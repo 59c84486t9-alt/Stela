@@ -200,8 +200,8 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
             .ok_or(Error::InvalidTable)?;
         let backing = self.owners.as_ref().ok_or(Error::Released)?.2
             [usize::from(self.layout.table_bar)]
-            .as_ref()
-            .ok_or(Error::InvalidBar)?;
+        .as_ref()
+        .ok_or(Error::InvalidBar)?;
         if end > table_end || !backing.accessible(offset, ENTRY_BYTES) {
             return Err(Error::Mapping);
         }
@@ -379,7 +379,10 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
                         self.verify_message(peer, recorded)?;
                         let peer_offset = self.entry_offset(peer)? + 12;
                         if self.read(bar, peer_offset)? & VECTOR_MASK != 0 {
-                            return Err(Error::Readback { bar, offset: peer_offset });
+                            return Err(Error::Readback {
+                                bar,
+                                offset: peer_offset,
+                            });
                         }
                     }
                 }

@@ -156,7 +156,10 @@ impl<const N: usize> TaskBinding<N> {
     /// its expected sequence can never signal or inspect a future job.
     pub fn target_current(self: &Arc<Self>) -> Result<TargetTask<N>, WorkError> {
         let wake = self.current_wake()?;
-        Ok(TargetTask { binding: ManuallyDrop::new(self.clone()), wake: ManuallyDrop::new(wake) })
+        Ok(TargetTask {
+            binding: ManuallyDrop::new(self.clone()),
+            wake: ManuallyDrop::new(wake),
+        })
     }
 
     unsafe extern "C" fn wake_target(binding: *mut c_void, expected: u64) -> i32 {
@@ -169,10 +172,14 @@ impl<const N: usize> TaskBinding<N> {
         // SAFETY: same-CPU exclusion and acquired initial publication; only an
         // actual new-job arrive updates this field, before C can target it.
         let handle = unsafe { (*this.target.get()).assume_init_ref() };
-        if expected == 0 || handle.sequence() != expected { return -116; }
+        if expected == 0 || handle.sequence() != expected {
+            return -116;
+        }
         match handle.wake() {
-            Ok(()) => 0, Err(WorkError::Busy) => -16,
-            Err(WorkError::Closed) => -116, Err(_) => -1,
+            Ok(()) => 0,
+            Err(WorkError::Busy) => -16,
+            Err(WorkError::Closed) => -116,
+            Err(_) => -1,
         }
     }
 
@@ -328,9 +335,8 @@ unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
             // SAFETY: actual same-CPU destination stack/IF0, no foreign C or
             // IRQ task-pointer reader. The mutable field borrow ends before
             // any hook. Runtime retains Queue/signal so old Drop is nonfinal.
-            let previous = unsafe {
-                core::ptr::replace((*self.target.get()).assume_init_mut(), next)
-            };
+            let previous =
+                unsafe { core::ptr::replace((*self.target.get()).assume_init_mut(), next) };
             drop(previous);
         }
         // SAFETY: actual resumed/new job stack and existing ticket before IF restore.
@@ -377,7 +383,10 @@ impl<const N: usize> Drop for TaskBinding<N> {
 /// delivery, realtime queue or guest signal ABI is implied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum WaitSignal { Interrupt = 1, Fatal = 2 }
+pub enum WaitSignal {
+    Interrupt = 1,
+    Fatal = 2,
+}
 
 /// Owns metadata and an immutable expected job, not a permanent C usage ref.
 /// Completion can close the job while this handle is retained. Only the plain
@@ -388,12 +397,19 @@ pub struct TargetTask<const N: usize> {
 }
 impl<const N: usize> Clone for TargetTask<N> {
     fn clone(&self) -> Self {
-        Self { binding: self.binding.clone(), wake: self.wake.clone() }
+        Self {
+            binding: self.binding.clone(),
+            wake: self.wake.clone(),
+        }
     }
 }
 impl<const N: usize> TargetTask<N> {
-    pub fn context_id(&self) -> ContextId { self.wake.context_id() }
-    pub fn sequence(&self) -> u64 { self.wake.sequence() }
+    pub fn context_id(&self) -> ContextId {
+        self.wake.context_id()
+    }
+    pub fn sequence(&self) -> u64 {
+        self.wake.sequence()
+    }
     /// Post to the captured job only. Closed/reused jobs return Closed before
     /// future C state is accessed; retaining this target is not a Linux task ref.
     ///
@@ -401,13 +417,21 @@ impl<const N: usize> TargetTask<N> {
     /// Call on the real same-CPU entered Linux process continuation described
     /// by `caller`, with shared service roots retained. Do not call from IRQ,
     /// IF0 switch hooks, a dispatcher, or outside run_scoped/Linux entry.
-    pub unsafe fn signal(&self, caller: Pin<&Runtime<N>>, kind: WaitSignal) -> Result<(), WorkError> {
+    pub unsafe fn signal(
+        &self,
+        caller: Pin<&Runtime<N>>,
+        kind: WaitSignal,
+    ) -> Result<(), WorkError> {
         self.wake.check_process()?;
         caller.current_context()?;
         // SAFETY: immutable expected generation plus separately retained C
         // metadata; caller proves actual entered Linux process authority.
-        match unsafe { stela_linux_task_signal(self.binding.task.as_ptr(), self.sequence(), kind as u32) } {
-            0 => Ok(()), -116 => Err(WorkError::Closed), -16 => Err(WorkError::Busy),
+        match unsafe {
+            stela_linux_task_signal(self.binding.task.as_ptr(), self.sequence(), kind as u32)
+        } {
+            0 => Ok(()),
+            -116 => Err(WorkError::Closed),
+            -16 => Err(WorkError::Busy),
             _ => Err(WorkError::CorruptContext),
         }
     }
@@ -418,7 +442,10 @@ impl<const N: usize> Drop for TargetTask<N> {
             // SAFETY: qualified process CPU. Native callers retain the normal
             // flags-restored release boundary; no switch hook owns a TargetTask.
             // Keep the immutable wake owner until after binding destruction.
-            unsafe { ManuallyDrop::drop(&mut self.binding); ManuallyDrop::drop(&mut self.wake); }
+            unsafe {
+                ManuallyDrop::drop(&mut self.binding);
+                ManuallyDrop::drop(&mut self.wake);
+            }
         } else {
             // Never let an old producer's final owner release run in native
             // IRQ/foreign-CPU context. Keep BOTH metadata and provider roots.
@@ -916,7 +943,6 @@ pub(crate) mod tests {
         unsafe { stela_linux_task_test_taskless() };
     }
 
-
     #[repr(C)]
     struct MutexCall {
         scenario: u32,
@@ -953,11 +979,13 @@ pub(crate) mod tests {
                 targets: core::array::from_fn(|_| Mutex::new(None)),
                 // All stable callback storage is allocated before publication;
                 // neither original wake_q nor PREPARE callbacks allocate it.
-                jobs: core::array::from_fn(|role| Box::new(MutexRole {
-                    fixture: weak.clone(),
-                    scenario,
-                    role,
-                })),
+                jobs: core::array::from_fn(|role| {
+                    Box::new(MutexRole {
+                        fixture: weak.clone(),
+                        scenario,
+                        role,
+                    })
+                }),
                 completed: AtomicU64::new(0),
                 signals: AtomicU64::new(0),
                 stale: AtomicU64::new(0),
@@ -988,13 +1016,27 @@ pub(crate) mod tests {
             // This is also used in an original RCU process-retirement callback.
             // Refuse contention instead of blocking at SOFTIRQ_OFFSET; cloning
             // only increments retained owners, with nonfinal drops afterward.
-            self.targets[role].try_lock().unwrap().as_ref().unwrap().clone()
+            self.targets[role]
+                .try_lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .clone()
         }
         fn enqueue(&self, role: usize) {
-            let lane = if role == 1 || role == 4 { Kind::Notify } else { Kind::General };
+            let lane = if role == 1 || role == 4 {
+                Kind::Notify
+            } else {
+                Kind::General
+            };
             // SAFETY: fixture owns stable job storage until every real callback
             // completes. Enqueue is bounded, with no callback or heap allocation.
-            unsafe { self.runtime().queue().execute(lane, mutex_role, self.context(role)) }.unwrap();
+            unsafe {
+                self.runtime()
+                    .queue()
+                    .execute(lane, mutex_role, self.context(role))
+            }
+            .unwrap();
         }
     }
     unsafe fn mutex_job<'a>(context: *mut c_void) -> &'a MutexRole {
@@ -1015,7 +1057,11 @@ pub(crate) mod tests {
             }
             2 | 3 | 4 => {
                 let target = f.target(1);
-                let kind = if event == 3 { WaitSignal::Fatal } else { WaitSignal::Interrupt };
+                let kind = if event == 3 {
+                    WaitSignal::Fatal
+                } else {
+                    WaitSignal::Interrupt
+                };
                 // SAFETY: called by the real same-CPU entered C owner. Event4
                 // is process PREPARE's bounded softirq-accounted callback, not
                 // a native interrupt producer or an IF0 switch hook.
@@ -1028,13 +1074,20 @@ pub(crate) mod tests {
             }
             5 => {
                 let old = f.target(1);
-                assert_eq!(unsafe { old.signal(runtime, WaitSignal::Fatal) }, Err(WorkError::Closed));
+                assert_eq!(
+                    unsafe { old.signal(runtime, WaitSignal::Fatal) },
+                    Err(WorkError::Closed)
+                );
                 f.stale.fetch_add(1, Ordering::Relaxed);
             }
             6 => f.enqueue(4),
             7 | 8 => {
                 let target = f.target(0);
-                let kind = if event == 7 { WaitSignal::Interrupt } else { WaitSignal::Fatal };
+                let kind = if event == 7 {
+                    WaitSignal::Interrupt
+                } else {
+                    WaitSignal::Fatal
+                };
                 // SAFETY: actual entered current posts to its own expected job.
                 unsafe { target.signal(runtime, kind) }.unwrap();
                 f.self_signals.fetch_add(1, Ordering::Relaxed);
@@ -1076,22 +1129,43 @@ pub(crate) mod tests {
         // SAFETY: only shared retained Runtime/owner roots span suspension;
         // call is an actual immovable stack local until this C body returns.
         unsafe {
-            binding.run_scoped(runtime, stela_linux_mutex_test_run, ptr::from_mut(&mut call).cast())
-        }.unwrap();
+            binding.run_scoped(
+                runtime,
+                stela_linux_mutex_test_run,
+                ptr::from_mut(&mut call).cast(),
+            )
+        }
+        .unwrap();
         f.completed.fetch_add(1, Ordering::Relaxed);
     }
 
     fn exact_mutex_child(selector: &str) {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", selector, "--ignored", "--test-threads=1", "--nocapture", "--format=pretty", "--color=never"])
-            .output().unwrap();
+            .args([
+                "--exact",
+                selector,
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+                "--format=pretty",
+                "--color=never",
+            ])
+            .output()
+            .unwrap();
         let stdout = std::string::String::from_utf8_lossy(&output.stdout);
         let stderr = std::string::String::from_utf8_lossy(&output.stderr);
         let expected = std::format!("test {selector} ... ok");
         let named = stdout.lines().any(|line| line == expected);
-        let one = stdout.lines().any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"));
-        assert!(output.status.success() && named && one,
-            "mutex child did not execute/pass exactly once ({}):\n{}{}", output.status, stdout, stderr);
+        let one = stdout
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"));
+        assert!(
+            output.status.success() && named && one,
+            "mutex child did not execute/pass exactly once ({}):\n{}{}",
+            output.status,
+            stdout,
+            stderr
+        );
     }
     pub(crate) fn run_mutex_child() {
         exact_mutex_child("gpu::linux::task::tests::mutex_child");
@@ -1110,18 +1184,38 @@ pub(crate) mod tests {
             let cpu = CpuModel::new();
             let f = MutexFixture::new(cpu.clone(), scenario);
             let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
-            let executor = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
+            let executor =
+                Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
             let runtime = executor.runtime();
-            f.runtime.store(runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>, Ordering::Release);
+            f.runtime.store(
+                runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+                Ordering::Release,
+            );
             // SAFETY: actual guarded stacks and retained fixture/job roots, no
             // C owner/ref survives completion, no native admission is asserted.
             unsafe { runtime.call_foreground(mutex_role, f.context(0), 100000) }.unwrap();
-            assert_eq!(f.completed.load(Ordering::Relaxed), if scenario == 0 { 5 } else { 2 });
-            assert_eq!(f.prepare_signals.load(Ordering::Relaxed), u64::from(scenario == 5));
-            assert_eq!(f.stale.load(Ordering::Relaxed), if scenario == 0 { 2 } else { 0 });
-            let expected_signals = match scenario { 1 | 3 | 4 | 6 | 9 => 1, 2 => 2, _ => 0 };
+            assert_eq!(
+                f.completed.load(Ordering::Relaxed),
+                if scenario == 0 { 5 } else { 2 }
+            );
+            assert_eq!(
+                f.prepare_signals.load(Ordering::Relaxed),
+                u64::from(scenario == 5)
+            );
+            assert_eq!(
+                f.stale.load(Ordering::Relaxed),
+                if scenario == 0 { 2 } else { 0 }
+            );
+            let expected_signals = match scenario {
+                1 | 3 | 4 | 6 | 9 => 1,
+                2 => 2,
+                _ => 0,
+            };
             assert_eq!(f.signals.load(Ordering::Relaxed), expected_signals);
-            assert_eq!(f.self_signals.load(Ordering::Relaxed), if scenario < 7 || scenario == 10 { 2 } else { 0 });
+            assert_eq!(
+                f.self_signals.load(Ordering::Relaxed),
+                if scenario < 7 || scenario == 10 { 2 } else { 0 }
+            );
             // All expected-job snapshots are now inert even though metadata is
             // still retained. Taking them in process context breaks Arc cycles.
             for slot in &f.targets {
@@ -1135,7 +1229,8 @@ pub(crate) mod tests {
             assert_eq!(unsafe { runtime.retire() }, Err(WorkError::Pending));
             for slot in &f.bindings {
                 if let Some(binding) = slot.lock().unwrap().take() {
-                    let retained = unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
+                    let retained =
+                        unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
                     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
                     drop(retained);
                     // SAFETY: actual jobs completed; C refs, waiters, signal
@@ -1145,7 +1240,10 @@ pub(crate) mod tests {
             }
             unsafe { runtime.retire() }.unwrap();
             drop(executor);
-            assert_eq!(dropped.load(Ordering::Relaxed), (u64::from(scenario) + 1) * 4);
+            assert_eq!(
+                dropped.load(Ordering::Relaxed),
+                (u64::from(scenario) + 1) * 4
+            );
             assert_eq!(quarantined(), 0);
             assert!(!RAW.occupied.load(Ordering::Acquire));
             unsafe { stela_linux_task_test_taskless() };
@@ -1182,7 +1280,10 @@ pub(crate) mod tests {
         let queue = unsafe { Queue::<16>::new(cpu, f.clone()) }.unwrap();
         let executor = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
         let runtime = executor.runtime();
-        f.runtime.store(runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>, Ordering::Release);
+        f.runtime.store(
+            runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+            Ordering::Release,
+        );
         unsafe { runtime.call_foreground(quarantine_targets, f.context(0), 100000) }.unwrap();
         runtime.queue().close().unwrap();
         let binding = f.bindings[0].lock().unwrap().take().unwrap();

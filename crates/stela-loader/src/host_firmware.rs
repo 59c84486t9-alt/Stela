@@ -385,22 +385,38 @@ mod tests {
         let lengths = [63_571_696, 200_812, 199_820];
         assert!(current.check_lengths(lengths).is_ok());
         assert!(old.check_lengths(lengths).is_err());
-        assert!(current.check_lengths([63_571_696, 200_812, 199_820, 3_136_536]).is_ok());
-        assert!(current.check_lengths([63_571_696, 200_812, 199_820, 3_136_537]).is_err());
+        assert!(
+            current
+                .check_lengths([63_571_696, 200_812, 199_820, 3_136_536])
+                .is_ok()
+        );
+        assert!(
+            current
+                .check_lengths([63_571_696, 200_812, 199_820, 3_136_537])
+                .is_err()
+        );
         for length in [16 * 1024 * 1024, 16 * 1024 * 1024 + 1, MAX_IMAGE_BYTES] {
             let mut item = image();
             item["length"] = json!(length);
             let bytes = manifest(vec![item]);
             let parsed = Manifest::parse(&bytes).unwrap();
             assert!(parsed.check_mount(&MOUNT_CAPABILITY).is_ok());
-            assert_eq!(parsed.check_mount(&legacy).is_ok(), length <= 16 * 1024 * 1024);
+            assert_eq!(
+                parsed.check_mount(&legacy).is_ok(),
+                length <= 16 * 1024 * 1024
+            );
         }
         assert!(!supports_mount(b""));
         assert!(!supports_mount(&MOUNT_CAPABILITY[..20]));
         assert!(!supports_mount(&unknown));
         let mut mixed = legacy.to_vec();
         mixed.extend_from_slice(&MOUNT_CAPABILITY);
-        assert!(MountLimits::from_image(&mixed).unwrap().check_lengths(lengths).is_ok());
+        assert!(
+            MountLimits::from_image(&mixed)
+                .unwrap()
+                .check_lengths(lengths)
+                .is_ok()
+        );
         mixed.extend_from_slice(&unknown);
         assert!(!supports_mount(&mixed));
     }
@@ -422,8 +438,14 @@ mod tests {
         let error = Package::read_for_mount(&directory, &legacy).err().unwrap();
         assert!(error.to_string().contains("image limit"));
         // A compatible mount proceeds to the absent payload and refuses it.
-        let error = Package::read_for_mount(&directory, &MOUNT_CAPABILITY).err().unwrap();
-        assert!(error.to_string().contains("missing host firmware package file"));
+        let error = Package::read_for_mount(&directory, &MOUNT_CAPABILITY)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("missing host firmware package file")
+        );
         assert!(check_installed_mount(&directory, &MOUNT_CAPABILITY).is_ok());
         assert!(check_installed_mount(&directory, b"legacy-no-mount").is_err());
         for bytes in [b"{}".to_vec(), vec![b' '; MAX_MANIFEST_BYTES + 1]] {

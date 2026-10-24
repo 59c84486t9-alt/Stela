@@ -208,7 +208,8 @@ mod tests {
             &cache,
             true,
             &host_firmware::MOUNT_CAPABILITY,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(text.contains("1492 bytes"));
         assert!(!cache.exists());
         assert!(!destination.exists());
@@ -217,13 +218,16 @@ mod tests {
             br#"{"schema":1,"complete":false,"requirements":[]}"#,
         )
         .unwrap();
-        assert!(provision(
-            &inventory,
-            &destination,
-            &cache,
-            true,
-            &host_firmware::MOUNT_CAPABILITY,
-        ).is_err());
+        assert!(
+            provision(
+                &inventory,
+                &destination,
+                &cache,
+                true,
+                &host_firmware::MOUNT_CAPABILITY,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -311,7 +315,8 @@ mod tests {
             &cache,
             false,
             &host_firmware::MOUNT_CAPABILITY,
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(output.join("provisioning.txt"), report).unwrap();
         let manifest_bytes = fs::read(destination.join("manifest.json")).unwrap();
         let manifest = host_firmware::Manifest::parse(&manifest_bytes).unwrap();
@@ -358,7 +363,8 @@ mod tests {
             &cache,
             false,
             &host_firmware::MOUNT_CAPABILITY,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(again.contains("Published pinned firmware"));
         assert_eq!(
             fs::read(destination.join("manifest.json")).unwrap(),

@@ -94,11 +94,16 @@ impl Peripheral {
             return;
         }
         for index in 0..self.vectors {
-            let pending = if index == 0 { self.pending } else { self.pending_entries[usize::from(index)] };
+            let pending = if index == 0 {
+                self.pending
+            } else {
+                self.pending_entries[usize::from(index)]
+            };
             let entry = (TABLE / 4) as usize + usize::from(index) * 4;
             if pending && self.memory[entry + 3] & 1 == 0 {
                 let actual = MsiMessage {
-                    address: u64::from(self.memory[entry]) | u64::from(self.memory[entry + 1]) << 32,
+                    address: u64::from(self.memory[entry])
+                        | u64::from(self.memory[entry + 1]) << 32,
                     data: self.memory[entry + 2],
                 };
                 if let Some(route) = &self.routes[usize::from(index)] {
@@ -106,12 +111,18 @@ impl Peripheral {
                 } else {
                     // Only the pre-existing legacy entry-zero fixtures use
                     // their original boolean publication witness.
-                    assert!(index == 0 && self.callback_published,
-                        "MSI-X arrived without an actual published route for entry {index}");
+                    assert!(
+                        index == 0 && self.callback_published,
+                        "MSI-X arrived without an actual published route for entry {index}"
+                    );
                 }
                 self.emitted.push(actual);
                 self.delivered_entries.push(index);
-                if index == 0 { self.pending = false; } else { self.pending_entries[usize::from(index)] = false; }
+                if index == 0 {
+                    self.pending = false;
+                } else {
+                    self.pending_entries[usize::from(index)] = false;
+                }
                 self.memory[(PBA / 4) as usize + usize::from(index / 32)] &= !(1 << (index % 32));
             }
         }
@@ -206,7 +217,11 @@ unsafe impl BarAccess for Bar {
         assert_eq!(offset % 4, 0);
         if (offset - TABLE) % 16 < 12 {
             let entry = (TABLE / 4) as usize + ((offset - TABLE) / 16) as usize * 4;
-            assert_ne!(m.memory[entry + 3] & 1, 0, "message changed before target entry was masked");
+            assert_ne!(
+                m.memory[entry + 3] & 1,
+                0,
+                "message changed before target entry was masked"
+            );
         }
         assert_eq!(
             m.get(0x52, 2) & 0xc000,
@@ -896,7 +911,11 @@ fn message(index: u16) -> MsiMessage {
 fn selected_masks(m: &Peripheral, selected: &[u16]) {
     for index in 0..m.vectors {
         let word = (TABLE / 4) as usize + usize::from(index) * 4 + 3;
-        assert_eq!(m.memory[word] & 1, u32::from(!selected.contains(&index)), "entry {index}");
+        assert_eq!(
+            m.memory[word] & 1,
+            u32::from(!selected.contains(&index)),
+            "entry {index}"
+        );
     }
 }
 
@@ -924,9 +943,16 @@ fn legacy_wrappers_match_complete_original_owner_access_traces() {
             }};
         }
         compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
-        let invalid = MsiMessage { address: 3, data: 0 };
-        compare!(unsafe { owner.program(invalid) }, unsafe { old.program(invalid) });
-        compare!(unsafe { owner.program(MESSAGE) }, unsafe { old.program(MESSAGE) });
+        let invalid = MsiMessage {
+            address: 3,
+            data: 0,
+        };
+        compare!(unsafe { owner.program(invalid) }, unsafe {
+            old.program(invalid)
+        });
+        compare!(unsafe { owner.program(MESSAGE) }, unsafe {
+            old.program(MESSAGE)
+        });
         for model in [&m, &other] {
             let mut model = model.lock().unwrap();
             model.callback_published = true;
@@ -934,7 +960,9 @@ fn legacy_wrappers_match_complete_original_owner_access_traces() {
         }
         compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
         compare!(owner.mask(), old.mask());
-        compare!(unsafe { owner.program(message(1)) }, unsafe { old.program(message(1)) });
+        compare!(unsafe { owner.program(message(1)) }, unsafe {
+            old.program(message(1))
+        });
         compare!(owner.disable(), old.disable());
         assert_eq!(owner.vectors(), old.vectors());
         assert_eq!(owner.needs_reset(), old.needs_reset());
@@ -942,7 +970,9 @@ fn legacy_wrappers_match_complete_original_owner_access_traces() {
         drop(unsafe { old.release() }.unwrap());
         assert_eq!(owner.address(), old.address());
         compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
-        compare!(unsafe { owner.program(MESSAGE) }, unsafe { old.program(MESSAGE) });
+        compare!(unsafe { owner.program(MESSAGE) }, unsafe {
+            old.program(MESSAGE)
+        });
         assert_eq!(owner.needs_reset(), old.needs_reset());
         compare!(owner.mask(), old.mask());
         assert_eq!(m.lock().unwrap().events, other.lock().unwrap().events);
@@ -954,7 +984,9 @@ fn indexed_sparse_boundary_payloads_and_simultaneous_pending_delivery() {
     for vectors in [1, 2, 65, 66, 2048] {
         let (mut owner, m) = attach(fixture(vectors));
         let mut indices: Vec<u16> = [0, 1, 63, 64, 65, 2047]
-            .into_iter().filter(|index| *index < vectors).collect();
+            .into_iter()
+            .filter(|index| *index < vectors)
+            .collect();
         indices.push(vectors - 1);
         indices.sort_unstable();
         indices.dedup();
@@ -986,12 +1018,33 @@ fn indexed_sparse_boundary_payloads_and_simultaneous_pending_delivery() {
             selected_masks(&m, &indices);
             assert_eq!(m.delivered_entries, indices);
             for &index in &indices {
-                assert_eq!(m.routes[usize::from(index)].as_ref().unwrap().calls.load(Ordering::Relaxed), 1);
+                assert_eq!(
+                    m.routes[usize::from(index)]
+                        .as_ref()
+                        .unwrap()
+                        .calls
+                        .load(Ordering::Relaxed),
+                    1
+                );
             }
-            assert_eq!(m.emitted, indices.iter().copied().map(message).collect::<Vec<_>>());
-            assert!(m.memory[(PBA / 4) as usize..(PBA / 4) as usize + usize::from(vectors).div_ceil(32)].iter().all(|word| *word == 0));
-            assert!(!m.events.iter().any(|event| matches!(event, Event::BarWrite(offset, _) if *offset >= PBA)));
-            assert!(matches!(m.events.iter().rev().find(|event| matches!(event, Event::ConfigWrite(..))), Some(Event::ConfigWrite(0x52, control)) if control & 0xc000 == 0x8000));
+            assert_eq!(
+                m.emitted,
+                indices.iter().copied().map(message).collect::<Vec<_>>()
+            );
+            assert!(
+                m.memory
+                    [(PBA / 4) as usize..(PBA / 4) as usize + usize::from(vectors).div_ceil(32)]
+                    .iter()
+                    .all(|word| *word == 0)
+            );
+            assert!(
+                !m.events
+                    .iter()
+                    .any(|event| matches!(event, Event::BarWrite(offset, _) if *offset >= PBA))
+            );
+            assert!(
+                matches!(m.events.iter().rev().find(|event| matches!(event, Event::ConfigWrite(..))), Some(Event::ConfigWrite(0x52, control)) if control & 0xc000 == 0x8000)
+            );
         }
         drop(unsafe { owner.release() }.unwrap());
     }
@@ -1020,7 +1073,14 @@ fn indexed_program_preserves_live_peers_and_real_pending_bits() {
         assert_eq!(m.delivered_entries, [0, 63, 64]);
         assert_eq!(m.emitted, [message(0), message(63), message(64)]);
         for index in [0, 63, 64] {
-            assert_eq!(m.routes[usize::from(index)].as_ref().unwrap().calls.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                m.routes[usize::from(index)]
+                    .as_ref()
+                    .unwrap()
+                    .calls
+                    .load(Ordering::Relaxed),
+                1
+            );
             let word = (TABLE / 4) as usize + usize::from(index) * 4;
             assert_eq!(m.memory[word..word + 3], before[word..word + 3]);
         }
@@ -1064,7 +1124,10 @@ fn mixed_legacy_calls_invalidate_nonzero_replay_without_reviving_old_routes() {
         }
         selected_masks(&m.lock().unwrap(), &[0]);
         let events = m.lock().unwrap().events.clone();
-        assert_eq!(unsafe { owner.unmask_indices(&[0, 64]) }, Err(Error::NotProgrammed));
+        assert_eq!(
+            unsafe { owner.unmask_indices(&[0, 64]) },
+            Err(Error::NotProgrammed)
+        );
         assert_eq!(m.lock().unwrap().events, events);
         assert!(!owner.needs_reset());
         unsafe { owner.program_indexed(64, message(64)) }.unwrap();
@@ -1088,10 +1151,35 @@ fn invalid_index_selection_message_and_offset_leave_valid_state_unchanged() {
     for indices in [&[][..], &[0, 0][..], &[65][..], &[0, 1][..]] {
         assert!(unsafe { owner.unmask_indices(indices) }.is_err());
     }
-    assert_eq!(unsafe { owner.program_indexed(65, message(1)) }, Err(Error::InvalidIndex));
-    assert_eq!(unsafe { owner.program_indexed(u16::MAX, message(1)) }, Err(Error::InvalidIndex));
-    assert_eq!(unsafe { owner.program(MsiMessage { address: 3, data: 0 }) }, Err(Error::InvalidMessage));
-    assert_eq!(unsafe { owner.program_indexed(64, MsiMessage { address: 1, data: 0 }) }, Err(Error::InvalidMessage));
+    assert_eq!(
+        unsafe { owner.program_indexed(65, message(1)) },
+        Err(Error::InvalidIndex)
+    );
+    assert_eq!(
+        unsafe { owner.program_indexed(u16::MAX, message(1)) },
+        Err(Error::InvalidIndex)
+    );
+    assert_eq!(
+        unsafe {
+            owner.program(MsiMessage {
+                address: 3,
+                data: 0,
+            })
+        },
+        Err(Error::InvalidMessage)
+    );
+    assert_eq!(
+        unsafe {
+            owner.program_indexed(
+                64,
+                MsiMessage {
+                    address: 1,
+                    data: 0,
+                },
+            )
+        },
+        Err(Error::InvalidMessage)
+    );
     assert!(!owner.needs_reset());
     assert_eq!(m.lock().unwrap().memory, memory);
     assert_eq!(m.lock().unwrap().config, config);
@@ -1101,7 +1189,10 @@ fn invalid_index_selection_message_and_offset_leave_valid_state_unchanged() {
     // without touching MMIO. This fixture does not admit such a hardware layout.
     let saved = owner.layout;
     owner.layout.table_offset = u64::MAX - 7;
-    assert_eq!(unsafe { owner.program_indexed(64, message(1)) }, Err(Error::InvalidTable));
+    assert_eq!(
+        unsafe { owner.program_indexed(64, message(1)) },
+        Err(Error::InvalidTable)
+    );
     owner.layout = saved;
     assert_eq!(m.lock().unwrap().events, events);
     drop(unsafe { owner.release() }.unwrap());
@@ -1120,7 +1211,9 @@ fn indexed_sequence(owner: &mut MsixConfig<Config, Bar>) -> Result<(), Error> {
 #[test]
 fn every_indexed_access_failure_before_or_after_effect_poisons_all_entries() {
     let (mut baseline, m) = attach(fixture(3));
-    for index in 0..3 { m.lock().unwrap().publish(index); }
+    for index in 0..3 {
+        m.lock().unwrap().publish(index);
+    }
     m.lock().unwrap().queue_on_guard.extend([0, 1]);
     indexed_sequence(&mut baseline).unwrap();
     let count = m.lock().unwrap().events.len();
@@ -1128,22 +1221,39 @@ fn every_indexed_access_failure_before_or_after_effect_poisons_all_entries() {
     for after_effect in [false, true] {
         for failure in 1..=count {
             let f = fixture(3);
-            let drops = [f.config_drops.clone(), f.root_drops.clone(), f.bar_drops.clone()];
+            let drops = [
+                f.config_drops.clone(),
+                f.root_drops.clone(),
+                f.bar_drops.clone(),
+            ];
             let (mut owner, m) = attach(f);
             {
                 let mut m = m.lock().unwrap();
                 m.fail = Some(failure);
                 m.after_effect = after_effect;
-                for index in 0..3 { m.publish(index); }
+                for index in 0..3 {
+                    m.publish(index);
+                }
                 m.queue_on_guard.extend([0, 1]);
             }
-            assert!(indexed_sequence(&mut owner).is_err(), "unreached failure {failure}");
+            assert!(
+                indexed_sequence(&mut owner).is_err(),
+                "unreached failure {failure}"
+            );
             assert!(owner.needs_reset());
             assert!(owner.message.is_none() && owner.messages.iter().all(Option::is_none));
-            for index in 0..3 { assert!(!owner.live.contains(index)); }
+            for index in 0..3 {
+                assert!(!owner.live.contains(index));
+            }
             let events = m.lock().unwrap().events.len();
-            assert_eq!(unsafe { owner.unmask_indices(&[0, 1]) }, Err(Error::Quarantined));
-            assert_eq!(unsafe { owner.program_indexed(2, MESSAGE) }, Err(Error::Quarantined));
+            assert_eq!(
+                unsafe { owner.unmask_indices(&[0, 1]) },
+                Err(Error::Quarantined)
+            );
+            assert_eq!(
+                unsafe { owner.program_indexed(2, MESSAGE) },
+                Err(Error::Quarantined)
+            );
             assert_eq!(unsafe { owner.release() }.err(), Some(Error::Quarantined));
             assert_eq!(m.lock().unwrap().events.len(), events);
             drop(owner);
@@ -1173,9 +1283,13 @@ fn selected_message_and_peer_corruption_never_reopen_the_global_guard() {
         assert!(owner.needs_reset());
         let m = m.lock().unwrap();
         assert_eq!(m.get(0x52, 2) & 0xc000, 0xc000);
-        assert!(!m.events[start..].iter().any(|event| matches!(event, Event::ConfigWrite(0x52, control) if control & 0xc000 == 0x8000)));
+        assert!(!m.events[start..].iter().any(
+            |event| matches!(event, Event::ConfigWrite(0x52, control) if control & 0xc000 == 0x8000)
+        ));
         if !corrupt_peer {
-            assert!(!m.events[start..].iter().any(|event| matches!(event, Event::BarWrite(offset, 0) if (*offset - TABLE) % 16 == 12)));
+            assert!(!m.events[start..].iter().any(
+                |event| matches!(event, Event::BarWrite(offset, 0) if (*offset - TABLE) % 16 == 12)
+            ));
         }
     }
 }
@@ -1183,34 +1297,48 @@ fn selected_message_and_peer_corruption_never_reopen_the_global_guard() {
 // Real allocator refusal, scoped to the child test thread. Other tests/threads
 // retain System allocation. No production fault hook or allocator substitution
 // appears in MsixConfig, and the armed phase cannot allocate event log storage.
-#[cfg(not(all(feature = "linux-kernel", target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(all(
+    feature = "linux-kernel",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+)))]
 mod allocation {
     use core::cell::Cell;
     use std::alloc::{GlobalAlloc, Layout, System};
     std::thread_local! { static STATE: Cell<(bool, usize)> = const { Cell::new((false, 0)) }; }
     pub struct Allocator;
     fn reject() -> bool {
-        STATE.try_with(|state| {
-            let (armed, count) = state.get();
-            if armed { state.set((true, count + 1)); }
-            armed
-        }).unwrap_or(false)
+        STATE
+            .try_with(|state| {
+                let (armed, count) = state.get();
+                if armed {
+                    state.set((true, count + 1));
+                }
+                armed
+            })
+            .unwrap_or(false)
     }
     // SAFETY: armed calls return NULL before effects; unarmed allocations and
     // every deallocation use the same System owner and exact caller layout.
     unsafe impl GlobalAlloc for Allocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if reject() { return core::ptr::null_mut(); }
+            if reject() {
+                return core::ptr::null_mut();
+            }
             // SAFETY: forwarding the allocator's unchanged layout to System.
             unsafe { System.alloc(layout) }
         }
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            if reject() { return core::ptr::null_mut(); }
+            if reject() {
+                return core::ptr::null_mut();
+            }
             // SAFETY: forwarding the allocator's unchanged layout to System.
             unsafe { System.alloc_zeroed(layout) }
         }
         unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {
-            if reject() { return core::ptr::null_mut(); }
+            if reject() {
+                return core::ptr::null_mut();
+            }
             // SAFETY: forwarding the live allocation and original layout.
             unsafe { System.realloc(pointer, layout, bytes) }
         }
@@ -1219,10 +1347,21 @@ mod allocation {
             unsafe { System.dealloc(pointer, layout) }
         }
     }
-    pub fn arm() { STATE.with(|state| state.set((true, 0))); }
-    pub fn disarm() -> usize { STATE.with(|state| { let (_, count) = state.replace((false, 0)); count }) }
+    pub fn arm() {
+        STATE.with(|state| state.set((true, 0)));
+    }
+    pub fn disarm() -> usize {
+        STATE.with(|state| {
+            let (_, count) = state.replace((false, 0));
+            count
+        })
+    }
 }
-#[cfg(not(all(feature = "linux-kernel", target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(all(
+    feature = "linux-kernel",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+)))]
 #[global_allocator]
 static ALLOCATOR: allocation::Allocator = allocation::Allocator;
 
@@ -1230,10 +1369,18 @@ static ALLOCATOR: allocation::Allocator = allocation::Allocator;
 // gpu/linux/task.rs. Reuse its actual test-only counter/refusal boundary; never
 // install another allocator in that binary. Only the isolated exact child arms
 // it, excluding other controller fixtures and allocation-producing work.
-#[cfg(all(feature = "linux-kernel", target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    feature = "linux-kernel",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 mod allocation {
     #[repr(C)]
-    struct Counts { heap: u64, heap_try: u64, pages: u64 }
+    struct Counts {
+        heap: u64,
+        heap_try: u64,
+        pages: u64,
+    }
     unsafe extern "C" {
         fn stela_test_allocations_begin(refuse: bool);
         fn stela_test_allocations_end() -> Counts;
@@ -1289,8 +1436,10 @@ fn actual_metadata_allocation_refusal_is_immutable_and_legacy_path_allocates_not
     let indexed = unsafe { owner.program_indexed(0, MESSAGE) };
     let selected = unsafe { owner.unmask_indices(&[0]) };
     let attempts = allocation::disarm();
-    assert_eq!((programmed, unmasked, indexed, selected, attempts),
-        (Ok(()), Ok(()), Ok(()), Ok(()), 0));
+    assert_eq!(
+        (programmed, unmasked, indexed, selected, attempts),
+        (Ok(()), Ok(()), Ok(()), Ok(()), 0)
+    );
     unsafe { owner.program_indexed(2047, message(2047)) }.unwrap();
     assert_eq!(owner.messages.len(), 2047);
     m.lock().unwrap().publish(2046);
@@ -1309,7 +1458,11 @@ fn actual_metadata_allocation_refusal_is_immutable_and_legacy_path_allocates_not
 fn indexed_layout_identity_control_and_peer_mask_changes_quarantine_one_owner() {
     for case in 0..7 {
         let f = fixture(3);
-        let drops = [f.config_drops.clone(), f.root_drops.clone(), f.bar_drops.clone()];
+        let drops = [
+            f.config_drops.clone(),
+            f.root_drops.clone(),
+            f.bar_drops.clone(),
+        ];
         let (mut owner, m) = attach(f);
         for index in 0..3 {
             unsafe { owner.program_indexed(index, message(index)) }.unwrap();
@@ -1332,8 +1485,11 @@ fn indexed_layout_identity_control_and_peer_mask_changes_quarantine_one_owner() 
         assert!(unsafe { owner.program_indexed(2, message(2)) }.is_err());
         assert!(owner.needs_reset());
         if case < 6 {
-            assert!(!m.lock().unwrap().events[start..].iter()
-                .any(|event| matches!(event, Event::BarRead(..) | Event::BarWrite(..))));
+            assert!(
+                !m.lock().unwrap().events[start..]
+                    .iter()
+                    .any(|event| matches!(event, Event::BarRead(..) | Event::BarWrite(..)))
+            );
         } else {
             assert_eq!(m.lock().unwrap().get(0x52, 2) & 0xc000, 0xc000);
         }
@@ -1348,22 +1504,32 @@ fn legacy_vector_zero_has_independently_stated_literal_access_order() {
     // Exact immutable fixture layout: one 64-bit BAR, table/PBA in BAR0, one
     // capability. This sequence comes from the source contract, not new helpers.
     let discovery = [
-        Event::ConfigRead(0, 4), Event::ConfigRead(0x0e, 1),
-        Event::ConfigRead(4, 2), Event::ConfigRead(6, 2),
-        Event::ConfigRead(0x34, 1), Event::ConfigRead(0x50, 2),
-        Event::ConfigRead(0x52, 2), Event::ConfigRead(0x54, 4),
-        Event::ConfigRead(0x58, 4), Event::ConfigRead(0x10, 4),
-        Event::ConfigRead(0x14, 4), Event::ConfigRead(0x10, 4),
+        Event::ConfigRead(0, 4),
+        Event::ConfigRead(0x0e, 1),
+        Event::ConfigRead(4, 2),
+        Event::ConfigRead(6, 2),
+        Event::ConfigRead(0x34, 1),
+        Event::ConfigRead(0x50, 2),
+        Event::ConfigRead(0x52, 2),
+        Event::ConfigRead(0x54, 4),
+        Event::ConfigRead(0x58, 4),
+        Event::ConfigRead(0x10, 4),
+        Event::ConfigRead(0x14, 4),
+        Event::ConfigRead(0x10, 4),
         Event::ConfigRead(0x14, 4),
     ];
     let prefix = || {
         let mut expected = discovery.to_vec();
         expected.extend([
-            Event::ConfigRead(4, 2), Event::ConfigWrite(4, 0x507),
-            Event::ConfigRead(4, 2), Event::ConfigWrite(0x52, 0xc001),
+            Event::ConfigRead(4, 2),
+            Event::ConfigWrite(4, 0x507),
+            Event::ConfigRead(4, 2),
+            Event::ConfigWrite(0x52, 0xc001),
             Event::ConfigRead(0x52, 2),
-            Event::BarWrite(0x10c, 1), Event::BarRead(0x10c),
-            Event::BarWrite(0x11c, 1), Event::BarRead(0x11c),
+            Event::BarWrite(0x10c, 1),
+            Event::BarRead(0x10c),
+            Event::BarWrite(0x11c, 1),
+            Event::BarRead(0x11c),
         ]);
         expected
     };
@@ -1371,9 +1537,12 @@ fn legacy_vector_zero_has_independently_stated_literal_access_order() {
     unsafe { owner.program(MESSAGE) }.unwrap();
     let mut expected = prefix();
     expected.extend([
-        Event::BarWrite(0x100, 0xfee0_1000), Event::BarRead(0x100),
-        Event::BarWrite(0x104, 0x1234_5678), Event::BarRead(0x104),
-        Event::BarWrite(0x108, 0x8765_4321), Event::BarRead(0x108),
+        Event::BarWrite(0x100, 0xfee0_1000),
+        Event::BarRead(0x100),
+        Event::BarWrite(0x104, 0x1234_5678),
+        Event::BarRead(0x104),
+        Event::BarWrite(0x108, 0x8765_4321),
+        Event::BarRead(0x108),
     ]);
     expected.extend(discovery);
     assert_eq!(m.lock().unwrap().events, expected);
@@ -1382,8 +1551,11 @@ fn legacy_vector_zero_has_independently_stated_literal_access_order() {
     unsafe { owner.unmask() }.unwrap();
     let mut expected = prefix();
     expected.extend([
-        Event::BarRead(0x100), Event::BarRead(0x104), Event::BarRead(0x108),
-        Event::BarWrite(0x10c, 0), Event::BarRead(0x10c),
+        Event::BarRead(0x100),
+        Event::BarRead(0x104),
+        Event::BarRead(0x108),
+        Event::BarWrite(0x10c, 0),
+        Event::BarRead(0x10c),
     ]);
     expected.extend(discovery);
     expected.extend([Event::ConfigWrite(0x52, 0x8001), Event::ConfigRead(0x52, 2)]);

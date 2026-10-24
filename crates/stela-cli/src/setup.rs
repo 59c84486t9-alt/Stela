@@ -1163,7 +1163,8 @@ impl Setup {
                 stela_loader::host_firmware::supports_mount(&mount_image),
                 "installed stela.efi predates host firmware resources; run stela setup --update-stela first"
             );
-            let package = stela_loader::host_firmware::Package::read_for_mount(source, &mount_image)?;
+            let package =
+                stela_loader::host_firmware::Package::read_for_mount(source, &mount_image)?;
             let (images, bytes) = package.inventory();
             let destination = record.esp.join(stela_loader::host_firmware::DIRECTORY);
             let mut report = format!(
@@ -5081,7 +5082,8 @@ mod tests {
         rerun(&f, |c| {
             c.update_stela = true;
             c.efi = Some(legacy.clone());
-        }).unwrap();
+        })
+        .unwrap();
         let source = f._dir.path().join("large-package");
         fs::create_dir(&source).unwrap();
         let bytes = vec![0x5a; 16 * 1024 * 1024 + 1];
@@ -5098,7 +5100,8 @@ mod tests {
             let error = rerun(&f, |c| {
                 c.host_firmware = Some(source.clone());
                 c.dry_run = dry;
-            }).unwrap_err();
+            })
+            .unwrap_err();
             assert!(error.to_string().contains("image limit"), "{error:#}");
             assert_eq!(snapshot(&f.esp), before);
         }
@@ -5109,7 +5112,8 @@ mod tests {
         rerun(&f, |c| {
             c.update_stela = true;
             c.efi = Some(current.clone());
-        }).unwrap();
+        })
+        .unwrap();
         rerun(&f, |c| c.host_firmware = Some(source.clone())).unwrap();
         let loaded = Package::read(&f.esp.join(DIRECTORY)).unwrap();
         assert_eq!(loaded.inventory(), (1, 16 * 1024 * 1024 + 1));
@@ -5117,13 +5121,24 @@ mod tests {
         assert!(loaded.check_mount(&fs::read(&legacy).unwrap()).is_err());
         let before = snapshot(&f.esp);
         let error = rerun(&f, |c| c.rollback = true).unwrap_err();
-        assert!(error.to_string().contains("cannot load installed host firmware"), "{error:#}");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot load installed host firmware"),
+            "{error:#}"
+        );
         assert_eq!(snapshot(&f.esp), before);
         let error = rerun(&f, |c| {
             c.update_stela = true;
             c.efi = Some(legacy.clone());
-        }).unwrap_err();
-        assert!(error.to_string().contains("cannot load installed host firmware"), "{error:#}");
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot load installed host firmware"),
+            "{error:#}"
+        );
         assert_eq!(snapshot(&f.esp), before);
 
         // Uninstall retains independently managed host firmware. A new setup
@@ -5139,7 +5154,12 @@ mod tests {
                 reinstall.efi = Some(candidate.clone());
                 reinstall.dry_run = dry;
                 let error = setup(&environment(&f.host), reinstall).unwrap_err();
-                assert!(error.to_string().contains("cannot load installed host firmware"), "{error:#}");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("cannot load installed host firmware"),
+                    "{error:#}"
+                );
                 assert_eq!(snapshot(&f.esp), before);
             }
         }
