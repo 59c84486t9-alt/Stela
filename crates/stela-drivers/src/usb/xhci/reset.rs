@@ -515,11 +515,6 @@ pub(crate) mod tests {
         }
     }
     impl Hardware {
-        pub(crate) fn reconstructed(&self) -> bool {
-            self.commands_seen
-                .iter()
-                .any(|(kind, slot, _)| *kind == CONFIGURE_ENDPOINT && *slot > 1)
-        }
         fn take(cursor: &mut Cursor) -> (u64, u64, u32, u32) {
             loop {
                 let at = cursor.next;

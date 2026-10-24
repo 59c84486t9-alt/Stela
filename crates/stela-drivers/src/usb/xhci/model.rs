@@ -26,6 +26,42 @@ impl Controller {
         }
         self.registers = Box::new(NoAccess);
     }
+    /// Read actual retained native allocations after checking the caller's
+    /// genuine attachment identity. Includes controller-wide and retry owners;
+    /// allocation lengths include full ring padding, never just active TRBs.
+    pub(crate) fn reset_allocation_geometry(
+        &self,
+        id: SlotId,
+    ) -> Result<Vec<(u64, usize)>, BlockError> {
+        let slot = self.validate_id(id)?;
+        let state = self.slots[usize::from(slot)].as_ref().unwrap();
+        let mut all: Vec<_> = [
+            &self.dcbaa,
+            &self.commands.buffer,
+            &self.events,
+            &self._event_table,
+            &state.input,
+            &state._output,
+            &state.control,
+        ]
+        .into_iter()
+        .chain(self._scratchpads.iter())
+        .map(|buffer| (buffer.physical(), buffer.len()))
+        .collect();
+        for endpoint in state.endpoints.iter().flatten() {
+            all.push((endpoint.ring.buffer.physical(), endpoint.ring.buffer.len()));
+            if let Some(streams) = &endpoint.streams {
+                all.extend(streams.allocation_geometry());
+            }
+        }
+        for ring in state.retired_rings.iter().flatten() {
+            all.push((ring.buffer.physical(), ring.buffer.len()));
+        }
+        all.extend(self.retry_resources.allocation_geometry());
+        all.sort_unstable();
+        Ok(all)
+    }
+
     /// Record the speed a model device in `slot` was addressed at.
     pub(crate) fn set_slot_speed(&mut self, slot: u8, speed: u8) {
         self.slots[usize::from(slot)].as_mut().unwrap().speed = speed;

@@ -90,6 +90,23 @@ impl Host {
         binding: Binding,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
+        let io = Self::configure_native(controller, device, &binding, dma)?;
+        let engine = Engine::new(io, dma)?;
+        Ok(Self {
+            engine,
+            flags: binding.flags,
+            device: device.clone(),
+            binding,
+        })
+    }
+    /// Establish the actual alternate and endpoint/stream contexts before
+    /// acquiring or transferring any transport DMA owner.
+    fn configure_native(
+        controller: Shared,
+        device: &Device,
+        binding: &Binding,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Native, BlockError> {
         use super::super::xhci::{FULL_SPEED, HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS};
         if !matches!(
             device.speed,
@@ -141,24 +158,18 @@ impl Host {
                 .configure(&endpoints, None, dma)?;
             None
         };
-        let engine = Engine::new(
-            Native {
-                controller,
-                id: device.id,
-                endpoints,
-                streams,
-            },
-            dma,
-        )?;
-        Ok(Self {
-            engine,
-            flags: binding.flags,
-            device: device.clone(),
-            binding,
+        Ok(Native {
+            controller,
+            id: device.id,
+            endpoints,
+            streams,
         })
     }
     /// Permanently retire this owner and construct a new owner after an actual
     /// whole-device USB reset. Existing Rc disk aliases never become usable.
+    /// Retain the three transport allocations; root-leaf reset also reuses
+    /// retired controller resources. Downstream reset keeps its existing
+    /// controller-allocation behavior until subtree reuse is supported.
     pub(super) fn reset_and_rebind(
         &mut self,
         dma: &mut dyn DmaAllocator,
@@ -170,6 +181,9 @@ impl Host {
                 BlockError::Unsupported(why),
             )
         };
+        if !self.engine.buffers_present() {
+            return Err(fail("UAS transport DMA owners already transferred"));
+        }
         let interfaces = super::super::xhci::interfaces(&self.device.configuration);
         if self.device.configuration.get(4) != Some(&1)
             || interfaces.is_empty()
@@ -185,7 +199,7 @@ impl Host {
         // SAFETY: this sole interface owns exactly all configured class DCIs,
         // and its shared owner was permanently poisoned before retirement.
         let mut fresh = unsafe {
-            controller.borrow_mut().reset_and_identify(
+            controller.borrow_mut().reset_and_reuse_root(
                 &self.device,
                 &self.binding.endpoints(),
                 dma,
@@ -224,13 +238,45 @@ impl Host {
                         error,
                     )
                 })?;
-            // SAFETY: the fresh physical attachment/verified configuration is
-            // exclusive, and no endpoint other than EP0 has been configured.
-            unsafe { Self::new(controller.clone(), &fresh, binding, dma) }.map_err(|error| {
+            let mut io = Self::configure_native(controller.clone(), &fresh, &binding, dma)
+                .map_err(|error| {
+                    (
+                        alloc::string::String::from("UAS reset reconstruct endpoints"),
+                        error,
+                    )
+                })?;
+            if io.streams() == Some(0) {
+                return Err(fail("UAS has no usable stream IDs"));
+            }
+            io.ready().map_err(|error| {
                 (
-                    alloc::string::String::from("UAS reset reconstruct endpoints"),
+                    alloc::string::String::from("UAS reset final transport readiness"),
                     error,
                 )
+            })?;
+            // Actual whole-device retirement and every fallible reconstruction
+            // step precede transferring any of the three unique allocations.
+            // Old aliases retain their permanently poisoned, empty engine.
+            let mut command = self.engine.command.transfer();
+            let mut status = self.engine.status.transfer();
+            let mut data = self.engine.data.transfer();
+            command.bytes_mut().fill(0);
+            status.bytes_mut().fill(0);
+            data.bytes_mut().fill(0);
+            Ok(Self {
+                engine: Engine {
+                    io,
+                    command,
+                    status,
+                    data,
+                    pending: core::array::from_fn(|_| None),
+                    touched: [false; 4],
+                    tag: 0,
+                    poisoned: false,
+                },
+                flags: binding.flags,
+                device: fresh,
+                binding,
             })
         })();
         if result.is_err()
@@ -436,11 +482,37 @@ impl Io for Native {
     }
 }
 
+/// A unique allocation can move only after acknowledged device retirement.
+/// Empty slots belong to permanently poisoned old engines, never dummy buffers.
+struct TransportBuffer(Option<DmaBuffer>);
+impl TransportBuffer {
+    fn new(buffer: DmaBuffer) -> Self {
+        Self(Some(buffer))
+    }
+    fn present(&self) -> bool {
+        self.0.is_some()
+    }
+    fn transfer(&mut self) -> Self {
+        Self(Some(self.0.take().expect("retained UAS DMA owner")))
+    }
+}
+impl core::ops::Deref for TransportBuffer {
+    type Target = DmaBuffer;
+    fn deref(&self) -> &DmaBuffer {
+        self.0.as_ref().expect("retained UAS DMA owner")
+    }
+}
+impl core::ops::DerefMut for TransportBuffer {
+    fn deref_mut(&mut self) -> &mut DmaBuffer {
+        self.0.as_mut().expect("retained UAS DMA owner")
+    }
+}
+
 struct Engine<I: Io> {
     io: I,
-    command: DmaBuffer,
-    status: DmaBuffer,
-    data: DmaBuffer,
+    command: TransportBuffer,
+    status: TransportBuffer,
+    data: TransportBuffer,
     pending: [Option<I::Ticket>; 4],
     touched: [bool; 4],
     tag: u16,
@@ -454,14 +526,17 @@ impl<I: Io> Engine<I> {
         io.ready()?;
         Ok(Self {
             io,
-            command: dma.allocate(IU_BUFFER_BYTES, IU_BUFFER_BYTES)?,
-            status: dma.allocate(IU_BUFFER_BYTES, IU_BUFFER_BYTES)?,
-            data: dma.allocate(MAX_TD, MAX_TD)?,
+            command: TransportBuffer::new(dma.allocate(IU_BUFFER_BYTES, IU_BUFFER_BYTES)?),
+            status: TransportBuffer::new(dma.allocate(IU_BUFFER_BYTES, IU_BUFFER_BYTES)?),
+            data: TransportBuffer::new(dma.allocate(MAX_TD, MAX_TD)?),
             pending: core::array::from_fn(|_| None),
             touched: [false; 4],
             tag: 0,
             poisoned: false,
         })
+    }
+    fn buffers_present(&self) -> bool {
+        self.command.present() && self.status.present() && self.data.present()
     }
     fn post(&mut self, pipe: Pipe, address: u64, length: usize) -> Result<(), BlockError> {
         let index = pipe.index();
@@ -488,7 +563,7 @@ impl<I: Io> Engine<I> {
         Err(error)
     }
     fn command(&mut self, lun: [u8; 8], cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
-        if self.poisoned {
+        if self.poisoned || !self.buffers_present() {
             return Err(BlockError::Unsupported("UAS interface requires rebind"));
         }
         let (length, input) = match &data {
@@ -691,6 +766,9 @@ fn status_iu(bytes: &[u8], tag: u16) -> Option<Frame> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod reset_reuse_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2310,21 +2388,40 @@ mod tests {
                 hardware.borrow().device_task,
                 "endpoint cancellation retired firmware task"
             );
-            let before = {
+            let original = {
                 let host = owner.borrow();
-                (
-                    host.transport.engine.command.bytes().to_vec(),
-                    host.transport.engine.status.bytes().to_vec(),
-                    host.transport.engine.data.bytes().to_vec(),
-                )
+                [
+                    &host.transport.engine.command,
+                    &host.transport.engine.status,
+                    &host.transport.engine.data,
+                ]
+                .map(|buffer| (buffer.physical(), buffer.len()))
             };
             let mut fresh = disks[0].reset_and_rebind(&mut dma, &mut failures).unwrap();
             assert_eq!(fresh.len(), 1);
             assert_eq!(fresh[0].identity().blocks, 2048);
             assert!(failures.is_empty());
-            assert_eq!(hardware.borrow().enables, vec![1, 1, 2]);
+            assert_eq!(hardware.borrow().enables, vec![1, 1]);
+            let super::super::UsbTransport::Uas(current) = &fresh[0].disk else {
+                panic!()
+            };
+            assert_ne!(current.bot.borrow().transport.device.id, device.id);
             assert_eq!(hardware.borrow().resets, 1);
             assert!(!hardware.borrow().device_task);
+            let current_owner = current.bot.clone();
+            let current_bytes = {
+                let host = current_owner.borrow();
+                let buffers = [
+                    &host.transport.engine.command,
+                    &host.transport.engine.status,
+                    &host.transport.engine.data,
+                ];
+                assert_eq!(
+                    buffers.map(|buffer| (buffer.physical(), buffer.len())),
+                    original
+                );
+                buffers.map(|buffer| buffer.bytes().to_vec())
+            };
             let access = hardware.borrow().accesses;
             assert!(alias.read(0, &mut [0; 512]).is_err());
             assert!(disks[0].write(0, &[0; 512]).is_err());
@@ -2332,9 +2429,15 @@ mod tests {
             {
                 let host = owner.borrow();
                 assert!(host.transport.requires_rebind());
-                assert_eq!(host.transport.engine.command.bytes(), before.0);
-                assert_eq!(host.transport.engine.status.bytes(), before.1);
-                assert_eq!(host.transport.engine.data.bytes(), before.2);
+                assert!(!host.transport.engine.command.present());
+                assert!(!host.transport.engine.status.present());
+                assert!(!host.transport.engine.data.present());
+            }
+            {
+                let host = current_owner.borrow();
+                assert_eq!(host.transport.engine.command.bytes(), current_bytes[0]);
+                assert_eq!(host.transport.engine.status.bytes(), current_bytes[1]);
+                assert_eq!(host.transport.engine.data.bytes(), current_bytes[2]);
             }
             fresh[0].write(1500, &[0xa7; 512]).unwrap();
             fresh[0].flush().unwrap();
@@ -2393,37 +2496,12 @@ mod tests {
                 )
             }
             .unwrap();
-            struct RebuildFailure<'a> {
-                inner: &'a mut dyn DmaAllocator,
-                hardware: alloc::rc::Rc<RefCell<crate::usb::xhci::model::ResetHardware>>,
-            }
-            impl DmaAllocator for RebuildFailure<'_> {
-                fn allocate(
-                    &mut self,
-                    bytes: usize,
-                    align: usize,
-                ) -> Result<DmaBuffer, BlockError> {
-                    if self.hardware.borrow().reconstructed() {
-                        Err(BlockError::NoDmaMemory)
-                    } else {
-                        self.inner.allocate(bytes, align)
-                    }
-                }
-            }
-            if changed {
-                hardware.borrow_mut().fault = crate::usb::xhci::model::ResetFault::Identity;
-            }
-            let result = if changed {
-                disks[0].reset_and_rebind(&mut dma, &mut failures)
+            hardware.borrow_mut().fault = if changed {
+                crate::usb::xhci::model::ResetFault::Identity
             } else {
-                disks[0].reset_and_rebind(
-                    &mut RebuildFailure {
-                        inner: &mut dma,
-                        hardware: hardware.clone(),
-                    },
-                    &mut failures,
-                )
+                crate::usb::xhci::model::ResetFault::ConfigureAfterReset
             };
+            let result = disks[0].reset_and_rebind(&mut dma, &mut failures);
             assert!(result.is_err());
             assert!(!failures.is_empty());
             assert!(
@@ -2432,7 +2510,15 @@ mod tests {
                     .endpoint_ready(device.slot, 1)
                     .is_err()
             );
-            assert!(controller.borrow_mut().endpoint_ready(2, 1).is_err());
+            let current_slot = *hardware.borrow().enables.last().unwrap();
+            assert!(
+                controller
+                    .borrow_mut()
+                    .endpoint_ready(current_slot, 1)
+                    .is_err()
+            );
+            assert!(controller.borrow().test_device_id(current_slot).is_err());
+            assert!(controller.borrow_mut().device(device.id).is_err());
             let access = hardware.borrow().accesses;
             assert!(disks[0].read(0, &mut [0; 512]).is_err());
             assert_eq!(hardware.borrow().accesses, access);
