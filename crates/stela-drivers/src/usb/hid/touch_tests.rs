@@ -8,6 +8,10 @@ use crate::{
 use alloc::{boxed::Box, rc::Rc, vec};
 use core::cell::{Cell, RefCell};
 
+// Pinned Linux xhci.h TRB_RESET_EP: Reset Endpoint Command TRB type.
+// Keep this test wire expectation independent of production item visibility.
+const RESET_ENDPOINT_COMMAND: u32 = 14;
+
 pub(super) const SINGLE: &[u8] = &[
     5, 0x0d, 9, 4, 0xa1, 1, 0x85, 1, 9, 0x22, 0xa1, 2, 0x15, 0, 0x25, 127, 0x75, 8, 0x95, 1, 9,
     0x51, 0x81, 2, 0x25, 1, 9, 0x42, 0x81, 2, 5, 1, 0x26, 0xff, 0x7f, 0x75, 16, 9, 0x30, 0x81, 2,
@@ -430,7 +434,7 @@ fn actual_stall_recovery_abandons_pending_frame_and_retains_original_dma_owner()
     assert_eq!(input.touch.as_ref().unwrap().pending_contacts(), 0);
     assert_eq!(input.buffer.physical(), physical);
     assert!(input.retry.is_some());
-    assert!(peer.borrow().seen.contains(&xhci::RESET_ENDPOINT));
+    assert!(peer.borrow().seen.contains(&RESET_ENDPOINT_COMMAND));
     assert!(peer.borrow().seen.contains(&xhci::SET_DEQUEUE));
     peer.borrow_mut().halt_transfer = None;
     input.stop_hid().unwrap();
