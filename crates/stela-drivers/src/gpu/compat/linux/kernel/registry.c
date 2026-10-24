@@ -247,7 +247,7 @@ static int image_shape(const struct stela_linux_registry_image *im, size_t *tota
       v->header.flags || p->level < -1 || p->level > 7 || v->header.level != p->level)
    return -EINVAL;
   if (p->flags & ~(KERNEL_PARAM_FL_UNSAFE | KERNEL_PARAM_FL_HWPARAM) ||
-      p->ops->flags & ~KERNEL_PARAM_OPS_FL_NOARG) return -EOPNOTSUPP;
+      p->ops->flags & ~(unsigned int)KERNEL_PARAM_OPS_FL_NOARG) return -EOPNOTSUPP;
   for (size_t j = 0; j < i; ++j)
    if (im->parameters[j]->target == p) return -EINVAL;
  }

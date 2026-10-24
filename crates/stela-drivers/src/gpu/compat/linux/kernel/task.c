@@ -164,13 +164,16 @@ static void wake_account(struct stela_linux_task *task)
 
 static bool quiet_except_usage(const struct stela_linux_task *task)
 {
+	/* Linux's sigisemptyset() takes a mutable set: test a copy. */
+	sigset_t pending = task->linux_task.pending.signal;
+
 	return !task->linux_task.thread_info.preempt_count && !task->linux_task.thread_info.flags &&
 	       READ_ONCE(task->linux_task.__state) == TASK_RUNNING &&
 	       task->linux_task.flags == PF_KTHREAD && !task->linux_task.blocked_on &&
 	       !task->linux_task.blocked_donor && !task->linux_task.wake_q.next &&
 	       !task->linux_task.in_iowait && !task->linux_task.is_blocked &&
 	       !task->io_blocked && !task->load_blocked &&
-	       sigisemptyset(&task->linux_task.pending.signal) &&
+	       sigisemptyset(&pending) &&
 	       list_empty(&task->linux_task.pending.list) &&
 	       refcount_read(&task->linux_task.stack_refcount) == 1;
 }

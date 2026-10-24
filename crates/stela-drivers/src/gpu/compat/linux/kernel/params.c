@@ -150,7 +150,7 @@ static int parse_parameter(char *param, char *val, const char *doing,
 			return 0;
 		if (!val && !(kp->ops->flags & KERNEL_PARAM_OPS_FL_NOARG))
 			return -EINVAL;
-		if ((kp->ops->flags & ~KERNEL_PARAM_OPS_FL_NOARG) ||
+		if ((kp->ops->flags & ~(unsigned int)KERNEL_PARAM_OPS_FL_NOARG) ||
 		    (kp->flags & ~(KERNEL_PARAM_FL_HWPARAM | KERNEL_PARAM_FL_UNSAFE))) {
 			pr_err("%s: unsupported parameter flags for '%s'\n", doing, param);
 			return -EOPNOTSUPP;

@@ -296,7 +296,7 @@ static void ordinary_owner(const struct stela_mutex_test_call *call)
 		 * then loses to original unlock/PICKUP before the waiter runs. */
 		assert(wake_up_process(tasks[1]) == 1);
 		assert(!stela_linux_task_yield());
-		assert(atomic_long_read(&lock.owner) & 2UL);
+		assert((unsigned long)atomic_long_read(&lock.owner) & 2UL);
 		checkpoint(call, 2);
 	}
 	if (scenario == 1 || scenario == 2 || scenario == 5) {
@@ -306,7 +306,7 @@ static void ordinary_owner(const struct stela_mutex_test_call *call)
 	payload = 42;
 	mutex_unlock(&lock);
 	if (scenario == 6)
-		assert(atomic_long_read(&lock.owner) & 4UL);
+		assert((unsigned long)atomic_long_read(&lock.owner) & 4UL);
 	until(&finished, workers);
 	assert(!stela_linux_task_waiting_io() && !stela_linux_task_waiting_load());
 	if (!scenario) {

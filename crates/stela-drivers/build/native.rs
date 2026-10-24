@@ -259,6 +259,7 @@ impl Linux {
                 PathBuf::from(format!("{COMPAT}/stela/test.c")),
                 PathBuf::from(format!("{COMPAT}/stela/registry_test_host.c")),
                 PathBuf::from(format!("{COMPAT}/stela/taint_test_host.c")),
+                PathBuf::from(format!("{COMPAT}/stela/rodata_test_host.c")),
             ];
             let services = archive(&host, "linux-host", &services);
             let mut kernel_build = host;
