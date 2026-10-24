@@ -21,6 +21,8 @@ pub use native_run::{
 pub(in crate::machine::engine) use native_run::{
     RecoveredDeviceAccess, RecoveredRead, RecoveredWrite,
 };
+#[cfg(feature = "native-profile")]
+pub use policy::DataTlbStatistics as NativeDataTlbStatistics;
 use policy::Policy;
 pub use policy::{Failure as SharedMemoryFailure, Refusal as SharedMemoryRefusal};
 use stela_compiler::context::memory::MemoryStatus;
@@ -206,6 +208,19 @@ impl SharedMemory {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// Cumulative observations for this actual current PE, not the full cohort.
+    #[cfg(feature = "native-profile")]
+    pub fn native_data_tlb_statistics(&mut self) -> Option<NativeDataTlbStatistics> {
+        Some(
+            self.cpu
+                .canonical_memory
+                .as_mut()?
+                .memory
+                .policy_mut()
+                .data_tlb_statistics(),
+        )
+    }
+
     /// Bound every currently instantiated canonical PE's compiler artifacts.
     /// Reset/start owners inherit the tightened bound from their real source.
     /// No executing code or architectural state is cached or invalidated here.

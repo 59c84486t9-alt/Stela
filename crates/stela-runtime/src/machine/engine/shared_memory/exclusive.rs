@@ -22,8 +22,7 @@ impl SharedMemory {
         data: ExclusiveData,
     ) -> Result<ExclusiveResult, MemoryStatus> {
         let authority = NativeSystemTarget::capture().map_err(|_| MemoryStatus::Unsupported)?;
-        self.memory.policy_mut().controls = controls;
-        self.memory.policy_mut().failure = None;
+        self.memory.policy_mut().reset_controls(controls);
         let requirements = MemoryRequirements {
             required_flags: request.flags,
             required_profile: profile_requirements::NATIVE_ACCESS,

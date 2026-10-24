@@ -1,4 +1,4 @@
-//! One authoritative ARM walk for each reached physical atomic quantity.
+//! Source-qualified ARM data translation with architectural TLB maintenance.
 use super::*;
 use crate::memory::{
     backing::AccessKind,
@@ -7,6 +7,9 @@ use crate::memory::{
 use stela_compiler::context::memory::{
     InstructionRequirements, MemoryOperationClass, SpAlignmentRequirement, flags,
 };
+mod tlb;
+#[cfg(feature = "native-profile")]
+pub use tlb::Statistics as DataTlbStatistics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
@@ -53,9 +56,10 @@ pub enum Refusal {
 }
 
 pub(super) struct Policy {
-    pub(super) controls: Controls,
+    controls: Controls,
     ram: Arc<RegisteredSystemRam>,
     pub(super) failure: Option<Failure>,
+    tlb: tlb::DataTlb,
 }
 impl Policy {
     pub(super) fn new(controls: Controls, ram: Arc<RegisteredSystemRam>) -> Self {
@@ -63,7 +67,26 @@ impl Policy {
             controls,
             ram,
             failure: None,
+            tlb: tlb::DataTlb::default(),
         }
+    }
+    /// Only the stopped owning Machine supplies its architectural epoch.
+    pub(super) fn refresh(&mut self, controls: Controls, generation: u64) {
+        let changed = self.controls.translation != controls.translation
+            || self.controls.requester != controls.requester;
+        self.tlb.refresh(generation, changed);
+        self.controls = controls;
+        self.failure = None;
+    }
+    /// A stopped helper without a Machine epoch must use fresh walks.
+    pub(super) fn reset_controls(&mut self, controls: Controls) {
+        self.tlb.disable();
+        self.controls = controls;
+        self.failure = None;
+    }
+    #[cfg(feature = "native-profile")]
+    pub(super) fn data_tlb_statistics(&self) -> DataTlbStatistics {
+        self.tlb.statistics()
     }
     fn unsupported(&mut self, request: DataRequest, address: u64, reason: Refusal) -> MemoryStatus {
         self.failure.get_or_insert(Failure::Unsupported {
@@ -235,10 +258,6 @@ impl DataPolicy for Policy {
             AccessKind::Write => mmu::Access::Write,
             AccessKind::Execute => return Err((MemoryStatus::Unsupported, part.address)),
         };
-        let mut tables = Tables {
-            ram: &self.ram,
-            failure: None,
-        };
         // Match Arm Mem, including its ASIMD-pair alignment override. All
         // other pieces retain the original instruction's alignment result;
         // DEVPAGE2 takes FAULT when a later byte reaches Device memory.
@@ -251,15 +270,27 @@ impl DataPolicy for Policy {
         } else {
             mmu::alignment::MemoryCheck::new(shape(request), request.address)
         };
-        let outcome = mmu::translate_checked_part(
-            &self.controls.translation,
-            part.address,
-            access,
-            self.controls.requester,
-            alignment,
-            &mut tables,
-        );
-        if let Some(status) = tables.failure {
+        let eligible = request.operation == DataOperation::Ordinary && !self.controls.cold_m0();
+        let cached = self.tlb.lookup(part, eligible);
+        let (outcome, failure) = if let Some(mapped) = cached {
+            (mmu::Outcome::Mapped(mapped), None)
+        } else {
+            let mut tables = Tables::new(&self.ram);
+            let outcome = mmu::translate_checked_part(
+                &self.controls.translation,
+                part.address,
+                access,
+                self.controls.requester,
+                alignment,
+                &mut tables,
+            );
+            self.tlb.record_walk(
+                #[cfg(feature = "native-profile")]
+                tables.reads,
+            );
+            (outcome, tables.failure)
+        };
+        if let Some(status) = failure {
             return Err((status, part.address));
         }
         let translated = match outcome {
@@ -353,6 +384,9 @@ impl DataPolicy for Policy {
                 part.address,
             ));
         }
+        if cached.is_none() && eligible {
+            self.tlb.fill(part, translated);
+        }
         Ok(translated.physical)
     }
     fn check(&mut self, access: DataAccess<'_>) -> Result<(), MemoryStatus> {
@@ -366,14 +400,25 @@ impl DataPolicy for Policy {
 pub(super) struct Tables<'a> {
     ram: &'a RegisteredSystemRam,
     pub(super) failure: Option<MemoryStatus>,
+    #[cfg(feature = "native-profile")]
+    reads: u64,
 }
 impl<'a> Tables<'a> {
     pub(super) fn new(ram: &'a RegisteredSystemRam) -> Self {
-        Self { ram, failure: None }
+        Self {
+            ram,
+            failure: None,
+            #[cfg(feature = "native-profile")]
+            reads: 0,
+        }
     }
 }
 impl mmu::TableMemory for Tables<'_> {
     fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
+        #[cfg(feature = "native-profile")]
+        {
+            self.reads = self.reads.saturating_add(1);
+        }
         match self.ram.read_descriptor(physical) {
             Ok(value) => Some(value),
             Err(MemoryStatus::Translation) => None,
@@ -498,7 +543,7 @@ pub(super) mod tests {
             ram,
         )
     }
-    fn ordinary_transfer(
+    pub(in crate::machine::engine::shared_memory) fn ordinary_transfer(
         thread: &mut crate::memory::domain::MemoryThread<Policy>,
         address: u64,
         bytes: &mut [u8],

@@ -546,7 +546,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         self.watch.pass = [None; 2];
         // The passed pages leave the shadow tables again.
-        self.translation_generation += 1;
+        self.advance_translation_generation();
         self.host.invalidate_translations();
         self.sync_regime();
         result

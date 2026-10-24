@@ -70,6 +70,8 @@ pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
     ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
 };
+#[cfg(feature = "native-profile")]
+pub use shared_memory::NativeDataTlbStatistics;
 pub use shared_memory::{
     HeldRamService, NativeCohort, NativeRun, NativeRunIdentity, NativeRunObservation,
     NativeTransport, ReturnedRun, ServiceHost, ServiceTransport, SharedMemory, SharedMemoryFailure,
@@ -1853,7 +1855,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         if watch.ranges != self.watch.ranges {
             // Newly watched pages must leave the shadow tables.
-            self.translation_generation += 1;
+            self.advance_translation_generation();
             self.host.invalidate_translations();
         }
         self.watch = watch;
@@ -2167,8 +2169,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         report
     }
 
+    /// An architectural cache epoch must never wrap back to an old authority.
+    fn advance_translation_generation(&mut self) {
+        self.translation_generation = self
+            .translation_generation
+            .checked_add(1)
+            .expect("architectural translation generation exhausted");
+    }
+
     fn translations_changed(&mut self) {
-        self.translation_generation += 1;
+        self.advance_translation_generation();
         self.statistics.translation_changes += 1;
         self.host.invalidate_translations();
         self.sync_regime();
@@ -2178,14 +2188,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// fetch translates and asks again, and no cached, looked-up or chained
     /// transfer enters a block of another page before it has.
     pub fn fetch_permissions_changed(&mut self) {
-        self.translation_generation += 1;
+        self.advance_translation_generation();
     }
 
     /// A TLBI: the fetch translations of every regime go, and the host
     /// drops what `reach` names of its shadow. No control changed, so the
     /// regime and what derives from System registers stay.
     fn tlb_maintained(&mut self, reach: mmu::tlbi::Reach) {
-        self.translation_generation += 1;
+        self.advance_translation_generation();
         self.statistics.tlb_maintenance += 1;
         if reach != mmu::tlbi::Reach::All {
             self.statistics.scoped_maintenance += 1;
@@ -2197,7 +2207,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// alone: the regime's new controls tell the host so
     /// ([`Host::set_regime`]), which keeps the upper half's shadow.
     fn table_base_changed(&mut self) {
-        self.translation_generation += 1;
+        self.advance_translation_generation();
         self.statistics.table_base_changes += 1;
         self.sync_regime();
     }
@@ -6078,6 +6088,26 @@ impl<H: Host> mmu::TableMemory for RamTables<'_, H> {
 mod tests {
     use super::*;
     use crate::machine::exception::Pstate;
+
+    #[test]
+    fn architectural_translation_generation_exhaustion_never_reuses_an_old_epoch() {
+        let operations: [fn(&mut Machine<FakeHost, NoDevices>); 5] = [
+            Machine::advance_translation_generation,
+            Machine::translations_changed,
+            Machine::fetch_permissions_changed,
+            |machine| machine.tlb_maintained(mmu::tlbi::Reach::All),
+            Machine::table_base_changed,
+        ];
+        for operation in operations {
+            let mut machine = board_on(crate::machine::Chip::AppleM1, &[], NoDevices, Vec::new());
+            machine.translation_generation = u64::MAX;
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&mut machine)))
+                    .is_err()
+            );
+            assert_eq!(machine.translation_generation, u64::MAX);
+        }
+    }
 
     pub(super) struct FakeHost {
         pub(super) ram: Vec<u8>,

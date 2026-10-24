@@ -581,6 +581,100 @@ mod tests {
         assert!(matches!(machine.peers[0], Peer::Off));
         assert!(machine.devices.power.is_empty());
     }
+    #[test]
+    fn actual_tlbi_and_both_preparations_refresh_every_retained_data_tlb() {
+        use super::super::policy::tests::ordinary_transfer;
+        use crate::machine::system::Register;
+        const LEAF: u64 = 0x13020;
+        const DATA: u64 = 0x14000;
+        const OTHER: u64 = 0x15000;
+        const VA: u64 = 0x4000;
+        const TLBI_VAE1IS_X0: u32 = 0xd508_8320;
+        let (mut machine, mut owners) = fixture(2);
+        let held = hold(&mut machine, &mut owners);
+        machine
+            .start(Start {
+                cpu: 1,
+                address: VA,
+            })
+            .unwrap();
+        machine.cpu.pc = VA;
+        let ram = Arc::clone(&machine.cpu.canonical_memory.as_ref().unwrap().ram);
+        let publish = |physical, bytes: &[u8]| {
+            // SAFETY: actual fixture-owned canonical RAM; owners remain held.
+            unsafe { ram.publish_physical(physical, bytes) }.unwrap();
+        };
+        for physical in [DATA, OTHER] {
+            publish(physical, &0x1400_0000u32.to_le_bytes());
+        }
+        publish(DATA + 8, &7u64.to_le_bytes());
+        publish(OTHER + 8, &9u64.to_le_bytes());
+        let Peer::Parked(parked) = &mut machine.peers[1] else {
+            panic!("started PE");
+        };
+        let cpu = parked.cpu_mut();
+        cpu.pstate = Pstate::reset(1);
+        cpu.registers
+            .set_raw(Register::SCTLR_EL1, 0, 1 | (1 << 2) | (1 << 12));
+        cpu.registers.set_raw(
+            Register::TCR_EL1,
+            0,
+            16 | (16 << 16) | (1 << 23) | (5 << 32),
+        );
+        cpu.registers.set_raw(Register::TTBR0_EL1, 0, 0x10000);
+        cpu.registers.set_raw(Register::MAIR_EL1, 0, 0xff);
+        let bindings: Vec<_> = owners.iter().map(WorkerOwner::binding).collect();
+        let read = |cpu: &mut Cpu| {
+            let mut bytes = [0; 8];
+            assert_eq!(
+                ordinary_transfer(
+                    &mut cpu.canonical_memory.as_mut().unwrap().memory,
+                    VA + 8,
+                    &mut bytes,
+                    0
+                )
+                .0,
+                MemoryStatus::Success
+            );
+            u64::from_le_bytes(bytes)
+        };
+        // Both actual preparation APIs receive the Machine epoch. No fixture
+        // executes native code or fabricates a target/worker execution receipt.
+        drop(machine.native_cohort(&bindings, true).unwrap());
+        assert_eq!(read(&mut machine.cpu), 7);
+        let Peer::Parked(parked) = &mut machine.peers[1] else {
+            unreachable!()
+        };
+        assert_eq!(read(parked.cpu_mut()), 7);
+        publish(LEAF, &(OTHER | 3 | (1 << 10) | (3 << 8)).to_le_bytes());
+        // Routine worker invalidation leaves architectural TLB metadata intact.
+        machine.host.invalidate_translations();
+        drop(machine.native_cohort(&bindings, true).unwrap());
+        assert_eq!(read(&mut machine.cpu), 7);
+        let Peer::Parked(parked) = &mut machine.peers[1] else {
+            unreachable!()
+        };
+        assert_eq!(read(parked.cpu_mut()), 7);
+        machine.cpu.state.x[0] = VA >> 12;
+        machine.system_instruction(TLBI_VAE1IS_X0).unwrap();
+        // Refresh only the BSP first. The parked peer still has old metadata
+        // until its next actual preparation consumes the newer global epoch.
+        // SAFETY: all real fixture owners are held, and the unexecuted loan is
+        // dropped before any Machine mutation. This grants no physical entry.
+        drop(unsafe { machine.shared_native_run(bindings[0]) }.unwrap());
+        assert_eq!(read(&mut machine.cpu), 9);
+        drop(machine.native_cohort(&bindings, true).unwrap());
+        let Peer::Parked(parked) = &mut machine.peers[1] else {
+            unreachable!()
+        };
+        assert_eq!(read(parked.cpu_mut()), 9);
+        release_members(
+            machine.native_publication.as_mut().unwrap(),
+            &mut owners,
+            held,
+        );
+    }
+
     fn fresh(profile: &CpuProfile, pe: usize) -> Cpu {
         let mut cpu = Cpu::of(profile.chip, 0x8000, Pstate::reset(2));
         crate::machine::engine::system::identify(profile, pe, &mut cpu, &mut Vec::new());

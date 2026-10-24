@@ -603,7 +603,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             &self.profile,
             &self.profile_missing,
             &self.admit_table,
-            bytes,
+            PreparationBoundary {
+                source_bytes: bytes,
+                translation_generation: self.translation_generation,
+            },
         )
         .map_err(|failure| failure.status)
     }
@@ -623,6 +626,11 @@ fn source_window(pc: u64, breakpoints: &[u64], traces: &[u64]) -> usize {
     bytes
 }
 
+struct PreparationBoundary {
+    source_bytes: usize,
+    translation_generation: u64,
+}
+
 fn prepare<'a>(
     cpu: &'a mut crate::machine::Cpu,
     binding: publication::WorkerBinding,
@@ -630,8 +638,12 @@ fn prepare<'a>(
     cpu_profile: &crate::machine::CpuProfile,
     missing: &[crate::machine::system::Register],
     admit: &crate::machine::chip::AdmitTable,
-    source_bytes: usize,
+    boundary: PreparationBoundary,
 ) -> Result<NativeRun<'a>, PreparationFailure> {
+    let PreparationBoundary {
+        source_bytes,
+        translation_generation,
+    } = boundary;
     let location = (pe, cpu.pc, cpu.pstate.el);
     let at = |stage, status| PreparationFailure::at(stage, status, location, None);
     if binding.pe != pe || cpu.monitor.is_some() {
@@ -833,8 +845,10 @@ fn prepare<'a>(
         }
     };
     memory.artifacts.remember_controls(&controls);
-    memory.memory.policy_mut().controls = controls;
-    memory.memory.policy_mut().failure = None;
+    memory
+        .memory
+        .policy_mut()
+        .refresh(controls, translation_generation);
     Ok(NativeRun {
         memory,
         state,
@@ -1023,7 +1037,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 &self.profile,
                 &self.profile_missing,
                 &self.admit_table,
-                bytes,
+                PreparationBoundary {
+                    source_bytes: bytes,
+                    translation_generation: self.translation_generation,
+                },
             )?);
         }
         Ok(Cohort {
@@ -1165,7 +1182,10 @@ mod artifact_tests {
             &machine.profile,
             &machine.profile_missing,
             &machine.admit_table,
-            bytes,
+            PreparationBoundary {
+                source_bytes: bytes,
+                translation_generation: machine.translation_generation,
+            },
         )
         .map_err(|failure| failure.status)?;
         Ok(Arc::clone(&run.artifact))
@@ -1186,7 +1206,10 @@ mod artifact_tests {
             &machine.profile,
             &machine.profile_missing,
             &machine.admit_table,
-            bytes,
+            PreparationBoundary {
+                source_bytes: bytes,
+                translation_generation: machine.translation_generation,
+            },
         ) {
             Ok(_) => panic!("preparation unexpectedly succeeded"),
             Err(failure) => failure,
@@ -1412,7 +1435,10 @@ mod artifact_tests {
             &machine.profile,
             &machine.profile_missing,
             &machine.admit_table,
-            bytes,
+            PreparationBoundary {
+                source_bytes: bytes,
+                translation_generation: machine.translation_generation,
+            },
         )
         .unwrap();
         let identity = Arc::clone(&run.artifact.identity);

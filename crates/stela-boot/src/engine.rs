@@ -2576,6 +2576,14 @@ fn run<H: Host>(
                 "NATIVE BOARD {:?}\n",
                 machine.devices.advance_statistics()
             ));
+            #[cfg(feature = "native-profile")]
+            {
+                let pe = machine.processor();
+                output::arguments(format_args!(
+                    "NATIVE DATA TLB pe={pe} {:?}\n",
+                    machine.native_data_tlb_statistics()
+                ));
+            }
             service_gap = 0;
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);
