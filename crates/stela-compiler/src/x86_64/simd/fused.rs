@@ -20,6 +20,7 @@ use crate::{
 };
 use alloc::vec;
 use alloc::vec::Vec;
+mod half;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -33,14 +34,23 @@ const DOUBLE_PREFIX: u8 = 0xf2;
 const REGISTER_DIRECT: u8 = 0xc0;
 const MODRM_REGISTER_SHIFT: u8 = 3;
 
-fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
-    let opcode = match operand.operation {
+fn fused_opcode(operation: FusedOperation) -> FusedOpcode {
+    match operation {
         FusedOperation::Add => FusedOpcode::MultiplyAdd,
         FusedOperation::Subtract => FusedOpcode::NegativeMultiplyAdd,
         FusedOperation::NegatedAdd => FusedOpcode::NegativeMultiplySubtract,
         FusedOperation::NegatedSubtract => FusedOpcode::MultiplySubtract,
-    };
-    emit_fma(code, operand.format, operand.shape, opcode, target);
+    }
+}
+
+fn emit_checked_fma(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+    emit_fma(
+        code,
+        operand.format,
+        operand.shape,
+        fused_opcode(operand.operation),
+        target,
+    );
 }
 
 fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
@@ -87,7 +97,7 @@ pub(in crate::x86_64) fn emit(
     entry: Entry,
 ) -> Option<ColdSplit> {
     if operand.format == Format::Half {
-        super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
+        half::emit(code, operand, pc, target);
         return None;
     }
     let native_fma = target.supports(TargetCpu::Fma);

@@ -212,8 +212,8 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
     match operation {
         FloatingPointOperation::ExtremaScale(operand) => extrema_scale::always_exits(operand),
         FloatingPointOperation::Binary(operand) => arithmetic::always_exits(operand),
-        FloatingPointOperation::Fused(operand) => operand.format == Format::Half,
-        FloatingPointOperation::Widening(_)
+        FloatingPointOperation::Fused(_)
+        | FloatingPointOperation::Widening(_)
         | FloatingPointOperation::BFloat16(_)
         | FloatingPointOperation::Complex(_) => false,
         FloatingPointOperation::Conversion(operand) => match operand {
