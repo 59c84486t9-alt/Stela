@@ -66,6 +66,10 @@ pub(crate) struct Run {
     /// Print the serviced-call counts when the program exits.
     #[arg(long, help_heading = ADVANCED)]
     statistics: bool,
+    /// Save sampled FP helper controls/status in fresh engine directories under this container.
+    /// Requires a build with stela-runtime/native-profile.
+    #[arg(long, help_heading = ADVANCED)]
+    fp_profile_output: Option<PathBuf>,
     /// Stop at the first operation Stela does not support instead of
     /// failing it as macOS fails an operation it lacks (also
     /// STELA_STRICT=1).
@@ -256,6 +260,7 @@ impl Run {
             cpu_subtype: None,
             trace: false,
             statistics: false,
+            fp_profile_output: None,
             strict: false,
             model: None,
         })
@@ -279,6 +284,10 @@ impl Run {
         }
         if self.statistics {
             command.push("--statistics".into());
+        }
+        if let Some(output) = &self.fp_profile_output {
+            command.push("--fp-profile-output".into());
+            command.push(std::path::absolute(output)?.into_os_string());
         }
         if self.strict {
             command.push("--strict".into());
@@ -383,6 +392,7 @@ impl Run {
             environment,
             trace: self.trace,
             statistics: self.statistics,
+            fp_profile_output: self.fp_profile_output.clone(),
             strict: self.strict,
         };
         let report = hosted::run(launch).map_err(|error| stopped(&target.program, error))?;
@@ -445,6 +455,16 @@ mod tests {
             command[1..],
             ["run", "--root", "/guest"].map(OsString::from)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fp_profile_exec_binds_a_relative_container_to_the_launch_directory() -> Result<()> {
+        let mut run = Run::shorthand(vec!["hello".into()])?;
+        run.fp_profile_output = Some(PathBuf::from("profiles"));
+        let command = run.reexec(&[])?;
+        assert_eq!(command[2], "--fp-profile-output");
+        assert_eq!(command[3], std::path::absolute("profiles")?.as_os_str());
         Ok(())
     }
 

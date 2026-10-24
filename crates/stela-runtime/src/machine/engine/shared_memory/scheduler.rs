@@ -802,15 +802,16 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                         "numerical source exit is not an FP operation",
                     )));
                 };
-                crate::floating::complete(&mut self.cpu.state, &operation).map_err(|_| {
-                    self.unsupported(RequirementKind::Instruction {
-                        word: settlement.terminal,
-                        detail: alloc::format!(
-                            "FPCR {:#x} enables a trapped FP exception",
-                            self.cpu.state.fpcr
-                        ),
-                    })
-                })?;
+                self.complete_floating_point(settlement.terminal, &operation)
+                    .map_err(|_| {
+                        self.unsupported(RequirementKind::Instruction {
+                            word: settlement.terminal,
+                            detail: alloc::format!(
+                                "FPCR {:#x} enables a trapped FP exception",
+                                self.cpu.state.fpcr
+                            ),
+                        })
+                    })?;
                 completing(self, Self::next)
             }
             Ok(ExitKind::PointerAuthentication) => completing(self, |machine| {

@@ -131,6 +131,8 @@ pub struct Launch {
     /// Retain serviced instruction frequencies from completed thread engines.
     /// This diagnoses helper exits, not retired instructions or time shares.
     pub statistics: bool,
+    /// Container for fresh per-engine FP diagnostic directories; requires native-profile.
+    pub fp_profile_output: Option<std::path::PathBuf>,
     /// Stop at the first unsupported operation instead of failing it as
     /// the guest's platform does ([`unsupported`]).
     pub strict: bool,
@@ -215,6 +217,11 @@ pub fn preparation(model: &str) -> Result<std::sync::Arc<crate::machine::Prepara
 
 /// Run the process to its exit.
 pub fn run(launch: Launch) -> Result<Report> {
+    #[cfg(not(feature = "native-profile"))]
+    ensure!(
+        launch.fp_profile_output.is_none(),
+        "FP profiling requires a native-profile build"
+    );
     check_host_timebase()?;
     translations::configure(translations::Config::from_environment());
     // SIGPIPE as exec left it, which the host runtime's own start-up
@@ -316,6 +323,19 @@ pub fn run(launch: Launch) -> Result<Report> {
         );
     }
     let (engine, signer) = threads::engine(chip, profile, target, keys, jop)?;
+    #[cfg(feature = "native-profile")]
+    let engine = {
+        let mut engine = engine;
+        engine.fp_profile_output = launch
+            .fp_profile_output
+            .as_deref()
+            .map(|path| {
+                std::fs::create_dir_all(path).context("create the FP profile container")?;
+                std::fs::canonicalize(path).context("resolve the FP profile container")
+            })
+            .transpose()?;
+        engine
+    };
     let process = kernel::Process::new(kernel::Config {
         shared_region,
         signer,

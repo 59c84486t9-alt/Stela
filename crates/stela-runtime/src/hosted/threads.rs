@@ -43,6 +43,8 @@ use std::{
 };
 use stela_compiler::TargetCpu;
 
+#[cfg(feature = "native-profile")]
+mod profile_output;
 mod statistics;
 use statistics::Statistics;
 
@@ -79,6 +81,8 @@ pub(super) struct Engine {
     pub(super) tables: Arc<Tables>,
     pub(super) keys: pe::Keys,
     pub(super) jop: pe::UserJop,
+    #[cfg(feature = "native-profile")]
+    pub(super) fp_profile_output: Option<std::path::PathBuf>,
 }
 
 impl Engine {
@@ -595,7 +599,10 @@ fn enter<F>(
     drop(sender);
     let mut pe = pe;
     let ends = EndsControl(&member.control);
+    #[cfg(not(feature = "native-profile"))]
     let outcome = run(&mut kernel, &mut pe, &member);
+    #[cfg(feature = "native-profile")]
+    let outcome = profile_output::execute(&mut kernel, &mut pe, &member);
     lock(&process.runtime.statistics).record(pe.statistics, || pe.exit_words());
     process.exception_ports.thread_ended(port);
     // A thread ending the process records the end while it is still a
@@ -627,7 +634,16 @@ fn enter<F>(
 /// the reservation another thread's execution may have broken, the
 /// compiled blocks the hosted kernel made stale, and the host protection
 /// of the MAP_JIT pages, which follows its view ([`Kernel::jit_view`]).
-fn resume(kernel: &mut Kernel, member: &Member, pe: &mut Pe) -> Result<()> {
+fn resume(
+    kernel: &mut Kernel,
+    member: &Member,
+    pe: &mut Pe,
+    #[cfg(feature = "native-profile")] profile: &mut Option<profile_output::ThreadOutput>,
+) -> Result<()> {
+    #[cfg(feature = "native-profile")]
+    if let Some(profile) = profile {
+        profile.resume(pe);
+    }
     if kernel.process.runtime.execution.acquire(kernel.thread) {
         pe.cpu.monitor = None;
     }
@@ -679,7 +695,12 @@ impl Drop for EndsControl<'_> {
 /// At each return to guest code the thread's control parks it while it is
 /// suspended or held (`thread_suspend`, `thread_get_state`); a thread the
 /// process's end wakes there ends.
-fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<Termination>> {
+fn run(
+    kernel: &mut Kernel,
+    pe: &mut Box<Pe>,
+    member: &Member,
+    #[cfg(feature = "native-profile")] profile: &mut Option<profile_output::ThreadOutput>,
+) -> Result<Option<Termination>> {
     let process = kernel.process.clone();
     let thread = kernel.thread;
     let execution = &process.runtime.execution;
@@ -692,9 +713,20 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
     if !control.leave(pe) {
         return Ok(None);
     }
-    resume(kernel, member, pe)?;
+    resume(
+        kernel,
+        member,
+        pe,
+        #[cfg(feature = "native-profile")]
+        profile,
+    )?;
     loop {
-        match pe.run(pe.statistics.blocks + SLICE_BLOCKS) {
+        let stop = pe.run(pe.statistics.blocks + SLICE_BLOCKS);
+        #[cfg(feature = "native-profile")]
+        if let Some(profile) = &mut *profile {
+            profile.checkpoint(pe, false);
+        }
+        match stop {
             Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) if kernel.jit_register(pe)? => {
                 pe.return_from_exception().map_err(|status| {
                     anyhow::anyhow!("exception-return monitor/event settlement: {status:?}")
@@ -714,7 +746,13 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                 if !control.leave(pe) {
                     return Ok(None);
                 }
-                resume(kernel, member, pe)?;
+                resume(
+                    kernel,
+                    member,
+                    pe,
+                    #[cfg(feature = "native-profile")]
+                    profile,
+                )?;
                 pe.return_from_exception().map_err(|status| {
                     anyhow::anyhow!("exception-return monitor/event settlement: {status:?}")
                 })?;
@@ -736,18 +774,36 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                     if let Some(end) = deliver(kernel, pe)? {
                         return Ok(ended(end));
                     }
-                    resume(kernel, member, pe)?;
+                    resume(
+                        kernel,
+                        member,
+                        pe,
+                        #[cfg(feature = "native-profile")]
+                        profile,
+                    )?;
                 } else if control.pending() {
                     restart_ranges(&process, pe);
                     execution.release(thread);
                     if !control.leave(pe) {
                         return Ok(None);
                     }
-                    resume(kernel, member, pe)?;
+                    resume(
+                        kernel,
+                        member,
+                        pe,
+                        #[cfg(feature = "native-profile")]
+                        profile,
+                    )?;
                 } else if execution.contended() {
                     restart_ranges(&process, pe);
                     execution.release(thread);
-                    resume(kernel, member, pe)?;
+                    resume(
+                        kernel,
+                        member,
+                        pe,
+                        #[cfg(feature = "native-profile")]
+                        profile,
+                    )?;
                 }
             }
             Stop::Waiting => {
@@ -759,7 +815,13 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                 if let Some(end) = deliver(kernel, pe)? {
                     return Ok(ended(end));
                 }
-                resume(kernel, member, pe)?;
+                resume(
+                    kernel,
+                    member,
+                    pe,
+                    #[cfg(feature = "native-profile")]
+                    profile,
+                )?;
             }
             // An instruction the runtime does not implement: as an Apple
             // CPU's UNDEFINED encoding, EXC_BAD_INSTRUCTION at its pc.
@@ -785,7 +847,13 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                 if let Some(end) = deliver(kernel, pe)? {
                     return Ok(ended(end));
                 }
-                resume(kernel, member, pe)?;
+                resume(
+                    kernel,
+                    member,
+                    pe,
+                    #[cfg(feature = "native-profile")]
+                    profile,
+                )?;
             }
             Stop::Breakpoint(pc) => {
                 execution.release(thread);
@@ -857,6 +925,8 @@ pub(super) fn engine(
         tables: Arc::new(Tables::new()?),
         keys,
         jop,
+        #[cfg(feature = "native-profile")]
+        fp_profile_output: None,
     };
     if jop == pe::UserJop::Disabled {
         return Ok((engine, None));

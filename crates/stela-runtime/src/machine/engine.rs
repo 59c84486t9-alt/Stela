@@ -8,6 +8,8 @@ mod device_access;
 mod device_read;
 mod device_write;
 mod exclusive;
+#[cfg(all(feature = "std", feature = "native-profile"))]
+pub(crate) mod floating_profile;
 mod guarded;
 mod hosted;
 pub mod installed_code;
@@ -1448,6 +1450,26 @@ fn is_floating_point(word: u32) -> bool {
     (word >> 25) & 7 == 7 || word & 0x0a00_0000 == 0x0800_0000 && word & (1 << 26) != 0
 }
 
+impl<H: Host, D: Devices> Machine<H, D> {
+    /// Both FP service boundaries share the same sole semantic completion.
+    #[inline]
+    fn complete_floating_point(
+        &mut self,
+        word: u32,
+        operation: &FloatingPointOperation,
+    ) -> Result<(), stela_compiler::aarch64::floating::UnsupportedControl> {
+        #[cfg(all(feature = "std", feature = "native-profile"))]
+        if let Some(profile) = &mut self.floating_profile
+            && profile.tick()
+        {
+            return profile.complete(&mut self.cpu.state, word, operation);
+        }
+        #[cfg(not(all(feature = "std", feature = "native-profile")))]
+        let _ = word;
+        crate::floating::complete(&mut self.cpu.state, operation)
+    }
+}
+
 pub struct Machine<H: Host, D: Devices> {
     /// The running PE.
     pub cpu: Cpu,
@@ -1459,6 +1481,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// the instruction word that took them, except those the live blocks
     /// count at their last instructions (see [`Self::exit_words`]).
     exit_words: BTreeMap<u32, u64>,
+    #[cfg(all(feature = "std", feature = "native-profile"))]
+    floating_profile: Option<alloc::boxed::Box<floating_profile::Sampler>>,
     target: TargetCpu,
     blocks: Vec<Block>,
     /// Slots of `blocks` whose code was reclaimed, for new blocks.
@@ -1676,6 +1700,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile,
             statistics: Statistics::default(),
             exit_words: BTreeMap::new(),
+            #[cfg(all(feature = "std", feature = "native-profile"))]
+            floating_profile: None,
             target,
             blocks: Vec::new(),
             free_blocks: Vec::new(),
@@ -3926,7 +3952,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         "numerical exit at a word that is not numerical FP",
                     )));
                 };
-                match crate::floating::complete(&mut self.cpu.state, &operation) {
+                match self.complete_floating_point(word, &operation) {
                     Ok(()) => self.completing(next_pc, Self::next),
                     Err(_) => Err(self.unsupported(RequirementKind::Instruction {
                         word,
