@@ -375,9 +375,9 @@ impl<P: ColdPlatform> Requester<P> {
         // SAFETY: caller supplies complete actual requester quiescence; real
         // DTE block invalidates old domain before its root may be retired.
         unsafe { self.table.borrow_mut().block(self.rid) }.map_err(Error::DeviceTable)?;
+        drop(_guard);
         // SAFETY: last exposed DTE is now blocked and full-domain invalidation
         // plus completion have acknowledged no remaining invalidated walks.
-        drop(_guard);
         unsafe { self.tree.retire() };
         self.active.borrow_mut().retain(|rid| *rid != self.rid);
         self.detached = true;

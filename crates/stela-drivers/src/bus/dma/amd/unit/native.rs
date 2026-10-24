@@ -422,9 +422,9 @@ impl<P: ColdPlatform> Unit<P> {
                 return Err(Error::Fault);
             }
         }
+        drop(_guard);
         // SAFETY: all external requesters/drains are a real caller obligation;
         // final full invalidation/store plus observed engine stop completed.
-        drop(_guard);
         unsafe { self.table.borrow_mut().retire() };
         self.engine.retired.set(true);
         Ok(())

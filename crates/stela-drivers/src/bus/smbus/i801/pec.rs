@@ -71,10 +71,8 @@ impl<R: Registers, T: Timer> I801<R, T> {
                 ))
             } else if let Some(raw) = sample(DEV_ERR) {
                 Some(Self::error(ErrorKind::Device, raw))
-            } else if let Some(raw) = sample(FAILED) {
-                Some(Self::error(ErrorKind::Failed, raw))
             } else {
-                None
+                sample(FAILED).map(|raw| Self::error(ErrorKind::Failed, raw))
             };
         }
         let result = self.finish(error);
