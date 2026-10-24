@@ -394,6 +394,8 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use crate::bus::pci::Address;
     use alloc::{collections::BTreeMap, vec, vec::Vec};
@@ -1398,6 +1400,27 @@ mod tests {
             inner: Rc::new(RefCell::new(engine)),
         })
     }
+    fn measured_host_clock() -> Clock {
+        // The recovery scenario exercises real Clock/Deadline code. Its clock
+        // must describe the running TSC, rather than shorten every command and
+        // retirement budget by pretending that it advances at 100 ticks/us.
+        // This remains a hosted timing test, not a virtual-time device model.
+        let mut rates = [0_u64; 3];
+        for rate in &mut rates {
+            let started = std::time::Instant::now();
+            let before = Chip::ticks();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let after = Chip::ticks();
+            let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap();
+            assert!(elapsed_us != 0, "monotonic reference clock must advance");
+            *rate = after.checked_sub(before).expect("monotonic host TSC") / elapsed_us;
+            assert!(*rate != 0, "host TSC must advance during calibration");
+        }
+        rates.sort_unstable();
+        Clock {
+            ticks_per_microsecond: rates[1],
+        }
+    }
     fn inject(host: &Host, chip: &Rc<RefCell<Chip>>, fault: Fault) {
         // Keep positive setup generous; fault waits use a smaller, still-real
         // TSC clock so the actual deadlines expire without multi-second stalls.
@@ -1605,20 +1628,46 @@ mod tests {
         stale(&mut card, &chip);
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
-        let mut card = host.poll().unwrap().unwrap();
-        let setup_clock = host.inner.borrow().clock;
-        host.inner.borrow_mut().clock = Clock {
-            ticks_per_microsecond: 100,
-        };
-        chip.borrow_mut().card.nonready = true;
-        assert_eq!(card.flush(), Err(BlockError::Timeout));
-        stale(&mut card, &chip);
-        chip.borrow_mut().card.nonready = false;
-        // The shortened real-TSC budget belongs only to the failed readiness
-        // phase. Fresh positive identification uses its original setup clock,
-        // including when the shared gate schedules many other hardware models.
+        let setup_clock = measured_host_clock();
         host.inner.borrow_mut().clock = setup_clock;
         let mut card = host.poll().unwrap().unwrap();
+        let status_before = chip
+            .borrow()
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Command(13, ..)))
+            .count();
+        chip.borrow_mut().card.nonready = true;
+        assert_eq!(card.flush(), Err(BlockError::Timeout));
+        assert!(
+            chip.borrow()
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::Command(13, ..)))
+                .count()
+                > status_before,
+            "the real card-status response must establish non-readiness"
+        );
+        let failure = host.last_failure().unwrap();
+        assert_eq!(failure.primary, BlockError::Timeout);
+        assert_eq!(failure.retirement, None);
+        assert!(!failure.quarantined);
+        assert!(host.inner.borrow().request_deadline.is_none());
+        assert_eq!(
+            host.inner.borrow().clock.ticks_per_microsecond,
+            setup_clock.ticks_per_microsecond,
+            "readiness and recovery share the measured host clock"
+        );
+        stale(&mut card, &chip);
+        chip.borrow_mut().card.nonready = false;
+        // The original acknowledged Stop permits fresh identification. Do not
+        // scale either the failed request or its cleanup to a subsecond host
+        // scheduling window, and do not clear a retained retirement failure.
+        let retired_generation = card.generation;
+        let mut card = host.poll().unwrap().unwrap();
+        assert_ne!(card.generation, retired_generation);
+        card.read(7, &mut bytes).unwrap();
+        assert_eq!(bytes, chip.borrow().card.block(7));
         inject(&host, &chip, Fault::MissingEnd);
         chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
         chip.borrow_mut().delay_us = 5_000_001;
