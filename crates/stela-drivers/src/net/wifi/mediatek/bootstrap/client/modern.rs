@@ -126,6 +126,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
     ) -> Result<(), Error> {
+        self.validate_modern_join(&join, profile)?;
+        self.join_inner(join, Some(beacon), profile, now, source, policy)
+    }
+
+    pub(super) fn validate_modern_join(&self, join: &Join, profile: Profile) -> Result<(), Error> {
         let requested = join.request.modern().ok_or(Error::WrongProfile)?;
         let actual = self
             .local_advertisement(join.channel.band)
@@ -141,7 +146,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::WrongProfile);
         }
-        self.join_inner(join, Some(beacon), profile, now, source, policy)
+        Ok(())
     }
 
     /// Actual private shared context retained by this native owner. Inspection
@@ -1653,4 +1658,5 @@ pub(super) mod tests {
 
     mod edca_controls;
     mod management_controls;
+    mod pmf_controls;
 }

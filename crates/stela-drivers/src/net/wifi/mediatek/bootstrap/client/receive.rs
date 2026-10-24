@@ -211,6 +211,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s: &mut Owned<I, Q, C>,
         parent: Parent<C>,
     ) -> Result<Vec<Ingress>, Error> {
+        Self::validate_pmf_data(s)?;
         s.station
             .validate_association_context(parent.context())
             .map_err(Error::Station)?;

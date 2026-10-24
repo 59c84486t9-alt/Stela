@@ -202,6 +202,20 @@ impl Station {
         timeout_tu: u16,
         now_us: u64,
     ) -> Result<Action, Error> {
+        if self.requires_protected_management() {
+            return Err(Error::Unsupported);
+        }
+        self.begin_authenticated_tx_block_ack(tid, timeout_tu, now_us)
+    }
+
+    /// Internal only: the native consumer validates a current authenticated
+    /// management Session and holds both exact OS/hardware policy guards.
+    pub(in crate::net::wifi) fn begin_authenticated_tx_block_ack(
+        &mut self,
+        tid: u8,
+        timeout_tu: u16,
+        now_us: u64,
+    ) -> Result<Action, Error> {
         self.clock(now_us)?;
         let context = self.ba_context()?;
         if usize::from(tid) >= TIDS || self.tx_ba.maximum.is_none() {

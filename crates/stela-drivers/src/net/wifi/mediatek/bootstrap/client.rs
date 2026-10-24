@@ -12,6 +12,8 @@ mod local;
 pub mod management;
 mod modern;
 mod packet;
+mod pmf;
+pub use wifi::station::NativeBssObservation as PmfBssObservation;
 mod policy;
 pub use policy::{
     AttachError, BssHandle, Environment, LinkAttachError, LinkControlError, LinkEvent, LinkNotice,
@@ -148,6 +150,9 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     controller: Controller<I, Q, C>,
     interface: Interface<Arc<C>>,
     station: Station,
+    pmf_observations: Vec<Arc<PmfBssObservation>>,
+    pmf_selected: Option<Arc<PmfBssObservation>>,
+    pmf_authentication: Option<wifi::regulatory::PmfAuthenticationBinding>,
     scanner: scan::Scanner,
     phase: Phase,
     profile: Option<Profile>,
@@ -225,6 +230,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 controller,
                 interface,
                 station,
+                pmf_observations: Vec::new(),
+                pmf_selected: None,
+                pmf_authentication: None,
                 scanner,
                 phase: Phase::Idle,
                 profile: None,
@@ -336,6 +344,22 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
     ) -> Result<(), Error> {
+        if join.request.pmf().is_some() {
+            return Err(Error::ModernAdmissionRequired);
+        }
+        self.join_inner_guarded(join, beacon, profile, now, source, policy, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn join_inner_guarded(
+        &mut self,
+        join: Join,
+        beacon: Option<scan::result::Bss>,
+        profile: Profile,
+        now: u64,
+        source: &dyn PageSource,
+        policy: &mut impl station::RegulatoryPolicy,
+        mut guard: Option<&mut wifi::regulatory::PmfAuthenticationGuard<'_>>,
+    ) -> Result<(), Error> {
         let s = self.state_mut();
         if s.phase != Phase::Idle || s.authentication_end.is_some() {
             return Err(Error::Busy);
@@ -398,10 +422,38 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let broadcast = profile.broadcast_request().map_err(Error::Codec)?;
         let ciphers = join.request.key_ciphers();
         let action = match beacon {
+            Some(_) if join.request.pmf().is_some() => s.station.begin_modern_pmf(
+                join,
+                s.pmf_selected.as_ref().ok_or(Error::WrongProfile)?.clone(),
+                now,
+                policy,
+            ),
             Some(beacon) => s.station.begin_modern(join, beacon, now, policy),
             None => s.station.begin(join, now, policy),
         }
         .map_err(Error::Station)?;
+        if s.station.requires_protected_management() {
+            let Action::Transmit {
+                ticket, ref bytes, ..
+            } = action
+            else {
+                return Err(Error::WrongPhase);
+            };
+            let outcome = match guard.as_deref_mut() {
+                Some(guard) => Self::qualify_pmf_authentication(s, guard, Some((ticket, bytes))),
+                None => Err(Error::ModernAdmissionRequired),
+            };
+            if let Err(error) = outcome {
+                // No native mutation has happened: withdraw only this genuine
+                // unsubmitted canonical generation, keeping epochs monotonic.
+                s.station
+                    .withdraw_unsubmitted_pmf(ticket)
+                    .map_err(Error::Station)?;
+                s.pmf_selected = None;
+                s.pmf_authentication = None;
+                return Err(error);
+            }
+        }
         // source peer-add clears admission counters before BSS(false), then
         // plain STA_REC(NONE). Neither creates an authorized OS port.
         s.profile = Some(profile);
@@ -446,7 +498,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
         }
         s.phase = Phase::Joining;
-        Self::action(s, action, now, source, policy)
+        let result = Self::action_guarded(s, action, now, source, policy, guard);
+        if result.is_err() && s.station.requires_protected_management() {
+            s.phase = Phase::Quarantined;
+        }
+        result
     }
     fn action(
         s: &mut Owned<I, Q, C>,
@@ -454,6 +510,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         now: u64,
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
+    ) -> Result<(), Error> {
+        Self::action_guarded(s, action, now, source, policy, None)
+    }
+    fn action_guarded(
+        s: &mut Owned<I, Q, C>,
+        action: Action,
+        now: u64,
+        source: &dyn PageSource,
+        policy: &mut impl station::RegulatoryPolicy,
+        guard: Option<&mut wifi::regulatory::PmfAuthenticationGuard<'_>>,
     ) -> Result<(), Error> {
         match action {
             Action::Transmit {
@@ -465,6 +531,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     || !policy.allow_management_tx(channel)
                 {
                     return Err(Error::WrongProfile);
+                }
+                if s.station.requires_protected_management() {
+                    Self::qualify_pmf_authentication(
+                        s,
+                        guard.ok_or(Error::ModernAdmissionRequired)?,
+                        Some((ticket, &bytes)),
+                    )?;
                 }
                 Self::reserve_channel(s)?;
                 if s.roc_deadline
@@ -561,6 +634,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         source: &dyn PageSource,
         policy: &mut impl station::RegulatoryPolicy,
     ) -> Result<(), Error> {
+        if self.station().requires_protected_management() {
+            return Err(Error::ModernAdmissionRequired);
+        }
         let s = self.state_mut();
         if !matches!(s.phase, Phase::Joining | Phase::Associated) {
             return Err(Error::WrongPhase);
@@ -644,6 +720,24 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         source: &dyn PageSource,
         policy: &mut (impl station::RegulatoryPolicy + scan::Policy),
     ) -> Result<Vec<Event>, Error> {
+        if self.station().requires_protected_management()
+            && matches!(
+                self.phase(),
+                Phase::Joining | Phase::AwaitingModernAdmission | Phase::Associated
+            )
+        {
+            return Err(Error::ModernAdmissionRequired);
+        }
+        self.poll_inner(now, source, policy, None)
+    }
+
+    fn poll_inner(
+        &mut self,
+        now: u64,
+        source: &dyn PageSource,
+        policy: &mut (impl station::RegulatoryPolicy + scan::Policy),
+        mut guard: Option<&mut wifi::regulatory::PmfAuthenticationGuard<'_>>,
+    ) -> Result<Vec<Event>, Error> {
         if self.station().phase() == station::Phase::ExternalAuthenticating {
             self.poll_station(now, source, policy)?;
         }
@@ -722,7 +816,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     && event.payload[0] == s.profile.unwrap().interface.bss_index
                 {
                     let action = s.station.disconnect().map_err(Error::Station)?;
-                    Self::action(s, action, now, source, policy)?;
+                    Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
                     events.push(Event::ConnectionLost(f));
                 } else {
                     s.asynchronous.push(f);
@@ -754,11 +848,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 }
             };
             if s.phase == Phase::Scanning {
-                events.push(Event::Bss(
-                    s.scanner
-                        .observe(s.scan_ticket.unwrap(), &frame, policy)
-                        .map_err(Error::Scan)?,
-                ));
+                let bss = s
+                    .scanner
+                    .observe(s.scan_ticket.unwrap(), &frame, policy)
+                    .map_err(Error::Scan)?;
+                s.pmf_observations
+                    .try_reserve(1)
+                    .map_err(|_| Error::NoMemory)?;
+                if s.pmf_observations.len() == pmf::MAX_OBSERVATIONS {
+                    s.pmf_observations.remove(0);
+                }
+                s.pmf_observations
+                    .push(Arc::new(PmfBssObservation { bss: bss.clone() }));
+                events.push(Event::Bss(bss));
                 continue;
             }
             if s.station.phase() == station::Phase::ExternalAuthenticating {
@@ -775,7 +877,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .poll(now.max(session.deadline()), policy)
                         .map_err(Error::Station)?
                     {
-                        Self::action(s, action, now, source, policy)?;
+                        Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
                     }
                     s.asynchronous.push(f);
                     continue;
@@ -792,7 +894,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 events.push(Event::Raw(f));
                 continue;
             }
-            if s.management.is_some() && wifi::security::management::robust(&frame) {
+            if (s.management.is_some() || s.station.requires_protected_management())
+                && wifi::security::management::robust(&frame)
+            {
                 events.push(Event::ProtectedManagement(Self::receive_management(
                     s, frame, &f.bytes,
                 )?));
@@ -819,8 +923,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .station
                     .receive(epoch, &frame, now, policy)
                     .map_err(Error::Station)?;
-                Self::action(s, action, now, source, policy)?;
+                Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
             } else if s.phase == Phase::Associated {
+                Self::validate_pmf_data(s)?;
                 if modern_data
                     && (frame.header().protected()
                         || frame.header().amsdu
@@ -993,6 +1098,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.modern = None;
         s.edca = None;
         s.management = None;
+        s.pmf_selected = None;
+        s.pmf_authentication = None;
         s.authentication_deadline = None;
         Ok(())
     }

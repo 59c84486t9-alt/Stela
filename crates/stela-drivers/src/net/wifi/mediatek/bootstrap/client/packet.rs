@@ -31,6 +31,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         management: bool,
         minimum_rate: bool,
     ) -> Result<(txwi::Config, PacketOwner<C>, Option<u64>), Error> {
+        Self::validate_pmf_data(s)?;
         let p = s.profile.ok_or(Error::WrongPhase)?;
         if s.format_generation != Some(s.peer_generation) {
             return Err(Error::WrongPhase);
@@ -105,7 +106,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             tid: h.tid,
             tx_ba: None,
             authentication: s.station.external_authentication().cloned(),
-            management: None,
+            management: if s.station.requires_protected_management() {
+                s.management.clone()
+            } else {
+                None
+            },
         };
         let grant = if management && s.phase == Phase::Joining {
             let roc = s.roc_deadline.ok_or(Error::GrantTimeout)?;
@@ -256,7 +261,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             authority.publish_association(
                 admission,
                 &s.station,
-                wifi::regulatory::AssociationUse::Data,
+                if s.station.requires_protected_management() && !matches!(class, TxClass::Data) {
+                    wifi::regulatory::AssociationUse::Authentication
+                } else {
+                    wifi::regulatory::AssociationUse::Data
+                },
                 |_, _| {
                     Self::publish_submission(
                         &mut s.controller,

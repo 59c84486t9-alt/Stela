@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Layouts adapted from Linux include/linux/ieee80211.h and
 // net/mac80211/{util.c,mlme.c}; source notices in THIRD_PARTY.md.
-//! Single-link open-system/RSN association wire forms. SAE, FT, PMF and
-//! multi-link negotiation are refused by this first native MLME path.
+//! Single-link open-system/RSN wire forms. Legacy constructors refuse PMF;
+//! the explicit modern PMF profile requires separate retained OS authority.
 
 use super::{PortPolicy, phy};
 use crate::net::{
@@ -30,6 +30,7 @@ pub struct AssociationRequest {
     rsn: Option<(Cipher, Cipher)>,
     legacy_wpa: bool,
     modern: Option<Arc<ModernSelection>>,
+    pmf: Option<pmf::Selection>,
 }
 
 /// Exact local association advertisement and explicit OS-selected PHY profile.
@@ -111,6 +112,7 @@ fn rsn(mut bytes: &[u8]) -> Result<(Cipher, Cipher), Error> {
 }
 
 pub(super) mod action;
+pub mod pmf;
 
 fn elements(bytes: &[u8]) -> Result<Vec<(u8, &[u8])>, Error> {
     let mut rest = bytes;
@@ -186,6 +188,43 @@ impl AssociationRequest {
         Ok(request)
     }
 
+    /// Explicit single-link CCMP128/BIP-CMAC128 advertisement selected by the
+    /// real OS. Parsing is not authentication or permission to configure native
+    /// resources: both current providers must separately qualify this selection.
+    pub fn new_modern_with_local_pmf(
+        capabilities: u16,
+        listen_interval: u16,
+        bytes: Vec<u8>,
+        local: phy::Capabilities,
+        mode: phy::Mode,
+        width: phy::Width,
+    ) -> Result<Self, Error> {
+        if mode == phy::Mode::Legacy || local.role() != phy::Role::Station {
+            return Err(Error::Invalid("modern local mode/role"));
+        }
+        let observed = phy::Capabilities::parse(local.band(), phy::Role::Station, &bytes)
+            .map_err(|_| Error::Invalid("local modern capabilities"))?;
+        if !local.matches_wire_capabilities(&observed)
+            || !matches!(local.band(), Band::Ghz2 | Band::Ghz5)
+        {
+            return Err(Error::Invalid("PMF local source/band"));
+        }
+        let mut request = Self::parse_inner(capabilities, listen_interval, bytes, true, true)?;
+        if request.pmf.is_none() || capabilities & 0x10 == 0 || request.legacy_wpa {
+            return Err(Error::Invalid("PMF requires selected RSN"));
+        }
+        request.modern = Some(Arc::new(ModernSelection {
+            capabilities: local,
+            mode,
+            width,
+        }));
+        Ok(request)
+    }
+
+    pub fn pmf(&self) -> Option<&pmf::Selection> {
+        self.pmf.as_ref()
+    }
+
     pub fn modern(&self) -> Option<&ModernSelection> {
         self.modern.as_deref()
     }
@@ -195,6 +234,16 @@ impl AssociationRequest {
         listen_interval: u16,
         bytes: Vec<u8>,
         modern: bool,
+    ) -> Result<Self, Error> {
+        Self::parse_inner(capabilities, listen_interval, bytes, modern, false)
+    }
+
+    fn parse_inner(
+        capabilities: u16,
+        listen_interval: u16,
+        bytes: Vec<u8>,
+        modern: bool,
+        allow_pmf: bool,
     ) -> Result<Self, Error> {
         if bytes.len() > MAX_ELEMENTS {
             return Err(Error::Invalid("association elements too long"));
@@ -206,6 +255,7 @@ impl AssociationRequest {
         let mut rates = false;
         let mut extended_rates = false;
         let mut selected_rsn = None;
+        let mut selected_pmf = None;
         let mut legacy_wpa = false;
         for (id, data) in elements(&bytes)? {
             match id {
@@ -231,8 +281,14 @@ impl AssociationRequest {
                     if selected_rsn.is_some() {
                         return Err(Error::Invalid("duplicate RSN"));
                     }
-                    selected_rsn = Some(rsn(data)?);
+                    if allow_pmf {
+                        selected_pmf = Some(pmf::Selection::parse(data)?);
+                        selected_rsn = Some((Cipher::Ccmp128, Cipher::Ccmp128));
+                    } else {
+                        selected_rsn = Some(rsn(data)?);
+                    }
                 }
+                244 if allow_pmf => return Err(Error::Unsupported("PMF RSNX negotiation")),
                 221 if data.starts_with(&[0, 0x50, 0xf2, 1]) => legacy_wpa = true,
                 // Do not advertise modes the current native state machine and
                 // actual driver association context cannot configure yet.
@@ -261,6 +317,7 @@ impl AssociationRequest {
             rsn: selected_rsn,
             legacy_wpa,
             modern: None,
+            pmf: selected_pmf,
         })
     }
 

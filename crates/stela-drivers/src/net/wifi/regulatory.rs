@@ -14,11 +14,15 @@
 use super::{Band, Channel, scan as scan_protocol, station};
 
 mod association;
+mod authentication;
+pub use authentication::PmfAuthenticationOperation;
+pub(crate) use authentication::{PmfAuthenticationBinding, PmfAuthenticationGuard};
 mod scan;
 pub use scan::{ScanAdmission, ScanOperation};
 pub mod database;
 pub mod wmm;
 pub use association::{AssociationAdmission, AssociationOperation, AssociationUse, EdcaOperation};
+pub(crate) use association::{AssociationOwner, NativeManagementUse};
 
 static NEXT_OWNER: super::Identities = super::Identities::new();
 
@@ -131,6 +135,13 @@ pub trait HardwareLease {
     fn context(&self) -> NativeContext;
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel>;
     fn allows(&mut self, operation: Operation) -> bool;
+    /// Independently qualify the actual original PMF request/BSS/pending Ticket
+    /// before native peer/ROC/auth/assoc RX/TX and every retry. The real retained
+    /// service must serialize revocation through all queued/deferred users.
+    /// Parsed RSNEs or regulatory permission alone never select this policy.
+    fn allows_pmf_authentication(&mut self, _operation: &PmfAuthenticationOperation<'_>) -> bool {
+        false
+    }
     /// Qualify the complete context-bound autonomous radio profile. The default
     /// refuses; legacy single-rate permission never implies this permission.
     fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
@@ -195,9 +206,32 @@ pub unsafe trait HardwarePolicy {
 pub trait OsLease {
     fn revision(&self) -> u64;
     fn allows(&mut self, operation: Operation) -> bool;
+    /// Independently qualify the actual original PMF request/BSS/pending Ticket
+    /// before native peer/ROC/auth/assoc RX/TX and every retry. The real retained
+    /// service must serialize revocation through all queued/deferred users.
+    /// Parsed RSNEs or regulatory permission alone never select this policy.
+    fn allows_pmf_authentication(&mut self, _operation: &PmfAuthenticationOperation<'_>) -> bool {
+        false
+    }
     /// Qualify the complete context-bound autonomous radio profile. The default
     /// refuses; legacy single-rate permission never implies this permission.
     fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
+        false
+    }
+    /// Separately qualify the exact PMF RSNE/BSS/current association. Configure
+    /// requires explicit real OS selection; Receive permits only the actual
+    /// OS receive service including pre-key EAPOL; Authentication permits only
+    /// canonical EAPOL control-port TX. Management and Data require genuine
+    /// authenticated RSN agreement and current OS policy.
+    /// Regulatory permission, parsed capabilities and copied epochs cannot
+    /// satisfy this contract. Hold/revoke this authority with the same lease.
+    fn allows_protected_management(&mut self, _operation: &AssociationOperation<'_>) -> bool {
+        false
+    }
+    /// Independently authorize opening this PMF controlled port only after the
+    /// genuine OS authenticated handshake and negotiated RSN agreement. The
+    /// native consumer separately requires actual current PTK/GTK/IGTK ACKs.
+    fn allows_protected_port(&mut self, _operation: &AssociationOperation<'_>) -> bool {
         false
     }
     /// Qualify these exact current observed/effective queues separately from
@@ -219,6 +253,14 @@ pub trait OsLease {
 /// `allows_association` must qualify that same complete enabled context profile,
 /// not one selected rate or metadata observation, for all current location,
 /// full channel footprint, DFS/no-IR/indoor and per-rate power constraints.
+/// `allows_protected_management` must independently qualify the exact original
+/// PMF selection and actual AP/current context: explicit OS selection during
+/// Configure, selected OS receive/authentication service for Receive and
+/// Authentication, then authenticated RSN agreement for Management/Data.
+/// `allows_protected_port` independently requires completed genuine OS
+/// authentication before opening the port. Synchronize revocation through real
+/// keys, queued/deferred users and autonomous responses. A country service alone
+/// must refuse it.
 /// `allows_edca` must independently inspect the new AP/effective queue arrays
 /// and enforce this exact current country/control-channel rule; the original
 /// context admission does not qualify a later contention/TXOP relaxation.

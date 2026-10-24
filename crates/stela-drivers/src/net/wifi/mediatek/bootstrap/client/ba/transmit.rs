@@ -36,7 +36,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // Management RX stays an OS observation until explicitly consumed.
         // Legacy initiation cannot select negotiated protected BA policy or
         // bypass the separate OS-selected management entry point.
-        if s.management.is_some() {
+        if s.management.is_some() || s.station.requires_protected_management() {
             return Err(Error::Unsupported);
         }
         if s.transmit_ba

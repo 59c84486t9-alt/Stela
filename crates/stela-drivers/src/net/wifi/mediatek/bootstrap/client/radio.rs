@@ -74,6 +74,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .begin(request, now, budget, policy)
             .map_err(Error::Scan)?;
         s.scan_ticket = Some(ticket);
+        s.pmf_observations.clear();
         // From request ownership through transport, any unexpected failure
         // retains an explicit non-Idle owner. A policy refusal before handoff
         // can withdraw only the never-submitted Starting generation.

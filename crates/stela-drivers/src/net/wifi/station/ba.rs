@@ -416,6 +416,9 @@ impl Station {
                 start_sequence: sequence,
             });
         }
+        if context.pmf().is_some() {
+            return Err(Error::Unsupported);
+        }
         super::wire::check_peer(frame, self.local, context.bssid()).map_err(super::Error::Wire)?;
         let action = wire::action(
             frame,

@@ -12,6 +12,11 @@ use alloc::sync::Arc;
 pub enum AssociationUse {
     /// Enable/configure the complete context, including autonomous responses.
     Configure,
+    /// Current receive/authentication service, including pre-key EAPOL. This
+    /// does not authorize protected management TX or authenticated MLME effects.
+    Receive,
+    /// Actual canonical EAPOL control-port submission before authentication.
+    Authentication,
     Management,
     Data,
 }
@@ -82,13 +87,27 @@ impl AssociationAdmission {
     }
 }
 
+/// Sealed by crate visibility: implementations expose their actual Station,
+/// never a copied context. Exclusive borrowing spans the complete native effect.
+pub(crate) trait AssociationOwner {
+    fn association_station(&self) -> &Station;
+}
+#[derive(Clone, Copy)]
+pub(crate) enum NativeManagementUse {
+    Receive,
+    AuthorizePort,
+}
+
 fn current(station: &Station, operation: &AssociationOperation<'_>) -> Result<(), Error> {
     station
         .validate_association_context(operation.context)
         .map_err(|_| Error::Stale)?;
     let required = match operation.purpose {
         AssociationUse::Configure => Phase::Configuring,
-        AssociationUse::Management | AssociationUse::Data => Phase::Associated,
+        AssociationUse::Receive
+        | AssociationUse::Authentication
+        | AssociationUse::Management
+        | AssociationUse::Data => Phase::Associated,
     };
     if station.phase() != required {
         return Err(Error::Mismatch);
@@ -107,7 +126,9 @@ fn check(
     {
         return Err(Error::HardwareDenied);
     }
-    if !os.allows_association(operation) {
+    if !os.allows_association(operation)
+        || (operation.context.pmf().is_some() && !os.allows_protected_management(operation))
+    {
         return Err(Error::OsDenied);
     }
     Ok(())
@@ -236,6 +257,67 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         Ok(result)
     }
 
+    /// Mutate the exact retained native owner while both current providers are
+    /// held. The Station borrow ends before the exclusive native callback; no
+    /// reference, copied permit or pointer circumvents Rust aliasing.
+    ///
+    /// # Safety
+    /// Native owner, providers and callback belong to the same real requester.
+    /// Enforce configure_modern's retention/revocation/drain contract. This
+    /// boundary supplies no key/RX authentication or retirement evidence.
+    pub(crate) unsafe fn consume_native_association<N: AssociationOwner, T>(
+        &mut self,
+        admission: AssociationAdmission,
+        native_owner: &mut N,
+        purpose: NativeManagementUse,
+        consume: impl FnOnce(&mut N, &AssociationOperation<'_>) -> T,
+    ) -> Result<T, Error> {
+        if admission.owner != self.identity {
+            return Err(Error::Stale);
+        }
+        let expected = match purpose {
+            NativeManagementUse::Receive => AssociationUse::Receive,
+            NativeManagementUse::AuthorizePort => AssociationUse::Management,
+        };
+        if admission.purpose != expected {
+            return Err(Error::Mismatch);
+        }
+        let operation = admission.operation();
+        current(native_owner.association_station(), &operation)?;
+        let mut hardware = self.hardware.acquire().ok_or(Error::HardwareUnavailable)?;
+        let native = hardware.context();
+        if admission.native != native {
+            return Err(Error::Stale);
+        }
+        let mut os = self.os.acquire(native).ok_or(Error::OsUnavailable)?;
+        if admission.os_revision != os.revision() {
+            return Err(Error::Stale);
+        }
+        check(&mut hardware, &mut os, &operation)?;
+        if matches!(purpose, NativeManagementUse::AuthorizePort)
+            && (operation.context().pmf().is_none() || !os.allows_protected_port(&operation))
+        {
+            return Err(Error::OsDenied);
+        }
+        if matches!(purpose, NativeManagementUse::Receive)
+            && native_owner
+                .association_station()
+                .protected_port_authorized()
+        {
+            // One receive batch may release deferred/reordered data. Qualify
+            // Data independently while these same current guards remain held.
+            let data = AssociationOperation {
+                context: operation.context,
+                purpose: AssociationUse::Data,
+            };
+            check(&mut hardware, &mut os, &data)?;
+        }
+        let result = consume(native_owner, &operation);
+        drop(os);
+        drop(hardware);
+        Ok(result)
+    }
+
     /// Recheck the exact context and purpose at native publication, holding the
     /// immutable station plus hardware then OS guards through `submit`.
     /// Closure return is not command ACK, association success, air completion or
@@ -329,6 +411,8 @@ mod tests {
     struct OsGuard(Rc<Model>);
     fn mask(purpose: Use) -> u8 {
         match purpose {
+            Use::Receive => 8,
+            Use::Authentication => 16,
             Use::Configure => 1,
             Use::Management => 2,
             Use::Data => 4,

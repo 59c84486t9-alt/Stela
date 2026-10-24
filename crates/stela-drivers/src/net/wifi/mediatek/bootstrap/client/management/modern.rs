@@ -9,7 +9,99 @@
 use super::*;
 use wifi::regulatory::{AssociationAdmission, AssociationUse, HardwarePolicy, OsPolicy, Owner};
 
+impl<I: BarIo, Q: QueueIo, C: 'static> wifi::regulatory::AssociationOwner for Client<I, Q, C> {
+    fn association_station(&self) -> &station::Station {
+        self.station()
+    }
+}
+
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
+    /// Open the explicit PMF port only while the real OS independently confirms
+    /// its authenticated handshake and all original current hardware key ACKs.
+    /// The legacy port command cannot grant this permission.
+    ///
+    /// # Safety
+    /// configure_modern's exact requester/retention/revocation contract applies.
+    /// The real OS has completed authentication for this original RSN agreement.
+    pub unsafe fn authorize_port_pmf<H: HardwarePolicy, O: OsPolicy>(
+        &mut self,
+        authority: &mut Owner<H, O>,
+        admission: AssociationAdmission,
+        session: &Session,
+    ) -> Result<(), Error> {
+        Self::validate_management(self.state(), session)?;
+        let context = session.context.as_ref().ok_or(Error::WrongPhase)?;
+        if context.pmf().is_none() {
+            return Err(Error::WrongProfile);
+        }
+        // SAFETY: same exclusive native owner and genuine protected-port guard.
+        unsafe {
+            authority.consume_native_association(
+                admission,
+                self,
+                wifi::regulatory::NativeManagementUse::AuthorizePort,
+                |client, _| {
+                    let s = client.state_mut();
+                    Self::validate_management(s, session)?;
+                    s.station
+                        .authorize_protected_port(
+                            context,
+                            session.association,
+                            s.ptk.as_ref().ok_or(Error::NoKey)?.slot(),
+                            s.gtk.as_ref().ok_or(Error::NoKey)?.slot(),
+                        )
+                        .map_err(Error::Station)
+                },
+            )
+        }
+        .map_err(Error::Regulatory)?
+    }
+
+    /// Poll this exact PMF native association under both current real providers.
+    /// Pre-key robust frames fail closed; data delivery requires the current
+    /// Session once its controlled port opens. Observations still require a
+    /// fresh guarded authenticated consuming API for delayed management effects.
+    ///
+    /// # Safety
+    /// configure_modern's real same-requester authority, retention, revocation
+    /// and stop/drain contract applies to all synchronous/deferred RX users.
+    pub unsafe fn poll_pmf<H: HardwarePolicy, O: OsPolicy>(
+        &mut self,
+        authority: &mut Owner<H, O>,
+        admission: AssociationAdmission,
+        now: u64,
+        source: &dyn PageSource,
+        policy: &mut (impl station::RegulatoryPolicy + scan::Policy),
+    ) -> Result<Vec<Event>, Error> {
+        if !self.station().requires_protected_management() {
+            return Err(Error::WrongProfile);
+        }
+        // SAFETY: native exclusive owner is revalidated before callback borrow.
+        unsafe {
+            authority.consume_native_association(
+                admission,
+                self,
+                wifi::regulatory::NativeManagementUse::Receive,
+                |client, _| client.poll_inner(now, source, policy, None),
+            )
+        }
+        .map_err(Error::Regulatory)?
+    }
+
+    pub(in crate::net::wifi::mediatek::bootstrap::client) fn validate_pmf_data(
+        s: &Owned<I, Q, C>,
+    ) -> Result<(), Error> {
+        if s.station.requires_protected_management()
+            && s.station.port_open(
+                s.ptk.as_ref().map(|key| key.slot()),
+                s.gtk.as_ref().map(|key| key.slot()),
+            )
+        {
+            Self::validate_management(s, s.management.as_ref().ok_or(Error::NoKey)?)?;
+        }
+        Ok(())
+    }
+
     /// Install the initial GTK/IGTK batch for this actual modern association.
     /// The returned transport retains the same private context as the native
     /// peer and canonical Station. This does not negotiate PMF or open a port.

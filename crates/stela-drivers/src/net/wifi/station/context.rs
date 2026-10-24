@@ -19,7 +19,20 @@ use crate::net::{
         scan::result::{Bss, Kind},
     },
 };
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+
+/// Exact observation minted only by a native owner's completed scan RX path.
+/// Public protocol parsers cannot construct it. A native owner separately
+/// checks original Arc membership; providers retain this same opaque identity.
+#[derive(Debug)]
+pub struct NativeBssObservation {
+    pub(crate) bss: Bss,
+}
+impl NativeBssObservation {
+    pub fn bss(&self) -> &Bss {
+        &self.bss
+    }
+}
 
 /// Explicit actual request/resource mode. No MLD constructor or authority is
 /// available; advertising ML or EHT cannot create a multi-link association.
@@ -39,6 +52,8 @@ pub struct AssociationContext {
     response: AssociationResponse,
     dtim_period: u8,
     dtim_count: u8,
+    pmf: Option<super::wire::pmf::Selection>,
+    native_observation: Option<Arc<NativeBssObservation>>,
 }
 fn failure(error: super::phy::Error) -> Error {
     Error::Phy(error)
@@ -89,6 +104,15 @@ impl AssociationContext {
         beacon: &Bss,
         response: &AssociationResponse,
     ) -> Result<Self, Error> {
+        Self::build_with_native(ticket, join, beacon, response, None)
+    }
+    pub(super) fn build_with_native(
+        ticket: Ticket,
+        join: &Join,
+        beacon: &Bss,
+        response: &AssociationResponse,
+        native_observation: Option<&Arc<NativeBssObservation>>,
+    ) -> Result<Self, Error> {
         let selection = join
             .request
             .modern()
@@ -104,6 +128,18 @@ impl AssociationContext {
             return Err(Error::Unsupported(
                 "current beacon/channel/timing/AID required",
             ));
+        }
+        if let Some(pmf) = join.request.pmf() {
+            let observed =
+                native_observation.ok_or(Error::Unsupported("native PMF observation required"))?;
+            if observed.bss.elements != beacon.elements || observed.bss.ticket != beacon.ticket {
+                return Err(Error::Unsupported("native PMF observation mismatch"));
+            }
+            if beacon.capabilities & 0x10 == 0 || response.capabilities & 0x10 == 0 {
+                return Err(Error::Unsupported("PMF AP privacy capability"));
+            }
+            pmf.validate_peer(&beacon.elements, &response.elements)
+                .map_err(Error::Wire)?;
         }
         let mut tim = None;
         for (id, b) in ies(&beacon.elements)? {
@@ -193,7 +229,18 @@ impl AssociationContext {
             response: response.clone(),
             dtim_period,
             dtim_count,
+            pmf: join.request.pmf().cloned(),
+            native_observation: native_observation.cloned(),
         })
+    }
+    /// Exact original OS-selected RSNE, validated against this actual BSS and
+    /// successful association response. This remains unauthenticated input
+    /// until the genuine OS service qualifies its protected-management policy.
+    pub fn pmf_observation(&self) -> Option<&Arc<NativeBssObservation>> {
+        self.native_observation.as_ref()
+    }
+    pub fn pmf(&self) -> Option<&super::wire::pmf::Selection> {
+        self.pmf.as_ref()
     }
     pub fn intent(&self) -> AssociationIntent {
         AssociationIntent::SingleLink

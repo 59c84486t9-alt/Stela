@@ -110,7 +110,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // SAFETY: same exact original Station and both current policy guards.
         let action = unsafe {
             authority.consume_association(admission, &mut s.station, |station, _| {
-                station.begin_tx_block_ack(tid, timeout_tu, now)
+                station.begin_authenticated_tx_block_ack(tid, timeout_tu, now)
             })
         }
         .map_err(Error::Regulatory)?
@@ -137,6 +137,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         original: &[u8],
     ) -> Result<BaSubmission<C>, Error> {
         Self::validate_ba_management(s)?;
+        if s.station.requires_protected_management() && s.ba_management.is_none() {
+            return Err(Error::WrongPhase);
+        }
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(original.len())

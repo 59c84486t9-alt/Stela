@@ -24,7 +24,7 @@ mod aggregate;
 mod context;
 pub mod external;
 mod sequence;
-pub use context::{AssociationContext, AssociationIntent};
+pub use context::{AssociationContext, AssociationIntent, NativeBssObservation};
 pub mod ba;
 pub mod data;
 pub mod operations;
@@ -167,6 +167,7 @@ pub struct Station {
     external: Option<Arc<external::Session>>,
     selected_beacon: Option<super::scan::result::Bss>,
     context: Option<Arc<AssociationContext>>,
+    pmf_observation: Option<Arc<NativeBssObservation>>,
     epoch: u64,
     serial: u32,
     sequence: u16,
@@ -190,6 +191,7 @@ impl Station {
             external: None,
             selected_beacon: None,
             context: None,
+            pmf_observation: None,
             epoch: 0,
             serial: 0,
             sequence: 0,
@@ -289,6 +291,34 @@ impl Station {
         now_us: u64,
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<Action, Error> {
+        if join.request.pmf().is_some() {
+            return Err(Error::Unsupported(
+                "PMF requires original native observation/OS authority",
+            ));
+        }
+        self.begin_modern_inner(join, beacon, now_us, policy)
+    }
+    pub(in crate::net::wifi) fn begin_modern_pmf(
+        &mut self,
+        join: Join,
+        observed: Arc<NativeBssObservation>,
+        now_us: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Action, Error> {
+        if join.request.pmf().is_none() {
+            return Err(Error::Unsupported("selected PMF request required"));
+        }
+        let action = self.begin_modern_inner(join, observed.bss.clone(), now_us, policy)?;
+        self.pmf_observation = Some(observed);
+        Ok(action)
+    }
+    fn begin_modern_inner(
+        &mut self,
+        join: Join,
+        beacon: super::scan::result::Bss,
+        now_us: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Action, Error> {
         let selection = join
             .request
             .modern()
@@ -301,6 +331,47 @@ impl Station {
             return Err(Error::Unsupported("selected beacon/local PHY mismatch"));
         }
         self.begin_inner(join, Some(beacon), now_us, policy)
+    }
+
+    pub(in crate::net::wifi) fn pmf_authentication(
+        &self,
+    ) -> Result<(Ticket, &Join, &Arc<NativeBssObservation>), Error> {
+        if !matches!(self.phase, Phase::Authenticating | Phase::Associating) {
+            return Err(Error::Stale);
+        }
+        let join = self.join.as_ref().ok_or(Error::Stale)?;
+        if join.request.pmf().is_none() {
+            return Err(Error::Stale);
+        }
+        Ok((
+            self.pending.ok_or(Error::Stale)?.ticket,
+            join,
+            self.pmf_observation.as_ref().ok_or(Error::Stale)?,
+        ))
+    }
+
+    /// Withdraw only this genuine first never-submitted PMF request. Native
+    /// code calls this before its first peer/ROC/DMA mutation; it releases no
+    /// hardware owner and supplies no retirement proof. Epochs are not reused.
+    pub(in crate::net::wifi) fn withdraw_unsubmitted_pmf(
+        &mut self,
+        ticket: Ticket,
+    ) -> Result<(), Error> {
+        if self.phase != Phase::Authenticating
+            || self.pending.is_none_or(|pending| {
+                pending.ticket != ticket || pending.queued || pending.attempts != 1
+            })
+            || !self.requires_protected_management()
+        {
+            return Err(Error::Stale);
+        }
+        self.pending = None;
+        self.join = None;
+        self.selected_beacon = None;
+        self.context = None;
+        self.pmf_observation = None;
+        self.phase = Phase::Idle;
+        Ok(())
     }
 
     /// Identity preflight, not a publication lease. Native submission must also
@@ -346,6 +417,7 @@ impl Station {
         self.join = Some(join);
         self.selected_beacon = beacon;
         self.context = None;
+        self.pmf_observation = None;
         self.phase = Phase::Authenticating;
         match self.transmit(Phase::Authenticating, 1, policy) {
             Ok(action) => Ok(action),
@@ -412,6 +484,11 @@ impl Station {
             return Err(Error::Wire(wire::Error::Integrity));
         }
         wire::check_peer(frame, self.local, join.bssid)?;
+        if join.request.pmf().is_some() && super::security::management::robust(frame) {
+            return Err(Error::Unsupported(
+                "PMF requires authenticated management consumer",
+            ));
+        }
         if matches!(
             frame.header().control & TYPE_SUBTYPE,
             DISASSOCIATION | DEAUTHENTICATION
@@ -458,9 +535,18 @@ impl Station {
                         .selected_beacon
                         .as_ref()
                         .ok_or(Error::Unsupported("selected beacon required"))?;
-                    Some(Arc::new(AssociationContext::build(
-                        ticket, join, beacon, &response,
-                    )?))
+                    let context = if request.pmf().is_some() {
+                        AssociationContext::build_with_native(
+                            ticket,
+                            join,
+                            beacon,
+                            &response,
+                            self.pmf_observation.as_ref(),
+                        )?
+                    } else {
+                        AssociationContext::build(ticket, join, beacon, &response)?
+                    };
+                    Some(Arc::new(context))
                 } else {
                     None
                 };
@@ -546,6 +632,7 @@ impl Station {
                 self.join = None;
                 self.selected_beacon = None;
                 self.context = None;
+                self.pmf_observation = None;
                 Phase::Idle
             }
             Completion::Uncertain => Phase::Quarantined,
@@ -553,10 +640,50 @@ impl Station {
         Ok(())
     }
 
+    pub(in crate::net::wifi) fn protected_port_authorized(&self) -> bool {
+        self.requires_protected_management() && self.authorization.is_some()
+    }
+
+    pub fn requires_protected_management(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_some_and(|join| join.request.pmf().is_some())
+    }
+
     /// Generic OS controlled-port command, not proof generated by this layer.
     /// The trusted frontend must issue it only after authenticating the real
     /// handshake and peer. Both keys must already have genuine firmware ACKs.
     pub fn authorize_port(
+        &mut self,
+        epoch: u64,
+        pairwise: &KeySlot,
+        group: &KeySlot,
+    ) -> Result<(), Error> {
+        if self.requires_protected_management() {
+            return Err(Error::Unsupported(
+                "PMF requires current OS/key session authority",
+            ));
+        }
+        self.authorize_port_keys(epoch, pairwise, group)
+    }
+
+    /// Internal native consumer: caller has validated the original current
+    /// management Session and holds the genuine OS protected-port authority.
+    pub(in crate::net::wifi) fn authorize_protected_port(
+        &mut self,
+        context: &AssociationContext,
+        epoch: u64,
+        pairwise: &KeySlot,
+        group: &KeySlot,
+    ) -> Result<(), Error> {
+        self.validate_association_context(context)?;
+        if context.pmf().is_none() {
+            return Err(Error::Unsupported("no selected PMF policy"));
+        }
+        self.authorize_port_keys(epoch, pairwise, group)
+    }
+
+    fn authorize_port_keys(
         &mut self,
         epoch: u64,
         pairwise: &KeySlot,
@@ -654,6 +781,7 @@ impl Station {
             self.external = None;
             self.selected_beacon = None;
             self.context = None;
+            self.pmf_observation = None;
             Phase::Idle
         } else {
             Phase::Quarantined
