@@ -986,7 +986,7 @@ impl fmt::Display for Requirement {
 }
 
 /// Trace hits kept between [`Machine::take_trace_hits`] calls.
-pub const TRACE_HITS: usize = 64;
+pub const TRACE_HITS: usize = 4096;
 
 /// Watch hits kept between [`Machine::take_watch_hits`] calls.
 pub const WATCH_HITS: usize = 4096;
