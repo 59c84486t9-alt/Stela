@@ -36,6 +36,7 @@ impl Controller {
 /// SET_ADDRESS recovery interval before accepting its first Setup.
 pub(crate) struct AddressModel {
     pub(crate) port_speed: u8,
+    pub(crate) context_bytes: usize,
     pub(crate) commands: u64,
     pub(crate) command_index: usize,
     pub(crate) events: u64,
@@ -95,17 +96,20 @@ impl Registers for AddressRegisters {
                 // SAFETY: the live DCBAA slot points to the output context
                 // allocated by address() before publishing this command.
                 model.output = unsafe { ((model.dcbaa + 8) as *const u64).read_volatile() };
-                // SAFETY: EP0's dequeue pointer in the 32-byte input
-                // context points to this test controller's control ring.
-                model.control_ring =
-                    unsafe { ((parameter + 2 * 32 + 8) as *const u64).read_volatile() & !0xf };
+                // SAFETY: EP0's dequeue pointer in the actual input context
+                // points to this test controller's retained control ring.
+                model.control_ring = unsafe {
+                    ((parameter + 2 * model.context_bytes as u64 + 8) as *const u64).read_volatile()
+                        & !0xf
+                };
                 model.ready_at = Clock::ticks() + model.recovery_ticks;
                 model.address_code
             } else {
                 if matches!(kind, RESET_ENDPOINT | STOP_ENDPOINT) {
-                    // SAFETY: EP0 state in the live 32-byte output context.
+                    // SAFETY: EP0 state in the actual retained output context.
                     unsafe {
-                        ((model.output + 32) as *mut u32).write_volatile(ENDPOINT_STOPPED);
+                        ((model.output + model.context_bytes as u64) as *mut u32)
+                            .write_volatile(ENDPOINT_STOPPED);
                     }
                 }
                 if kind == SET_DEQUEUE {
@@ -125,7 +129,8 @@ impl Registers for AddressRegisters {
             let (parameter, code) = if model.early_setup {
                 // SAFETY: failed transfer halts EP0 in the live context.
                 unsafe {
-                    ((model.output + 32) as *mut u32).write_volatile(ENDPOINT_HALTED);
+                    ((model.output + model.context_bytes as u64) as *mut u32)
+                        .write_volatile(ENDPOINT_HALTED);
                 }
                 (ring, 4)
             } else {
@@ -175,6 +180,7 @@ fn address_controller_with_capabilities(
     };
     let model = Rc::new(RefCell::new(AddressModel {
         port_speed: HIGH_SPEED,
+        context_bytes: 32,
         commands: commands.buffer.physical(),
         command_index: 0,
         events: events.physical(),
@@ -688,8 +694,48 @@ fn cancellation_controller_with_capabilities(
     speed: u8,
     capability_words: Option<[u32; 3]>,
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
+    cancellation_controller_with_context(dma, configurations, speed, capability_words, 32)
+}
+
+/// Actual Address Device and SET_CONFIGURATION acknowledgements for endpoint
+/// peers that exercise retained 32- and 64-byte contexts. No generation, parent
+/// identity or current grant is synthesized by the later endpoint-only peer.
+pub(crate) fn configured_endpoint_controller(
+    dma: &mut dyn DmaAllocator,
+    speed: u8,
+    context_bytes: usize,
+) -> Controller {
+    let (mut controller, peer) = cancellation_controller_with_context(
+        dma,
+        &[vec![9, 2, 9, 0, 0, 1, 0, 0x80, 0]],
+        speed,
+        None,
+        context_bytes,
+    );
+    controller.set_configuration(1, 1).unwrap();
+    assert_eq!(peer.borrow().configuration_value, 1);
+    assert_eq!(
+        peer.borrow().setup[0].0,
+        setup(0, SET_CONFIGURATION, 1, 0, 0)
+    );
+    controller
+}
+
+fn cancellation_controller_with_context(
+    dma: &mut dyn DmaAllocator,
+    configurations: &[Vec<u8>],
+    speed: u8,
+    capability_words: Option<[u32; 3]>,
+    context_bytes: usize,
+) -> (Controller, Rc<RefCell<CancelModel>>) {
+    assert!(matches!(context_bytes, 32 | 64));
     let (mut controller, address_peer) =
         address_controller_with_capabilities(dma, SUCCESS, capability_words);
+    controller.context_bytes = context_bytes;
+    {
+        let mut peer = address_peer.borrow_mut();
+        peer.context_bytes = context_bytes;
+    }
     if speed >= SUPER_SPEED {
         controller.port_major[0] = 3;
         address_peer.borrow_mut().port_speed = speed;
@@ -713,7 +759,7 @@ fn cancellation_controller_with_capabilities(
     rings[1] = state.endpoints[1].as_ref().unwrap().ring.buffer.physical();
     let model = Rc::new(RefCell::new(CancelModel {
         port_speed: speed,
-        context_bytes: 32,
+        context_bytes,
         commands: controller.commands.buffer.physical(),
         command_index: controller.commands.index,
         events: controller.events.physical(),

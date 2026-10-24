@@ -87,16 +87,16 @@ impl Controller {
     }
 
     pub(super) fn validate_id(&self, id: SlotId) -> Result<u8, BlockError> {
-        self.validate_ancestry(id)?;
-        self.live_slot(id.slot)?;
-        if self.slots[usize::from(id.slot)]
-            .as_ref()
-            .is_none_or(|state| state.generation != id.generation)
-        {
+        // Reject the consumer's own retired identity before walking the current
+        // replacement's topology. This pure, permanent refusal must also win
+        // over a suspended replacement and any absent or foreign parent grant.
+        if !self.known_id(id) {
             return Err(BlockError::Unsupported(
                 "xHCI device generation is permanently retired",
             ));
         }
+        self.validate_ancestry(id)?;
+        self.live_slot(id.slot)?;
         if self.slots[usize::from(id.slot)].as_ref().unwrap().suspended {
             return Err(BlockError::Unsupported(
                 "USB consumer is fenced for device lifecycle",

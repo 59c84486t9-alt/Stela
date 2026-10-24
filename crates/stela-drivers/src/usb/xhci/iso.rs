@@ -740,6 +740,7 @@ pub(super) mod tests {
         control: u32,
     }
     struct Hardware {
+        slot: u8,
         speed: u8,
         commands: u64,
         command_index: usize,
@@ -778,7 +779,7 @@ pub(super) mod tests {
                 (at as *mut u64).write_volatile(parameter);
                 ((at + 8) as *mut u32).write_volatile(code << 24 | residual as u32);
                 ((at + 12) as *mut u32).write_volatile(
-                    1 << 24
+                    u32::from(self.slot) << 24
                         | u32::from(dci) << 16
                         | kind << 10
                         | u32::from((self.event_index / RING_TRBS).is_multiple_of(2)),
@@ -790,6 +791,7 @@ pub(super) mod tests {
             let at = self.commands + (self.command_index % (RING_TRBS - 1) * TRB) as u64;
             let parameter = Self::long(at);
             let control = Self::word(at + 12);
+            assert_eq!((control >> 24) as u8, self.slot);
             assert_eq!(
                 control & CYCLE,
                 u32::from((self.command_index / (RING_TRBS - 1)).is_multiple_of(2))
@@ -974,9 +976,10 @@ pub(super) mod tests {
             }
         }
         fn write32(&mut self, offset: usize, value: u32) {
+            let doorbell = 0x1000 + 4 * usize::from(self.0.borrow().slot);
             match offset {
                 0x1000 => self.0.borrow_mut().command(),
-                0x1004 => self.0.borrow_mut().transfer(value as u8),
+                at if at == doorbell => self.0.borrow_mut().transfer(value as u8),
                 _ => {}
             }
         }
@@ -1004,6 +1007,7 @@ pub(super) mod tests {
         let events = dma.allocate(RING_TRBS * TRB, RING_TRBS * TRB).unwrap();
         let output = dma.allocate(32 * context_bytes, 64).unwrap();
         let model = Rc::new(RefCell::new(Hardware {
+            slot: 1,
             speed,
             commands: commands.buffer.physical(),
             command_index: 0,
@@ -1084,6 +1088,56 @@ pub(super) mod tests {
             },
             model,
         )
+    }
+
+    /// Install the same independent ISO peer on the exact controller resources
+    /// retained after real address/configuration (or full hub enumeration).
+    fn attach_addressed_peer(
+        mut controller: Controller,
+        slot: u8,
+        speed: u8,
+        cfc: bool,
+    ) -> (Controller, Rc<RefCell<Hardware>>) {
+        let id = controller.device_id(slot).unwrap();
+        controller.validate_id(id).unwrap();
+        let model = Rc::new(RefCell::new(Hardware {
+            slot,
+            speed,
+            commands: controller.commands.buffer.physical(),
+            command_index: controller.commands.index,
+            events: controller.events.physical(),
+            event_index: controller.event_index
+                + if controller.event_cycle { 0 } else { RING_TRBS },
+            output: controller.slots[usize::from(slot)]
+                .as_ref()
+                .unwrap()
+                ._output
+                .physical(),
+            context_bytes: controller.context_bytes,
+            cursors: BTreeMap::new(),
+            active: Vec::new(),
+            seen: Vec::new(),
+            mfindex: 0x3ff0,
+            fail: None,
+            silent: None,
+            fatal: false,
+            output_bytes: Vec::new(),
+            serviced: BTreeMap::new(),
+        }));
+        controller.registers = Box::new(Model(model.clone()));
+        controller.clock.ticks_per_microsecond = 1;
+        controller.iso_caps = Capabilities::new(0x110, 0xb, if cfc { 1 << 11 } else { 0 });
+        (controller, model)
+    }
+
+    fn addressed_controller(
+        dma: &mut dyn DmaAllocator,
+        speed: u8,
+        context_bytes: usize,
+        cfc: bool,
+    ) -> (Controller, Rc<RefCell<Hardware>>) {
+        let controller = model::configured_endpoint_controller(dma, speed, context_bytes);
+        attach_addressed_peer(controller, 1, speed, cfc)
     }
 
     fn assert_schedule_refused(
@@ -1188,10 +1242,9 @@ pub(super) mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: all modeled DMA remains in this live, disjoint allocation.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (mut previous, _) = controller(&mut dma, speed, context_bytes, cfc);
-            let (mut current, model) = controller(&mut dma, speed, context_bytes, cfc);
+            let (mut previous, _) = addressed_controller(&mut dma, speed, context_bytes, cfc);
+            let (mut current, model) = addressed_controller(&mut dma, speed, context_bytes, cfc);
             for c in [&mut previous, &mut current] {
-                c.slots[1].as_mut().unwrap().generation = identity::next_generation().unwrap();
                 c.configure(1, &[endpoint(0x81, speed)], None, &mut dma)
                     .unwrap();
             }
@@ -1869,10 +1922,40 @@ pub(super) mod tests {
     #[test]
     fn routed_usb2_and_superspeed_iso_complete_actual_retained_ring_payloads() {
         for speed in [FULL_SPEED, HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS] {
-            let mut backing = vec![0u64; 64 * 1024];
+            let mut backing = vec![0u64; 256 * 1024];
             let base = backing.as_mut_ptr() as u64;
             let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
-            let (mut c, model) = controller(&mut dma, speed, 32, true);
+            let parent_speed = if speed == FULL_SPEED {
+                HIGH_SPEED
+            } else {
+                speed
+            };
+            let mut hub = hub::model::Node::hub(parent_speed, 2);
+            let ports = hub.ports.as_mut().unwrap();
+            ports[0].status = 0;
+            ports[0].change = 0;
+            ports[1].child_speed = speed;
+            let nodes = BTreeMap::from([(0, hub), (2, hub::model::Node::leaf(speed))]);
+            let (mut c, _) = hub::tests::controller(&mut dma, 32, nodes);
+            let mut failures = Vec::new();
+            let devices = c.enumerate(&mut dma, &mut failures);
+            assert!(failures.is_empty(), "{failures:?}");
+            assert_eq!(devices.len(), 2);
+            let child = devices
+                .iter()
+                .find(|device| device.descriptor[4] != HUB_CLASS)
+                .unwrap();
+            let slot = child.slot;
+            let attachment = c.slots[usize::from(slot)].as_ref().unwrap().attachment;
+            assert_eq!((attachment.tier, attachment.route), (1, 2));
+            let parent = c.original_parent(child.id).unwrap().unwrap();
+            assert_eq!(attachment.parent, Some((parent.hardware_slot(), 2)));
+            assert_eq!(
+                attachment.translator,
+                (speed == FULL_SPEED).then_some((parent.hardware_slot(), 2))
+            );
+            c.set_configuration(slot, 1).unwrap();
+            let (mut c, model) = attach_addressed_peer(c, slot, speed, true);
             let mut ep = endpoint(0x81, speed);
             if speed >= SUPER_SPEED {
                 ep.max_packet = 1024;
@@ -1882,18 +1965,12 @@ pub(super) mod tests {
                     bytes_per_interval: 12 * 1024,
                 });
             }
-            c.slot(1).unwrap().attachment.tier = 1;
-            c.slot(1).unwrap().attachment.route = 2;
-            c.slot(1).unwrap().attachment.parent = Some((2, 2));
-            if speed == FULL_SPEED {
-                c.slot(1).unwrap().attachment.translator = Some((2, 2));
-            }
-            c.configure(1, &[ep], None, &mut dma).unwrap();
+            c.configure(slot, &[ep], None, &mut dma).unwrap();
             let mut payload = dma.allocate(16 * 1024, 16 * 1024).unwrap();
             payload.bytes_mut().fill(0xa7);
             let length = if speed >= SUPER_SPEED { 12 * 1024 } else { 128 };
             let ticket = c
-                .submit_iso(1, ep.dci(), payload.physical(), length)
+                .submit_iso(slot, ep.dci(), payload.physical(), length)
                 .unwrap();
             assert!(c.completed_iso(&ticket).is_none());
             model.borrow_mut().complete(ep.dci(), 0, SUCCESS, 0);

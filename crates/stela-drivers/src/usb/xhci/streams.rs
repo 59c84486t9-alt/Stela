@@ -865,6 +865,36 @@ mod tests {
         )
     }
 
+    fn addressed_controller(
+        dma: &mut dyn DmaAllocator,
+        context_bytes: usize,
+    ) -> (Controller, Rc<RefCell<Hardware>>) {
+        let mut controller = model::configured_endpoint_controller(dma, SUPER_SPEED, context_bytes);
+        let id = controller.device_id(1).unwrap();
+        controller.validate_id(id).unwrap();
+        let model = Rc::new(RefCell::new(Hardware {
+            command_base: controller.commands.buffer.physical(),
+            command_index: controller.commands.index,
+            event_base: controller.events.physical(),
+            event_index: controller.event_index
+                + if controller.event_cycle { 0 } else { RING_TRBS },
+            output: controller.slots[1].as_ref().unwrap()._output.physical(),
+            context_bytes,
+            cursors: BTreeMap::new(),
+            active: BTreeMap::new(),
+            doorbells: Vec::new(),
+            commands: Vec::new(),
+            fail_command: None,
+            silent_command: None,
+            fatal: false,
+            cadence: false,
+        }));
+        controller.registers = Box::new(Model(model.clone()));
+        controller.max_primary_streams = 16;
+        controller.stream_policy = Policy::Standard;
+        (controller, model)
+    }
+
     #[test]
     fn retired_device_stream_ticket_is_pure_before_readiness_and_preserves_current_dma() {
         struct NoAccess;
@@ -881,10 +911,9 @@ mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: all modeled DMA remains in this live, disjoint allocation.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (mut previous, _) = controller(&mut dma, context_bytes);
-            let (mut current, model) = controller(&mut dma, context_bytes);
+            let (mut previous, _) = addressed_controller(&mut dma, context_bytes);
+            let (mut current, model) = addressed_controller(&mut dma, context_bytes);
             for c in [&mut previous, &mut current] {
-                c.slots[1].as_mut().unwrap().generation = identity::next_generation().unwrap();
                 c.configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 2, &mut dma)
                     .unwrap();
             }
