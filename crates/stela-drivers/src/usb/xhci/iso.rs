@@ -1931,6 +1931,17 @@ pub(super) mod tests {
                 speed
             };
             let mut hub = hub::model::Node::hub(parent_speed, 2);
+            if speed == SUPER_SPEED_PLUS {
+                // Original wire fixture used by the native hub SSP positive
+                // control: symmetric speed ID 1, one 10-Gbit/s lane each way.
+                let mut bos = vec![5, 15, 25, 0, 1, 20, 16, 10, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+                for kind in [0u32, 2] {
+                    bos.extend_from_slice(
+                        &(1 | 3 << 4 | kind << 6 | 1 << 14 | 10 << 16).to_le_bytes(),
+                    );
+                }
+                hub.bos = Some(bos);
+            }
             let ports = hub.ports.as_mut().unwrap();
             ports[0].status = 0;
             ports[0].change = 0;
@@ -1945,6 +1956,7 @@ pub(super) mod tests {
                 .iter()
                 .find(|device| device.descriptor[4] != HUB_CLASS)
                 .unwrap();
+            assert_eq!(child.speed, speed);
             let slot = child.slot;
             let attachment = c.slots[usize::from(slot)].as_ref().unwrap().attachment;
             assert_eq!((attachment.tier, attachment.route), (1, 2));
