@@ -27,6 +27,7 @@ mod tests;
 
 const GET_PARAMETER: u16 = 0xf00;
 const PAR_DEVICE_LIST_LENGTH: u8 = 0x15;
+const DEVLIST_LEN_MASK: u32 = 0x3f;
 const GET_DEVICE_SELECTION: u16 = 0xf35;
 const SET_DEVICE_SELECTION: u16 = 0x735;
 const GET_PIN_SENSE: u16 = 0xf09;
@@ -153,10 +154,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     fn device_count(&mut self, codec: u8, node: u8) -> Result<u8, DigitalError> {
         let count = self.digital_read(codec, node, GET_PARAMETER, PAR_DEVICE_LIST_LENGTH)?;
-        if count > 63 {
+        if count == u32::MAX {
             return Err(DigitalError::InvalidDeviceList);
         }
-        Ok(count as u8 + 1)
+        Ok((count & DEVLIST_LEN_MASK) as u8 + 1)
     }
     fn device_selection(&mut self, codec: u8, node: u8, count: u8) -> Result<u8, DigitalError> {
         let selected = self.digital_read(codec, node, GET_DEVICE_SELECTION, 0)?;

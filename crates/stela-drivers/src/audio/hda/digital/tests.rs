@@ -731,3 +731,83 @@ fn native_connection_change_and_actual_link_budget_refuse_pcm() {
     );
     assert!(pins[0].last_observation().is_none());
 }
+
+#[test]
+fn native_masked_device_count_uses_both_fresh_entries_and_restores_selector() {
+    let mut ram = Ram::new();
+    let (mut controller, peer) = controller(&mut ram);
+    {
+        let mut peer = peer.borrow_mut();
+        peer.count = 2;
+        peer.selected = 1;
+        peer.parameters.insert((4, 0x15), 0xa500_0001);
+    }
+    let mut pins = controller.discover_digital_pins(0).unwrap();
+    assert_eq!(pins.len(), 2);
+    for (index, pin) in pins.iter_mut().enumerate() {
+        assert_eq!(pin.device_entry(), index as u8);
+        assert_eq!(pin.converters().len(), 1);
+        assert_eq!(pin.converters()[0].node(), 2 + index as u8);
+        assert_eq!(pin.converters()[0].channels(), [2, 8][index]);
+        assert_eq!(
+            controller.poll_digital_pin(pin),
+            Ok(DigitalPresence::Stable)
+        );
+        let sink = pin.last_observation().unwrap();
+        assert_eq!(sink.raw(), image(index == 1));
+        assert_eq!(
+            sink.connection,
+            [DigitalConnection::Hdmi, DigitalConnection::DisplayPort][index]
+        );
+        assert_eq!(peer.borrow().selected, 1);
+    }
+    let peer = peer.borrow();
+    let sets: Vec<_> = peer
+        .commands
+        .iter()
+        .filter(|word| (*word >> 8) & 0xfff == 0x735)
+        .map(|word| *word as u8)
+        .collect();
+    assert_eq!(sets, [0, 1, 0, 1]);
+    assert_eq!(peer.reads, 4);
+    assert_eq!(peer.selected, 1);
+}
+
+#[test]
+fn native_device_count_masks_low_field_boundaries_without_wrapping() {
+    for (response, count) in [(0, 1), (63, 64), (0xa500_0000, 1), (0xa500_003f, 64)] {
+        let mut ram = Ram::new();
+        let (mut controller, peer) = controller(&mut ram);
+        peer.borrow_mut().parameters.insert((4, 0x15), response);
+        let commands = peer.borrow().commands.len();
+        assert_eq!(controller.device_count(0, 4), Ok(count));
+        let peer = peer.borrow();
+        assert_eq!(peer.commands.len(), commands + 1);
+        assert_eq!(peer.commands[commands] & 0x000f_ffff, 0x000f_0015);
+    }
+}
+
+#[test]
+fn native_all_ones_device_count_refuses_before_selector_publication() {
+    let mut ram = Ram::new();
+    let (mut controller, peer) = controller(&mut ram);
+    {
+        let mut peer = peer.borrow_mut();
+        peer.count = 2;
+        peer.selected = 1;
+        peer.parameters.insert((4, 0x15), u32::MAX);
+    }
+    assert_eq!(
+        controller.discover_digital_pins(0).unwrap_err(),
+        DigitalError::InvalidDeviceList
+    );
+    let peer = peer.borrow();
+    assert_eq!(peer.selected, 1);
+    assert!(
+        peer.commands
+            .iter()
+            .all(|word| (*word >> 8) & 0xfff != 0x735)
+    );
+    assert!(!controller.command_poisoned);
+    assert!(!controller.lifecycle_failed);
+}
