@@ -363,6 +363,8 @@ struct Transfer {
 
 struct Slot {
     generation: u64,
+    /// Genuine parent retained by the physical topology at enumeration.
+    parent_id: Option<SlotId>,
     /// Original physical descriptor inventory for topology reconciliation.
     inventory: Option<Device>,
     consumer: identity::Consumer,

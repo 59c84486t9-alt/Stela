@@ -27,11 +27,27 @@ impl Controller {
         slot: u8,
         port: u8,
     ) -> Result<Option<u8>, BlockError> {
+        self.legacy_slot(slot)?;
+        let id = self.device_id(slot)?;
+        self.hub_port_for(id, port)
+    }
+
+    pub(in super::super) fn hub_port_for(
+        &mut self,
+        id: SlotId,
+        port: u8,
+    ) -> Result<Option<u8>, BlockError> {
+        self.validate_topology_id(id)?;
+        self.hub_port_owned(id, port)
+    }
+
+    fn hub_port_owned(&mut self, id: SlotId, port: u8) -> Result<Option<u8>, BlockError> {
+        let slot = self.validate_topology_id(id)?;
         let index = u16::from(port);
         self.observe_current_ancestors(slot, true)?;
         let clock = self.clock;
         let connected = enumerate::debounce(clock, || {
-            let (status, change) = self.hub_port_status(slot, port)?;
+            let (status, change) = self.hub_port_status_owned(slot, port)?;
             powered(status, change)?;
             let changed = change & HUB_PORT_CONNECTION != 0;
             for (bit, selector) in [
@@ -42,7 +58,7 @@ impl Controller {
                 (32, 23),
             ] {
                 if change & bit != 0 {
-                    self.control(slot, setup(0x23, CLEAR_FEATURE, selector, index, 0), &[])?;
+                    self.control_owned(slot, setup(0x23, CLEAR_FEATURE, selector, index, 0), &[])?;
                 }
             }
             Ok((status & HUB_PORT_CONNECTION != 0, changed))
@@ -51,19 +67,19 @@ impl Controller {
             return Ok(None);
         }
         for _ in 0..RESET_ATTEMPTS {
-            self.control(slot, setup(0x23, SET_FEATURE, PORT_RESET, index, 0), &[])?;
+            self.control_owned(slot, setup(0x23, SET_FEATURE, PORT_RESET, index, 0), &[])?;
             let deadline = self.clock.deadline(PORT_RESET_US);
             loop {
-                let (status, change) = self.hub_port_status(slot, port)?;
+                let (status, change) = self.hub_port_status_owned(slot, port)?;
                 powered(status, change)?;
                 if change & HUB_PORT_RESET != 0 && status & HUB_PORT_RESET == 0 {
-                    self.control(
+                    self.control_owned(
                         slot,
                         setup(0x23, CLEAR_FEATURE, C_PORT_RESET, index, 0),
                         &[],
                     )?;
                     self.clock.delay(RESET_SETTLE_US);
-                    let (status, change) = self.hub_port_status(slot, port)?;
+                    let (status, change) = self.hub_port_status_owned(slot, port)?;
                     powered(status, change)?;
                     self.observe_current_ancestors(slot, true)?;
                     if status & HUB_PORT_CONNECTION == 0 {
@@ -76,7 +92,7 @@ impl Controller {
                     }
                     if status & (HUB_PORT_ENABLE | HUB_PORT_RESET) == HUB_PORT_ENABLE {
                         let root = self.slot(slot)?.attachment.root_port;
-                        self.current_port_reset(Some((slot, port)), root);
+                        self.current_hub_port_reset(id, port, root)?;
                         return Ok(Some(if status & HUB_PORT_LOW_SPEED != 0 {
                             LOW_SPEED
                         } else if status & HUB_PORT_HIGH_SPEED != 0 {

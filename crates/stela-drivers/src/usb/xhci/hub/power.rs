@@ -77,6 +77,7 @@ impl Controller {
     fn hub_suspend_authority(&mut self, slot: u8, port: u8) -> Result<bool, BlockError> {
         self.live_slot(slot)?;
         let attachment = self.slot(slot)?.attachment;
+        self.validate_current_graph(attachment.root_port)?;
         let ports = self.power.hub_ports(slot).ok_or(BlockError::Unsupported(
             "USB suspend requires an owned external hub",
         ))?;
@@ -126,7 +127,7 @@ impl Controller {
     }
 
     fn suspend_port_state(&mut self, slot: u8, port: u8, ss: bool) -> Result<State, BlockError> {
-        let (status, change) = self.hub_port_status(slot, port)?;
+        let (status, change) = self.hub_port_status_owned(slot, port)?;
         let state = State { status, change };
         state.session(ss)?;
         Ok(state)
@@ -141,7 +142,7 @@ impl Controller {
     ) -> Result<(), BlockError> {
         let (bit, selector) = if ss { (1 << 6, 25) } else { (1 << 2, 18) };
         if state.change & bit != 0 {
-            self.control(
+            self.control_owned(
                 slot,
                 setup(0x23, CLEAR_FEATURE, selector, u16::from(port), 0),
                 &[],
@@ -153,11 +154,27 @@ impl Controller {
     /// Caller owns topology serialization, blocks every descendant's public
     /// submissions and has stopped all descendant endpoints. Current contracts
     /// remain reserved across suspend and any uncertain request completion.
+    #[cfg(test)]
     pub(in super::super) fn suspend_hub_port(
         &mut self,
         slot: u8,
         port: u8,
     ) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        let id = self.device_id(slot)?;
+        self.suspend_hub_port_for(id, port)
+    }
+
+    pub(in super::super) fn suspend_hub_port_for(
+        &mut self,
+        id: SlotId,
+        port: u8,
+    ) -> Result<(), BlockError> {
+        let slot = self.validate_topology_id(id)?;
+        self.suspend_hub_port_owned(slot, port)
+    }
+
+    fn suspend_hub_port_owned(&mut self, slot: u8, port: u8) -> Result<(), BlockError> {
         let ss = self.hub_suspend_authority(slot, port)?;
         let before = self.suspend_port_state(slot, port, ss)?;
         self.clear_suspend_change(slot, port, ss, before)?;
@@ -167,7 +184,7 @@ impl Controller {
                     "USB hub link is not active before suspend",
                 ));
             }
-            self.control(slot, link_request(port, ss, true), &[])?;
+            self.control_owned(slot, link_request(port, ss, true), &[])?;
         }
         self.clock.delay(SUSPEND_SETTLE_US);
         let deadline = self.clock.deadline(LINK_TRANSITION_US);
@@ -186,11 +203,27 @@ impl Controller {
 
     /// Resume only the retained power session. A connection/reset/power change
     /// remains visible to the topology owner and requires normal fresh binding.
+    #[cfg(test)]
     pub(in super::super) fn resume_hub_port(
         &mut self,
         slot: u8,
         port: u8,
     ) -> Result<(), BlockError> {
+        self.legacy_slot(slot)?;
+        let id = self.device_id(slot)?;
+        self.resume_hub_port_for(id, port)
+    }
+
+    pub(in super::super) fn resume_hub_port_for(
+        &mut self,
+        id: SlotId,
+        port: u8,
+    ) -> Result<(), BlockError> {
+        let slot = self.validate_topology_id(id)?;
+        self.resume_hub_port_owned(slot, port)
+    }
+
+    fn resume_hub_port_owned(&mut self, slot: u8, port: u8) -> Result<(), BlockError> {
         let ss = self.hub_suspend_authority(slot, port)?;
         let before = self.suspend_port_state(slot, port, ss)?;
         let speed = before.status & (HUB_PORT_LOW_SPEED | HUB_PORT_HIGH_SPEED);
@@ -200,7 +233,7 @@ impl Controller {
                     "USB hub link is not suspended before resume",
                 ));
             }
-            self.control(slot, link_request(port, ss, false), &[])?;
+            self.control_owned(slot, link_request(port, ss, false), &[])?;
             self.clock.delay(RESUME_SIGNAL_US);
         }
         let deadline = self.clock.deadline(LINK_TRANSITION_US);

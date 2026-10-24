@@ -5,6 +5,8 @@ use super::*;
 
 #[cfg(test)]
 mod downstream_tests;
+#[cfg(test)]
+mod generation_tests;
 mod recovery;
 mod suspend;
 
@@ -142,10 +144,10 @@ impl Host {
                         "USB hub status bitmap exceeds actual endpoint",
                     ));
                 }
-                c.endpoint_ready(device.slot, endpoint.dci())?;
+                c.device(device.id)?.endpoint_ready(endpoint.dci())?;
                 let attachment = c.slot(device.slot)?.attachment;
                 let ssp = if matches!(device.speed, SUPER_SPEED | SUPER_SPEED_PLUS) {
-                    c.hub_ssp(device.slot)?
+                    c.hub_ssp_for(device.id)?
                 } else {
                     None
                 };
@@ -207,14 +209,13 @@ impl Host {
                 continue;
             }
             if let Err(error) = self.hub(index, dma, &mut changes) {
-                let slot = self.hubs[index].device.slot;
                 let location = self.hubs[index].device.location.clone();
                 let current = self
                     .controller
                     .borrow()
                     .known_id(self.hubs[index].device.id);
                 if self.hubs[index].recovery.is_none() && current {
-                    let _ = self.retire(slot, &mut changes);
+                    let _ = self.retire(self.hubs[index].device.id, &mut changes);
                 }
                 changes
                     .added
@@ -281,6 +282,8 @@ impl Host {
     ) -> Result<(), BlockError> {
         let (status, owner, notification_error) = {
             let mut c = self.controller.borrow_mut();
+            c.validate_current_graph(port)?;
+            let owner = c.current_port_owner(None, port)?;
             c.ready()?;
             let notification_error = c
                 .pending
@@ -296,11 +299,7 @@ impl Host {
                     && event.parameter == u64::from(port) << 24)
             });
             let at = c.port_offset(port);
-            (
-                c.registers.read32(at),
-                c.power.port_owner(None, port),
-                notification_error,
-            )
+            (c.registers.read32(at), owner, notification_error)
         };
         if let Some(status) = notification_error {
             if let Some(owner) = owner {
@@ -377,6 +376,7 @@ impl Host {
         };
         c.connect(
             location,
+            None,
             reset,
             dma,
             &mut changes.added.devices,
@@ -406,7 +406,8 @@ impl Host {
             let length = usize::from(owner.ports + 1).div_ceil(8);
             if let Some(ticket) = owner.pending {
                 let Some(result) =
-                    c.completed(owner.device.slot, owner.endpoint.dci(), ticket, length)
+                    c.device(owner.device.id)?
+                        .completed(owner.endpoint.dci(), ticket, length)
                 else {
                     return Ok(());
                 };
@@ -425,8 +426,7 @@ impl Host {
                 bits
             } else {
                 owner.bitmap.bytes_mut().fill(0);
-                owner.pending = Some(c.submit(
-                    owner.device.slot,
+                owner.pending = Some(c.device(owner.device.id)?.submit(
                     owner.endpoint.dci(),
                     owner.bitmap.physical(),
                     length,
@@ -437,12 +437,12 @@ impl Host {
         // A notification schedules actual status reads; it never authorizes
         // recovering or acknowledging a condition that was not observed.
         {
-            let slot = self.hubs[index].device.slot;
-            let status = self.controller.borrow_mut().control(
-                slot,
-                setup(0xa0, GET_STATUS, 0, 0, 4),
-                &[],
-            )?;
+            let id = self.hubs[index].device.id;
+            let status = self
+                .controller
+                .borrow_mut()
+                .device(id)?
+                .control(setup(0xa0, GET_STATUS, 0, 0, 4), &[])?;
             if status.len() != 4 {
                 return Err(BlockError::Unsupported("short USB hub lifecycle status"));
             }
@@ -459,7 +459,7 @@ impl Host {
         // Bitmap is notification only: actual status and power authority decide.
         {
             let mut c = self.controller.borrow_mut();
-            c.observe_current_ancestors(self.hubs[index].device.slot, true)?;
+            c.observe_current_ancestors_for(self.hubs[index].device.id, true)?;
         }
         for port in 1..=self.hubs[index].ports {
             if self.hubs[index].retired {
@@ -480,12 +480,12 @@ impl Host {
         let owner = &mut self.hubs[index];
         let length = usize::from(owner.ports + 1).div_ceil(8);
         owner.bitmap.bytes_mut().fill(0);
-        owner.pending = Some(self.controller.borrow_mut().submit(
-            owner.device.slot,
-            owner.endpoint.dci(),
-            owner.bitmap.physical(),
-            length,
-        )?);
+        owner.pending = Some(
+            self.controller
+                .borrow_mut()
+                .device(owner.device.id)?
+                .submit(owner.endpoint.dci(), owner.bitmap.physical(), length)?,
+        );
         Ok(())
     }
 
@@ -496,16 +496,17 @@ impl Host {
         dma: &mut dyn DmaAllocator,
         changes: &mut Changes,
     ) -> Result<(), BlockError> {
-        let slot = self.hubs[index].device.slot;
+        let id = self.hubs[index].device.id;
+        let slot = id.hardware_slot();
         let attachment = self.hubs[index].attachment;
         let ss = attachment.speed >= SUPER_SPEED;
         let (status, change, owner) = {
             let mut c = self.controller.borrow_mut();
-            let (status, change) = c.hub_port_status(slot, port)?;
+            let (status, change) = c.hub_port_status_for(id, port)?;
             (
                 status,
                 change,
-                c.power.port_owner(Some((slot, port)), attachment.root_port),
+                c.current_port_owner(Some((id, port)), attachment.root_port)?,
             )
         };
         if change & 8 != 0 || status & 8 != 0 {
@@ -529,8 +530,7 @@ impl Host {
         };
         for &(bit, selector) in selectors {
             if change & bit != 0 {
-                c.control(
-                    slot,
+                c.device(id)?.control(
                     setup(0x23, CLEAR_FEATURE, selector, u16::from(port), 0),
                     &[],
                 )?;
@@ -550,13 +550,13 @@ impl Host {
         let location = format!("{}.{port}", self.hubs[index].device.location);
         let ssp = self.hubs[index].ssp.as_ref();
         let reset = |c: &mut Controller| {
-            c.observe_current_ancestors(slot, true)?;
+            c.observe_current_ancestors_for(id, true)?;
             let speed = if ss {
-                c.superspeed_port(slot, port, ssp)
+                c.superspeed_port_for(id, port, ssp)
             } else {
-                c.hub_port(slot, port)
+                c.hub_port_for(id, port)
             };
-            c.observe_current_ancestors(slot, true)?;
+            c.observe_current_ancestors_for(id, true)?;
             Ok(speed?.map(|speed| Attachment {
                 root_port: attachment.root_port,
                 route: enumerate::child_route(attachment.route, attachment.tier, port),
@@ -571,6 +571,7 @@ impl Host {
         };
         c.connect(
             location,
+            Some(self.hubs[index].device.id),
             reset,
             dma,
             &mut changes.added.devices,
@@ -579,21 +580,41 @@ impl Host {
         Ok(())
     }
 
-    fn retire(&mut self, ancestor: u8, changes: &mut Changes) -> Result<(), BlockError> {
+    fn retire(&mut self, ancestor: SlotId, changes: &mut Changes) -> Result<(), BlockError> {
         self.retire_except(ancestor, None, changes)
     }
 
     fn retire_except(
         &mut self,
-        ancestor: u8,
-        keep: Option<u8>,
+        ancestor: SlotId,
+        keep: Option<SlotId>,
         changes: &mut Changes,
     ) -> Result<(), BlockError> {
         let mut c = self.controller.borrow_mut();
+        c.validate_ancestry(ancestor)?;
+        let root = c.slots[usize::from(ancestor.hardware_slot())]
+            .as_ref()
+            .unwrap()
+            .attachment
+            .root_port;
+        c.validate_current_graph(root)?;
         let mut slots: Vec<_> = (1..c.slots.len())
-            .filter(|slot| c.power.belongs_to(*slot as u8, ancestor))
+            .filter(|slot| c.power.belongs_to(*slot as u8, ancestor.hardware_slot()))
             .map(|slot| slot as u8)
             .collect();
+        // Validate the complete original graph before changing any consumer,
+        // hub, DMA or current-owner state. No retained raw number is upgraded.
+        for &slot in &slots {
+            let state = c.slots[usize::from(slot)]
+                .as_ref()
+                .ok_or(BlockError::Unsupported(
+                    "USB retirement original slot absent",
+                ))?;
+            let inventory = state.inventory.as_ref().ok_or(BlockError::Unsupported(
+                "USB retirement original inventory absent",
+            ))?;
+            c.validate_ancestry(inventory.id)?;
+        }
         // Fence every generation before the first Stop, but keep physical
         // parents internally live for descendant TT-buffer retirement.
         for &slot in &slots {
@@ -609,16 +630,16 @@ impl Host {
             )
         });
         for hub in &mut self.hubs {
-            if slots.contains(&hub.device.slot) {
+            if slots.contains(&hub.device.slot) && c.known_id(hub.device.id) {
                 hub.retired = true;
-                if Some(hub.device.slot) != keep {
+                if Some(hub.device.id) != keep {
                     hub.recovery = None;
                 }
             }
         }
         let mut retained = Vec::new();
         for device in self.devices.drain(..) {
-            if slots.contains(&device.slot) {
+            if slots.contains(&device.slot) && c.known_id(device.id) {
                 changes.removed.push(device);
             } else {
                 retained.push(device);
@@ -645,13 +666,13 @@ impl Host {
         // From here no private child cancellation needs a live parent. Failed
         // contributors remain quarantined with every original allocation.
         for &slot in &slots {
-            c.quarantine_slot(slot);
+            c.quarantine_slot_owned(slot);
         }
         if let Some(error) = failure {
             return Err(error);
         }
         for slot in slots {
-            if Some(slot) != keep
+            if Some(slot) != keep.map(SlotId::hardware_slot)
                 && c.slot_ownership[usize::from(slot)] == reset::Ownership::Enabled
             {
                 c.disable_slot(slot, reset::Ownership::Retired)

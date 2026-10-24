@@ -36,6 +36,9 @@ struct Hub {
 }
 #[derive(Clone)]
 struct Grant {
+    /// Reserved before Address Device, retained until physical reset proof.
+    generation: Option<u64>,
+    parent_id: Option<SlotId>,
     attachment: Attachment,
     maximum_ma: u16,
     reserved_ma: u16,
@@ -62,6 +65,15 @@ impl Ledger {
         )
     }
     #[cfg(test)]
+    pub(super) fn inject_parent_identity(
+        &mut self,
+        slot: u8,
+        parent: Option<SlotId>,
+    ) -> Option<SlotId> {
+        core::mem::replace(&mut self.grant_mut(slot).unwrap().parent_id, parent)
+    }
+
+    #[cfg(test)]
     pub(super) fn retained(&self, slot: u8) -> bool {
         self.grant(slot).is_ok()
     }
@@ -73,6 +85,62 @@ impl Ledger {
                 "USB device has no retained current grant",
             ))
     }
+    pub(super) fn validate_generation(
+        &self,
+        id: SlotId,
+        parent: Option<SlotId>,
+        attachment: Attachment,
+    ) -> Result<(), BlockError> {
+        if let Ok(grant) = self.grant(id.hardware_slot()) {
+            if grant.generation == Some(id.generation())
+                && grant.parent_id == parent
+                && grant.attachment == attachment
+            {
+                return Ok(());
+            }
+            #[cfg(test)]
+            if id.generation() == 0 && grant.generation.is_none() && parent.is_none() {
+                return Ok(());
+            }
+            return Err(BlockError::Unsupported(
+                "USB physical current belongs to another generation",
+            ));
+        }
+        // Some endpoint-only fixtures have no physical power model. Production
+        // addressed generations always reserve their current before publication.
+        #[cfg(test)]
+        if id.generation() == 0 {
+            return Ok(());
+        }
+        Err(BlockError::Unsupported(
+            "USB original physical current grant absent",
+        ))
+    }
+    fn original_parent(&self, slot: u8) -> Result<Option<u8>, BlockError> {
+        let grant = self.grant(slot)?;
+        let Some((parent, _)) = grant.attachment.parent else {
+            if grant.parent_id.is_some() {
+                return Err(BlockError::Unsupported(
+                    "USB current root has a parent identity",
+                ));
+            }
+            return Ok(None);
+        };
+        let ancestor = self.grant(parent)?;
+        if let Some(id) = grant.parent_id {
+            if id.hardware_slot() != parent || ancestor.generation != Some(id.generation()) {
+                return Err(BlockError::Unsupported(
+                    "USB current original parent generation retired",
+                ));
+            }
+        } else if grant.generation.is_some() {
+            return Err(BlockError::Unsupported(
+                "USB current original parent identity absent",
+            ));
+        }
+        Ok(Some(parent))
+    }
+
     fn grant_mut(&mut self, slot: u8) -> Result<&mut Grant, BlockError> {
         self.entries
             .get_mut(usize::from(slot))
@@ -181,6 +249,8 @@ impl Ledger {
             ));
         }
         *previous = Some(Grant {
+            generation: None,
+            parent_id: None,
             attachment,
             maximum_ma,
             reserved_ma: unit(attachment.speed),
@@ -323,10 +393,7 @@ impl Ledger {
             if slot == ancestor {
                 return true;
             }
-            let Ok(owner) = self.grant(slot) else {
-                return false;
-            };
-            let Some((parent, _)) = owner.attachment.parent else {
+            let Ok(Some(parent)) = self.original_parent(slot) else {
                 return false;
             };
             slot = parent;
@@ -378,6 +445,55 @@ impl Ledger {
 }
 
 impl Controller {
+    pub(super) fn current_port_owner(
+        &self,
+        parent: Option<(SlotId, u8)>,
+        root: u8,
+    ) -> Result<Option<SlotId>, BlockError> {
+        if let Some((id, _)) = parent {
+            self.validate_topology_id(id)?;
+        }
+        let raw = parent.map(|(id, port)| (id.hardware_slot(), port));
+        let Some(slot) = self.power.port_owner(raw, root) else {
+            return Ok(None);
+        };
+        // Authority is the old retained grant, never a fresh lookup from a
+        // retained numerical slot. A changed generation refuses the operation.
+        let grant = self.power.grant(slot)?;
+        let state = self
+            .slots
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .ok_or(BlockError::Unsupported(
+                "USB current owner has no original slot metadata",
+            ))?;
+        if grant.generation != Some(state.generation) || grant.parent_id != parent.map(|(id, _)| id)
+        {
+            return Err(BlockError::Unsupported(
+                "USB current owner generation changed",
+            ));
+        }
+        let id =
+            state
+                .inventory
+                .as_ref()
+                .map(|device| device.id)
+                .ok_or(BlockError::Unsupported(
+                    "USB current owner inventory unresolved",
+                ))?;
+        self.validate_ancestry(id)?;
+        Ok(Some(id))
+    }
+
+    pub(super) fn observe_current_ancestors_for(
+        &mut self,
+        id: SlotId,
+        include_hub: bool,
+    ) -> Result<(), BlockError> {
+        self.validate_ancestry(id)?;
+        self.observe_current_ancestors(id.hardware_slot(), include_hub)
+    }
+
     pub(super) fn root_current(&mut self, port: u8, speed: u8) -> Result<u16, BlockError> {
         let major = self
             .port_major
@@ -423,8 +539,12 @@ impl Controller {
     pub(super) fn reserve_current(
         &mut self,
         slot: u8,
+        generation: u64,
         attachment: Attachment,
+        parent_id: Option<SlotId>,
     ) -> Result<(), BlockError> {
+        self.validate_attachment_parent(attachment, parent_id)?;
+        self.validate_current_graph(attachment.root_port)?;
         let root_speed = if self
             .port_major
             .get(usize::from(attachment.root_port.wrapping_sub(1)))
@@ -438,7 +558,11 @@ impl Controller {
         if let Some((parent, _)) = attachment.parent {
             self.live_slot(parent)?;
         }
-        self.power.reserve(slot, attachment, root_ma)
+        self.power.reserve(slot, attachment, root_ma)?;
+        let grant = self.power.grant_mut(slot)?;
+        grant.generation = Some(generation);
+        grant.parent_id = parent_id;
+        Ok(())
     }
     pub(super) fn current_descriptions(
         &mut self,
@@ -470,6 +594,7 @@ impl Controller {
         slot: u8,
         include_hub: bool,
     ) -> Result<(), BlockError> {
+        self.validate_owned_slot_ancestry(slot)?;
         let attachment = self.power.grant(slot)?.attachment;
         let root_speed = if self
             .port_major
@@ -494,6 +619,13 @@ impl Controller {
         Ok(())
     }
     pub(super) fn prepare_port_current(&mut self, slot: u8, port: u8) -> Result<(), BlockError> {
+        self.validate_owned_slot_ancestry(slot)?;
+        let root = self.slots[usize::from(slot)]
+            .as_ref()
+            .unwrap()
+            .attachment
+            .root_port;
+        self.validate_current_graph(root)?;
         // Reject pure budget/ownership failures before touching MMIO or DMA.
         // Reservation is conservative across any later uncertain health/ACK.
         self.power.powered_port(slot, port)?;
@@ -513,19 +645,22 @@ impl Controller {
         controller_ma: u16,
         self_powered: bool,
     ) -> Result<(), BlockError> {
+        self.validate_owned_slot_ancestry(slot)?;
         self.power.hub(slot, ports, controller_ma, self_powered)
     }
     pub(super) fn reserve_port_current(&mut self, slot: u8, port: u8) -> Result<(), BlockError> {
+        self.validate_owned_slot_ancestry(slot)?;
         self.power.powered_port(slot, port)
     }
     pub(super) fn observe_hub_current(&mut self, slot: u8) -> Result<(), BlockError> {
+        self.validate_owned_slot_ancestry(slot)?;
         let result = (|| {
-            let bytes = self.control(slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])?;
+            let bytes = self.control_owned(slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])?;
             if bytes.len() != 2 || (bytes[0] & 1 != 0) != self.power.hub_is_self_powered(slot)? {
                 return Err(BlockError::Unsupported("USB hub power source changed"));
             }
             for _ in 0..2 {
-                let bytes = self.control(slot, setup(0xa0, GET_STATUS, 0, 0, 4), &[])?;
+                let bytes = self.control_owned(slot, setup(0xa0, GET_STATUS, 0, 0, 4), &[])?;
                 if bytes.len() != 4 {
                     return Err(BlockError::Unsupported("short USB hub power status"));
                 }
@@ -539,7 +674,7 @@ impl Controller {
                 if change == 0 {
                     return Ok(());
                 }
-                self.control(slot, setup(0x20, CLEAR_FEATURE, 0, 0, 0), &[])?;
+                self.control_owned(slot, setup(0x20, CLEAR_FEATURE, 0, 0, 0), &[])?;
             }
             Err(BlockError::Unsupported(
                 "USB hub local power change did not clear",
@@ -559,7 +694,74 @@ impl Controller {
             }
         }
     }
-    pub(super) fn current_port_reset(&mut self, parent: Option<(u8, u8)>, root: u8) {
+    pub(super) fn current_hub_port_reset(
+        &mut self,
+        id: SlotId,
+        port: u8,
+        root: u8,
+    ) -> Result<(), BlockError> {
+        self.validate_topology_id(id)?;
+        let state = self.slots[usize::from(id.hardware_slot())]
+            .as_ref()
+            .unwrap();
+        if state.attachment.root_port != root {
+            return Err(BlockError::Unsupported("USB reset current root changed"));
+        }
+        self.validate_current_graph(root)?;
+        self.current_port_reset(Some((id.hardware_slot(), port)), root)?;
+        Ok(())
+    }
+
+    pub(super) fn validate_current_graph(&self, root: u8) -> Result<(), BlockError> {
+        // Validate all grants on this physical root, not only members accepted
+        // by a boolean descendant predicate: malformed ancestry must refuse,
+        // rather than disappear from validation and be released later.
+        for (slot, entry) in self.power.entries.iter().enumerate() {
+            let Some(grant) = entry.as_ref().filter(|g| g.attachment.root_port == root) else {
+                continue;
+            };
+            if let Some(state) = self.slots.get(slot).and_then(Option::as_ref)
+                && (grant.generation != Some(state.generation)
+                    || grant.parent_id != state.parent_id
+                    || grant.attachment != state.attachment)
+            {
+                return Err(BlockError::Unsupported(
+                    "USB physical current generation changed",
+                ));
+            }
+            let mut current = slot as u8;
+            let mut complete = false;
+            for _ in 0..=MAX_TIERS {
+                let Some(parent) = self.power.original_parent(current)? else {
+                    complete = true;
+                    break;
+                };
+                let child = self.power.grant(current)?;
+                let ancestor = self.power.grant(parent)?;
+                if ancestor.attachment.root_port != root
+                    || ancestor.attachment.tier.checked_add(1) != Some(child.attachment.tier)
+                {
+                    return Err(BlockError::Unsupported(
+                        "USB physical current original ancestry changed",
+                    ));
+                }
+                current = parent;
+            }
+            if !complete {
+                return Err(BlockError::Unsupported(
+                    "USB physical current ancestry is cyclic",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn current_port_reset(
+        &mut self,
+        parent: Option<(u8, u8)>,
+        root: u8,
+    ) -> Result<(), BlockError> {
+        self.validate_current_graph(root)?;
         let owners: Vec<u8> = self
             .power
             .entries
@@ -578,6 +780,7 @@ impl Controller {
             self.quarantine_current_subtree(slot);
         }
         self.power.reset_port(parent, root);
+        Ok(())
     }
 }
 

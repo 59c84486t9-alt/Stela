@@ -47,16 +47,31 @@ pub(super) fn child_route(parent: u32, tier: u8, port: u8) -> u32 {
 
 impl Controller {
     /// Enables a slot and addresses the device at `attachment`.
+    #[cfg(test)]
     pub(super) fn address(
         &mut self,
         attachment: Attachment,
         dma: &mut dyn DmaAllocator,
     ) -> Result<u8, (String, BlockError)> {
+        self.address_parent(attachment, None, dma)
+    }
+
+    pub(super) fn address_parent(
+        &mut self,
+        attachment: Attachment,
+        parent_id: Option<SlotId>,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<u8, (String, BlockError)> {
+        during(
+            "validate original USB parent",
+            self.validate_attachment_parent(attachment, parent_id),
+        )?;
+        let generation = during("allocate device generation", identity::next_generation())?;
         let slot = during(
             "Enable Slot without recycling retired IDs",
             self.fresh_slot(),
         )?;
-        if let Err(error) = self.reserve_current(slot, attachment) {
+        if let Err(error) = self.reserve_current(slot, generation, attachment, parent_id) {
             let _ = self.disable_slot(slot, reset::Ownership::Vacant);
             return Err(("reserve USB upstream current".into(), error));
         }
@@ -108,7 +123,8 @@ impl Controller {
         let input_address = input.physical();
         self.dcbaa.write(usize::from(slot) * 8, output.physical());
         self.slots[usize::from(slot)] = Some(Slot {
-            generation: during("allocate device generation", identity::next_generation())?,
+            generation,
+            parent_id,
             inventory: None,
             consumer: identity::Consumer::Unclaimed,
             suspended: false,
@@ -183,7 +199,7 @@ impl Controller {
                     })
                 })
             };
-            self.connect(location, reset, dma, &mut devices, failures);
+            self.connect(location, None, reset, dma, &mut devices, failures);
         }
         devices
     }
@@ -193,6 +209,7 @@ impl Controller {
     pub(super) fn connect(
         &mut self,
         location: String,
+        parent_id: Option<SlotId>,
         mut reset: impl FnMut(&mut Self) -> Result<Option<Attachment>, BlockError>,
         dma: &mut dyn DmaAllocator,
         devices: &mut Vec<Device>,
@@ -200,6 +217,12 @@ impl Controller {
     ) {
         let mut failure = None;
         for _ in 0..PORT_INIT_TRIES {
+            if let Some(id) = parent_id
+                && let Err(error) = self.validate_topology_id(id)
+            {
+                failures.push((format!("{location} original parent generation"), error));
+                return;
+            }
             let attachment = match reset(self) {
                 Ok(Some(attachment)) => attachment,
                 Ok(None) => return,
@@ -208,7 +231,7 @@ impl Controller {
                     return;
                 }
             };
-            match self.identify(attachment, location.clone(), dma) {
+            match self.identify_parent(attachment, parent_id, location.clone(), dma) {
                 Ok(device) => {
                     return self.adopt(device, attachment, location, dma, devices, failures);
                 }
@@ -231,6 +254,7 @@ impl Controller {
     /// A root port's device speed once the port is enabled, or `None` with
     /// nothing connected.
     pub(super) fn root_port(&mut self, port: u8) -> Result<Option<u8>, BlockError> {
+        self.validate_current_graph(port)?;
         let at = self.port_offset(port);
         if self.registers.read32(at) & PP == 0 {
             self.write_port(port, PP);
@@ -289,7 +313,7 @@ impl Controller {
         if self.port_major[usize::from(port - 1)] != 3
             || matches!(link, LINK_INACTIVE | LINK_COMPLIANCE)
         {
-            self.current_port_reset(None, port);
+            self.current_port_reset(None, port)?;
         }
         Ok(Some((portsc >> PORT_SPEED_SHIFT & PORT_SPEED_FIELD) as u8))
     }
@@ -343,13 +367,24 @@ impl Controller {
 
     /// Address a new device and read its descriptors. A device that fails
     /// gives its slot back.
+    #[cfg(test)]
     pub(super) fn identify(
         &mut self,
         attachment: Attachment,
         location: String,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Device, (String, BlockError)> {
-        let slot = self.address(attachment, dma)?;
+        self.identify_parent(attachment, None, location, dma)
+    }
+
+    pub(super) fn identify_parent(
+        &mut self,
+        attachment: Attachment,
+        parent_id: Option<SlotId>,
+        location: String,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Device, (String, BlockError)> {
+        let slot = self.address_parent(attachment, parent_id, dma)?;
         let described = self.describe(slot, attachment, location);
         if described.is_err() {
             // Best effort: a slot that will not disable stays enabled.
@@ -545,7 +580,11 @@ impl Controller {
         devices: &mut Vec<Device>,
         failures: &mut Vec<(String, BlockError)>,
     ) -> Result<(), BlockError> {
-        self.live_slot(device.slot)?;
+        if self.validate_topology_id(device.id)? != device.slot {
+            return Err(BlockError::Unsupported(
+                "USB hub original descriptor slot changed",
+            ));
+        }
         if self.slot(device.slot)?.attachment != attachment {
             return Err(BlockError::Unsupported(
                 "USB hub attachment is not its retained owner",
@@ -558,7 +597,7 @@ impl Controller {
             return Err(BlockError::Unsupported("hub more than five tiers deep"));
         }
         let slot = device.slot;
-        let hub = self.control(
+        let hub = self.control_owned(
             slot,
             setup(
                 DEVICE_TO_HOST | TYPE_CLASS,
@@ -573,7 +612,7 @@ impl Controller {
         let bytes = if hub.len() == length {
             hub
         } else {
-            let bytes = self.control(
+            let bytes = self.control_owned(
                 slot,
                 setup(
                     DEVICE_TO_HOST | TYPE_CLASS,
@@ -608,7 +647,7 @@ impl Controller {
         } else {
             0
         };
-        self.set_configuration(slot, device.configuration_value())?;
+        self.set_configuration_owned(slot, device.configuration_value())?;
         // Device status describes the configuration the device acknowledged.
         let self_powered = self.hub_power_source(slot)?;
         self.install_hub_current(slot, ports, descriptor.controller_ma, self_powered)?;
@@ -618,7 +657,7 @@ impl Controller {
         // leaves it a single-TT hub.
         let multi = device.descriptor[6] == HUB_MULTI_TT
             && self
-                .control(
+                .control_owned(
                     slot,
                     setup(
                         RECIPIENT_INTERFACE,
@@ -635,7 +674,7 @@ impl Controller {
         // original descriptor cannot supply a complete status bitmap, refuse
         // before Configure Endpoint, downstream power or child publication.
         let endpoint = hub::usb2_status_endpoint(original, device.speed, alternate, ports)?;
-        self.configure(slot, &[endpoint], Some((ports, tt_think, multi)), dma)?;
+        self.configure_owned(slot, &[endpoint], Some((ports, tt_think, multi)), dma)?;
         let mut powered_ports = Vec::new();
         for port in 1..=ports {
             if let Err(error) = self.reserve_port_current(slot, port) {
@@ -645,7 +684,7 @@ impl Controller {
                 ));
                 continue;
             }
-            self.control(
+            self.control_owned(
                 slot,
                 setup(
                     TYPE_CLASS | RECIPIENT_OTHER,
@@ -663,7 +702,7 @@ impl Controller {
             let location = format!("{}.{port}", device.location);
             crate::working(&location);
             let reset = |c: &mut Self| {
-                c.hub_port(slot, port).map(|speed| {
+                c.hub_port_for(device.id, port).map(|speed| {
                     speed.map(|speed| Attachment {
                         root_port: attachment.root_port,
                         route: child_route(attachment.route, attachment.tier, port),
@@ -677,13 +716,32 @@ impl Controller {
                     })
                 })
             };
-            self.connect(location, reset, dma, devices, failures);
+            self.connect(location, Some(device.id), reset, dma, devices, failures);
         }
         Ok(())
     }
 
+    pub(super) fn hub_port_status_for(
+        &mut self,
+        id: SlotId,
+        port: u8,
+    ) -> Result<(u16, u16), BlockError> {
+        let slot = self.validate_topology_id(id)?;
+        self.hub_port_status_owned(slot, port)
+    }
+
+    #[cfg(test)]
     pub(super) fn hub_port_status(&mut self, slot: u8, port: u8) -> Result<(u16, u16), BlockError> {
-        let status = self.control(
+        self.legacy_slot(slot)?;
+        self.hub_port_status_owned(slot, port)
+    }
+
+    pub(super) fn hub_port_status_owned(
+        &mut self,
+        slot: u8,
+        port: u8,
+    ) -> Result<(u16, u16), BlockError> {
+        let status = self.control_owned(
             slot,
             setup(
                 DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_OTHER,

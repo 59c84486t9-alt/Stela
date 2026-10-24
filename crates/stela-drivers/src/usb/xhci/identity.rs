@@ -47,6 +47,10 @@ impl SlotId {
         self.slot
     }
 
+    pub(super) fn generation(self) -> u64 {
+        self.generation
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture(slot: u8) -> Self {
         Self {
@@ -83,6 +87,7 @@ impl Controller {
     }
 
     pub(super) fn validate_id(&self, id: SlotId) -> Result<u8, BlockError> {
+        self.validate_ancestry(id)?;
         self.live_slot(id.slot)?;
         if self.slots[usize::from(id.slot)]
             .as_ref()
@@ -107,9 +112,141 @@ impl Controller {
             .is_some_and(|state| state.generation == id.generation)
     }
 
+    /// Validate the identities stored at actual enumeration, including the
+    /// original parent objects. This pure check also works for a disabled child
+    /// whose physical current grant must outlive Disable Slot. Suspension is
+    /// allowed for private topology sequencing, never for class access.
+    pub(super) fn validate_ancestry(&self, id: SlotId) -> Result<(), BlockError> {
+        let mut current = id;
+        for depth in 0..=MAX_TIERS {
+            if !self.known_id(current) {
+                return Err(BlockError::Unsupported(
+                    "USB original topology generation retired",
+                ));
+            }
+            let state = self.slots[usize::from(current.slot)].as_ref().unwrap();
+            self.power
+                .validate_generation(current, state.parent_id, state.attachment)?;
+            match (state.attachment.parent, state.parent_id) {
+                (None, None) if state.attachment.tier == 0 && state.attachment.route == 0 => {
+                    return Ok(());
+                }
+                (Some((slot, port)), Some(parent))
+                    if slot == parent.slot && port != 0 && depth < MAX_TIERS =>
+                {
+                    if !self.known_id(parent)
+                        || self.slot_ownership.get(usize::from(slot))
+                            != Some(&reset::Ownership::Enabled)
+                    {
+                        return Err(BlockError::Unsupported(
+                            "USB original parent generation retired",
+                        ));
+                    }
+                    let ancestor = self.slots[usize::from(slot)].as_ref().unwrap();
+                    let translator = match (state.attachment.speed, ancestor.attachment.speed) {
+                        (LOW_SPEED | FULL_SPEED, HIGH_SPEED) => Some((slot, port)),
+                        _ => ancestor.attachment.translator,
+                    };
+                    if ancestor.retiring
+                        || state.attachment.translator != translator
+                        || ancestor.attachment.root_port != state.attachment.root_port
+                        || ancestor.attachment.tier.checked_add(1) != Some(state.attachment.tier)
+                        || enumerate::child_route(
+                            ancestor.attachment.route,
+                            ancestor.attachment.tier,
+                            port,
+                        ) != state.attachment.route
+                    {
+                        return Err(BlockError::Unsupported(
+                            "USB original parent attachment changed",
+                        ));
+                    }
+                    current = parent;
+                }
+                _ => {
+                    return Err(BlockError::Unsupported(
+                        "USB original parent identity absent",
+                    ));
+                }
+            }
+        }
+        Err(BlockError::Unsupported(
+            "USB original topology exceeds depth",
+        ))
+    }
+
+    /// Private owned command paths may act before descriptor inventory exists,
+    /// e.g. failed EP0 enumeration retirement. Check their stored graph without
+    /// issuing a new credential to any retained raw-slot caller.
+    pub(super) fn validate_owned_slot_ancestry(&self, slot: u8) -> Result<(), BlockError> {
+        let state = self
+            .slots
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .ok_or(BlockError::Unsupported("USB owned topology slot absent"))?;
+        self.validate_ancestry(SlotId {
+            slot,
+            generation: state.generation,
+        })
+    }
+
+    pub(super) fn validate_topology_id(&self, id: SlotId) -> Result<u8, BlockError> {
+        self.validate_ancestry(id)?;
+        self.live_slot(id.slot)?;
+        Ok(id.slot)
+    }
+
+    pub(super) fn original_parent(&self, id: SlotId) -> Result<Option<SlotId>, BlockError> {
+        self.validate_ancestry(id)?;
+        Ok(self.slots[usize::from(id.slot)].as_ref().unwrap().parent_id)
+    }
+
+    pub(super) fn validate_attachment_parent(
+        &self,
+        attachment: Attachment,
+        parent: Option<SlotId>,
+    ) -> Result<(), BlockError> {
+        match (attachment.parent, parent) {
+            (None, None)
+                if attachment.tier == 0
+                    && attachment.route == 0
+                    && attachment.translator.is_none() =>
+            {
+                Ok(())
+            }
+            (Some((slot, port)), Some(id)) if slot == id.slot && port != 0 => {
+                self.validate_topology_id(id)?;
+                let ancestor = self.slots[usize::from(slot)].as_ref().unwrap();
+                let translator = match (attachment.speed, ancestor.attachment.speed) {
+                    (LOW_SPEED | FULL_SPEED, HIGH_SPEED) => Some((slot, port)),
+                    _ => ancestor.attachment.translator,
+                };
+                if attachment.translator != translator
+                    || ancestor.attachment.root_port != attachment.root_port
+                    || ancestor.attachment.tier.checked_add(1) != Some(attachment.tier)
+                    || enumerate::child_route(
+                        ancestor.attachment.route,
+                        ancestor.attachment.tier,
+                        port,
+                    ) != attachment.route
+                    || self.power.hub_ports(slot).is_none_or(|ports| port > ports)
+                {
+                    return Err(BlockError::Unsupported(
+                        "USB new attachment has a foreign original parent",
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(BlockError::Unsupported(
+                "USB enumeration requires its original typed parent",
+            )),
+        }
+    }
+
     /// The private hub recovery capability deliberately retains a quarantined
     /// generation. It never grants ordinary class access or matches a reuse.
     pub(super) fn validate_recovery_id(&self, id: SlotId) -> Result<(), BlockError> {
+        self.validate_ancestry(id)?;
         if self.slot_ownership.get(usize::from(id.slot)) != Some(&reset::Ownership::Enabled)
             || self
                 .slots

@@ -68,7 +68,6 @@ impl Host {
 
     fn prepare_suspend(&mut self, changes: &mut Changes) -> Result<Snapshot, BlockError> {
         let mut c = self.controller.borrow_mut();
-        c.ready()?;
         if c.quirks.reset_on_resume {
             return Err(BlockError::Unsupported(
                 "USB suspend requires controller reset/republication profile support",
@@ -87,8 +86,14 @@ impl Host {
                     "USB suspend has unresolved device ownership",
                 ));
             }
-            topology.push((c.device_id(slot as u8)?, state.attachment));
+            let id = state.inventory.as_ref().unwrap().id;
+            c.validate_topology_id(id)?;
+            topology.push((id, state.attachment));
         }
+        for port in 1..=c.max_ports {
+            c.validate_current_graph(port)?;
+        }
+        c.ready()?;
         let mut roots = Vec::new();
         for port in 1..=c.max_ports {
             let at = c.port_offset(port);
@@ -113,15 +118,18 @@ impl Host {
         }
         changes.removed.append(&mut self.devices);
         for &(id, _) in &topology {
-            c.disable_consumer_wake(id.hardware_slot())?;
+            c.disable_consumer_wake(id)?;
         }
         topology.sort_by_key(|(_, attachment)| core::cmp::Reverse(attachment.tier));
         for &(id, attachment) in &topology {
             // An earlier descendant request re-rings upstream hub EP0. Recancel
             // this exact subtree immediately before suspending its uplink.
-            c.stop_suspend_subtree(id.hardware_slot())?;
-            if let Some((parent, port)) = attachment.parent {
-                c.suspend_hub_port(parent, port)?;
+            c.stop_suspend_subtree(id)?;
+            if let Some((_, port)) = attachment.parent {
+                let parent = c.original_parent(id)?.ok_or(BlockError::Unsupported(
+                    "USB suspend original parent absent",
+                ))?;
+                c.suspend_hub_port_for(parent, port)?;
             }
         }
         for &(port, before) in &roots {
@@ -159,7 +167,9 @@ impl Host {
             return changes;
         };
         if let Err(error) = self.restore_suspend(&snapshot) {
-            self.controller.borrow_mut().quarantine_suspended_slots();
+            self.controller
+                .borrow_mut()
+                .quarantine_suspend_snapshot(&snapshot);
             changes
                 .added
                 .failures
@@ -172,11 +182,13 @@ impl Host {
             .topology
             .iter()
             .filter(|(_, attachment)| attachment.parent.is_none())
-            .map(|(id, _)| id.hardware_slot())
+            .map(|(id, _)| *id)
             .collect();
         for slot in roots {
             if let Err(error) = self.retire(slot, &mut changes) {
-                self.controller.borrow_mut().quarantine_suspended_slots();
+                self.controller
+                    .borrow_mut()
+                    .quarantine_suspend_snapshot(&snapshot);
                 changes
                     .added
                     .failures
@@ -200,7 +212,7 @@ impl Host {
                     translator: None,
                 };
                 if let Err(error) = c.reset_root_device(attachment) {
-                    c.quarantine_suspended_slots();
+                    c.quarantine_suspend_snapshot(&snapshot);
                     changes
                         .added
                         .failures
@@ -231,8 +243,10 @@ impl Host {
 
     fn restore_suspend(&mut self, snapshot: &Snapshot) -> Result<(), BlockError> {
         let mut c = self.controller.borrow_mut();
+        c.validate_suspend_snapshot(snapshot)?;
         c.resume_controller()?;
         for &(port, before) in &snapshot.roots {
+            c.validate_suspend_snapshot(snapshot)?;
             let actual = c.read_suspend_port(port);
             root_session(before, actual)?;
             if actual >> PLS_SHIFT & PLS_FIELD != U3 {
@@ -262,8 +276,12 @@ impl Host {
                     "USB suspended device generation changed",
                 ));
             }
-            if let Some((parent, port)) = attachment.parent {
-                c.resume_hub_port(parent, port)?;
+            c.validate_suspend_snapshot(snapshot)?;
+            if let Some((_, port)) = attachment.parent {
+                let parent = c
+                    .original_parent(id)?
+                    .ok_or(BlockError::Unsupported("USB resume original parent absent"))?;
+                c.resume_hub_port_for(parent, port)?;
             }
         }
         Ok(())
@@ -296,6 +314,46 @@ impl Controller {
                 state.retiring = true;
             }
         }
+    }
+
+    fn quarantine_suspend_snapshot(&mut self, snapshot: &Snapshot) {
+        for &(id, _) in &snapshot.topology {
+            if self.known_id(id)
+                && let Some(state) = self.slots[usize::from(id.hardware_slot())].as_mut()
+                && state.suspended
+            {
+                state.retiring = true;
+            }
+        }
+    }
+
+    fn validate_suspend_snapshot(&self, snapshot: &Snapshot) -> Result<(), BlockError> {
+        if self.slot_ownership.iter().enumerate().any(|(slot, owner)| {
+            *owner == reset::Ownership::Enabled
+                && !snapshot
+                    .topology
+                    .iter()
+                    .any(|(id, _)| usize::from(id.hardware_slot()) == slot && self.known_id(*id))
+        }) {
+            return Err(BlockError::Unsupported(
+                "USB suspended topology gained a foreign generation",
+            ));
+        }
+        for &(id, attachment) in &snapshot.topology {
+            self.validate_topology_id(id)?;
+            if self.slots[usize::from(id.hardware_slot())]
+                .as_ref()
+                .unwrap()
+                .attachment
+                != attachment
+            {
+                return Err(BlockError::Unsupported(
+                    "USB suspended original attachment changed",
+                ));
+            }
+            self.validate_current_graph(attachment.root_port)?;
+        }
+        Ok(())
     }
 
     fn read_suspend_port(&mut self, port: u8) -> u32 {
@@ -333,7 +391,14 @@ impl Controller {
         }
     }
 
-    fn stop_suspend_subtree(&mut self, ancestor: u8) -> Result<(), BlockError> {
+    fn stop_suspend_subtree(&mut self, ancestor: SlotId) -> Result<(), BlockError> {
+        let slot = self.validate_topology_id(ancestor)?;
+        let root = self.slots[usize::from(slot)]
+            .as_ref()
+            .unwrap()
+            .attachment
+            .root_port;
+        self.validate_current_graph(root)?;
         let mut slots: Vec<_> = self
             .slots
             .iter()
@@ -343,7 +408,7 @@ impl Controller {
                     .as_ref()
                     .filter(|_| {
                         self.slot_ownership[id] == reset::Ownership::Enabled
-                            && self.power.belongs_to(id as u8, ancestor)
+                            && self.power.belongs_to(id as u8, ancestor.hardware_slot())
                     })
                     .map(|state| (id as u8, state.attachment.tier))
             })
@@ -359,7 +424,8 @@ impl Controller {
         Ok(())
     }
 
-    fn disable_consumer_wake(&mut self, slot: u8) -> Result<(), BlockError> {
+    fn disable_consumer_wake(&mut self, id: SlotId) -> Result<(), BlockError> {
+        let slot = self.validate_topology_id(id)?;
         let state = self.slot(slot)?;
         let value = state.current_configuration.ok_or(BlockError::Unsupported(
             "USB suspend configuration unresolved",
@@ -383,7 +449,7 @@ impl Controller {
             .map(|interface| interface.number)
             .collect();
         let superspeed = state.speed >= SUPER_SPEED;
-        let status = self.control(slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])?;
+        let status = self.control_owned(slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])?;
         if status.len() != 2 {
             return Err(BlockError::Unsupported("short USB suspend device status"));
         }
@@ -395,7 +461,7 @@ impl Controller {
                 ));
             }
             if status & 2 != 0 {
-                self.control(slot, setup(0, CLEAR_FEATURE, 1, 0, 0), &[])?;
+                self.control_owned(slot, setup(0, CLEAR_FEATURE, 1, 0, 0), &[])?;
             }
         } else {
             if status & !0x1f != 0 {
@@ -406,11 +472,11 @@ impl Controller {
             // Disable every actual interface's function remote-wakeup/LP flags,
             // including composite devices, rather than assuming interface zero.
             for interface in active {
-                self.control(slot, setup(1, SET_FEATURE, 0, u16::from(interface), 0), &[])?;
+                self.control_owned(slot, setup(1, SET_FEATURE, 0, u16::from(interface), 0), &[])?;
             }
             for (bit, selector) in [(2, 48), (3, 49), (4, 50)] {
                 if status & (1 << bit) != 0 {
-                    self.control(slot, setup(0, CLEAR_FEATURE, selector, 0, 0), &[])?;
+                    self.control_owned(slot, setup(0, CLEAR_FEATURE, selector, 0, 0), &[])?;
                 }
             }
         }

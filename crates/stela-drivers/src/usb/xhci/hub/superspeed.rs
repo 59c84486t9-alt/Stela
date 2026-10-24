@@ -106,6 +106,13 @@ impl Controller {
         devices: &mut Vec<Device>,
         failures: &mut Vec<(String, BlockError)>,
     ) -> Result<(), BlockError> {
+        if self.validate_topology_id(device.id)? != device.slot
+            || self.slot(device.slot)?.attachment != attachment
+        {
+            return Err(BlockError::Unsupported(
+                "USB SuperSpeed hub original attachment changed",
+            ));
+        }
         topology(attachment)?;
         let interfaces = interfaces(&device.configuration);
         let mut eligible = interfaces
@@ -120,7 +127,7 @@ impl Controller {
             ));
         }
         let slot = device.slot;
-        let bytes = self.control(
+        let bytes = self.control_owned(
             slot,
             setup(
                 0xa0,
@@ -133,7 +140,7 @@ impl Controller {
         )?;
         let descriptor = Descriptor::new(&bytes, &endpoint)?;
         let ssp = if u16::from_le_bytes([device.descriptor[2], device.descriptor[3]]) >= 0x0310 {
-            self.hub_ssp(slot)?
+            self.hub_ssp_for(device.id)?
         } else {
             None
         };
@@ -142,7 +149,7 @@ impl Controller {
                 "SuperSpeedPlus hub requires actual BOS sublink capabilities",
             ));
         }
-        self.set_configuration(slot, device.configuration_value())?;
+        self.set_configuration_owned(slot, device.configuration_value())?;
         // Device status describes the configuration the device acknowledged.
         let self_powered = self.hub_power_source(slot)?;
         self.install_hub_current(
@@ -153,8 +160,8 @@ impl Controller {
         )?;
         self.observe_hub_power(slot, attachment)?;
         // SuperSpeed has no USB2 transaction translator or MTT/TT think time.
-        self.configure(slot, &[endpoint], Some((descriptor.ports, 0, false)), dma)?;
-        self.control(slot, depth_request(attachment.tier), &[])?;
+        self.configure_owned(slot, &[endpoint], Some((descriptor.ports, 0, false)), dma)?;
+        self.control_owned(slot, depth_request(attachment.tier), &[])?;
         let mut powered_ports = Vec::new();
         for port in 1..=descriptor.ports {
             if let Err(error) = self.reserve_port_current(slot, port) {
@@ -164,7 +171,7 @@ impl Controller {
                 ));
                 continue;
             }
-            self.control(
+            self.control_owned(
                 slot,
                 setup(0x23, SET_FEATURE, PORT_POWER, u16::from(port), 0),
                 &[],
@@ -178,7 +185,7 @@ impl Controller {
             crate::working(&location);
             let reset = |controller: &mut Self| {
                 controller.observe_hub_power(slot, attachment)?;
-                let speed = controller.superspeed_port(slot, port, ssp.as_ref());
+                let speed = controller.superspeed_port_for(device.id, port, ssp.as_ref());
                 // Recheck global authority even when this individual port
                 // failed. A local reset error must not hide parent power loss.
                 controller.observe_hub_power(slot, attachment)?;
@@ -186,7 +193,7 @@ impl Controller {
                     .map(|speed| child(slot, attachment, port, speed))
                     .transpose()
             };
-            self.connect(location, reset, dma, devices, failures);
+            self.connect(location, Some(device.id), reset, dma, devices, failures);
             if self.live_slot(slot).is_err() {
                 // connect already records the actual power observation failure.
                 // Keep the inventory as historical identity, never as a live handle.
@@ -201,14 +208,19 @@ impl Controller {
     }
 
     pub(in super::super) fn hub_power_source(&mut self, slot: u8) -> Result<bool, BlockError> {
-        let bytes = self.control(slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])?;
+        let bytes = self.control_owned(slot, setup(0x80, GET_STATUS, 0, 0, 2), &[])?;
         if bytes.len() != 2 {
             return Err(BlockError::Unsupported("short USB hub power source status"));
         }
         Ok(bytes[0] & 1 != 0)
     }
 
-    pub(in super::super) fn hub_ssp(&mut self, slot: u8) -> Result<Option<Ssp>, BlockError> {
+    pub(in super::super) fn hub_ssp_for(&mut self, id: SlotId) -> Result<Option<Ssp>, BlockError> {
+        let slot = self.validate_topology_id(id)?;
+        self.hub_ssp_owned(slot)
+    }
+
+    fn hub_ssp_owned(&mut self, slot: u8) -> Result<Option<Ssp>, BlockError> {
         let header = self.descriptor(slot, BOS_DESCRIPTOR, 0, 5)?;
         if header.len() != 5 || header[0] != 5 || header[1] != BOS_DESCRIPTOR {
             return Err(BlockError::Unsupported("invalid hub BOS header"));
@@ -230,7 +242,7 @@ impl Controller {
         port: u8,
         extended: bool,
     ) -> Result<Port, BlockError> {
-        let bytes = self.control(slot, status_request(port, extended), &[])?;
+        let bytes = self.control_owned(slot, status_request(port, extended), &[])?;
         Port::decode(&bytes, extended)
     }
 
@@ -242,7 +254,7 @@ impl Controller {
     ) -> Result<(), BlockError> {
         for &(bit, selector) in CHANGES {
             if change & bit != 0 {
-                self.control(
+                self.control_owned(
                     slot,
                     setup(0x23, CLEAR_FEATURE, selector, u16::from(port), 0),
                     &[],
@@ -252,12 +264,23 @@ impl Controller {
         Ok(())
     }
 
-    pub(in super::super) fn superspeed_port(
+    pub(in super::super) fn superspeed_port_for(
         &mut self,
-        slot: u8,
+        id: SlotId,
         port: u8,
         ssp: Option<&Ssp>,
     ) -> Result<Option<u8>, BlockError> {
+        self.validate_topology_id(id)?;
+        self.superspeed_port_owned(id, port, ssp)
+    }
+
+    fn superspeed_port_owned(
+        &mut self,
+        id: SlotId,
+        port: u8,
+        ssp: Option<&Ssp>,
+    ) -> Result<Option<u8>, BlockError> {
+        let slot = self.validate_topology_id(id)?;
         // Qualify the same stable connection interval as USB2/root ports.
         // Clearing CSC once is not evidence that the downstream plug settled.
         let clock = self.clock;
@@ -285,7 +308,7 @@ impl Controller {
         // admit a child on completion bits alone or on an upstream speed guess.
         for _ in 0..PORT_RESET_ATTEMPTS {
             let selector = if warm { BH_PORT_RESET } else { PORT_RESET };
-            self.control(
+            self.control_owned(
                 slot,
                 setup(0x23, SET_FEATURE, selector, u16::from(port), 0),
                 &[],
@@ -328,7 +351,7 @@ impl Controller {
                         break;
                     }
                     let root = self.slot(slot)?.attachment.root_port;
-                    self.current_port_reset(Some((slot, port)), root);
+                    self.current_hub_port_reset(id, port, root)?;
                     return match ssp {
                         Some(ssp) => ssp.speed(final_state.extended.unwrap()).map(Some),
                         None => Ok(Some(SUPER_SPEED)),

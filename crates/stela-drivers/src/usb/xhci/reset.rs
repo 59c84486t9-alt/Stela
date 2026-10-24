@@ -104,6 +104,10 @@ impl Controller {
         )?;
         let slot = device.slot;
         let attachment = self.slot(slot).unwrap().attachment;
+        let original_parent = during(
+            "retain original reset parent",
+            self.original_parent(device.id),
+        )?;
         let consumer = self.slot(slot).unwrap().consumer;
         // Reobserve root and every actual ancestor before invalidating the
         // leaf. A failed shared supply cannot authorize private class recovery.
@@ -111,18 +115,21 @@ impl Controller {
             "observe reset device physical ancestry",
             // Preflight requires a leaf. Its device status cannot supply a
             // hub power contract; observe the root and every actual parent.
-            self.observe_current_ancestors(slot, false),
+            self.observe_current_ancestors_for(device.id, false),
         )?;
         let parent = attachment
             .parent
-            .map(|(slot, port)| {
+            .map(|(_, port)| {
+                let parent = original_parent
+                    .ok_or(BlockError::Unsupported("USB reset original parent absent"))?;
+                let slot = self.validate_topology_id(parent)?;
                 let speed = self.slot(slot)?.attachment.speed;
                 let ssp = if speed >= SUPER_SPEED {
-                    self.hub_ssp(slot)?
+                    self.hub_ssp_for(parent)?
                 } else {
                     None
                 };
-                Ok::<_, BlockError>((slot, port, speed, ssp))
+                Ok::<_, BlockError>((parent, port, speed, ssp))
             })
             .transpose()
             .map_err(|error| ("retain reset parent protocol".into(), error))?;
@@ -134,19 +141,19 @@ impl Controller {
         if let Some((parent, port, speed, ssp)) = parent {
             during(
                 "observe downstream reset parent",
-                self.observe_current_ancestors(parent, true),
+                self.observe_current_ancestors_for(parent, true),
             )?;
             let actual = during(
                 "acknowledge physical downstream-port reset",
                 if speed >= SUPER_SPEED {
-                    self.superspeed_port(parent, port, ssp.as_ref())
+                    self.superspeed_port_for(parent, port, ssp.as_ref())
                 } else {
-                    self.hub_port(parent, port)
+                    self.hub_port_for(parent, port)
                 },
             )?;
             during(
                 "observe downstream reset completion ancestry",
-                self.observe_current_ancestors(parent, true),
+                self.observe_current_ancestors_for(parent, true),
             )?;
             if actual != Some(attachment.speed) {
                 return Err((
@@ -162,7 +169,8 @@ impl Controller {
                 self.reset_root_device(attachment),
             )?;
         }
-        let result = self.identify(attachment, device.location.clone(), dma);
+        let result =
+            self.identify_parent(attachment, original_parent, device.location.clone(), dma);
         if let Ok(fresh) = &result {
             self.slot(fresh.slot).unwrap().consumer = consumer;
         }
@@ -267,6 +275,7 @@ impl Controller {
     }
     pub(super) fn reset_root_device(&mut self, attachment: Attachment) -> Result<(), BlockError> {
         let port = attachment.root_port;
+        self.validate_current_graph(port)?;
         let at = self.port_offset(port);
         let before = self.registers.read32(at);
         if before & (CCS | PP) != CCS | PP {
@@ -317,7 +326,7 @@ impl Controller {
                 }
                 self.write_port(port, portsc & PORT_CHANGES);
                 self.clock.delay(POST_RESET_US);
-                self.current_port_reset(None, port);
+                self.current_port_reset(None, port)?;
                 return Ok(());
             }
             if deadline.passed() {
@@ -1401,6 +1410,7 @@ pub(crate) mod tests {
                 let control = dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap();
                 controller.slots[usize::from(other)] = Some(Slot {
                     generation: 0,
+                    parent_id: None,
                     inventory: None,
                     consumer: identity::Consumer::Unclaimed,
                     suspended: false,

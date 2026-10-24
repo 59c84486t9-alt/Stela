@@ -1024,6 +1024,7 @@ pub(super) mod tests {
         let mut slots = vec![None];
         slots.push(Some(Slot {
             generation: 0,
+            parent_id: None,
             inventory: None,
             consumer: identity::Consumer::Unclaimed,
             suspended: false,

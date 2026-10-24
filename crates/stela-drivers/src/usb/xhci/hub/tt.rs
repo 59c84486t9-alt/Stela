@@ -19,6 +19,7 @@ impl Controller {
     /// STALL, then calls this after Stop/Reset/Set Dequeue and before unpoison.
     /// A failed clear preserves that owner's poison and retained DMA.
     pub(in super::super) fn clear_hub_tt(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        self.validate_owned_slot_ancestry(slot)?;
         self.ready()?;
         if self.slot_ownership.get(usize::from(slot)) != Some(&reset::Ownership::Enabled) {
             return Err(BlockError::Unsupported(
@@ -108,13 +109,13 @@ impl Controller {
             | if dci & 1 != 0 { DEVINFO_IN } else { 0 };
         if kind == CONTROL_TYPE {
             // Donor clears the opposite direction first, then the requested one.
-            self.control(
+            self.control_owned(
                 hub,
                 setup(0x23, CLEAR_TT_BUFFER, devinfo ^ DEVINFO_IN, tt, 0),
                 &[],
             )?;
         }
-        self.control(hub, setup(0x23, CLEAR_TT_BUFFER, devinfo, tt, 0), &[])?;
+        self.control_owned(hub, setup(0x23, CLEAR_TT_BUFFER, devinfo, tt, 0), &[])?;
         Ok(())
     }
 }

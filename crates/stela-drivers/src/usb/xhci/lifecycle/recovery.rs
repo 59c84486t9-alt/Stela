@@ -16,10 +16,11 @@ impl Host {
         port: Option<u8>,
         changes: &mut Changes,
     ) -> Result<(), BlockError> {
-        let slot = self.hubs[index].device.slot;
+        let id = self.hubs[index].device.id;
+        let slot = id.hardware_slot();
         // Repowering any port can affect a ganged supply. Conservatively retire
         // the entire hub, including otherwise healthy siblings, before doing it.
-        self.retire_except(slot, Some(slot), changes)?;
+        self.retire_except(id, Some(id), changes)?;
         self.hubs[index].pending = None;
         self.hubs[index].recovery = Some(Recovery {
             slot,
@@ -41,7 +42,7 @@ impl Host {
         c.validate_recovery_id(owner.id())?;
         // Reobserve the actual root and every unaffected physical ancestor
         // before each batch of private EP0 effects, including after cooldown.
-        c.observe_current_ancestors(owner.slot, false)?;
+        c.observe_current_ancestors_for(owner.id(), false)?;
         let (status, change) = hub_status(&mut c, owner)?;
         if change & 1 != 0 {
             c.recovery_control(owner, setup(0x20, CLEAR_FEATURE, 0, 0, 0))?;
@@ -64,7 +65,7 @@ impl Host {
                 HUB_COOLDOWN_US
             },
         );
-        c.observe_current_ancestors(owner.slot, false)?;
+        c.observe_current_ancestors_for(owner.id(), false)?;
         // Never substitute bus power for a lost self-powered contract. Preserve
         // the full old current ledger while waiting for actual restoration.
         let device = c.recovery_control(owner, setup(0x80, GET_STATUS, 0, 0, 2))?;
@@ -82,7 +83,7 @@ impl Host {
         let powered = c.power.powered_ports(owner.slot)?;
         for port in 1..=hub.ports {
             if powered & (1 << port) != 0 {
-                c.observe_current_ancestors(owner.slot, false)?;
+                c.observe_current_ancestors_for(owner.id(), false)?;
                 c.recovery_control(
                     owner,
                     setup(0x23, SET_FEATURE, PORT_POWER, u16::from(port), 0),
@@ -90,7 +91,7 @@ impl Host {
             }
         }
         c.clock.delay(MAX_POWER_GOOD_US);
-        c.observe_current_ancestors(owner.slot, false)?;
+        c.observe_current_ancestors_for(owner.id(), false)?;
         if hub_status(&mut c, owner)? != (0, 0) {
             return Err(BlockError::Unsupported(
                 "USB recovery hub over-current persists",
@@ -113,28 +114,31 @@ impl Host {
         }
         // Private recovery transfers have finished; stop EP0 again before
         // Disable Slot. Any uncertainty retains the capability and original DMA.
+        c.validate_recovery_id(owner.id())?;
+        let original_parent = c.original_parent(owner.id())?;
         c.disable_slot(owner.slot, reset::Ownership::Retired)
             .map_err(|(_, error)| error)?;
         let attachment = hub.attachment;
         let location = hub.device.location.clone();
         hub.recovery = None;
         drop(c);
-        self.reconnect_hub(attachment, location, dma, changes)
+        self.reconnect_hub(attachment, original_parent, location, dma, changes)
     }
 
     fn reconnect_hub(
         &mut self,
         attachment: Attachment,
+        original_parent: Option<SlotId>,
         location: String,
         dma: &mut dyn DmaAllocator,
         changes: &mut Changes,
     ) -> Result<(), BlockError> {
         let parent = attachment
             .parent
-            .map(|(slot, _)| {
+            .map(|(_, _)| {
                 self.hubs
                     .iter()
-                    .position(|hub| hub.device.slot == slot && !hub.retired)
+                    .position(|hub| Some(hub.device.id) == original_parent && !hub.retired)
                     .ok_or(BlockError::Unsupported(
                         "USB recovery physical parent is retired",
                     ))
@@ -145,14 +149,17 @@ impl Host {
             parent.is_some_and(|index| self.hubs[index].attachment.speed >= SUPER_SPEED);
         let mut c = self.controller.borrow_mut();
         let reset = |c: &mut Controller| {
-            let speed = if let Some((parent, port)) = attachment.parent {
-                c.observe_current_ancestors(parent, true)?;
+            let speed = if let Some((_, port)) = attachment.parent {
+                let parent = original_parent.ok_or(BlockError::Unsupported(
+                    "USB recovery original parent absent",
+                ))?;
+                c.observe_current_ancestors_for(parent, true)?;
                 let speed = if superspeed {
-                    c.superspeed_port(parent, port, ssp)?
+                    c.superspeed_port_for(parent, port, ssp)?
                 } else {
-                    c.hub_port(parent, port)?
+                    c.hub_port_for(parent, port)?
                 };
-                c.observe_current_ancestors(parent, true)?;
+                c.observe_current_ancestors_for(parent, true)?;
                 speed
             } else {
                 c.root_current(attachment.root_port, attachment.speed)?;
@@ -166,6 +173,7 @@ impl Host {
         };
         c.connect(
             location,
+            original_parent,
             reset,
             dma,
             &mut changes.added.devices,
