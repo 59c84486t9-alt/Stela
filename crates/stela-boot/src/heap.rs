@@ -108,6 +108,35 @@ impl Heap {
             same_cpu: PhantomData,
         }
     }
+    fn try_lock(&self) -> Option<Guard<'_>> {
+        // Mask before the single attempt, as for the blocking owner. An ISR
+        // cannot safely wait on its interrupted context's allocator lock.
+        #[cfg(target_os = "uefi")]
+        let flags: usize;
+        #[cfg(target_os = "uefi")]
+        unsafe {
+            core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
+        }
+        if self
+            .held
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            #[cfg(target_os = "uefi")]
+            // SAFETY: no guard/state access was acquired. Restore this CPU's
+            // exact incoming flags, including an already-clear interrupt flag.
+            unsafe {
+                core::arch::asm!("push {}", "popfq", in(reg) flags);
+            }
+            return None;
+        }
+        Some(Guard {
+            heap: self,
+            #[cfg(target_os = "uefi")]
+            flags,
+            same_cpu: PhantomData,
+        })
+    }
     /// # Safety
     /// The entire aligned extent is live RW+NX boot-private Normal-WB RAM, has
     /// no aliases/references/other owners, and remains reserved for the boot.
@@ -127,6 +156,48 @@ impl Heap {
         state.first = node;
         state.ready = true;
         state.total = bytes;
+    }
+
+    /// Attempt ordinary heap allocation without waiting for the heap lock.
+    /// Zero-sized requests, an uninitialized heap, contention and exhaustion
+    /// return NULL without changing heap bytes or accounting. Success uses the
+    /// ordinary size-class/alignment/header rules and exact-layout deallocation.
+    /// This makes one lock attempt; a successful free-list search is finite,
+    /// but is not promised to take constant time.
+    ///
+    /// # Safety
+    /// The caller preserves the initialized heap's actual RAM/mapping/owner
+    /// lifetime and exclusively owns a successful payload until its one matching
+    /// `GlobalAlloc::dealloc` on this same heap with this exact layout. NMI/fault
+    /// handlers do not reenter the heap. No physical/page/DMA authority follows.
+    pub unsafe fn try_allocate(&self, layout: Layout) -> *mut u8 {
+        if layout.size() == 0 {
+            return ptr::null_mut();
+        }
+        let Some(guard) = self.try_lock() else {
+            return ptr::null_mut();
+        };
+        // SAFETY: this actual guard exclusively protects the heap state. The
+        // shared body checks initialization before accessing backing storage.
+        let block = unsafe { allocate_locked(&mut *self.state.get(), layout) };
+        drop(guard);
+        block
+    }
+
+    /// Attempt allocation as in `try_allocate`, then zero the entire payload
+    /// before returning it. Zeroing owns only the successful payload and takes
+    /// place after releasing the metadata guard/restoring the incoming IRQ state.
+    ///
+    /// # Safety
+    /// The complete `try_allocate` ownership and exclusion contract applies.
+    pub unsafe fn try_allocate_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller retains the same heap, mapping and exact layout.
+        let block = unsafe { self.try_allocate(layout) };
+        if !block.is_null() {
+            // SAFETY: successful allocation gives this full payload exclusively.
+            unsafe { block.write_bytes(0, layout.size()) };
+        }
+        block
     }
 
     /// Select whole, zeroed pages inside a CPU interval from this same heap.
@@ -224,6 +295,37 @@ fn aligned(value: usize, alignment: usize) -> Option<usize> {
         .checked_add(alignment - 1)
         .map(|v| v & !(alignment - 1))
 }
+/// Ordinary and attempted allocation share the original locked algorithm.
+///
+/// # Safety
+/// The heap's actual guard exclusively owns `state`. Initialization is checked
+/// before backing access; successful allocations retain their original layout.
+unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
+    if !state.ready {
+        return ptr::null_mut();
+    }
+    let Some(class) = class(layout) else {
+        let block = unsafe { carve(state, layout.size(), layout.align()) };
+        if !block.is_null() {
+            state.live += layout.size();
+        }
+        return block;
+    };
+    let head = state.small[class];
+    let block = if head.is_null() {
+        unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
+    } else {
+        // SAFETY: a block of this class that `dealloc` linked and
+        // nothing else owns.
+        state.small[class] = unsafe { (*head).next };
+        head.cast()
+    };
+    if !block.is_null() {
+        state.live += SMALLEST << class;
+    }
+    block
+}
+
 // SAFETY: callers follow the GlobalAlloc contract. The free-list split returns
 // a disjoint aligned extent, and its header records the original bytes until
 // the single matching deallocation.
@@ -231,29 +333,8 @@ unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _guard = self.lock();
         let state = unsafe { &mut *self.state.get() };
-        if !state.ready {
-            return ptr::null_mut();
-        }
-        let Some(class) = class(layout) else {
-            let block = unsafe { carve(state, layout.size(), layout.align()) };
-            if !block.is_null() {
-                state.live += layout.size();
-            }
-            return block;
-        };
-        let head = state.small[class];
-        let block = if head.is_null() {
-            unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
-        } else {
-            // SAFETY: a block of this class that `dealloc` linked and
-            // nothing else owns.
-            state.small[class] = unsafe { (*head).next };
-            head.cast()
-        };
-        if !block.is_null() {
-            state.live += SMALLEST << class;
-        }
-        block
+        // SAFETY: the actual guard owns this state for the entire operation.
+        unsafe { allocate_locked(state, layout) }
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         let _guard = self.lock();
@@ -470,6 +551,182 @@ mod tests {
 
     fn backing() -> Box<Ram> {
         Box::new(Ram([0; 128 * 1024]))
+    }
+
+    fn usage_values(heap: &Heap) -> [usize; 5] {
+        let u = heap.usage();
+        [u.total, u.live, u.carved, u.peak, u.largest]
+    }
+
+    #[test]
+    fn attempted_unready_zero_and_contended_requests_preserve_state() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let layouts = [
+            Layout::from_size_align(17, 16).unwrap(),
+            Layout::from_size_align(256, 128).unwrap(),
+            Layout::from_size_align(4097, 4096).unwrap(),
+        ];
+        // SAFETY: these are valid layouts; unready allocation cannot access RAM.
+        unsafe {
+            for layout in layouts {
+                assert!(heap.try_allocate(layout).is_null());
+                assert!(heap.try_allocate_zeroed(layout).is_null());
+            }
+        }
+        assert_eq!(usage_values(&heap), [0; 5]);
+        // SAFETY: exclusive test backing, retained through every exact free.
+        unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
+        let before = usage_values(&heap);
+        let image = ram.0.to_vec();
+        let zero = Layout::from_size_align(0, 128).unwrap();
+        // SAFETY: the new APIs explicitly reject zero without allocation.
+        unsafe {
+            assert!(heap.try_allocate(zero).is_null());
+            assert!(heap.try_allocate_zeroed(zero).is_null());
+        }
+        assert_eq!(ram.0.as_slice(), image.as_slice());
+        assert_eq!(usage_values(&heap), before);
+        let guard = heap.lock();
+        // A blocking or recursively acquired implementation cannot pass this.
+        // SAFETY: the existing guard retains exclusive metadata ownership;
+        // attempted allocation must fail without accessing that metadata.
+        unsafe {
+            for layout in layouts {
+                assert!(heap.try_allocate(layout).is_null());
+                assert!(heap.try_allocate_zeroed(layout).is_null());
+                assert!(heap.held.load(Ordering::Relaxed));
+            }
+        }
+        assert_eq!(ram.0.as_slice(), image.as_slice());
+        drop(guard);
+        assert_eq!(usage_values(&heap), before);
+    }
+
+    #[test]
+    fn attempted_zeroed_reuse_keeps_other_live_payloads_and_global_free_rules() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let layout = Layout::from_size_align(17, 16).unwrap();
+        // SAFETY: fresh exclusive backing; every successful block is freed once
+        // through this exact heap/layout while the backing remains live.
+        unsafe {
+            heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+            let a = heap.alloc(layout);
+            let b = heap.alloc(layout);
+            assert!(!a.is_null() && !b.is_null() && a != b);
+            a.write_bytes(0xa5, layout.size());
+            b.write_bytes(0x5a, layout.size());
+            heap.dealloc(a, layout);
+            let tried = heap.try_allocate_zeroed(layout);
+            assert_eq!(tried, a);
+            assert!(
+                core::slice::from_raw_parts(tried, layout.size())
+                    .iter()
+                    .all(|v| *v == 0)
+            );
+            assert!(
+                core::slice::from_raw_parts(b, layout.size())
+                    .iter()
+                    .all(|v| *v == 0x5a)
+            );
+            assert_eq!(heap.usage().live, 64);
+            heap.dealloc(tried, layout);
+            let ordinary = heap.alloc(layout);
+            assert_eq!(ordinary, tried);
+            ordinary.write_bytes(0x7c, layout.size());
+            heap.dealloc(ordinary, layout);
+            let unzeroed = heap.try_allocate(layout);
+            assert_eq!(unzeroed, ordinary);
+            heap.dealloc(unzeroed, layout);
+            heap.dealloc(b, layout);
+        }
+        assert_eq!(heap.usage().live, 0);
+        // The existing small-object cache still retains its own two blocks.
+        assert!(heap.usage().carved > 0);
+    }
+
+    #[test]
+    fn attempted_general_alignment_zeroing_and_ordinary_free_coalesce() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        // SAFETY: all disjoint payloads retain this exclusive backing/layout.
+        unsafe {
+            heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+            for (bytes, align) in [(256, 128), (4097, 4096), (8193, 32768)] {
+                let layout = Layout::from_size_align(bytes, align).unwrap();
+                let tried = heap.try_allocate_zeroed(layout);
+                let other = heap.alloc(layout);
+                assert!(!tried.is_null() && !other.is_null() && tried != other);
+                assert!((tried as usize).is_multiple_of(align));
+                assert!(
+                    core::slice::from_raw_parts(tried, bytes)
+                        .iter()
+                        .all(|v| *v == 0)
+                );
+                tried.write_bytes(0xa5, bytes);
+                other.write_bytes(0x5a, bytes);
+                heap.dealloc(tried, layout);
+                let again = heap.try_allocate_zeroed(layout);
+                assert!(!again.is_null() && (again as usize).is_multiple_of(align));
+                assert!(
+                    core::slice::from_raw_parts(again, bytes)
+                        .iter()
+                        .all(|v| *v == 0)
+                );
+                assert!(
+                    core::slice::from_raw_parts(other, bytes)
+                        .iter()
+                        .all(|v| *v == 0x5a)
+                );
+                heap.dealloc(other, layout);
+                heap.dealloc(again, layout);
+                assert_eq!(heap.usage().live, 0);
+                assert_eq!(heap.usage().carved, 0);
+                assert_eq!(heap.usage().largest, ram.0.len());
+            }
+        }
+    }
+
+    #[test]
+    fn attempted_exhaustion_preserves_live_bytes_then_reclaims_the_full_extent() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let layout = Layout::from_size_align(256, 128).unwrap();
+        // SAFETY: each raw allocation retains the same real backing and exact
+        // layout; no payload slice survives subsequent allocation/deallocation.
+        unsafe {
+            heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+            let mut blocks = Vec::new();
+            loop {
+                let block = heap.try_allocate(layout);
+                if block.is_null() {
+                    break;
+                }
+                assert!((block as usize).is_multiple_of(128));
+                block.write_bytes(0x39, layout.size());
+                blocks.push(block);
+            }
+            assert!(blocks.len() > 32);
+            let before = usage_values(&heap);
+            let image = ram.0.to_vec();
+            assert!(heap.try_allocate(layout).is_null());
+            assert!(heap.try_allocate_zeroed(layout).is_null());
+            assert!(heap.alloc(layout).is_null());
+            assert_eq!(ram.0.as_slice(), image.as_slice());
+            assert_eq!(usage_values(&heap), before);
+            for block in blocks {
+                assert!(
+                    core::slice::from_raw_parts(block, layout.size())
+                        .iter()
+                        .all(|v| *v == 0x39)
+                );
+                heap.dealloc(block, layout);
+            }
+        }
+        assert_eq!(heap.usage().live, 0);
+        assert_eq!(heap.usage().carved, 0);
+        assert_eq!(heap.usage().largest, ram.0.len());
     }
 
     #[test]

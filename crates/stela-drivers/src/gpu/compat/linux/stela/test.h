@@ -18,6 +18,12 @@ s64 stela_test_now_ns(void);
 void stela_test_sleep_us(u64 usecs);
 /* A separate child must stop at the contract trap instead of returning. */
 int stela_test_traps(void (*operation)(void));
+/* A bounded preallocated hosted heap model. Toggle only with no live try
+ * allocation or concurrent allocator caller; it proves no native IRQ behavior. */
+void stela_test_heap_try_enable(bool enable);
+/* Diagnostic for the caller's own live allocation, excluding concurrent free
+ * or reallocation. The occupied flag is not arbitrary-observer publication. */
+bool stela_test_heap_try_contains(const void *object);
 
 __noreturn void stela_test_fail(const char *file, int line, const char *condition);
 #define assert(condition) \

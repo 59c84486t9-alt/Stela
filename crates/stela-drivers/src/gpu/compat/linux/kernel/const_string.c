@@ -89,6 +89,21 @@ static size_t allocations;
 static size_t releases;
 static size_t live;
 
+/* This independent libc-backed model admits no nonblocking allocations. It
+ * supplies the ABI's truthful absent capability without pulling test.c's
+ * alternative heap object into this executable. */
+bool stela_linux_heap_try_available(void)
+{
+	return false;
+}
+
+void *stela_linux_heap_try_alloc(size_t size, size_t align)
+{
+	(void)size;
+	(void)align;
+	__builtin_trap();
+}
+
 void *stela_linux_heap_alloc(size_t size, size_t align)
 {
 	attempts++;

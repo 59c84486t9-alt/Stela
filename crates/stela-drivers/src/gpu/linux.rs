@@ -4,6 +4,7 @@
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr};
 
+pub mod heap;
 pub mod image;
 pub mod pages;
 
@@ -17,8 +18,8 @@ extern "C" fn stela_linux_heap_alloc(size: usize, align: usize) -> *mut c_void {
 }
 
 /// # Safety
-/// `object` is a live stela_linux_heap_alloc allocation of `size` and
-/// `align`, freed once.
+/// `object` is a live ordinary or registered nonblocking canonical-global
+/// heap allocation of `size` and `align`, freed once through that same heap.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_linux_heap_free(object: *mut c_void, size: usize, align: usize) {
     // SAFETY: the caller's contract; the allocation was made with this layout.

@@ -64,6 +64,13 @@ void stela_linux_unsupported(const char *operation);
  * same size and alignment. */
 void *stela_linux_heap_alloc(size_t size, size_t align);
 void stela_linux_heap_free(void *object, size_t size, size_t align);
+/* Permanent access to the SAME canonical heap/free identity, without waiting,
+ * reclaim, growth or fallback. Query first; absent/in-progress capability is
+ * unsupported, while an installed allocator's NULL is ordinary exhaustion or
+ * contention. Nonzero valid layouts require the actual retained owner/context.
+ * Registration supplies no native ISR entry, page/PFN or DMA authority. */
+bool stela_linux_heap_try_available(void);
+void *stela_linux_heap_try_alloc(size_t size, size_t align);
 /* Actual retained native image DATA only; no pointer read or heap/free grant.
  * Requires permanent Rust image registration before the dependent lifecycle is
  * admitted. Missing/in-progress registration traps instead of returning false.

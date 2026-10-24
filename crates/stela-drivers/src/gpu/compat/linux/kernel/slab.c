@@ -35,8 +35,14 @@ static bool request_supported(gfp_t flags)
 		__GFP_NORETRY;
 	if (!IS_ENABLED(CONFIG_MEMCG))
 		allowed |= __GFP_ACCOUNT;
-	if (!stela_linux_quiescent() || !gfpflags_allow_blocking(flags) || (flags & ~allowed)) {
+	bool quiescent = stela_linux_quiescent();
+	bool may_block = gfpflags_allow_blocking(flags);
+	if ((flags & ~allowed) || (may_block && !quiescent)) {
 		stela_linux_unsupported("kmalloc allocation policy or context");
+		return false;
+	}
+	if (!may_block && !stela_linux_heap_try_available()) {
+		stela_linux_unsupported("kmalloc nonblocking canonical heap unavailable");
 		return false;
 	}
 	return true;
@@ -54,7 +60,9 @@ static void *allocate(size_t size, gfp_t flags, size_t minimum_align)
 	align = max(align, sizeof(struct header));
 	if (size > SIZE_MAX - align)
 		return NULL;
-	u8 *base = stela_linux_heap_alloc(align + size, align);
+	u8 *base = gfpflags_allow_blocking(flags) ?
+		stela_linux_heap_alloc(align + size, align) :
+		stela_linux_heap_try_alloc(align + size, align);
 	if (!base)
 		return NULL;
 	struct header *header = (struct header *)(base + align) - 1;
@@ -115,7 +123,8 @@ static unsigned int refusals;
 static void unsupported(void *context, const char *operation)
 {
 	(void)context;
-	assert(!strcmp(operation, "kmalloc allocation policy or context"));
+	assert(!strcmp(operation, "kmalloc allocation policy or context") ||
+	       !strcmp(operation, "kmalloc nonblocking canonical heap unavailable"));
 	refusals++;
 }
 
@@ -173,6 +182,73 @@ static void strict_refusal(void)
 	void *object = __kmalloc_noprof(96, GFP_ATOMIC);
 	kfree(object);
 	stela_linux_exit();
+}
+
+static void check_nonblocking_allocation(void)
+{
+	unsigned int before = refusals;
+	u8 *object = __kmalloc_noprof(128, GFP_NOWAIT | __GFP_ZERO);
+	assert(object && stela_test_heap_try_contains(object));
+	assert((unsigned long)object % 128 == 0);
+	for (size_t i = 0; i < 128; i++)
+		assert(!object[i]);
+	memset(object, 0xa5, 128);
+	/* The bounded model has one actual preallocated span. An ordinary heap
+	 * fallback would incorrectly succeed and is caught by this failure. */
+	assert(!__kmalloc_noprof(128, GFP_NOWAIT));
+	assert(!__kmalloc_cache_noprof(NULL, GFP_NOWAIT, 128));
+	assert(!__kmalloc_large_noprof(128, GFP_NOWAIT));
+	assert(refusals == before);
+	for (size_t i = 0; i < 128; i++)
+		assert(object[i] == 0xa5);
+	kfree(object);
+	object = __kmalloc_cache_noprof(NULL, GFP_NOWAIT, 128);
+	assert(object && stela_test_heap_try_contains(object));
+	for (size_t i = 0; i < 128; i++)
+		assert(!object[i]);
+	kfree(object);
+	object = __kmalloc_large_noprof(128, GFP_NOWAIT);
+	assert(object && stela_test_heap_try_contains(object));
+	assert((unsigned long)object % PAGE_SIZE == 0);
+	kfree(object);
+	assert(refusals == before);
+}
+
+static void nonblocking_policy_and_context(void)
+{
+	assert(!stela_linux_heap_try_available());
+	stela_test_heap_try_enable(true);
+	assert(stela_linux_heap_try_available());
+	check_nonblocking_allocation();
+	preempt_disable();
+	check_nonblocking_allocation();
+	preempt_enable();
+	rcu_read_lock();
+	check_nonblocking_allocation();
+	rcu_read_unlock();
+	local_bh_disable();
+	check_nonblocking_allocation();
+	local_bh_enable();
+	unsigned long irq = arch_local_irq_save();
+	check_nonblocking_allocation();
+	arch_local_irq_restore(irq);
+	unsigned int before = refusals;
+	const gfp_t flags[] = {
+		0, GFP_NOWAIT | __GFP_NOWARN | __GFP_NOMEMALLOC | __GFP_NORETRY,
+		GFP_NOWAIT | __GFP_ACCOUNT,
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(flags); i++) {
+		void *object = __kmalloc_noprof(128, flags[i]);
+		assert(object && stela_test_heap_try_contains(object));
+		kfree(object);
+	}
+	assert(refusals == before);
+	check_refusal(GFP_ATOMIC);
+	check_refusal(GFP_NOWAIT | __GFP_RECLAIMABLE);
+	check_refusal(GFP_NOWAIT | __GFP_MOVABLE);
+	stela_test_heap_try_enable(false);
+	assert(!stela_linux_heap_try_available() && stela_linux_quiescent());
+	check_refusal(GFP_NOWAIT);
 }
 
 static void outside_owner(void)
@@ -241,6 +317,7 @@ int main(void)
 	kfree(copy);
 	assert(!kstrdup(NULL, GFP_KERNEL));
 	policy_and_context();
+	nonblocking_policy_and_context();
 	stela_linux_exit();
 	assert(stela_test_traps(strict_refusal));
 	assert(stela_test_traps(outside_owner));

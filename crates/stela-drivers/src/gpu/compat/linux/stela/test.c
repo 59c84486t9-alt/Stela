@@ -4,6 +4,8 @@
  * outside Stela's Linux environment. */
 #include <errno.h>
 #include <signal.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,10 +16,60 @@
 
 void *stela_linux_heap_alloc(size_t size, size_t align);
 void stela_linux_heap_free(void *object, size_t size, size_t align);
+bool stela_linux_heap_try_available(void);
+void *stela_linux_heap_try_alloc(size_t size, size_t align);
+void stela_test_heap_try_enable(bool enable);
+bool stela_test_heap_try_contains(const void *object);
 int64_t stela_test_now_ns(void);
 void stela_test_sleep_us(uint64_t usecs);
 _Noreturn void stela_test_fail(const char *file, int line, const char *condition);
 int stela_test_traps(void (*operation)(void));
+
+/* Actual preallocated storage, not a libc allocator called under NOWAIT.
+ * One span makes contention/exhaustion and same-backend free observable. */
+static _Alignas(4096) unsigned char try_storage[64 * 1024];
+static _Atomic bool try_enabled;
+static _Atomic bool try_occupied;
+static size_t try_size, try_align;
+
+void stela_test_heap_try_enable(bool enable)
+{
+	if (atomic_load_explicit(&try_occupied, memory_order_acquire))
+		abort();
+	atomic_store_explicit(&try_enabled, enable, memory_order_release);
+}
+
+bool stela_linux_heap_try_available(void)
+{
+	return atomic_load_explicit(&try_enabled, memory_order_acquire);
+}
+
+void *stela_linux_heap_try_alloc(size_t size, size_t align)
+{
+	if (!stela_linux_heap_try_available())
+		abort();
+	if (!size || !align || (align & (align - 1)) ||
+	    align > 4096 || size > sizeof(try_storage))
+		return NULL;
+	bool expected = false;
+	if (!atomic_compare_exchange_strong_explicit(&try_occupied, &expected, true,
+					     memory_order_acquire, memory_order_relaxed))
+		return NULL;
+	try_size = size;
+	try_align = align;
+	memset(try_storage, 0, size);
+	return try_storage;
+}
+
+bool stela_test_heap_try_contains(const void *object)
+{
+	/* Caller owns this returned allocation and excludes free/reallocation;
+	 * occupied alone does not publish the later plain size/align writes. */
+	if (!atomic_load_explicit(&try_occupied, memory_order_acquire))
+		return false;
+	uintptr_t base = (uintptr_t)try_storage, address = (uintptr_t)object;
+	return address >= base && address - base < try_size;
+}
 
 void *stela_linux_heap_alloc(size_t size, size_t align)
 {
@@ -31,6 +83,14 @@ void *stela_linux_heap_alloc(size_t size, size_t align)
 
 void stela_linux_heap_free(void *object, size_t size, size_t align)
 {
+	if (object == try_storage) {
+		if (!atomic_load_explicit(&try_occupied, memory_order_relaxed) ||
+		    size != try_size || align != try_align)
+			abort();
+		memset(try_storage, 0xd3, size);
+		atomic_store_explicit(&try_occupied, false, memory_order_release);
+		return;
+	}
 	(void)size;
 	(void)align;
 	free(object);
