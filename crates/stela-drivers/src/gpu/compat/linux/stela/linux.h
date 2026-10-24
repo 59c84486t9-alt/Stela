@@ -24,7 +24,10 @@ struct stela_linux_services {
 	 * atomic waits must not sleep. */
 	void (*delay_us)(void *context, u64 minimum, u64 maximum, bool atomic);
 	/* A firmware image by Linux's name, valid until the owner exits, or a
-	 * negative errno. */
+	 * negative errno. Success returns a readable stable source window; the
+	 * common request adapter copies it before publishing owned firmware.
+	 * Return within the same entered owner and quiescent context. No pointer
+	 * to this context or source is retained in the resulting firmware. */
 	int (*firmware)(void *context, const char *name, const u8 **data, size_t *size);
 	/* One formatted kernel message at its printk level (LOGLEVEL_*). */
 	void (*log)(void *context, int level, const char *message);
