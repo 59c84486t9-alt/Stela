@@ -113,6 +113,17 @@ pub struct AudioDevice<T: Transport> {
     pub last_fault: Option<Error>,
 }
 
+impl AudioDevice<super::Native> {
+    /// Create an idle owner for the actual optional UAC2 AC status endpoint.
+    /// Call `start`, poll and drain notices explicitly, then acknowledge `stop`.
+    pub fn status_notifications(
+        &self,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Option<super::StatusNotifications>, Error> {
+        self.transport.status_notifications(dma)
+    }
+}
+
 impl<T: Transport> AudioDevice<T> {
     pub fn new(transport: T, binding: Binding, dma: &mut dyn DmaAllocator) -> Result<Self, Error> {
         transport.validate()?;

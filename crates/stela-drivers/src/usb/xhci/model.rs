@@ -12,6 +12,20 @@ use super::*;
 pub(crate) use crate::bus::dma::RegionAllocator;
 
 impl Controller {
+    /// Install a hostile register surface after fixture construction. Identity
+    /// admission must fail before even a readiness read can reach this surface.
+    pub(crate) fn forbid_mmio(&mut self) {
+        struct NoAccess;
+        impl Registers for NoAccess {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("retired/foreign consumer reached MMIO read")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("retired/foreign consumer reached MMIO write")
+            }
+        }
+        self.registers = Box::new(NoAccess);
+    }
     /// Record the speed a model device in `slot` was addressed at.
     pub(crate) fn set_slot_speed(&mut self, slot: u8, speed: u8) {
         self.slots[usize::from(slot)].as_mut().unwrap().speed = speed;

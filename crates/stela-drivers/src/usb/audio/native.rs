@@ -58,8 +58,20 @@ pub struct Native {
     id: SlotId,
     playback: Arena,
     capture: Arena,
+    status_plan: Result<Option<super::status::StatusPlan>, super::Error>,
 }
 impl Native {
+    pub(super) fn status_notifications(
+        &self,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Option<super::StatusNotifications>, super::Error> {
+        self.shared.borrow_mut().device(self.id)?;
+        self.status_plan
+            .clone()?
+            .map(|plan| super::StatusNotifications::new(self.shared.clone(), self.id, plan, dma))
+            .transpose()
+    }
+
     fn arena(&mut self, owner: Direction) -> &mut Arena {
         match owner {
             Direction::Playback => &mut self.playback,
@@ -181,11 +193,15 @@ impl UsbAudio {
                 super::Error::Transport(e) => e,
                 _ => BlockError::Unsupported("USB audio high-capability discovery failed"),
             })?;
+        // Optional status admission never changes the existing PCM binding.
+        // Retain an explicit refusal until the caller requests that service.
+        let status_plan = super::status::StatusPlan::discover(&binding, &device.configuration);
         let native = Native {
             shared,
             id: device.id,
             playback: Arena::new(dma)?,
             capture: Arena::new(dma)?,
+            status_plan,
         };
         Self::new(native, binding, dma).map_err(|error| match error {
             super::Error::Transport(e) => e,
@@ -218,6 +234,7 @@ mod tests {
                 id: shared.borrow().test_device_id(1).unwrap(),
                 playback: Arena::new(&mut dma).unwrap(),
                 capture: Arena::new(&mut dma).unwrap(),
+                status_plan: Ok(None),
             };
             let ep = Endpoint {
                 address: 0x82,

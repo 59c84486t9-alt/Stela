@@ -29,6 +29,8 @@ mod mixer;
 mod native;
 mod packet;
 pub use native::{Native, UsbAudio};
+mod status;
+pub use status::{StatusAttribute, StatusNotice, StatusNotifications};
 mod stream;
 pub use control::{Control, RateRange, ResolvedClock};
 pub use descriptors::{Binding, Entity, Format, Graph, Sync};
