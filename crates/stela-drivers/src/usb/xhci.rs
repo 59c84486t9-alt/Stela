@@ -82,6 +82,7 @@ mod power;
 mod quirks;
 pub mod renesas;
 mod reset;
+mod retirement;
 mod ring;
 mod streams;
 mod teardown;

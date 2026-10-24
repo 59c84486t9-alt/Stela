@@ -119,20 +119,8 @@ impl Controller {
             .transpose()
             .map_err(|error| ("retain reset parent protocol".into(), error))?;
         self.slot(slot).unwrap().retiring = true;
-        let mut failed = None;
-        for dci in 1..32 {
-            if self.slot(slot).unwrap().endpoints[dci].is_some()
-                && let Err(error) = self.cancel_inner(slot, dci as u8)
-            {
-                failed.get_or_insert(error);
-            }
-        }
-        if let Some(error) = failed {
-            return Err(("retire every endpoint before Disable Slot".into(), error));
-        }
-        // 4.6.4 requires all active endpoints stopped/idle and all transfer and
-        // command events received BEFORE Disable Slot. cancel_inner supplies
-        // acknowledged Stop/Reset/SetDequeue and drains every stream's events.
+        // The whole-slot boundary supplies every Stop/Reset/Set Dequeue
+        // acknowledgment and ordered event drain before Disable Slot.
         self.disable_slot(slot, Ownership::Retired)
             .map_err(|(operation, error)| (operation.into(), error))?;
         if let Some((parent, port, speed, ssp)) = parent {
@@ -183,42 +171,6 @@ impl Controller {
         }
         result
     }
-    /// Disable Slot (xHCI 4.6.4) and clear the slot's DCBAA entry, leaving
-    /// it `ownership`: `Vacant` for a slot no driver was ever given, which
-    /// Linux `xhci_free_dev` disables the same way, or `Retired` after a
-    /// reset, since stale class handles may still name it. Old contexts and
-    /// rings stay allocated in the slot record until the ID is reused.
-    pub(super) fn disable_slot(
-        &mut self,
-        slot: u8,
-        ownership: Ownership,
-    ) -> Result<(), (&'static str, BlockError)> {
-        let fail = |operation| move |error| (operation, error);
-        self.ready()
-            .map_err(fail("pre-Disable Slot event retirement"))?;
-        let completion = self
-            .command(0, 0, DISABLE_SLOT << 10 | u32::from(slot) << 24)
-            .map_err(fail("acknowledge Disable Slot"))?;
-        if completion.slot() != slot {
-            self.command_poisoned = true;
-            return Err((
-                "acknowledge Disable Slot identity",
-                BlockError::Unsupported("Disable Slot completion named another slot"),
-            ));
-        }
-        self.drain();
-        self.ready()
-            .map_err(fail("post-Disable Slot controller status"))?;
-        self.pending
-            .retain(|event| !(event.kind() == TRANSFER_EVENT && event.slot() == slot));
-        self.slot_ownership[usize::from(slot)] = ownership;
-        self.dcbaa.write(usize::from(slot) * 8, 0u64);
-        if ownership == Ownership::Vacant {
-            self.slots[usize::from(slot)] = None;
-        }
-        Ok(())
-    }
-
     fn reset_preflight(&self, device: &Device, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         if self.validate_id(device.id)? != device.slot {
             return Err(BlockError::Unsupported(
@@ -1473,6 +1425,64 @@ pub(crate) mod tests {
                 BlockError::Unsupported("USB reset physical port has another unretired slot owner")
             ));
             assert_eq!(hardware.borrow().accesses, before);
+        }
+    }
+
+    // Additional whole-slot retirement peer operations consume the original
+    // command/TD DMA. Existing reset-model paths and test bodies are unchanged.
+    impl Hardware {
+        pub(crate) fn pending_command_kind(&self) -> u32 {
+            let mut cursor = self.commands;
+            Self::take(&mut cursor).3 >> 10 & 63
+        }
+
+        pub(crate) fn queue_iso_service(&mut self, slot: u8, dci: u8) {
+            let cursor = self.cursors.get_mut(&(slot, dci, 0)).unwrap();
+            let (trb, buffer, status, control) = Self::take(cursor);
+            assert_eq!(control >> 10 & 63, 5, "expected an actual Isoch TRB");
+            assert_eq!(control & IOC, IOC);
+            assert_eq!(read::<u32>(self.output(slot, dci)) & 7, ENDPOINT_RUNNING);
+            assert!(
+                self.pending
+                    .insert(
+                        (slot, dci, 0),
+                        Td {
+                            trb,
+                            buffer,
+                            length: (status & 0x1ffff) as usize,
+                        }
+                    )
+                    .is_none()
+            );
+        }
+
+        pub(crate) fn reject_pending_address(&mut self) -> bool {
+            let mut cursor = self.commands;
+            let (at, _, _, control) = Self::take(&mut cursor);
+            if control >> 10 & 63 != ADDRESS_DEVICE {
+                return false;
+            }
+            self.commands = cursor;
+            let slot = (control >> 24) as u8;
+            assert!(self.enabled[usize::from(slot)]);
+            let output = read::<u64>(self.dcbaa + u64::from(slot) * 8);
+            assert_ne!(output, 0);
+            assert_eq!(read::<u32>(output + self.context as u64) & 7, 0);
+            self.outputs.insert(slot, output);
+            self.commands_seen.push((ADDRESS_DEVICE, slot, 0));
+            self.event(at, 4 << 24, COMMAND_COMPLETION, slot, 0);
+            true
+        }
+
+        pub(crate) fn stall_completed_control(&mut self, slot: u8) {
+            let out = self.output(slot, 1);
+            put(out, read::<u32>(out) & !7 | ENDPOINT_HALTED);
+            let at = self.events + ((self.event_count - 1) % RING_TRBS * TRB) as u64;
+            let control = read::<u32>(at + 12);
+            assert_eq!(control >> 10 & 63, TRANSFER_EVENT);
+            assert_eq!(control >> 24, u32::from(slot));
+            assert_eq!(control >> 16 & 31, 1);
+            put(at + 8, STALL << 24);
         }
     }
 }

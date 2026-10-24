@@ -113,7 +113,6 @@ impl Host {
         }
         // Private recovery transfers have finished; stop EP0 again before
         // Disable Slot. Any uncertainty retains the capability and original DMA.
-        c.cancel_inner(owner.slot, 1)?;
         c.disable_slot(owner.slot, reset::Ownership::Retired)
             .map_err(|(_, error)| error)?;
         let attachment = hub.attachment;
