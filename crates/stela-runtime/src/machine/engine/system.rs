@@ -1320,7 +1320,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             _ => None,
         });
         match translation {
-            Translation::All => self.translations_changed(),
+            Translation::All => self.controls_changed(),
             Translation::TableBase => self.table_base_changed(),
             Translation::Maintenance(reach) => self.tlb_maintained(reach),
             Translation::Unchanged if regime => self.sync_regime(),

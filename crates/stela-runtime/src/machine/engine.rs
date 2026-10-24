@@ -1365,6 +1365,35 @@ struct JumpEntry {
     block: usize,
 }
 
+/// One lookup context of one half: the EL (with the guarded level) and
+/// variant fetches run in, the half's translation inputs
+/// ([`Machine::half_inputs`]) and the code generation, under one number.
+/// Between changes no control value shows (TLBIs, the host's fetch
+/// permissions), translation is a function of these, as a TLB tags its
+/// entries, so a return to earlier controls (a TTBR0 or SPRR permission
+/// switched back) finds its entries in the lookup table still valid.
+#[derive(Debug, Clone, Copy)]
+struct Space {
+    inputs: ([mmu::Controls; 2], u64),
+    el: u8,
+    variant: Variant,
+    code: u64,
+    number: u64,
+}
+
+/// A half's last context number, with the EL, variant and translation and
+/// code generations it was found for.
+#[derive(Debug, Clone, Copy)]
+struct Recent {
+    el: u8,
+    variant: Variant,
+    generations: (u64, u64),
+    number: u64,
+}
+
+/// The contexts one half keeps, least recently used dropped first.
+const SPACES: usize = 64;
+
 /// What a block is compiled for besides its PC and PA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Variant {
@@ -1543,21 +1572,17 @@ pub struct Machine<H: Host, D: Devices> {
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
     translation_generation: u64,
-    /// The upper half's translation epoch, and the `translation_generation`
-    /// it was last confirmed at: every advance since was of the lower half
-    /// alone ([`Machine::upper_generation`]).
-    upper_epoch: (u64, u64),
     /// Advances when installed code is discarded.
     code_generation: u64,
     /// The blocks fetches ran, by PC and context, for lookup thunks
     /// (`x86_64::chain`): the table `ChainControl::table` names.
     targets: alloc::boxed::Box<[chain::LookupEntry]>,
-    /// The context numbers of the current generations, by EL (with the
-    /// guarded level), variant and half; numbers are never reused.
-    contexts: Vec<(u8, Variant, usize, u64)>,
-    /// The translation and code generations each half's `contexts` are
-    /// for, and the next number.
-    context_generations: [(u64, u64); 2],
+    /// Each half's lookup contexts ([`Space`]) since its translations last
+    /// changed in a way no control value shows, most recently used last.
+    spaces: [Vec<Space>; 2],
+    /// Each half's last context.
+    recent: [Option<Recent>; 2],
+    /// The next context number; numbers are never reused.
     next_context: u64,
     /// Identification registers the CPU profile has no value for.
     profile_missing: Vec<SystemRegister>,
@@ -1758,11 +1783,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fetch: vec![None; FETCH_CACHE],
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
-            upper_epoch: (1, 1),
             code_generation: 1,
             targets: vec![chain::LookupEntry::default(); chain::LOOKUP_ENTRIES].into_boxed_slice(),
-            contexts: Vec::new(),
-            context_generations: [(0, 0); 2],
+            spaces: [Vec::new(), Vec::new()],
+            recent: [None; 2],
             next_context: 1,
             profile_missing: Vec::new(),
             lookup: super::system::Lookup::new(),
@@ -2302,39 +2326,51 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .expect("architectural translation generation exhausted");
     }
 
-    /// Advance the generation for a change of the lower half's translations
-    /// alone, which leaves the upper half's epoch as current as it was.
-    fn advance_lower_translation_generation(&mut self) {
-        let upper_current = self.upper_epoch.1 == self.translation_generation;
-        self.advance_translation_generation();
-        if upper_current {
-            self.upper_epoch.1 = self.translation_generation;
+    /// The translations of the halves `halves` may have changed with no
+    /// control value showing it: their lookup contexts go, so no lookup
+    /// enters a block their entries name.
+    fn forget_spaces(&mut self, halves: core::ops::RangeInclusive<usize>) {
+        for half in halves {
+            self.spaces[half].clear();
         }
     }
 
-    fn translations_changed(&mut self) {
+    /// A translation control changed: cached fetch translations go, and
+    /// the host's shadow. Lookup contexts are keyed by the controls'
+    /// values ([`Space`]), so a return to earlier ones finds theirs again.
+    fn controls_changed(&mut self) {
         self.advance_translation_generation();
         self.statistics.translation_changes += 1;
         self.host.invalidate_translations();
         self.sync_regime();
     }
 
+    /// Anything about translation may have changed: every lookup context
+    /// goes too.
+    fn translations_changed(&mut self) {
+        self.forget_spaces(0..=1);
+        self.controls_changed();
+    }
+
     /// The host's answers to [`Host::fetch_permitted`] changed: every later
     /// fetch translates and asks again, and no cached, looked-up or chained
     /// transfer enters a block of another page before it has.
     pub fn fetch_permissions_changed(&mut self) {
+        self.forget_spaces(0..=1);
         self.advance_translation_generation();
     }
 
     /// A TLBI: the fetch translations of every regime go, and the host
-    /// drops what `reach` names of its shadow. No control changed, so the
-    /// regime and what derives from System registers stay.
+    /// drops what `reach` names of its shadow, and the lookup contexts of
+    /// the halves it may reach. No control changed, so the regime and what
+    /// derives from System registers stay.
     fn tlb_maintained(&mut self, reach: mmu::tlbi::Reach) {
         if reach.lower_only() {
-            self.advance_lower_translation_generation();
+            self.forget_spaces(0..=0);
         } else {
-            self.advance_translation_generation();
+            self.forget_spaces(0..=1);
         }
+        self.advance_translation_generation();
         self.statistics.tlb_maintenance += 1;
         if reach != mmu::tlbi::Reach::All {
             self.statistics.scoped_maintenance += 1;
@@ -2344,9 +2380,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// A TTBR0 write, which changes the translation of the lower half
     /// alone: the regime's new controls tell the host so
-    /// ([`Host::set_regime`]), which keeps the upper half's shadow.
+    /// ([`Host::set_regime`]), which keeps the upper half's shadow. Lookup
+    /// contexts are keyed by its value, as by every control's.
     fn table_base_changed(&mut self) {
-        self.advance_lower_translation_generation();
+        self.advance_translation_generation();
         self.statistics.table_base_changes += 1;
         self.sync_regime();
     }
@@ -3333,30 +3370,47 @@ impl<H: Host, D: Devices> Machine<H, D> {
         true
     }
 
-    /// The number of the context a fetch runs in now: the generations, the
-    /// EL with the guarded level, and the variant. Lookup entries name it.
+    /// The number of the context a fetch in `half` runs in now: the EL with
+    /// the guarded level, the variant, the code generation and the half's
+    /// translation inputs ([`Space`]). Lookup entries name it.
     fn context(&mut self, el: u8, variant: Variant, half: usize) -> u64 {
-        let translation = if half == 0 {
-            self.translation_generation
-        } else {
-            self.upper_generation()
-        };
-        let generations = (translation, self.code_generation);
-        if self.context_generations[half] != generations {
-            self.context_generations[half] = generations;
-            self.contexts.retain(|&(_, _, other, _)| other != half);
-        }
-        if let Some(&(.., number)) = self
-            .contexts
-            .iter()
-            .find(|&&(other, kind, of, _)| other == el && kind == variant && of == half)
+        let generations = (self.translation_generation, self.code_generation);
+        if let Some(recent) = self.recent[half]
+            && (recent.el, recent.variant, recent.generations) == (el, variant, generations)
         {
-            return number;
+            return recent.number;
         }
-        let number = self.next_context;
-        self.next_context += 1;
-        self.contexts.push((el, variant, half, number));
-        number
+        let inputs = self.half_inputs(half);
+        let spaces = &mut self.spaces[half];
+        spaces.retain(|space| space.code == generations.1);
+        let found = spaces
+            .iter()
+            .position(|space| space.el == el && space.variant == variant && space.inputs == inputs);
+        let space = match found {
+            Some(at) => spaces.remove(at),
+            None => {
+                if spaces.len() == SPACES {
+                    spaces.remove(0);
+                }
+                let number = self.next_context;
+                self.next_context += 1;
+                Space {
+                    inputs,
+                    el,
+                    variant,
+                    code: generations.1,
+                    number,
+                }
+            }
+        };
+        self.spaces[half].push(space);
+        self.recent[half] = Some(Recent {
+            el,
+            variant,
+            generations,
+            number: space.number,
+        });
+        space.number
     }
 
     /// Both halves' contexts at `el` in `variant`.
@@ -3364,16 +3418,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         [0, 1].map(|half| self.context(el, variant, half))
     }
 
-    /// The upper half's translation epoch: it advances with
-    /// `translation_generation` unless every advance since it was last
-    /// confirmed was of the lower half alone, so a change made any other
-    /// way reaches the upper half too.
-    fn upper_generation(&mut self) -> u64 {
-        let (epoch, at) = self.upper_epoch;
-        if at != self.translation_generation {
-            self.upper_epoch = (epoch + 1, self.translation_generation);
+    /// What decides `half`'s translations besides the tables' contents:
+    /// both regimes' controls and HCR_EL2. The upper half's leave out
+    /// TTBR0's table address, which it never walks, but keep TTBR0's ASID
+    /// field while TCR.A1 selects it, as it selects the upper half's
+    /// non-global entries.
+    fn half_inputs(&self, half: usize) -> ([mmu::Controls; 2], u64) {
+        const TCR_A1: u64 = 1 << 22;
+        const TTBR_ASID: u64 = 0xffff << 48;
+        let (mut controls, hcr) = self.cpu.translation_inputs();
+        if half == 1 {
+            for controls in &mut controls {
+                controls.ttbr0 &= if controls.tcr & TCR_A1 == 0 {
+                    TTBR_ASID
+                } else {
+                    0
+                };
+            }
         }
-        self.upper_epoch.0
+        (controls, hcr)
     }
 
     /// The checks before an instruction executes, in Arm's priority after PC
@@ -8365,28 +8428,51 @@ mod tests {
     }
 
     #[test]
-    fn the_upper_half_keeps_its_contexts_over_lower_half_changes_alone() {
-        let mut machine = board_on(crate::machine::Chip::AppleM1, &[], NoDevices, Vec::new());
+    fn lookup_contexts_follow_translation_inputs_and_outlive_a_return_to_them() {
+        const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
+        const MSR_MAIR_EL1_X0: u32 = 0xd518_a200;
+        let mut machine = machine(&[]);
         let variant = machine.current_variant(false, false);
-        let before = machine.contexts(2, variant);
-        // A TTBR0 write and a TLBI of lower-half addresses renew the lower
-        // half's context only.
-        machine.table_base_changed();
+        let msr = |machine: &mut Machine<FakeHost, NoDevices>, word, value| {
+            machine.cpu.state.x[0] = value;
+            machine.system_instruction(word).unwrap();
+        };
+        let ttbr0 = machine.cpu.read(SystemRegister::TTBR0_EL1);
+        let mair = machine.cpu.read(SystemRegister::MAIR_EL1);
+        let first = machine.contexts(2, variant);
+        // Another TTBR0 table under the same ASID is another lower-half
+        // context alone, and the first value finds the first contexts.
+        msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 0x8000_4000);
+        let other = machine.contexts(2, variant);
+        assert!(other[0] != first[0] && other[1] == first[1]);
+        msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
+        assert_eq!(machine.contexts(2, variant), first);
+        // Another ASID selects other non-global entries of both halves.
+        msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 1 << 48);
+        let asid = machine.contexts(2, variant);
+        assert!(asid[0] != first[0] && asid[1] != first[1]);
+        msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
+        // Any other control, too, and back.
+        msr(&mut machine, MSR_MAIR_EL1_X0, mair ^ 0xff);
+        let attributes = machine.contexts(2, variant);
+        assert!(attributes[0] != first[0] && attributes[1] != first[1]);
+        msr(&mut machine, MSR_MAIR_EL1_X0, mair);
+        assert_eq!(machine.contexts(2, variant), first);
+        // A TLBI of lower-half addresses forgets the lower half's contexts.
         machine.tlb_maintained(mmu::tlbi::Reach::Containing(0x4000));
-        let after = machine.contexts(2, variant);
-        assert_ne!(after[0], before[0]);
-        assert_eq!(after[1], before[1]);
-        // Any other change, however it was made, renews both.
+        let maintained = machine.contexts(2, variant);
+        assert!(maintained[0] != first[0] && maintained[1] == first[1]);
+        // One of the upper half, a host permission change or any other
+        // change to translation forgets both.
         for change in [
             |machine: &mut Machine<FakeHost, NoDevices>| {
                 machine.tlb_maintained(mmu::tlbi::Reach::Containing(0xffff_fe00_0000_0000))
             },
-            Machine::advance_translation_generation,
-            |machine: &mut Machine<FakeHost, NoDevices>| machine.translation_generation += 1,
+            Machine::fetch_permissions_changed,
+            Machine::translations_changed,
         ] {
             let before = machine.contexts(2, variant);
             change(&mut machine);
-            machine.table_base_changed();
             let after = machine.contexts(2, variant);
             assert!(after[0] != before[0] && after[1] != before[1]);
         }

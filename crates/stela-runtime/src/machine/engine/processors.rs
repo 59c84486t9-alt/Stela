@@ -528,7 +528,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else if upper[0] == upper[1] {
             self.table_base_changed();
         } else {
-            self.translations_changed();
+            self.controls_changed();
         }
     }
 
