@@ -77,6 +77,10 @@ pub(super) struct Parked {
     cpu: Cpu,
     event_sample: Option<u64>,
     waiting: Option<Wait>,
+    /// Its mirrored-read cells (`MIRRORED`) as it left them: their values
+    /// follow from its own System registers and PSTATE, which no other PE
+    /// changes, so it takes them back when it runs again.
+    mirrors: super::Mirrors,
 }
 
 /// The selected existing PE runs; the others are off. A profile without
@@ -96,7 +100,9 @@ impl Parked {
     pub(super) fn cpu(&self) -> &Cpu {
         &self.cpu
     }
+    /// Its state, to change: its mirrored-read cells close.
     pub(super) fn cpu_mut(&mut self) -> &mut Cpu {
+        self.mirrors = super::Mirrors::default();
         &mut self.cpu
     }
 }
@@ -510,12 +516,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             cpu: core::mem::replace(&mut self.cpu, incoming.cpu),
             event_sample: core::mem::replace(&mut self.event_sample, incoming.event_sample),
             waiting: core::mem::replace(&mut self.waiting, incoming.waiting),
+            mirrors: *self.mirrors,
         };
         self.peers[self.current] = Peer::Parked(Box::new(outgoing));
         self.current = next;
         self.statistics.switches += 1;
         // The switch changes no device: what derives from the PE goes, the
-        // devices' lines and deadline stay.
+        // devices' lines and deadline stay, and the incoming PE's mirrored
+        // reads reopen as it left them.
         let device_lines = self.device_lines;
         // Another PE ran since the incoming one's exclusive load and may
         // have written its granule, even back to the same bytes: its
@@ -534,6 +542,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.controls_changed();
         }
         self.device_lines = device_lines;
+        *self.mirrors = incoming.mirrors;
     }
 
     /// Clear the Exclusives monitor of every PE whose reserved granule
@@ -741,6 +750,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 cpu,
                 event_sample: None,
                 waiting: None,
+                mirrors: super::Mirrors::default(),
             }));
         }
         self.devices.processor_power(pe, true);
@@ -1960,6 +1970,7 @@ mod tests {
             cpu: Cpu::of(machine.profile.chip, pc, Pstate::reset(2)),
             event_sample: None,
             waiting: None,
+            mirrors: super::super::Mirrors::default(),
         }));
         assert_eq!(machine.device_read(base + PC_SAMPLE, 8, 0), Ok(0));
         machine.device_read(base + PC_SAMPLE, 4, 0).unwrap();
@@ -2299,6 +2310,33 @@ mod tests {
         machine.switch_to(current);
         assert_eq!(machine.lines().irq, machine.devices.irq[current]);
         assert_eq!(machine.devices.lines_asked.len(), asked + 1);
+    }
+
+    #[test]
+    fn a_pe_takes_its_open_mirrored_reads_back_when_it_runs_again() {
+        const MRS_X8_TPIDR_EL1: u32 = 0xd538_d088;
+        let mut machine = pair();
+        let current = machine.processor();
+        let other = current ^ 1;
+        machine.cpu.registers.set(Register::TPIDR_EL1, 0, 0x7000);
+        machine.system_instruction(MRS_X8_TPIDR_EL1).unwrap();
+        let open = machine.mirrors[2];
+        assert_eq!((open.readable, open.value), (1, 0x7000));
+        // The other PE's cells are its own, closed until it reads.
+        machine.switch_to(other);
+        assert_eq!(machine.mirrors[2].readable, 0);
+        machine.switch_to(current);
+        assert_eq!(machine.mirrors[2], open);
+        // A change to a parked PE closes the cells it left.
+        machine.switch_to(other);
+        if let Peer::Parked(parked) = &mut machine.peers[current] {
+            parked
+                .cpu_mut()
+                .registers
+                .set(Register::TPIDR_EL1, 0, 0x8000);
+        }
+        machine.switch_to(current);
+        assert_eq!(machine.mirrors[2].readable, 0);
     }
 
     /// Switch to the next PE that can run, which must be `pe`.
