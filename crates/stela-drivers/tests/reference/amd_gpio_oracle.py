@@ -47,6 +47,7 @@ class Evidence:
         self.environment = dict(os.environ)
         self.cancellation = None
         self.waiter = child_wait.ChildWaiter()
+        self.quarantined_commands = []  # Retain failed-cleanup owners until interpreter exit.
         self.environment.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
         self.record = {
             "schema": 1,
@@ -86,6 +87,11 @@ class Evidence:
         with stdout.open("xb") as out, stderr.open("xb") as err:
             process = subprocess.Popen(arguments, stdout=out, stderr=err,
                                        env=self.environment, start_new_session=True)
+            item["pid"] = process.pid
+            item["pgid"] = process.pid  # start_new_session=True
+            item["pgid_source"] = "Popen(start_new_session=True)"
+            item["leader_reaped"] = False
+            cleanup_attempted = False
             group_cleaned = False
             try:
                 deadline = time.monotonic() + timeout
@@ -100,13 +106,11 @@ class Evidence:
                         # are signaled. Even a leader that exited during a
                         # cancellation cannot orphan descendants or allow its
                         # numeric group ID to be reused before this cleanup.
-                        try:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                        cleanup_attempted = True
+                        self.waiter.cleanup_owned_group(process.pid, item)
                         group_cleaned = True
-                        item["group_cleanup"] = "before original leader reap"
                         item["returncode"] = process.wait()
+                        item["leader_reaped"] = True
                         break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -116,17 +120,39 @@ class Evidence:
                 item["timed_out"] = isinstance(error, subprocess.TimeoutExpired)
                 item["interruption"] = type(error).__name__
                 if isinstance(error, ChildProcessError):
-                    # An external reaper invalidates the PID/group lease.
-                    # Never signal that now-unowned numeric group ID or
-                    # manufacture an exit status by asking Popen to wait.
+                    # ECHILD invalidates the lease. Never signal or ask Popen
+                    # to manufacture a status for an externally reaped child.
                     item["leader_ownership"] = "lost; refused group signal"
+                    if cleanup_attempted:
+                        item["cleanup_error"] = type(error).__name__
                     raise
+                if cleanup_attempted and not group_cleaned:
+                    item["cleanup_error"] = type(error).__name__
+                    item["cleanup_error_repr"] = repr(error)
+                    item["cleanup_error_errno"] = getattr(error, "errno", None)
+                    item["leader_ownership"] = "quarantined on shared helper until interpreter exit"
+                    self.quarantined_commands.append(process)
+                    child_wait.quarantine_failed_cleanup(process)
+                    raise  # Do not let Popen.__del__ poll/reap this retained owner.
                 if not group_cleaned and process.returncode is None:
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                        cleanup_attempted = True
+                        self.waiter.cleanup_owned_group(process.pid, item)
+                        group_cleaned = True
+                    except ChildProcessError:
+                        item["leader_ownership"] = "lost; refused group signal"
+                        item["cleanup_error"] = "ChildProcessError"
+                        raise
+                    except BaseException as cleanup_error:
+                        item["cleanup_error"] = type(cleanup_error).__name__
+                        item["cleanup_error_repr"] = repr(cleanup_error)
+                        item["cleanup_error_errno"] = getattr(cleanup_error, "errno", None)
+                        item["leader_ownership"] = "quarantined on shared helper until interpreter exit"
+                        self.quarantined_commands.append(process)
+                        child_wait.quarantine_failed_cleanup(process)
+                        raise
                 item["returncode"] = process.wait()
+                item["leader_reaped"] = True
                 if item["timed_out"]:
                     raise RuntimeError(f"{name} timed out after {timeout}s") from None
                 raise

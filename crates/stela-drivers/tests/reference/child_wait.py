@@ -11,7 +11,18 @@ import ctypes
 import errno
 import os
 import platform
+import signal
 import sys
+
+
+# A cleanup refusal must not trigger Popen.__del__ polling/reaping when an
+# Evidence instance unwinds. Retain these finite failed owners until shutdown;
+# never subsequently signal their numeric process groups from this quarantine.
+_QUARANTINED_COMMANDS = []
+
+
+def quarantine_failed_cleanup(process):
+    _QUARANTINED_COMMANDS.append(process)
 
 
 class _DarwinSigval(ctypes.Union):
@@ -92,3 +103,67 @@ class ChildWaiter:
             # group cleanup. Treat the ownership observation as unusable.
             raise ChildProcessError("waitid returned a different child")
         return True
+
+    def cleanup_owned_group(self, pid, receipt):
+        """Signal only the retained child's group; independently prove EPERM.
+
+        The caller created a new session with PGID == the original child PID
+        and exclusively owns reaping. Every group action rechecks that lease.
+        A successful signal is not a proof that descendants have exited; the
+        process controls separately check release of their inherited lock.
+        """
+        exited = self.exited_unreaped(pid)  # ECHILD must precede any group action.
+        receipt["leader_exited_before_cleanup"] = exited
+        receipt["cleanup_pid"] = pid
+        receipt["cleanup_pgid"] = pid
+        receipt["group_cleanup"] = "attempting SIGKILL before original leader reap"
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            receipt["group_cleanup"] = "ESRCH before original leader reap"
+        except PermissionError as error:
+            receipt["group_signal_errno"] = error.errno
+            if error.errno != errno.EPERM or sys.platform != "darwin":
+                raise
+            # Darwin killpg skips zombies and reports EPERM if it signaled no
+            # member. EPERM alone cannot distinguish this from denied access.
+            # Require an exited *owned* leader and an independently complete
+            # group snapshot containing that retained leader and nothing else.
+            if not self.exited_unreaped(pid):
+                raise
+            snapshot = self._darwin_group_snapshot(pid)
+            receipt["darwin_group_snapshot"] = snapshot
+            if (snapshot["bytes"] != ctypes.sizeof(ctypes.c_int32)
+                    or snapshot["errno"] != 0 or snapshot["pids"] != [pid]):
+                raise
+            if not self.exited_unreaped(pid):
+                raise ChildProcessError("lost exited leader during group proof")
+            receipt["leader_exited_after_snapshot"] = True
+            receipt["group_cleanup"] = "Darwin EPERM; sole retained exited leader proven"
+        else:
+            receipt["group_cleanup"] = "SIGKILL before original leader reap"
+
+    def _darwin_group_snapshot(self, pid):
+        # SDK libproc.h: int proc_listpids(uint32_t, uint32_t, void *, int).
+        # PROC_PGRP_ONLY == 2 (sys/proc_info.h); pid_t is signed 32-bit.
+        # XNU proc_info.c holds proc_list_lock across allproc AND zombproc.
+        # A two-pid buffer is deliberately never resized: only exactly one
+        # returned pid is accepted. Full buffers may be truncated. libproc
+        # converts syscall errors to zero, which is never accepted as empty.
+        if (sys.platform != "darwin" or platform.machine() not in ("arm64", "x86_64")
+                or ctypes.sizeof(ctypes.c_void_p) != 8
+                or ctypes.sizeof(ctypes.c_int) != 4):
+            raise RuntimeError("unsupported Darwin proc_listpids ABI")
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        listpids = library.proc_listpids
+        listpids.argtypes = [ctypes.c_uint32, ctypes.c_uint32,
+                            ctypes.c_void_p, ctypes.c_int]
+        listpids.restype = ctypes.c_int
+        members = (ctypes.c_int32 * 2)()
+        ctypes.set_errno(0)
+        count = listpids(2, pid, members, ctypes.sizeof(members))
+        error = ctypes.get_errno()
+        valid = 0 < count <= ctypes.sizeof(members) and count % 4 == 0
+        return {"backend": "darwin-libSystem.proc_listpids-pgrp",
+                "bytes": count, "capacity_bytes": ctypes.sizeof(members),
+                "errno": error, "pids": list(members)[:count // 4] if valid else []}

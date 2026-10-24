@@ -266,5 +266,205 @@ class WaitBackendControls(unittest.TestCase):
                 child.wait(timeout=5)
 
 
+class GroupCleanupProofControls(unittest.TestCase):
+    """UNRUN: refusal controls use synthetic receipts, never numeric OS kills."""
+
+    def setUp(self):
+        self.helper = reference.child_wait
+        self.waiter = object.__new__(self.helper.ChildWaiter)
+        self.receipt = {}
+
+    def proof(self, observation, snapshot):
+        return (mock.patch.object(self.waiter, "exited_unreaped", side_effect=observation),
+                mock.patch.object(self.waiter, "_darwin_group_snapshot", return_value=snapshot),
+                mock.patch.object(self.helper.sys, "platform", "darwin"),
+                mock.patch.object(self.helper.os, "killpg",
+                                  side_effect=PermissionError(1, "control EPERM")))
+
+    def test_eperm_accepts_only_complete_original_exited_leader_snapshot(self):
+        snapshot = {"bytes": 4, "capacity_bytes": 8, "errno": 0, "pids": [123]}
+        observation, inspect, platform, signal_group = self.proof([True, True, True], snapshot)
+        with observation as owned, inspect as listed, platform, signal_group as kill:
+            self.waiter.cleanup_owned_group(123, self.receipt)
+        self.assertEqual(owned.call_count, 3)
+        listed.assert_called_once_with(123)
+        kill.assert_called_once_with(123, signal.SIGKILL)
+        self.assertEqual(self.receipt["group_signal_errno"], 1)
+        self.assertEqual(self.receipt["darwin_group_snapshot"], snapshot)
+        self.assertIn("sole retained exited leader proven", self.receipt["group_cleanup"])
+
+    def test_eperm_never_accepts_empty_error_truncated_or_other_member(self):
+        for size, error, members in ((0, 0, []), (0, 1, []), (-1, 0, []),
+                                     (3, 0, []), (8, 0, [123, 456]),
+                                     (12, 0, [123]), (4, 0, [456]), (4, 5, [123])):
+            with self.subTest(size=size, error=error, members=members):
+                snapshot = {"bytes": size, "errno": error, "pids": members}
+                observation, inspect, platform, signal_group = self.proof([True, True], snapshot)
+                with observation, inspect, platform, signal_group as kill:
+                    with self.assertRaises(PermissionError):
+                        self.waiter.cleanup_owned_group(123, {})
+                kill.assert_called_once_with(123, signal.SIGKILL)
+
+    def test_eperm_live_leader_refuses_without_snapshot(self):
+        observation, inspect, platform, signal_group = self.proof([False, False], {})
+        with observation, inspect as listed, platform, signal_group:
+            with self.assertRaises(PermissionError):
+                self.waiter.cleanup_owned_group(123, self.receipt)
+        listed.assert_not_called()
+
+    def test_lost_lease_before_group_action_never_signals(self):
+        with mock.patch.object(self.waiter, "exited_unreaped", side_effect=ChildProcessError), \
+                mock.patch.object(self.helper.os, "killpg") as kill:
+            with self.assertRaises(ChildProcessError):
+                self.waiter.cleanup_owned_group(123, self.receipt)
+        kill.assert_not_called()
+
+    def test_lost_lease_before_snapshot_never_inspects_group(self):
+        observation, inspect, platform, signal_group = self.proof(
+            [True, ChildProcessError("control reaper")], {})
+        with observation, inspect as listed, platform, signal_group as kill:
+            with self.assertRaises(ChildProcessError):
+                self.waiter.cleanup_owned_group(123, self.receipt)
+        listed.assert_not_called()
+        kill.assert_called_once_with(123, signal.SIGKILL)
+
+    def test_non_darwin_eperm_has_no_platform_exception(self):
+        with mock.patch.object(self.waiter, "exited_unreaped", return_value=True), \
+                mock.patch.object(self.helper.sys, "platform", "linux"), \
+                mock.patch.object(self.waiter, "_darwin_group_snapshot") as listed, \
+                mock.patch.object(self.helper.os, "killpg", side_effect=PermissionError(1, "denied")):
+            with self.assertRaises(PermissionError):
+                self.waiter.cleanup_owned_group(123, self.receipt)
+        listed.assert_not_called()
+
+    def test_snapshot_binding_passes_exact_bounded_pid_buffer(self):
+        library = mock.Mock()
+        def listpids(kind, group, buffer, size):
+            self.assertEqual((kind, group, size), (2, 123, 8))
+            buffer[0] = 123
+            return 4
+        library.proc_listpids.side_effect = listpids
+        with mock.patch.object(self.helper.sys, "platform", "darwin"), \
+                mock.patch.object(self.helper.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(self.helper.ctypes, "CDLL", return_value=library) as load:
+            snapshot = self.waiter._darwin_group_snapshot(123)
+        load.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
+        self.assertEqual(snapshot["bytes"], 4)
+        self.assertEqual(snapshot["capacity_bytes"], 8)
+        self.assertEqual(snapshot["pids"], [123])
+        self.assertEqual(snapshot["errno"], 0)
+
+    def test_lost_lease_after_snapshot_refuses_success_and_never_resignals(self):
+        snapshot = {"bytes": 4, "errno": 0, "pids": [123]}
+        observation, inspect, platform, signal_group = self.proof(
+            [True, True, ChildProcessError("control reaper")], snapshot)
+        with observation, inspect, platform, signal_group as kill:
+            with self.assertRaises(ChildProcessError):
+                self.waiter.cleanup_owned_group(123, self.receipt)
+        kill.assert_called_once_with(123, signal.SIGKILL)
+        self.assertNotIn("proven", self.receipt["group_cleanup"])
+
+
+class AdditionalActualGroupControls(unittest.TestCase):
+    """UNRUN actual bounded group controls; original controls stay unchanged."""
+
+    runner = reference
+    setUp = ProcessControls.setUp
+    receipt = ProcessControls.receipt
+
+    def test_refused_cleanup_is_not_retried_or_reaped(self):
+        process = mock.Mock(pid=123, returncode=None)
+        with mock.patch.object(self.runner.subprocess, "Popen", return_value=process), \
+                mock.patch.object(self.evidence.waiter, "exited_unreaped", return_value=True), \
+                mock.patch.object(self.evidence.waiter, "cleanup_owned_group",
+                                  side_effect=PermissionError(1, "refused proof")) as cleanup:
+            with self.assertRaises(PermissionError):
+                self.evidence.command("refused-cleanup", ["unused-control"], 5)
+        cleanup.assert_called_once()
+        process.wait.assert_not_called()
+        self.assertIs(self.evidence.quarantined_commands[0], process)
+        self.assertIs(self.runner.child_wait._QUARANTINED_COMMANDS[-1], process)
+        command = self.receipt()["commands"][0]
+        self.assertEqual(command["cleanup_error"], "PermissionError")
+        self.assertEqual(command["cleanup_error_errno"], 1)
+        self.assertIn("refused proof", command["cleanup_error_repr"])
+        self.assertFalse(command["leader_reaped"])
+        self.assertNotIn("returncode", command)
+
+    def test_normal_exit_records_original_pid_group_and_reap(self):
+        output = self.evidence.command("normal-owner", [sys.executable, "-c",
+            "import os; print(os.getpid(), os.getpgrp())"], 5)
+        pid, pgid = map(int, output.split())
+        command = self.receipt()["commands"][0]
+        self.assertEqual(command["pid"], pid)
+        self.assertEqual(command["pgid"], pgid)
+        self.assertEqual(pid, pgid)
+        self.assertEqual(command["cleanup_pid"], pid)
+        self.assertEqual(command["cleanup_pgid"], pgid)
+        self.assertEqual(command["returncode"], 0)
+        self.assertTrue(command["leader_reaped"])
+        self.assertTrue(command["leader_exited_before_cleanup"])
+
+    def test_exited_leader_cleanup_releases_live_descendant_lock(self):
+        gate = self.output.parent / "normal-descendant.lock"
+        source = ("import fcntl, os, time\n"
+                  f"gate = open({str(gate)!r}, 'w')\n"
+                  "fcntl.flock(gate, fcntl.LOCK_EX)\n"
+                  "child = os.fork()\n"
+                  "if child == 0:\n"
+                  "    time.sleep(5)\n"
+                  "    os._exit(0)\n"
+                  "print(os.getpid(), os.getpgrp(), child, flush=True)\n"
+                  "os._exit(0)\n")
+        output = self.evidence.command("normal-descendant", [sys.executable, "-c", source], 5)
+        pid, pgid, child = map(int, output.split())
+        self.assertNotEqual(pid, child)
+        command = self.receipt()["commands"][0]
+        self.assertEqual((command["pid"], command["pgid"]), (pid, pgid))
+        self.assertTrue(command["leader_reaped"])
+        self.assertEqual(command["returncode"], 0)
+        self.assertEqual(command["group_cleanup"], "SIGKILL before original leader reap")
+        with gate.open() as lock:
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        self.fail("live descendant survived completed-leader cleanup")
+                    time.sleep(0.01)
+
+
+class AmdAdditionalActualGroupControls(AdditionalActualGroupControls):
+    runner = amd_gpio_oracle
+
+
+class ActualDarwinGroupSnapshotControls(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin group snapshot only")
+    def test_real_sole_zombie_snapshot_preserves_original_reaping_owner(self):
+        helper = reference.child_wait
+        waiter = helper.ChildWaiter()
+        child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not waiter.exited_unreaped(child.pid):
+                if time.monotonic() >= deadline:
+                    self.fail("child did not exit before snapshot deadline")
+                time.sleep(0.01)
+            snapshot = waiter._darwin_group_snapshot(child.pid)
+            self.assertEqual(snapshot["bytes"], 4)
+            self.assertEqual(snapshot["capacity_bytes"], 8)
+            self.assertEqual(snapshot["errno"], 0)
+            self.assertEqual(snapshot["pids"], [child.pid])
+            self.assertTrue(waiter.exited_unreaped(child.pid))
+            self.assertIsNone(child.returncode)
+            self.assertEqual(child.wait(timeout=5), 0)
+        finally:
+            if child.returncode is None:
+                waiter.cleanup_owned_group(child.pid, {})
+                child.wait(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()
