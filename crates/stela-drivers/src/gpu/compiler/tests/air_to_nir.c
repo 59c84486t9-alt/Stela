@@ -2298,6 +2298,7 @@ module_flag_test(const char *extra, enum stela_air_error_kind expected)
 }
 
 #include "air_division_tests.h"
+#include "air_count_tests.h"
 
 static void
 tests(void)
@@ -2316,6 +2317,7 @@ tests(void)
    binding_prelude_contract();
    effect_oracle_contract();
    integer_division_tests();
+   integer_count_tests();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();

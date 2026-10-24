@@ -944,6 +944,68 @@ stage_return(struct translator *t, LLVMValueRef inst)
    return true;
 }
 
+enum integer_count_operation {
+   INTEGER_COUNT_POPULATION,
+   INTEGER_COUNT_LEADING_ZEROS,
+   INTEGER_COUNT_TRAILING_ZEROS,
+};
+
+/* Admit canonical LLVM overloads, never names that merely share a prefix. */
+static bool
+integer_count(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
+              unsigned intrinsic, enum integer_count_operation operation)
+{
+   unsigned components, bits;
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   if (!shape(type, &components, &bits) || bits == 1)
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-count result shape");
+   LLVMTypeRef expected = LLVMIntrinsicGetType(t->context, intrinsic, &type, 1);
+   unsigned arity = operation == INTEGER_COUNT_POPULATION ? 1 : 2;
+   if (!LLVMIsDeclaration(callee) || LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv ||
+       LLVMGlobalGetValueType(callee) != expected || LLVMGetCalledFunctionType(inst) != expected ||
+       LLVMGetNumArgOperands(inst) != arity || LLVMCountParams(callee) != arity ||
+       LLVMIsFunctionVarArg(expected) || LLVMGetNumOperandBundles(inst) ||
+       LLVMTypeOf(LLVMGetOperand(inst, 0)) != type)
+      return fail(t, STELA_AIR_TYPE, "unsupported LLVM integer-count call signature");
+   size_t canonical_length = 0, name_length = 0;
+   char *canonical = LLVMIntrinsicCopyOverloadedName2(t->module, intrinsic, &type, 1,
+                                                     &canonical_length);
+   if (!canonical)
+      return fail(t, STELA_AIR_ALLOCATION, "LLVM integer-count overload name unavailable");
+   const char *name = LLVMGetValueName2(callee, &name_length);
+   bool canonical_name = name_length == canonical_length && !memcmp(name, canonical, name_length);
+   LLVMDisposeMessage(canonical); /* The pinned C API uses strdup/free. */
+   if (!canonical_name)
+      return fail(t, STELA_AIR_INSTRUCTION, "noncanonical LLVM integer-count overload name");
+   if (operation != INTEGER_COUNT_POPULATION) {
+      LLVMValueRef flag = LLVMGetOperand(inst, 1);
+      if (LLVMTypeOf(flag) != LLVMInt1TypeInContext(t->context) || !LLVMIsAConstantInt(flag))
+         return fail(t, STELA_AIR_INSTRUCTION, "LLVM zero-count poison flag requires constant scalar i1");
+      /* true with a zero input is LLVM poison. Defined inputs have the same
+       * mapping for either flag; no zero-result/trap claim is made for true. */
+   }
+   nir_def *input = get_value(t, LLVMGetOperand(inst, 0));
+   if (!input)
+      return false;
+   if (input->num_components != components || input->bit_size != bits)
+      return fail(t, STELA_AIR_TYPE, "LLVM integer-count operand shape mismatch");
+   /* NIR ufind_msb is only valid for 32/64-bit sources. Widen without sign
+    * extension so the original width still determines leading-zero counts. */
+   if (bits < 32)
+      input = nir_u2u32(&t->b, input);
+   nir_def *count;
+   if (operation == INTEGER_COUNT_POPULATION) {
+      count = nir_bit_count(&t->b, input);
+   } else if (operation == INTEGER_COUNT_LEADING_ZEROS) {
+      count = nir_isub(&t->b, nir_imm_int(&t->b, bits - 1), nir_ufind_msb(&t->b, input));
+   } else {
+      nir_def *lsb = nir_find_lsb(&t->b, input);
+      count = nir_bcsel(&t->b, nir_ieq_imm(&t->b, lsb, -1), nir_imm_int(&t->b, bits), lsb);
+   }
+   return put_value(t, inst, nir_u2uN(&t->b, count, bits), 0);
+}
+
 static bool same_pointer_resource(const struct value *a, const struct value *b);
 
 static bool
@@ -1006,6 +1068,19 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMCall) {
       LLVMValueRef callee = LLVMGetCalledValue(inst);
+      if (LLVMIsAFunction(callee)) {
+         unsigned intrinsic = LLVMGetIntrinsicID(callee);
+         static const char *const counts[] = {
+            [INTEGER_COUNT_POPULATION] = "llvm.ctpop",
+            [INTEGER_COUNT_LEADING_ZEROS] = "llvm.ctlz",
+            [INTEGER_COUNT_TRAILING_ZEROS] = "llvm.cttz",
+         };
+         for (unsigned operation = 0; intrinsic && operation < ARRAY_SIZE(counts); operation++) {
+            unsigned expected = LLVMLookupIntrinsicID(counts[operation], strlen(counts[operation]));
+            if (expected && intrinsic == expected)
+               return integer_count(t, inst, callee, intrinsic, (enum integer_count_operation)operation);
+         }
+      }
       size_t name_length = 0;
       const char *name = LLVMGetValueName2(callee, &name_length);
       if (name_length == strlen("air.wg.barrier") && !memcmp(name, "air.wg.barrier", name_length)) {
