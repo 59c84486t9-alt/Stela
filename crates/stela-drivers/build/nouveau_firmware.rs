@@ -18,10 +18,9 @@ pub fn validate() {
     println!("cargo:rerun-if-env-changed={SELECTOR}");
     println!("cargo:rerun-if-env-changed={BOOTLOADER}");
     if request().is_some() {
-        assert!(
-            cfg!(feature = "linux-kernel"),
-            "{SELECTOR} requires the linux-kernel feature"
-        );
+        #[cfg(not(feature = "linux-kernel"))]
+        panic!("{SELECTOR} requires the linux-kernel feature");
+        #[cfg(feature = "linux-kernel")]
         assert_eq!(
             env::var("TARGET").expect("Cargo supplies TARGET"),
             env::var("HOST").expect("Cargo supplies HOST"),
