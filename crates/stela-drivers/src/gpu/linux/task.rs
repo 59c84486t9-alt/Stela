@@ -281,10 +281,7 @@ impl<const N: usize> TaskBinding<N> {
         if self.published.load(Ordering::Acquire) && !self.detached.load(Ordering::Acquire) {
             return Err(self);
         }
-        let mut this = match Arc::try_unwrap(self) {
-            Ok(value) => value,
-            Err(value) => return Err(value),
-        };
+        let mut this = Arc::try_unwrap(self)?;
         // SAFETY: explicit caller proof plus successful unique detached ownership.
         unsafe { stela_linux_task_release(this.task.as_ptr()) };
         this.released = true;
@@ -476,8 +473,9 @@ pub(crate) mod tests {
     };
     use std::{alloc::System, sync::Mutex, thread};
 
+    /// Page-aligned backing, reached only through the raw storage pointer.
     #[repr(align(4096))]
-    struct Span([u8; 64 * 1024]);
+    struct Span(#[allow(dead_code)] [u8; 64 * 1024]);
     struct Raw {
         storage: UnsafeCell<Span>,
         enabled: AtomicBool,
@@ -1055,7 +1053,7 @@ pub(crate) mod tests {
                     f.enqueue(3);
                 }
             }
-            2 | 3 | 4 => {
+            2..=4 => {
                 let target = f.target(1);
                 let kind = if event == 3 {
                     WaitSignal::Fatal

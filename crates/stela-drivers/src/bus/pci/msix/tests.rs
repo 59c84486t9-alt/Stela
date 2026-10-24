@@ -1072,7 +1072,7 @@ fn indexed_program_preserves_live_peers_and_real_pending_bits() {
         selected_masks(&m, &[0, 63, 64]);
         assert_eq!(m.delivered_entries, [0, 63, 64]);
         assert_eq!(m.emitted, [message(0), message(63), message(64)]);
-        for index in [0, 63, 64] {
+        for index in [0u16, 63, 64] {
             assert_eq!(
                 m.routes[usize::from(index)]
                     .as_ref()
