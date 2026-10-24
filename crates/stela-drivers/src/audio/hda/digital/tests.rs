@@ -811,3 +811,145 @@ fn native_all_ones_device_count_refuses_before_selector_publication() {
     assert!(!controller.command_poisoned);
     assert!(!controller.lifecycle_failed);
 }
+
+/// Retained display-side counterpart for the CORB/RIRB peer. Its attachment
+/// goes through the actual legacy ownership API; no controller field is forged.
+struct LegacyDisplayPeer {
+    state: std::sync::Mutex<super::super::hdmi::DisplayAudioState>,
+    observations: core::sync::atomic::AtomicUsize,
+}
+// SAFETY: this test exclusively owns the modeled HDA and display connector.
+// The attached Arc retains its link/power state until actual port detachment.
+// No playback is requested; unexpected clock/link effects fail the model.
+unsafe impl super::super::hdmi::DisplayAudioPort for LegacyDisplayPeer {
+    fn identity(&self) -> super::super::hdmi::DisplayAudioIdentity {
+        use crate::bus::pci::Address;
+        super::super::hdmi::DisplayAudioIdentity {
+            hda_function: Address {
+                segment: 0,
+                bus: 1,
+                device: 0,
+                function: 1,
+            },
+            gpu_function: Address {
+                segment: 0,
+                bus: 1,
+                device: 0,
+                function: 0,
+            },
+            codec: 0,
+            pin: 4,
+            port: 7,
+        }
+    }
+    fn observe(&self, _deadline_us: u64) -> Result<super::super::hdmi::DisplayAudioState, Error> {
+        self.observations
+            .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        Ok(*self.state.lock().unwrap())
+    }
+    fn enable_audio(&self, _format: PcmFormat, _deadline_us: u64) -> Result<(), Error> {
+        panic!("digital observation must not enable the retained display route")
+    }
+    fn disable_audio(&self, _deadline_us: u64) -> Result<(), Error> {
+        panic!("digital observation must not disable the retained display route")
+    }
+}
+
+#[test]
+fn native_legacy_attachment_excludes_saved_digital_sessions_until_actual_detach() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut ram = Ram::new();
+    let (mut controller, peer) = controller(&mut ram);
+    {
+        let mut peer = peer.borrow_mut();
+        peer.count = 2;
+        peer.selected = 1;
+        // The real graph enumeration admits the existing legacy profile and
+        // reads actual AFG/widget D0 capabilities from this command-ring peer.
+        peer.parameters.insert((0, 0), 0x10de_0008);
+        peer.parameters.insert((1, 0x0f), 1);
+        peer.parameters.insert((4, 9), 0x0040_0700);
+        peer.parameters.insert((4, 0x0f), 1);
+    }
+    let mut pins = controller.discover_digital_pins(0).unwrap();
+    assert_eq!(pins.len(), 2);
+    for pin in &mut pins {
+        assert_eq!(
+            controller.poll_digital_pin(pin),
+            Ok(DigitalPresence::Stable)
+        );
+        assert!(pin.last_observation().is_some());
+    }
+    let owner = Arc::new(LegacyDisplayPeer {
+        state: std::sync::Mutex::new(super::super::hdmi::DisplayAudioState {
+            generation: 1,
+            connected: true,
+        }),
+        observations: AtomicUsize::new(0),
+    });
+    let graph = controller.enumerate_codec(0).unwrap();
+    // SAFETY: retained display peer owns this actual modeled codec/pin; the
+    // controller validates the token and freshly re-enumerates its real graph.
+    let port = unsafe { controller.attach_hdmi_port(&graph, 4, owner.clone()) }.unwrap();
+    assert_eq!(owner.observations.load(Ordering::SeqCst), 1);
+    assert_eq!(Arc::strong_count(&owner), 2);
+    assert!(controller.hdmi_owns_node(0, 4));
+    assert!(controller.streams.iter().all(Option::is_none));
+    // Stopped/unprepared is still owned. A close alone does not detach it.
+    controller.close_hdmi(port).unwrap();
+    let commands = peer.borrow().commands.len();
+    let accesses = peer.borrow().accesses;
+    let eld_reads = peer.borrow().reads;
+    for pin in &mut pins {
+        let attempt = pin.attempt();
+        assert_eq!(
+            controller.poll_digital_pin(pin),
+            Err(DigitalError::Controller(Error::RouteInUse))
+        );
+        assert_eq!(pin.attempt(), attempt + 1);
+        assert!(pin.last_observation().is_none());
+    }
+    assert_eq!(peer.borrow().commands.len(), commands);
+    assert_eq!(peer.borrow().accesses, accesses);
+    assert_eq!(
+        controller.digital_pcm_supported(&mut pins[0], 2, pcm(48_000, 24, 2)),
+        Err(DigitalError::Controller(Error::RouteInUse))
+    );
+    assert_eq!(peer.borrow().commands.len(), commands);
+    assert_eq!(peer.borrow().accesses, accesses);
+    assert_eq!(
+        controller.discover_digital_pins(0).unwrap_err(),
+        DigitalError::Controller(Error::RouteInUse)
+    );
+    {
+        let peer = peer.borrow();
+        assert!(
+            peer.commands[commands..]
+                .iter()
+                .all(|word| matches!((word >> 8) & 0xfff, 0xf00 | 0xf02 | 0xf1c))
+        );
+        assert_eq!(peer.reads, eld_reads);
+        assert_eq!(peer.selected, 1);
+    }
+    assert_eq!(Arc::strong_count(&owner), 2);
+    assert_eq!(owner.observations.load(Ordering::SeqCst), 1);
+    assert_eq!(controller.hdmi_first_error(port), Ok(None));
+    assert!(controller.hdmi_owns_node(0, 4));
+    assert!(controller.streams.iter().all(Option::is_none));
+    assert!(!controller.routing_failed);
+    assert!(!controller.lifecycle_failed);
+    assert!(!controller.command_poisoned);
+    // Actual acknowledged owner release reopens observation of the same pin;
+    // refusal did not silently detach, replace, or poison the retained owner.
+    controller.detach_hdmi_port(port).unwrap();
+    assert_eq!(Arc::strong_count(&owner), 1);
+    assert!(!controller.hdmi_owns_node(0, 4));
+    assert_eq!(
+        controller.poll_digital_pin(&mut pins[0]),
+        Ok(DigitalPresence::Stable)
+    );
+    assert_eq!(peer.borrow().selected, 1);
+    assert_eq!(peer.borrow().reads, eld_reads + 2);
+}

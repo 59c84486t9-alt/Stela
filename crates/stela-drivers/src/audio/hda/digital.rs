@@ -185,6 +185,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         entry: u8,
         operation: impl FnOnce(&mut Self) -> Result<U, DigitalError>,
     ) -> Result<U, DigitalError> {
+        // An attached legacy port retains its pin even before playback starts
+        // or after a stream stops. Device selection and ELD belong to that
+        // owner until an acknowledged detach, not to an observational session.
+        if self.hdmi_owns_node(codec, node) {
+            return Err(Error::RouteInUse.into());
+        }
         let count = self.device_count(codec, node)?;
         if entry >= count {
             return Err(DigitalError::DeviceEntryGone);
@@ -234,6 +240,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn discover_digital_pins(&mut self, codec: u8) -> Result<Vec<DigitalPin>, DigitalError> {
         self.digital_ready()?;
         let graph = self.enumerate_codec(codec)?;
+        // Check the complete graph before selecting even an unrelated earlier
+        // pin. The central helper also fences sessions saved before attachment.
+        if graph
+            .groups
+            .iter()
+            .filter(|group| group.function_type & 0xff == 1)
+            .flat_map(|group| &group.widgets)
+            .any(|pin| digital_pin(pin) && self.hdmi_owns_node(codec, pin.node))
+        {
+            return Err(Error::RouteInUse.into());
+        }
         let mut pins = Vec::new();
         for group in &graph.groups {
             if group.function_type & 0xff != 1 {
