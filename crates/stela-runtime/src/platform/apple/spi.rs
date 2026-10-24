@@ -60,6 +60,10 @@ const IE_TX_COMPLETE: u32 = 1 << 21;
 const FIFO_THRESHOLD: u32 = 3 << 17;
 const CONFIG_MASK: u32 = 6 | MODE | IE_RX_COMPLETE | IE_THRESHOLD | IE_TX_COMPLETE | FIFO_THRESHOLD;
 const TRANSFER_CONFIGURATION: u8 = 3; // CTRL and CFG.
+/// SHIFTCFG and DELAY_PRE/POST: a power cycle or reset restores the boot
+/// stage's zero words, which `_configureHardwareDelay` read-modify-writes
+/// after power-up (file 0x2dbcf34) without writing them first.
+const RESET_CONFIGURATION: u8 = 0xe0;
 
 fn configuration_bit(offset: u64) -> u8 {
     match offset {
@@ -268,7 +272,9 @@ impl Lifecycle for Spi {
             self.rx_count = 0;
             self.tx.clear();
             self.rx.clear();
-            self.configuration = 0;
+            self.shift = 0;
+            self.cs_delays = [0; 2];
+            self.configuration = RESET_CONFIGURATION;
         }
         self.lifecycle = proposed;
         self.interrupt(access);
@@ -612,6 +618,7 @@ mod tests {
                 write(&mut spi, CTRL, 0, &mut a);
                 assert_eq!(spi.read(CTRL, Width::Word, &mut a), Ok(0));
                 assert!(spi.read(CFG, Width::Word, &mut a).is_err());
+                assert_eq!(spi.read(DELAY_PRE, Width::Word, &mut a), Ok(0));
             }
         }
     }
