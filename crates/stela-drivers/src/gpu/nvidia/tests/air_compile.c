@@ -543,7 +543,7 @@ static void integer_minmax_tests(void)
                                                        stela_air_minmax_fixtures[i].declarations);
         struct stela_metal_assembly *library = fixture(air);
         LLVMDisposeMemoryBuffer(air);
-        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_minmax_fixtures[i].name);
+        targets(library, STELA_AIR_FP_IEEE_DEFAULT, stela_air_minmax_fixtures[i].name, false);
         stela_metal_assembly_destroy(&library);
     }
 }
