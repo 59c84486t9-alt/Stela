@@ -335,8 +335,6 @@ impl Linux {
             build
                 .define("KBUILD_MODNAME", format!("\"{}\"", module.name).as_str())
                 .define("KBUILD_MODFILE", format!("\"{}\"", module.file).as_str());
-        } else {
-            build.define("KBUILD_MODNAME", "\"stela-linux\"");
         }
         let drivers = drivers
             .iter()

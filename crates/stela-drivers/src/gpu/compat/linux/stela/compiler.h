@@ -9,3 +9,8 @@
 #define __section(section)
 #undef __noinstr_section
 #define __noinstr_section(section) noinline notrace
+
+/* Explicit driver and helper identities take precedence over the common one. */
+#ifndef KBUILD_MODNAME
+#define KBUILD_MODNAME "stela-linux"
+#endif
