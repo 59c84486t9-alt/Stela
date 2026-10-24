@@ -12,6 +12,7 @@ use mailbox::key::bip;
 use wifi::security::NonceOwner;
 
 mod modern;
+mod rotation;
 
 /// Actual retained transport namespace. No public constructor, Clone or mutable
 /// fields. Its existence proves key installation, not negotiated PMF policy.
@@ -26,6 +27,7 @@ pub struct Session {
     ptk: KeyIdentity,
     gtk: KeyIdentity,
     igtk: bip::Identity,
+    igtks: [Option<bip::Identity>; 2],
 }
 impl Session {
     pub const fn association_epoch(&self) -> u64 {
@@ -39,6 +41,11 @@ impl Session {
     }
     pub const fn management_key(&self) -> bip::Identity {
         self.igtk
+    }
+    /// Exact retained MMIE 4/5 receive identities; firmware delivery/air overlap
+    /// remains unqualified and no hardware integrity error is ignored.
+    pub const fn receive_management_keys(&self) -> [Option<bip::Identity>; 2] {
+        self.igtks
     }
     pub fn association_context(&self) -> Option<&station::AssociationContext> {
         self.context.as_deref()
@@ -159,6 +166,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             || ptk != session.ptk
             || gtk != session.gtk
             || s.gtk.as_ref().and_then(HardwareKey::installed_igtk) != Some(session.igtk)
+            || s.gtk.as_ref().map(HardwareKey::installed_igtks) != Some(session.igtks)
         {
             return Err(Error::Station(station::Error::Stale));
         }
@@ -249,6 +257,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             ptk,
             gtk,
             igtk,
+            igtks: s.gtk.as_ref().ok_or(Error::NoKey)?.installed_igtks(),
         });
         s.management = Some(session.clone());
         Ok(session)

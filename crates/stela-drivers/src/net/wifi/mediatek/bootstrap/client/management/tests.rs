@@ -645,3 +645,5 @@ fn actual_protected_tx_unmap_failure_retains_session_and_refuses_further_managem
     assert_eq!(model.drops.load(Ordering::Relaxed), 0);
     assert!(!model.memory.lock().unwrap().mappings.is_empty());
 }
+
+mod rotation_controls;

@@ -16,6 +16,8 @@ pub enum Error {
     DataKeyRequired,
     GenerationExhausted,
     AlreadyInstalled,
+    RetiredMaterial,
+    HistoryExhausted,
     Authentication(management::Error),
 }
 
@@ -40,6 +42,8 @@ impl Identity {
         self.generation
     }
 }
+pub(super) const HISTORY_CAPACITY: usize = 64;
+
 pub(super) struct GtkCache {
     identity: KeyIdentity,
     material: Zeroizing<[u8; 16]>,
@@ -92,11 +96,33 @@ impl<C: 'static> HardwareKey<C> {
     ) -> Result<management::Authenticated<'a>, super::Error> {
         self.installed_igtk()
             .ok_or(super::Error::Bip(Error::DataKeyRequired))?;
-        self.owned_mut()
+        let bytes = frame.bytes();
+        // The full authenticator validates MMIE length/type, peer, MIC and IPN.
+        // Selection reads only the complete trailing source key ID; it does not
+        // guess a key from the latest firmware update or copied RX flags.
+        let index = bytes
+            .get(bytes.len().saturating_sub(16)..bytes.len().saturating_sub(14))
+            .and_then(|id| <[u8; 2]>::try_from(id).ok())
+            .map(u16::from_le_bytes);
+        let s = self.owned_mut();
+        let key = if s
             .igtk
-            .as_mut()
-            .unwrap()
-            .key
+            .as_ref()
+            .is_some_and(|key| Some(u16::from(key.identity.index)) == index)
+        {
+            s.igtk.as_mut().unwrap()
+        } else if s
+            .other_igtk
+            .as_ref()
+            .is_some_and(|key| Some(u16::from(key.identity.index)) == index)
+        {
+            s.other_igtk.as_mut().unwrap()
+        } else {
+            // Preserve the existing WrongKey/BadMmie distinction from the full
+            // source parser, including hostile/truncated trailing elements.
+            s.igtk.as_mut().unwrap()
+        };
+        key.key
             .authenticate(frame)
             .map_err(|error| super::Error::Bip(Error::Authentication(error)))
     }
@@ -159,6 +185,7 @@ impl<C: 'static> HardwareKey<C> {
             }
             return Err(super::Error::Bip(Error::AlreadyInstalled));
         }
+        let history = reserve_material(s, digest)?;
         let generation = s
             .igtk_generation
             .checked_add(1)
@@ -171,6 +198,7 @@ impl<C: 'static> HardwareKey<C> {
         };
         let key = management::BipKey::new(gtk, index, material, receive)
             .map_err(|error| super::Error::Bip(Error::Authentication(error)))?;
+        s.igtk_history[history] = Some(digest);
         s.igtk_generation = generation;
         s.pending_igtk = Some(Installed {
             identity,
@@ -208,6 +236,170 @@ impl<C: 'static> HardwareKey<C> {
         }
     }
 }
+
+/// Management-material history survives actual removal/rebind: a new key index
+/// must not revive retired temporal material with a reset replay namespace.
+fn reserve_material<C>(s: &Owned<C>, digest: [u8; 32]) -> Result<usize, super::Error> {
+    let mut empty = None;
+    let mut reused = false;
+    for (index, remembered) in s.igtk_history.iter().enumerate() {
+        if let Some(old) = remembered {
+            reused |= old.iter().zip(digest).fold(0u8, |d, (a, b)| d | (*a ^ b)) == 0;
+        } else if empty.is_none() {
+            empty = Some(index);
+        }
+    }
+    if reused {
+        return Err(super::Error::Bip(Error::RetiredMaterial));
+    }
+    empty.ok_or(super::Error::Bip(Error::HistoryExhausted))
+}
+
+impl<C: 'static> HardwareKey<C> {
+    /// Both actual retained management receive windows, indexed by MMIE 4/5.
+    /// Firmware still has the source single cached-GTK||IGTK update command;
+    /// these software windows do not prove physical firmware/air overlap.
+    pub fn installed_igtks(&self) -> [Option<Identity>; 2] {
+        if self.installed_igtk().is_none() {
+            return [None; 2];
+        }
+        let mut keys = [None; 2];
+        for key in [&self.owned().igtk, &self.owned().other_igtk]
+            .into_iter()
+            .flatten()
+        {
+            keys[usize::from(key.identity.index - 4)] = Some(key.identity);
+        }
+        keys
+    }
+
+    /// Replay floor for that exact still-retained receive key, including the
+    /// previous index during overlap. A copied identity cannot create a window.
+    pub fn retained_igtk_receive_floor(&self, identity: Identity) -> Option<PacketNumber> {
+        self.installed_igtk()?;
+        [&self.owned().igtk, &self.owned().other_igtk]
+            .into_iter()
+            .flatten()
+            .find(|key| key.identity == identity)
+            .map(|key| key.key.receive_floor())
+    }
+
+    /// Source-exact acknowledged live management-key update. Alternating 4/5
+    /// retains the other software MIC/IPN window; replacing the same index retires
+    /// only that original window. Exact installed retries retain its advanced
+    /// floor and issue no command, including retries of the other receive index.
+    /// All historical material is bounded to 64 unique keys per actual owner;
+    /// exhaustion refuses before publication rather than evicting replay history.
+    ///
+    /// # Safety
+    /// The real authenticated OS exchange supplies this exact peer's new IGTK/IPN
+    /// and authorizes same-index replacement only after the peer has ceased using
+    /// that index's old material. Independently stop/drain all old GTK hardware
+    /// RX/TX, DMA/IRQ/work and external deferred users before repeating the
+    /// combined GTK batch; serialized empty CPU queues alone do not prove this.
+    /// Preserve actual requester/association/GTK ownership and material history.
+    /// Firmware source exposes one cached-GTK||IGTK batch without an IGTK index;
+    /// two receive keys authenticate only intact delivered native frames. Actual
+    /// firmware delivery/overlap is unqualified: never clear ICV/monitor errors,
+    /// infer protection negotiation or release an old peer key merely from ACK.
+    pub unsafe fn rotate_igtk<W: QueueIo, F: QueueIo, R: QueueIo>(
+        &mut self,
+        mailbox: &mut Mailbox<W, F, R>,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<Identity, super::Error> {
+        self.check(mailbox)?;
+        self.installed_igtk()
+            .ok_or(super::Error::Bip(Error::DataKeyRequired))?;
+        let s = self.owned_mut();
+        let gtk = s.slot.installed().ok_or(super::Error::NoKey)?;
+        let cache = s
+            .gtk
+            .as_ref()
+            .filter(|cache| cache.identity == gtk)
+            .ok_or(super::Error::Bip(Error::DataKeyRequired))?;
+        let request = wire::Request::install(
+            mailbox.identity.chip,
+            s.context,
+            gtk,
+            cache.material.as_ref(),
+            index,
+            material,
+        )
+        .map_err(super::Error::Request)?;
+        let digest: [u8; 32] = Sha256::digest(material).into();
+        for old in [&s.igtk, &s.other_igtk].into_iter().flatten() {
+            let same = old
+                .digest
+                .iter()
+                .zip(digest)
+                .fold(0u8, |d, (a, b)| d | (*a ^ b))
+                == 0;
+            if old.identity.index == index && same {
+                return Ok(old.identity);
+            }
+        }
+        let history = reserve_material(s, digest)?;
+        let generation = s
+            .igtk_generation
+            .checked_add(1)
+            .ok_or(super::Error::Bip(Error::GenerationExhausted))?;
+        let identity = Identity {
+            gtk,
+            owner: s.owner,
+            generation,
+            index,
+        };
+        let key = management::BipKey::new(gtk, index, material, receive)
+            .map_err(|e| super::Error::Bip(Error::Authentication(e)))?;
+        // Reserve history and every old/new key before publication. Any negative,
+        // ambiguous or late reply retains the entire quarantined native owner.
+        s.igtk_history[history] = Some(digest);
+        s.igtk_generation = generation;
+        s.pending_igtk = Some(Installed {
+            identity,
+            digest,
+            key,
+        });
+        s.phase = Phase::Quarantined;
+        s.reply = None;
+        let outcome = mailbox.unified(Command::StationRecord, request.bytes());
+        let accepted = outcome
+            .as_ref()
+            .is_ok_and(|r| r.status == 0 && r.dma_released);
+        if accepted {
+            let previous = s.igtk.take().unwrap();
+            if previous.identity.index != index {
+                // Replace only the requested index. The previous latest key is
+                // the untouched other window, preserving its MIC/IPN/statistics.
+                s.other_igtk = Some(previous);
+            }
+            s.igtk = s.pending_igtk.take();
+            s.phase = Phase::Installed;
+        } else {
+            s.slot.invalidate();
+        }
+        match outcome {
+            Ok(reply) => {
+                let status = reply.status;
+                s.reply = Some(reply);
+                if accepted {
+                    Ok(identity)
+                } else {
+                    Err(super::Error::Firmware(status))
+                }
+            }
+            Err(error) => {
+                s.reply = mailbox.interrupted_unified_reply().cloned();
+                Err(super::Error::Transport(error))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod rotation_tests;
 
 #[cfg(test)]
 mod tests {

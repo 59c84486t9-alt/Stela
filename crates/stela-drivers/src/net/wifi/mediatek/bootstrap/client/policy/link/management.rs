@@ -66,3 +66,40 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Ok(result?)
     }
 }
+
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q, C, S> {
+    /// Rotate one current IGTK slot after consuming all retained frontend users.
+    /// Historical taken envelopes are revoked by the new exact Session.
+    ///
+    /// # Safety
+    /// Inherit ManagedClient::rotate_management_key's authentic OS exchange,
+    /// peer same-index retirement and actual old hardware/RX/IRQ/work/external
+    /// deferred-user drain contract, including notices already taken by the OS.
+    /// This CPU backpressure check does not prove that independent fence.
+    pub unsafe fn rotate_management_key(
+        &mut self,
+        session: &Session,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<Arc<Session>, LinkControlError>
+    where
+        C: Send + Sync,
+    {
+        let s = self.state_mut();
+        if !s.data.is_empty()
+            || !s.notices.is_empty()
+            || s.pending.is_some()
+            || s.released.is_some()
+        {
+            return Err(LinkControlError::Backpressure);
+        }
+        // SAFETY: inherited genuine key exchange, peer policy and actual drain.
+        let result = unsafe {
+            s.client
+                .rotate_management_key(session, index, material, receive)
+        };
+        Self::reconcile(s);
+        Ok(result?)
+    }
+}

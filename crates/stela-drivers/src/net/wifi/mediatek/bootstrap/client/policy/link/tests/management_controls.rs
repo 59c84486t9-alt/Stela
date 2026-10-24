@@ -182,3 +182,5 @@ fn owning_management_tx_releases_original_keys_and_rejects_deferred_envelope_aft
     assert_eq!(model.drops.load(Ordering::Relaxed), 1);
     assert!(model.memory.lock().unwrap().mappings.is_empty());
 }
+
+mod rotation_controls;

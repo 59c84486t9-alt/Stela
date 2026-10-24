@@ -52,6 +52,8 @@ enum Phase {
 struct Owned<C> {
     gtk: Option<bip::GtkCache>,
     igtk: Option<bip::Installed>,
+    other_igtk: Option<bip::Installed>,
+    igtk_history: [Option<[u8; 32]>; bip::HISTORY_CAPACITY],
     pending_igtk: Option<bip::Installed>,
     igtk_generation: u64,
     slot: KeySlot,
@@ -114,6 +116,8 @@ impl<C: 'static> HardwareKey<C> {
             owned: Some(Box::new(Owned {
                 gtk: None,
                 igtk: None,
+                other_igtk: None,
+                igtk_history: [None; bip::HISTORY_CAPACITY],
                 pending_igtk: None,
                 igtk_generation: 0,
                 slot,
@@ -349,6 +353,7 @@ impl<C: 'static> HardwareKey<C> {
         state.candidate = None;
         state.gtk = None;
         state.igtk = None;
+        state.other_igtk = None;
         state.pending_igtk = None;
         Ok(())
     }

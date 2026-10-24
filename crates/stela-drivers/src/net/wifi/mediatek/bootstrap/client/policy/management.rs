@@ -96,3 +96,38 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         .map_err(PolicyError::Client)
     }
 }
+
+impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
+    /// Update a current retained management session through this sole owning
+    /// hardware/OS attachment; retains the other MMIE receive key window.
+    ///
+    /// # Safety
+    /// Inherit Client::rotate_management_key_modern's authenticated exchange,
+    /// peer same-index retirement and actual old hardware/RX/IRQ/deferred-user
+    /// drain contract. Physical firmware overlap remains unqualified.
+    pub unsafe fn rotate_management_key(
+        &mut self,
+        session: &Session,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<Arc<Session>, PolicyError>
+    where
+        C: Send + Sync,
+    {
+        let admission = self.management_admission()?;
+        // SAFETY: this private attachment retains the exact native requester and
+        // authorities; caller supplies authentic peer policy and actual drain.
+        unsafe {
+            self.client.rotate_management_key_modern(
+                &mut self.authority,
+                admission,
+                session,
+                index,
+                material,
+                receive,
+            )
+        }
+        .map_err(PolicyError::Client)
+    }
+}
