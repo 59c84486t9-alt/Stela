@@ -102,12 +102,26 @@ impl Speculation {
 pub struct Row {
     pub register: Encoding,
     pub shift: u8,
+    /// Architectural field width, including mixed-width SME, FP8 and AMU fields.
+    pub width: u8,
     pub level: u64,
     pub absent: u64,
     /// The `FEAT_` tag the chip must have; `None` for fields the architecture
     /// fixes for any AArch64 PE.
     pub feature: Option<&'static str>,
     pub basis: Basis,
+}
+
+impl Row {
+    /// Most feature fields have four bits; other layouts are explicit in TABLE.
+    const fn with_width(mut self, width: u8) -> Self {
+        self.width = width;
+        self
+    }
+
+    fn mask(&self) -> u64 {
+        u64::MAX >> (u64::BITS - u32::from(self.width))
+    }
 }
 
 const fn row(
@@ -121,6 +135,7 @@ const fn row(
     Row {
         register,
         shift,
+        width: 4,
         level,
         absent,
         feature,
@@ -142,8 +157,8 @@ const fn fixed(register: Encoding, shift: u8, level: u64, reason: &'static str) 
     row(register, shift, level, 0, None, Basis::Engine(true, reason))
 }
 
-/// The bits of one ID register field, at its shift: Arm's feature ID fields
-/// are four bits wide.
+/// The common four-bit ID field, used for explicit profile masks.
+#[cfg(test)]
 const ID_FIELD: u64 = 0xf;
 /// ID_AA64DFR0_EL1.BRPs and WRPs, the breakpoint and watchpoint counts less
 /// one.
@@ -354,28 +369,32 @@ pub const TABLE: &[Row] = &[
         3,
         "FEAT_AMUv1",
         engine(true, ACTIVITY_MONITORS),
-    ),
+    )
+    .with_width(8),
     feature(
         AMCFGR_EL0,
         8,
         63,
         "FEAT_AMUv1",
         engine(true, ACTIVITY_MONITORS),
-    ),
+    )
+    .with_width(6),
     feature(
         AMCFGR_EL0,
         24,
         1,
         "FEAT_AMUv1",
         engine(true, ACTIVITY_MONITORS),
-    ),
+    )
+    .with_width(1),
     feature(
         AMCGCR_EL0,
         0,
         4,
         "FEAT_AMUv1",
         engine(true, ACTIVITY_MONITORS),
-    ),
+    )
+    .with_width(8),
     feature(
         ID_AA64PFR0_EL1,
         48,
@@ -462,10 +481,10 @@ pub const TABLE: &[Row] = &[
     // F8F16, F16F16, B16B16, I16I32, F64F64, I16I64, SMEver and LUTv2, with
     // the levels AARCHMRS requires of each feature. FA64 (bit 63) reads 0:
     // no Apple chip has FEAT_SME_FA64.
-    feature(ID_AA64SMFR0_EL1, 32, 1, "FEAT_SME", engine(true, SME_RUNS)),
-    feature(ID_AA64SMFR0_EL1, 33, 1, "FEAT_SME2", engine(true, SME_RUNS)),
-    feature(ID_AA64SMFR0_EL1, 34, 1, "FEAT_SME", engine(true, SME_RUNS)),
-    feature(ID_AA64SMFR0_EL1, 35, 1, "FEAT_SME", engine(true, SME_RUNS)),
+    feature(ID_AA64SMFR0_EL1, 32, 1, "FEAT_SME", engine(true, SME_RUNS)).with_width(1),
+    feature(ID_AA64SMFR0_EL1, 33, 1, "FEAT_SME2", engine(true, SME_RUNS)).with_width(1),
+    feature(ID_AA64SMFR0_EL1, 34, 1, "FEAT_SME", engine(true, SME_RUNS)).with_width(1),
+    feature(ID_AA64SMFR0_EL1, 35, 1, "FEAT_SME", engine(true, SME_RUNS)).with_width(1),
     feature(
         ID_AA64SMFR0_EL1,
         36,
@@ -479,28 +498,32 @@ pub const TABLE: &[Row] = &[
         1,
         "FEAT_SME_F8F32",
         engine(true, SME_RUNS),
-    ),
+    )
+    .with_width(1),
     feature(
         ID_AA64SMFR0_EL1,
         41,
         1,
         "FEAT_SME_F8F16",
         engine(true, SME_RUNS),
-    ),
+    )
+    .with_width(1),
     feature(
         ID_AA64SMFR0_EL1,
         42,
         1,
         "FEAT_SME_F16F16",
         engine(true, SME_RUNS),
-    ),
+    )
+    .with_width(1),
     feature(
         ID_AA64SMFR0_EL1,
         43,
         1,
         "FEAT_SME_B16B16",
         engine(true, SME_RUNS),
-    ),
+    )
+    .with_width(1),
     feature(
         ID_AA64SMFR0_EL1,
         44,
@@ -514,7 +537,8 @@ pub const TABLE: &[Row] = &[
         1,
         "FEAT_SME_F64F64",
         engine(true, SME_RUNS),
-    ),
+    )
+    .with_width(1),
     feature(
         ID_AA64SMFR0_EL1,
         52,
@@ -536,7 +560,8 @@ pub const TABLE: &[Row] = &[
         1,
         "FEAT_SME_LUTv2",
         engine(true, SME_RUNS),
-    ),
+    )
+    .with_width(1),
     // ID_AA64ZFR0_EL1 describes the SVE instructions of streaming mode:
     // SVEver reads 0, since no Apple chip has FEAT_SVE (AARCHMRS: FEAT_SVE2
     // if and only if SVEver is at least 1), and with FEAT_SME the BF16,
@@ -873,9 +898,9 @@ pub const TABLE: &[Row] = &[
     // ID_AA64PFR2_EL1.FPMR and ID_AA64FPFR0_EL1: the FP8 conversions
     // (F8CVT) in both formats (F8E5M2, F8E4M3); no FP8 arithmetic feature.
     feature(ID_AA64PFR2_EL1, 32, 1, "FEAT_FPMR", engine(true, FPMR)),
-    feature(ID_AA64FPFR0_EL1, 0, 1, "FEAT_FP8", engine(true, FP8)),
-    feature(ID_AA64FPFR0_EL1, 1, 1, "FEAT_FP8", engine(true, FP8)),
-    feature(ID_AA64FPFR0_EL1, 31, 1, "FEAT_FP8", engine(true, FP8)),
+    feature(ID_AA64FPFR0_EL1, 0, 1, "FEAT_FP8", engine(true, FP8)).with_width(1),
+    feature(ID_AA64FPFR0_EL1, 1, 1, "FEAT_FP8", engine(true, FP8)).with_width(1),
+    feature(ID_AA64FPFR0_EL1, 31, 1, "FEAT_FP8", engine(true, FP8)).with_width(1),
     feature(
         ID_AA64MMFR3_EL1,
         4,
@@ -1179,7 +1204,7 @@ pub const TABLE: &[Row] = &[
     // instruction cache; instruction fetch needs IC (DIC 0) but no data
     // clean (IDC 1), because translation reads guest RAM directly.
     fixed(CTR_EL0, 0, 4, "64-byte instruction cache lines"),
-    fixed(CTR_EL0, 14, 0b11, "PIPT instruction cache"),
+    fixed(CTR_EL0, 14, 0b11, "PIPT instruction cache").with_width(2),
     fixed(CTR_EL0, 16, 4, "64-byte data cache lines"),
     fixed(CTR_EL0, 20, 4, "64-byte exclusives reservation granule"),
     fixed(CTR_EL0, 24, 4, "64-byte writeback granule"),
@@ -1188,10 +1213,11 @@ pub const TABLE: &[Row] = &[
         28,
         1,
         "IDC: no data clean for instruction coherence",
-    ),
-    fixed(CTR_EL0, 31, 1, "RES1"),
+    )
+    .with_width(1),
+    fixed(CTR_EL0, 31, 1, "RES1").with_width(1),
     // CTR_EL0.TminLine: the tag cache line is 64 bytes, as the data's.
-    feature(CTR_EL0, 32, 4, "FEAT_MTE2", engine(true, MTE2)),
+    feature(CTR_EL0, 32, 4, "FEAT_MTE2", engine(true, MTE2)).with_width(6),
     feature(GMID_EL1, 0, 4, "FEAT_MTE2", engine(true, MTE2)),
     // ID_AA64MMFR4_EL1.E2H0 = 0b1110: HCR_EL2.E2H is RES1 (no FEAT_E2H0) and
     // HCR_EL2.NV1 is RES0 (RAZ where FEAT_NV is, an IMPLEMENTATION DEFINED
@@ -1210,13 +1236,15 @@ pub const TABLE: &[Row] = &[
         0,
         0b10,
         "external invasive debug disabled",
-    ),
+    )
+    .with_width(2),
     fixed(
         DBGAUTHSTATUS_EL1,
         2,
         0b10,
         "external non-invasive debug disabled",
-    ),
+    )
+    .with_width(2),
     // AIDR_EL1: Apple feature bits, named by m1n1 `cpu_regs.h`. Apple
     // features have no clang `FEAT_` tag; each bit is an engine property.
     // Bits m1n1 does not name read 0.
@@ -1225,13 +1253,15 @@ pub const TABLE: &[Row] = &[
         4,
         1,
         "AMX: machine::amx executes the AMX instructions",
-    ),
+    )
+    .with_width(1),
     fixed(
         AIDR_EL1,
         16,
         1,
         "GXF: GENTER, GEXIT and the guarded-level banks",
-    ),
+    )
+    .with_width(1),
     row(
         AIDR_EL1,
         0,
@@ -1239,7 +1269,8 @@ pub const TABLE: &[Row] = &[
         0,
         None,
         engine(false, "MUL53 instructions are not modeled"),
-    ),
+    )
+    .with_width(1),
     // WKdm: WKDMC and WKDMD (`stela_compiler::wkdm`), which every chip's
     // 26A434 kernel executes unless booted with `-vm_compressor_wk_sw`; it
     // does not read this bit.
@@ -1253,7 +1284,8 @@ pub const TABLE: &[Row] = &[
             stela_compiler::wkdm::COMPRESS_X0_X1,
             stela_compiler::wkdm::DECOMPRESS_X0_X1,
         ]),
-    ),
+    )
+    .with_width(1),
     row(
         AIDR_EL1,
         2,
@@ -1261,7 +1293,8 @@ pub const TABLE: &[Row] = &[
         0,
         None,
         engine(false, "architectural state retention is not modeled"),
-    ),
+    )
+    .with_width(1),
     row(
         AIDR_EL1,
         9,
@@ -1269,7 +1302,8 @@ pub const TABLE: &[Row] = &[
         0,
         None,
         engine(false, "the ACTLR TSO mode switch is not modeled"),
-    ),
+    )
+    .with_width(1),
     row(
         AIDR_EL1,
         19,
@@ -1277,7 +1311,8 @@ pub const TABLE: &[Row] = &[
         0,
         None,
         engine(false, "APFLG is not modeled"),
-    ),
+    )
+    .with_width(1),
     row(
         AIDR_EL1,
         20,
@@ -1285,7 +1320,8 @@ pub const TABLE: &[Row] = &[
         0,
         None,
         engine(false, "PSRV is not modeled"),
-    ),
+    )
+    .with_width(1),
     // Unnamed by m1n1: the 26A434 kernel enables the static branch that
     // adds ACTLR EnAFP and EnPRSV to a translated thread's EL0 return from
     // it (0xfffffe000c551258).
@@ -1299,7 +1335,8 @@ pub const TABLE: &[Row] = &[
             false,
             "the alternate floating-point mode it selects is not modeled",
         ),
-    ),
+    )
+    .with_width(1),
     // XNU's `AIDR_AGT` (xnu-12377.121.6 `tests/apple_generic_timer.c`):
     // CNTFRQ_EL0 reads 1 GHz, which m1n1 reads beside the 24 MHz Apple
     // timer on an M4 Pro (`src/hv/hv_sprr.c`).
@@ -1310,7 +1347,8 @@ pub const TABLE: &[Row] = &[
         0,
         None,
         Basis::GenericTimer("the Arm bank counts 1 GHz beside the Apple generic timer"),
-    ),
+    )
+    .with_width(1),
 ];
 
 /// The chip has `feature`: in its Apple clang feature set, or implied by it.
@@ -1370,24 +1408,39 @@ fn engine_field(chip: Chip, register: Encoding, shift: u8) -> u64 {
 /// The chip-varying features `chip` has that the identification `fixed`
 /// withholds, one bit per [`Feature`] (`1 << feature as u64`): a feature
 /// is withheld when one of the ID fields its rows describe reads below the
-/// feature's lowest level there, as a profile that masks the field (the
-/// hosted machine's memory tagging) or whose row's basis fails on this host
-/// presents it. A PE then treats the feature as absent, exactly as a chip
+/// feature's lowest level there, among the rows whose containing feature
+/// the PE presents. A streaming-only field does not constrain the ordinary
+/// AdvSIMD feature when streaming is absent. A profile can withhold a feature
+/// by masking its field (the hosted machine's memory tagging), or because
+/// the field's basis fails on this host. The PE treats it as absent, as a chip
 /// without it. A register `fixed` has no value for withholds nothing.
 pub fn withheld(chip: Chip, fixed: &[(Encoding, u64)]) -> u64 {
     let mut withheld = 0;
     for feature in Feature::ALL.into_iter().filter(|feature| feature.on(chip)) {
-        let name = feature.name();
-        let presented = TABLE
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.feature == Some(name))
-            .all(|(index, row)| presents(index, row, fixed));
-        if !presented {
+        if !presents_feature(chip, feature.name(), fixed) {
             withheld |= 1 << feature as u64;
         }
     }
     withheld
+}
+
+/// Conditional rows describe an instruction feature inside another feature,
+/// rather than making that containing feature a requirement for every use.
+/// TABLE's containing-feature dependencies are acyclic (checked below).
+fn presents_feature(chip: Chip, feature: &str, fixed: &[(Encoding, u64)]) -> bool {
+    has(chip, feature)
+        && TABLE
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.feature == Some(feature))
+            .all(|(index, row)| {
+                if let Basis::With(containing, _) = row.basis
+                    && !presents_feature(chip, containing, fixed)
+                {
+                    return true;
+                }
+                presents(index, row, fixed)
+            })
 }
 
 /// Whether `fixed` presents `row` (at `index` in [`TABLE`]): its field
@@ -1397,7 +1450,7 @@ fn presents(index: usize, row: &Row, fixed: &[(Encoding, u64)]) -> bool {
     let Some(value) = fixed
         .iter()
         .find(|(register, _)| *register == row.register)
-        .map(|(_, value)| value >> row.shift & ID_FIELD)
+        .map(|(_, value)| value >> row.shift & row.mask())
     else {
         return true;
     };
@@ -1476,6 +1529,156 @@ mod tests {
             .join("../../isa")
             .join(name);
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn containing_feature_dependencies_are_acyclic() {
+        fn visit(feature: &str, path: &mut Vec<&'static str>) {
+            for row in TABLE.iter().filter(|row| row.feature == Some(feature)) {
+                if let Basis::With(containing, _) = row.basis {
+                    assert!(!path.contains(&containing), "feature cycle: {path:?}");
+                    path.push(containing);
+                    visit(containing, path);
+                    path.pop();
+                }
+            }
+        }
+        for row in TABLE {
+            if let Some(feature) = row.feature {
+                visit(feature, &mut vec![feature]);
+            }
+        }
+    }
+
+    #[test]
+    fn identification_fields_fit_their_independent_architectural_ranges() {
+        for row in TABLE {
+            assert!(row.width != 0 && u16::from(row.shift) + u16::from(row.width) <= 64);
+            assert_eq!(row.level & !row.mask(), 0, "{row:?}");
+            assert_eq!(row.absent & !row.mask(), 0, "{row:?}");
+            for other in TABLE.iter().filter(|other| other.register == row.register) {
+                if row.shift == other.shift {
+                    assert_eq!(row.width, other.width, "{row:?} {other:?}");
+                } else {
+                    assert_eq!(
+                        (row.mask() << row.shift) & (other.mask() << other.shift),
+                        0,
+                        "overlapping fields: {row:?} {other:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_identification_keeps_mixed_width_instruction_features() {
+        for chip in Chip::ALL {
+            let fixed = derive(chip, TargetCpu::Baseline, true, Speculation::NONE);
+            let absent = withheld(chip, &fixed);
+            for feature in [
+                Feature::FEAT_AMUv1,
+                Feature::FEAT_AMUv1p1,
+                Feature::FEAT_SME,
+                Feature::FEAT_SME2,
+                Feature::FEAT_SME_F64F64,
+                Feature::FEAT_SME_F8F32,
+                Feature::FEAT_SME_F8F16,
+                Feature::FEAT_FP8,
+            ] {
+                assert_eq!(absent & (1 << feature as u64), 0, "{chip:?} {feature:?}");
+            }
+            // Clearing a field must deny its feature with the adjacent
+            // fields retained. Full AMU SIZE above must read all six bits.
+            for (register, shift, feature) in [
+                (ID_AA64SMFR0_EL1, 32, Feature::FEAT_SME),
+                (ID_AA64SMFR0_EL1, 33, Feature::FEAT_SME2),
+                (ID_AA64FPFR0_EL1, 0, Feature::FEAT_FP8),
+                (AMCFGR_EL0, 8, Feature::FEAT_AMUv1),
+            ] {
+                if !feature.on(chip) {
+                    continue;
+                }
+                let row = TABLE
+                    .iter()
+                    .find(|row| row.register == register && row.shift == shift)
+                    .unwrap();
+                let mut masked = fixed.clone();
+                for (candidate, value) in &mut masked {
+                    if *candidate == register {
+                        *value &= !(row.mask() << shift);
+                    }
+                }
+                assert_ne!(
+                    withheld(chip, &masked) & (1 << feature as u64),
+                    0,
+                    "{chip:?} {feature:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_matrix_and_bfloat_features_do_not_require_streaming() {
+        const SMMLA: u32 = 0x4e9b_a781;
+        const BFDOT: u32 = 0x6e42_fc20;
+        let bit = |feature: Feature| 1u64 << feature as u64;
+        let ordinary = bit(Feature::FEAT_I8MM) | bit(Feature::FEAT_BF16);
+        for chip in Chip::ALL {
+            let mut fixed = derive(chip, TargetCpu::Baseline, true, Speculation::NONE);
+            let mut missing_streaming_fields = fixed.clone();
+            for (register, value) in &mut missing_streaming_fields {
+                if *register == ID_AA64ZFR0_EL1 {
+                    *value = 0;
+                }
+            }
+            assert_eq!(
+                withheld(chip, &missing_streaming_fields) & ordinary,
+                if Feature::FEAT_SME.on(chip) {
+                    ordinary
+                } else {
+                    0
+                },
+                "a presented containing feature requires its fields: {chip:?}"
+            );
+            for hidden_streaming in [false, true] {
+                if hidden_streaming {
+                    for (register, value) in &mut fixed {
+                        match *register {
+                            ID_AA64PFR1_EL1 => *value &= !(ID_FIELD << PFR1_SME),
+                            ID_AA64SMFR0_EL1 | ID_AA64ZFR0_EL1 => *value = 0,
+                            _ => {}
+                        }
+                    }
+                }
+                let withheld = withheld(chip, &fixed);
+                assert_eq!(withheld & ordinary, 0, "{chip:?} {hidden_streaming}");
+                let admission = chip.admit_table(withheld).unwrap();
+                for word in [SMMLA, BFDOT] {
+                    assert_eq!(
+                        admission.admit(word),
+                        if chip == Chip::AppleM1 { 0 } else { word },
+                        "{chip:?} {hidden_streaming} {word:#x}"
+                    );
+                }
+                if hidden_streaming && Feature::FEAT_SME.on(chip) {
+                    assert_ne!(withheld & bit(Feature::FEAT_SME), 0);
+                    assert_eq!(admission.admit(0x8081_2000), 0, "FMOPA stays absent");
+                }
+            }
+            // Masking the ordinary field still denies the ordinary feature,
+            // independently of whether streaming fields would present it.
+            for (register, value) in &mut fixed {
+                if *register == ID_AA64ISAR1_EL1 {
+                    *value &= !(ID_FIELD << 44 | ID_FIELD << 52);
+                }
+            }
+            let expected = if chip == Chip::AppleM1 { 0 } else { ordinary };
+            assert_eq!(withheld(chip, &fixed) & ordinary, expected, "{chip:?}");
+            let admission = chip.admit_table(withheld(chip, &fixed)).unwrap();
+            for word in [SMMLA, BFDOT] {
+                assert_eq!(admission.admit(word), 0, "{chip:?} {word:#x}");
+            }
+        }
     }
 
     /// A field masked to 0 withholds the features its rows describe, and a
@@ -1702,7 +1905,7 @@ mod tests {
             });
             let chip_values = derive(chip, target, false, Speculation::NONE);
             let chip_value = |register| chip_values.iter().find(|(r, _)| *r == register).unwrap().1;
-            let field = (chip_value(row.register) >> row.shift) & 0xf;
+            let field = (chip_value(row.register) >> row.shift) & row.mask();
             let compiles = samples.iter().all(|word| {
                 CompilationPlan::new(
                     &word.to_le_bytes(),

@@ -15,6 +15,7 @@ const INPUTS: &[&str] = &[
     "src/machine/engine",
     "src/machine/chip.rs",
     "src/machine/chip",
+    "src/machine/identification.rs",
     "src/translations.rs",
 ];
 

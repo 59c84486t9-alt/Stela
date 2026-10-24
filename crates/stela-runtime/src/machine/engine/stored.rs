@@ -210,6 +210,81 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn cached_blocks_do_not_cross_presented_instruction_features() {
+        use crate::machine::system::{Feature, Register};
+        use crate::machine::{Chip, identification, registers::encodings::ID_AA64ISAR1_EL1};
+
+        const SMMLA: u32 = 0x4e9b_a781;
+        let words = [0x9100_0400, SMMLA, 0xd400_0001];
+        let build = |masked| {
+            let template = super::super::tests::machine_on(Chip::AppleM2, &words);
+            let mut profile = template.profile;
+            profile.fixed = identification::derive(
+                Chip::AppleM2,
+                stela_compiler::TargetCpu::Baseline,
+                true,
+                identification::Speculation::NONE,
+            );
+            if masked {
+                for (register, value) in &mut profile.fixed {
+                    if *register == ID_AA64ISAR1_EL1 {
+                        *value &= !(0xf << 52);
+                    }
+                }
+            }
+            let mut machine = Machine::new(
+                template.cpu,
+                template.host,
+                crate::machine::NoDevices,
+                profile,
+                stela_compiler::TargetCpu::Baseline,
+            );
+            machine.cpu.registers.set(Register::CPACR_EL1, 0, 3 << 20);
+            assert_eq!(
+                machine.admit_table.withheld() & (1 << Feature::FEAT_I8MM as u64) != 0,
+                masked
+            );
+            machine
+        };
+        for first_masked in [false, true] {
+            let mut first = build(first_masked);
+            first.host.store = Some(MemoryStore::default());
+            assert!(matches!(
+                first.fetch_block(BASE, false),
+                Ok(Fetched::Block(_))
+            ));
+            let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
+            let mut record = Record::new(translations::translator_id(), offer.key);
+            record.insert(proven(&offer));
+            for shared in [false, true] {
+                for same_profile in [false, true] {
+                    let mut store = MemoryStore::default();
+                    if shared {
+                        store
+                            .prepared
+                            .insert((offer.key, offer.pc, offer.context), offer.block.clone());
+                    } else {
+                        store.records.insert(offer.key, Arc::new(record.clone()));
+                    }
+                    let mut next = build(if same_profile {
+                        first_masked
+                    } else {
+                        !first_masked
+                    });
+                    next.host.store = Some(store);
+                    assert!(matches!(
+                        next.fetch_block(BASE, false),
+                        Ok(Fetched::Block(_))
+                    ));
+                    assert_eq!(next.statistics.compiled, u64::from(!same_profile));
+                    assert_eq!(next.statistics.shared, u64::from(shared && same_profile));
+                    assert_eq!(next.statistics.stored, u64::from(!shared && same_profile));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_block_another_thread_prepared_at_the_same_pc_is_installed_as_it_is() {
         // adr x0, #8; add x0, x0, #1; svc #0
         let words = [0x1000_0040, 0x9100_0400, 0xd400_0001];

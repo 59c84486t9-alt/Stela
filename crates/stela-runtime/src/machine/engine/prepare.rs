@@ -156,7 +156,7 @@ impl Preparation {
     pub fn context(&self, page: u64) -> Digest {
         let Self {
             chip,
-            admit: _,
+            admit,
             target,
             fp,
             checks,
@@ -164,8 +164,9 @@ impl Preparation {
             system,
         } = self;
         let described = format!(
-            "chip {chip:?} target {target:?} fp {fp} checks {checks:?} scalable {scalable:?} \
+            "chip {chip:?} withheld {:#x} target {target:?} fp {fp} checks {checks:?} scalable {scalable:?} \
              system {system:?} class {:#x}",
+            admit.withheld(),
             translations::address_class(page)
         );
         Digest::of(described.as_bytes())
