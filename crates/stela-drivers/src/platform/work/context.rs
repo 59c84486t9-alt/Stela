@@ -72,6 +72,9 @@ pub(super) fn stack_pointer() -> usize {
     rsp
 }
 impl Frame {
+    pub(super) fn saved_stack_pointer(&self) -> usize {
+        self.rsp as usize
+    }
     pub(super) fn new(controls: Controls) -> Self {
         Self {
             rsp: 0,

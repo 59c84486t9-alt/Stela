@@ -126,6 +126,7 @@ pub unsafe trait StackBacking: Send + Sync {
 pub struct Stack {
     backing: Box<dyn StackBacking>,
     bounds: Range<usize>,
+    guard: Range<usize>,
 }
 impl Stack {
     pub fn new(backing: Box<dyn StackBacking>) -> Result<Self, WorkError> {
@@ -143,7 +144,11 @@ impl Stack {
         {
             return Err(WorkError::InvalidStack);
         }
-        Ok(Self { backing, bounds })
+        Ok(Self {
+            backing,
+            bounds,
+            guard,
+        })
     }
     pub fn bounds(&self) -> Range<usize> {
         self.bounds.clone()
@@ -467,13 +472,172 @@ pub fn quarantined_owners() -> u64 {
     QUARANTINED.load(Ordering::Relaxed)
 }
 
+/// A view of the real retained continuation, never authority to dereference
+/// its stack. Active hooks receive actual RSP; idle detach receives saved RSP.
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskContext {
+    pub queue_id: u64,
+    pub context_id: u64,
+    pub sequence: u64,
+    pub stack_start: usize,
+    pub stack_end: usize,
+    pub guard_start: usize,
+    pub guard_end: usize,
+    pub stack_pointer: usize,
+}
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    assert!(size_of::<TaskContext>() == 64);
+    assert!(core::mem::offset_of!(TaskContext, sequence) == 16);
+    assert!(core::mem::offset_of!(TaskContext, stack_pointer) == 56);
+};
+#[cfg(target_arch = "x86_64")]
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LeaveReason {
+    Yield = 0,
+    Blocked = 1,
+}
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParkOutcome {
+    Skipped,
+    Resumed,
+}
+
+/// Retained foreign execution state for one genuine continuation.
+///
+/// # Safety
+/// This object retains every callback/code/context/root it reaches until real
+/// quiescent detach and process-context final release. Hooks never unwind,
+/// allocate, release owners, wait, reenter Runtime or enable hardware IRQs.
+/// `attach`, `still_blocked`, `leave`, `arrive`, `complete` run on the actual
+/// context stack, qualified CPU, with IF=0 and no queue lock. `detach` instead
+/// runs on its taskless dispatcher for an idle task; it never invents current.
+/// Returned attach/leave/detach failure is transactional. `still_blocked` only
+/// reads the genuine condition and validates prepared suspension. Linux-owned
+/// wrappers prepare/drain in process context BEFORE generic park/yield; hooks
+/// never manufacture an owner exit or callback drain at IF=0. `leave` commits
+/// only prepared state/lease suspension and clears foreign current. `arrive`
+/// restores that state/current on the destination stack before IF restoration;
+/// `new_job` starts a clean reused worker lease with its new existing ticket.
+/// `complete` validates owner already EXITED/quiescent and clears current with
+/// no drain/drop. Arrive/completion errors are fatal, never returned through an
+/// inconsistent foreign context. Detach validates stopped producers and all
+/// real foreign wait/task references; its final owner is released AFTER IF
+/// restoration. TaskContext references are callback-scoped: copy primitive
+/// metadata only, never retain the view pointer. Its ranges are observations,
+/// not an independent stack/root lifetime lease.
+#[cfg(target_arch = "x86_64")]
+pub unsafe trait SwitchBinding: Send + Sync {
+    /// # Safety
+    /// Called on the actual current stack at IF0 with all binding roots retained.
+    unsafe fn attach(&self, context: &TaskContext) -> Result<(), WorkError>;
+    /// # Safety
+    /// Called after process PREPARE on the actual current stack at IF0; pure check.
+    unsafe fn still_blocked(&self, context: &TaskContext) -> Result<bool, WorkError>;
+    /// # Safety
+    /// Called on the outgoing actual stack at IF0 with prepared state; transactional error.
+    unsafe fn leave(&self, context: &TaskContext, reason: LeaveReason) -> Result<(), WorkError>;
+    /// # Safety
+    /// Called on the destination actual stack at IF0 before any hardware IF restore.
+    unsafe fn arrive(&self, context: &TaskContext, new_job: bool) -> Result<(), WorkError>;
+    /// # Safety
+    /// Called on the completing actual stack at IF0 after foreign owner already exited.
+    unsafe fn complete(&self, context: &TaskContext) -> Result<(), WorkError>;
+    /// # Safety
+    /// Called on the idle taskless dispatcher at IF0 after genuine foreign quiescence.
+    unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError>;
+}
+
+#[cfg(target_arch = "x86_64")]
+struct WakeSignal {
+    sequence: AtomicU64,
+    pending: AtomicBool,
+}
+/// IRQ-safe retained read/admission view. No Runtime, Task, foreign task or
+/// stack pointer is stored here. A completed job's handle never authorizes a
+/// future job on the same continuation; stale views may outlive retired stacks.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone)]
+pub struct WakeHandle<const N: usize> {
+    queue: ManuallyDrop<Arc<Queue<N>>>,
+    signal: ManuallyDrop<Arc<WakeSignal>>,
+    id: ContextId,
+    sequence: u64,
+}
+#[cfg(target_arch = "x86_64")]
+impl<const N: usize> WakeHandle<N> {
+    pub fn context_id(&self) -> ContextId {
+        self.id
+    }
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    /// Qualified same-CPU process/IRQ admission only; never resume inline or
+    /// change the foreign condition. Close permits wakes for admitted jobs.
+    /// Release/acquire pending plus final IF exclusion covers wake at park.
+    pub fn wake(&self) -> Result<(), WorkError> {
+        let mut guard = self.queue.lock()?;
+        if guard.state().poisoned
+            || self.queue.retired.load(Ordering::Acquire)
+            || self.queue.abandoned.load(Ordering::Acquire)
+            || self.signal.sequence.load(Ordering::Acquire) != self.sequence
+        {
+            return Err(WorkError::Closed);
+        }
+        self.signal.pending.store(true, Ordering::Release);
+        Ok(())
+    }
+    /// Refresh only from this same genuine executing continuation. Reused-job
+    /// arrive can replace an old handle without a Runtime pointer. Runtime's
+    /// active binding retains Queue/signal, so such replacement decrements only
+    /// nonfinal Arc references; it cannot release any owner/code/stack backing.
+    pub fn renew_current(&self) -> Result<Self, WorkError> {
+        if self.queue.current_id()? != self.id {
+            return Err(WorkError::Unavailable);
+        }
+        let sequence = self.signal.sequence.load(Ordering::Acquire);
+        if sequence == 0 {
+            return Err(WorkError::Closed);
+        }
+        Ok(Self {
+            queue: self.queue.clone(),
+            signal: self.signal.clone(),
+            id: self.id,
+            sequence,
+        })
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl<const N: usize> Drop for WakeHandle<N> {
+    fn drop(&mut self) {
+        if self.queue.process().is_ok() {
+            // SAFETY: process context on the qualified CPU. Runtime retains
+            // nonfinal refs during attach/arrive replacement; stale handles
+            // may finally release an already-retired queue only here.
+            unsafe {
+                ManuallyDrop::drop(&mut self.signal);
+                ManuallyDrop::drop(&mut self.queue);
+            }
+        } else {
+            // Destruction is not IRQ/foreign-CPU reclamation authority. Keep
+            // both allocations/roots rather than freeing a final owner there.
+            quarantine();
+        }
+    }
+}
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum TaskState {
     Idle,
     Ready,
     Running,
-    Waiting,
+    Runnable,
+    Blocked,
 }
 #[cfg(target_arch = "x86_64")]
 struct Task {
@@ -484,6 +648,8 @@ struct Task {
     job: Option<(usize, Job)>,
     flags: u64,
     draining: bool,
+    binding: Option<Arc<dyn SwitchBinding>>,
+    signal: Arc<WakeSignal>,
 }
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
 /// task one is serial Notify; remaining stacks run general work. The dispatcher
@@ -501,7 +667,7 @@ pub struct Runtime<const N: usize> {
 }
 #[cfg(target_arch = "x86_64")]
 impl<const N: usize> Runtime<N> {
-    fn new(queue: Arc<Queue<N>>, stacks: Vec<Stack>) -> Result<Pin<Box<Self>>, WorkError> {
+    fn validate_stacks(queue: &Queue<N>, stacks: &[Stack]) -> Result<(), WorkError> {
         queue.process()?;
         if stacks.len() < 4 || stacks.len() > 16 {
             return Err(WorkError::Unavailable);
@@ -523,6 +689,10 @@ impl<const N: usize> Runtime<N> {
         if stacks.iter().any(|s| s.bounds.contains(&rsp)) {
             return Err(WorkError::InvalidStack);
         }
+        Ok(())
+    }
+    fn new(queue: Arc<Queue<N>>, stacks: Vec<Stack>) -> Result<Pin<Box<Self>>, WorkError> {
+        Self::validate_stacks(&queue, &stacks)?;
         // SAFETY: the executor runs on the qualified native CPL0 CPU.
         let controls = unsafe { context::controls()? };
         Self::with_controls(queue, stacks, controls)
@@ -548,6 +718,11 @@ impl<const N: usize> Runtime<N> {
                 job: None,
                 flags: 0,
                 draining: false,
+                binding: None,
+                signal: Arc::new(WakeSignal {
+                    sequence: AtomicU64::new(0),
+                    pending: AtomicBool::new(false),
+                }),
             });
         }
         if queue
@@ -602,6 +777,145 @@ impl<const N: usize> Runtime<N> {
         }
         Ok(task.id)
     }
+    fn context_view(&self, index: usize, active: bool) -> TaskContext {
+        // SAFETY: callers qualify CPU/exclusion and a valid retained index.
+        let task = unsafe { &*self.task(index) };
+        TaskContext {
+            queue_id: self.queue.id,
+            context_id: task.id.get(),
+            sequence: task.job.map_or(0, |(_, job)| job.sequence),
+            stack_start: task.stack.bounds.start,
+            stack_end: task.stack.bounds.end,
+            guard_start: task.stack.guard.start,
+            guard_end: task.stack.guard.end,
+            stack_pointer: if active {
+                context::stack_pointer()
+            } else {
+                task.frame.saved_stack_pointer()
+            },
+        }
+    }
+    pub fn current_context(&self) -> Result<TaskContext, WorkError> {
+        self.current_id()?;
+        Ok(self.context_view(self.current.get(), true))
+    }
+    /// Attach a preallocated retained binding on this actual executing stack.
+    /// No hook runs on a dispatcher/IRQ stack. Failure does not install the
+    /// binding. This call consumes the supplied Arc; retain a separate clone
+    /// before calling if it must be reused after failure. Process-context
+    /// failure drops that Arc after restoring any saved IRQ flags. IRQ/foreign-
+    /// CPU rejection quarantines the supplied roots instead of releasing them.
+    pub fn bind_current(
+        self: Pin<&Self>,
+        binding: Arc<dyn SwitchBinding>,
+    ) -> Result<WakeHandle<N>, WorkError> {
+        if let Err(error) = self.current_id() {
+            if self.queue.process().is_err() {
+                // Rejection on IRQ/foreign CPU is not final owner-release
+                // authority. Preserve the supplied binding's roots there.
+                core::mem::forget(binding);
+                quarantine();
+            }
+            return Err(error);
+        }
+        let flags = self.queue.cpu.save_disable()?;
+        let index = self.current.get();
+        let result = (|| {
+            // SAFETY: current is validated and IF remains disabled throughout.
+            if unsafe { (*self.task(index)).binding.is_some() } {
+                return Err(WorkError::Busy);
+            }
+            let view = self.context_view(index, true);
+            // SAFETY: current task is retained and IF0 protects its job assignment.
+            let task = unsafe { &*self.task(index) };
+            if view.sequence == 0 || task.signal.sequence.load(Ordering::Acquire) != view.sequence {
+                return Err(WorkError::CorruptContext);
+            }
+            // SAFETY: the retained unsafe binding promises transactional/no-switch hooks.
+            unsafe { binding.attach(&view)? };
+            let handle = WakeHandle {
+                queue: ManuallyDrop::new(self.queue.clone()),
+                signal: ManuallyDrop::new(task.signal.clone()),
+                id: task.id,
+                sequence: view.sequence,
+            };
+            // SAFETY: exclusive qualified CPU; prior immutable borrow's last use is above.
+            unsafe {
+                (*self.task(index)).binding = Some(binding.clone());
+            }
+            Ok(handle)
+        })();
+        // SAFETY: no hook/lock is live and flags came from save_disable above.
+        unsafe { self.queue.cpu.restore(flags) };
+        result
+    }
+    pub fn wake_handle(self: Pin<&Self>) -> Result<WakeHandle<N>, WorkError> {
+        self.current_id()?;
+        // SAFETY: current task is validated; this method never switches.
+        let task = unsafe { &*self.task(self.current.get()) };
+        if task.binding.is_none() {
+            return Err(WorkError::Unavailable);
+        }
+        let sequence = task.job.ok_or(WorkError::CorruptContext)?.1.sequence;
+        if sequence == 0 || task.signal.sequence.load(Ordering::Acquire) != sequence {
+            return Err(WorkError::CorruptContext);
+        }
+        Ok(WakeHandle {
+            queue: ManuallyDrop::new(self.queue.clone()),
+            signal: ManuallyDrop::new(task.signal.clone()),
+            id: task.id,
+            sequence,
+        })
+    }
+    fn arrive(&self, index: usize, new_job: bool) {
+        self.valid();
+        let view = self.context_view(index, true);
+        // SAFETY: hook runs on its real destination stack, IF=0, no lock/switch borrow.
+        if let Some(binding) = unsafe { &(*self.task(index)).binding }
+            && let Err(error) = unsafe { binding.arrive(&view, new_job) }
+        {
+            self.queue.cpu.fatal(error);
+        }
+    }
+    /// # Safety
+    /// Real foreign producers/task/wake references are quiescent. The retained
+    /// binding validates this at detach; copied metadata is not lifetime proof.
+    /// Returned owner is released only in process context after IF restoration.
+    pub unsafe fn detach_binding(
+        self: Pin<&Self>,
+        id: ContextId,
+    ) -> Result<Arc<dyn SwitchBinding>, WorkError> {
+        self.queue.process()?;
+        if self.current.get() != NONE {
+            return Err(WorkError::WouldDeadlock);
+        }
+        let flags = self.queue.cpu.save_disable()?;
+        let result = (|| {
+            // SAFETY: dispatcher owns all task state with IF=0; vector never resizes.
+            let index = unsafe { (&*self.tasks.get()).iter().position(|task| task.id == id) }
+                .ok_or(WorkError::Unavailable)?;
+            // SAFETY: index comes from this retained vector.
+            let task = unsafe { &*self.task(index) };
+            if task.state != TaskState::Idle || task.job.is_some() {
+                return Err(WorkError::Pending);
+            }
+            let binding = task.binding.as_ref().ok_or(WorkError::Unavailable)?;
+            let view = self.context_view(index, false);
+            if !(view.stack_start..view.stack_end).contains(&view.stack_pointer) {
+                return Err(WorkError::CorruptContext);
+            }
+            // SAFETY: unsafe caller supplies real quiescence; failure is transactional.
+            unsafe { binding.detach(&view)? };
+            // SAFETY: no task/hook is running; take moves owner without dropping it.
+            match unsafe { (*self.task(index)).binding.take() } {
+                Some(binding) => Ok(binding),
+                None => self.queue.cpu.fatal(WorkError::CorruptContext),
+            }
+        })();
+        // SAFETY: no owner is dropped by moving the Result; no queue lock is held.
+        unsafe { self.queue.cpu.restore(flags) };
+        result
+    }
     fn valid(&self) {
         if let Err(e) = self.current_id() {
             self.queue.cpu.fatal(e)
@@ -611,28 +925,74 @@ impl<const N: usize> Runtime<N> {
     /// this same retained stack and ContextId. It never calls a queued callback
     /// recursively on the lock-owning caller stack.
     pub fn yield_now(self: Pin<&Self>) -> Result<(), WorkError> {
+        self.suspend(LeaveReason::Yield).map(|_| ())
+    }
+    /// Suspend once only if the retained foreign predicate is still blocked.
+    /// Linux-owned process PREPARE must precede this call. Skipped/error leaves
+    /// its original entered lease intact; its wrapper clears prepared state.
+    pub fn park_if_blocked(self: Pin<&Self>) -> Result<ParkOutcome, WorkError> {
+        self.suspend(LeaveReason::Blocked)
+    }
+    fn suspend(self: Pin<&Self>, reason: LeaveReason) -> Result<ParkOutcome, WorkError> {
         self.current_id()?;
         let index = self.current.get();
         let flags = self.queue.cpu.save_disable()?;
-        // SAFETY: `index` is the running task, and IRQs are disabled.
+        let view = self.context_view(index, true);
+        let admission = {
+            // SAFETY: qualified current task and IF0; borrow ends before switch.
+            let binding = unsafe { &(*self.task(index)).binding };
+            (|| {
+                if reason == LeaveReason::Blocked {
+                    let binding = binding.as_ref().ok_or(WorkError::Unavailable)?;
+                    // SAFETY: IF0 pure predicate; process PREPARE is provider-owned.
+                    let still_blocked = unsafe { binding.still_blocked(&view)? };
+                    // SAFETY: atomic sidecar is separate from Task; IF excludes same-CPU IRQ.
+                    let pending = unsafe {
+                        (*self.task(index))
+                            .signal
+                            .pending
+                            .swap(false, Ordering::AcqRel)
+                    };
+                    if !still_blocked || pending {
+                        return Ok(false);
+                    }
+                }
+                if let Some(binding) = binding {
+                    // SAFETY: transactional prepared commit only, no lock/alloc/drop/switch.
+                    unsafe { binding.leave(&view, reason)? };
+                }
+                Ok(true)
+            })()
+        };
+        match admission {
+            Ok(true) => {}
+            other => {
+                // SAFETY: no departure committed; original task/current/lease intact.
+                unsafe { self.queue.cpu.restore(flags) };
+                return other.map(|_| ParkOutcome::Skipped);
+            }
+        }
+        // SAFETY: running task is exclusively owned, with IF disabled.
         unsafe {
-            (*self.task(index)).state = TaskState::Waiting;
+            (*self.task(index)).state = if reason == LeaveReason::Blocked {
+                TaskState::Blocked
+            } else {
+                TaskState::Runnable
+            };
         }
         self.current.set(NONE);
         self.queue.active.clear();
-        // SAFETY: both frames are retained, pinned and initialized; IRQs stay disabled
-        // across the switch, and no lock or borrow spans it.
+        // SAFETY: retained initialized frames; no Task reference or queue lock spans switch.
         unsafe {
             context::switch(
                 core::ptr::addr_of_mut!((*self.task(index)).frame),
                 self.dispatch.get(),
             )
         };
-        self.valid();
-        // SAFETY: the task resumed on its own stack with `flags` from its own
-        // save_disable.
+        self.arrive(index, false);
+        // SAFETY: restored foreign and native metadata match this real resumed stack.
         unsafe { self.queue.cpu.restore(flags) };
-        Ok(())
+        Ok(ParkOutcome::Resumed)
     }
     /// Run at most one genuine task continuation. No callback is inline here:
     /// actual RIP/RSP switch onto its distinct owned stack precedes callback.
@@ -667,6 +1027,10 @@ impl<const N: usize> Runtime<N> {
                         task.job = Some(job);
                         task.state = TaskState::Ready;
                         task.flags = flags;
+                        task.signal.pending.store(false, Ordering::Relaxed);
+                        task.signal
+                            .sequence
+                            .store(job.1.sequence, Ordering::Release);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -676,7 +1040,11 @@ impl<const N: usize> Runtime<N> {
                     }
                 }
             }
-            if matches!(task.state, TaskState::Ready | TaskState::Waiting) {
+            if task.state == TaskState::Blocked && task.signal.pending.swap(false, Ordering::AcqRel)
+            {
+                task.state = TaskState::Runnable;
+            }
+            if matches!(task.state, TaskState::Ready | TaskState::Runnable) {
                 selected = Some(i);
                 break;
             }
@@ -716,9 +1084,9 @@ impl<const N: usize> Runtime<N> {
     /// Dispatcher/root/IRQ callers never receive an invented ACPICA thread ID.
     /// # Safety
     /// Callback/context ownership and bounded-stack/no-unwind rules match execute.
-    /// No caller stack-local reference may escape into the job. Timeout does
-    /// not cancel or release admitted work: its genuine provider-owned context
-    /// remains retained until later completion or permanent quarantine.
+    /// No caller stack-local reference may escape into the job. Timeout or
+    /// Pending does not cancel or release admitted work: its genuine provider-
+    /// owned context remains retained until completion or permanent quarantine.
     pub unsafe fn call_foreground(
         self: Pin<&Self>,
         callback: Callback,
@@ -734,7 +1102,9 @@ impl<const N: usize> Runtime<N> {
             if self.queue.cpu.ticks() >= deadline {
                 return Err(WorkError::TimedOut);
             }
-            self.step()?;
+            if !self.step()? {
+                return Err(WorkError::Pending);
+            }
         }
         Ok(())
     }
@@ -777,7 +1147,7 @@ impl<const N: usize> Runtime<N> {
                 // SAFETY: `current` is the running task, verified by current_id above.
                 unsafe { (*self.task(current)).job.map(|(_, j)| j) }
             };
-            let pending = {
+            let (pending, queued) = {
                 let mut g = self.queue.lock()?;
                 let s = g.state();
                 let pending = s
@@ -794,7 +1164,7 @@ impl<const N: usize> Runtime<N> {
                 {
                     return Err(WorkError::WouldDeadlock);
                 }
-                pending
+                (pending, s.jobs.iter().flatten().any(|job| !job.running))
             };
             if !pending {
                 return Ok(());
@@ -803,8 +1173,25 @@ impl<const N: usize> Runtime<N> {
                 return Err(WorkError::TimedOut);
             }
             if current == NONE {
-                self.step()?;
+                if !self.step()? {
+                    return Err(WorkError::Pending);
+                }
             } else {
+                // All pending peers blocked and no unassigned job: return to
+                // the caller/producer; yielding this drain would poll forever.
+                // SAFETY: peers are suspended; same CPU owns immutable reads.
+                let blocked_only = !queued
+                    && unsafe {
+                        (&*self.tasks.get()).iter().enumerate().all(|(i, task)| {
+                            i == current
+                                || task.state == TaskState::Idle
+                                || (task.state == TaskState::Blocked
+                                    && !task.signal.pending.load(Ordering::Acquire))
+                        })
+                    };
+                if blocked_only {
+                    return Err(WorkError::Pending);
+                }
                 self.yield_now()?;
             }
         }
@@ -822,7 +1209,7 @@ impl<const N: usize> Runtime<N> {
         if unsafe {
             (&*self.tasks.get())
                 .iter()
-                .any(|t| t.state != TaskState::Idle)
+                .any(|t| t.state != TaskState::Idle || t.binding.is_some())
         } {
             return Err(WorkError::Pending);
         }
@@ -845,6 +1232,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             let (slot, job) = t.job.expect("assigned task");
             (slot, job, t.flags)
         };
+        executor.arrive(index, true);
         // SAFETY: covered by this function's own safety contract.
         unsafe { executor.queue.cpu.restore(flags) };
         // SAFETY: covered by this function's own safety contract.
@@ -853,6 +1241,20 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
         let _flags = match executor.queue.cpu.save_disable() {
             Ok(f) => f,
             Err(e) => executor.queue.cpu.fatal(e),
+        };
+        let view = executor.context_view(index, true);
+        // SAFETY: actual completing stack, IF=0; owner must already have exited.
+        if let Some(binding) = unsafe { &(*executor.task(index)).binding }
+            && let Err(error) = unsafe { binding.complete(&view) }
+        {
+            executor.queue.cpu.fatal(error);
+        }
+        // SAFETY: close this exact job before future assignment; old handles stay inert.
+        unsafe {
+            (*executor.task(index))
+                .signal
+                .sequence
+                .store(0, Ordering::Release)
         };
         if let Err(e) = executor.queue.finish(slot, job.sequence) {
             executor.queue.cpu.fatal(e);
@@ -915,6 +1317,21 @@ impl<const N: usize> Executor<N> {
     pub fn new(queue: Arc<Queue<N>>, stacks: Vec<Stack>) -> Result<Self, WorkError> {
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::new(queue, stacks)?),
+        })
+    }
+    /// Genuine hosted continuation mechanism test only. StackBacking must own
+    /// real mapped guarded stacks; Cpu is an explicit hosted model. This never
+    /// qualifies CPL0/IRQ/native roots or registers a native producer.
+    #[cfg(test)]
+    pub(crate) fn new_hosted_for_test(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+    ) -> Result<Self, WorkError> {
+        Runtime::<N>::validate_stacks(&queue, &stacks)?;
+        // SAFETY: unprivileged read only, used solely by actual hosted stack tests.
+        let controls = unsafe { context::read_controls() };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_controls(queue, stacks, controls)?),
         })
     }
     /// The returned actual pinned runtime is what a retained native provider
@@ -1367,6 +1784,597 @@ mod tests {
             assert_eq!(view.active.id.load(Ordering::Acquire), 0);
             let retained = unsafe { Pin::new_unchecked(&*raw) };
             assert_eq!(retained.step(), Err(WorkError::Closed));
+        }
+        // Genuine switched-stack fixtures for the generic binding contract.
+        // This is a hosted state/IRQ model, not a native Linux/C task producer.
+        mod bound {
+            use super::*;
+
+            struct Globals {
+                current: AtomicU64,
+                preempt: AtomicU64,
+                virtual_irq: AtomicU64,
+                entered: AtomicBool,
+            }
+            struct Binding {
+                cpu: Arc<CpuModel>,
+                globals: Arc<Globals>,
+                id: AtomicU64,
+                sequence: AtomicU64,
+                saved_preempt: AtomicU64,
+                saved_irq: AtomicU64,
+                saved_entered: AtomicBool,
+                blocked: AtomicBool,
+                prepared: AtomicBool,
+                refuse_attach: AtomicBool,
+                refuse_leave: AtomicBool,
+                wake_at_commit: AtomicBool,
+                refs: AtomicU64,
+                arrives: AtomicU64,
+                completed: AtomicU64,
+                detached: AtomicBool,
+                handle: Mutex<Option<WakeHandle<16>>>,
+            }
+            impl Binding {
+                fn new(cpu: Arc<CpuModel>, globals: Arc<Globals>) -> Arc<Self> {
+                    Arc::new(Self {
+                        cpu,
+                        globals,
+                        id: AtomicU64::new(0),
+                        sequence: AtomicU64::new(0),
+                        saved_preempt: AtomicU64::new(0),
+                        saved_irq: AtomicU64::new(0x200),
+                        saved_entered: AtomicBool::new(false),
+                        blocked: AtomicBool::new(false),
+                        prepared: AtomicBool::new(false),
+                        refuse_attach: AtomicBool::new(false),
+                        refuse_leave: AtomicBool::new(false),
+                        wake_at_commit: AtomicBool::new(false),
+                        refs: AtomicU64::new(1),
+                        arrives: AtomicU64::new(0),
+                        completed: AtomicU64::new(0),
+                        detached: AtomicBool::new(false),
+                        handle: Mutex::new(None),
+                    })
+                }
+                fn stack(&self, context: &TaskContext, active: bool) {
+                    assert_eq!(self.cpu.flags.load(Ordering::Acquire), 2);
+                    assert!(
+                        (context.stack_start..context.stack_end).contains(&context.stack_pointer)
+                    );
+                    assert_eq!(context.guard_end, context.stack_start);
+                    assert!(context.guard_end - context.guard_start >= 4096);
+                    assert_eq!(
+                        (context.stack_start..context.stack_end)
+                            .contains(&context::stack_pointer()),
+                        active
+                    );
+                    if active {
+                        assert!(context.sequence > 0);
+                    }
+                }
+                fn current(&self, context: &TaskContext) {
+                    self.stack(context, true);
+                    assert_eq!(self.id.load(Ordering::Acquire), context.context_id);
+                    assert_eq!(self.sequence.load(Ordering::Acquire), context.sequence);
+                    assert_eq!(
+                        self.globals.current.load(Ordering::Acquire),
+                        context.context_id
+                    );
+                }
+                fn enter(&self, preempt: u64, virtual_irq: u64) {
+                    assert_eq!(
+                        self.globals.current.load(Ordering::Acquire),
+                        self.id.load(Ordering::Acquire)
+                    );
+                    assert!(!self.globals.entered.swap(true, Ordering::AcqRel));
+                    self.globals.preempt.store(preempt, Ordering::Release);
+                    self.globals
+                        .virtual_irq
+                        .store(virtual_irq, Ordering::Release);
+                }
+                fn exit(&self) {
+                    self.blocked.store(false, Ordering::Release);
+                    self.prepared.store(false, Ordering::Release);
+                    self.globals.preempt.store(0, Ordering::Release);
+                    self.globals.virtual_irq.store(0x200, Ordering::Release);
+                    assert!(self.globals.entered.swap(false, Ordering::AcqRel));
+                }
+                fn wake(&self) {
+                    self.handle
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .wake()
+                        .unwrap();
+                }
+            }
+            // SAFETY: hosted single-thread hooks use atomics and bounded try_lock,
+            // retain all model roots, never switch/allocate/drop final owners.
+            // They validate genuine Runtime stack/ticket metadata on every hook.
+            unsafe impl SwitchBinding for Binding {
+                unsafe fn attach(&self, context: &TaskContext) -> Result<(), WorkError> {
+                    self.stack(context, true);
+                    if self.refuse_attach.load(Ordering::Acquire) {
+                        return Err(WorkError::Busy);
+                    }
+                    assert_eq!(self.globals.current.load(Ordering::Acquire), 0);
+                    assert_eq!(self.id.swap(context.context_id, Ordering::AcqRel), 0);
+                    self.sequence.store(context.sequence, Ordering::Release);
+                    self.globals
+                        .current
+                        .store(context.context_id, Ordering::Release);
+                    Ok(())
+                }
+                unsafe fn still_blocked(&self, context: &TaskContext) -> Result<bool, WorkError> {
+                    self.current(context);
+                    if !self.prepared.load(Ordering::Acquire)
+                        || self.globals.preempt.load(Ordering::Acquire) != 1
+                    {
+                        return Err(WorkError::Busy);
+                    }
+                    Ok(self.blocked.load(Ordering::Acquire))
+                }
+                unsafe fn leave(
+                    &self,
+                    context: &TaskContext,
+                    reason: LeaveReason,
+                ) -> Result<(), WorkError> {
+                    self.current(context);
+                    if self.refuse_leave.load(Ordering::Acquire)
+                        || (self.globals.entered.load(Ordering::Acquire)
+                            && !self.prepared.load(Ordering::Acquire))
+                    {
+                        return Err(WorkError::Busy);
+                    }
+                    if reason == LeaveReason::Blocked {
+                        assert_eq!(self.globals.preempt.load(Ordering::Acquire), 1);
+                    }
+                    self.saved_preempt.store(
+                        self.globals.preempt.swap(0, Ordering::AcqRel),
+                        Ordering::Release,
+                    );
+                    self.saved_irq.store(
+                        self.globals.virtual_irq.swap(0x200, Ordering::AcqRel),
+                        Ordering::Release,
+                    );
+                    self.saved_entered.store(
+                        self.globals.entered.swap(false, Ordering::AcqRel),
+                        Ordering::Release,
+                    );
+                    self.prepared.store(false, Ordering::Release);
+                    self.globals.current.store(0, Ordering::Release);
+                    if self.wake_at_commit.swap(false, Ordering::AcqRel) {
+                        // Deterministic injection after final condition/pending
+                        // check, before Blocked publication/switch. This is a
+                        // spurious admitted wake, not a lock-acquire result.
+                        if let Err(error) = self.handle.try_lock().unwrap().as_ref().unwrap().wake()
+                        {
+                            self.cpu.fatal(error);
+                        }
+                    }
+                    Ok(())
+                }
+                unsafe fn arrive(
+                    &self,
+                    context: &TaskContext,
+                    new_job: bool,
+                ) -> Result<(), WorkError> {
+                    self.stack(context, true);
+                    assert_eq!(self.globals.current.load(Ordering::Acquire), 0);
+                    assert_eq!(self.globals.preempt.load(Ordering::Acquire), 0);
+                    assert!(!self.globals.entered.load(Ordering::Acquire));
+                    assert_eq!(self.id.load(Ordering::Acquire), context.context_id);
+                    if new_job {
+                        assert_eq!(self.sequence.load(Ordering::Acquire), 0);
+                        let mut handle = self.handle.try_lock().unwrap();
+                        let renewed = handle.as_ref().unwrap().renew_current()?;
+                        assert_eq!(renewed.sequence(), context.sequence);
+                        *handle = Some(renewed); // nonfinal Arc decrements only
+                        self.sequence.store(context.sequence, Ordering::Release);
+                        self.saved_preempt.store(0, Ordering::Release);
+                        self.saved_irq.store(0x200, Ordering::Release);
+                        self.saved_entered.store(false, Ordering::Release);
+                    } else {
+                        assert_eq!(self.sequence.load(Ordering::Acquire), context.sequence);
+                    }
+                    self.globals
+                        .current
+                        .store(context.context_id, Ordering::Release);
+                    self.globals.preempt.store(
+                        self.saved_preempt.load(Ordering::Acquire),
+                        Ordering::Release,
+                    );
+                    self.globals
+                        .virtual_irq
+                        .store(self.saved_irq.load(Ordering::Acquire), Ordering::Release);
+                    self.globals.entered.store(
+                        self.saved_entered.load(Ordering::Acquire),
+                        Ordering::Release,
+                    );
+                    self.arrives.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+                unsafe fn complete(&self, context: &TaskContext) -> Result<(), WorkError> {
+                    self.current(context);
+                    assert!(!self.globals.entered.load(Ordering::Acquire));
+                    assert_eq!(self.globals.preempt.load(Ordering::Acquire), 0);
+                    assert_eq!(self.globals.virtual_irq.load(Ordering::Acquire), 0x200);
+                    assert!(!self.blocked.load(Ordering::Acquire));
+                    assert_eq!(self.refs.load(Ordering::Acquire), 1);
+                    self.globals.current.store(0, Ordering::Release);
+                    self.sequence.store(0, Ordering::Release);
+                    self.completed.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+                unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError> {
+                    self.stack(context, false);
+                    assert_eq!(context.context_id, self.id.load(Ordering::Acquire));
+                    assert_eq!(context.sequence, 0);
+                    assert_eq!(self.globals.current.load(Ordering::Acquire), 0);
+                    if self.refs.load(Ordering::Acquire) != 1
+                        || self.sequence.load(Ordering::Acquire) != 0
+                    {
+                        return Err(WorkError::Pending);
+                    }
+                    self.detached.store(true, Ordering::Release);
+                    Ok(())
+                }
+            }
+            struct BoundFixture {
+                cpu: Arc<CpuModel>,
+                runtime: AtomicU64,
+                globals: Arc<Globals>,
+                bindings: [Arc<Binding>; 2],
+                cancelled: AtomicBool,
+                data: AtomicU64,
+                events: Mutex<Vec<(u64, u64, usize)>>,
+            }
+            impl BoundFixture {
+                unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
+                    // SAFETY: test Queue retains this fixture; actual executor
+                    // allocation stays pinned/owned through completion/quarantine.
+                    unsafe {
+                        Pin::new_unchecked(
+                            &*(self.runtime.load(Ordering::Acquire) as *const Runtime<16>),
+                        )
+                    }
+                }
+                fn event(&self, n: u64) {
+                    let runtime = unsafe { self.runtime() };
+                    let context = runtime.current_context().unwrap();
+                    assert_eq!(
+                        context.context_id,
+                        self.globals.current.load(Ordering::Acquire)
+                    );
+                    self.events.lock().unwrap().push((
+                        n,
+                        context.context_id,
+                        context::stack_pointer(),
+                    ));
+                }
+                fn bind(&self, index: usize) {
+                    let binding = self.bindings[index].clone();
+                    let handle = unsafe { self.runtime() }
+                        .bind_current(binding.clone())
+                        .unwrap();
+                    *binding.handle.lock().unwrap() = Some(handle);
+                }
+                fn detach_all(&self) {
+                    for binding in &self.bindings {
+                        let id = binding.id.load(Ordering::Acquire);
+                        if id == 0 {
+                            continue;
+                        }
+                        let retained =
+                            unsafe { self.runtime().detach_binding(ContextId(id)) }.unwrap();
+                        assert_eq!(self.cpu.flags.load(Ordering::Acquire), 0x202);
+                        assert!(binding.detached.load(Ordering::Acquire));
+                        // Final model/waker release occurs only after IF restore.
+                        binding.handle.lock().unwrap().take();
+                        drop(retained);
+                    }
+                }
+            }
+            fn bound_setup() -> (Executor<16>, Arc<BoundFixture>, Arc<AtomicU64>) {
+                let cpu = CpuModel::new();
+                let globals = Arc::new(Globals {
+                    current: AtomicU64::new(0),
+                    preempt: AtomicU64::new(0),
+                    virtual_irq: AtomicU64::new(0x200),
+                    entered: AtomicBool::new(false),
+                });
+                let f = Arc::new(BoundFixture {
+                    cpu: cpu.clone(),
+                    runtime: AtomicU64::new(0),
+                    globals: globals.clone(),
+                    bindings: [
+                        Binding::new(cpu.clone(), globals.clone()),
+                        Binding::new(cpu.clone(), globals),
+                    ],
+                    cancelled: AtomicBool::new(false),
+                    data: AtomicU64::new(0),
+                    events: Mutex::new(Vec::new()),
+                });
+                let queue = unsafe { Queue::<16>::new(cpu, f.clone()) }.unwrap();
+                let dropped = Arc::new(AtomicU64::new(0));
+                let executor =
+                    Executor::new_hosted_for_test(queue, stacks(dropped.clone())).unwrap();
+                f.runtime.store(
+                    executor.runtime().get_ref() as *const Runtime<16> as u64,
+                    Ordering::Release,
+                );
+                (executor, f, dropped)
+            }
+            unsafe fn bound<'a>(p: *mut c_void) -> &'a BoundFixture {
+                unsafe { &*p.cast::<BoundFixture>() }
+            }
+            unsafe extern "C" fn park_until_cancelled(p: *mut c_void) {
+                let f = unsafe { bound(p) };
+                f.bind(0);
+                let binding = &f.bindings[0];
+                binding.enter(1, 0x200);
+                binding.blocked.store(true, Ordering::Release);
+                binding.prepared.store(true, Ordering::Release);
+                f.event(1);
+                assert_eq!(
+                    unsafe { f.runtime() }.park_if_blocked(),
+                    Ok(ParkOutcome::Resumed)
+                );
+                assert!(f.cancelled.load(Ordering::Acquire));
+                assert_eq!(f.data.load(Ordering::Acquire), 0x1234);
+                assert_eq!(f.globals.preempt.load(Ordering::Acquire), 1);
+                f.event(2);
+                binding.exit();
+            }
+            #[test]
+            fn blocked_pending_cancel_irq_wake_late_handle_and_quiescent_retirement() {
+                let (executor, f, dropped) = bound_setup();
+                let r = executor.runtime();
+                let p = Arc::as_ptr(&f) as *mut c_void;
+                assert_eq!(r.current_context(), Err(WorkError::Unavailable));
+                assert_eq!(r.park_if_blocked(), Err(WorkError::Unavailable));
+                assert_eq!(
+                    unsafe { r.call_foreground(park_until_cancelled, p, 10000) },
+                    Err(WorkError::Pending)
+                );
+                assert!(!r.step().unwrap());
+                assert_eq!(r.drain(10000), Err(WorkError::Pending));
+                assert_eq!(unsafe { r.retire() }, Err(WorkError::Pending));
+                let handle = f.bindings[0]
+                    .handle
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                assert_eq!(
+                    unsafe { r.detach_binding(handle.context_id()) }.err(),
+                    Some(WorkError::Pending)
+                );
+                let foreign = handle.clone();
+                // Return the handle to its CPU before Drop: no foreign reclamation.
+                let (error, foreign) = thread::spawn(move || (foreign.wake(), foreign))
+                    .join()
+                    .unwrap();
+                assert_eq!(error, Err(WorkError::WrongCpu));
+                drop(foreign);
+                r.queue.close().unwrap(); // existing blocked job must still wake
+                f.data.store(0x1234, Ordering::Release);
+                f.cancelled.store(true, Ordering::Release);
+                f.bindings[0].blocked.store(false, Ordering::Release);
+                f.cpu.flags.store(2, Ordering::Release);
+                f.cpu.irq.store(true, Ordering::Release);
+                assert_eq!(r.current_context(), Err(WorkError::InterruptContext));
+                assert_eq!(r.park_if_blocked(), Err(WorkError::InterruptContext));
+                assert_eq!(
+                    handle.renew_current().err(),
+                    Some(WorkError::InterruptContext)
+                );
+                handle.wake().unwrap();
+                handle.wake().unwrap();
+                assert_eq!(f.cpu.flags.load(Ordering::Acquire), 2);
+                f.cpu.irq.store(false, Ordering::Release);
+                f.cpu.flags.store(0x202, Ordering::Release);
+                assert!(r.step().unwrap());
+                assert!(!r.step().unwrap());
+                assert_eq!(handle.wake(), Err(WorkError::Closed));
+                f.bindings[0].refs.store(2, Ordering::Release);
+                assert_eq!(
+                    unsafe { r.detach_binding(handle.context_id()) }.err(),
+                    Some(WorkError::Pending)
+                );
+                assert_eq!(unsafe { r.retire() }, Err(WorkError::Pending));
+                f.bindings[0].refs.store(1, Ordering::Release);
+                f.detach_all();
+                unsafe { r.retire() }.unwrap();
+                drop(executor);
+                assert_eq!(dropped.load(Ordering::Acquire), 4);
+                assert_eq!(handle.wake(), Err(WorkError::Closed));
+                drop(handle);
+            }
+            unsafe extern "C" fn peer_waiter(p: *mut c_void) {
+                let f = unsafe { bound(p) };
+                f.bind(1);
+                let binding = &f.bindings[1];
+                binding.enter(1, 0x200);
+                binding.blocked.store(true, Ordering::Release);
+                binding.prepared.store(true, Ordering::Release);
+                f.event(20);
+                unsafe { f.runtime() }.park_if_blocked().unwrap();
+                assert!(f.cancelled.load(Ordering::Acquire));
+                assert_eq!(f.data.load(Ordering::Acquire), 99);
+                assert_eq!(f.globals.preempt.load(Ordering::Acquire), 1);
+                f.event(21);
+                binding.exit();
+            }
+            unsafe extern "C" fn peer_waker(p: *mut c_void) {
+                let f = unsafe { bound(p) };
+                f.bind(0);
+                let binding = &f.bindings[0];
+                binding.enter(3, 0);
+                f.event(10);
+                unsafe { f.runtime() }
+                    .queue
+                    .execute(Kind::General, peer_waiter, p)
+                    .unwrap();
+                binding.prepared.store(true, Ordering::Release);
+                unsafe { f.runtime() }.yield_now().unwrap();
+                assert_eq!(f.globals.preempt.load(Ordering::Acquire), 3);
+                assert_eq!(f.globals.virtual_irq.load(Ordering::Acquire), 0);
+                f.event(11);
+                // Pending peers are blocked; drain returns, it cannot poll them.
+                assert_eq!(unsafe { f.runtime() }.drain(10000), Err(WorkError::Pending));
+                f.data.store(99, Ordering::Release);
+                f.cancelled.store(true, Ordering::Release);
+                f.bindings[1].blocked.store(false, Ordering::Release);
+                f.bindings[1].wake();
+                binding.prepared.store(true, Ordering::Release);
+                unsafe { f.runtime() }.yield_now().unwrap();
+                assert_eq!(f.globals.preempt.load(Ordering::Acquire), 3);
+                binding.exit();
+                f.event(12);
+            }
+            #[test]
+            fn multiple_real_continuations_preserve_stack_identity_preempt_irq_and_lease() {
+                let (executor, f, dropped) = bound_setup();
+                let r = executor.runtime();
+                unsafe { r.call_foreground(peer_waker, Arc::as_ptr(&f) as *mut c_void, 10000) }
+                    .unwrap();
+                let events = f.events.lock().unwrap();
+                let pos = |n| events.iter().position(|e| e.0 == n).unwrap();
+                assert!(
+                    pos(10) < pos(20)
+                        && pos(20) < pos(11)
+                        && pos(11) < pos(21)
+                        && pos(21) < pos(12)
+                );
+                assert_eq!(events[pos(10)].1, events[pos(11)].1);
+                assert_ne!(events[pos(10)].1, events[pos(20)].1);
+                assert_ne!(events[pos(10)].2, events[pos(20)].2);
+                drop(events);
+                assert_eq!(f.globals.current.load(Ordering::Acquire), 0);
+                f.detach_all();
+                unsafe { r.retire() }.unwrap();
+                drop(executor);
+                assert_eq!(dropped.load(Ordering::Acquire), 4);
+            }
+            unsafe extern "C" fn races_and_refusals(p: *mut c_void) {
+                let f = unsafe { bound(p) };
+                let r = unsafe { f.runtime() };
+                let binding = &f.bindings[0];
+                binding.refuse_attach.store(true, Ordering::Release);
+                assert_eq!(r.bind_current(binding.clone()).err(), Some(WorkError::Busy));
+                assert_eq!(f.globals.current.load(Ordering::Acquire), 0);
+                binding.refuse_attach.store(false, Ordering::Release);
+                f.bind(0);
+                binding.enter(1, 0x200);
+                binding.blocked.store(true, Ordering::Release);
+                binding.prepared.store(true, Ordering::Release);
+                binding.wake();
+                binding.wake();
+                assert_eq!(r.park_if_blocked(), Ok(ParkOutcome::Skipped));
+                assert!(f.globals.entered.load(Ordering::Acquire));
+                assert_eq!(binding.arrives.load(Ordering::Acquire), 0);
+                // The Linux process wrapper clears a skipped prepared marker.
+                binding.prepared.store(false, Ordering::Release);
+                assert_eq!(r.park_if_blocked(), Err(WorkError::Busy));
+                assert_eq!(f.globals.preempt.load(Ordering::Acquire), 1);
+                binding.prepared.store(true, Ordering::Release);
+                binding.refuse_leave.store(true, Ordering::Release);
+                assert_eq!(r.park_if_blocked(), Err(WorkError::Busy));
+                assert!(f.globals.entered.load(Ordering::Acquire));
+                binding.refuse_leave.store(false, Ordering::Release);
+                binding.wake_at_commit.store(true, Ordering::Release);
+                assert_eq!(r.park_if_blocked(), Ok(ParkOutcome::Resumed));
+                assert_eq!(binding.arrives.load(Ordering::Acquire), 1);
+                // Spurious wake resumes only the continuation; it did not
+                // satisfy the model condition or fabricate lock ownership.
+                assert!(binding.blocked.load(Ordering::Acquire));
+                binding.exit();
+                f.event(30);
+            }
+            unsafe extern "C" fn reused_worker(p: *mut c_void) {
+                let f = unsafe { bound(p) };
+                let binding = &f.bindings[0];
+                let handle = unsafe { f.runtime() }.wake_handle().unwrap();
+                assert_eq!(
+                    handle.sequence(),
+                    binding.handle.lock().unwrap().as_ref().unwrap().sequence()
+                );
+                assert_eq!(
+                    unsafe { f.runtime() }.current_id().unwrap(),
+                    handle.context_id()
+                );
+                binding.enter(0, 0x200);
+                f.event(31);
+                binding.exit();
+            }
+            #[test]
+            fn final_check_commit_spurious_wakes_transactional_errors_and_reused_job_generation() {
+                let (executor, f, dropped) = bound_setup();
+                let r = executor.runtime();
+                let p = Arc::as_ptr(&f) as *mut c_void;
+                unsafe { r.call_foreground(races_and_refusals, p, 10000) }.unwrap();
+                let old = f.bindings[0]
+                    .handle
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                assert_eq!(old.wake(), Err(WorkError::Closed));
+                assert_eq!(old.renew_current().err(), Some(WorkError::Unavailable));
+                unsafe { r.call_foreground(reused_worker, p, 10000) }.unwrap();
+                assert_eq!(old.wake(), Err(WorkError::Closed));
+                assert_ne!(
+                    old.sequence(),
+                    f.bindings[0]
+                        .handle
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .sequence()
+                );
+                assert_eq!(f.bindings[0].completed.load(Ordering::Acquire), 2);
+                assert_eq!(f.bindings[0].arrives.load(Ordering::Acquire), 2);
+                f.detach_all();
+                unsafe { r.retire() }.unwrap();
+                drop(executor);
+                assert_eq!(dropped.load(Ordering::Acquire), 4);
+                drop(old);
+            }
+            #[test]
+            fn abandoned_blocked_executor_retains_actual_stacks_and_rejects_late_wake() {
+                let (executor, f, dropped) = bound_setup();
+                let r = executor.runtime();
+                assert_eq!(
+                    unsafe {
+                        r.call_foreground(
+                            park_until_cancelled,
+                            Arc::as_ptr(&f) as *mut c_void,
+                            10000,
+                        )
+                    },
+                    Err(WorkError::Pending)
+                );
+                let handle = f.bindings[0]
+                    .handle
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                let weak = Arc::downgrade(&f);
+                drop(executor);
+                drop(f);
+                assert_eq!(dropped.load(Ordering::Acquire), 0);
+                assert!(weak.upgrade().is_some());
+                assert_eq!(handle.wake(), Err(WorkError::Closed));
+                drop(handle);
+            }
         }
     }
 }
