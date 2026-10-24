@@ -22,12 +22,14 @@
 //! A device ID or an idle status bit does not prove exclusive ownership. The
 //! unsafe [`PortIo::claim`] contract requires that ownership before any I/O.
 //! MMIO-only devices need a separate register accessor. [`i2c_block`] adds
-//! fixed-length I²C blocks with retained PCI configuration ownership. PEC,
-//! block process calls, SMBALERT and Host Notify remain unsupported.
+//! fixed-length I²C blocks with retained PCI configuration ownership and opt-in
+//! hardware PEC through that owner. Raw I801 handles still refuse PEC. Block
+//! process calls, SMBALERT and Host Notify remain unsupported.
 //!
 //! Read-to-acquire INUSE semantics are documented in Intel's Host Status
 //! Register Address (HSTS), offset 0, Core Ultra SoC I/O Registers, ID 795260.
 pub mod i2c_block;
+mod pec;
 
 use super::{Address, Block, Bus, Error, ErrorKind, MAX_BLOCK, Phase, Recovery, Transaction};
 use crate::{Clock, bus::i2c::Timer};
@@ -116,6 +118,12 @@ impl ControllerInfo {
     }
 
     pub fn has_block_buffer(self) -> bool {
+        self.block_buffer
+    }
+
+    /// Exact pinned FEATURE_SMBUS_PEC profiles: ICH4 and later. This reports
+    /// capability only; actual configuration ownership is separately required.
+    pub fn has_hardware_pec(self) -> bool {
         self.block_buffer
     }
 }

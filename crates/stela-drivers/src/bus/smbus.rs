@@ -143,6 +143,12 @@ pub enum ErrorKind {
     FirmwareSmi,
     WrongProtocolMode,
     UnsupportedPec,
+    /// Hardware reported packet CRC failure; retain its original AUXSTS byte.
+    PecMismatch {
+        auxiliary_status: u8,
+    },
+    PecModeRejected,
+    PecStatusStuck,
     UnsupportedTransaction,
     /// The controller was busy before this driver started a transaction;
     /// another owner's operation is never killed to acquire the bus.

@@ -324,16 +324,35 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         transaction: Transaction<'_>,
         pec: bool,
     ) -> Result<(), Error> {
+        // PEC is admitted only by this retained actual configuration owner.
+        // Unsupported protocols/profiles refuse before configuration or host I/O.
+        if pec {
+            if self.failure.is_some() {
+                return Err(ErrorKind::NeedsReset.into());
+            }
+            self.owners
+                .as_ref()
+                .unwrap()
+                .0
+                .pec_supported(&transaction)?;
+        }
         let start = self.owners.as_ref().unwrap().0.timer.now_us();
         self.ready()?;
         self.deadline(start)?;
         self.active = true;
-        let result =
+        let result = if pec {
             self.owners
                 .as_mut()
                 .unwrap()
                 .0
-                .transaction_until(address, transaction, pec, start);
+                .pec_transaction_until(address, transaction, start)
+        } else {
+            self.owners
+                .as_mut()
+                .unwrap()
+                .0
+                .transaction_until(address, transaction, pec, start)
+        };
         self.complete(result, false, start)
     }
     pub fn release(mut self) -> Result<(I801<R, T>, C), Self> {
