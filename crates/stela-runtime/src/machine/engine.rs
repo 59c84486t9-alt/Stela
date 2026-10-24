@@ -4118,8 +4118,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The PAC keys as (low, high) words in APIA, APIB, APDA, APDB, APGA order.
     fn pointer_keys(&self) -> [Option<[u64; 2]>; 5] {
         // The original T6000 LLB initializes C13/C14 keys and consumes them
-        // at EL2. They are not aliases of the architectural lower bank.
-        if self.cpu.pstate.el == 2 {
+        // at EL2. They are not aliases of the architectural lower bank. EL0
+        // in the host shares them, as the architectural keys serve every EL:
+        // 26A434 XNU at EL2 loads each thread's B keys there on a context
+        // switch (0xfffffe000bb9bd14) for its EL0 to use.
+        if self.cpu.pstate.el == 2 || self.cpu.pstate.el == 0 && self.cpu.in_host() {
             return self.cpu.apple.pointer_keys.pairs();
         }
         use SystemRegister as R;
@@ -9686,6 +9689,41 @@ mod tests {
         machine.cpu.pstate = Pstate::reset(1);
         machine.derived_changed();
         assert_eq!(machine.pointer_keys()[4], Some([91, 92]));
+    }
+
+    #[test]
+    fn el0_in_the_host_uses_the_el2_keys() {
+        use crate::machine::system::key;
+        const HCR_E2H: u64 = 1 << 34;
+        use stela_compiler::aarch64::system::registers::Encoding;
+        let mut machine = pac_machine();
+        machine.cpu.pstate = Pstate::reset(2);
+        for (half, value) in [31, 32].into_iter().enumerate() {
+            machine.cpu.state.x[2] = value;
+            let encoding = Encoding::new(3, 0, 2, 1, 2 + half as u8);
+            machine
+                .system_instruction(0xd500_0000 | u32::from(key(encoding)) << 5 | 2)
+                .unwrap();
+        }
+        let el2 = machine.pointer_keys();
+        assert_eq!(el2[1], Some([31, 32]));
+        machine.cpu.pstate = Pstate::reset(0);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H | 1 << HCR_TGE);
+        machine.derived_changed();
+        assert_eq!(machine.pointer_keys(), el2);
+        // A guest's EL0 keeps the lower bank.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
+        machine.derived_changed();
+        assert_eq!(
+            machine.pointer_keys()[1],
+            Some([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210])
+        );
     }
 
     const PACM: u32 = 0xd503_24ff;
