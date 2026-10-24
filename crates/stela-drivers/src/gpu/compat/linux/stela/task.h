@@ -20,6 +20,9 @@ struct stela_linux_task_ops {
 	/* Actual CPU/IRQ/RSP/current ticket validation, bounded and allocation-
 	 * free. The retained binding/code outlive this attached task. */
 	bool (*is_current)(void *binding, const struct stela_linux_task_context *context);
+	/* Exact active-job signal; caller already proved a real same-CPU C
+	 * current and retained target lifetime. No allocation/switch/final drop. */
+	int (*wake_target)(void *binding, u64 expected_sequence);
 };
 
 struct stela_linux_task_scope_ops {
@@ -34,6 +37,7 @@ struct stela_linux_task_scope_ops {
 struct stela_linux_lease {
 	const struct stela_linux_owner *owner;
 	unsigned long irq_flags;
+	u64 generation;
 };
 void stela_linux_lease_snapshot(struct stela_linux_lease *lease);
 bool stela_linux_lease_matches(const struct stela_linux_lease *lease);
@@ -62,11 +66,20 @@ void stela_linux_task_release(struct stela_linux_task *task);
 int stela_linux_task_scope_begin(struct stela_linux_task *task,
 	const struct stela_linux_task_scope_ops *ops, void *scope);
 int stela_linux_task_scope_end(struct stela_linux_task *task);
-/* Internal adapters only; these are not Linux schedule/wake exports. A true
- * schedule_preempt_disabled adapter must prove it owns the sole preempt level;
- * count==1 by itself cannot distinguish that level from an outer RCU reader. */
+/* Internal prepared transition hooks. The selected original mutex scheduler
+ * adapter owns the sole preempt level; count==1 alone does not distinguish
+ * that level from an outer RCU reader. General schedule APIs remain separate. */
 int stela_linux_task_park(bool scheduler_preempt_disabled);
 int stela_linux_task_yield(void);
 struct task_struct *stela_linux_current(void);
 struct thread_info *stela_linux_thread_info(void);
+/* Narrow kernel-wait cancellation, not POSIX process/siginfo delivery. Values
+ * 1/2 post actual SIGUSR1/SIGKILL bits. Target metadata is retained separately;
+ * an old sequence returns -ESTALE before reading future-job state. */
+int stela_linux_task_signal(struct stela_linux_task *task, u64 expected_sequence,
+	unsigned int kind);
+int stela_linux_task_ack_signal(unsigned int kind);
+unsigned int stela_linux_task_pending_signals(void);
+unsigned int stela_linux_task_waiting_io(void);
+unsigned int stela_linux_task_waiting_load(void);
 #endif

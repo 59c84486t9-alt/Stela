@@ -579,6 +579,12 @@ impl<const N: usize> WakeHandle<N> {
     /// Qualified same-CPU process/IRQ admission only; never resume inline or
     /// change the foreign condition. Close permits wakes for admitted jobs.
     /// Release/acquire pending plus final IF exclusion covers wake at park.
+    /// Qualify process-context owner release on this retained queue's actual
+    /// CPU, including after job close. This grants no current task/RSP, live
+    /// sequence, Linux entry or native producer authority and signals nothing.
+    pub(crate) fn check_process(&self) -> Result<(), WorkError> {
+        self.queue.process()
+    }
     pub fn wake(&self) -> Result<(), WorkError> {
         let mut guard = self.queue.lock()?;
         if guard.state().poisoned

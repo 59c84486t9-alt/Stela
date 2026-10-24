@@ -1,9 +1,27 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /* Owned common string helpers following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/string.c and
  * lib/string_helpers.c. Their original GPL notices remain with those sources.
  * Existing MIT kernel/string.c is unchanged. */
+#include <linux/ctype.h>
 #include <linux/string.h>
+
+/* skip_spaces is an exact bounded projection from the pinned original
+ * lib/string_helpers.c, Copyright 31 August 2008 James Bottomley;
+ * Copyright (C) 2013, Intel Corporation. No dynamic module export table. */
+/**
+ * skip_spaces - Removes leading whitespace from @str.
+ * @str: The string to be stripped.
+ *
+ * Returns a pointer to the first non-whitespace character in @str.
+ */
+char *skip_spaces(const char *str)
+{
+	while (isspace(*str))
+		++str;
+	return (char *)str;
+}
+
 
 int strncmp(const char *left, const char *right, size_t count)
 {
@@ -54,8 +72,41 @@ char *strreplace(char *string, char old, char replacement)
 #ifdef STELA_LINUX_STRING_HELPERS_TEST
 #include <stela/test.h>
 
+/* The expected set is transcribed from pinned lib/ctype.c, not derived
+ * from isspace here: bytes 9..13, 32 and 160 carry its _S bit. This includes
+ * Linux's single-byte NBSP, without host locale or Unicode decoding. */
+static void leading_whitespace(void)
+{
+	char *(*volatile skip)(const char *) = skip_spaces;
+	for (unsigned int byte = 0; byte < 256; byte++) {
+		struct { u8 before; char text[3]; u8 after; } guarded = {
+			.before = 0x61, .text = {(char)byte, 'X', 0}, .after = 0xc8,
+		};
+		char saved[sizeof(guarded.text)];
+		memcpy(saved, guarded.text, sizeof(saved));
+		bool whitespace = (byte >= 9 && byte <= 13) || byte == 32 || byte == 160;
+		assert(skip(guarded.text) == guarded.text + whitespace);
+		assert(guarded.before == 0x61 && guarded.after == 0xc8);
+		assert(!memcmp(saved, guarded.text, sizeof(saved)));
+	}
+	static const char mixed[] = {'\t', '\n', '\v', '\f', '\r', ' ', (char)0xa0, '!', 0};
+	assert(skip(mixed) == mixed + 7);
+	char only[] = {' ', (char)0xa0, '\t', '\n', '\v', '\f', '\r', 0};
+	char only_saved[sizeof(only)];
+	memcpy(only_saved, only, sizeof(only));
+	assert(skip(only) == only + sizeof(only) - 1);
+	assert(!memcmp(only, only_saved, sizeof(only)));
+	static const char empty[] = "";
+	assert(skip(empty) == empty);
+	static const char embedded[] = {' ', 0, '\t', 'X', 0};
+	assert(skip(embedded) == embedded + 1);
+	static const char utf8_nbsp[] = {(char)0xc2, (char)0xa0, 'X', 0};
+	assert(skip(utf8_nbsp) == utf8_nbsp);
+}
+
 int main(void)
 {
+	leading_whitespace();
 	/* Exercise the actual implementation, not compiler-folded libc calls. */
 	int (*volatile compare)(const char *, const char *, size_t) = strncmp;
 	char *(*volatile find)(const char *, int) = strchr;

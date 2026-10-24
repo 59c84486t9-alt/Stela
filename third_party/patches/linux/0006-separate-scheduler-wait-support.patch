@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 02:15:00 -0400
+Subject: [PATCH] refactor(sched): separate shared wait support
+
+---
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -1098,93 +1098,6 @@
+ 	return false;
+ }
+ #endif
+-
+-static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
+-{
+-	struct wake_q_node *node = &task->wake_q;
+-
+-	/*
+-	 * Atomically grab the task, if ->wake_q is !nil already it means
+-	 * it's already queued (either by us or someone else) and will get the
+-	 * wakeup due to that.
+-	 *
+-	 * In order to ensure that a pending wakeup will observe our pending
+-	 * state, even in the failed case, an explicit smp_mb() must be used.
+-	 */
+-	smp_mb__before_atomic();
+-	if (unlikely(cmpxchg_relaxed(&node->next, NULL, WAKE_Q_TAIL)))
+-		return false;
+-
+-	/*
+-	 * The head is context local, there can be no concurrency.
+-	 */
+-	*head->lastp = node;
+-	head->lastp = &node->next;
+-	return true;
+-}
+-
+-/**
+- * wake_q_add() - queue a wakeup for 'later' waking.
+- * @head: the wake_q_head to add @task to
+- * @task: the task to queue for 'later' wakeup
+- *
+- * Queue a task for later wakeup, most likely by the wake_up_q() call in the
+- * same context, _HOWEVER_ this is not guaranteed, the wakeup can come
+- * instantly.
+- *
+- * This function must be used as-if it were wake_up_process(); IOW the task
+- * must be ready to be woken at this location.
+- */
+-void wake_q_add(struct wake_q_head *head, struct task_struct *task)
+-{
+-	if (__wake_q_add(head, task))
+-		get_task_struct(task);
+-}
+-
+-/**
+- * wake_q_add_safe() - safely queue a wakeup for 'later' waking.
+- * @head: the wake_q_head to add @task to
+- * @task: the task to queue for 'later' wakeup
+- *
+- * Queue a task for later wakeup, most likely by the wake_up_q() call in the
+- * same context, _HOWEVER_ this is not guaranteed, the wakeup can come
+- * instantly.
+- *
+- * This function must be used as-if it were wake_up_process(); IOW the task
+- * must be ready to be woken at this location.
+- *
+- * This function is essentially a task-safe equivalent to wake_q_add(). Callers
+- * that already hold reference to @task can call the 'safe' version and trust
+- * wake_q to do the right thing depending whether or not the @task is already
+- * queued for wakeup.
+- */
+-void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task)
+-{
+-	if (!__wake_q_add(head, task))
+-		put_task_struct(task);
+-}
+-
+-void wake_up_q(struct wake_q_head *head)
+-{
+-	struct wake_q_node *node = head->first;
+-
+-	while (node != WAKE_Q_TAIL) {
+-		struct task_struct *task;
+-
+-		task = container_of(node, struct task_struct, wake_q);
+-		node = node->next;
+-		/* pairs with cmpxchg_relaxed() in __wake_q_add() */
+-		WRITE_ONCE(task->wake_q.next, NULL);
+-		/* Task can safely be re-inserted now. */
+-
+-		/*
+-		 * wake_up_process() executes a full barrier, which pairs with
+-		 * the queueing in wake_q_add() so as not to miss wakeups.
+-		 */
+-		wake_up_process(task);
+-		put_task_struct(task);
+-	}
+-}
+ 
+ /*
+  * resched_curr - mark rq's current task 'to be rescheduled now'.
+@@ -8175,20 +8088,6 @@
+ 		return "VOLUNTARY";
+ 
+ 	return "NONE";
+-}
+-
+-int io_schedule_prepare(void)
+-{
+-	int old_iowait = current->in_iowait;
+-
+-	current->in_iowait = 1;
+-	blk_flush_plug(current->plug, true);
+-	return old_iowait;
+-}
+-
+-void io_schedule_finish(int token)
+-{
+-	current->in_iowait = token;
+ }
+ 
+ /*
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
+ CONTEXT_ANALYSIS_core.o := y
++CONTEXT_ANALYSIS_wait_support.o := y
+ CONTEXT_ANALYSIS_fair.o := y
+ 
+ # The compilers are complaining about unused variables inside an if(0) scope
+@@ -23,6 +24,7 @@
+ # I turn this off for IA-64 only.  Andreas Schwab says it's also needed on m68k
+ # to get a correct value for the wait-channel (WCHAN in ps). --davidm
+ CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
++CFLAGS_wait_support.o := $(CFLAGS_core.o)
+ endif
+ 
+ # Branch profiling isn't noinstr-safe
+@@ -36,7 +38,7 @@
+ # These compilation units have roughly the same size and complexity - so their
+ # build parallelizes well and finishes roughly at once:
+ #
+-obj-y += core.o
++obj-y += core.o wait_support.o
+ obj-y += fair.o
+ obj-y += build_policy.o
+ obj-y += build_utility.o
+diff --git a/kernel/sched/wait_support.c b/kernel/sched/wait_support.c
+new file mode 100644
+--- /dev/null
++++ b/kernel/sched/wait_support.c
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  kernel/sched/core.c
++ *
++ *  Core kernel CPU scheduler code
++ *
++ *  Copyright (C) 1991-2002  Linus Torvalds
++ *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
++ */
++/* Wait support mechanically separated from core.c. Bodies and API effects
++ * remain original; the target scheduler supplies real wake/task services. */
++#include <linux/blkdev.h>
++#include <linux/sched/task.h>
++#include <linux/sched/wake_q.h>
++
++static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
++{
++	struct wake_q_node *node = &task->wake_q;
++
++	/*
++	 * Atomically grab the task, if ->wake_q is !nil already it means
++	 * it's already queued (either by us or someone else) and will get the
++	 * wakeup due to that.
++	 *
++	 * In order to ensure that a pending wakeup will observe our pending
++	 * state, even in the failed case, an explicit smp_mb() must be used.
++	 */
++	smp_mb__before_atomic();
++	if (unlikely(cmpxchg_relaxed(&node->next, NULL, WAKE_Q_TAIL)))
++		return false;
++
++	/*
++	 * The head is context local, there can be no concurrency.
++	 */
++	*head->lastp = node;
++	head->lastp = &node->next;
++	return true;
++}
++
++/**
++ * wake_q_add() - queue a wakeup for 'later' waking.
++ * @head: the wake_q_head to add @task to
++ * @task: the task to queue for 'later' wakeup
++ *
++ * Queue a task for later wakeup, most likely by the wake_up_q() call in the
++ * same context, _HOWEVER_ this is not guaranteed, the wakeup can come
++ * instantly.
++ *
++ * This function must be used as-if it were wake_up_process(); IOW the task
++ * must be ready to be woken at this location.
++ */
++void wake_q_add(struct wake_q_head *head, struct task_struct *task)
++{
++	if (__wake_q_add(head, task))
++		get_task_struct(task);
++}
++
++/**
++ * wake_q_add_safe() - safely queue a wakeup for 'later' waking.
++ * @head: the wake_q_head to add @task to
++ * @task: the task to queue for 'later' wakeup
++ *
++ * Queue a task for later wakeup, most likely by the wake_up_q() call in the
++ * same context, _HOWEVER_ this is not guaranteed, the wakeup can come
++ * instantly.
++ *
++ * This function must be used as-if it were wake_up_process(); IOW the task
++ * must be ready to be woken at this location.
++ *
++ * This function is essentially a task-safe equivalent to wake_q_add(). Callers
++ * that already hold reference to @task can call the 'safe' version and trust
++ * wake_q to do the right thing depending whether or not the @task is already
++ * queued for wakeup.
++ */
++void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task)
++{
++	if (!__wake_q_add(head, task))
++		put_task_struct(task);
++}
++
++void wake_up_q(struct wake_q_head *head)
++{
++	struct wake_q_node *node = head->first;
++
++	while (node != WAKE_Q_TAIL) {
++		struct task_struct *task;
++
++		task = container_of(node, struct task_struct, wake_q);
++		node = node->next;
++		/* pairs with cmpxchg_relaxed() in __wake_q_add() */
++		WRITE_ONCE(task->wake_q.next, NULL);
++		/* Task can safely be re-inserted now. */
++
++		/*
++		 * wake_up_process() executes a full barrier, which pairs with
++		 * the queueing in wake_q_add() so as not to miss wakeups.
++		 */
++		wake_up_process(task);
++		put_task_struct(task);
++	}
++}
++
++int io_schedule_prepare(void)
++{
++	int old_iowait = current->in_iowait;
++
++	current->in_iowait = 1;
++	blk_flush_plug(current->plug, true);
++	return old_iowait;
++}
++
++void io_schedule_finish(int token)
++{
++	current->in_iowait = token;
++}
++

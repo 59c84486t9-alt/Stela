@@ -15,6 +15,7 @@
  * access, are bound by the adapter that owns the device. A NULL log or warn
  * discards those reports and a NULL firmware has no images; a service reached
  * without its callback, or outside enter and exit, traps. */
+#include <linux/compiler_attributes.h>
 #include <linux/types.h>
 
 struct stela_linux_services {
@@ -60,6 +61,9 @@ void stela_linux_rcu_finish(void);
 const struct stela_linux_owner *stela_linux_owner(void);
 /* Report an operation Stela does not provide yet to the running owner. */
 void stela_linux_unsupported(const char *operation);
+/* Emit an emergency report through the entered owner, then unconditionally
+ * trap. No graceful return; this does not implement Linux panic machinery. */
+__noreturn void stela_linux_fatal(const char *message);
 
 /* Platform memory behind Linux's allocators: Stela's global heap in its
  * images, libc in hosted test programs. Zeroed and aligned to align, a power

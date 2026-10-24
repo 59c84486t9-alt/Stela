@@ -41,3 +41,9 @@
 /COPYING
 /README
 /Makefile
+/kernel/locking/mutex.c
+/kernel/locking/mutex.h
+/kernel/locking/ww_mutex.h
+/kernel/sched/core.c
+/kernel/sched/Makefile
+/kernel/sched/wait_support.c

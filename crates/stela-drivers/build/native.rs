@@ -215,6 +215,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/kobject.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
+            PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
         ];
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
@@ -247,12 +249,17 @@ impl Linux {
                 .files([
                     format!("{COMPAT}/kernel/trees.c"),
                     format!("{COMPAT}/stela/task_test.c"),
+                    format!("{COMPAT}/stela/mutex_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");
         }
         if let Some(host) = hosted() {
-            let services = [PathBuf::from(format!("{COMPAT}/stela/test.c"))];
+            let services = [
+                PathBuf::from(format!("{COMPAT}/stela/test.c")),
+                PathBuf::from(format!("{COMPAT}/stela/registry_test_host.c")),
+                PathBuf::from(format!("{COMPAT}/stela/taint_test_host.c")),
+            ];
             let services = archive(&host, "linux-host", &services);
             let mut kernel_build = host;
             linux.apply(&mut kernel_build, None, &[], None);
@@ -278,6 +285,10 @@ impl Linux {
                 "linux_trees",
                 "crate::gpu::linux::task::tests::run_trees_child()",
             );
+            tests.add_rust(
+                "linux_mutex_wait",
+                "crate::gpu::linux::task::tests::run_mutex_child()",
+            );
         }
         let Some(mut build) = hosted() else {
             return;
@@ -299,6 +310,10 @@ impl Linux {
             ("linux_slab", "slab.c", "STELA_LINUX_SLAB_TEST"),
             ("linux_cache", "cache.c", "STELA_LINUX_CACHE_TEST"),
             ("linux_params", "params.c", "STELA_LINUX_PARAMS_TEST"),
+            ("linux_params_parser", "params.c", "STELA_LINUX_PARAMS_PARSER_TEST"),
+            ("linux_registry", "registry.c", "STELA_LINUX_REGISTRY_TEST"),
+            ("linux_taint", "taint.c", "STELA_LINUX_TAINT_TEST"),
+            ("linux_entry_generation", "linux.c", "STELA_LINUX_ENTRY_GENERATION_TEST"),
             ("linux_firmware", "firmware.c", "STELA_LINUX_FIRMWARE_TEST"),
             ("linux_crc", "crc.c", "STELA_LINUX_CRC_TEST"),
             ("linux_find_bit", "find_bit.c", "STELA_LINUX_FIND_BIT_TEST"),

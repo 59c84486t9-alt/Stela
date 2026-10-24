@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
-/* Bounded module-parameter operations for the entered serialized Linux owner.
+// SPDX-License-Identifier: GPL-2.0-only
+/* Shared module-parameter grammar and operations for the entered serialized Linux owner.
  * Behavioral reference: Linux 7.2.12 kernel/params.c, Copyright (C) 2001
  * Rusty Russell, and lib/kstrtox.c. Keep the public operation ABI and use
- * Stela's canonical parser/formatter/heap. No sysfs, module loader, security
- * dispatch or pre-allocator command-line lifetime is supplied by this unit. */
+ * Stela's canonical parser/formatter/heap. No sysfs, module loader, LSM
+ * implementation or pre-allocator command-line lifetime is supplied by this unit. */
 #include <asm/page.h>
 #include <linux/errno.h>
 #include <linux/kstrtox.h>
@@ -14,6 +14,254 @@
 #include <linux/sprintf.h>
 #include <linux/string.h>
 #include <stela/linux.h>
+
+/* Shared grammar and dispatch projected from Linux 7.2.12 kernel/params.c,
+ * Copyright (C) 2001 Rusty Russell, and lib/cmdline.c (GPL-2.0-only).
+ * Pinned input identities and verbatim oracle ranges accompany this proposal.
+ * Existing typed operations below remain unchanged. */
+#include <linux/ctype.h>
+#include <linux/err.h>
+#include <linux/irqflags.h>
+#include <linux/panic.h>
+#include <linux/security.h>
+#include <stela/params.h>
+
+static char dash2underscore(char c)
+{
+	if (c == '-')
+		return '_';
+	return c;
+}
+
+bool parameqn(const char *a, const char *b, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		if (dash2underscore(a[i]) != dash2underscore(b[i]))
+			return false;
+	}
+	return true;
+}
+
+bool parameq(const char *a, const char *b)
+{
+	return parameqn(a, b, strlen(a)+1);
+}
+
+/*
+ * Parse a string to get a param value pair.
+ * You can use " around spaces, but can't escape ".
+ * Hyphens and underscores equivalent in parameter names.
+ */
+char *next_arg(char *args, char **param, char **val)
+{
+	unsigned int i, equals = 0;
+	int in_quote = 0, quoted = 0;
+
+	if (*args == '"') {
+		args++;
+		in_quote = 1;
+		quoted = 1;
+	}
+
+	for (i = 0; args[i]; i++) {
+		if (isspace(args[i]) && !in_quote)
+			break;
+		if (equals == 0) {
+			if (args[i] == '=')
+				equals = i;
+		}
+		if (args[i] == '"')
+			in_quote = !in_quote;
+	}
+
+	*param = args;
+	if (!equals)
+		*val = NULL;
+	else {
+		args[equals] = '\0';
+		*val = args + equals + 1;
+
+		/* Don't include quotes in value. */
+		if (**val == '"') {
+			(*val)++;
+			if (args[i-1] == '"')
+				args[i-1] = '\0';
+		}
+	}
+	if (quoted && i > 0 && args[i-1] == '"')
+		args[i-1] = '\0';
+
+	if (args[i]) {
+		args[i] = '\0';
+		args += i + 1;
+	} else
+		args += i;
+
+	/* Chew up trailing spaces. */
+	return skip_spaces(args);
+}
+
+/* The public contiguous ABI and registry view share one dispatch core. The
+ * accessor never copies descriptors: custom setters see the original kp. */
+struct parameter_view {
+	const struct kernel_param *contiguous;
+	const struct kernel_param *const *pointers;
+	unsigned int count;
+};
+
+static const struct kernel_param *parameter_at(const struct parameter_view *view,
+					      unsigned int index)
+{
+	return view->pointers ? view->pointers[index] : &view->contiguous[index];
+}
+
+static int observe_parameter(const struct stela_linux_param_observer *observer,
+			     enum stela_linux_param_event event,
+			     const struct kernel_param *kp, char *param, char *val,
+			     int result, int *observer_error)
+{
+	if (!observer || !observer->observe)
+		return 0;
+	int error = observer->observe(observer->context, event, kp, param, val, result);
+	if (error) {
+		*observer_error = error < 0 ? error : -EPROTO;
+		return *observer_error;
+	}
+	return 0;
+}
+
+static int parse_parameter(char *param, char *val, const char *doing,
+			   const struct parameter_view *view, s16 min_level,
+			   s16 max_level, void *arg, parse_unknown_fn unknown,
+			   const struct stela_linux_param_observer *observer,
+			   int *observer_error)
+{
+	for (unsigned int i = 0; i < view->count; i++) {
+		const struct kernel_param *kp = parameter_at(view, i);
+		/* Invalid owned manifests must not turn into a NULL call. Public
+		 * Linux callers retain their valid-descriptor input contract. */
+		if (!kp || !kp->name || !kp->ops)
+			return -EINVAL;
+		if (!parameq(param, kp->name))
+			continue;
+		if (kp->level < min_level || kp->level > max_level)
+			return 0;
+		if (!val && !(kp->ops->flags & KERNEL_PARAM_OPS_FL_NOARG))
+			return -EINVAL;
+		if ((kp->ops->flags & ~KERNEL_PARAM_OPS_FL_NOARG) ||
+		    (kp->flags & ~(KERNEL_PARAM_FL_HWPARAM | KERNEL_PARAM_FL_UNSAFE))) {
+			pr_err("%s: unsupported parameter flags for '%s'\n", doing, param);
+			return -EOPNOTSUPP;
+		}
+		if (!kp->ops->set)
+			return -EPERM;
+		int error = observe_parameter(observer, STELA_LINUX_PARAM_BEFORE_SET,
+					      kp, param, val, 0, observer_error);
+		if (error)
+			return error;
+		pr_debug("handling %s with %p\n", param, kp->ops->set);
+		kernel_param_lock(kp->mod);
+		/* Preserve security-first ordering and real shared taint effects. */
+		if ((kp->flags & KERNEL_PARAM_FL_HWPARAM) &&
+		    security_locked_down(LOCKDOWN_MODULE_PARAMETERS)) {
+			error = -EPERM;
+		} else {
+			if (kp->flags & KERNEL_PARAM_FL_UNSAFE) {
+				pr_notice("Setting dangerous option %s - tainting kernel\n", kp->name);
+				add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+			}
+			error = kp->ops->set(val, kp);
+		}
+		kernel_param_unlock(kp->mod);
+		int fault = observe_parameter(observer, STELA_LINUX_PARAM_AFTER_SET,
+					      kp, param, val, error, observer_error);
+		return fault ? fault : error;
+	}
+	if (unknown) {
+		int error = observe_parameter(observer, STELA_LINUX_PARAM_BEFORE_UNKNOWN,
+					      NULL, param, val, 0, observer_error);
+		if (error)
+			return error;
+		pr_debug("doing %s: %s='%s'\n", doing, param, val);
+		error = unknown(param, val, doing, arg);
+		int fault = observe_parameter(observer, STELA_LINUX_PARAM_AFTER_UNKNOWN,
+					      NULL, param, val, error, observer_error);
+		return fault ? fault : error;
+	}
+	pr_debug("Unknown argument '%s'\n", param);
+	return -ENOENT;
+}
+
+static struct stela_linux_params_result parse_parameter_args(
+	const char *doing, char *args, const struct parameter_view *view,
+	s16 min_level, s16 max_level, void *arg, parse_unknown_fn unknown,
+	const struct stela_linux_param_observer *observer)
+{
+	(void)stela_linux_owner();
+	struct stela_linux_params_result result = {0};
+	char *param, *val;
+	args = skip_spaces(args);
+	if (*args)
+		pr_debug("doing %s, parsing ARGS: '%s'\n", doing, args);
+	while (*args) {
+		args = next_arg(args, &param, &val);
+		if (!val && !strcmp(param, "--")) {
+			if (!result.result)
+				result.result = args;
+			return result;
+		}
+		int irq_was_disabled = irqs_disabled();
+		int ret = parse_parameter(param, val, doing, view, min_level, max_level,
+					  arg, unknown, observer, &result.observer_error);
+		/* A broken callback boundary is terminal, distinct from a source
+		 * parameter error. No warning/log callback runs in a changed owner. */
+		if (result.observer_error) {
+			result.result = ERR_PTR(result.observer_error);
+			return result;
+		}
+		if (irq_was_disabled && !irqs_disabled())
+			pr_warn("%s: option '%s' enabled irq's!\n", doing, param);
+		switch (ret) {
+		case 0:
+			continue;
+		case -ENOENT:
+			pr_err("%s: Unknown parameter `%s'\n", doing, param);
+			break;
+		case -ENOSPC:
+			pr_err("%s: `%s' too large for parameter `%s'\n", doing, val ?: "", param);
+			break;
+		default:
+			pr_err("%s: `%s' invalid for parameter `%s'\n", doing, val ?: "", param);
+			break;
+		}
+		result.result = ERR_PTR(ret);
+	}
+	return result;
+}
+
+char *parse_args(const char *doing, char *args, const struct kernel_param *params,
+		 unsigned int num, s16 min_level, s16 max_level, void *arg,
+		 parse_unknown_fn unknown)
+{
+	const struct parameter_view view = {.contiguous = params, .count = num};
+	return parse_parameter_args(doing, args, &view, min_level, max_level,
+				    arg, unknown, NULL).result;
+}
+
+struct stela_linux_params_result stela_linux_parse_args_view(
+	const char *doing, char *args, const struct kernel_param *const *params,
+	unsigned int num, s16 min_level, s16 max_level, void *arg,
+	parse_unknown_fn unknown, const struct stela_linux_param_observer *observer)
+{
+	(void)stela_linux_owner();
+	if (num && !params)
+		return (struct stela_linux_params_result){.result = ERR_PTR(-EINVAL)};
+	const struct parameter_view view = {.pointers = params, .count = num};
+	return parse_parameter_args(doing, args, &view, min_level, max_level,
+				    arg, unknown, observer);
+}
 
 #define PARAM_STRING_LIMIT 1024UL
 
@@ -595,4 +843,8 @@ int main(void)
 	printf("Linux parameters: typed grammar, text, bounded strings and owned teardown passed\n");
 	return 0;
 }
+#endif
+
+#ifdef STELA_LINUX_PARAMS_PARSER_TEST
+#include <stela/params-parser-test.h>
 #endif
