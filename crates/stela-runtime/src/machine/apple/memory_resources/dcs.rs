@@ -187,7 +187,11 @@ mod tests {
                 owner.read(base + CONFIG_ED0, Width::Word, &mut access),
                 Ok(0x4c00_0000 + channel as u64)
             );
-            for offset in [REFRESH, 0x580, 0x588, 0x4000, DRAIN] {
+            assert_eq!(
+                owner.read(base + REFRESH, Width::Word, &mut access),
+                Ok(0x14a)
+            );
+            for offset in [0x4000, DRAIN] {
                 assert!(owner.read(base + offset, Width::Word, &mut access).is_err());
             }
             assert!(

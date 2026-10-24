@@ -701,7 +701,8 @@ mod tests {
         let mut owner = owner(Arc::clone(&ram));
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 9, &mut latch);
-        for offset in [0x41c, 0x580, 0x588, 0x4000, DCS_BYTES + ptd::PTD_BYTES] {
+        assert_eq!(owner.read(0x41c, Width::Word, &mut access), Ok(0x14a));
+        for offset in [0x4000, DCS_BYTES + ptd::PTD_BYTES] {
             assert!(owner.read(offset, Width::Word, &mut access).is_err());
         }
         let paused = LifecycleState {

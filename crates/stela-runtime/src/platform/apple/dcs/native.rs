@@ -5,6 +5,21 @@
 //! _dcsWriteQueueFlush file2efde44..2efdf14 clears low16 of +a40, retains
 //! high16, delays330us and executes the final barrier. No ordinary read or
 //! saved ready bit establishes completion of the actual synchronous frontend.
+//!
+//! `handleDCSOdtsEvent` reads each channel's +41c once a second: the latest
+//! LPDDR mode register 4 refresh rate of its two ranks in bits 4:0 and 9:5,
+//! retrying while either reads 0xd. The model's DRAM is at nominal
+//! temperature, where LPDDR5 refreshes at the 1x rate, code 0xa (Intel 12th
+//! Generation Core datasheet volume 2, `MR4_RANK_TEMPERATURE`).
+//!
+//! `_enablePerfCtrl` and `_writePerfCtrl` program the performance counter
+//! control and event selection words +580..+640, which hold their full32
+//! writes from a zero handoff. In the driver's `AMCPerfCounterConfig` table
+//! (`SR duration(usec)`, `PD duration(usec)`), +588 bits 0 and 4 enable the
+//! self-refresh and power-down duration counters and bits 8 and 12 clear
+//! them; `_enablePerfCtrl` panics unless a clear bit reads clear within
+//! 20 us, and a clear completes at once. The counters at +4000 count DRAM
+//! events, which no producer supplies, so their reads refuse.
 use crate::platform::apple::bus::{
     Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
 };
@@ -20,6 +35,12 @@ const REFRESH: u64 = 0x41c;
 const DRAIN: u64 = 0xa40;
 const CONFIG_EC8: u64 = 0xec8;
 const CONFIG_ED0: u64 = 0xed0;
+const PERF: core::ops::Range<u64> = 0x580..0x640;
+const DURATION: u64 = 0x588;
+const DURATION_CLEAR: u32 = 1 << 8 | 1 << 12;
+/// The LPDDR5 1x refresh-rate code in both ranks' fields.
+const NOMINAL_REFRESH: u64 = 0xa | 0xa << 5;
+const PERF_WORDS: usize = ((PERF.end - PERF.start) / 4) as usize;
 
 /// Caller-declared software backing, not physical reset/DRAM observations.
 /// Initial configuration is retained as opaque full32 words; drain high16 is
@@ -61,6 +82,7 @@ pub struct ChannelProgress {
 struct Channel {
     configuration: ChannelConfiguration,
     progress: ChannelProgress,
+    perf: [u32; PERF_WORDS],
 }
 struct State {
     channels: Vec<Channel>,
@@ -123,6 +145,7 @@ impl Controller {
                     .map(|configuration| Channel {
                         configuration,
                         progress: ChannelProgress::default(),
+                        perf: [0; PERF_WORDS],
                     })
                     .collect(),
                 lifecycle,
@@ -255,6 +278,11 @@ impl MmioDevice for Controller {
             ));
         }
         let configuration = state.channels[channel].configuration;
+        if PERF.contains(&register) {
+            return Ok(u64::from(
+                state.channels[channel].perf[((register - PERF.start) / 4) as usize],
+            ));
+        }
         match register {
             CONFIG_EC8 => Ok(u64::from(configuration.ec8)),
             CONFIG_ED0 => Ok(u64::from(configuration.ed0)),
@@ -262,9 +290,7 @@ impl MmioDevice for Controller {
             DRAIN => Err(fail(
                 "native DCS drain requires the actual canonical all-writer memory service",
             )),
-            REFRESH => Err(fail(
-                "native DCS refresh telemetry has no qualified producer",
-            )),
+            REFRESH => Ok(NOMINAL_REFRESH),
             _ => Err(fail(
                 "native DCS register/event accounting is not source-qualified",
             )),
@@ -284,6 +310,16 @@ impl MmioDevice for Controller {
             .try_borrow_mut()
             .map_err(|_| fail("native DCS owner is already borrowed"))?;
         state.accessible().map_err(fail)?;
+        if PERF.contains(&register) && value <= u64::from(u32::MAX) {
+            let value = value as u32;
+            let clear = if register == DURATION {
+                DURATION_CLEAR
+            } else {
+                0
+            };
+            state.channels[channel].perf[((register - PERF.start) / 4) as usize] = value & !clear;
+            return Ok(());
+        }
         if !matches!(register, CONFIG_EC8 | CONFIG_ED0 | GATING) || value > u64::from(u32::MAX) {
             return Err(fail(
                 "native DCS write has no qualified full32 configuration or memory service",
@@ -326,6 +362,50 @@ impl MmioDevice for Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_reads_nominal_and_perf_control_holds_with_clears_completing() {
+        let live = LifecycleState {
+            powered: true,
+            clocked: true,
+            quiesced: false,
+            reset: false,
+            retention: true,
+        };
+        let configuration = ChannelConfiguration {
+            ec8: 0,
+            ed0: 0,
+            gating: 0,
+            drain_high: 0,
+        };
+        let mut owner =
+            Controller::initialized(alloc::vec![configuration; CHANNELS], live).unwrap();
+        let mut latch = crate::platform::apple::interrupt::InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let base = 3 * CHANNEL_STRIDE;
+        assert_eq!(
+            owner.read(base + REFRESH, Width::Word, &mut access),
+            Ok(0x14a)
+        );
+        assert_eq!(owner.read(base + 0x58c, Width::Word, &mut access), Ok(0));
+        owner
+            .write(base + 0x58c, Width::Word, 0x3ff_001a, &mut access)
+            .unwrap();
+        assert_eq!(
+            owner.read(base + 0x58c, Width::Word, &mut access),
+            Ok(0x3ff_001a)
+        );
+        owner
+            .write(base + DURATION, Width::Word, 0x1111, &mut access)
+            .unwrap();
+        assert_eq!(
+            owner.read(base + DURATION, Width::Word, &mut access),
+            Ok(0x11)
+        );
+        // Other channels keep their own words; the counters refuse.
+        assert_eq!(owner.read(0x58c, Width::Word, &mut access), Ok(0));
+        assert!(owner.read(base + 0x4000, Width::Word, &mut access).is_err());
+    }
 
     #[test]
     fn completed_drain_progress_is_bounded_and_exhaustion_preserves_pending_effects() {
