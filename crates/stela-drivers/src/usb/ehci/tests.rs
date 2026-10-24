@@ -57,6 +57,8 @@ struct Shared {
     unmapped: usize,
     mode: Mode,
     request: Option<[u8; 8]>,
+    request_root: Option<usize>,
+    addresses: [Option<u8>; 15],
     response: Vec<u8>,
     description: Vec<u8>,
     hold_status: Option<u8>,
@@ -69,6 +71,7 @@ struct Shared {
     suppress_writeback: bool,
     reset_disconnect: bool,
     high_speed: bool,
+    disable_ack: bool,
 }
 impl Shared {
     fn new() -> Self {
@@ -108,6 +111,8 @@ impl Shared {
             unmapped: 0,
             mode: Mode::Complete,
             request: None,
+            request_root: None,
+            addresses: [None; 15],
             response: Vec::new(),
             description: DESCRIPTION.to_vec(),
             hold_status: None,
@@ -120,6 +125,7 @@ impl Shared {
             suppress_writeback: false,
             reset_disconnect: false,
             high_speed: true,
+            disable_ack: true,
         }
     }
     fn u32(&self, offset: usize) -> u32 {
@@ -144,6 +150,20 @@ impl Shared {
         assert_ne!(info & (1 << 15), 0);
         assert_eq!(info & (3 << 12), 2 << 12);
         assert_eq!(self.u32(8), 1 << 30);
+        let address = (info & 127) as u8;
+        let physical: Vec<usize> = (0..15)
+            .filter(|root| {
+                self.addresses[*root] == Some(address)
+                    && self.words[(OP + PORT) / 4 + root] & (CONNECT | ENABLE | OWNER | PORT_RESET)
+                        == CONNECT | ENABLE
+            })
+            .collect();
+        assert_eq!(
+            physical.len(),
+            1,
+            "actual USB address must identify one enabled physical root"
+        );
+        let root = physical[0];
         let control = info & (1 << 14) != 0;
         assert_eq!((info >> 16) & 0x7ff, if control { 64 } else { 512 });
         let mut resume = self.u32(24) & ACTIVE != 0;
@@ -233,6 +253,7 @@ impl Shared {
                 assert_eq!(initial & TOGGLE, 0);
                 let setup: [u8; 8] = self.device[pointer..pointer + 8].try_into().unwrap();
                 self.request = Some(setup);
+                self.request_root = Some(root);
                 self.setup_trace.push(setup);
                 self.offset = 0;
                 self.response = if setup[1] == 6 && setup[3] == 2 {
@@ -259,6 +280,9 @@ impl Shared {
                 );
                 assert_ne!(initial & TOGGLE, 0);
                 self.status_pids.push(pid);
+                if setup[1] == 5 {
+                    self.addresses[self.request_root.unwrap()] = Some(setup[2]);
+                }
             } else if pid == 1 {
                 if control {
                     actual = actual.min(self.response.len().saturating_sub(self.offset));
@@ -540,7 +564,7 @@ impl Hardware for Access {
             let mut next = (value & !(PORT_CHANGES | CONNECT | ENABLE))
                 | (old & (CONNECT | ENABLE))
                 | (old & PORT_CHANGES & !value);
-            if value & ENABLE == 0 {
+            if value & ENABLE == 0 && (old & ENABLE == 0 || m.disable_ack) {
                 next &= !ENABLE;
             }
             if old & PORT_RESET != 0 && value & PORT_RESET == 0 {
@@ -549,6 +573,7 @@ impl Hardware for Access {
                 } else {
                     if m.high_speed {
                         next |= ENABLE | 1 << 3;
+                        m.addresses[(offset - OP - PORT) / 4] = Some(0);
                     }
                 }
             }
@@ -1218,4 +1243,227 @@ fn sticky_legacy_smi_enable_refuses_handoff_before_reset_dma_and_bme() {
             .iter()
             .any(|(offset, value)| *offset == OP + CMD && *value & RESET != 0)
     );
+}
+
+fn two_roots() -> (Controller, Arc<Mutex<Shared>>) {
+    let m = Arc::new(Mutex::new(Shared::new()));
+    {
+        let mut m = m.lock().unwrap();
+        m.words[1] = (m.words[1] & !15) | 2;
+        m.words[(OP + PORT + 4) / 4] = CONNECT | POWER;
+    }
+    (controller(m.clone()), m)
+}
+
+#[test]
+fn connected_ambiguous_default_root_never_releases_address0_for_another_root() {
+    for through_live in [false, true] {
+        let (mut c, m) = two_roots();
+        let old = c.reset_port(1).unwrap();
+        let before = {
+            let mut m = m.lock().unwrap();
+            m.words[(OP + PORT) / 4] |= 1 << 3;
+            (
+                m.device.clone(),
+                m.cpu_syncs,
+                m.device_syncs,
+                m.setup_trace.clone(),
+            )
+        };
+        if through_live {
+            assert_eq!(
+                c.control_in(&old, [0x80, 6, 0, 1, 0, 0, 18, 0]),
+                Err(Error::Stale)
+            );
+        } else {
+            assert_eq!(c.refresh_roots(), Err(Error::Stale));
+        }
+        assert!(c.ready().is_err());
+        assert_eq!(c.default_port, Some(1));
+        assert!(c.ports[0].is_none());
+        let io = m.lock().unwrap().io;
+        assert_eq!(c.reset_port(2).err(), Some(Error::Quarantined));
+        assert_eq!(m.lock().unwrap().io, io);
+        let after = {
+            let m = m.lock().unwrap();
+            assert_eq!(
+                m.words[(OP + PORT) / 4] & (CONNECT | ENABLE),
+                CONNECT | ENABLE
+            );
+            (
+                m.device.clone(),
+                m.cpu_syncs,
+                m.device_syncs,
+                m.setup_trace.clone(),
+            )
+        };
+        assert_eq!(before, after);
+    }
+}
+
+#[test]
+fn connected_ambiguous_addressed_root_never_permits_duplicate_set_address_or_dma() {
+    let (mut c, m) = two_roots();
+    let old = c.reset_port(1).unwrap();
+    c.set_address(&old, 7).unwrap();
+    let default = c.reset_port(2).unwrap();
+    let before = {
+        let mut m = m.lock().unwrap();
+        m.words[(OP + PORT) / 4] |= 1 << 3;
+        (
+            m.device.clone(),
+            m.cpu_syncs,
+            m.device_syncs,
+            m.setup_trace.clone(),
+        )
+    };
+    assert_eq!(c.refresh_roots(), Err(Error::Stale));
+    assert!(c.ready().is_err());
+    assert_eq!(c.default_port, Some(2));
+    let io = m.lock().unwrap().io;
+    assert_eq!(c.set_address(&default, 7), Err(Error::Quarantined));
+    assert_eq!(
+        c.control_in(&default, [0x80, 6, 0, 1, 0, 0, 18, 0]),
+        Err(Error::Quarantined)
+    );
+    assert_eq!(m.lock().unwrap().io, io);
+    let after = {
+        let m = m.lock().unwrap();
+        assert_eq!(
+            m.words[(OP + PORT) / 4] & (CONNECT | ENABLE),
+            CONNECT | ENABLE
+        );
+        (
+            m.device.clone(),
+            m.cpu_syncs,
+            m.device_syncs,
+            m.setup_trace.clone(),
+        )
+    };
+    assert_eq!(before, after);
+}
+
+#[test]
+fn ambiguous_owned_reset_failures_cannot_release_old_default_or_assigned_bus_owner() {
+    for addressed in [false, true] {
+        for fault in [0, 1] {
+            let (mut c, m) = two_roots();
+            let old = c.reset_port(1).unwrap();
+            if addressed {
+                c.set_address(&old, 7).unwrap();
+            }
+            {
+                let mut m = m.lock().unwrap();
+                if fault == 0 {
+                    m.words[(OP + PORT) / 4] |= OVERCURRENT;
+                } else {
+                    m.reset_disconnect = true;
+                }
+            }
+            assert_eq!(c.reset_port(1).err(), Some(Error::Stale));
+            assert!(c.ready().is_err());
+            assert_eq!(c.default_port, if addressed { None } else { Some(1) });
+            let before = {
+                let m = m.lock().unwrap();
+                (
+                    m.io,
+                    m.device.clone(),
+                    m.cpu_syncs,
+                    m.device_syncs,
+                    m.setup_trace.clone(),
+                )
+            };
+            assert_eq!(c.reset_port(2).err(), Some(Error::Quarantined));
+            assert!(c.control_in(&old, [0x80, 6, 0, 1, 0, 0, 18, 0]).is_err());
+            let after = {
+                let m = m.lock().unwrap();
+                (
+                    m.io,
+                    m.device.clone(),
+                    m.cpu_syncs,
+                    m.device_syncs,
+                    m.setup_trace.clone(),
+                )
+            };
+            assert_eq!(before, after);
+        }
+    }
+}
+
+#[test]
+fn actual_disconnect_releases_assigned_address_and_preserves_other_root_completion() {
+    let (mut c, m) = two_roots();
+    let old = c.reset_port(1).unwrap();
+    c.set_address(&old, 7).unwrap();
+    let next = c.reset_port(2).unwrap();
+    m.lock().unwrap().words[(OP + PORT) / 4] = POWER | (1 << 1);
+    assert_eq!(c.refresh_roots().unwrap(), vec![1]);
+    assert!(c.ready().is_ok());
+    c.set_address(&next, 7).unwrap(); // Same address only after physical disconnect.
+    let before = m.lock().unwrap().io;
+    assert_eq!(c.set_address(&old, 9), Err(Error::Stale));
+    assert_eq!(m.lock().unwrap().io, before);
+
+    let (mut c, m) = two_roots();
+    let first = c.reset_port(1).unwrap();
+    c.set_address(&first, 7).unwrap();
+    let second = c.reset_port(2).unwrap();
+    c.set_address(&second, 8).unwrap();
+    let pipes = c.configure(&second, 0).unwrap();
+    let current = c.submit_bulk_in(input(&pipes), 19, 1_000_000).unwrap();
+    let before = {
+        let mut m = m.lock().unwrap();
+        m.words[(OP + PORT) / 4] = POWER | (1 << 1);
+        (m.device.clone(), m.cpu_syncs, m.device_syncs)
+    };
+    assert_eq!(c.refresh_roots().unwrap(), vec![1]);
+    assert!(c.ready().is_ok());
+    let after = {
+        let m = m.lock().unwrap();
+        (m.device.clone(), m.cpu_syncs, m.device_syncs)
+    };
+    assert_eq!(before, after);
+    assert_eq!(c.poll(&current).unwrap().unwrap().actual, 19);
+}
+
+#[test]
+fn inherited_enabled_roots_are_physically_disabled_before_first_default_owner() {
+    let m = Arc::new(Mutex::new(Shared::new()));
+    {
+        let mut m = m.lock().unwrap();
+        m.words[1] = (m.words[1] & !15) | 2;
+        m.words[(OP + PORT) / 4] = CONNECT | POWER | ENABLE;
+        m.addresses[0] = Some(0);
+        m.words[(OP + PORT + 4) / 4] = CONNECT | POWER | ENABLE;
+        m.addresses[1] = Some(7);
+    }
+    let mut c = controller(m.clone());
+    assert_eq!(m.lock().unwrap().words[(OP + PORT) / 4] & ENABLE, 0);
+    assert_eq!(m.lock().unwrap().words[(OP + PORT + 4) / 4] & ENABLE, 0);
+    let first = c.reset_port(1).unwrap();
+    c.set_address(&first, 7).unwrap(); // Other physical7 is disabled.
+    assert_eq!(m.lock().unwrap().addresses[0], Some(7));
+}
+
+#[test]
+fn inherited_root_disable_requires_actual_ack_and_retains_uncertain_native_owner() {
+    let m = Arc::new(Mutex::new(Shared::new()));
+    {
+        let mut m = m.lock().unwrap();
+        m.words[(OP + PORT) / 4] = CONNECT | POWER | ENABLE;
+        m.addresses[0] = Some(0);
+        m.disable_ack = false;
+    }
+    let failure = match Controller::initialize(Box::new(Access(m.clone()))) {
+        Err(failure) => failure,
+        Ok(_) => panic!("inherited live root accepted without PEclear ACK"),
+    };
+    assert_eq!(failure.error, Error::Timeout);
+    assert!(failure.is_quarantined());
+    drop(failure);
+    let m = m.lock().unwrap();
+    assert!(m.mapped && m.bme && !m.retired);
+    assert_eq!(m.unmapped, 0);
+    assert_ne!(m.words[(OP + PORT) / 4] & ENABLE, 0);
+    assert!(m.setup_trace.is_empty());
 }

@@ -316,6 +316,22 @@ impl Controller {
         self.put(CONFIG, 1)?;
         self.wait(self.operational + CONFIG, 1, 1, TRANSITION_US)?;
         self.hw().delay_us(5_000)?; // Actual root-routing settle, not register readback.
+        // HCRST is not USB device-address retirement. Before minting any
+        // default-address owner, prove every untracked EHCI root isolated.
+        for index in 0..self.ports.len() {
+            let at = self.port_at(index);
+            let value = self.read(at)?;
+            if value & OWNER != 0 {
+                continue;
+            } // Actual companion route, not ours.
+            if value & (PORT_RESET | (1 << 6)) != 0 {
+                return Err(Error::Unsupported("EHCI inherited root transition"));
+            }
+            if value & ENABLE != 0 {
+                self.write(at, value & !(ENABLE | PORT_CHANGES))?;
+                self.wait(at, ENABLE, 0, TRANSITION_US)?;
+            }
+        }
         self.health()
     }
     fn legacy(&mut self, mut offset: u16) -> Result<(), Error> {

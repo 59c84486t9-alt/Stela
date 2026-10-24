@@ -202,18 +202,33 @@ impl Controller {
         if value & (CONNECT | ENABLE | OWNER | OVERCURRENT | PORT_RESET | PORT_CHANGES)
             != CONNECT | ENABLE
         {
-            self.ports[index] = None;
-            if self.default_port == Some(id.port) {
-                self.default_port = None;
-            }
-            if self.pending.is_some() {
-                self.state = State::Failed;
-            }
+            self.retire_observed_root(index, value)?;
             return Err(Error::Stale);
         }
         let result = self.health();
         self.guard(result)?;
         Ok(index)
+    }
+    fn retire_observed_root(&mut self, index: usize, value: u32) -> Result<(), Error> {
+        let port = (index + 1) as u8;
+        self.ports[index] = None; // Revoke public identity before any other work.
+        // Losing an identity is not physical isolation. A connected device can
+        // still answer its old assigned address (or address0) despite PEC/CSC,
+        // overcurrent or an unfinished reset. Never free that bus namespace.
+        if value & CONNECT != 0 {
+            return self.fail(Error::Stale);
+        }
+        if self.default_port == Some(port) {
+            self.default_port = None;
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.root_port() == port)
+        {
+            return self.fail(Error::Stale);
+        }
+        Ok(())
     }
     fn health(&mut self) -> Result<(), Error> {
         let status = self.op(STS)?;
@@ -299,16 +314,21 @@ impl Controller {
             .ok_or(Error::Exhausted)?;
         self.next_generation = generation;
         self.ports[index] = None;
-        self.default_port = None;
+        // Keep any old address0 reservation throughout the owned transition.
+        // A failed reset can leave that exact device reachable at address0.
         let result = self.reset_root(index);
         if let Err(error) = result {
-            // A clean companion handoff / disconnected port is an explicit
-            // unsupported device, not uncertainty in our schedule ownership.
-            if !matches!(
+            // Only these paths observed actual OWNER handoff or a disabled
+            // FS/LS port after completed reset. Every ambiguous failure closes
+            // the whole controller, including old assigned address aliases.
+            if matches!(
                 error,
                 Error::Unsupported("EHCI companion-owned root" | "EHCI FS/LS companion traffic")
-                    | Error::Stale
             ) {
+                if self.default_port == Some(port) {
+                    self.default_port = None;
+                }
+            } else {
                 self.state = State::Failed;
             }
             return Err(error);
@@ -394,18 +414,8 @@ impl Controller {
                 != CONNECT | ENABLE
             {
                 let port = (index + 1) as u8;
-                self.ports[index] = None;
-                if self.default_port == Some(port) {
-                    self.default_port = None;
-                }
+                self.retire_observed_root(index, value)?;
                 removed.push(port);
-                if self
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.root_port() == port)
-                {
-                    return self.fail(Error::Stale);
-                }
                 // Leave PORTSC unchanged: replaying an unexpected reset/
                 // resume/owner bit is not authorized by observing a change.
                 // A later explicit root reset owns its W1C acknowledgments.
