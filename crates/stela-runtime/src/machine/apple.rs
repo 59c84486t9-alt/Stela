@@ -79,6 +79,7 @@ pub use crate::platform::usb::{
 };
 use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use core::cell::Cell;
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 
 mod canonical_reads;
@@ -176,6 +177,12 @@ pub struct AppleDevices {
     /// The SoC's sleep and wake (`sleep`).
     sleep: sleep::SocSleep,
     rtc_clock: Option<pmu::RtcClock>,
+    /// Every PMU's oscillator, the RTC's among them.
+    pmu_clocks: Vec<pmu::RtcClock>,
+    /// The latest count a board entry was given, and the entry; the first
+    /// entry given an earlier count, with it, for the stop it causes.
+    time_seen: Cell<(u64, &'static str)>,
+    time_regression: Cell<Option<[(u64, &'static str); 2]>>,
 }
 
 const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
@@ -519,6 +526,9 @@ impl AppleDevices {
             native_pmp_services: None,
             sleep: sleep::SocSleep::for_boot_processor(boot_processor),
             rtc_clock: None,
+            pmu_clocks: Vec::new(),
+            time_seen: Cell::new((0, "start")),
+            time_regression: Cell::new(None),
         }
     }
 
@@ -1435,6 +1445,7 @@ impl AppleDevices {
             let clock = pmu::RtcClock::new(epoch).map_err(String::from)?;
             let model = Pmu::with_clock(configuration, clock, wall.filter(|_| pmu.rtc.is_some()))
                 .map_err(String::from)?;
+            self.pmu_clocks.extend(model.rtc_clock());
             if let Some(profile) = pmu.rtc_helper {
                 if !pmu.primary || self.rtc_clock.is_some() || primary_clock.is_some() {
                     return Err("RTC helper has no unique primary oscillator owner".into());
@@ -1968,14 +1979,34 @@ impl AppleDevices {
         }
         Ok(())
     }
-    /// The RTC's last backwards counter, for a stop's reason.
+    /// Record the count board entry `entry` was given.
+    fn observe_time(&self, now: u64, entry: &'static str) {
+        let seen = self.time_seen.get();
+        if now < seen.0 {
+            if self.time_regression.get().is_none() {
+                self.time_regression.set(Some([(now, entry), seen]));
+            }
+        } else {
+            self.time_seen.set((now, entry));
+        }
+    }
+
+    /// A PMU oscillator's last backwards counter, and the first board entry
+    /// given an earlier count than another, for a stop's reason.
     fn rtc_regression(&self) -> String {
-        self.rtc_clock
-            .as_ref()
-            .and_then(pmu::RtcClock::regression)
-            .map_or_else(String::new, |(now, published)| {
-                format!(" (RTC counter {now:#x} after publication {published:#x})")
-            })
+        let mut reason = String::new();
+        if let Some((now, published)) = self
+            .rtc_clock
+            .iter()
+            .chain(&self.pmu_clocks)
+            .find_map(pmu::RtcClock::regression)
+        {
+            reason += &format!(" (PMU counter {now:#x} after publication {published:#x})");
+        }
+        if let Some([(now, entry), (seen, before)]) = self.time_regression.get() {
+            reason += &format!(" ({entry} at {now:#x} after {before} at {seen:#x})");
+        }
+        reason
     }
 
     fn publish_rtc_time_or_halt(&mut self, now: u64) -> bool {
@@ -2934,6 +2965,7 @@ impl Devices for AppleDevices {
     }
 
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        self.observe_time(now, "read");
         let consumed = self.consume_scalar_read(cpu, physical, bytes, now, None)?;
         consumed.settlement?;
         Ok(consumed.value)
@@ -2956,6 +2988,7 @@ impl Devices for AppleDevices {
         now: u64,
         memory: &mut dyn super::engine::CanonicalDeviceMemory,
     ) -> Result<super::engine::ConsumedScalar, DeviceError> {
+        self.observe_time(now, "read");
         self.consume_scalar_read(cpu, physical, bytes, now, Some(memory))
     }
 
@@ -2967,6 +3000,7 @@ impl Devices for AppleDevices {
         now: u64,
         _memory: &mut dyn super::engine::CanonicalDeviceMemory,
     ) -> Result<ConsumedPair, DeviceError> {
+        self.observe_time(now, "paired read");
         // Only the actual Prepared publication/status owner has a qualified
         // whole-pair read. Never consume two unrelated scalar registers here.
         self.read_pair(cpu, physical, bytes, now)?.ok_or_else(|| {
@@ -2983,6 +3017,7 @@ impl Devices for AppleDevices {
         bytes: u8,
         now: u64,
     ) -> Result<Option<ConsumedPair>, DeviceError> {
+        self.observe_time(now, "paired read");
         // Probe without effects: both members must belong to the same actual
         // joint resource at consecutive offsets, not merely adjacent PAs.
         let Some(width) = Width::from_bytes(u64::from(bytes)) else {
@@ -3025,6 +3060,7 @@ impl Devices for AppleDevices {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
+        self.observe_time(now, "write");
         use super::engine::ConsumedWrite;
         match self.consume_scalar_write(cpu, physical, bytes, value, now, None)? {
             ConsumedWrite::Complete { settlement } => settlement,
@@ -3041,6 +3077,7 @@ impl Devices for AppleDevices {
         now: u64,
         owners: &mut dyn super::engine::CanonicalDeviceWrite,
     ) -> Result<super::engine::ConsumedWrite, DeviceError> {
+        self.observe_time(now, "write");
         if let Some(completed) =
             self.consume_processor_power_write(cpu, physical, bytes, value, now, owners)?
         {
@@ -3059,6 +3096,7 @@ impl Devices for AppleDevices {
         write: Option<u64>,
         now: u64,
     ) -> Option<Result<u64, &'static str>> {
+        self.observe_time(now, "System register");
         if !self.publish_rtc_time_or_halt(now) {
             return Some(Err("RTC counter publication refused; board halted"));
         }
@@ -3086,6 +3124,7 @@ impl Devices for AppleDevices {
     }
 
     fn lines(&mut self, cpu: usize, now: u64) -> Lines {
+        self.observe_time(now, "lines");
         if !self.publish_rtc_time_or_halt(now) {
             return Lines::default();
         }
@@ -3120,6 +3159,7 @@ impl Devices for AppleDevices {
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {
+        self.observe_time(now, "deadline");
         if !self.publish_rtc_time_or_halt(now) {
             return None;
         }
@@ -3186,6 +3226,7 @@ impl Devices for AppleDevices {
     /// An AICv2 or AICv3 stops sending IRQs to a CPU whose SIQ_CFG_EL1
     /// refuses them; an AICv1 is not documented to consult it.
     fn irq_steering(&mut self, cpu: usize, refuses: bool, now: u64) {
+        self.observe_time(now, "IRQ steering");
         let Some(Controller::V2(id)) = self.aic else {
             return;
         };
@@ -3256,6 +3297,7 @@ impl Devices for AppleDevices {
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
+        self.observe_time(now, "transfer");
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         // SAFETY: the persistent native binding admits only the canonical
@@ -3525,6 +3567,16 @@ mod tests {
     };
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+
+    #[test]
+    fn a_board_entry_given_an_earlier_count_is_named_in_the_stop_reason() {
+        let d = AppleDevices::new();
+        d.observe_time(10, "lines");
+        assert_eq!(d.rtc_regression(), "");
+        d.observe_time(5, "deadline");
+        d.observe_time(3, "read");
+        assert_eq!(d.rtc_regression(), " (deadline at 0x5 after lines at 0xa)");
+    }
 
     #[test]
     fn native_dart_mounts_program_the_selected_register_bank_and_transfer_real_dma_bytes() {
