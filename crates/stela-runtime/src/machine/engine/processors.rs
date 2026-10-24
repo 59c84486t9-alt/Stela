@@ -2147,6 +2147,29 @@ mod tests {
         assert_eq!(machine.schedule(), Err(Stop::Idle));
     }
     #[test]
+    fn dma_dispatch_reads_one_clock_only_when_pending_and_publishes_when_due() {
+        let mut machine = board(&[], Board::default(), Vec::new());
+        let reads = machine.host.counter_reads;
+        machine.poll_due_devices().unwrap();
+        assert_eq!(machine.host.counter_reads, reads);
+        machine.devices.dma = Some(100);
+        machine.host.now = 99;
+        machine.poll_due_devices().unwrap();
+        assert_eq!(machine.host.counter_reads, reads + 1);
+        assert_eq!(machine.devices.dma, Some(100));
+        assert_eq!(&machine.host.ram[0x100..0x103], &[0; 3]);
+        machine.host.now = 100;
+        machine.poll_due_devices().unwrap();
+        assert_eq!(machine.host.counter_reads, reads + 2);
+        assert_eq!(machine.devices.dma, None);
+        assert_eq!(&machine.host.ram[0x100..0x103], b"USB");
+        assert!(machine.devices.irq[0]);
+        assert!(machine.device_lines.is_none());
+        machine.poll_due_devices().unwrap();
+        assert_eq!(machine.host.counter_reads, reads + 2);
+    }
+
+    #[test]
     fn native_bus_peer_dma_runs_and_wakes_a_waiting_pe_without_mmio() {
         let devices = Board {
             dma: Some(1000),

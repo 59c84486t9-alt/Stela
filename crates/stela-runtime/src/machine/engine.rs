@@ -2791,11 +2791,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The same RAM publication path as MMIO-triggered DMA, reached with no
     /// translated invocation live. Called while running and while all PEs wait.
     fn poll_devices(&mut self, now: u64) -> Step {
-        if self
-            .devices
-            .dma_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
+        if let Some(deadline) = self.devices.dma_deadline() {
+            self.poll_devices_at(now, deadline)?;
+        }
+        Ok(())
+    }
+
+    /// Dispatch need not observe time when no asynchronous DMA is pending.
+    /// Scheduler callers already have a timestamp and use `poll_devices`.
+    fn poll_due_devices(&mut self) -> Step {
+        if let Some(deadline) = self.devices.dma_deadline() {
+            let now = self.now();
+            self.poll_devices_at(now, deadline)?;
+        }
+        Ok(())
+    }
+
+    fn poll_devices_at(&mut self, now: u64, deadline: u64) -> Step {
+        if now >= deadline {
             // A device's asynchronous work it cannot carry out is dropped,
             // reported once, outside strict mode.
             if let Err(error) = self.device_transfer(now) {
@@ -2808,8 +2821,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn step(&mut self) -> Step {
-        let now = self.now();
-        self.poll_devices(now)?;
+        self.poll_due_devices()?;
         let delivered = self.deliver_interrupts();
         if let Some(reason) = self.devices.take_reset() {
             return Err(Stop::Reset(reason));
@@ -7427,6 +7439,49 @@ mod tests {
         fn system_instruction_for_test(&mut self, word: u32) {
             self.pointer_authentication(word).unwrap();
         }
+    }
+
+    #[test]
+    fn untimed_dispatch_skips_dma_clock_but_guest_counter_reads_stay_fresh() {
+        let mut machine = machine(&[]);
+        machine.lines();
+        machine.breakpoints.push(BASE);
+        let reads = machine.host.counter_reads;
+        for now in [10, 20, 30] {
+            machine.host.now = now;
+            assert_eq!(machine.step(), Err(Stop::Breakpoint(BASE)));
+            assert_eq!(machine.host.counter_reads, reads);
+        }
+        machine.system_instruction(0xd53b_e041).unwrap(); // mrs x1, cntvct_el0
+        assert_eq!(machine.cpu.state.x[1], 30);
+        machine.host.now = 40;
+        machine.system_instruction(0xd53b_e041).unwrap();
+        assert_eq!(machine.cpu.state.x[1], 40);
+        assert_eq!(machine.host.counter_reads, reads + 2);
+    }
+
+    #[test]
+    fn dispatch_still_reads_time_for_timer_lines_without_dma() {
+        let mut machine = machine_on(one_timer_bank(), &[]);
+        machine.lines();
+        machine.breakpoints.push(BASE);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTV_CVAL_EL0, 0, 10);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTV_CTL_EL0, 0, 1);
+        machine.timers = None;
+        let reads = machine.host.counter_reads;
+        machine.host.now = 9;
+        assert_eq!(machine.step(), Err(Stop::Breakpoint(BASE)));
+        assert_eq!(machine.host.counter_reads, reads + 1);
+        assert!(!machine.lines().fiq);
+        machine.host.now = 10;
+        assert_eq!(machine.step(), Err(Stop::Breakpoint(BASE)));
+        assert!(machine.lines().fiq); // Apple's generic timer FIQ remains masked.
     }
 
     #[test]
