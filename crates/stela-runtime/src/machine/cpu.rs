@@ -797,6 +797,16 @@ impl Cpu {
         [0, u64::MAX].map(|address| self.tag_checked(self.pstate.el, address))
     }
 
+    /// What every EL's translations follow besides the tables: both regimes'
+    /// controls and HCR_EL2, which selects EL0's regime. A PE with equal
+    /// inputs translates every address of every EL as this one does.
+    pub fn translation_inputs(&self) -> ([Controls; 2], u64) {
+        (
+            [TranslationRegime::El10, TranslationRegime::El20].map(|regime| self.controls(regime)),
+            self.read(Register::HCR_EL2),
+        )
+    }
+
     /// Translation controls of a regime: its stage-1 registers and, for
     /// EL1&0, the stage-2 registers that `mmu` applies under HCR_EL2.VM or DC.
     pub fn controls(&self, regime: TranslationRegime) -> Controls {

@@ -495,6 +495,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             unreachable!("only a parked PE is ready to run");
         };
         let incoming = *incoming;
+        let translates_alike = incoming.cpu.translation_inputs() == self.cpu.translation_inputs();
         let outgoing = Parked {
             cpu: core::mem::replace(&mut self.cpu, incoming.cpu),
             event_sample: core::mem::replace(&mut self.event_sample, incoming.event_sample),
@@ -508,8 +509,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // store-exclusive fails, as Arm permits of any (`observe_writes`).
         self.cpu.monitor = None;
         // The fetch and jump caches and the host's shadow tables follow the
-        // incoming PE's translation regime.
-        self.translations_changed();
+        // incoming PE's translation regime. One that translates alike keeps
+        // them: the tables and TLBIs are shared, and what derives from its
+        // other System registers is recomputed.
+        if translates_alike {
+            self.sync_regime();
+        } else {
+            self.translations_changed();
+        }
     }
 
     /// Clear the Exclusives monitor of every PE whose reserved granule
@@ -1008,6 +1015,23 @@ mod tests {
         machine.devices.reset = Some(START);
         machine.warm_reset().unwrap();
         assert_eq!(machine.retired_instructions(), 26);
+    }
+
+    #[test]
+    fn a_switch_keeps_cached_translations_only_between_pes_that_translate_alike() {
+        let mut machine = pair();
+        let (first, other) = (machine.current, 1 - machine.current);
+        let generation = machine.translation_generation;
+        machine.switch_to(other);
+        assert_eq!(machine.translation_generation, generation);
+        assert_eq!(machine.statistics.translation_changes, 0);
+        let Peer::Parked(parked) = &mut machine.peers[first] else {
+            panic!("parked peer")
+        };
+        parked.cpu.registers.set(Register::TTBR0_EL1, 0, 0x4000);
+        machine.switch_to(first);
+        assert!(machine.translation_generation > generation);
+        assert_eq!(machine.statistics.translation_changes, 1);
     }
 
     fn end_slice(machine: &mut Machine<FakeHost, Board>) {
