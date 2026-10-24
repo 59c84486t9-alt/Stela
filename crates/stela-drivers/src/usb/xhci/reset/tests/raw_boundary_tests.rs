@@ -75,6 +75,7 @@ fn unpublished_profile(
         force_idle_stop: false,
         forced_idle_events: 0,
         class_peer: None,
+        uas_abort: abort_peer::State::default(),
     }));
     let mut controller = Controller {
         registers: Box::new(Model(hardware.clone())),
