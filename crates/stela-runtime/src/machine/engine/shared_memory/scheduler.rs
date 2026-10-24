@@ -513,7 +513,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     }
 
     /// Check the real fetched word before a frame may cross a physical core.
-    /// This uses the canonical descriptor/source owner, including AF updates.
+    /// This uses the canonical descriptor/source owner, including precise access-flag faults.
     fn native_entry_check(&mut self) -> Result<bool, Stop> {
         let controls = Controls::capture(&self.cpu, self.profile.name, &self.profile_missing)
             .map_err(|_| {

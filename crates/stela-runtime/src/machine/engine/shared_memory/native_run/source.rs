@@ -2,6 +2,9 @@
 use super::super::{Controls, SharedMemory, mmu, policy};
 use stela_compiler::context::memory::MemoryStatus;
 
+mod translation;
+pub(super) use translation::ExecuteTranslation;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::machine::engine::shared_memory) enum FetchFailure {
     Fault(mmu::Fault),
@@ -42,6 +45,28 @@ fn instruction_with_tables(
     tables: &mut policy::Tables<'_>,
     #[cfg(feature = "native-profile")] resolutions: &mut u64,
 ) -> Result<(u32, bool), FetchFailure> {
+    let mapped = resolve(
+        controls,
+        pc,
+        tables,
+        #[cfg(feature = "native-profile")]
+        resolutions,
+    )?;
+    let mut word = [0; 4];
+    // SAFETY: private source staging, same all-reader owner and stopped writers.
+    unsafe { memory.ram.read_physical(mapped.physical, &mut word) }
+        .map_err(FetchFailure::Refused)?;
+    Ok((u32::from_le_bytes(word), mapped.guarded))
+}
+
+/// Keep one authoritative first-word resolution, including its diagnostic
+/// guarded probe and effective attributes, for both source readers.
+fn resolve(
+    controls: &Controls,
+    pc: u64,
+    tables: &mut policy::Tables<'_>,
+    #[cfg(feature = "native-profile")] resolutions: &mut u64,
+) -> Result<mmu::Translation, FetchFailure> {
     let outcome = mmu::translate(
         &controls.translation,
         pc,
@@ -95,11 +120,7 @@ fn instruction_with_tables(
     {
         return Err(FetchFailure::Refused(MemoryStatus::Unsupported));
     }
-    let mut word = [0; 4];
-    // SAFETY: private source staging, same all-reader owner and stopped writers.
-    unsafe { memory.ram.read_physical(mapped.physical, &mut word) }
-        .map_err(FetchFailure::Refused)?;
-    Ok((u32::from_le_bytes(word), mapped.guarded))
+    Ok(mapped)
 }
 
 /// Arm BTypeNext for an actual completed BR/BLR/RET at this source leaf.

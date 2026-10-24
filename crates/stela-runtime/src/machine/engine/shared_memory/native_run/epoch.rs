@@ -107,7 +107,7 @@ impl NativeRun<'_> {
             }
             #[cfg(feature = "native-profile")]
             let measured = host.native_timing_work_start(Work::WarmSource);
-            let successor = self.warm_successor();
+            let successor = self.warm_successor(execution);
             #[cfg(feature = "native-profile")]
             if let Some(started) = measured {
                 host.native_timing_work_end(Work::WarmSource, started);
@@ -136,6 +136,7 @@ impl NativeRun<'_> {
     /// Owner/domain corruption is never converted into an innocent cache miss.
     pub(super) fn warm_successor(
         &self,
+        execution: &crate::memory::domain::MemoryExecutionSession,
     ) -> Result<Result<(usize, Arc<Artifact>), NativeEpochEnd>, MemoryStatus> {
         let Some(controls) = self.memory.artifacts.controls() else {
             return Ok(Err(NativeEpochEnd::Cold));
@@ -144,13 +145,28 @@ impl NativeRun<'_> {
         if !pc.is_multiple_of(4) {
             return Ok(Err(NativeEpochEnd::Source));
         }
-        let (first, guarded) = match source::instruction(self.memory, controls, pc) {
+        let loan = execution.checked_execution(&self.memory.memory)?;
+        // SAFETY: the preceding body has returned, no guest or Host service
+        // runs in this probe, all other PEs are Off, and the native-round caller
+        // excludes unjoined code/MMU writers. The pin alone is not that proof.
+        let source = match unsafe {
+            source::ExecuteTranslation::first(
+                &self.memory.ram,
+                controls,
+                loan,
+                pc,
+                #[cfg(feature = "native-profile")]
+                &self.memory.source,
+            )
+        } {
             Ok(source) => source,
             Err(source::FetchFailure::Refused(MemoryStatus::Domain)) => {
                 return Err(MemoryStatus::Domain);
             }
             Err(_) => return Ok(Err(NativeEpochEnd::Source)),
         };
+        let first = source.first_word();
+        let guarded = source.guarded();
         if *self.btype != 0
             && guarded
             && !source::target_accepts(
@@ -174,7 +190,7 @@ impl NativeRun<'_> {
         }
         let mut staging = [0; super::super::super::MAX_BLOCK_BYTES as usize];
         let input = staging.get_mut(..bytes).ok_or(MemoryStatus::Domain)?;
-        match self.memory.fetch(controls, pc, input) {
+        match source.read_into(input) {
             Ok(()) => {}
             Err(MemoryStatus::Domain) => return Err(MemoryStatus::Domain),
             Err(_) => return Ok(Err(NativeEpochEnd::Source)),

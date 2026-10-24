@@ -742,24 +742,7 @@ fn prepare<'a>(
     let controls = Controls::capture(cpu, cpu_profile.name, missing)
         .map_err(|status| at("control capture", status))?;
     let pc = cpu.pc;
-    let memory = cpu
-        .canonical_memory
-        .as_ref()
-        .ok_or_else(|| at("canonical memory ownership", MemoryStatus::Unsupported))?;
-    let (first, guarded) = source::instruction(memory, &controls, pc).map_err(|failure| {
-        let status = match failure {
-            source::FetchFailure::Fault(_) => MemoryStatus::Unsupported,
-            source::FetchFailure::Refused(status) => status,
-        };
-        at("first instruction fetch", status).detail(alloc::format!("{failure:?}"))
-    })?;
-    let at = |stage, status| PreparationFailure::at(stage, status, location, Some(first));
-    if cpu.pstate.btype != 0
-        && guarded
-        && !source::target_accepts(first, cpu.pstate.btype, cpu.regime_sctlr(), cpu.pstate.el)
-    {
-        return Err(at("branch target compatibility", MemoryStatus::Unsupported));
-    }
+    let entry_sctlr = cpu.regime_sctlr();
     let asimd = controls.asimd;
     let btype = &mut cpu.pstate.btype;
     let state = &mut cpu.state;
@@ -772,165 +755,199 @@ fn prepare<'a>(
     if memory.pe != pe {
         return Err(at("canonical PE ownership", MemoryStatus::Unsupported));
     }
-    let profile = stela_compiler::block::BlockProfile::SystemModeSharedV1(controls.sp);
-    let target = memory.ram.target();
-    let key = ArtifactKey {
-        pe,
-        pc,
-        worker: binding.worker,
-        profile: cpu_profile.name,
-        admission: AdmissionPolicy {
-            profile_chip: cpu_profile.chip,
-            table_chip: admit.chip(),
-            withheld: admit.withheld(),
-            asimd,
-        },
-        controls_sha256: controls.shared_identity(),
-        compiler_source_sha256: stela_compiler::SOURCE_SHA256,
-        abi: profile.abi(),
-        target,
-        guarded,
-    };
-    let admitted = |word| {
-        admit.admit(word) == word
-            && (!super::super::is_floating_point(word) || asimd)
-            && cpu_profile.chip.checks(word).iter().all(|check| {
-                matches!(
-                    check,
-                    crate::machine::chip::Check::Fp | crate::machine::chip::Check::FpAdvSimd
-                )
-            })
-    };
-    let candidate = memory
-        .artifacts
-        .candidate(&key)
-        .filter(|(_, artifact)| artifact.source.len() <= source_bytes);
-    let artifact = if let Some((index, artifact)) = candidate {
-        // A hit is merely immutable compilation reuse. Rewalk executable source
-        // and read actual canonical bytes for its exact retained prefix every
-        // time. A shorter compiled prefix remains a valid scheduling boundary;
-        // words after it cannot grant or revoke its instruction effects.
-        let bytes = artifact.source.len();
-        if bytes == 0 || !bytes.is_multiple_of(4) || bytes > super::super::window(pc) {
-            return Err(at("cached source extent", MemoryStatus::Domain));
-        }
-        // The existing compiler block bound also bounds private revalidation
-        // staging. Every hit still walks source permissions and copies actual
-        // canonical bytes; only the per-round heap allocation disappears.
-        let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
-        let input = staging
-            .get_mut(..bytes)
-            .ok_or_else(|| at("cached source staging", MemoryStatus::Domain))?;
-        memory
-            .fetch(&controls, pc, input)
-            .map_err(|status| at("cached executable source fetch", status))?;
-        // The immutable artifact was admitted in full before construction.
-        // Exact bytes and the fresh key above bind every pure decoder input:
-        // both actual chips, withheld features and effective ASIMD permission.
-        // Reuse only that decoder result; the source walk, BTYPE entry check,
-        // current controls and physical execution authority remain separate.
-        (input == artifact.source.as_slice()).then_some((index, artifact))
-    } else {
-        None
-    };
-    let artifact = match artifact {
-        Some((index, artifact)) => {
-            memory.artifacts.reuse(index);
-            artifact
-        }
-        None => {
-            let mut input = alloc::vec![0; source_bytes];
-            // Instruction walks use the same source controls, canonical descriptor
-            // owner and original physical bytes. No direct identity-frame shortcut.
-            memory
-                .fetch(&controls, pc, &mut input)
-                .map_err(|status| at("cold executable source fetch", status))?;
-            // A denied later access check must not erase an already reached GPR
-            // prefix. End before it; the held scheduler checks that exact next word.
-            if let Some(boundary) = input
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .position(|raw| !admitted(u32::from_le_bytes(*raw)))
-            {
-                if boundary == 0 {
-                    return Err(at("instruction admission", MemoryStatus::Unsupported));
-                }
-                input.truncate(boundary * 4);
-            }
-            let plan = stela_compiler::block::CompilationPlan::new(
-                &input,
-                stela_compiler::GuestAddress(pc),
-                profile,
-                target,
-            )
-            .map_err(|error| {
-                at("compilation planning", MemoryStatus::Unsupported).detail(error.0)
-            })?;
-            let bytes = plan.source_bytes();
-            input.truncate(bytes);
-            if !input
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|raw| admitted(u32::from_le_bytes(*raw)))
-            {
-                return Err(at("compiled prefix admission", MemoryStatus::Unsupported));
-            }
-            let requirements = plan
-                .memory_requirements()
-                .ok_or_else(|| at("checked memory requirements", MemoryStatus::Unsupported))?;
-            let (compiled, _profile) = {
-                #[cfg(feature = "native-profile")]
-                {
-                    plan.compile_profiled()
-                }
-                #[cfg(not(feature = "native-profile"))]
-                {
-                    plan.compile().map(|block| (block, ()))
-                }
-            }
-            .map_err(|error| at("native emission", MemoryStatus::Unsupported).detail(error.0))?;
-            if !compiled.fault_recovery.is_empty() {
-                return Err(at(
-                    "checked fault recovery contract",
-                    MemoryStatus::Unsupported,
-                ));
-            }
-            let identity = Identity {
-                pe,
+    let execution = memory
+        .memory
+        .execution_loan()
+        .map_err(|status| at("source mapping pin", status))?;
+    let artifact = {
+        // SAFETY: prepare is reached only under shared_native_run's held cohort
+        // and no-code/MMU/control/unjoined-writer contract. No guest or Host service
+        // runs until this witness is dropped below; compilation is private work.
+        let source = unsafe {
+            source::ExecuteTranslation::first(
+                &memory.ram,
+                &controls,
+                &execution,
                 pc,
-                source_sha256: crate::sha256(&input),
-                native_sha256: crate::sha256(&compiled.native.x86_64_code),
-                controls_sha256: key.controls_sha256.as_ref().into(),
-                compiler_source_sha256: stela_compiler::SOURCE_SHA256,
-                abi: profile.abi(),
-                target,
-                requirements,
-            };
-            let artifact = Arc::new(Artifact {
-                key,
-                identity: Arc::new(identity),
-                code: Arc::new(compiled.native.x86_64_code),
-                source_map: compiled.native.source_map,
-                branch_type: source::branch_type(
-                    u32::from_le_bytes(
-                        input
-                            .last_chunk()
-                            .copied()
-                            .ok_or_else(|| at("compiled source extent", MemoryStatus::Domain))?,
-                    ),
-                    guarded,
-                ),
-                source: input,
-                requirements,
                 #[cfg(feature = "native-profile")]
-                profile: _profile,
-            });
-            memory.artifacts.insert(Arc::clone(&artifact));
-            artifact
+                &memory.source,
+            )
+        }
+        .map_err(|failure| {
+            let status = match failure {
+                source::FetchFailure::Fault(_) => MemoryStatus::Unsupported,
+                source::FetchFailure::Refused(status) => status,
+            };
+            at("first instruction fetch", status).detail(alloc::format!("{failure:?}"))
+        })?;
+        let first = source.first_word();
+        let guarded = source.guarded();
+        let at = |stage, status| PreparationFailure::at(stage, status, location, Some(first));
+        if *btype != 0 && guarded && !source::target_accepts(first, *btype, entry_sctlr, location.2)
+        {
+            return Err(at("branch target compatibility", MemoryStatus::Unsupported));
+        }
+        let profile = stela_compiler::block::BlockProfile::SystemModeSharedV1(controls.sp);
+        let target = memory.ram.target();
+        let key = ArtifactKey {
+            pe,
+            pc,
+            worker: binding.worker,
+            profile: cpu_profile.name,
+            admission: AdmissionPolicy {
+                profile_chip: cpu_profile.chip,
+                table_chip: admit.chip(),
+                withheld: admit.withheld(),
+                asimd,
+            },
+            controls_sha256: controls.shared_identity(),
+            compiler_source_sha256: stela_compiler::SOURCE_SHA256,
+            abi: profile.abi(),
+            target,
+            guarded,
+        };
+        let admitted = |word| {
+            admit.admit(word) == word
+                && (!super::super::is_floating_point(word) || asimd)
+                && cpu_profile.chip.checks(word).iter().all(|check| {
+                    matches!(
+                        check,
+                        crate::machine::chip::Check::Fp | crate::machine::chip::Check::FpAdvSimd
+                    )
+                })
+        };
+        let candidate = memory
+            .artifacts
+            .candidate(&key)
+            .filter(|(_, artifact)| artifact.source.len() <= source_bytes);
+        let artifact = if let Some((index, artifact)) = candidate {
+            // A hit is merely immutable compilation reuse. Rewalk executable source
+            // and read actual canonical bytes for its exact retained prefix every
+            // time. A shorter compiled prefix remains a valid scheduling boundary;
+            // words after it cannot grant or revoke its instruction effects.
+            let bytes = artifact.source.len();
+            if bytes == 0 || !bytes.is_multiple_of(4) || bytes > super::super::window(pc) {
+                return Err(at("cached source extent", MemoryStatus::Domain));
+            }
+            // The existing compiler block bound also bounds private revalidation
+            // staging. Every hit still walks source permissions and copies actual
+            // canonical bytes; only the per-round heap allocation disappears.
+            let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
+            let input = staging
+                .get_mut(..bytes)
+                .ok_or_else(|| at("cached source staging", MemoryStatus::Domain))?;
+            source
+                .read_into(input)
+                .map_err(|status| at("cached executable source fetch", status))?;
+            // The immutable artifact was admitted in full before construction.
+            // Exact bytes and the fresh key above bind every pure decoder input:
+            // both actual chips, withheld features and effective ASIMD permission.
+            // Reuse only that decoder result; the source walk, BTYPE entry check,
+            // current controls and physical execution authority remain separate.
+            (input == artifact.source.as_slice()).then_some((index, artifact))
+        } else {
+            None
+        };
+        match artifact {
+            Some((index, artifact)) => {
+                memory.artifacts.reuse(index);
+                artifact
+            }
+            None => {
+                let mut input = alloc::vec![0; source_bytes];
+                // Instruction walks use the same source controls, canonical descriptor
+                // owner and original physical bytes. No direct identity-frame shortcut.
+                source
+                    .read_into(&mut input)
+                    .map_err(|status| at("cold executable source fetch", status))?;
+                // A denied later access check must not erase an already reached GPR
+                // prefix. End before it; the held scheduler checks that exact next word.
+                if let Some(boundary) = input
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .position(|raw| !admitted(u32::from_le_bytes(*raw)))
+                {
+                    if boundary == 0 {
+                        return Err(at("instruction admission", MemoryStatus::Unsupported));
+                    }
+                    input.truncate(boundary * 4);
+                }
+                let plan = stela_compiler::block::CompilationPlan::new(
+                    &input,
+                    stela_compiler::GuestAddress(pc),
+                    profile,
+                    target,
+                )
+                .map_err(|error| {
+                    at("compilation planning", MemoryStatus::Unsupported).detail(error.0)
+                })?;
+                let bytes = plan.source_bytes();
+                input.truncate(bytes);
+                if !input
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|raw| admitted(u32::from_le_bytes(*raw)))
+                {
+                    return Err(at("compiled prefix admission", MemoryStatus::Unsupported));
+                }
+                let requirements = plan
+                    .memory_requirements()
+                    .ok_or_else(|| at("checked memory requirements", MemoryStatus::Unsupported))?;
+                let (compiled, _profile) = {
+                    #[cfg(feature = "native-profile")]
+                    {
+                        plan.compile_profiled()
+                    }
+                    #[cfg(not(feature = "native-profile"))]
+                    {
+                        plan.compile().map(|block| (block, ()))
+                    }
+                }
+                .map_err(|error| {
+                    at("native emission", MemoryStatus::Unsupported).detail(error.0)
+                })?;
+                if !compiled.fault_recovery.is_empty() {
+                    return Err(at(
+                        "checked fault recovery contract",
+                        MemoryStatus::Unsupported,
+                    ));
+                }
+                let identity = Identity {
+                    pe,
+                    pc,
+                    source_sha256: crate::sha256(&input),
+                    native_sha256: crate::sha256(&compiled.native.x86_64_code),
+                    controls_sha256: key.controls_sha256.as_ref().into(),
+                    compiler_source_sha256: stela_compiler::SOURCE_SHA256,
+                    abi: profile.abi(),
+                    target,
+                    requirements,
+                };
+                let artifact =
+                    Arc::new(Artifact {
+                        key,
+                        identity: Arc::new(identity),
+                        code: Arc::new(compiled.native.x86_64_code),
+                        source_map: compiled.native.source_map,
+                        branch_type: source::branch_type(
+                            u32::from_le_bytes(input.last_chunk().copied().ok_or_else(|| {
+                                at("compiled source extent", MemoryStatus::Domain)
+                            })?),
+                            guarded,
+                        ),
+                        source: input,
+                        requirements,
+                        #[cfg(feature = "native-profile")]
+                        profile: _profile,
+                    });
+                memory.artifacts.insert(Arc::clone(&artifact));
+                artifact
+            }
         }
     };
+    drop(execution);
     memory.artifacts.remember_controls(&controls);
     memory
         .memory
@@ -2262,14 +2279,15 @@ mod artifact_tests {
         machine.cpu.pc = PC;
         let run = unsafe { machine.shared_native_run(BINDING) }.unwrap();
         let before = run.memory.artifacts.stats();
+        let execution = run.memory.memory.execution_session().unwrap();
         *run.pc = PC + 4;
-        let (_, candidate) = run.warm_successor().unwrap().unwrap();
+        let (_, candidate) = run.warm_successor(&execution).unwrap().unwrap();
         assert!(Arc::ptr_eq(&candidate, &artifacts[1]));
         assert!(Arc::ptr_eq(&run.artifact, &artifacts[0]));
         // A valid but cold reached target yields; it never compiles on worker.
         *run.pc = PC + 12;
         assert!(matches!(
-            run.warm_successor(),
+            run.warm_successor(&execution),
             Ok(Err(NativeEpochEnd::Cold))
         ));
         assert_eq!(run.memory.artifacts.stats(), before);
@@ -2277,7 +2295,7 @@ mod artifact_tests {
         unsafe { ram.publish_physical(DATA + 4, &0x14000001u32.to_le_bytes()) }.unwrap();
         *run.pc = PC + 4;
         assert!(matches!(
-            run.warm_successor(),
+            run.warm_successor(&execution),
             Ok(Err(NativeEpochEnd::Source))
         ));
         assert_eq!(run.memory.artifacts.stats(), before);
@@ -2290,6 +2308,7 @@ mod artifact_tests {
         let (mut machine, ram, _) = branch_artifacts(2);
         machine.cpu.pc = PC;
         let run = unsafe { machine.shared_native_run(BINDING) }.unwrap();
+        let execution = run.memory.memory.execution_session().unwrap();
         let mut descriptor = [0; 8];
         unsafe { ram.read_physical(LEAF, &mut descriptor) }.unwrap();
         let descriptor = u64::from_le_bytes(descriptor);
@@ -2297,17 +2316,17 @@ mod artifact_tests {
         *run.btype = 3;
         unsafe { ram.publish_physical(LEAF, &(descriptor | (1 << 50)).to_le_bytes()) }.unwrap();
         assert!(matches!(
-            run.warm_successor(),
+            run.warm_successor(&execution),
             Ok(Err(NativeEpochEnd::Source))
         ));
         *run.btype = 0;
         // Same virtual PC and old cached bytes cannot confer execute rights.
         unsafe { ram.publish_physical(LEAF, &0u64.to_le_bytes()) }.unwrap();
         assert!(matches!(
-            run.warm_successor(),
+            run.warm_successor(&execution),
             Ok(Err(NativeEpochEnd::Source))
         ));
         unsafe { ram.publish_physical(LEAF, &descriptor.to_le_bytes()) }.unwrap();
-        assert!(matches!(run.warm_successor(), Ok(Ok(_))));
+        assert!(matches!(run.warm_successor(&execution), Ok(Ok(_))));
     }
 }

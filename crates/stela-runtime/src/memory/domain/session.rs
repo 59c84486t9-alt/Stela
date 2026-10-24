@@ -9,6 +9,16 @@ pub(crate) struct MemoryExecutionSession {
     profile: MemoryProfile,
 }
 impl MemoryExecutionSession {
+    /// Borrow the actual mapping pin after checking membership and live health.
+    /// This grants neither guest permissions nor exclusion of RAM/PTE writers.
+    pub(crate) fn checked_execution<P: DataPolicy>(
+        &self,
+        thread: &MemoryThread<P>,
+    ) -> Result<&MemoryExecutionLoan, MemoryStatus> {
+        self.check_thread(thread)?;
+        Ok(&self.execution)
+    }
+
     pub(super) fn check_thread<P: DataPolicy>(
         &self,
         thread: &MemoryThread<P>,
