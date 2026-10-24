@@ -456,6 +456,7 @@ pub(crate) mod tests {
         input: bool,
         data: Vec<u8>,
         ready: bool,
+        data_complete: bool,
         hang: bool,
         lba: u64,
         write: bool,
@@ -894,6 +895,7 @@ pub(crate) mod tests {
                     input: true,
                     data: Vec::new(),
                     ready: false,
+                    data_complete: false,
                     hang: self.hang_next,
                     lba: 0,
                     write: false,
@@ -1006,7 +1008,7 @@ pub(crate) mod tests {
                 self.task = Some(task);
                 return;
             }
-            if task.requested != 0 {
+            if task.requested != 0 && !task.data_complete {
                 let dci = if task.input { 7 } else { 8 };
                 let Some(td) = self.pending.remove(&(slot, dci, stream)) else {
                     self.task = Some(task);
@@ -1034,6 +1036,9 @@ pub(crate) mod tests {
                     slot,
                     dci,
                 );
+                // Status may be posted after this data TD has completed. Keep
+                // the actual completed phase when waiting for that separate IU.
+                task.data_complete = true;
             }
             if let Some(td) = self.pending.remove(&status_key) {
                 let mut frame = vec![0u8; if task.sense.is_some() { 34 } else { 16 }];
