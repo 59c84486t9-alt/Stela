@@ -1525,13 +1525,16 @@ impl Mirrors {
 }
 
 /// System registers whose writes only store what nothing derived reads:
-/// exception entries and returns read the exception registers then, and
-/// a thread pointer is read as it is.
+/// exception entries and returns read the exception registers then, a
+/// thread pointer is read as it is, and only translation reads TTBR0,
+/// whose change the host's regime follows ([`Machine::table_base_changed`]).
 fn stored(register: SystemRegister) -> bool {
     use SystemRegister::*;
     matches!(
         register,
-        ELR_EL1
+        TTBR0_EL1
+            | TTBR0_EL2
+            | ELR_EL1
             | ELR_EL2
             | SPSR_EL1
             | SPSR_EL2
@@ -2609,9 +2612,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// ([`Host::set_regime`]). Lookup contexts are keyed by the controls'
     /// values ([`Space`]), so a return to earlier ones finds theirs again.
     fn controls_changed(&mut self) {
+        self.derived_changed();
+        self.permissions_changed();
+    }
+
+    /// Translation changed, but nothing derived from System registers:
+    /// an SPRR_PERM write, which XNU makes around its writes to protected
+    /// data and at thread switches, thousands of times a second.
+    fn permissions_changed(&mut self) {
         self.advance_translation_generation();
         self.statistics.translation_changes += 1;
-        self.sync_regime();
+        self.sync_host_regime();
     }
 
     /// Anything about translation may have changed: every lookup context
@@ -2660,7 +2671,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn table_base_changed(&mut self) {
         self.advance_translation_generation();
         self.statistics.table_base_changes += 1;
-        self.sync_regime();
+        self.sync_host_regime();
     }
 
     /// Forget the blocks compiled from the page holding `physical`, which an
@@ -6401,13 +6412,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.device_lines = None;
                 }
                 // PSTATE.D and Apple registers can change what is derived.
-                if !changes.stored {
+                if !changes.stored && !changes.permissions {
                     self.derived_changed();
                 }
                 if changes.translation {
                     self.translations_changed();
                 } else if changes.controls {
                     self.controls_changed();
+                } else if changes.permissions {
+                    self.permissions_changed();
                 } else if changes.regime {
                     self.sync_regime();
                 }
@@ -11101,7 +11114,7 @@ mod tests {
     /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading
     /// the engine's cell takes over, chaining on to the next instruction;
     /// the cell opens on a plain read and closes on any derived change
-    /// other than a PSTATE mask or SPSel write.
+    /// other than a PSTATE mask, SPSel, TTBR0 or SPRR_PERM write.
     #[test]
     fn mirrored_reads_complete_natively_from_the_open_cell() {
         const ADD: u32 = 0x9100_0400; // add x0, x0, #1
@@ -11207,6 +11220,25 @@ mod tests {
         assert_eq!(*machine.mirrors, Mirrors::default());
         // A read to XZR has no cell to open, nor a thunk.
         assert_eq!(mirrored_read(base, 0xd538_d09f), None); // mrs xzr, tpidr_el1
+        // A TTBR0 or SPRR_PERM write changes translation alone: the host
+        // takes the new controls and the cells stay.
+        const MSR_TTBR0: u32 = 0xd518_2009; // msr ttbr0_el1, x9
+        const MSR_SPRR_CONFIG: u32 = 0xd51e_f109; // msr sprr_config_el1, x9
+        const MSR_SPRR_PERM: u32 = 0xd51e_f1c9; // msr sprr_perm_el1, x9
+        machine.cpu.state.x[9] = 1;
+        machine.system_instruction(MSR_SPRR_CONFIG).unwrap();
+        machine.system_instruction(MRS).unwrap();
+        for (msr, value) in [(MSR_TTBR0, 0x8000), (MSR_SPRR_PERM, 0x22)] {
+            let (generation, regimes) =
+                (machine.translation_generation, machine.host.regimes.len());
+            let controls = machine.cpu.controls(machine.cpu.regime());
+            machine.cpu.state.x[9] = value;
+            machine.system_instruction(msr).unwrap();
+            assert!(machine.translation_generation > generation);
+            let regime = machine.host.regimes[regimes..].last().unwrap();
+            assert_ne!(regime.controls, controls);
+            assert_eq!(machine.mirrors[thread].readable, 1);
+        }
     }
 
     /// An exception keeps the device lines; a System register write that

@@ -191,6 +191,9 @@ pub struct Changes {
     /// SPRR, whose values [`super::mmu::Controls`] carries: shadow roots
     /// and fetch translations, while lookup contexts follow the values.
     pub controls: bool,
+    /// SPRR_PERM alone: as `controls`, but nothing derived from System
+    /// registers reads the permissions, so that state stays.
+    pub permissions: bool,
     /// EL, PAN or SPSel: which shadow root and stack apply.
     pub regime: bool,
     /// DAIF or a timer: interrupt delivery must be re-evaluated.
@@ -1195,7 +1198,7 @@ impl Apple {
                     );
                 }
                 apple.sprr_perm[index] = value;
-                changes.controls = true;
+                changes.permissions = true;
             }
             Self::SprrFields(which) => apple.sprr_fields[which] = value,
             Self::GxfConfig(level) => {
