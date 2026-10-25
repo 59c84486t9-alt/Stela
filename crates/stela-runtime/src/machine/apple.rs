@@ -3559,11 +3559,14 @@ impl Devices for AppleDevices {
             }
             if now >= master.next_poll {
                 master.next_poll = now.saturating_add(USB_POLL_TICKS);
-                master
+                let advanced = master
                     .session
                     .advance(&mut controller.peer(&mut port), now)
-                    .map_err(fail)?;
-                controller.flush(&mut port).map_err(fail)?;
+                    .and_then(|()| controller.flush(&mut port));
+                advanced.map_err(|why| match controller.dma_fault() {
+                    Some(fault) => fail(&format!("{why}: {fault:x?}")),
+                    None => fail(why),
+                })?;
             }
             master.phy_changed = false;
         }

@@ -41,7 +41,7 @@ use super::{
     typec::Usb2Speed,
 };
 use crate::platform::{
-    dma::Port,
+    dma::{DmaError, Port},
     usb::{BusPeer, Function, MAX_PACKET, Reply, Token},
 };
 use alloc::{collections::VecDeque, string::String};
@@ -159,6 +159,26 @@ struct Lifecycle {
     reset: bool,
 }
 
+/// A controller DMA that failed: its I/O address, length and direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaFault {
+    pub iova: u64,
+    pub bytes: usize,
+    pub write: bool,
+    pub error: DmaError,
+}
+
+impl DmaFault {
+    fn new(iova: u64, bytes: usize, write: bool, error: DmaError) -> Self {
+        Self {
+            iova,
+            bytes,
+            write,
+            error,
+        }
+    }
+}
+
 pub struct Dwc3 {
     lifecycle: Lifecycle,
     phy_reset: bool,
@@ -190,7 +210,8 @@ pub struct Dwc3 {
     port_generation: u64,
     port_ready: bool,
     connected: bool,
-    poisoned: bool,
+    /// The DMA failure that poisoned the controller until software reset.
+    poisoned: Option<DmaFault>,
     host: xhci::Xhci,
     apple: apple::Registers,
 }
@@ -233,7 +254,7 @@ impl Dwc3 {
             port_generation: 0,
             port_ready: false,
             connected: false,
-            poisoned: false,
+            poisoned: None,
             host: xhci::Xhci::new(),
             apple: apple::Registers::default(),
         }
@@ -455,13 +476,18 @@ impl Dwc3 {
         Ok(())
     }
 
+    /// The DMA failure that poisoned the controller, if one did.
+    pub fn dma_fault(&self) -> Option<DmaFault> {
+        self.poisoned
+    }
+
     /// Publish bounded queued events via this device's DART stream, before
     /// asserting a wire. Full rings backpressure without overwriting entries.
     /// An uncertain DMA failure poisons the controller until software reset;
     /// no payload or completion is retried behind the owner's back.
     pub fn flush(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
         self.activity_ready()?;
-        if self.poisoned {
+        if self.poisoned.is_some() {
             return Err("DWC3 requires reset after a DMA failure");
         }
         for _ in 0..self.pending.len() {
@@ -478,8 +504,13 @@ impl Dwc3 {
                 .address
                 .checked_add(u64::from(ring.producer))
                 .ok_or("DWC3 event address overflow")?;
-            if port.write(address, &event.value.to_le_bytes()).is_err() {
-                self.poisoned = true;
+            if let Err(error) = port.write(address, &event.value.to_le_bytes()) {
+                self.poisoned = Some(DmaFault::new(
+                    address,
+                    event.value.to_le_bytes().len(),
+                    true,
+                    error,
+                ));
                 return Err("DWC3 event DMA fault; reset required");
             }
             ring.producer = (ring.producer + EVENT_BYTES) % ring.size;
@@ -535,7 +566,7 @@ impl Dwc3 {
         function: Option<&mut (dyn Function + '_)>,
     ) -> Result<(), &'static str> {
         self.activity_ready()?;
-        if self.poisoned {
+        if self.poisoned.is_some() {
             return Err("DWC3 requires reset after a DMA failure");
         }
         self.host.service(port, function)?;
@@ -809,7 +840,7 @@ impl Dwc3 {
         port: &mut Port<'_, '_>,
     ) -> Result<Reply, &'static str> {
         self.activity_ready()?;
-        if self.poisoned {
+        if self.poisoned.is_some() {
             return Err("DWC3 requires reset after a DMA failure");
         }
         if !self.connected || !self.available() {
@@ -836,8 +867,8 @@ impl Dwc3 {
         }
         let mut trb = [0u8; TRB_BYTES as usize];
         for links in 0..=MAX_LINKS_PER_PACKET {
-            if port.read(transfer.trb, &mut trb).is_err() {
-                self.poisoned = true;
+            if let Err(error) = port.read(transfer.trb, &mut trb) {
+                self.poisoned = Some(DmaFault::new(transfer.trb, trb.len(), false, error));
                 return Err("DWC3 TRB DMA fault; reset required");
             }
             let ctrl = u32::from_le_bytes(trb[12..16].try_into().unwrap());
@@ -910,8 +941,9 @@ impl Dwc3 {
         } else {
             port.write(address, &data[..bytes])
         };
-        if result.is_err() {
-            self.poisoned = true;
+        if let Err(error) = result {
+            let write = token != Token::In;
+            self.poisoned = Some(DmaFault::new(address, bytes, write, error));
             return Err("DWC3 payload DMA fault; reset required");
         }
         transfer.done += bytes as u32;
@@ -922,8 +954,13 @@ impl Dwc3 {
             let mut completion = [0; 8];
             completion[..4].copy_from_slice(&residual.to_le_bytes());
             completion[4..].copy_from_slice(&(ctrl & !HWO).to_le_bytes());
-            if port.write(transfer.trb + 8, &completion).is_err() {
-                self.poisoned = true;
+            if let Err(error) = port.write(transfer.trb + 8, &completion) {
+                self.poisoned = Some(DmaFault::new(
+                    transfer.trb + 8,
+                    completion.len(),
+                    true,
+                    error,
+                ));
                 return Err("DWC3 TRB completion DMA fault; reset required");
             }
             let last = ctrl & LST != 0 || (short && ctrl & CSP == 0);
@@ -2066,7 +2103,7 @@ mod tests {
             );
             assert!(dwc.flush(&mut port).is_err());
         }
-        assert!(dwc.poisoned);
+        assert!(dwc.poisoned.is_some());
         assert_eq!(dwc.rings[0].count, 0);
         assert!(
             latch
@@ -2076,7 +2113,7 @@ mod tests {
         );
         let mut access = Access::new(0, 0, &mut latch);
         write(&mut dwc, DCTL, RESET, &mut access);
-        assert!(!dwc.poisoned);
+        assert!(dwc.poisoned.is_none());
         assert!(dwc.endpoints.iter().all(|ep| ep.active.is_none()));
         assert_eq!(dwc.read(DCTL, Width::Word, &mut access), Ok(0));
     }
@@ -2135,7 +2172,7 @@ mod tests {
                 assert_eq!(dwc.rings[0].count, 4);
             } else {
                 assert!(result.is_err());
-                assert!(dwc.poisoned);
+                assert!(dwc.poisoned.is_some());
                 assert_eq!(dwc.rings[0].count, 0);
                 assert_eq!(
                     &ram.bytes[(3 * PAGE) as usize..(3 * PAGE + 496) as usize],
@@ -2258,7 +2295,7 @@ mod tests {
             [device, config]
         );
         assert!(dwc.rings[0].producer > 0);
-        assert!(!dwc.poisoned);
+        assert!(dwc.poisoned.is_none());
     }
     #[test]
     fn one_full_ring_does_not_block_another_interrupt_buffer() {
