@@ -13,6 +13,8 @@ use core::task::Poll;
 use sha1::{Digest, Sha1};
 pub const PORT: u16 = 12345;
 pub const CHUNK_BYTES: usize = 128 * 1024;
+/// The image bytes one [`Sender::poll`] moves at most: 64 chunks.
+const POLL_BYTES: u64 = 64 * CHUNK_BYTES as u64;
 const SHA1_BYTES: usize = 20;
 const PACKET_BYTES: u64 = 1450;
 const FEC_STRIDE: u64 = 40;
@@ -74,7 +76,18 @@ impl Sender {
         stream: &mut impl ByteStream,
         source: &mut impl ImageSource,
     ) -> Poll<Result<()>> {
-        let r = self.step(stream, source);
+        // Step on while each step queues or sends, up to POLL_BYTES, so the
+        // image does not move one chunk a scheduler turn.
+        let start = self.output.written();
+        let r = loop {
+            let (before, queued) = (self.output.written(), self.output.is_pending());
+            let r = self.step(stream, source);
+            let written = self.output.written();
+            let moved = written != before || !queued && self.output.is_pending();
+            if r.is_ready() || !moved || written - start >= POLL_BYTES {
+                break r;
+            }
+        };
         if matches!(r, Poll::Ready(Err(_))) {
             self.phase = Phase::Failed;
         }
@@ -264,6 +277,51 @@ mod tests {
             &p[CHUNK_BYTES + 37..],
             Sha1::digest(&data[CHUNK_BYTES..]).as_slice()
         );
+    }
+    /// Over a stream that takes every byte, the payload's chunks leave in
+    /// one poll rather than one a poll.
+    #[test]
+    fn a_ready_stream_takes_the_payload_in_one_poll() {
+        let data = vec![9; 3 * CHUNK_BYTES];
+        let mut source = fixture(&data, false);
+        let mut input = xml(Value::dict([("Command", Value::from("Initiate"))]));
+        input.extend(xml(Value::dict([("Command", Value::from("Payload"))])));
+        // Every read and write completes at once.
+        struct Ready {
+            input: Vec<u8>,
+            output: Vec<u8>,
+        }
+        impl ByteStream for Ready {
+            fn read(&mut self, b: &mut [u8]) -> Poll<Result<usize>> {
+                let n = b.len().min(self.input.len());
+                if n == 0 {
+                    return Poll::Pending;
+                }
+                b[..n].copy_from_slice(&self.input[..n]);
+                self.input.drain(..n);
+                Poll::Ready(Ok(n))
+            }
+            fn write(&mut self, b: &[u8]) -> Poll<Result<usize>> {
+                self.output.extend_from_slice(b);
+                Poll::Ready(Ok(b.len()))
+            }
+        }
+        let mut stream = Ready {
+            input,
+            output: Vec::new(),
+        };
+        let mut sender = Sender::new("os.dmg".into(), &source).unwrap();
+        // The commands arrive a byte a poll, as nothing reads ahead.
+        for _ in 0..100_000 {
+            if sender.phase() == Phase::Payload {
+                break;
+            }
+            assert!(sender.poll(&mut stream, &mut source).is_pending());
+        }
+        assert_eq!(sender.phase(), Phase::Payload);
+        assert!(sender.poll(&mut stream, &mut source).is_ready());
+        assert_eq!(sender.phase(), Phase::Complete);
+        assert!(stream.output.ends_with(&data));
     }
     #[test]
     fn large_oob_is_chunked_and_overflow_refuses_with_original_request() {
