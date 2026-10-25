@@ -2395,8 +2395,8 @@ fn level_name(guarded: bool) -> &'static str {
 /// Blocks between checks of whether the screen or a heartbeat is due.
 const SLICE: u64 = 1 << 18;
 
-/// How often a wait of every PE returns to the run loop to take host
-/// inputs (`Machine::set_wait_limit`).
+/// How often the waits of every PE return to the run loop to take host
+/// inputs, at least (`Machine::set_wait_limit`).
 const WAIT_POLLS_PER_SECOND: u64 = 20;
 
 /// Seconds between heartbeats, which locate a guest that runs without output.

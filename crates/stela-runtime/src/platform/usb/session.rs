@@ -36,6 +36,9 @@ pub struct Session {
     output: Option<u64>,
     logs: VecDeque<Log>,
     probe: Option<Probe>,
+    /// A bulk transfer moved bytes since [`Session::take_due`]: the client
+    /// may have bytes to read or room to write.
+    due: bool,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -57,6 +60,7 @@ impl Session {
             output: None,
             logs: VecDeque::new(),
             probe: None,
+            due: false,
         }
     }
     pub fn attach(&mut self, generation: u64) -> Result<(), &'static str> {
@@ -119,6 +123,10 @@ impl Session {
     pub fn release(&mut self, stream: StreamId) -> Result<(), &'static str> {
         self.mux.release(stream)
     }
+    /// Whether a bulk transfer moved bytes since the last call.
+    pub fn take_due(&mut self) -> bool {
+        core::mem::take(&mut self.due)
+    }
     pub fn take_log(&mut self) -> Option<Log> {
         self.logs.pop_front()
     }
@@ -164,6 +172,7 @@ impl Session {
                             .push_back(Log::MuxRejected(completion.bytes[..kept].to_vec()));
                         return Err(error);
                     }
+                    self.due |= output || !completion.bytes.is_empty();
                 }
                 TransferStatus::Timeout if input && completion.transferred == 0 => {}
                 _ => return Err("USB mux bulk transfer failed"),

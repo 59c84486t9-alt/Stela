@@ -3270,6 +3270,12 @@ impl Devices for AppleDevices {
         self.sleep.asleep
     }
 
+    fn take_host_service(&mut self) -> bool {
+        self.usb_masters
+            .iter_mut()
+            .fold(false, |due, master| master.session.take_due() | due)
+    }
+
     fn memory_lock(&self) -> super::mmu::MemoryLocks {
         let Some(device) = self.memory_controller else {
             return [None; amcc::GROUPS];

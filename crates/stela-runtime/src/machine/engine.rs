@@ -751,6 +751,13 @@ pub trait Devices {
     fn waits_on_host(&self) -> bool {
         false
     }
+    /// Whether a device moved bytes the host feeds or drains since the last
+    /// call, such as a bulk transfer of a USB session the host writes and
+    /// reads. Then a wait of every PE is [`Stop::Waiting`] at once, so the
+    /// host refills or drains it before the board waits on.
+    fn take_host_service(&mut self) -> bool {
+        false
+    }
     /// The physical regions the memory controllers have locked against writes,
     /// first and last byte, by CTRR lock group.
     fn memory_lock(&self) -> super::mmu::MemoryLocks {
@@ -1050,10 +1057,11 @@ pub enum Stop {
     Budget,
     /// Every PE is off or waits in WFI or WFE with nothing able to wake it.
     Idle,
-    /// Every PE is off or waits, and the wait reached the wait limit
-    /// (`Machine::set_wait_limit`), or only something outside the board can
-    /// end it (`Devices::waits_on_host`) and no limit is set. The host
-    /// takes its inputs and runs the machine again to go on waiting.
+    /// Every PE is off or waits, and the run's waits reached the wait limit
+    /// (`Machine::set_wait_limit`), a device has bytes for the host
+    /// (`Devices::take_host_service`), or only something outside the board
+    /// can end the wait (`Devices::waits_on_host`) and no limit is set. The
+    /// host takes its inputs and runs the machine again to go on waiting.
     Waiting,
     /// A device carried out the guest's reset or power-off request.
     Reset(Reset),
@@ -1799,9 +1807,12 @@ pub struct Machine<H: Host, D: Devices> {
     clock: alloc::boxed::Box<clock::Clock>,
     /// End waits of every PE by leaping the counter (`clock::Clock::skip_to`).
     idle_skip: bool,
-    /// The longest one wait of every PE lasts in system counter ticks
-    /// before `run` returns [`Stop::Waiting`] (`set_wait_limit`).
+    /// The longest the waits of every PE in one `run` last in all, in
+    /// system counter ticks, before it returns [`Stop::Waiting`]
+    /// (`set_wait_limit`).
     wait_limit: Option<u64>,
+    /// System counter ticks the PEs have waited on the host in this `run`.
+    waited: u64,
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.
     pacm_written: bool,
@@ -1961,6 +1972,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             clock: alloc::boxed::Box::default(),
             idle_skip: false,
             wait_limit: None,
+            waited: 0,
             pacm_written: false,
             completing: None,
             chain: alloc::boxed::Box::default(),
@@ -2294,12 +2306,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         (now, timers)
     }
 
-    /// Bound each wait of every PE on the host to `limit` system counter
-    /// ticks, after which `run` returns [`Stop::Waiting`] so the host can
-    /// take inputs that reach the board from outside it, such as its power
-    /// button. The counter keeps following the host's meanwhile; an idle
-    /// skip, which leaps to a deadline at once, is not bounded. Without a
-    /// limit a wait lasts until a deadline.
+    /// Bound the waits of every PE on the host in one `run` to `limit`
+    /// system counter ticks in all, after which it returns [`Stop::Waiting`]
+    /// so the host can take inputs that reach the board from outside it,
+    /// such as its power button. In all, so that a guest whose timers end
+    /// each wait early still returns. The counter keeps following the
+    /// host's meanwhile; an idle skip, which leaps to a deadline at once, is
+    /// not bounded. Without a limit a wait lasts until a deadline.
     pub fn set_wait_limit(&mut self, limit: Option<u64>) {
         self.wait_limit = limit.map(|limit| limit.max(1));
     }
@@ -3237,6 +3250,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The serial scheduler and chained native blocks, until a stop.
     pub(super) fn run_blocks(&mut self, budget: u64) -> Stop {
         self.block_limit = if budget == 0 { u64::MAX } else { budget };
+        self.waited = 0;
         // The host may have changed the devices between runs (`devices` is
         // theirs too): their lines are asked again.
         self.device_lines = None;

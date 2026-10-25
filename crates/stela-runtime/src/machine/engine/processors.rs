@@ -267,8 +267,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// time slice ends or it waits. Otherwise run the next PE that can, round
     /// robin from the running one, or wait on the host until one can (or,
     /// with idle skip, leap the counter to the next deadline); with nothing
-    /// left to wake any PE the machine is idle. A wait that reaches the wait
-    /// limit, or that only the host's inputs can end, returns to the host.
+    /// left to wake any PE the machine is idle. A wait that reaches the
+    /// run's wait limit, follows a device's bytes for the host, or that only
+    /// the host's inputs can end, returns to the host.
     pub(super) fn schedule(&mut self) -> Step {
         self.take_starts()?;
         if !self.processor_paused(self.current)
@@ -281,7 +282,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let host = self.host.counter();
         self.clock.end_slice(host, self.statistics.blocks);
         let mut waited = false;
-        let mut wait_start = None;
         loop {
             self.observe_writes();
             let now = self.now();
@@ -308,6 +308,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.clock.start_slice(host, self.statistics.blocks, share);
                 return self.wake();
             }
+            if self.devices.take_host_service() {
+                if waited {
+                    self.host.arm_timer(None);
+                }
+                return Err(Stop::Waiting);
+            }
             let deadline = self.next_deadline(now);
             if deadline.is_none() && !self.devices.waits_on_host() {
                 return Err(Stop::Idle);
@@ -320,7 +326,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let limit = self
                 .wait_limit
-                .map(|limit| wait_start.get_or_insert(now).saturating_add(limit));
+                .map(|limit| now.saturating_add(limit.saturating_sub(self.waited)));
             let until = match (deadline, limit) {
                 (_, Some(limit)) if now >= limit => None,
                 (Some(deadline), Some(limit)) => Some(deadline.min(limit)),
@@ -335,6 +341,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.statistics.waits += 1;
             self.host.arm_timer(Some(self.clock.host_deadline(until)));
             self.host.wait_for_interrupt();
+            self.waited = self.waited.saturating_add(self.now().saturating_sub(now));
             waited = true;
         }
     }
@@ -839,6 +846,8 @@ mod tests {
         power: Vec<(usize, bool)>,
         /// Something outside the board can still wake a PE.
         host_wake: bool,
+        /// It has moved bytes the host feeds since the engine last asked.
+        host_service: bool,
         /// The counts its lines and deadlines were asked at, in order.
         counts: Vec<u64>,
         /// It answers `Devices::pins`, and the PEs that asked.
@@ -941,6 +950,9 @@ mod tests {
         }
         fn waits_on_host(&self) -> bool {
             self.host_wake
+        }
+        fn take_host_service(&mut self) -> bool {
+            core::mem::take(&mut self.host_service)
         }
     }
 
@@ -2002,7 +2014,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_only_the_host_can_end_or_that_reaches_the_limit_returns_to_the_host() {
+    fn a_wait_only_the_host_can_end_that_reaches_the_limit_or_owes_the_host_returns_to_it() {
         let mut machine = board(&[], Board::default(), alloc::vec![identity(0)]);
         machine.system_instruction(WFI).unwrap();
         // Nothing can wake the PE: idle.
@@ -2018,13 +2030,25 @@ mod tests {
         machine.set_idle_skip(true);
         assert_eq!(machine.schedule(), Err(Stop::Waiting));
         assert_eq!(machine.host.now, 3000);
-        // The limit bounds a wait for a deadline too; the deadline still
-        // ends the wait it falls in.
+        // The limit bounds the run's waits in all: a later one in the same
+        // run returns at once.
         machine.set_idle_skip(false);
         machine.devices.host_wake = false;
         machine.devices.dma = Some(10_000);
         assert_eq!(machine.schedule(), Err(Stop::Waiting));
+        assert_eq!(machine.host.now, 3000);
+        // It bounds a wait for a deadline too, in the next run; the deadline
+        // still ends the wait it falls in.
+        machine.waited = 0;
+        assert_eq!(machine.schedule(), Err(Stop::Waiting));
         assert_eq!(machine.host.now, 6000);
+        // A device that moved bytes for the host returns to it before any
+        // wait, once.
+        machine.waited = 0;
+        machine.devices.host_service = true;
+        assert_eq!(machine.schedule(), Err(Stop::Waiting));
+        assert_eq!(machine.host.now, 6000);
+        assert!(!machine.devices.host_service);
         machine.set_wait_limit(None);
         machine.schedule().unwrap();
         assert!(machine.host.now >= 10_000);
