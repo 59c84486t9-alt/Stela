@@ -417,7 +417,8 @@ pub enum Readiness {
     /// would start recoveryOS instead.
     NotInstalled,
     /// Its SSD has no iBootSystemContainer yet, or NVRAM holds the machine
-    /// in recovery mode: only Install macOS starts.
+    /// in recovery mode, as an unfinished restore leaves it: only Install
+    /// macOS starts.
     Unprepared,
     /// The check could not be made; starting the choice reports why.
     Unknown,
@@ -440,9 +441,23 @@ pub fn ready(options: &str, kind: ChoiceKind) -> Readiness {
             };
             // The engine splits a `--storage` partition that `--nor` also
             // names; recoveryOS then reads its namespace.
-            let part = match option(options, "--nor") == option(options, "--storage") {
-                true => Part::Namespace,
-                false => Part::Whole,
+            let in_storage = option(options, "--nor") == option(options, "--storage");
+            // NVRAM that an unfinished restore left holding the machine in
+            // recovery mode waits for Install macOS, as the Mac choice does.
+            if let Some(nor) = option(options, "--nor").and_then(|s| s.parse::<Target>().ok()) {
+                let state = if in_storage { Part::State } else { Part::Whole };
+                match select(&nor, state, false) {
+                    Ok(s) if s.target == boot_selection::Target::RecoveryMode => {
+                        return Readiness::Unprepared;
+                    }
+                    Ok(_) => {}
+                    Err(_) => return Readiness::Unknown,
+                }
+            }
+            let part = if in_storage {
+                Part::Namespace
+            } else {
+                Part::Whole
             };
             match blank(&target, part) {
                 Ok(true) => Readiness::Unprepared,
