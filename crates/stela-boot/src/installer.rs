@@ -1,0 +1,1313 @@
+//! Install macOS's disk picker, before boot services end: full-screen pages
+//! on the firmware's framebuffer where the user chooses the PC disk macOS
+//! is installed on and the space it takes, as a Linux installer's
+//! partitioner does. Each disk shows its partitions as a bar; macOS can
+//! take free space or a Stela partition already there, a partition can be
+//! deleted, the whole disk erased, and the new partition's size set.
+//!
+//! Nothing is written until the last page confirms it. Then the disk's GPT
+//! gains the partition (the Stela Apple region type, `payload::gpt`), which
+//! holds the Mac's internal SSD and, in its tail, the machine state
+//! (`pc::machine_state`); its first MiB and that tail are zeroed, so the
+//! restore and the NOR start blank. The caller records the choice
+//! (`mount_interface::DISK_FILE`).
+//!
+//! Disks are listed as the engine finds them after boot (`pc::storage`): by
+//! serial number, so one without a serial cannot be chosen, and the USB
+//! Stela started from is left out. Filesystems are never resized: another
+//! system's space is freed only by deleting its partition.
+use crate::{
+    choice::{self, Press, Wait},
+    console::{Framebuffer, font::Font},
+    output,
+    payload::{Aligned, device_path, disk_model, disk_serial},
+};
+use alloc::{format, string::String, vec, vec::Vec};
+use sha2::{Digest, Sha256};
+use stela_runtime::{
+    payload::gpt::{self, Found, Guid, Role, Table},
+    pc::{machine_state, storage::Target},
+};
+use uefi::{
+    Handle,
+    boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
+    proto::{loaded_image::LoadedImage, media::block::BlockIO},
+};
+
+const MIB: u64 = 1 << 20;
+const GB: u64 = 1_000_000_000;
+/// The least space macOS is given, as the messages say it.
+const MIN_BYTES: u64 = 64 * GB;
+/// The new partition's GPT name.
+const NAME: &str = "Stela macOS";
+/// The most bytes one firmware write takes.
+const WRITE_BYTES: u64 = MIB;
+
+const BACKGROUND: u32 = 0x16181d;
+const CARD: u32 = 0x22252c;
+const RAISED: u32 = 0x2d313a;
+const ACCENT: u32 = 0x4c8dff;
+const TEXT: u32 = 0xeceef2;
+const DIM: u32 = 0x9097a3;
+const WARN: u32 = 0xffb84d;
+const DANGER: u32 = 0xff5a52;
+const NEW: u32 = 0x34c77b;
+const FREE: u32 = 0x353943;
+
+/// One disk of this PC.
+struct Disk {
+    io: ScopedProtocol<BlockIO>,
+    media: u32,
+    geometry: gpt::Disk,
+    serial: Option<String>,
+    model: String,
+    bus: &'static str,
+    /// Its GPT; `None` on a blank disk or one with another scheme.
+    table: Option<Table>,
+    /// Data without a GPT, which only erasing the disk replaces.
+    foreign: bool,
+    /// Why it cannot take macOS, when it cannot.
+    refusal: Option<&'static str>,
+}
+
+impl Disk {
+    fn bytes(&self) -> u64 {
+        self.geometry.blocks * self.geometry.block_bytes
+    }
+
+    fn mib_blocks(&self) -> u64 {
+        (MIB / self.geometry.block_bytes).max(1)
+    }
+
+    fn partition(&self, index: usize) -> &gpt::Partition {
+        &self
+            .table
+            .as_ref()
+            .expect("a partition is in the table")
+            .partitions[index]
+    }
+
+    fn read(&mut self, lba: u64, blocks: u64) -> Result<Vec<u8>, &'static str> {
+        let mut buffer = Aligned::new((blocks * self.geometry.block_bytes) as usize);
+        self.io
+            .read_blocks(self.media, lba, buffer.bytes())
+            .map_err(|_| "the disk cannot be read")?;
+        Ok(buffer.bytes().to_vec())
+    }
+
+    fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), &'static str> {
+        let mut buffer = Aligned::new(bytes.len());
+        buffer.bytes().copy_from_slice(bytes);
+        self.io
+            .write_blocks(self.media, lba, buffer.bytes())
+            .map_err(|_| "the disk refused a write")
+    }
+
+    /// Zero `bytes` from block `lba`.
+    fn zero(&mut self, lba: u64, bytes: u64) -> Result<(), &'static str> {
+        let block = self.geometry.block_bytes;
+        let zeros = vec![0u8; WRITE_BYTES as usize];
+        let mut done = 0;
+        while done < bytes {
+            let span = (bytes - done).min(WRITE_BYTES);
+            self.write(lba + done / block, &zeros[..span as usize])?;
+            done += span;
+        }
+        Ok(())
+    }
+}
+
+/// What a stretch of a disk holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Content {
+    /// Partition `n` of the disk's table.
+    Partition(usize),
+    Free,
+    /// Data of another partition scheme.
+    Foreign,
+}
+
+/// A stretch of a disk, in blocks from `first` to before `end`.
+#[derive(Clone, Copy)]
+struct Segment {
+    first: u64,
+    end: u64,
+    content: Content,
+}
+
+/// Where macOS goes.
+#[derive(Clone, Copy)]
+enum Place {
+    /// Free space from `first` to before `end`, aligned to MiB.
+    Free { first: u64, end: u64 },
+    /// A Stela partition already there.
+    Reuse(usize),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Disks,
+    Partitions,
+    Size,
+    Confirm,
+}
+
+/// What a key press leads to.
+enum Step {
+    Stay,
+    Leave,
+    Write,
+}
+
+struct Picker {
+    disks: Vec<Disk>,
+    page: Page,
+    disk: usize,
+    /// The highlighted row of the partitions page.
+    row: usize,
+    /// Partitions of the chosen disk to delete, in the order deleted.
+    deleted: Vec<usize>,
+    erased: bool,
+    place: Option<Place>,
+    /// The new partition's size.
+    size: u64,
+    /// Whether the confirmation's install button has the focus.
+    install: bool,
+    notice: Option<&'static str>,
+}
+
+/// Choose the partition macOS is installed on, creating it if need be; its
+/// `SERIAL:GUID`. `None` when the user leaves, or without a framebuffer or
+/// keyboard to choose with.
+pub fn choose() -> Option<String> {
+    let Some((screen, font)) = Framebuffer::from_firmware().zip(crate::console::font::console())
+    else {
+        output::arguments(format_args!(
+            "INSTALLER refused: no framebuffer to draw on\n"
+        ));
+        return None;
+    };
+    let mut canvas = Canvas::new(screen, font);
+    let mut picker = Picker {
+        disks: disks(),
+        page: Page::Disks,
+        disk: 0,
+        row: 0,
+        deleted: Vec::new(),
+        erased: false,
+        place: None,
+        size: 0,
+        install: false,
+        notice: None,
+    };
+    for disk in &picker.disks {
+        output::arguments(format_args!(
+            "INSTALLER disk {} {} serial={:?} bytes={} table={} refusal={:?}\n",
+            disk.bus,
+            disk.model,
+            disk.serial,
+            disk.bytes(),
+            disk.table.as_ref().map_or(0, |t| t.partitions.len()),
+            disk.refusal
+        ));
+    }
+    loop {
+        picker.draw(&mut canvas);
+        canvas.show();
+        let press = match choice::key(None) {
+            Wait::Key(press) => press,
+            Wait::NoInput => return None,
+            Wait::Nothing | Wait::Timeout => continue,
+        };
+        picker.notice = None;
+        match picker.press(press) {
+            Step::Stay => {}
+            Step::Leave => return None,
+            Step::Write => match picker.write() {
+                Ok(target) => return Some(target),
+                Err(error) => {
+                    output::arguments(format_args!("INSTALLER write refused: {error}\n"));
+                    picker.notice = Some(error);
+                }
+            },
+        }
+    }
+}
+
+impl Picker {
+    fn chosen(&self) -> &Disk {
+        &self.disks[self.disk]
+    }
+
+    /// The chosen disk as it will be.
+    fn segments(&self) -> Vec<Segment> {
+        segments_of(self.chosen(), &self.deleted, self.erased)
+    }
+
+    /// A free segment's MiB-aligned span.
+    fn aligned(&self, segment: Segment) -> (u64, u64) {
+        let unit = self.chosen().mib_blocks();
+        (
+            segment.first.div_ceil(unit) * unit,
+            segment.end / unit * unit,
+        )
+    }
+
+    fn span_bytes(&self, (first, end): (u64, u64)) -> u64 {
+        end.saturating_sub(first) * self.chosen().geometry.block_bytes
+    }
+
+    fn open_disk(&mut self) {
+        self.deleted.clear();
+        self.erased = false;
+        self.place = None;
+        self.page = Page::Partitions;
+        let segments = self.segments();
+        // The largest free space starts highlighted.
+        self.row = (0..segments.len())
+            .filter(|&n| segments[n].content == Content::Free)
+            .max_by_key(|&n| self.span_bytes(self.aligned(segments[n])))
+            .unwrap_or(0);
+    }
+
+    fn press(&mut self, press: Press) -> Step {
+        match self.page {
+            Page::Disks => self.press_disks(press),
+            Page::Partitions => self.press_partitions(press),
+            Page::Size => self.press_size(press),
+            Page::Confirm => self.press_confirm(press),
+        }
+    }
+
+    fn press_disks(&mut self, press: Press) -> Step {
+        let count = self.disks.len();
+        match press {
+            Press::Escape => return Step::Leave,
+            Press::Up if count > 0 => self.disk = (self.disk + count - 1) % count,
+            Press::Down if count > 0 => self.disk = (self.disk + 1) % count,
+            Press::Enter if count > 0 => match self.chosen().refusal {
+                Some(refusal) => self.notice = Some(refusal),
+                None => self.open_disk(),
+            },
+            _ => {}
+        }
+        Step::Stay
+    }
+
+    fn press_partitions(&mut self, press: Press) -> Step {
+        let segments = self.segments();
+        let count = segments.len();
+        self.row = self.row.min(count.saturating_sub(1));
+        let segment = segments.get(self.row).copied();
+        match press {
+            Press::Escape => self.page = Page::Disks,
+            Press::Up if count > 0 => self.row = (self.row + count - 1) % count,
+            Press::Down if count > 0 => self.row = (self.row + 1) % count,
+            Press::Character('e' | 'E') => {
+                self.erased = true;
+                self.row = 0;
+            }
+            Press::Character('u' | 'U') => {
+                if self.erased {
+                    self.erased = false;
+                } else {
+                    self.deleted.pop();
+                }
+            }
+            Press::Delete | Press::Character('d' | 'D') => match segment.map(|s| s.content) {
+                Some(Content::Partition(n)) => self.deleted.push(n),
+                Some(Content::Foreign) => self.erased = true,
+                _ => {}
+            },
+            Press::Enter => match segment {
+                Some(
+                    segment @ Segment {
+                        content: Content::Free,
+                        ..
+                    },
+                ) => {
+                    let (first, end) = self.aligned(segment);
+                    let bytes = self.span_bytes((first, end));
+                    if bytes < MIN_BYTES {
+                        self.notice = Some("This free space is too small: macOS needs 64 GB.");
+                    } else {
+                        self.place = Some(Place::Free { first, end });
+                        self.size = bytes / MIB * MIB;
+                        self.page = Page::Size;
+                    }
+                }
+                Some(Segment {
+                    content: Content::Partition(n),
+                    ..
+                }) if self.chosen().partition(n).role() == Some(Role::AppleRegion) => {
+                    self.place = Some(Place::Reuse(n));
+                    self.install = false;
+                    self.page = Page::Confirm;
+                }
+                Some(Segment {
+                    content: Content::Partition(_),
+                    ..
+                }) => {
+                    self.notice =
+                        Some("Choose free space, or delete this partition first (Delete).");
+                }
+                Some(Segment {
+                    content: Content::Foreign,
+                    ..
+                }) => {
+                    self.notice = Some("Erase the disk first (E) to use it.");
+                }
+                None => {}
+            },
+            _ => {}
+        }
+        Step::Stay
+    }
+
+    /// The new partition's size limits and step.
+    fn size_range(&self) -> (u64, u64, u64) {
+        let Some(Place::Free { first, end }) = self.place else {
+            return (0, 0, 0);
+        };
+        let most = self.span_bytes((first, end)) / MIB * MIB;
+        // A round step: the power of two GB nearest a 32nd of the range.
+        let step = ((most - MIN_BYTES) / 32 / GB).max(1).next_power_of_two() * GB;
+        (MIN_BYTES, most, step)
+    }
+
+    fn press_size(&mut self, press: Press) -> Step {
+        let (least, most, step) = self.size_range();
+        match press {
+            Press::Escape => self.page = Page::Partitions,
+            Press::Left | Press::Down => {
+                self.size = self.size.saturating_sub(step).max(least) / MIB * MIB
+            }
+            Press::Right | Press::Up => self.size = (self.size + step).min(most) / MIB * MIB,
+            Press::Home => self.size = least,
+            Press::End => self.size = most,
+            Press::Enter => {
+                self.install = false;
+                self.page = Page::Confirm;
+            }
+            _ => {}
+        }
+        Step::Stay
+    }
+
+    fn press_confirm(&mut self, press: Press) -> Step {
+        let back = match self.place {
+            Some(Place::Free { .. }) => Page::Size,
+            _ => Page::Partitions,
+        };
+        match press {
+            Press::Escape => self.page = back,
+            Press::Left | Press::Right | Press::Character('\t') => self.install = !self.install,
+            Press::Enter if self.install => return Step::Write,
+            Press::Enter => self.page = back,
+            _ => {}
+        }
+        Step::Stay
+    }
+
+    /// The partitions the confirmed change deletes.
+    fn deleting(&self) -> Vec<usize> {
+        match (&self.chosen().table, self.erased) {
+            (Some(table), true) => (0..table.partitions.len()).collect(),
+            _ => self.deleted.clone(),
+        }
+    }
+
+    /// Write the confirmed change; the partition's `SERIAL:GUID`.
+    fn write(&mut self) -> Result<String, &'static str> {
+        let place = self.place.ok_or("nothing was chosen")?;
+        let deleting = self.deleting();
+        let size = self.size;
+        let erased = self.erased;
+        let disk = &mut self.disks[self.disk];
+        let serial = disk
+            .serial
+            .clone()
+            .ok_or("the disk reports no serial number")?;
+        let block = disk.geometry.block_bytes;
+        let mut seed = 0u64;
+        let mut entropy = || {
+            seed += 1;
+            // SAFETY: RDTSC only reads the time-stamp counter.
+            let time = unsafe { core::arch::x86_64::_rdtsc() };
+            let digest = Sha256::new()
+                .chain_update(serial.as_bytes())
+                .chain_update(time.to_le_bytes())
+                .chain_update(seed.to_le_bytes())
+                .finalize();
+            Guid::from_entropy(digest[..16].try_into().expect("16 bytes"))
+        };
+        let mut table = match &disk.table {
+            Some(table) => table.clone(),
+            None => Table {
+                disk_guid: entropy(),
+                partitions: Vec::new(),
+            },
+        };
+        let (guid, first, blocks) = match place {
+            Place::Reuse(n) => {
+                let partition = &table.partitions[n];
+                (
+                    partition.unique_guid,
+                    partition.first_lba,
+                    partition.blocks(),
+                )
+            }
+            Place::Free { first, .. } => (entropy(), first, size / block),
+        };
+        let mut deleting = deleting;
+        deleting.sort_unstable();
+        for n in deleting.iter().rev() {
+            table.partitions.remove(*n);
+        }
+        if erased && disk.table.is_none() {
+            table.partitions.clear();
+        }
+        let changed = matches!(place, Place::Free { .. }) || !deleting.is_empty() || erased;
+        if let Place::Free { .. } = place {
+            if table.partitions.len() >= 128 {
+                return Err("the disk's partition table is full");
+            }
+            table.partitions.push(gpt::Partition {
+                type_guid: Role::AppleRegion.type_guid(),
+                unique_guid: guid,
+                first_lba: first,
+                last_lba: first + blocks - 1,
+                attributes: 0,
+                name: NAME.into(),
+            });
+            table.partitions.sort_by_key(|p| p.first_lba);
+        }
+        let target = format!("{serial}:{guid}");
+        target.parse::<Target>()?;
+        output::arguments(format_args!(
+            "INSTALLER writing {target} first_lba={first} blocks={blocks} deleting={} \
+             table={changed}\n",
+            deleting.len()
+        ));
+        if changed {
+            let writes = gpt::encode(disk.geometry, &table)
+                .map_err(|_| "the new partition table is invalid")?;
+            for write in writes {
+                disk.write(write.lba, &write.bytes)?;
+            }
+        }
+        let bytes = blocks * block;
+        let split = machine_state::split(bytes).map_err(|_| "the partition is too small")?;
+        disk.zero(first, MIB)?;
+        disk.zero(
+            first + split.namespace_bytes / block,
+            bytes - split.namespace_bytes,
+        )?;
+        disk.io
+            .flush_blocks()
+            .map_err(|_| "the disk did not finish writing")?;
+        Ok(target)
+    }
+}
+
+/// Open `handle`'s block I/O, without taking it from its driver.
+fn block_io(handle: Handle) -> Option<ScopedProtocol<BlockIO>> {
+    // SAFETY: only the disk the user confirms is written, after its partition
+    // driver's last read.
+    unsafe {
+        boot::open_protocol::<BlockIO>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()
+}
+
+/// The device path of the whole disk Stela started from.
+fn boot_disk() -> Option<String> {
+    let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle()).ok()?;
+    let path = device_path(image.device()?)?;
+    Some(path.split("/HD(").next()?.into())
+}
+
+/// The bus a disk's device path names.
+fn bus(path: &str) -> &'static str {
+    [
+        ("/NVMe(", "NVMe"),
+        ("/Sata(", "SATA"),
+        ("/USB(", "USB"),
+        ("/Scsi(", "SCSI"),
+        ("/eMMC(", "eMMC"),
+        ("/SD(", "SD card"),
+    ]
+    .into_iter()
+    .find(|(node, _)| path.contains(node))
+    .map_or("Disk", |(_, bus)| bus)
+}
+
+/// Every writable whole disk of this PC but the one Stela started from.
+fn disks() -> Vec<Disk> {
+    let started = boot_disk();
+    let Ok(handles) = boot::find_handles::<BlockIO>() else {
+        return Vec::new();
+    };
+    let mut disks = Vec::new();
+    for handle in handles {
+        let Some(io) = block_io(handle) else {
+            continue;
+        };
+        let media = io.media();
+        if media.is_logical_partition() || !media.is_media_present() || media.is_read_only() {
+            continue;
+        }
+        let path = device_path(handle).unwrap_or_default();
+        if started.as_deref() == Some(path.as_str()) {
+            continue;
+        }
+        let geometry = gpt::Disk {
+            block_bytes: u64::from(media.block_size()),
+            blocks: media.last_block() + 1,
+        };
+        let serial = disk_serial(handle, &path);
+        let mut disk = Disk {
+            media: media.media_id(),
+            io,
+            geometry,
+            model: disk_model(handle, &path).unwrap_or_else(|| format!("{} disk", bus(&path))),
+            bus: bus(&path),
+            serial,
+            table: None,
+            foreign: false,
+            refusal: None,
+        };
+        let found = gpt::read(geometry, |lba, blocks| {
+            disk.read(lba, blocks)
+                .map_err(stela_runtime::payload::PayloadError::Disk)
+        });
+        match found {
+            Ok(Found::Table { table, .. }) => disk.table = Some(table),
+            Ok(Found::Blank | Found::Interrupted) => {}
+            Err(_) => disk.foreign = true,
+        }
+        disk.refusal = match &disk.serial {
+            None => Some("This disk reports no serial number, which Stela finds it by."),
+            Some(serial) if serial.contains(char::is_whitespace) => {
+                Some("This disk's serial number has spaces, which Stela cannot name.")
+            }
+            Some(_) if disk.bytes() < MIN_BYTES => Some("This disk is smaller than 64 GB."),
+            Some(_) => None,
+        };
+        disks.push(disk);
+    }
+    disks
+}
+
+/// `bytes` as people read disk sizes: decimal units, three figures.
+fn size(bytes: u64) -> String {
+    let tenths = |unit: u64| (bytes * 10 + unit / 2) / unit;
+    match bytes {
+        b if b >= 1000 * GB => {
+            let t = tenths(1000 * GB);
+            format!("{}.{} TB", t / 10, t % 10)
+        }
+        b if b >= 10 * GB => format!("{} GB", (b + GB / 2) / GB),
+        b if b >= GB => {
+            let t = tenths(GB);
+            format!("{}.{} GB", t / 10, t % 10)
+        }
+        b => format!("{} MB", (b + 500_000) / 1_000_000),
+    }
+}
+
+/// A partition type's name and colour.
+fn kind(partition: &gpt::Partition) -> (&'static str, u32) {
+    if let Some(role) = partition.role() {
+        return match role {
+            Role::AppleRegion => ("Stela macOS", NEW),
+            Role::Esp => ("EFI System", 0x8a94a6),
+            role => (role.name(), 0x7c8796),
+        };
+    }
+    const KNOWN: [(&str, &str, u32); 7] = [
+        (
+            "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            "Windows data",
+            0x3b82f6,
+        ),
+        (
+            "E3C9E316-0B5C-4DB8-817D-F92DF00215AE",
+            "Microsoft reserved",
+            0x5b6b8a,
+        ),
+        (
+            "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC",
+            "Windows recovery",
+            0x6b7fb3,
+        ),
+        (
+            "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            "Linux filesystem",
+            0xf2a33a,
+        ),
+        (
+            "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F",
+            "Linux swap",
+            0xc27c2e,
+        ),
+        (
+            "7C3457EF-0000-11AA-AA11-00306543ECAC",
+            "Apple APFS",
+            0xb28bff,
+        ),
+        (
+            "48465300-0000-11AA-AA11-00306543ECAC",
+            "Apple HFS+",
+            0x9d7be0,
+        ),
+    ];
+    KNOWN
+        .into_iter()
+        .find(|(guid, ..)| Guid::parse(guid) == Some(partition.type_guid))
+        .map_or(("Other", 0x7c8796), |(_, name, colour)| (name, colour))
+}
+
+impl Picker {
+    fn segment_label(&self, segment: Segment) -> (String, &'static str, u32) {
+        match segment.content {
+            Content::Partition(n) => {
+                let partition = self.chosen().partition(n);
+                let (kind, colour) = kind(partition);
+                let name = match partition.name.trim() {
+                    "" => String::from(kind),
+                    name => String::from(name),
+                };
+                (name, kind, colour)
+            }
+            Content::Free => (String::from("Free space"), "", FREE),
+            Content::Foreign => (String::from("Other partition scheme"), "MBR", 0x7c8796),
+        }
+    }
+
+    fn draw(&self, canvas: &mut Canvas) {
+        let (width, height) = canvas.size();
+        canvas.fill(0, 0, width, height, BACKGROUND);
+        let column = (width.saturating_sub(64)).min(860);
+        let left = (width - column) / 2;
+        let layout = Layout {
+            left,
+            column,
+            height,
+        };
+        canvas.text(left, 36, "Install macOS", 2, TEXT);
+        match self.page {
+            Page::Disks => self.draw_disks(canvas, &layout),
+            Page::Partitions => self.draw_partitions(canvas, &layout),
+            Page::Size => self.draw_size(canvas, &layout),
+            Page::Confirm => self.draw_confirm(canvas, &layout),
+        }
+        if let Some(notice) = self.notice {
+            canvas.text(left, height - 72, notice, 1, DANGER);
+        }
+        let keys = match self.page {
+            Page::Disks => "Up/Down  choose      Enter  continue      Esc  back to Stela",
+            Page::Partitions => {
+                "Up/Down  choose    Enter  install here    Del  delete    E  erase disk    \
+                 U  undo    Esc  back"
+            }
+            Page::Size => {
+                "Left/Right  change size    Home/End  smallest/largest    Enter  continue    Esc  back"
+            }
+            Page::Confirm => "Left/Right  choose      Enter  confirm      Esc  back",
+        };
+        canvas.text(left, height - 40, keys, 1, DIM);
+    }
+
+    fn draw_disks(&self, canvas: &mut Canvas, layout: &Layout) {
+        canvas.text(
+            layout.left,
+            84,
+            "Choose the disk to install macOS on.",
+            1,
+            DIM,
+        );
+        if self.disks.is_empty() {
+            canvas.text(
+                layout.left,
+                130,
+                "No disk of this PC can take macOS. Connect one and start Stela again.",
+                1,
+                WARN,
+            );
+            return;
+        }
+        const CARD_HEIGHT: usize = 86;
+        const GAP: usize = 12;
+        let top = 124;
+        let fits = (layout.height.saturating_sub(top + 96) / (CARD_HEIGHT + GAP)).max(1);
+        let first = window(self.disk, self.disks.len(), fits);
+        for (row, n) in (first..self.disks.len()).take(fits).enumerate() {
+            let disk = &self.disks[n];
+            let y = top + row * (CARD_HEIGHT + GAP);
+            let selected = n == self.disk;
+            if selected {
+                canvas.panel(layout.left, y, layout.column, CARD_HEIGHT, 10, ACCENT);
+                canvas.panel(
+                    layout.left + 2,
+                    y + 2,
+                    layout.column - 4,
+                    CARD_HEIGHT - 4,
+                    8,
+                    RAISED,
+                );
+            } else {
+                canvas.panel(layout.left, y, layout.column, CARD_HEIGHT, 10, CARD);
+            }
+            let inner = layout.left + 18;
+            let colour = if disk.refusal.is_some() { DIM } else { TEXT };
+            canvas.text(inner, y + 14, &disk.model, 1, colour);
+            let total = size(disk.bytes());
+            canvas.text_right(layout.left + layout.column - 18, y + 14, &total, 1, colour);
+            let detail = match disk.refusal {
+                Some(refusal) => (String::from(refusal), WARN),
+                None => (
+                    format!(
+                        "{}  -  serial {}",
+                        disk.bus,
+                        disk.serial.as_deref().unwrap_or("")
+                    ),
+                    DIM,
+                ),
+            };
+            canvas.text(inner, y + 36, &detail.0, 1, detail.1);
+            let bar = Bar {
+                x: inner,
+                y: y + 60,
+                width: layout.column - 36,
+                height: 12,
+            };
+            let segments = segments_of(disk, &[], false);
+            self.draw_bar(canvas, n, &segments, &bar, None, None);
+        }
+    }
+
+    /// Disk `n`'s `segments` as a bar, `highlight` outlined and `new` (a
+    /// span of blocks) drawn as the partition macOS gets.
+    fn draw_bar(
+        &self,
+        canvas: &mut Canvas,
+        n: usize,
+        segments: &[Segment],
+        bar: &Bar,
+        highlight: Option<usize>,
+        new: Option<(u64, u64)>,
+    ) {
+        let disk = &self.disks[n];
+        let blocks = disk.geometry.blocks.max(1);
+        let x_of =
+            |lba: u64| bar.x + (u128::from(lba) * bar.width as u128 / u128::from(blocks)) as usize;
+        canvas.panel(bar.x, bar.y, bar.width, bar.height, bar.height / 3, FREE);
+        for (index, segment) in segments.iter().enumerate() {
+            let (x, end) = (x_of(segment.first), x_of(segment.end));
+            let width = end.saturating_sub(x).max(2);
+            let colour = match segment.content {
+                Content::Partition(p) => {
+                    kind(
+                        disk.table
+                            .as_ref()
+                            .map(|t| &t.partitions[p])
+                            .expect("table"),
+                    )
+                    .1
+                }
+                Content::Foreign => 0x7c8796,
+                Content::Free => FREE,
+            };
+            if highlight == Some(index) {
+                canvas.panel(x, bar.y.saturating_sub(3), width, bar.height + 6, 4, TEXT);
+                canvas.panel(
+                    x + 2,
+                    bar.y - 1,
+                    width.saturating_sub(4).max(1),
+                    bar.height + 2,
+                    3,
+                    colour,
+                );
+            } else {
+                canvas.fill(
+                    x + 1,
+                    bar.y,
+                    width.saturating_sub(2).max(1),
+                    bar.height,
+                    colour,
+                );
+            }
+            if bar.height >= 30 && segment.content != Content::Free {
+                let (name, _, _) = self.segment_label(*segment);
+                if canvas.text_width(&name, 1) + 16 < width {
+                    canvas.text(x + 8, bar.y + (bar.height - 16) / 2, &name, 1, BACKGROUND);
+                }
+            }
+        }
+        if let Some((first, end)) = new {
+            let (x, right) = (x_of(first), x_of(end));
+            let width = right.saturating_sub(x).max(2);
+            canvas.fill(
+                x + 1,
+                bar.y,
+                width.saturating_sub(2).max(1),
+                bar.height,
+                NEW,
+            );
+            if bar.height >= 30 && canvas.text_width(NAME, 1) + 16 < width {
+                canvas.text(x + 8, bar.y + (bar.height - 16) / 2, NAME, 1, BACKGROUND);
+            }
+        }
+    }
+
+    fn subtitle(&self, canvas: &mut Canvas, layout: &Layout) {
+        let disk = self.chosen();
+        let text = format!("{}, {}  -  {}", disk.model, size(disk.bytes()), disk.bus);
+        canvas.text(layout.left, 84, &text, 1, DIM);
+    }
+
+    fn big_bar(&self, layout: &Layout) -> Bar {
+        Bar {
+            x: layout.left,
+            y: 122,
+            width: layout.column,
+            height: 40,
+        }
+    }
+
+    fn draw_partitions(&self, canvas: &mut Canvas, layout: &Layout) {
+        self.subtitle(canvas, layout);
+        let segments = self.segments();
+        let bar = self.big_bar(layout);
+        self.draw_bar(canvas, self.disk, &segments, &bar, Some(self.row), None);
+        const ROW: usize = 36;
+        let top = 190;
+        let fits = (layout.height.saturating_sub(top + 150) / ROW).max(1);
+        let first = window(self.row, segments.len(), fits);
+        for (line, n) in (first..segments.len()).take(fits).enumerate() {
+            let segment = segments[n];
+            let y = top + line * ROW;
+            if n == self.row {
+                canvas.panel(layout.left, y, layout.column, ROW - 4, 8, RAISED);
+            }
+            let (name, kind, colour) = self.segment_label(segment);
+            canvas.panel(layout.left + 14, y + 9, 14, 14, 4, colour);
+            // Free space is an outline, not a colour of its own.
+            if segment.content == Content::Free {
+                let inside = if n == self.row { RAISED } else { BACKGROUND };
+                canvas.panel(layout.left + 14, y + 9, 14, 14, 4, DIM);
+                canvas.panel(layout.left + 16, y + 11, 10, 10, 3, inside);
+            }
+            canvas.text(layout.left + 40, y + 8, &name, 1, TEXT);
+            canvas.text(layout.left + layout.column * 5 / 10, y + 8, kind, 1, DIM);
+            let bytes = (segment.end - segment.first) * self.chosen().geometry.block_bytes;
+            canvas.text_right(
+                layout.left + layout.column - 14,
+                y + 8,
+                &size(bytes),
+                1,
+                TEXT,
+            );
+        }
+        let mut y = top + fits.min(segments.len()) * ROW + 10;
+        let deleting = self.deleting();
+        if self.erased {
+            canvas.text(
+                layout.left,
+                y,
+                "The whole disk is erased when you confirm.",
+                1,
+                WARN,
+            );
+            y += 24;
+        } else if !deleting.is_empty() {
+            let names: Vec<String> = deleting
+                .iter()
+                .map(|&n| {
+                    let partition = self.chosen().partition(n);
+                    format!(
+                        "{} ({})",
+                        partition.name.trim(),
+                        size(partition.blocks() * self.chosen().geometry.block_bytes)
+                    )
+                })
+                .collect();
+            let text = format!("Deleted when you confirm: {}", names.join(", "));
+            canvas.text(layout.left, y, &text, 1, WARN);
+            y += 24;
+        }
+        let about = match segments.get(self.row).map(|s| s.content) {
+            Some(Content::Free) => "Enter installs macOS in this free space.",
+            Some(Content::Partition(n))
+                if self.chosen().partition(n).role() == Some(Role::AppleRegion) =>
+            {
+                "Enter installs macOS again on this Stela partition, erasing the macOS on it."
+            }
+            Some(Content::Partition(_)) => {
+                "Delete frees this partition's space; everything on it is lost when you confirm."
+            }
+            Some(Content::Foreign) => "This disk uses another partition scheme: E erases it.",
+            None => "",
+        };
+        canvas.text(layout.left, y + 6, about, 1, DIM);
+    }
+
+    fn draw_size(&self, canvas: &mut Canvas, layout: &Layout) {
+        self.subtitle(canvas, layout);
+        let bar = self.big_bar(layout);
+        let block = self.chosen().geometry.block_bytes;
+        let new = match self.place {
+            Some(Place::Free { first, .. }) => Some((first, first + self.size / block)),
+            _ => None,
+        };
+        self.draw_bar(canvas, self.disk, &self.segments(), &bar, None, new);
+        let (least, most, step) = self.size_range();
+        let shown = format!("<   {}   >", size(self.size));
+        let x = layout.left + (layout.column.saturating_sub(canvas.text_width(&shown, 3))) / 2;
+        canvas.text(x, 220, &shown, 3, TEXT);
+        let limits = format!(
+            "macOS gets at least {} and up to {} of this free space, in steps of {}.",
+            size(least),
+            size(most),
+            size(step)
+        );
+        let x = layout.left + (layout.column.saturating_sub(canvas.text_width(&limits, 1))) / 2;
+        canvas.text(x, 300, &limits, 1, DIM);
+    }
+
+    fn draw_confirm(&self, canvas: &mut Canvas, layout: &Layout) {
+        let deleting = self.deleting();
+        let destructive =
+            self.erased || !deleting.is_empty() || matches!(self.place, Some(Place::Reuse(_)));
+        let title = if destructive {
+            "Erase and install?"
+        } else {
+            "Install here?"
+        };
+        canvas.text(layout.left, 84, title, 1, TEXT);
+        let disk = self.chosen();
+        let block = disk.geometry.block_bytes;
+        let into = match self.place {
+            Some(Place::Reuse(n)) => format!(
+                "macOS is installed on the Stela partition ({}) of {}, erasing it.",
+                size(disk.partition(n).blocks() * block),
+                disk.model
+            ),
+            _ => format!(
+                "macOS is installed in a new {} partition on {} ({}).",
+                size(self.size),
+                disk.model,
+                size(disk.bytes())
+            ),
+        };
+        let mut y = 124;
+        canvas.text(layout.left, y, &into, 1, TEXT);
+        y += 34;
+        if self.erased {
+            canvas.text(
+                layout.left,
+                y,
+                "Everything on this disk is erased.",
+                1,
+                WARN,
+            );
+            y += 26;
+        }
+        if !deleting.is_empty() {
+            canvas.text(
+                layout.left,
+                y,
+                "These partitions are deleted, with everything on them:",
+                1,
+                WARN,
+            );
+            y += 26;
+            for &n in deleting.iter().take(8) {
+                let partition = disk.partition(n);
+                let (kind, colour) = kind(partition);
+                canvas.panel(layout.left + 14, y + 1, 14, 14, 4, colour);
+                let line = format!(
+                    "{}  {}  {}",
+                    partition.name.trim(),
+                    kind,
+                    size(partition.blocks() * block)
+                );
+                canvas.text(layout.left + 40, y, &line, 1, TEXT);
+                y += 24;
+            }
+        }
+        canvas.text(
+            layout.left,
+            y + 12,
+            "Nothing is written until you confirm. The install then downloads macOS from Apple.",
+            1,
+            DIM,
+        );
+        let buttons = layout.height - 136;
+        let action = if destructive {
+            "Erase and Install"
+        } else {
+            "Install"
+        };
+        let fill = if destructive { DANGER } else { ACCENT };
+        let right = layout.left + layout.column;
+        let action_width = canvas.text_width(action, 1) + 48;
+        self.button(
+            canvas,
+            right - action_width,
+            buttons,
+            action_width,
+            action,
+            self.install,
+            fill,
+        );
+        let back_width = canvas.text_width("Back", 1) + 48;
+        self.button(
+            canvas,
+            right - action_width - 16 - back_width,
+            buttons,
+            back_width,
+            "Back",
+            !self.install,
+            ACCENT,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn button(
+        &self,
+        canvas: &mut Canvas,
+        x: usize,
+        y: usize,
+        width: usize,
+        text: &str,
+        focused: bool,
+        fill: u32,
+    ) {
+        let (background, foreground) = if focused {
+            (fill, 0xffffff)
+        } else {
+            (CARD, TEXT)
+        };
+        canvas.panel(x, y, width, 40, 10, background);
+        canvas.text(x + 24, y + 12, text, 1, foreground);
+    }
+}
+
+/// `disk` as it will be: its partitions but the `deleted` ones, or none
+/// when it is `erased`, and the free space of a MiB or more between them.
+fn segments_of(disk: &Disk, deleted: &[usize], erased: bool) -> Vec<Segment> {
+    let (first, end) = (
+        disk.geometry.first_usable(),
+        disk.geometry.last_usable() + 1,
+    );
+    if disk.foreign && !erased {
+        return vec![Segment {
+            first,
+            end,
+            content: Content::Foreign,
+        }];
+    }
+    let mut kept: Vec<(usize, &gpt::Partition)> = match (&disk.table, erased) {
+        (Some(table), false) => table
+            .partitions
+            .iter()
+            .enumerate()
+            .filter(|(n, _)| !deleted.contains(n))
+            .collect(),
+        _ => Vec::new(),
+    };
+    kept.sort_by_key(|(_, p)| p.first_lba);
+    let mut segments = Vec::new();
+    let mut at = first;
+    for (n, partition) in kept {
+        if partition.first_lba >= at + disk.mib_blocks() {
+            segments.push(Segment {
+                first: at,
+                end: partition.first_lba,
+                content: Content::Free,
+            });
+        }
+        segments.push(Segment {
+            first: partition.first_lba,
+            end: partition.last_lba + 1,
+            content: Content::Partition(n),
+        });
+        at = at.max(partition.last_lba + 1);
+    }
+    if end >= at + disk.mib_blocks() {
+        segments.push(Segment {
+            first: at,
+            end,
+            content: Content::Free,
+        });
+    }
+    segments
+}
+
+/// The first of `count` rows to show so that `selected` is among `fits`.
+fn window(selected: usize, count: usize, fits: usize) -> usize {
+    selected
+        .saturating_sub(fits - 1)
+        .min(count.saturating_sub(fits))
+}
+
+struct Layout {
+    left: usize,
+    column: usize,
+    height: usize,
+}
+
+struct Bar {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+/// A page drawn in memory and shown at once. Coordinates are in units of
+/// `scale` screen pixels, so pages keep their proportions on any display.
+struct Canvas {
+    screen: Framebuffer,
+    font: Font,
+    width: usize,
+    height: usize,
+    scale: usize,
+    /// Pixels with blue in the low byte, row by row.
+    pixels: Vec<u32>,
+}
+
+impl Canvas {
+    fn new(screen: Framebuffer, font: Font) -> Self {
+        let (width, height) = screen.resolution();
+        Self {
+            screen,
+            font,
+            width,
+            height,
+            scale: (height / 540).clamp(1, 4),
+            pixels: vec![0; width * height],
+        }
+    }
+
+    fn size(&self) -> (usize, usize) {
+        (self.width / self.scale, self.height / self.scale)
+    }
+
+    /// Fill device pixels, cut to the screen.
+    fn device_fill(&mut self, x: usize, y: usize, width: usize, height: usize, colour: u32) {
+        let right = (x + width).min(self.width);
+        for row in y..(y + height).min(self.height) {
+            if x < right {
+                self.pixels[row * self.width + x..row * self.width + right].fill(colour);
+            }
+        }
+    }
+
+    fn fill(&mut self, x: usize, y: usize, width: usize, height: usize, colour: u32) {
+        let s = self.scale;
+        self.device_fill(x * s, y * s, width * s, height * s, colour);
+    }
+
+    /// A rectangle with corners of `radius` rounded.
+    fn panel(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        radius: usize,
+        colour: u32,
+    ) {
+        let s = self.scale;
+        let (x, y, width, height) = (x * s, y * s, width * s, height * s);
+        let radius = (radius * s).min(width / 2).min(height / 2) as u64;
+        for row in 0..height {
+            let from_edge = row.min(height - 1 - row) as u64;
+            let inset = if from_edge < radius {
+                let dy = radius - from_edge;
+                (radius - (radius * radius - dy * dy).isqrt()) as usize
+            } else {
+                0
+            };
+            self.device_fill(
+                x + inset,
+                y + row,
+                width.saturating_sub(2 * inset),
+                1,
+                colour,
+            );
+        }
+    }
+
+    fn text_width(&self, text: &str, size: usize) -> usize {
+        text.len() * self.font.width * size
+    }
+
+    /// `text` from (`x`, `y`) at `size` times the font; its width.
+    fn text(&mut self, x: usize, y: usize, text: &str, size: usize, colour: u32) -> usize {
+        let s = self.scale * size;
+        let (glyph_width, glyph_height) = (self.font.width, self.font.height);
+        for (index, character) in text.bytes().enumerate() {
+            let left = (x + index * glyph_width * size) * self.scale;
+            for gy in 0..glyph_height {
+                for gx in 0..glyph_width {
+                    if self.font.pixel(character, gx, gy) {
+                        self.device_fill(left + gx * s, y * self.scale + gy * s, s, s, colour);
+                    }
+                }
+            }
+        }
+        self.text_width(text, size)
+    }
+
+    /// `text` ending at `right`.
+    fn text_right(&mut self, right: usize, y: usize, text: &str, size: usize, colour: u32) {
+        let width = self.text_width(text, size);
+        self.text(right.saturating_sub(width), y, text, size, colour);
+    }
+
+    fn show(&self) {
+        let mut row = vec![0u8; self.width * 4];
+        for y in 0..self.height {
+            for (out, pixel) in row
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(&self.pixels[y * self.width..(y + 1) * self.width])
+            {
+                *out = pixel.to_le_bytes();
+            }
+            self.screen.show_row(y, &row);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_as_three_figures_in_decimal_units() {
+        assert_eq!(size(1_000_204_886_016), "1.0 TB");
+        assert_eq!(size(512 * GB), "512 GB");
+        assert_eq!(size(8_600_000_000), "8.6 GB");
+        assert_eq!(size(260 * 1_000_000), "260 MB");
+    }
+
+    #[test]
+    fn the_window_keeps_the_selection_in_view() {
+        assert_eq!(window(0, 10, 4), 0);
+        assert_eq!(window(5, 10, 4), 2);
+        assert_eq!(window(9, 10, 4), 6);
+        assert_eq!(window(1, 2, 4), 0);
+    }
+}

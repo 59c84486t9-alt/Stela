@@ -10,7 +10,7 @@
 //! drawing writes only the cells that changed: video memory is
 //! write-combining and slow to read back, so scrolling redraws from the grid
 //! instead of moving pixels.
-mod font;
+pub(crate) mod font;
 mod mode;
 
 use alloc::{string::String, vec, vec::Vec};

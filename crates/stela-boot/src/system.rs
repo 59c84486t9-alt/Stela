@@ -451,6 +451,9 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
     if !options.starts_with(b"--system") {
         return None;
     }
+    if crate::choice::unchosen(options) {
+        return Some("No disk is chosen for macOS yet: choose Install macOS first.");
+    }
     crate::status::begin("Checking the internal SSD and NVRAM");
     let (held, found) = match crate::selection::peek(options.to_vec()) {
         Err(refusal @ Refusal::BlankDisk) => (Some(held(refusal)), "no macOS installed yet"),

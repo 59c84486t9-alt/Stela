@@ -42,6 +42,7 @@ mod handoff;
 mod heap;
 mod host_check;
 mod host_firmware;
+mod installer;
 mod la57;
 mod layout;
 mod log_file;
@@ -206,6 +207,7 @@ fn main() -> Status {
         host_firmware::read(&mut firmware_root).unwrap_or_else(|e| output::fatal(e));
     drop(firmware_root);
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
+    let options = choice::resolve(&mut volume, options);
     status::done("");
     let held = system::held_at_start(&options);
     let options = choice::choose(&mut volume, options, held);

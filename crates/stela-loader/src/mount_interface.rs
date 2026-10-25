@@ -30,7 +30,8 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// [`MAX_CHOICES`] entries, chosen with `1`-`9` and then `a`-`z`. Revision
 /// 5: `--external-disks` makes every host disk the engine leaves the guest's
 /// external drive, and `--storage` may share the USB with the install medium.
-pub const OPTIONS_REVISION: u32 = 5;
+/// Revision 6: [`CHOSEN_DISK`] stands for the partition Install macOS chose.
+pub const OPTIONS_REVISION: u32 = 6;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";
@@ -39,6 +40,26 @@ pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";
 /// whole output there from its first line, before and after boot services
 /// end, so every run leaves a log on the USB itself.
 pub const BOOT_LOG_FILE: &str = "\\EFI\\stela\\boot.log";
+/// The word that stands, in a startup choice's options, for the partition
+/// `stela.efi`'s Install macOS chose for the Mac's internal SSD
+/// (`SERIAL:GUID`), which it keeps in [`DISK_FILE`].
+pub const CHOSEN_DISK: &str = "@disk";
+/// The chosen partition, beside `stela.cfg`.
+pub const DISK_FILE: &str = "\\EFI\\stela\\disk.cfg";
+
+/// `options` with each [`CHOSEN_DISK`] replaced by `disk`; `None` when they
+/// name the chosen disk and none was chosen.
+pub fn with_disk(options: &str, disk: Option<&str>) -> Option<String> {
+    let mut words = Vec::new();
+    for word in options.split_ascii_whitespace() {
+        words.push(match word {
+            CHOSEN_DISK => disk?,
+            word => word,
+        });
+    }
+    Some(words.join(" "))
+}
+
 /// The keys that choose entries, in order: one per entry.
 const KEYS: &[u8; 35] = b"123456789abcdefghijklmnopqrstuvwxyz";
 /// The most entries the keys choose among.
@@ -320,6 +341,20 @@ impl Choices {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn the_chosen_disk_stands_in_for_every_word_that_names_it() {
+        let options = "--system --storage @disk --nor @disk --tss";
+        assert_eq!(
+            with_disk(options, Some("S1:0C81")).as_deref(),
+            Some("--system --storage S1:0C81 --nor S1:0C81 --tss")
+        );
+        assert_eq!(with_disk(options, None), None);
+        assert_eq!(
+            with_disk("--system --bundle x", None).as_deref(),
+            Some("--system --bundle x")
+        );
+    }
 
     #[test]
     fn the_marker_round_trips_and_disagreeing_markers_count_as_none() {

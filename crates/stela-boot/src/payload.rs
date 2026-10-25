@@ -612,10 +612,14 @@ const NVME_SERIAL: core::ops::Range<usize> = 4..24;
 /// edk2 treats a zero timeout as already expired; its own admin commands
 /// allow 5 seconds.
 const NVME_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(5);
-/// ATA IDENTIFY DEVICE words 10-19: the serial number, two characters per
-/// word with the first in the high byte.
+/// ATA IDENTIFY DEVICE words 10-19: the serial number, and words 27-46:
+/// the model number, two characters per word with the first in the high
+/// byte.
 const ATA_IDENTIFY_BYTES: usize = 512;
 const ATA_SERIAL: core::ops::Range<usize> = 20..40;
+const ATA_MODEL: core::ops::Range<usize> = 54..94;
+/// NVMe Identify Controller bytes 24-63: the model number.
+const NVME_MODEL: core::ops::Range<usize> = 24..64;
 
 fn trimmed(bytes: &[u8]) -> Option<String> {
     let text = core::str::from_utf8(bytes).ok()?.trim_matches([' ', '\0']);
@@ -626,17 +630,30 @@ fn trimmed(bytes: &[u8]) -> Option<String> {
 /// IDENTIFY data or its USB device's serial number string. Other buses,
 /// such as virtio, report none.
 pub(crate) fn disk_serial(handle: Handle, path: &str) -> Option<String> {
-    nvme_serial(path)
-        .or_else(|| ata_serial(handle))
-        .or_else(|| usb_serial(path))
+    nvme_identify(path)
+        .and_then(|data| trimmed(data.get(NVME_SERIAL)?))
+        .or_else(|| ata_text(handle, ATA_SERIAL))
+        .or_else(|| usb_string(path, |device| device.str_serial_number))
 }
 
-/// The iSerialNumber string of the USB device the disk belongs to, in US
-/// English and trimmed as Stela's own USB driver reads it
-/// (`stela_drivers::usb::xhci`), so both name the disk alike. Hubs' paths
-/// prefix their devices', so the device is the one with the longest path
-/// the disk's starts with.
-fn usb_serial(path: &str) -> Option<String> {
+/// A whole disk's model name, from the same sources as [`disk_serial`]
+/// (the USB device's product string).
+pub(crate) fn disk_model(handle: Handle, path: &str) -> Option<String> {
+    nvme_identify(path)
+        .and_then(|data| trimmed(data.get(NVME_MODEL)?))
+        .or_else(|| ata_text(handle, ATA_MODEL))
+        .or_else(|| usb_string(path, |device| device.str_product))
+}
+
+/// A string of the USB device the disk belongs to, `index` naming it in
+/// the device descriptor, in US English and trimmed as Stela's own USB
+/// driver reads it (`stela_drivers::usb::xhci`), so both name the disk
+/// alike. Hubs' paths prefix their devices', so the device is the one with
+/// the longest path the disk's starts with.
+fn usb_string(
+    path: &str,
+    index: impl FnOnce(&uefi::proto::usb::DeviceDescriptor) -> u8,
+) -> Option<String> {
     use uefi::proto::usb::io::UsbIo;
     const LANGUAGE_EN_US: u16 = 0x0409;
     let (device, _) = boot::find_handles::<UsbIo>()
@@ -657,7 +674,7 @@ fn usb_serial(path: &str) -> Option<String> {
         )
     }
     .ok()?;
-    let index = io.device_descriptor().ok()?.str_serial_number;
+    let index = index(&io.device_descriptor().ok()?);
     if index == 0 {
         return None;
     }
@@ -669,7 +686,8 @@ fn usb_serial(path: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.into())
 }
 
-fn nvme_serial(path: &str) -> Option<String> {
+/// The Identify Controller data of the NVMe controller `path` is on.
+fn nvme_identify(path: &str) -> Option<Vec<u8>> {
     use uefi::proto::nvme::{NvmeQueueType, NvmeRequestBuilder, pass_thru::NvmePassThru};
     for controller in boot::find_handles::<NvmePassThru>().ok()? {
         let Some(prefix) = device_path(controller) else {
@@ -698,12 +716,13 @@ fn nvme_serial(path: &str) -> Option<String> {
                 .ok()?
                 .build();
         let response = pass_thru.controller().execute_command(request).ok()?;
-        return trimmed(response.transfer_buffer()?.get(NVME_SERIAL)?);
+        return Some(response.transfer_buffer()?.to_vec());
     }
     None
 }
 
-fn ata_serial(handle: Handle) -> Option<String> {
+/// The text in `range` of the disk's ATA IDENTIFY data.
+fn ata_text(handle: Handle, range: core::ops::Range<usize>) -> Option<String> {
     use uefi::proto::media::disk_info::{DiskInfo, DiskInfoInterface};
     // SAFETY: the identify data is only read.
     let info = unsafe {
@@ -724,14 +743,14 @@ fn ata_serial(handle: Handle) -> Option<String> {
         return None;
     }
     let mut data = [0u8; ATA_IDENTIFY_BYTES];
-    if info.identify(&mut data).ok()? < ATA_SERIAL.end {
+    if info.identify(&mut data).ok()? < range.end {
         return None;
     }
-    let mut serial = data[ATA_SERIAL].to_vec();
-    for pair in serial.as_chunks_mut::<2>().0 {
+    let mut text = data[range].to_vec();
+    for pair in text.as_chunks_mut::<2>().0 {
         pair.swap(0, 1);
     }
-    trimmed(&serial)
+    trimmed(&text)
 }
 
 /// GUID entropy for a new table: the disk, the time and a counter. These
