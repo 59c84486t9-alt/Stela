@@ -43,10 +43,15 @@ impl Endian {
 pub struct Output {
     bytes: Vec<u8>,
     at: usize,
+    /// Every byte the stream has taken.
+    written: u64,
 }
 impl Output {
     pub fn is_pending(&self) -> bool {
         self.at < self.bytes.len()
+    }
+    pub fn written(&self) -> u64 {
+        self.written
     }
     pub fn queue(&mut self, bytes: Vec<u8>, limit: usize) -> Result<()> {
         if self.is_pending() {
@@ -71,6 +76,7 @@ impl Output {
                     return Poll::Ready(Err(Error::Transport(String::from("invalid/zero write"))));
                 }
                 self.at += n;
+                self.written += n as u64;
                 if self.is_pending() {
                     Poll::Pending
                 } else {
@@ -133,6 +139,9 @@ impl Framed {
     }
     pub fn sending(&self) -> bool {
         self.output.is_pending()
+    }
+    pub fn written(&self) -> u64 {
+        self.output.written()
     }
     pub fn poll_receive(&mut self, s: &mut impl ByteStream) -> Poll<Result<Value>> {
         if self.failed {

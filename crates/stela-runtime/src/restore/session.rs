@@ -18,6 +18,8 @@ pub const PROTOCOL: u64 = 15;
 const MAX_JOBS: usize = 16;
 const MAX_LEDGER_BYTES: usize = 16 * 1024 * 1024;
 const FILE_CHUNK: usize = 8192;
+/// The bytes one [`Job::poll`] moves at most.
+const POLL_BYTES: u64 = 1024 * 1024;
 /// Every message type the host understands, with the value the public host
 /// sends for it (idevicerestore 4b3e847e `restore_supported_message_types`,
 /// "extracted from ac2"). Restored's `is_host_compatible` compares this
@@ -478,11 +480,27 @@ impl Job {
         s: &mut impl ByteStream,
         store: &mut Store<R>,
     ) -> Poll<Result<()>> {
-        let r = self.step(s, store);
+        // Step on while each step queues or sends, up to POLL_BYTES: a
+        // transfer of 8 KiB frames would otherwise move one frame a turn.
+        let start = self.written();
+        let r = loop {
+            let (before, queued) = (self.written(), self.sending());
+            let r = self.step(s, store);
+            let moved = self.written() != before || !queued && self.sending();
+            if r.is_ready() || !moved || self.written() - start >= POLL_BYTES {
+                break r;
+            }
+        };
         if matches!(r, Poll::Ready(Err(_))) {
             self.failed = true;
         }
         r.map(|r| r.map_err(|e| super::refuse(format!("transfer failed: {e}"), &self.request)))
+    }
+    fn written(&self) -> u64 {
+        self.frame.written() + self.raw.written()
+    }
+    fn sending(&self) -> bool {
+        self.frame.sending() || self.raw.is_pending()
     }
     fn step<R: ReadAt>(
         &mut self,
@@ -906,6 +924,36 @@ mod tests {
             got.extend_from_slice(chunk);
         }
         assert_eq!(got, data);
+    }
+    /// A stream that takes every byte lets one poll move a whole file of
+    /// several FileData frames, and its end.
+    #[test]
+    fn one_poll_moves_every_frame_a_ready_stream_takes() {
+        struct Open(Vec<u8>);
+        impl ByteStream for Open {
+            fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize>> {
+                Poll::Pending
+            }
+            fn write(&mut self, b: &[u8]) -> Poll<Result<usize>> {
+                self.0.extend_from_slice(b);
+                Poll::Ready(Ok(b.len()))
+            }
+        }
+        let data = vec![5; 4 * FILE_CHUNK + 1];
+        let mut answers = Answers::new(fixture(&data, false));
+        answers.store.prepare().unwrap();
+        let request = Value::dict([
+            ("DataType", Value::from("SourceBootObjectV4")),
+            ("Arguments", Value::dict([("ImageName", Value::from("OS"))])),
+        ]);
+        let plan = answers.plan(&request).unwrap();
+        let mut job = Job::new(1, Some(2345), request, plan);
+        let mut stream = Open(Vec::new());
+        assert!(matches!(
+            job.poll(&mut stream, &mut answers.store),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(stream.0.len() > data.len());
     }
     #[test]
     fn unknown_updater_recovery_policy_and_failure_status_retain_full_context() {
