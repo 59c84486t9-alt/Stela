@@ -1402,9 +1402,16 @@ mod tests {
         rig.retire(1, 5);
         rig.submit(1, 6, 0, 1, 0, [0; 6]).unwrap();
         rig.retire(1, 6);
-        rig.submit(1, 7, 2, 1, DATA, [32, 0, 0, 0, 0, 0]).unwrap();
+        // A barrier Flush (CDW10 bit 0) completes as a flush; other CDW10
+        // bits refuse.
+        rig.submit(1, 7, 0, 1, 0, [1, 0, 0, 0, 0, 0]).unwrap();
+        rig.retire(1, 7);
+        let mut refused = Rig::new();
+        refused.io_queues();
+        assert!(refused.submit(1, 0, 0, 1, 0, [2, 0, 0, 0, 0, 0]).is_err());
+        rig.submit(1, 8, 2, 1, DATA, [32, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(
-            u16::from_le_bytes(rig.bytes(IOCQ + 16 + 14, 2).try_into().unwrap()) >> 1,
+            u16::from_le_bytes(rig.bytes(IOCQ + 2 * 16 + 14, 2).try_into().unwrap()) >> 1,
             0x80
         );
     }

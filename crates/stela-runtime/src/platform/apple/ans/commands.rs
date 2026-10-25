@@ -584,7 +584,15 @@ impl Ans {
             return Ok(Outcome::status(INVALID_NAMESPACE));
         }
         if cmd.opcode() == FLUSH {
-            if cmd.long(24) != 0 || cmd.long(32) != 0 || !cmd.zero_words(40) {
+            // CDW10 bit 0 asks for a barrier: IONVMeBlockStorageDevice's
+            // synchronize (0x3dee350) sets it from kIOStorageSynchronize-
+            // OptionBarrier when the controller supports one. Writes here
+            // complete durably in order, so a full flush keeps the barrier.
+            if cmd.long(24) != 0
+                || cmd.long(32) != 0
+                || cmd.word(40) & !1 != 0
+                || !cmd.zero_words(44)
+            {
                 return Err("ANS Flush fields are not modeled");
             }
             return Ok(block_result(self.medium.device.flush()));
