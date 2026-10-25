@@ -146,6 +146,9 @@ const CAUSES: usize = 7;
 /// range alone: T0SZ, EPD0, IRGN0, ORGN0, SH0, TG0 (bits 15:0), TBI0, HPD0,
 /// TBID0, NFD0, E0PD0 and TCMA0.
 const LOWER_TCR: u64 = 0xffff | 1 << 37 | 1 << 41 | 1 << 51 | 1 << 53 | 1 << 55 | 1 << 57;
+/// The TCR field of those regimes that decides EL0's accesses to TTBR1's
+/// range alone: E0PD1, which faults them without a walk.
+const USER_TCR: u64 = 1 << 56;
 /// The [`mmu::Controls`] fields a [`Cause::Controls`] reset counts as
 /// differing: SCTLR, TCR, TTBR0, TTBR1, MAIR, SPRR, CTRR, the regime and
 /// stage 2 (its requirement or controls).
@@ -1408,17 +1411,18 @@ impl Host for BareHost<'_> {
             && current.controls != regime.controls
         {
             let (from, to) = (current.controls, regime.controls);
-            // What the lower half's own inputs and SPRR's permission
-            // registers leave of the controls; each of those has its own
-            // reset, and they compose (a context switch writes TTBR0 and
+            // What the lower half's own inputs, E0PD1 and SPRR's
+            // permission registers leave of the controls; each of those has
+            // its own reset, and they compose (a context switch writes TTBR0 and
             // the thread's SPRR_PERM_EL0 together).
-            let lower_tcr = match to.regime {
-                mmu::Regime::El10 | mmu::Regime::El20 => LOWER_TCR,
-                _ => 0,
+            let (lower_tcr, user_tcr) = match to.regime {
+                mmu::Regime::El10 | mmu::Regime::El20 => (LOWER_TCR, USER_TCR),
+                _ => (0, 0),
             };
+            let own = lower_tcr | user_tcr;
             let rest = mmu::Controls {
                 ttbr0: to.ttbr0,
-                tcr: from.tcr & !lower_tcr | to.tcr & lower_tcr,
+                tcr: from.tcr & !own | to.tcr & own,
                 sprr: mmu::Sprr {
                     el0: to.sprr.el0,
                     el1: to.sprr.el1,
@@ -1426,7 +1430,7 @@ impl Host for BareHost<'_> {
                 },
                 ..from
             };
-            let lower = from.ttbr0 != to.ttbr0 || from.tcr != to.tcr;
+            let lower = from.ttbr0 != to.ttbr0 || (from.tcr ^ to.tcr) & lower_tcr != 0;
             // TTBR0 translates only the lower half, but it can name the
             // ASID the upper half's non-global entries were made in.
             let asid = mmu::current_asid(&from) == mmu::current_asid(&to);
@@ -1434,7 +1438,7 @@ impl Host for BareHost<'_> {
                 if lower {
                     state.reset_lower();
                 }
-                if from.sprr.el0 != to.sprr.el0 {
+                if from.sprr.el0 != to.sprr.el0 || (from.tcr ^ to.tcr) & user_tcr != 0 {
                     state.reset_user_views();
                 }
                 if from.sprr.el1 != to.sprr.el1 {
