@@ -40,10 +40,10 @@ const MIB: u64 = 1024 * 1024;
 const HEAP_BYTES: RangeInclusive<u64> = 512 * MIB..=2048 * MIB;
 const CODE_BYTES: RangeInclusive<u64> = 128 * MIB..=512 * MIB;
 const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
-/// Guest DRAM bytes per byte of the shadow page-table pool: room for each
-/// of the host's 8 roots to map all of guest DRAM once in 4 KiB pages (8
-/// bytes per page). An exhausted half resets and refills; a 26A434 restore
-/// boot's halves held at most 2 MiB at once.
+/// Guest DRAM bytes per byte of each native executor's shadow page-table
+/// pool: room for its 8 roots to map all of guest DRAM once in 4 KiB pages
+/// (8 bytes per page). An exhausted half resets and refills everything; a
+/// 26A434 restore's userland filled 8 MiB halves 20 to 80 times a beat.
 const POOL_SHARE: u64 = 64;
 /// Host RAM left for the loader's own tables and pages after the sizing.
 const RESERVE_BYTES: u64 = 256 * MIB;
@@ -140,15 +140,19 @@ struct Sizes {
 }
 
 impl Sizes {
-    /// The pool scales with the guest DRAM it maps; the heap and arena take
-    /// a share of what the guest and pool leave, between their bounds. On a
-    /// host too small for the guest the parts keep their least sizes and the
-    /// guest gets what remains.
-    fn for_host(free: u64, guest: u64) -> Self {
+    /// The pool scales with the guest DRAM each of the `cores` executors
+    /// maps; the heap and arena take a share of what the guest and pool
+    /// leave, between their bounds. On a host too small for the guest the
+    /// parts keep their least sizes and the guest gets what remains.
+    fn for_host(free: u64, guest: u64, cores: usize) -> Self {
         let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
             (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
         };
-        let pool = clamp(guest / POOL_SHARE, POOL_BYTES, LARGE);
+        let pool = clamp(
+            (guest / POOL_SHARE).saturating_mul(cores as u64),
+            POOL_BYTES,
+            LARGE,
+        );
         let spare = free.saturating_sub(guest + pool + RESERVE_BYTES);
         Self {
             heap: clamp(spare / 2, HEAP_BYTES, LARGE),
@@ -543,7 +547,7 @@ fn load(
         Some(bytes) => crate::engine::number(bytes)?,
         None => crate::engine::DEFAULT_RAM,
     };
-    let sizes = Sizes::for_host(free_ram()?, guest);
+    let sizes = Sizes::for_host(free_ram()?, guest, cores);
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
     // complete firmware reservation is covered before publishing the handoff.
