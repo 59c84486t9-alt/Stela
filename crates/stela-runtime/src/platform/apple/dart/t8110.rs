@@ -842,6 +842,48 @@ fn fault(fault: Fault) -> DmaError {
     DmaError::Fault(fault as u32)
 }
 
+/// The refusal of fault `code` on a remapped stream, whose ERROR record
+/// needs the unrecovered source-versus-context SID provenance.
+fn remapped_fault(code: u32) -> &'static str {
+    const FAULTS: [(Fault, &str); 7] = [
+        (
+            Fault::NoTtbr,
+            "DART remapped no-TTBR fault: source-versus-context SID provenance",
+        ),
+        (
+            Fault::NoPgd,
+            "DART remapped no-PGD fault: source-versus-context SID provenance",
+        ),
+        (
+            Fault::NoPmd,
+            "DART remapped no-PMD fault: source-versus-context SID provenance",
+        ),
+        (
+            Fault::NoPte,
+            "DART remapped no-PTE fault: source-versus-context SID provenance",
+        ),
+        (
+            Fault::Write,
+            "DART remapped write fault: source-versus-context SID provenance",
+        ),
+        (
+            Fault::Read,
+            "DART remapped read fault: source-versus-context SID provenance",
+        ),
+        (
+            Fault::Region,
+            "DART remapped subpage fault: source-versus-context SID provenance",
+        ),
+    ];
+    FAULTS
+        .iter()
+        .find(|(fault, _)| *fault as u32 == code)
+        .map_or(
+            "DART remapped fault: source-versus-context SID provenance",
+            |(_, why)| why,
+        )
+}
+
 impl Iommu for Dart {
     fn page(&self) -> u64 {
         PAGE
@@ -861,9 +903,7 @@ impl Iommu for Dart {
         let result = self.walk(memory, sid, iova, last, write);
         if let Err(DmaError::Fault(code)) = result {
             if self.tcr[sid] & TCR_REMAP_ENABLE != 0 {
-                return Err(DmaError::Unsupported(
-                    "DART remapped fault source-versus-context SID provenance",
-                ));
+                return Err(DmaError::Unsupported(remapped_fault(code)));
             }
             self.report(sid, iova, code, write, access)?;
         }
@@ -1500,7 +1540,7 @@ mod tests {
         assert_eq!(
             dart.translate(&mut ram, 0, 0x200_4010, 0x200_4013, true, &mut a),
             Err(DmaError::Unsupported(
-                "DART remapped fault source-versus-context SID provenance"
+                "DART remapped write fault: source-versus-context SID provenance"
             ))
         );
         assert_eq!(dart.read(ERROR, Width::Word, &mut a), Ok(0));
@@ -2104,7 +2144,7 @@ mod tests {
         assert_eq!(
             d.translate(&mut ram, 0, dva, dva, true, &mut a),
             Err(DmaError::Unsupported(
-                "DART remapped fault source-versus-context SID provenance"
+                "DART remapped write fault: source-versus-context SID provenance"
             ))
         );
         assert_eq!(d.read(PENDING, Width::Word, &mut a), Ok(0));
