@@ -537,12 +537,18 @@ fn trace_unit_status(stored: u64) -> u64 {
 }
 
 /// CNTVCT_ALIAS_EL0 reads the virtual count of the current regime: the
-/// physical count, minus CNTVOFF_EL2 outside the EL2&0 host.
+/// physical count, minus [`count_alias_offset`].
 fn count_alias(cpu: &Cpu, physical: u64) -> u64 {
+    physical.wrapping_sub(count_alias_offset(cpu))
+}
+
+/// What CNTVCT_ALIAS_EL0 subtracts from the physical count: CNTVOFF_EL2,
+/// or nothing in the EL2&0 host.
+pub(crate) fn count_alias_offset(cpu: &Cpu) -> u64 {
     if cpu.regime() == TranslationRegime::El20 {
-        physical
+        0
     } else {
-        physical.wrapping_sub(cpu.read(Register::CNTVOFF_EL2))
+        cpu.read(Register::CNTVOFF_EL2)
     }
 }
 

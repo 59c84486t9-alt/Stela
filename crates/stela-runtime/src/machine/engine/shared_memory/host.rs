@@ -367,6 +367,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn counter(&mut self) -> u64 {
         self.local.counter()
     }
+    fn tsc_counter(&self) -> Option<(u64, u64)> {
+        self.local.tsc_counter()
+    }
     fn profile_ticks(&mut self) -> u64 {
         self.local.profile_ticks()
     }

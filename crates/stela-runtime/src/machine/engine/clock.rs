@@ -47,14 +47,18 @@
 /// runs far below 3,000,000 blocks, the ticket spinlock bound at this rate.
 pub(super) const TICKS_PER_BLOCK: u64 = 1;
 
+use stela_compiler::x86_64::register_read::Count;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Clock {
     /// Host counts the guest is behind.
     lag: u64,
     /// Counts the guest leapt ahead over idle waits.
     lead: u64,
-    /// The last count read, which no later read precedes.
-    last: u64,
+    /// The last count read, which no later read precedes, and `lead` less
+    /// `lag`, where native count reads find them
+    /// (`register_read::count_thunk`).
+    count: Count,
     /// The running slice, when a PE runs: its host start, start block
     /// count and the PEs sharing the round.
     slice: Option<Slice>,
@@ -79,15 +83,16 @@ impl Clock {
     pub(super) fn follow_host(&mut self) {
         self.follows_host = true;
         self.lag = 0;
+        self.sync();
     }
 
     /// The count at host counter value `host`.
     pub(super) fn read(&mut self, host: u64) -> u64 {
-        self.last = host
+        self.count.last = host
             .saturating_add(self.lead)
             .saturating_sub(self.lag)
-            .max(self.last);
-        self.last
+            .max(self.count.last);
+        self.count.last
     }
 
     /// The host counter value at which the count reaches `count`.
@@ -99,6 +104,7 @@ impl Clock {
     /// guest's world happening: the count does not show it.
     pub(super) fn exclude(&mut self, counts: u64) {
         self.lag += counts;
+        self.sync();
     }
 
     /// While every PE waits at host counter value `host`, the count leaps to
@@ -110,7 +116,8 @@ impl Clock {
             // an earlier slice may still hold `count` above host minus lag.
             let adjusted = host.saturating_add(self.lead).saturating_sub(self.lag);
             self.lead += deadline - adjusted;
-            self.last = deadline;
+            self.count.last = deadline;
+            self.sync();
         }
     }
 
@@ -145,7 +152,25 @@ impl Clock {
             .saturating_sub(self.lag.saturating_sub(slice.lag));
         if !self.follows_host {
             self.lag += elapsed.saturating_sub(allowed);
+            self.sync();
         }
+    }
+
+    /// The last count read.
+    pub(super) fn last(&self) -> u64 {
+        self.count.last
+    }
+
+    /// Native count reads at the host counter `((tsc - base) * per_tsc) >>
+    /// 64` ([`super::Host::tsc_counter`]): where they find the count.
+    pub(super) fn native(&mut self, (base, per_tsc): (u64, u64)) -> u64 {
+        self.count.base = base;
+        self.count.per_tsc = per_tsc;
+        &self.count as *const Count as u64
+    }
+
+    fn sync(&mut self) {
+        self.count.offset = self.lead.wrapping_sub(self.lag);
     }
 }
 

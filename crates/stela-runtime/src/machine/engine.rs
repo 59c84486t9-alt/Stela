@@ -541,6 +541,12 @@ pub trait Host {
     }
     /// The guest's system counter.
     fn counter(&mut self) -> u64;
+    /// The TSC base and 64.64 fixed-point scale of a host whose
+    /// [`Host::counter`] is `((tsc - base) * scale) >> 64`, which native
+    /// code then reads itself ([`register_read::count_thunk`]).
+    fn tsc_counter(&self) -> Option<(u64, u64)> {
+        None
+    }
     /// A cycle count for `--profile`'s phase timing ([`step_timing`]); a
     /// host without one answers 0.
     fn profile_ticks(&mut self) -> u64 {
@@ -1455,10 +1461,13 @@ struct Variant {
 /// and plainness follow from System registers and PSTATE alone, so a read
 /// the engine found plain stays plain, with the same value, until derived
 /// state may change ([`Machine::derived_changed`]). They are the thread
-/// pointers, Apple's GL2 thread pointer and GXF status, and DAIF.
-const MIRRORED: [Encoding; 7] = {
+/// pointers, Apple's GL2 thread pointer and GXF status, and DAIF; and
+/// Apple's virtual count alias, whose cell holds the offset it subtracts
+/// from the clock's count ([`COUNT_MIRROR`]).
+const MIRRORED: [Encoding; 8] = {
     use registers::encodings::{
-        DAIF, GXF_STATUS_EL1, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2, TPIDRRO_EL0,
+        CNTVCT_ALIAS_EL0, DAIF, GXF_STATUS_EL1, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2,
+        TPIDRRO_EL0,
     };
     [
         TPIDR_EL0,
@@ -1467,6 +1476,7 @@ const MIRRORED: [Encoding; 7] = {
         TPIDR_EL2,
         TPIDR_GL2,
         GXF_STATUS_EL1,
+        CNTVCT_ALIAS_EL0,
         DAIF,
     ]
 };
@@ -1518,6 +1528,13 @@ impl core::ops::IndexMut<usize> for Mirrors {
 /// The [`MIRRORED`] index of DAIF.
 const DAIF_MIRROR: usize = MIRRORED.len() - 1;
 const _: () = assert!(matches!(MIRRORED[DAIF_MIRROR], registers::encodings::DAIF));
+/// The [`MIRRORED`] index of CNTVCT_ALIAS_EL0, a count read whenever the
+/// host's counter is its TSC's ([`Host::tsc_counter`]).
+const COUNT_MIRROR: usize = DAIF_MIRROR - 1;
+const _: () = assert!(matches!(
+    MIRRORED[COUNT_MIRROR],
+    registers::encodings::CNTVCT_ALIAS_EL0
+));
 
 /// MRS DAIF's value for PSTATE's D, A, I and F masks: bits 9:6.
 fn daif_register(daif: u8) -> u64 {
@@ -1733,8 +1750,9 @@ pub struct Machine<H: Host, D: Devices> {
     slice_end: u64,
     /// The system counter value at which it ends, whichever comes first.
     slice_deadline: u64,
-    /// The system counter the PEs observe (`clock`).
-    clock: clock::Clock,
+    /// The system counter the PEs observe (`clock`), where native count
+    /// reads find it.
+    clock: alloc::boxed::Box<clock::Clock>,
     /// End waits of every PE by leaping the counter (`clock::Clock::skip_to`).
     idle_skip: bool,
     /// The longest one wait of every PE lasts in system counter ticks
@@ -1896,7 +1914,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             unmodeled: Vec::new(),
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
-            clock: clock::Clock::default(),
+            clock: alloc::boxed::Box::default(),
             idle_skip: false,
             wait_limit: None,
             pacm_written: false,
@@ -4332,7 +4350,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let (index, rt) = mirrored_read(pc, word)?;
         let cell = &self.mirrors[index] as *const register_read::Cell as u64;
-        let thunk = register_read::thunk(GuestAddress(pc), rt, cell);
+        let thunk = if index == COUNT_MIRROR {
+            let count = self.clock.native(self.host.tsc_counter()?);
+            register_read::count_thunk(GuestAddress(pc), rt, cell, count)
+        } else {
+            register_read::thunk(GuestAddress(pc), rt, cell)
+        };
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
@@ -6111,11 +6134,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.cpu.pstate.guarded,
             self.statistics.exceptions,
         );
-        if step.is_ok() && after == before {
-            self.mirrors[index] = register_read::Cell {
-                readable: 1,
-                value: self.cpu.state.x[usize::from(access.rt())],
-            };
+        let read = self.cpu.state.x[usize::from(access.rt())];
+        // A count read opens its cell only where it read the clock's last
+        // count less the offset: a chip that answers through another view,
+        // or a later read of the clock, leaves it to the exits.
+        let value = if index == COUNT_MIRROR {
+            let offset = registers::count_alias_offset(&self.cpu);
+            (read == self.clock.last().wrapping_sub(offset)).then_some(offset)
+        } else {
+            Some(read)
+        };
+        if let (Ok(()), true, Some(value)) = (&step, after == before, value) {
+            self.mirrors[index] = register_read::Cell { readable: 1, value };
         }
         step
     }
@@ -6724,6 +6754,8 @@ mod tests {
         pub(super) counter_reads: usize,
         /// Counts the counter moves on after each read.
         pub(super) counter_step: u64,
+        /// What [`Host::tsc_counter`] answers.
+        pub(super) tsc_counter: Option<(u64, u64)>,
         placement: mmu::placement::Placement,
         translation_helper: Option<u64>,
         /// What [`Host::memory_low`] answers.
@@ -6845,6 +6877,9 @@ mod tests {
             if reach == mmu::tlbi::Reach::All {
                 self.invalidations += 1;
             }
+        }
+        fn tsc_counter(&self) -> Option<(u64, u64)> {
+            self.tsc_counter
         }
         fn counter(&mut self) -> u64 {
             self.counter_reads += 1;
@@ -6969,6 +7004,7 @@ mod tests {
             fetch_checks: 0,
             counter_reads: 0,
             counter_step: 0,
+            tsc_counter: None,
             placement: mmu::placement::Placement::FiveLevel,
             translation_helper: None,
             memory_low: false,
@@ -11102,6 +11138,51 @@ mod tests {
         assert_eq!(*machine.mirrors, Mirrors::default());
         // A read to XZR has no cell to open, nor a thunk.
         assert_eq!(mirrored_read(base, 0xd538_d09f), None); // mrs xzr, tpidr_el1
+    }
+
+    /// A count alias read opens its cell with the offset it subtracts, and
+    /// completes natively only on a host whose counter is its TSC's, at
+    /// the clock's count.
+    #[test]
+    fn count_alias_reads_complete_natively_where_the_host_counts_its_tsc() {
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const MRS: u32 = 0xd53c_faca; // mrs x10, cntvct_alias_el0
+        for tsc in [None, Some((5, 7))] {
+            let mut machine = machine(&[ADD, MRS, ADD]);
+            machine.host.tsc_counter = tsc;
+            let base = machine.cpu.pc;
+            machine.host.exits = vec![NativeExit::Exit {
+                next_pc: base + 8,
+                kind: ExitKind::Fallthrough as u64,
+            }];
+            machine.step().unwrap();
+            let cell = &machine.mirrors[COUNT_MIRROR] as *const register_read::Cell as u64;
+            let count = tsc.map_or(0, |tsc| machine.clock.native(tsc));
+            let installed = machine.host.installed.last().unwrap();
+            let thunk = register_read::count_thunk(GuestAddress(base + 4), 10, cell, count);
+            assert_eq!(*installed == thunk.code, tsc.is_some());
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::CNTVOFF_EL2, 0, 0x30);
+            machine.cpu.pc = base + 4;
+            machine.system_instruction(MRS).unwrap();
+            let offset = registers::count_alias_offset(&machine.cpu);
+            let plain = machine.cpu.state.x[10] == machine.clock.last().wrapping_sub(offset);
+            // The M2 reads the alias as the count less CNTVOFF_EL2.
+            assert!(plain || machine.cpu.registers.chip() != crate::machine::chip::Chip::AppleM2);
+            assert_eq!(
+                machine.mirrors[COUNT_MIRROR],
+                if plain {
+                    register_read::Cell {
+                        readable: 1,
+                        value: offset,
+                    }
+                } else {
+                    register_read::Cell::default()
+                }
+            );
+        }
     }
 
     /// Native accesses check and mask their own addresses at every access

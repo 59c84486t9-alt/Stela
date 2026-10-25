@@ -1569,6 +1569,11 @@ impl Host for BareHost<'_> {
         fresh_counter()
     }
 
+    fn tsc_counter(&self) -> Option<(u64, u64)> {
+        let state = state();
+        Some((state.tsc_base, state.counter_per_tsc))
+    }
+
     fn arm_timer(&mut self, deadline: Option<u64>) {
         let now = self.counter();
         let state = state();

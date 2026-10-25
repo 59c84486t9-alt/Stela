@@ -1452,7 +1452,7 @@ mod tests {
             }
             let before_generation = machine.translation_generation;
             let before_regimes = machine.host.regimes.len();
-            let mut expected_clock = machine.clock;
+            let mut expected_clock = *machine.clock;
             machine.host.now = 100;
             let result = machine.processor_write().apply(&[ProcessorChange {
                 domain: 1,

@@ -12,6 +12,11 @@
 //! trapped nor redirected, with `value` the register's contents, and clears
 //! it whenever a System register write, an exception, an exception return
 //! or a PE switch may change either. Thunks clobber only RAX and flags.
+//!
+//! A [`count_thunk`] reads a count instead: the system count the engine's
+//! clock shows at the host's TSC ([`Count`]), less the cell's `value`.
+//! It also clobbers RCX and RDX, which are dead at every block exit (the
+//! direct exit returns in RAX and RDX, and chaining uses RCX).
 use super::pointer::Thunk;
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
@@ -28,21 +33,77 @@ pub struct Cell {
 const VALUE: u8 = core::mem::offset_of!(Cell, value) as u8;
 const _: () = assert!(core::mem::offset_of!(Cell, readable) == 0);
 
+/// The engine's system count at a host TSC value `tsc`: the larger of
+/// `((tsc - base) * per_tsc >> 64) + offset` and `last`, which becomes the
+/// new `last`, so the count never runs backwards.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Count {
+    pub base: u64,
+    pub per_tsc: u64,
+    pub offset: u64,
+    pub last: u64,
+}
+
+const BASE: u8 = core::mem::offset_of!(Count, base) as u8;
+const PER_TSC: u8 = core::mem::offset_of!(Count, per_tsc) as u8;
+const OFFSET: u8 = core::mem::offset_of!(Count, offset) as u8;
+const LAST: u8 = core::mem::offset_of!(Count, last) as u8;
+
 /// The thunk completing `MRS Xt, <register>` at `pc` from the cell at
 /// `cell`, else exiting at `pc` for the engine.
 pub fn thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
-    let mut code = Vec::with_capacity(64);
-    code.extend([0x48, 0xb8]); // movabs rax,cell
-    code.extend(cell.to_le_bytes());
-    code.extend([0x48, 0x83, 0x38, 0x00]); // cmp qword [rax],0
-    code.extend([0x0f, 0x84]); // je miss
-    let fixup = code.len();
-    code.extend([0; 4]);
+    let mut code = open(cell);
+    let fixup = code.len() - 4;
     if rt != 31 {
         code.extend([0x48, 0x8b, 0x40, VALUE]); // mov rax,[rax+value]
         code.extend([0x48, 0x89, 0x87]); // mov [rdi+x(rt)],rax
         code.extend((u32::from(rt) * 8).to_le_bytes());
     }
+    finish(code, fixup, pc)
+}
+
+/// The thunk completing `MRS Xt, <count>` at `pc` with the count at
+/// `count` less the `value` of the cell at `cell`, else exiting at `pc`.
+pub fn count_thunk(pc: GuestAddress, rt: u8, cell: u64, count: u64) -> Thunk {
+    let mut code = open(cell);
+    let fixup = code.len() - 4;
+    code.extend([0x48, 0xb9]); // movabs rcx,count
+    code.extend(count.to_le_bytes());
+    code.extend([0x0f, 0x31]); // rdtsc
+    code.extend([0x48, 0xc1, 0xe2, 0x20]); // shl rdx,32
+    code.extend([0x48, 0x09, 0xd0]); // or rax,rdx
+    code.extend([0x48, 0x2b, 0x41, BASE]); // sub rax,[rcx+base]
+    code.extend([0x48, 0xf7, 0x61, PER_TSC]); // mul qword [rcx+per_tsc]
+    code.extend([0x48, 0x03, 0x51, OFFSET]); // add rdx,[rcx+offset]
+    code.extend([0x48, 0x8b, 0x41, LAST]); // mov rax,[rcx+last]
+    code.extend([0x48, 0x39, 0xc2]); // cmp rdx,rax
+    code.extend([0x48, 0x0f, 0x42, 0xd0]); // cmovb rdx,rax
+    code.extend([0x48, 0x89, 0x51, LAST]); // mov [rcx+last],rdx
+    if rt != 31 {
+        code.extend([0x48, 0xb8]); // movabs rax,cell
+        code.extend(cell.to_le_bytes());
+        code.extend([0x48, 0x2b, 0x50, VALUE]); // sub rdx,[rax+value]
+        code.extend([0x48, 0x89, 0x97]); // mov [rdi+x(rt)],rdx
+        code.extend((u32::from(rt) * 8).to_le_bytes());
+    }
+    finish(code, fixup, pc)
+}
+
+/// Load `cell` and branch to the miss while it is not readable; the
+/// branch's 32-bit displacement ends the code.
+fn open(cell: u64) -> Vec<u8> {
+    let mut code = Vec::with_capacity(128);
+    code.extend([0x48, 0xb8]); // movabs rax,cell
+    code.extend(cell.to_le_bytes());
+    code.extend([0x48, 0x83, 0x38, 0x00]); // cmp qword [rax],0
+    code.extend([0x0f, 0x84, 0, 0, 0, 0]); // je miss
+    code
+}
+
+/// The direct exit to the next instruction, then the miss at `fixup`'s
+/// branch: the original exit at `pc`.
+fn finish(mut code: Vec<u8>, fixup: usize, pc: GuestAddress) -> Thunk {
     let next = code.len();
     code.extend(super::chain::direct_exit(
         GuestAddress(pc.0.wrapping_add(4)),
@@ -80,12 +141,17 @@ mod tests {
         );
     }
 
-    /// Thunks run on the host: a readable cell completes the read into Xt,
-    /// or into nothing for XZR; a cleared one exits with no write.
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-    #[test]
-    fn thunks_read_the_cell_only_while_it_is_readable() {
-        use crate::GuestState;
+    #[repr(C)]
+    #[derive(Debug, PartialEq, Eq)]
+    struct Exit {
+        pc: u64,
+        kind: u64,
+    }
+
+    /// Run a thunk on the host.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    fn run(code: &[u8], state: &mut crate::GuestState) -> Exit {
         use core::ffi::c_void;
         unsafe extern "C" {
             fn mmap(
@@ -104,43 +170,48 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        #[repr(C)]
-        #[derive(Debug, PartialEq, Eq)]
-        struct Exit {
-            pc: u64,
-            kind: u64,
+        // SAFETY: private anonymous memory, RX after the copy, unmapped after
+        // the call; the thunk touches only `state` and its cells, which
+        // outlive it.
+        unsafe {
+            let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+            assert_ne!(page as usize, usize::MAX);
+            core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+            assert_eq!(mprotect(page, PAGE, 5), 0);
+            let entry: unsafe extern "sysv64" fn(*mut crate::GuestState) -> Exit =
+                core::mem::transmute(page);
+            let exit = entry(state);
+            assert_eq!(munmap(page, PAGE), 0);
+            exit
         }
-        fn run(code: &[u8], state: &mut GuestState) -> Exit {
-            // SAFETY: private anonymous memory, RX after the copy, unmapped
-            // after the call; the thunk touches only `state` and the cell,
-            // which outlive it.
-            unsafe {
-                let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
-                assert_ne!(page as usize, usize::MAX);
-                core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
-                assert_eq!(mprotect(page, PAGE, 5), 0);
-                let entry: unsafe extern "sysv64" fn(*mut GuestState) -> Exit =
-                    core::mem::transmute(page);
-                let exit = entry(state);
-                assert_eq!(munmap(page, PAGE), 0);
-                exit
-            }
-        }
-        let pc = GuestAddress(0x4000);
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    const PC: GuestAddress = GuestAddress(0x4000);
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    const MISS: Exit = Exit {
+        pc: PC.0,
+        kind: ExitKind::System as u64,
+    };
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    const NEXT: Exit = Exit {
+        pc: PC.0 + 4,
+        kind: ExitKind::Fallthrough as u64,
+    };
+
+    /// Thunks run on the host: a readable cell completes the read into Xt,
+    /// or into nothing for XZR; a cleared one exits with no write.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn thunks_read_the_cell_only_while_it_is_readable() {
+        use crate::GuestState;
+        let (pc, miss, next) = (PC, MISS, NEXT);
         let mut cell = alloc::boxed::Box::new(Cell::default());
         let address = &mut *cell as *mut Cell;
         let set = |value: Cell| unsafe { address.write(value) };
         let mut state = GuestState::default();
         state.x[19] = 7;
         let read = thunk(pc, 19, address as u64);
-        let miss = Exit {
-            pc: pc.0,
-            kind: ExitKind::System as u64,
-        };
-        let next = Exit {
-            pc: pc.0 + 4,
-            kind: ExitKind::Fallthrough as u64,
-        };
         set(Cell {
             readable: 0,
             value: 0xffff_fe00_1234_5000,
@@ -156,5 +227,41 @@ mod tests {
         let before = state.x;
         assert_eq!(run(&thunk(pc, 31, address as u64).code, &mut state), next);
         assert_eq!(state.x, before);
+    }
+
+    /// A count read adds the offset to the scaled TSC (zero here, as
+    /// `per_tsc` is), never reads below `last` and keeps what it read
+    /// there, and subtracts the cell's value; XZR still moves `last`.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn count_thunks_read_a_monotonic_count_less_the_cell_value() {
+        use crate::GuestState;
+        let mut cell = alloc::boxed::Box::new(Cell::default());
+        let mut count = alloc::boxed::Box::new(Count {
+            offset: 100,
+            last: 50,
+            ..Count::default()
+        });
+        let (cell_at, count_at) = (&mut *cell as *mut Cell, &mut *count as *mut Count);
+        let read = count_thunk(PC, 3, cell_at as u64, count_at as u64);
+        let mut state = GuestState::default();
+        assert_eq!(run(&read.code, &mut state), MISS);
+        // SAFETY: the boxes outlive every thunk run.
+        unsafe {
+            cell_at.write(Cell {
+                readable: 1,
+                value: 30,
+            })
+        };
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!((state.x[3], unsafe { (*count_at).last }), (70, 100));
+        unsafe { (*count_at).offset = 80 };
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!((state.x[3], unsafe { (*count_at).last }), (70, 100));
+        unsafe { (*count_at).offset = 500 };
+        let before = state.x;
+        let discard = count_thunk(PC, 31, cell_at as u64, count_at as u64);
+        assert_eq!(run(&discard.code, &mut state), NEXT);
+        assert_eq!((state.x, unsafe { (*count_at).last }), (before, 500));
     }
 }
