@@ -17,10 +17,11 @@
 //! Stela started from is left out. Filesystems are never resized: another
 //! system's space is freed only by deleting its partition.
 use crate::{
-    choice::{self, Press, Wait},
-    console::{Framebuffer, font::Font},
+    choice::{self, Press, Wait, window},
+    console::{Framebuffer, font},
     output,
     payload::{Aligned, device_path, disk_model, disk_serial},
+    ui::{self, Canvas},
 };
 use alloc::{format, string::String, vec, vec::Vec};
 use sha2::{Digest, Sha256};
@@ -42,17 +43,6 @@ const MIN_BYTES: u64 = 64 * GB;
 const NAME: &str = "Stela macOS";
 /// The most bytes one firmware write takes.
 const WRITE_BYTES: u64 = MIB;
-
-const BACKGROUND: u32 = 0x16181d;
-const CARD: u32 = 0x22252c;
-const RAISED: u32 = 0x2d313a;
-const ACCENT: u32 = 0x4c8dff;
-const TEXT: u32 = 0xeceef2;
-const DIM: u32 = 0x9097a3;
-const WARN: u32 = 0xffb84d;
-const DANGER: u32 = 0xff5a52;
-const NEW: u32 = 0x34c77b;
-const FREE: u32 = 0x353943;
 
 /// One disk of this PC.
 struct Disk {
@@ -180,8 +170,7 @@ struct Picker {
 /// `SERIAL:GUID`. `None` when the user leaves, or without a framebuffer or
 /// keyboard to choose with.
 pub fn choose() -> Option<String> {
-    let Some((screen, font)) = Framebuffer::from_firmware().zip(crate::console::font::console())
-    else {
+    let Some((screen, font)) = Framebuffer::from_firmware().zip(font::console()) else {
         output::arguments(format_args!(
             "INSTALLER refused: no framebuffer to draw on\n"
         ));
@@ -329,7 +318,7 @@ impl Picker {
                     let (first, end) = self.aligned(segment);
                     let bytes = self.span_bytes((first, end));
                     if bytes < MIN_BYTES {
-                        self.notice = Some("This free space is too small: macOS needs 64 GB.");
+                        self.notice = Some("macOS needs at least 64 GB");
                     } else {
                         self.place = Some(Place::Free { first, end });
                         self.size = bytes / MIB * MIB;
@@ -348,14 +337,13 @@ impl Picker {
                     content: Content::Partition(_),
                     ..
                 }) => {
-                    self.notice =
-                        Some("Choose free space, or delete this partition first (Delete).");
+                    self.notice = Some("Choose free space, or delete this partition first");
                 }
                 Some(Segment {
                     content: Content::Foreign,
                     ..
                 }) => {
-                    self.notice = Some("Erase the disk first (E) to use it.");
+                    self.notice = Some("Erase the disk first");
                 }
                 None => {}
             },
@@ -593,12 +581,13 @@ fn disks() -> Vec<Disk> {
             Ok(Found::Blank | Found::Interrupted) => {}
             Err(_) => disk.foreign = true,
         }
+        // Stela finds the disk again by its serial number.
         disk.refusal = match &disk.serial {
-            None => Some("This disk reports no serial number, which Stela finds it by."),
+            None => Some("No serial number"),
             Some(serial) if serial.contains(char::is_whitespace) => {
-                Some("This disk's serial number has spaces, which Stela cannot name.")
+                Some("Serial number has spaces")
             }
-            Some(_) if disk.bytes() < MIN_BYTES => Some("This disk is smaller than 64 GB."),
+            Some(_) if disk.bytes() < MIN_BYTES => Some("Smaller than 64 GB"),
             Some(_) => None,
         };
         disks.push(disk);
@@ -627,82 +616,87 @@ fn size(bytes: u64) -> String {
 fn kind(partition: &gpt::Partition) -> (&'static str, u32) {
     if let Some(role) = partition.role() {
         return match role {
-            Role::AppleRegion => ("Stela macOS", NEW),
-            Role::Esp => ("EFI System", 0x8a94a6),
-            role => (role.name(), 0x7c8796),
+            Role::AppleRegion => (NAME, ui::BLUE),
+            Role::Esp => ("EFI System", 0x7d818b),
+            role => (role.name(), OTHER),
         };
     }
     const KNOWN: [(&str, &str, u32); 7] = [
         (
             "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
             "Windows data",
-            0x3b82f6,
+            0x7fb0f2,
         ),
         (
             "E3C9E316-0B5C-4DB8-817D-F92DF00215AE",
             "Microsoft reserved",
-            0x5b6b8a,
+            0x5a5e68,
         ),
         (
             "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC",
             "Windows recovery",
-            0x6b7fb3,
+            0x9196a1,
         ),
         (
             "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
             "Linux filesystem",
-            0xf2a33a,
+            0xf2a660,
         ),
         (
             "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F",
             "Linux swap",
-            0xc27c2e,
+            0xc4773a,
         ),
         (
             "7C3457EF-0000-11AA-AA11-00306543ECAC",
             "Apple APFS",
-            0xb28bff,
+            0xb8bbc3,
         ),
         (
             "48465300-0000-11AA-AA11-00306543ECAC",
             "Apple HFS+",
-            0x9d7be0,
+            0xa0a4ad,
         ),
     ];
     KNOWN
         .into_iter()
         .find(|(guid, ..)| Guid::parse(guid) == Some(partition.type_guid))
-        .map_or(("Other", 0x7c8796), |(_, name, colour)| (name, colour))
+        .map_or(("Other", OTHER), |(_, name, colour)| (name, colour))
 }
 
+/// A partition's colour and the data of another scheme's.
+const OTHER: u32 = 0x6b6f78;
+const ROW: usize = 36;
+
 impl Picker {
+    /// A segment's name, its type when the name is not that, and colour.
     fn segment_label(&self, segment: Segment) -> (String, &'static str, u32) {
         match segment.content {
             Content::Partition(n) => {
                 let partition = self.chosen().partition(n);
                 let (kind, colour) = kind(partition);
-                let name = match partition.name.trim() {
-                    "" => String::from(kind),
-                    name => String::from(name),
-                };
-                (name, kind, colour)
+                match partition.name.trim() {
+                    "" => (String::from(kind), "", colour),
+                    name if name == kind => (String::from(kind), "", colour),
+                    name => (String::from(name), kind, colour),
+                }
             }
-            Content::Free => (String::from("Free space"), "", FREE),
-            Content::Foreign => (String::from("Other partition scheme"), "MBR", 0x7c8796),
+            Content::Free => (String::from("Free space"), "", ui::LINE),
+            Content::Foreign => (String::from("Unknown layout"), "", OTHER),
         }
     }
 
     fn draw(&self, canvas: &mut Canvas) {
         let (width, height) = canvas.size();
-        canvas.fill(0, 0, width, height, BACKGROUND);
-        let column = (width.saturating_sub(64)).min(860);
-        let left = (width - column) / 2;
+        canvas.fill(0, 0, width, height, ui::BACKGROUND);
+        let top = canvas.header() + 16;
+        let column = width.saturating_sub(32).min(720);
         let layout = Layout {
-            left,
+            left: (width - column) / 2,
             column,
+            top,
             height,
         };
-        canvas.text(left, 36, "Install macOS", 2, TEXT);
         match self.page {
             Page::Disks => self.draw_disks(canvas, &layout),
             Page::Partitions => self.draw_partitions(canvas, &layout),
@@ -710,87 +704,130 @@ impl Picker {
             Page::Confirm => self.draw_confirm(canvas, &layout),
         }
         if let Some(notice) = self.notice {
-            canvas.text(left, height - 72, notice, 1, DANGER);
+            canvas.text_centred(width / 2, height - 76, notice, 1, ui::ORANGE);
         }
-        let keys = match self.page {
-            Page::Disks => "Up/Down  choose      Enter  continue      Esc  back to Stela",
-            Page::Partitions => {
-                "Up/Down  choose    Enter  install here    Del  delete    E  erase disk    \
-                 U  undo    Esc  back"
-            }
-            Page::Size => {
-                "Left/Right  change size    Home/End  smallest/largest    Enter  continue    Esc  back"
-            }
-            Page::Confirm => "Left/Right  choose      Enter  confirm      Esc  back",
+        let keys: &[(&str, &str)] = match self.page {
+            Page::Partitions => &[
+                ("Enter", "Install here"),
+                ("D", "Delete"),
+                ("E", "Erase disk"),
+                ("U", "Undo"),
+                ("Esc", "Back"),
+            ],
+            _ => &[],
         };
-        canvas.text(left, height - 40, keys, 1, DIM);
+        let gap = 24;
+        let total: usize = keys
+            .iter()
+            .map(|(key, label)| canvas.text_width(key, 1) + 8 + canvas.text_width(label, 1))
+            .sum::<usize>()
+            + gap * keys.len().saturating_sub(1);
+        let mut x = width.saturating_sub(total) / 2;
+        for (key, label) in keys {
+            canvas.text(x, height - 40, key, 1, ui::ORANGE);
+            x += canvas.text_width(key, 1) + 8;
+            canvas.text(x, height - 40, label, 1, ui::DIM);
+            x += canvas.text_width(label, 1) + gap;
+        }
+    }
+
+    /// The page's title, and its size on the right.
+    fn title(&self, canvas: &mut Canvas, layout: &Layout, title: &str, right: &str) {
+        canvas.text(layout.left, layout.top, title, 1, ui::TEXT);
+        canvas.text_right(layout.left + layout.column, layout.top, right, 1, ui::DIM);
+    }
+
+    /// A row raised and marked orange.
+    fn selection(canvas: &mut Canvas, x: usize, y: usize, width: usize, height: usize) {
+        canvas.panel(x, y, width, height, 8, ui::RAISED);
+        canvas.panel(x + 6, y + 9, 3, height.saturating_sub(18), 1, ui::ORANGE);
     }
 
     fn draw_disks(&self, canvas: &mut Canvas, layout: &Layout) {
-        canvas.text(
-            layout.left,
-            84,
-            "Choose the disk to install macOS on.",
-            1,
-            DIM,
-        );
+        self.title(canvas, layout, "Choose a disk", "");
         if self.disks.is_empty() {
-            canvas.text(
-                layout.left,
-                130,
-                "No disk of this PC can take macOS. Connect one and start Stela again.",
-                1,
-                WARN,
-            );
+            canvas.text(layout.left, layout.top + 40, "No disk found", 1, ui::DIM);
             return;
         }
-        const CARD_HEIGHT: usize = 86;
-        const GAP: usize = 12;
-        let top = 124;
-        let fits = (layout.height.saturating_sub(top + 96) / (CARD_HEIGHT + GAP)).max(1);
+        const CARD: usize = 92;
+        const GAP: usize = 10;
+        let top = layout.top + 36;
+        let fits = (layout.height.saturating_sub(top + 96) / (CARD + GAP)).max(1);
         let first = window(self.disk, self.disks.len(), fits);
         for (row, n) in (first..self.disks.len()).take(fits).enumerate() {
             let disk = &self.disks[n];
-            let y = top + row * (CARD_HEIGHT + GAP);
-            let selected = n == self.disk;
-            if selected {
-                canvas.panel(layout.left, y, layout.column, CARD_HEIGHT, 10, ACCENT);
-                canvas.panel(
-                    layout.left + 2,
-                    y + 2,
-                    layout.column - 4,
-                    CARD_HEIGHT - 4,
-                    8,
-                    RAISED,
-                );
+            let y = top + row * (CARD + GAP);
+            if n == self.disk {
+                Self::selection(canvas, layout.left, y, layout.column, CARD);
             } else {
-                canvas.panel(layout.left, y, layout.column, CARD_HEIGHT, 10, CARD);
+                canvas.panel(layout.left, y, layout.column, CARD, 8, ui::CARD);
             }
-            let inner = layout.left + 18;
-            let colour = if disk.refusal.is_some() { DIM } else { TEXT };
-            canvas.text(inner, y + 14, &disk.model, 1, colour);
-            let total = size(disk.bytes());
-            canvas.text_right(layout.left + layout.column - 18, y + 14, &total, 1, colour);
-            let detail = match disk.refusal {
-                Some(refusal) => (String::from(refusal), WARN),
-                None => (
-                    format!(
-                        "{}  -  serial {}",
-                        disk.bus,
-                        disk.serial.as_deref().unwrap_or("")
-                    ),
-                    DIM,
-                ),
+            let inner = layout.left + 20;
+            let right = layout.left + layout.column - 20;
+            let colour = if disk.refusal.is_some() {
+                ui::DIM
+            } else {
+                ui::TEXT
             };
-            canvas.text(inner, y + 36, &detail.0, 1, detail.1);
+            canvas.text(inner, y + 14, &disk.model, 1, colour);
+            canvas.text_right(right, y + 14, &size(disk.bytes()), 1, colour);
             let bar = Bar {
                 x: inner,
-                y: y + 60,
-                width: layout.column - 36,
-                height: 12,
+                y: y + 42,
+                width: right - inner,
+                height: 10,
             };
             let segments = segments_of(disk, &[], false);
             self.draw_bar(canvas, n, &segments, &bar, None, None);
+            match disk.refusal {
+                Some(refusal) => canvas.text(inner, y + 64, refusal, 1, ui::ORANGE),
+                None => self.legend(canvas, n, &segments, inner, right, y + 64),
+            }
+        }
+    }
+
+    /// Each partition of disk `n` as a swatch and its name, largest first,
+    /// as many as fit between `x` and `right`.
+    fn legend(
+        &self,
+        canvas: &mut Canvas,
+        n: usize,
+        segments: &[Segment],
+        mut x: usize,
+        right: usize,
+        y: usize,
+    ) {
+        let disk = &self.disks[n];
+        let mut names: Vec<(String, u32, u64)> = segments
+            .iter()
+            .filter_map(|segment| match segment.content {
+                Content::Partition(p) => {
+                    let partition = &disk.table.as_ref()?.partitions[p];
+                    let (kind, colour) = kind(partition);
+                    let name = match partition.name.trim() {
+                        "" => kind,
+                        name => name,
+                    };
+                    Some((String::from(name), colour, partition.blocks()))
+                }
+                Content::Foreign => Some((String::from("Unknown layout"), OTHER, 0)),
+                Content::Free => None,
+            })
+            .collect();
+        names.sort_by_key(|(.., blocks)| core::cmp::Reverse(*blocks));
+        if names.is_empty() {
+            canvas.text(x, y, "Empty", 1, ui::DIM);
+        }
+        for (index, (name, colour, _)) in names.iter().enumerate() {
+            let width = 18 + canvas.text_width(name, 1);
+            let more = names.len() - index;
+            if x + width + 64 > right && more > 1 {
+                canvas.text(x, y, &format!("+{more}"), 1, ui::DIM);
+                break;
+            }
+            canvas.panel(x, y + 3, 10, 10, 3, *colour);
+            canvas.text(x + 18, y, name, 1, ui::DIM);
+            x += width + 20;
         }
     }
 
@@ -809,25 +846,35 @@ impl Picker {
         let blocks = disk.geometry.blocks.max(1);
         let x_of =
             |lba: u64| bar.x + (u128::from(lba) * bar.width as u128 / u128::from(blocks)) as usize;
-        canvas.panel(bar.x, bar.y, bar.width, bar.height, bar.height / 3, FREE);
+        canvas.panel(bar.x, bar.y, bar.width, bar.height, 3, ui::LINE);
+        let label = |canvas: &mut Canvas, x: usize, width: usize, name: &str| {
+            if bar.height >= 30 && canvas.text_width(name, 1) + 16 < width {
+                canvas.text(
+                    x + 8,
+                    bar.y + (bar.height - 16) / 2,
+                    name,
+                    1,
+                    ui::BACKGROUND,
+                );
+            }
+        };
         for (index, segment) in segments.iter().enumerate() {
             let (x, end) = (x_of(segment.first), x_of(segment.end));
             let width = end.saturating_sub(x).max(2);
             let colour = match segment.content {
-                Content::Partition(p) => {
-                    kind(
-                        disk.table
-                            .as_ref()
-                            .map(|t| &t.partitions[p])
-                            .expect("table"),
-                    )
-                    .1
-                }
-                Content::Foreign => 0x7c8796,
-                Content::Free => FREE,
+                Content::Partition(p) => kind(&disk.table.as_ref().expect("table").partitions[p]).1,
+                Content::Foreign => OTHER,
+                Content::Free => ui::LINE,
             };
             if highlight == Some(index) {
-                canvas.panel(x, bar.y.saturating_sub(3), width, bar.height + 6, 4, TEXT);
+                canvas.panel(
+                    x,
+                    bar.y.saturating_sub(3),
+                    width,
+                    bar.height + 6,
+                    4,
+                    ui::ORANGE,
+                );
                 canvas.panel(
                     x + 2,
                     bar.y - 1,
@@ -845,11 +892,9 @@ impl Picker {
                     colour,
                 );
             }
-            if bar.height >= 30 && segment.content != Content::Free {
+            if segment.content != Content::Free {
                 let (name, _, _) = self.segment_label(*segment);
-                if canvas.text_width(&name, 1) + 16 < width {
-                    canvas.text(x + 8, bar.y + (bar.height - 16) / 2, &name, 1, BACKGROUND);
-                }
+                label(canvas, x, width, &name);
             }
         }
         if let Some((first, end)) = new {
@@ -860,127 +905,101 @@ impl Picker {
                 bar.y,
                 width.saturating_sub(2).max(1),
                 bar.height,
-                NEW,
+                ui::BLUE,
             );
-            if bar.height >= 30 && canvas.text_width(NAME, 1) + 16 < width {
-                canvas.text(x + 8, bar.y + (bar.height - 16) / 2, NAME, 1, BACKGROUND);
-            }
+            label(canvas, x, width, "macOS");
         }
-    }
-
-    fn subtitle(&self, canvas: &mut Canvas, layout: &Layout) {
-        let disk = self.chosen();
-        let text = format!("{}, {}  -  {}", disk.model, size(disk.bytes()), disk.bus);
-        canvas.text(layout.left, 84, &text, 1, DIM);
     }
 
     fn big_bar(&self, layout: &Layout) -> Bar {
         Bar {
             x: layout.left,
-            y: 122,
+            y: layout.top + 36,
             width: layout.column,
-            height: 40,
+            height: 36,
         }
     }
 
     fn draw_partitions(&self, canvas: &mut Canvas, layout: &Layout) {
-        self.subtitle(canvas, layout);
+        let disk = self.chosen();
+        self.title(canvas, layout, &disk.model, &size(disk.bytes()));
         let segments = self.segments();
         let bar = self.big_bar(layout);
         self.draw_bar(canvas, self.disk, &segments, &bar, Some(self.row), None);
-        const ROW: usize = 36;
-        let top = 190;
-        let fits = (layout.height.saturating_sub(top + 150) / ROW).max(1);
+        let top = bar.y + bar.height + 24;
+        let fits = (layout.height.saturating_sub(top + 120) / ROW).max(1);
         let first = window(self.row, segments.len(), fits);
         for (line, n) in (first..segments.len()).take(fits).enumerate() {
             let segment = segments[n];
             let y = top + line * ROW;
-            if n == self.row {
-                canvas.panel(layout.left, y, layout.column, ROW - 4, 8, RAISED);
+            let selected = n == self.row;
+            if selected {
+                Self::selection(canvas, layout.left, y, layout.column, ROW - 4);
             }
             let (name, kind, colour) = self.segment_label(segment);
-            canvas.panel(layout.left + 14, y + 9, 14, 14, 4, colour);
+            let swatch = layout.left + 22;
+            canvas.panel(swatch, y + 10, 12, 12, 3, colour);
             // Free space is an outline, not a colour of its own.
             if segment.content == Content::Free {
-                let inside = if n == self.row { RAISED } else { BACKGROUND };
-                canvas.panel(layout.left + 14, y + 9, 14, 14, 4, DIM);
-                canvas.panel(layout.left + 16, y + 11, 10, 10, 3, inside);
+                let inside = if selected { ui::RAISED } else { ui::BACKGROUND };
+                canvas.panel(swatch + 2, y + 12, 8, 8, 2, inside);
             }
-            canvas.text(layout.left + 40, y + 8, &name, 1, TEXT);
-            canvas.text(layout.left + layout.column * 5 / 10, y + 8, kind, 1, DIM);
-            let bytes = (segment.end - segment.first) * self.chosen().geometry.block_bytes;
+            canvas.text(swatch + 24, y + 8, &name, 1, ui::TEXT);
+            canvas.text(
+                layout.left + layout.column * 11 / 20,
+                y + 8,
+                kind,
+                1,
+                ui::DIM,
+            );
+            let bytes = (segment.end - segment.first) * disk.geometry.block_bytes;
             canvas.text_right(
-                layout.left + layout.column - 14,
+                layout.left + layout.column - 16,
                 y + 8,
                 &size(bytes),
                 1,
-                TEXT,
+                ui::TEXT,
             );
         }
-        let mut y = top + fits.min(segments.len()) * ROW + 10;
+        let y = top + fits.min(segments.len()) * ROW + 12;
         let deleting = self.deleting();
-        if self.erased {
-            canvas.text(
-                layout.left,
-                y,
-                "The whole disk is erased when you confirm.",
-                1,
-                WARN,
-            );
-            y += 24;
-        } else if !deleting.is_empty() {
-            let names: Vec<String> = deleting
+        let pending = if self.erased {
+            String::from("Erasing the whole disk")
+        } else if deleting.is_empty() {
+            return;
+        } else {
+            let names: Vec<&str> = deleting
                 .iter()
-                .map(|&n| {
-                    let partition = self.chosen().partition(n);
-                    format!(
-                        "{} ({})",
-                        partition.name.trim(),
-                        size(partition.blocks() * self.chosen().geometry.block_bytes)
-                    )
+                .map(|&n| match disk.partition(n).name.trim() {
+                    "" => kind(disk.partition(n)).0,
+                    name => name,
                 })
                 .collect();
-            let text = format!("Deleted when you confirm: {}", names.join(", "));
-            canvas.text(layout.left, y, &text, 1, WARN);
-            y += 24;
-        }
-        let about = match segments.get(self.row).map(|s| s.content) {
-            Some(Content::Free) => "Enter installs macOS in this free space.",
-            Some(Content::Partition(n))
-                if self.chosen().partition(n).role() == Some(Role::AppleRegion) =>
-            {
-                "Enter installs macOS again on this Stela partition, erasing the macOS on it."
-            }
-            Some(Content::Partition(_)) => {
-                "Delete frees this partition's space; everything on it is lost when you confirm."
-            }
-            Some(Content::Foreign) => "This disk uses another partition scheme: E erases it.",
-            None => "",
+            format!("Deleting {}", names.join(", "))
         };
-        canvas.text(layout.left, y + 6, about, 1, DIM);
+        canvas.text(layout.left + 22, y, &pending, 1, ui::ORANGE);
     }
 
     fn draw_size(&self, canvas: &mut Canvas, layout: &Layout) {
-        self.subtitle(canvas, layout);
+        let disk = self.chosen();
+        self.title(canvas, layout, "Size for macOS", &disk.model);
         let bar = self.big_bar(layout);
-        let block = self.chosen().geometry.block_bytes;
+        let block = disk.geometry.block_bytes;
         let new = match self.place {
             Some(Place::Free { first, .. }) => Some((first, first + self.size / block)),
             _ => None,
         };
         self.draw_bar(canvas, self.disk, &self.segments(), &bar, None, new);
-        let (least, most, step) = self.size_range();
-        let shown = format!("<   {}   >", size(self.size));
-        let x = layout.left + (layout.column.saturating_sub(canvas.text_width(&shown, 3))) / 2;
-        canvas.text(x, 220, &shown, 3, TEXT);
-        let limits = format!(
-            "macOS gets at least {} and up to {} of this free space, in steps of {}.",
-            size(least),
-            size(most),
-            size(step)
-        );
-        let x = layout.left + (layout.column.saturating_sub(canvas.text_width(&limits, 1))) / 2;
-        canvas.text(x, 300, &limits, 1, DIM);
+        let (least, most, _) = self.size_range();
+        let middle = layout.left + layout.column / 2;
+        let y = bar.y + bar.height + 56;
+        let shown = size(self.size);
+        let half = canvas.text_width(&shown, 2) / 2;
+        canvas.text_centred(middle, y, &shown, 2, ui::TEXT);
+        canvas.text_right(middle - half - 24, y, "<", 2, ui::ORANGE);
+        canvas.text(middle + half + 24, y, ">", 2, ui::ORANGE);
+        let limits = format!("{} - {}", size(least), size(most));
+        canvas.text_centred(middle, y + 48, &limits, 1, ui::DIM);
     }
 
     fn draw_confirm(&self, canvas: &mut Canvas, layout: &Layout) {
@@ -988,117 +1007,85 @@ impl Picker {
         let destructive =
             self.erased || !deleting.is_empty() || matches!(self.place, Some(Place::Reuse(_)));
         let title = if destructive {
-            "Erase and install?"
+            "Erase and install macOS?"
         } else {
-            "Install here?"
+            "Install macOS?"
         };
-        canvas.text(layout.left, 84, title, 1, TEXT);
+        self.title(canvas, layout, title, "");
         let disk = self.chosen();
         let block = disk.geometry.block_bytes;
-        let into = match self.place {
-            Some(Place::Reuse(n)) => format!(
-                "macOS is installed on the Stela partition ({}) of {}, erasing it.",
-                size(disk.partition(n).blocks() * block),
-                disk.model
-            ),
-            _ => format!(
-                "macOS is installed in a new {} partition on {} ({}).",
-                size(self.size),
-                disk.model,
-                size(disk.bytes())
-            ),
-        };
-        let mut y = 124;
-        canvas.text(layout.left, y, &into, 1, TEXT);
-        y += 34;
+        let mut rows: Vec<(&str, String, u32)> = Vec::new();
+        rows.push(("Disk", disk.model.clone(), ui::TEXT));
+        rows.push((
+            "macOS",
+            match self.place {
+                Some(Place::Reuse(n)) => {
+                    format!("{}, replaced", size(disk.partition(n).blocks() * block))
+                }
+                _ => format!("New {} partition", size(self.size)),
+            },
+            ui::TEXT,
+        ));
         if self.erased {
-            canvas.text(
-                layout.left,
-                y,
-                "Everything on this disk is erased.",
-                1,
-                WARN,
-            );
-            y += 26;
-        }
-        if !deleting.is_empty() {
-            canvas.text(
-                layout.left,
-                y,
-                "These partitions are deleted, with everything on them:",
-                1,
-                WARN,
-            );
-            y += 26;
-            for &n in deleting.iter().take(8) {
+            rows.push((
+                "Erases",
+                String::from("Everything on this disk"),
+                ui::ORANGE,
+            ));
+        } else {
+            for &n in &deleting {
                 let partition = disk.partition(n);
-                let (kind, colour) = kind(partition);
-                canvas.panel(layout.left + 14, y + 1, 14, 14, 4, colour);
-                let line = format!(
-                    "{}  {}  {}",
-                    partition.name.trim(),
-                    kind,
-                    size(partition.blocks() * block)
-                );
-                canvas.text(layout.left + 40, y, &line, 1, TEXT);
-                y += 24;
+                let name = match partition.name.trim() {
+                    "" => kind(partition).0,
+                    name => name,
+                };
+                let line = format!("{name}, {}", size(partition.blocks() * block));
+                rows.push(("Deletes", line, ui::ORANGE));
             }
         }
-        canvas.text(
-            layout.left,
-            y + 12,
-            "Nothing is written until you confirm. The install then downloads macOS from Apple.",
-            1,
-            DIM,
-        );
-        let buttons = layout.height - 136;
+        let card = 24 + rows.len().min(9) * 28;
+        let top = layout.top + 36;
+        canvas.panel(layout.left, top, layout.column, card, 8, ui::CARD);
+        for (index, (label, value, colour)) in rows.iter().take(9).enumerate() {
+            let y = top + 16 + index * 28;
+            canvas.text(layout.left + 20, y, label, 1, ui::DIM);
+            canvas.text(layout.left + 120, y, value, 1, *colour);
+        }
+        let buttons = top + card + 32;
         let action = if destructive {
             "Erase and Install"
         } else {
             "Install"
         };
-        let fill = if destructive { DANGER } else { ACCENT };
         let right = layout.left + layout.column;
         let action_width = canvas.text_width(action, 1) + 48;
-        self.button(
+        Self::button(
             canvas,
             right - action_width,
             buttons,
             action_width,
             action,
             self.install,
-            fill,
         );
         let back_width = canvas.text_width("Back", 1) + 48;
-        self.button(
+        Self::button(
             canvas,
-            right - action_width - 16 - back_width,
+            right - action_width - 12 - back_width,
             buttons,
             back_width,
             "Back",
             !self.install,
-            ACCENT,
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn button(
-        &self,
-        canvas: &mut Canvas,
-        x: usize,
-        y: usize,
-        width: usize,
-        text: &str,
-        focused: bool,
-        fill: u32,
-    ) {
+    fn button(canvas: &mut Canvas, x: usize, y: usize, width: usize, text: &str, focused: bool) {
         let (background, foreground) = if focused {
-            (fill, 0xffffff)
+            (ui::ORANGE, ui::BACKGROUND)
         } else {
-            (CARD, TEXT)
+            (ui::RAISED, ui::TEXT)
         };
-        canvas.panel(x, y, width, 40, 10, background);
-        canvas.text(x + 24, y + 12, text, 1, foreground);
+        canvas.panel(x, y, width, 36, 8, background);
+        canvas.text(x + 24, y + 10, text, 1, foreground);
     }
 }
 
@@ -1153,16 +1140,11 @@ fn segments_of(disk: &Disk, deleted: &[usize], erased: bool) -> Vec<Segment> {
     segments
 }
 
-/// The first of `count` rows to show so that `selected` is among `fits`.
-fn window(selected: usize, count: usize, fits: usize) -> usize {
-    selected
-        .saturating_sub(fits - 1)
-        .min(count.saturating_sub(fits))
-}
-
 struct Layout {
     left: usize,
     column: usize,
+    /// The first row under the header.
+    top: usize,
     height: usize,
 }
 
@@ -1171,124 +1153,6 @@ struct Bar {
     y: usize,
     width: usize,
     height: usize,
-}
-
-/// A page drawn in memory and shown at once. Coordinates are in units of
-/// `scale` screen pixels, so pages keep their proportions on any display.
-struct Canvas {
-    screen: Framebuffer,
-    font: Font,
-    width: usize,
-    height: usize,
-    scale: usize,
-    /// Pixels with blue in the low byte, row by row.
-    pixels: Vec<u32>,
-}
-
-impl Canvas {
-    fn new(screen: Framebuffer, font: Font) -> Self {
-        let (width, height) = screen.resolution();
-        Self {
-            screen,
-            font,
-            width,
-            height,
-            scale: (height / 540).clamp(1, 4),
-            pixels: vec![0; width * height],
-        }
-    }
-
-    fn size(&self) -> (usize, usize) {
-        (self.width / self.scale, self.height / self.scale)
-    }
-
-    /// Fill device pixels, cut to the screen.
-    fn device_fill(&mut self, x: usize, y: usize, width: usize, height: usize, colour: u32) {
-        let right = (x + width).min(self.width);
-        for row in y..(y + height).min(self.height) {
-            if x < right {
-                self.pixels[row * self.width + x..row * self.width + right].fill(colour);
-            }
-        }
-    }
-
-    fn fill(&mut self, x: usize, y: usize, width: usize, height: usize, colour: u32) {
-        let s = self.scale;
-        self.device_fill(x * s, y * s, width * s, height * s, colour);
-    }
-
-    /// A rectangle with corners of `radius` rounded.
-    fn panel(
-        &mut self,
-        x: usize,
-        y: usize,
-        width: usize,
-        height: usize,
-        radius: usize,
-        colour: u32,
-    ) {
-        let s = self.scale;
-        let (x, y, width, height) = (x * s, y * s, width * s, height * s);
-        let radius = (radius * s).min(width / 2).min(height / 2) as u64;
-        for row in 0..height {
-            let from_edge = row.min(height - 1 - row) as u64;
-            let inset = if from_edge < radius {
-                let dy = radius - from_edge;
-                (radius - (radius * radius - dy * dy).isqrt()) as usize
-            } else {
-                0
-            };
-            self.device_fill(
-                x + inset,
-                y + row,
-                width.saturating_sub(2 * inset),
-                1,
-                colour,
-            );
-        }
-    }
-
-    fn text_width(&self, text: &str, size: usize) -> usize {
-        text.len() * self.font.width * size
-    }
-
-    /// `text` from (`x`, `y`) at `size` times the font; its width.
-    fn text(&mut self, x: usize, y: usize, text: &str, size: usize, colour: u32) -> usize {
-        let s = self.scale * size;
-        let (glyph_width, glyph_height) = (self.font.width, self.font.height);
-        for (index, character) in text.bytes().enumerate() {
-            let left = (x + index * glyph_width * size) * self.scale;
-            for gy in 0..glyph_height {
-                for gx in 0..glyph_width {
-                    if self.font.pixel(character, gx, gy) {
-                        self.device_fill(left + gx * s, y * self.scale + gy * s, s, s, colour);
-                    }
-                }
-            }
-        }
-        self.text_width(text, size)
-    }
-
-    /// `text` ending at `right`.
-    fn text_right(&mut self, right: usize, y: usize, text: &str, size: usize, colour: u32) {
-        let width = self.text_width(text, size);
-        self.text(right.saturating_sub(width), y, text, size, colour);
-    }
-
-    fn show(&self) {
-        let mut row = vec![0u8; self.width * 4];
-        for y in 0..self.height {
-            for (out, pixel) in row
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(&self.pixels[y * self.width..(y + 1) * self.width])
-            {
-                *out = pixel.to_le_bytes();
-            }
-            self.screen.show_row(y, &row);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1301,13 +1165,5 @@ mod tests {
         assert_eq!(size(512 * GB), "512 GB");
         assert_eq!(size(8_600_000_000), "8.6 GB");
         assert_eq!(size(260 * 1_000_000), "260 MB");
-    }
-
-    #[test]
-    fn the_window_keeps_the_selection_in_view() {
-        assert_eq!(window(0, 10, 4), 0);
-        assert_eq!(window(5, 10, 4), 2);
-        assert_eq!(window(9, 10, 4), 6);
-        assert_eq!(window(1, 2, 4), 0);
     }
 }

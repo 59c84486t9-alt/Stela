@@ -60,6 +60,7 @@ mod status;
 mod storage;
 mod system;
 mod tables;
+mod ui;
 #[global_allocator]
 pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new();
 /// Large enough for a J473AP boot bundle (about 135 MB) read whole.

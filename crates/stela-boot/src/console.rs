@@ -2,17 +2,18 @@
 //! still shows the mount's progress, from the startup choice until the
 //! guest's display takes the screen.
 //!
-//! Glyphs come from one 8x16 bitmap font drawn at its own resolution on any
-//! screen, so a larger display shows smaller, sharper text. The screen runs
-//! in the panel's native mode where the firmware offers it ([`mode`]), so
-//! each font pixel is one panel pixel instead of one the monitor scales up,
-//! as in OpenCore's console. The text is a grid of cells kept in memory, and
-//! drawing writes only the cells that changed: video memory is
+//! The text sits under Stela's header ([`ui`]), in its colours. Glyphs come
+//! from one 8x16 bitmap font drawn at the pages' [`ui::scale`]. The screen
+//! runs in the panel's native mode where the firmware offers it ([`mode`]),
+//! so each font pixel is whole panel pixels instead of ones the monitor
+//! scales up, as in OpenCore's console. The text is a grid of cells kept in
+//! memory, and drawing writes only the cells that changed: video memory is
 //! write-combining and slow to read back, so scrolling redraws from the grid
 //! instead of moving pixels.
 pub(crate) mod font;
 mod mode;
 
+use crate::ui;
 use alloc::{string::String, vec, vec::Vec};
 use core::{
     cell::UnsafeCell,
@@ -27,6 +28,8 @@ use uefi::{
 };
 
 const BYTES_PER_PIXEL: usize = 4;
+/// The most columns of text, as wide as the pages' column.
+const COLUMNS: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -111,9 +114,8 @@ pub struct Framebuffer {
 impl Framebuffer {
     /// The first GOP's mode, when it is a linear 32-bit framebuffer: RGB,
     /// BGR or channel masks (`scanout::ChannelMasks`). The first call
-    /// switches the GOP to the best mode ([`mode`]), and later ones take it
-    /// back after the firmware's menu ([`to_firmware`]). A `PixelBltOnly`
-    /// mode has no framebuffer to draw in once boot services end, so it
+    /// switches the GOP to the best mode ([`mode`]). A `PixelBltOnly` mode
+    /// has no framebuffer to draw in once boot services end, so it
     /// gives none, as do masks that `ChannelMasks` refuses. Boot managers
     /// keep their own handle open, so this only reads the protocol rather
     /// than opening it exclusively.
@@ -190,14 +192,13 @@ impl Framebuffer {
     }
 
     fn pixel(&self, color: Color) -> u32 {
-        match color {
-            Color::Text => self.rgb(0xd0, 0xd0, 0xd0),
-            Color::Dim => self.rgb(0x80, 0x80, 0x80),
-            Color::Good => self.rgb(0x5f, 0xd7, 0x5f),
-            Color::Warn => self.rgb(0xff, 0xd7, 0x5f),
-            Color::Fatal => self.rgb(0xff, 0x5f, 0x5f),
-            Color::Busy => self.rgb(0xff, 0x5f, 0x5f),
-        }
+        self.encoding.encode(match color {
+            Color::Text => ui::TEXT,
+            Color::Dim => ui::DIM,
+            Color::Good => ui::BLUE,
+            Color::Warn | Color::Busy => ui::ORANGE,
+            Color::Fatal => ui::RED,
+        })
     }
 
     /// The pixel value of a colour in this mode's layout.
@@ -226,13 +227,14 @@ impl Framebuffer {
         unsafe { line.add(x).read_volatile() }
     }
 
+    /// Stela's background under its header.
     fn clear(&self) {
-        for row in 0..self.height {
-            let line = (self.base + row * self.stride * BYTES_PER_PIXEL) as *mut u32;
-            for column in 0..self.width {
-                // SAFETY: inside the mode's visible framebuffer.
-                unsafe { line.add(column).write_volatile(0) };
-            }
+        let background = self.encoding.encode(ui::BACKGROUND);
+        self.rectangle(0, 0, self.width, self.height, background);
+        if let Some(font) = font::console() {
+            let mut header = ui::Canvas::header_band(*self, font);
+            header.header();
+            header.show();
         }
     }
 }
@@ -252,6 +254,11 @@ const BLANK: Cell = Cell {
 struct Text {
     screen: Framebuffer,
     font: Font,
+    /// Screen pixels per font pixel.
+    scale: usize,
+    /// The screen pixel the grid starts at, across and down.
+    left: usize,
+    top: usize,
     columns: usize,
     rows: usize,
     cells: Vec<Cell>,
@@ -264,12 +271,19 @@ impl Text {
     fn new(screen: Framebuffer) -> Option<Self> {
         let (width, height) = screen.resolution();
         let font = font::console()?;
-        // A one-cell margin all round.
-        let columns = (width / font.width).checked_sub(2)?;
-        let rows = (height / font.height).checked_sub(2)?;
+        let scale = ui::scale(height);
+        let top = ui::HEADER * scale;
+        // A centred column, at least a cell from either side, over a margin
+        // of a cell below.
+        let columns = (width / (font.width * scale)).checked_sub(2)?.min(COLUMNS);
+        let left = (width - columns * font.width * scale) / 2;
+        let rows = (height.checked_sub(top)? / (font.height * scale)).checked_sub(1)?;
         (columns > 0 && rows > 0).then(|| Self {
             screen,
             font,
+            scale,
+            left,
+            top,
             columns,
             rows,
             cells: vec![BLANK; columns * rows],
@@ -309,26 +323,28 @@ impl Text {
 
     /// Draw every cell that differs from what the screen shows.
     fn present(&mut self) {
-        let (on_width, on_height) = (self.font.width, self.font.height);
+        let s = self.scale;
+        let (on_width, on_height) = (self.font.width * s, self.font.height * s);
+        let off = self.screen.encoding.encode(ui::BACKGROUND);
         for index in 0..self.cells.len() {
             let cell = self.cells[index];
             if cell == self.shown[index] {
                 continue;
             }
             self.shown[index] = cell;
-            let x = (index % self.columns + 1) * on_width;
-            let y = (index / self.columns + 1) * on_height;
-            let (on, off) = (self.screen.pixel(cell.color), 0);
+            let x = self.left + index % self.columns * on_width;
+            let y = self.top + index / self.columns * on_height;
+            let on = self.screen.pixel(cell.color);
             for row in 0..on_height {
                 let line = (self.screen.base + (y + row) * self.screen.stride * BYTES_PER_PIXEL)
                     as *mut u32;
                 for column in 0..on_width {
-                    let value = if self.font.pixel(cell.character, column, row) {
+                    let value = if self.font.pixel(cell.character, column / s, row / s) {
                         on
                     } else {
                         off
                     };
-                    // SAFETY: the grid and its margin lie inside the mode's
+                    // SAFETY: the grid and its margins lie inside the mode's
                     // visible framebuffer.
                     unsafe { line.add(x + column).write_volatile(value) };
                 }
@@ -377,21 +393,6 @@ pub fn install(screen: Framebuffer) {
 pub fn release() {
     // SAFETY: see `Console`; no reference to the text is live here.
     unsafe { *PARKED.0.get() = (*CONSOLE.0.get()).take() };
-}
-
-/// Hand the screen to the firmware's text console, for its startup menu:
-/// [`release`], and give the GOP back the firmware's own mode, which the
-/// text console was laid out for. The kept text was drawn for the mode
-/// Stela chose, so it is dropped when the mode changes back; the next
-/// [`Framebuffer::from_firmware`] takes the chosen mode again.
-pub fn to_firmware() {
-    release();
-    if let Some((_, mut gop)) = gop()
-        && mode::give_back(&mut gop)
-    {
-        // SAFETY: see `Console`; no reference to the text is live here.
-        unsafe { *PARKED.0.get() = None };
-    }
 }
 
 /// Take the screen back after [`release`] and draw the kept text again, so

@@ -1,10 +1,10 @@
 //! The startup menu (`stela_loader::mount_interface`): when the boot volume
-//! has `choices.cfg`, `stela.efi` lists on the firmware console the entries
-//! that can start now, under the Mac's heading, then the PC firmware's own
-//! boot entries (`firmware::entries`), with one highlighted and a line on
-//! what it does. A macOS entry is left out until a macOS is installed, a
-//! macOS or recoveryOS entry while Install macOS has not prepared its SSD,
-//! and Install macOS once it has (`selection::ready`). Up and Down move the
+//! has `choices.cfg`, `stela.efi` lists on the framebuffer, in Stela's look
+//! ([`ui`]), the entries that can start now, then the PC firmware's own
+//! boot entries (`firmware::entries`), with one highlighted. A macOS entry
+//! is left out until a macOS is installed, a macOS or recoveryOS entry
+//! while Install macOS has not prepared its SSD, and Install macOS once it
+//! has (`selection::ready`). Up and Down move the
 //! highlight, Enter starts the highlighted entry, and an entry's key (`1`-`9`,
 //! then `a`-`z`) starts it at once; a firmware entry restarts the PC into it.
 //! A countdown from the file's timeout starts the first entry, the one
@@ -15,14 +15,15 @@
 //! machine that can only be set up waits at the menu with no countdown and
 //! its setup entry highlighted ([`hold`]).
 use crate::{
-    console,
+    console::{self, Framebuffer, font},
     firmware::entries::{self, Entry},
     output,
     selection::{self, Readiness},
     status,
+    ui::{self, Canvas},
 };
 use alloc::{format, string::String, vec::Vec};
-use core::{fmt::Write, time::Duration};
+use core::time::Duration;
 use stela_loader::mount_interface::{
     CHOICES_FILE, CHOSEN_DISK, ChoiceKind, Choices, DISK_FILE, with_disk,
 };
@@ -30,11 +31,9 @@ use uefi::{
     CString16,
     boot::{self, EventType, TimerTrigger, Tpl},
     fs::{FileSystem, PathBuf},
-    proto::console::text::{Color, Key, Output, ScanCode},
+    proto::console::text::{Key, ScanCode},
 };
 
-/// Columns assumed when the console reports no mode.
-const COLUMNS: usize = 80;
 const TICK: Duration = Duration::from_secs(1);
 
 pub(crate) enum Press {
@@ -170,8 +169,6 @@ pub fn unchosen(options: &[u8]) -> bool {
         .is_ok_and(|text| text.split_ascii_whitespace().any(|w| w == CHOSEN_DISK))
 }
 
-/// The heading over Stela's choices.
-const MAC: &str = "Stela";
 /// The heading over the firmware's entries.
 const PC: &str = "This PC";
 
@@ -190,23 +187,12 @@ enum Item {
     Firmware(Entry),
 }
 
-/// One line of the menu.
-enum Line<'a> {
-    Text(&'a str),
-    Item(usize),
-}
-
-/// The menu on the firmware console.
+/// The menu.
 struct Menu<'a> {
     choices: &'a Choices,
     /// The partition Install macOS chose, when it chose one.
     disk: Option<String>,
     items: Vec<Item>,
-    /// Why the machine can only be set up, when it can.
-    held: Option<&'a str>,
-    /// Whether the Mac's SSD is not prepared yet, so setting it up is its
-    /// first start rather than a fresh start.
-    blank: bool,
     selected: usize,
     /// Seconds before the first entry starts, while the countdown runs.
     countdown: Option<u32>,
@@ -233,7 +219,6 @@ impl<'a> Menu<'a> {
                 None => Readiness::Unprepared,
             })
             .collect();
-        let blank = held.is_some() || readiness.contains(&Readiness::Unprepared);
         // The SSDs a macOS or recoveryOS choice is known to start from,
         // which Install macOS has prepared already.
         let prepared: Vec<Option<&str>> = choices
@@ -299,8 +284,6 @@ impl<'a> Menu<'a> {
             countdown: (held.is_none() && starts_mac && choices.timeout_seconds > 0)
                 .then_some(choices.timeout_seconds),
             items,
-            held,
-            blank,
             selected,
             notice: None,
         }
@@ -313,115 +296,53 @@ impl<'a> Menu<'a> {
         }
     }
 
-    /// What `item` does, in a line.
-    fn about(&self, item: &Item) -> &'static str {
-        match item {
-            Item::Firmware(_) => "Restarts the PC into this entry of its firmware's boot menu.",
-            Item::Choice(n, kind) => match kind {
-                ChoiceKind::Mac => "Starts the Mac from its startup disk, as a Mac starts up.",
-                ChoiceKind::Recovery => {
-                    "macOS Recovery: Disk Utility, and Reinstall macOS onto a disk of this PC."
-                }
-                ChoiceKind::Setup if unchosen(self.choices.entries[*n].options.as_bytes()) => {
-                    "Choose a disk of this PC and install macOS onto it. Needs the network."
-                }
-                ChoiceKind::Setup if self.blank => {
-                    "Run this first: Apple's restore prepares the Mac's SSD. Needs the network."
-                }
-                ChoiceKind::Setup => {
-                    "Erases the Mac's SSD and prepares it again; the PC's disks are kept."
-                }
-                ChoiceKind::Update => "Updates the Mac's macOS in place, keeping its data.",
-                ChoiceKind::Other => "",
-            },
-        }
-    }
-
-    /// The lines from the first heading down: the Mac's entries, then the
-    /// firmware's.
-    fn lines(&self) -> Vec<Line<'a>> {
-        let mut lines = Vec::new();
-        let mut section = None;
-        for (index, item) in self.items.iter().enumerate() {
-            let heading = match item {
-                Item::Choice(..) => MAC,
-                Item::Firmware(_) => PC,
-            };
-            if section != Some(heading) {
-                if section.is_some() {
-                    lines.push(Line::Text(""));
-                }
-                lines.push(Line::Text(heading));
-                section = Some(heading);
+    /// The entries under the header, the highlighted one raised with an
+    /// orange mark, then the countdown or a notice.
+    fn draw(&self, canvas: &mut Canvas) {
+        const ROW: usize = 36;
+        let (width, height) = canvas.size();
+        canvas.fill(0, 0, width, height, ui::BACKGROUND);
+        let top = canvas.header() + 24;
+        let column = width.saturating_sub(32).min(440);
+        let left = (width - column) / 2;
+        let fits = (height.saturating_sub(top + 120) / ROW).max(1);
+        let first = window(self.selected, self.items.len(), fits);
+        let mut y = top;
+        let mut firmware = false;
+        for index in (first..self.items.len()).take(fits) {
+            let item = &self.items[index];
+            if !firmware && matches!(item, Item::Firmware(_)) {
+                firmware = true;
+                y += 16;
+                canvas.text(left + 16, y, PC, 1, ui::DIM);
+                y += 28;
             }
-            lines.push(Line::Item(index));
-        }
-        lines
-    }
-
-    /// Clear the screen and write why the machine is held; the row the
-    /// lines start on.
-    fn open(&self, out: &mut Output) -> usize {
-        let _ = out.set_color(Color::LightGray, Color::Black);
-        let _ = out.clear();
-        let _ = out.enable_cursor(false);
-        if let Some(reason) = self.held {
-            let _ = write!(out, "{reason}\n\n");
-        }
-        out.cursor_position().1
-    }
-
-    /// Draw the lines from row `top`, then what the highlighted entry does
-    /// and the line under it, each over what was there.
-    fn draw(&self, out: &mut Output, top: usize) {
-        // Lines stop short of the last column, which would scroll the screen.
-        let width = out
-            .current_mode()
-            .ok()
-            .flatten()
-            .map_or(COLUMNS, |mode| mode.columns())
-            .saturating_sub(1);
-        let mut row = top;
-        let mut put = |out: &mut Output, text: &str, highlighted: bool| {
-            let (foreground, background) = match highlighted {
-                true => (Color::Black, Color::LightGray),
-                false => (Color::LightGray, Color::Black),
-            };
-            let _ = out.set_cursor_position(0, row);
-            let _ = out.set_color(foreground, background);
-            let text: String = text.chars().take(width).collect();
-            let _ = write!(out, "{text:<width$}");
-            row += 1;
-        };
-        for line in self.lines() {
-            match line {
-                Line::Text(text) => put(out, text, false),
-                Line::Item(n) => {
-                    let key = Choices::key(n).unwrap_or(' ');
-                    let name = self.name(&self.items[n]);
-                    put(out, &format!("  {key}  {name}"), n == self.selected);
-                }
+            if index == self.selected {
+                canvas.panel(left, y, column, ROW - 4, 8, ui::RAISED);
+                canvas.panel(left + 6, y + 9, 3, ROW - 22, 1, ui::ORANGE);
             }
+            canvas.text(left + 20, y + 8, self.name(item), 1, ui::TEXT);
+            y += ROW;
         }
-        put(out, "", false);
-        put(out, self.about(&self.items[self.selected]), false);
-        let status = match (self.notice, self.countdown) {
-            (Some(notice), _) => String::from(notice),
-            (None, Some(seconds)) => format!(
-                "{} starts in {seconds}. Press any key to stop.",
-                self.name(&self.items[0])
+        let (status, colour) = match (self.notice, self.countdown) {
+            (Some(notice), _) => (String::from(notice), ui::ORANGE),
+            (None, Some(seconds)) => (
+                format!("{} in {seconds}", self.name(&self.items[0])),
+                ui::DIM,
             ),
-            (None, None) => String::from("Up/Down to select, Enter to start."),
+            (None, None) => return,
         };
-        put(out, &status, false);
+        canvas.text_centred(width / 2, height - 56, &status, 1, colour);
     }
 
     /// The chosen item; `None` without console input.
     fn run(&mut self) -> Option<usize> {
-        console::to_firmware();
-        let top = uefi::system::with_stdout(|out| self.open(out));
+        console::release();
+        let (screen, font) = Framebuffer::from_firmware().zip(font::console())?;
+        let mut canvas = Canvas::new(screen, font);
         loop {
-            uefi::system::with_stdout(|out| self.draw(out, top));
+            self.draw(&mut canvas);
+            canvas.show();
             let wait = key(self.countdown.map(|_| TICK));
             if let Wait::Key(_) = wait {
                 self.countdown = None;
@@ -450,12 +371,8 @@ impl<'a> Menu<'a> {
     }
 }
 
-/// Clear the menu away and log the chosen entry; its options, on `disk`.
+/// Log the chosen entry; its options, on `disk`.
 fn chosen(choices: &Choices, index: usize, disk: Option<&str>) -> Vec<u8> {
-    uefi::system::with_stdout(|out| {
-        let _ = out.set_color(Color::LightGray, Color::Black);
-        let _ = out.clear();
-    });
     let entry = &choices.entries[index];
     output::arguments(format_args!("CHOICE {} ({})\n", index + 1, entry.name));
     status::info(&format!("Starting {}", entry.name));
@@ -524,4 +441,24 @@ pub fn hold(volume: &mut FileSystem, reason: &str) -> Option<Vec<u8>> {
     let choices = read(volume)?;
     output::arguments(format_args!("HOLD {reason}\n"));
     menu(volume, &choices, Some(reason))
+}
+
+/// The first of `count` rows to show so that `selected` is among `fits`.
+pub(crate) fn window(selected: usize, count: usize, fits: usize) -> usize {
+    selected
+        .saturating_sub(fits - 1)
+        .min(count.saturating_sub(fits))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_keeps_the_selection_in_view() {
+        assert_eq!(window(0, 10, 4), 0);
+        assert_eq!(window(5, 10, 4), 2);
+        assert_eq!(window(9, 10, 4), 6);
+        assert_eq!(window(1, 2, 4), 0);
+    }
 }

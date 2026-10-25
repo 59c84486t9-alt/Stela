@@ -5,8 +5,8 @@
 //! it ([`stream`]), and its result replaces them when it ends:
 //!
 //! ```text
-//! [  OK  ] Read Install macOS (484 MB, 12 s)
-//! [ ***  ] Starting the macOS installer (46 s)  installer: fdr create
+//!    ok    Read Install macOS (484 MB, 12 s)
+//!   ***    Starting the macOS installer (46 s)  installer: fdr create
 //!          AppleNVMe: controller ready
 //! ```
 //!
@@ -36,8 +36,8 @@ const MARKER: usize = 6;
 pub const HISTORY_BYTES: usize = 4096;
 /// The most lines [`stream`] shows under the running step.
 pub const STREAM_LINES: usize = 40;
-/// The width of `[  OK  ] `, where a step's text starts: info and streamed
-/// lines start there too.
+/// The width of a step's mark and the gap after it, where its text starts:
+/// info and streamed lines start there too.
 const TEXT_INDENT: &str = "         ";
 
 /// Text formatted on the stack: drawing a timer tick allocates nothing.
@@ -134,9 +134,9 @@ impl Mark {
 
     fn draw(self, text: &str) {
         let (label, color) = match self {
-            Mark::Ok => ("  OK  ", Color::Good),
-            Mark::Warn => (" WARN ", Color::Warn),
-            Mark::Failed => ("FAILED", Color::Fatal),
+            Mark::Ok => ("  ok  ", Color::Good),
+            Mark::Warn => (" warn ", Color::Warn),
+            Mark::Failed => (" fail ", Color::Fatal),
             Mark::Info => {
                 console::rewrite(&[(TEXT_INDENT, Color::Text), (text, Color::Text)]);
                 console::write(&[("\n", Color::Text)]);
@@ -144,9 +144,9 @@ impl Mark {
             }
         };
         console::rewrite(&[
-            ("[", Color::Text),
+            (" ", Color::Text),
             (label, color),
-            ("] ", Color::Text),
+            ("  ", Color::Text),
             (text, Color::Text),
         ]);
         console::write(&[("\n", Color::Text)]);
@@ -190,9 +190,9 @@ impl State {
         }
         let gap = if running.detail.is_empty() { "" } else { "  " };
         console::rewrite(&[
-            ("[", Color::Text),
+            (" ", Color::Text),
             (marker, Color::Busy),
-            ("] ", Color::Text),
+            ("  ", Color::Text),
             (&running.title, Color::Text),
             (elapsed.as_str(), Color::Dim),
             (gap, Color::Text),

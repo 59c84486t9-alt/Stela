@@ -3,10 +3,6 @@
 //! and switches to it; the panel's native resolution comes from the EDID the
 //! firmware read from it. A mode that cannot be set, or whose framebuffer is
 //! too small for it, leaves the firmware's. Each choice is logged.
-//!
-//! The firmware's text console is laid out for the mode it started in, so
-//! [`give_back`] restores that mode while it draws the startup menu, and the
-//! next [`select`] takes the chosen one again.
 use super::{Framebuffer, encoding};
 use crate::output::{self, Global};
 use alloc::{format, string::String, vec::Vec};
@@ -41,17 +37,8 @@ impl EdidActive {
     }
 }
 
-/// What the first [`select`] decided.
-struct Modes {
-    /// The firmware's own mode, when it is one of the listed modes.
-    firmware: Option<Mode>,
-    /// The mode Stela runs in, when it is one of the listed modes.
-    chosen: Option<Mode>,
-    /// [`give_back`] restored the firmware's mode.
-    given_back: bool,
-}
-
-static MODES: Global<Option<Modes>> = Global(RefCell::new(None));
+/// Whether [`select`] has chosen the mode.
+static SELECTED: Global<bool> = Global(RefCell::new(false));
 
 /// `1920x1080 Bgr`.
 fn describe(mode: &ModeInfo) -> String {
@@ -59,46 +46,17 @@ fn describe(mode: &ModeInfo) -> String {
     format!("{width}x{height} {:?}", mode.pixel_format())
 }
 
-/// Run `gop`, on `handle`, in the best mode: chosen on the first call,
-/// taken again after [`give_back`].
+/// Run `gop`, on `handle`, in the best mode, chosen on the first call.
 pub(super) fn select(handle: Handle, gop: &mut GraphicsOutput) {
-    let Ok(mut modes) = MODES.0.try_borrow_mut() else {
-        return;
-    };
-    let Some(modes) = &mut *modes else {
-        *modes = Some(choose(handle, gop));
-        return;
-    };
-    if core::mem::take(&mut modes.given_back)
-        && let Some(chosen) = &modes.chosen
-        && gop.set_mode(chosen).is_err()
+    if let Ok(mut selected) = SELECTED.0.try_borrow_mut()
+        && !*selected
     {
-        output::arguments(format_args!(
-            "DISPLAY could not take {} again\n",
-            describe(chosen.info())
-        ));
+        *selected = true;
+        choose(handle, gop);
     }
 }
 
-/// Give `gop` back the firmware's mode; whether that changed the mode.
-pub(super) fn give_back(gop: &mut GraphicsOutput) -> bool {
-    let Ok(mut modes) = MODES.0.try_borrow_mut() else {
-        return false;
-    };
-    let Some(modes) = &mut *modes else {
-        return false;
-    };
-    let changed = match (modes.firmware, modes.chosen) {
-        (Some(firmware), Some(chosen)) if firmware.info() != chosen.info() => {
-            gop.set_mode(&firmware).is_ok()
-        }
-        _ => false,
-    };
-    modes.given_back |= changed;
-    changed
-}
-
-fn choose(handle: Handle, gop: &mut GraphicsOutput) -> Modes {
+fn choose(handle: Handle, gop: &mut GraphicsOutput) {
     let listed: Vec<Mode> = gop.modes().collect();
     let info = gop.current_mode_info();
     let firmware = listed.iter().position(|mode| *mode.info() == info);
@@ -140,11 +98,7 @@ fn choose(handle: Handle, gop: &mut GraphicsOutput) -> Modes {
         output::arguments(format_args!(
             "DISPLAY keeps the firmware's mode: no listed mode is drawable and fits the guest\n"
         ));
-        return Modes {
-            firmware,
-            chosen: firmware,
-            given_back: false,
-        };
+        return;
     };
     let mode = listed[choice.index as usize];
     let chosen = if choice.index == current {
@@ -159,28 +113,14 @@ fn choose(handle: Handle, gop: &mut GraphicsOutput) -> Modes {
         Ok(())
     };
     match chosen {
-        Ok(()) => {
-            output::arguments(format_args!(
-                "DISPLAY runs {}: {reason}\n",
-                describe(mode.info())
-            ));
-            Modes {
-                firmware,
-                chosen: Some(mode),
-                given_back: false,
-            }
-        }
-        Err(why) => {
-            output::arguments(format_args!(
-                "DISPLAY keeps the firmware's mode: {} ({reason}) failed, {why}\n",
-                describe(mode.info())
-            ));
-            Modes {
-                firmware,
-                chosen: firmware,
-                given_back: false,
-            }
-        }
+        Ok(()) => output::arguments(format_args!(
+            "DISPLAY runs {}: {reason}\n",
+            describe(mode.info())
+        )),
+        Err(why) => output::arguments(format_args!(
+            "DISPLAY keeps the firmware's mode: {} ({reason}) failed, {why}\n",
+            describe(mode.info())
+        )),
     }
 }
 

@@ -73,8 +73,7 @@ impl Font {
     }
 }
 
-/// The one font, at its own resolution on every screen: a larger display
-/// shows more, sharper text rather than larger glyphs.
+/// The one font, drawn at whole multiples of its pixels.
 static SPLEEN: &[u8] = include_bytes!("spleen-8x16.psfu");
 
 pub fn console() -> Option<Font> {
