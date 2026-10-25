@@ -126,8 +126,9 @@ const EL1_VIEW: usize = 1;
 const PAN_VIEW: usize = 2;
 const GUARDED_VIEW: usize = 3;
 /// Why the whole shadow was reset: a half ran out of frames; controls
-/// that differ in SPRR state alone, in TTBR0 alone (with an ASID the
-/// upper half's non-global entries were made under), or otherwise; another
+/// that differ in SPRR state alone (more than its permission registers),
+/// in TTBR0 alone (with an ASID the upper half's non-global entries were
+/// made under), or otherwise; another
 /// pattern of tag-checked halves; [`Host::invalidate_translations`]; or a
 /// TLBI that reaches everything.
 #[derive(Clone, Copy)]
@@ -141,6 +142,10 @@ enum Cause {
     Maintained,
 }
 const CAUSES: usize = 7;
+/// The TCR fields of the EL1&0 and EL2&0 regimes that configure TTBR0's
+/// range alone: T0SZ, EPD0, IRGN0, ORGN0, SH0, TG0 (bits 15:0), TBI0, HPD0,
+/// TBID0, NFD0, E0PD0 and TCMA0.
+const LOWER_TCR: u64 = 0xffff | 1 << 37 | 1 << 41 | 1 << 51 | 1 << 53 | 1 << 55 | 1 << 57;
 /// The [`mmu::Controls`] fields a [`Cause::Controls`] reset counts as
 /// differing: SCTLR, TCR, TTBR0, TTBR1, MAIR, SPRR, CTRR, the regime and
 /// stage 2 (its requirement or controls).
@@ -1396,47 +1401,57 @@ impl Host for BareHost<'_> {
         if let Some(current) = state.regime
             && current.controls != regime.controls
         {
-            // TTBR0 alone translates only the lower half, but it can name
-            // the ASID the upper half's non-global entries were made in.
-            let ttbr0 = mmu::Controls {
-                ttbr0: regime.controls.ttbr0,
-                ..current.controls
+            let (from, to) = (current.controls, regime.controls);
+            // What the lower half's own inputs and SPRR's permission
+            // registers leave of the controls; each of those has its own
+            // reset, and they compose (a context switch writes TTBR0 and
+            // the thread's SPRR_PERM_EL0 together).
+            let lower_tcr = match to.regime {
+                mmu::Regime::El10 | mmu::Regime::El20 => LOWER_TCR,
+                _ => 0,
             };
-            let asid = mmu::current_asid(&current.controls) == mmu::current_asid(&regime.controls);
-            let user = mmu::Controls {
+            let rest = mmu::Controls {
+                ttbr0: to.ttbr0,
+                tcr: from.tcr & !lower_tcr | to.tcr & lower_tcr,
                 sprr: mmu::Sprr {
-                    el0: regime.controls.sprr.el0,
-                    ..current.controls.sprr
+                    el0: to.sprr.el0,
+                    el1: to.sprr.el1,
+                    ..from.sprr
                 },
-                ..current.controls
+                ..from
             };
-            let kernel = mmu::Controls {
-                sprr: mmu::Sprr {
-                    el1: regime.controls.sprr.el1,
-                    ..current.controls.sprr
-                },
-                ..current.controls
-            };
-            if ttbr0 == regime.controls && (asid || !state.extents[UPPER].private()) {
-                state.reset_lower();
-            } else if user == regime.controls {
-                state.reset_user_views();
-            } else if kernel == regime.controls {
-                state.switch_bank(current.controls.sprr.el1, regime.controls.sprr.el1);
+            let lower = from.ttbr0 != to.ttbr0 || from.tcr != to.tcr;
+            // TTBR0 translates only the lower half, but it can name the
+            // ASID the upper half's non-global entries were made in.
+            let asid = mmu::current_asid(&from) == mmu::current_asid(&to);
+            if rest == to && (!lower || asid || !state.extents[UPPER].private()) {
+                if lower {
+                    state.reset_lower();
+                }
+                if from.sprr.el0 != to.sprr.el0 {
+                    state.reset_user_views();
+                }
+                if from.sprr.el1 != to.sprr.el1 {
+                    state.switch_bank(from.sprr.el1, to.sprr.el1);
+                }
             } else {
-                let sprr = mmu::Controls {
-                    sprr: regime.controls.sprr,
-                    ..current.controls
+                let ttbr0 = mmu::Controls {
+                    ttbr0: to.ttbr0,
+                    ..from
                 };
-                let cause = if sprr == regime.controls {
+                let sprr = mmu::Controls {
+                    sprr: to.sprr,
+                    ..from
+                };
+                let cause = if sprr == to {
                     Cause::Sprr
-                } else if ttbr0 == regime.controls {
+                } else if ttbr0 == to {
                     Cause::Table
                 } else {
                     Cause::Controls
                 };
                 if matches!(cause, Cause::Controls) && state.legacy_translations_dirty {
-                    let fields = differing(&current.controls, &regime.controls);
+                    let fields = differing(&from, &to);
                     for (count, differs) in state.control_fields.iter_mut().zip(fields) {
                         *count += u64::from(differs);
                     }
