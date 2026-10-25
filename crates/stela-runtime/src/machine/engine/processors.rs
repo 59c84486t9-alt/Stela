@@ -542,10 +542,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // incoming PE's translation regime. One that translates alike keeps
         // them: the tables and TLBIs are shared, and what derives from its
         // other System registers is recomputed. One whose TTBR0s alone
-        // differ changes the lower half's translations, as a TTBR0 write.
+        // differ changes the lower half's translations, as a TTBR0 write,
+        // and what derives from the other System registers, as they are
+        // another PE's.
         if inputs[0] == inputs[1] {
             self.sync_regime();
         } else if upper[0] == upper[1] {
+            self.derived_changed();
             self.table_base_changed();
         } else {
             self.controls_changed();
@@ -1079,7 +1082,10 @@ mod tests {
             panic!("parked peer")
         };
         parked.cpu.registers.set(Register::TTBR0_EL1, 0, 0x4000);
+        // What derives from the outgoing PE's registers goes with it.
+        machine.floating_point = Some(None);
         machine.switch_to(first);
+        assert_eq!(machine.floating_point, None);
         assert!(machine.translation_generation > generation);
         assert_eq!(machine.statistics.table_base_changes, 1);
         assert_eq!(machine.statistics.translation_changes, 0);
