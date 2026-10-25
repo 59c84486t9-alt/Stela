@@ -615,17 +615,25 @@ impl<R: ReadAt> Answers<R> {
         // stable component-name order; FlashVersion1 uses a dictionary instead.
         names.sort_by_key(|name| (!name.starts_with("iBoot"), name.clone()));
         let dict_mode = args.get("FlashVersion1").is_some();
+        let sep: Vec<_> = [
+            ("RestoreSEP", "RestoreSEPImageData"),
+            ("SEP", "SEPImageData"),
+            ("SepStage1", "SEPPatchImageData"),
+        ]
+        .into_iter()
+        .filter(|(component, _)| manifest.contains_key(*component))
+        .collect();
         let mut dict = BTreeMap::new();
         let mut array = Vec::new();
         let mut total = llb.len();
-        for name in names {
-            let b = self.personalized(identity, &name, &Value::dict([]))?;
+        for name in &names {
+            let b = self.personalized(identity, name, &Value::dict([]))?;
             total += b.len();
             if total > MAX_REPLY_BYTES {
-                return Err(Error::Limit("NOR response bytes"));
+                return self.nor_streamed(identity, &names, dict_mode, &sep);
             }
             if dict_mode {
-                dict.insert(name, Value::Data(b));
+                dict.insert(name.clone(), Value::Data(b));
             } else {
                 array.push(Value::Data(b));
             }
@@ -642,21 +650,51 @@ impl<R: ReadAt> Answers<R> {
             ),
         ]
         .into();
-        for (component, key) in [
-            ("RestoreSEP", "RestoreSEPImageData"),
-            ("SEP", "SEPImageData"),
-            ("SepStage1", "SEPPatchImageData"),
-        ] {
-            if manifest.contains_key(component) {
-                let b = self.personalized(identity, component, &Value::dict([]))?;
-                total += b.len();
-                if total > MAX_REPLY_BYTES {
-                    return Err(Error::Limit("NOR response bytes"));
-                }
-                response.insert(key.into(), Value::Data(b));
+        for &(component, key) in &sep {
+            let b = self.personalized(identity, component, &Value::dict([]))?;
+            total += b.len();
+            if total > MAX_REPLY_BYTES {
+                return self.nor_streamed(identity, &names, dict_mode, &sep);
             }
+            response.insert(key.into(), Value::Data(b));
         }
         Ok(Plan::Reply(Value::Dict(response)))
+    }
+    /// `NORData` too large to hold (a Mac's firmware set): every image
+    /// streamed from its member, framed as the held reply would be.
+    fn nor_streamed(
+        &mut self,
+        identity: &Identity,
+        names: &[String],
+        dict_mode: bool,
+        sep: &[(&str, &str)],
+    ) -> Result<Plan> {
+        let empty = Value::dict([]);
+        let mut stream = |name: &str| {
+            self.personalized_stream(identity, name, &empty)
+                .map(Streamed::Data)
+        };
+        let mut response = BTreeMap::new();
+        response.insert("LlbImageData".into(), stream("LLB")?);
+        let images = if dict_mode {
+            let mut dict = BTreeMap::new();
+            for name in names {
+                dict.insert(name.clone(), stream(name)?);
+            }
+            Streamed::Dict(dict)
+        } else {
+            Streamed::Array(
+                names
+                    .iter()
+                    .map(|name| stream(name))
+                    .collect::<Result<_>>()?,
+            )
+        };
+        response.insert("NorImageData".into(), images);
+        for &(component, key) in sep {
+            response.insert(key.into(), stream(component)?);
+        }
+        Ok(Plan::Message(framed_binary(&Streamed::Dict(response))?))
     }
     /// `NORData` when nothing flashes NOR: only the restore SEP images, each its
     /// identity's IM4P unchanged and digest-verified, in the `IMG4` container
@@ -902,6 +940,7 @@ fn bootability_mode(
 enum Streamed {
     String(String),
     Data(Vec<Segment>),
+    Array(Vec<Streamed>),
     Dict(BTreeMap<String, Streamed>),
 }
 /// Frame `v` as the control stream frames a reply: a big-endian length and
@@ -933,6 +972,12 @@ fn framed_binary(v: &Streamed) -> Result<Vec<Segment>> {
             Streamed::Data(segments) => {
                 marker(&mut head, 0x40, segments.iter().map(Segment::len).sum());
                 body = segments.clone();
+            }
+            Streamed::Array(a) => {
+                marker(&mut head, 0xa0, a.len() as u64);
+                for v in a {
+                    head.extend_from_slice(&emit(v, objects).to_be_bytes());
+                }
             }
             Streamed::Dict(d) => {
                 marker(&mut head, 0xd0, d.len() as u64);
@@ -1192,6 +1237,10 @@ mod tests {
                 ]),
             ),
             ("ImageName", Value::from("Ap,Big")),
+            (
+                "NorImageData",
+                Value::Array(vec![Value::Data(b"iBoot".to_vec()), Value::from("x")]),
+            ),
         ]);
         let streamed = Streamed::Dict(
             [
@@ -1216,6 +1265,13 @@ mod tests {
                     ),
                 ),
                 ("ImageName".into(), Streamed::String("Ap,Big".into())),
+                (
+                    "NorImageData".into(),
+                    Streamed::Array(vec![
+                        Streamed::Data(vec![Segment::Bytes(b"iBoot".to_vec())]),
+                        Streamed::String("x".into()),
+                    ]),
+                ),
             ]
             .into(),
         );
