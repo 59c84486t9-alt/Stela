@@ -38,8 +38,9 @@ const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
 /// Which restore the host runs, and how it reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// The user's install: the inventory's Erase identity, restored without
-    /// the macOS system image ([`Route::Recovery`]).
+    /// The user's install: the inventory's Erase identity, with the macOS
+    /// system image when the payload holds it ([`Route::Stock`]), else
+    /// without ([`Route::Recovery`]).
     Install,
     /// The same, with the inventory's Update identity: restored_update
     /// installs over the installed system and keeps its data.
@@ -211,6 +212,7 @@ impl Experiment {
             }));
         }
         let route = match mode {
+            Mode::Install if answers.has_system_image() => Route::Stock,
             Mode::Install => Route::Recovery,
             Mode::Update => Route::Stock,
             Mode::Study => Route::StelaFirmwareStudy,

@@ -492,6 +492,10 @@ pub(crate) mod tests {
     pub(crate) fn set_aea_keys(store: &mut Store<Memory>, keys: Vec<crate::payload::AeaKey>) {
         store.manifest.aea_keys = keys;
     }
+    /// Drop a member from a store's inventory, as a trimmed medium leaves it.
+    pub(crate) fn drop_member(store: &mut Store<Memory>, name: &str) {
+        store.manifest.members.retain(|m| m.name != name);
+    }
     /// The fixture with more BuildManifest components, each `(name, path,
     /// bytes)` with its SHA-384 as the Digest.
     pub(crate) fn with_components(

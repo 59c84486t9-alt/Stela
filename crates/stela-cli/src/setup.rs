@@ -7,10 +7,11 @@
 //! (`setup::medium`): the recovery members of the restore image
 //! (`restore::payload::trim`), or a whole IPSW given with `--ipsw`. It
 //! prepares each machine's restore bundle (`stela boot prepare --restore`)
-//! and adds an Install macOS startup choice that restores
-//! recoveryOS onto the target without the macOS system image
-//! (`stela.efi --install`); macOS is then installed from recoveryOS, which
-//! "macOS (Stela)" boots afterwards. The restore personalizes its root
+//! and adds an Install macOS startup choice (`stela.efi --install`). From a
+//! whole IPSW it restores macOS and recoveryOS onto the target, as a Mac's
+//! restore does; from the trimmed members it restores recoveryOS alone, and
+//! macOS is then installed from recoveryOS. The macOS choice boots it
+//! afterwards. The restore personalizes its root
 //! tickets and the recoveryOS LocalPolicy with Apple's signing server, so it
 //! needs `--tss`.
 //!

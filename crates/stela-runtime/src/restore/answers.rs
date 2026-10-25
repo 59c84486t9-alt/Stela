@@ -282,6 +282,15 @@ impl<R: ReadAt> Answers<R> {
         }
         Ok(())
     }
+    /// Whether the payload holds the selected identity's macOS system image
+    /// (its `OS` component), which a trimmed install medium leaves out.
+    pub fn has_system_image(&self) -> bool {
+        let store = &self.store;
+        store
+            .identity()
+            .path("OS")
+            .is_ok_and(|path| store.member_len(path).is_ok())
+    }
     pub fn supported(&self) -> Value {
         Value::Dict(
             DATA_TYPES
@@ -1095,6 +1104,15 @@ fn cpio_header(name: &str, mode: u64, size: u64) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_payload_has_the_system_image_only_while_its_inventory_holds_the_os_member() {
+        use super::super::store::tests::{drop_member, fixture};
+        assert!(Answers::new(fixture(b"x", false)).has_system_image());
+        let mut store = fixture(b"x", false);
+        drop_member(&mut store, "os.dmg");
+        assert!(!Answers::new(store).has_system_image());
+    }
 
     #[test]
     fn nor_data_without_flashing_carries_only_the_unchanged_restore_sep_image_in_an_img4() {
