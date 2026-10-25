@@ -8847,10 +8847,11 @@ mod tests {
 
     /// A TTBR0 write reaches the host only as the regime's new controls,
     /// which differ from the old in TTBR0 alone, so the host keeps the upper
-    /// half's shadow; any other translation control invalidates everything.
-    /// Both make the fetch translations stale.
+    /// half's shadow. Another translation control reaches it the same way,
+    /// and the host drops what the new controls translate differently
+    /// ([`Host::set_regime`]). Both make the fetch translations stale.
     #[test]
-    fn ttbr0_writes_change_only_the_regime_and_other_controls_invalidate() {
+    fn translation_controls_reach_the_host_as_its_regime() {
         const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
         const MSR_TCR_EL1_X0: u32 = 0xd518_2040;
         let mut machine = machine(&[]);
@@ -8878,8 +8879,17 @@ mod tests {
         );
         machine.cpu.state.x[0] = 25 | 25 << 16;
         machine.system_instruction(MSR_TCR_EL1_X0).unwrap();
-        assert_eq!(machine.host.invalidations, 1);
+        assert_eq!(machine.host.invalidations, 0);
         assert_eq!(machine.statistics.translation_changes, 1);
+        let tcr = *machine.host.regimes.last().unwrap();
+        assert_eq!(tcr.controls.tcr, 25 | 25 << 16);
+        assert_eq!(
+            mmu::Controls {
+                tcr: tcr.controls.tcr,
+                ..after.controls
+            },
+            tcr.controls
+        );
     }
 
     /// A TLBI hands the host what it reaches of the current context and
