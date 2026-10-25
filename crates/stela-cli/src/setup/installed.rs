@@ -116,9 +116,11 @@ impl InstalledDisk {
         )
     }
 
+    /// A stick setup's Mac sees the PC's disks as external drives and has
+    /// the network, so recoveryOS can install macOS onto one of them.
     fn external(&self) -> &'static str {
         if self.external_disks {
-            " --external-disks"
+            " --external-disks --guest-network"
         } else {
             ""
         }
