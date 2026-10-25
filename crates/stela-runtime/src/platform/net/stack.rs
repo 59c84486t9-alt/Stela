@@ -3,7 +3,7 @@
 //! requests, and non-blocking [`Transfer`]s that several connections can
 //! run at once.
 use super::{Clock, Ipv4, NetError, http};
-use alloc::{vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use smoltcp::{
     iface::{Config as InterfaceConfig, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
@@ -28,6 +28,8 @@ const CARRIER_WAIT_US: u64 = 6_000_000;
 const DHCP_WAIT_US: u64 = 30_000_000;
 /// smoltcp's resolver retries each server within this.
 const DNS_WAIT_US: u64 = 15_000_000;
+/// How long a name's address is used before it is looked up again.
+const RESOLVED_US: u64 = 300_000_000;
 /// A POST, from connection to the response's end.
 const POST_WAIT_US: u64 = 120_000_000;
 /// A transfer that receives nothing for this long has failed.
@@ -120,6 +122,8 @@ pub struct Stack<L: Link, C: Clock> {
     dns: SocketHandle,
     config: Option<Config>,
     next_port: u16,
+    /// Names looked up, their first address and when it was found.
+    resolved: Vec<(String, Ipv4, u64)>,
 }
 
 impl<L: Link, C: Clock> Stack<L, C> {
@@ -146,6 +150,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
             dns,
             config: None,
             next_port: FIRST_EPHEMERAL + (seed % 8192) as u16,
+            resolved: Vec::new(),
         }
     }
 
@@ -242,10 +247,35 @@ impl<L: Link, C: Clock> Stack<L, C> {
     }
 
     /// The first IPv4 address of `host`, or `host` itself as a literal.
+    /// An address found in the last [`RESOLVED_US`] is used again, and a
+    /// lookup that fails falls back to the last address the name had, so
+    /// one lost reply does not end a long download.
     fn resolve(&mut self, host: &str) -> Result<Ipv4, NetError> {
         if let Ok(address) = host.parse() {
             return Ok(address);
         }
+        let now = self.now();
+        let known = self.resolved.iter().position(|(name, ..)| name == host);
+        if let Some(index) = known
+            && now.wrapping_sub(self.resolved[index].2) < RESOLVED_US
+        {
+            return Ok(self.resolved[index].1);
+        }
+        match (self.lookup(host), known) {
+            (Ok(address), Some(index)) => {
+                self.resolved[index] = (String::from(host), address, now);
+                Ok(address)
+            }
+            (Ok(address), None) => {
+                self.resolved.push((String::from(host), address, now));
+                Ok(address)
+            }
+            (Err(_), Some(index)) => Ok(self.resolved[index].1),
+            (Err(error), None) => Err(error),
+        }
+    }
+
+    fn lookup(&mut self, host: &str) -> Result<Ipv4, NetError> {
         let query = self
             .sockets
             .get_mut::<dns::Socket>(self.dns)
@@ -664,5 +694,20 @@ pub(crate) mod tests {
             s.get_range("10.0.2.2:81", "/", 0, 9, |_| ()),
             Err(NetError::Reset)
         );
+    }
+
+    #[test]
+    fn a_name_keeps_its_address_and_falls_back_to_it_when_a_lookup_fails() {
+        let clock = TestClock::default();
+        // No DNS server is configured, so every lookup fails.
+        let mut s = stack(Lan::new(100, clock.clone()), clock);
+        assert!(matches!(s.resolve("cdn.example"), Err(NetError::Dns(_))));
+        let now = s.now();
+        s.resolved
+            .push((String::from("cdn.example"), SERVER_IP, now));
+        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP));
+        s.resolved[0].2 = now.wrapping_sub(RESOLVED_US);
+        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP));
+        assert_eq!(s.resolve("10.0.2.2"), Ok(SERVER_IP));
     }
 }

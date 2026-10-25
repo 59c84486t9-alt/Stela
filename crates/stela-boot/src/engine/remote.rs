@@ -28,8 +28,9 @@ const AHEAD: usize = 32 << 20;
 const SKIP: u64 = 8 << 20;
 /// Bytes already read that stay buffered for a re-read.
 const KEEP: usize = 8 << 20;
-/// Consecutive failures of one range's progress before a read fails.
-const ATTEMPTS: u32 = 4;
+/// Consecutive failures of one range's progress before a read fails; the
+/// waits between them double from a second, about a minute in all.
+const ATTEMPTS: u32 = 7;
 
 pub struct Remote {
     network: Shared,
@@ -126,6 +127,10 @@ impl Remote {
                 ));
                 if failures == ATTEMPTS {
                     return Err(error);
+                }
+                let started = output::now();
+                while output::millis_since(started) < 1000 << (failures - 1) {
+                    core::hint::spin_loop();
                 }
             } else if self.end() > before {
                 failures = 0;
