@@ -10,7 +10,6 @@
 pub(crate) mod bundle;
 mod console_lines;
 mod display;
-mod erase;
 pub(crate) mod host;
 mod input;
 pub(crate) mod install;
@@ -2374,8 +2373,7 @@ const BEAT_SECONDS: u64 = 10;
 
 /// Run up to `budget` blocks (0: no limit), showing what macOS prints last
 /// as the running step's detail, reporting the PE's position
-/// every [`BEAT_SECONDS`], and making ANS namespace erases durable on the
-/// host between slices and before the stop ([`erase`]). The caller supplies
+/// every [`BEAT_SECONDS`]. The caller supplies
 /// its admitted execution path; reporting and host polling never select a
 /// different memory or native-entry path.
 #[allow(clippy::too_many_arguments)]
@@ -2428,7 +2426,6 @@ fn run<H: Host>(
     let mut translated = TranslatedSeen::default();
     let mut shadows = ShadowSeen::default();
     let mut occupancy = None;
-    let mut host_erase = erase::HostErase::default();
     // Ticks inside `execute` since the last beat, and the step timing then.
     let mut sliced_ticks = 0u64;
     let mut timing_at_beat = machine.step_timing().copied();
@@ -2578,11 +2575,6 @@ fn run<H: Host>(
         // Only the actual executed count can establish budget completion.
         let budget_reached = budget != 0 && machine.statistics.blocks >= budget;
         let sliced = waiting || matches!(stop, Stop::Budget) && !budget_reached;
-        if sliced {
-            machine.exclude_host_time(|devices| host_erase.poll(devices));
-        } else {
-            machine.exclude_host_time(|devices| host_erase.finish(devices));
-        }
         let now = host::rdtsc();
         // Keep diagnostic flash writes independent of the UI/input cadence.
         // Guest NOR sector commits still happen at every service boundary.

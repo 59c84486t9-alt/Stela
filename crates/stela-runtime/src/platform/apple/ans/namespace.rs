@@ -15,18 +15,14 @@
 //!
 //! Re-creating a namespace erases it, as a controller dropping its FTL
 //! mappings does: [`Medium::erase`] marks its extent in [`Erased`], reads
-//! of a marked block return zeros, a guest write unmarks what it covers, and
-//! [`Medium::zero_erased`] writes zeros to the host for the rest, unmarking
-//! a run only after the host flushed it. docs/research/ans2.md owns the
-//! design (`Formatting the medium`).
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+//! of a marked block return zeros, and a guest write unmarks what it covers.
+//! The host's bytes are never zeroed, which would write the whole medium.
+//! docs/research/ans2.md owns the design (`Formatting the medium`).
+use alloc::{collections::BTreeMap, vec::Vec};
 use stela_drivers::block::{BlockDevice, BlockError};
 
 pub const BLOCK_BYTES: u32 = 4096;
 const RECORD_BYTES: usize = 12;
-/// Logical blocks per host zeroing write: 1 MiB, the largest transfer the
-/// guest's own commands already make through the backing (MDTS).
-const ZERO_BLOCKS: u64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Description {
@@ -67,9 +63,9 @@ pub(super) struct Namespace {
     pub blocks: u64,
 }
 
-/// Medium blocks erased by a namespace re-creation whose host bytes are
-/// still stale: disjoint, non-adjacent `[start, end)` runs keyed by start,
-/// in 4 KiB medium (not namespace) blocks.
+/// Medium blocks erased and not written since, whose host bytes are stale:
+/// disjoint, non-adjacent `[start, end)` runs keyed by start, in 4 KiB
+/// medium (not namespace) blocks.
 #[derive(Debug, Default)]
 struct Erased {
     runs: BTreeMap<u64, u64>,
@@ -256,8 +252,8 @@ impl Medium {
         Ok(())
     }
 
-    /// Erase every block of namespace `id`, as re-creating it does. The
-    /// effect is immediate for reads; [`Self::zero_erased`] makes it durable.
+    /// Erase every block of namespace `id`, as re-creating it does: they read
+    /// as zeros from now on, until written.
     pub fn erase(&mut self, id: u32) -> Option<()> {
         let namespace = self.namespace(id)?;
         self.erased
@@ -268,8 +264,8 @@ impl Medium {
     /// Deallocate `blocks` blocks of namespace `id` from `lba`, as Dataset
     /// Management with the Deallocate attribute does: like a namespace
     /// erase, but for one range. The blocks read as zeros at once (the
-    /// controller reports DLFEAT 001b) and [`Self::zero_erased`] makes that
-    /// durable. `None` when the range leaves the namespace; nothing changes.
+    /// controller reports DLFEAT 001b). `None` when the range leaves the
+    /// namespace; nothing changes.
     pub fn deallocate(&mut self, id: u32, lba: u64, blocks: u64) -> Option<()> {
         let namespace = self.namespace(id)?;
         let end = lba.checked_add(blocks)?;
@@ -281,46 +277,9 @@ impl Medium {
         Some(())
     }
 
-    /// Erased blocks whose host bytes are still stale.
-    pub fn erase_pending(&self) -> u64 {
+    /// Blocks erased and not written since, which read as zeros.
+    pub fn erased_blocks(&self) -> u64 {
         self.erased.blocks
-    }
-
-    /// Write zeros over up to `budget` erased blocks, lowest first, flush
-    /// the host, and only then drop them from the erased runs, so a block
-    /// leaves them only once its zeros are durable. Returns the blocks still
-    /// pending. A failed write or flush leaves the runs unchanged.
-    pub fn zero_erased(&mut self, budget: u64) -> Result<u64, BlockError> {
-        let mut segments = Vec::new();
-        let mut left = budget;
-        for (&start, &end) in &self.erased.runs {
-            if left == 0 {
-                break;
-            }
-            let take = (end - start).min(left);
-            segments.push((start, start + take));
-            left -= take;
-        }
-        if segments.is_empty() {
-            return Ok(self.erased.blocks);
-        }
-        let zeros = vec![0; (ZERO_BLOCKS * u64::from(BLOCK_BYTES)) as usize];
-        for &(start, end) in &segments {
-            let mut block = start;
-            while block < end {
-                let count = (end - block).min(ZERO_BLOCKS);
-                self.device.write(
-                    block * self.host_blocks_per_lba,
-                    &zeros[..(count * u64::from(BLOCK_BYTES)) as usize],
-                )?;
-                block += count;
-            }
-        }
-        self.device.flush()?;
-        for (start, end) in segments {
-            self.erased.remove(start, end);
-        }
-        Ok(self.erased.blocks)
     }
 }
 
@@ -416,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn erased_namespace_reads_zero_until_written_and_zeroing_reaches_the_host() {
+    fn erased_namespace_reads_zero_until_written_and_the_host_is_never_zeroed() {
         for block_size in [512, 4096] {
             let (mut medium, mut host) = erasable(block_size);
             let ratio = u64::from(BLOCK_BYTES / block_size);
@@ -426,7 +385,7 @@ mod tests {
             }
             medium.erase(2).unwrap();
             assert_eq!(medium.erase(3), None);
-            assert_eq!(medium.erase_pending(), 300);
+            assert_eq!(medium.erased_blocks(), 300);
             let mut data = alloc::vec![0xff; 2 * 4096];
             medium.read(2, 0, &mut data).unwrap();
             assert!(data.iter().all(|&b| b == 0));
@@ -438,38 +397,21 @@ mod tests {
             medium.read(2, 6, &mut data).unwrap();
             assert_eq!(&data[..4096], &[0; 4096]);
             assert_eq!(&data[4096..], &[0x5a; 4096]);
-            assert_eq!(medium.erase_pending(), 299);
-            // The host still holds stale bytes until zeroed, in budgets.
+            assert_eq!(medium.erased_blocks(), 299);
+            // The host keeps its stale bytes: nothing zeroes them.
             let first = medium.namespace(2).unwrap().first;
             let mut stale = alloc::vec![0; 4096];
             host.read(first * ratio, &mut stale).unwrap();
             assert_eq!(stale, [0x22; 4096]);
-            assert_eq!(medium.zero_erased(5).unwrap(), 294);
-            host.read(first * ratio, &mut stale).unwrap();
-            assert_eq!(stale, [0; 4096]);
-            host.read((first + 5) * ratio, &mut stale).unwrap();
-            assert_eq!(stale, [0x22; 4096]);
-            assert_eq!(medium.zero_erased(u64::MAX).unwrap(), 0);
-            assert_eq!(medium.zero_erased(u64::MAX).unwrap(), 0);
-            // The host bytes alone, all the next boot sees, hold the
-            // erase and the later write; the neighbouring namespace kept
-            // its data.
-            let mut whole = alloc::vec![0; 300 * 4096];
-            host.read(first * ratio, &mut whole).unwrap();
-            for (lba, block) in whole.chunks(4096).enumerate() {
-                let fill = if lba == 7 { 0x5a } else { 0 };
-                assert!(block.iter().all(|&b| b == fill), "block {lba}");
-            }
-            host.read((first - 1) * ratio, &mut stale).unwrap();
-            assert_eq!(stale, [0x11; 4096]);
+            host.read((first + 7) * ratio, &mut stale).unwrap();
+            assert_eq!(stale, [0x5a; 4096]);
         }
     }
 
     #[test]
-    fn deallocated_ranges_read_zero_stay_inside_their_namespace_and_reach_the_host() {
+    fn deallocated_ranges_read_zero_and_stay_inside_their_namespace() {
         for block_size in [512, 4096] {
-            let (mut medium, mut host) = erasable(block_size);
-            let ratio = u64::from(BLOCK_BYTES / block_size);
+            let (mut medium, _) = erasable(block_size);
             for lba in 0..300 {
                 medium.write(1, lba, &[0x11; 4096]).unwrap();
                 medium.write(2, lba, &[0x22; 4096]).unwrap();
@@ -478,10 +420,10 @@ mod tests {
             assert_eq!(medium.deallocate(2, 299, 2), None);
             assert_eq!(medium.deallocate(2, u64::MAX, 2), None);
             assert_eq!(medium.deallocate(4, 0, 1), None);
-            assert_eq!(medium.erase_pending(), 0);
+            assert_eq!(medium.erased_blocks(), 0);
             medium.deallocate(2, 10, 5).unwrap();
             medium.deallocate(2, 0, 0).unwrap();
-            assert_eq!(medium.erase_pending(), 5);
+            assert_eq!(medium.erased_blocks(), 5);
             let mut data = alloc::vec![0xff; 7 * 4096];
             medium.read(2, 9, &mut data).unwrap();
             for (i, block) in data.chunks(4096).enumerate() {
@@ -491,13 +433,6 @@ mod tests {
             // The neighbouring namespace keeps its data.
             medium.read(1, 299, &mut data[..4096]).unwrap();
             assert_eq!(&data[..4096], &[0x11; 4096]);
-            assert_eq!(medium.zero_erased(u64::MAX).unwrap(), 0);
-            let first = medium.namespace(2).unwrap().first;
-            let mut stale = alloc::vec![0; 4096];
-            host.read((first + 12) * ratio, &mut stale).unwrap();
-            assert_eq!(stale, [0; 4096]);
-            host.read((first + 15) * ratio, &mut stale).unwrap();
-            assert_eq!(stale, [0x22; 4096]);
         }
     }
 

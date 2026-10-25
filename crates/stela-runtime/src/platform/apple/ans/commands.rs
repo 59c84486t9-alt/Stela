@@ -1371,14 +1371,14 @@ mod tests {
             port.write(0x1000, &request(sizes)).unwrap();
             create.0[40] = cdw10;
             assert!(ans.execute(0, &create, &mut port, &mut sart).is_err());
-            assert_eq!(ans.medium.erase_pending(), 0);
+            assert_eq!(ans.medium.erased_blocks(), 0);
         }
         create.0[40] = 0;
         for sizes in [[0, 3], [7, 3]] {
             port.write(0x1000, &request(sizes)).unwrap();
             let outcome = ans.execute(0, &create, &mut port, &mut sart).unwrap();
             assert_eq!(outcome.status, SUCCESS);
-            assert_eq!(ans.medium.erase_pending(), 10);
+            assert_eq!(ans.medium.erased_blocks(), 10);
         }
         for (nsid, lba) in [(1, 6), (2, 0), (2, 2)] {
             port.write(0x2000, &[0xff; 4096]).unwrap();
@@ -1392,7 +1392,6 @@ mod tests {
         assert_eq!(io(&mut ans, &mut port, READ, 2, 1), SUCCESS);
         port.read(0x2000, &mut block).unwrap();
         assert_eq!(block, [0x44; 4096]);
-        assert_eq!(ans.zero_erased(u64::MAX), Ok(0));
         for (nsid, lba, fill) in [(2, 0, 0), (2, 1, 0x44), (2, 2, 0)] {
             assert_eq!(io(&mut ans, &mut port, READ, nsid, lba), SUCCESS);
             port.read(0x2000, &mut block).unwrap();
@@ -1455,7 +1454,7 @@ mod tests {
             .execute(1, &dsm(1, DEALLOCATE), &mut port, &mut sart)
             .unwrap();
         assert_eq!(outcome.status, LBA_RANGE);
-        assert_eq!(ans.erase_pending(), 0);
+        assert_eq!(ans.erased_blocks(), 0);
         // Hints, reserved fields and context attributes refuse.
         for (count, attributes) in [(0, 1 | DEALLOCATE), (0, 0), (0x100, DEALLOCATE)] {
             assert!(
@@ -1468,14 +1467,14 @@ mod tests {
             ans.execute(1, &dsm(0, DEALLOCATE), &mut port, &mut sart)
                 .is_err()
         );
-        assert_eq!(ans.erase_pending(), 0);
+        assert_eq!(ans.erased_blocks(), 0);
         // eanFormat's whole-namespace range, then two ranges of one command.
         port.write(0x2000, &list(&[(0, 8, 0)])).unwrap();
         let outcome = ans
             .execute(1, &dsm(0, DEALLOCATE), &mut port, &mut sart)
             .unwrap();
         assert_eq!(outcome.status, SUCCESS);
-        assert_eq!(ans.erase_pending(), 8);
+        assert_eq!(ans.erased_blocks(), 8);
         let mut block = [0; 4096];
         for lba in [0, 7] {
             port.write(0x3000, &[0xff; 4096]).unwrap();
@@ -1485,17 +1484,16 @@ mod tests {
         }
         port.write(0x3000, &[0x77; 4096]).unwrap();
         assert_eq!(rw(&mut ans, &mut port, WRITE, 3), SUCCESS);
-        assert_eq!(ans.erase_pending(), 7);
+        assert_eq!(ans.erased_blocks(), 7);
         port.write(0x2000, &list(&[(0, 1, 3), (0, 0, 5)])).unwrap();
         let outcome = ans
             .execute(1, &dsm(1, DEALLOCATE), &mut port, &mut sart)
             .unwrap();
         assert_eq!(outcome.status, SUCCESS);
-        assert_eq!(ans.erase_pending(), 8);
+        assert_eq!(ans.erased_blocks(), 8);
         assert_eq!(rw(&mut ans, &mut port, READ, 3), SUCCESS);
         port.read(0x3000, &mut block).unwrap();
         assert_eq!(block, [0; 4096]);
-        assert_eq!(ans.zero_erased(u64::MAX), Ok(0));
     }
 
     #[test]

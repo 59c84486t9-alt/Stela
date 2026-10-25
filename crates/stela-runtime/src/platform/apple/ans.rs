@@ -44,7 +44,7 @@ pub use geometry::QueueGeometry;
 pub use namespace::Description;
 use namespace::Medium;
 use prp::dma_error;
-use stela_drivers::block::{BlockDevice, BlockError};
+use stela_drivers::block::BlockDevice;
 
 const NAME: &str = "ans2";
 /// Historical default software tag slots; configured dies use QueueGeometry.
@@ -348,17 +348,9 @@ impl Ans {
         Ok(())
     }
 
-    /// Logical blocks a namespace re-creation erased that still hold stale
-    /// bytes on the backing. The guest already reads them as zeros.
-    pub fn erase_pending(&self) -> u64 {
-        self.medium.erase_pending()
-    }
-
-    /// Make up to `blocks` erased logical blocks durable on the backing,
-    /// which is host work between engine slices and at the stop, never
-    /// part of a guest command. Returns the blocks still pending.
-    pub fn zero_erased(&mut self, blocks: u64) -> Result<u64, BlockError> {
-        self.medium.zero_erased(blocks)
+    /// Logical blocks erased and not written since, which read as zeros.
+    pub fn erased_blocks(&self) -> u64 {
+        self.medium.erased_blocks()
     }
 
     fn page(&self) -> u64 {
