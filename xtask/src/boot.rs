@@ -254,13 +254,27 @@ pub struct Run {
         "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_irq_work_check: bool,
-    /// Boot an existing USB disk image, such as one `stela setup` prepared,
-    /// from its removable-media boot loader; writes go to a temporary
-    /// overlay.
+    /// Boot an existing USB disk image, such as a copy of a stick `stela
+    /// setup` prepared, from its removable-media boot loader, attached as a
+    /// USB mass-storage device; writes go to a temporary overlay unless
+    /// `--usb-writable`.
     #[arg(long, conflicts_with_all = [
         "payload", "module", "bundle", "append", "storage_check", "preboot_disk"
     ])]
     usb_image: Option<PathBuf>,
+    /// The `--usb-image` stick's USB serial number, which its setup's
+    /// `--storage` and `--nor` options name.
+    #[arg(long, requires = "usb_image", default_value = "STELAUSBIMAGE")]
+    usb_serial: String,
+    /// Keep the guest's writes in the `--usb-image` file, so a restore's
+    /// install boots in a later run.
+    #[arg(long, requires = "usb_image")]
+    usb_writable: bool,
+    /// Resume a `savevm` checkpoint of a `.qcow2` `--usb-image`, whose UEFI
+    /// variables live beside it in `<image>.vars.qcow2` so checkpoints keep
+    /// every writable drive.
+    #[arg(long, requires = "usb_image")]
+    loadvm: Option<String>,
     /// Give a bundle's guest the native USB keyboard and pointer, fed by
     /// QEMU's virtio keyboard and tablet: adds both devices and the mount's
     /// `--input`.
@@ -508,6 +522,33 @@ fn qemu_cpu(requested: Option<&str>, no_la57: bool, system: bool) -> String {
 
 /// QEMU MTTCG runs one host thread per virtual CPU. Instruction counting
 /// requires its single-thread engine (QEMU devel/tcg-icount.html).
+/// Create a qcow2 `overlay` of raw `base` through QEMU's own monitor, the
+/// tool this checkout has.
+fn overlay(qemu: &Path, base: &Path, overlay: &Path) -> Result<()> {
+    let mut child = Process::new(qemu)
+        .args(["-machine", "none", "-nodefaults", "-display", "none"])
+        .args(["-monitor", "stdio", "-drive"])
+        .arg(format!(
+            "if=none,id=base,format=raw,readonly=on,file={}",
+            option_path(base)
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()?;
+    use std::io::Write;
+    writeln!(
+        child.stdin.take().context("QEMU monitor")?,
+        "snapshot_blkdev base {} qcow2\nquit",
+        overlay.display()
+    )?;
+    ensure!(
+        child.wait()?.success() && overlay.exists(),
+        "create {}",
+        overlay.display()
+    );
+    Ok(())
+}
+
 fn qemu_accelerator(icount: Option<u8>) -> &'static str {
     if icount.is_some() {
         "tcg,thread=single"
@@ -737,8 +778,31 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     };
     let qemu = qemu()?;
     let firmware = firmware(&qemu)?;
-    let variables = output.join("variables.fd");
-    fs::copy(firmware.join(FIRMWARE_VARIABLES), &variables)?;
+    // A qcow2 stick keeps its variables in a qcow2 of its own, so `savevm`
+    // can checkpoint the whole machine.
+    let checkpointed = arguments
+        .usb_image
+        .as_ref()
+        .is_some_and(|image| image.extension().is_some_and(|e| e == "qcow2"));
+    let (variables, format) = if checkpointed {
+        let variables = arguments
+            .usb_image
+            .as_ref()
+            .unwrap()
+            .with_extension("vars.qcow2");
+        if !variables.exists() {
+            overlay(&qemu, &firmware.join(FIRMWARE_VARIABLES), &variables)?;
+        }
+        (variables, "qcow2")
+    } else {
+        let variables = output.join("variables.fd");
+        fs::copy(firmware.join(FIRMWARE_VARIABLES), &variables)?;
+        (variables, "raw")
+    };
+    ensure!(
+        arguments.loadvm.is_none() || checkpointed,
+        "--loadvm needs a .qcow2 --usb-image"
+    );
     let serial = output.join("serial.txt");
     let usb = arguments.usb_image.is_some();
     let mut command = Process::new(&qemu);
@@ -795,6 +859,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 .flatten(),
         )
         .args(["-m", &memory, "-nodefaults", "-no-reboot"])
+        .args(
+            arguments
+                .loadvm
+                .iter()
+                .flat_map(|tag| ["-loadvm", tag.as_str()]),
+        )
         .arg("-drive")
         .arg(format!(
             "if=pflash,format=raw,readonly=on,file={}",
@@ -802,13 +872,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         ))
         .arg("-drive")
         .arg(format!(
-            "if=pflash,format=raw,file={}",
+            "if=pflash,format={format},file={}",
             option_path(&variables)
         ))
         .arg("-drive")
         .arg(match &arguments.usb_image {
             Some(usb) => format!(
-                "if=none,id=volume,format=raw,snapshot=on,file={}",
+                "if=none,id=volume,format={format},snapshot={},file={}",
+                if arguments.usb_writable { "off" } else { "on" },
                 option_path(usb)
             ),
             None => match &fat {
@@ -821,8 +892,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                     option_path(&volume)
                 ),
             },
-        })
-        .args(["-device", "virtio-blk-pci,drive=volume"]);
+        });
+    if !usb {
+        command.args(["-device", "virtio-blk-pci,drive=volume"]);
+    }
     if let Some(mode) = arguments.audio_check {
         mode.attach(&mut command, &output);
         // isa-debug-exit calls exit() before the audio backend finalizes its
@@ -899,7 +972,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             ))
             .args(["-device", "virtio-net-pci,netdev=guest-net"]);
     }
-    let host_usb = arguments.usb_input || arguments.usb_network || !arguments.usb_disk.is_empty();
+    let host_usb =
+        usb || arguments.usb_input || arguments.usb_network || !arguments.usb_disk.is_empty();
     if host_usb {
         command.args([
             "-device",
@@ -909,6 +983,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 "qemu-xhci,id=host-usb"
             },
         ]);
+    }
+    if usb {
+        command.arg("-device").arg(format!(
+            "usb-storage,drive=volume,serial={},bus=host-usb.0,bootindex=0",
+            arguments.usb_serial
+        ));
     }
     if arguments.usb_input {
         for device in ["usb-kbd", "usb-tablet", "usb-mouse"] {
@@ -1211,6 +1291,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "image": binding(&image)?,
         "source": source.exists().then(|| binding(&source)).transpose()?,
         "usb_image": arguments.usb_image,
+        "usb_serial": arguments.usb_image.as_ref().map(|_| &arguments.usb_serial),
+        "usb_writable": arguments.usb_writable,
         "no_la57": arguments.no_la57,
         "qemu_host_cores": arguments.host_cores,
         "qemu_host_threads": arguments.host_threads,
