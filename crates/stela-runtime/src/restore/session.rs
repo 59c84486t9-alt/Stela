@@ -176,8 +176,12 @@ impl Session {
             "AuthInstallRestoreVariant".into(),
             info.required("Variant")?.clone(),
         );
+        // A macOS identity names the variant of its paired recoveryOS.
+        // restored requests the system image only when the host sends it
+        // (R 0x100027018), as idevicerestore does with this value.
         if let Some(v) = info.get("MacOSVariant") {
             opts.insert("MacOSVariant".into(), v.clone());
+            opts.insert("AuthInstallRecoveryOSVariant".into(), v.clone());
         }
         if let Some(v) = info.get("MinimumSystemPartition") {
             opts.insert("SystemPartitionSize".into(), v.clone());
@@ -708,6 +712,9 @@ mod tests {
             );
             // Both restore the system and the paired recoveryOS.
             assert!(flag("ShouldRestoreSystemImage") && flag("InstallRecoveryOS"));
+            let variant = |key: &str| options.required(key).unwrap().string().unwrap();
+            assert_eq!(variant("AuthInstallRecoveryOSVariant"), "macOS Customer");
+            assert_eq!(variant("MacOSVariant"), "macOS Customer");
         }
     }
     fn request(kind: &str) -> Value {

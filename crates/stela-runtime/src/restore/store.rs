@@ -573,6 +573,7 @@ pub(crate) mod tests {
                 "Info",
                 Value::dict([
                     ("Variant", Value::from(variant)),
+                    ("MacOSVariant", Value::from("macOS Customer")),
                     ("RestoreBehavior", Value::from(restore_behavior)),
                     ("DeviceClass", Value::from("testap")),
                     ("OSDiskImageSize", Value::Integer(123)),

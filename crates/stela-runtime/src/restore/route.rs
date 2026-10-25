@@ -14,7 +14,7 @@ pub enum Route {
     /// from recoveryOS. restored fetches the image only in
     /// `restore_system_image`, whose body runs only when the host sends
     /// `AuthInstallRecoveryOSVariant` (R 0x100012ff4, 0x1000131ac ->
-    /// 0x100027018), which Stela never sends. `SystemImage` false
+    /// 0x100027018), which this route withholds. `SystemImage` false
     /// (R 0x100014ec0, 0x100026ed4) tells the later steps there is no system
     /// volume. Evidence: `docs/research/small-installer-usb.md`.
     Recovery,
@@ -44,6 +44,7 @@ impl Route {
             for key in ["SystemImage", "ShouldRestoreSystemImage"] {
                 d.insert(key.into(), Value::Boolean(false));
             }
+            d.remove("AuthInstallRecoveryOSVariant");
         }
         Ok(())
     }
@@ -123,6 +124,10 @@ mod tests {
         let mut options = Value::dict([
             ("InstallRecoveryOS", Value::Boolean(true)),
             ("ShouldRestoreSystemImage", Value::Boolean(true)),
+            (
+                "AuthInstallRecoveryOSVariant",
+                Value::from("macOS Customer"),
+            ),
         ]);
         Route::Recovery.options(&mut options).unwrap();
         let flag = |key| options.required(key).unwrap().boolean().unwrap();
