@@ -16,10 +16,14 @@
 mod wire;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{self, Read, Write},
     net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{Receiver, RecvTimeoutError, Sender, channel},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -39,6 +43,10 @@ const RETRANSMIT: Duration = Duration::from_secs(1);
 const IDLE: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TICK: Duration = Duration::from_millis(50);
+/// Host bytes a connection queues for the guest before its host read
+/// waits, so an open-ended download streams at the guest's pace instead
+/// of piling up here.
+const HOST_BUFFER: usize = 4 << 20;
 
 const DHCP_SERVER: u16 = 67;
 const DHCP_CLIENT: u16 = 68;
@@ -90,7 +98,10 @@ struct Connection {
     /// Host bytes sent and not yet acknowledged, from `send_unacknowledged`.
     flight: Vec<u8>,
     /// Host bytes not yet sent.
-    unsent: Vec<u8>,
+    unsent: VecDeque<u8>,
+    /// Host bytes read and not yet sent, shared with the host reader,
+    /// which waits while it reaches [`HOST_BUFFER`].
+    queued: Arc<AtomicUsize>,
     host_closed: bool,
     fin_sent: bool,
     fin_acknowledged: bool,
@@ -162,7 +173,7 @@ impl Lan {
             Event::Connected(key, result) => self.connected(key, result),
             Event::Data(key, bytes) => {
                 if let Some(c) = self.connections.get_mut(&key) {
-                    c.unsent.extend_from_slice(&bytes);
+                    c.unsent.extend(bytes);
                     c.last_activity = Instant::now();
                     self.push(key);
                 }
@@ -523,6 +534,7 @@ impl Lan {
                 return self.refuse(source, destination, segment);
             }
             self.iss = self.iss.wrapping_add(64_000);
+            let connection_queued = Arc::new(AtomicUsize::new(0));
             let connection = Connection {
                 state: State::Connecting,
                 writer: None,
@@ -534,7 +546,8 @@ impl Lan {
                 scale: segment.scale,
                 mss: segment.mss.map_or(536, usize::from).min(MSS),
                 flight: Vec::new(),
-                unsent: Vec::new(),
+                unsent: VecDeque::new(),
+                queued: Arc::clone(&connection_queued),
                 host_closed: false,
                 fin_sent: false,
                 fin_acknowledged: false,
@@ -547,6 +560,7 @@ impl Lan {
             self.connections.insert(key, connection);
             self.note(format_args!("TCP {} connecting", show(key)));
             let events = self.events.clone();
+            let queued = Arc::clone(&connection_queued);
             thread::spawn(move || {
                 let address = SocketAddr::from((Ipv4Addr::from(key.1), key.2));
                 let result = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT);
@@ -555,12 +569,21 @@ impl Lan {
                 if let Some(mut reader) = reader {
                     let mut buffer = vec![0u8; 16 * 1024];
                     loop {
+                        // The connection is gone once only this thread
+                        // holds the count.
+                        while queued.load(Ordering::Acquire) >= HOST_BUFFER {
+                            if Arc::strong_count(&queued) == 1 {
+                                return;
+                            }
+                            thread::sleep(TICK);
+                        }
                         match reader.read(&mut buffer) {
                             Ok(0) => {
                                 let _ = events.send(Event::Closed(key, Ok(())));
                                 break;
                             }
                             Ok(n) => {
+                                queued.fetch_add(n, Ordering::AcqRel);
                                 if events.send(Event::Data(key, buffer[..n].to_vec())).is_err() {
                                     break;
                                 }
@@ -674,6 +697,7 @@ impl Lan {
         while !c.unsent.is_empty() && (c.flight.len() as u32) < c.window {
             let room = (c.window as usize - c.flight.len()).min(c.mss);
             let bytes: Vec<u8> = c.unsent.drain(..room.min(c.unsent.len())).collect();
+            c.queued.fetch_sub(bytes.len(), Ordering::AcqRel);
             segments.push((c.send_next, ACK | PSH, bytes.clone()));
             c.send_next = c.send_next.wrapping_add(bytes.len() as u32);
             c.to_guest += bytes.len() as u64;
