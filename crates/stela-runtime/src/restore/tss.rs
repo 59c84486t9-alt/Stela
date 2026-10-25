@@ -23,6 +23,10 @@ pub const HOST: &str = "gs.apple.com";
 /// checks the signature.
 pub const PATH: &str = "/TSS/controller?action=2";
 pub const CONTENT_TYPE: &str = "text/xml; charset=\"utf-8\"";
+/// libtatsu's request headers. The service answers a request without its
+/// User-Agent with HTTP 401 (2026-10-24), and one with it normally.
+pub const HEADERS: [(&str, &str); 2] =
+    [("User-Agent", "InetURL/1.0"), ("Cache-Control", "no-cache")];
 /// libtatsu's `TSS_CLIENT_VERSION_STRING` (`AUTH_VERSION` 1104.0.9).
 const VERSION: &str = "libauthinstall-1104.0.9";
 /// The bare policy IM4P the ticket's `lpol` entry covers (idevicerestore
@@ -33,9 +37,17 @@ pub const LOCAL_POLICY: [u8; 22] = [
 ];
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// One HTTP POST to the signing service, returning the response body.
+/// One HTTP POST to the signing service with `headers` besides its
+/// content type, returning the response body.
 pub trait Transport {
-    fn post(&mut self, host: &str, path: &str, content_type: &str, body: &[u8]) -> Result<Vec<u8>>;
+    fn post(
+        &mut self,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>>;
 }
 
 /// The device the request personalizes for, and the way out to Apple.
@@ -374,7 +386,9 @@ pub fn request_local_policy(
 
 fn send(signer: &mut Signer, request: &Value) -> Result<Vec<u8>> {
     let body = plist::encode_xml(request, plist::Limits::default())?;
-    let response = signer.transport.post(HOST, PATH, CONTENT_TYPE, &body)?;
+    let response = signer
+        .transport
+        .post(HOST, PATH, &HEADERS, CONTENT_TYPE, &body)?;
     ticket(&response)
 }
 
@@ -594,7 +608,14 @@ mod tests {
         nonces: Nonces,
     }
     impl Transport for Signing {
-        fn post(&mut self, _: &str, _: &str, _: &str, body: &[u8]) -> Result<Vec<u8>> {
+        fn post(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &str,
+            body: &[u8],
+        ) -> Result<Vec<u8>> {
             self.posts.set(self.posts.get() + 1);
             let request = plist::decode(body, plist::Limits::default())?;
             assert_eq!(request.required("ApNonce")?.data()?, nonces().ap);
@@ -669,10 +690,12 @@ mod tests {
             &mut self,
             host: &str,
             path: &str,
+            headers: &[(&str, &str)],
             content_type: &str,
             body: &[u8],
         ) -> Result<Vec<u8>> {
             assert_eq!((host, path, content_type), (HOST, PATH, CONTENT_TYPE));
+            assert_eq!(headers, HEADERS);
             self.sent = body.to_vec();
             let ticket =
                 super::super::ticket::tests::ticket_for(b"lpol", &LOCAL_POLICY, Some(self.ecid));

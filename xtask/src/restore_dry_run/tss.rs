@@ -163,8 +163,16 @@ pub struct Synthetic {
     pub requests: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 impl Transport for Synthetic {
-    fn post(&mut self, host: &str, path: &str, kind: &str, body: &[u8]) -> HostResult<Vec<u8>> {
+    fn post(
+        &mut self,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        kind: &str,
+        body: &[u8],
+    ) -> HostResult<Vec<u8>> {
         assert_eq!((host, path), ("gs.apple.com", "/TSS/controller?action=2"));
+        assert!(headers.contains(&("User-Agent", "InetURL/1.0")));
         assert!(kind.starts_with("text/xml"));
         self.requests.borrow_mut().push(body.to_vec());
         let request = plist::Value::from_reader(Cursor::new(body)).unwrap();

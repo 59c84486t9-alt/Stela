@@ -1388,7 +1388,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         let (host, path) = network::split_url(url).unwrap_or_else(|error| output::fatal(error));
         // Any HTTP status proves the path end to end; only a transport
         // failure (link, DHCP, DNS, TCP, malformed reply) fails the check.
-        match network.post(host, path, "text/plain", b"") {
+        match network.post(host, path, &[], "text/plain", b"") {
             Ok(body) => {
                 output::arguments(format_args!(
                     "NETWORK CHECK body bytes={} sha256={}\n",

@@ -118,10 +118,11 @@ impl HostNetwork {
         &mut self,
         host: &str,
         path: &str,
+        headers: &[(&str, &str)],
         content_type: &str,
         body: &[u8],
     ) -> Result<Vec<u8>, NetError> {
-        let result = self.stack.post(host, path, &[], content_type, body);
+        let result = self.stack.post(host, path, headers, content_type, body);
         match &result {
             Ok(reply) => output::arguments(format_args!(
                 "NETWORK POST http://{host}{path} sent={} received={}\n",
@@ -142,10 +143,11 @@ impl stela_runtime::restore::tss::Transport for HostNetwork {
         &mut self,
         host: &str,
         path: &str,
+        headers: &[(&str, &str)],
         content_type: &str,
         body: &[u8],
     ) -> stela_runtime::restore::Result<Vec<u8>> {
-        HostNetwork::post(self, host, path, content_type, body)
+        HostNetwork::post(self, host, path, headers, content_type, body)
             .map_err(|error| stela_runtime::restore::Error::Transport(format!("{error}")))
     }
 }
@@ -160,6 +162,7 @@ impl stela_runtime::restore::tss::Transport for Offline {
         &mut self,
         host: &str,
         path: &str,
+        _headers: &[(&str, &str)],
         _content_type: &str,
         _body: &[u8],
     ) -> stela_runtime::restore::Result<Vec<u8>> {
