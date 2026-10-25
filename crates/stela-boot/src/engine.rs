@@ -2658,7 +2658,7 @@ fn run<H: Host>(
                  compiled={} discards={} evictions={} chained={}% exceptions={} interrupts={} \
                  waits={} \
                  heap={}M/{}M carved={}M peak={}M largest={}M \
-                 shadow_peak={}M/{}M/{}M exhausted={}\n",
+                 shadow_peak={}M/{}M/{}M exhausted={} code_peak={}M/{}M\n",
                 cpu.pc,
                 level_name(cpu.pstate.guarded),
                 cpu.pstate.el,
@@ -2681,6 +2681,8 @@ fn run<H: Host>(
                 shadow.shadow_peak[1] >> 20,
                 shadow.shadow_bytes >> 20,
                 shadow.exhausted,
+                shadow.code_peak >> 20,
+                shadow.code_bytes >> 20,
             ));
             output::arguments(format_args!(
                 "REGISTERS pe={} pc={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x} x23={:#x} lr={:#x}\n",

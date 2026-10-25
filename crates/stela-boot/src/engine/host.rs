@@ -268,6 +268,9 @@ pub struct State {
     /// installed last.
     code_unit: u64,
     code_used: u64,
+    /// The furthest the arena's code has reached: what the run needed of it
+    /// until it first filled and new code reclaimed the oldest.
+    code_peak: u64,
     installed_immutable: InstalledCodeCache,
     recorded: Option<Recorded>,
     native: bool,
@@ -428,6 +431,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             code_bytes: config.code_bytes,
             code_unit: 0,
             code_used: 0,
+            code_peak: 0,
             installed_immutable: InstalledCodeCache::default(),
             recorded: None,
             native: false,
@@ -508,6 +512,9 @@ pub struct Statistics {
     /// Each half's shadow bytes and the most it has held at once.
     pub shadow_bytes: u64,
     pub shadow_peak: [u64; 2],
+    /// The code arena's bytes and the furthest its code has reached.
+    pub code_bytes: u64,
+    pub code_peak: u64,
 }
 
 pub fn statistics() -> Statistics {
@@ -536,6 +543,8 @@ pub fn statistics() -> Statistics {
             end - start
         },
         shadow_peak: state.pool.peak,
+        code_bytes: state.code_bytes,
+        code_peak: state.code_peak,
     }
 }
 
@@ -1265,6 +1274,7 @@ impl Host for BareHost<'_> {
         // Serialize before the executable alias runs the new bytes.
         core::arch::x86_64::__cpuid(0);
         state.code_used = end;
+        state.code_peak = state.code_peak.max(end);
         #[cfg(feature = "native-profile")]
         state.native_profile.copied(code.len());
         Ok(NativeCode((state.code_virtual + offset) as usize))
