@@ -29,6 +29,7 @@ pub use device_write::{
 mod processors;
 mod scalable;
 mod shared_memory;
+pub mod step_timing;
 mod stored;
 mod system;
 mod tags;
@@ -540,6 +541,11 @@ pub trait Host {
     }
     /// The guest's system counter.
     fn counter(&mut self) -> u64;
+    /// A cycle count for `--profile`'s phase timing ([`step_timing`]); a
+    /// host without one answers 0.
+    fn profile_ticks(&mut self) -> u64 {
+        0
+    }
     /// Interrupt the host at this counter value, or never.
     fn arm_timer(&mut self, deadline: Option<u64>);
     /// Block until a host interrupt arrives.
@@ -1592,6 +1598,8 @@ pub struct Machine<H: Host, D: Devices> {
     pub devices: D,
     pub profile: CpuProfile,
     pub statistics: Statistics,
+    /// `--profile`'s phase timing, while it is on.
+    step_timing: Option<step_timing::StepTiming>,
     /// Exits to the engine from compiled code (System, FP, PAC and AMX), by
     /// the instruction word that took them, except those the live blocks
     /// count at their last instructions (see [`Self::exit_words`]).
@@ -1827,6 +1835,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             devices,
             profile,
             statistics: Statistics::default(),
+            step_timing: None,
             exit_words: BTreeMap::new(),
             #[cfg(all(feature = "std", feature = "native-profile"))]
             floating_profile: None,
@@ -2127,6 +2136,54 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// host time, and time of day runs ahead of the host's (`clock`).
     pub fn set_idle_skip(&mut self, skip: bool) {
         self.idle_skip = skip;
+    }
+
+    /// Time the step loop's phases and exits from now on ([`step_timing`]).
+    pub fn set_step_timing(&mut self, on: bool) {
+        self.step_timing = on.then(step_timing::StepTiming::default);
+    }
+
+    /// The step loop's timing so far, while it is on.
+    pub fn step_timing(&self) -> Option<&step_timing::StepTiming> {
+        self.step_timing.as_ref()
+    }
+
+    /// The profile clock, while timing is on.
+    #[inline]
+    fn timing_start(&mut self) -> u64 {
+        match self.step_timing {
+            Some(_) => self.host.profile_ticks(),
+            None => 0,
+        }
+    }
+
+    /// Charge the ticks since `since` to `phase`; the profile clock now.
+    #[inline]
+    fn timing_charge(&mut self, phase: step_timing::Phase, since: u64) -> u64 {
+        if self.step_timing.is_none() {
+            return 0;
+        }
+        let now = self.host.profile_ticks();
+        if let Some(timing) = &mut self.step_timing {
+            timing.phases[phase as usize] += now.wrapping_sub(since);
+        }
+        now
+    }
+
+    /// Charge the ticks since `since` to handling an exit in `slot`.
+    #[inline]
+    fn timing_exit(&mut self, slot: usize, since: u64) {
+        if self.step_timing.is_none() {
+            return;
+        }
+        let now = self.host.profile_ticks();
+        if let Some(timing) = &mut self.step_timing {
+            let spent = now.wrapping_sub(since);
+            timing.phases[step_timing::Phase::Exit as usize] += spent;
+            if let Some(exit) = timing.exits.get_mut(slot) {
+                *exit = (exit.0 + 1, exit.1 + spent);
+            }
+        }
     }
 
     /// Keep the system counter at the host's: no slow slice holds it back
@@ -3097,8 +3154,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if self.statistics.blocks >= self.block_limit {
                 return Stop::Budget;
             }
-            if let Err(stop) = self
-                .schedule()
+            let started = self.timing_start();
+            let scheduled = self.schedule();
+            self.timing_charge(step_timing::Phase::Schedule, started);
+            if let Err(stop) = scheduled
                 .and_then(|()| self.step())
                 .or_else(|stop| self.undefined_instead(stop))
             {
@@ -3140,8 +3199,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn step(&mut self) -> Step {
+        let started = self.timing_start();
         self.poll_due_devices()?;
         let delivered = self.deliver_interrupts();
+        self.timing_charge(step_timing::Phase::Devices, started);
         if let Some(reason) = self.devices.take_reset() {
             return Err(Stop::Reset(reason));
         }
@@ -3180,7 +3241,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // PSTATE.PACM applies to the one instruction after PACM.
         let pacm = self.cpu.pstate.pacm;
         let single = mode.breakpoints || mode.step || pacm;
-        let index = match self.fetch_block(pc, single)? {
+        let fetching = self.timing_start();
+        let fetched = self.fetch_block(pc, single);
+        self.timing_charge(step_timing::Phase::Fetch, fetching);
+        let index = match fetched? {
             Fetched::Block(index) => index,
             Fetched::Exception(exception) => {
                 self.cpu.step_advance = false;
@@ -3329,7 +3393,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         // SAFETY: installed by this machine since the last discard, for the
         // system-mode block ABI; chained blocks and thunks too.
+        let entered = self.timing_start();
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
+        let returned = self.timing_charge(step_timing::Phase::Native, entered);
         let control = *self.chain;
         // A thunk that found no transfer left wrapped the budget, after
         // using all of it.
@@ -3352,25 +3418,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if let Some(miss) = self.lookup_miss(last, next_pc, kind, control.budget > budget) {
                     self.statistics.lookup_misses[miss] += 1;
                 }
-                self.exit(last, next_pc, kind)?;
-                let btype = self.cpu.pstate.btype;
-                match ExitKind::try_from(kind) {
-                    Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call))
-                        if btype == 0 =>
-                    {
-                        self.link(last, next_pc, kind);
+                let exited = self.exit(last, next_pc, kind);
+                if exited.is_ok() {
+                    let btype = self.cpu.pstate.btype;
+                    match ExitKind::try_from(kind) {
+                        Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call))
+                            if btype == 0 =>
+                        {
+                            self.link(last, next_pc, kind);
+                        }
+                        Ok(ExitKind::Return | ExitKind::Indirect | ExitKind::Call) => {
+                            self.link_dynamic(last, btype);
+                        }
+                        _ => {}
                     }
-                    Ok(ExitKind::Return | ExitKind::Indirect | ExitKind::Call) => {
-                        self.link_dynamic(last, btype);
-                    }
-                    _ => {}
                 }
-                Ok(())
+                self.timing_exit(kind as usize, returned);
+                exited
             }
             NativeExit::Fault(mut fault) => {
                 let at = (entry.0 as u64).wrapping_add(fault.offset as u64);
                 fault.offset = at.wrapping_sub(self.blocks[last].code.0 as u64) as usize;
-                self.native_fault(last, fault)
+                let handled = self.native_fault(last, fault);
+                self.timing_exit(step_timing::FAULT_SLOT, returned);
+                handled
             }
         }
     }

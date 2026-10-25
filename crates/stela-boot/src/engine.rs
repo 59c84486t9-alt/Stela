@@ -49,6 +49,7 @@ use stela_loader::{
     installed, recovery,
 };
 use stela_runtime::machine::apple::WallClock;
+use stela_runtime::machine::engine::step_timing;
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Host, Machine, PeerState, Stop, Transition,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
@@ -175,6 +176,9 @@ struct Options {
     /// Execute PEs in checked native rounds on their assigned workers
     /// (`--native-rounds`) instead of serialized chained blocks on the BSP.
     native_rounds: bool,
+    /// Time the engine's phases between translated blocks and report them
+    /// with each heartbeat (`--profile`).
+    profile: bool,
     /// The user opted in to Apple's signing server (`--tss`, `stela setup
     /// --tss`): the restore host may send this machine's ECID and component
     /// hashes to gs.apple.com for the recoveryOS LocalPolicy, over the host
@@ -313,6 +317,7 @@ impl Options {
             native_shared_check: false,
             native_artifacts: false,
             native_rounds: false,
+            profile: false,
             tss: false,
             ecid: None,
             network_check: None,
@@ -340,6 +345,10 @@ impl Options {
             }
             if name == "--native-rounds" {
                 options.native_rounds = true;
+                continue;
+            }
+            if name == "--profile" {
+                options.profile = true;
                 continue;
             }
             if name == "--monitor-trace" {
@@ -2215,6 +2224,12 @@ fn run_machine<H: Host>(
         machine.begin_survey();
     }
     machine.set_idle_skip(options.idle_skip);
+    machine.set_step_timing(options.profile);
+    if options.profile {
+        output::arguments(format_args!(
+            "PROFILE on: each heartbeat reports the engine's time by phase and exit kind\n"
+        ));
+    }
     machine.set_strict(options.strict);
     machine.devices.set_strict(options.strict);
     output::arguments(format_args!(
@@ -2274,6 +2289,73 @@ fn run_machine<H: Host>(
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds, &options.dumps, &host_power)
+}
+
+/// Exit kinds by `ExitKind` value, then native faults
+/// (`step_timing::FAULT_SLOT`), as the PROFILE line names them.
+const EXIT_NAMES: [&str; step_timing::EXIT_SLOTS] = [
+    "fallthrough",
+    "direct",
+    "indirect",
+    "call",
+    "return",
+    "trap",
+    "pointer-auth",
+    "clock",
+    "thread-register",
+    "floating-point",
+    "scalable",
+    "system",
+    "amx",
+    "fault",
+];
+
+/// `--profile`'s heartbeat lines: of `elapsed` ticks, the share inside the
+/// engine (`sliced`) and in each of its phases, the rest of the engine's
+/// time unattributed, and each exit kind's count, share and mean cost.
+fn profile_report(timing: &step_timing::StepTiming, sliced: u64, elapsed: u64, tsc_hz: u64) {
+    let share = |ticks: u64| {
+        let permille = u128::from(ticks) * 1000 / u128::from(elapsed.max(1));
+        format!("{}.{}%", permille / 10, permille % 10)
+    };
+    let mut line = format!(
+        "PROFILE seconds={} engine={} host_service={}",
+        elapsed / tsc_hz.max(1),
+        share(sliced),
+        share(elapsed.saturating_sub(sliced)),
+    );
+    let mut attributed = 0u64;
+    for phase in step_timing::Phase::ALL {
+        let ticks = timing.phases[phase as usize];
+        attributed = attributed.saturating_add(ticks);
+        line.push_str(&format!(" {}={}", phase.name(), share(ticks)));
+    }
+    line.push_str(&format!(
+        " unattributed={}\n",
+        share(sliced.saturating_sub(attributed))
+    ));
+    output::arguments(format_args!("{line}"));
+    let mut exits: Vec<(usize, (u64, u64))> = timing
+        .exits
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, (count, _))| *count > 0)
+        .collect();
+    exits.sort_by_key(|exit| core::cmp::Reverse(exit.1.1));
+    let mut line = String::from("PROFILE exits");
+    for (slot, (count, ticks)) in exits {
+        let mean_ns =
+            u128::from(ticks) * 1_000_000_000 / u128::from(count) / u128::from(tsc_hz.max(1));
+        line.push_str(&format!(
+            " {}={}x/{}/{}ns",
+            EXIT_NAMES[slot],
+            count,
+            share(ticks),
+            mean_ns
+        ));
+    }
+    output::arguments(format_args!("{line}\n"));
 }
 
 fn level_name(guarded: bool) -> &'static str {
@@ -2347,6 +2429,9 @@ fn run<H: Host>(
     let mut shadows = ShadowSeen::default();
     let mut occupancy = None;
     let mut host_erase = erase::HostErase::default();
+    // Ticks inside `execute` since the last beat, and the step timing then.
+    let mut sliced_ticks = 0u64;
+    let mut timing_at_beat = machine.step_timing().copied();
     boot_progress.start(beat.0, machine.statistics.blocks);
     loop {
         let slice = machine.statistics.blocks + SLICE;
@@ -2355,8 +2440,10 @@ fn run<H: Host>(
         } else {
             budget.min(slice)
         };
+        let slice_started = host::rdtsc();
         let stop = execute(machine, limit);
         let service_now = host::rdtsc();
+        sliced_ticks += service_now.wrapping_sub(slice_started);
         service_gap = service_gap.max(service_now.wrapping_sub(serviced));
         serviced = service_now;
         service_boundaries = service_boundaries.saturating_add(1);
@@ -2591,6 +2678,11 @@ fn run<H: Host>(
                 instructions.saturating_mul(1000) / u128::from((blocks - beat.2).max(1)),
             ));
             retired_at_beat = retired;
+            if let (Some(now), Some(then)) = (machine.step_timing().copied(), timing_at_beat) {
+                profile_report(&now.since(&then), sliced_ticks, elapsed, tsc_hz);
+                timing_at_beat = Some(now);
+            }
+            sliced_ticks = 0;
             #[cfg(feature = "native-profile")]
             output::arguments(format_args!(
                 "NATIVE PROFILE bsp_reference_ticks {:?}\n",

@@ -192,6 +192,14 @@ pub(crate) struct Setup {
     /// Turn the Apple signing server opt-in off on an existing setup.
     #[arg(long)]
     no_tss: bool,
+    /// Have every startup choice time the engine (its `--profile`): each
+    /// heartbeat of the boot log then reports where the engine's time goes
+    /// between translated blocks, by phase and by exit kind.
+    #[arg(long, conflicts_with = "no_profile")]
+    profile: bool,
+    /// Turn the engine profile off on an existing setup.
+    #[arg(long)]
+    no_profile: bool,
     /// Have the install refuse an IPSW without recorded block hashes, which
     /// it otherwise reads whole before the restore starts; with them it
     /// checks each block as the restore reads it either way. It adds the
@@ -408,6 +416,9 @@ struct Record {
     /// (`--verify-on-read`).
     #[serde(default)]
     verify_on_read: bool,
+    /// Every choice times the engine (`--profile`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    profile: bool,
     /// The translation store `stela.efi` keeps its packs in, if the USB
     /// has room for one (`setup::translations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -515,7 +526,8 @@ impl Record {
 
     fn line(&self, text: String) -> String {
         let tss = if self.tss { " --tss" } else { "" };
-        format!("{text}{tss}\n")
+        let profile = if self.profile { " --profile" } else { "" };
+        format!("{text}{tss}{profile}\n")
     }
 
     /// The option line that boots `install`, or the setup's own recoveryOS.
@@ -1090,6 +1102,7 @@ impl Setup {
         self.default_install.is_some()
             || self.remove_install.is_some()
             || self.no_tss
+            || self.no_profile
             || self.chooser_timeout.is_some()
     }
 
@@ -1274,11 +1287,14 @@ impl Setup {
         if configured && self.target.is_some() {
             return machines::add(environment, &self);
         }
-        if configured && (self.configures() || (self.tss && self.ipsw.is_none() && !self.fetch)) {
+        if configured
+            && (self.configures()
+                || ((self.tss || self.profile) && self.ipsw.is_none() && !self.fetch))
+        {
             return machines::configure(environment, &self);
         }
         ensure!(
-            !self.configures() && !self.no_tss,
+            !self.configures() && !self.no_tss && !self.no_profile,
             "{} has no setup to change; run `stela setup` first",
             self.usb.display()
         );
@@ -2010,6 +2026,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         medium: None,
         media: Vec::new(),
         verify_on_read: command.verify_on_read,
+        profile: command.profile,
         translations: None,
     };
     let install = match &installed {
@@ -2608,6 +2625,8 @@ mod tests {
             new_ecid: false,
             tss: false,
             no_tss: false,
+            profile: false,
+            no_profile: false,
             verify_on_read: false,
             install_volume: None,
             default_install: None,
@@ -3396,6 +3415,22 @@ mod tests {
             None
         );
         assert_eq!(off.missing_restore_bundles().len(), 1);
+
+        // The engine profile turns on for every choice, and off again.
+        let on = rerun(&f, |c| c.profile = true).unwrap();
+        assert!(on.contains("profile        on"), "{on}");
+        let config = || fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
+        assert!(config().trim_end().ends_with("--profile"), "{}", config());
+        let choices =
+            Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
+        assert!(
+            choices
+                .entries
+                .iter()
+                .all(|e| e.options.ends_with("--profile"))
+        );
+        rerun(&f, |c| c.no_profile = true).unwrap();
+        assert!(!config().contains("--profile"));
 
         // The next boot is chosen in NVRAM, which a dry run leaves alone.
         let dry = rerun(&f, |c| {

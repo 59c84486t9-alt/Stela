@@ -1555,6 +1555,10 @@ impl Host for BareHost<'_> {
         }
     }
 
+    fn profile_ticks(&mut self) -> u64 {
+        rdtsc()
+    }
+
     fn counter(&mut self) -> u64 {
         fresh_counter()
     }

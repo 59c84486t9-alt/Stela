@@ -305,7 +305,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
 }
 
 /// Settings of an existing setup: the default install, removing one, the
-/// TSS opt-in and the startup choices' timeout.
+/// TSS opt-in, the engine profile and the startup choices' timeout.
 pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Result<String> {
     let mut record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
@@ -361,6 +361,17 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
                 )?;
             }
         }
+    }
+    if command.profile || command.no_profile {
+        record.profile = command.profile;
+        writeln!(
+            text,
+            "  profile        {}",
+            match record.profile {
+                true => "on: each heartbeat of the boot log times the engine's phases",
+                false => "off",
+            }
+        )?;
     }
     if let Some(seconds) = command.chooser_timeout {
         record.chooser_timeout = Some(seconds);
