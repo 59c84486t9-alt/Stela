@@ -413,6 +413,11 @@ fn u64_value(value: u64) -> Vec<u8> {
     value.to_le_bytes().to_vec()
 }
 
+/// The low 32 bits of `value`, for a u32 DeviceTree property.
+fn u32_value(value: u64) -> Vec<u8> {
+    (value as u32).to_le_bytes().to_vec()
+}
+
 impl<'a> Verified<'a> {
     fn file_bytes(&self, name: &str) -> Result<&'a [u8], BundleError> {
         self.manifest.file(name)?;
@@ -487,6 +492,20 @@ impl<'a> Verified<'a> {
                         "boot_args.Video.v_width" => u64_value(screen.width),
                         "boot_args.Video.v_height" => u64_value(screen.height),
                         "boot_args.Video.v_depth" => u64_value(screen.bits_per_pixel),
+                        // iBoot derives these from v_depth (file 0x24148..
+                        // 0x2425c): bits 8..15 rotation and 24..31 boot
+                        // rotation in quarter turns, bits 16..23 the scale
+                        // less one. Stela's depth has neither, so the scale
+                        // is 1, never the template's 0.
+                        "/chosen display-rotation" => {
+                            u32_value((screen.bits_per_pixel >> 8 & 0xff) * 90)
+                        }
+                        "/chosen display-scale" => {
+                            u32_value((screen.bits_per_pixel >> 16 & 0xff) + 1)
+                        }
+                        "/chosen display-boot-rotation" => {
+                            u32_value((screen.bits_per_pixel >> 24 & 0xff) * 90)
+                        }
                         "/arm-io/dispext0 framebuffer-width" => u32::try_from(screen.width)
                             .map_err(|_| error("external framebuffer width exceeds u32"))?
                             .to_le_bytes()
@@ -939,6 +958,50 @@ mod tests {
         })?;
         assert_eq!(&ram[0x4014..0x4018], &1920u32.to_le_bytes());
         assert_eq!(&ram[0x4018..0x401c], &1080u32.to_le_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn display_scale_and_rotation_follow_the_video_depth() -> Result<(), BundleError> {
+        let kernel = [0xaa; 100];
+        let tree = [0x11; 32];
+        let patches = format!(
+            r#"{PATCHES},
+        {{"source":"framebuffer","required":false,"region":"DeviceTree","file":"devicetree.adt","file_offset":20,"bytes":4,"encoding":"bytes","field":"/chosen display-rotation","prepared_hex":""}},
+        {{"source":"framebuffer","required":false,"region":"DeviceTree","file":"devicetree.adt","file_offset":24,"bytes":4,"encoding":"bytes","field":"/chosen display-scale","prepared_hex":""}},
+        {{"source":"framebuffer","required":false,"region":"DeviceTree","file":"devicetree.adt","file_offset":28,"bytes":4,"encoding":"bytes","field":"/chosen display-boot-rotation","prepared_hex":""}}"#
+        );
+        let manifest = Manifest::parse(manifest_with(&kernel, &tree, &patches).as_bytes())?;
+        let files: BTreeMap<&str, &[u8]> =
+            BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
+        let verified = manifest.verify(&|name| files.get(name).copied())?;
+        let mut ram = vec![0xff; FRAME_BYTES as usize];
+        let mut entropy = |bytes: &mut [u8]| {
+            bytes.fill(0x42);
+            Ok(())
+        };
+        // Without a display the template stands, as iBoot leaves it.
+        verified.load(&machine(), &mut entropy, &mut |pa, bytes| {
+            write_into(&mut ram, pa, bytes)
+        })?;
+        assert_eq!(&ram[0x4014..0x4020], &[0x11; 12]);
+        let screen = Machine {
+            framebuffer: Some(Framebuffer {
+                guest_pa: 0xc000_0000,
+                bytes: 0x80_0000,
+                row_bytes: 5120,
+                width: 1280,
+                height: 800,
+                bits_per_pixel: 32,
+            }),
+            ..machine()
+        };
+        verified.load(&screen, &mut entropy, &mut |pa, bytes| {
+            write_into(&mut ram, pa, bytes)
+        })?;
+        assert_eq!(&ram[0x4014..0x4018], &0u32.to_le_bytes());
+        assert_eq!(&ram[0x4018..0x401c], &1u32.to_le_bytes());
+        assert_eq!(&ram[0x401c..0x4020], &0u32.to_le_bytes());
         Ok(())
     }
 

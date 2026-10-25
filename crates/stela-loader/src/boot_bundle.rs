@@ -2055,6 +2055,30 @@ fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>>
             Encoding::Bytes,
             "u64 framebuffer base, u64 framebuffer bytes",
         ),
+        (
+            "/chosen",
+            "display-rotation",
+            PatchSource::Framebuffer,
+            false,
+            Encoding::Bytes,
+            "u32 degrees, from boot_args.Video.v_depth bits 8..15",
+        ),
+        (
+            "/chosen",
+            "display-scale",
+            PatchSource::Framebuffer,
+            false,
+            Encoding::Bytes,
+            "u32 scale, boot_args.Video.v_depth bits 16..23 plus one",
+        ),
+        (
+            "/chosen",
+            "display-boot-rotation",
+            PatchSource::Framebuffer,
+            false,
+            Encoding::Bytes,
+            "u32 degrees, from boot_args.Video.v_depth bits 24..31",
+        ),
     ];
     let bytes = tree.serialize();
     for &(path, property, source, required, encoding, rule) in slots {
@@ -2493,6 +2517,9 @@ mod tests {
             ("effective-security-mode-ap", 4),
             ("sepfw-load-at-boot", 4),
             ("osenvironment", 32),
+            ("display-rotation", 4),
+            ("display-scale", 4),
+            ("display-boot-rotation", 4),
         ] {
             tree.set_property("/chosen", name, vec![0; bytes]).unwrap();
         }
@@ -3341,6 +3368,7 @@ mod tests {
         );
         assert!(image.kept.iter().all(|field| field.contains("Video")
             || field.contains("vram")
+            || field.contains("/chosen display-")
             || field.contains("CommandLine")));
 
         // An M4 bundle places iBoot's dummy CL4 page and states the core
