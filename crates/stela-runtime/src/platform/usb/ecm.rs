@@ -352,6 +352,11 @@ impl Ecm {
         self.state.inbound.push_back(frame.to_vec());
     }
 
+    /// Whether the guest's receive queue has room for another frame.
+    pub fn has_room(&self) -> bool {
+        self.state.inbound.len() < QUEUE_FRAMES
+    }
+
     /// The next frame the guest sent, for the host network.
     pub fn take(&mut self) -> Option<Vec<u8>> {
         self.state.outbound.pop_front()
@@ -728,6 +733,19 @@ mod tests {
         assert_eq!(sizes, [512, 512, 0]);
         assert_eq!(read(&mut e, BULK_IN), None);
         assert_eq!(e.counters().to_guest, 1);
+    }
+
+    #[test]
+    fn a_full_receive_queue_has_no_room_and_drops_the_next_frame() {
+        let mut e = adapter(true);
+        for _ in 0..QUEUE_FRAMES {
+            assert!(e.has_room());
+            e.deliver(&frame(MAC, 60));
+        }
+        assert!(!e.has_room());
+        e.deliver(&frame(MAC, 60));
+        assert_eq!(e.state.counters.overflowed, 1);
+        assert_eq!(e.state.inbound.len(), QUEUE_FRAMES);
     }
 
     #[test]

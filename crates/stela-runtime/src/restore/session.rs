@@ -18,8 +18,6 @@ pub const PROTOCOL: u64 = 15;
 const MAX_JOBS: usize = 16;
 const MAX_LEDGER_BYTES: usize = 16 * 1024 * 1024;
 const FILE_CHUNK: usize = 8192;
-/// The bytes one [`Job::poll`] moves at most.
-const POLL_BYTES: u64 = 1024 * 1024;
 /// Every message type the host understands, with the value the public host
 /// sends for it (idevicerestore 4b3e847e `restore_supported_message_types`,
 /// "extracted from ac2"). Restored's `is_host_compatible` compares this
@@ -480,14 +478,14 @@ impl Job {
         s: &mut impl ByteStream,
         store: &mut Store<R>,
     ) -> Poll<Result<()>> {
-        // Step on while each step queues or sends, up to POLL_BYTES: a
-        // transfer of 8 KiB frames would otherwise move one frame a turn.
-        let start = self.written();
+        // Step on while each step queues or sends: the stream takes only
+        // what the guest has room for (its receive window), so the guest's
+        // own buffers end the turn.
         let r = loop {
             let (before, queued) = (self.written(), self.sending());
             let r = self.step(s, store);
             let moved = self.written() != before || !queued && self.sending();
-            if r.is_ready() || !moved || self.written() - start >= POLL_BYTES {
+            if r.is_ready() || !moved {
                 break r;
             }
         };

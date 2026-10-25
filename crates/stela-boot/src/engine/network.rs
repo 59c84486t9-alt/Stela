@@ -173,9 +173,6 @@ impl stela_runtime::restore::tss::Transport for Offline {
     }
 }
 
-/// Frames moved each way per poll, so a busy link cannot hold the engine.
-const FRAMES_PER_POLL: usize = 32;
-
 /// The guest's USB Ethernet adapter bridged to a host adapter of its own
 /// (`--guest-network`). The adapter keeps the host adapter's station
 /// address, so the guest is that adapter on the host's network and the
@@ -230,15 +227,16 @@ impl GuestNetwork {
                 if up { "up" } else { "down" }
             ));
         }
-        for _ in 0..FRAMES_PER_POLL {
-            let Some(frame) = devices.network_take() else {
-                break;
-            };
+        // The guest's queues are the only bound: every frame it queued goes
+        // out, and frames come in while its receive queue has room. The rest
+        // wait in the host adapter's ring, which drops on overflow as the
+        // hardware does.
+        while let Some(frame) = devices.network_take() {
             if let Err(error) = self.link.transmit(&frame) {
                 self.refuse(error.into());
             }
         }
-        for _ in 0..FRAMES_PER_POLL {
+        while devices.network_room() {
             match self.link.receive() {
                 Ok(Some(frame)) => {
                     // Without an attached adapter the frame has nowhere to go.

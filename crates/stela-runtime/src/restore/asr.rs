@@ -13,8 +13,6 @@ use core::task::Poll;
 use sha1::{Digest, Sha1};
 pub const PORT: u16 = 12345;
 pub const CHUNK_BYTES: usize = 128 * 1024;
-/// The image bytes one [`Sender::poll`] moves at most: 64 chunks.
-const POLL_BYTES: u64 = 64 * CHUNK_BYTES as u64;
 const SHA1_BYTES: usize = 20;
 const PACKET_BYTES: u64 = 1450;
 const FEC_STRIDE: u64 = 40;
@@ -76,15 +74,14 @@ impl Sender {
         stream: &mut impl ByteStream,
         source: &mut impl ImageSource,
     ) -> Poll<Result<()>> {
-        // Step on while each step queues or sends, up to POLL_BYTES, so the
-        // image does not move one chunk a scheduler turn.
-        let start = self.output.written();
+        // Step on while each step queues or sends: the stream takes only
+        // what the guest has room for (its receive window), so the guest's
+        // own buffers end the turn.
         let r = loop {
             let (before, queued) = (self.output.written(), self.output.is_pending());
             let r = self.step(stream, source);
-            let written = self.output.written();
-            let moved = written != before || !queued && self.output.is_pending();
-            if r.is_ready() || !moved || written - start >= POLL_BYTES {
+            let moved = self.output.written() != before || !queued && self.output.is_pending();
+            if r.is_ready() || !moved {
                 break r;
             }
         };
