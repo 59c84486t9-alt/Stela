@@ -2,8 +2,9 @@
 //! has `choices.cfg`, `stela.efi` lists on the firmware console the entries
 //! that can start now, under the Mac's heading, then the PC firmware's own
 //! boot entries (`firmware::entries`), with one highlighted and a line on
-//! what it does. A Mac or recoveryOS entry whose SSD the setup restore has
-//! not prepared yet is left out (`selection::ready`). Up and Down move the
+//! what it does. A macOS entry is left out until a macOS is installed, a
+//! macOS or recoveryOS entry while Install macOS has not prepared its SSD,
+//! and Install macOS once it has (`selection::ready`). Up and Down move the
 //! highlight, Enter starts the highlighted entry, and an entry's key (`1`-`9`,
 //! then `a`-`z`) starts it at once; a firmware entry restarts the PC into it.
 //! A countdown from the file's timeout starts the first entry, the one
@@ -17,7 +18,7 @@ use crate::{
     console,
     firmware::entries::{self, Entry},
     output,
-    selection::{self, Refusal},
+    selection::{self, Readiness},
     status,
 };
 use alloc::{format, string::String, vec::Vec};
@@ -128,6 +129,13 @@ const MAC: &str = "Stela";
 /// The heading over the firmware's entries.
 const PC: &str = "This PC";
 
+/// The SSD (`--storage`) a startup choice's options name.
+fn storage(options: &str) -> Option<&str> {
+    let mut words = options.split_ascii_whitespace();
+    words.find(|word| *word == "--storage")?;
+    words.next()
+}
+
 /// One entry of the menu.
 enum Item {
     /// Entry `n` of the startup choices.
@@ -162,20 +170,41 @@ impl<'a> Menu<'a> {
     /// The menu of `choices`: those that can start now, then the firmware's
     /// entries. `held` is why the machine can only be set up.
     fn new(choices: &'a Choices, held: Option<&'a str>) -> Self {
-        let mut blank = held.is_some();
+        let readiness: Vec<Readiness> = choices
+            .entries
+            .iter()
+            .map(|entry| selection::ready(&entry.options, entry.kind()))
+            .collect();
+        let blank = held.is_some() || readiness.contains(&Readiness::Unprepared);
+        // The SSDs a macOS or recoveryOS choice is known to start from,
+        // which Install macOS has prepared already.
+        let prepared: Vec<Option<&str>> = choices
+            .entries
+            .iter()
+            .zip(&readiness)
+            .filter(|(_, r)| **r == Readiness::Ready)
+            .map(|(entry, _)| storage(&entry.options))
+            .collect();
         let mut items = Vec::new();
         for (n, entry) in choices.entries.iter().enumerate() {
             let kind = entry.kind();
-            match selection::ready(&entry.options, kind) {
-                Err(refusal @ (Refusal::BlankDisk | Refusal::RecoveryMode)) => {
-                    blank |= matches!(refusal, Refusal::BlankDisk);
-                    output::arguments(format_args!(
-                        "CHOICE {} ({}) left out: its SSD is not set up\n",
-                        n + 1,
-                        entry.name
-                    ));
+            let left_out = match (kind, readiness[n]) {
+                (ChoiceKind::Mac, Readiness::NotInstalled) => Some("no macOS is installed"),
+                (ChoiceKind::Mac | ChoiceKind::Recovery, Readiness::Unprepared) => {
+                    Some("its SSD is not prepared")
                 }
-                _ => items.push(Item::Choice(n, kind)),
+                (ChoiceKind::Setup, _) if prepared.contains(&storage(&entry.options)) => {
+                    Some("its SSD is prepared")
+                }
+                _ => None,
+            };
+            match left_out {
+                Some(reason) => output::arguments(format_args!(
+                    "CHOICE {} ({}) left out: {reason}\n",
+                    n + 1,
+                    entry.name
+                )),
+                None => items.push(Item::Choice(n, kind)),
             }
         }
         // A setup without its restore choice still lists its own.
@@ -196,10 +225,14 @@ impl<'a> Menu<'a> {
                 .unwrap_or(0),
             None => 0,
         };
-        let first_is_default = matches!(items.first(), Some(Item::Choice(0, _)));
+        // The countdown starts the first entry when it starts the Mac.
+        let starts_mac = matches!(
+            items.first(),
+            Some(Item::Choice(_, ChoiceKind::Mac | ChoiceKind::Recovery))
+        );
         Self {
             choices,
-            countdown: (held.is_none() && first_is_default && choices.timeout_seconds > 0)
+            countdown: (held.is_none() && starts_mac && choices.timeout_seconds > 0)
                 .then_some(choices.timeout_seconds),
             items,
             held,

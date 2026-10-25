@@ -407,18 +407,36 @@ fn replace(text: &str, name: &str, value: &str) -> String {
     words.join(" ")
 }
 
-/// Whether the startup choice `options` of `kind` can start now: a Mac or
-/// recoveryOS choice whose internal SSD has no iBootSystemContainer cannot,
-/// as it waits for the setup restore that creates it, nor a Mac choice NVRAM
-/// holds in recovery mode. A check that cannot be made counts as ready, so
-/// starting the choice reports why it cannot.
-pub fn ready(options: &str, kind: ChoiceKind) -> Result<(), Refusal> {
+/// Whether a startup choice can start now ([`ready`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    /// It starts what it names: macOS from an installed system, or
+    /// recoveryOS from a prepared SSD.
+    Ready,
+    /// A Mac choice whose startup disk holds no installed macOS, which
+    /// would start recoveryOS instead.
+    NotInstalled,
+    /// Its SSD has no iBootSystemContainer yet, or NVRAM holds the machine
+    /// in recovery mode: only Install macOS starts.
+    Unprepared,
+    /// The check could not be made; starting the choice reports why.
+    Unknown,
+}
+
+/// Whether the startup choice `options` of `kind` can start now. Install
+/// and other choices are not checked ([`Readiness::Unknown`]).
+pub fn ready(options: &str, kind: ChoiceKind) -> Readiness {
     match kind {
-        ChoiceKind::Mac => peek(options.into()).map(drop),
+        ChoiceKind::Mac => match route_checked(options.as_bytes().into(), false) {
+            Ok((_, true)) => Readiness::Ready,
+            Ok((_, false)) => Readiness::NotInstalled,
+            Err(Refusal::BlankDisk | Refusal::RecoveryMode) => Readiness::Unprepared,
+            Err(Refusal::Other(_)) => Readiness::Unknown,
+        },
         ChoiceKind::Recovery => {
             let Some(target) = option(options, "--storage").and_then(|s| s.parse::<Target>().ok())
             else {
-                return Ok(());
+                return Readiness::Unknown;
             };
             // The engine splits a `--storage` partition that `--nor` also
             // names; recoveryOS then reads its namespace.
@@ -427,11 +445,12 @@ pub fn ready(options: &str, kind: ChoiceKind) -> Result<(), Refusal> {
                 false => Part::Whole,
             };
             match blank(&target, part) {
-                Ok(true) => Err(Refusal::BlankDisk),
-                _ => Ok(()),
+                Ok(true) => Readiness::Unprepared,
+                Ok(false) => Readiness::Ready,
+                Err(_) => Readiness::Unknown,
             }
         }
-        _ => Ok(()),
+        _ => Readiness::Unknown,
     }
 }
 
@@ -442,7 +461,7 @@ pub enum Refusal {
     /// host, Stela's Install macOS startup choice.
     RecoveryMode,
     /// The internal SSD has no iBootSystemContainer yet: only Install macOS
-    /// (Stela) boots.
+    /// boots.
     BlankDisk,
     Other(&'static str),
 }
@@ -460,6 +479,13 @@ pub fn peek(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
 }
 
 fn route_with(options: Vec<u8>, consume: bool) -> Result<Vec<u8>, Refusal> {
+    route_checked(options, consume).map(|(routed, _)| routed)
+}
+
+/// [`route_with`], and whether the boot disk holds an installed system: false
+/// when a Mac boot falls back to recoveryOS for want of one.
+fn route_checked(options: Vec<u8>, consume: bool) -> Result<(Vec<u8>, bool), Refusal> {
+    let mut installed_system = true;
     let text =
         core::str::from_utf8(&options).map_err(|_| Refusal::Other("stela.cfg is not UTF-8"))?;
     let refuse = |error: String| {
@@ -518,6 +544,7 @@ fn route_with(options: Vec<u8>, consume: bool) -> Result<Vec<u8>, Refusal> {
                 && !installed(&disk, part, selection.volume.as_ref()).map_err(refuse)?
             {
                 selection.missing_boot_media();
+                installed_system = false;
             }
             // A recoveryOS boot takes the disk's own copy first, as LLB does.
             let volume = selection.volume;
@@ -556,5 +583,5 @@ fn route_with(options: Vec<u8>, consume: bool) -> Result<Vec<u8>, Refusal> {
     if selection.is_some() {
         output::arguments(format_args!("BOOT {log}\n"));
     }
-    Ok(routed.into_bytes())
+    Ok((routed.into_bytes(), installed_system))
 }
