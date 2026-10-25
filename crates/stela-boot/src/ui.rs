@@ -176,6 +176,18 @@ impl Canvas {
         }
     }
 
+    /// The first and last glyph rows any character of `text` sets.
+    fn ink_rows(&self, text: &str) -> (usize, usize) {
+        let set = |y: usize| {
+            text.bytes()
+                .any(|c| (0..self.font.width).any(|x| self.font.pixel(c, x, y)))
+        };
+        let rows = 0..self.font.height;
+        let first = rows.clone().find(|&y| set(y)).unwrap_or(0);
+        let last = rows.rev().find(|&y| set(y)).unwrap_or(self.font.height - 1);
+        (first, last)
+    }
+
     /// The logo and name, together centred at the top; the first unit row
     /// under them.
     pub fn header(&mut self) -> usize {
@@ -185,10 +197,11 @@ impl Canvas {
         let left = width.saturating_sub(LOGO + gap + name) / 2;
         let top = 28;
         self.logo(left, top, LOGO);
-        let glyph = self.font.height * 2;
+        // Centre the name's ink, not its glyph cells, on the logo.
+        let (first, last) = self.ink_rows(NAME);
         self.text(
             left + LOGO + gap,
-            (top + LOGO / 2).saturating_sub(glyph / 2 + 2),
+            (top + LOGO / 2).saturating_sub(first + last + 1),
             NAME,
             2,
             TEXT,

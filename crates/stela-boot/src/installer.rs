@@ -668,24 +668,25 @@ fn kind(partition: &gpt::Partition) -> (&'static str, u32) {
 const OTHER: u32 = 0x6b6f78;
 const ROW: usize = 36;
 
-impl Picker {
-    /// A segment's name, its type when the name is not that, and colour.
-    fn segment_label(&self, segment: Segment) -> (String, &'static str, u32) {
-        match segment.content {
-            Content::Partition(n) => {
-                let partition = self.chosen().partition(n);
-                let (kind, colour) = kind(partition);
-                match partition.name.trim() {
-                    "" => (String::from(kind), "", colour),
-                    name if name == kind => (String::from(kind), "", colour),
-                    name => (String::from(name), kind, colour),
-                }
+/// A segment of `disk`: its name, its type when the name is not that, and
+/// colour.
+fn segment_label(disk: &Disk, segment: Segment) -> (String, &'static str, u32) {
+    match segment.content {
+        Content::Partition(n) => {
+            let partition = disk.partition(n);
+            let (kind, colour) = kind(partition);
+            match partition.name.trim() {
+                "" => (String::from(kind), "", colour),
+                name if name == kind => (String::from(kind), "", colour),
+                name => (String::from(name), kind, colour),
             }
-            Content::Free => (String::from("Free space"), "", ui::LINE),
-            Content::Foreign => (String::from("Unknown layout"), "", OTHER),
         }
+        Content::Free => (String::from("Free space"), "", ui::LINE),
+        Content::Foreign => (String::from("Unknown layout"), "", OTHER),
     }
+}
 
+impl Picker {
     fn draw(&self, canvas: &mut Canvas) {
         let (width, height) = canvas.size();
         canvas.fill(0, 0, width, height, ui::BACKGROUND);
@@ -893,7 +894,7 @@ impl Picker {
                 );
             }
             if segment.content != Content::Free {
-                let (name, _, _) = self.segment_label(*segment);
+                let (name, _, _) = segment_label(disk, *segment);
                 label(canvas, x, width, &name);
             }
         }
@@ -936,7 +937,7 @@ impl Picker {
             if selected {
                 Self::selection(canvas, layout.left, y, layout.column, ROW - 4);
             }
-            let (name, kind, colour) = self.segment_label(segment);
+            let (name, kind, colour) = segment_label(disk, segment);
             let swatch = layout.left + 22;
             canvas.panel(swatch, y + 10, 12, 12, 3, colour);
             // Free space is an outline, not a colour of its own.
