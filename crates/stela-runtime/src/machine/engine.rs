@@ -1464,14 +1464,15 @@ struct Variant {
 /// and plainness follow from System registers and PSTATE alone, so a read
 /// the engine found plain stays plain, with the same value, until derived
 /// state may change ([`Machine::derived_changed`]). They are the thread
-/// pointers, Apple's GL2 thread pointer and GXF status, and DAIF; and
-/// Apple's virtual count alias, whose cell holds the offset it subtracts
-/// from the clock's count ([`COUNT_MIRROR`]).
-const MIRRORED: [Encoding; 8] = {
+/// pointers, Apple's GL2 thread pointer and GXF status, and DAIF; and the
+/// virtual count and Apple's alias of it, whose cells hold the offset they
+/// subtract from the clock's count ([`COUNT_MIRRORS`]).
+const MIRRORED: [Encoding; 9] = {
     use registers::encodings::{
         CNTVCT_ALIAS_EL0, DAIF, GXF_STATUS_EL1, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2,
         TPIDRRO_EL0,
     };
+    use stela_compiler::aarch64::system::registers::CNTVCT_EL0;
     [
         TPIDR_EL0,
         TPIDRRO_EL0,
@@ -1479,6 +1480,7 @@ const MIRRORED: [Encoding; 8] = {
         TPIDR_EL2,
         TPIDR_GL2,
         GXF_STATUS_EL1,
+        CNTVCT_EL0,
         CNTVCT_ALIAS_EL0,
         DAIF,
     ]
@@ -1561,11 +1563,16 @@ impl core::ops::IndexMut<usize> for Mirrors {
 /// The [`MIRRORED`] index of DAIF.
 const DAIF_MIRROR: usize = MIRRORED.len() - 1;
 const _: () = assert!(matches!(MIRRORED[DAIF_MIRROR], registers::encodings::DAIF));
-/// The [`MIRRORED`] index of CNTVCT_ALIAS_EL0, a count read whenever the
-/// host's counter is its TSC's ([`Host::tsc_counter`]).
-const COUNT_MIRROR: usize = DAIF_MIRROR - 1;
+/// The [`MIRRORED`] indices of CNTVCT_EL0 and CNTVCT_ALIAS_EL0, count
+/// reads completed natively whenever the host's counter is its TSC's
+/// ([`Host::tsc_counter`]).
+const COUNT_MIRRORS: [usize; 2] = [DAIF_MIRROR - 2, DAIF_MIRROR - 1];
 const _: () = assert!(matches!(
-    MIRRORED[COUNT_MIRROR],
+    MIRRORED[COUNT_MIRRORS[0]],
+    stela_compiler::aarch64::system::registers::CNTVCT_EL0
+));
+const _: () = assert!(matches!(
+    MIRRORED[COUNT_MIRRORS[1]],
     registers::encodings::CNTVCT_ALIAS_EL0
 ));
 
@@ -4405,7 +4412,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let (index, rt) = mirrored_read(pc, word)?;
         let cell = &self.mirrors[index] as *const register_read::Cell as u64;
-        let thunk = if index == COUNT_MIRROR {
+        let thunk = if COUNT_MIRRORS.contains(&index) {
             let count = self.clock.native(self.host.tsc_counter()?);
             register_read::count_thunk(GuestAddress(pc), rt, cell, count)
         } else {
@@ -6193,7 +6200,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // A count read opens its cell only where it read the clock's last
         // count less the offset: a chip that answers through another view,
         // or a later read of the clock, leaves it to the exits.
-        let value = if index == COUNT_MIRROR {
+        let value = if COUNT_MIRRORS.contains(&index) {
             let offset = registers::count_alias_offset(&self.cpu);
             (read == self.clock.last().wrapping_sub(offset)).then_some(offset)
         } else {
@@ -11217,48 +11224,55 @@ mod tests {
         assert_eq!(machine.device_lines, None);
     }
 
-    /// A count alias read opens its cell with the offset it subtracts, and
-    /// completes natively only on a host whose counter is its TSC's, at
-    /// the clock's count.
+    /// A virtual count read, of CNTVCT_EL0 or Apple's alias, opens its
+    /// cell with the offset it subtracts, and completes natively only on a
+    /// host whose counter is its TSC's, at the clock's count.
     #[test]
-    fn count_alias_reads_complete_natively_where_the_host_counts_its_tsc() {
+    fn count_reads_complete_natively_where_the_host_counts_its_tsc() {
         const ADD: u32 = 0x9100_0400; // add x0, x0, #1
-        const MRS: u32 = 0xd53c_faca; // mrs x10, cntvct_alias_el0
-        for tsc in [None, Some((5, 7))] {
-            let mut machine = machine(&[ADD, MRS, ADD]);
-            machine.host.tsc_counter = tsc;
-            let base = machine.cpu.pc;
-            machine.host.exits = vec![NativeExit::Exit {
-                next_pc: base + 8,
-                kind: ExitKind::Fallthrough as u64,
-            }];
-            machine.step().unwrap();
-            let cell = &machine.mirrors[COUNT_MIRROR] as *const register_read::Cell as u64;
-            let count = tsc.map_or(0, |tsc| machine.clock.native(tsc));
-            let installed = machine.host.installed.last().unwrap();
-            let thunk = register_read::count_thunk(GuestAddress(base + 4), 10, cell, count);
-            assert_eq!(*installed == thunk.code, tsc.is_some());
-            machine
-                .cpu
-                .registers
-                .set(SystemRegister::CNTVOFF_EL2, 0, 0x30);
-            machine.cpu.pc = base + 4;
-            machine.system_instruction(MRS).unwrap();
-            let offset = registers::count_alias_offset(&machine.cpu);
-            let plain = machine.cpu.state.x[10] == machine.clock.last().wrapping_sub(offset);
-            // The M2 reads the alias as the count less CNTVOFF_EL2.
-            assert!(plain || machine.cpu.registers.chip() != crate::machine::chip::Chip::AppleM2);
-            assert_eq!(
-                machine.mirrors[COUNT_MIRROR],
-                if plain {
-                    register_read::Cell {
-                        readable: 1,
-                        value: offset,
+        const READS: [(u32, usize); 2] = [
+            (0xd53b_e04a, COUNT_MIRRORS[0]), // mrs x10, cntvct_el0
+            (0xd53c_faca, COUNT_MIRRORS[1]), // mrs x10, cntvct_alias_el0
+        ];
+        for (mrs, index) in READS {
+            for tsc in [None, Some((5, 7))] {
+                let mut machine = machine(&[ADD, mrs, ADD]);
+                machine.host.tsc_counter = tsc;
+                let base = machine.cpu.pc;
+                machine.host.exits = vec![NativeExit::Exit {
+                    next_pc: base + 8,
+                    kind: ExitKind::Fallthrough as u64,
+                }];
+                machine.step().unwrap();
+                let cell = &machine.mirrors[index] as *const register_read::Cell as u64;
+                let count = tsc.map_or(0, |tsc| machine.clock.native(tsc));
+                let installed = machine.host.installed.last().unwrap();
+                let thunk = register_read::count_thunk(GuestAddress(base + 4), 10, cell, count);
+                assert_eq!(*installed == thunk.code, tsc.is_some());
+                machine
+                    .cpu
+                    .registers
+                    .set(SystemRegister::CNTVOFF_EL2, 0, 0x30);
+                machine.cpu.pc = base + 4;
+                machine.system_instruction(mrs).unwrap();
+                let offset = registers::count_alias_offset(&machine.cpu);
+                let plain = machine.cpu.state.x[10] == machine.clock.last().wrapping_sub(offset);
+                // The M2 reads both as the count less CNTVOFF_EL2.
+                assert!(
+                    plain || machine.cpu.registers.chip() != crate::machine::chip::Chip::AppleM2
+                );
+                assert_eq!(
+                    machine.mirrors[index],
+                    if plain {
+                        register_read::Cell {
+                            readable: 1,
+                            value: offset,
+                        }
+                    } else {
+                        register_read::Cell::default()
                     }
-                } else {
-                    register_read::Cell::default()
-                }
-            );
+                );
+            }
         }
     }
 

@@ -545,8 +545,8 @@ fn count_alias(cpu: &Cpu, physical: u64) -> u64 {
     physical.wrapping_sub(count_alias_offset(cpu))
 }
 
-/// What CNTVCT_ALIAS_EL0 subtracts from the physical count: CNTVOFF_EL2,
-/// or nothing in the EL2&0 host.
+/// What CNTVCT_ALIAS_EL0, like CNTVCT_EL0, subtracts from the physical
+/// count: CNTVOFF_EL2, or nothing in the EL2&0 regime.
 pub(crate) fn count_alias_offset(cpu: &Cpu) -> u64 {
     if cpu.regime() == TranslationRegime::El20 {
         0
