@@ -601,7 +601,11 @@ impl Ans {
             return self.dataset_management(cmd, port);
         }
         let controls = cmd.word(48);
-        if controls & !0x4000_ffff != 0 || !cmd.zero_words(52) {
+        // CDW13 bits 3:0 are NVMe's Dataset Management access frequency,
+        // a hint the controller may ignore: `AppleNVMeRequest`'s read and
+        // write builders (0x3deb7d4) put a value below 16 there. Their other
+        // CDW13 fields, at bits 10:8 and from bit 12, are Apple's.
+        if controls & !0x4000_ffff != 0 || cmd.word(52) & !0xf != 0 || !cmd.zero_words(56) {
             return Err("ANS protection, encryption, metadata or read/write hints are not modeled");
         }
         let blocks = u64::from((controls & 0xffff) + 1);

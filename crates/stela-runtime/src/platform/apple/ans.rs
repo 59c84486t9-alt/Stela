@@ -1388,7 +1388,8 @@ mod tests {
             .unwrap();
         rig.retire(1, 2);
         assert!(rig.ram.write(DATA, &[0; 4096]));
-        rig.submit(1, 3, 2, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+        // An access-frequency hint (CDW13 bits 3:0) changes nothing.
+        rig.submit(1, 3, 2, 1, DATA, [3, 0, 0, 2, 0, 0]).unwrap();
         rig.retire(1, 3);
         assert_eq!(rig.bytes(DATA, 4096), pattern);
         rig.submit(1, 4, 5, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
@@ -1409,6 +1410,14 @@ mod tests {
         let mut refused = Rig::new();
         refused.io_queues();
         assert!(refused.submit(1, 0, 0, 1, 0, [2, 0, 0, 0, 0, 0]).is_err());
+        // Apple's CDW13 fields above the hint refuse.
+        let mut refused = Rig::new();
+        refused.io_queues();
+        assert!(
+            refused
+                .submit(1, 0, 2, 1, DATA, [3, 0, 0, 1 << 8, 0, 0])
+                .is_err()
+        );
         rig.submit(1, 8, 2, 1, DATA, [32, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(
             u16::from_le_bytes(rig.bytes(IOCQ + 2 * 16 + 14, 2).try_into().unwrap()) >> 1,
