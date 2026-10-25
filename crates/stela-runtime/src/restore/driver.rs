@@ -474,6 +474,11 @@ mod tests {
         ] {
             assert!(!messages.required(name).unwrap().boolean().unwrap());
         }
+        // An AEA image's content key comes through an asynchronous URLAsset.
+        let asynchronous = opts.required("SupportedAsyncDataTypes").unwrap();
+        for name in ["RecoveryOSASRImage", "SystemImageData", "URLAsset"] {
+            assert!(asynchronous.required(name).unwrap().boolean().unwrap());
+        }
         assert_eq!(
             responses[5].required("MsgType").unwrap().string().unwrap(),
             "ReceivedFinalStatusMsg"

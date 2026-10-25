@@ -43,6 +43,13 @@ const MESSAGE_TYPES: [(&str, bool); 18] = [
     ("RestoredCrash", true),
     ("StatusMsg", false),
 ];
+/// The data types the host serves for an `AsyncDataRequestMsg`, on the
+/// request's own DataPort. 26A434 `restored_external` takes a type as
+/// supported this way only when this dictionary names it (R 0x100022dd4);
+/// without the dictionary, only the system image and the recoveryOS image.
+/// Its AEA transfer asks for an image's content key through `URLAsset` only
+/// then (R 0x10005d6e8); otherwise it fails the image with error 1106.
+const ASYNC_DATA_TYPES: [&str; 3] = ["RecoveryOSASRImage", "SystemImageData", "URLAsset"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     New,
@@ -193,6 +200,15 @@ impl Session {
                 MESSAGE_TYPES
                     .into_iter()
                     .map(|(name, value)| (name.into(), Value::Boolean(value)))
+                    .collect(),
+            ),
+        );
+        opts.insert(
+            "SupportedAsyncDataTypes".into(),
+            Value::Dict(
+                ASYNC_DATA_TYPES
+                    .into_iter()
+                    .map(|name| (name.into(), Value::Boolean(true)))
                     .collect(),
             ),
         );
