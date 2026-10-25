@@ -1409,8 +1409,8 @@ struct Space {
     number: u64,
 }
 
-/// A half's last context number, with the EL, variant and translation and
-/// code generations it was found for.
+/// A half's recent context number, with the EL, variant and translation
+/// and code generations it was found for.
 #[derive(Debug, Clone, Copy)]
 struct Recent {
     el: u8,
@@ -1421,6 +1421,9 @@ struct Recent {
 
 /// The contexts one half keeps, least recently used dropped first.
 const SPACES: usize = 64;
+/// The recent contexts one half finds without comparing controls: enough
+/// for the ELs and GXF states a kernel's exceptions alternate between.
+const RECENT: usize = 4;
 
 /// What a block is compiled for besides its PC and PA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1689,8 +1692,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// Each half's lookup contexts ([`Space`]) since its translations last
     /// changed in a way no control value shows, most recently used last.
     spaces: [Vec<Space>; 2],
-    /// Each half's last context.
-    recent: [Option<Recent>; 2],
+    /// Each half's recent contexts, most recent first.
+    recent: [[Option<Recent>; RECENT]; 2],
     /// The largest leaf a fetch of each half translated through since its
     /// contexts were last forgotten, 0 for none, and whether one was
     /// non-global: what a TLBI by VA or ASID reaches of its lookup entries.
@@ -1905,7 +1908,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             code_generation: 1,
             targets: vec![chain::LookupEntry::default(); chain::LOOKUP_ENTRIES].into_boxed_slice(),
             spaces: [Vec::new(), Vec::new()],
-            recent: [None; 2],
+            recent: [[None; RECENT]; 2],
             fetch_leaves: [0; 2],
             private_fetches: [false; 2],
             next_context: 1,
@@ -2542,7 +2545,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         for half in halves {
             self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].clear();
-            self.recent[half] = None;
+            self.recent[half] = [None; RECENT];
             self.fetch_leaves[half] = 0;
             self.private_fetches[half] = false;
         }
@@ -3671,9 +3674,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// translation inputs ([`Space`]). Lookup entries name it.
     fn context(&mut self, el: u8, variant: Variant, half: usize) -> u64 {
         let generations = (self.translation_generation, self.code_generation);
-        if let Some(recent) = self.recent[half]
-            && (recent.el, recent.variant, recent.generations) == (el, variant, generations)
-        {
+        if let Some(recent) = self.recent[half].iter().flatten().find(|recent| {
+            (recent.el, recent.variant, recent.generations) == (el, variant, generations)
+        }) {
             return recent.number;
         }
         let inputs = self.half_inputs(half);
@@ -3700,7 +3703,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         };
         self.spaces[half].push(space);
-        self.recent[half] = Some(Recent {
+        self.recent[half].rotate_right(1);
+        self.recent[half][0] = Some(Recent {
             el,
             variant,
             generations,
