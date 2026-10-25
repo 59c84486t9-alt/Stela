@@ -3,8 +3,10 @@
 //! (`pc::boot_log`): the USB's `EFI/stela/boot.log` ([`crate::log_file`])
 //! and the machine state's, once `--nor` opens it. [`add_log`] adds one,
 //! which starts with everything the record still holds, and [`flush_log`]
-//! stores what each has not: at every step, between engine slices and at
-//! every stop, which [`terminate`] reaches. The screen shows the curated
+//! stores what each has not: at every step and at every stop, which
+//! [`terminate`] reaches. Between engine slices [`flush_due`] stores the
+//! machine state's log each second but the USB's, slow flash the guest
+//! waits on, only every [`USB_FLUSH_SECONDS`]. The screen shows the curated
 //! steps of [`status`](crate::status) instead, and a fatal error or panic, which
 //! reach it before the console exists through the firmware's.
 use crate::{console, serial::Serial};
@@ -42,6 +44,19 @@ struct Sink {
     device: Box<dyn BlockDevice>,
     kind: Log,
     stored: u64,
+    /// The counter at its last store.
+    flushed: u64,
+    /// Its stores so far and the counter ticks they took.
+    stores: u64,
+    ticks: u64,
+}
+
+/// Seconds between the USB log's stores while the engine runs.
+const USB_FLUSH_SECONDS: u64 = 10;
+
+fn rdtsc() -> u64 {
+    // SAFETY: RDTSC has no memory effects.
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 /// What a log is kept for, which decides what its failure does.
@@ -83,8 +98,7 @@ fn stamp(record: &mut Pending<[u8; PENDING_BYTES]>) {
     if hz == 0 {
         return;
     }
-    // SAFETY: RDTSC has no memory effects.
-    let millis = unsafe { core::arch::x86_64::_rdtsc() } / (hz / 1000).max(1);
+    let millis = rdtsc() / (hz / 1000).max(1);
     let mut text = Stamp::default();
     let _ = write!(text, "[{:5}.{:03}] ", millis / 1000, millis % 1000);
     record.push(&text.bytes[..text.length]);
@@ -212,6 +226,9 @@ pub fn add_log(
             device,
             kind,
             stored,
+            flushed: rdtsc(),
+            stores: 0,
+            ticks: 0,
         });
     }
     Ok(())
@@ -230,6 +247,20 @@ pub fn close_logs() {
 /// fails is reported and closed; a failed machine-state store stops the
 /// machine. Output printed during the flush is not recorded.
 pub fn flush_log() {
+    flush_where(|_| true);
+}
+
+/// [`flush_log`] for the logs whose store is due: the machine state's
+/// every call, the USB's every [`USB_FLUSH_SECONDS`].
+pub fn flush_due() {
+    let hz = TSC_HZ.load(Ordering::Relaxed);
+    let now = rdtsc();
+    flush_where(|sink| {
+        sink.kind != Log::Usb || now.wrapping_sub(sink.flushed) >= USB_FLUSH_SECONDS * hz
+    });
+}
+
+fn flush_where(due: impl Fn(&Sink) -> bool) {
     if FLUSHING.swap(true, Ordering::Acquire) {
         return;
     }
@@ -237,10 +268,17 @@ pub fn flush_log() {
     if let (Ok(mut sinks), Ok(record)) = (SINKS.0.try_borrow_mut(), RECORD.0.try_borrow()) {
         let mut index = 0;
         while index < sinks.len() {
+            if !due(&sinks[index]) {
+                index += 1;
+                continue;
+            }
             let Sink {
                 writer,
                 device,
                 stored,
+                flushed,
+                stores,
+                ticks,
                 ..
             } = &mut sinks[index];
             let Ok(reached) = record.copy_since(*stored, |bytes| {
@@ -248,7 +286,12 @@ pub fn flush_log() {
                 Ok::<_, Infallible>(())
             });
             *stored = reached;
-            match writer.flush(&mut **device) {
+            let started = rdtsc();
+            let result = writer.flush(&mut **device);
+            *flushed = rdtsc();
+            *stores += 1;
+            *ticks += flushed.wrapping_sub(started);
+            match result {
                 Ok(()) => index += 1,
                 Err(error) => failed.push((sinks.remove(index).kind, error)),
             }
@@ -260,6 +303,42 @@ pub fn flush_log() {
         if kind == Log::Machine {
             fatal("the boot log could not be stored");
         }
+    }
+}
+
+/// The counter now, for [`millis_since`].
+pub fn now() -> u64 {
+    rdtsc()
+}
+
+/// Milliseconds since counter value `start`; 0 before the rate is known.
+pub fn millis_since(start: u64) -> u64 {
+    match TSC_HZ.load(Ordering::Relaxed) {
+        0 => 0,
+        hz => rdtsc().wrapping_sub(start) / (hz / 1000).max(1),
+    }
+}
+
+/// Report each open log's stores so far and the milliseconds they took.
+pub fn report_log_stores() {
+    let hz = TSC_HZ.load(Ordering::Relaxed).max(1);
+    let Ok(sinks) = SINKS.0.try_borrow() else {
+        return;
+    };
+    let costs: Vec<(Log, u64, u64)> = sinks
+        .iter()
+        .map(|sink| (sink.kind, sink.stores, sink.ticks * 1000 / hz))
+        .collect();
+    drop(sinks);
+    for (kind, stores, millis) in costs {
+        let name = match kind {
+            Log::Machine => "machine",
+            Log::Firmware => "firmware",
+            Log::Usb => "usb",
+        };
+        arguments(format_args!(
+            "BOOT LOG {name} stores={stores} ms={millis}\n"
+        ));
     }
 }
 

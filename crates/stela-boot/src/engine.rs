@@ -2613,7 +2613,7 @@ fn run<H: Host>(
         // Keep diagnostic flash writes independent of the UI/input cadence.
         // Guest NOR sector commits still happen at every service boundary.
         if now.wrapping_sub(log_flushed) >= tsc_hz {
-            machine.exclude_host_time(|_| output::flush_log());
+            machine.exclude_host_time(|_| output::flush_due());
             log_flushed = host::rdtsc();
         }
         if !sliced {
@@ -2621,6 +2621,7 @@ fn run<H: Host>(
                 "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={}\n",
                 u128::from(service_gap) * 1_000_000 / u128::from(tsc_hz),
             ));
+            output::report_log_stores();
             return stop;
         }
         if now.wrapping_sub(hot_sampled) >= tsc_hz / 1000 {

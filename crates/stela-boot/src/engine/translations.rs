@@ -352,12 +352,15 @@ pub fn write() {
     ));
     // Proof recompiles the original and both relocation probes; stop while
     // the heap still has room for the layout and the write.
+    let started = output::now();
     let planned = store.plan(bound, || !crate::ALLOCATOR.low());
     output::arguments(format_args!(
-        "TRANSLATIONS planned records={} bytes={}\n",
+        "TRANSLATIONS planned records={} bytes={} ms={}\n",
         planned.layout.records(),
-        planned.layout.bytes()
+        planned.layout.bytes(),
+        output::millis_since(started)
     ));
+    let started = output::now();
     let mut volume = match Fat32::open(Bytes::new(partition)) {
         Ok(volume) => volume,
         Err(error) => {
@@ -380,13 +383,14 @@ pub fn write() {
     match pack::write_in_place(&mut *device, &file.extents, &planned.layout) {
         Ok(()) => output::arguments(format_args!(
             "TRANSLATIONS written records={} bytes={} proven={} unprovable={} unproven={} \
-             evicted={}\n",
+             evicted={} ms={}\n",
             planned.layout.records(),
             planned.layout.bytes(),
             planned.proven,
             planned.unprovable,
             planned.unproven,
-            planned.evicted
+            planned.evicted,
+            output::millis_since(started)
         )),
         Err(error) => output::arguments(format_args!("TRANSLATIONS not written: {error:?}\n")),
     }
