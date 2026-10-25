@@ -1506,11 +1506,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         None => (None, None, None, None),
     };
+    // Serialized, the BSP runs every PE and the workers no guest code.
+    let serialized =
+        !(options.native_rounds || options.native_shared_check || options.native_bootstrap_check);
     let partition = crate::native_smp::resources::partition(
         handoff.native_resources.cores as usize,
         0,
         handoff.code.bytes,
         handoff.pool.bytes,
+        serialized,
     )
     .unwrap_or_else(|error| output::fatal(error));
     let native_tsc_base = host::rdtsc();
@@ -1551,6 +1555,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             &worker_ram,
             native_tsc_base,
             options.native_bootstrap_check,
+            serialized,
         )
     }
     .unwrap_or_else(|error| {

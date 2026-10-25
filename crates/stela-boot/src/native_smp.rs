@@ -59,7 +59,13 @@ pub(crate) unsafe fn validate(
     {
         return Err("native executor reservations differ from requested cores");
     }
-    resources::partition(cores, cores - 1, handoff.code.bytes, handoff.pool.bytes)?;
+    resources::partition(
+        cores,
+        cores - 1,
+        handoff.code.bytes,
+        handoff.pool.bytes,
+        false,
+    )?;
     if cores > 1
         && (!(crate::tables::PAGE..1 << 20).contains(&resources.sipi)
             || !resources.sipi.is_multiple_of(crate::tables::PAGE))
