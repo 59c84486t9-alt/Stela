@@ -63,7 +63,7 @@
 //! return to prior OS"): a restore clears `auto-boot` while it writes the
 //! disk and sets it again once it completes, so an interrupted restore
 //! leaves the machine in recovery mode (the order is Inferred). Stela's
-//! restore host is its Install macOS (Stela) startup choice, so `stela.efi`
+//! restore host is its Install macOS startup choice, so `stela.efi`
 //! holds such a machine at its startup choices instead of booting the
 //! half-restored disk.
 //!
@@ -669,7 +669,7 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
         }
         Target::RecoveryMode => bail!(
             "{RECOVERY_MODE_REFUSAL} ({reasons}): it waits for a restore host, as an \
-             interrupted restore leaves it; choose Install macOS (Stela) to restore again"
+             interrupted restore leaves it; choose Install macOS to restore again"
         ),
         Target::PairedRecovery if selection.paired_on_disk => {
             on_disk(
@@ -953,7 +953,7 @@ mod tests {
             assert!(!selection.consumes());
             let error = route(CONFIG, Some(&selection)).unwrap_err().to_string();
             assert!(error.starts_with(RECOVERY_MODE_REFUSAL), "{error}");
-            assert!(error.contains("Install macOS (Stela)"), "{error}");
+            assert!(error.contains("Install macOS"), "{error}");
         }
         // auto-boot-once lets one boot through, which consumes it.
         let once = variables(&[

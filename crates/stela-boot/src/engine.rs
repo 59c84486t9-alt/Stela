@@ -64,7 +64,7 @@ use stela_runtime::restore::store::Verify;
 
 /// The user-facing restore: `--install MANIFEST` names the install medium's
 /// `payload.json`, `--install-source GUID` the FAT32 partition holding it.
-pub const INSTALL_OPTION: &str = "--install";
+pub const INSTALL_OPTION: &str = stela_loader::mount_interface::INSTALL_OPTION;
 const INSTALL_SOURCE_OPTION: &str = "--install-source";
 /// The restore host refuses a payload without recorded block hashes, which
 /// it would read whole before StartRestore (`restore::store::Verify`).
@@ -74,7 +74,7 @@ pub const VERIFY_ON_READ_OPTION: &str = "--verify-on-read";
 pub const STRICT_OPTION: &str = "--strict";
 /// The install restores with the inventory's Update identity, over the
 /// installed system and keeping its data, instead of erasing the target.
-pub const UPDATE_RESTORE_OPTION: &str = "--update-restore";
+pub const UPDATE_RESTORE_OPTION: &str = stela_loader::mount_interface::UPDATE_RESTORE_OPTION;
 /// Every host disk the engine leaves is the guest's external drive.
 pub const EXTERNAL_DISKS_OPTION: &str = "--external-disks";
 

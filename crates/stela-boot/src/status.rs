@@ -5,7 +5,7 @@
 //! it ([`stream`]), and its result replaces them when it ends:
 //!
 //! ```text
-//! [  OK  ] Read Install macOS (Stela) (484 MB, 12 s)
+//! [  OK  ] Read Install macOS (484 MB, 12 s)
 //! [ ***  ] Starting the macOS installer (46 s)  installer: fdr create
 //!          AppleNVMe: controller ready
 //! ```

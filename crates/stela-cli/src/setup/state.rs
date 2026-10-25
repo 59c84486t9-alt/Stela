@@ -100,7 +100,7 @@ pub(super) fn next_boot(variables: &Variables) -> String {
                 }
                 boot_selection::Target::RecoveryMode => "no system: recovery mode, as an \
                      interrupted restore leaves it; stela.efi shows its startup choices for \
-                     Install macOS (Stela)"
+                     Install macOS"
                     .into(),
             };
             if selection.reasons.is_empty() {

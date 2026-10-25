@@ -440,8 +440,8 @@ fn map_devices(
 /// What the menu says when the machine can only be restored.
 fn held(refusal: Refusal) -> &'static str {
     match refusal {
-        Refusal::BlankDisk => "The internal SSD is blank. Install macOS to use it.",
-        _ => "The last install did not finish. Install macOS again.",
+        Refusal::BlankDisk => "The Mac's SSD is not prepared yet: choose Install macOS first.",
+        _ => "The Mac's last install did not finish: choose Install macOS again.",
     }
 }
 

@@ -3,7 +3,7 @@
 //! partition) that is its own Stela machine with its own ECID,
 //! NVRAM and SEP state, as two Macs are. One is the default `stela.cfg`
 //! boots; `stela.efi`'s startup choices (`choices.cfg`) list every install,
-//! its System Recovery and its Install macOS (Stela), which restores the
+//! its System Recovery and its Install macOS, which restores the
 //! USB's install medium onto it with the machine's own restore bundle. They
 //! open on their own with several installs or an install medium, and when a
 //! key is held otherwise.
@@ -41,9 +41,9 @@ pub(super) struct Install {
     pub(super) disk: installed::InstalledDisk,
 }
 
-/// A name the startup choices can show, with room for " - System Recovery".
+/// A name the startup choices can show, with room for " Recovery".
 pub(super) fn check_name(name: &str) -> Result<()> {
-    const RECOVERY_SUFFIX: usize = " - System Recovery".len();
+    const RECOVERY_SUFFIX: usize = " Recovery".len();
     ensure!(
         !name.is_empty()
             && name.len() + RECOVERY_SUFFIX <= stela_loader::mount_interface::MAX_NAME
@@ -264,8 +264,8 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     describe_install(&next, &install_plan, &mut text)?;
     writeln!(
         text,
-        "  choices.cfg    lists \"{name}\", its System Recovery, its Install macOS (Stela) and \
-         its Update macOS (Stela); the startup choices open at every boot"
+        "  choices.cfg    lists \"{name}\", its System Recovery, its Install macOS and \
+         its Update macOS; the startup choices open at every boot"
     )?;
     if checked.nor_image.is_some() {
         writeln!(
@@ -356,7 +356,7 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
             if record.active_medium().is_some() {
                 writeln!(
                     text,
-                    "  choices.cfg    drops the Install macOS (Stela) choice: the restore needs \
+                    "  choices.cfg    drops the Install macOS choice: the restore needs \
                      --tss"
                 )?;
             }
@@ -409,7 +409,7 @@ mod tests {
         machine_ecid(None, None, true, true, &mut notes).unwrap();
         assert!(notes[0].contains("orphaned"));
         assert!(check_name("macOS 2").is_ok());
-        for bad in ["", " macOS", "a\tb", &"x".repeat(30)] {
+        for bad in ["", " macOS", "a\tb", &"x".repeat(32)] {
             assert!(check_name(bad).is_err(), "{bad:?}");
         }
     }

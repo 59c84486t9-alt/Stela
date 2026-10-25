@@ -31,6 +31,7 @@ pub(crate) const STACK_PAGES: usize = 256;
 pub const NATIVE_ARENAS: usize = 2;
 pub const RAM_ARENAS: usize = 8;
 
+pub(crate) mod entries;
 mod pe;
 pub(crate) use pe::loaded_extent;
 

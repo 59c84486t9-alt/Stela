@@ -7,7 +7,7 @@
 //! (`setup::medium`): the recovery members of the restore image
 //! (`restore::payload::trim`), or a whole IPSW given with `--ipsw`. It
 //! prepares each machine's restore bundle (`stela boot prepare --restore`)
-//! and adds an Install macOS (Stela) startup choice that restores
+//! and adds an Install macOS startup choice that restores
 //! recoveryOS onto the target without the macOS system image
 //! (`stela.efi --install`); macOS is then installed from recoveryOS, which
 //! "macOS (Stela)" boots afterwards. The restore personalizes its root
@@ -88,9 +88,9 @@ const CHOICES_PATH: &str = "EFI/stela/choices.cfg";
 /// opens only when a key is held.
 const CHOOSER_SECONDS: u32 = 5;
 /// The startup choice that installs macOS onto a setup's one install.
-const INSTALL_CHOICE: &str = "Install macOS (Stela)";
+const INSTALL_CHOICE: &str = "Install macOS";
 /// The startup choice that updates a setup's one install in place.
-const UPDATE_CHOICE: &str = "Update macOS (Stela)";
+const UPDATE_CHOICE: &str = "Update macOS";
 /// The engine option that restores the medium's Update identity.
 const UPDATE_RESTORE: &str = "--update-restore";
 /// Install media kept: the active build's and the one before it, for
@@ -195,7 +195,7 @@ pub(crate) struct Setup {
     /// Have the install refuse an IPSW without recorded block hashes, which
     /// it otherwise reads whole before the restore starts; with them it
     /// checks each block as the restore reads it either way. It adds the
-    /// engine's `--verify-on-read` to the Install macOS (Stela) choice.
+    /// engine's `--verify-on-read` to the Install macOS choice.
     #[arg(long, requires = "target")]
     verify_on_read: bool,
     /// The USB's FAT32 data partition for the install medium (the full IPSW
@@ -576,8 +576,8 @@ impl Record {
         machines
     }
 
-    /// The option line of `install`'s Install macOS (Stela) choice
-    /// ([`Kind::Restore`]) or Update macOS (Stela) choice
+    /// The option line of `install`'s Install macOS choice
+    /// ([`Kind::Restore`]) or Update macOS choice
     /// ([`Kind::Update`]): its restore bundle of that kind, the install
     /// medium and its partitions. None without the active build's medium or
     /// the machine's bundle, or without the signing server opt-in the
@@ -603,12 +603,12 @@ impl Record {
         Some(self.line(format!("{base} {}{update}{verify}", medium.options())))
     }
 
-    /// The Install macOS (Stela) choice's option line.
+    /// The Install macOS choice's option line.
     fn install_line(&self, install: &machines::Install) -> Option<String> {
         self.restore_line(Kind::Restore, install)
     }
 
-    /// The name of `install`'s Install macOS (Stela) or Update macOS
+    /// The name of `install`'s Install macOS or Update macOS
     /// (Stela) choice.
     fn restore_choice(&self, kind: Kind, install: &machines::Install) -> String {
         if self.installs.len() == 1 {
@@ -643,7 +643,7 @@ impl Record {
     }
 
     /// The startup choices: each install, default first, its System
-    /// Recovery and its Install macOS (Stela).
+    /// Recovery and its Install macOS.
     /// None without an installed disk.
     fn choices(&self) -> Option<Choices> {
         let default = self.default()?;
@@ -655,7 +655,7 @@ impl Record {
                 options: self.boot_line(Some(install)).trim().into(),
             });
             entries.push(Choice {
-                name: format!("{} - System Recovery", install.name),
+                name: format!("{} Recovery", install.name),
                 options: self
                     .line(
                         install
@@ -1598,7 +1598,7 @@ fn prepare_recovery(
 }
 
 /// `stela boot prepare --restore` for the IPSW, model and machine into
-/// `output`: the restore bundle the Install macOS (Stela) choice boots.
+/// `output`: the restore bundle the Install macOS choice boots.
 fn prepare_restore(
     ipsw: &Path,
     model: &str,
@@ -1610,7 +1610,7 @@ fn prepare_restore(
 }
 
 /// `stela boot prepare --restore --update`: the update restore bundle the
-/// Update macOS (Stela) choice boots.
+/// Update macOS choice boots.
 fn prepare_update(
     ipsw: &Path,
     model: &str,
@@ -2050,7 +2050,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     record.choices_text()?;
     notes.push(match &installed {
         Some(checked) => format!(
-            "The Install macOS (Stela) startup choice restores recoveryOS from the install \
+            "The Install macOS startup choice restores recoveryOS from the install \
              medium onto {} as the Mac's internal SSD (ANS2), without the macOS system image; \
              macOS is then installed from recoveryOS. The complete SEP trust route is still \
              being qualified, so an install may not finish yet.",
@@ -3288,13 +3288,13 @@ mod tests {
             format!("{line}\n")
         );
         // The startup choices hold the install, its System Recovery and
-        // Install macOS (Stela), and open on their own.
+        // Install macOS, and open on their own.
         let choices =
             Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
         assert_eq!(choices.timeout_seconds, CHOOSER_SECONDS);
         assert_eq!(choices.entries[0].name, "macOS");
         assert_eq!(choices.entries[0].options, line);
-        assert_eq!(choices.entries[1].name, "macOS - System Recovery");
+        assert_eq!(choices.entries[1].name, "macOS Recovery");
         assert_eq!(
             choices.entries[1].options,
             format!(
@@ -3317,7 +3317,7 @@ mod tests {
         routed.sort_unstable();
         expected.sort_unstable();
         assert_eq!(routed, expected);
-        // Install macOS (Stela) restores the install medium onto the disk
+        // Install macOS restores the install medium onto the disk
         // with the machine's restore bundle.
         let build = restore::payload::SYNTHETIC_BUILD;
         assert_eq!(choices.entries[2].name, INSTALL_CHOICE);
@@ -3380,10 +3380,7 @@ mod tests {
         );
         // The opt-in turns off again, and the Install choice with it.
         let off = rerun(&f, |c| c.no_tss = true).unwrap();
-        assert!(
-            off.contains("drops the Install macOS (Stela) choice"),
-            "{off}"
-        );
+        assert!(off.contains("drops the Install macOS choice"), "{off}");
         assert!(
             !fs::read_to_string(f.esp.join("EFI/stela/stela.cfg"))
                 .unwrap()
@@ -3394,7 +3391,10 @@ mod tests {
         assert_eq!(choices.entries.len(), 2);
         // Its personalized restore bundle no longer serves the setup.
         let off = self::record(&f);
-        assert_eq!(off.restore_bundle(Kind::Restore, off.installs[0].ecid), None);
+        assert_eq!(
+            off.restore_bundle(Kind::Restore, off.installs[0].ecid),
+            None
+        );
         assert_eq!(off.missing_restore_bundles().len(), 1);
 
         // The next boot is chosen in NVRAM, which a dry run leaves alone.
@@ -3635,10 +3635,10 @@ mod tests {
             names,
             [
                 "macOS",
-                "macOS - System Recovery",
+                "macOS Recovery",
                 "macOS - Install macOS",
                 "macOS 2",
-                "macOS 2 - System Recovery",
+                "macOS 2 Recovery",
                 "macOS 2 - Install macOS"
             ]
         );
@@ -4260,7 +4260,7 @@ mod tests {
         let choices =
             || Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
         let names: Vec<String> = choices().entries.into_iter().map(|e| e.name).collect();
-        assert_eq!(names, ["macOS", "macOS - System Recovery", INSTALL_CHOICE]);
+        assert_eq!(names, ["macOS", "macOS Recovery", INSTALL_CHOICE]);
         let first = restore::payload::SYNTHETIC_BUILD;
         let newer = f._dir.path().join("Newer.ipsw");
         restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
@@ -4641,14 +4641,11 @@ mod tests {
         );
         assert_eq!(partition_bytes(&f, NOR), state);
         // The USB's own log, which setup preallocates, comes first.
-        let usb = crate::boot_log::tests::region(&["CHOICE 3 (Install macOS (Stela))\n"]);
+        let usb = crate::boot_log::tests::region(&["CHOICE 3 (Install macOS)\n"]);
         fs::write(f.esp.join(efi::BOOT_LOG), &usb).unwrap();
         let text = rerun(&f, |c| c.boot_log = true).unwrap();
         assert!(text.starts_with("Boot log on the USB ("), "{text}");
-        assert!(
-            text.contains("CHOICE 3 (Install macOS (Stela))\n"),
-            "{text}"
-        );
+        assert!(text.contains("CHOICE 3 (Install macOS)\n"), "{text}");
         assert!(
             text.ends_with("=== STELA BOOT 1 ===\nNOR persistent fresh=true\n"),
             "{text}"

@@ -29,7 +29,7 @@
 //!   Preboot volume's new objects. `--update-os` brings the setup to a new
 //!   build offline: its System Recovery bundles and, for a setup with
 //!   installs, the build's install medium and each machine's erase and
-//!   update restore bundles. The Update macOS (Stela) choice then restores
+//!   update restore bundles. The Update macOS choice then restores
 //!   the build's Update identity over the installed system, keeping its
 //!   data, as Apple Configurator's update restore does. The previous
 //!   build's medium is kept for rollback ([`MEDIA_KEPT`] media in all), so
@@ -498,7 +498,7 @@ pub(super) fn update_os(
         prepare_bundles(environment, ipsw, &record.model, Some(&build), &machines)?;
     let recovery_bytes: u64 = prepared.iter().map(|p| p.bytes).sum();
     // With installs, the build's install medium and restore bundles, so
-    // Install and Update macOS (Stela) restore the new build offline.
+    // Install and Update macOS restore the new build offline.
     let install = match record.installs.is_empty() {
         true => {
             check_space(environment.host, &record.volume, &prepared)?;
@@ -544,9 +544,9 @@ pub(super) fn update_os(
     match &install {
         Some(_) => writeln!(
             text,
-            "  next           choose Update macOS (Stela) in the startup choices: it restores \
+            "  next           choose Update macOS in the startup choices: it restores \
              {product_version} over the installed system offline and keeps its data (Install \
-             macOS (Stela) erases the disk instead)"
+             macOS erases the disk instead)"
         )?,
         None => writeln!(
             text,

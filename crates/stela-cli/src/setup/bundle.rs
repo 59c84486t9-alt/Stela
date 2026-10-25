@@ -8,7 +8,7 @@
 //!   1, revision 0;
 //! - `recovery-<ECID>`: a machine's recoveryOS bundle, schema 1, revision 0;
 //! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
-//!   --restore`), which the Install macOS (Stela) choice boots;
+//!   --restore`), which the Install macOS choice boots;
 //! - `update-<ECID>`: a machine's update restore bundle (`stela boot
 //!   prepare --restore --update`), which earlier setups' Update macOS
 //!   (Stela) choice booted; setup prepares none now;

@@ -28,6 +28,7 @@ use crate::{
 use alloc::{format, string::String, vec, vec::Vec};
 use stela_loader::{
     boot_selection::{self, BootVolume, Selection},
+    mount_interface::ChoiceKind,
     recovery,
 };
 use stela_runtime::{
@@ -406,11 +407,39 @@ fn replace(text: &str, name: &str, value: &str) -> String {
     words.join(" ")
 }
 
+/// Whether the startup choice `options` of `kind` can start now: a Mac or
+/// recoveryOS choice whose internal SSD has no iBootSystemContainer cannot,
+/// as it waits for the setup restore that creates it, nor a Mac choice NVRAM
+/// holds in recovery mode. A check that cannot be made counts as ready, so
+/// starting the choice reports why it cannot.
+pub fn ready(options: &str, kind: ChoiceKind) -> Result<(), Refusal> {
+    match kind {
+        ChoiceKind::Mac => peek(options.into()).map(drop),
+        ChoiceKind::Recovery => {
+            let Some(target) = option(options, "--storage").and_then(|s| s.parse::<Target>().ok())
+            else {
+                return Ok(());
+            };
+            // The engine splits a `--storage` partition that `--nor` also
+            // names; recoveryOS then reads its namespace.
+            let part = match option(options, "--nor") == option(options, "--storage") {
+                true => Part::Namespace,
+                false => Part::Whole,
+            };
+            match blank(&target, part) {
+                Ok(true) => Err(Refusal::BlankDisk),
+                _ => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Why no boot options came out of [`route`].
 pub enum Refusal {
     /// NVRAM holds the machine in iBoot's recovery mode
     /// (`boot_selection::Target::RecoveryMode`): it waits for a restore
-    /// host, Stela's Install macOS (Stela) startup choice.
+    /// host, Stela's Install macOS startup choice.
     RecoveryMode,
     /// The internal SSD has no iBootSystemContainer yet: only Install macOS
     /// (Stela) boots.

@@ -159,11 +159,55 @@ pub fn mismatch(expected: Interface, found: Option<Interface>) -> Option<String>
     (!differences.is_empty()).then(|| differences.join(", "))
 }
 
+/// The user-facing restore option: `--install MANIFEST` names the install
+/// medium's `payload.json`.
+pub const INSTALL_OPTION: &str = "--install";
+/// The install restores with the inventory's Update identity, over the
+/// installed system and keeping its data, instead of erasing the target.
+pub const UPDATE_RESTORE_OPTION: &str = "--update-restore";
+
 /// One startup choice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     pub name: String,
     pub options: String,
+}
+
+/// What a startup choice starts, read from its options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceKind {
+    /// The Mac, from the startup disk NVRAM names, as a Mac starts
+    /// (`--system` with `--preboot`).
+    Mac,
+    /// recoveryOS from a bundle (`--system` without `--preboot`).
+    Recovery,
+    /// The restore that lays out the Mac's SSD ([`INSTALL_OPTION`]).
+    Setup,
+    /// The restore that updates the installed system in place
+    /// ([`UPDATE_RESTORE_OPTION`]).
+    Update,
+    /// Anything else, such as a host check.
+    Other,
+}
+
+impl Choice {
+    pub fn kind(&self) -> ChoiceKind {
+        let mut words = self.options.split_ascii_whitespace();
+        if words.next() != Some("--system") {
+            return ChoiceKind::Other;
+        }
+        let has = |name: &str| words.clone().any(|word| word == name);
+        match (
+            has(INSTALL_OPTION),
+            has(UPDATE_RESTORE_OPTION),
+            has(crate::boot_selection::PREBOOT_OPTION),
+        ) {
+            (true, true, _) => ChoiceKind::Update,
+            (true, false, _) => ChoiceKind::Setup,
+            (false, _, true) => ChoiceKind::Mac,
+            (false, _, false) => ChoiceKind::Recovery,
+        }
+    }
 }
 
 /// The startup choices: the default first.
@@ -300,6 +344,34 @@ mod tests {
         assert!(mismatch(CURRENT, find(b"MZ")).unwrap().contains("no Stela"));
         // A truncated marker is no marker.
         assert_eq!(find(&marker(CURRENT)[..MARKER_BYTES - 1]), None);
+    }
+
+    #[test]
+    fn a_choice_is_classified_by_its_options() {
+        let kind = |options: &str| {
+            Choice {
+                name: "x".into(),
+                options: options.into(),
+            }
+            .kind()
+        };
+        let disk = "--system --storage A:B --nor A:B";
+        assert_eq!(
+            kind(&format!("{disk} --preboot A:B --recovery-bundle r")),
+            ChoiceKind::Mac
+        );
+        assert_eq!(kind(&format!("{disk} --bundle r")), ChoiceKind::Recovery);
+        assert_eq!(
+            kind(&format!("{disk} --bundle s --install p.json")),
+            ChoiceKind::Setup
+        );
+        assert_eq!(
+            kind(&format!(
+                "{disk} --bundle s --install p.json --update-restore"
+            )),
+            ChoiceKind::Update
+        );
+        assert_eq!(kind("--host-check"), ChoiceKind::Other);
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub mod devices;
 pub mod dvfs;
 #[cfg(feature = "std")]
 pub mod exports;
+pub mod firmware_boot;
 pub mod gpu_dvfs;
 pub mod handoff;
 pub mod host_firmware;
