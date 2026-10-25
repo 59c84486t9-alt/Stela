@@ -2911,6 +2911,29 @@ impl ShadowSeen {
              lower_resets={lower_resets} user_resets={user_resets} \
              bank_switches={bank_switches} bank_misses={bank_misses} scoped={scoped}\n"
         ));
+        if let Some((from, to)) = host.last_controls
+            && controls > 0
+        {
+            output::arguments(format_args!(
+                "SHADOW LAST tcr={:#x}->{:#x} ttbr0={:#x}->{:#x} ttbr1={:#x}->{:#x} \
+                 sprr={:#x}/{:#x}/{:#x}/{:#x}->{:#x}/{:#x}/{:#x}/{:#x} regime={:?}\n",
+                from.tcr,
+                to.tcr,
+                from.ttbr0,
+                to.ttbr0,
+                from.ttbr1,
+                to.ttbr1,
+                from.sprr.config,
+                from.sprr.el1,
+                from.sprr.el0,
+                from.sprr.fields[0] | from.sprr.fields[1] << 32,
+                to.sprr.config,
+                to.sprr.el1,
+                to.sprr.el0,
+                to.sprr.fields[0] | to.sprr.fields[1] << 32,
+                to.regime,
+            ));
+        }
     }
 }
 

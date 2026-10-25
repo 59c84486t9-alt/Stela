@@ -294,6 +294,8 @@ pub struct State {
     reset_causes: [u64; CAUSES],
     /// The [`Cause::Controls`] resets each field differed in ([`differing`]).
     control_fields: [u64; FIELDS],
+    /// The controls the last of those resets went from and to.
+    last_controls: Option<(mmu::Controls, mmu::Controls)>,
     /// The leaves each half was filled from.
     extents: [Extents; 2],
     /// TLBIs that unmapped ranges rather than whole halves.
@@ -450,6 +452,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             user_resets: 0,
             reset_causes: [0; CAUSES],
             control_fields: [0; FIELDS],
+            last_controls: None,
             extents: [Extents::new(), Extents::new()],
             scoped: 0,
             prefills: 0,
@@ -490,6 +493,8 @@ pub struct Statistics {
     /// The other-controls resets each field differed in: SCTLR, TCR, TTBR0,
     /// TTBR1, MAIR, SPRR, CTRR, the regime and stage 2.
     pub control_fields: [u64; FIELDS],
+    /// The controls the last of those went from and to.
+    pub last_controls: Option<(mmu::Controls, mmu::Controls)>,
     /// Switches to another SPRR_PERM_EL1 value's kernel roots, and those
     /// that found none kept.
     pub bank_switches: u64,
@@ -520,6 +525,7 @@ pub fn statistics() -> Statistics {
         user_resets: state.user_resets,
         reset_causes: state.reset_causes,
         control_fields: state.control_fields,
+        last_controls: state.last_controls,
         bank_switches: state.bank_switches,
         bank_misses: state.bank_misses,
         scoped: state.scoped,
@@ -1455,6 +1461,7 @@ impl Host for BareHost<'_> {
                     for (count, differs) in state.control_fields.iter_mut().zip(fields) {
                         *count += u64::from(differs);
                     }
+                    state.last_controls = Some((from, to));
                 }
                 state.reset_shadow(cause);
             }
