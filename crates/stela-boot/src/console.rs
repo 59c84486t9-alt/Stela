@@ -28,8 +28,9 @@ use uefi::{
 };
 
 const BYTES_PER_PIXEL: usize = 4;
-/// The most columns of text, as wide as the pages' column.
-const COLUMNS: usize = 100;
+/// The most columns of text: wider than the pages' column, as log lines
+/// are long.
+const COLUMNS: usize = 140;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -304,6 +305,14 @@ impl Text {
         self.cells[last..].fill(BLANK);
     }
 
+    /// Carry on at `indent` on a blank row under the cursor's.
+    fn wrap(&mut self, indent: usize) {
+        self.newline();
+        let start = self.row * self.columns;
+        self.cells[start..start + self.columns].fill(BLANK);
+        self.column = indent.min(self.columns - 1);
+    }
+
     fn put(&mut self, character: u8, color: Color) {
         match character {
             b'\n' => self.newline(),
@@ -447,19 +456,60 @@ pub fn rewrite(segments: &[(&str, Color)]) {
     });
 }
 
+/// Replace the cursor's line with `segments` and carry on under it: a word
+/// that would pass the edge starts the next row, `indent` cells in. The
+/// cursor ends on the last row.
+pub fn rewrite_wrapped(segments: &[(&str, Color)], indent: usize) {
+    with(|text| {
+        let start = text.row * text.columns;
+        text.cells[start..start + text.columns].fill(BLANK);
+        text.column = 0;
+        let room = text.columns.saturating_sub(indent);
+        for (part, color) in segments {
+            for word in part.split_inclusive(' ') {
+                let length = word.trim_end().len();
+                if text.column > indent && text.column + length > text.columns && length <= room {
+                    text.wrap(indent);
+                }
+                for character in word.bytes().filter(|&c| c != b'\n') {
+                    if text.column == text.columns {
+                        if character == b' ' {
+                            continue;
+                        }
+                        text.wrap(indent);
+                    }
+                    text.put(character, *color);
+                }
+            }
+        }
+        text.present();
+    });
+}
+
 /// Show `lines` on the rows under the cursor's, `indent` cells in and each
-/// cut to the line, the last ones when not all fit, and blank the rest; the
-/// cursor stays. An empty `lines` clears what an earlier call showed.
+/// wrapped onto as many rows as it takes, the last rows when not all fit,
+/// and blank the rest; the cursor stays. An empty `lines` clears what an
+/// earlier call showed.
 pub fn below(lines: &[String], indent: usize, color: Color) {
     with(|text| {
+        let width = text.columns.saturating_sub(indent).max(1);
+        let rows_of = |line: &String| line.len().div_ceil(width).max(1);
         let first = text.row + 1;
-        let shown = &lines[lines.len().saturating_sub(text.rows - first)..];
+        let total: usize = lines.iter().map(rows_of).sum();
+        let skip = total.saturating_sub(text.rows - first);
+        let mut pieces = lines.iter().flat_map(|line| {
+            let bytes = line.as_bytes();
+            let end = |k: usize| (k * width).min(bytes.len());
+            (0..rows_of(line)).map(move |k| &bytes[end(k)..end(k + 1)])
+        });
+        for _ in 0..skip {
+            pieces.next();
+        }
         for row in first..text.rows {
             let cells = &mut text.cells[row * text.columns..(row + 1) * text.columns];
             cells.fill(BLANK);
-            if let Some(line) = shown.get(row - first) {
-                let cells = cells.iter_mut().skip(indent);
-                for (cell, character) in cells.zip(line.bytes()) {
+            if let Some(piece) = pieces.next() {
+                for (cell, &character) in cells.iter_mut().skip(indent).zip(piece) {
                     *cell = Cell {
                         character: printable(character),
                         color,
