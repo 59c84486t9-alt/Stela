@@ -102,6 +102,11 @@ pub(crate) trait Host {
     fn mount(&self, identifier: &str) -> Result<PathBuf>;
     /// This computer's CPU, for a disk it boots itself.
     fn cpu(&self) -> Result<Cpu>;
+    /// Erase whole disk `disk` into a GPT with an EFI partition and a FAT32
+    /// volume named `name` on the rest, mounted.
+    fn erase(&self, disk: &str, name: &str) -> Result<()> {
+        bail!("this computer cannot erase {disk} into {name}")
+    }
 }
 
 /// The computer `stela setup` runs on.
@@ -235,6 +240,20 @@ impl Host for System {
         let mount = text(&info, "MountPoint");
         ensure!(!mount.is_empty(), "diskutil mounted {identifier} nowhere");
         Ok(PathBuf::from(mount))
+    }
+
+    fn erase(&self, disk: &str, name: &str) -> Result<()> {
+        ensure!(
+            cfg!(target_os = "macos"),
+            "erasing a USB needs macOS's diskutil"
+        );
+        // diskutil's GPT always starts with a 200 MiB EFI partition.
+        let status = Command::new("diskutil")
+            .args(["eraseDisk", "FAT32", name, "GPT", disk])
+            .status()
+            .context("cannot run diskutil")?;
+        ensure!(status.success(), "diskutil could not erase {disk}");
+        Ok(())
     }
 
     fn cpu(&self) -> Result<Cpu> {
@@ -435,7 +454,10 @@ fn mac_disks() -> Result<Vec<Disk>> {
             continue;
         }
         let info = plist(Command::new("diskutil").args(["info", "-plist", &identifier]))?;
-        if text(&info, "VirtualOrPhysical") == "Virtual" {
+        // A disk image stands in for a USB, as a stick's copy does in QEMU.
+        if text(&info, "VirtualOrPhysical") == "Virtual"
+            && text(&info, "BusProtocol") != "Disk Image"
+        {
             continue;
         }
         let flag = |key| {

@@ -17,6 +17,10 @@
 //! written, and compared with its download receipt and Apple's catalog
 //! digest; `payload.json` is written only when they match, so a medium
 //! without it is never taken for a complete one.
+//!
+//! A remote medium ([`write_remote`]) holds only `payload.json` and
+//! `blocks.bin`: `stela.efi` streams the IPSW from Apple's servers during
+//! the install (`payload::Layout::Remote`).
 use super::{MARGIN, host::FileSystem, host::Host};
 use crate::{efi, restore};
 use anyhow::{Context, Result, bail, ensure};
@@ -46,6 +50,9 @@ pub(super) struct Medium {
     pub(super) partition_guid: String,
     /// SHA-256 of its `payload.json`.
     pub(super) manifest_sha256: String,
+    /// It names the IPSW on Apple's servers instead of holding it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) remote: bool,
 }
 
 impl Medium {
@@ -78,11 +85,14 @@ impl Medium {
 
     /// The engine options that restore from it.
     pub(super) fn options(&self) -> String {
-        format!(
-            "--install {} --install-source {}",
-            self.firmware_manifest(),
-            self.partition_guid
-        )
+        match self.remote {
+            true => format!("--install {}", self.firmware_manifest()),
+            false => format!(
+                "--install {} --install-source {}",
+                self.firmware_manifest(),
+                self.partition_guid
+            ),
+        }
     }
 
     /// What is wrong with it: a missing or changed `payload.json`, or a
@@ -104,6 +114,15 @@ impl Medium {
         let Ok(parsed) = stela_runtime::payload::PayloadManifest::parse(&bytes) else {
             return vec![format!("{} is not a restore inventory", manifest.display())];
         };
+        if self.remote {
+            return match directory.join(BLOCK_HASHES_FILE).is_file() {
+                true => Vec::new(),
+                false => vec![format!(
+                    "{} is missing",
+                    directory.join(BLOCK_HASHES_FILE).display()
+                )],
+            };
+        }
         let Layout::Pieces { pieces, .. } = &parsed.layout else {
             return vec![format!("{} names no pieces", manifest.display())];
         };
@@ -489,6 +508,25 @@ pub(super) fn write(
     Ok(written)
 }
 
+/// Write a remote medium to `volume`: `inventory`, which names the IPSW on
+/// Apple's servers ([`restore::remote_inventory`]), and its block hashes;
+/// the SHA-256 of its `payload.json`.
+pub(super) fn write_remote(
+    volume: &Path,
+    inventory: restore::payload::Inventory,
+) -> Result<String> {
+    ensure!(
+        matches!(inventory.manifest.layout, Layout::Remote { .. }),
+        "a remote medium's inventory names a remote image"
+    );
+    let directory = directory(volume, &inventory.manifest.product_build);
+    fs::create_dir_all(&directory)?;
+    efi::write_atomic(&directory.join(BLOCK_HASHES_FILE), &inventory.blocks, false)?;
+    let json = inventory.manifest.to_json();
+    efi::write_atomic(&directory.join(MANIFEST_FILE), json.as_bytes(), false)?;
+    Ok(stela_runtime::sha256(json.as_bytes()))
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -581,6 +619,7 @@ pub(super) mod tests {
                 volume: volume.clone(),
                 partition_guid: "G".into(),
                 manifest_sha256: first.manifest_sha256.clone(),
+                remote: false,
             }
             .problems()
             .is_empty()
@@ -643,7 +682,50 @@ pub(super) mod tests {
             volume,
             partition_guid: "G".into(),
             manifest_sha256: String::new(),
+            remote: false,
         };
+        assert_eq!(medium.problems().len(), 1);
+    }
+
+    #[test]
+    fn a_remote_medium_holds_only_the_inventory_and_names_no_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipsw = ipsw(dir.path());
+        let volume = dir.path().join("STELA");
+        let bytes = fs::metadata(&ipsw).unwrap().len();
+        let layout = Layout::Remote {
+            url: "http://updates-http.example.test/Synthetic.ipsw".into(),
+            etag: "\"e\"".into(),
+        };
+        let remote = restore::payload::remote_inventory(
+            fs::File::open(&ipsw).unwrap(),
+            &ipsw,
+            bytes,
+            layout,
+            restore::payload::SYNTHETIC_MODEL,
+            None,
+        )
+        .unwrap();
+        assert!(write_remote(&volume, inventory(&ipsw)).is_err());
+        let medium = Medium {
+            build: restore::payload::SYNTHETIC_BUILD.into(),
+            volume: volume.clone(),
+            partition_guid: String::new(),
+            manifest_sha256: write_remote(&volume, remote).unwrap(),
+            remote: true,
+        };
+        assert!(medium.problems().is_empty(), "{:?}", medium.problems());
+        let mut names: Vec<_> = fs::read_dir(medium.directory())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, [BLOCK_HASHES_FILE, MANIFEST_FILE]);
+        assert_eq!(
+            medium.options(),
+            format!("--install {}", medium.firmware_manifest())
+        );
+        fs::remove_file(medium.directory().join(BLOCK_HASHES_FILE)).unwrap();
         assert_eq!(medium.problems().len(), 1);
     }
 
@@ -654,6 +736,7 @@ pub(super) mod tests {
             volume: PathBuf::from("/Volumes/STELA"),
             partition_guid: String::new(),
             manifest_sha256: String::new(),
+            remote: false,
         };
         assert_eq!(
             medium("26A434").removable_directory().unwrap(),

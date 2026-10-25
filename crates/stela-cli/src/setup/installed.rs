@@ -20,8 +20,9 @@ use super::ecid::Ecid;
 use super::host::{Host, PartitionInfo};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use stela_loader::boot_selection::{
-    BOOT_COMMAND, Command, ONE_TIME_BOOT_COMMAND, RECOVERY_BOOT_MODE, lookup,
+use stela_loader::{
+    boot_selection::{BOOT_COMMAND, Command, ONE_TIME_BOOT_COMMAND, RECOVERY_BOOT_MODE, lookup},
+    mount_interface::CHOSEN_DISK,
 };
 use stela_runtime::{
     machine::apple::nor::{CAPACITY, Image, SECTOR_SIZE, nvram::Partition, nvram::Variables},
@@ -61,9 +62,36 @@ pub(super) struct InstalledDisk {
     pub(super) external_disks: bool,
 }
 
+/// How messages name the partition `stela.efi`'s Install macOS chooses.
+const CHOSEN_REGION: &str = "the PC disk chosen in stela.efi";
+
 impl InstalledDisk {
+    /// The partition `stela.efi`'s Install macOS chooses on the PC itself
+    /// (`mount_interface::CHOSEN_DISK`), with the machine state in its tail.
+    /// Setup never reaches it; the PC's other disks are the Mac's external
+    /// drives.
+    pub(super) fn chosen() -> Self {
+        Self {
+            apple_region: CHOSEN_REGION.into(),
+            apple_region_serial: CHOSEN_DISK.into(),
+            apple_region_guid: String::new(),
+            nor: CHOSEN_REGION.into(),
+            nor_serial: CHOSEN_DISK.into(),
+            nor_guid: String::new(),
+            machine_state_offset: None,
+            external_disks: true,
+        }
+    }
+
+    pub(super) fn is_chosen(&self) -> bool {
+        self.apple_region_serial == CHOSEN_DISK
+    }
+
     /// The partitions the install keeps, for messages.
     pub(super) fn partitions(&self) -> String {
+        if self.is_chosen() {
+            return self.apple_region.clone();
+        }
         match self.machine_state_offset {
             Some(_) => self.apple_region.clone(),
             None => format!("{} and {}", self.apple_region, self.nor),
@@ -72,6 +100,9 @@ impl InstalledDisk {
 
     /// Where the machine state is, for messages.
     pub(super) fn state_description(&self) -> String {
+        if self.is_chosen() {
+            return format!("the tail of {CHOSEN_REGION}");
+        }
         match self.machine_state_offset {
             Some(offset) => format!(
                 "the tail of {} from byte {offset:#x}, outside the Mac's SSD (serial {}, \
@@ -127,11 +158,17 @@ impl InstalledDisk {
     }
 
     fn region_target(&self) -> String {
-        format!("{}:{}", self.apple_region_serial, self.apple_region_guid)
+        match self.is_chosen() {
+            true => CHOSEN_DISK.into(),
+            false => format!("{}:{}", self.apple_region_serial, self.apple_region_guid),
+        }
     }
 
     fn nor_target(&self) -> String {
-        format!("{}:{}", self.nor_serial, self.nor_guid)
+        match self.is_chosen() {
+            true => CHOSEN_DISK.into(),
+            false => format!("{}:{}", self.nor_serial, self.nor_guid),
+        }
     }
 }
 
@@ -154,6 +191,10 @@ pub(super) fn confirm(
     role: Role,
     explicit: Option<&str>,
 ) -> Result<String> {
+    ensure!(
+        !disk.is_chosen(),
+        "this install's disk is chosen in stela.efi on the PC, out of this computer's reach"
+    );
     let (recorded, serial, guid, what) = match role {
         Role::AppleRegion => (
             &disk.apple_region,
