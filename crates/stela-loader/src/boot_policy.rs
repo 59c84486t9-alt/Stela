@@ -285,7 +285,7 @@ pub fn apply(
                 CHOSEN,
                 "boot-manifest-hash",
                 manifest.digest.to_vec(),
-                "SHA-384 of the global boot manifest",
+                "SHA-384 of the boot manifest",
             )?;
             writer.fill(
                 CHOSEN,

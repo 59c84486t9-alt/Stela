@@ -221,7 +221,8 @@ pub struct Answers<R> {
     pub staged: Staged,
     /// Apple's signing service, only when the user enables it (`tss`).
     pub signer: Option<tss::Signer>,
-    /// The root tickets Apple personalized for this restore, each asked once.
+    /// The root tickets Apple personalized for this restore, each asked once;
+    /// the AP one is the ticket the restore booted under ([`Self::boot_with`]).
     roots: BTreeMap<tss::Root, Ticket>,
     /// The host's wall clock, in seconds since the Unix epoch.
     pub clock: Option<Box<dyn FnMut() -> u64>>,
@@ -235,6 +236,20 @@ impl<R: ReadAt> Answers<R> {
             roots: BTreeMap::new(),
             clock: None,
         }
+    }
+    /// The personalized AP ticket the restore booted under (`stela boot
+    /// prepare --tss`): the signer takes the nonces it is bound to, as Stela
+    /// plays the boot ROM and the SEP ROM, and it answers `RootTicket`, whose
+    /// SHA-384 restored's `update_ticket` requires to be
+    /// `/chosen/boot-manifest-hash`.
+    pub fn boot_with(&mut self, bytes: Vec<u8>) -> Result<()> {
+        let signer = self.signer.as_mut().ok_or(Error::Invalid(
+            "a booted ticket needs Apple's signing service (opt-in --tss)",
+        ))?;
+        let (ticket, nonces) = Ticket::booted(bytes, self.store.identity(), signer.ecid)?;
+        signer.nonces = nonces;
+        self.roots.insert(tss::Root::Ap, ticket);
+        Ok(())
     }
     /// Stage the offline `URLAsset` answer for each AEA member's
     /// `fcs-key-url` GET from the inventory's recorded recipient key, so the

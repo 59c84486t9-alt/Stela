@@ -30,6 +30,9 @@ use stela_runtime::{
     },
 };
 
+/// The bundle's boot manifest (`stela_loader::boot_bundle`).
+const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
+
 /// Which restore the host runs, and how it reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -181,7 +184,19 @@ impl Experiment {
                 .map_err(|e| format!("{e}"))?;
         }
         let mut answers = Answers::new(store);
-        answers.signer = signer;
+        if signer.is_some() {
+            answers.signer = signer;
+            // The bundle boots under the AP ticket Apple personalized for it,
+            // which also answers RootTicket.
+            let booted = inventory_file(handoff, BOOT_MANIFEST_FILE)
+                .ok_or("--tss needs the bundle's boot manifest")?;
+            answers.boot_with(booted.to_vec()).map_err(|error| {
+                format!(
+                    "--tss needs a bundle whose boot manifest Apple personalized for this machine \
+                     (stela boot prepare --tss): {error}"
+                )
+            })?;
+        }
         // Serve the system-image content-key GET from the inventory's keys.
         answers
             .stage_system_image_keys()

@@ -97,6 +97,14 @@ fn integer(b: &[u8]) -> Result<u64> {
     }
     Ok(b.iter().fold(0, |n, &v| (n << 8) | v as u64))
 }
+/// What a parse requires of nonce-bound properties (`BNCH`, `snon`): none
+/// at all, the nonces a request sent, or whichever the ticket names.
+#[derive(Clone, Copy)]
+enum Bound<'a> {
+    Unsent,
+    Sent(&'a Nonces),
+    Named,
+}
 #[derive(Clone)]
 pub struct Ticket {
     bytes: Vec<u8>,
@@ -106,7 +114,7 @@ impl Ticket {
     /// A global ticket: one with any personalized or nonce-bound property
     /// refuses.
     pub fn global(bytes: Vec<u8>, identity: &Identity) -> Result<Self> {
-        Self::parse(bytes, identity, None)
+        Self::parse(bytes, identity, None, Bound::Unsent)
     }
     /// A ticket personalized for the device whose ECID is `ecid`: its `MANP`
     /// must name exactly that ECID. A nonce-bound property (`BNCH`, `snon`)
@@ -117,8 +125,35 @@ impl Ticket {
         ecid: u64,
         nonces: Option<&Nonces>,
     ) -> Result<Self> {
-        let ticket = Self::parse(bytes, identity, Some((ecid, nonces)))?;
-        let named = ticket
+        let bound = nonces.map_or(Bound::Unsent, Bound::Sent);
+        Self::parse(bytes, identity, Some(ecid), bound)?.named(ecid)
+    }
+    /// A ticket personalized for `ecid` that a boot was made under, and the
+    /// nonces it is bound to, which it must name both of: Stela, playing the
+    /// boot ROM and the SEP ROM, takes them from it.
+    pub fn booted(bytes: Vec<u8>, identity: &Identity, ecid: u64) -> Result<(Self, Nonces)> {
+        let ticket = Self::parse(bytes, identity, Some(ecid), Bound::Named)?.named(ecid)?;
+        let nonce = |key: &[u8; 4]| {
+            ticket
+                .entries
+                .get(b"MANP")
+                .and_then(|p| p.get(key))
+                .ok_or(Error::Invalid("booted ticket names no nonce"))?
+                .data()
+        };
+        let nonces = Nonces {
+            ap: nonce(b"BNCH")?
+                .try_into()
+                .map_err(|_| Error::Invalid("booted ticket's BNCH is not 32 bytes"))?,
+            sep: nonce(b"snon")?
+                .try_into()
+                .map_err(|_| Error::Invalid("booted ticket's snon is not 20 bytes"))?,
+        };
+        Ok((ticket, nonces))
+    }
+    /// This ticket, if its `MANP` names exactly `ecid`.
+    fn named(self, ecid: u64) -> Result<Self> {
+        let named = self
             .entries
             .get(b"MANP")
             .and_then(|p| p.get(b"ECID"))
@@ -127,14 +162,9 @@ impl Ticket {
         if named != ecid {
             return Err(Error::Invalid("personalized ticket names another ECID"));
         }
-        Ok(ticket)
+        Ok(self)
     }
-    fn parse(
-        bytes: Vec<u8>,
-        identity: &Identity,
-        binding: Option<(u64, Option<&Nonces>)>,
-    ) -> Result<Self> {
-        let nonces = binding.and_then(|(_, nonces)| nonces);
+    fn parse(bytes: Vec<u8>, identity: &Identity, ecid: Option<u64>, bound: Bound) -> Result<Self> {
         if bytes.len() > MAX_TICKET_BYTES {
             return Err(Error::Limit("IM4M bytes"));
         }
@@ -173,15 +203,16 @@ impl Ticket {
                 let (key, mut property) = named(first, tag, b)?;
                 let (first, _, b) = property.next()?;
                 property.end()?;
-                let sent = match &key {
-                    b"BNCH" => nonces.map(|n| &n.ap[..]),
-                    b"snon" => nonces.map(|n| &n.sep[..]),
+                let sent = match (&key, bound) {
+                    (b"BNCH" | b"snon", Bound::Unsent) => None,
+                    (b"BNCH", Bound::Sent(nonces)) => Some(&nonces.ap[..]),
+                    (b"snon", Bound::Sent(nonces)) => Some(&nonces.sep[..]),
                     _ => Some(b),
                 };
                 if sent != Some(b) {
                     return Err(Error::Invalid("ticket is bound to another nonce"));
                 }
-                if key == *b"ECID" && (binding.is_none() || name != *b"MANP") {
+                if key == *b"ECID" && (ecid.is_none() || name != *b"MANP") {
                     return Err(Error::Invalid("manifest is personalized"));
                 }
                 let value = match first {
@@ -425,7 +456,13 @@ pub(crate) mod tests {
             ..sent
         };
         assert!(Ticket::personalized(bound.clone(), identity, 7, Some(&other)).is_err());
-        assert!(Ticket::global(bound, identity).is_err());
+        assert!(Ticket::global(bound.clone(), identity).is_err());
+        // A ticket a boot was made under gives the nonces it names.
+        let (_, named) = Ticket::booted(bound.clone(), identity, 7).unwrap();
+        assert_eq!(named, sent);
+        assert!(Ticket::booted(bound, identity, 8).is_err());
+        let unbound = bound_ticket(b"krnl", b"k", Some(7), None);
+        assert!(Ticket::booted(unbound, identity, 7).is_err());
     }
     #[test]
     fn a_personalized_ticket_must_name_this_devices_ecid() {

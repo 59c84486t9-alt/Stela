@@ -18,10 +18,13 @@ use stela_runtime::{apfs::btree::Seal, payload::Purpose};
 mod board_firmware;
 mod disk;
 mod recovery_volume;
+mod ticket;
 
 const MANIFEST_FILE: &str = "bundle.json";
 const KERNEL_LIMIT: u64 = 512 * 1024 * 1024;
 const COMPONENT_LIMIT: u64 = 64 * 1024 * 1024;
+/// The largest BuildManifest `--tss` reads.
+const BUILD_MANIFEST_LIMIT: u64 = 64 * 1024 * 1024;
 const RAMDISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 /// The recoveryOS volume holds the whole BaseSystem UDIF image (2.3 GB for
 /// 26A434) and its APFS metadata.
@@ -480,6 +483,13 @@ pub(crate) struct Prepare {
     /// `unique-device-id`). Without it those rows stay unresolved.
     #[arg(long, value_parser = parse_ecid)]
     ecid: Option<u64>,
+    /// Boot the restore under the AP root ticket Apple's signing service
+    /// personalizes for this machine, instead of the IPSW's global ticket:
+    /// sends the ECID, nonces drawn here and the identity's component hashes
+    /// to gs.apple.com. The restore host (mount `--tss`) answers restored's
+    /// RootTicket with the same ticket.
+    #[arg(long, requires_all = ["restore", "ecid"])]
+    tss: bool,
     /// A firmware image the board's own devices run, kept under its guest
     /// file name (such as `USB-C_HPM,47.bin`); repeat for each image. Each
     /// takes the place of the same-named image the DeviceTree's board names;
@@ -868,7 +878,35 @@ impl Prepare {
                 declared_digest: None,
             }))
         };
-        let boot_manifest = global_manifest(false)?;
+        let boot_manifest = match (self.tss, self.ecid) {
+            (true, Some(ecid)) => {
+                eprintln!(
+                    "TSS OPT-IN: sending ECID {ecid:#x}, fresh nonces and the identity's component \
+                     hashes to gs.apple.com for the restore's AP root ticket"
+                );
+                let manifest = restore::archive::read_member(
+                    &ipsw,
+                    "BuildManifest.plist",
+                    BUILD_MANIFEST_LIMIT,
+                )?;
+                let bytes = ticket::personalized(&manifest, identity.index, ecid)?;
+                let digest = stela_runtime::sha256(&bytes);
+                Some(Decoded {
+                    source: Source {
+                        component: "Boot manifest".into(),
+                        member: "gs.apple.com personalized AP ticket".into(),
+                        container_sha256: digest.clone(),
+                        payload_type: "im4m".into(),
+                        description: String::new(),
+                        decoded_bytes: bytes.len(),
+                        decoded_sha256: digest,
+                    },
+                    bytes,
+                    declared_digest: None,
+                })
+            }
+            _ => global_manifest(false)?,
+        };
         let cryptex1_manifest = global_manifest(true)?;
         let mut cryptex_trust_caches = vec![];
         if self.cryptex_trust_caches {

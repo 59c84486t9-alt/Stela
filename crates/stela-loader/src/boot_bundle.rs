@@ -1891,7 +1891,7 @@ fn shape_device_tree(
     unresolved.extend(set_die_count(tree, target.chip_id)?);
     unresolved.push(
         "/chosen/boot-object-manifests: no signed LocalPolicy or personalized manifest objects; \
-         a supplied original global boot manifest is forwarded separately"
+         a supplied original boot manifest is forwarded separately"
             .into(),
     );
     unresolved.push("preoslog: iBoot log region omitted".into());

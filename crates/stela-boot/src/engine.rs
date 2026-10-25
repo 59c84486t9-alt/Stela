@@ -2067,18 +2067,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                         "--tss needs the bundle's machine ECID (stela boot prepare --ecid)",
                     )
                 });
-            // Stela holds the boot ROM's and the SEP ROM's nonces for the
-            // restore, drawn once from the CPU's entropy.
-            let mut nonces = stela_runtime::restore::tss::Nonces {
-                ap: [0; 32],
-                sep: [0; 20],
-            };
-            bundle::entropy(&mut nonces.ap)
-                .and_then(|()| bundle::entropy(&mut nonces.sep))
-                .unwrap_or_else(|error| output::fatal(error));
             stela_runtime::restore::tss::Signer {
                 ecid,
-                nonces,
+                // The restore takes the boot ROM's and the SEP ROM's nonces
+                // from the ticket the bundle boots under (`Answers::boot_with`).
+                nonces: stela_runtime::restore::tss::Nonces {
+                    ap: [0; 32],
+                    sep: [0; 20],
+                },
                 transport: match host_network.take().expect("--tss opens the host network") {
                     Ok(network) => alloc::boxed::Box::new(network),
                     Err(reason) => alloc::boxed::Box::new(network::Offline(reason)),

@@ -672,6 +672,41 @@ mod tests {
     }
 
     #[test]
+    fn the_root_ticket_is_the_one_the_restore_booted_under() {
+        use super::super::answers::{Answers, Plan};
+        let mut answers = Answers::new(super::super::store::tests::fixture(b"x", false));
+        let posts = alloc::rc::Rc::new(core::cell::Cell::new(0));
+        answers.signer = Some(Signer {
+            ecid: 0x77,
+            nonces: Nonces {
+                ap: [0; 32],
+                sep: [0; 20],
+            },
+            transport: alloc::boxed::Box::new(Signing {
+                posts: posts.clone(),
+                nonces: nonces(),
+            }),
+        });
+        let booted =
+            super::super::ticket::tests::bound_ticket(b"krnl", b"k", Some(0x77), Some(&nonces()));
+        // A ticket for another machine refuses.
+        let other =
+            super::super::ticket::tests::bound_ticket(b"krnl", b"k", Some(0x78), Some(&nonces()));
+        assert!(answers.boot_with(other).is_err());
+        answers.boot_with(booted.clone()).unwrap();
+        assert_eq!(answers.signer.as_ref().unwrap().nonces, nonces());
+        let request = Value::dict([("DataType", Value::from("RootTicket"))]);
+        let Plan::Reply(reply) = answers.plan(&request).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            reply.required("RootTicketData").unwrap().data().unwrap(),
+            booted
+        );
+        assert_eq!(posts.get(), 0);
+    }
+
+    #[test]
     fn a_volume_uuid_must_be_canonical() {
         assert!(volume_uuid("15C1EDB0A41443F89AF64E28F13D8956").is_err());
         assert!(volume_uuid("15C1EDB0-A414-43F8-9AF6-4E28F13D895G").is_err());
