@@ -185,7 +185,10 @@ pub struct AppleDevices {
     time_regression: Cell<Option<[(u64, &'static str); 2]>>,
 }
 
+/// The host polls its USB sessions once a high-speed microframe, in which
+/// a bulk pipe moves at most 13 512-byte packets (USB 2.0 Table 5-10).
 const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
+const USB_PACKETS_PER_MICROFRAME: usize = 13;
 /// A native host handle, owned by this AppleDevices instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsbId(DeviceId);
@@ -3559,9 +3562,8 @@ impl Devices for AppleDevices {
             }
             if now >= master.next_poll {
                 master.next_poll = now.saturating_add(USB_POLL_TICKS);
-                let advanced = master
-                    .session
-                    .advance(&mut controller.peer(&mut port), now)
+                let advanced = (0..USB_PACKETS_PER_MICROFRAME)
+                    .try_for_each(|_| master.session.advance(&mut controller.peer(&mut port), now))
                     .and_then(|()| controller.flush(&mut port));
                 advanced.map_err(|why| match controller.dma_fault() {
                     Some(fault) => fail(&format!("{why}: {fault:x?}")),
