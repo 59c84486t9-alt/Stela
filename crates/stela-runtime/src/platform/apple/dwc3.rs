@@ -159,13 +159,15 @@ struct Lifecycle {
     reset: bool,
 }
 
-/// A controller DMA that failed: its I/O address, length and direction.
+/// A controller DMA that failed: its I/O address, length and direction,
+/// and for a payload the endpoint and the TRB, at its address, it served.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmaFault {
     pub iova: u64,
     pub bytes: usize,
     pub write: bool,
     pub error: DmaError,
+    pub payload: Option<(usize, u64, [u8; TRB_BYTES as usize])>,
 }
 
 impl DmaFault {
@@ -175,6 +177,7 @@ impl DmaFault {
             bytes,
             write,
             error,
+            payload: None,
         }
     }
 }
@@ -832,6 +835,33 @@ impl Dwc3 {
         Ok(Reply::Nak)
     }
 
+    /// The TRB at `address`, or past the owned link TRBs it leads to.
+    fn fetch(
+        &mut self,
+        port: &mut Port<'_, '_>,
+        mut address: u64,
+    ) -> Result<(u64, [u8; TRB_BYTES as usize]), &'static str> {
+        let mut trb = [0u8; TRB_BYTES as usize];
+        for _ in 0..=MAX_LINKS_PER_PACKET {
+            if let Err(error) = port.read(address, &mut trb) {
+                self.poisoned = Some(DmaFault::new(address, trb.len(), false, error));
+                return Err("DWC3 TRB DMA fault; reset required");
+            }
+            let ctrl = u32::from_le_bytes(trb[12..16].try_into().unwrap());
+            if ctrl & HWO == 0 || (ctrl >> 4) & 0x3f != 8 {
+                return Ok((address, trb));
+            }
+            if ctrl & !(HWO | (0x3f << 4)) != 0 || trb[8..12] != [0; 4] {
+                return Err("DWC3 link TRB has unmodeled flags or size");
+            }
+            address = u64::from_le_bytes(trb[..8].try_into().unwrap());
+            if !address.is_multiple_of(TRB_BYTES) {
+                return Err("DWC3 unaligned link TRB");
+            }
+        }
+        Err("DWC3 cyclic or excessive TRB links")
+    }
+
     fn packet(
         &mut self,
         n: usize,
@@ -865,32 +895,11 @@ impl Dwc3 {
         if self.pending.len() == MAX_PENDING_EVENTS {
             return Ok(Reply::Nak);
         }
-        let mut trb = [0u8; TRB_BYTES as usize];
-        for links in 0..=MAX_LINKS_PER_PACKET {
-            if let Err(error) = port.read(transfer.trb, &mut trb) {
-                self.poisoned = Some(DmaFault::new(transfer.trb, trb.len(), false, error));
-                return Err("DWC3 TRB DMA fault; reset required");
-            }
-            let ctrl = u32::from_le_bytes(trb[12..16].try_into().unwrap());
-            if ctrl & HWO == 0 {
-                return self.not_ready(n, token, data.len(), true);
-            }
-            let kind = (ctrl >> 4) & 0x3f;
-            if kind == 8 {
-                if ctrl & !(HWO | (0x3f << 4)) != 0 || trb[8..12] != [0; 4] {
-                    return Err("DWC3 link TRB has unmodeled flags or size");
-                }
-                if links == MAX_LINKS_PER_PACKET {
-                    return Err("DWC3 cyclic or excessive TRB links");
-                }
-                transfer.trb = u64::from_le_bytes(trb[..8].try_into().unwrap());
-                transfer.done = 0;
-                if !transfer.trb.is_multiple_of(TRB_BYTES) {
-                    return Err("DWC3 unaligned link TRB");
-                }
-                continue;
-            }
-            break;
+        let (address, trb) = self.fetch(port, transfer.trb)?;
+        transfer.trb = address;
+        if u32::from_le_bytes(trb[12..16].try_into().unwrap()) & HWO == 0 {
+            self.endpoints[n].active = Some(transfer);
+            return self.not_ready(n, token, data.len(), true);
         }
         let buffer = u64::from_le_bytes(trb[..8].try_into().unwrap());
         let size = u32::from_le_bytes(trb[8..12].try_into().unwrap());
@@ -943,7 +952,10 @@ impl Dwc3 {
         };
         if let Err(error) = result {
             let write = token != Token::In;
-            self.poisoned = Some(DmaFault::new(address, bytes, write, error));
+            self.poisoned = Some(DmaFault {
+                payload: Some((n, transfer.trb, trb)),
+                ..DmaFault::new(address, bytes, write, error)
+            });
             return Err("DWC3 payload DMA fault; reset required");
         }
         transfer.done += bytes as u32;
@@ -974,11 +986,15 @@ impl Dwc3 {
                     | if ctrl & LST != 0 { EV_LST } else { 0 };
                 self.queue(ep.ring, ep_event(n, event_kind, status, 0))?;
             }
+            // The core prefetches past a completed TRB, so a link is
+            // followed while its block still belongs to this ring: Apple's
+            // driver returns a finished block to a pool shared by all
+            // endpoints as soon as its event arrives.
             ep.active = if last {
                 None
             } else {
                 Some(Transfer {
-                    trb: next_trb,
+                    trb: self.fetch(port, next_trb)?.0,
                     done: 0,
                 })
             };
@@ -1939,6 +1955,35 @@ mod tests {
         assert_eq!(dwc.rings[0].producer, 4);
         assert_eq!(dwc.rings[0].count, 8);
     }
+    #[test]
+    fn a_completed_trb_follows_its_link_before_software_reuses_the_block() {
+        let (mut dwc, mut dart, mut ram, mut latch) = setup();
+        let mut access = Access::new(0, 0, &mut latch);
+        configure(&mut dwc, 3, 0, &mut access);
+        let resting = TRB + 0x100;
+        trb(&mut ram, TRB, 3, HWO | IOC | 1 << 4);
+        ram.put_u64(TRB + 16, resting);
+        assert!(ram.write(TRB + 24, &[0, 0, 0, 0, 0x81, 0, 0, 0]));
+        trb(&mut ram, resting, 2, LST | 1 << 4);
+        start(&mut dwc, 3, TRB, &mut access);
+        let mut bytes = [0; 512];
+        let mut packet = |dwc: &mut Dwc3, ram: &mut Ram| {
+            let mut port = Port {
+                iommu: &mut dart,
+                stream: SID,
+                memory: ram,
+                access: &mut access,
+            };
+            dwc.peer(&mut port).packet(0x81, Token::In, &mut bytes)
+        };
+        assert_eq!(packet(&mut dwc, &mut ram), Ok(Reply::Ack(3)));
+        // The pool hands the finished block to another ring, then software
+        // queues this ring's next request in its resting TRB.
+        trb(&mut ram, TRB + 16, 7, HWO | 1 << 4);
+        trb(&mut ram, resting, 2, HWO | LST | 1 << 4);
+        assert_eq!(packet(&mut dwc, &mut ram), Ok(Reply::Ack(2)));
+    }
+
     #[test]
     fn in_link_trbs_stall_update_end_and_detach_leaves_transfers_to_software() {
         let (mut dwc, mut dart, mut ram, mut latch) = setup();
