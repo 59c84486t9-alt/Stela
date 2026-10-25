@@ -2935,7 +2935,7 @@ impl TranslatedSeen {
 /// The host's shadow counters at the last heartbeat.
 #[derive(Default)]
 struct ShadowSeen {
-    counts: [u64; 9],
+    counts: [u64; 10],
     causes: [u64; 7],
     fields: [u64; 9],
 }
@@ -2948,7 +2948,8 @@ impl ShadowSeen {
     /// everything, and for other controls the fields that differed); the
     /// resets of the lower half and of the views SPRR_PERM_EL0 decides; the
     /// switches between SPRR_PERM_EL1 values' kernel roots and those that
-    /// found none kept; and the TLBIs that unmapped ranges instead.
+    /// found none kept; the TLBIs that unmapped ranges instead; and the root
+    /// loads for a change of view.
     fn report(&mut self) {
         let host = host::statistics();
         let counts = [
@@ -2961,6 +2962,7 @@ impl ShadowSeen {
             host.bank_switches,
             host.bank_misses,
             host.scoped,
+            host.view_switches,
         ];
         let [
             fills,
@@ -2972,6 +2974,7 @@ impl ShadowSeen {
             bank_switches,
             bank_misses,
             scoped,
+            view_switches,
         ] = core::array::from_fn(|index| counts[index] - self.counts[index]);
         self.counts = counts;
         let [_, sprr, table, controls, tags, invalidated, maintained] =
@@ -2996,7 +2999,8 @@ impl ShadowSeen {
              regime={regime} stage2={stage2}) tags={tags} \
              invalidated={invalidated} maintained={maintained} \
              lower_resets={lower_resets} user_resets={user_resets} \
-             bank_switches={bank_switches} bank_misses={bank_misses} scoped={scoped}\n"
+             bank_switches={bank_switches} bank_misses={bank_misses} scoped={scoped} \
+             view_switches={view_switches}\n"
         ));
         if let Some((from, to)) = host.last_controls
             && controls > 0

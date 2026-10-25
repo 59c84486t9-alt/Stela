@@ -259,6 +259,8 @@ pub struct State {
     /// Switches to a bank's roots, and those that found the bank empty.
     bank_switches: u64,
     bank_misses: u64,
+    /// Root loads for a change of view (EL, PAN, GXF or tag checks).
+    view_switches: u64,
     /// A shadow-map attempt or software-TLB fill may have published guest
     /// translations. Only a complete reset can prove both halves clean again.
     legacy_translations_dirty: bool,
@@ -425,6 +427,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             banks,
             bank_switches: 0,
             bank_misses: 0,
+            view_switches: 0,
             legacy_translations_dirty: false,
             current: usize::MAX,
             regime: None,
@@ -502,6 +505,7 @@ pub struct Statistics {
     /// that found none kept.
     pub bank_switches: u64,
     pub bank_misses: u64,
+    pub view_switches: u64,
     pub scoped: u64,
     pub stray: u64,
     /// The APIC timer frequency.
@@ -531,6 +535,7 @@ pub fn statistics() -> Statistics {
         last_controls: state.last_controls,
         bank_switches: state.bank_switches,
         bank_misses: state.bank_misses,
+        view_switches: state.view_switches,
         scoped: state.scoped,
         stray: state.stray,
         apic_hz: state.apic_hz,
@@ -1494,6 +1499,7 @@ impl Host for BareHost<'_> {
         } + if regime.tag_checked() { VIEWS } else { 0 };
         if state.current != view {
             state.current = view;
+            state.view_switches += 1;
             load_root(state.roots[view]);
         }
     }
