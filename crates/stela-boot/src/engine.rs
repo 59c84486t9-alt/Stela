@@ -1322,14 +1322,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             // The guest's adapter is its own: the mount's client keeps the
             // first one. Without one the Mac boots with no network, which
             // is reported once.
-            let guest_network = options.guest_network.then(|| {
-                network::GuestNetwork::open(&mut links, wants_network)
-                    .inspect_err(|error| {
-                        output::arguments(format_args!("guest network refusal: {error}\n"));
-                        crate::status::warn(error);
-                    })
-                    .ok()
-            }).flatten();
+            let guest_network = options
+                .guest_network
+                .then(|| {
+                    network::GuestNetwork::open(&mut links, wants_network)
+                        .inspect_err(|error| {
+                            output::arguments(format_args!("guest network refusal: {error}\n"));
+                            crate::status::warn(error);
+                        })
+                        .ok()
+                })
+                .flatten();
             // A missing network is reported here and refused only by what
             // needs it, so the mount still boots and logs how far it gets.
             let network = wants_network.then(|| {
