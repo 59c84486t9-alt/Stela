@@ -367,6 +367,12 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn counter(&mut self) -> u64 {
         self.local.counter()
     }
+    fn profile_ticks(&mut self) -> u64 {
+        self.local.profile_ticks()
+    }
+    fn translations(&mut self) -> Option<&mut dyn crate::machine::Translations> {
+        self.local.translations()
+    }
     fn arm_timer(&mut self, deadline: Option<u64>) {
         if self.source_service() {
             self.effect(HostEffect::ArmTimer(deadline));
@@ -420,10 +426,20 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         fn counter(&mut self) -> u64 {
             1
         }
+        fn profile_ticks(&mut self) -> u64 {
+            7
+        }
         fn arm_timer(&mut self, _: Option<u64>) {}
         fn wait_for_interrupt(&mut self) {
             unreachable!()
         }
+    }
+
+    #[test]
+    fn the_wrapper_keeps_the_local_profile_clock() {
+        let (.., ram) = super::super::policy::tests::fixture();
+        let mut host = ServiceHost::new(Local, OneWorker(None), ram);
+        assert_eq!(host.profile_ticks(), 7);
     }
     pub(in crate::machine::engine::shared_memory) struct OneWorker(
         pub(in crate::machine::engine::shared_memory) Option<WorkerOwner>,
