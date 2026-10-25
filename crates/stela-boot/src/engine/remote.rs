@@ -4,9 +4,11 @@
 //! Each request carries `If-Range` with the entity tag setup recorded, so a
 //! changed object fails instead of mixing two versions; the restore store
 //! then checks the bytes as the manifest says (`payload::Member::sha256`).
-//! One range at a time streams into a read-ahead buffer: a read at or just
-//! past the buffer continues the range, a read elsewhere starts one there,
-//! and [`Remote::pump`] keeps the buffer filling while the engine runs the
+//! One range at a time, from where the restore reads to the image's end
+//! (an ordinary download from there), streams into a read-ahead buffer: a
+//! read at or just past the buffer continues it, and a read elsewhere
+//! starts one there, abandoning only what the TCP window has in flight.
+//! [`Remote::pump`] keeps the buffer filling while the engine runs the
 //! guest, so the download overlaps the restore's own writes. A range that
 //! fails resumes from its last byte received, a few times.
 use super::network::Shared;
@@ -20,9 +22,6 @@ use stela_runtime::{
     payload::{Layout, PayloadManifest, ReadAt},
 };
 
-/// Bytes one request asks for: a member streams in few requests, and a
-/// seek abandons only what the TCP window has in flight.
-const SPAN: u64 = 256 << 20;
 /// How far [`Remote::pump`] fills ahead of the restore.
 const AHEAD: usize = 32 << 20;
 /// A read up to this far past the buffered bytes continues the open range.
@@ -42,6 +41,8 @@ pub struct Remote {
     start: u64,
     buffer: VecDeque<u8>,
     range: Option<(Transfer, Ranged)>,
+    /// Ranges requested so far.
+    ranges: u64,
     /// Whether [`Remote::pump`] reads ahead: from a read that succeeded
     /// until a read-ahead fails.
     ahead: bool,
@@ -68,6 +69,7 @@ impl Remote {
             // socket's worth more, so the ring rarely grows.
             buffer: VecDeque::with_capacity(AHEAD + KEEP + (8 << 20)),
             range: None,
+            ranges: 0,
             ahead: false,
         })
     }
@@ -86,10 +88,15 @@ impl Remote {
     /// when none is open.
     fn step(&mut self) -> Result<(), NetError> {
         if self.range.is_none() {
-            let (first, last) = (self.end(), (self.end() + SPAN).min(self.len) - 1);
+            let (first, last) = (self.end(), self.len - 1);
             let request = http::get_range(&self.host, &self.path, first, last, Some(&self.etag))?;
             let transfer = self.network.0.borrow_mut().download(&self.host, request)?;
             self.range = Some((transfer, Ranged::new(first, last)));
+            self.ranges += 1;
+            output::arguments(format_args!(
+                "REMOTE IMAGE range {} bytes={first}-{last}\n",
+                self.ranges
+            ));
         }
         let (transfer, ranged) = self.range.as_mut().expect("opened above");
         let buffer = &mut self.buffer;
