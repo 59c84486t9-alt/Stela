@@ -45,8 +45,9 @@ const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
 /// (8 bytes per page). An exhausted half resets and refills everything; a
 /// 26A434 restore's userland filled 8 MiB halves 20 to 80 times a beat.
 const POOL_SHARE: u64 = 64;
-/// Host RAM left for the loader's own tables and pages after the sizing.
-const RESERVE_BYTES: u64 = 256 * MIB;
+/// Free host RAM bytes per byte of the engine heap and of the code arena.
+const HEAP_SHARE: u64 = 16;
+const CODE_SHARE: u64 = 64;
 /// The code arena divides into parts of whole 2 MiB pages.
 const CODE_ALIGNMENT: u64 = 16 * MIB;
 const BELOW_4G: u64 = 0xffff_f000;
@@ -140,24 +141,21 @@ struct Sizes {
 }
 
 impl Sizes {
-    /// The pool scales with the guest DRAM each of the `cores` executors
-    /// maps; the heap and arena take a share of what the guest and pool
-    /// leave, between their bounds. On a host too small for the guest the
-    /// parts keep their least sizes and the guest gets what remains.
-    fn for_host(free: u64, guest: u64, cores: usize) -> Self {
+    /// Each part takes a share of the `free` host RAM, between its bounds;
+    /// the guest gets everything left. The pool scales with the guest DRAM
+    /// each of the `cores` executors maps, of which `free` is the bound.
+    fn for_host(free: u64, cores: usize) -> Self {
         let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
             (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
         };
-        let pool = clamp(
-            (guest / POOL_SHARE).saturating_mul(cores as u64),
-            POOL_BYTES,
-            LARGE,
-        );
-        let spare = free.saturating_sub(guest + pool + RESERVE_BYTES);
         Self {
-            heap: clamp(spare / 2, HEAP_BYTES, LARGE),
-            code: clamp(spare / 8, CODE_BYTES, CODE_ALIGNMENT),
-            pool,
+            heap: clamp(free / HEAP_SHARE, HEAP_BYTES, LARGE),
+            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT),
+            pool: clamp(
+                (free / POOL_SHARE).saturating_mul(cores as u64),
+                POOL_BYTES,
+                LARGE,
+            ),
         }
     }
 }
@@ -183,6 +181,19 @@ fn free_ram() -> Result<u64, &'static str> {
             end.saturating_sub(start)
         })
         .sum())
+}
+
+/// Whether a firmware memory map entry is RAM: every type but the reserved,
+/// unusable, MMIO and PAL code ones.
+fn is_ram(ty: MemoryType) -> bool {
+    !matches!(
+        ty,
+        MemoryType::RESERVED
+            | MemoryType::UNUSABLE
+            | MemoryType::MMIO
+            | MemoryType::MMIO_PORT_SPACE
+            | MemoryType::PAL_CODE
+    )
 }
 
 fn read32(base: usize, offset: usize) -> usize {
@@ -543,11 +554,7 @@ fn load(
     let native_cores = crate::native_smp::requested(text)?;
     let (native_processors, cores) = crate::native_smp::firmware::capture_assignment(native_cores)
         .map_err(crate::native_smp::firmware::Error::message)?;
-    let guest = match option(text, crate::engine::RAM_OPTION) {
-        Some(bytes) => crate::engine::number(bytes)?,
-        None => crate::engine::DEFAULT_RAM,
-    };
-    let sizes = Sizes::for_host(free_ram()?, guest, cores);
+    let sizes = Sizes::for_host(free_ram()?, cores);
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
     // complete firmware reservation is covered before publishing the handoff.
@@ -773,7 +780,11 @@ fn load(
     let history_bytes = crate::status::history(&mut history);
     let mut guest = [Region::default(); MAX_GUEST_RANGES];
     let mut count = 0;
+    let mut installed = 0;
     for entry in map.entries() {
+        if is_ram(entry.ty) {
+            installed += entry.page_count * PAGE;
+        }
         if !matches!(
             entry.ty,
             MemoryType::CONVENTIONAL
@@ -826,6 +837,7 @@ fn load(
             wall_tsc,
             guest,
             guest_count: count,
+            installed,
             storage,
             host_firmware,
             power,

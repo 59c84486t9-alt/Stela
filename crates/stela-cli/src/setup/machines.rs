@@ -23,7 +23,7 @@ use super::{
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
-use stela_loader::{boot_bundle::Options as BundleOptions, mount_interface::MAX_CHOICES};
+use stela_loader::mount_interface::MAX_CHOICES;
 
 /// The first install's name unless `--install` gives one.
 pub(super) const FIRST_NAME: &str = "macOS";
@@ -141,7 +141,6 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
             serial: command.disk_serial.as_deref(),
             erase_target: command.erase_target,
             initialize_nor: command.initialize_nor,
-            dram_bytes: BundleOptions::default().dram_size,
             usb_disk: usb_disk.as_deref(),
             external_disks: false,
         },

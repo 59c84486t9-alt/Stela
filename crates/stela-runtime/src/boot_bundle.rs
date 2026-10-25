@@ -226,6 +226,11 @@ pub struct Machine {
     pub dram_base: u64,
     /// Guest DRAM bytes actually backed from `dram_base`.
     pub ram_bytes: u64,
+    /// The DRAM the Mac reports (`/chosen dram-size`, `memSizeActual`):
+    /// the backed bytes and, above them, the host memory Stela and the
+    /// firmware keep, which the kernel never manages, as with iBoot's
+    /// carveouts.
+    pub dram_bytes: u64,
     /// The counter rate `CNTFRQ_EL0` reports.
     pub timebase_hz: u64,
     pub framebuffer: Option<Framebuffer>,
@@ -259,6 +264,34 @@ impl Machine {
             }
             Some(_) => Err("the framebuffer does not end the backed RAM"),
         }
+    }
+}
+
+impl Manifest {
+    /// The cores' lock registers iBoot leaves on `machine`. Where the chip
+    /// keeps memory tags, SPTM requires TAG_OFFSET_EL2 at the top of the
+    /// managed range, sized for `/chosen dram-size`
+    /// ([`crate::machine::tag_storage`]), so its value follows the machine's
+    /// DRAM rather than the prepared one.
+    pub fn core_locks(
+        &self,
+        machine: &Machine,
+    ) -> Result<Option<crate::machine::ctrr::Handoff>, BundleError> {
+        let Some(mut locks) = self.core_locks.clone() else {
+            return Ok(None);
+        };
+        if locks.tag_offset != 0 {
+            let fail = |reason: &str| BundleError::Machine(format!("tag storage: {reason}"));
+            let phys_base = self.options.phys_base;
+            let managed = machine.managed_end().map_err(fail)? - phys_base;
+            locks.tag_offset =
+                crate::machine::tag_storage::hand_off(phys_base, managed, machine.dram_bytes)
+                    .ok_or_else(|| fail("its base does not fit TAG_OFFSET_EL2"))?;
+            if crate::machine::tag_storage::base(locks.tag_offset) < self.top_of_kernel_data {
+                return Err(fail("it overlaps the loaded regions"));
+            }
+        }
+        Ok(Some(locks))
     }
 }
 
@@ -461,7 +494,7 @@ impl<'a> Verified<'a> {
         let options = &self.manifest.options;
         let value = match (patch.source.as_str(), patch.field.as_str()) {
             ("dram-size", "/chosen dram-size" | "boot_args.memSizeActual") => {
-                Some(u64_value(machine.ram_bytes))
+                Some(u64_value(machine.dram_bytes))
             }
             ("dram-size", "boot_args.memSize") => Some(u64_value(
                 machine.managed_end().map_err(error)? - options.phys_base,
@@ -574,6 +607,12 @@ impl<'a> Verified<'a> {
             .dram_base
             .checked_add(machine.ram_bytes)
             .ok_or_else(|| BundleError::Machine("DRAM range overflows".into()))?;
+        if machine.dram_bytes < machine.ram_bytes {
+            return Err(BundleError::Machine(format!(
+                "the Mac's {:#x} bytes of DRAM hold fewer than the {:#x} backed",
+                machine.dram_bytes, machine.ram_bytes
+            )));
+        }
         if self.manifest.top_of_kernel_data > ram_end || options.phys_base < machine.dram_base {
             return Err(BundleError::Machine(format!(
                 "the bundle needs DRAM up to {:#x}; {:#x} bytes are backed",
@@ -729,6 +768,7 @@ mod tests {
         Machine {
             dram_base: BASE,
             ram_bytes: FRAME_BYTES,
+            dram_bytes: FRAME_BYTES,
             timebase_hz: 24_000_000,
             framebuffer: None,
             boot_args: None,
@@ -867,6 +907,40 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn the_mac_reports_the_installed_dram_above_the_backed_range() -> Result<(), BundleError> {
+        let kernel = [0xaa; 100];
+        let tree = [0x11; 20];
+        let json = manifest_json(&kernel, &tree);
+        let manifest = Manifest::parse(json.as_bytes())?;
+        let files: BTreeMap<&str, &[u8]> =
+            BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
+        let verified = manifest.verify(&|name| files.get(name).copied())?;
+        let mut ram = vec![0xffu8; FRAME_BYTES as usize];
+        let mut entropy = |buffer: &mut [u8]| {
+            buffer.fill(0x42);
+            Ok(())
+        };
+        // Host memory Stela keeps shows as DRAM the kernel does not manage.
+        let kept = Machine {
+            dram_bytes: 3 * FRAME_BYTES,
+            ..machine()
+        };
+        verified.load(&kept, &mut entropy, &mut |pa, bytes| {
+            write_into(&mut ram, pa, bytes)
+        })?;
+        assert_eq!(&ram[0x4000..0x4008], &(3 * FRAME_BYTES).to_le_bytes());
+        let short = Machine {
+            dram_bytes: FRAME_BYTES - 0x4000,
+            ..machine()
+        };
+        assert!(matches!(
+            verified.load(&short, &mut entropy, &mut |_, _| true),
+            Err(BundleError::Machine(_))
+        ));
+        Ok(())
     }
 
     #[test]

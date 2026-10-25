@@ -100,8 +100,7 @@ pub(crate) trait Host {
     fn unmount(&self, partition: &PartitionInfo) -> Result<()>;
     /// Mount the volume on partition `identifier` and return where.
     fn mount(&self, identifier: &str) -> Result<PathBuf>;
-    /// This computer's memory and CPU, for a disk it boots itself.
-    fn memory_bytes(&self) -> Result<u64>;
+    /// This computer's CPU, for a disk it boots itself.
     fn cpu(&self) -> Result<Cpu>;
 }
 
@@ -235,17 +234,6 @@ impl Host for System {
         let mount = text(&info, "MountPoint");
         ensure!(!mount.is_empty(), "diskutil mounted {identifier} nowhere");
         Ok(PathBuf::from(mount))
-    }
-
-    fn memory_bytes(&self) -> Result<u64> {
-        let output = Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .context("cannot run sysctl")?;
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .context("sysctl hw.memsize is not a number")
     }
 
     fn cpu(&self) -> Result<Cpu> {

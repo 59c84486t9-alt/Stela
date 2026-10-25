@@ -70,10 +70,9 @@ const TARGET_SERIAL: &str = "STELA-TARGET-01";
 const SYNTHETIC_SLICE_BYTES: u64 = 400_000;
 
 /// Stela's system-mode test kernel (`boot/kernel.S`), loaded 16 KiB into the
-/// J473AP DRAM base with 4 GiB of guest DRAM.
+/// J473AP DRAM base.
 const KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kernel.bin"));
-const KERNEL_OPTIONS: &str =
-    "--system --load 0x800004000 --entry 0x800004000 --ram-bytes 0x100000000";
+const KERNEL_OPTIONS: &str = "--system --load 0x800004000 --entry 0x800004000";
 /// What the test kernel must leave in X0-X10 when it idles; X1 and X2, its
 /// tasks' SVC counts, need only be nonzero.
 const KERNEL_RESULTS: [(usize, Option<u64>); 11] = [
@@ -94,8 +93,8 @@ const KERNEL_RESULTS: [(usize, Option<u64>); 11] = [
     (10, Some(0x0040_0000_0000_0000)),
 ];
 
-/// System options for a boot bundle: the J473AP DRAM base and 8 GiB.
-const BUNDLE_OPTIONS: &str = "--system --bundle \\EFI\\stela\\bundle --ram-bytes 0x200000000";
+/// System options for a boot bundle, which gets the VM's free RAM.
+const BUNDLE_OPTIONS: &str = "--system --bundle \\EFI\\stela\\bundle";
 
 /// The line the test kernel writes through the S5L UART model.
 const KERNEL_BANNER: &str = "GUEST| STELA TEST KERNEL: MMU ON, UART MMIO";

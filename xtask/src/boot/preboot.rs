@@ -106,10 +106,7 @@ pub fn prepare(path: &Path) -> Result<Preboot> {
 impl Preboot {
     /// The mount options: system mode on the bundle built from this disk.
     pub fn options(&self) -> String {
-        format!(
-            "--system --preboot {SERIAL}:{} --ram-bytes {:#x}",
-            self.partition, self.expected.options.dram_size
-        )
+        format!("--system --preboot {SERIAL}:{}", self.partition)
     }
 
     /// Attach the image read-only to the guest through a snapshot overlay.

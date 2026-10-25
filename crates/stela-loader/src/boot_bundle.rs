@@ -2055,30 +2055,6 @@ fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>>
             Encoding::Bytes,
             "u64 framebuffer base, u64 framebuffer bytes",
         ),
-        (
-            "/chosen",
-            "display-rotation",
-            PatchSource::Framebuffer,
-            false,
-            Encoding::Bytes,
-            "u32 degrees, from boot_args.Video.v_depth bits 8..15",
-        ),
-        (
-            "/chosen",
-            "display-scale",
-            PatchSource::Framebuffer,
-            false,
-            Encoding::Bytes,
-            "u32 scale, boot_args.Video.v_depth bits 16..23 plus one",
-        ),
-        (
-            "/chosen",
-            "display-boot-rotation",
-            PatchSource::Framebuffer,
-            false,
-            Encoding::Bytes,
-            "u32 degrees, from boot_args.Video.v_depth bits 24..31",
-        ),
     ];
     let bytes = tree.serialize();
     for &(path, property, source, required, encoding, rule) in slots {
@@ -2094,6 +2070,38 @@ fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>>
             bytes: at.value_bytes as u64,
             encoding,
             field: format!("{path} {property}"),
+            prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + at.value_bytes]),
+            rule: rule.into(),
+        });
+    }
+    // iBoot fills the display configuration in place, only where the
+    // template has it (26A434 J473 iBoot 0x24148..0x2425c).
+    for (property, rule) in [
+        (
+            "display-rotation",
+            "u32 degrees, from boot_args.Video.v_depth bits 8..15",
+        ),
+        (
+            "display-scale",
+            "u32 scale, boot_args.Video.v_depth bits 16..23 plus one",
+        ),
+        (
+            "display-boot-rotation",
+            "u32 degrees, from boot_args.Video.v_depth bits 24..31",
+        ),
+    ] {
+        let Ok(at) = tree.locate("/chosen", property) else {
+            continue;
+        };
+        patches.push(Patch {
+            source: PatchSource::Framebuffer,
+            required: false,
+            region: region.name.clone(),
+            file: region.file.clone(),
+            file_offset: at.value_offset as u64,
+            bytes: at.value_bytes as u64,
+            encoding: Encoding::Bytes,
+            field: format!("/chosen {property}"),
             prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + at.value_bytes]),
             rule: rule.into(),
         });
@@ -3341,6 +3349,7 @@ mod tests {
         let machine = stela_runtime::boot_bundle::Machine {
             dram_base: options.dram_base,
             ram_bytes: span as u64,
+            dram_bytes: span as u64,
             timebase_hz: 24_000_000,
             framebuffer: None,
             boot_args: None,

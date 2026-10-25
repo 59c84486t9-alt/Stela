@@ -30,9 +30,6 @@ use stela_runtime::{
     pc::{boot_log, machine_state},
 };
 
-/// Memory the PC keeps for itself beyond the guest's DRAM: the engine's
-/// heap, translations and the firmware's own.
-const HOST_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 /// LBA 1 at 512-byte or 4096-byte blocks.
 const GPT_HEADER_OFFSETS: [u64; 2] = [512, 4096];
@@ -91,14 +88,14 @@ impl InstalledDisk {
     /// The engine options that boot it: macOS from its Preboot volume, or
     /// recoveryOS from `recovery` as NVRAM chooses. The bundle `stela.efi`
     /// builds from Preboot carries the machine's `ecid`.
-    pub(super) fn options(&self, recovery: &str, dram_bytes: u64, ecid: Option<Ecid>) -> String {
+    pub(super) fn options(&self, recovery: &str, ecid: Option<Ecid>) -> String {
         let region = self.region_target();
         let ecid = ecid
             .map(|ecid| format!(" --ecid {ecid}"))
             .unwrap_or_default();
         format!(
             "--system --storage {region} --nor {} --preboot {region} --recovery-bundle \
-             {recovery} --ram-bytes {dram_bytes:#x}{ecid}{}",
+             {recovery}{ecid}{}",
             self.nor_target(),
             self.external()
         )
@@ -107,18 +104,12 @@ impl InstalledDisk {
     /// The options of its System Recovery, as `stela.efi` routes a
     /// recoveryOS choice of NVRAM (`boot_selection::route`): the disk and
     /// NVRAM stay, `--bundle` replaces `--preboot`.
-    pub(super) fn recovery_options(
-        &self,
-        recovery: &str,
-        dram_bytes: u64,
-        ecid: Option<Ecid>,
-    ) -> String {
+    pub(super) fn recovery_options(&self, recovery: &str, ecid: Option<Ecid>) -> String {
         let ecid = ecid
             .map(|ecid| format!(" --ecid {ecid}"))
             .unwrap_or_default();
         format!(
-            "--system --storage {} --nor {} --bundle {recovery} --ram-bytes \
-             {dram_bytes:#x}{ecid}{}",
+            "--system --storage {} --nor {} --bundle {recovery}{ecid}{}",
             self.region_target(),
             self.nor_target(),
             self.external()
@@ -291,7 +282,6 @@ pub(super) struct Request<'a> {
     pub(super) serial: Option<&'a str>,
     pub(super) erase_target: bool,
     pub(super) initialize_nor: bool,
-    pub(super) dram_bytes: u64,
     /// The setup USB's whole disk, which holds neither partition, unless
     /// the Apple region is the USB's own (`external_disks`).
     pub(super) usb_disk: Option<&'a str>,
@@ -412,14 +402,6 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     ensure!(
         cpu.entropy,
         "this PC's CPU has neither RDSEED nor RDRAND, which the kernel's seeds need"
-    );
-    let memory = host.memory_bytes()?;
-    ensure!(
-        memory >= request.dram_bytes + HOST_RESERVE_BYTES,
-        "this PC has {:.1} GiB of memory; the guest's {} GiB and Stela need {:.1} GiB",
-        memory as f64 / (1u64 << 30) as f64,
-        request.dram_bytes >> 30,
-        (request.dram_bytes + HOST_RESERVE_BYTES) as f64 / (1u64 << 30) as f64
     );
     ensure!(
         request.nor != Some(request.apple_region),

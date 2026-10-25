@@ -503,26 +503,33 @@ pub fn enters_recovery_os(
     Ok(manifest(files, built)?.options.osenvironment.as_deref() == Some("recoveryos"))
 }
 
-/// Load the bundle the loader read into guest DRAM `[dram_base, dram_base +
-/// ram_bytes)`, with the guest framebuffer when the machine shows one.
+/// The guest's DRAM: `backed` bytes of host RAM from `base`, within the
+/// `installed` bytes the Mac reports.
+#[derive(Debug, Clone, Copy)]
+pub struct Dram {
+    pub base: u64,
+    pub backed: u64,
+    pub installed: u64,
+}
+
+/// Load the bundle the loader read into guest DRAM `dram`, with the guest
+/// framebuffer when the machine shows one.
 pub fn load(
     host: &mut impl Host,
     files: &[File],
-    dram_base: u64,
-    ram_bytes: u64,
+    dram: Dram,
     framebuffer: Option<Framebuffer>,
     nvram: Option<Nvram>,
 ) -> Result<Entry, String> {
     let named = |name: &str| files.iter().find(|file| file.name() == name).map(contents);
-    load_named(host, &named, dram_base, ram_bytes, framebuffer, nvram)
+    load_named(host, &named, dram, framebuffer, nvram)
 }
 
 /// Load a bundle built in the heap, as [`from_disk`] returns it.
 pub fn load_built(
     host: &mut impl Host,
     files: &[(String, Vec<u8>)],
-    dram_base: u64,
-    ram_bytes: u64,
+    dram: Dram,
     framebuffer: Option<Framebuffer>,
     nvram: Option<Nvram>,
 ) -> Result<Entry, String> {
@@ -532,14 +539,13 @@ pub fn load_built(
             .find(|(file, _)| file == name)
             .map(|(_, bytes)| bytes.as_slice())
     };
-    load_named(host, &named, dram_base, ram_bytes, framebuffer, nvram)
+    load_named(host, &named, dram, framebuffer, nvram)
 }
 
 fn load_named<'a>(
     host: &mut impl Host,
     named: &impl Fn(&str) -> Option<&'a [u8]>,
-    dram_base: u64,
-    ram_bytes: u64,
+    dram: Dram,
     framebuffer: Option<Framebuffer>,
     nvram: Option<Nvram>,
 ) -> Result<Entry, String> {
@@ -574,7 +580,7 @@ fn load_named<'a>(
             if let Some(trace) = trace {
                 trace
                     .validate(
-                        dram_base,
+                        dram.base,
                         manifest.options.phys_base,
                         manifest
                             .regions
@@ -588,8 +594,9 @@ fn load_named<'a>(
         .transpose()?
         .flatten();
     let machine = Machine {
-        dram_base,
-        ram_bytes,
+        dram_base: dram.base,
+        ram_bytes: dram.backed,
+        dram_bytes: dram.installed,
         timebase_hz: TIMEBASE_HZ,
         framebuffer,
         boot_args: None,
@@ -601,6 +608,10 @@ fn load_named<'a>(
             host.write_ram(pa, data)
         })
         .map_err(|e| format!("{e}"))?;
+    let core_locks = manifest
+        .core_locks(&machine)
+        .map_err(|e| format!("{e}"))?
+        .unwrap_or_default();
     trace_record(host, &mut trace, *b"ELOD")?;
     if let Some(region) = trace_region {
         if !host.write_ram(region.base, trace.bytes()) {
@@ -625,7 +636,7 @@ fn load_named<'a>(
         x0: image.x0,
         boot_processor: Some(source.boot_processor()),
         hidden_clpc: source.hidden_clpc().to_vec(),
-        dram_base,
+        dram_base: dram.base,
         regions: image.regions.len(),
         patches: image.patches.len(),
         kept: image.kept,
@@ -635,7 +646,7 @@ fn load_named<'a>(
         read_only_region: manifest
             .read_only_region
             .map(|region| (region.base, region.bytes)),
-        core_locks: manifest.core_locks.unwrap_or_default(),
+        core_locks,
     })
 }
 

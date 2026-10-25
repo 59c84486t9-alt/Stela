@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     const CONFIG: &str = "--system --storage S:G --nor S:N --preboot S:G \
-                          --recovery-bundle \\EFI\\stela\\recovery --ram-bytes 0x200000000";
+                          --recovery-bundle \\EFI\\stela\\recovery";
 
     #[test]
     fn macos_boots_keep_the_preboot_disk_and_name_the_volume() {
@@ -1032,7 +1032,7 @@ mod tests {
         ]);
         let (options, log) = route(CONFIG, Some(&select(&vars).unwrap())).unwrap();
         let expected = format!(
-            "--system --storage S:G --nor S:N --preboot S:G --ram-bytes 0x200000000 \
+            "--system --storage S:G --nor S:N --preboot S:G \
              --boot-volume {} --boot-command 9 --safe-boot",
             String::from_utf8(volume(VolumeType::Apfs)).unwrap()
         );
@@ -1093,7 +1093,7 @@ mod tests {
         let (options, log) = route(CONFIG, Some(&selection)).unwrap();
         assert_eq!(
             options,
-            "--system --storage S:G --nor S:N --ram-bytes 0x200000000 \
+            "--system --storage S:G --nor S:N \
              --bundle \\EFI\\stela\\recovery"
         );
         assert!(log.starts_with("System Recovery"));

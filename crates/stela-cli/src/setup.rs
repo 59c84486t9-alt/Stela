@@ -72,10 +72,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use stela_loader::{
-    boot_bundle::Options as BundleOptions,
-    mount_interface::{self, Choice, Choices, Interface},
-};
+use stela_loader::mount_interface::{self, Choice, Choices, Interface};
 
 /// The pinned system target.
 pub(crate) const PINNED_BUILD: &str = "26A434";
@@ -522,17 +519,13 @@ impl Record {
 
     /// The option line that boots `install`, or the setup's own recoveryOS.
     fn boot_line(&self, install: Option<&machines::Install>) -> String {
-        let dram_bytes = BundleOptions::default().dram_size;
         match install {
-            Some(install) => self.line(install.disk.options(
-                &self.recovery(install.ecid),
-                dram_bytes,
-                install.ecid,
-            )),
-            None => self.line(format!(
-                "--system --bundle {} --ram-bytes {dram_bytes:#x}",
-                self.recovery(self.ecid)
-            )),
+            Some(install) => self.line(
+                install
+                    .disk
+                    .options(&self.recovery(install.ecid), install.ecid),
+            ),
+            None => self.line(format!("--system --bundle {}", self.recovery(self.ecid))),
         }
     }
 
@@ -591,11 +584,7 @@ impl Record {
             return None;
         }
         let restore = bundle::firmware_path_of(kind, &self.build, install.ecid, self.generation());
-        let base = install.disk.recovery_options(
-            &restore,
-            BundleOptions::default().dram_size,
-            install.ecid,
-        );
+        let base = install.disk.recovery_options(&restore, install.ecid);
         let update = if kind == Kind::Update {
             format!(" {UPDATE_RESTORE}")
         } else {
@@ -653,7 +642,6 @@ impl Record {
     /// None without an installed disk.
     fn choices(&self) -> Option<Choices> {
         let default = self.default()?;
-        let dram_bytes = BundleOptions::default().dram_size;
         let mut entries = Vec::new();
         let others = self.installs.iter().filter(|i| i.name != default.name);
         for install in std::iter::once(default).chain(others) {
@@ -664,11 +652,11 @@ impl Record {
             entries.push(Choice {
                 name: format!("{} - System Recovery", install.name),
                 options: self
-                    .line(install.disk.recovery_options(
-                        &self.recovery(install.ecid),
-                        dram_bytes,
-                        install.ecid,
-                    ))
+                    .line(
+                        install
+                            .disk
+                            .recovery_options(&self.recovery(install.ecid), install.ecid),
+                    )
                     .trim()
                     .into(),
             });
@@ -1834,7 +1822,6 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
             command.usb.display()
         );
     }
-    let dram_bytes = BundleOptions::default().dram_size;
     let usb_disk = host.volume(&esp)?.disk;
     // Without --target, a raw partition of the USB is the Mac's internal
     // SSD, and the PC's disks its external drives.
@@ -1853,7 +1840,6 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
                 serial: command.disk_serial.as_deref(),
                 erase_target: command.erase_target,
                 initialize_nor: command.initialize_nor,
-                dram_bytes,
                 usb_disk: usb_disk.as_deref(),
                 external_disks: stick.is_some(),
             },
@@ -1972,11 +1958,6 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     record.translations = store;
     record.options = record.options_text();
     record.choices_text()?;
-    notes.push(format!(
-        "recoveryOS runs in {} GiB of guest memory, so the PC needs more RAM than that free \
-         when it boots the entry.",
-        dram_bytes >> 30
-    ));
     notes.push(match &installed {
         Some(checked) => format!(
             "The Install macOS (Stela) startup choice restores the install medium onto {} as \
@@ -2326,7 +2307,6 @@ mod tests {
         /// Partitions of the PC's disk, each backed by an image file.
         pub(super) partitions: BTreeMap<String, (PartitionInfo, PathBuf)>,
         pub(super) serials: BTreeMap<String, String>,
-        pub(super) memory: u64,
         pub(super) cpu: Cpu,
         /// The partitions `unmount` unmounted, in order.
         pub(super) unmounted: std::cell::RefCell<Vec<String>>,
@@ -2344,7 +2324,6 @@ mod tests {
                 disks,
                 partitions: BTreeMap::new(),
                 serials: BTreeMap::new(),
-                memory: 32 * GIB,
                 cpu: Cpu { entropy: true },
                 unmounted: Default::default(),
                 mountable: BTreeMap::new(),
@@ -2418,9 +2397,6 @@ mod tests {
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(data)?;
             Ok(())
-        }
-        fn memory_bytes(&self) -> Result<u64> {
-            Ok(self.memory)
         }
         fn cpu(&self) -> Result<Cpu> {
             Ok(self.cpu)
@@ -2698,8 +2674,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
             format!(
-                "--system --bundle \\EFI\\stela\\boot\\{}\\{} --ram-bytes \
-                 0x200000000\n",
+                "--system --bundle \\EFI\\stela\\boot\\{}\\{}\n",
                 restore::payload::SYNTHETIC_BUILD,
                 bundle::leaf(Some(ecid), current())
             )
@@ -2899,7 +2874,8 @@ mod tests {
         assert!(
             migrated
                 .options_text()
-                .contains("\\boot\\STELA1\\recovery ")
+                .split_ascii_whitespace()
+                .any(|word| word.ends_with("\\boot\\STELA1\\recovery"))
         );
         // The markerless stela.efi it has must be updated before changes.
         let error = rerun(&f, |c| c.no_tss = true).unwrap_err().to_string();
@@ -3198,7 +3174,7 @@ mod tests {
         );
         let line = format!(
             "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --preboot {region} \
-             --recovery-bundle {recovery} --ram-bytes 0x200000000 --ecid {ecid} --tss"
+             --recovery-bundle {recovery} --ecid {ecid} --tss"
         );
         assert_eq!(
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
@@ -3216,7 +3192,7 @@ mod tests {
             choices.entries[1].options,
             format!(
                 "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --bundle {recovery} \
-                 --ram-bytes 0x200000000 --ecid {ecid} --tss"
+                 --ecid {ecid} --tss"
             )
         );
         // That line is what stela.efi routes a System Recovery choice to.
@@ -3242,7 +3218,7 @@ mod tests {
             choices.entries[2].options,
             format!(
                 "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --bundle \
-                 \\EFI\\stela\\boot\\{build}\\{} --ram-bytes 0x200000000 --ecid {ecid} \
+                 \\EFI\\stela\\boot\\{build}\\{} --ecid {ecid} \
                  --install \\EFI\\stela\\install\\{build}\\payload.json --install-source \
                  {STELA_GUID} --tss",
                 bundle::leaf_of(Kind::Restore, Some(ecid), current())
@@ -3430,9 +3406,6 @@ mod tests {
         assert!(refusal(&f, &|_| {}).contains("is mounted"));
         f.host.partitions.get_mut(NOR).unwrap().0.mount = None;
         assert!(refusal(&f, &|c| c.nor = Some(REGION.into())).contains("two partitions"));
-        f.host.memory = 8 * GIB;
-        assert!(refusal(&f, &|_| {}).contains("GiB of memory"));
-        f.host.memory = 32 * GIB;
         f.host.cpu.entropy = false;
         assert!(refusal(&f, &|_| {}).contains("RDSEED"));
         f.host.cpu.entropy = true;
@@ -3889,7 +3862,13 @@ mod tests {
             migrated.ends_with(&leaf) && leaf.contains(&format!("-s{next_schema}")),
             "{leaf}"
         );
-        assert!(options().contains(&format!("{leaf} ")), "{}", options());
+        assert!(
+            options()
+                .split_ascii_whitespace()
+                .any(|word| word.ends_with(&leaf)),
+            "{}",
+            options()
+        );
         // The old bundle stays for the rollback, which boots it again.
         assert!(old.join("bundle.json").is_file());
         rerun(&f, |c| c.rollback = true).unwrap();
@@ -4760,7 +4739,7 @@ mod tests {
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
             format!(
                 "--system --storage {region} --nor {region} --preboot {region} \
-                 --recovery-bundle {recovery} --ram-bytes 0x200000000 --ecid {ecid} --tss\n"
+                 --recovery-bundle {recovery} --ecid {ecid} --tss\n"
             )
         );
         let choices =
@@ -4769,7 +4748,7 @@ mod tests {
             choices.entries[1].options,
             format!(
                 "--system --storage {region} --nor {region} --bundle {recovery} \
-                 --ram-bytes 0x200000000 --ecid {ecid} --tss"
+                 --ecid {ecid} --tss"
             )
         );
         // Setup itself wrote neither the SSD nor the machine state.

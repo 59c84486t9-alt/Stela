@@ -168,6 +168,9 @@ pub struct Handoff {
     /// Free host RAM after boot services, in 2 MiB-aligned ranges.
     pub guest: [Region; MAX_GUEST_RANGES],
     pub guest_count: usize,
+    /// The host's RAM in the firmware's memory map, every RAM type
+    /// included: the DRAM the guest Mac reports.
+    pub installed: u64,
     /// The host storage drivers' ranges, for a bundle built from a disk.
     pub storage: Storage,
     /// Host-device firmware, separate from guest boot-bundle files.

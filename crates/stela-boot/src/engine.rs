@@ -80,12 +80,6 @@ pub const EXTERNAL_DISKS_OPTION: &str = "--external-disks";
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
-/// The guest DRAM asked for without `--ram-bytes`, and the least a smaller
-/// host may shrink a larger request to.
-pub(crate) const DEFAULT_RAM: u64 = 4 << 30;
-/// The most guest DRAM bytes, which a host with less free RAM shrinks to
-/// whole GiB.
-pub(crate) const RAM_OPTION: &str = "--ram-bytes";
 /// The most of the engine heap (at least 512 MiB) `--storage-ram` may
 /// take for written blocks; a restore or recovery boot writes far less.
 const RAM_STORAGE_LIMIT: usize = 64 << 20;
@@ -106,7 +100,12 @@ struct Options {
     dram_base: u64,
     /// `--dram-base` was given; otherwise a bundle's own base applies.
     dram_explicit: bool,
+    /// Guest DRAM backed by host RAM: all the host has free
+    /// ([`guest_ram`]).
     ram_bytes: u64,
+    /// The DRAM the Mac reports: the host's RAM, of which what Stela and
+    /// the firmware keep shows as memory the kernel does not manage.
+    dram_bytes: u64,
     load: u64,
     entry: u64,
     x0: u64,
@@ -281,7 +280,8 @@ impl Options {
         let mut options = Self {
             dram_base: DRAM_BASE,
             dram_explicit: false,
-            ram_bytes: DEFAULT_RAM,
+            ram_bytes: 0,
+            dram_bytes: 0,
             load: DRAM_BASE,
             entry: DRAM_BASE,
             x0: 0,
@@ -586,7 +586,6 @@ impl Options {
                     options.dram_base = value;
                     options.dram_explicit = true;
                 }
-                RAM_OPTION => options.ram_bytes = value,
                 "--load" => options.load = value,
                 "--entry" => options.entry = value,
                 "--x0" => options.x0 = value,
@@ -657,8 +656,8 @@ impl Options {
         if options.recovery.is_some() && options.safe_boot {
             return Err("a recoveryOS boot is not a safe-mode boot");
         }
-        if !options.dram_base.is_multiple_of(LARGE) || options.ram_bytes < LARGE {
-            return Err("guest DRAM base must be 2 MiB aligned and hold at least 2 MiB");
+        if !options.dram_base.is_multiple_of(LARGE) {
+            return Err("guest DRAM base must be 2 MiB aligned");
         }
         Ok(options)
     }
@@ -768,41 +767,31 @@ unsafe fn write_msr(msr: u32, value: u64) {
     }
 }
 
-/// Assign guest DRAM from the free host ranges, lowest first: the bytes
-/// asked for, or on a host with less free RAM what it has in whole GiB, down
-/// to [`DEFAULT_RAM`] (`docs/design/system.md#memory-sizing`).
+/// Back guest DRAM with every free host range, lowest first, and report
+/// the host's whole RAM as the Mac's, so what Stela and the firmware keep
+/// shows as memory the kernel does not manage
+/// (`docs/design/system.md#memory-sizing`).
 fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>, &'static str> {
-    const GIB: u64 = 1 << 30;
-    let regions = &handoff.guest[..handoff.guest_count];
-    let available: u64 = regions.iter().map(|region| region.bytes).sum();
-    let requested = options.ram_bytes;
-    if available < requested {
-        if available < requested.min(DEFAULT_RAM) {
-            output::arguments(format_args!(
-                "guest DRAM requested={requested:#x} available={available:#x}\n"
-            ));
-            return Err("not enough free host RAM for the requested guest DRAM");
-        }
-        options.ram_bytes = (available / GIB * GIB).max(requested.min(DEFAULT_RAM));
-        output::arguments(format_args!(
-            "guest DRAM shrunk from {requested:#x} to {:#x}: the host has {available:#x} free\n",
-            options.ram_bytes
-        ));
-    }
     let mut ranges = Vec::new();
     let mut assigned = 0;
-    for region in regions {
-        if assigned == options.ram_bytes {
-            break;
-        }
-        let bytes = region.bytes.min(options.ram_bytes - assigned);
+    for region in &handoff.guest[..handoff.guest_count] {
         ranges.push(RamRange {
             guest: options.dram_base + assigned,
             host: region.physical,
-            bytes,
+            bytes: region.bytes,
         });
-        assigned += bytes;
+        assigned += region.bytes;
     }
+    if assigned < LARGE {
+        return Err("no free host RAM is left for the guest");
+    }
+    options.ram_bytes = assigned;
+    options.dram_bytes = (handoff.installed & !(LARGE - 1)).max(assigned);
+    output::arguments(format_args!(
+        "GUEST DRAM backed={assigned:#x} reported={:#x} kept={:#x}\n",
+        options.dram_bytes,
+        options.dram_bytes - assigned
+    ));
     Ok(ranges)
 }
 
@@ -1632,12 +1621,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let (entry, x0) = if options.bundle {
         crate::status::begin("Loading macOS into memory");
         let files = &handoff.files[..handoff.file_count];
-        let (dram_base, ram_bytes) = (options.dram_base, options.ram_bytes);
+        let dram = bundle::Dram {
+            base: options.dram_base,
+            backed: options.ram_bytes,
+            installed: options.dram_bytes,
+        };
         let loaded = match &built {
-            Some(built) => {
-                bundle::load_built(&mut bare, built, dram_base, ram_bytes, framebuffer, nvram)
-            }
-            None => bundle::load(&mut bare, files, dram_base, ram_bytes, framebuffer, nvram),
+            Some(built) => bundle::load_built(&mut bare, built, dram, framebuffer, nvram),
+            None => bundle::load(&mut bare, files, dram, framebuffer, nvram),
         };
         let loaded = match loaded {
             Ok(loaded) => loaded,
