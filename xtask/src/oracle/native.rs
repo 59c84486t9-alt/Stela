@@ -323,10 +323,12 @@ impl Translation {
     }
 
     /// Admit a System word the system-mode profile exits on, after only
-    /// hints it compiles inline, which access no memory.
+    /// hints and ISBs it compiles inline, which access no memory.
     pub fn system(words: &[u32]) -> Result<Self> {
         const HINT_MASK: u32 = 0xffff_f01f;
         const HINT: u32 = 0xd503_201f;
+        const ISB_MASK: u32 = 0xffff_f0ff;
+        const ISB: u32 = 0xd503_30df;
         let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
         let compiled = stela_compiler::block::compile_for_target(
             &source,
@@ -337,8 +339,10 @@ impl Translation {
         .map_err(|error| anyhow::anyhow!(error))?;
         let inline = compiled.native.source_map.len() - 1;
         ensure!(
-            words[..inline].iter().all(|word| word & HINT_MASK == HINT),
-            "system lane cases run only hints before the System word that ends their block"
+            words[..inline]
+                .iter()
+                .all(|word| word & HINT_MASK == HINT || word & ISB_MASK == ISB),
+            "system lane cases run only hints and ISBs before the System word that ends their block"
         );
         Ok(Self::System)
     }
