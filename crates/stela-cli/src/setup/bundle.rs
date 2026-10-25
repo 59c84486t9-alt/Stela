@@ -10,8 +10,8 @@
 //! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
 //!   --restore`), which the Install macOS (Stela) choice boots;
 //! - `update-<ECID>`: a machine's update restore bundle (`stela boot
-//!   prepare --restore --update`), which the Update macOS (Stela) choice
-//!   boots;
+//!   prepare --restore --update`), which earlier setups' Update macOS
+//!   (Stela) choice booted; setup prepares none now;
 //! - any of these with `-s<schema>` for another schema and `-r<revision>`
 //!   for another revision, so a Stela update that reads a new schema or
 //!   prepares a new revision adds its bundles beside the old ones and its
@@ -79,8 +79,11 @@ pub(super) enum Kind {
     Update,
 }
 
-/// The kinds the install medium's restores boot: erase, then update.
-pub(super) const RESTORE_KINDS: [Kind; 2] = [Kind::Restore, Kind::Update];
+/// The kinds the install medium's restores boot: the erase restore alone.
+/// The medium holds the recovery members only
+/// (`restore::payload::trim`), which have no update identity; the installed
+/// macOS updates itself, as on a Mac.
+pub(super) const RESTORE_KINDS: [Kind; 1] = [Kind::Restore];
 
 impl Kind {
     fn is_recovery(&self) -> bool {

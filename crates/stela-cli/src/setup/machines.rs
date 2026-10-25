@@ -356,8 +356,8 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
             if record.active_medium().is_some() {
                 writeln!(
                     text,
-                    "  choices.cfg    drops the Install and Update macOS (Stela) choices: the \
-                     restores need --tss"
+                    "  choices.cfg    drops the Install macOS (Stela) choice: the restore needs \
+                     --tss"
                 )?;
             }
         }

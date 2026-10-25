@@ -282,8 +282,8 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     }
     if record.installs_media() && record.active_medium().is_none() {
         report.problem(format!(
-            "the active build {} has no install medium, so its Install and Update macOS (Stela) \
-             choices are missing: `stela setup --repair --ipsw` with its restore image",
+            "the active build {} has no install medium, so its Install macOS (Stela) choice is \
+             missing: `stela setup --repair --ipsw` with its restore image",
             record.build
         ));
     }
@@ -315,8 +315,8 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         }
         if medium.build == record.build && !record.tss {
             report.problem(
-                "the Install and Update macOS (Stela) choices are off because the restores need \
-                 Apple's signing server: `stela setup --tss`"
+                "the Install macOS (Stela) choice is off because the restore needs Apple's \
+                 signing server: `stela setup --tss`"
                     .into(),
             );
         }
