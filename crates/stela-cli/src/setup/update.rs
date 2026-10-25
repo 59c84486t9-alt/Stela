@@ -367,6 +367,7 @@ pub(super) fn update_stela(
                 let (_, _, restore) = prepare_kind(
                     environment,
                     kind,
+                    record.tss,
                     ipsw,
                     &record.model,
                     Some(&record.build),

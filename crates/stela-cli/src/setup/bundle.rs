@@ -124,6 +124,11 @@ pub(super) struct Bundle {
     pub(super) manifest_sha256: String,
     #[serde(default, skip_serializing_if = "Kind::is_recovery")]
     pub(super) kind: Kind,
+    /// A restore bundle that boots under the AP ticket Apple's signing
+    /// service personalized for its machine (`boot prepare --tss`), not the
+    /// IPSW's global ticket.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) personalized: bool,
 }
 
 impl Bundle {

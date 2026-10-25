@@ -453,6 +453,7 @@ impl Record {
                         revision: first.revision,
                         manifest_sha256: String::new(),
                         kind: Kind::Recovery,
+                        personalized: false,
                     });
                 }
             }
@@ -536,10 +537,14 @@ impl Record {
 
     /// The restore bundle of `kind` (erase or update) of `ecid`'s machine
     /// for the active build.
+    /// The active build's restore bundle of `kind` for `ecid`, signed as the
+    /// setup's TSS choice needs: under Apple's personalized ticket with the
+    /// opt-in, under the global one without. A bundle signed the other way
+    /// counts as missing, so the next setup run prepares it again.
     fn restore_bundle(&self, kind: Kind, ecid: Option<Ecid>) -> Option<&bundle::Bundle> {
-        self.bundles
-            .iter()
-            .find(|b| b.same_kind(kind, &self.build, ecid, self.generation()))
+        self.bundles.iter().find(|b| {
+            b.same_kind(kind, &self.build, ecid, self.generation()) && b.personalized == self.tss
+        })
     }
 
     /// The install medium of `build`.
@@ -802,8 +807,10 @@ fn write_record(esp: &Path, record: &Record) -> Result<()> {
     efi::write_atomic(&path, &bytes, false)
 }
 
-/// Writes a boot bundle for an IPSW, model and machine into a directory.
-type Prepare = dyn Fn(&Path, &str, Option<Ecid>, &Path) -> Result<()>;
+/// Writes a boot bundle for an IPSW, model and machine into a directory;
+/// a restore bundle under Apple's personalized ticket when the `bool` says
+/// so (recoveryOS bundles always boot under the global one).
+type Prepare = dyn Fn(&Path, &str, Option<Ecid>, bool, &Path) -> Result<()>;
 
 /// An IPSW's restore inventory for a model.
 type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
@@ -915,6 +922,7 @@ struct Prepared {
     build: String,
     ecid: Option<Ecid>,
     kind: Kind,
+    personalized: bool,
     generation: bundle::Generation,
     directory: tempfile::TempDir,
     bytes: u64,
@@ -935,13 +943,23 @@ fn prepare_bundles(
     build: Option<&str>,
     ecids: &[Option<Ecid>],
 ) -> Result<(String, String, Vec<Prepared>)> {
-    prepare_kind(environment, Kind::Recovery, ipsw, model, build, ecids)
+    prepare_kind(
+        environment,
+        Kind::Recovery,
+        false,
+        ipsw,
+        model,
+        build,
+        ecids,
+    )
 }
 
-/// [`prepare_bundles`] for bundles of `kind`.
+/// [`prepare_bundles`] for bundles of `kind`; restore bundles under Apple's
+/// personalized ticket with the TSS opt-in `tss`.
 fn prepare_kind(
     environment: &Environment<'_>,
     kind: Kind,
+    tss: bool,
     ipsw: &Path,
     model: &str,
     build: Option<&str>,
@@ -964,7 +982,8 @@ fn prepare_kind(
             Kind::Restore => environment.prepare_restore,
             Kind::Update => environment.prepare_update,
         };
-        prepare(ipsw, model, ecid, &output)
+        let personalized = tss && kind != Kind::Recovery;
+        prepare(ipsw, model, ecid, personalized, &output)
             .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
         let generation = bundle::generation(&output)?;
         ensure!(
@@ -977,6 +996,7 @@ fn prepare_kind(
             build: found.clone(),
             ecid,
             kind,
+            personalized,
             generation,
             directory,
             bytes,
@@ -1021,6 +1041,7 @@ fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result<()> {
             revision: generation.revision,
             manifest_sha256: digest,
             kind: bundle.kind,
+            personalized: bundle.personalized,
         });
     }
     Ok(())
@@ -1547,7 +1568,13 @@ const CONSOLE_BOOT_ARGS: &str = "--boot-args=-v serial=3 serial-device-name=uart
 /// `output`, then the engine's own board check of the prepared DeviceTree
 /// (`machine::soc::board`), so a model the engine cannot run is refused
 /// before the USB changes rather than when the PC boots it.
-fn prepare_recovery(ipsw: &Path, model: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
+fn prepare_recovery(
+    ipsw: &Path,
+    model: &str,
+    ecid: Option<Ecid>,
+    _: bool,
+    output: &Path,
+) -> Result<()> {
     let mut line: Vec<String> = [
         "--ipsw",
         ipsw.to_str().context("IPSW path is not UTF-8")?,
@@ -1572,22 +1599,36 @@ fn prepare_recovery(ipsw: &Path, model: &str, ecid: Option<Ecid>, output: &Path)
 
 /// `stela boot prepare --restore` for the IPSW, model and machine into
 /// `output`: the restore bundle the Install macOS (Stela) choice boots.
-fn prepare_restore(ipsw: &Path, model: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
-    prepare_ramdisk(ipsw, model, ecid, output, false)
+fn prepare_restore(
+    ipsw: &Path,
+    model: &str,
+    ecid: Option<Ecid>,
+    personalized: bool,
+    output: &Path,
+) -> Result<()> {
+    prepare_ramdisk(ipsw, model, ecid, personalized, output, false)
 }
 
 /// `stela boot prepare --restore --update`: the update restore bundle the
 /// Update macOS (Stela) choice boots.
-fn prepare_update(ipsw: &Path, model: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
-    prepare_ramdisk(ipsw, model, ecid, output, true)
+fn prepare_update(
+    ipsw: &Path,
+    model: &str,
+    ecid: Option<Ecid>,
+    personalized: bool,
+    output: &Path,
+) -> Result<()> {
+    prepare_ramdisk(ipsw, model, ecid, personalized, output, true)
 }
 
 /// A restore bundle of the model's erase or, with `update`, update restore
-/// identity.
+/// identity; `personalized`, under the AP ticket Apple's signing service
+/// issues for the machine, which the restore's `--tss` choice needs.
 fn prepare_ramdisk(
     ipsw: &Path,
     model: &str,
     ecid: Option<Ecid>,
+    personalized: bool,
     output: &Path,
     update: bool,
 ) -> Result<()> {
@@ -1608,6 +1649,13 @@ fn prepare_ramdisk(
     }
     if let Some(ecid) = ecid {
         line.extend(["--ecid".into(), ecid.to_string()]);
+    }
+    if personalized {
+        ensure!(
+            ecid.is_some(),
+            "a personalized restore bundle needs an ECID"
+        );
+        line.push("--tss".into());
     }
     boot::prepare(&line)
 }
@@ -1663,8 +1711,15 @@ fn plan_install(
             .map(|&(_, ecid)| ecid)
             .collect();
         if !ecids.is_empty() {
-            let (_, _, prepared) =
-                prepare_kind(environment, kind, ipsw, &record.model, Some(build), &ecids)?;
+            let (_, _, prepared) = prepare_kind(
+                environment,
+                kind,
+                record.tss,
+                ipsw,
+                &record.model,
+                Some(build),
+                &ecids,
+            )?;
             restore.extend(prepared);
         }
     }
@@ -2585,19 +2640,31 @@ mod tests {
 
     /// A stand-in for `boot prepare --recovery`: the synthetic IPSW has no
     /// kernel to prepare. The bundle's byte names the machine.
-    fn fake_prepare(_: &Path, _: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
+    fn fake_prepare(_: &Path, _: &str, ecid: Option<Ecid>, _: bool, output: &Path) -> Result<()> {
         let byte = ecid.map_or(0x5a, |e| e.0 as u8);
         bundle::tests::write(output, current(), &[byte; 4096])
     }
 
     /// A stand-in for `boot prepare --restore`.
-    fn fake_prepare_restore(_: &Path, _: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
+    fn fake_prepare_restore(
+        _: &Path,
+        _: &str,
+        ecid: Option<Ecid>,
+        _: bool,
+        output: &Path,
+    ) -> Result<()> {
         let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ 0xa5;
         bundle::tests::write(output, current(), &[byte; 2048])
     }
 
     /// A stand-in for `boot prepare --restore --update`.
-    fn fake_prepare_update(_: &Path, _: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
+    fn fake_prepare_update(
+        _: &Path,
+        _: &str,
+        ecid: Option<Ecid>,
+        _: bool,
+        output: &Path,
+    ) -> Result<()> {
         let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ 0x3c;
         bundle::tests::write(output, current(), &[byte; 1024])
     }
@@ -2627,7 +2694,7 @@ mod tests {
     fn preparers(revision: u32) -> [Box<Prepare>; 3] {
         let of = |kind: u8, bytes: usize| -> Box<Prepare> {
             Box::new(
-                move |_: &Path, _: &str, ecid: Option<Ecid>, output: &Path| {
+                move |_: &Path, _: &str, ecid: Option<Ecid>, _: bool, output: &Path| {
                     let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ kind ^ revision as u8;
                     let generation = bundle::Generation {
                         revision,
@@ -3200,6 +3267,12 @@ mod tests {
         let record = record(&f);
         let ecid = record.installs[0].ecid.unwrap();
         assert_eq!(record.ecid, Some(ecid));
+        // The restore boots under the ticket Apple personalized for it.
+        assert!(
+            record
+                .restore_bundle(Kind::Restore, Some(ecid))
+                .is_some_and(|b| b.personalized)
+        );
         let region = format!("{SERIAL}:{REGION_GUID}");
         let recovery = format!(
             "\\EFI\\stela\\boot\\{}\\{}",
@@ -3319,6 +3392,10 @@ mod tests {
         let choices =
             Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
         assert_eq!(choices.entries.len(), 2);
+        // Its personalized restore bundle no longer serves the setup.
+        let off = self::record(&f);
+        assert_eq!(off.restore_bundle(Kind::Restore, off.installs[0].ecid), None);
+        assert_eq!(off.missing_restore_bundles().len(), 1);
 
         // The next boot is chosen in NVRAM, which a dry run leaves alone.
         let dry = rerun(&f, |c| {
@@ -3847,7 +3924,7 @@ mod tests {
             schema: next_schema,
             ..current()
         };
-        let prepare = move |_: &Path, _: &str, ecid: Option<Ecid>, output: &Path| {
+        let prepare = move |_: &Path, _: &str, ecid: Option<Ecid>, _: bool, output: &Path| {
             bundle::tests::write(
                 output,
                 next_generation,
