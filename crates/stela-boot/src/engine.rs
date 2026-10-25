@@ -2519,6 +2519,9 @@ fn run<H: Host>(
                 )),
             }
         }
+        while let Some((port, line)) = machine.devices.take_usb_host_trace() {
+            output::arguments(format_args!("XHCI port={port} {line}\n"));
+        }
 
         while let Some(log) = machine.devices.take_smc_log() {
             output::arguments(format_args!(

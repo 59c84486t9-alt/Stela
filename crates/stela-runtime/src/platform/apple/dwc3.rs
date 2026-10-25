@@ -44,7 +44,7 @@ use crate::platform::{
     dma::Port,
     usb::{BusPeer, Function, MAX_PACKET, Reply, Token},
 };
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, string::String};
 use regs::*;
 
 const NAME: &str = "dwc3-device";
@@ -439,7 +439,7 @@ impl Dwc3 {
                 self.bus_event();
                 self.connected = false;
             }
-            self.host.attach(None)?;
+            self.host.attach(None);
             self.pending_phy_disconnect = false;
         }
         let ready = state.high_speed_device_ready();
@@ -509,7 +509,22 @@ impl Dwc3 {
     /// port, or nothing.
     pub fn attach_host_function(&mut self, speed: Option<Usb2Speed>) -> Result<(), &'static str> {
         self.activity_ready()?;
-        self.host.attach(speed)
+        self.host.attach(speed);
+        Ok(())
+    }
+
+    /// The host personality's next trace line, for the boot log.
+    pub fn take_host_trace(&mut self) -> Option<String> {
+        self.host.take_trace()
+    }
+
+    /// The host personality's registers and event rings, while it runs or
+    /// holds events.
+    pub fn host_summary(&self) -> Option<String> {
+        let wires: [bool; RINGS] = core::array::from_fn(|n| self.rings[n].asserted);
+        self.host
+            .summary()
+            .map(|summary| alloc::format!("{summary} wires={wires:?}"))
     }
 
     /// Runs the host personality's commands and transfers, `function`
@@ -542,6 +557,8 @@ impl Dwc3 {
         for irq in self.irqs {
             access.interrupts.set_level(Wire::Aic(irq), false);
         }
+        let mut host = core::mem::take(&mut self.host);
+        host.reset("DWC3 core reset");
         let generation = self.port_generation;
         let ready = self.port_ready;
         let lifecycle = self.lifecycle;
@@ -561,6 +578,7 @@ impl Dwc3 {
             self.phy_clocked,
             self.phy_quiesced,
         ) = phy;
+        self.host = host;
         self.session_reset = true;
     }
 
@@ -1107,7 +1125,7 @@ impl MmioDevice for Dwc3 {
                     self.release();
                 }
                 if value & CORE_RESET != 0 {
-                    self.host = xhci::Xhci::new();
+                    self.host.reset("GCTL core soft reset");
                     self.interrupts(access);
                 }
                 self.gctl = value;

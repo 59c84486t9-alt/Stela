@@ -45,14 +45,23 @@
 //!
 //! Refused rather than modeled: features not advertised (light reset,
 //! CEM, extended TBC, virtualization, streams, USB2 hardware LPM), port
-//! test modes and port indicators. A full event ring holds further events
-//! until software advances ERDP, rather than posting an Event Ring Full
-//! Error.
+//! test modes and port indicators.
+//!
+//! Each interrupter's events wait for its own ring: one with no ring or a
+//! full ring holds only its own events. Up to `MAX_PENDING_EVENTS` wait
+//! per interrupter; past that an event is lost, as on a full ring, and once
+//! software makes room the interrupter's ring takes an Event Ring Full
+//! Error (spec 4.9.4). A register write that posts an event always lands.
+//!
+//! The host trace (`take_trace`) records, for the boot log, what explains
+//! a stalled transfer: USBCMD changes, event ring loads, IE changes, port
+//! status, commands, every default control pipe SETUP and completion,
+//! transfer errors, ignored doorbells and events held or lost.
 mod slot;
 
 use super::super::typec::Usb2Speed;
 use crate::platform::{dma::Port, usb::Function};
-use alloc::{boxed::Box, collections::VecDeque};
+use alloc::{boxed::Box, collections::VecDeque, format, string::String};
 use slot::Slot;
 
 /// Bytes of the core's address space the host registers occupy.
@@ -170,10 +179,17 @@ const SLOT_NOT_ENABLED: u32 = 11;
 const PARAMETER_ERROR: u32 = 17;
 const CONTEXT_STATE_ERROR: u32 = 19;
 const COMMAND_RING_STOPPED: u32 = 24;
+const EVENT_RING_FULL: u32 = 21;
+const HOST_CONTROLLER: u32 = 37;
 /// Commands one doorbell may run before yielding: a ring software filled
 /// without a Link TRB back cannot hold the engine.
 const COMMANDS_PER_SERVICE: usize = 256;
+/// Events one interrupter holds while its ring cannot take them.
 const MAX_PENDING_EVENTS: usize = 256;
+/// Host trace lines per second of system count; later ones are counted.
+const TRACE_LINES: u32 = 256;
+/// System counts per second.
+const SECOND: u64 = 24_000_000;
 /// 24 MHz system counts per 125 us microframe.
 const MICROFRAME: u64 = 3000;
 /// Microframes from one MFINDEX wrap to the next.
@@ -190,6 +206,12 @@ struct Interrupter {
     ring: Option<EventRing>,
     /// ERSTBA was written: the table is read before the next event.
     reload: bool,
+    /// Events written to the ring.
+    delivered: u64,
+    /// Events lost since the last Event Ring Full Error.
+    lost: u64,
+    /// The trace reported that the ring holds events back.
+    holding: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -230,6 +252,37 @@ pub struct Xhci {
     started: Option<u64>,
     /// The microframe count of the next wrap event, while EWE is set.
     next_wrap: u64,
+    trace: Trace,
+}
+
+#[derive(Clone, Default)]
+struct Trace {
+    lines: VecDeque<String>,
+    /// The last line noted, and how often it recurred since.
+    last: Option<String>,
+    repeated: u64,
+    /// Lines added this second, and the system count it began at.
+    spent: u32,
+    second: u64,
+    dropped: u64,
+}
+
+impl Trace {
+    fn push(&mut self, line: String) {
+        if self.spent == TRACE_LINES {
+            self.dropped += 1;
+        } else {
+            self.spent += 1;
+            self.lines.push_back(line);
+        }
+    }
+
+    fn flush_repeats(&mut self) {
+        let repeated = core::mem::take(&mut self.repeated);
+        if repeated != 0 {
+            self.push(format!("(the line before recurred {repeated} times)"));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -294,6 +347,83 @@ impl Xhci {
             mfindex: 0,
             started: None,
             next_wrap: 0,
+            trace: Trace::default(),
+        }
+    }
+
+    /// The state after a reset of the controller, `why`; the trace is kept.
+    pub(super) fn reset(&mut self, why: &str) {
+        let trace = core::mem::take(&mut self.trace);
+        *self = Self::new();
+        self.trace = trace;
+        self.trace.last = None;
+        self.note(format!("{why}: controller reset"));
+    }
+
+    /// Adds `line` to the trace; a line repeating the one before is only
+    /// counted.
+    fn note(&mut self, line: String) {
+        let trace = &mut self.trace;
+        if trace.last.as_ref() == Some(&line) {
+            trace.repeated += 1;
+            return;
+        }
+        trace.flush_repeats();
+        trace.push(line.clone());
+        trace.last = Some(line);
+    }
+
+    /// The host trace's next line, for the boot log.
+    pub fn take_trace(&mut self) -> Option<String> {
+        if self.trace.lines.is_empty() {
+            self.trace.flush_repeats();
+        }
+        if let Some(line) = self.trace.lines.pop_front() {
+            return Some(line);
+        }
+        let dropped = core::mem::take(&mut self.trace.dropped);
+        (dropped != 0).then(|| format!("{dropped} trace lines dropped"))
+    }
+
+    /// Registers, slots and each event ring, for the boot log's heartbeat,
+    /// while the controller runs or holds events.
+    pub fn summary(&self) -> Option<String> {
+        use core::fmt::Write;
+        if self.usbsts & HCH != 0 && self.pending.is_empty() {
+            return None;
+        }
+        let mut line = format!(
+            "USBCMD={:#x} USBSTS={:#x} PORTSC={:#x} slots={} held={}",
+            self.usbcmd,
+            self.usbsts,
+            self.ports[0].portsc,
+            self.slots.iter().flatten().count(),
+            self.pending.len()
+        );
+        for (n, i) in self.interrupters.iter().enumerate() {
+            if let Some(ring) = i.ring {
+                let enqueue = ring.base + u64::from(ring.index) * TRB_BYTES;
+                let _ = write!(
+                    line,
+                    " i{n}=[enqueue={enqueue:#x} ERDP={:#x} IMAN={:#x} delivered={} lost={}]",
+                    i.erdp, i.iman, i.delivered, i.lost
+                );
+            }
+        }
+        Some(line)
+    }
+
+    /// Why interrupter `n`'s ring cannot take an event, for the trace.
+    fn ring_state(&self, n: usize) -> String {
+        let i = &self.interrupters[n];
+        match i.ring {
+            None => format!("no event ring (ERSTSZ {})", i.erstsz),
+            Some(ring) => format!(
+                "ring full at {:#x}, ERDP {:#x}, IMAN {:#x}",
+                ring.base + u64::from(ring.index) * TRB_BYTES,
+                i.erdp,
+                i.iman
+            ),
         }
     }
 
@@ -333,21 +463,15 @@ impl Xhci {
     }
 
     /// Cables `attached` to the USB2 port, or nothing.
-    pub fn attach(&mut self, attached: Option<Usb2Speed>) -> Result<(), &'static str> {
+    pub fn attach(&mut self, attached: Option<Usb2Speed>) {
         if self.ports[0].attached == attached {
-            return Ok(());
+            return;
         }
-        let before = self.ports[0];
-        let status = self.usbsts;
+        let before = self.ports[0].portsc;
         self.ports[0].attached = attached;
+        self.note(format!("port 1 cable: {attached:?}"));
         self.detect(0);
-        if let Err(reason) = self.changed(0, before.portsc) {
-            // A full event queue must not consume a physical disconnect.
-            self.ports[0] = before;
-            self.usbsts = status;
-            return Err(reason);
-        }
-        Ok(())
+        self.changed(0, before);
     }
 
     /// Brings port `n`'s connection status in line with its cable.
@@ -378,14 +502,17 @@ impl Xhci {
 
     /// A change bit that `portsc` did not have before posts a Port Status
     /// Change Event while running.
-    fn changed(&mut self, n: usize, before: u32) -> Result<(), &'static str> {
-        if self.ports[n].portsc & !before & PORT_CHANGES != 0 {
+    fn changed(&mut self, n: usize, before: u32) {
+        let portsc = self.ports[n].portsc;
+        if portsc != before {
+            self.note(format!("port {} PORTSC {before:#x} -> {portsc:#x}", n + 1));
+        }
+        if portsc & !before & PORT_CHANGES != 0 {
             self.usbsts |= PCD;
             if self.usbsts & HCH == 0 {
-                self.post(0, Self::port_status_change(n))?;
+                self.post(0, Self::port_status_change(n));
             }
         }
-        Ok(())
     }
 
     /// Interrupter `n`'s wire level.
@@ -556,7 +683,7 @@ impl Xhci {
             if value & (CS | CA) != 0 && low {
                 self.command_running = false;
                 self.command_doorbell = false;
-                self.post(0, Self::completion(self.command, COMMAND_RING_STOPPED, 0))?;
+                self.post(0, Self::completion(self.command, COMMAND_RING_STOPPED, 0));
             }
             return Ok(());
         }
@@ -637,7 +764,11 @@ impl Xhci {
                 match (at - INTERRUPTER_BASE) % INTERRUPTER_STRIDE {
                     0x00 => {
                         let ip = if value & IP != 0 { 0 } else { i.iman & IP };
+                        let before = i.iman;
                         i.iman = ip | value & IE;
+                        if (before ^ value) & IE != 0 {
+                            self.note(format!("interrupter {n} IE={}", value & IE != 0));
+                        }
                     }
                     0x04 => i.imod = value,
                     0x08 => {
@@ -690,7 +821,7 @@ impl Xhci {
             if self.usbsts & HCH == 0 {
                 return Err("xHCI HCRST while running is undefined");
             }
-            *self = Self::new();
+            self.reset("HCRST");
             return Ok(());
         }
         if value & (CSS | CRS) != 0 && (self.usbsts & HCH == 0 || value & RUN != 0) {
@@ -699,6 +830,9 @@ impl Xhci {
         // CSS/CRS complete at once: SSS and RSS never read set and no state
         // is lost, so SRE stays clear.
         let running = value & RUN != 0;
+        if (self.usbcmd ^ value) & (RUN | INTE | EWE) != 0 {
+            self.note(format!("USBCMD {:#x} -> {value:#x}", self.usbcmd));
+        }
         match (self.started, running) {
             (None, true) => self.started = Some(now),
             (Some(_), false) => {
@@ -774,7 +908,8 @@ impl Xhci {
         self.ports[n].portsc = portsc;
         // A function cabled to a port that just gained power connects.
         self.detect(n);
-        self.changed(n, before)
+        self.changed(n, before);
+        Ok(())
     }
 
     fn port_status_change(n: usize) -> [u32; 4] {
@@ -795,16 +930,31 @@ impl Xhci {
         ]
     }
 
-    fn post(&mut self, interrupter: usize, trb: [u32; 4]) -> Result<(), &'static str> {
-        if self.pending.len() == MAX_PENDING_EVENTS {
-            return Err("xHCI pending event capacity exhausted");
-        }
-        self.pending.push_back(Event {
+    fn post(&mut self, interrupter: usize, trb: [u32; 4]) {
+        self.queue(Event {
             interrupter,
             trb,
             interrupt: true,
         });
-        Ok(())
+    }
+
+    /// Holds `event` for its interrupter's ring, or loses it when the
+    /// interrupter already holds `MAX_PENDING_EVENTS`.
+    fn queue(&mut self, event: Event) {
+        let n = event.interrupter;
+        let held = self.pending.iter().filter(|e| e.interrupter == n).count();
+        if held < MAX_PENDING_EVENTS {
+            self.pending.push_back(event);
+            return;
+        }
+        if self.interrupters[n].lost == 0 {
+            let line = format!(
+                "interrupter {n} loses events: {held} held, {}",
+                self.ring_state(n)
+            );
+            self.note(line);
+        }
+        self.interrupters[n].lost += 1;
     }
 
     /// Runs doorbelled commands and posts events through the core's DMA
@@ -816,6 +966,11 @@ impl Xhci {
         port: &mut Port<'_, '_>,
         mut function: Option<&mut (dyn Function + '_)>,
     ) -> Result<(), &'static str> {
+        let now = port.access.now;
+        if now >= self.trace.second.saturating_add(SECOND) {
+            self.trace.second = now;
+            self.trace.spent = 0;
+        }
         // Only a cabled function hears the bus.
         if self.ports[0].attached.is_none() {
             function = None;
@@ -831,7 +986,7 @@ impl Xhci {
             .is_some_and(|deadline| port.access.now >= deadline)
         {
             self.next_wrap += MFINDEX_PERIOD;
-            self.post(0, [0, 0, SUCCESS << 24, MFINDEX_WRAP << 10])?;
+            self.post(0, [0, 0, SUCCESS << 24, MFINDEX_WRAP << 10]);
         }
         for n in 0..INTERRUPTERS {
             if self.interrupters[n].reload {
@@ -839,6 +994,14 @@ impl Xhci {
                 self.interrupters[n].ring = None;
                 self.load_segment(port, n, 0)?;
                 self.interrupters[n].reload = false;
+                let line = match self.interrupters[n].ring {
+                    Some(ring) => format!(
+                        "interrupter {n} event ring at {:#x}, {} TRBs, {} segments",
+                        ring.base, ring.size, self.interrupters[n].erstsz
+                    ),
+                    None => format!("interrupter {n} has no event ring (ERSTSZ 0)"),
+                };
+                self.note(line);
             }
         }
         if self.command_doorbell && self.usbsts & HCH == 0 {
@@ -848,11 +1011,53 @@ impl Xhci {
         if self.usbsts & HCH == 0 {
             self.run_transfers(port, function)?;
         }
-        while let Some(event) = self.pending.front().copied() {
-            if !self.deliver(port, event)? {
-                break;
+        self.deliver_pending(port)
+    }
+
+    /// Writes held events in order, each interrupter's to its own ring,
+    /// then an Event Ring Full Error where events were lost.
+    fn deliver_pending(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+        let mut blocked = [false; INTERRUPTERS];
+        let mut at = 0;
+        while at < self.pending.len() {
+            let event = self.pending[at];
+            if !blocked[event.interrupter] && self.deliver(port, event)? {
+                self.pending.remove(at);
+            } else {
+                blocked[event.interrupter] = true;
+                at += 1;
             }
-            self.pending.pop_front();
+        }
+        for (n, blocked) in blocked.iter_mut().enumerate() {
+            let lost = self.interrupters[n].lost;
+            if lost != 0 && !*blocked {
+                let error = Event {
+                    interrupter: n,
+                    trb: [0, 0, EVENT_RING_FULL << 24, HOST_CONTROLLER << 10],
+                    interrupt: true,
+                };
+                if self.deliver(port, error)? {
+                    self.interrupters[n].lost = 0;
+                    self.note(format!(
+                        "interrupter {n} took an Event Ring Full Error: {lost} events lost"
+                    ));
+                } else {
+                    *blocked = true;
+                }
+            }
+            if *blocked != self.interrupters[n].holding {
+                self.interrupters[n].holding = *blocked;
+                let line = if *blocked {
+                    let held = self.pending.iter().filter(|e| e.interrupter == n).count();
+                    format!(
+                        "interrupter {n} holds {held} events: {}",
+                        self.ring_state(n)
+                    )
+                } else {
+                    format!("interrupter {n} takes events again")
+                };
+                self.note(line);
+            }
         }
         Ok(())
     }
@@ -940,6 +1145,7 @@ impl Xhci {
         } else if let Some(ring) = &mut self.interrupters[n].ring {
             ring.index += 1;
         }
+        self.interrupters[n].delivered += 1;
         if event.interrupt {
             let i = &mut self.interrupters[n];
             i.erdp |= EHB;
@@ -1042,7 +1248,10 @@ impl Xhci {
                 // capabilities this controller does not advertise.
                 _ => (TRB_ERROR, 0),
             };
-            self.post(0, Self::completion(trb, code, slot))?;
+            self.note(format!(
+                "command type {kind} slot {slot} endpoint {endpoint} parameter {parameter:#x}: completion {code}"
+            ));
+            self.post(0, Self::completion(trb, code, slot));
         }
         self.command_doorbell = true;
         Ok(())
@@ -1134,27 +1343,62 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn physical_disconnect_retries_after_event_queue_backpressure() {
+    fn held_events_wait_per_interrupter_and_overflow_reports_event_ring_full() {
+        const RING1: u64 = RAM + 0x3000;
+        let mut ram = Ram::new(RAM, 0x4000);
         let mut x = Xhci::new();
         wr(&mut x, PORT_BASE, PP);
         wr(&mut x, OPERATIONAL, RUN);
-        x.attach(Some(Usb2Speed::High)).unwrap();
-        x.ports[0].portsc &= !PORT_CHANGES;
-        x.pending.clear();
-        for _ in 0..MAX_PENDING_EVENTS {
-            x.post(0, Xhci::port_status_change(0)).unwrap();
+        for _ in 0..MAX_PENDING_EVENTS + 4 {
+            x.post(0, Xhci::port_status_change(0));
         }
-        let before = x.ports[0];
-        let status = x.usbsts;
-        assert!(x.attach(None).is_err());
-        assert_eq!(x.ports[0].attached, before.attached);
-        assert_eq!(x.ports[0].portsc, before.portsc);
-        assert_eq!(x.usbsts, status);
-        x.pending.clear();
-        x.attach(None).unwrap();
-        assert_eq!(x.ports[0].attached, None);
-        assert_eq!(x.ports[0].portsc & (CCS | PED), 0);
-        assert_eq!(x.pending.len(), 1);
+        assert_eq!(x.pending.len(), MAX_PENDING_EVENTS);
+        assert_eq!(x.interrupters[0].lost, 4);
+        // A register write that posts an event lands though its event is lost.
+        x.attach(Some(Usb2Speed::High));
+        assert_eq!(rd(&mut x, PORT_BASE) & (CCS | CSC), CCS | CSC);
+        assert_eq!(x.interrupters[0].lost, 5);
+        // Interrupter 0 has no ring; interrupter 1's event is not held behind it.
+        let i1 = INTERRUPTER_BASE + INTERRUPTER_STRIDE;
+        ram.put_u64(ERST + 0x40, RING1);
+        ram.put_u64(ERST + 0x48, 16);
+        wr(&mut x, i1 + 8, 1);
+        x.write(i1 + 0x18, 8, RING1, 0).unwrap();
+        x.write(i1 + 0x10, 8, ERST + 0x40, 0).unwrap();
+        x.queue(Event {
+            interrupter: 1,
+            trb: Xhci::port_status_change(0),
+            interrupt: true,
+        });
+        service(&mut x, &mut ram);
+        let mut first = [0u8; 16];
+        assert!(ram.read(RING1, &mut first));
+        assert_eq!(u32::from(first[12]) & CYCLE, 1);
+        assert_eq!(x.pending.len(), MAX_PENDING_EVENTS);
+        // Once interrupter 0 has a ring, its held events and then the error.
+        let i0 = INTERRUPTER_BASE;
+        ram.put_u64(ERST, EVENTS);
+        ram.put_u64(ERST + 8, 512);
+        wr(&mut x, i0 + 8, 1);
+        x.write(i0 + 0x18, 8, EVENTS, 0).unwrap();
+        x.write(i0 + 0x10, 8, ERST, 0).unwrap();
+        service(&mut x, &mut ram);
+        assert!(x.pending.is_empty());
+        let error = event(&mut ram, MAX_PENDING_EVENTS as u64);
+        assert_eq!(error[2] >> 24, EVENT_RING_FULL);
+        assert_eq!(error[3] >> 10 & 0x3f, HOST_CONTROLLER);
+        assert_eq!(x.interrupters[0].lost, 0);
+        let trace: alloc::vec::Vec<String> = core::iter::from_fn(|| x.take_trace()).collect();
+        assert!(
+            trace
+                .iter()
+                .any(|l| l.starts_with("interrupter 0 loses events"))
+        );
+        assert!(
+            trace
+                .iter()
+                .any(|l| l.contains("Event Ring Full Error: 5 events lost"))
+        );
     }
 
     #[test]
@@ -1461,7 +1705,7 @@ pub(crate) mod tests {
     /// SET_CONFIGURATION and configures its keyboard endpoint (DCI 3).
     fn enumerated() -> Bench {
         let mut b = Bench::new();
-        b.x.attach(Some(Usb2Speed::Full)).unwrap();
+        b.x.attach(Some(Usb2Speed::Full));
         let portsc = rd(&mut b.x, PORTSC1);
         assert_eq!(portsc & (CCS | CSC | PED), CCS | CSC);
         assert_eq!(portsc & PLS, POLLING << PLS_SHIFT);
@@ -1743,7 +1987,7 @@ pub(crate) mod tests {
         let again = b.command([0, 0, 0, STOP_ENDPOINT << 10 | 3 << 16 | 1 << 24 | CYCLE]);
         assert_eq!(again[2] >> 24, CONTEXT_STATE_ERROR);
         // Disconnection clears the port; Disable Slot frees the slot.
-        b.x.attach(None).unwrap();
+        b.x.attach(None);
         assert_eq!(rd(&mut b.x, PORTSC1) & (CCS | PED | CSC), CSC);
         b.service();
         assert_eq!(b.event()[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
@@ -1776,7 +2020,7 @@ pub(crate) mod tests {
         }
         let mut hub = Hub::new(One(Peripheral::new()), "HUB").unwrap();
         let mut b = Bench::new();
-        b.x.attach(Some(Usb2Speed::High)).unwrap();
+        b.x.attach(Some(Usb2Speed::High));
         service_with(&mut b.x, &mut b.ram, 0, Some(&mut hub));
         assert_eq!(b.event()[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
         wr(&mut b.x, PORTSC1, PP | CSC | PR);
@@ -1926,7 +2170,7 @@ pub(crate) mod tests {
                 };
                 // The cable stays plugged in across a controller reset, as the
                 // machine keeps it (`attach_host_function` each service).
-                self.xhci.attach(Some(Usb2Speed::High)).unwrap();
+                self.xhci.attach(Some(Usb2Speed::High));
                 self.function.set_time(self.now);
                 self.xhci
                     .service(&mut port, Some(&mut self.function))

@@ -2077,7 +2077,13 @@ impl AppleDevices {
                     Some(why) => format!(" unavailable={why}"),
                     None => String::new(),
                 };
-                format!("port={} attached={}{why}", master.number, master.attached)
+                let host = controller
+                    .host_summary()
+                    .map_or_else(String::new, |host| format!(" host=[{host}]"));
+                format!(
+                    "port={} attached={}{why}{host}",
+                    master.number, master.attached
+                )
             })
             .collect()
     }
@@ -2086,6 +2092,16 @@ impl AppleDevices {
         self.usb_masters
             .iter_mut()
             .find_map(|master| master.session.take_log())
+    }
+
+    /// The next line of a USB controller's host trace, with its port.
+    pub fn take_usb_host_trace(&mut self) -> Option<(u32, String)> {
+        self.usb_masters.iter().find_map(|master| {
+            self.bus
+                .device_mut::<Dwc3>(master.device)
+                .and_then(Dwc3::take_host_trace)
+                .map(|line| (master.number, line))
+        })
     }
 
     /// An `aes,s8000` the ADT describes in `config`, at its block and

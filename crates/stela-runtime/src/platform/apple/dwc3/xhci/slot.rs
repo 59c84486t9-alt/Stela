@@ -41,7 +41,7 @@ use crate::platform::{
     dma::Port,
     usb::{self, Function, Reply, Token},
 };
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, format, vec::Vec};
 
 pub(super) const ENDPOINTS: usize = 31;
 const CONTEXT: u64 = 32;
@@ -683,9 +683,13 @@ impl Xhci {
             return Err("xHCI doorbell names a stream; streams are not supported");
         }
         let Some(slot) = self.slot_mut(id) else {
+            self.note(format!("doorbell {id} dci {dci} ignored: slot not enabled"));
             return Ok(());
         };
         if slot.state == SlotState::Enabled {
+            self.note(format!(
+                "doorbell {id} dci {dci} ignored: slot not addressed"
+            ));
             return Ok(());
         }
         let endpoint = &mut slot.endpoints[dci - 1];
@@ -695,6 +699,11 @@ impl Xhci {
         if endpoint.state == EpState::Running {
             endpoint.rung = true;
             endpoint.waiting = false;
+        } else {
+            let state = endpoint.state;
+            self.note(format!(
+                "doorbell {id} dci {dci} ignored: endpoint {state:?}"
+            ));
         }
         Ok(())
     }
@@ -895,10 +904,7 @@ impl Xhci {
         if interrupter >= self.interrupters.len() {
             return Err("xHCI TRB names an interrupter the controller does not have");
         }
-        if self.pending.len() == super::MAX_PENDING_EVENTS {
-            return Err("xHCI pending event capacity exhausted");
-        }
-        self.pending.push_back(Event {
+        self.queue(Event {
             interrupter,
             trb,
             interrupt,
@@ -916,7 +922,15 @@ impl Xhci {
         dci: usize,
     ) -> Result<(), &'static str> {
         let asked = trb.control & IOC != 0 || (code == SHORT_PACKET && trb.control & ISP != 0);
-        if asked || !matches!(code, SUCCESS | SHORT_PACKET) {
+        let failed = !matches!(code, SUCCESS | SHORT_PACKET);
+        if dci == 1 || failed {
+            self.note(format!(
+                "slot {id} dci {dci} TRB {:#x}: completion {code}, residual {residual}{}",
+                trb.address,
+                if asked || failed { "" } else { ", no event" }
+            ));
+        }
+        if asked || failed {
             let event = transfer_event(trb.address, residual, code, false, id, dci);
             self.post_to(trb.interrupter(), event, trb.control & BEI == 0)?;
         }
@@ -1016,6 +1030,8 @@ impl Xhci {
                         continue;
                     }
                     let mut setup = trb.parameter.to_le_bytes();
+                    let route = self.slot_mut(id).unwrap().route();
+                    self.note(format!("slot {id} route {route:#x} SETUP {setup:02x?}"));
                     match function.packet(endpoint_address, Token::Setup, &mut setup)? {
                         Reply::Ack(8) => {
                             self.td(id, dci).index += 1;
