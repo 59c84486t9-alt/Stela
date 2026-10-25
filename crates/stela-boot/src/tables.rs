@@ -120,10 +120,12 @@ pub fn map_range(
     Ok(())
 }
 
-/// Unmap `first..=last`, a canonical address range in one half: clear each
-/// entry that maps only addresses in the range, and descend into the tables
-/// of the entries that straddle its ends. Tables the cleared entries pointed
-/// to stay allocated; the TLB is the caller's.
+/// Unmap `first..=last`, a canonical address range in one half: clear the
+/// pages it holds, descending into every table it reaches. The tables stay
+/// linked, empty where the range covers them, so a later map of the range
+/// takes no new frame: clearing their entries instead would leave their
+/// frames taken and unreachable until the whole pool resets. The TLB is the
+/// caller's.
 pub fn unmap(frames: &dyn Frames, root: u64, first: u64, last: u64) {
     clear(frames, root, layout::top_level(), first, last);
 }
@@ -141,7 +143,7 @@ fn clear(frames: &dyn Frames, table: u64, level: u32, first: u64, last: u64) {
         if value & PRESENT == 0 {
             continue;
         }
-        if level == 0 || value & HUGE != 0 || (first <= start && end <= last) {
+        if level == 0 || value & HUGE != 0 {
             // SAFETY: as above.
             unsafe { entry.write_volatile(0) };
         } else {
