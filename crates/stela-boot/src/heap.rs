@@ -455,7 +455,10 @@ unsafe fn publish_carve(
     mut used_end: usize,
 ) -> *mut u8 {
     let base = node as usize;
-    let minimum = core::mem::size_of::<Free>();
+    // A gap smaller than a header and the smallest block could never be
+    // carved, so it stays in the allocation rather than lengthening every
+    // later walk.
+    let minimum = core::mem::size_of::<Header>() + SMALLEST;
     let header_base = user - core::mem::size_of::<Header>();
     let prefix = header_base - base;
     let allocated_base = if prefix >= minimum { header_base } else { base };
@@ -865,6 +868,26 @@ mod tests {
                 (before.live, before.carved, before.peak, before.largest)
             );
         }
+    }
+
+    /// A remainder too small for any block stays in the allocation instead
+    /// of becoming a free extent that every later walk passes.
+    #[test]
+    fn remainders_too_small_for_a_block_stay_allocated() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let header = core::mem::size_of::<Header>();
+        let layout = Layout::from_size_align(ram.0.len() - header - 24, WORD).unwrap();
+        // SAFETY: the one payload is freed with its layout before `ram` goes.
+        unsafe {
+            heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+            let block = heap.alloc(layout);
+            assert!(!block.is_null());
+            assert_eq!(heap.usage().carved, ram.0.len());
+            heap.dealloc(block, layout);
+        }
+        assert_eq!(heap.usage().carved, 0);
+        assert_eq!(heap.usage().largest, ram.0.len());
     }
 
     #[test]
