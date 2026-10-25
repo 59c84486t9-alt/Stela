@@ -1510,6 +1510,36 @@ impl Mirrors {
         self.banks[from] = self.cells;
         self.cells = self.banks[to];
     }
+
+    /// Close the cells of one register in every state.
+    fn close(&mut self, index: usize) {
+        for cells in core::iter::once(&mut self.cells).chain(&mut self.banks) {
+            cells[index] = register_read::Cell::default();
+        }
+    }
+}
+
+/// System registers whose writes only store what nothing derived reads:
+/// exception entries and returns read the exception registers then, and
+/// a thread pointer is read as it is.
+fn stored(register: SystemRegister) -> bool {
+    use SystemRegister::*;
+    matches!(
+        register,
+        ELR_EL1
+            | ELR_EL2
+            | SPSR_EL1
+            | SPSR_EL2
+            | ESR_EL1
+            | ESR_EL2
+            | FAR_EL1
+            | FAR_EL2
+            | PAR_EL1
+            | TPIDR_EL0
+            | TPIDRRO_EL0
+            | TPIDR_EL1
+            | TPIDR_EL2
+    )
 }
 
 impl core::ops::Index<usize> for Mirrors {
@@ -1951,6 +1981,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn unsupported(&self, kind: RequirementKind) -> Stop {
         Stop::Unsupported(self.requirement(kind))
+    }
+
+    /// A write of `register`: a [`stored`] one closes only its own cells,
+    /// any other forgets everything derived.
+    fn register_written(&mut self, register: SystemRegister) {
+        if !stored(register) {
+            return self.derived_changed();
+        }
+        use registers::encodings as e;
+        let encoding = match register {
+            SystemRegister::TPIDR_EL0 => e::TPIDR_EL0,
+            SystemRegister::TPIDRRO_EL0 => e::TPIDRRO_EL0,
+            SystemRegister::TPIDR_EL1 => e::TPIDR_EL1,
+            SystemRegister::TPIDR_EL2 => e::TPIDR_EL2,
+            _ => return,
+        };
+        if let Some(index) = MIRRORED.iter().position(|&mirrored| mirrored == encoding) {
+            self.mirrors.close(index);
+        }
     }
 
     /// Forget state derived from System registers and PSTATE.
@@ -6339,7 +6388,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.device_lines = None;
                 }
                 // PSTATE.D and Apple registers can change what is derived.
-                self.derived_changed();
+                if !changes.stored {
+                    self.derived_changed();
+                }
                 if changes.translation {
                     self.translations_changed();
                 } else if changes.controls {
@@ -11108,14 +11159,19 @@ mod tests {
         machine.system_instruction(MRS_GXF_STATUS).unwrap();
         assert_eq!(machine.statistics.exceptions, exceptions);
         assert_eq!(machine.mirrors[thread].readable, 1);
-        // A write of the register closes it, as does a PSTATE write.
+        // A write of the register closes its cells in every state, and no
+        // other: the thread pointer is only stored.
         machine.cpu.pc = base + 4;
         machine.system_instruction(MRS).unwrap();
         machine.system_instruction(MRS_DAIF).unwrap();
         assert_eq!(machine.mirrors[daif].readable, 1);
+        machine.mirrors.banks[0][thread].readable = 1;
         machine.cpu.state.x[9] = 0x6000;
         machine.system_instruction(MSR).unwrap();
-        assert_eq!(*machine.mirrors, Mirrors::default());
+        assert_eq!(machine.mirrors[thread].readable, 0);
+        assert_eq!(machine.mirrors.banks[0][thread].readable, 0);
+        assert_eq!(machine.mirrors[daif].readable, 1);
+        machine.derived_changed();
         machine.system_instruction(MRS_DAIF).unwrap();
         let masks = machine.cpu.state.x[8];
         // A mask write keeps the cells, the DAIF one with the new masks.

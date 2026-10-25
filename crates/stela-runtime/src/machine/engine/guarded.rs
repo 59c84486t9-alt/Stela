@@ -145,8 +145,8 @@ pub(super) mod tests {
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0);
     }
 
-    /// GENTER and GEXIT keep each GXF state's open mirrored reads, which
-    /// any System register write closes in every state.
+    /// GENTER and GEXIT keep each GXF state's open mirrored reads, which a
+    /// write of their register closes in every state.
     #[test]
     fn guarded_transitions_find_each_states_mirrored_reads_again() {
         const MRS_TPIDR_EL1: u32 = 0xd538_d088; // mrs x8, tpidr_el1
@@ -173,10 +173,11 @@ pub(super) mod tests {
         assert_eq!(machine.mirrors.cells, el1);
         machine.system_instruction(GENTER).unwrap();
         assert_eq!(machine.mirrors.cells, gl1);
-        // A write closes them all.
+        // A write of TPIDR_EL1 closes its cells alone.
         machine.system_instruction(MSR_TPIDR_EL1).unwrap();
         machine.system_instruction(GEXIT).unwrap();
-        assert!(machine.mirrors.cells.iter().all(|cell| cell.readable == 0));
+        let cells = machine.mirrors.cells;
+        assert_eq!((cells[thread].readable, cells[status]), (0, el1[status]));
     }
 
     #[test]

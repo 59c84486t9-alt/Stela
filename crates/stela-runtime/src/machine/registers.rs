@@ -197,6 +197,9 @@ pub struct Changes {
     pub interrupts: bool,
     /// FP/SIMD access.
     pub floating_point: bool,
+    /// The write only stored a GL bank register, which nothing derived
+    /// reads: the exception entries and returns that use it read it then.
+    pub stored: bool,
     /// The write took a value whose effect this machine does not model
     /// (`impdef::Entry::unmodeled_effect`): what is missing, which the
     /// engine reports once, or stops at in strict mode.
@@ -1211,15 +1214,25 @@ impl Apple {
             Self::GxfStatus | Self::ApStatus | Self::CountAlias | Self::PhysicalCountAlias => {
                 return Outcome::Undefined;
             }
-            Self::GxfEntry(level, true) => apple.guarded[level].enter = value,
-            Self::GxfEntry(level, false) => apple.guarded[level].abort = value,
+            Self::GxfEntry(level, true) => {
+                apple.guarded[level].enter = value;
+                changes.stored = true;
+            }
+            Self::GxfEntry(level, false) => {
+                apple.guarded[level].abort = value;
+                changes.stored = true;
+            }
             Self::Guarded(..) if !guarded => {
                 return refuse("GL bank register outside the guarded level");
             }
             Self::Guarded(level, encoding) => {
-                bank_write(&mut apple.guarded[level], encoding, value)
+                bank_write(&mut apple.guarded[level], encoding, value);
+                changes.stored = true;
             }
-            Self::GuardedOne(encoding) => bank_write(&mut apple.guarded[0], encoding, value),
+            Self::GuardedOne(encoding) => {
+                bank_write(&mut apple.guarded[0], encoding, value);
+                changes.stored = true;
+            }
             Self::TpidrGl(level) => apple.guarded[level].tpidr = value,
             Self::ApControl(level) => apple.apctl[level] = value,
             Self::KernelKey(index) => apple.kernel_key[index] = value,
@@ -2127,6 +2140,25 @@ mod tests {
             cpu.apple_access(mrs(0, Encoding::new(3, 0, 13, 7, 7)), 0),
             Outcome::Undefined
         );
+    }
+
+    /// GL bank writes only store; a control write does not.
+    #[test]
+    fn guarded_bank_writes_report_that_they_only_store() {
+        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        let stored = |cpu: &mut Cpu, encoding, value| {
+            cpu.state.x[5] = value;
+            match cpu.apple_access(msr(5, encoding), 0) {
+                Outcome::Written(changes) => changes.stored,
+                outcome => panic!("{outcome:?}"),
+            }
+        };
+        assert!(!stored(&mut cpu, SPRR_CONFIG_EL1, 1));
+        assert!(!stored(&mut cpu, GXF_CONFIG_EL1, 1));
+        cpu.pstate.guarded = true;
+        for encoding in [ELR_GL12, SPSR_GL12, GXF_ENTER_EL12] {
+            assert!(stored(&mut cpu, encoding, 0x1000));
+        }
     }
 
     #[test]

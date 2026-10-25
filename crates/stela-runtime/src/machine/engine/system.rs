@@ -841,7 +841,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         if !banked {
             cpu.registers.set(register, index, value);
         }
-        self.machine.derived_changed();
+        self.machine.register_written(register);
         self.machine
             .profile_missing
             .retain(|missing| *missing != register);
