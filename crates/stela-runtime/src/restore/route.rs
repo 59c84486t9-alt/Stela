@@ -1,6 +1,7 @@
-//! Host option study for firmware owned by Stela. This is an explicitly
-//! unqualified experiment, not an attestation that every requested object can
-//! be supplied. Evidence: restored classic arm64e file offsets in
+//! Host option sets: Apple's stock restore, the recovery-only erase restore
+//! of the stick SSD, and the study for firmware owned by Stela. The study is
+//! an explicitly unqualified experiment, not an attestation that every
+//! requested object can be supplied. Evidence: restored classic arm64e file offsets in
 //! `docs/research/stela-firmware-route.md`. No application/build keys.
 use super::{Error, Result, plist::Value};
 
@@ -8,6 +9,15 @@ use super::{Error, Result, plist::Value};
 pub enum Route {
     #[default]
     Stock,
+    /// Apple's erase restore without the macOS system image: the stick SSD
+    /// gets its layout, xART and recoveryOS, and macOS is installed later
+    /// from recoveryOS. restored fetches the image only in
+    /// `restore_system_image`, whose body runs only when the host sends
+    /// `AuthInstallRecoveryOSVariant` (R 0x100012ff4, 0x1000131ac ->
+    /// 0x100027018), which Stela never sends. `SystemImage` false
+    /// (R 0x100014ec0, 0x100026ed4) tells the later steps there is no system
+    /// volume. Evidence: `docs/research/small-installer-usb.md`.
+    Recovery,
     /// Exercise the original global/Reduced Security path while leaving NOR
     /// flashing and recovery population disabled. SEP load remains mandatory
     /// when AppleSEPManager exists (R 0x2d428, 0x2d51c); do not claim otherwise.
@@ -30,17 +40,26 @@ impl Route {
             );
             d.insert("PreferPersonalizedManifest".into(), Value::Boolean(false));
         }
+        if self == Self::Recovery {
+            for key in ["SystemImage", "ShouldRestoreSystemImage"] {
+                d.insert(key.into(), Value::Boolean(false));
+            }
+        }
         Ok(())
     }
     /// Whether restored may flash the NOR firmware set. The study turns
     /// `FlashNOR` off, which leaves `load_sep_os` as `NORData`'s only
     /// consumer (R 0x2d51c..0x2d660, `docs/research/stela-firmware-route.md`).
     pub fn flashes_nor(self) -> bool {
-        self == Self::Stock
+        self != Self::StelaFirmwareStudy
     }
     pub fn allows(self, kind: &str) -> bool {
-        self == Self::Stock
-            || matches!(
+        match self {
+            Self::Stock => true,
+            // A request for the image means restored took a route the
+            // evidence says it cannot: refuse it rather than install macOS.
+            Self::Recovery => !matches!(kind, "SystemImageData" | "RecoveryOSASRImage"),
+            Self::StelaFirmwareStudy => matches!(
                 kind,
                 "BuildIdentityDict"
                     | "RootTicket"
@@ -59,7 +78,8 @@ impl Route {
                     | "RestoreAttestation"
                     | "HostSystemTime"
                     | "NORData"
-            )
+            ),
+        }
     }
 }
 #[cfg(test)]
@@ -97,5 +117,21 @@ mod tests {
         assert!(Route::StelaFirmwareStudy.allows("RootTicket"));
         assert!(Route::StelaFirmwareStudy.allows("HostSystemTime"));
         assert!(!Route::StelaFirmwareStudy.allows("Unknown"));
+    }
+    #[test]
+    fn recovery_declines_the_system_image_up_front_and_refuses_it_if_asked() {
+        let mut options = Value::dict([
+            ("InstallRecoveryOS", Value::Boolean(true)),
+            ("ShouldRestoreSystemImage", Value::Boolean(true)),
+        ]);
+        Route::Recovery.options(&mut options).unwrap();
+        let flag = |key| options.required(key).unwrap().boolean().unwrap();
+        assert!(!flag("SystemImage") && !flag("ShouldRestoreSystemImage"));
+        assert!(flag("InstallRecoveryOS"));
+        assert!(options.get("AuthInstallRecoveryOSVariant").is_none());
+        assert!(!Route::Recovery.allows("SystemImageData"));
+        assert!(!Route::Recovery.allows("RecoveryOSASRImage"));
+        assert!(Route::Recovery.allows("RecoveryOSLocalPolicy"));
+        assert!(Route::Recovery.flashes_nor());
     }
 }

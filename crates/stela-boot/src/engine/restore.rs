@@ -2,8 +2,10 @@
 //! `restored` over the USB controller's device port.
 //!
 //! Two sources feed it. The install medium (`--install`) is the IPSW as
-//! pieces on the USB's FAT32 partition, restored with Apple's stock options
-//! ([`Mode::Install`], or [`Mode::Update`] with `--update-restore`). The opt-in, unqualified option study
+//! pieces on the USB's FAT32 partition. [`Mode::Install`] erases the stick
+//! SSD and installs recoveryOS without the macOS system image; macOS is
+//! installed from recoveryOS. [`Mode::Update`] (`--update-restore`) runs
+//! Apple's stock update. The opt-in, unqualified option study
 //! (`--restore-study`) reads an exact IPSW extent on an explicitly selected
 //! raw partition with the study's options ([`Mode::Study`]). Neither source
 //! is an ANS namespace or a pointer into translated memory. Live USB
@@ -36,8 +38,8 @@ const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
 /// Which restore the host runs, and how it reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// The user's install: Apple's stock restore options, the inventory's
-    /// Erase identity.
+    /// The user's install: the inventory's Erase identity, restored without
+    /// the macOS system image ([`Route::Recovery`]).
     Install,
     /// The same, with the inventory's Update identity: restored_update
     /// installs over the installed system and keeps its data.
@@ -209,7 +211,8 @@ impl Experiment {
             }));
         }
         let route = match mode {
-            Mode::Install | Mode::Update => Route::Stock,
+            Mode::Install => Route::Recovery,
+            Mode::Update => Route::Stock,
             Mode::Study => Route::StelaFirmwareStudy,
         };
         let driver = Driver::new(answers, route).map_err(|e| format!("{e}"))?;
@@ -241,7 +244,8 @@ impl Experiment {
                 output::arguments(format_args!(
                     "{}\n",
                     match self.mode {
-                        Mode::Install => "INSTALL protocol complete; reboot into macOS (Stela)",
+                        Mode::Install =>
+                            "INSTALL protocol complete; restart into recoveryOS (Stela)",
                         Mode::Update => "UPDATE protocol complete; reboot into macOS (Stela)",
                         Mode::Study => {
                             "RESTORE STUDY protocol complete; installed boot is unqualified"
