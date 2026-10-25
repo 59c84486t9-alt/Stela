@@ -38,6 +38,9 @@ pub(super) const fn tunnel_buffer(bytes: u32) -> u32 {
 /// (`HousekeepingTimerEvent` 0x3de9144, `DoHousekeeping` 0x3db7fa0) or a
 /// later controller initialization (0x3db22b4) or format (0x3db5790).
 const DEVICE_TIME: u32 = 6;
+/// The CDW13 hints of a read or write: access frequency (3:0), priority
+/// tier (10:8) and passive I/O (12).
+const HINTS: u32 = 1 << 12 | 0x7 << 8 | 0xf;
 const APPLE_DEBUG_SERVICE: u8 = 0xc2;
 
 /// The host clocks one device-time tunnel carries (0x3df6e50..0x3df6e78),
@@ -601,11 +604,12 @@ impl Ans {
             return self.dataset_management(cmd, port);
         }
         let controls = cmd.word(48);
-        // CDW13 bits 3:0 are NVMe's Dataset Management access frequency,
-        // a hint the controller may ignore: `AppleNVMeRequest`'s read and
-        // write builders (0x3deb7d4) put a value below 16 there. Their other
-        // CDW13 fields, at bits 10:8 and from bit 12, are Apple's.
-        if controls & !0x4000_ffff != 0 || cmd.word(52) & !0xf != 0 || !cmd.zero_words(56) {
+        // CDW13 carries hints the controller may ignore, from
+        // `AppleNVMeRequest`'s read and write builders (0x3deb7d4, 0x3deb8f4):
+        // bits 3:0 NVMe's Dataset Management access frequency, bits 10:8
+        // the request's priority tier and bit 12 passive I/O. The writes'
+        // bit 11 has no established meaning and refuses.
+        if controls & !0x4000_ffff != 0 || cmd.word(52) & !HINTS != 0 || !cmd.zero_words(56) {
             return Err("ANS protection, encryption, metadata or read/write hints are not modeled");
         }
         let blocks = u64::from((controls & 0xffff) + 1);

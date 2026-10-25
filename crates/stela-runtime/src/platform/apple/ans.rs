@@ -1410,12 +1410,19 @@ mod tests {
         let mut refused = Rig::new();
         refused.io_queues();
         assert!(refused.submit(1, 0, 0, 1, 0, [2, 0, 0, 0, 0, 0]).is_err());
-        // Apple's CDW13 fields above the hint refuse.
+        // Apple's priority tier and passive bit are hints too; the writes'
+        // bit 11 refuses.
+        let mut hinted = Rig::new();
+        hinted.io_queues();
+        hinted
+            .submit(1, 0, 2, 1, DATA, [3, 0, 0, 1 << 12 | 3 << 8 | 2, 0, 0])
+            .unwrap();
+        hinted.retire(1, 0);
         let mut refused = Rig::new();
         refused.io_queues();
         assert!(
             refused
-                .submit(1, 0, 2, 1, DATA, [3, 0, 0, 1 << 8, 0, 0])
+                .submit(1, 0, 1, 1, DATA, [3, 0, 0, 1 << 11, 0, 0])
                 .is_err()
         );
         rig.submit(1, 8, 2, 1, DATA, [32, 0, 0, 0, 0, 0]).unwrap();
