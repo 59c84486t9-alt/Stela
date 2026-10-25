@@ -1230,7 +1230,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("the audio check failed")
         });
     }
-    let wants_network = options.tss || options.network_check.is_some();
+    // The signing service is asked only during a restore, so a boot that
+    // restores nothing leaves the adapter to the guest.
+    let restoring = options.install.is_some() || options.restore_source.is_some();
+    let wants_network = (options.tss && restoring) || options.network_check.is_some();
     let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
         if targets.is_empty()
             && options.install_source.is_none()
