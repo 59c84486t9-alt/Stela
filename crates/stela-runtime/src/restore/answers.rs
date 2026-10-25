@@ -603,7 +603,6 @@ impl<R: ReadAt> Answers<R> {
         )])))
     }
     fn nor(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
-        let llb = self.personalized(identity, "LLB", &Value::dict([]))?;
         let Value::Dict(manifest) = identity.value.required("Manifest")? else {
             return Err(Error::Invalid("NOR manifest dictionary"));
         };
@@ -638,6 +637,20 @@ impl<R: ReadAt> Answers<R> {
         .into_iter()
         .filter(|(component, _)| manifest.contains_key(*component))
         .collect();
+        // Images too large to hold before personalization stream without
+        // being read whole first: a remote image's members are far apart.
+        let mut stored = 0;
+        for name in ["LLB"]
+            .into_iter()
+            .chain(names.iter().map(String::as_str))
+            .chain(sep.iter().map(|&(component, _)| component))
+        {
+            stored += self.store.member_len(identity.path(name)?)?;
+        }
+        if stored > MAX_REPLY_BYTES as u64 {
+            return self.nor_streamed(identity, &names, dict_mode, &sep);
+        }
+        let llb = self.personalized(identity, "LLB", &Value::dict([]))?;
         let mut dict = BTreeMap::new();
         let mut array = Vec::new();
         let mut total = llb.len();
