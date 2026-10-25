@@ -10,7 +10,9 @@
 //!
 //! `stela setup` writes the install medium instead: the whole IPSW as
 //! numbered pieces below FAT32's file limit ([`Layout::Pieces`]), which
-//! [`pieces::Joined`] presents to the restore host as one IPSW.
+//! [`pieces::Joined`] presents to the restore host as one IPSW, or only
+//! the manifest of the IPSW on Apple's CDN ([`Layout::Remote`]), which
+//! `stela.efi` streams during the restore.
 use alloc::{
     format,
     string::{String, ToString},
@@ -169,7 +171,7 @@ pub fn copy_verified<S: PayloadSource, E>(
     if total != member.bytes {
         return Err(mismatch("shorter than the manifest says"));
     }
-    if hex::encode(hash.finalize()) != member.sha256 {
+    if member.sha256.as_deref() != Some(&*hex::encode(hash.finalize())) {
         return Err(mismatch("SHA-256 differs from the manifest"));
     }
     Ok(())
@@ -180,7 +182,10 @@ pub fn copy_verified<S: PayloadSource, E>(
 pub struct SourceImage {
     pub file_name: String,
     pub bytes: u64,
-    pub sha256: String,
+    /// The whole IPSW's SHA-256; absent for a [`Layout::Remote`] image,
+    /// which setup reads only in part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     pub build_manifest_sha256: String,
     /// The SHA-1 Apple's catalog lists for the image, when it was checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +218,10 @@ pub enum Layout {
         pieces: Vec<Piece>,
         block_hashes: BlockHashes,
     },
+    /// The IPSW on Apple's CDN at `url` (plain HTTP), read by byte ranges,
+    /// each request pinned to `etag` (RFC 9110 13.1.5 If-Range) so a changed
+    /// object fails instead of mixing two versions.
+    Remote { url: String, etag: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,7 +229,13 @@ pub struct Member {
     /// The ZIP member path in the IPSW.
     pub name: String,
     pub bytes: u64,
-    pub sha256: String,
+    /// Absent for a member of a [`Layout::Remote`] image that the device
+    /// verifies as the restore consumes it: an Image4 component, whose
+    /// digest the personalized ticket covers, an AEA archive, which
+    /// authenticates itself under its key, or a global ticket. Stela then
+    /// passes its bytes through unhashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     /// Its SHA-384, the digest a BuildManifest component names, when the
     /// manifest carries precomputed hashes ([`BlockHashes`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,7 +394,12 @@ impl PayloadManifest {
         {
             return fail("invalid build");
         }
-        if !sha256_hex(&self.source.sha256)
+        let remote = matches!(self.layout, Layout::Remote { .. });
+        if self
+            .source
+            .sha256
+            .as_deref()
+            .map_or(!remote, |s| !sha256_hex(s))
             || !sha256_hex(&self.source.build_manifest_sha256)
             || self
                 .source
@@ -395,6 +415,16 @@ impl PayloadManifest {
             Layout::Archive { path } if safe_path(path) => {}
             Layout::Archive { .. } => return fail("unsafe archive path"),
             Layout::Staged => {}
+            Layout::Remote { url, etag } => {
+                let printable = |text: &str| text.bytes().all(|b| (0x21..0x7f).contains(&b));
+                if !url.starts_with("http://")
+                    || !printable(url)
+                    || etag.is_empty()
+                    || !printable(etag)
+                {
+                    return fail("remote image URL or ETag");
+                }
+            }
             Layout::Pieces {
                 piece_bytes,
                 pieces,
@@ -425,7 +455,7 @@ impl PayloadManifest {
         let mut names: Vec<&str> = Vec::with_capacity(self.members.len());
         for member in &self.members {
             if !safe_path(&member.name)
-                || !sha256_hex(&member.sha256)
+                || member.sha256.as_deref().map_or(!remote, |s| !sha256_hex(s))
                 || member
                     .sha384
                     .as_ref()
@@ -442,8 +472,8 @@ impl PayloadManifest {
             if blocks.block_bytes != HASH_BLOCK_BYTES {
                 return fail("block hashes of another block size");
             }
-            if self.members.iter().any(|member| member.sha384.is_none()) {
-                return fail("block hashes without every member's SHA-384");
+            if self.hashed().any(|member| member.sha384.is_none()) {
+                return fail("block hashes without every hashed member's SHA-384");
             }
             if self.hash_blocks() > MAX_HASH_BLOCKS {
                 return fail("more block hashes than 64 GiB of members");
@@ -504,6 +534,12 @@ impl PayloadManifest {
         self.members.iter().find(|member| member.name == name)
     }
 
+    /// The members whose bytes Stela checks: all but a remote image's
+    /// device-verified ones.
+    pub fn hashed(&self) -> impl Iterator<Item = &Member> {
+        self.members.iter().filter(|member| member.sha256.is_some())
+    }
+
     /// The members a full restore needs: the Erase identity's and the
     /// global manifests, in manifest order, laid out for staging.
     pub fn erase_subset(&self) -> Result<Self, PayloadError> {
@@ -539,11 +575,10 @@ impl PayloadManifest {
         })
     }
 
-    /// Blocks of [`HASH_BLOCK_BYTES`] the members take, in the order
-    /// [`BlockHashes`] lists them.
+    /// Blocks of [`HASH_BLOCK_BYTES`] the hashed members take, in the
+    /// order [`BlockHashes`] lists them.
     pub fn hash_blocks(&self) -> u64 {
-        self.members
-            .iter()
+        self.hashed()
             .map(|member| member.bytes.div_ceil(HASH_BLOCK_BYTES))
             .sum()
     }
@@ -622,7 +657,7 @@ pub(crate) mod tests {
             source: SourceImage {
                 file_name: "Test.ipsw".into(),
                 bytes: 1,
-                sha256: "0".repeat(64),
+                sha256: Some("0".repeat(64)),
                 build_manifest_sha256: "1".repeat(64),
                 catalog_sha1: None,
             },
@@ -632,7 +667,7 @@ pub(crate) mod tests {
                 .map(|(name, data)| Member {
                     name: name.clone(),
                     bytes: data.len() as u64,
-                    sha256: crate::sha256(data),
+                    sha256: Some(crate::sha256(data)),
                     sha384: None,
                 })
                 .collect(),
@@ -669,9 +704,11 @@ pub(crate) mod tests {
         let (manifest, _) = manifest();
         let json = manifest.to_json();
         assert_eq!(PayloadManifest::parse(json.as_bytes()).unwrap(), manifest);
-        let broken: [fn(&mut PayloadManifest); 17] = [
+        let broken: [fn(&mut PayloadManifest); 19] = [
             |m| m.members[0].name = "../escape".into(),
-            |m| m.members[0].sha256 = "A".repeat(64),
+            |m| m.members[0].sha256 = Some("A".repeat(64)),
+            |m| m.members[0].sha256 = None,
+            |m| m.source.sha256 = None,
             |m| m.members[1].name = m.members[0].name.clone(),
             |m| m.identities[0].members.push("missing".into()),
             |m| {
@@ -740,6 +777,41 @@ pub(crate) mod tests {
         assert_eq!(manifest.hash_blocks(), 1 + 39 + 1);
         manifest.block_hashes.as_mut().unwrap().block_bytes = 4096;
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn only_a_remote_image_leaves_device_verified_members_unhashed() {
+        let (mut manifest, _) = manifest();
+        manifest.layout = Layout::Remote {
+            url: "http://updates-http.cdn-apple.com/a/UniversalMac.ipsw".into(),
+            etag: "\"8faf3ef6-3175\"".into(),
+        };
+        manifest.source.sha256 = None;
+        manifest.members[1].sha256 = None;
+        for member in manifest.hashed().collect::<Vec<_>>() {
+            assert!(member.sha256.is_some());
+        }
+        // The unhashed member takes no block hashes.
+        manifest.members[0].sha384 = Some("5".repeat(96));
+        manifest.members[2].sha384 = Some("5".repeat(96));
+        manifest.members[3].sha384 = Some("5".repeat(96));
+        manifest.block_hashes = Some(blocks(BLOCK_HASHES_FILE));
+        manifest.validate().unwrap();
+        assert_eq!(manifest.hash_blocks(), 1 + 1);
+        let json = manifest.to_json();
+        assert_eq!(PayloadManifest::parse(json.as_bytes()).unwrap(), manifest);
+        for (url, etag) in [
+            ("https://a/b", "e"),
+            ("http://a b", "e"),
+            ("http://a/b", ""),
+        ] {
+            let mut bad = manifest.clone();
+            bad.layout = Layout::Remote {
+                url: url.into(),
+                etag: etag.into(),
+            };
+            assert!(bad.validate().is_err(), "{url} {etag}");
+        }
     }
 
     /// A pieces layout of these sizes.

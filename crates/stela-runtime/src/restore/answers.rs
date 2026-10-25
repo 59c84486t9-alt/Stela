@@ -402,7 +402,13 @@ impl<R: ReadAt> Answers<R> {
         let global = self.ticket_for(identity, args, name)?;
         // Image4 finds the object by its IM4P type: send the type under which
         // the ticket covers the manifest digest (`Ticket::retype_covered`).
-        let tag = if self.store.digest384(&path)?.as_slice() == digest {
+        // A device-verified member's own digest is unknown: its stored type
+        // stands when the ticket covers the digest under it.
+        let stored_covered = match self.store.digest384(&path)? {
+            Some(own) => own.as_slice() == digest,
+            None => global.tags_with(digest).contains(&stored),
+        };
+        let tag = if stored_covered {
             stored
         } else {
             let tags = global.tags_with(digest);

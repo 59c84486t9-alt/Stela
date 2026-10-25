@@ -11,14 +11,17 @@
 //! is an ANS namespace or a pointer into translated memory. Live USB
 //! qualification and the complete intact SEP trust route remain research
 //! requirements.
-use super::bundle::{self, Bytes};
+use super::{
+    bundle::{self, Bytes},
+    remote::Remote,
+};
 use crate::{
     handoff::Handoff,
     output,
     system::{RESTORE_BLOCKS_FILE, RESTORE_INVENTORY_FILE},
 };
-use alloc::{boxed::Box, format, string::String};
-use core::task::Poll;
+use alloc::{boxed::Box, format, rc::Rc, string::String};
+use core::{cell::RefCell, task::Poll};
 use stela_drivers::block::BlockDevice;
 use stela_runtime::{
     machine::apple::{AppleDevices, MuxStream, UsbId},
@@ -59,8 +62,12 @@ impl Mode {
     }
 }
 
-/// Any IPSW source, its errors described.
-pub struct Source(Box<dyn ReadAt<Error = String>>);
+/// Any IPSW source, its errors described; a remote image's reader also
+/// reads ahead between the restore's requests ([`Source::pump`]).
+pub struct Source {
+    reader: Box<dyn ReadAt<Error = String>>,
+    remote: Option<Rc<RefCell<Remote>>>,
+}
 
 struct Described<R>(R);
 
@@ -74,9 +81,40 @@ impl<R: ReadAt> ReadAt for Described<R> {
     }
 }
 
+/// A shared remote reader, borrowed for each read.
+struct Borrowed(Rc<RefCell<Remote>>);
+
+impl ReadAt for Borrowed {
+    type Error = stela_runtime::net::NetError;
+    fn len(&self) -> u64 {
+        self.0.borrow().len()
+    }
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.borrow_mut().read_at(offset, buffer)
+    }
+}
+
 impl Source {
     pub fn new<R: ReadAt + 'static>(reader: R) -> Self {
-        Self(Box::new(Described(reader)))
+        Self {
+            reader: Box::new(Described(reader)),
+            remote: None,
+        }
+    }
+
+    pub fn remote(remote: Remote) -> Self {
+        let remote = Rc::new(RefCell::new(remote));
+        Self {
+            reader: Box::new(Described(Borrowed(Rc::clone(&remote)))),
+            remote: Some(remote),
+        }
+    }
+
+    /// Reads a remote image ahead without waiting; nothing for another.
+    pub fn pump(&mut self) {
+        if let Some(remote) = &self.remote {
+            remote.borrow_mut().pump();
+        }
     }
 
     /// The study's raw source: the IPSW from the partition's first byte.
@@ -90,10 +128,10 @@ impl Source {
 impl ReadAt for Source {
     type Error = String;
     fn len(&self) -> u64 {
-        self.0.len()
+        self.reader.len()
     }
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), String> {
-        self.0.read_at(offset, buffer)
+        self.reader.read_at(offset, buffer)
     }
 }
 
@@ -166,7 +204,7 @@ impl Experiment {
                 mode => mode.label(),
             },
             manifest.product_build,
-            manifest.source.sha256,
+            manifest.source.sha256.as_deref().unwrap_or("-"),
             manifest.source.build_manifest_sha256,
             identity,
             manifest.source.bytes,
@@ -231,6 +269,7 @@ impl Experiment {
             return;
         }
         let label = self.mode.label();
+        self.driver.answers.store.reader_mut().pump();
         let mut client = devices
             .usb_client(self.usb)
             .unwrap_or_else(|e| output::fatal(e));

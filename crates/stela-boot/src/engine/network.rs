@@ -1,6 +1,7 @@
-//! The mount's own network client: one HTTP POST at a time over the host's
-//! first network adapter, for the restore client's signing-server request
-//! (`--tss`) and the connectivity check (`--network-check`).
+//! The mount's own network client over the host's first network adapter:
+//! the restore client's signing-server requests (`--tss`), the
+//! connectivity check (`--network-check`) and a remote install image's
+//! ranged downloads (`engine::remote`), which share it.
 //!
 //! UEFI's Simple Network Protocol ends with boot services, and the request
 //! is made during the restore, long after ExitBootServices, so the client
@@ -14,7 +15,8 @@
 //! (`storage::RestoreRoot`), as block and input I/O do.
 use super::storage::RestoreRoot;
 use crate::output;
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, rc::Rc, string::String, vec::Vec};
+use core::cell::RefCell;
 use stela_drivers::{
     Clock,
     net::{Link, LinkError, Mac},
@@ -22,7 +24,7 @@ use stela_drivers::{
 };
 use stela_runtime::{
     machine::apple::AppleDevices,
-    net::{NetError, Stack},
+    net::{NetError, Stack, Transfer, stack::DOWNLOAD_BUFFER},
 };
 
 /// The host's network adapters and the loader root they are reached in.
@@ -135,10 +137,33 @@ impl HostNetwork {
         }
         result
     }
+
+    /// Opens a download of `request`'s response from `host`.
+    pub fn download(&mut self, host: &str, request: Vec<u8>) -> Result<Transfer, NetError> {
+        self.stack.open(host, request, DOWNLOAD_BUFFER)
+    }
+
+    /// What has arrived for `transfer`, without waiting (`Stack::read`).
+    pub fn read(
+        &mut self,
+        transfer: &mut Transfer,
+        take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
+    ) -> Result<bool, NetError> {
+        self.stack.read(transfer, take)
+    }
+
+    pub fn close(&mut self, transfer: Transfer) {
+        self.stack.close(transfer);
+    }
 }
 
+/// The host network, shared by the signing transport and a remote install
+/// image; the engine is serialized, so a borrow never overlaps another.
+#[derive(Clone)]
+pub struct Shared(pub Rc<RefCell<HostNetwork>>);
+
 /// The restore client's way to Apple's signing service (`--tss`).
-impl stela_runtime::restore::tss::Transport for HostNetwork {
+impl stela_runtime::restore::tss::Transport for Shared {
     fn post(
         &mut self,
         host: &str,
@@ -147,7 +172,9 @@ impl stela_runtime::restore::tss::Transport for HostNetwork {
         content_type: &str,
         body: &[u8],
     ) -> stela_runtime::restore::Result<Vec<u8>> {
-        HostNetwork::post(self, host, path, headers, content_type, body)
+        self.0
+            .borrow_mut()
+            .post(host, path, headers, content_type, body)
             .map_err(|error| stela_runtime::restore::Error::Transport(format!("{error}")))
     }
 }

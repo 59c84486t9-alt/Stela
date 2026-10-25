@@ -18,6 +18,7 @@ mod network;
 pub(crate) mod nor;
 pub(crate) mod power;
 mod progress;
+mod remote;
 mod restore;
 mod speculation;
 pub(crate) mod storage;
@@ -29,7 +30,7 @@ use crate::{
     handoff::{Handoff, MAGIC},
     layout, output,
 };
-use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, format, rc::Rc, string::String, vec::Vec};
 use core::{
     arch::{
         asm,
@@ -620,8 +621,8 @@ impl Options {
         if !options.restore && restore_inputs {
             return Err("restore inputs require explicit --restore-study");
         }
-        if options.install.is_some() != options.install_source.is_some() {
-            return Err("--install and --install-source name the install medium together");
+        if options.install_source.is_some() && options.install.is_none() {
+            return Err("--install-source names the partition of an --install medium");
         }
         if options.install.is_some()
             && (!options.bundle
@@ -1241,128 +1242,140 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
-    let wants_network = (options.tss && restoring) || options.network_check.is_some();
-    let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
-        if targets.is_empty()
-            && options.install_source.is_none()
-            && options.preboot.is_none()
-            && !options.input
-            && !wants_network
-            && options.usb_storage.is_empty()
-            && !options.external_disks
-            && !options.guest_network
-            && translation_store.is_none()
-        {
-            (
-                Vec::new(),
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-                None,
-                storage::HostDisks::none(),
+    // An install without a medium partition streams its remote image.
+    let remote_image = options.install.is_some() && options.install_source.is_none();
+    let wants_network =
+        (options.tss && restoring) || remote_image || options.network_check.is_some();
+    let (
+        services,
+        medium,
+        preboot,
+        host_input,
+        mut host_network,
+        usb_disks,
+        guest_network,
+        host_disks,
+    ) = if targets.is_empty()
+        && options.install_source.is_none()
+        && options.preboot.is_none()
+        && !options.input
+        && !wants_network
+        && options.usb_storage.is_empty()
+        && !options.external_disks
+        && !options.guest_network
+        && translation_store.is_none()
+    {
+        (
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            storage::HostDisks::none(),
+        )
+    } else {
+        let mut storage_handoff = handoff
+            .storage
+            .handoff()
+            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+        storage_handoff.firmware = host_firmware.clone();
+        if options.audio_check.is_some() {
+            // The audio check retains the final slice even after shutdown.
+            storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
+        }
+        crate::status::begin("Starting the PC's disks and USB devices");
+        // SAFETY: before host::install, with sole ownership of DMA/controllers.
+        let storage::Opened {
+            services,
+            medium,
+            preboot,
+            store,
+            log,
+            inputs,
+            mut links,
+            usb_disks,
+            disks,
+        } = unsafe {
+            storage::open(
+                &storage_handoff,
+                &storage::Partitions {
+                    targets: &targets,
+                    medium: options.install_source,
+                    preboot: options.preboot.as_ref(),
+                    store: translation_store,
+                    log: handoff.log_partition.map(Guid),
+                },
+                &options.usb_storage,
+                options.external_disks.then(|| {
+                    stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
+                        .saturating_sub(options.usb_storage.len())
+                }),
             )
-        } else {
-            let mut storage_handoff = handoff
-                .storage
-                .handoff()
-                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-            storage_handoff.firmware = host_firmware.clone();
-            if options.audio_check.is_some() {
-                // The audio check retains the final slice even after shutdown.
-                storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
-            }
-            crate::status::begin("Starting the PC's disks and USB devices");
-            // SAFETY: before host::install, with sole ownership of DMA/controllers.
-            let storage::Opened {
-                services,
-                medium,
-                preboot,
-                store,
-                log,
-                inputs,
-                mut links,
-                usb_disks,
-                disks,
-            } = unsafe {
-                storage::open(
-                    &storage_handoff,
-                    &storage::Partitions {
-                        targets: &targets,
-                        medium: options.install_source,
-                        preboot: options.preboot.as_ref(),
-                        store: translation_store,
-                        log: handoff.log_partition.map(Guid),
-                    },
-                    &options.usb_storage,
-                    options.external_disks.then(|| {
-                        stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
-                            .saturating_sub(options.usb_storage.len())
-                    }),
-                )
-            }
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("host storage refusal: {error}\n"));
-                output::fatal(&format!("host storage could not be opened: {error}"))
-            });
-            let count = |count: usize, one: &str, many: &str| {
-                format!("{count} {}", if count == 1 { one } else { many })
-            };
-            let partitions = count(
-                services.len() + usize::from(medium.is_some()),
-                "partition",
-                "partitions",
-            );
-            crate::status::done(&match usb_disks.len() {
-                0 => partitions,
-                disks => format!(
-                    "{partitions}, and {} macOS sees as USB drives",
-                    count(disks, "disk", "disks")
-                ),
-            });
-            if let Some(log) = log {
-                crate::log_file::resume(log);
-            }
-            if let Some(store) = store {
-                translations::set_partition(store);
-            }
-            // The guest's adapter is its own: the mount's client keeps the
-            // first one. Without one the Mac boots with no network, which
-            // is reported once.
-            let guest_network = options
-                .guest_network
-                .then(|| {
-                    network::GuestNetwork::open(&mut links, wants_network)
-                        .inspect_err(|error| {
-                            output::arguments(format_args!("guest network refusal: {error}\n"));
-                            crate::status::warn(error);
-                        })
-                        .ok()
-                })
-                .flatten();
-            // A missing network is reported here and refused only by what
-            // needs it, so the mount still boots and logs how far it gets.
-            let network = wants_network.then(|| {
-                crate::status::begin("Getting a network address");
-                network::HostNetwork::open(links, storage_handoff.clock)
-                    .inspect(|network| crate::status::done(network.describe()))
+        }
+        .unwrap_or_else(|error| {
+            output::arguments(format_args!("host storage refusal: {error}\n"));
+            output::fatal(&format!("host storage could not be opened: {error}"))
+        });
+        let count = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
+        let partitions = count(
+            services.len() + usize::from(medium.is_some()),
+            "partition",
+            "partitions",
+        );
+        crate::status::done(&match usb_disks.len() {
+            0 => partitions,
+            disks => format!(
+                "{partitions}, and {} macOS sees as USB drives",
+                count(disks, "disk", "disks")
+            ),
+        });
+        if let Some(log) = log {
+            crate::log_file::resume(log);
+        }
+        if let Some(store) = store {
+            translations::set_partition(store);
+        }
+        // The guest's adapter is its own: the mount's client keeps the
+        // first one. Without one the Mac boots with no network, which
+        // is reported once.
+        let guest_network = options
+            .guest_network
+            .then(|| {
+                network::GuestNetwork::open(&mut links, wants_network)
                     .inspect_err(|error| {
-                        output::arguments(format_args!("host network refusal: {error}\n"));
+                        output::arguments(format_args!("guest network refusal: {error}\n"));
                         crate::status::warn(error);
                     })
-            });
-            (
-                services,
-                medium,
-                preboot,
-                options.input.then(|| input::HostInput::new(inputs)),
-                network,
-                usb_disks,
-                guest_network,
-                disks,
-            )
-        };
+                    .ok()
+            })
+            .flatten();
+        // A missing network is reported here and refused only by what
+        // needs it, so the mount still boots and logs how far it gets.
+        let network = wants_network.then(|| {
+            crate::status::begin("Getting a network address");
+            network::HostNetwork::open(links, storage_handoff.clock)
+                .inspect(|network| crate::status::done(network.describe()))
+                .map(|network| network::Shared(Rc::new(RefCell::new(network))))
+                .inspect_err(|error| {
+                    output::arguments(format_args!("host network refusal: {error}\n"));
+                    crate::status::warn(error);
+                })
+        });
+        (
+            services,
+            medium,
+            preboot,
+            options.input.then(|| input::HostInput::new(inputs)),
+            network,
+            usb_disks,
+            guest_network,
+            disks,
+        )
+    };
     let built = preboot.map(|partition| from_disk(partition, &options));
     // A bundle runs at the DRAM base it was prepared for, its SoC's.
     if options.bundle && !options.dram_explicit {
@@ -1386,15 +1399,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             range.guest, range.bytes, range.host
         ));
     }
-    let mut host_network = host_network;
     if let Some(url) = &options.network_check {
-        let Some(Ok(network)) = host_network.as_mut() else {
+        let Some(Ok(network)) = &host_network else {
             output::fatal("the network check failed")
         };
         let (host, path) = network::split_url(url).unwrap_or_else(|error| output::fatal(error));
         // Any HTTP status proves the path end to end; only a transport
         // failure (link, DHCP, DNS, TCP, malformed reply) fails the check.
-        match network.post(host, path, &[], "text/plain", b"") {
+        let checked = network
+            .0
+            .borrow_mut()
+            .post(host, path, &[], "text/plain", b"");
+        match checked {
             Ok(body) => {
                 output::arguments(format_args!(
                     "NETWORK CHECK body bytes={} sha256={}\n",
@@ -1409,8 +1425,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             Err(_) => output::fatal("the network check failed"),
         }
     }
-    // The restore client's signing-server transport (`restore::tss`)
-    // takes `host_network` below; it lives for the whole run.
+    // The restore client's signing-server transport (`restore::tss`) and a
+    // remote install image share `host_network`; it lives for the whole run.
     let mut services = services.into_iter();
     let backing = options.storage.as_ref().map(|_| services.next().unwrap());
     let backing = backing.or_else(|| {
@@ -1431,8 +1447,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .restore_source
         .as_ref()
         .map(|_| services.next().unwrap());
-    // The restore host's IPSW: the study's raw extent, or the install
-    // medium's pieces, found through FAT32 and joined.
+    // The restore host's IPSW: the study's raw extent, the install medium's
+    // pieces, found through FAT32 and joined, or the remote image.
     let source = match (source, medium) {
         (Some(partition), _) => Some(
             restore::inventory(handoff)
@@ -1449,6 +1465,16 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             let opened = install::open(partition, &manifest, directory, hashes)?;
             crate::status::done("");
             Ok(restore::Source::new(opened))
+        })),
+        (None, None) if remote_image => Some(restore::inventory(handoff).and_then(|manifest| {
+            let network = match &host_network {
+                Some(Ok(network)) => network.clone(),
+                Some(Err(reason)) => return Err(reason.clone()),
+                None => unreachable!("a remote install opens the host network"),
+            };
+            Ok(restore::Source::remote(remote::Remote::new(
+                network, &manifest,
+            )?))
         })),
         (None, None) => None,
     }

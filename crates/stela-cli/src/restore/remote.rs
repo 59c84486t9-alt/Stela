@@ -67,6 +67,16 @@ impl Remote {
         })
     }
 
+    /// The pinned entity tag.
+    pub fn etag(&self) -> &str {
+        &self.etag
+    }
+
+    /// The object's length.
+    pub fn size(&self) -> u64 {
+        self.len
+    }
+
     /// Fetch `[start, start + bytes)` into the chunk.
     fn fetch(&mut self, start: u64, bytes: u64) -> Result<()> {
         let end = start + bytes - 1;

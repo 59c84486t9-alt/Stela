@@ -33,6 +33,21 @@ pub(crate) enum ImagesCommand {
         #[arg(long, default_value = ".stela/images")]
         output_dir: PathBuf,
     },
+    /// Write the `payload.json` and `blocks.bin` of an install `stela.efi`
+    /// streams from Apple's servers, reading only the members it hashes.
+    RemoteInventory {
+        #[arg(long)]
+        build: String,
+        #[arg(long)]
+        model: String,
+        /// A new directory for the two files.
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Read each recipient AEA key from this directory instead of
+        /// fetching it (`image-manifest --aea-keys-in`).
+        #[arg(long)]
+        aea_keys_in: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -340,6 +355,29 @@ impl ImagesCommand {
                     output.display(),
                     bytes as f64 / 1e9,
                     started.elapsed().as_secs_f64()
+                );
+            }
+            Self::RemoteInventory {
+                build,
+                model,
+                output_dir,
+                aea_keys_in,
+            } => {
+                let images = restore::catalog()?;
+                let image = restore::select(&images, Some(&build), Some(&model))?;
+                let inventory = restore::remote_inventory(&image, &model, aea_keys_in.as_deref())?;
+                std::fs::create_dir(&output_dir)
+                    .with_context(|| format!("{} exists", output_dir.display()))?;
+                let manifest = output_dir.join(stela_runtime::payload::MANIFEST_FILE);
+                let blocks = output_dir.join(stela_runtime::payload::BLOCK_HASHES_FILE);
+                std::fs::write(&blocks, &inventory.blocks)?;
+                std::fs::write(&manifest, inventory.manifest.to_json() + "\n")?;
+                eprintln!(
+                    "{}: macOS {} streamed from {} ({} members hashed)",
+                    manifest.display(),
+                    image.build,
+                    image.url,
+                    inventory.report["hashed"]
                 );
             }
         }

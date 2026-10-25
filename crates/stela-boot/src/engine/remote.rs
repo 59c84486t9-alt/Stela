@@ -1,0 +1,182 @@
+//! A remote install image (`payload::Layout::Remote`): the IPSW on Apple's
+//! CDN, read by plain-HTTP byte ranges over the mount's own network.
+//!
+//! Each request carries `If-Range` with the entity tag setup recorded, so a
+//! changed object fails instead of mixing two versions; the restore store
+//! then checks the bytes as the manifest says (`payload::Member::sha256`).
+//! One range at a time streams into a read-ahead buffer: a read at or just
+//! past the buffer continues the range, a read elsewhere starts one there,
+//! and [`Remote::pump`] keeps the buffer filling while the engine runs the
+//! guest, so the download overlaps the restore's own writes. A range that
+//! fails resumes from its last byte received, a few times.
+use super::network::Shared;
+use crate::output;
+use alloc::{collections::VecDeque, string::String};
+use stela_runtime::{
+    net::{
+        NetError, Transfer,
+        http::{self, Ranged},
+    },
+    payload::{Layout, PayloadManifest, ReadAt},
+};
+
+/// Bytes one request asks for: a member streams in few requests, and a
+/// seek abandons only what the TCP window has in flight.
+const SPAN: u64 = 256 << 20;
+/// How far [`Remote::pump`] fills ahead of the restore.
+const AHEAD: usize = 32 << 20;
+/// A read up to this far past the buffered bytes continues the open range.
+const SKIP: u64 = 8 << 20;
+/// Bytes already read that stay buffered for a re-read.
+const KEEP: usize = 8 << 20;
+/// Consecutive failures of one range's progress before a read fails.
+const ATTEMPTS: u32 = 4;
+
+pub struct Remote {
+    network: Shared,
+    host: String,
+    path: String,
+    etag: String,
+    len: u64,
+    /// Image bytes from `start`; the open range continues at their end.
+    start: u64,
+    buffer: VecDeque<u8>,
+    range: Option<(Transfer, Ranged)>,
+    /// Whether [`Remote::pump`] reads ahead: from a read that succeeded
+    /// until a read-ahead fails.
+    ahead: bool,
+}
+
+impl Remote {
+    pub fn new(network: Shared, manifest: &PayloadManifest) -> Result<Self, String> {
+        let Layout::Remote { url, etag } = &manifest.layout else {
+            return Err(String::from("the install payload is not a remote image"));
+        };
+        let (host, path) = super::network::split_url(url)?;
+        output::arguments(format_args!(
+            "REMOTE IMAGE http://{host}{path} bytes={} etag={etag}\n",
+            manifest.source.bytes
+        ));
+        Ok(Self {
+            network,
+            host: host.into(),
+            path: path.into(),
+            etag: etag.clone(),
+            len: manifest.source.bytes,
+            start: 0,
+            // Room for the read-ahead, what stays for a re-read and a
+            // socket's worth more, so the ring rarely grows.
+            buffer: VecDeque::with_capacity(AHEAD + KEEP + (8 << 20)),
+            range: None,
+            ahead: false,
+        })
+    }
+
+    fn end(&self) -> u64 {
+        self.start + self.buffer.len() as u64
+    }
+
+    fn stop(&mut self) {
+        if let Some((transfer, _)) = self.range.take() {
+            self.network.0.borrow_mut().close(transfer);
+        }
+    }
+
+    /// Takes what has arrived, opening a range at the buffer's end first
+    /// when none is open.
+    fn step(&mut self) -> Result<(), NetError> {
+        if self.range.is_none() {
+            let (first, last) = (self.end(), (self.end() + SPAN).min(self.len) - 1);
+            let request = http::get_range(&self.host, &self.path, first, last, Some(&self.etag))?;
+            let transfer = self.network.0.borrow_mut().download(&self.host, request)?;
+            self.range = Some((transfer, Ranged::new(first, last)));
+        }
+        let (transfer, ranged) = self.range.as_mut().expect("opened above");
+        let buffer = &mut self.buffer;
+        let done = self
+            .network
+            .0
+            .borrow_mut()
+            .read(transfer, |bytes, closed| {
+                ranged.feed(bytes, closed, |body| buffer.extend(body))
+            })?;
+        if done {
+            self.stop();
+        }
+        Ok(())
+    }
+
+    /// Fills the buffer up to `until`.
+    fn fill(&mut self, until: u64) -> Result<(), NetError> {
+        let mut failures = 0;
+        while self.end() < until {
+            let before = self.end();
+            if let Err(error) = self.step() {
+                self.stop();
+                failures += 1;
+                output::arguments(format_args!(
+                    "REMOTE IMAGE range at {before} failed ({failures}/{ATTEMPTS}): {error}\n"
+                ));
+                if failures == ATTEMPTS {
+                    return Err(error);
+                }
+            } else if self.end() > before {
+                failures = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// Without waiting, takes what has arrived while less than [`AHEAD`] is
+    /// buffered, opening the next range when one ends. A failure leaves the
+    /// next read to retry.
+    pub fn pump(&mut self) {
+        if self.ahead && self.buffer.len() < AHEAD && self.end() < self.len && self.step().is_err()
+        {
+            self.stop();
+            self.ahead = false;
+        }
+    }
+}
+
+impl ReadAt for Remote {
+    type Error = NetError;
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), NetError> {
+        let until = offset + out.len() as u64;
+        if until > self.len {
+            return Err(NetError::Invalid("read past the remote image's end"));
+        }
+        if offset < self.start || offset > self.end() + SKIP {
+            self.stop();
+            self.buffer.clear();
+            self.start = offset;
+        }
+        self.fill(until)?;
+        self.ahead = true;
+        // The ring's two halves, from the read's first byte.
+        let (mut at, mut filled) = ((offset - self.start) as usize, 0);
+        for part in <[&[u8]; 2]>::from(self.buffer.as_slices()) {
+            if at < part.len() {
+                let take = (part.len() - at).min(out.len() - filled);
+                out[filled..filled + take].copy_from_slice(&part[at..at + take]);
+                filled += take;
+                at = 0;
+            } else {
+                at -= part.len();
+            }
+        }
+        // Bytes before this read are done with, but the last few stay for
+        // a re-read.
+        let done = (until - self.start) as usize;
+        if done > KEEP {
+            self.buffer.drain(..done - KEEP);
+            self.start = until - KEEP as u64;
+        }
+        Ok(())
+    }
+}

@@ -417,7 +417,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         end: u64,
         mut body: impl FnMut(&[u8]),
     ) -> Result<u64, NetError> {
-        let request = http::get_range(host, path, start, end)?;
+        let request = http::get_range(host, path, start, end, None)?;
         let transfer = self.open(host, request, DOWNLOAD_BUFFER)?;
         let mut ranged = http::Ranged::new(start, end);
         self.finish(transfer, u64::MAX, |bytes, closed| {

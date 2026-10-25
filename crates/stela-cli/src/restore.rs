@@ -274,6 +274,60 @@ pub fn fetch_recovery(image: &Image, model: &str, output: &Path) -> Result<u64> 
     payload::trim(remote::Remote::open(client()?, &image.url)?, model, output)
 }
 
+/// The restore inventory of `image` for `model` that `stela.efi` streams
+/// from Apple's servers during the install ([`payload::remote_inventory`]).
+/// It is read here over HTTPS and records the plain-HTTP twin the mount,
+/// which has no TLS, reads, once that twin serves the same object.
+pub fn remote_inventory(
+    image: &Image,
+    model: &str,
+    keys_in: Option<&Path>,
+) -> Result<payload::Inventory> {
+    let url = Url::parse(&image.url)?;
+    ensure!(
+        apple_url(&url),
+        "image must be hosted on Apple's HTTPS servers"
+    );
+    let http = plain_http(&url)?;
+    let source = remote::Remote::open(client()?, &image.url)?;
+    let twin_client = Client::builder()
+        .user_agent(concat!("stela/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
+        .redirect(Policy::none())
+        .build()?;
+    let twin = remote::Remote::open(twin_client, &http)?;
+    ensure!(
+        (twin.etag(), twin.size()) == (source.etag(), source.size()),
+        "{http} serves another object than {}",
+        image.url
+    );
+    let layout = stela_runtime::payload::Layout::Remote {
+        url: http,
+        etag: source.etag().into(),
+    };
+    let name = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .context("the image URL names no file")?;
+    let bytes = source.size();
+    payload::remote_inventory(source, Path::new(name), bytes, layout, model, keys_in)
+}
+
+/// Apple's update CDN serves each object over plain HTTP from its `-http`
+/// host as well.
+fn plain_http(url: &Url) -> Result<String> {
+    ensure!(
+        url.host_str() == Some("updates.cdn-apple.com"),
+        "{url} is not on Apple's update CDN, the one that also serves plain HTTP"
+    );
+    let mut http = url.clone();
+    http.set_scheme("http")
+        .map_err(|()| anyhow::anyhow!("{url} has no plain-HTTP form"))?;
+    http.set_host(Some("updates-http.cdn-apple.com"))?;
+    Ok(http.into())
+}
+
 pub fn download(image: &Image, output: &Path) -> Result<Receipt> {
     let url = Url::parse(&image.url)?;
     ensure!(

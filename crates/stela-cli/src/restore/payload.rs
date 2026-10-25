@@ -5,7 +5,8 @@
 //! [`inventory`] hashes members where they are. [`write`] lays the payload
 //! out under `EFI/stela/images/<build>/`, as FAT32 slices or as the whole
 //! IPSW, and writes `payload.json` last, so a volume without it holds no
-//! payload.
+//! payload. [`remote_inventory`] describes an IPSW `stela.efi` streams
+//! from Apple's servers during the install.
 use super::{aea, components, manifest};
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
@@ -161,8 +162,8 @@ struct Hashed {
 }
 
 /// Stream one member through `sink`, returning its length and hashes.
-fn stream(
-    archive: &mut ZipArchive<File>,
+fn stream<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     name: &str,
     mut sink: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<Hashed> {
@@ -208,7 +209,7 @@ fn stream(
         member: Member {
             name: name.into(),
             bytes: total,
-            sha256: hex::encode(hash.finalize()),
+            sha256: Some(hex::encode(hash.finalize())),
             sha384: Some(hex::encode(hash384.finalize())),
         },
         blocks,
@@ -263,8 +264,8 @@ fn hash_members(image: &Path, names: &[String]) -> Result<Vec<Hashed>> {
 }
 
 /// AEA metadata of each `.aea` member, read from the archive in place.
-fn aea_metadata(
-    archive: &mut ZipArchive<File>,
+fn aea_metadata<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     image: &Path,
     names: &[String],
 ) -> Result<Vec<(String, aea::Metadata)>> {
@@ -357,7 +358,7 @@ fn manifest_for(
     layout: Layout,
     members: Vec<Member>,
     aea_keys: Vec<AeaKey>,
-    (bytes, sha256): (u64, String),
+    (bytes, sha256): (u64, Option<String>),
 ) -> Result<PayloadManifest> {
     let manifest = PayloadManifest {
         schema_version: 1,
@@ -464,7 +465,7 @@ pub fn inventory(
         },
         hashed.into_iter().map(|h| h.member).collect(),
         Vec::new(),
-        ipsw?,
+        ipsw.map(|(bytes, sha256)| (bytes, Some(sha256)))?,
     )?;
     let keyed = PayloadManifest {
         aea_keys,
@@ -485,6 +486,85 @@ pub fn inventory(
     Ok(Inventory {
         report,
         manifest: keyed,
+        blocks,
+    })
+}
+
+/// The restore inventory of the IPSW `source` of `bytes` named `image`,
+/// read by ranges where it is, for `stela.efi` to stream from `layout`'s
+/// URL during the install ([`Layout::Remote`]). Only members no device
+/// check covers are hashed (the restored plists, the bootability bundle,
+/// the global manifests): an Image4 component's digest is in the
+/// personalized ticket and an AEA archive authenticates itself, so those
+/// pass through unhashed, and the sealed system volume checks itself.
+pub fn remote_inventory<R: Read + Seek>(
+    source: R,
+    image: &Path,
+    bytes: u64,
+    layout: Layout,
+    model: &str,
+    keys_in: Option<&Path>,
+) -> Result<Inventory> {
+    ensure!(
+        matches!(layout, Layout::Remote { .. }),
+        "a remote inventory needs a remote layout"
+    );
+    let mut archive = ZipArchive::new(source)?;
+    let selection = select(&mut archive, model)?;
+    let metadata = aea_metadata(&mut archive, image, &selection.names)?;
+    let verified: BTreeSet<&str> = selection
+        .restore
+        .identities
+        .iter()
+        .flat_map(|identity| identity.components.values())
+        .filter(|component| component.declared_digest_hex.is_some())
+        .map(|component| component.path.as_str())
+        .chain(metadata.iter().map(|(name, _)| name.as_str()))
+        .collect();
+    let mut members = Vec::new();
+    let mut hashed = Vec::new();
+    for name in &selection.names {
+        if verified.contains(name.as_str()) {
+            members.push(Member {
+                name: name.clone(),
+                bytes: archive.by_name(name)?.size(),
+                sha256: None,
+                sha384: None,
+            });
+        } else {
+            let member = stream(&mut archive, name, |_| Ok(()))?;
+            members.push(member.member.clone());
+            hashed.push(member);
+        }
+    }
+    let (blocks, block_entry) = block_hashes(&hashed);
+    let aea_keys = match keys_in {
+        Some(dir) => local_keys(&metadata, dir)?,
+        None => fetch_keys(&metadata)?,
+    };
+    let manifest = PayloadManifest {
+        aea_keys,
+        block_hashes: Some(block_entry),
+        ..manifest_for(
+            image,
+            &selection,
+            layout,
+            members,
+            Vec::new(),
+            (bytes, None),
+        )?
+    };
+    manifest
+        .validate()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let report = json!({
+        "payload": manifest,
+        "hashed": hashed.len(),
+        "limits": "Members without a SHA-256 are verified by the device: Image4 components by the personalized ticket, AEA archives by their own authentication.",
+    });
+    Ok(Inventory {
+        report,
+        manifest,
         blocks,
     })
 }
@@ -626,7 +706,14 @@ pub fn write(options: &WriteOptions<'_>) -> Result<serde_json::Value> {
             (Layout::Archive { path }, members, whole)
         }
     };
-    let manifest = manifest_for(image, &selection, layout, members, aea_keys, whole)?;
+    let manifest = manifest_for(
+        image,
+        &selection,
+        layout,
+        members,
+        aea_keys,
+        (whole.0, Some(whole.1)),
+    )?;
     let mut file = tempfile::NamedTempFile::new_in(&directory)?;
     file.write_all(manifest.to_json().as_bytes())?;
     file.write_all(b"\n")?;
@@ -868,7 +955,7 @@ mod tests {
         );
         assert_eq!(manifest.global_manifests.len(), 1);
         assert!(manifest.aea_keys.is_empty());
-        assert_eq!(manifest.source.sha256, file_sha256(&image)?.1);
+        assert_eq!(manifest.source.sha256, Some(file_sha256(&image)?.1));
         // Each member's slices join back to its hashed bytes.
         let mut archive = ZipArchive::new(File::open(&image)?)?;
         for member in &manifest.members {
@@ -881,7 +968,7 @@ mod tests {
             let mut original = Vec::new();
             archive.by_name(&member.name)?.read_to_end(&mut original)?;
             assert_eq!(joined, original);
-            assert_eq!(stela_runtime::sha256(&joined), member.sha256);
+            assert_eq!(Some(stela_runtime::sha256(&joined)), member.sha256);
         }
         assert!(directory.join("Firmware/stelatest-os.dmg.003").exists());
         assert!(!directory.join("Firmware/unrelated.bin.000").exists());
@@ -1013,6 +1100,71 @@ mod tests {
         }
         assert_eq!(at, blocks.len());
         assert!(inventory(&image, "Missing1,1", false, None, None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_remote_inventory_hashes_only_members_no_device_check_covers() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let image = dir.path().join("Synthetic.ipsw");
+        synthetic_ipsw(&image)?;
+        let bytes = fs::metadata(&image)?.len();
+        let layout = Layout::Remote {
+            url: "http://example.test/Synthetic.ipsw".into(),
+            etag: "\"e\"".into(),
+        };
+        let remote = remote_inventory(
+            File::open(&image)?,
+            &image,
+            bytes,
+            layout.clone(),
+            SYNTHETIC_MODEL,
+            None,
+        )?;
+        let manifest = &remote.manifest;
+        assert_eq!(manifest.layout, layout);
+        assert_eq!(
+            (manifest.source.bytes, &manifest.source.sha256),
+            (bytes, &None)
+        );
+        let full = inventory(&image, SYNTHETIC_MODEL, false, None, None)?.manifest;
+        let names =
+            |m: &PayloadManifest| m.members.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(manifest), names(&full));
+        // The components the BuildManifest digests pass through; the rest
+        // keep the in-place inventory's hashes.
+        for (member, hashed) in manifest.members.iter().zip(&full.members) {
+            let component = [
+                "kernelcache.release.stelatest",
+                "Firmware/stelatest-os.dmg",
+                "stelatest-ramdisk.dmg",
+                "stelatest-update.dmg",
+            ]
+            .contains(&member.name.as_str());
+            assert_eq!(member.bytes, hashed.bytes);
+            if component {
+                assert_eq!(
+                    (&member.sha256, &member.sha384),
+                    (&None, &None),
+                    "{}",
+                    member.name
+                );
+            } else {
+                assert_eq!(member, hashed);
+            }
+        }
+        assert_eq!(remote.blocks.len() as u64, manifest.hash_blocks() * 32);
+        assert!(
+            remote_inventory(
+                File::open(&image)?,
+                &image,
+                bytes,
+                Layout::Staged,
+                SYNTHETIC_MODEL,
+                None
+            )
+            .is_err()
+        );
         Ok(())
     }
 }

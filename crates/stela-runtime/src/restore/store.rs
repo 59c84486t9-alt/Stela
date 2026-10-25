@@ -14,6 +14,10 @@
 //! member, before StartRestore ([`Store::prepare`]); with
 //! [`Verify::OnRead`] only the blocks the restore reads, as it reads them.
 //! Both use the one block check, and a mismatch refuses the member by name.
+//!
+//! A remote image's device-verified members (`payload::Member::sha256`
+//! absent) have no hashes to check: their bytes pass through as read, and
+//! the device's own Image4 and AEA checks verify them.
 use super::{
     Error, Result,
     plist::{self, Limits, Value},
@@ -82,7 +86,8 @@ pub enum Verify {
 struct Verified {
     entry: Entry,
     blocks: Vec<[u8; 32]>,
-    sha384: [u8; 48],
+    /// Absent for a device-verified member, which has no blocks either.
+    sha384: Option<[u8; 48]>,
     /// For recorded hashes not yet checked against the whole member: the
     /// SHA-384 of its bytes read in order from its start, and how far they
     /// reach.
@@ -209,6 +214,9 @@ impl<R: ReadAt> Store<R> {
     pub fn manifest(&self) -> &PayloadManifest {
         &self.manifest
     }
+    pub fn reader_mut(&mut self) -> &mut R {
+        &mut self.reader
+    }
     pub fn identity(&self) -> &Identity {
         &self.identities[self.current]
     }
@@ -276,6 +284,10 @@ impl<R: ReadAt> Store<R> {
         let mut at = 0;
         let mut adopted = BTreeMap::new();
         for member in &self.manifest.members {
+            if member.sha256.is_none() {
+                adopted.insert(member.name.clone(), self.unhashed(&member.name)?);
+                continue;
+            }
             let entry = self
                 .archive
                 .find(&member.name)
@@ -295,7 +307,7 @@ impl<R: ReadAt> Store<R> {
                 Verified {
                     entry,
                     blocks,
-                    sha384,
+                    sha384: Some(sha384),
                     whole: Some((0, Sha384::new())),
                 },
             );
@@ -347,7 +359,7 @@ impl<R: ReadAt> Store<R> {
             hash.update(self.block(path, block)?);
         }
         let verified = self.verified.get_mut(path).expect("recorded");
-        if <[u8; 48]>::from(hash.finalize()) != verified.sha384 {
+        if Some(<[u8; 48]>::from(hash.finalize())) != verified.sha384 {
             return Err(Error::Payload(format!(
                 "{path}: SHA-384 differs from the payload manifest"
             )));
@@ -355,11 +367,33 @@ impl<R: ReadAt> Store<R> {
         verified.whole = None;
         Ok(())
     }
-    pub fn digest384(&self, path: &str) -> Result<&[u8; 48]> {
+    /// A prepared member's SHA-384; `None` for a device-verified one.
+    pub fn digest384(&self, path: &str) -> Result<Option<&[u8; 48]>> {
         self.verified
             .get(path)
-            .map(|v| &v.sha384)
+            .map(|v| v.sha384.as_ref())
             .ok_or(Error::Invalid("member not prepared"))
+    }
+    /// A device-verified member's entry, which no hash covers.
+    fn unhashed(&self, path: &str) -> Result<Verified> {
+        let member = self
+            .manifest
+            .member(path)
+            .ok_or(Error::Invalid("unlisted payload member"))?;
+        let entry = self
+            .archive
+            .find(path)
+            .ok_or(Error::Invalid("missing ZIP member"))?
+            .clone();
+        if entry.bytes != member.bytes {
+            return Err(Error::Invalid("ZIP/payload member size mismatch"));
+        }
+        Ok(Verified {
+            entry,
+            blocks: Vec::new(),
+            sha384: None,
+            whole: None,
+        })
     }
     pub fn verify(&mut self, path: &str) -> Result<()> {
         if self.verified.contains_key(path) {
@@ -369,6 +403,11 @@ impl<R: ReadAt> Store<R> {
             .manifest
             .member(path)
             .ok_or(Error::Invalid("unlisted payload member"))?;
+        let Some(sha256) = member.sha256.clone() else {
+            let unhashed = self.unhashed(path)?;
+            self.verified.insert(path.into(), unhashed);
+            return Ok(());
+        };
         let entry = self
             .archive
             .find(path)
@@ -411,7 +450,7 @@ impl<R: ReadAt> Store<R> {
             hash384.update(&buffer[..done]);
             hashes.push(Sha256::digest(&buffer[..done]).into());
         }
-        if total != member.bytes || hex::encode(hash.finalize()) != member.sha256 {
+        if total != member.bytes || hex::encode(hash.finalize()) != sha256 {
             return Err(Error::Payload(format!(
                 "{path}: immutable SHA-256/length mismatch"
             )));
@@ -422,7 +461,7 @@ impl<R: ReadAt> Store<R> {
             Verified {
                 entry,
                 blocks: hashes,
-                sha384: hash384.finalize().into(),
+                sha384: Some(hash384.finalize().into()),
                 whole: None,
             },
         );
@@ -437,6 +476,9 @@ impl<R: ReadAt> Store<R> {
             return Err(Error::Invalid("payload read range"));
         }
         self.verify(path)?;
+        if self.verified[path].sha384.is_none() {
+            return self.read_unhashed(path, offset, len);
+        }
         let mut result = Vec::with_capacity(len);
         let mut at = offset;
         while result.len() < len {
@@ -456,7 +498,7 @@ impl<R: ReadAt> Store<R> {
             *reached += result.len() as u64;
             if *reached == size {
                 let actual: [u8; 48] = hash.clone().finalize().into();
-                if actual != verified.sha384 {
+                if Some(actual) != verified.sha384 {
                     return Err(Error::Payload(format!(
                         "{path}: SHA-384 differs from the payload manifest"
                     )));
@@ -465,6 +507,20 @@ impl<R: ReadAt> Store<R> {
             }
         }
         Ok(result)
+    }
+    /// A device-verified member's bytes, as read.
+    fn read_unhashed(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let entry = self.verified[path].entry.clone();
+        let mut bytes = vec![0; len];
+        let mut progress = match self.cursor.take() {
+            Some((p, progress)) if p == path => Some(progress),
+            _ => None,
+        };
+        self.archive
+            .read_member_resuming(&mut self.reader, &entry, &mut progress, offset, &mut bytes)
+            .map_err(payload)?;
+        self.cursor = progress.map(|progress| (path.to_string(), progress));
+        Ok(bytes)
     }
     pub fn read_component(&mut self, name: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
         let path = self.identity().path(name)?.to_string();
@@ -606,7 +662,7 @@ pub(crate) mod tests {
             .map(|(name, bytes)| Member {
                 name: (*name).into(),
                 bytes: bytes.len() as u64,
-                sha256: crate::sha256(bytes),
+                sha256: Some(crate::sha256(bytes)),
                 sha384: None,
             })
             .collect();
@@ -682,7 +738,10 @@ pub(crate) mod tests {
         // Nothing is left to read before the restore.
         assert!(s.prepared());
         s.prepare().unwrap();
-        assert_eq!(s.digest384("os.dmg").unwrap(), &Sha384::digest(&data)[..]);
+        assert_eq!(
+            s.digest384("os.dmg").unwrap().unwrap(),
+            &Sha384::digest(&data)[..]
+        );
         assert_eq!(
             s.read_at("os.dmg", 10, 20).unwrap(),
             data[10..30],
@@ -789,9 +848,25 @@ pub(crate) mod tests {
         assert!(error.contains("neither erase nor update"), "{error}");
     }
     #[test]
+    fn a_remote_images_device_verified_member_passes_through_unhashed() {
+        let data = b"bytes the device verifies";
+        let mut s = fixture(data, true);
+        s.manifest.layout = crate::payload::Layout::Remote {
+            url: "http://updates-http.cdn-apple.com/a.ipsw".into(),
+            etag: "\"e\"".into(),
+        };
+        s.manifest.source.sha256 = None;
+        s.manifest.members[0].sha256 = None;
+        s.prepare().unwrap();
+        assert!(s.prepared());
+        assert_eq!(s.read_at("os.dmg", 6, 3).unwrap(), &data[6..9]);
+        assert_eq!(s.read_at("os.dmg", 0, data.len()).unwrap(), data);
+        assert_eq!(s.digest384("os.dmg").unwrap(), None);
+    }
+    #[test]
     fn corrupt_inventory_fails_before_any_bytes_are_returned() {
         let mut s = fixture(b"hello", false);
-        s.manifest.members[0].sha256 = "0".repeat(64);
+        s.manifest.members[0].sha256 = Some("0".repeat(64));
         assert!(s.read_at("os.dmg", 0, 1).is_err());
         assert!(s.verified.is_empty());
     }

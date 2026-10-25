@@ -449,7 +449,7 @@ pub(super) fn write(
     let sha256 = hex::encode(whole.sha256.finalize());
     let sha1 = hex::encode(whole.sha1.finalize());
     ensure!(
-        sha256 == manifest.source.sha256,
+        manifest.source.sha256.as_ref() == Some(&sha256),
         "{} changed while setup read it: its SHA-256 is now {sha256}",
         ipsw.display()
     );

@@ -63,13 +63,23 @@ pub fn post(
     Ok(bytes)
 }
 
-/// A GET of bytes `start..=end` of `path`.
-pub fn get_range(host: &str, path: &str, start: u64, end: u64) -> Result<Vec<u8>, NetError> {
+/// A GET of bytes `start..=end` of `path`. With `etag`, the server sends
+/// the range only while the object still has that entity tag, and the whole
+/// object otherwise (RFC 9110 13.1.5), which [`Ranged`] refuses.
+pub fn get_range(
+    host: &str,
+    path: &str,
+    start: u64,
+    end: u64,
+    etag: Option<&str>,
+) -> Result<Vec<u8>, NetError> {
     if end < start {
         return Err(NetError::Invalid("HTTP range"));
     }
     let range = format!("bytes={start}-{end}");
-    Ok(request("GET", host, path, &[("Range", &range)])?.into_bytes())
+    let mut fields = Vec::from([("Range", &*range)]);
+    fields.extend(etag.map(|etag| ("If-Range", etag)));
+    Ok(request("GET", host, path, &fields)?.into_bytes())
 }
 
 /// The fields of a final 2xx response head that frame its body.
@@ -321,11 +331,18 @@ mod tests {
         assert!(post("a", "x", &[], "x", b"").is_err());
         assert!(post("a", "/", &[("X", "a\r\nInjected: 1")], "x", b"").is_err());
         assert!(post("a", "/", &[("X:", "1")], "x", b"").is_err());
-        let get = get_range("updates-http.cdn-apple.com", "/a.ipsw", 10, 19).unwrap();
+        let get = get_range(
+            "updates-http.cdn-apple.com",
+            "/a.ipsw",
+            10,
+            19,
+            Some("\"e\""),
+        )
+        .unwrap();
         let get = core::str::from_utf8(&get).unwrap();
         assert!(get.starts_with("GET /a.ipsw HTTP/1.1\r\n"));
-        assert!(get.contains("\r\nRange: bytes=10-19\r\n"));
-        assert!(get_range("a", "/", 2, 1).is_err());
+        assert!(get.contains("\r\nRange: bytes=10-19\r\nIf-Range: \"e\"\r\n"));
+        assert!(get_range("a", "/", 2, 1, None).is_err());
     }
 
     #[test]

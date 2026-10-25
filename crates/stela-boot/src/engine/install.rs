@@ -29,8 +29,11 @@ pub fn check_pieces(
     directory: &str,
     manifest: &PayloadManifest,
 ) -> Result<(), &'static str> {
-    let Layout::Pieces { pieces, .. } = &manifest.layout else {
-        return Err("--install names a payload that is not an install medium");
+    let pieces = match &manifest.layout {
+        Layout::Pieces { pieces, .. } => pieces,
+        // Streamed after boot services end, over the mount's own network.
+        Layout::Remote { .. } => return Ok(()),
+        _ => return Err("--install names a payload that is not an install medium"),
     };
     let mut complete = true;
     for (index, piece) in pieces.iter().enumerate() {
