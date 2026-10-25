@@ -22,7 +22,7 @@ pub const RED: u32 = 0xe4574d;
 /// Page units the header takes at the top.
 pub const HEADER: usize = 88;
 const LOGO: usize = 32;
-const NAME: &str = "stela";
+const NAME: &str = "Stela";
 
 /// Screen pixels per page unit: pages are laid out for about 720 rows.
 pub fn scale(rows: usize) -> usize {
