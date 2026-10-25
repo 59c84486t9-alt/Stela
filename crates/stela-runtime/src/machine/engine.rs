@@ -1722,8 +1722,9 @@ pub struct Machine<H: Host, D: Devices> {
     debug: Option<DebugMode>,
     /// The device lines of a PE, the count before which no device changes
     /// state by itself (`Devices::deadline`) and that PE, while valid: a
-    /// device or board register access, a System register write, an
-    /// exception and the host between runs can change them, and clear it.
+    /// device or board register access, a System register write and the
+    /// host between runs can change them, and clear it; an exception
+    /// changes the PE alone, which the devices do not see.
     /// A PE switch keeps it, as it changes no device: another PE's lines,
     /// the running one's or a waiting one's, are then its latched pins
     /// (`Devices::pins`).
@@ -2008,6 +2009,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Forget state derived from System registers and PSTATE.
     fn derived_changed(&mut self) {
         self.forget_derived();
+        self.device_lines = None;
         // A closed cell keeps no value a mispredicted native read could use
         // (FEAT_CSV3's System register rule).
         *self.mirrors = Mirrors::default();
@@ -2029,7 +2031,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.sync_host_regime();
     }
 
-    /// What [`Self::derived_changed`] forgets but the mirrored reads.
+    /// What [`Self::derived_changed`] forgets but the mirrored reads and
+    /// the device lines.
     fn forget_derived(&mut self) {
         self.timers = None;
         self.floating_point = None;
@@ -2037,7 +2040,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.native_system = None;
         self.debug = None;
         self.reopen_pointers();
-        self.device_lines = None;
     }
 
     /// The PAC service after a derived-state change: what native code had
@@ -11198,6 +11200,21 @@ mod tests {
         assert_eq!(*machine.mirrors, Mirrors::default());
         // A read to XZR has no cell to open, nor a thunk.
         assert_eq!(mirrored_read(base, 0xd538_d09f), None); // mrs xzr, tpidr_el1
+    }
+
+    /// An exception keeps the device lines; a System register write that
+    /// may change derived state forgets them.
+    #[test]
+    fn exceptions_keep_the_device_lines_a_register_write_forgets() {
+        const SVC: u32 = 0xd400_0001; // svc #0
+        let mut machine = machine(&[SVC]);
+        let lines = Some((Lines::default(), u64::MAX, machine.current));
+        machine.device_lines = lines;
+        machine.system_instruction(SVC).unwrap();
+        assert!(machine.statistics.exceptions > 0);
+        assert_eq!(machine.device_lines, lines);
+        machine.derived_changed();
+        assert_eq!(machine.device_lines, None);
     }
 
     /// A count alias read opens its cell with the offset it subtracts, and
