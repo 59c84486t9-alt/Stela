@@ -1423,9 +1423,12 @@ impl Host for BareHost<'_> {
             let rest = mmu::Controls {
                 ttbr0: to.ttbr0,
                 tcr: from.tcr & !own | to.tcr & own,
+                // The fields that keep an index writable after the locks
+                // change no access.
                 sprr: mmu::Sprr {
                     el0: to.sprr.el0,
                     el1: to.sprr.el1,
+                    fields: to.sprr.fields,
                     ..from.sprr
                 },
                 ..from
