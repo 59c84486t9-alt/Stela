@@ -51,8 +51,8 @@ const MAX_TIMEOUT_SECONDS: f64 = 120.0;
 /// QEMU's FAT16 directory volume holds at most 516 MB; keep a margin.
 const VVFAT_BYTES: u64 = 480 * 1024 * 1024;
 /// A real restore payload verifies, and a kernel bundle boots, in tens of
-/// minutes under TCG.
-const MAX_LONG_TIMEOUT_SECONDS: f64 = 4.0 * 3600.0;
+/// minutes under TCG; a whole install takes hours.
+const MAX_LONG_TIMEOUT_SECONDS: f64 = 24.0 * 3600.0;
 const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
 const FIRMWARE_VARIABLES: &str = "edk2-i386-vars.fd";
 
