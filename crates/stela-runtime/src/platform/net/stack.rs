@@ -1,82 +1,125 @@
-//! The interface: address configuration by DHCP, ARP, IPv4 routing to the
-//! on-link network or the router, UDP for DHCP and DNS, and blocking TCP
-//! exchanges. One operation runs at a time; while it waits, the stack
-//! answers ARP requests for its address and drops traffic for no waiter.
-use super::{
-    Clock, Ipv4, NetError, dhcp, dns, http,
-    tcp::{self, Connection, Emit, Incoming},
-    wire::{self, Arp, Frame, Ipv4Packet, Segment, Udp},
+//! The interface: smoltcp over a [`Link`], configured by DHCP (renewed as
+//! the lease runs) or statically, with blocking DNS lookups and HTTP
+//! requests, and non-blocking [`Transfer`]s that several connections can
+//! run at once.
+use super::{Clock, Ipv4, NetError, http};
+use alloc::{vec, vec::Vec};
+use smoltcp::{
+    iface::{Config as InterfaceConfig, Interface, SocketHandle, SocketSet},
+    phy::{self, Device, DeviceCapabilities, Medium},
+    socket::{dhcpv4, dns, tcp},
+    time::{Duration, Instant},
+    wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Cidr},
 };
-use alloc::{string::String, vec::Vec};
-use stela_drivers::net::{Link, Mac};
+use stela_drivers::net::{Link, LinkError, MAX_FRAME};
 
 /// An interface's IPv4 configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    pub address: Ipv4,
-    pub mask: Ipv4,
+    pub address: Ipv4Cidr,
     pub router: Option<Ipv4>,
     pub dns: Vec<Ipv4>,
-}
-
-impl Config {
-    fn on_link(&self, ip: Ipv4) -> bool {
-        let mask = self.mask.to_u32();
-        ip.to_u32() & mask == self.address.to_u32() & mask
-    }
-
-    fn directed_broadcast(&self) -> Ipv4 {
-        Ipv4::from_u32(self.address.to_u32() | !self.mask.to_u32())
-    }
 }
 
 /// Autonegotiation after an adapter reset: about 3 s for 2.5GBASE-T,
 /// doubled.
 const CARRIER_WAIT_US: u64 = 6_000_000;
-const DHCP_ATTEMPTS: u32 = 4;
-const DHCP_FIRST_WAIT_US: u64 = 4_000_000;
-const ARP_ATTEMPTS: u32 = 3;
-const ARP_WAIT_US: u64 = 1_000_000;
-const ARP_CACHE: usize = 16;
-const DNS_ATTEMPTS: u32 = 3;
-const DNS_WAIT_US: u64 = 2_000_000;
-/// From connection to the response's end.
-const EXCHANGE_US: u64 = 120_000_000;
-const CLOSE_US: u64 = 2_000_000;
+/// smoltcp's DHCP client retries within this.
+const DHCP_WAIT_US: u64 = 30_000_000;
+/// smoltcp's resolver retries each server within this.
+const DNS_WAIT_US: u64 = 15_000_000;
+/// A POST, from connection to the response's end.
+const POST_WAIT_US: u64 = 120_000_000;
+/// A transfer that receives nothing for this long has failed.
+const IDLE_US: u64 = 30_000_000;
 const FIRST_EPHEMERAL: u16 = 49152;
+/// A POST's receive buffer, and a download's: the latter bounds the TCP
+/// window, so a 30 ms path carries 4 MiB / 30 ms, about 140 MB/s, per
+/// connection.
+const POST_BUFFER: usize = 256 * 1024;
+pub const DOWNLOAD_BUFFER: usize = 4 << 20;
+const SEND_BUFFER: usize = 64 * 1024;
 
-/// A received datagram or segment for a waiting operation.
-enum Inbound {
-    Udp {
-        source: Ipv4,
-        source_port: u16,
-        port: u16,
-        payload: Vec<u8>,
-    },
-    Tcp {
-        source: Ipv4,
-        source_port: u16,
-        port: u16,
-        sequence: u32,
-        acknowledgment: u32,
-        flags: u8,
-        window: u16,
-        mss: Option<u16>,
-        payload: Vec<u8>,
-    },
+/// The link as smoltcp's device. A link refusal is kept, and the operation
+/// polling the interface reports it.
+struct Phy<L> {
+    link: L,
+    fault: Option<LinkError>,
+}
+
+struct Rx(Vec<u8>);
+struct Tx<'a, L>(&'a mut Phy<L>);
+
+impl phy::RxToken for Rx {
+    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
+        f(&self.0)
+    }
+}
+
+impl<L: Link> phy::TxToken for Tx<'_, L> {
+    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, length: usize, f: F) -> R {
+        let mut frame = vec![0; length];
+        let result = f(&mut frame);
+        if let Err(error) = self.0.link.transmit(&frame) {
+            self.0.fault.get_or_insert(error);
+        }
+        result
+    }
+}
+
+impl<L: Link> Device for Phy<L> {
+    type RxToken<'a>
+        = Rx
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = Tx<'a, L>
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _: Instant) -> Option<(Rx, Tx<'_, L>)> {
+        match self.link.receive() {
+            Ok(Some(frame)) => Some((Rx(frame), Tx(self))),
+            Ok(None) => None,
+            Err(error) => {
+                self.fault.get_or_insert(error);
+                None
+            }
+        }
+    }
+
+    fn transmit(&mut self, _: Instant) -> Option<Tx<'_, L>> {
+        Some(Tx(self))
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut capabilities = DeviceCapabilities::default();
+        capabilities.medium = Medium::Ethernet;
+        // smoltcp counts the Ethernet header in an Ethernet MTU.
+        capabilities.max_transmission_unit = MAX_FRAME;
+        capabilities
+    }
+}
+
+/// One TCP connection carrying one request and its response.
+pub struct Transfer {
+    socket: SocketHandle,
+    request: Vec<u8>,
+    sent: usize,
+    /// When the transfer fails unless something arrives first.
+    idle_at: u64,
 }
 
 pub struct Stack<L: Link, C: Clock> {
-    link: L,
+    phy: Phy<L>,
     clock: C,
-    mac: Mac,
+    iface: Interface,
+    sockets: SocketSet<'static>,
+    /// Absent once a configuration is set by hand.
+    dhcp: Option<SocketHandle>,
+    dns: SocketHandle,
     config: Option<Config>,
-    arp: Vec<(Ipv4, Mac)>,
-    ip_id: u16,
-    seed: u64,
     next_port: u16,
-    /// Frames dropped as malformed or for nobody, for diagnostics.
-    pub dropped: u64,
 }
 
 impl<L: Link, C: Clock> Stack<L, C> {
@@ -85,529 +128,161 @@ impl<L: Link, C: Clock> Stack<L, C> {
         let seed = clock.now_us()
             ^ u64::from_be_bytes([
                 0, 0, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
-            ])
-            ^ 0x9e37_79b9_7f4a_7c15;
-        let mut stack = Self {
-            link,
+            ]);
+        let mut config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(mac.0)));
+        config.random_seed = seed;
+        let mut phy = Phy { link, fault: None };
+        let now = Instant::from_micros(clock.now_us() as i64);
+        let iface = Interface::new(config, &mut phy, now);
+        let mut sockets = SocketSet::new(Vec::new());
+        let dhcp = Some(sockets.add(dhcpv4::Socket::new()));
+        let dns = sockets.add(dns::Socket::new(&[], Vec::new()));
+        Self {
+            phy,
             clock,
-            mac,
+            iface,
+            sockets,
+            dhcp,
+            dns,
             config: None,
-            arp: Vec::new(),
-            ip_id: 0,
-            seed: seed | 1,
-            next_port: 0,
-            dropped: 0,
-        };
-        stack.next_port = FIRST_EPHEMERAL + (stack.random() as u16 & 0x3fff);
-        stack.ip_id = stack.random() as u16;
-        stack
+            next_port: FIRST_EPHEMERAL + (seed % 8192) as u16,
+        }
     }
 
     pub fn link_mut(&mut self) -> &mut L {
-        &mut self.link
+        &mut self.phy.link
     }
 
     pub fn config(&self) -> Option<&Config> {
         self.config.as_ref()
     }
 
-    /// Uses `config` instead of asking a DHCP server.
+    /// Configures the interface by hand instead of by DHCP.
     pub fn set_config(&mut self, config: Config) {
-        self.config = Some(config);
-        self.arp.clear();
-    }
-
-    /// Identifiers that need only be unpredictable to an off-path guesser
-    /// across boots: DHCP and DNS transaction IDs, initial sequence numbers
-    /// and the first ephemeral port (xorshift64* over the clock and MAC).
-    fn random(&mut self) -> u32 {
-        self.seed ^= self.clock.now_us();
-        self.seed ^= self.seed >> 12;
-        self.seed ^= self.seed << 25;
-        self.seed ^= self.seed >> 27;
-        (self.seed.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 32) as u32
-    }
-
-    fn port(&mut self) -> u16 {
-        let port = self.next_port;
-        self.next_port = match port {
-            u16::MAX => FIRST_EPHEMERAL,
-            _ => port + 1,
-        };
-        port
-    }
-
-    fn address(&self) -> Ipv4 {
-        self.config
-            .as_ref()
-            .map_or(Ipv4::UNSPECIFIED, |c| c.address)
-    }
-
-    fn learn(&mut self, ip: Ipv4, mac: Mac) {
-        if let Some(entry) = self.arp.iter_mut().find(|(known, _)| *known == ip) {
-            entry.1 = mac;
-            return;
+        if let Some(dhcp) = self.dhcp.take() {
+            self.sockets.remove(dhcp);
         }
-        if self.arp.len() == ARP_CACHE {
-            self.arp.remove(0);
-        }
-        self.arp.push((ip, mac));
+        self.apply(Some(config));
     }
 
-    /// One frame from the link, handled: ARP is answered here; a datagram
-    /// or segment for this address comes back.
-    fn poll(&mut self) -> Result<Option<Inbound>, NetError> {
-        let Some(bytes) = self.link.receive()? else {
-            return Ok(None);
-        };
-        let Some(frame) = Frame::parse(&bytes) else {
-            self.dropped += 1;
-            return Ok(None);
-        };
-        if frame.destination != self.mac && frame.destination != Mac::BROADCAST {
-            self.dropped += 1;
-            return Ok(None);
-        }
-        match frame.ethertype {
-            wire::ETHERTYPE_ARP => {
-                self.arp_packet(frame)?;
-                Ok(None)
+    fn apply(&mut self, config: Option<Config>) {
+        self.iface.update_ip_addrs(|addresses| {
+            addresses.clear();
+            if let Some(config) = &config {
+                addresses.push(IpCidr::Ipv4(config.address)).unwrap();
             }
-            wire::ETHERTYPE_IPV4 => Ok(self.ipv4_packet(frame.payload)),
-            _ => {
-                self.dropped += 1;
-                Ok(None)
+        });
+        let routes = self.iface.routes_mut();
+        match config.as_ref().and_then(|config| config.router) {
+            Some(router) => {
+                routes.add_default_ipv4_route(router).unwrap();
+            }
+            None => {
+                routes.remove_default_ipv4_route();
             }
         }
+        let servers: Vec<IpAddress> = config
+            .iter()
+            .flat_map(|config| config.dns.iter().copied().map(IpAddress::Ipv4))
+            .collect();
+        self.sockets
+            .get_mut::<dns::Socket>(self.dns)
+            .update_servers(&servers);
+        self.config = config;
     }
 
-    fn arp_packet(&mut self, frame: Frame<'_>) -> Result<(), NetError> {
-        let Some(arp) = Arp::parse(frame.payload) else {
-            self.dropped += 1;
-            return Ok(());
-        };
-        let ours = self.config.is_some() && arp.target_ip == self.address();
-        if arp.reply || ours {
-            self.learn(arp.sender_ip, arp.sender_mac);
-        }
-        if !arp.reply && ours {
-            let reply = Arp {
-                reply: true,
-                sender_mac: self.mac,
-                sender_ip: self.address(),
-                target_mac: arp.sender_mac,
-                target_ip: arp.sender_ip,
+    fn now(&self) -> u64 {
+        self.clock.now_us()
+    }
+
+    /// Moves every frame the link holds through the interface, then takes
+    /// DHCP's news. A link refusal since the last poll is the error.
+    pub fn poll(&mut self) -> Result<(), NetError> {
+        let now = Instant::from_micros(self.now() as i64);
+        self.iface.poll(now, &mut self.phy, &mut self.sockets);
+        if let Some(dhcp) = self.dhcp {
+            let news = match self.sockets.get_mut::<dhcpv4::Socket>(dhcp).poll() {
+                Some(dhcpv4::Event::Configured(lease)) => Some(Some(Config {
+                    address: lease.address,
+                    router: lease.router,
+                    dns: lease.dns_servers.iter().copied().collect(),
+                })),
+                Some(dhcpv4::Event::Deconfigured) => Some(None),
+                None => None,
             };
-            let bytes = wire::frame(arp.sender_mac, self.mac, wire::ETHERTYPE_ARP, &reply.emit());
-            self.link.transmit(&bytes)?;
-        }
-        Ok(())
-    }
-
-    fn ipv4_packet(&mut self, bytes: &[u8]) -> Option<Inbound> {
-        let Some(packet) = Ipv4Packet::parse(bytes) else {
-            self.dropped += 1;
-            return None;
-        };
-        let accepted = match &self.config {
-            // Before configuration only DHCP replies arrive, to any address.
-            None => true,
-            Some(config) => {
-                packet.destination == config.address
-                    || packet.destination == Ipv4::BROADCAST
-                    || packet.destination == config.directed_broadcast()
-            }
-        };
-        if !accepted {
-            self.dropped += 1;
-            return None;
-        }
-        let inbound = match packet.protocol {
-            wire::PROTOCOL_UDP => Udp::parse(packet.source, packet.destination, packet.payload)
-                .map(|udp| Inbound::Udp {
-                    source: packet.source,
-                    source_port: udp.source_port,
-                    port: udp.destination_port,
-                    payload: udp.payload.to_vec(),
-                }),
-            wire::PROTOCOL_TCP => Segment::parse(packet.source, packet.destination, packet.payload)
-                .map(|s| Inbound::Tcp {
-                    source: packet.source,
-                    source_port: s.source_port,
-                    port: s.destination_port,
-                    sequence: s.sequence,
-                    acknowledgment: s.acknowledgment,
-                    flags: s.flags,
-                    window: s.window,
-                    mss: s.mss,
-                    payload: s.payload.to_vec(),
-                }),
-            _ => None,
-        };
-        if inbound.is_none() {
-            self.dropped += 1;
-        }
-        inbound
-    }
-
-    /// The MAC address of `ip`'s next hop.
-    fn next_hop(&mut self, ip: Ipv4) -> Result<Mac, NetError> {
-        let Some(config) = &self.config else {
-            return match ip {
-                Ipv4::BROADCAST => Ok(Mac::BROADCAST),
-                _ => Err(NetError::Invalid("unicast before address configuration")),
-            };
-        };
-        if ip == Ipv4::BROADCAST || ip == config.directed_broadcast() {
-            return Ok(Mac::BROADCAST);
-        }
-        let hop = if config.on_link(ip) {
-            ip
-        } else {
-            config.router.ok_or(NetError::Unreachable(ip))?
-        };
-        if let Some(&(_, mac)) = self.arp.iter().find(|(known, _)| *known == hop) {
-            return Ok(mac);
-        }
-        let request = Arp {
-            reply: false,
-            sender_mac: self.mac,
-            sender_ip: config.address,
-            target_mac: Mac::default(),
-            target_ip: hop,
-        };
-        let frame = wire::frame(
-            Mac::BROADCAST,
-            self.mac,
-            wire::ETHERTYPE_ARP,
-            &request.emit(),
-        );
-        for _ in 0..ARP_ATTEMPTS {
-            self.link.transmit(&frame)?;
-            let deadline = self.clock.now_us() + ARP_WAIT_US;
-            while self.clock.now_us() < deadline {
-                self.poll()?;
-                if let Some(&(_, mac)) = self.arp.iter().find(|(known, _)| *known == hop) {
-                    return Ok(mac);
-                }
+            if let Some(config) = news {
+                self.apply(config);
             }
         }
-        Err(NetError::Unreachable(hop))
-    }
-
-    fn send_ipv4(
-        &mut self,
-        destination: Ipv4,
-        protocol: u8,
-        payload: &[u8],
-    ) -> Result<(), NetError> {
-        if wire::IPV4_HEADER + payload.len() > wire::MTU {
-            return Err(NetError::Invalid("datagram exceeds the link MTU"));
+        match self.phy.fault.take() {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
         }
-        let mac = self.next_hop(destination)?;
-        self.ip_id = self.ip_id.wrapping_add(1);
-        let packet = wire::ipv4(self.address(), destination, protocol, self.ip_id, payload);
-        let frame = wire::frame(mac, self.mac, wire::ETHERTYPE_IPV4, &packet);
-        Ok(self.link.transmit(&frame)?)
     }
 
-    fn send_udp(
-        &mut self,
-        destination: Ipv4,
-        source_port: u16,
-        destination_port: u16,
-        payload: &[u8],
-    ) -> Result<(), NetError> {
-        let datagram = wire::udp(
-            self.address(),
-            destination,
-            source_port,
-            destination_port,
-            payload,
-        );
-        self.send_ipv4(destination, wire::PROTOCOL_UDP, &datagram)
-    }
-
-    /// Waits until `deadline` for a UDP datagram to `port` that `accept`
-    /// takes.
-    fn wait_udp<T>(
-        &mut self,
-        port: u16,
-        deadline: u64,
-        mut accept: impl FnMut(Ipv4, u16, &[u8]) -> Option<T>,
-    ) -> Result<Option<T>, NetError> {
-        while self.clock.now_us() < deadline {
-            if let Some(Inbound::Udp {
-                source,
-                source_port,
-                port: to,
-                payload,
-            }) = self.poll()?
-                && to == port
-                && let Some(value) = accept(source, source_port, &payload)
-            {
-                return Ok(Some(value));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Configures the interface from a DHCP server (RFC 2131 3.1).
+    /// Waits for carrier and a DHCP lease.
     pub fn dhcp(&mut self) -> Result<&Config, NetError> {
-        let deadline = self.clock.now_us().saturating_add(CARRIER_WAIT_US);
-        while !self.link.carrier() {
-            if self.clock.now_us() >= deadline {
+        let start = self.now();
+        while !self.phy.link.carrier() {
+            if self.now() >= start + CARRIER_WAIT_US {
                 return Err(NetError::NoCarrier);
             }
         }
-        self.config = None;
-        let xid = self.random();
-        let started = self.clock.now_us();
-        let mut wait = DHCP_FIRST_WAIT_US;
-        let mac = self.mac;
-        let seconds = |clock: &C| ((clock.now_us() - started) / 1_000_000).min(0xffff) as u16;
-        for _ in 0..DHCP_ATTEMPTS {
-            let discover = dhcp::request(dhcp::DISCOVER, xid, mac, None, seconds(&self.clock));
-            self.send_udp(
-                Ipv4::BROADCAST,
-                dhcp::CLIENT_PORT,
-                dhcp::SERVER_PORT,
-                &discover,
-            )?;
-            let deadline = self.clock.now_us() + wait;
-            wait *= 2;
-            let offer = self.wait_udp(dhcp::CLIENT_PORT, deadline, |_, from, payload| {
-                (from == dhcp::SERVER_PORT)
-                    .then(|| dhcp::Reply::parse(payload, mac))
-                    .flatten()
-                    .filter(|r| r.xid == xid && r.kind == dhcp::OFFER)
-            })?;
-            let Some(offer) = offer else { continue };
-            let server = offer
-                .server
-                .ok_or(NetError::Dhcp("offer without a server"))?;
-            let request = dhcp::request(
-                dhcp::REQUEST,
-                xid,
-                mac,
-                Some((offer.address, server)),
-                seconds(&self.clock),
-            );
-            self.send_udp(
-                Ipv4::BROADCAST,
-                dhcp::CLIENT_PORT,
-                dhcp::SERVER_PORT,
-                &request,
-            )?;
-            let deadline = self.clock.now_us() + wait;
-            let reply = self.wait_udp(dhcp::CLIENT_PORT, deadline, |_, from, payload| {
-                (from == dhcp::SERVER_PORT)
-                    .then(|| dhcp::Reply::parse(payload, mac))
-                    .flatten()
-                    .filter(|r| {
-                        r.xid == xid
-                            && matches!(r.kind, dhcp::ACK | dhcp::NAK)
-                            && r.server.is_none_or(|s| s == server)
-                    })
-            })?;
-            match reply {
-                Some(ack) if ack.kind == dhcp::ACK => {
-                    if ack.address == Ipv4::UNSPECIFIED {
-                        return Err(NetError::Dhcp("acknowledged no address"));
-                    }
-                    self.arp.clear();
-                    self.config = Some(Config {
-                        address: ack.address,
-                        // RFC 2132 3.3 requires the mask; a missing one is
-                        // taken as the whole address (no on-link peers).
-                        mask: ack.mask.or(offer.mask).unwrap_or(Ipv4::BROADCAST),
-                        router: ack.router.or(offer.router),
-                        dns: if ack.dns.is_empty() {
-                            offer.dns
-                        } else {
-                            ack.dns
-                        },
-                    });
-                    return Ok(self.config.as_ref().unwrap());
-                }
-                Some(_) => return Err(NetError::Dhcp("server refused the request (NAK)")),
-                None => continue,
+        let deadline = self.now() + DHCP_WAIT_US;
+        while self.config.is_none() {
+            if self.dhcp.is_none() {
+                return Err(NetError::Invalid("DHCP after a configuration by hand"));
             }
-        }
-        Err(NetError::Dhcp("no server answered"))
-    }
-
-    /// `host`'s address: a dotted-quad literal, or a DNS A lookup through
-    /// the configured servers.
-    pub fn resolve(&mut self, host: &str) -> Result<Ipv4, NetError> {
-        if let Some(ip) = Ipv4::parse(host) {
-            return Ok(ip);
-        }
-        let servers = match &self.config {
-            Some(config) if !config.dns.is_empty() => config.dns.clone(),
-            Some(_) => return Err(NetError::Dns(String::from("no DNS server configured"))),
-            None => return Err(NetError::Invalid("resolve before address configuration")),
-        };
-        let mut last = NetError::Timeout("DNS");
-        for server in servers {
-            for _ in 0..DNS_ATTEMPTS {
-                let id = self.random() as u16;
-                let port = self.port();
-                let query = dns::query(id, host)?;
-                if let Err(error) = self.send_udp(server, port, dns::PORT, &query) {
-                    last = error;
-                    break;
-                }
-                let deadline = self.clock.now_us() + DNS_WAIT_US;
-                let reply = self.wait_udp(port, deadline, |from, from_port, payload| {
-                    (from == server && from_port == dns::PORT)
-                        .then(|| dns::answer(payload, id, host))
-                })?;
-                match reply {
-                    Some(Ok(addresses)) => return Ok(addresses[0]),
-                    // An authoritative failure is not retried.
-                    Some(Err(error)) => return Err(error),
-                    None => last = NetError::Timeout("DNS"),
-                }
+            if self.now() >= deadline {
+                return Err(NetError::Dhcp("no server answered"));
             }
+            self.poll()?;
         }
-        Err(last)
+        Ok(self.config.as_ref().unwrap())
     }
 
-    fn send_segment(
-        &mut self,
-        remote: (Ipv4, u16),
-        local: u16,
-        emit: &Emit,
-    ) -> Result<(), NetError> {
-        let segment = wire::tcp(
-            self.address(),
-            remote.0,
-            &wire::Outgoing {
-                source_port: local,
-                destination_port: remote.1,
-                sequence: emit.sequence,
-                acknowledgment: emit.acknowledgment,
-                flags: emit.flags,
-                window: emit.window,
-                mss: emit.mss,
-                payload: &emit.payload,
-            },
-        );
-        self.send_ipv4(remote.0, wire::PROTOCOL_TCP, &segment)
-    }
-
-    /// Opens a connection to `remote`, sends `request`, and collects what
-    /// the peer sends until `complete` (given the bytes so far and whether
-    /// the peer has closed) says the reply is whole. Then closes.
-    pub fn exchange(
-        &mut self,
-        remote: (Ipv4, u16),
-        request: &[u8],
-        mut complete: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
-    ) -> Result<Vec<u8>, NetError> {
-        if self.config.is_none() {
-            return Err(NetError::Invalid("connect before address configuration"));
+    /// The first IPv4 address of `host`, or `host` itself as a literal.
+    fn resolve(&mut self, host: &str) -> Result<Ipv4, NetError> {
+        if let Ok(address) = host.parse() {
+            return Ok(address);
         }
-        // ARP before the SYN, so the connection's timers start on the wire.
-        self.next_hop(remote.0)?;
-        let local = self.port();
-        let iss = self.random();
-        let now = self.clock.now_us();
-        let (mut connection, syn) = Connection::open(iss, now);
-        self.send_segment(remote, local, &syn)?;
-        connection.send(request)?;
-        let deadline = now + EXCHANGE_US;
-        let mut checked = None;
+        let query = self
+            .sockets
+            .get_mut::<dns::Socket>(self.dns)
+            .start_query(self.iface.context(), host, DnsQueryType::A)
+            .map_err(|error| NetError::Dns(alloc::format!("{host}: {error:?}")))?;
+        let deadline = self.now() + DNS_WAIT_US;
         loop {
-            let now = self.clock.now_us();
-            if now >= deadline {
-                return Err(NetError::Timeout("TCP exchange"));
-            }
-            let progress = (connection.received.len(), connection.peer_closed);
-            if connection.state != tcp::State::SynSent && checked != Some(progress) {
-                checked = Some(progress);
-                if complete(&connection.received, connection.peer_closed)? {
-                    break;
+            self.poll()?;
+            let now = self.now();
+            let socket = self.sockets.get_mut::<dns::Socket>(self.dns);
+            match socket.get_query_result(query) {
+                Ok(addresses) => {
+                    return addresses
+                        .iter()
+                        .map(|&IpAddress::Ipv4(address)| address)
+                        .next()
+                        .ok_or_else(|| NetError::Dns(alloc::format!("{host}: no address")));
                 }
-                if connection.peer_closed {
-                    return Err(NetError::Http(String::from(
-                        "connection closed before the reply was complete",
-                    )));
+                Err(dns::GetQueryResultError::Pending) if now < deadline => {}
+                Err(dns::GetQueryResultError::Pending) => {
+                    socket.cancel_query(query);
+                    return Err(NetError::Timeout("DNS"));
                 }
-            }
-            if connection.state == tcp::State::Closed {
-                return Err(NetError::Reset);
-            }
-            self.step(&mut connection, remote, local)?;
-        }
-        let received = core::mem::take(&mut connection.received);
-        // A graceful close; its failure does not lose the reply.
-        connection.close();
-        let deadline = self.clock.now_us() + CLOSE_US;
-        while !connection.drained()
-            && connection.state != tcp::State::Closed
-            && self.clock.now_us() < deadline
-        {
-            if self.step(&mut connection, remote, local).is_err() {
-                break;
+                Err(error) => return Err(NetError::Dns(alloc::format!("{host}: {error:?}"))),
             }
         }
-        Ok(received)
     }
 
-    /// One round of timer work and at most one received segment.
-    fn step(
-        &mut self,
-        connection: &mut Connection,
-        remote: (Ipv4, u16),
-        local: u16,
-    ) -> Result<(), NetError> {
-        let now = self.clock.now_us();
-        for emit in connection.poll(now)? {
-            self.send_segment(remote, local, &emit)?;
-        }
-        if let Some(Inbound::Tcp {
-            source,
-            source_port,
-            port,
-            sequence,
-            acknowledgment,
-            flags,
-            window,
-            mss,
-            payload,
-        }) = self.poll()?
-        {
-            if (source, source_port, port) != (remote.0, remote.1, local) {
-                self.dropped += 1;
-                return Ok(());
-            }
-            let segment = Incoming {
-                sequence,
-                acknowledgment,
-                flags,
-                window,
-                mss,
-                payload: &payload,
-            };
-            for emit in connection.receive(segment, self.clock.now_us())? {
-                self.send_segment(remote, local, &emit)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// One HTTP/1.1 POST to `host` on port 80, configuring the interface
-    /// by DHCP first if it has no address. Returns the response body.
-    pub fn post(
+    /// Connects to `host` (`name` or `name:port`, port 80 by default) and
+    /// queues `request`, configuring the interface by DHCP first if it has
+    /// no address. `buffer` bounds the receive window.
+    pub fn open(
         &mut self,
         host: &str,
-        path: &str,
-        headers: &[(&str, &str)],
-        content_type: &str,
-        body: &[u8],
-    ) -> Result<Vec<u8>, NetError> {
+        request: Vec<u8>,
+        buffer: usize,
+    ) -> Result<Transfer, NetError> {
         let (name, port) = match host.rsplit_once(':') {
             Some((name, port)) => (
                 name,
@@ -616,432 +291,378 @@ impl<L: Link, C: Clock> Stack<L, C> {
             ),
             None => (host, 80),
         };
-        let request = http::post(host, path, headers, content_type, body)?;
         if self.config.is_none() {
             self.dhcp()?;
         }
-        let ip = self.resolve(name)?;
-        let reply = self.exchange((ip, port), &request, |bytes, closed| {
-            http::response(bytes, closed).map(|r| r.is_some())
+        let address = self.resolve(name)?;
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; buffer]),
+            tcp::SocketBuffer::new(vec![0; SEND_BUFFER]),
+        );
+        socket.set_congestion_control(tcp::CongestionControl::Reno);
+        socket.set_timeout(Some(Duration::from_micros(IDLE_US)));
+        let local = self.next_port;
+        self.next_port = local.checked_add(1).unwrap_or(FIRST_EPHEMERAL);
+        socket
+            .connect(
+                self.iface.context(),
+                (IpAddress::Ipv4(address), port),
+                local,
+            )
+            .map_err(|_| NetError::Invalid("TCP connect"))?;
+        Ok(Transfer {
+            socket: self.sockets.add(socket),
+            request,
+            sent: 0,
+            idle_at: self.now() + IDLE_US,
+        })
+    }
+
+    /// Without waiting: polls the interface, sends what is left of the
+    /// request, and hands what has arrived to `take` with whether the peer
+    /// has closed. Returns `take`'s verdict that the response is complete.
+    pub fn read(
+        &mut self,
+        transfer: &mut Transfer,
+        mut take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
+    ) -> Result<bool, NetError> {
+        self.poll()?;
+        let now = self.now();
+        let socket = self.sockets.get_mut::<tcp::Socket>(transfer.socket);
+        if socket.can_send() && transfer.sent < transfer.request.len() {
+            transfer.sent += socket
+                .send_slice(&transfer.request[transfer.sent..])
+                .map_err(|_| NetError::Reset)?;
+        }
+        let mut done = false;
+        while socket.can_recv() && !done {
+            done = socket
+                .recv(|bytes| (bytes.len(), take(bytes, false)))
+                .map_err(|_| NetError::Reset)??;
+            transfer.idle_at = now + IDLE_US;
+        }
+        if done {
+            return Ok(true);
+        }
+        match socket.state() {
+            tcp::State::Closed if transfer.sent == 0 => Err(NetError::Reset),
+            tcp::State::SynSent | tcp::State::SynReceived => self.waiting(transfer, now),
+            _ if !socket.may_recv() => take(&[], true),
+            _ => self.waiting(transfer, now),
+        }
+    }
+
+    fn waiting(&self, transfer: &Transfer, now: u64) -> Result<bool, NetError> {
+        if now >= transfer.idle_at {
+            return Err(NetError::Timeout("TCP transfer"));
+        }
+        Ok(false)
+    }
+
+    /// Ends `transfer`, gracefully if it completed, and frees its socket.
+    pub fn close(&mut self, transfer: Transfer) {
+        self.sockets.get_mut::<tcp::Socket>(transfer.socket).abort();
+        // The RST leaves on this poll; its failure loses nothing.
+        let _ = self.poll();
+        self.sockets.remove(transfer.socket);
+    }
+
+    /// Reads `transfer` until `take` says its response is complete.
+    fn finish(
+        &mut self,
+        mut transfer: Transfer,
+        deadline: u64,
+        mut take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
+    ) -> Result<(), NetError> {
+        let result = loop {
+            match self.read(&mut transfer, &mut take) {
+                Ok(true) => break Ok(()),
+                Ok(false) if self.now() >= deadline => break Err(NetError::Timeout("HTTP")),
+                Ok(false) => {}
+                Err(error) => break Err(error),
+            }
+        };
+        self.close(transfer);
+        result
+    }
+
+    /// One HTTP/1.1 POST; the response body on a 2xx status.
+    pub fn post(
+        &mut self,
+        host: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>, NetError> {
+        let request = http::post(host, path, headers, content_type, body)?;
+        let transfer = self.open(host, request, POST_BUFFER)?;
+        let mut reply = Vec::new();
+        let mut response = None;
+        self.finish(transfer, self.now() + POST_WAIT_US, |bytes, closed| {
+            reply.extend_from_slice(bytes);
+            response = http::response(&reply, closed)?;
+            Ok(response.is_some())
         })?;
-        // `exchange` returned because the response is complete.
-        let closed = true;
-        http::response(&reply, closed)?
-            .map(|response| response.body)
-            .ok_or_else(|| NetError::Http(String::from("incomplete response")))
+        Ok(response.unwrap().body)
+    }
+
+    /// Bytes `start..=end` of `http://host/path`, handed to `body` in order
+    /// as they arrive. Returns the resource's whole size.
+    pub fn get_range(
+        &mut self,
+        host: &str,
+        path: &str,
+        start: u64,
+        end: u64,
+        mut body: impl FnMut(&[u8]),
+    ) -> Result<u64, NetError> {
+        let request = http::get_range(host, path, start, end)?;
+        let transfer = self.open(host, request, DOWNLOAD_BUFFER)?;
+        let mut ranged = http::Ranged::new(start, end);
+        self.finish(transfer, u64::MAX, |bytes, closed| {
+            ranged.feed(bytes, closed, &mut body)
+        })?;
+        Ok(ranged.size.unwrap())
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::platform::net::wire::{ACK, FIN, PSH, RST, SYN};
-    use alloc::collections::VecDeque;
-    use core::cell::Cell;
-    use stela_drivers::net::{LinkError, MAX_FRAME, MIN_FRAME};
+    use alloc::{collections::VecDeque, rc::Rc};
+    use core::cell::{Cell, RefCell};
+    use stela_drivers::net::Mac;
 
-    pub(crate) struct TestClock(pub Cell<u64>);
+    const CLIENT: Mac = Mac([2, 0, 0, 0, 0, 1]);
+    const SERVER: [u8; 6] = [2, 0, 0, 0, 0, 2];
+    const CLIENT_IP: Ipv4 = Ipv4::new(10, 0, 2, 15);
+    const SERVER_IP: Ipv4 = Ipv4::new(10, 0, 2, 2);
+
+    /// Each reading advances 20 µs, so waits end.
+    #[derive(Clone, Default)]
+    pub(crate) struct TestClock(Rc<Cell<u64>>);
+
     impl Clock for TestClock {
-        /// Each reading advances 100 us, so waits end without real time.
         fn now_us(&self) -> u64 {
-            let now = self.0.get() + 100;
-            self.0.set(now);
-            now
+            self.0.set(self.0.get() + 20);
+            self.0.get()
         }
     }
 
-    const CLIENT: Mac = Mac([0x52, 0x54, 0, 0x12, 0x34, 0x56]);
-    const ROUTER_MAC: Mac = Mac([0x52, 0x55, 10, 0, 2, 2]);
-    const ROUTER: Ipv4 = Ipv4([10, 0, 2, 2]);
-    const RESOLVER: Ipv4 = Ipv4([10, 0, 2, 3]);
-    const LEASE: Ipv4 = Ipv4([10, 0, 2, 15]);
-    const SERVER: Ipv4 = Ipv4([17, 1, 2, 3]);
+    /// Frames from one end to the other.
+    #[derive(Default)]
+    struct Queue(VecDeque<Vec<u8>>);
 
-    /// QEMU user networking in miniature: a DHCP server and router, a
-    /// resolver and one HTTP server beyond the router.
-    pub(crate) struct Lan {
-        rx: VecDeque<Vec<u8>>,
-        pub sent: Vec<Vec<u8>>,
-        pub drop_syns: usize,
-        pub drop_response_segments: usize,
-        pub refuse: bool,
-        pub dhcp_silent: bool,
-        /// Carrier polls that report no link before the link comes up.
-        pub carrier_after: usize,
-        pub response: Vec<u8>,
+    struct End {
+        mac: Mac,
+        out: Rc<RefCell<Queue>>,
+        into: Rc<RefCell<Queue>>,
+    }
+
+    impl Link for End {
+        fn mac(&self) -> Mac {
+            self.mac
+        }
+        fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+            self.out.borrow_mut().0.push_back(frame.to_vec());
+            Ok(())
+        }
+        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+            Ok(self.into.borrow_mut().0.pop_front())
+        }
+    }
+
+    /// A smoltcp HTTP server serving `pattern(offset)` for ranges of a
+    /// `size`-byte resource, stepped whenever the client reads its link;
+    /// every `drop_every`th frame to the client is lost and every
+    /// `swap_every`th pair swapped.
+    struct Lan {
+        client: End,
+        server: Phy<End>,
+        iface: Interface,
+        sockets: SocketSet<'static>,
+        listener: SocketHandle,
+        clock: TestClock,
+        size: u64,
         request: Vec<u8>,
-        server_next: u32,
-        client_next: u32,
-        responded: bool,
-        response_start: u32,
-        /// The highest acknowledgment seen, and the one last answered by a
-        /// retransmission.
-        acked: u32,
-        resent_for: Option<u32>,
-        pub received_request: Option<Vec<u8>>,
+        reply: Option<(Vec<u8>, u64, u64)>,
+        sent: u64,
+        frames: usize,
+        drop_every: usize,
+        swap_every: usize,
+    }
+
+    fn pattern(offset: u64) -> u8 {
+        (offset.wrapping_mul(0x9e37_79b9) >> 13) as u8
     }
 
     impl Lan {
-        pub(crate) fn new(response: &[u8]) -> Self {
-            Self {
-                rx: VecDeque::new(),
-                sent: Vec::new(),
-                drop_syns: 0,
-                drop_response_segments: 0,
-                refuse: false,
-                dhcp_silent: false,
-                carrier_after: 0,
-                response: response.to_vec(),
-                request: Vec::new(),
-                server_next: 7000,
-                client_next: 0,
-                responded: false,
-                response_start: 0,
-                acked: 0,
-                resent_for: None,
-                received_request: None,
-            }
-        }
-
-        fn deliver_ip(&mut self, source: Ipv4, destination: Ipv4, protocol: u8, payload: &[u8]) {
-            let packet = wire::ipv4(source, destination, protocol, 1, payload);
-            let to = if destination == Ipv4::BROADCAST {
-                Mac::BROADCAST
-            } else {
-                CLIENT
+        fn new(size: u64, clock: TestClock) -> Self {
+            let (a, b) = (Rc::default(), Rc::default());
+            let client = End {
+                mac: CLIENT,
+                out: Rc::clone(&a),
+                into: Rc::clone(&b),
             };
-            self.rx
-                .push_back(wire::frame(to, ROUTER_MAC, wire::ETHERTYPE_IPV4, &packet));
-        }
-
-        fn tcp_reply(&mut self, port: u16, flags: u8, payload: &[u8], mss: Option<u16>) {
-            let segment = wire::tcp(
-                SERVER,
-                LEASE,
-                &wire::Outgoing {
-                    source_port: 80,
-                    destination_port: port,
-                    sequence: self.server_next,
-                    acknowledgment: self.client_next,
-                    flags,
-                    window: 8192,
-                    mss,
-                    payload,
+            let mut server = Phy {
+                link: End {
+                    mac: Mac(SERVER),
+                    out: b,
+                    into: a,
                 },
+                fault: None,
+            };
+            let config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(SERVER)));
+            let mut iface = Interface::new(config, &mut server, Instant::ZERO);
+            iface.update_ip_addrs(|a| a.push(IpCidr::new(SERVER_IP.into(), 24)).unwrap());
+            let mut sockets = SocketSet::new(Vec::new());
+            let mut socket = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0; 1 << 20]),
+                tcp::SocketBuffer::new(vec![0; 1 << 20]),
             );
-            self.deliver_ip(SERVER, LEASE, wire::PROTOCOL_TCP, &segment);
-        }
-
-        fn handle(&mut self, frame: &[u8]) {
-            let frame = Frame::parse(frame).unwrap();
-            assert_eq!(frame.source, CLIENT);
-            if frame.ethertype == wire::ETHERTYPE_ARP {
-                let arp = Arp::parse(frame.payload).unwrap();
-                if !arp.reply && (arp.target_ip == ROUTER || arp.target_ip == RESOLVER) {
-                    let reply = Arp {
-                        reply: true,
-                        sender_mac: ROUTER_MAC,
-                        sender_ip: arp.target_ip,
-                        target_mac: CLIENT,
-                        target_ip: arp.sender_ip,
-                    };
-                    self.rx.push_back(wire::frame(
-                        CLIENT,
-                        ROUTER_MAC,
-                        wire::ETHERTYPE_ARP,
-                        &reply.emit(),
-                    ));
-                }
-                return;
-            }
-            let ip = Ipv4Packet::parse(frame.payload).expect("client sends valid IPv4");
-            match ip.protocol {
-                wire::PROTOCOL_UDP => self.udp(ip),
-                wire::PROTOCOL_TCP => {
-                    assert_eq!(frame.destination, ROUTER_MAC, "off-link goes to the router");
-                    self.tcp(ip)
-                }
-                other => panic!("unexpected protocol {other}"),
+            socket.listen(80).unwrap();
+            let listener = sockets.add(socket);
+            Self {
+                client,
+                server,
+                iface,
+                sockets,
+                listener,
+                clock,
+                size,
+                request: Vec::new(),
+                reply: None,
+                sent: 0,
+                frames: 0,
+                drop_every: 0,
+                swap_every: 0,
             }
         }
 
-        fn udp(&mut self, ip: Ipv4Packet<'_>) {
-            let udp = Udp::parse(ip.source, ip.destination, ip.payload).unwrap();
-            if udp.destination_port == dhcp::SERVER_PORT {
-                if self.dhcp_silent {
-                    return;
-                }
-                let kind = udp.payload[FIXED_KIND];
-                let xid = u32::from_be_bytes(udp.payload[4..8].try_into().unwrap());
-                let reply_kind = match kind {
-                    dhcp::DISCOVER => dhcp::OFFER,
-                    dhcp::REQUEST => dhcp::ACK,
-                    _ => return,
-                };
-                let lease = dhcp::Reply {
-                    kind: reply_kind,
-                    xid,
-                    address: LEASE,
-                    server: Some(ROUTER),
-                    mask: Some(Ipv4([255, 255, 255, 0])),
-                    router: Some(ROUTER),
-                    dns: alloc::vec![RESOLVER],
-                    lease_seconds: Some(86400),
-                };
-                let message = dhcp::reply(reply_kind, xid, CLIENT, &lease);
-                let datagram = wire::udp(ROUTER, Ipv4::BROADCAST, 67, 68, &message);
-                self.deliver_ip(ROUTER, Ipv4::BROADCAST, wire::PROTOCOL_UDP, &datagram);
-            } else if udp.destination_port == dns::PORT {
-                assert_eq!(ip.destination, RESOLVER);
-                let id = u16::from_be_bytes([udp.payload[0], udp.payload[1]]);
-                let message = dns::response(
-                    id,
-                    "gs.apple.com",
-                    &[
-                        ("gs.apple.com", Err("gs.cdn.test")),
-                        ("gs.cdn.test", Ok(SERVER)),
-                    ],
+        fn step(&mut self) {
+            let now = Instant::from_micros(self.clock.0.get() as i64);
+            self.iface.poll(now, &mut self.server, &mut self.sockets);
+            let socket = self.sockets.get_mut::<tcp::Socket>(self.listener);
+            while socket.can_recv() {
+                socket
+                    .recv(|bytes| {
+                        self.request.extend_from_slice(bytes);
+                        (bytes.len(), ())
+                    })
+                    .unwrap();
+            }
+            if self.reply.is_none() && self.request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let text = core::str::from_utf8(&self.request).unwrap();
+                let range = text.split("Range: bytes=").nth(1).unwrap();
+                let range = range.split("\r\n").next().unwrap();
+                let (first, last) = range.split_once('-').unwrap();
+                let (first, last): (u64, u64) = (first.parse().unwrap(), last.parse().unwrap());
+                let head = alloc::format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{last}/{}\r\nContent-Length: {}\r\n\r\n",
+                    self.size,
+                    last - first + 1
                 );
-                let datagram = wire::udp(RESOLVER, LEASE, 53, udp.source_port, &message);
-                self.deliver_ip(RESOLVER, LEASE, wire::PROTOCOL_UDP, &datagram);
+                self.reply = Some((head.into_bytes(), first, last + 1));
             }
-        }
-
-        fn tcp(&mut self, ip: Ipv4Packet<'_>) {
-            assert_eq!(ip.destination, SERVER);
-            let s = Segment::parse(ip.source, ip.destination, ip.payload).unwrap();
-            assert_eq!(s.destination_port, 80);
-            if s.flags & SYN != 0 {
-                if self.drop_syns > 0 {
-                    self.drop_syns -= 1;
-                    return;
+            if let Some((head, first, end)) = &mut self.reply {
+                if !head.is_empty() {
+                    let n = socket.send_slice(head).unwrap();
+                    head.drain(..n);
                 }
-                self.client_next = s.sequence.wrapping_add(1);
-                if self.refuse {
-                    self.tcp_reply(s.source_port, RST | ACK, &[], None);
-                    return;
+                while head.is_empty() && *first + self.sent < *end && socket.can_send() {
+                    let at = *first + self.sent;
+                    let chunk: Vec<u8> = (at..(*end).min(at + 4096)).map(pattern).collect();
+                    self.sent += socket.send_slice(&chunk).unwrap() as u64;
                 }
-                self.tcp_reply(s.source_port, SYN | ACK, &[], Some(1460));
-                self.server_next += 1;
-                return;
-            }
-            if s.sequence == self.client_next && !s.payload.is_empty() {
-                self.request.extend_from_slice(s.payload);
-                self.client_next = self.client_next.wrapping_add(s.payload.len() as u32);
-            }
-            if s.flags & FIN != 0 && s.sequence == self.client_next {
-                self.client_next = self.client_next.wrapping_add(1);
-                self.tcp_reply(s.source_port, ACK, &[], None);
-                return;
-            }
-            let complete = self
-                .request
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .is_some_and(|end| {
-                    let head = core::str::from_utf8(&self.request[..end]).unwrap();
-                    let length: usize = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("Content-Length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
-                    self.request.len() >= end + 4 + length
-                });
-            if !complete {
-                self.tcp_reply(s.source_port, ACK, &[], None);
-                return;
-            }
-            if self.responded {
-                // A duplicate acknowledgment asks once for the lost part,
-                // go-back-N from it.
-                let ack = s.acknowledgment;
-                if before_server(self.acked, ack) {
-                    self.acked = ack;
-                } else if ack == self.acked
-                    && before_server(ack, self.server_next)
-                    && self.resent_for != Some(ack)
-                {
-                    self.resent_for = Some(ack);
-                    self.server_next = ack;
-                    self.respond_from(s.source_port);
+                if *first + self.sent == *end {
+                    socket.close();
                 }
-                return;
             }
-            self.received_request = Some(self.request.clone());
-            self.responded = true;
-            self.response_start = self.server_next;
-            self.acked = self.server_next;
-            self.respond_from(s.source_port);
-        }
-
-        fn respond_from(&mut self, port: u16) {
-            let offset = self.server_next.wrapping_sub(self.response_start) as usize;
-            let response = self.response.clone();
-            for chunk in response[offset.min(response.len())..].chunks(100) {
-                if self.drop_response_segments > 0 {
-                    self.drop_response_segments -= 1;
-                    self.server_next = self.server_next.wrapping_add(chunk.len() as u32);
+            self.iface.poll(now, &mut self.server, &mut self.sockets);
+            // Impair what the server sent.
+            let mut queue = self.client.into.borrow_mut();
+            let mut kept = VecDeque::new();
+            while let Some(frame) = queue.0.pop_front() {
+                self.frames += 1;
+                if self.drop_every != 0 && self.frames.is_multiple_of(self.drop_every) {
                     continue;
                 }
-                self.tcp_reply(port, ACK | PSH, chunk, None);
-                self.server_next = self.server_next.wrapping_add(chunk.len() as u32);
+                kept.push_back(frame);
+                if self.swap_every != 0 && self.frames.is_multiple_of(self.swap_every) {
+                    let n = kept.len();
+                    if n >= 2 {
+                        kept.swap(n - 1, n - 2);
+                    }
+                }
             }
-            self.tcp_reply(port, FIN | ACK, &[], None);
-            self.server_next = self.server_next.wrapping_add(1);
+            queue.0 = kept;
         }
     }
-
-    fn before_server(a: u32, b: u32) -> bool {
-        (a.wrapping_sub(b) as i32) < 0
-    }
-
-    /// The DHCP message-type value's offset: the fixed fields, the cookie
-    /// and option 53's code and length.
-    const FIXED_KIND: usize = 236 + 4 + 2;
 
     impl Link for Lan {
         fn mac(&self) -> Mac {
             CLIENT
         }
-        fn carrier(&mut self) -> bool {
-            self.carrier_after = self.carrier_after.saturating_sub(1);
-            self.carrier_after == 0
-        }
         fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-            assert!(frame.len() >= MIN_FRAME && frame.len() <= MAX_FRAME);
-            self.sent.push(frame.to_vec());
-            self.handle(frame);
-            Ok(())
+            self.client.transmit(frame)
         }
         fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-            Ok(self.rx.pop_front())
+            if self.client.into.borrow().0.is_empty() {
+                self.step();
+            }
+            self.client.receive()
         }
     }
 
-    fn stack(lan: Lan) -> Stack<Lan, TestClock> {
-        Stack::new(lan, TestClock(Cell::new(0)))
-    }
-
-    const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\n\r\n";
-
-    fn ticket_response() -> Vec<u8> {
-        let body = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".repeat(10);
-        let mut response = RESPONSE.to_vec();
-        response.extend_from_slice(&body);
-        response
+    fn stack(lan: Lan, clock: TestClock) -> Stack<Lan, TestClock> {
+        let mut s = Stack::new(lan, clock);
+        s.set_config(Config {
+            address: Ipv4Cidr::new(CLIENT_IP, 24),
+            router: None,
+            dns: Vec::new(),
+        });
+        s
     }
 
     #[test]
-    fn dhcp_configures_and_dns_follows_aliases() {
-        let mut s = stack(Lan::new(b""));
-        let config = s.dhcp().unwrap().clone();
-        assert_eq!(config.address, LEASE);
-        assert_eq!(config.router, Some(ROUTER));
-        assert_eq!(config.dns, [RESOLVER]);
-        assert_eq!(s.resolve("gs.apple.com").unwrap(), SERVER);
-        assert_eq!(s.resolve("1.2.3.4").unwrap(), Ipv4([1, 2, 3, 4]));
-    }
-
-    #[test]
-    fn dhcp_waits_a_bounded_time_for_carrier() {
-        let mut lan = Lan::new(b"");
-        lan.carrier_after = 1000;
-        assert_eq!(stack(lan).dhcp().unwrap().address, LEASE);
-        let mut lan = Lan::new(b"");
-        lan.carrier_after = usize::MAX;
-        let mut s = stack(lan);
-        assert_eq!(s.dhcp().unwrap_err(), NetError::NoCarrier);
-        assert!(s.link.sent.is_empty());
-    }
-
-    #[test]
-    fn a_post_returns_the_body_through_loss_and_reordering() {
-        let mut lan = Lan::new(&ticket_response());
-        lan.drop_syns = 1;
-        lan.drop_response_segments = 1;
-        let mut s = stack(lan);
-        let body = s
-            .post(
-                "gs.apple.com",
-                "/TSS/controller?action=2",
-                &[],
-                "text/xml",
-                &[b'x'; 3000],
-            )
-            .unwrap();
-        assert_eq!(body, b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".repeat(10));
-        let request = s.link_mut().received_request.clone().unwrap();
-        let text = core::str::from_utf8(&request[..request.len() - 3000]).unwrap();
-        assert!(
-            text.starts_with("POST /TSS/controller?action=2 HTTP/1.1\r\nHost: gs.apple.com\r\n")
-        );
-        assert!(request.ends_with(&[b'x'; 3000]));
-        // The client closed gracefully after the response.
-        let fins = s
-            .link_mut()
-            .sent
-            .iter()
-            .filter_map(|f| {
-                let frame = Frame::parse(f)?;
-                let ip = Ipv4Packet::parse(frame.payload)?;
-                let seg = Segment::parse(ip.source, ip.destination, ip.payload)?;
-                (seg.flags & FIN != 0).then_some(())
+    fn a_range_arrives_whole_and_in_order_through_loss_and_reordering() {
+        let clock = TestClock::default();
+        let mut lan = Lan::new(1 << 40, clock.clone());
+        lan.drop_every = 97;
+        lan.swap_every = 13;
+        let mut s = stack(lan, clock);
+        let start = 3 << 30;
+        let length = 3 << 20;
+        let mut body = Vec::new();
+        let size = s
+            .get_range("10.0.2.2", "/a.ipsw", start, start + length - 1, |b| {
+                body.extend_from_slice(b)
             })
-            .count();
-        assert_eq!(fins, 1);
+            .unwrap();
+        assert_eq!(size, 1 << 40);
+        assert_eq!(body.len() as u64, length);
+        assert!(body.iter().zip(start..).all(|(&b, at)| b == pattern(at)));
+        let request = core::str::from_utf8(&s.link_mut().request).unwrap();
+        assert!(request.starts_with("GET /a.ipsw HTTP/1.1\r\nHost: 10.0.2.2\r\n"));
     }
 
     #[test]
-    fn refusals_and_silence_are_explicit_errors() {
-        let mut lan = Lan::new(&ticket_response());
-        lan.refuse = true;
-        let mut s = stack(lan);
+    fn a_silent_or_absent_peer_times_out() {
+        let clock = TestClock::default();
+        let mut lan = Lan::new(100, clock.clone());
+        lan.drop_every = 1;
+        let mut s = stack(lan, clock);
         assert_eq!(
-            s.post("gs.apple.com", "/", &[], "text/xml", b""),
-            Err(NetError::Refused)
+            s.get_range("10.0.2.2", "/", 0, 9, |_| ()),
+            Err(NetError::Timeout("TCP transfer"))
         );
-        let lan = Lan::new(b"HTTP/1.1 500 Oops\r\nContent-Length: 0\r\n\r\n");
-        let mut s = stack(lan);
+        let clock = TestClock::default();
+        let mut s = stack(Lan::new(100, clock.clone()), clock);
+        // Port 81 has no listener: smoltcp answers with a reset.
         assert_eq!(
-            s.post("gs.apple.com", "/", &[], "text/xml", b""),
-            Err(NetError::Status(500))
+            s.get_range("10.0.2.2:81", "/", 0, 9, |_| ()),
+            Err(NetError::Reset)
         );
-        let mut lan = Lan::new(b"");
-        lan.dhcp_silent = true;
-        let mut s = stack(lan);
-        assert_eq!(s.dhcp(), Err(NetError::Dhcp("no server answered")));
-        let mut lan = Lan::new(b"");
-        lan.drop_syns = usize::MAX;
-        let mut s = stack(lan);
-        s.dhcp().unwrap();
-        assert_eq!(
-            s.post("17.1.2.3", "/", &[], "text/xml", b""),
-            Err(NetError::Timeout("TCP connection"))
-        );
-    }
-
-    #[test]
-    fn arp_requests_for_the_lease_are_answered() {
-        let mut s = stack(Lan::new(b""));
-        s.dhcp().unwrap();
-        let who_has = Arp {
-            reply: false,
-            sender_mac: ROUTER_MAC,
-            sender_ip: ROUTER,
-            target_mac: Mac::default(),
-            target_ip: LEASE,
-        };
-        s.link.rx.push_back(wire::frame(
-            Mac::BROADCAST,
-            ROUTER_MAC,
-            wire::ETHERTYPE_ARP,
-            &who_has.emit(),
-        ));
-        s.poll().unwrap();
-        let reply = Arp::parse(Frame::parse(s.link.sent.last().unwrap()).unwrap().payload).unwrap();
-        assert!(reply.reply);
-        assert_eq!((reply.sender_ip, reply.sender_mac), (LEASE, CLIENT));
-        assert_eq!(reply.target_mac, ROUTER_MAC);
     }
 }

@@ -11,7 +11,10 @@
 //! same address and port: connect, data both ways, FIN and RST. Anything
 //! else (other protocols, other UDP ports, IP options it cannot route) is
 //! dropped and logged. Each lease, query and connection is logged to the
-//! run directory. Dev-only: one guest, IPv4, no fragments.
+//! run directory. Dev-only: one guest, IPv4, no fragments. The guest's
+//! window scale (RFC 7323) is honored; the peer's own window is unscaled.
+mod wire;
+
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
@@ -21,14 +24,12 @@ use std::{
     time::{Duration, Instant},
 };
 use stela_drivers::net::Mac;
-use stela_runtime::net::{
-    Ipv4,
-    wire::{self, ACK, Arp, FIN, Frame, Ipv4Packet, Outgoing, PSH, RST, SYN, Segment, Udp},
-};
+use wire::{ACK, Arp, FIN, Frame, Ipv4Packet, Outgoing, PSH, RST, SYN, Segment, Udp};
 
-pub const GATEWAY: Ipv4 = Ipv4([10, 0, 2, 2]);
-pub const GUEST: Ipv4 = Ipv4([10, 0, 2, 15]);
-const MASK: Ipv4 = Ipv4([255, 255, 255, 0]);
+type Ipv4 = Ipv4Addr;
+pub const GATEWAY: Ipv4 = Ipv4::new(10, 0, 2, 2);
+pub const GUEST: Ipv4 = Ipv4::new(10, 0, 2, 15);
+const MASK: Ipv4 = Ipv4::new(255, 255, 255, 0);
 const GATEWAY_MAC: Mac = Mac([0x52, 0x55, 0x0a, 0x00, 0x02, 0x02]);
 const LEASE_SECONDS: u32 = 24 * 60 * 60;
 const DNS_TTL: u32 = 60;
@@ -83,6 +84,8 @@ struct Connection {
     send_unacknowledged: u32,
     send_next: u32,
     window: u32,
+    /// The guest's window scale shift, when its SYN offered scaling.
+    scale: Option<u8>,
     mss: usize,
     /// Host bytes sent and not yet acknowledged, from `send_unacknowledged`.
     flight: Vec<u8>,
@@ -109,7 +112,7 @@ pub fn host_resolver(name: &str) -> io::Result<Vec<Ipv4>> {
     Ok((name, 0)
         .to_socket_addrs()?
         .filter_map(|address| match address {
-            SocketAddr::V4(v4) => Some(Ipv4(v4.ip().octets())),
+            SocketAddr::V4(v4) => Some(*v4.ip()),
             SocketAddr::V6(_) => None,
         })
         .collect())
@@ -121,7 +124,6 @@ pub struct Lan {
     resolver: Resolver,
     guest_mac: Option<Mac>,
     connections: HashMap<Key, Connection>,
-    identification: u16,
     iss: u32,
     out: Vec<Vec<u8>>,
 }
@@ -138,7 +140,6 @@ impl Lan {
             resolver,
             guest_mac: None,
             connections: HashMap::new(),
-            identification: 0,
             iss,
             out: Vec::new(),
         }
@@ -276,8 +277,7 @@ impl Lan {
     }
 
     fn ip(&mut self, source: Ipv4, destination: Ipv4, protocol: u8, payload: &[u8]) {
-        self.identification = self.identification.wrapping_add(1);
-        let packet = wire::ipv4(source, destination, protocol, self.identification, payload);
+        let packet = wire::ipv4(source, destination, protocol, payload);
         let mac = match destination {
             Ipv4::BROADCAST => Mac::BROADCAST,
             _ => self.guest_mac.unwrap_or(Mac::BROADCAST),
@@ -322,12 +322,12 @@ impl Lan {
             let (value, rest) = rest.split_at(length);
             match (code, length) {
                 (53, 1) => kind = Some(value[0]),
-                (50, 4) => requested = Some(Ipv4(value.try_into().unwrap())),
+                (50, 4) => requested = Some(Ipv4::from(<[u8; 4]>::try_from(value).unwrap())),
                 _ => {}
             }
             options = rest;
         }
-        let client = Ipv4(request[12..16].try_into().unwrap());
+        let client = Ipv4::from(<[u8; 4]>::try_from(&request[12..16]).unwrap());
         let mac = Mac(request[28..34].try_into().unwrap());
         let reply = match kind {
             Some(1) => 2,                                         // DISCOVER: OFFER
@@ -340,20 +340,20 @@ impl Lan {
         bytes[4..8].copy_from_slice(&request[4..8]);
         bytes[10..12].copy_from_slice(&request[10..12]);
         if reply != 6 {
-            bytes[16..20].copy_from_slice(&GUEST.0);
-            bytes[20..24].copy_from_slice(&GATEWAY.0);
+            bytes[16..20].copy_from_slice(&GUEST.octets());
+            bytes[20..24].copy_from_slice(&GATEWAY.octets());
         }
         bytes[28..44].copy_from_slice(&request[28..44]);
         bytes.extend_from_slice(&DHCP_COOKIE);
         bytes.extend_from_slice(&[53, 1, reply, 54, 4]);
-        bytes.extend_from_slice(&GATEWAY.0);
+        bytes.extend_from_slice(&GATEWAY.octets());
         if reply != 6 {
             bytes.extend_from_slice(&[51, 4]);
             bytes.extend_from_slice(&LEASE_SECONDS.to_be_bytes());
             for code in [1u8, 3, 6] {
                 bytes.extend_from_slice(&[code, 4]);
                 let value = if code == 1 { MASK } else { GATEWAY };
-                bytes.extend_from_slice(&value.0);
+                bytes.extend_from_slice(&value.octets());
             }
         }
         bytes.push(255);
@@ -421,7 +421,7 @@ impl Lan {
                 reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1]);
                 reply.extend_from_slice(&DNS_TTL.to_be_bytes());
                 reply.extend_from_slice(&[0, 4]);
-                reply.extend_from_slice(&address.0);
+                reply.extend_from_slice(&address.octets());
             }
             let _ = events.send(Event::Resolved { port, reply });
         });
@@ -429,9 +429,13 @@ impl Lan {
 
     fn send(&mut self, key: Key, sequence: u32, flags: u8, payload: &[u8], mss: bool) {
         let (port, remote, remote_port) = key;
-        let acknowledgment = self.connections.get(&key).map_or(0, |c| c.receive_next);
+        let connection = self.connections.get(&key);
+        let acknowledgment = connection.map_or(0, |c| c.receive_next);
+        // A SYN-ACK answers the guest's scaling offer with shift 0.
+        let scale = connection.and_then(|c| c.scale).and(mss.then_some(0));
+        let remote = Ipv4::from(remote);
         let segment = wire::tcp(
-            Ipv4(remote),
+            remote,
             GUEST,
             &Outgoing {
                 source_port: remote_port,
@@ -441,10 +445,11 @@ impl Lan {
                 flags,
                 window: WINDOW,
                 mss: mss.then_some(MSS as u16),
+                scale,
                 payload,
             },
         );
-        self.ip(Ipv4(remote), GUEST, wire::PROTOCOL_TCP, &segment);
+        self.ip(remote, GUEST, wire::PROTOCOL_TCP, &segment);
         if let Some(c) = self.connections.get_mut(&key) {
             c.last_sent = Instant::now();
         }
@@ -474,6 +479,7 @@ impl Lan {
                 flags,
                 window: 0,
                 mss: None,
+                scale: None,
                 payload: &[],
             },
         );
@@ -506,7 +512,11 @@ impl Lan {
         if source != GUEST {
             return;
         }
-        let key = (segment.source_port, destination.0, segment.destination_port);
+        let key = (
+            segment.source_port,
+            destination.octets(),
+            segment.destination_port,
+        );
         let now = Instant::now();
         let Some(c) = self.connections.get_mut(&key) else {
             if segment.flags & (SYN | ACK | RST) != SYN {
@@ -521,6 +531,7 @@ impl Lan {
                 send_unacknowledged: self.iss,
                 send_next: self.iss.wrapping_add(1),
                 window: u32::from(segment.window),
+                scale: segment.scale,
                 mss: segment.mss.map_or(536, usize::from).min(MSS),
                 flight: Vec::new(),
                 unsent: Vec::new(),
@@ -594,7 +605,7 @@ impl Lan {
                 }
                 c.send_unacknowledged = ack;
             }
-            c.window = u32::from(segment.window);
+            c.window = u32::from(segment.window) << c.scale.unwrap_or(0);
         }
         let mut acknowledge = false;
         if !segment.payload.is_empty() || segment.flags & FIN != 0 {
@@ -711,7 +722,7 @@ impl Lan {
 }
 
 fn show((port, remote, remote_port): Key) -> String {
-    format!("{GUEST}:{port} -> {}:{remote_port}", Ipv4(remote))
+    format!("{GUEST}:{port} -> {}:{remote_port}", Ipv4::from(remote))
 }
 
 /// Runs the LAN over QEMU's stream connection until QEMU closes it.
@@ -873,7 +884,10 @@ mod tests {
         let log = Log::default();
         let mut stack = stack(&log);
         let config = stack.dhcp().unwrap();
-        assert_eq!((config.address, config.router), (GUEST, Some(GATEWAY)));
+        assert_eq!(
+            (config.address.address(), config.router),
+            (GUEST, Some(GATEWAY))
+        );
         assert_eq!(config.dns, [GATEWAY]);
         let host = format!("localhost:{port}");
         let body = stack
@@ -902,7 +916,7 @@ mod tests {
         let log = Log::default();
         let mut stack = stack(&log);
         let result = stack.post(&format!("127.0.0.1:{port}"), "/", &[], "text/plain", b"");
-        assert!(matches!(result, Err(NetError::Refused)), "{result:?}");
+        assert!(matches!(result, Err(NetError::Reset)), "{result:?}");
         let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
         assert!(text.contains("refused"), "{text}");
     }

@@ -100,10 +100,10 @@ impl HostNetwork {
         );
         let config = stack.dhcp().map_err(|error| format!("{error}"))?;
         output::arguments(format_args!(
-            "NETWORK address={} mask={} router={:?} dns={:?}\n",
-            config.address, config.mask, config.router, config.dns
+            "NETWORK address={} router={:?} dns={:?}\n",
+            config.address, config.router, config.dns
         ));
-        let description = format!("{} on adapter {location}", config.address);
+        let description = format!("{} on adapter {location}", config.address.address());
         Ok(Self { stack, description })
     }
 

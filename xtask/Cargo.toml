@@ -17,6 +17,8 @@ stela-compiler.workspace = true
 stela-drivers.workspace = true
 stela-loader.workspace = true
 stela-runtime.workspace = true
+# The LAN peer's frames (`boot::lan::wire`).
+smoltcp = { version = "0.14", default-features = false, features = ["medium-ethernet", "proto-ipv4"] }
 object = { version = "0.37", features = ["read"] }
 plist = "1"
 sha1 = "0.10"
