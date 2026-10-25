@@ -51,6 +51,9 @@ struct Stream {
     received: u32,
     window: u32,
     input: VecDeque<u8>,
+    /// An ACK or RST owed to the peer while the transmit queue was full.
+    /// TCP lets one later ACK cover every byte received meanwhile.
+    reply: Option<u8>,
 }
 
 pub struct Mux {
@@ -116,7 +119,21 @@ impl Mux {
     pub fn take_packet(&mut self) -> Option<Vec<u8>> {
         let packet = self.outgoing.pop_front()?;
         self.queued_bytes -= packet.len();
+        self.flush_replies();
         Some(packet)
+    }
+    /// Queue owed replies ahead of further writes as space frees up.
+    fn flush_replies(&mut self) {
+        for index in 0..self.streams.len() {
+            let stream = &self.streams[index];
+            if let Some(flags) = stream.reply
+                && self.can_emit(self.header() + TCP_HEADER)
+            {
+                let next = stream.next;
+                self.send_tcp(index, flags, next, &[])
+                    .expect("space was checked");
+            }
+        }
     }
     pub fn take_log(&mut self) -> Option<Vec<u8>> {
         self.logs.pop_front()
@@ -198,6 +215,7 @@ impl Mux {
             received: 0,
             window: 0,
             input: VecDeque::new(),
+            reply: None,
         });
         let index = self.streams.len() - 1;
         // The SYN sequence is zero. As in usbmuxd, it consumes one byte.
@@ -223,7 +241,10 @@ impl Mux {
         )
         .to_vec();
         payload.extend_from_slice(data);
-        self.emit(TCP, &payload)
+        self.emit(TCP, &payload)?;
+        // Every segment carries the current ACK, and an RST ends the stream.
+        self.streams[index].reply = None;
+        Ok(())
     }
     /// Accepts a bounded prefix according to the peer's scaled byte window.
     /// No hidden unbounded application send queue exists.
@@ -298,6 +319,7 @@ impl Mux {
         if result.is_err() {
             self.state = State::Failed;
         }
+        self.flush_replies();
         result
     }
     fn receive_inner(&mut self, bytes: &mut &[u8]) -> Result<(), &'static str> {
@@ -388,7 +410,9 @@ impl Mux {
             .iter()
             .position(|stream| stream.id.port == destination && stream.destination == source)
         else {
-            if flags & RST == 0 {
+            // With the queue full the RST is dropped, as a lost segment
+            // would be; the peer's next segment draws another.
+            if flags & RST == 0 && self.can_emit(self.header() + TCP_HEADER) {
                 self.emit(TCP, &tcp_header(destination, source, 0, sequence, RST, 0))?;
             }
             return Ok(());
@@ -396,6 +420,7 @@ impl Mux {
         let stream = &mut self.streams[index];
         let connecting = stream.state == StreamState::Connecting;
         if flags & RST != 0 {
+            stream.reply = None;
             stream.state = if stream.state == StreamState::Connecting {
                 StreamState::Refused
             } else {
@@ -418,9 +443,9 @@ impl Mux {
         // down with an RST, as usbmuxd's connection_teardown does.
         let expected = if connecting { SYN | ACK } else { ACK };
         if flags != expected {
-            let next = stream.next;
             stream.state = StreamState::Reset;
-            return self.send_tcp(index, RST, next, &[]);
+            stream.reply = Some(RST);
+            return Ok(());
         }
         if stream.state == StreamState::Connecting {
             if acknowledgement != 1 || sequence != 0 || !data.is_empty() {
@@ -440,9 +465,8 @@ impl Mux {
         }
         stream.acknowledged = acknowledgement;
         stream.window = window;
-        let next = stream.next;
         if connecting || !data.is_empty() {
-            self.send_tcp(index, ACK, next, &[])?;
+            stream.reply = Some(ACK);
         }
         Ok(())
     }
@@ -637,6 +661,31 @@ pub(crate) mod tests {
         while mux.emit(CONTROL, b"log").is_ok() {}
         assert!(mux.queued_bytes <= MAX_FRAME);
         assert!(mux.outgoing.len() <= MAX_QUEUED);
+    }
+    #[test]
+    fn replies_owed_while_writes_fill_the_queue_are_coalesced_not_fatal() {
+        let (mut mux, id) = connected();
+        mux.streams[0].window = u32::MAX;
+        while mux.write(id, &[0; 4096]).unwrap() != 0 {}
+        while mux.write(id, b"x").unwrap() != 0 {}
+        while mux.emit(CONTROL, &[]).is_ok() {}
+        assert!(!mux.control_ready());
+        let sent = mux.streams[0].next;
+        for sequence in [1, 3] {
+            let mut segment = tcp_header(62078, id.port, sequence, sent, ACK, 256).to_vec();
+            segment.extend_from_slice(b"ok");
+            mux.receive(&wire(TCP, &segment, 2)).unwrap();
+        }
+        assert_eq!(mux.state(), State::Active);
+        // The first freed space carries one bare ACK covering both segments,
+        // queued ahead of any further write.
+        mux.take_packet();
+        let ack = &mux.outgoing.back().unwrap()[MUX2_HEADER..];
+        assert_eq!(ack.len(), TCP_HEADER);
+        assert_eq!(&ack[8..12], &5u32.to_be_bytes());
+        assert_eq!(ack[13], ACK);
+        while mux.take_packet().is_some() {}
+        assert!(mux.outgoing.is_empty());
     }
     #[test]
     fn complete_data_and_reset_vectors_match_executed_pinned_usbmuxd() {
