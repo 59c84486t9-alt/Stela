@@ -201,8 +201,9 @@ impl Host for System {
             .open(&path)
             .with_context(|| format!("cannot open {path} for writing (sudo)"))?;
         file.seek(SeekFrom::Start(offset))?;
+        // A raw device has no file cache to flush: its writes reach the
+        // disk unbuffered, and `sync_all`'s F_FULLFSYNC fails on it (ENOTTY).
         file.write_all(bytes)?;
-        file.sync_all()?;
         Ok(())
     }
 
