@@ -116,28 +116,39 @@ impl State {
     }
     fn levels(&self) -> Result<[bool; ROUTES], &'static str> {
         let mut levels = [false; ROUTES];
-        for entry in 0..self.values.len() {
-            let mask = 1 << (entry % 32);
-            let enabled = self.enabled[entry / 32].bit(mask);
-            let pending = self.pending[entry / 32].bit(mask);
-            if enabled == Some(false) || pending == Some(false) {
-                continue;
+        for (word, (enabled, pending)) in self.enabled.iter().zip(&self.pending).enumerate() {
+            // An entry known disabled or known not pending drives nothing;
+            // visit the others in entry order.
+            let idle = (enabled.known & !enabled.value) | (pending.known & !pending.value);
+            let mut live = !idle & u64::from(u32::MAX);
+            while live != 0 {
+                let bit = live.trailing_zeros() as usize;
+                live &= live - 1;
+                let entry = word * 32 + bit;
+                if entry >= self.values.len() {
+                    break;
+                }
+                let mask = 1 << bit;
+                if enabled.bit(mask) != Some(true) || pending.bit(mask) != Some(true) {
+                    return Err("PTD interrupt disposition is not qualified");
+                }
+                let shift = (entry % 8) * 4;
+                let route = (self.routes[entry / 8].read(0xf << shift)? >> shift) as usize;
+                if self.notification_owner == NotificationOwner::External
+                    && self.bindings[route].is_none()
+                {
+                    return Err("PTD route has no qualified interrupt resource");
+                }
+                levels[route] = true;
             }
-            if enabled != Some(true) || pending != Some(true) {
-                return Err("PTD interrupt disposition is not qualified");
-            }
-            let shift = (entry % 8) * 4;
-            let route = (self.routes[entry / 8].read(0xf << shift)? >> shift) as usize;
-            if self.notification_owner == NotificationOwner::External
-                && self.bindings[route].is_none()
-            {
-                return Err("PTD route has no qualified interrupt resource");
-            }
-            levels[route] = true;
         }
         Ok(levels)
     }
     fn synchronize(&mut self, levels: [bool; ROUTES], access: &mut Access<'_>) {
+        // Unchanged route levels leave every wire's aggregate as it is.
+        if levels == self.asserted {
+            return;
+        }
         // Several route selectors may name the same physical wire. Publish its
         // aggregate level, never a deassertion that masks another live route.
         let wires: BTreeSet<_> = self.bindings.iter().flatten().copied().collect();
