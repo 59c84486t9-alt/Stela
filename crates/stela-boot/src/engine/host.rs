@@ -9,8 +9,9 @@
 //! permission view (EL0, EL1, EL1 with PAN, GL1), and a second set for the
 //! same views while tag checks keep Tagged memory out (`Regime::tag_checks`),
 //! filled on demand by the #PF handler from the software walk of the
-//! guest's tables, a window of the guest leaf per fault. The views but
-//! EL0's keep their roots of a few SPRR_PERM_EL1 values (`Bank`). Each half
+//! guest's tables, a window of the guest leaf per fault. The views keep
+//! their roots of a few values of SPRR_PERM_EL0, SPRR_PERM_EL1 and E0PD1
+//! (`Bank`). Each half
 //! takes its tables from its own part of the pool, so a change of TTBR0
 //! alone (a context switch) drops the lower half and keeps the upper
 //! half's, and records the leaves it was filled from
@@ -168,41 +169,33 @@ fn differing(from: &mmu::Controls, to: &mmu::Controls) -> [bool; FIELDS] {
     ]
 }
 
-/// The views whose rights SPRR_PERM_EL0 decides: EL0's, and EL1's with
-/// PAN, which loses data access where EL0 has any
-/// (`mmu::sprr::permissions`).
-const USER_VIEWS: [usize; 2] = [EL0_VIEW, PAN_VIEW];
-/// The views whose rights SPRR_PERM_EL1 decides: all but EL0's.
-const KERNEL_VIEWS: [usize; 3] = [EL1_VIEW, PAN_VIEW, GUARDED_VIEW];
-/// The roots of the [`KERNEL_VIEWS`], tag-checked ones after the others.
-const KERNEL_ROOTS: [usize; 6] = [
-    EL1_VIEW,
-    PAN_VIEW,
-    GUARDED_VIEW,
-    VIEWS + EL1_VIEW,
-    VIEWS + PAN_VIEW,
-    VIEWS + GUARDED_VIEW,
-];
-/// The SPRR_PERM_EL1 values whose kernel roots the shadow keeps besides
-/// the current one ([`Bank`]).
-const BANKS: usize = 3;
+/// What decides the views' rights besides the guest's tables and the
+/// controls a bank shares: SPRR_PERM_EL0, SPRR_PERM_EL1 and the E0PD1 bit
+/// of TCR ([`USER_TCR`]), which faults EL0's accesses to the upper half.
+type Rights = (u64, u64, u64);
+/// The [`Rights`] whose roots the shadow keeps besides the current ones
+/// ([`Bank`]).
+const BANKS: usize = 6;
 
-/// The [`KERNEL_ROOTS`] the shadow filled under another SPRR_PERM_EL1
-/// value, everything else as it is now: a kernel that makes one
-/// permission index writable and back, as XNU does around its writes to
-/// protected data, finds each value's tables again. Every reset and unmap
+/// The roots the shadow filled under other [`Rights`], everything else as
+/// it is now: a guest that alternates a few values, as XNU does around its
+/// writes to protected data and between threads' EL0 permissions, and the
+/// restore kernel with E0PD1, finds each one's tables again instead of
+/// filling them anew and leaving the old ones taken. Every reset and unmap
 /// reaches them as it does the current roots.
 #[derive(Clone, Copy)]
 struct Bank {
-    /// The SPRR_PERM_EL1 value, `None` while the roots are empty.
-    el1: Option<u64>,
-    roots: [u64; KERNEL_ROOTS.len()],
+    /// Their rights, `None` while the roots are empty.
+    rights: Option<Rights>,
+    roots: [u64; ROOTS],
     /// When it was last the current bank, for replacement.
     used: u64,
 }
 const ROOTS: usize = 2 * VIEWS;
 /// Frames reserved for roots and other permanent tables.
 const PERMANENT_FRAMES: u64 = 64;
+// The current roots and the banks', and the host root.
+const _: () = assert!(ROOTS * (1 + BANKS) < PERMANENT_FRAMES as usize);
 /// A root's entries.
 const ROOT_ENTRIES: usize = 512;
 /// log2 of the bytes a four-level root entry maps: 512 GiB.
@@ -254,7 +247,7 @@ pub struct State {
     /// Engine root without any guest mapping.
     host_root: u64,
     roots: [u64; ROOTS],
-    /// The kernel roots of other SPRR_PERM_EL1 values.
+    /// The roots of other SPRR_PERM_EL0 and SPRR_PERM_EL1 pairs.
     banks: [Bank; BANKS],
     /// Switches to a bank's roots, and those that found the bank empty.
     bank_switches: u64,
@@ -293,8 +286,6 @@ pub struct State {
     pub exhausted: u64,
     /// Resets of the lower half alone.
     pub lower_resets: u64,
-    /// Resets of the [`USER_VIEWS`] alone.
-    pub user_resets: u64,
     /// Whole resets by [`Cause`].
     reset_causes: [u64; CAUSES],
     /// The [`Cause::Controls`] resets each field differed in ([`differing`]).
@@ -404,8 +395,8 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
         *slot = root()?;
     }
     let mut banks = [Bank {
-        el1: None,
-        roots: [0; KERNEL_ROOTS.len()],
+        rights: None,
+        roots: [0; ROOTS],
         used: 0,
     }; BANKS];
     for slot in banks.iter_mut().flat_map(|bank| &mut bank.roots) {
@@ -455,7 +446,6 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             resets: 0,
             exhausted: 0,
             lower_resets: 0,
-            user_resets: 0,
             reset_causes: [0; CAUSES],
             control_fields: [0; FIELDS],
             last_controls: None,
@@ -492,7 +482,6 @@ pub struct Statistics {
     pub resets: u64,
     pub exhausted: u64,
     pub lower_resets: u64,
-    pub user_resets: u64,
     /// Whole resets by cause: exhausted frames, SPRR, TTBR0 and other
     /// controls, tag checks, invalidations and TLBIs of everything.
     pub reset_causes: [u64; CAUSES],
@@ -529,7 +518,6 @@ pub fn statistics() -> Statistics {
         resets: state.resets,
         exhausted: state.exhausted,
         lower_resets: state.lower_resets,
-        user_resets: state.user_resets,
         reset_causes: state.reset_causes,
         control_fields: state.control_fields,
         last_controls: state.last_controls,
@@ -657,39 +645,12 @@ impl State {
         self.reload();
     }
 
-    /// Drop the [`USER_VIEWS`] alone: what an SPRR_PERM_EL0 write changes.
-    /// Their tables' frames stay taken until the next whole reset, as each
-    /// half's frames are freed only together; a half that runs out of
-    /// frames resets as it would otherwise.
-    fn reset_user_views(&mut self) {
-        for view in USER_VIEWS {
-            for root in [self.roots[view], self.roots[VIEWS + view]] {
-                self.detach(root, LOWER);
-                self.detach(root, UPPER);
-            }
-        }
-        // The banks' PAN roots too.
-        for index in 0..BANKS {
-            for (slot, &view) in KERNEL_ROOTS.iter().enumerate() {
-                if USER_VIEWS.contains(&(view % VIEWS)) {
-                    self.detach(self.banks[index].roots[slot], LOWER);
-                    self.detach(self.banks[index].roots[slot], UPPER);
-                }
-            }
-        }
-        self.tlb.clear();
-        self.user_resets += 1;
-        if USER_VIEWS.contains(&(self.current % VIEWS)) {
-            self.reload();
-        }
-    }
-
-    /// Take the [`KERNEL_ROOTS`] of SPRR_PERM_EL1 value `to` from its bank,
-    /// leaving those of `from` there: a bank of `to`, or else the least
-    /// recently used, emptied.
-    fn switch_bank(&mut self, from: u64, to: u64) {
+    /// Take the roots of rights `to` from their bank, leaving those of
+    /// `from` there: a bank of `to`, or else the least recently used,
+    /// emptied.
+    fn switch_bank(&mut self, from: Rights, to: Rights) {
         self.bank_switches += 1;
-        let index = match self.banks.iter().position(|bank| bank.el1 == Some(to)) {
+        let index = match self.banks.iter().position(|bank| bank.rights == Some(to)) {
             Some(index) => index,
             None => {
                 self.bank_misses += 1;
@@ -707,16 +668,12 @@ impl State {
             }
         };
         let bank = &mut self.banks[index];
-        for (slot, &view) in KERNEL_ROOTS.iter().enumerate() {
-            core::mem::swap(&mut bank.roots[slot], &mut self.roots[view]);
-        }
-        bank.el1 = Some(from);
+        core::mem::swap(&mut bank.roots, &mut self.roots);
+        bank.rights = Some(from);
         bank.used = self.bank_switches;
         // The software TLB is tagged by view, not root.
         self.tlb.clear();
-        if KERNEL_VIEWS.contains(&(self.current % VIEWS)) {
-            self.reload();
-        }
+        self.reload();
     }
 
     /// Every root the shadow fills: the current ones and the banks'.
@@ -1417,9 +1374,10 @@ impl Host for BareHost<'_> {
         {
             let (from, to) = (current.controls, regime.controls);
             // What the lower half's own inputs, E0PD1 and SPRR's
-            // permission registers leave of the controls; each of those has
-            // its own reset, and they compose (a context switch writes TTBR0 and
-            // the thread's SPRR_PERM_EL0 together).
+            // permission registers leave of the controls: the lower half has
+            // its own reset and the others their bank, and they compose (a
+            // context switch writes TTBR0 and the thread's SPRR_PERM_EL0
+            // together).
             let (lower_tcr, user_tcr) = match to.regime {
                 mmu::Regime::El10 | mmu::Regime::El20 => (LOWER_TCR, USER_TCR),
                 _ => (0, 0),
@@ -1446,11 +1404,10 @@ impl Host for BareHost<'_> {
                 if lower {
                     state.reset_lower();
                 }
-                if from.sprr.el0 != to.sprr.el0 || (from.tcr ^ to.tcr) & user_tcr != 0 {
-                    state.reset_user_views();
-                }
-                if from.sprr.el1 != to.sprr.el1 {
-                    state.switch_bank(from.sprr.el1, to.sprr.el1);
+                let rights = |c: &mmu::Controls| (c.sprr.el0, c.sprr.el1, c.tcr & user_tcr);
+                let (from, to) = (rights(&from), rights(&to));
+                if from != to {
+                    state.switch_bank(from, to);
                 }
             } else {
                 let ttbr0 = mmu::Controls {

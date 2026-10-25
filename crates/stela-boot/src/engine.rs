@@ -2967,7 +2967,7 @@ impl TranslatedSeen {
 /// The host's shadow counters at the last heartbeat.
 #[derive(Default)]
 struct ShadowSeen {
-    counts: [u64; 10],
+    counts: [u64; 9],
     causes: [u64; 7],
     fields: [u64; 9],
 }
@@ -2978,9 +2978,9 @@ impl ShadowSeen {
     /// the ones each cause led to (a half running out of frames, SPRR,
     /// TTBR0 or other controls, tag checks, invalidations and TLBIs of
     /// everything, and for other controls the fields that differed); the
-    /// resets of the lower half and of the views SPRR_PERM_EL0 decides; the
-    /// switches between SPRR_PERM_EL1 values' kernel roots and those that
-    /// found none kept; the TLBIs that unmapped ranges instead; and the root
+    /// resets of the lower half; the switches between the roots of
+    /// SPRR_PERM_EL0, SPRR_PERM_EL1 and E0PD1 values and those that found
+    /// none kept; the TLBIs that unmapped ranges instead; and the root
     /// loads for a change of view.
     fn report(&mut self) {
         let host = host::statistics();
@@ -2990,7 +2990,6 @@ impl ShadowSeen {
             host.resets,
             host.exhausted,
             host.lower_resets,
-            host.user_resets,
             host.bank_switches,
             host.bank_misses,
             host.scoped,
@@ -3002,7 +3001,6 @@ impl ShadowSeen {
             resets,
             exhausted,
             lower_resets,
-            user_resets,
             bank_switches,
             bank_misses,
             scoped,
@@ -3030,7 +3028,7 @@ impl ShadowSeen {
              ttbr0={ttbr0} ttbr1={ttbr1} mair={mair} sprr={sprr_field} ctrr={ctrr} \
              regime={regime} stage2={stage2}) tags={tags} \
              invalidated={invalidated} maintained={maintained} \
-             lower_resets={lower_resets} user_resets={user_resets} \
+             lower_resets={lower_resets} \
              bank_switches={bank_switches} bank_misses={bank_misses} scoped={scoped} \
              view_switches={view_switches}\n"
         ));
