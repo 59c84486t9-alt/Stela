@@ -23,6 +23,14 @@ const REGISTRY: &str = include_str!("../../../../isa/apple-soc-facts.json");
 /// runs from.
 pub const RESTORE_RAMDISK: &str = "RestoreRamDisk";
 
+/// Whether a component belongs only to the macOS system volume, which a
+/// recovery-only erase restore (`SystemImage` false) never asks for: the
+/// system image, its seal metadata and the cryptexes installed with it.
+pub fn system_volume(component: &str) -> bool {
+    matches!(component, "OS" | "Ap,SystemVolumeCanonicalMetadata")
+        || component.starts_with("Cryptex1,")
+}
+
 /// The synthetic IPSW's profile (`payload::synthetic_ipsw`), which no Mac
 /// has.
 pub const SYNTHETIC: (&str, u32, u32, &str) = ("StelaTest1,1", 0xfe01, 0x01, "stelatestap");

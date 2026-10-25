@@ -13,16 +13,18 @@ use sha2::{Digest, Sha256, Sha384};
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
 };
 use stela_runtime::payload::{
     AeaKey, BLOCK_HASHES_FILE, BlockHashes, HASH_BLOCK_BYTES, IdentitySet, KIND, Layout,
-    MANIFEST_FILE, Member, PayloadManifest, SourceImage, images_directory, slice_count, slice_path,
+    MANIFEST_FILE, Member, PayloadManifest, Purpose, SourceImage, images_directory, slice_count,
+    slice_path,
 };
 use zip::ZipArchive;
 
 const BUILD_MANIFEST: &str = "BuildManifest.plist";
+const RESTORE_PLIST: &str = "Restore.plist";
 const BUFFER: usize = 4 * 1024 * 1024;
 
 /// Which members a model needs, before anything is hashed.
@@ -50,7 +52,22 @@ fn restored_members<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
-fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
+/// The archive comment of a recovery medium [`trim`] wrote. Its identities
+/// are the profile's erase restore and installed system, without the
+/// components only the macOS system volume holds
+/// ([`components::system_volume`]).
+pub const RECOVERY_COMMENT: &[u8] = b"Stela recovery members";
+
+fn select<R: Read + Seek>(archive: &mut ZipArchive<R>, model: &str) -> Result<Selection> {
+    let recovery = archive.comment() == RECOVERY_COMMENT;
+    select_scope(archive, model, recovery)
+}
+
+fn select_scope<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    model: &str,
+    recovery: bool,
+) -> Result<Selection> {
     let mut bytes = Vec::new();
     archive
         .by_name(BUILD_MANIFEST)?
@@ -63,7 +80,14 @@ fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
     // The profile's identities, as `components` defines them.
     let profile = components::Profile::of(model)?;
     let mut restore = manifest::inspect(&bytes, None)?;
-    restore.identities.retain(|identity| profile.owns(identity));
+    restore.identities.retain(|identity| {
+        profile.owns(identity)
+            && (!recovery
+                || matches!(
+                    components::purpose(identity),
+                    Some(Purpose::Erase | Purpose::Installed)
+                ))
+    });
     ensure!(
         !restore.identities.is_empty(),
         "macOS {} has no identities for {profile}",
@@ -86,8 +110,9 @@ fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
                 })?,
                 members: identity
                     .components
-                    .values()
-                    .map(|component| component.path.clone())
+                    .iter()
+                    .filter(|(name, _)| !recovery || !components::system_volume(name))
+                    .map(|(_, component)| component.path.clone())
                     .chain(restored.iter().cloned())
                     .collect::<BTreeSet<_>>()
                     .into_iter()
@@ -475,6 +500,54 @@ pub fn identity(image: &Path, model: &str) -> Result<(String, String)> {
     ))
 }
 
+/// Copy the recovery members of the IPSW `source` for `model` into a new
+/// archive at `output`, with [`RECOVERY_COMMENT`] as its comment. Every
+/// member is stored uncompressed, so `stela.efi` reads any range of one
+/// directly; a deflated member is inflated here once, its CRC-32 checked as
+/// it is read. `source` may be a local file or a remote one read by ranges;
+/// only the members copied are read. The archive is written beside
+/// `output` and renamed when complete, so a partial one is never taken for
+/// a medium. Returns the bytes written for the members.
+pub fn trim<R: Read + Seek>(source: R, model: &str, output: &Path) -> Result<u64> {
+    use zip::{CompressionMethod, write::SimpleFileOptions};
+    let mut archive = ZipArchive::new(source)?;
+    let selection = select_scope(&mut archive, model, true)?;
+    let mut names: Vec<&str> = vec![BUILD_MANIFEST];
+    if archive.index_for_name(RESTORE_PLIST).is_some() {
+        names.push(RESTORE_PLIST);
+    }
+    names.extend(selection.names.iter().map(String::as_str));
+    let part = output.with_extension("part");
+    let mut writer = zip::ZipWriter::new(File::create(&part)?);
+    let mut written = 0;
+    for name in names {
+        let index = archive
+            .index_for_name(name)
+            .with_context(|| format!("the IPSW lacks {name}"))?;
+        if archive.by_index_raw(index)?.compression() == CompressionMethod::Stored {
+            written += archive.by_index_raw(index)?.size();
+            writer
+                .raw_copy_file(archive.by_index_raw(index)?)
+                .with_context(|| format!("copy {name}"))?;
+            continue;
+        }
+        let mut member = archive.by_index(index)?;
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .large_file(member.size() >= u32::MAX as u64)
+            .last_modified_time(member.last_modified().unwrap_or_default());
+        writer.start_file(name, options)?;
+        let count =
+            std::io::copy(&mut member, &mut writer).with_context(|| format!("inflate {name}"))?;
+        ensure!(count == member.size(), "{name} is truncated");
+        written += count;
+    }
+    writer.set_raw_comment(RECOVERY_COMMENT.into());
+    writer.finish()?.sync_all()?;
+    fs::rename(&part, output)?;
+    Ok(written)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum PayloadLayout {
     /// FAT32-safe slices of each member.
@@ -824,6 +897,71 @@ mod tests {
         }
         // A second write never replaces a payload.
         assert!(write(&options(&image, &root, PayloadLayout::Split)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_trimmed_archive_holds_the_recovery_members_and_inventories_as_them() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let image = dir.path().join("Synthetic.ipsw");
+        synthetic_ipsw(&image)?;
+        let trimmed = dir.path().join("Recovery.ipsw");
+        let copied = trim(File::open(&image)?, SYNTHETIC_MODEL, &trimmed)?;
+        assert!(copied > 0 && !trimmed.with_extension("part").exists());
+        let mut archive = ZipArchive::new(File::open(&trimmed)?)?;
+        assert_eq!(archive.comment(), RECOVERY_COMMENT);
+        let names: BTreeSet<String> = archive.file_names().map(str::to_owned).collect();
+        for name in [
+            BUILD_MANIFEST,
+            "kernelcache.release.stelatest",
+            "stelatest-ramdisk.dmg",
+            "RestoreVersion.plist",
+            "Firmware/Manifests/restore/Customer/apticket.stelatestap.im4m",
+        ] {
+            assert!(names.contains(name), "{name}");
+        }
+        // The system image, the update ramdisk and other files stay behind.
+        for name in [
+            "Firmware/stelatest-os.dmg",
+            "stelatest-update.dmg",
+            "Firmware/unrelated.bin",
+        ] {
+            assert!(!names.contains(name), "{name}");
+        }
+        // Every member is stored, with the source's bytes.
+        let mut original = ZipArchive::new(File::open(&image)?)?;
+        for name in &names {
+            let mut kept = Vec::new();
+            let mut member = archive.by_name(name)?;
+            assert_eq!(
+                member.compression(),
+                zip::CompressionMethod::Stored,
+                "{name}"
+            );
+            member.read_to_end(&mut kept)?;
+            let mut source = Vec::new();
+            original.by_name(name)?.read_to_end(&mut source)?;
+            assert_eq!(kept, source, "{name}");
+        }
+        // Its inventory names only the erase and installed identities.
+        let recovery = inventory(&trimmed, SYNTHETIC_MODEL, false, None, None)?;
+        let purposes: Vec<Purpose> = recovery
+            .manifest
+            .identities
+            .iter()
+            .map(|i| i.purpose)
+            .collect();
+        assert_eq!(purposes, [Purpose::Erase, Purpose::Installed]);
+        assert!(
+            !recovery
+                .manifest
+                .members
+                .iter()
+                .any(|m| m.name == "Firmware/stelatest-os.dmg")
+        );
+        // A full IPSW's inventory is unchanged.
+        let full = inventory(&image, SYNTHETIC_MODEL, false, None, None)?;
+        assert_eq!(full.manifest.identities.len(), 3);
         Ok(())
     }
 

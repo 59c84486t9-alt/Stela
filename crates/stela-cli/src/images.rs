@@ -23,6 +23,16 @@ pub(crate) enum ImagesCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Copy one model's recovery members from Apple's servers by byte
+    /// ranges into a small archive, without downloading the whole image.
+    FetchRecovery {
+        #[arg(long)]
+        build: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long, default_value = ".stela/images")]
+        output_dir: PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -302,6 +312,35 @@ impl ImagesCommand {
                     println!("{}", serde_json::to_string_pretty(&receipt)?);
                     eprintln!("Saved {}", output.display());
                 }
+            }
+            Self::FetchRecovery {
+                build,
+                model,
+                output_dir,
+            } => {
+                let images = restore::catalog()?;
+                let image = restore::select(&images, Some(&build), Some(&model))?;
+                ensure!(
+                    image.build.bytes().all(|c| c.is_ascii_alphanumeric())
+                        && model
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b','),
+                    "invalid build or model identifier"
+                );
+                std::fs::create_dir_all(&output_dir)?;
+                let output = output_dir.join(format!(
+                    "Recovery_{}_{}.ipsw",
+                    image.build,
+                    model.replace(',', "_")
+                ));
+                let started = std::time::Instant::now();
+                let bytes = restore::fetch_recovery(&image, &model, &output)?;
+                eprintln!(
+                    "Saved {}: {:.2} GB of members in {:.0} s",
+                    output.display(),
+                    bytes as f64 / 1e9,
+                    started.elapsed().as_secs_f64()
+                );
             }
         }
         Ok(())

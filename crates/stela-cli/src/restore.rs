@@ -5,6 +5,7 @@ pub mod components;
 pub mod disk;
 pub mod manifest;
 pub mod payload;
+pub mod remote;
 pub mod udif;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
@@ -259,6 +260,18 @@ fn range_total(value: &str, offset: u64) -> Result<u64> {
         "incorrect or incomplete resumed range"
     );
     Ok(total)
+}
+
+/// Copy `image`'s recovery members for `model` from Apple's servers by
+/// byte ranges into the archive `output` ([`payload::trim`]). Returns the
+/// bytes written for the members.
+pub fn fetch_recovery(image: &Image, model: &str, output: &Path) -> Result<u64> {
+    let url = Url::parse(&image.url)?;
+    ensure!(
+        apple_url(&url),
+        "image must be hosted on Apple's HTTPS servers"
+    );
+    payload::trim(remote::Remote::open(client()?, &image.url)?, model, output)
 }
 
 pub fn download(image: &Image, output: &Path) -> Result<Receipt> {
