@@ -10,9 +10,10 @@
 //! largest leaf of at most [`SMALL`] bytes, whose aligned extent around an
 //! address holds every smaller leaf at that address too, and each larger
 //! leaf by its own extent, because a few large blocks (a physical aperture)
-//! must not make every TLBI by page drop megabytes.
+//! must not make every TLBI by page drop megabytes. The lower halves of
+//! contexts the shadow switched away from it may keep too ([`Kept`]).
 
-use super::tlbi::Reach;
+use super::tlbi::{Everywhere, Reach};
 use alloc::vec::Vec;
 
 /// The host page a shadow maps.
@@ -127,6 +128,124 @@ impl Extents {
             !overlaps
         });
         Some(ranges)
+    }
+}
+
+/// The lower halves of the contexts a shadow switched away from that it
+/// keeps besides the current one, at most [`KEPT`]: XNU switches between a
+/// few processes' TTBR0s and the kernel's empty one thousands of times a
+/// second during a restore, and a switch back to one finds its half again
+/// instead of filling it anew.
+///
+/// A half is kept as the root entries that held it, detached from their
+/// roots, with the leaves it was filled from. Its tables stay in the
+/// shadow's frames until the half is emptied, which drops every kept half
+/// ([`Kept::clear`]). A TLBI reaches the kept halves through what it
+/// removes from every context ([`Everywhere`]), as the current half
+/// through [`Reach`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Kept {
+    halves: Vec<KeptHalf>,
+    /// Switches so far, which order the halves for replacement.
+    switches: u64,
+}
+
+/// The contexts whose lower halves [`Kept`] holds at most.
+pub const KEPT: usize = 8;
+
+/// One context's kept lower half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptHalf {
+    /// What selects the context: TTBR0 and the TCR fields of the lower half.
+    pub key: (u64, u64),
+    /// Each nonzero root entry of the half: root, entry index and value.
+    pub entries: Vec<(u64, usize, u64)>,
+    pub extents: Extents,
+    used: u64,
+}
+
+impl Kept {
+    pub const fn new() -> Self {
+        Self {
+            halves: Vec::new(),
+            switches: 0,
+        }
+    }
+
+    /// Keep the half of context `key` that a switch detached, replacing
+    /// the least recently kept one when full, and take the half of `to`
+    /// if one is kept.
+    pub fn switch(
+        &mut self,
+        key: (u64, u64),
+        entries: Vec<(u64, usize, u64)>,
+        extents: Extents,
+        to: (u64, u64),
+    ) -> Option<KeptHalf> {
+        self.switches += 1;
+        self.halves.retain(|half| half.key != key);
+        if !entries.is_empty() {
+            if self.halves.len() == KEPT
+                && let Some(oldest) = (0..self.halves.len()).min_by_key(|&i| self.halves[i].used)
+            {
+                self.halves.swap_remove(oldest);
+            }
+            self.halves.push(KeptHalf {
+                key,
+                entries,
+                extents,
+                used: self.switches,
+            });
+        }
+        let index = self.halves.iter().position(|half| half.key == to)?;
+        Some(self.halves.swap_remove(index))
+    }
+
+    /// Drop every kept half, returning how many there were.
+    pub fn clear(&mut self) -> usize {
+        let halves = self.halves.len();
+        self.halves.clear();
+        halves
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.halves.is_empty()
+    }
+
+    /// Apply a TLBI that removes `everywhere` to the kept halves within
+    /// `bounds`: `unmap(value, first, last)` unmaps a range under the root
+    /// entry `value`, whose top-level entries each map `1 << entry_bits`
+    /// bytes. A half whose extents are unknown for the TLBI's addresses, or
+    /// that a TLBI of non-global or all entries reaches, is dropped. Returns
+    /// the halves dropped.
+    pub fn invalidate(
+        &mut self,
+        everywhere: Everywhere,
+        bounds: (u64, u64),
+        entry_bits: u32,
+        mut unmap: impl FnMut(u64, u64, u64),
+    ) -> usize {
+        let reach = match everywhere {
+            Everywhere::Addresses(reach) => reach,
+            Everywhere::NonGlobal | Everywhere::All => Reach::All,
+        };
+        let before = self.halves.len();
+        self.halves.retain_mut(|half| {
+            let Some(ranges) = half.extents.ranges(reach, bounds) else {
+                return false;
+            };
+            for &(first, last) in &ranges {
+                for &(_, entry, value) in &half.entries {
+                    let start = (entry as u64) << entry_bits;
+                    let end = start | ((1 << entry_bits) - 1);
+                    if first <= end && start <= last {
+                        unmap(value, first.max(start), last.min(end));
+                    }
+                }
+            }
+            true
+        });
+        before - self.halves.len()
     }
 }
 
@@ -259,5 +378,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn kept_halves_return_on_a_switch_back_and_follow_tlbis() {
+        const ROOT: u64 = 0x1000;
+        let a = (0x0001_0000_8000_0000, 0x10);
+        let b = (0x0002_0000_9000_0000, 0x10);
+        let mut kept = Kept::new();
+        let mut extents = Extents::new();
+        extents.record(0x1_0000_4000, 1 << 14, false);
+        // A first switch keeps A's half and finds no B.
+        let half = kept.switch(a, alloc::vec![(ROOT, 0, 0xa003)], extents.clone(), b);
+        assert_eq!(half, None);
+        // An empty half is not kept; the switch back finds A's.
+        let half = kept.switch(b, Vec::new(), Extents::new(), a).unwrap();
+        assert_eq!(half.key, a);
+        assert_eq!(half.entries, [(ROOT, 0, 0xa003)]);
+        assert_eq!(half.extents, extents);
+        assert!(kept.is_empty());
+        // A TLBI by address unmaps its page's neighbourhood under each
+        // kept entry it overlaps, and keeps the half.
+        kept.switch(a, half.entries, half.extents, b);
+        let mut unmapped = Vec::new();
+        let reach = Reach::Containing(0x1_0000_5000);
+        let dropped = kept.invalidate(
+            Everywhere::Addresses(reach),
+            LOWER,
+            39,
+            |value, first, last| unmapped.push((value, first, last)),
+        );
+        assert_eq!(dropped, 0);
+        assert_eq!(unmapped, [(0xa003, 0x1_0000_4000, 0x1_0000_7fff)]);
+        // An upper-half address reaches nothing of it.
+        unmapped.clear();
+        let upper = Everywhere::Addresses(Reach::Containing(0xffff_fe00_0000_0000));
+        assert_eq!(
+            kept.invalidate(upper, LOWER, 39, |v, f, l| unmapped.push((v, f, l))),
+            0
+        );
+        assert!(unmapped.is_empty());
+        // A TLBI of an ASID's or of every entry drops the kept halves.
+        assert_eq!(
+            kept.invalidate(Everywhere::NonGlobal, LOWER, 39, |_, _, _| {}),
+            1
+        );
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn kept_halves_replace_the_least_recently_kept() {
+        let mut kept = Kept::new();
+        let key = |n: u64| (n << 12, 0);
+        for n in 0..=KEPT as u64 {
+            kept.switch(
+                key(n),
+                alloc::vec![(0x1000, 0, n + 1)],
+                Extents::new(),
+                key(n + 1),
+            );
+        }
+        // The first is gone, the rest remain.
+        assert_eq!(
+            kept.switch(key(99), Vec::new(), Extents::new(), key(0)),
+            None
+        );
+        for n in 1..=KEPT as u64 {
+            let half = kept
+                .switch(key(99), Vec::new(), Extents::new(), key(n))
+                .unwrap();
+            assert_eq!(half.entries, [(0x1000, 0, n + 1)]);
+        }
+        kept.switch(key(1), alloc::vec![(0x1000, 0, 2)], Extents::new(), key(2));
+        assert_eq!(kept.clear(), 1);
+        assert!(kept.is_empty());
     }
 }

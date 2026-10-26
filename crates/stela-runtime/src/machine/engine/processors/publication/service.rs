@@ -1,7 +1,10 @@
 //! Closed Host effects on a recovered, held physical worker. No CPU, Machine,
 //! raw callback or borrowed Host is transported to another core.
 use super::*;
-use crate::machine::{Regime, mmu::tlbi::Reach};
+use crate::machine::{
+    Regime,
+    mmu::tlbi::{Everywhere, Reach},
+};
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -11,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub enum HostEffect {
     Regime(Box<Regime>),
     InvalidateTranslations,
-    InvalidateReach(Reach),
+    InvalidateReach(Reach, Everywhere),
     IsolatePredictions,
     CodeInvalidated(Option<u64>),
     ArmTimer(Option<u64>),
@@ -282,7 +285,7 @@ impl HostEffectCommand {
         match self.effect {
             HostEffect::Regime(_) => "regime",
             HostEffect::InvalidateTranslations => "invalidate",
-            HostEffect::InvalidateReach(_) => "reach",
+            HostEffect::InvalidateReach(..) => "reach",
             HostEffect::IsolatePredictions => "isolate",
             HostEffect::CodeInvalidated(_) => "code",
             HostEffect::ArmTimer(_) => "timer",
@@ -319,7 +322,9 @@ impl WorkerOwner {
         match &command.effect {
             HostEffect::Regime(regime) => host.set_regime(regime),
             HostEffect::InvalidateTranslations => host.invalidate_translations(),
-            HostEffect::InvalidateReach(reach) => host.invalidate_reach(*reach),
+            HostEffect::InvalidateReach(reach, everywhere) => {
+                host.invalidate_reach(*reach, *everywhere)
+            }
             HostEffect::IsolatePredictions => host.isolate_predictions(),
             HostEffect::CodeInvalidated(page) => host.code_invalidated(*page),
             HostEffect::ArmTimer(deadline) => host.arm_timer(*deadline),
@@ -374,7 +379,7 @@ mod tests {
         fn invalidate_translations(&mut self) {
             self.effects.push("invalidate");
         }
-        fn invalidate_reach(&mut self, _: Reach) {
+        fn invalidate_reach(&mut self, _: Reach, _: Everywhere) {
             self.effects.push("reach");
         }
         fn isolate_predictions(&mut self) {
@@ -641,7 +646,10 @@ mod tests {
         services.accept(receipt).unwrap();
         for (effect, expected) in [
             (HostEffect::InvalidateTranslations, "invalidate"),
-            (HostEffect::InvalidateReach(Reach::All), "reach"),
+            (
+                HostEffect::InvalidateReach(Reach::All, Everywhere::All),
+                "reach",
+            ),
             (HostEffect::IsolatePredictions, "isolate"),
             (HostEffect::CodeInvalidated(Some(0x1000)), "code"),
             (HostEffect::DiscardCode, "discard"),

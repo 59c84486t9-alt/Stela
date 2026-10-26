@@ -125,7 +125,10 @@ mod tests {
                     let reaches = machine.host.reaches.len();
                     machine.system_instruction(word).unwrap();
                     assert_eq!(machine.translation_generation, generation + 1);
-                    assert_eq!(machine.host.reaches[reaches..], [Reach::All]);
+                    assert_eq!(
+                        machine.host.reaches[reaches..],
+                        [(Reach::All, Everywhere::All)]
+                    );
                     assert!(machine.cpu.pstate.guarded);
                 }
                 assert_eq!(machine.cpu.pc, pc + 8);

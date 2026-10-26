@@ -13,9 +13,11 @@
 //! their roots of a few values of SPRR_PERM_EL0, SPRR_PERM_EL1 and E0PD1
 //! (`Bank`). Each half
 //! takes its tables from its own part of the pool, so a change of TTBR0
-//! alone (a context switch) drops the lower half and keeps the upper
+//! alone (a context switch) detaches the lower half and keeps the upper
 //! half's, and records the leaves it was filled from
 //! (`mmu::shadow::Extents`), so a TLBI unmaps only the ranges it reaches.
+//! The detached lower halves of a few recent TTBR0s stay in their frames
+//! (`mmu::shadow::Kept`), and a switch back attaches its half again.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
 use crate::{
     apic::{self, Apic},
@@ -31,8 +33,8 @@ use stela_runtime::machine::{
     mmu::{
         self, Access, Outcome,
         placement::Placement,
-        shadow::{self, Extents},
-        tlbi::Reach,
+        shadow::{self, Extents, Kept},
+        tlbi::{Everywhere, Reach},
         translated::Tlb,
     },
 };
@@ -297,6 +299,17 @@ pub struct State {
     last_controls: Option<(mmu::Controls, mmu::Controls)>,
     /// The leaves each half was filled from.
     extents: [Extents; 2],
+    /// The lower halves of other TTBR0 contexts.
+    kept: Kept,
+    /// The lower half's root entries any root may hold, by index: a switch
+    /// of TTBR0 visits these, a few, rather than every entry of the half.
+    lower_used: [u64; ROOT_ENTRIES / 64],
+    /// Switches of the lower half to another TTBR0, those that found its
+    /// half kept, and the kept halves a TLBI or a bank's replacement
+    /// dropped.
+    pub lower_switches: u64,
+    pub lower_found: u64,
+    pub kept_dropped: u64,
     /// TLBIs that unmapped ranges rather than whole halves.
     pub scoped: u64,
     /// Pages mapped beside a fault's from the same leaf.
@@ -454,6 +467,11 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             control_fields: [0; FIELDS],
             last_controls: None,
             extents: [Extents::new(), Extents::new()],
+            kept: Kept::new(),
+            lower_used: [0; ROOT_ENTRIES / 64],
+            lower_switches: 0,
+            lower_found: 0,
+            kept_dropped: 0,
             scoped: 0,
             prefills: 0,
             stray: 0,
@@ -486,6 +504,11 @@ pub struct Statistics {
     pub resets: u64,
     pub exhausted: u64,
     pub lower_resets: u64,
+    /// Switches of the lower half to another TTBR0, those that found its
+    /// half kept, and the kept halves dropped.
+    pub lower_switches: u64,
+    pub lower_found: u64,
+    pub kept_dropped: u64,
     /// Whole resets by cause: exhausted frames, SPRR, TTBR0 and other
     /// controls, tag checks, invalidations and TLBIs of everything.
     pub reset_causes: [u64; CAUSES],
@@ -525,6 +548,9 @@ pub fn statistics() -> Statistics {
         resets: state.resets,
         exhausted: state.exhausted,
         lower_resets: state.lower_resets,
+        lower_switches: state.lower_switches,
+        lower_found: state.lower_found,
+        kept_dropped: state.kept_dropped,
         reset_causes: state.reset_causes,
         control_fields: state.control_fields,
         last_controls: state.last_controls,
@@ -646,12 +672,59 @@ impl State {
         self.legacy_translations_dirty = false;
     }
 
-    /// Drop the lower half's translations only.
+    /// Drop the lower half's translations only, and the kept halves.
     fn reset_lower(&mut self) {
         self.clear(LOWER);
         self.tlb.clear();
         self.lower_resets += 1;
         self.reload();
+    }
+
+    /// TTBR0 or the lower half's TCR fields changed from `from` to `to`:
+    /// detach the lower half from every root and keep it, and attach the
+    /// half kept for `to`, if any.
+    fn switch_lower(&mut self, from: (u64, u64), to: (u64, u64)) {
+        self.lower_switches += 1;
+        let mut entries = Vec::new();
+        for root in self.all_roots() {
+            for entry in self.lower_entries() {
+                // SAFETY: permanent root frames through the physmap.
+                let slot = unsafe { (layout::physical(root) as *mut u64).add(entry) };
+                // SAFETY: as above.
+                let value = unsafe { slot.read() };
+                if value != 0 {
+                    entries.push((root, entry, value));
+                    // SAFETY: as above.
+                    unsafe { slot.write(0) };
+                }
+            }
+        }
+        self.lower_used = [0; ROOT_ENTRIES / 64];
+        let extents = core::mem::take(&mut self.extents[LOWER]);
+        if let Some(half) = self.kept.switch(from, entries, extents, to) {
+            self.lower_found += 1;
+            for &(root, entry, value) in &half.entries {
+                // SAFETY: as above; the half's tables are still the pool's.
+                unsafe { (layout::physical(root) as *mut u64).add(entry).write(value) };
+                self.lower_used[entry / 64] |= 1 << (entry % 64);
+            }
+            self.extents[LOWER] = half.extents;
+        }
+        // The software TLB is tagged by view, not root.
+        self.tlb.clear();
+        self.reload();
+    }
+
+    /// The lower half's root entries [`State::lower_used`] names.
+    fn lower_entries(&self) -> impl Iterator<Item = usize> + use<> {
+        let used = self.lower_used;
+        let (first, last) = self.half_entries(LOWER);
+        (first..=last).filter(move |&entry| used[entry / 64] & 1 << (entry % 64) != 0)
+    }
+
+    /// Drop the kept lower halves; their frames return with the half's.
+    fn drop_kept(&mut self) {
+        self.kept_dropped += self.kept.clear() as u64;
     }
 
     /// Take the roots of rights `to` from their bank, leaving those of
@@ -673,6 +746,9 @@ impl State {
                     self.detach(root, LOWER);
                     self.detach(root, UPPER);
                 }
+                // The kept halves may hold entries of these roots, which
+                // take other rights now.
+                self.drop_kept();
                 index
             }
         };
@@ -691,21 +767,31 @@ impl State {
         self.roots.into_iter().chain(banked.into_iter().flatten())
     }
 
-    /// Unmap `half` from every root and free its frames.
+    /// Unmap `half` from every root and free its frames, the kept lower
+    /// halves' too.
     fn clear(&mut self, half: usize) {
         self.pool.reset_half(half);
         self.extents[half].clear();
         for root in self.all_roots() {
             self.detach(root, half);
         }
+        if half == LOWER {
+            self.lower_used = [0; ROOT_ENTRIES / 64];
+            self.drop_kept();
+        }
     }
 
     /// Unmap `half` from `root`, leaving its tables' frames taken.
     fn detach(&self, root: u64, half: usize) {
-        let (first, last) = self.half_entries(half);
-        for entry in first..=last {
+        let write = |entry: usize| {
             // SAFETY: permanent root frames through the physmap.
             unsafe { (layout::physical(root) as *mut u64).add(entry).write(0) };
+        };
+        if half == LOWER {
+            self.lower_entries().for_each(write);
+        } else {
+            let (first, last) = self.half_entries(half);
+            (first..=last).for_each(write);
         }
     }
 
@@ -1000,9 +1086,14 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     // A failed allocation can already have installed intermediate tables.
     state.legacy_translations_dirty = true;
     if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
-        // The shadow pool is exhausted: start over and map again.
+        // The half's frames are exhausted: start it over and map again. The
+        // lower half's kept halves hold frames until it is emptied.
         state.exhausted += 1;
-        state.reset_shadow(Cause::Exhausted);
+        if half == LOWER {
+            state.reset_lower();
+        } else {
+            state.reset_shadow(Cause::Exhausted);
+        }
         state.pool.half = half;
         state.legacy_translations_dirty = true;
         if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
@@ -1010,6 +1101,10 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
         }
     }
     invlpg(virtual_page);
+    if half == LOWER {
+        let entry = tables::index(virtual_page, layout::top_level());
+        state.lower_used[entry / 64] |= 1 << (entry % 64);
+    }
     state.extents[half].record(address, translation.size, translation.global);
     // The rest of the leaf's window has the same translation and rights:
     // map its RAM pages that are not watched now, as a TLB entry covers
@@ -1412,7 +1507,8 @@ impl Host for BareHost<'_> {
             let asid = mmu::current_asid(&from) == mmu::current_asid(&to);
             if rest == to && (!lower || asid || !state.extents[UPPER].private()) {
                 if lower {
-                    state.reset_lower();
+                    let key = |c: &mmu::Controls| (c.ttbr0, c.tcr & lower_tcr);
+                    state.switch_lower(key(&from), key(&to));
                 }
                 let rights = |c: &mmu::Controls| (c.sprr.el0, c.sprr.el1, c.tcr & user_tcr);
                 let (from, to) = (rights(&from), rights(&to));
@@ -1483,8 +1579,20 @@ impl Host for BareHost<'_> {
         state().reset_shadow(Cause::Invalidated);
     }
 
-    fn invalidate_reach(&mut self, reach: Reach) {
+    fn invalidate_reach(&mut self, reach: Reach, everywhere: Everywhere) {
         let state = state();
+        if !state.kept.is_empty() {
+            let bounds = state.half_range(LOWER);
+            let entry_bits = 12 + 9 * layout::top_level();
+            let pool = &state.pool;
+            let dropped =
+                state
+                    .kept
+                    .invalidate(everywhere, bounds, entry_bits, |entry, first, last| {
+                        tables::unmap_under(pool, entry, first, last)
+                    });
+            state.kept_dropped += dropped as u64;
+        }
         if reach == Reach::All {
             return state.reset_shadow(Cause::Maintained);
         }

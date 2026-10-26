@@ -130,6 +130,20 @@ pub fn unmap(frames: &dyn Frames, root: u64, first: u64, last: u64) {
     clear(frames, root, layout::top_level(), first, last);
 }
 
+/// [`unmap`] the part of `first..=last` that the root entry `entry` maps,
+/// which holds the range, whether or not the entry is in a root.
+pub fn unmap_under(frames: &dyn Frames, entry: u64, first: u64, last: u64) {
+    if entry & PRESENT != 0 && entry & HUGE == 0 {
+        clear(
+            frames,
+            entry & ADDRESS,
+            layout::top_level() - 1,
+            first,
+            last,
+        );
+    }
+}
+
 fn clear(frames: &dyn Frames, table: u64, level: u32, first: u64, last: u64) {
     let shift = 12 + 9 * level;
     // The table maps the aligned region holding the range.

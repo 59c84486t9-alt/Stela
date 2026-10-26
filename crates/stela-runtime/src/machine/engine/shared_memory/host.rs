@@ -357,11 +357,11 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
             self.local.invalidate_translations();
         }
     }
-    fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach) {
+    fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach, everywhere: mmu::tlbi::Everywhere) {
         if self.source_service() {
-            self.effect(HostEffect::InvalidateReach(reach));
+            self.effect(HostEffect::InvalidateReach(reach, everywhere));
         } else {
-            self.local.invalidate_reach(reach);
+            self.local.invalidate_reach(reach, everywhere);
         }
     }
     fn counter(&mut self) -> u64 {

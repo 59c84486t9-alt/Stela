@@ -8,8 +8,9 @@
 // It builds 16 KiB-granule tables (TTBR0: 47-bit with an identity block and
 // three EL0 pages; TTBR1: 39-bit high half mapping the DRAM block at
 // 0xffffff8000000000), turns the MMU on, continues in the high half, takes a
-// data abort and an SVC at EL2, then runs two EL0 tasks that make SVCs while
-// the virtual timer's FIQ switches between them. After SWITCHES switches it
+// data abort and an SVC at EL2, switches TTBR0 between two ASIDs' tables
+// that map TEST_VA to different pages, then runs two EL0 tasks that make SVCs
+// while the virtual timer's FIQ switches between them. After SWITCHES switches it
 // disables the timer, leaves its results in X0-X7 and waits with nothing able
 // to wake it:
 //   x0 = 0x5354454c41204f4b ("STELA OK"), or 0xbad for an unexpected exception
@@ -18,6 +19,7 @@
 //   x4, x5 = ESR and FAR of the EL2 data abort
 //   x6 = ESR of the EL2 SVC, x7 = ESR of the last EL0 SVC
 //   x8, x9 = ESRs of the EL2 load and store at WINDOW_VA, x10 = its FAR
+//   x11 = the pages TEST_VA read across the TTBR0 switches, a nibble each
 
 .set BLOCK, 0x2000000
 .set KERNEL_VA, 0xffffff8000000000
@@ -28,6 +30,13 @@
 .set KDATA, 0x320000
 .set KSTACK_TOP, 0x310000
 .set USER_VA, 0x100000000
+// A kernel page of the lower half (level 3 entry 4 of USER_VA's table), and
+// the three pages ASID 1's and ASID 2's tables map there, holding 1, 2, 3.
+.set TEST_VA, (USER_VA + 0x10000)
+.set TEST_INDEX, 4
+.set TEST_PAGES, 0x20c000
+// ASID 2's tables: level 1, 2 and 3.
+.set TABLES_2, (TABLES + 0x14000)
 // Outside both translation ranges, and the host address of the Stela window
 // (PML5 entry 64), which must fault like any other.
 .set WINDOW_VA, 0x0040000000000000
@@ -49,6 +58,7 @@
 .set UART_VA, (KERNEL_VA + BLOCK + (UART_PA - UART_BLOCK))
 .set USER_TEXT, 0x0020000000000fc3   // page, AF, nG, AP EL0 RO, PXN
 .set USER_DATA, 0x0060000000000f43   // page, AF, nG, AP EL0 RW, PXN, UXN
+.set TEST_PAGE, 0x0060000000000f03   // page, AF, nG, AP EL1 RW, PXN, UXN
 
 // Kernel data, at KERNEL_VA + KDATA.
 .set D_ABORT_ESR, 0
@@ -62,6 +72,7 @@
 .set D_WINDOW_LOAD, 64
 .set D_WINDOW_STORE, 72
 .set D_WINDOW_FAR, 80
+.set D_TEST_READS, 88
 .set D_CONTEXT, 0x100              // two 0x200-byte contexts
 // Context: x0-x30, then SP_EL0, ELR, SPSR.
 .set C_X8, 64
@@ -173,6 +184,7 @@ high:
     ldr x7, [x6]
     // EL2 SVC.
     svc #0x10
+    bl ttbr0_switches
     // Task B's first context; task A starts below.
     add x1, x22, #(D_CONTEXT + 0x200)
     mov x6, #1
@@ -325,8 +337,80 @@ done:
     ldr x8, [x0, #D_WINDOW_LOAD]
     ldr x9, [x0, #D_WINDOW_STORE]
     ldr x10, [x0, #D_WINDOW_FAR]
+    ldr x11, [x0, #D_TEST_READS]
     ldr x0, =0x5354454c41204f4b
     b finish
+
+// Read TEST_VA under TTBR0 value \ttbr into X11's next nibble.
+.macro read_under ttbr
+    msr ttbr0_el1, \ttbr
+    isb
+    ldr x6, [x14]
+    orr x11, x6, x11, lsl #4
+.endm
+
+// Point ASID 1's TEST_VA entry at page \page, break-before-make, while ASID
+// 2's tables are current, by the TLBI in \tlbi of operand \operand.
+.macro remap page, tlbi, operand
+    str xzr, [x8, #(TEST_INDEX * 8)]
+    dsb ishst
+    tlbi \tlbi, \operand
+    dsb ish
+    add x6, x20, #(TEST_PAGES + (\page - 1) * 0x4000)
+    orr x6, x6, x7
+    str x6, [x8, #(TEST_INDEX * 8)]
+    dsb ishst
+    isb
+.endm
+
+// TEST_VA under ASID 1's tables and ASID 2's, switching back and forth; then
+// ASID 1's mapping changes while ASID 2's tables are current, by TLBI VAE1
+// and by ASIDE1, which the next switch back must see. Leaves ASID 1's tables
+// current, as the tasks use, and the reads in D_TEST_READS.
+ttbr0_switches:
+    mov x11, #0
+    mov x7, #1
+    add x6, x21, #TEST_PAGES
+1:  str x7, [x6]                         // pages 1, 2 and 3 hold 1, 2 and 3
+    add x6, x6, #0x4000
+    add x7, x7, #1
+    cmp x7, #3
+    b.ls 1b
+    ldr x7, =TEST_PAGE
+    add x8, x21, #(TABLES + 0x10000)     // ASID 1's level 3
+    add x6, x20, #TEST_PAGES
+    orr x6, x6, x7
+    str x6, [x8, #(TEST_INDEX * 8)]
+    add x9, x21, #TABLES_2               // ASID 2's tables
+    add x6, x20, #(TABLES_2 + 0x4000)
+    orr x6, x6, #3
+    str x6, [x9]
+    add x6, x20, #(TABLES_2 + 0x8000)
+    orr x6, x6, #3
+    str x6, [x9, #(0x4000 + 0x80 * 8)]
+    add x10, x21, #(TABLES_2 + 0x8000)
+    add x6, x20, #(TEST_PAGES + 0x4000)
+    orr x6, x6, x7
+    str x6, [x10, #(TEST_INDEX * 8)]
+    dsb ishst
+    add x12, x20, #(TABLES + 0x8000)
+    orr x12, x12, #(1 << 48)             // ASID 1
+    add x13, x20, #TABLES_2
+    orr x13, x13, #(2 << 48)             // ASID 2
+    ldr x14, =TEST_VA
+    ldr x15, =((1 << 48) | (TEST_VA >> 12))
+    mov x16, #(1 << 48)
+    read_under x12                       // 1
+    read_under x13                       // 2
+    read_under x12                       // 1, ASID 1's half again
+    read_under x13                       // 2
+    remap 3, vae1, x15
+    read_under x12                       // 3
+    read_under x13                       // 2
+    remap 1, aside1, x16
+    read_under x12                       // 1
+    str x11, [x22, #D_TEST_READS]
+    ret
 
 unexpected:
     mov x0, #0xbad

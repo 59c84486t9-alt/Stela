@@ -533,8 +533,10 @@ pub trait Host {
     /// Drop every cached translation.
     fn invalidate_translations(&mut self);
     /// Drop the cached translations a TLBI reaches in the current context,
-    /// as [`Host::set_regime`] last gave it; a superset is always correct.
-    fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach) {
+    /// as [`Host::set_regime`] last gave it, and, of those a host keeps for
+    /// other contexts, what it removes from every context (`everywhere`,
+    /// [`mmu::tlbi::Scope::everywhere`]); a superset is always correct.
+    fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach, _everywhere: mmu::tlbi::Everywhere) {
         if reach != mmu::tlbi::Reach::Nothing {
             self.invalidate_translations();
         }
@@ -2692,7 +2694,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if reach != mmu::tlbi::Reach::All {
             self.statistics.scoped_maintenance += 1;
         }
-        self.host.invalidate_reach(reach);
+        self.host.invalidate_reach(reach, everywhere);
     }
 
     /// A TTBR0 write, which changes the translation of the lower half
@@ -6880,7 +6882,8 @@ mod tests {
         pub(super) isolations: usize,
         /// The pages of [`Host::code_invalidated`] calls.
         pub(super) code_invalidations: Vec<Option<u64>>,
-        pub(super) reaches: Vec<mmu::tlbi::Reach>,
+        /// The reaches and scopes of [`Host::invalidate_reach`] calls.
+        pub(super) reaches: Vec<(mmu::tlbi::Reach, mmu::tlbi::Everywhere)>,
         pub(super) installed: Vec<Vec<u8>>,
         /// Executable copies of the context leaves the engine called.
         executables: Vec<crate::execution::platform::Mapping>,
@@ -7016,8 +7019,8 @@ mod tests {
         fn invalidate_translations(&mut self) {
             self.invalidations += 1;
         }
-        fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach) {
-            self.reaches.push(reach);
+        fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach, everywhere: mmu::tlbi::Everywhere) {
+            self.reaches.push((reach, everywhere));
             if reach == mmu::tlbi::Reach::All {
                 self.invalidations += 1;
             }
@@ -9144,12 +9147,13 @@ mod tests {
     }
 
     /// A TLBI hands the host what it reaches of the current context and
-    /// makes every fetch translation stale, but changes no control: the
+    /// what it removes from every context, and makes every fetch
+    /// translation stale, but changes no control: the
     /// regime is not sent again and what derives from System registers
     /// stays.
     #[test]
     fn tlbis_reach_their_address_range_or_asid_without_a_regime_change() {
-        use mmu::tlbi::Reach;
+        use mmu::tlbi::{Everywhere, Reach};
         const TLBI_VAE1_X0: u32 = 0xd508_8720;
         const TLBI_ASIDE1_X0: u32 = 0xd508_8740;
         const TLBI_RVAE1_X0: u32 = 0xd508_8620;
@@ -9170,17 +9174,21 @@ mod tests {
         machine.cpu.state.x[0] = 2 << 46 | 1 << 39 | 0x10_0000 >> 14;
         machine.system_instruction(TLBI_RVAE1_X0).unwrap();
         machine.system_instruction(TLBI_VMALLE1).unwrap();
+        let range = Reach::Overlapping {
+            first: 0x10_0000,
+            last: 0x10_ffff,
+        };
         assert_eq!(
             machine.host.reaches,
             [
-                Reach::Containing(high),
-                Reach::Nothing,
-                Reach::All,
-                Reach::Overlapping {
-                    first: 0x10_0000,
-                    last: 0x10_ffff
-                },
-                Reach::All,
+                (
+                    Reach::Containing(high),
+                    Everywhere::Addresses(Reach::Containing(high))
+                ),
+                (Reach::Nothing, Everywhere::NonGlobal),
+                (Reach::All, Everywhere::NonGlobal),
+                (range, Everywhere::Addresses(range)),
+                (Reach::All, Everywhere::All),
             ]
         );
         assert_eq!(machine.translation_generation, generation + 5);

@@ -73,9 +73,9 @@ const SYNTHETIC_SLICE_BYTES: u64 = 400_000;
 /// J473AP DRAM base.
 const KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kernel.bin"));
 const KERNEL_OPTIONS: &str = "--system --load 0x800004000 --entry 0x800004000";
-/// What the test kernel must leave in X0-X10 when it idles; X1 and X2, its
+/// What the test kernel must leave in X0-X11 when it idles; X1 and X2, its
 /// tasks' SVC counts, need only be nonzero.
-const KERNEL_RESULTS: [(usize, Option<u64>); 11] = [
+const KERNEL_RESULTS: [(usize, Option<u64>); 12] = [
     (0, Some(0x5354_454c_4120_4f4b)),
     (1, None),
     (2, None),
@@ -91,6 +91,10 @@ const KERNEL_RESULTS: [(usize, Option<u64>); 11] = [
     (8, Some(0x9600_0004)),
     (9, Some(0x9600_0044)),
     (10, Some(0x0040_0000_0000_0000)),
+    // TEST_VA's pages across the TTBR0 switches: ASID 1's, 2's, 1's again,
+    // 2's, 1's after a TLBI VAE1 while 2's tables were current, 2's, and
+    // 1's after an ASIDE1.
+    (11, Some(0x121_2321)),
 ];
 
 /// System options for a boot bundle, which gets the VM's free RAM.
@@ -104,8 +108,8 @@ enum Scenario {
     /// Four instructions on the bounded MMU-off EL1 diagnostic.
     Smoke,
     /// The system-mode engine running Stela's own test kernel: a VHE host at
-    /// EL2, 16 KiB granule, high-half kernel, EL2 abort and SVC, timer FIQ,
-    /// two EL0 tasks.
+    /// EL2, 16 KiB granule, high-half kernel, EL2 abort and SVC, TTBR0
+    /// switches, timer FIQ, two EL0 tasks.
     SystemKernel,
 }
 
