@@ -128,7 +128,8 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     let Some(base) = native::hosted() else {
         return;
     };
-    let hosted = Builds::new(linux, &base, &generated, &dispatch);
+    let mut hosted = Builds::new(linux, &base, &generated, &dispatch);
+    native::mesa_hosted(&mut hosted.encoders);
     let mut archives = vec![
         native::archive(&hosted.xe, "intel-xe-hosted", &xe),
         native::archive(&hosted.i915, "intel-i915-hosted", &i915),
@@ -156,6 +157,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     }
     // Mesa's headers keep their own warning profile, as Linux's do.
     let mut mesa = base;
+    native::mesa_hosted(&mut mesa);
     let (include, src) = (
         format!("{}/include", native::MESA),
         format!("{}/src", native::MESA),

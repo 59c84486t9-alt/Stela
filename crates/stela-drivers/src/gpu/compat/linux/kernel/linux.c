@@ -3,6 +3,9 @@
  * that nothing preempts or interrupts. */
 #include <linux/bug.h>
 #include <linux/irqflags.h>
+#include <linux/panic.h>
+#include <linux/sprintf.h>
+#include <linux/stdarg.h>
 #include <linux/bottom_half.h>
 #include <linux/processor.h>
 #include <linux/preempt.h>
@@ -144,6 +147,19 @@ void stela_linux_fatal(const char *message)
 		current_owner->services->log(current_owner->context, LOGLEVEL_EMERG, message);
 	/* A returning logger cannot turn this failure into a successful return. */
 	__builtin_trap();
+}
+
+/* Linux's panic(), which BUG() reaches: the same terminal stop, with the
+ * message formatted as printk formats it. */
+void panic(const char *fmt, ...)
+{
+	char message[256];
+	va_list args;
+
+	va_start(args, fmt);
+	vscnprintf(message, sizeof(message), fmt, args);
+	va_end(args);
+	stela_linux_fatal(message);
 }
 
 unsigned long arch_local_save_flags(void)

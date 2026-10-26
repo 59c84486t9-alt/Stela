@@ -2044,7 +2044,8 @@ mod tests {
     }
     #[test]
     fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
-        let mut memory = vec![0u64; 32 * 1024];
+        // Two transports' MAX_TD-aligned buffers wherever the heap puts it.
+        let mut memory = vec![0u64; 48 * 1024];
         let start = memory.as_mut_ptr() as u64;
         let mut dma = dma(&mut memory);
         let io = model(

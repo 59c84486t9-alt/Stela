@@ -28,7 +28,12 @@ pub fn port() {
     println!("cargo:rerun-if-changed={version_mk}");
     let mut build = native::configure();
     // NVIDIA's Unix resource manager for an OS with its own interface layer.
+    // Its headers take a predefined __linux__ for Linux's kernel layer, which
+    // a Linux host's compiler defines even for this freestanding build.
     build
+        .flag("-U__linux__")
+        .flag("-U__linux")
+        .flag("-Ulinux")
         .define("NV_BSD", None)
         .include(&generated)
         .include(port)

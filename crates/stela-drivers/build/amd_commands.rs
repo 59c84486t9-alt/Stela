@@ -82,7 +82,13 @@ pub fn build() {
     // and drops its unused device-query code, whose libdrm calls never link.
     println!("cargo:rustc-link-lib=static=amd_common");
     // The command tests' immutable radeon_info fixture; only cfg(test) links it.
-    cc::Build::new()
+    let mut fixture = cc::Build::new();
+    // Mesa's Meson defines this where the C library has <endian.h>, as on
+    // Linux; Mesa's headers then read the byte order from it.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        fixture.define("HAVE_ENDIAN_H", None);
+    }
+    fixture
         .file(manifest.join("src/gpu/amd/tests/commands_fixture.c"))
         .include(source.join("include"))
         .include(source.join("src"))

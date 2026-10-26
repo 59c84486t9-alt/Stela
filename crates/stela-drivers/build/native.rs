@@ -68,9 +68,6 @@ pub fn configure() -> cc::Build {
             .flag(format!("--target={NATIVE_TARGET}"))
             .flag("-mno-stack-arg-probe")
             .flag("-mno-incremental-linker-compatible");
-        if !selected("CC") {
-            build.compiler("clang");
-        }
         if !selected("AR") {
             build.archiver(rust_archiver());
         }
@@ -96,7 +93,21 @@ pub fn hosted() -> Option<cc::Build> {
     Some(build)
 }
 
+/// Mesa's configuration of a build for this machine: its Meson defines
+/// `HAVE_ENDIAN_H` where the C library has <endian.h>, as on Linux, whose
+/// byte order Mesa's headers then read; elsewhere they detect it themselves.
+#[cfg(feature = "intel-port")]
+pub fn mesa_hosted(build: &mut cc::Build) {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        build.define("HAVE_ENDIAN_H", None);
+    }
+}
+
 fn common(build: &mut cc::Build) {
+    // The warning set is clang's; a host's default cc may be GCC.
+    if !selected("CC") {
+        build.compiler("clang");
+    }
     build.std("gnu11").warnings_into_errors(true);
     for warning in WARNINGS {
         build.flag(warning);
