@@ -93,18 +93,25 @@ impl<Q: BootIo, B: BiosIo> HardwareLease for Guard<'_, '_, '_, Q, B> {
     }
 }
 impl<Q: BootIo, B: BiosIo> Guard<'_, '_, '_, Q, B> {
+    /// # Safety
+    /// The private caller has validated the complete operation under both real
+    /// hardware and OS leases. Its closure must preserve the same exclusive
+    /// native requester/domain and perform only that checked publication.
+    pub(super) unsafe fn with_boot<T>(
+        &mut self,
+        operation: impl FnOnce(&mut RomBoot<'_, Q>) -> T,
+    ) -> T {
+        operation(self.owner.boot())
+    }
     pub(super) unsafe fn submit(
         &mut self,
+        id: Id,
         bytes: &[u8],
         source: &dyn PageSource,
     ) -> Result<CommandTicket, Error> {
         // SAFETY: original-owner page contract forwarded by Ax200Scan::start;
-        // caller encodes the exact guarded immutable passive request.
-        unsafe {
-            self.owner
-                .boot()
-                .submit_command(wire::REQUEST, bytes, source)
-        }
+        // caller encodes the exact guarded receive-only scan or unbound PHY.
+        unsafe { self.owner.boot().submit_command(id, bytes, source) }
     }
 }
 pub(super) struct Os<'p, O: CountryIo + OsPolicy> {

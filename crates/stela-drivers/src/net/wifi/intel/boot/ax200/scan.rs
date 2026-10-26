@@ -13,7 +13,16 @@ use regulatory::OsPolicy;
 mod policy;
 mod retirement;
 pub use retirement::{ScanRawReceive, ScanRetirement};
+mod phy;
 mod wire;
+pub use phy::{
+    Ax200Binding, Ax200BindingError, Ax200BindingPhase, Ax200Coexistence, Ax200CoexistenceError,
+    Ax200CoexistencePhase, Ax200LegacyPeer, Ax200LegacyPeerError, Ax200LegacyPeerPhase,
+    Ax200ManagementQueue, Ax200ManagementQueueError, Ax200ManagementQueuePhase, Ax200Phy,
+    Ax200PhyError, Ax200PhyPhase, Ax200TransmitPower, Ax200TransmitPowerError,
+    Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind, LegacyPeer, PeerCommand,
+    PeerCommandKind, PhyCommand, PhyCommandKind, TransmitPowerLimit,
+};
 static NEXT_CONTEXT: crate::net::wifi::Identities = crate::net::wifi::Identities::new();
 const MAX_SCAN_US: u64 = 30_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -558,7 +567,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                 *command_bytes = Some(bytes);
                 // SAFETY: same exact request and retained native page contract.
                 guard
-                    .submit(command_bytes.as_deref().unwrap(), source)
+                    .submit(wire::REQUEST, command_bytes.as_deref().unwrap(), source)
                     .map_err(Ax200ScanError::Boot)
             })
         }

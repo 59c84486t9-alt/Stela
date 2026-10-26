@@ -6,6 +6,7 @@
 //! No PHY binding, station or data queue is created by this continuation.
 use super::*;
 use crate::net::wifi::intel::command::Id;
+mod mld;
 const MAC_CONTEXT: Id = Id {
     group: 0,
     opcode: 0x28,
@@ -32,11 +33,19 @@ const ACCEPT_BEACON: u32 = 1 << 6;
 const COLD_CCK_BASIC_RESPONSES: u32 = 0xf;
 const COLD_OFDM_BASIC_RESPONSES: u32 = (1 << 0) | (1 << 2) | (1 << 4);
 const KEEP_ALIVE_SECONDS: u16 = 25;
+pub(in crate::net::wifi::intel::boot::ax200) fn cold_power_bytes(mode: PowerMode) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; MAC_POWER_BYTES];
+    bytes[4..6].copy_from_slice(&u16::from(mode == PowerMode::SavePower).to_le_bytes());
+    bytes[6..8].copy_from_slice(&KEEP_ALIVE_SECONDS.to_le_bytes());
+    bytes
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MacCommandKind {
     Add,
     Power,
     DisableBeaconFilter,
+    AddInactiveLink,
+    RemoveInactiveLink,
     Remove,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +78,7 @@ pub enum Ax200MacPhase {
 pub enum Ax200MacError {
     Boot(Error),
     Country(Ax200CountryError),
+    MldContinuationRequired,
     MissingApi(MacCommandKind),
     Version { kind: MacCommandKind, version: u8 },
     Deadline(MacCommandKind),
@@ -83,6 +93,8 @@ pub struct Ax200Mac<'a, Q: BootIo, B: BiosIo, O: CountryIo> {
     deadline: Option<crate::Deadline>,
     responses: Vec<CommandResponse>,
     uploaded: bool,
+    mld: bool,
+    link_uploaded: bool,
     removing: bool,
     first_error: Option<Ax200MacError>,
 }
@@ -105,8 +117,19 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'a, Q, B, O> {
             deadline: None,
             responses: Vec::new(),
             uploaded: false,
+            mld: false,
+            link_uploaded: false,
             removing: false,
             first_error: None,
+        })
+    }
+    /// Original cap110-selected cold MLD MAC0 and inactive link0. This keeps
+    /// its separate protocol identity; no legacy BINDING command may consume
+    /// it. The same initialized NVM, country, requester and OS owner survive.
+    pub fn begin_mld_mac_context(self) -> Result<Ax200Mac<'a, Q, B, O>, Box<Self>> {
+        self.begin_mac_context().map(|mut mac| {
+            mac.mld = true;
+            mac
         })
     }
 }
@@ -131,6 +154,13 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
     pub fn mac_id_and_color(&self) -> Option<u32> {
         self.uploaded.then_some(0)
     }
+    pub fn is_mld(&self) -> bool {
+        self.mld
+    }
+    /// Acknowledged inactive link identity, not activation or permission to TX.
+    pub fn inactive_link_id(&self) -> Option<u8> {
+        (self.mld && self.link_uploaded && !self.removing).then_some(0)
+    }
     pub fn initialized_nvm(&self) -> &InitializedNvm {
         self.country.initialized_nvm()
     }
@@ -141,13 +171,26 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
         self.country.take_firmware_notification()
     }
     pub fn replenish_completed_receive(&mut self) -> Result<Replenished, Error> {
-        self.country.replenish_completed_receive()
+        if let Some(error) = self.first_error.as_ref() {
+            return Err(match error {
+                Ax200MacError::Boot(error) => error.clone(),
+                _ => Error::State,
+            });
+        }
+        let result = self.country.replenish_completed_receive();
+        if let Err(error) = &result {
+            self.first_error
+                .get_or_insert_with(|| Ax200MacError::Boot(error.clone()));
+            self.phase = Ax200MacPhase::Failed;
+        }
+        result
     }
     pub fn stop(&mut self) -> Result<(), Error> {
         match self.country.stop() {
             Ok(()) => {
                 self.phase = Ax200MacPhase::Stopped;
                 self.uploaded = false;
+                self.link_uploaded = false;
                 Ok(())
             }
             Err(error) => {
@@ -159,6 +202,9 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
         }
     }
     fn prepare(&mut self) -> Result<(), Ax200MacError> {
+        if self.mld {
+            return mld::prepare(self);
+        }
         let fw = &self
             .country
             .board
@@ -170,6 +216,11 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
             .initialized
             .boot
             .firmware;
+        // Original ops.c selects the MLD MAC/link operations from cap110.
+        // Advertising legacy command bytes does not admit that old owner.
+        if fw.supports_capability(110) {
+            return Err(Ax200MacError::MldContinuationRequired);
+        }
         for (kind, id, versions) in [
             (MacCommandKind::Add, MAC_CONTEXT, &[5][..]),
             (MacCommandKind::Power, MAC_POWER, &[1, 2][..]),
@@ -219,14 +270,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
             id: MAC_CONTEXT,
             bytes,
         });
-        let mut bytes = alloc::vec![0; MAC_POWER_BYTES];
-        bytes[4..6].copy_from_slice(
-            &u16::from(
-                self.country.board.scan.mcc.setup.options.power_mode == PowerMode::SavePower,
-            )
-            .to_le_bytes(),
-        );
-        bytes[6..8].copy_from_slice(&KEEP_ALIVE_SECONDS.to_le_bytes());
+        let bytes = cold_power_bytes(self.country.board.scan.mcc.setup.options.power_mode);
         self.commands.push(MacCommand {
             kind: MacCommandKind::Power,
             id: MAC_POWER,
@@ -250,6 +294,15 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
             || self.removing
         {
             return Err(Ax200MacError::State);
+        }
+        if self.mld {
+            if !self.link_uploaded {
+                return Err(Ax200MacError::State);
+            }
+            let commands = mld::removal(self);
+            self.commands.extend(commands);
+            self.removing = true;
+            return Ok(());
         }
         let mut bytes = alloc::vec![0; MAC_CONTEXT_BYTES];
         bytes[4..8].copy_from_slice(&ACTION_REMOVE.to_le_bytes());
@@ -368,6 +421,12 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
                     }
                     if command.kind == MacCommandKind::Remove {
                         self.uploaded = false;
+                    }
+                    if command.kind == MacCommandKind::AddInactiveLink {
+                        self.link_uploaded = true;
+                    }
+                    if command.kind == MacCommandKind::RemoveInactiveLink {
+                        self.link_uploaded = false;
                     }
                 }
             }

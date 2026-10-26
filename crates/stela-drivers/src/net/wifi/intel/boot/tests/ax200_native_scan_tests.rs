@@ -20,6 +20,10 @@ struct PolicyState {
     deny_channel: AtomicUsize,
     revoke_at_acquire: AtomicUsize,
     unavailable: AtomicBool,
+    allow_transmit: AtomicBool,
+    transmit_ceiling_mbm: AtomicUsize,
+    deny_rate: AtomicUsize,
+    transmit_rates: AtomicUsize,
 }
 struct ScanOs {
     country: Os,
@@ -49,8 +53,33 @@ impl OsLease for Lease<'_> {
     }
     fn allows(&mut self, operation: regulatory::Operation) -> bool {
         assert_eq!(self.os.policy.held.load(Ordering::SeqCst), 1);
-        !self.os.country.revoked.load(Ordering::SeqCst)
-            && matches!(operation, regulatory::Operation::Receive(ch) if usize::from(ch.number) != self.os.policy.deny_channel.load(Ordering::SeqCst))
+        if self.os.country.revoked.load(Ordering::SeqCst) {
+            return false;
+        }
+        match operation {
+            regulatory::Operation::Receive(ch) => {
+                usize::from(ch.number) != self.os.policy.deny_channel.load(Ordering::SeqCst)
+            }
+            regulatory::Operation::Transmit {
+                channel,
+                purpose,
+                profile,
+            } => {
+                let rate = profile.rate as usize;
+                self.os
+                    .policy
+                    .transmit_rates
+                    .fetch_or(1 << rate, Ordering::SeqCst);
+                self.os.policy.allow_transmit.load(Ordering::SeqCst)
+                    && purpose == regulatory::Purpose::Management
+                    && usize::from(channel.number)
+                        != self.os.policy.deny_channel.load(Ordering::SeqCst)
+                    && profile.max_eirp_mbm >= 0
+                    && profile.max_eirp_mbm as usize
+                        <= self.os.policy.transmit_ceiling_mbm.load(Ordering::SeqCst)
+                    && rate + 1 != self.os.policy.deny_rate.load(Ordering::SeqCst)
+            }
+        }
     }
 }
 // SAFETY: synchronous modeled service with a unique mutable held lease through
@@ -68,6 +97,7 @@ unsafe impl OsPolicy for ScanOs {
             return None;
         }
         assert_eq!(self.policy.held.fetch_add(1, Ordering::SeqCst), 0);
+        self.policy.transmit_rates.store(0, Ordering::SeqCst);
         Some(Lease { os: self })
     }
 }
@@ -111,9 +141,26 @@ fn ready<'a>(
     }
     let (country, mut sequence, mut entry) =
         ax200_mac_tests::country_ready_with_os(catalog, empty, source, native, options, os, true);
-    let mut mac = country
-        .begin_mac_context()
-        .unwrap_or_else(|_| panic!("MAC"));
+    let mld = country
+        .board
+        .scan
+        .mcc
+        .setup
+        .lari
+        .radio
+        .initialized
+        .boot
+        .firmware
+        .supports_capability(110);
+    let mut mac = (if mld {
+        country.begin_mld_mac_context()
+    } else {
+        country.begin_mac_context()
+    })
+    .unwrap_or_else(|_| panic!("MAC"));
+    if mld {
+        mac.replenish_completed_receive().unwrap();
+    }
     unsafe { mac.advance(source) }.unwrap();
     for command in mac.commands().to_vec() {
         complete(
@@ -208,7 +255,7 @@ fn passive_umac15_holds_original_os_lease_at_real_dma_handoff_and_requires_actua
 }
 #[test]
 #[ignore = "requires unchanged pinned AX200 firmware"]
-fn actual_ax200_umac15_request_and_captured_scan_completion_schema() {
+fn actual_ax200_umac15_schema_does_not_bypass_mld_mac_requirement() {
     exercise_completion(true);
 }
 fn exercise_completion(actual: bool) {
@@ -225,6 +272,15 @@ fn exercise_completion(actual: bool) {
     } else {
         bytes()
     };
+    if actual {
+        let firmware = crate::net::wifi::intel::firmware::Firmware::parse(&bytes).unwrap();
+        assert_eq!(
+            firmware.command_version(1, 0x0d).unwrap().command_version,
+            15
+        );
+        ax200_mac_tests::assert_mld_mac_refusal(&bytes);
+        return;
+    }
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
     let native = Native::default();
@@ -1025,5 +1081,7 @@ fn pre_scan_raw_drain_native_fault_is_sticky_before_any_request_publication() {
     scan.stop().unwrap();
 }
 
+#[path = "ax200_phy_tests.rs"]
+mod phy_tests;
 #[path = "ax200_scan_retirement_tests.rs"]
 mod retirement_tests;

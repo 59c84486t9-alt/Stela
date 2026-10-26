@@ -26,8 +26,14 @@ mod scan;
 mod scan_configuration;
 pub use mcc::{Ax200Mcc, Ax200MccError, Ax200MccPhase};
 pub use scan::{
-    Ax200Scan, Ax200ScanError, Ax200ScanPhase, ScanCompletion, ScanRawReceive, ScanRejectedMpdu,
-    ScanResult, ScanResultProgress, ScanRetirement,
+    Ax200Binding, Ax200BindingError, Ax200BindingPhase, Ax200Coexistence, Ax200CoexistenceError,
+    Ax200CoexistencePhase, Ax200LegacyPeer, Ax200LegacyPeerError, Ax200LegacyPeerPhase,
+    Ax200ManagementQueue, Ax200ManagementQueueError, Ax200ManagementQueuePhase, Ax200Phy,
+    Ax200PhyError, Ax200PhyPhase, Ax200Scan, Ax200ScanError, Ax200ScanPhase, Ax200TransmitPower,
+    Ax200TransmitPowerError, Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind,
+    LegacyPeer, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, ScanCompletion,
+    ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress, ScanRetirement,
+    TransmitPowerLimit,
 };
 pub use scan_configuration::{
     Ax200ScanConfiguration, Ax200ScanConfigurationError, Ax200ScanConfigurationPhase,

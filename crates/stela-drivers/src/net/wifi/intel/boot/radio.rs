@@ -109,6 +109,9 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
                             group: response.group,
                         });
                     }
+                    if command.stage() == Stage::BluetoothCoexistence {
+                        self.initialized.boot.coexistence.initialized();
+                    }
                     self.responses.push(response);
                     self.ticket = None;
                 }
@@ -120,6 +123,11 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
             return Ok(self.phase);
         }
         let command = &plan.commands()[self.next];
+        if command.stage() == Stage::BluetoothCoexistence {
+            // Match the original reset before genuine BT_CONFIG publication;
+            // a send/ACK/reclaim failure cannot establish initialized state.
+            self.initialized.boot.coexistence.begin_initialization();
+        }
         // SAFETY: covered by this function's own safety contract.
         self.ticket = Some(unsafe {
             self.initialized

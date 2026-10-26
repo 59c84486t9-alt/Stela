@@ -474,6 +474,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                 });
             } else {
                 self.hcmd.retain_notification(&packet)?;
+                self.coexistence
+                    .observe(packet.command, packet.group, packet.payload());
             }
         }
         Ok(())

@@ -35,15 +35,23 @@ use core::{
     sync::atomic::{Ordering, fence},
 };
 mod ax200;
+mod coexistence;
+pub use coexistence::CoexistenceError;
 mod hcmd;
 pub use ax200::{
-    Ax200BoardPolicy, Ax200BoardPolicyError, Ax200BoardPolicyPhase, Ax200Country,
-    Ax200CountryError, Ax200CountryPhase, Ax200Mac, Ax200MacError, Ax200MacPhase, Ax200Mcc,
-    Ax200MccError, Ax200MccPhase, Ax200Scan, Ax200ScanConfiguration, Ax200ScanConfigurationError,
-    Ax200ScanConfigurationPhase, Ax200ScanError, Ax200ScanPhase, Ax200Setup, Ax200SetupError,
-    Ax200SetupOptions, Ax200SetupPhase, BoardCommand, BoardCommandKind, CountryIo, CountryIoError,
-    MacCommand, MacCommandKind, ScanCompletion, ScanRawReceive, ScanRejectedMpdu, ScanResult,
-    ScanResultProgress, ScanRetirement, SelectedCountry, SetupDecisions,
+    Ax200Binding, Ax200BindingError, Ax200BindingPhase, Ax200BoardPolicy, Ax200BoardPolicyError,
+    Ax200BoardPolicyPhase, Ax200Coexistence, Ax200CoexistenceError, Ax200CoexistencePhase,
+    Ax200Country, Ax200CountryError, Ax200CountryPhase, Ax200LegacyPeer, Ax200LegacyPeerError,
+    Ax200LegacyPeerPhase, Ax200Mac, Ax200MacError, Ax200MacPhase, Ax200ManagementQueue,
+    Ax200ManagementQueueError, Ax200ManagementQueuePhase, Ax200Mcc, Ax200MccError, Ax200MccPhase,
+    Ax200Phy, Ax200PhyError, Ax200PhyPhase, Ax200Scan, Ax200ScanConfiguration,
+    Ax200ScanConfigurationError, Ax200ScanConfigurationPhase, Ax200ScanError, Ax200ScanPhase,
+    Ax200Setup, Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase, Ax200TransmitPower,
+    Ax200TransmitPowerError, Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind,
+    BoardCommand, BoardCommandKind, CountryIo, CountryIoError, LegacyPeer, MacCommand,
+    MacCommandKind, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, ScanCompletion,
+    ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress, ScanRetirement,
+    SelectedCountry, SetupDecisions, TransmitPowerLimit,
 };
 mod lari;
 pub use lari::{LariError, LariPhase, LariRadio};
@@ -318,6 +326,10 @@ pub struct RomBoot<'a, Q: BootIo> {
     entries: u16,
     read: u16,
     credits: u16,
+    // Original MVM quota cache spans MAC/PHY/power continuations in this
+    // firmware epoch. Only a real completed empty command establishes it.
+    empty_quotas_applied: bool,
+    coexistence: coexistence::Coexistence,
     state: State,
 }
 struct Ax210Memory<'a> {
@@ -554,6 +566,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             entries,
             read: 0,
             credits: 0,
+            empty_quotas_applied: false,
+            coexistence: coexistence::Coexistence::new(),
             state: State::Prepared,
         };
         boot.publish()?;

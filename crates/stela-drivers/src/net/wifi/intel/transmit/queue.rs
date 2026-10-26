@@ -18,6 +18,8 @@ use crate::{
     },
 };
 use alloc::{sync::Arc, vec};
+mod native;
+pub(in crate::net::wifi::intel) use native::NativeMemory;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {

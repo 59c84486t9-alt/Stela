@@ -3,6 +3,8 @@
 //! Actual unbound MAC object and owned command DMA; no PHY/scan substitution.
 use super::{ax200_country_tests::Os, ax200_scan_tests::finish_mcc, ax200_tests::*, *};
 use core::sync::atomic::AtomicBool;
+#[path = "ax200_mld_mac_tests.rs"]
+mod mld_tests;
 pub(super) struct Native {
     pub(super) domain: Arc<Domain>,
     pub(super) state: Arc<Mutex<ModelState>>,
@@ -143,7 +145,7 @@ fn unbound_mac_power_filter_and_remove_use_original_owner_and_real_ack_reclaim()
 }
 #[test]
 #[ignore = "requires unchanged pinned AX200 firmware"]
-fn actual_ax200_mac_context_and_power_schema() {
+fn actual_ax200_mld_image_refuses_legacy_mac_before_effects() {
     exercise(true);
 }
 fn exercise(actual: bool) {
@@ -162,6 +164,10 @@ fn exercise(actual: bool) {
         } else {
             firmware_bytes(case)
         };
+        if actual {
+            assert_mld_mac_refusal(&bytes);
+            return;
+        }
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
         let empty = resources::Catalog::from_handoff(vec![]).unwrap();
         let native = Native::default();
@@ -373,4 +379,58 @@ fn exercise(actual: bool) {
             assert_eq!(native.os_drops.load(Ordering::Relaxed), 1);
         }
     }
+}
+pub(super) fn assert_mld_mac_refusal(bytes: &[u8]) {
+    let firmware = crate::net::wifi::intel::firmware::Firmware::parse(bytes).unwrap();
+    assert!(firmware.supports_capability(110));
+    let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), bytes);
+    let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+    let native = Native::default();
+    let source = Source::default();
+    let (country, _, _) = country_ready(
+        &catalog,
+        &empty,
+        &source,
+        &native,
+        Ax200SetupOptions::new(Clock {
+            ticks_per_microsecond: 1_000_000,
+        }),
+    );
+    let mut mac = country
+        .begin_mac_context()
+        .unwrap_or_else(|_| panic!("MAC"));
+    let calls = source.calls.load(Ordering::Relaxed);
+    let operations = native.state.lock().unwrap().ops.len();
+    let syncs = native.domain.records.lock().unwrap().syncs;
+    assert_eq!(
+        unsafe { mac.advance(&source) },
+        Err(Ax200MacError::MldContinuationRequired)
+    );
+    assert!(mac.commands().is_empty());
+    assert!(mac.ticket().is_none());
+    assert_eq!(source.calls.load(Ordering::Relaxed), calls);
+    assert_eq!(native.state.lock().unwrap().ops.len(), operations);
+    assert_eq!(native.domain.records.lock().unwrap().syncs, syncs);
+    assert_eq!(
+        unsafe { mac.advance(&source) },
+        Err(Ax200MacError::MldContinuationRequired)
+    );
+    assert_eq!(source.calls.load(Ordering::Relaxed), calls);
+    assert_eq!(native.state.lock().unwrap().ops.len(), operations);
+    assert_eq!(native.domain.records.lock().unwrap().syncs, syncs);
+    assert_eq!(mac.replenish_completed_receive(), Err(Error::State));
+    assert_eq!(native.state.lock().unwrap().ops.len(), operations);
+    assert_eq!(native.domain.records.lock().unwrap().syncs, syncs);
+    mac.stop().unwrap();
+    drop(mac);
+    assert!(native.domain.records.lock().unwrap().live.is_empty());
+}
+#[test]
+fn mld_selects_distinct_mac_owner_before_any_legacy_publication() {
+    let mut bytes = firmware_bytes(0);
+    bytes.extend(30u32.to_le_bytes());
+    bytes.extend(8u32.to_le_bytes());
+    bytes.extend(3u32.to_le_bytes());
+    bytes.extend((1u32 << 14).to_le_bytes());
+    assert_mld_mac_refusal(&bytes);
 }
