@@ -114,7 +114,7 @@ pub struct AudioDevice<T: Transport> {
 }
 
 impl AudioDevice<super::Native> {
-    /// Create an idle owner for the actual optional UAC2 AC status endpoint.
+    /// Create an idle owner for the actual optional UAC1/UAC2 AC status endpoint.
     /// Call `start`, poll and drain notices explicitly, then acknowledge `stop`.
     pub fn status_notifications(
         &self,

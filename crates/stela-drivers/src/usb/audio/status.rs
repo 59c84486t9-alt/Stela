@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Optional UAC2 AudioControl status interrupts. Layout/receive/requeue reference:
+//! Optional UAC1/UAC2 AudioControl status interrupts. Layout/receive/requeue reference:
 //! Linux sound/usb/mixer.c, Copyright (c) 2002 Takashi Iwai, and original audio.c
 //! contributions by Alan Cox and Thomas Sailer. See audio/THIRD_PARTY.md.
 //! Notifications invalidate observations; they never supply a new control value.
-use super::{Binding, Entity, Error, Graph, UAC2};
+use super::{Binding, Entity, Error, Graph, UAC1, UAC2};
 use crate::{
     bus::dma::{DmaAllocator, DmaBuffer, RegionAllocator},
     usb::xhci::{self, Endpoint, Shared, SlotId, TransferTicket},
@@ -31,6 +31,24 @@ pub struct StatusNotice {
     pub raw: [u8; MESSAGE_BYTES],
 }
 
+/// UAC1 reports an entire entity, without a selector, channel or replacement
+/// value. The memory flag names a memory-space change; it grants no vendor
+/// memory protocol or authority to change a running stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Uac1StatusNotice {
+    pub entity: u8,
+    pub memory_changed: bool,
+    pub interrupt_pending: bool,
+    pub raw: [u8; 2],
+}
+
+/// The actual protocol determines the wire layout and invalidation scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusEvent {
+    Uac1(Uac1StatusNotice),
+    Uac2(StatusNotice),
+}
+
 #[derive(Clone)]
 pub(super) struct StatusPlan {
     endpoint: Endpoint,
@@ -38,7 +56,7 @@ pub(super) struct StatusPlan {
 }
 impl StatusPlan {
     pub(super) fn discover(binding: &Binding, configuration: &[u8]) -> Result<Option<Self>, Error> {
-        if binding.graph.protocol != UAC2 {
+        if !matches!(binding.graph.protocol, UAC1 | UAC2) {
             return Ok(None);
         }
         let interfaces = xhci::interfaces(configuration);
@@ -48,18 +66,18 @@ impl StatusPlan {
         let control = interfaces
             .iter()
             .find(|i| i.number == binding.graph.control_interface && i.alternate == 0)
-            .ok_or(Error::Descriptor("missing UAC2 status control interface"))?;
+            .ok_or(Error::Descriptor("missing audio status control interface"))?;
         if control.class != super::CLASS
             || control.subclass != super::CONTROL_SUBCLASS
-            || control.protocol != UAC2
+            || control.protocol != binding.graph.protocol
         {
-            return Err(Error::Descriptor("foreign UAC2 status control interface"));
+            return Err(Error::Descriptor("foreign audio status control interface"));
         }
         if control.endpoints.is_empty() {
             return Ok(None);
         }
         if control.endpoints.len() != 1 {
-            return Err(Error::Unsupported("multiple UAC2 status endpoints"));
+            return Err(Error::Unsupported("multiple audio status endpoints"));
         }
         let endpoint = control.endpoints[0];
         if !endpoint.is_in()
@@ -67,11 +85,16 @@ impl StatusPlan {
             || endpoint.address & 0x70 != 0
             || endpoint.address & 15 == 0
             || endpoint.max_packet & 0x1800 != 0
-            || usize::from(endpoint.max_packet) < MESSAGE_BYTES
+            || usize::from(endpoint.max_packet)
+                < if binding.graph.protocol == UAC1 {
+                    2
+                } else {
+                    MESSAGE_BYTES
+                }
             || usize::from(endpoint.max_packet) > MAX_PACKET
             || !matches!(binding.speed, xhci::FULL_SPEED | xhci::HIGH_SPEED)
         {
-            return Err(Error::Unsupported("UAC2 status endpoint profile"));
+            return Err(Error::Unsupported("audio status endpoint profile"));
         }
         endpoint.validate_context(binding.speed)?;
         if interfaces.iter().any(|i| {
@@ -79,13 +102,45 @@ impl StatusPlan {
                 && i.endpoints.iter().any(|ep| ep.dci() == endpoint.dci())
         }) {
             return Err(Error::Descriptor(
-                "UAC2 status endpoint aliases another interface",
+                "audio status endpoint aliases another interface",
             ));
         }
         Ok(Some(Self {
             endpoint,
             graph: binding.graph.clone(),
         }))
+    }
+    fn message_bytes(&self) -> usize {
+        if self.graph.protocol == UAC1 {
+            2
+        } else {
+            MESSAGE_BYTES
+        }
+    }
+    fn event(&self, raw: &[u8]) -> Result<StatusEvent, Error> {
+        if self.graph.protocol == UAC1 {
+            let raw: [u8; 2] = raw
+                .try_into()
+                .map_err(|_| Error::Packet("truncated UAC1 status word"))?;
+            // bStatusType: bits 7/6 are pending/memory; bits 5/4 are
+            // reserved; bits 3:0 identify AC, AS-interface or AS-endpoint.
+            // AS origins need separate interface/endpoint status protocols.
+            if raw[0] & 0x3f != 0 {
+                return Err(Error::Unsupported("non-AC/reserved UAC1 status origin"));
+            }
+            self.graph.entity(raw[1])?;
+            Ok(StatusEvent::Uac1(Uac1StatusNotice {
+                entity: raw[1],
+                memory_changed: raw[0] & 0x40 != 0,
+                interrupt_pending: raw[0] & 0x80 != 0,
+                raw,
+            }))
+        } else {
+            let raw = raw
+                .try_into()
+                .map_err(|_| Error::Packet("truncated UAC2 status message"))?;
+            self.notice(raw).map(StatusEvent::Uac2)
+        }
     }
     fn notice(&self, raw: [u8; MESSAGE_BYTES]) -> Result<StatusNotice, Error> {
         if raw[0] != 0 {
@@ -145,7 +200,7 @@ impl StatusPlan {
 }
 
 /// Separate, opt-in native owner for one descriptor-selected interrupt endpoint.
-/// Exactly one receive can be pending. One complete packet (at most 170 notices)
+/// Exactly one receive can be pending. One complete packet (at most 512 events)
 /// supplies bounded backpressure: drain it before polling rearms the endpoint.
 /// All DMA allocations live for the boot even if this object is dropped. Drop
 /// does not retire hardware or free its endpoint; call `stop` for acknowledged
@@ -158,7 +213,7 @@ pub struct StatusNotifications {
     allocator: RegionAllocator,
     packet: DmaBuffer,
     ticket: Option<TransferTicket>,
-    notices: VecDeque<StatusNotice>,
+    notices: VecDeque<StatusEvent>,
     configured: bool,
     poisoned: bool,
     cancelled: bool,
@@ -266,20 +321,42 @@ impl StatusNotifications {
             }
         };
         self.ticket = None;
-        if bytes > self.packet.len() || !bytes.is_multiple_of(MESSAGE_BYTES) {
-            return Err(Error::Packet("truncated UAC2 status packet"));
+        let message_bytes = self.plan.message_bytes();
+        if bytes > self.packet.len() || !bytes.is_multiple_of(message_bytes) {
+            return Err(Error::Packet("truncated audio status packet"));
         }
-        let mut notices = Vec::with_capacity(bytes / MESSAGE_BYTES);
-        for offset in (0..bytes).step_by(MESSAGE_BYTES) {
-            let raw = core::array::from_fn(|n| self.packet.read::<u8>(offset + n));
-            notices.push(self.plan.notice(raw)?);
+        let mut notices = Vec::with_capacity(bytes / message_bytes);
+        for offset in (0..bytes).step_by(message_bytes) {
+            let mut raw = [0; MESSAGE_BYTES];
+            for (n, value) in raw.iter_mut().take(message_bytes).enumerate() {
+                *value = self.packet.read::<u8>(offset + n);
+            }
+            notices.push(self.plan.event(&raw[..message_bytes])?);
         }
         let count = notices.len();
         self.notices.extend(notices);
         Ok(count)
     }
-    /// Current identity is checked even when the queue is empty or cached.
+    /// UAC2 compatibility accessor. UAC1 has entity-wide events; use
+    /// `next_event` for those. A protocol mismatch never consumes the queue.
     pub fn next_notice(&mut self) -> Result<Option<StatusNotice>, Error> {
+        self.shared.borrow_mut().device(self.id)?;
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
+        if self.plan.graph.protocol != UAC2 {
+            return Err(Error::Unsupported(
+                "UAC1 status requires entity event accessor",
+            ));
+        }
+        match self.notices.pop_front() {
+            Some(StatusEvent::Uac2(notice)) => Ok(Some(notice)),
+            None => Ok(None),
+            Some(StatusEvent::Uac1(_)) => unreachable!("protocol-bound status queue"),
+        }
+    }
+    /// Current identity is checked even when the queue is empty or cached.
+    pub fn next_event(&mut self) -> Result<Option<StatusEvent>, Error> {
         self.shared.borrow_mut().device(self.id)?;
         if self.poisoned {
             return Err(Error::Poisoned);

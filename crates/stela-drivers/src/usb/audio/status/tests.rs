@@ -6,6 +6,8 @@ use crate::usb::xhci::{self, Device};
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
+mod uac1;
+
 fn configuration() -> Vec<u8> {
     let mut raw = crate::usb::audio::test_configuration();
     let at = raw
@@ -50,17 +52,23 @@ fn peer_with_packet(
         .position(|d| d == [7, 5, 0x81, 3, 12, 0, 4])
         .unwrap();
     raw[at + 4..at + 6].copy_from_slice(&packet.to_le_bytes());
-    let (mut controller, model) = xhci::model::status_interrupt_controller(dma, &raw);
+    peer_configuration(dma, &raw)
+}
+fn peer_configuration(
+    dma: &mut dyn DmaAllocator,
+    raw: &[u8],
+) -> (UsbAudio, Rc<RefCell<xhci::model::CancelModel>>, Shared) {
+    let (mut controller, model) = xhci::model::status_interrupt_controller(dma, raw);
     controller.set_configuration(1, 1).unwrap();
     let shared = Rc::new(RefCell::new(controller));
     let device = Device {
         id: shared.borrow().test_device_id(1).unwrap(),
         slot: 1,
         speed: xhci::HIGH_SPEED,
-        location: "representative standard UAC2 status peer".into(),
+        location: "representative standard audio status peer".into(),
         descriptor: [18, 1, 0, 2, 0, 0, 0, 64, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
-        configurations: vec![raw.clone()],
-        configuration: raw.clone(),
+        configurations: vec![raw.to_vec()],
+        configuration: raw.to_vec(),
         manufacturer: None,
         product: None,
         serial: None,
@@ -68,8 +76,8 @@ fn peer_with_packet(
         vendor_ethernet_tcr: None,
         vendor_ethernet_revision: None,
     };
-    let all = xhci::interfaces(&raw);
-    let plan = Plan::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
+    let all = xhci::interfaces(raw);
+    let plan = Plan::parse(&all[0], &all, raw, xhci::HIGH_SPEED).unwrap();
     let owner = UsbAudio::attach(shared.clone(), &device, plan, dma).unwrap();
     (owner, model, shared)
 }
@@ -190,7 +198,7 @@ fn actual_hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
             .push_back(vec![0; length]);
         assert_eq!(
             owner.poll(),
-            Err(Error::Packet("truncated UAC2 status packet"))
+            Err(Error::Packet("truncated audio status packet"))
         );
         assert!(owner.notices.is_empty());
         assert_eq!(owner.poll().unwrap(), 0);
@@ -514,7 +522,7 @@ fn unsupported_optional_status_profile_preserves_pcm_and_refuses_before_status_a
     let before = model.borrow().seen.clone();
     assert!(matches!(
         audio.status_notifications(&mut NoAllocation),
-        Err(Error::Unsupported("UAC2 status endpoint profile"))
+        Err(Error::Unsupported("audio status endpoint profile"))
     ));
     assert_eq!(model.borrow().seen, before);
     assert!(model.borrow().active[3].is_none());
