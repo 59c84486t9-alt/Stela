@@ -591,4 +591,44 @@ mod tests {
         assert_eq!(read_image(&device.durable), Err(Error::Corrupt));
         assert!(matches!(Journal::open(&mut device), Err(Error::Corrupt)));
     }
+
+    #[test]
+    fn the_engine_finds_the_state_file_by_its_short_name_and_reads_its_runs() {
+        use crate::{
+            payload::ReadAt,
+            platform::pc::{
+                boot_log,
+                fat32::{Fat32, tests::Volume},
+            },
+        };
+        let image = initial_image(b"seed").unwrap();
+        let mut volume = Volume::new();
+        let efi = volume.directory(2, 0, b"EFI        ");
+        let stela = volume.directory(efi, 0, b"STELA      ");
+        let install = volume.directory(stela, 0, b"INSTALL    ");
+        let build = volume.directory(install, 0, b"26A434     ");
+        // Fragmented, as a volume may place it: the second half comes first.
+        let clusters = volume.allocate(FILE_BYTES as u64);
+        let (first, second) = clusters.split_at(clusters.len() / 2);
+        let order: Vec<u32> = second.iter().chain(first).copied().collect();
+        volume.file_in(build, 0, b"FDRSTATEBIN", &image, &order);
+        // The path the loader hands the engine, as `engine::fdr::writer` opens it.
+        let path = format!(
+            "EFI/stela/install/26A434/{}",
+            crate::restore::fdr::STATE_FILE
+        );
+        let mut fat = Fat32::open(volume.disk).unwrap();
+        let file = fat.file(&path).unwrap();
+        assert_eq!(file.bytes, FILE_BYTES as u64);
+        let runs = boot_log::file_runs(&file, 512, FILE_BYTES as u64).unwrap();
+        assert_eq!(runs.len(), 2);
+        let mut disk = fat.into_inner();
+        let mut bytes = Vec::new();
+        for (block, count) in runs {
+            let mut run = vec![0; count as usize * 512];
+            disk.read_at(block * 512, &mut run).unwrap();
+            bytes.extend(run);
+        }
+        assert_eq!(read_image(&bytes).unwrap(), Some(b"seed".to_vec()));
+    }
 }

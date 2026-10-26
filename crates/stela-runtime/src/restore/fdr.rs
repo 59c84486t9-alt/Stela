@@ -8,7 +8,7 @@ use super::{
 use alloc::{string::String, vec::Vec};
 
 pub const FILE: &str = "fdr-diagnostic.plist";
-pub const STATE_FILE: &str = "fdr-state.bin";
+pub const STATE_FILE: &str = "fdrstate.bin";
 pub const MAX_BYTES: usize = 1024 * 1024;
 
 pub struct Diagnostic {

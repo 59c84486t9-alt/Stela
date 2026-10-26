@@ -274,7 +274,7 @@ pub fn with_inventory(
                         &state_path,
                         stela_runtime::pc::fdr_store::FILE_BYTES as u64,
                     )
-                    .map_err(|_| "FDR diagnostic needs its preallocated fdr-state.bin")?;
+                    .map_err(|_| "FDR diagnostic needs its preallocated fdrstate.bin")?;
                     let partition = super::translations::partition(handle)
                         .ok_or("FDR storage volume needs a GPT partition identity")?;
                     // SAFETY: both regions were just read into retained loader pages.
