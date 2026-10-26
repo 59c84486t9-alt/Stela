@@ -17,6 +17,7 @@ pub mod hop;
 pub mod icm;
 pub mod link;
 pub mod path;
+pub mod power;
 pub mod ring;
 pub mod router;
 pub mod topology;

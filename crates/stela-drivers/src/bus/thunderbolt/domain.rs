@@ -121,7 +121,7 @@ impl Domain {
             AdapterObservation::Unimplemented { .. } => false,
         })
     }
-    fn validate(inventory: &Inventory) -> Result<(), Error> {
+    pub(super) fn validate(inventory: &Inventory) -> Result<(), Error> {
         let max = inventory.header.max_port();
         if inventory.upstream_port > max || inventory.adapters.len() != usize::from(max) {
             return Err(Error::Inventory);
