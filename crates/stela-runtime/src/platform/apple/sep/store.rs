@@ -18,6 +18,7 @@ use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 8] = b"STSEPN02";
 const PURPOSE: &[u8] = b"sepos/nonce-store/v1";
+const SYSTEM_KEY_PURPOSE: &[u8] = b"keystore/system-key-root/v1";
 const MAC_BYTES: usize = 32;
 const HEADER_BYTES: usize = 18;
 pub const NONCE_BYTES: usize = 20;
@@ -104,6 +105,7 @@ struct State {
 pub struct Nonces<B: Backend> {
     backend: B,
     key: Zeroizing<[u8; MAC_BYTES]>,
+    system_key_root: Zeroizing<[u8; MAC_BYTES]>,
     state: Option<State>,
 }
 
@@ -115,6 +117,7 @@ impl<B: Backend> Nonces<B> {
             return Err("SEP nonce store is already provisioned");
         }
         let key = roots.uid(PURPOSE)?;
+        let system_key_root = roots.uid(SYSTEM_KEY_PURPOSE)?;
         let state = State {
             generation: 1,
             slots: BTreeMap::new(),
@@ -133,12 +136,14 @@ impl<B: Backend> Nonces<B> {
         Ok(Self {
             backend,
             key,
+            system_key_root,
             state: Some(state),
         })
     }
 
     pub fn open(roots: &Roots, mut backend: B) -> Result<Self, &'static str> {
         let key = roots.uid(PURPOSE)?;
+        let system_key_root = roots.uid(SYSTEM_KEY_PURPOSE)?;
         let head = backend
             .load()?
             .ok_or("SEP nonce store is missing; explicit provisioning required")?;
@@ -146,6 +151,7 @@ impl<B: Backend> Nonces<B> {
         Ok(Self {
             backend,
             key,
+            system_key_root,
             state: Some(state),
         })
     }
@@ -154,6 +160,14 @@ impl<B: Backend> Nonces<B> {
         self.state
             .as_ref()
             .ok_or("SEP nonce store commit outcome is uncertain; reopen required")
+    }
+
+    /// Immutable machine identity is separate from erasable nonce state. This
+    /// seed is reconstructed from the same persisted roots on every open; it
+    /// is never serialized into the nonce banks or exposed to the guest.
+    pub(super) fn system_key_root(&self) -> Result<Zeroizing<[u8; MAC_BYTES]>, &'static str> {
+        self.state()?;
+        Ok(self.system_key_root.clone())
     }
 
     /// The currently authenticated durable revision. A pending policy update

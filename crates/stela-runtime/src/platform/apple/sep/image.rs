@@ -4,7 +4,7 @@
 //! IOVA in 4-KiB units without a length. DER supplies the container extent;
 //! the caller supplies its permitted maximum. This is source-integrity
 //! evidence only: measurement never authenticates Image4 or boots sepOS.
-mod der;
+use super::der;
 pub(crate) mod rsa;
 pub mod signature;
 

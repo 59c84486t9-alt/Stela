@@ -1730,6 +1730,7 @@ dependencies = [
  "libc",
  "lzfse_rust",
  "miniz_oxide",
+ "p256",
  "serde",
  "serde_json",
  "sha1",

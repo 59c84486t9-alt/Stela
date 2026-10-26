@@ -55,6 +55,7 @@
 //! 0xff to -1, then maps it to IOReturn 0xe00002bc (0x2d3a324, table
 //! 0x725990). No sepOS-specific authorization error is invented.
 mod keybag;
+mod system_key;
 
 use super::{
     endpoint::Service,
@@ -63,6 +64,7 @@ use super::{
 };
 use alloc::{vec, vec::Vec};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 /// Stela's catalog ID for the service, after the xART pair.
 pub const ID: u8 = 0x12;
@@ -131,9 +133,17 @@ pub struct Environment {
 #[derive(Default)]
 pub struct KeyStore {
     environment: Option<Environment>,
+    system_keys: Option<system_key::SystemKeys>,
 }
 
 impl KeyStore {
+    pub(super) fn with_system_keys(root: Zeroizing<[u8; 32]>) -> Self {
+        Self {
+            environment: None,
+            system_keys: Some(system_key::SystemKeys::new(root)),
+        }
+    }
+
     pub fn environment(&self) -> Option<Environment> {
         self.environment
     }
@@ -153,13 +163,37 @@ impl KeyStore {
             ));
         }
         let command = frame.tag;
-        if !matches!(command, GET_CAPABILITIES | SET_ENVIRONMENT) && !keybag::recognizes(command) {
+        if !matches!(
+            command,
+            GET_CAPABILITIES | SET_ENVIRONMENT | system_key::PERFORM_OPERATION
+        ) && !keybag::recognizes(command)
+        {
             return Err(refuse("SEP keystore command is not implemented"));
         }
         let mut bytes = vec![0; (frame.data >> LENGTH_SHIFT) as usize];
         payload.input(&mut bytes).map_err(refuse)?;
         let message = Message::parse(&bytes).map_err(refuse)?;
         let mut fields = message.fields();
+        if command == system_key::PERFORM_OPERATION {
+            let operation =
+                system_key::public_query(message.variant(), &mut fields).map_err(refuse)?;
+            let keys = self
+                .system_keys
+                .as_mut()
+                .ok_or_else(|| refuse("SEP system identity requires provisioned machine roots"))?;
+            let public = keys.public(operation).map_err(refuse)?;
+            let mut reply_fields = (public.len() as u32).to_le_bytes().to_vec();
+            reply_fields.extend_from_slice(public);
+            reply_fields.resize(reply_fields.len().next_multiple_of(4), 0);
+            let reply = message.reply(&reply_fields);
+            payload.output(&reply).map_err(refuse)?;
+            return Ok(Frame {
+                tag: command | REPLY,
+                parameter: 0,
+                data: (reply.len() as u32) << LENGTH_SHIFT,
+                ..frame
+            });
+        }
         if keybag::recognizes(command) {
             keybag::validate(command, message.variant(), &mut fields).map_err(refuse)?;
             return Err(refuse(keybag::UNIMPLEMENTED));
@@ -382,6 +416,117 @@ pub(crate) mod tests {
         bytes[4..8].copy_from_slice(&cpx.to_le_bytes());
         bytes[8..12].copy_from_slice(&mode.to_le_bytes());
         bytes
+    }
+
+    // Authored encoding of the source-recovered public SIK dictionary:
+    // SET { SEQUENCE { "skg", 1 }, { "skt", 1 }, { "o", "oskgp" } }.
+    pub(crate) const SIK_QUERY: &[u8] = b"\x31\x20\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01\x30\x0a\x0c\x01o\x0c\x05oskgp";
+
+    pub(crate) fn system_request(version: u32, query: &[u8]) -> Vec<u8> {
+        let mut request = message(version, 0, 1, &[]);
+        let body = Message::parse(&request).unwrap().body;
+        request.truncate(body);
+        request.extend_from_slice(&0u32.to_le_bytes()); // variant
+        request.extend_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+        request.extend_from_slice(&u32::MAX.to_le_bytes());
+        request.extend_from_slice(&2u32.to_le_bytes());
+        request.extend_from_slice(&(query.len() as u32).to_le_bytes());
+        request.extend_from_slice(query);
+        request.resize(request.len().next_multiple_of(4), 0);
+        let hash = digest(&request);
+        request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
+        request
+    }
+
+    #[test]
+    fn system_identity_query_returns_one_raw_public_point_in_both_ipc_versions() {
+        let mut expected = None;
+        for version in [1, 2] {
+            let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+            let request = system_request(version, SIK_QUERY);
+            let before = request.clone();
+            let (reply, output) = ask(
+                &mut keystore,
+                frame(system_key::PERFORM_OPERATION, 19, request.len()),
+                request,
+            );
+            let reply = reply.unwrap();
+            assert_eq!(reply.tag, system_key::PERFORM_OPERATION | REPLY);
+            assert_eq!(reply.opcode, 19);
+            assert_eq!(reply.parameter, 0);
+            assert_eq!(reply.data as usize >> LENGTH_SHIFT, output.len());
+            let parsed = Message::parse(&output).unwrap();
+            assert_eq!(parsed.variant(), 0);
+            assert_eq!(output[VERSION..parsed.body], before[VERSION..parsed.body]);
+            let mut fields = parsed.fields();
+            let public = fields.blob().unwrap();
+            p256::PublicKey::from_sec1_bytes(public).unwrap();
+            assert_eq!(public.len(), 65);
+            if let Some(expected) = &expected {
+                assert_eq!(public, expected);
+            } else {
+                expected = Some(public.to_vec());
+            }
+            fields.end().unwrap();
+            assert!(keystore.environment().is_none());
+        }
+    }
+
+    #[test]
+    fn unsupported_or_malformed_system_queries_never_publish_success() {
+        let mut dictionaries = vec![vec![], SIK_QUERY[..SIK_QUERY.len() - 1].to_vec()];
+        for index in [11, 21, 33] {
+            // generation, type and operation
+            let mut bad = SIK_QUERY.to_vec();
+            bad[index] ^= 1;
+            dictionaries.push(bad);
+        }
+        let mut duplicate = SIK_QUERY.to_vec();
+        duplicate[16..19].copy_from_slice(b"skg");
+        dictionaries.push(duplicate);
+        let mut unsorted = SIK_QUERY.to_vec();
+        unsorted[2..12].copy_from_slice(&SIK_QUERY[12..22]);
+        unsorted[12..22].copy_from_slice(&SIK_QUERY[2..12]);
+        dictionaries.push(unsorted);
+        let mut trailing = SIK_QUERY.to_vec();
+        trailing.push(0);
+        dictionaries.push(trailing);
+        let mut nonminimal = SIK_QUERY.to_vec();
+        nonminimal.insert(2, 0x20);
+        nonminimal[1] = 0x81;
+        dictionaries.push(nonminimal);
+        let mut requests: Vec<_> = dictionaries.iter().map(|q| system_request(2, q)).collect();
+        // Even a valid digest cannot authorize different framing operands.
+        for index in [84, 96, 100] {
+            // variant, handle and operation
+            let mut bad = system_request(2, SIK_QUERY);
+            bad[index] ^= 1;
+            let hash = digest(&bad);
+            bad[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
+            requests.push(bad);
+        }
+        for request in requests {
+            let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+            let (result, output) = ask(
+                &mut keystore,
+                frame(system_key::PERFORM_OPERATION, 20, request.len()),
+                request,
+            );
+            assert_eq!(result.unwrap_err().answer.unwrap().frame.parameter, FAILURE);
+            assert!(output.is_empty());
+            assert!(keystore.environment().is_none());
+        }
+        let request = system_request(2, SIK_QUERY);
+        let (result, output) = ask(
+            &mut KeyStore::default(),
+            frame(system_key::PERFORM_OPERATION, 21, request.len()),
+            request,
+        );
+        assert_eq!(
+            result.unwrap_err().reason,
+            "SEP system identity requires provisioned machine roots"
+        );
+        assert!(output.is_empty());
     }
 
     fn ask(

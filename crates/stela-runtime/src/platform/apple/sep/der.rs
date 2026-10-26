@@ -1,4 +1,4 @@
-//! Strict, bounded DER cursor for SEP Image4 signature evidence.
+//! Strict, bounded DER cursor for SEP firmware and keystore protocols.
 //! X.690 definite, minimal lengths/tags; no BER normalization before hashing.
 
 #[derive(Clone, Copy, Debug)]

@@ -175,11 +175,20 @@ mod tests {
         let disk = disk();
         let (mut store, fresh) = open(at(&disk), ECID, &mut entropy).unwrap();
         assert!(fresh);
+        let identity_root = store.system_key_root().unwrap();
         let nonce = store.generate(0, &mut entropy).unwrap();
+        drop(store);
+        let (mut store, fresh) = open(at(&disk), ECID, &mut entropy).unwrap();
+        assert!(!fresh);
+        assert_eq!(store.read(0).unwrap(), nonce);
+        assert_eq!(*store.system_key_root().unwrap(), *identity_root);
+        store.erase().unwrap();
         drop(store);
         let (store, fresh) = open(at(&disk), ECID, &mut entropy).unwrap();
         assert!(!fresh);
-        assert_eq!(store.read(0).unwrap(), nonce);
+        assert_eq!(*store.system_key_root().unwrap(), *identity_root);
+        // Moving roots to a different ECID cannot reopen authenticated state.
+        assert!(open(at(&disk), ECID + 1, &mut entropy).is_err());
         // The NOR image before the area is untouched.
         let mut nor = [0u8; 512];
         disk.window(2047, 1).unwrap().read(0, &mut nor).unwrap();

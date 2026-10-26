@@ -143,9 +143,10 @@ impl SepOs {
             self.observe = Some(Journal::default());
         }
         self.catalog = Catalog::new(services)?;
+        let keystore = KeyStore::with_system_keys(store.system_key_root()?);
         self.services = Some(Services {
             xart: Xart::new(store),
-            keystore: KeyStore::default(),
+            keystore,
             boot_policy: BootPolicy::new(None),
         });
         Ok(self)
@@ -1005,6 +1006,36 @@ mod tests {
         // The negotiated version, 2, follows the header and result.
         assert_eq!(ram.bytes[0x8000 + 80..0x8000 + 88], 2u64.to_le_bytes());
         assert!(os.keystore().unwrap().environment().is_none());
+    }
+
+    #[test]
+    fn system_identity_uses_the_machine_store_and_registered_dma_buffers() {
+        let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+        map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
+        register(&mut os, keystore::ID, 0x8000, 0x8000);
+        let request = keystore::tests::system_request(2, keystore::tests::SIK_QUERY);
+        let frame = Frame {
+            service: keystore::ID,
+            tag: 0x22,
+            opcode: 17,
+            parameter: 0,
+            data: (request.len() as u32) << 16,
+        };
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        ram.bytes[..request.len()].copy_from_slice(&request);
+        assert!(reply(&mut os, frame).unwrap().is_empty());
+        assert_eq!(
+            dma(&mut os, &mut ram).unwrap(),
+            [Frame {
+                tag: 0x22 | keystore::REPLY,
+                data: 160 << 16,
+                ..frame
+            }]
+        );
+        // v2 header + variant, then blob length, SEC1 point and pad4.
+        assert_eq!(ram.bytes[0x8000 + 88..0x8000 + 92], 65u32.to_le_bytes());
+        p256::PublicKey::from_sec1_bytes(&ram.bytes[0x8000 + 92..0x8000 + 157]).unwrap();
+        assert_eq!(&ram.bytes[0x8000 + 157..0x8000 + 160], &[0; 3]);
     }
 
     #[test]
