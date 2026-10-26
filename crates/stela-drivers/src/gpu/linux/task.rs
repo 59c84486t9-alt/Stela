@@ -653,6 +653,8 @@ pub(crate) mod tests {
         fn stela_test_allocation_attempt(route: u32) -> bool;
         fn stela_linux_trees_fixture() -> i32;
         fn stela_linux_task_test_taskless();
+        fn stela_linux_percpu_fixture(context: *mut c_void);
+        fn stela_linux_percpu_taskless_fixture();
         fn stela_linux_task_test_unprepared_begin();
         fn stela_linux_task_test_unprepared_end();
         fn stela_linux_task_test_foreground(context: *mut c_void);
@@ -892,6 +894,9 @@ pub(crate) mod tests {
     unsafe extern "C" fn trees_body(_: *mut c_void) {
         // SAFETY: actual reused foreground job, old worker metadata retained.
         unsafe { stela_linux_task_test_closed_stack() };
+        // SAFETY: same real attached task and RunScoped body; this callable
+        // fixture enters/exits its own owner and retains no callback/context.
+        unsafe { stela_linux_percpu_fixture(ptr::null_mut()) };
         // SAFETY: retained actual C task, entered by the unchanged fixture body.
         assert_eq!(unsafe { stela_linux_trees_fixture() }, 0);
     }
@@ -956,6 +961,9 @@ pub(crate) mod tests {
         // real raw span and ordinary System storage until exact-layout free.
         assert!(unsafe { crate::gpu::linux::heap::register(try_allocate) }.is_ok());
         unsafe { stela_linux_task_test_taskless() };
+        // SAFETY: actual taskless dispatcher, before any TaskBinding attach;
+        // the observer requires a trap before backing allocation is attempted.
+        unsafe { stela_linux_percpu_taskless_fixture() };
         let dropped = Arc::new(AtomicU64::new(0));
         // A larger generic Runtime stack is real, but not this Linux THREAD_SIZE.
         {

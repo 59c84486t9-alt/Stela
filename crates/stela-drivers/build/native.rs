@@ -248,8 +248,10 @@ impl Linux {
             fixture
                 .define("STELA_LINUX_TREES_TEST", None)
                 .define("STELA_LINUX_TREES_CALLABLE", None)
+                .define("STELA_LINUX_PERCPU_TEST", None)
                 .files([
                     format!("{COMPAT}/kernel/trees.c"),
+                    format!("{COMPAT}/kernel/percpu.c"),
                     format!("{COMPAT}/stela/task_test.c"),
                     format!("{COMPAT}/stela/atomic_callback_test.c"),
                     format!("{COMPAT}/stela/mutex_test.c"),
