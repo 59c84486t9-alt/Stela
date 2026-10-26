@@ -2,6 +2,7 @@
 //! Cypress Gen5/6 PIP I2C FIFO, serialized command replies and physical reports.
 use super::{Interrupt, InterruptError, Recovery};
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 mod device;
 mod report;
@@ -31,6 +32,10 @@ pub enum State {
     Ready,
     DeepSleep,
     ButtonsOnly,
+    /// Scanning remains enabled at the acknowledged device interval.
+    LowPower {
+        interval_ms: u16,
+    },
     Stopped,
     Uncertain,
 }
@@ -44,27 +49,52 @@ pub enum ErrorKind {
     Bus(i2c::Error),
     Interrupt(InterruptError),
     Length(u16),
-    ChangedLength { peek: u16, actual: u16 },
+    ChangedLength {
+        peek: u16,
+        actual: u16,
+    },
     QueueFull,
     DrainLimit,
     Timeout,
     UnexpectedReset,
     Descriptor,
     FirmwareLaunch,
-    UnsupportedGeneration { family: u8, silicon_high: u8 },
-    CommandStatus { command: u8, status: u8 },
+    UnsupportedGeneration {
+        family: u8,
+        silicon_high: u8,
+    },
+    CommandStatus {
+        command: u8,
+        status: u8,
+    },
     UnsupportedCommand(u8),
     UnsupportedReport(u8),
-    ReportLength { id: u8, actual: u16 },
+    ReportLength {
+        id: u8,
+        actual: u16,
+    },
     ContactCount(u8),
     ContactType(u8),
     DuplicateId(u8),
-    Coordinate { id: u8, x: u16, y: u16 },
+    Coordinate {
+        id: u8,
+        x: u16,
+        y: u16,
+    },
     InvalidGeometry,
     ProductFamily(u16),
     UnsupportedProduct,
     IdentityChanged,
     Orientation(u8),
+    InvalidScanInterval(u16),
+    ParameterReply {
+        id: u8,
+        size: u8,
+    },
+    IntervalReadback {
+        expected: (u16, u16, u16),
+        actual: (u16, u16, u16),
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error {
@@ -88,6 +118,32 @@ impl core::fmt::Display for Error {
 pub enum Generation {
     Gen5,
     Gen6,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalibrationPhase {
+    SuspendScanning,
+    MutualCapacitance,
+    SelfCapacitance,
+    ResumeScanning,
+}
+/// The original failure survives a separately acknowledged resume attempt.
+/// Resume is attempted only after a complete calibration rejection, never after
+/// an uncertain transfer or timeout that could still own a delayed reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalibrationError {
+    pub phase: CalibrationPhase,
+    pub error: Error,
+    pub response: Option<Box<Packet>>,
+    pub resume_error: Option<Error>,
+}
+/// Observations from the most recent explicit Gen6 interval SET attempt.
+/// `applied` survives a later GET failure; only matching SET/GET observations
+/// qualify publication in `Capabilities::power_intervals`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntervalUpdate {
+    pub requested: (u16, u16, u16),
+    pub applied: Option<(u16, u16, u16)>,
+    pub readback: Option<(u16, u16, u16)>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
@@ -119,6 +175,7 @@ pub struct Device<B, I, T> {
     capabilities: Option<Capabilities>,
     pending: VecDeque<Packet>,
     failed_packet: Option<Packet>,
+    interval_update: Option<IntervalUpdate>,
 }
 impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// The platform grants exclusive ownership of the powered peripheral, bus and IRQ.
@@ -156,6 +213,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             capabilities: None,
             pending: VecDeque::new(),
             failed_packet: None,
+            interval_update: None,
         })
     }
     /// Most recent expected, controller-recovered Gen6 preparation-ping NACK.
@@ -168,6 +226,11 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     }
     pub fn capabilities(&self) -> Option<&Capabilities> {
         self.capabilities.as_ref()
+    }
+    /// Completed observations are retained separately from validated settings,
+    /// including after a partial update quarantines the peripheral owner.
+    pub fn interval_update(&self) -> Option<&IntervalUpdate> {
+        self.interval_update.as_ref()
     }
     /// Earlier physical packets remain owned even if a later command fails.
     pub fn take_pending_packet(&mut self) -> Option<Packet> {
@@ -185,6 +248,7 @@ mod tests {
     use super::*;
     use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
     use core::cell::{Cell, RefCell};
+    mod controls;
     struct Hardware {
         address: u8,
         queue: VecDeque<Vec<u8>>,
@@ -199,6 +263,13 @@ mod tests {
         fatal_error: Option<i2c::Error>,
         intervals: (u16, u16, u16),
         interval_length: usize,
+        set_intervals: Option<(u16, u16, u16)>,
+        interval_readback: Option<(u16, u16, u16)>,
+        low_interval: u16,
+        parameter_reply: Option<(u8, u8)>,
+        scanning: bool,
+        calibrations: Vec<u8>,
+        calibration_status: Option<(u8, u8)>,
         deep: bool,
         power: u8,
         info: Vec<u8>,
@@ -253,6 +324,13 @@ mod tests {
             fatal_error: None,
             intervals: (8, 30, 50),
             interval_length: 11,
+            set_intervals: None,
+            interval_readback: None,
+            low_interval: 30,
+            parameter_reply: None,
+            scanning: true,
+            calibrations: Vec::new(),
+            calibration_status: None,
             deep: true,
             power: 0,
             info,
@@ -363,7 +441,7 @@ mod tests {
                         }
                         [4, 0, 6, 0, 0x2f, 0, 8, state] => {
                             assert!(!h.bootloader && !h.deep);
-                            assert!(matches!(state, 1 | 5));
+                            assert!(matches!(state, 1 | 3 | 4 | 5));
                             h.power = state;
                             h.schedule(8, vec![6, 0, 0x1f, 0, 0x88, 0]);
                         }
@@ -381,7 +459,7 @@ mod tests {
                         [4, 0, 6, 0, 0x2f, 0, 0x46, state] => {
                             assert_eq!(h.generation, Generation::Gen6);
                             assert!(!h.command_irq && !h.deep);
-                            assert!(matches!(state, 1 | 4));
+                            assert!(matches!(state, 1..=4));
                             h.power = state;
                             h.schedule(0x46, vec![6, 0, 0x1f, 0, 0xc6, state]);
                         }
@@ -389,13 +467,60 @@ mod tests {
                             assert_eq!(h.generation, Generation::Gen6);
                             assert!(!h.command_irq && h.power == 1);
                             let mut response = vec![11, 0, 0x1f, 0, 0xc8];
-                            for value in [h.intervals.0, h.intervals.1, h.intervals.2] {
+                            let intervals = h.interval_readback.unwrap_or(h.intervals);
+                            for value in [intervals.0, intervals.1, intervals.2] {
                                 response.extend_from_slice(&value.to_le_bytes());
                             }
                             response.resize(h.interval_length, 0x96);
                             let length = response.len() as u16;
                             response[..2].copy_from_slice(&length.to_le_bytes());
                             h.schedule(0x48, response);
+                        }
+                        [4, 0, 11, 0, 0x2f, 0, 0x47, a, b, c, d, e, f] => {
+                            assert_eq!(h.generation, Generation::Gen6);
+                            assert!(!h.command_irq && h.power == 1);
+                            let requested = (
+                                u16::from_le_bytes([a, b]),
+                                u16::from_le_bytes([c, d]),
+                                u16::from_le_bytes([e, f]),
+                            );
+                            h.intervals = h.set_intervals.unwrap_or(requested);
+                            let mut response = vec![11, 0, 0x1f, 0, 0xc7];
+                            for value in [h.intervals.0, h.intervals.1, h.intervals.2] {
+                                response.extend_from_slice(&value.to_le_bytes());
+                            }
+                            response.resize(h.interval_length, 0x96);
+                            let length = response.len() as u16;
+                            response[..2].copy_from_slice(&length.to_le_bytes());
+                            h.schedule(0x47, response);
+                        }
+                        [4, 0, 9, 0, 0x2f, 0, 6, 0x4c, 2, low, high, 0, 0] => {
+                            assert_eq!(h.generation, Generation::Gen5);
+                            assert!(!h.deep && h.power == 1);
+                            h.low_interval = u16::from_le_bytes([low, high]);
+                            let (id, size) = h.parameter_reply.unwrap_or((0x4c, 2));
+                            h.schedule(6, vec![7, 0, 0x1f, 0, 0x86, id, size]);
+                        }
+                        [4, 0, 6, 0, 0x2f, 0, 5, 0x4c] => {
+                            assert_eq!(h.generation, Generation::Gen5);
+                            let (id, size) = h.parameter_reply.unwrap_or((0x4c, 2));
+                            let [low, high] = h.low_interval.to_le_bytes();
+                            h.schedule(5, vec![9, 0, 0x1f, 0, 0x85, id, size, low, high]);
+                        }
+                        [4, 0, 5, 0, 0x2f, 0, code @ (3 | 4)] => {
+                            assert!(!h.deep && h.power == 1);
+                            h.scanning = code == 4;
+                            h.schedule(code, vec![6, 0, 0x1f, 0, code | 0x80, 0]);
+                        }
+                        [4, 0, 6, 0, 0x2f, 0, 0x28, mode] => {
+                            assert!(!h.deep && h.power == 1 && !h.scanning);
+                            assert!(matches!(mode, 0 | 2));
+                            h.calibrations.push(mode);
+                            let status = h
+                                .calibration_status
+                                .filter(|(expected, _)| *expected == mode)
+                                .map_or(0, |(_, status)| status);
+                            h.schedule(0x28, vec![6, 0, 0x1f, 0, 0xa8, status]);
                         }
                         [4, 0, 5, 0, 0x2f, 0, 2] => {
                             assert!(!h.bootloader && !h.deep);
@@ -1123,7 +1248,7 @@ mod tests {
 
     mod gen6_tests {
         use super::*;
-        fn hardware6(boot: bool, platform: u8) -> Rc<RefCell<Hardware>> {
+        pub(super) fn hardware6(boot: bool, platform: u8) -> Rc<RefCell<Hardware>> {
             let h = hardware(boot, platform);
             {
                 let mut hw = h.borrow_mut();
@@ -1154,7 +1279,7 @@ mod tests {
             }
             h
         }
-        fn device6(h: &Rc<RefCell<Hardware>>) -> Device<Wire, Irq, Time> {
+        pub(super) fn device6(h: &Rc<RefCell<Hardware>>) -> Device<Wire, Irq, Time> {
             Device::new_gen6(
                 Wire(h.clone()),
                 Irq(h.clone()),

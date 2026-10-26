@@ -218,13 +218,21 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         Ok((descriptor, bootloader))
     }
     fn app_status(&mut self, command: &[u8], code: u8) -> Result<(), ErrorKind> {
+        self.app_status_timeout(command, code, 500_000)
+    }
+    fn app_status_timeout(
+        &mut self,
+        command: &[u8],
+        code: u8,
+        timeout_us: u64,
+    ) -> Result<(), ErrorKind> {
         let packet = self.request(
             command,
             Reply::App {
                 command: code,
                 minimum: 6,
             },
-            500_000,
+            timeout_us,
         )?;
         let status = packet.as_bytes()[5];
         if packet.as_bytes().len() != 6 {
@@ -435,6 +443,216 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             u16::from_le_bytes([bytes[9], bytes[10]]),
         ))
     }
+    fn gen6_set_intervals(
+        &mut self,
+        intervals: (u16, u16, u16),
+    ) -> Result<(u16, u16, u16), ErrorKind> {
+        self.interval_update = Some(IntervalUpdate {
+            requested: intervals,
+            applied: None,
+            readback: None,
+        });
+        let mut command = [4, 0, 11, 0, 0x2f, 0, 0x47, 0, 0, 0, 0, 0, 0];
+        for (offset, value) in [(7, intervals.0), (9, intervals.1), (11, intervals.2)] {
+            command[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let packet = self.request(
+            &command,
+            Reply::App {
+                command: 0x47,
+                minimum: 11,
+            },
+            500_000,
+        )?;
+        let bytes = packet.as_bytes();
+        if bytes.len() != 11 {
+            let actual = bytes.len() as u16;
+            self.failed_packet = Some(packet);
+            return Err(ErrorKind::ReportLength { id: 0x1f, actual });
+        }
+        let applied = (
+            u16::from_le_bytes([bytes[5], bytes[6]]),
+            u16::from_le_bytes([bytes[7], bytes[8]]),
+            u16::from_le_bytes([bytes[9], bytes[10]]),
+        );
+        if let Some(update) = &mut self.interval_update {
+            update.applied = Some(applied);
+        }
+        // The SET response contains actual applied values, not a status byte.
+        let actual = self.gen6_intervals()?;
+        if let Some(update) = &mut self.interval_update {
+            update.readback = Some(actual);
+        }
+        if actual != applied {
+            return Err(ErrorKind::IntervalReadback {
+                expected: applied,
+                actual,
+            });
+        }
+        Ok(actual)
+    }
+    fn gen5_low_interval(&mut self, interval: u16) -> Result<u16, ErrorKind> {
+        let [low, high] = interval.to_le_bytes();
+        // The donor sends the complete four-byte value structure even though
+        // the report length and parameter width describe only two value bytes.
+        let packet = self.request(
+            &[4, 0, 9, 0, 0x2f, 0, 6, 0x4c, 2, low, high, 0, 0],
+            Reply::App {
+                command: 6,
+                minimum: 7,
+            },
+            500_000,
+        )?;
+        let bytes = packet.as_bytes();
+        if bytes.len() != 7 {
+            let actual = bytes.len() as u16;
+            self.failed_packet = Some(packet);
+            return Err(ErrorKind::ReportLength { id: 0x1f, actual });
+        }
+        if bytes[5..7] != [0x4c, 2] {
+            let error = ErrorKind::ParameterReply {
+                id: bytes[5],
+                size: bytes[6],
+            };
+            self.failed_packet = Some(packet);
+            return Err(error);
+        }
+        let packet = self.request(
+            &[4, 0, 6, 0, 0x2f, 0, 5, 0x4c],
+            Reply::App {
+                command: 5,
+                minimum: 9,
+            },
+            500_000,
+        )?;
+        let bytes = packet.as_bytes();
+        if bytes.len() > 11 {
+            let actual = bytes.len() as u16;
+            self.failed_packet = Some(packet);
+            return Err(ErrorKind::ReportLength { id: 0x1f, actual });
+        }
+        if bytes[5..7] != [0x4c, 2] {
+            let error = ErrorKind::ParameterReply {
+                id: bytes[5],
+                size: bytes[6],
+            };
+            self.failed_packet = Some(packet);
+            return Err(error);
+        }
+        Ok(u16::from_le_bytes([bytes[7], bytes[8]]))
+    }
+    /// Select an explicitly requested low-power scan interval (20–1000 ms).
+    /// The returned interval is the device's acknowledged value. Gen6 reuses
+    /// the matching LP slot, otherwise fills LP1 only when empty, then LP2;
+    /// the ACTIVE interval and the other LP slot retain their actual values.
+    /// This is a device operation; scheduling and platform wake remain external.
+    pub fn low_power(&mut self, interval_ms: u16) -> Result<u16, Error> {
+        self.ready()?;
+        if !(20..=1000).contains(&interval_ms) {
+            return Err(ErrorKind::InvalidScanInterval(interval_ms).into());
+        }
+        let result = (|| {
+            self.interrupt
+                .mask_and_drain()
+                .map_err(ErrorKind::Interrupt)?;
+            if self.generation == Generation::Gen5 {
+                let actual = self.gen5_low_interval(interval_ms)?;
+                self.change_power(if actual <= 50 { 3 } else { 4 })?;
+                return Ok(actual);
+            }
+            self.gen6_irq(false)?;
+            let mut intervals = self.gen6_intervals()?;
+            let mode = if intervals.1 == interval_ms {
+                2
+            } else if intervals.2 == interval_ms {
+                3
+            } else {
+                let mode = if intervals.1 == 0 {
+                    intervals.1 = interval_ms;
+                    2
+                } else {
+                    intervals.2 = interval_ms;
+                    3
+                };
+                intervals = self.gen6_set_intervals(intervals)?;
+                mode
+            };
+            // Keep newly observed settings even if the subsequent power/IRQ
+            // acknowledgement fails; the owner must retain actual side effects.
+            self.capabilities
+                .as_mut()
+                .ok_or(ErrorKind::NotReady)?
+                .power_intervals = Some(intervals);
+            let actual = if mode == 2 { intervals.1 } else { intervals.2 };
+            self.gen6_power(mode)?;
+            self.gen6_irq(true)?;
+            Ok(actual)
+        })();
+        let actual = self.quarantine(result)?;
+        self.state = State::LowPower {
+            interval_ms: actual,
+        };
+        Ok(actual)
+    }
+    /// Run the donor's mutual-fine and self-capacitance calibration sequence
+    /// while scanning is suspended. Physical reports drained around commands
+    /// remain queued. Complete rejections permit one resume command; uncertain
+    /// failures retain the owner for platform reset and send no further command.
+    pub fn calibrate(&mut self) -> Result<(), CalibrationError> {
+        let mut phase = CalibrationPhase::SuspendScanning;
+        let mut attempted = false;
+        let operation = (|| {
+            self.ready()?;
+            attempted = true;
+            self.failed_packet = None;
+            let result = self
+                .interrupt
+                .mask_and_drain()
+                .map_err(ErrorKind::Interrupt)
+                .and_then(|()| self.app_status(&[4, 0, 5, 0, 0x2f, 0, 3], 3));
+            self.quarantine(result)?;
+            for (next, mode) in [
+                (CalibrationPhase::MutualCapacitance, 0),
+                (CalibrationPhase::SelfCapacitance, 2),
+            ] {
+                phase = next;
+                let result =
+                    self.app_status_timeout(&[4, 0, 6, 0, 0x2f, 0, 0x28, mode], 0x28, 5_000_000);
+                if let Err(kind) = result {
+                    // A complete nonzero calibration status retires the command
+                    // response. Only this determinate failure permits cleanup.
+                    if matches!(kind, ErrorKind::CommandStatus { command: 0x28, .. }) {
+                        return Err(kind.into());
+                    }
+                    return self.quarantine(Err(kind));
+                }
+            }
+            phase = CalibrationPhase::ResumeScanning;
+            let result = self.app_status(&[4, 0, 5, 0, 0x2f, 0, 4], 4);
+            self.quarantine(result)
+        })();
+        operation.map_err(|error| {
+            let response = if attempted {
+                self.failed_packet.clone().map(Box::new)
+            } else {
+                None
+            };
+            let resume_error = if self.state == State::Ready
+                && matches!(error.kind, ErrorKind::CommandStatus { command: 0x28, .. })
+            {
+                let result = self.app_status(&[4, 0, 5, 0, 0x2f, 0, 4], 4);
+                self.quarantine(result).err()
+            } else {
+                None
+            };
+            CalibrationError {
+                phase,
+                error,
+                response,
+                resume_error,
+            }
+        })
+    }
     fn configure(&mut self, c: &mut Capabilities) -> Result<(), ErrorKind> {
         if self.generation == Generation::Gen6 {
             self.gen6_irq(false)?;
@@ -502,7 +720,9 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         Ok(())
     }
     pub fn poll(&mut self) -> Result<Option<Frame>, Error> {
-        self.ready()?;
+        if !matches!(self.state, State::LowPower { .. }) {
+            self.ready()?;
+        }
         let result = (|| {
             let packet = if let Some(packet) = self.pending.pop_front() {
                 packet
@@ -533,7 +753,9 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         self.quarantine(result)
     }
     pub fn deep_sleep(&mut self) -> Result<(), Error> {
-        self.ready()?;
+        if !matches!(self.state, State::LowPower { .. } | State::ButtonsOnly) {
+            self.ready()?;
+        }
         let result = self
             .interrupt
             .mask_and_drain()
@@ -571,7 +793,10 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         if self.state == State::Uncertain {
             return Err(ErrorKind::NeedsReset.into());
         }
-        if !matches!(self.state, State::DeepSleep | State::ButtonsOnly) {
+        if !matches!(
+            self.state,
+            State::DeepSleep | State::ButtonsOnly | State::LowPower { .. }
+        ) {
             return Err(ErrorKind::NotReady.into());
         }
         let was_deep = self.state == State::DeepSleep;
