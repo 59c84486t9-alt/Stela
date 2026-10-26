@@ -166,6 +166,7 @@ bool stela_linux_quiescent(void)
 {
 	(void)stela_linux_owner();
 	return !stela_linux_atomic_callback_active() &&
+	       !stela_linux_rcu_callback_active() &&
 	       !preempt_count() && irq_flags == ARCH_IRQ_ENABLED;
 }
 
@@ -238,7 +239,7 @@ int main(void)
  assert(stela_linux_lease_resume(&same));
  stela_linux_lease_snapshot(&restored);
  assert(restored.owner==same.owner && restored.generation==same.generation &&
-        stela_linux_lease_matches(&same) && !stela_linux_lease_matches(&other));
+	    stela_linux_lease_matches(&same) && !stela_linux_lease_matches(&other));
  assert(!stela_linux_lease_resume(&other) && stela_linux_lease_matches(&same));
  stela_linux_exit();
  assert(stela_test_traps(exhaust_generation));

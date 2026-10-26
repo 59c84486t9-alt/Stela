@@ -56,6 +56,9 @@ void stela_linux_exit(void);
 /* Checked quiescence in the serialized context, not a native IRQ witness. */
 bool stela_linux_quiescent(void);
 /* Internal RCU retirement while the execution owner is still borrowed. */
+/* Entered serialized-owner observation only. Private RCU delivery remains
+ * active despite balanced public preempt/IRQ counters. No task/root grant. */
+bool stela_linux_rcu_callback_active(void);
 void stela_linux_rcu_finish(void);
 /* The owner running Linux code; traps outside enter and exit. */
 const struct stela_linux_owner *stela_linux_owner(void);

@@ -27,6 +27,15 @@ bool stela_linux_rcu_callback_current(const struct rcu_head *head)
  return invoking && head && invoking_head == head;
 }
 
+/* Independent lifecycle state, never inferred from public nesting counters.
+ * The entered single-CPU owner serializes access, including callback delivery.
+ * This is an observation only; it supplies no task/owner/root authority. */
+bool stela_linux_rcu_callback_active(void)
+{
+	(void)stela_linux_owner();
+	return invoking;
+}
+
 static void require_quiescence(void)
 {
 	if (!stela_linux_quiescent() || invoking)
@@ -287,6 +296,50 @@ static void callback_attempts_sleep(void)
 	stela_linux_exit();
 }
 
+static unsigned int balanced_calls;
+
+static void balanced_callback(struct rcu_head *head)
+{
+	assert(stela_linux_rcu_callback_current(head));
+	assert(stela_linux_rcu_callback_active());
+	assert(preempt_count() == (int)SOFTIRQ_OFFSET && !irqs_disabled());
+	const struct stela_linux_owner *before = stela_linux_owner();
+	preempt_count_sub(SOFTIRQ_OFFSET);
+	/* Same owner and genuinely balanced public counters are insufficient to
+	 * manufacture a process/quiescent allocation, sleep or root-entry grant. */
+	assert(!preempt_count() && !irqs_disabled());
+	assert(stela_linux_owner() == before && !stela_linux_quiescent());
+	assert(stela_linux_rcu_callback_active());
+	balanced_calls++;
+	preempt_count_add(SOFTIRQ_OFFSET);
+}
+
+static void entered_forbidden_delay(void *context, u64 minimum, u64 maximum, bool atomic)
+{
+	(void)context; (void)minimum; (void)maximum; (void)atomic;
+	/* Distinct witness status is NOT the expected SIGILL. A missing early
+	 * refusal cannot pass by entering this provider then trapping in cleanup. */
+	stela_test_witness_passed();
+}
+
+static void balanced_sleep_callback(struct rcu_head *head)
+{
+	(void)head;
+	preempt_count_sub(SOFTIRQ_OFFSET);
+	msleep(1);
+}
+
+static void balanced_callback_attempts_sleep(void)
+{
+	const struct stela_linux_services services = {.delay_us = entered_forbidden_delay};
+	const struct stela_linux_owner owner = {.services = &services};
+	struct rcu_head head;
+	stela_linux_enter(&owner);
+	call_rcu(&head, balanced_sleep_callback);
+	rcu_barrier();
+	stela_linux_exit();
+}
+
 int main(void)
 {
 	const struct stela_linux_services services = {.delay_us = delay_service};
@@ -320,6 +373,15 @@ int main(void)
 	assert(stela_test_traps(exit_with_irqs_disabled));
 	assert(stela_test_traps(callback_leaves_read_state));
 	assert(stela_test_traps(callback_attempts_sleep));
+	assert(stela_test_traps(balanced_callback_attempts_sleep));
+	stela_linux_enter(&owner);
+	assert(!stela_linux_rcu_callback_active() && stela_linux_quiescent());
+	struct rcu_head balanced;
+	call_rcu(&balanced, balanced_callback);
+	rcu_barrier();
+	assert(balanced_calls == 1 && !stela_linux_rcu_callback_active());
+	assert(stela_linux_quiescent() && !preempt_count());
+	stela_linux_exit();
 	printf("Serialized Linux RCU: nested readers, deferred FIFO callbacks, barriers, owner retirement and invalid contexts\n");
 	return 0;
 }
