@@ -40,6 +40,7 @@ use stela_runtime::payload::{
 
 mod audio_check;
 mod disks;
+mod fat32;
 mod host_firmware;
 mod lan;
 mod network_check;
@@ -1584,31 +1585,11 @@ fn directory_bytes(path: &Path) -> Result<u64> {
 /// A raw FAT32 image of `volume`, without a partition table, which the
 /// firmware mounts whole.
 fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
-    ensure!(
-        cfg!(target_os = "macos"),
-        "volumes over {VVFAT_BYTES} bytes need a FAT32 image, which this host cannot make; \
-         build it with hdiutil on macOS"
-    );
     let bytes = directory_bytes(volume)?;
-    let size = (bytes + bytes / 8 + (64 << 20)).div_ceil(1 << 20);
-    let base = output.join("volume");
-    exec(
-        Process::new("hdiutil")
-            .args([
-                "create",
-                "-quiet",
-                "-fs",
-                "MS-DOS FAT32",
-                "-volname",
-                "STELA",
-            ])
-            .args(["-layout", "NONE", "-format", "UDTO", "-size"])
-            .arg(format!("{size}m"))
-            .arg("-srcfolder")
-            .arg(volume)
-            .arg(&base),
-    )?;
-    Ok(output.join("volume.cdr"))
+    let size = (bytes + bytes / 8 + (64 << 20)).next_multiple_of(1 << 20);
+    let image = output.join("volume.img");
+    fat32::write(volume, &image, size, "STELA")?;
+    Ok(image)
 }
 
 fn native_irq_work_verified(serial: &str) -> bool {
