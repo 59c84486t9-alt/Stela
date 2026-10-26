@@ -1,5 +1,6 @@
 //! Actual RTS5229 HAIMR/PHY/card peer, including revision-C pull controls.
 use super::*;
+mod uhs;
 
 fn chip(mmc: bool, present: bool, revision: u8) -> Rc<RefCell<Chip>> {
     let chip = Chip::new(mmc, present);

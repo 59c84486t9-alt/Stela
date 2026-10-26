@@ -507,7 +507,7 @@ impl CardHost for Engine {
         true
     }
     fn sd_uhs_modes(&self) -> crate::storage::mmc::SdUhsModes {
-        let supported = self.config.profile == ChipProfile::Rts522a;
+        let supported = self.config.profile.supports_sd_uhs();
         crate::storage::mmc::SdUhsModes {
             sdr12: supported,
             sdr25: supported,
@@ -517,20 +517,20 @@ impl CardHost for Engine {
     }
     fn sd_max_current_ma(&self) -> u32 {
         // The board still supplies3.3V VCC; CMD11 changes signaling only.
-        if self.config.profile == ChipProfile::Rts522a {
+        if self.config.profile.supports_sd_uhs() {
             400
         } else {
             0
         }
     }
     fn switch_sd_signal_voltage(&mut self) -> Result<(), BlockError> {
-        self.rts522a_switch_signal()
+        self.switch_uhs_signal()
     }
     fn set_sd_uhs_timing(&mut self, timing: Timing) -> Result<(), BlockError> {
-        self.rts522a_timing(timing)
+        self.set_uhs_timing(timing)
     }
     fn tune_sd(&mut self) -> Result<(), BlockError> {
-        self.rts522a_tune()
+        self.tune_uhs()
     }
     fn mmc_width(&self) -> u8 {
         4

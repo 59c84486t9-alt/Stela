@@ -2,12 +2,12 @@
 // Native adaptation of rtsx_pci_sdmmc.c/rts5227.c, Copyright 2009-2013 Realtek.
 // CMD11 sequence also adapts MMC core.c: Copyright 2003-2004 Russell King,
 // 2004 Ian Molton, 2005-2008 Pierre Ossman, 2006 Philip Langdale.
-//! Actual RTS522A CMD11 electrical transition, SD UHS clocks and phase tuning.
+//! Qualified RTSX CMD11 electrical transitions, SD UHS clocks and phase tuning.
 use super::*;
 
 impl Engine {
-    pub(super) fn rts522a_switch_signal(&mut self) -> Result<(), BlockError> {
-        if self.config.profile != ChipProfile::Rts522a {
+    pub(super) fn switch_uhs_signal(&mut self) -> Result<(), BlockError> {
+        if !self.config.profile.supports_sd_uhs() {
             return Err(BlockError::Unsupported(
                 "RTSX profile has no qualified1.8V path",
             ));
@@ -21,11 +21,15 @@ impl Engine {
             }
             self.write_reg_before(CARD_CLK_EN, SD_CLK_EN, 0, Some(budget))?;
             self.write_reg_before(SD_BUS_STAT, 0xff, SD_CLK_FORCE_STOP, Some(budget))?;
-            self.phy(0x11, 0x3c02)?;
-            self.phy(8, 0x54a4)?;
-            let drive = self.config.drive_1v8();
-            for at in [SD30_CLK_DRIVE_SEL, SD30_CMD_DRIVE_SEL, SD30_DAT_DRIVE_SEL] {
-                self.write_reg_before(at, 0xff, drive, Some(budget))?;
+            if self.config.profile == ChipProfile::Rts5229 {
+                self.rts5229_voltage(true)?;
+            } else {
+                self.phy(0x11, 0x3c02)?;
+                self.phy(8, 0x54a4)?;
+                let drive = self.config.drive_1v8();
+                for at in [SD30_CLK_DRIVE_SEL, SD30_CMD_DRIVE_SEL, SD30_DAT_DRIVE_SEL] {
+                    self.write_reg_before(at, 0xff, drive, Some(budget))?;
+                }
             }
             self.clock.delay(10_000);
             self.check_card_before(budget)?;
@@ -55,13 +59,13 @@ impl Engine {
         })();
         result.map_err(|primary| self.emergency_off(primary, false))
     }
-    pub(super) fn rts522a_timing(&mut self, timing: Timing) -> Result<(), BlockError> {
-        if self.config.profile != ChipProfile::Rts522a || self.signal_voltage != SignalVoltage::V1_8
-        {
+    pub(super) fn set_uhs_timing(&mut self, timing: Timing) -> Result<(), BlockError> {
+        if !self.config.profile.supports_sd_uhs() || self.signal_voltage != SignalVoltage::V1_8 {
             return Err(BlockError::Unsupported(
                 "RTSX UHS timing requires qualified actual1.8V",
             ));
         }
+        self.check_card_before(Budget::new(self, 100_000))?;
         match timing {
             Timing::Sdr12 | Timing::Sdr25 => self.timing(false)?,
             Timing::Sdr50 | Timing::Sdr104 => {
@@ -83,7 +87,7 @@ impl Engine {
         self.timing_mode = timing;
         Ok(())
     }
-    fn phase(&mut self, phase: u8, rx: bool) -> Result<(), BlockError> {
+    pub(super) fn phase(&mut self, phase: u8, rx: bool) -> Result<(), BlockError> {
         self.write_reg(CLK_CTL, CLK_LOW_FREQ, CLK_LOW_FREQ)?;
         let at = if rx { SD_VPRX_CTL } else { SD_VPTX_CTL };
         self.write_reg(at, PHASE_SELECT_MASK, phase)?;
@@ -92,8 +96,8 @@ impl Engine {
         self.write_reg(CLK_CTL, CLK_LOW_FREQ, 0)?;
         self.write_reg(SD_CFG1, SD_ASYNC_FIFO_NOT_RST, 0)
     }
-    pub(super) fn rts522a_tune(&mut self) -> Result<(), BlockError> {
-        if self.config.profile != ChipProfile::Rts522a
+    pub(super) fn tune_uhs(&mut self) -> Result<(), BlockError> {
+        if !self.config.profile.supports_sd_uhs()
             || self.signal_voltage != SignalVoltage::V1_8
             || !matches!(self.timing_mode, Timing::Sdr50 | Timing::Sdr104)
         {
@@ -101,7 +105,15 @@ impl Engine {
                 "RTSX tuning requires declared SDR50/104",
             ));
         }
-        self.phase(20, false)?;
+        self.check_card_before(Budget::new(self, 100_000))?;
+        self.phase(
+            if self.config.profile == ChipProfile::Rts5229 {
+                27
+            } else {
+                20
+            },
+            false,
+        )?;
         let mut intersection = u32::MAX;
         for _ in 0..3 {
             let mut map = 0;
@@ -161,7 +173,7 @@ impl Engine {
 }
 
 // Source longest circular run: strict greater-than preserves the first tie.
-fn final_phase(map: u32) -> Option<u8> {
+pub(super) fn final_phase(map: u32) -> Option<u8> {
     if map == 0 {
         return None;
     }

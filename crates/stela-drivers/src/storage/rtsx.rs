@@ -37,6 +37,9 @@ enum ChipProfile {
     Rts5229,
 }
 impl ChipProfile {
+    fn supports_sd_uhs(self) -> bool {
+        matches!(self, Self::Rts522a | Self::Rts5229)
+    }
     fn device(self) -> u16 {
         match self {
             Self::Rts5227 => 0x5227,
@@ -756,6 +759,7 @@ mod tests {
         voltage_set_at: Option<u64>,
         bad_cmd11_low: bool,
         bad_cmd11_high: bool,
+        deny_v18_phy: bool,
         tuning_windows: [u32; 3],
         tuning_attempts: usize,
         tuning_fault: Option<Fault>,
@@ -826,6 +830,7 @@ mod tests {
                 voltage_set_at: None,
                 bad_cmd11_low: false,
                 bad_cmd11_high: false,
+                deny_v18_phy: false,
                 tuning_windows: [u32::MAX; 3],
                 tuning_attempts: 0,
                 tuning_fault: None,
@@ -847,6 +852,13 @@ mod tests {
             // SAFETY: model timestamps use the same native invariant TSC as Clock.
             unsafe { core::arch::x86_64::_rdtsc() }
         }
+        fn low_voltage_phy(&self) -> u16 {
+            if self.config[2..4] == [0x29, 0x52] {
+                0x4c64
+            } else {
+                0x54a4
+            }
+        }
         fn complete(&mut self) {
             let Some(mut transfer) = self.transfer.take() else {
                 return;
@@ -863,7 +875,7 @@ mod tests {
                 assert_eq!(
                     self.phy[8],
                     if self.card.low_voltage && transfer.opcode != 11 {
-                        0x54a4
+                        self.low_voltage_phy()
                     } else if rts522a {
                         0x57e4
                     } else {
@@ -1001,6 +1013,14 @@ mod tests {
                     }
                     if transfer.opcode == 19 {
                         assert_eq!(
+                            self.regs[0x3c2a] & 31,
+                            if self.config[2..4] == [0x29, 0x52] {
+                                27
+                            } else {
+                                20
+                            }
+                        );
+                        assert_eq!(
                             transfer.mode, 15,
                             "actual hardware auto tuning, not PPBUF emulation"
                         );
@@ -1067,7 +1087,7 @@ mod tests {
             let at = usize::from(at & 0x3fff);
             if at == 0x3da5
                 && self.card.low_voltage
-                && self.phy[8] == 0x54a4
+                && self.phy[8] == self.low_voltage_phy()
                 && self.regs[0x3d69] & 4 != 0
             {
                 self.regs[at] =
@@ -1114,7 +1134,13 @@ mod tests {
                     self.regs[0x3e3d..0x3e3f].copy_from_slice(&bytes);
                 } else {
                     self.phy[index] = u16::from_le_bytes([self.regs[0x3e3d], self.regs[0x3e3e]]);
-                    if index == 8 && self.phy[index] == 0x54a4 {
+                    if index == 8
+                        && self.phy[index] == self.low_voltage_phy()
+                        && self.bipr & SD_EXIST != 0
+                    {
+                        if self.deny_v18_phy {
+                            return;
+                        }
                         assert!(self.card.low_voltage, "CMD11 before1.8V PHY");
                         assert_eq!(
                             self.regs[0x3d69] & 4,
