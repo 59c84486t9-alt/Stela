@@ -11,7 +11,10 @@ pub(in crate::usb::bluetooth) use binding::service_bytes;
 pub use binding::{AirMode, Bindings, Pair, Voice};
 use core::fmt;
 pub use framing::Kind;
-pub use session::{Lifecycle, Loss, MediaIo, Read, Received, Session, SetupReport};
+pub use session::{
+    Lifecycle, Loss, MediaIo, OutputDisposition, OutputReceipt, Read, Received, Session,
+    SetupReport,
+};
 pub type Result<T> = core::result::Result<T, Error>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -26,6 +29,10 @@ pub enum Error {
         expected: usize,
         actual: usize,
     },
+    QueuedOutput {
+        sequence: u64,
+        cause: alloc::boxed::Box<Error>,
+    },
     Controller {
         status: u8,
         event: alloc::vec::Vec<u8>,
@@ -38,7 +45,7 @@ pub enum Error {
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MT7925 media {self:?}")
+        write!(f, "USB Bluetooth media {self:?}")
     }
 }
 impl core::error::Error for Error {}

@@ -226,6 +226,35 @@ fn model(sub: u16) -> (Hci<Model>, Rc<RefCell<Trace>>) {
         trace,
     )
 }
+pub(super) type DiagnosticScript = VecDeque<(Vec<u8>, Vec<(Pipe, Vec<u8>)>)>;
+pub(super) fn diagnostic_fixture(sub: u16) -> (Device, Catalog, DiagnosticScript) {
+    let (hci, _) = model(sub);
+    // Future completions must remain in the peripheral until their exact
+    // command is delivered. Reset/minidriver settling genuinely polls HCI.
+    let replies = hci
+        .io
+        .steps
+        .iter()
+        .map(|step| {
+            (
+                step.command.clone(),
+                step.responses
+                    .iter()
+                    .map(|(bytes, _)| (Pipe::Event, bytes.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    (
+        hci.binding.device().clone(),
+        catalog(sub, false, image_bytes()),
+        replies,
+    )
+}
+pub(super) fn initialized_diagnostic_report(sub: u16) -> OwnedReport {
+    let (mut hci, _) = model(sub);
+    initialize(&mut hci, &catalog(sub, false, image_bytes())).unwrap()
+}
 fn attempt(error: &Error) -> (&Error, &Attempt) {
     match error {
         Error::Attempt { cause, observation } => (cause, observation),

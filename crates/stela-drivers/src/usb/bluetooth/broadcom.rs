@@ -5,6 +5,7 @@
 //! HCD commands are required. Success is historical protocol evidence, not
 //! vendor authentication, Bluetooth service readiness or physical qualification.
 //! USB media and the distinct BCM4377 PCIe transport remain separate backends.
+pub mod diagnostics;
 mod identity;
 mod initialize;
 mod patch;

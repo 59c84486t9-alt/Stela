@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: ISC
 // Copyright (C) 2021 MediaTek Inc.
-//! Owned MT7925 media session. Stream retirement never authorizes a shared
+//! Shared MT7925 media and Realtek CVSD SCO owner. Stream retirement never authorizes a shared
 //! connectivity reset, power transition or Wi-Fi sibling retirement.
 use super::{Bindings, Error, Kind, Pair, Result, Voice, framing};
 use crate::{
@@ -24,12 +24,33 @@ pub enum Loss {
     Bandwidth,
     BufferOverrun,
 }
+/// Completion authority for one accepted queued SCO packet. Retirement after
+/// cancellation cannot establish whether an unobserved radio delivery occurred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputDisposition {
+    Completed,
+    RetiredUnconfirmed,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputReceipt {
+    pub sequence: u64,
+    pub packet_bytes: usize,
+    pub disposition: OutputDisposition,
+}
 /// Physical media boundary for this same exclusively owned HCI function.
 /// Implementations retain all uncertain DMA, including on failed cancellation.
 /// Replace must cancel/drain and drop old endpoint contexts before SET_INTERFACE
 /// and fresh configuration. Successful quiesce permits only stream restart;
 /// it is no physical suspend/resume or shared-radio reset authority.
 pub trait MediaIo: Io {
+    /// Some(sequence) means accepted, never delivered. None is bounded
+    /// backpressure with no publication or ownership change.
+    fn queue_sco(&mut self, _bytes: &[u8]) -> Result<Option<u64>> {
+        Err(Error::Unsupported("queued SCO transport"))
+    }
+    fn poll_sco_output(&mut self) -> Result<Option<OutputReceipt>> {
+        Err(Error::Unsupported("queued SCO completion transport"))
+    }
     fn start_iso(
         &mut self,
         pair: Pair,
@@ -73,15 +94,16 @@ pub struct SetupReport {
 }
 
 pub struct Session<B: MediaIo> {
-    pub(super) hci: Hci<B>,
+    pub(in crate::usb::bluetooth) hci: Hci<B>,
     bindings: Bindings,
     sco: Option<Pair>,
     sco_frames: framing::Framer,
     iso_frames: framing::Framer,
     pending: Vec<Received>,
     lifecycle: Lifecycle,
-    setup: SetupReport,
+    setup: Option<SetupReport>,
     last_reset: Option<SetupReport>,
+    wideband_mtu: Option<u16>,
 }
 impl<B: MediaIo> Session<B> {
     /// Consume one initialized exact-device transport before handing it to a
@@ -95,8 +117,9 @@ impl<B: MediaIo> Session<B> {
             Ok((bindings, setup, pending)) => Ok(Self {
                 hci,
                 bindings,
-                setup,
+                setup: Some(setup),
                 last_reset: None,
+                wideband_mtu: None,
                 pending,
                 sco: None,
                 sco_frames: framing::Framer::new(Kind::Sco),
@@ -112,6 +135,63 @@ impl<B: MediaIo> Session<B> {
                     base,
                 })
             }
+        }
+    }
+    pub(in crate::usb::bluetooth) fn start_realtek(hci: Hci<B>) -> Result<Self> {
+        Self::start_standard(hci, true)
+    }
+    pub(in crate::usb::bluetooth) fn start_qca(hci: Hci<B>) -> Result<Self> {
+        Self::start_standard(hci, false)
+    }
+    fn start_standard(mut hci: Hci<B>, realtek: bool) -> Result<Self> {
+        let result = (|| {
+            hci.open().map_err(Error::Hci)?;
+            let bindings = if realtek {
+                Bindings::realtek_sco(hci.binding())
+            } else {
+                Bindings::qca_sco(hci.binding())
+            }?;
+            let d = &hci.binding().device().descriptor;
+            let usb = crate::usb::bluetooth::realtek::UsbIdentity {
+                vendor: u16::from_le_bytes([d[8], d[9]]),
+                product: u16::from_le_bytes([d[10], d[11]]),
+                revision: u16::from_le_bytes([d[12], d[13]]),
+            };
+            let ready = match hci.initialization() {
+                Some(Ok(InitializationReport::Realtek(report))) if realtek => {
+                    report.before.usb == usb
+                }
+                Some(Ok(InitializationReport::Qualcomm(report))) if !realtek => {
+                    (report.usb.vendor, report.usb.product, report.usb.revision)
+                        == (usb.vendor, usb.product, usb.revision)
+                }
+                _ => false,
+            };
+            if !ready {
+                return Err(Error::Unsupported(
+                    "retained matching live USB vendor initialization required",
+                ));
+            }
+            Ok(bindings)
+        })();
+        match result {
+            Ok(bindings) => Ok(Self {
+                hci,
+                bindings,
+                sco: None,
+                sco_frames: framing::Framer::new(Kind::Sco),
+                iso_frames: framing::Framer::new(Kind::Iso),
+                pending: Vec::new(),
+                lifecycle: Lifecycle::Running,
+                setup: None,
+                last_reset: None,
+                wideband_mtu: None,
+            }),
+            Err(cause) => Err(Error::Cleanup {
+                cause: alloc::boxed::Box::new(cause),
+                media: hci.io.close_media().err(),
+                base: hci.close().err(),
+            }),
         }
     }
     fn prepare(
@@ -231,13 +311,19 @@ impl<B: MediaIo> Session<B> {
         self.lifecycle
     }
     pub fn setup_report(&self) -> &SetupReport {
-        &self.setup
+        self.setup.as_ref().expect("MT7925 setup completion")
     }
     /// Latest ordinary HCI Reset completion, distinct from the historical vendor
     /// setup and any physical/shared reset authority. Its CC is also queued for
     /// the caller's HCI stack, in observed order with asynchronous packets.
     pub fn last_reset(&self) -> Option<&SetupReport> {
         self.last_reset.as_ref()
+    }
+    /// Move already observed historical packets at a completed command boundary.
+    /// This performs no live poll or ownership grant and cannot discard earlier
+    /// observations if a subsequent native read/retirement operation fails.
+    pub(in crate::usb::bluetooth) fn take_pending_observations(&mut self) -> Vec<Received> {
+        core::mem::take(&mut self.pending)
     }
     /// Historical initialization evidence for this retained owner, never proof
     /// that a later physical reset/power loss preserved radio state. Such a
@@ -271,9 +357,17 @@ impl<B: MediaIo> Session<B> {
             }
             return self.reset();
         }
-        if packet.len() >= 2
-            && matches!(u16::from_le_bytes([packet[0], packet[1]]), 0xfc6f | 0xfd98)
-        {
+        let reinitializes = if packet.len() >= 2 {
+            let opcode = u16::from_le_bytes([packet[0], packet[1]]);
+            match self.hci.initialization() {
+                Some(Ok(InitializationReport::MediaTek(_))) => matches!(opcode, 0xfc6f | 0xfd98),
+                Some(Ok(InitializationReport::Realtek(_))) => opcode == 0xfc20,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if reinitializes {
             return Err(Error::Unsupported(
                 "WMT/media setup requires retirement and fresh initialization",
             ));
@@ -297,6 +391,7 @@ impl<B: MediaIo> Session<B> {
         self.sco_frames.reset();
         self.iso_frames.reset();
         self.last_reset = None;
+        self.wideband_mtu = None;
         let report = Self::command(&mut self.hci, &[3, 0x0c, 0], &mut self.pending, true)
             .map_err(|e| self.fail(e))?;
         self.last_reset = Some(report);
@@ -317,6 +412,7 @@ impl<B: MediaIo> Session<B> {
         self.running()?;
         let next = self.bindings.sco(voice)?;
         if next == self.sco {
+            self.wideband_mtu = None;
             return Ok(());
         }
         self.hci
@@ -324,12 +420,80 @@ impl<B: MediaIo> Session<B> {
             .replace_sco(self.sco, next, dma)
             .map_err(|e| self.fail(e.into()))?;
         self.sco = next;
+        self.wideband_mtu = None;
         self.sco_frames.reset();
         Ok(())
     }
+    pub(in crate::usb::bluetooth) fn set_wideband_voice(
+        &mut self,
+        connections: u8,
+        mtu: u16,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<()> {
+        self.running()?;
+        let capable = match self.hci.initialization() {
+            Some(Ok(InitializationReport::Realtek(r))) => {
+                r.before.project == crate::usb::bluetooth::realtek::Project::Rtl8852Bu
+                    || matches!(
+                        (r.before.usb.vendor, r.before.usb.product),
+                        (0x0bda, 0x8771) | (0x0b05, 0x190e)
+                    )
+            }
+            Some(Ok(InitializationReport::Qualcomm(r))) => r.policy.wideband_speech,
+            _ => false,
+        };
+        if !capable {
+            return Err(Error::Unsupported(
+                "source initialized USB wideband capability",
+            ));
+        }
+        let next = self.bindings.wideband_sco(connections, mtu)?;
+        if next != self.sco {
+            self.hci
+                .io
+                .replace_sco(self.sco, next, dma)
+                .map_err(|e| self.fail(e.into()))?;
+            self.sco = next;
+            self.sco_frames.reset();
+        }
+        self.wideband_mtu = next.map(|_| mtu);
+        Ok(())
+    }
+    pub(in crate::usb::bluetooth) fn queue_sco(&mut self, packet: &[u8]) -> Result<Option<u64>> {
+        self.running()?;
+        framing::validate(Kind::Sco, packet)?;
+        let pair = self
+            .sco
+            .ok_or(Error::Unsupported("queued SCO requires active voice"))?;
+        if self
+            .wideband_mtu
+            .is_some_and(|mtu| usize::from(packet[2]) > usize::from(mtu))
+            || (self.wideband_mtu.is_some() && pair.alternate == 6 && packet.len() > 63)
+        {
+            return Err(Error::Packet("wideband packet exceeds actual MTU/service"));
+        }
+        self.hci.io.queue_sco(packet).map_err(|e| self.fail(e))
+    }
+    pub(in crate::usb::bluetooth) fn poll_sco_output(&mut self) -> Result<Option<OutputReceipt>> {
+        self.hci.io.validate()?;
+        if !matches!(self.lifecycle, Lifecycle::Running | Lifecycle::Quiescent) {
+            return Err(Error::Unsupported("queued output owner is terminal"));
+        }
+        self.hci.io.poll_sco_output().map_err(|e| self.fail(e))
+    }
     pub fn submit(&mut self, kind: Kind, packet: &[u8]) -> Result<()> {
         self.running()?;
+        if kind == Kind::Iso && !self.bindings.has_iso() {
+            return Err(Error::Unsupported(
+                "SCO-only USB transport has no HCI ISO interface",
+            ));
+        }
         framing::validate(kind, packet)?;
+        if kind == Kind::Sco && self.wideband_mtu.is_some() {
+            return Err(Error::Unsupported(
+                "wideband SCO requires queued output and completion polling",
+            ));
+        }
         if kind == Kind::Sco && self.sco.is_none() {
             return Err(Error::Unsupported(
                 "SCO has no selected active voice alternate",
@@ -353,6 +517,9 @@ impl<B: MediaIo> Session<B> {
                 .map(Received::Hci),
         );
         for kind in [Kind::Iso, Kind::Sco] {
+            if kind == Kind::Iso && !self.bindings.has_iso() {
+                continue;
+            }
             if kind == Kind::Sco && self.sco.is_none() {
                 continue;
             }

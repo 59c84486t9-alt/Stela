@@ -1956,13 +1956,15 @@ mod native_models {
     }
     #[test]
     fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_exact_owners() {
-        for failure in 0..5 {
+        for failure in 0..7 {
             let (mut inputs, h, registry, _) = inputs();
             match failure {
                 0 => inputs.clock.ticks_per_microsecond = 0,
                 1 => inputs.function.device = 0xffff,
                 2 => inputs.function.config().write16(4, 2),
                 3 => inputs.function.config().write16(0x52, 0x8000),
+                5 => inputs.clock.ticks_per_microsecond = u64::MAX,
+                6 => inputs.clock.ticks_per_microsecond = u64::MAX / 2 / 120_000_000 + 1,
                 _ => {
                     inputs.bars[0] = None;
                 }

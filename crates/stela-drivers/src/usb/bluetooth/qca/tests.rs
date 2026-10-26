@@ -247,6 +247,18 @@ fn model(
         trace,
     )
 }
+pub(super) fn initialized_media_report(kind: Kind) -> OwnedReport {
+    let rom = if kind == Kind::Rome {
+        0x00000302
+    } else {
+        0x00130201
+    };
+    let before = version(rom, 1, 0x1234, 0, 0, 0);
+    let mut after = before.clone();
+    after.raw[4..8].copy_from_slice(&2u32.to_le_bytes());
+    let (mut hci, catalog, _) = model(before, after, 0, 4, 4);
+    initialize(&mut hci, &catalog).unwrap()
+}
 fn attempt(error: &Error) -> (&Error, &Attempt) {
     match error {
         Error::Attempt { cause, observation } => (cause, observation),

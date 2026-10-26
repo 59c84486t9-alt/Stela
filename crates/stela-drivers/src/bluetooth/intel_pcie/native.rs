@@ -265,6 +265,7 @@ pub struct NativePlatform<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     signals: Option<Arc<Signals<R>>>,
     interrupts: &'static dyn IrqController,
     clock: Clock,
+    clock_origin: u64,
     registration: Option<Box<dyn IrqRegistration>>,
     attempted: bool,
     retired: bool,
@@ -286,6 +287,14 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
         mut inputs: Inputs<C, B, R>,
     ) -> core::result::Result<Self, (Error, Inputs<C, B, R>)> {
         let valid = (|| {
+            inputs
+                .clock
+                .check_duration(120_000_000)
+                .map_err(|_| Error::Requirement("qualified representable native TSC timing"))?;
+            let clock_origin = inputs
+                .clock
+                .try_start()
+                .map_err(|_| Error::Requirement("qualified native TSC origin"))?;
             let f = &mut inputs.function;
             if f.vendor != 0x8086
                 || !super::DEVICE_IDS.contains(&f.device)
@@ -308,15 +317,18 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                     "same actual BAR0 register/MSI-X resource owner",
                 ));
             }
-            Ok(Identity {
-                address: f.address,
-                vendor: f.vendor,
-                device: f.device,
-                subsystem_vendor: f.config().read16(0x2c),
-                subsystem_device: f.config().read16(0x2e),
-            })
+            Ok((
+                Identity {
+                    address: f.address,
+                    vendor: f.vendor,
+                    device: f.device,
+                    subsystem_vendor: f.config().read16(0x2c),
+                    subsystem_device: f.config().read16(0x2e),
+                },
+                clock_origin,
+            ))
         })();
-        let identity = match valid {
+        let (identity, clock_origin) = match valid {
             Ok(identity) => identity,
             Err(error) => return Err((error, inputs)),
         };
@@ -365,6 +377,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             })),
             interrupts,
             clock,
+            clock_origin,
             registration: None,
             attempted: false,
             retired: false,
@@ -441,7 +454,9 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
             .map_err(Into::into)
     }
     fn now_us(&self) -> u64 {
-        self.clock.now_us()
+        self.clock
+            .try_elapsed_us(self.clock_origin)
+            .expect("admitted Intel PCIe native clock")
     }
     fn arm_vector_zero(&mut self) -> DriverResult<()> {
         if self.attempted {

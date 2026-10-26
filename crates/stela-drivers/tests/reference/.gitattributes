@@ -1,0 +1,5 @@
+# Immutable Bluetooth donor-output fixtures use canonical Linux bytes.
+realtek-sco.csv text eol=lf
+realtek-wideband.txt text eol=lf
+qca-wideband.txt text eol=lf
+broadcom-diag.txt text eol=lf

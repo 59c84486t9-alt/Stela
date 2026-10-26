@@ -21,11 +21,9 @@ pub(in crate::usb::bluetooth) fn peer(hci: Hci<Host>, dma: &mut dyn DmaAllocator
         pending: vec![Received::Hci(Packet::Event(vec![0xff, 1, 0x5a]))],
         lifecycle: Lifecycle::Running,
         // Deliberately no fabricated synchronous completion or command credit.
-        setup: SetupReport {
-            completion: Vec::new(),
-            command_credits: 0,
-        },
+        setup: None,
         last_reset: None,
+        wideband_mtu: None,
     };
     // This already selected voice is admitted while the genuine owner is live.
     session.set_voice(voice(), dma).unwrap();

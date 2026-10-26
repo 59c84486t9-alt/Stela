@@ -37,9 +37,10 @@ impl Pair {
 /// neither initializes firmware nor claims any endpoint or DMA ownership.
 #[derive(Clone, Debug)]
 pub struct Bindings {
-    pub(super) iso: Pair,
+    pub(super) iso: Option<Pair>,
     pub(super) sco: Vec<Interface>,
     pub(super) speed: u8,
+    use_alt3_for_wbs: bool,
 }
 impl Bindings {
     pub fn new(binding: &Binding) -> Result<Self> {
@@ -84,13 +85,71 @@ impl Bindings {
             }
         }
         Ok(Self {
-            iso,
+            iso: Some(iso),
             sco,
             speed: device.speed,
+            use_alt3_for_wbs: false,
         })
     }
     pub fn iso(&self) -> Pair {
-        self.iso
+        self.iso.expect("MT7925 third-interface plan")
+    }
+    pub(in crate::usb::bluetooth) fn has_iso(&self) -> bool {
+        self.iso.is_some()
+    }
+    /// Source ordinary USB2 SCO plan, without MediaTek's third interface.
+    pub(in crate::usb::bluetooth) fn realtek_sco(binding: &Binding) -> Result<Self> {
+        let device = binding.device();
+        if !super::super::super::realtek::is_candidate(device) || binding.interface() != 0 {
+            return Err(Error::Unsupported("exact initialized Realtek USB profile"));
+        }
+        Self::standard_sco(binding, true)
+    }
+    pub(in crate::usb::bluetooth) fn qca_sco(binding: &Binding) -> Result<Self> {
+        if !super::super::super::qca::is_candidate(binding.device()) || binding.interface() != 0 {
+            return Err(Error::Unsupported("exact initialized QCA USB profile"));
+        }
+        Self::standard_sco(binding, false)
+    }
+    fn standard_sco(binding: &Binding, use_alt3_for_wbs: bool) -> Result<Self> {
+        let device = binding.device();
+        let interfaces = xhci::interfaces(&device.configuration);
+        let sco: Vec<_> = interfaces
+            .iter()
+            .filter(|i| i.number == 1)
+            .cloned()
+            .collect();
+        if !sco
+            .iter()
+            .any(|i| i.alternate == 0 && i.endpoints.is_empty())
+            || sco
+                .iter()
+                .any(|i| (i.class, i.subclass, i.protocol) != (0xe0, 1, 1))
+        {
+            return Err(Error::Descriptor(
+                "standard SCO interface1 with empty alternate0",
+            ));
+        }
+        // The function owns only interface1. No alternate may alias any other
+        // interface, including an unclaimed composite sibling.
+        for setting in &sco {
+            for endpoint in &setting.endpoints {
+                if interfaces
+                    .iter()
+                    .filter(|i| i.number != 1)
+                    .flat_map(|i| &i.endpoints)
+                    .any(|ep| ep.dci() == endpoint.dci())
+                {
+                    return Err(Error::Descriptor("SCO endpoint aliases another interface"));
+                }
+            }
+        }
+        Ok(Self {
+            iso: None,
+            sco,
+            speed: device.speed,
+            use_alt3_for_wbs,
+        })
     }
     pub(in crate::usb::bluetooth) fn accepts_sco(&self, pair: Pair) -> bool {
         self.sco
@@ -112,13 +171,14 @@ impl Bindings {
             }
             AirMode::Cvsd => voice.connections,
             // This MediaTek tuple has WIDEBAND_SPEECH, not USE_ALT3_FOR_WBS.
-            AirMode::Transparent => {
+            AirMode::Transparent if self.iso.is_some() => {
                 if self.sco.iter().any(|i| i.alternate == 6) {
                     6
                 } else {
                     1
                 }
             }
+            AirMode::Transparent => return Err(Error::Unsupported("Realtek wideband SCO policy")),
         };
         let selected = self
             .sco
@@ -126,6 +186,42 @@ impl Bindings {
             .find(|i| i.alternate == alternate)
             .ok_or(Error::Descriptor("source-selected SCO alternate missing"))?;
         pair(selected, self.speed, 1).map(Some)
+    }
+    pub(in crate::usb::bluetooth) fn wideband_sco(
+        &self,
+        connections: u8,
+        mtu: u16,
+    ) -> Result<Option<Pair>> {
+        if self.has_iso() || connections > 3 || mtu == 0 {
+            return Err(Error::Unsupported("Realtek wideband voice/MTU profile"));
+        }
+        if connections == 0 {
+            return Ok(None);
+        }
+        let alternate = if self.sco.iter().any(|i| i.alternate == 6) {
+            6
+        } else if self.use_alt3_for_wbs && mtu >= 72 && self.sco.iter().any(|i| i.alternate == 3) {
+            3
+        } else {
+            1
+        };
+        let selected = self
+            .sco
+            .iter()
+            .find(|i| i.alternate == alternate)
+            .ok_or(Error::Descriptor("source wideband SCO alternate missing"))?;
+        let selected = pair(selected, self.speed, 1)?;
+        // Source alt6 pacing is in milliseconds: six/seven empty services plus
+        // one <=63-byte HCI packet. An arbitrary interval cannot encode it.
+        if alternate == 6
+            && (service_bytes(selected.output) != 63
+                || selected.output.interval != if self.speed == FULL_SPEED { 1 } else { 4 })
+        {
+            return Err(Error::Descriptor(
+                "wideband alternate6 requires 63-byte 1ms output",
+            ));
+        }
+        Ok(Some(selected))
     }
 }
 pub(in crate::usb::bluetooth) fn service_bytes(endpoint: Endpoint) -> usize {
@@ -182,10 +278,10 @@ mod tests {
         let b = Bindings::new(&binding).unwrap();
         assert_eq!(
             (
-                b.iso.interface,
-                b.iso.alternate,
-                b.iso.input.address,
-                b.iso.output.address
+                b.iso().interface,
+                b.iso().alternate,
+                b.iso().input.address,
+                b.iso().output.address
             ),
             (2, 1, 0x85, 5)
         );

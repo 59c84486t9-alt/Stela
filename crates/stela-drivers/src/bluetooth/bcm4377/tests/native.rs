@@ -2,6 +2,21 @@
 //! Native config/mapping/Registry models composed with the literal IPC device.
 //! These are software ownership/effect tests, not physical platform qualification.
 use super::*;
+#[test]
+fn native_clock_rejects_invalid_calibration_and_unrepresentable_attempt_before_attachment() {
+    for rate in [0, u64::MAX, u64::MAX / 2 / 120_000_000 + 1] {
+        // SAFETY: constructor receives deliberately invalid negative metadata;
+        // it must refuse before exposing a native time/attachment authority.
+        assert!(
+            unsafe {
+                crate::bluetooth::bcm4377::native::NativeClock::new(crate::Clock {
+                    ticks_per_microsecond: rate,
+                })
+            }
+            .is_err()
+        );
+    }
+}
 use crate::bluetooth::bcm4377::native::{
     self as host, Configuration, Inputs, MappedRegisters, MsiCompletion, NativePlatform, Registers,
     Time,

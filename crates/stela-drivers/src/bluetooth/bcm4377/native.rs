@@ -81,23 +81,28 @@ unsafe impl Configuration for OwnedConfig {
 pub unsafe trait Time: 'static {
     fn now_us(&self) -> u64;
 }
-pub struct NativeClock(Clock);
+pub struct NativeClock(Clock, u64);
 impl NativeClock {
     /// # Safety
     /// This is the platform's actually calibrated invariant TSC; it advances
     /// monotonically on every execution context admitted by this attachment.
     pub unsafe fn new(clock: Clock) -> Result<Self, Error> {
-        if clock.ticks_per_microsecond == 0 {
-            return Err(Error::Requirement("qualified nonzero native TSC rate"));
-        }
-        Ok(Self(clock))
+        clock
+            .check_duration(120_000_000)
+            .map_err(|_| Error::Requirement("qualified representable native TSC timing"))?;
+        let origin = clock
+            .try_start()
+            .map_err(|_| Error::Requirement("qualified native TSC origin"))?;
+        Ok(Self(clock, origin))
     }
 }
 // SAFETY: native attachment additionally requires calibrated invariant TSC and
 // an execution context with monotonic, advancing same-platform observations.
 unsafe impl Time for NativeClock {
     fn now_us(&self) -> u64 {
-        self.0.now_us()
+        self.0
+            .try_elapsed_us(self.1)
+            .expect("admitted BCM4377 native clock")
     }
 }
 

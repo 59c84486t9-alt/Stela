@@ -6,6 +6,7 @@
 //! A completed upload is not vendor authentication or radio/guest readiness.
 mod identity;
 mod initialize;
+pub mod media;
 mod packet;
 use super::{FirmwareReceipt, Hci, Io};
 use alloc::{boxed::Box, vec::Vec};

@@ -9,6 +9,7 @@
 mod firmware;
 mod identity;
 mod initialize;
+pub mod media;
 mod v2;
 pub use firmware::{Configuration, Fragment, Patch, Project, Staged};
 pub use identity::{Identity, LocalVersion, UsbIdentity};
@@ -178,6 +179,10 @@ mod tests {
     use alloc::{collections::VecDeque, rc::Rc, string::String};
     use core::cell::{Cell, RefCell};
     use sha2::{Digest, Sha256};
+    pub(super) fn initialized_report(project: Project) -> OwnedReport {
+        let (mut hci, catalog, _) = fixture(project, true);
+        initialize(&mut hci, &catalog).unwrap()
+    }
     struct Step {
         parameters: Vec<u8>,
         response: Vec<u8>,

@@ -11,9 +11,22 @@ use crate::{
 use alloc::vec::Vec;
 use core::sync::atomic::{Ordering, fence};
 
+mod diagnostics;
 mod media;
 
 const SEND_US: u64 = 5_000_000;
+// MediaTek's complete initialization attempt is the longest USB vendor budget.
+const MAX_NATIVE_BUDGET_US: u64 = 180_000_000;
+pub(in crate::usb::bluetooth) const CLOCK_REQUIREMENT: &str =
+    "qualified representable USB Bluetooth timing";
+pub(in crate::usb::bluetooth) fn clock_origin(clock: Clock) -> Result<u64, BlockError> {
+    clock
+        .check_duration(MAX_NATIVE_BUDGET_US)
+        .map_err(|_| BlockError::Unsupported(CLOCK_REQUIREMENT))?;
+    clock
+        .try_start()
+        .map_err(|_| BlockError::Unsupported(CLOCK_REQUIREMENT))
+}
 
 struct Receive {
     endpoint: Endpoint,
@@ -27,6 +40,7 @@ pub struct Host {
     controller: Shared,
     id: SlotId,
     clock: Clock,
+    clock_origin: u64,
     events: Receive,
     input: Receive,
     output: Endpoint,
@@ -35,6 +49,7 @@ pub struct Host {
     control_pending: bool,
     closed: bool,
     media: Option<media::Native>,
+    diagnostics: Option<diagnostics::Native>,
 }
 
 impl Hci<Host> {
@@ -46,6 +61,7 @@ impl Hci<Host> {
     ) -> Result<Self, BlockError> {
         controller.borrow_mut().device(device.id)?;
         let clock = controller.borrow().clock;
+        let clock_origin = clock_origin(clock)?;
         // Power-of-two size/alignment keeps each single-TRB buffer within a
         // 64 KiB boundary, including the largest supported ACL packet.
         let events = Receive {
@@ -64,6 +80,7 @@ impl Hci<Host> {
             controller,
             id: device.id,
             clock,
+            clock_origin,
             events,
             input,
             output,
@@ -72,6 +89,7 @@ impl Hci<Host> {
             control_pending: false,
             closed: false,
             media: None,
+            diagnostics: None,
         };
         Ok(Self::from_io(binding, host))
     }
@@ -95,7 +113,10 @@ impl Host {
                 "unretired USB Bluetooth bulk output",
             ));
         }
-        let deadline = self.clock.deadline(timeout_us);
+        let deadline = self
+            .clock
+            .try_deadline(timeout_us)
+            .map_err(|_| BlockError::Unsupported(CLOCK_REQUIREMENT))?;
         self.open()?;
         if packet.len() > self.transmit.len() {
             return Err(BlockError::Unsupported("USB Bluetooth bulk buffer size"));
@@ -245,6 +266,13 @@ impl Io for Host {
         } else {
             None
         };
+        if let Some(mut diagnostics) = self.diagnostics.take() {
+            let result = diagnostics.close(self);
+            self.diagnostics = Some(diagnostics);
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
         self.closed = true;
         let mut controller = self.controller.borrow_mut();
         let mut device = controller.device(self.id)?;
@@ -271,7 +299,9 @@ impl Io for Host {
         }
     }
     fn now_us(&self) -> u64 {
-        self.clock.now_us()
+        self.clock
+            .try_elapsed_us(self.clock_origin)
+            .expect("admitted native Bluetooth clock")
     }
 }
 
@@ -366,7 +396,43 @@ mod tests {
         }
     }
     #[test]
-    fn firmware_bulk_uses_actual_dma_and_expired_or_zero_budget_never_publishes() {
+    fn native_attachment_refuses_invalid_clock_before_dma_or_device_publication() {
+        use alloc::rc::Rc;
+        use core::cell::RefCell;
+        struct NoAllocation;
+        impl DmaAllocator for NoAllocation {
+            fn allocate(&mut self, _: usize, _: usize) -> Result<DmaBuffer, BlockError> {
+                panic!("invalid clock reached DMA allocation")
+            }
+        }
+        for rate in [0, u64::MAX, u64::MAX / 2 / MAX_NATIVE_BUDGET_US + 1] {
+            let mut backing = vec![0u64; 64 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: retained fixture exclusively owns backing until teardown.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = xhci::model::cancellation_controller(&mut dma);
+            let device = firmware_device(controller.test_device_id(1).unwrap());
+            let binding =
+                Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            controller.clock.ticks_per_microsecond = rate;
+            let before = backing.clone();
+            let commands = model.borrow().seen.clone();
+            let result = Hci::attach(
+                Rc::new(RefCell::new(controller)),
+                &device,
+                binding,
+                &mut NoAllocation,
+            );
+            assert!(matches!(
+                result,
+                Err(BlockError::Unsupported(CLOCK_REQUIREMENT))
+            ));
+            assert_eq!(backing, before);
+            assert_eq!(model.borrow().seen, commands);
+        }
+    }
+    #[test]
+    fn firmware_bulk_uses_actual_dma_and_invalid_or_zero_budget_never_publishes() {
         use alloc::rc::Rc;
         use core::cell::RefCell;
         let mut backing = vec![0u64; 64 * 1024];
@@ -389,7 +455,7 @@ mod tests {
         hci.io.clock.ticks_per_microsecond = 0;
         assert_eq!(
             hci.io.write_firmware(&[0xcc; 64], 3_000_000),
-            Err(BlockError::Timeout)
+            Err(BlockError::Unsupported(CLOCK_REQUIREMENT))
         );
         assert_eq!(backing, before);
         assert!(!hci.io.transmit_pending);

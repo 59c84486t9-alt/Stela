@@ -30,7 +30,9 @@
 //! dump signatures fail the attachment and retain the first raw fault.
 //! A successful USB command submission is not HCI Command Complete/Status.
 //! The separate [`mediatek::media`] session adds this PC's initialized MT7925
-//! SCO/interrupt-ISO transport. Generic media, bulk serialization, physical
+//! SCO/interrupt-ISO transport. [`realtek::media`] and [`qca::media`] add
+//! initialized source profiles' CVSD/queued wideband SCO and bounded delivery
+//! receipts. QCA adds explicit acknowledged HCI shutdown. Broader media, physical
 //! suspend/resume, hotplug reattachment and guest USB forwarding remain separate.
 //!
 //! Receive requests remain posted while idle; polling never waits for radio

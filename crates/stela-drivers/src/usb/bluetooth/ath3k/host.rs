@@ -16,6 +16,7 @@ pub struct Host {
     controller: Shared,
     id: SlotId,
     clock: Clock,
+    clock_origin: u64,
     output: u8,
     buffer: DmaBuffer,
     pending: bool,
@@ -29,8 +30,11 @@ impl Bootloader<Host> {
         dma: &mut dyn DmaAllocator,
     ) -> core::result::Result<Self, BlockError> {
         controller.borrow_mut().device(binding.device.id)?;
+        let clock = controller.borrow().clock;
+        let clock_origin = super::super::host::clock_origin(clock)?;
         let io = Host {
-            clock: controller.borrow().clock,
+            clock,
+            clock_origin,
             id: binding.device.id,
             output: binding.output.dci(),
             controller: controller.clone(),
@@ -107,7 +111,10 @@ impl Io for Host {
         if self.pending {
             return Err(BlockError::Unsupported("ATH3K unretired bulk output"));
         }
-        let deadline = self.clock.deadline(timeout);
+        let deadline = self
+            .clock
+            .try_deadline(timeout)
+            .map_err(|_| BlockError::Unsupported(super::super::host::CLOCK_REQUIREMENT))?;
         self.open()?;
         self.controller
             .borrow_mut()
@@ -166,7 +173,9 @@ impl Io for Host {
         failure.map_or(Ok(()), Err)
     }
     fn now_us(&self) -> u64 {
-        self.clock.now_us()
+        self.clock
+            .try_elapsed_us(self.clock_origin)
+            .expect("admitted ATH3K native clock")
     }
 }
 impl Drop for Host {
