@@ -53,6 +53,7 @@ pub enum StatusEvent {
 pub(super) struct StatusPlan {
     endpoint: Endpoint,
     graph: Graph,
+    connectors: super::connector::ConnectorPlan,
 }
 impl StatusPlan {
     pub(super) fn discover(binding: &Binding, configuration: &[u8]) -> Result<Option<Self>, Error> {
@@ -108,6 +109,7 @@ impl StatusPlan {
         Ok(Some(Self {
             endpoint,
             graph: binding.graph.clone(),
+            connectors: super::connector::ConnectorPlan::discover(binding, configuration)?,
         }))
     }
     fn message_bytes(&self) -> usize {
@@ -178,8 +180,10 @@ impl StatusPlan {
                     .get(usize::from(channel))
                     .is_some_and(|bits| access(*bits, 16))
             }
-            // Terminal bmControls and memory-space authority are not retained in
-            // the current graph. Mixer MCN uses a different address convention.
+            Entity::Input { id, .. } | Entity::Output { id, .. } => {
+                selector == 2 && channel == 0 && self.connectors.supports(*id)
+            }
+            // Mixer MCN uses a different address convention.
             _ => return Err(Error::Unsupported("UAC2 status entity control layout")),
         };
         if !readable {

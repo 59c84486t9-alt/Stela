@@ -125,6 +125,7 @@ pub(crate) fn refuse(peer: &mut Peer, target: &Shared) {
     refused!(peer.owner.start_playback(0, 48_000, &[0; 192], false));
     refused!(peer.owner.write_playback(&[0; 192]));
     refused!(peer.owner.finish_playback());
+    refused!(peer.owner.connector_status(3));
     refused!(peer.owner.start_capture(0, 48_000));
     let mut output = [0xa5; 192];
     refused!(peer.owner.read_capture(&mut output));

@@ -114,6 +114,12 @@ pub struct AudioDevice<T: Transport> {
 }
 
 impl AudioDevice<super::Native> {
+    /// Query an advertised UAC2 terminal connector through actual native EP0.
+    /// The returned channel observation grants no routing or PCM authority.
+    pub fn connector_status(&mut self, terminal: u8) -> Result<super::ConnectorStatus, Error> {
+        self.ready()?;
+        self.transport.connector_status(terminal)
+    }
     /// Create an idle owner for the actual optional UAC1/UAC2 AC status endpoint.
     /// Call `start`, poll and drain notices explicitly, then acknowledge `stop`.
     pub fn status_notifications(

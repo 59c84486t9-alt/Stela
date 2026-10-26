@@ -23,7 +23,9 @@ mod power;
 pub use power::PowerDomain;
 pub use uac1::EndpointRates;
 
+mod connector;
 mod control;
+pub use connector::ConnectorStatus;
 mod descriptors;
 mod feature;
 pub use feature::{FeatureControl, FeatureRange, FeatureValue};

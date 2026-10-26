@@ -86,8 +86,16 @@ pub struct Native {
     playback: Arena,
     capture: Arena,
     status_plan: Result<Option<super::status::StatusPlan>, super::Error>,
+    connector_plan: Result<super::connector::ConnectorPlan, super::Error>,
 }
 impl Native {
+    pub(super) fn connector_status(
+        &mut self,
+        terminal: u8,
+    ) -> Result<super::ConnectorStatus, super::Error> {
+        self.validate()?;
+        self.connector_plan.clone()?.read(self, terminal)
+    }
     pub(super) fn status_notifications(
         &self,
         dma: &mut dyn DmaAllocator,
@@ -225,6 +233,8 @@ impl UsbAudio {
         // Optional status admission never changes the existing PCM binding.
         // Retain an explicit refusal until the caller requests that service.
         let status_plan = super::status::StatusPlan::discover(&binding, &device.configuration);
+        let connector_plan =
+            super::connector::ConnectorPlan::discover(&binding, &device.configuration);
         let native = Native {
             shared,
             id: device.id,
@@ -232,6 +242,7 @@ impl UsbAudio {
             playback: Arena::new(dma)?,
             capture: Arena::new(dma)?,
             status_plan,
+            connector_plan,
         };
         Self::new(native, binding, dma).map_err(|error| match error {
             super::Error::Transport(e) => e,
@@ -335,6 +346,9 @@ mod tests {
                 playback: Arena::new(&mut dma).unwrap(),
                 capture: Arena::new(&mut dma).unwrap(),
                 status_plan: Ok(None),
+                connector_plan: Err(super::super::Error::Unsupported(
+                    "fixture has no connector binding",
+                )),
             };
             let ep = Endpoint {
                 address: 0x82,
