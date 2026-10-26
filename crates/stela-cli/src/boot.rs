@@ -410,8 +410,7 @@ pub(crate) struct Prepare {
     update: bool,
     /// Boot recoveryOS with the installed system's kernel: the kernel roots
     /// from a volume in memory holding the BaseSystem image, then from that
-    /// image. Needs `/usr/bin/aea` to decrypt BaseSystem and
-    /// `/usr/bin/hdiutil` to make the volume.
+    /// image.
     #[arg(long)]
     recovery: bool,
     /// The public AEA key (PKCS8 PEM) for BaseSystem; fetched from Apple's
@@ -692,7 +691,7 @@ fn base_system(
         RAMDISK_LIMIT,
     )?)?;
     let (_, image_sha256) = restore::payload::file_sha256(&image)?;
-    let (bytes, volume_uuid) = recovery_volume::build(&image, work.path(), RECOVERY_VOLUME_LIMIT)?;
+    let (bytes, volume_uuid) = recovery_volume::build(&image, RECOVERY_VOLUME_LIMIT)?;
     let source = Source {
         component: BASE_SYSTEM.into(),
         member: member.into(),

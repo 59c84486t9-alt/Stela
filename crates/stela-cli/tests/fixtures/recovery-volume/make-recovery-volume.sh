@@ -1,7 +1,8 @@
 #!/bin/sh
-# Make recovery-volume.img.gz: the recoveryOS volume `stela boot prepare
-# --recovery` builds (boot/recovery_volume.rs, the same hdiutil arguments),
-# holding a 4096-byte synthetic file in place of the BaseSystem image.
+# Make recovery-volume.img.gz: Apple's own form of the recoveryOS volume
+# `stela boot prepare --recovery` writes (boot/recovery_volume.rs), from
+# hdiutil, holding a 4096-byte synthetic file in place of the BaseSystem
+# image. It is the reference the written volume's key hashes are checked on.
 # Needs macOS (hdiutil); no root.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
