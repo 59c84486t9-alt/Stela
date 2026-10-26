@@ -1,0 +1,219 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 09:02:20 -0700
+Subject: [PATCH] refactor(seq-file): separate buffer output helpers
+
+---
+ fs/Makefile     |  2 +-
+ fs/seq_file.c   | 53 +--------------------------------
+ fs/seq_output.c | 78 +++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/seq_output.h | 17 +++++++++++
+ 4 files changed, 97 insertions(+), 53 deletions(-)
+ create mode 100644 fs/seq_output.c
+ create mode 100644 fs/seq_output.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 89a8a9d207d1c5b0943c8832615bb708d52b9f78..634be099b8fedd9cbedad4ed78a6eb968303ca9d 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -11,7 +11,7 @@ obj-y :=	open.o read_write.o file_table.o super.o \
+ 		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o \
+ 		attr.o bad_inode.o file.o filesystems.o namespace.o \
+-		seq_file.o xattr.o libfs.o fs-writeback.o \
++		seq_file.o seq_output.o xattr.o libfs.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+ 		fs_dirent.o fs_context.o fs_parser.o fsopen.o init.o \
+diff --git a/fs/seq_file.c b/fs/seq_file.c
+index 4745db2a34d12b1084cb059a667c367f4fb56dad..3ddfaf146f6842cb87aaf73960ba805a04c259e6 100644
+--- a/fs/seq_file.c
++++ b/fs/seq_file.c
+@@ -26,10 +26,7 @@
+ 
+ static struct kmem_cache *seq_file_cache __ro_after_init;
+ 
+-static void seq_set_overflow(struct seq_file *m)
+-{
+-	m->count = m->size;
+-}
++#include "seq_output.h"
+ 
+ static void *seq_buf_alloc(unsigned long size)
+ {
+@@ -384,30 +381,6 @@ void seq_escape_mem(struct seq_file *m, const char *src, size_t len,
+ }
+ EXPORT_SYMBOL(seq_escape_mem);
+ 
+-void seq_vprintf(struct seq_file *m, const char *f, va_list args)
+-{
+-	int len;
+-
+-	if (m->count < m->size) {
+-		len = vsnprintf(m->buf + m->count, m->size - m->count, f, args);
+-		if (m->count + len < m->size) {
+-			m->count += len;
+-			return;
+-		}
+-	}
+-	seq_set_overflow(m);
+-}
+-EXPORT_SYMBOL(seq_vprintf);
+-
+-void seq_printf(struct seq_file *m, const char *f, ...)
+-{
+-	va_list args;
+-
+-	va_start(args, f);
+-	seq_vprintf(m, f, args);
+-	va_end(args);
+-}
+-EXPORT_SYMBOL(seq_printf);
+ 
+ #ifdef CONFIG_BINARY_PRINTF
+ void seq_bprintf(struct seq_file *m, const char *f, const u32 *binary)
+@@ -670,11 +643,6 @@ void seq_putc(struct seq_file *m, char c)
+ }
+ EXPORT_SYMBOL(seq_putc);
+ 
+-void __seq_puts(struct seq_file *m, const char *s)
+-{
+-	seq_write(m, s, strlen(s));
+-}
+-EXPORT_SYMBOL(__seq_puts);
+ 
+ /**
+  * seq_put_decimal_ull_width - A helper routine for putting decimal numbers
+@@ -813,25 +781,6 @@ overflow:
+ }
+ EXPORT_SYMBOL(seq_put_decimal_ll);
+ 
+-/**
+- * seq_write - write arbitrary data to buffer
+- * @seq: seq_file identifying the buffer to which data should be written
+- * @data: data address
+- * @len: number of bytes
+- *
+- * Return 0 on success, non-zero otherwise.
+- */
+-int seq_write(struct seq_file *seq, const void *data, size_t len)
+-{
+-	if (seq->count + len < seq->size) {
+-		memcpy(seq->buf + seq->count, data, len);
+-		seq->count += len;
+-		return 0;
+-	}
+-	seq_set_overflow(seq);
+-	return -1;
+-}
+-EXPORT_SYMBOL(seq_write);
+ 
+ /**
+  * seq_pad - write padding spaces to buffer
+diff --git a/fs/seq_output.c b/fs/seq_output.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b7728f3688514ab294a5b87b094eabafa621f40
+--- /dev/null
++++ b/fs/seq_output.c
+@@ -0,0 +1,78 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * linux/fs/seq_file.c
++ *
++ * helper functions for making synthetic files from sequences of records.
++ * initial implementation -- AV, Oct 2001.
++ */
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <linux/cache.h>
++#include <linux/fs.h>
++#include <linux/export.h>
++#include <linux/hex.h>
++#include <linux/seq_file.h>
++#include <linux/vmalloc.h>
++#include <linux/slab.h>
++#include <linux/cred.h>
++#include <linux/mm.h>
++#include <linux/printk.h>
++#include <linux/string_helpers.h>
++#include <linux/uio.h>
++
++#include <linux/uaccess.h>
++#include <asm/page.h>
++
++#include "seq_output.h"
++
++void seq_vprintf(struct seq_file *m, const char *f, va_list args)
++{
++	int len;
++
++	if (m->count < m->size) {
++		len = vsnprintf(m->buf + m->count, m->size - m->count, f, args);
++		if (m->count + len < m->size) {
++			m->count += len;
++			return;
++		}
++	}
++	seq_set_overflow(m);
++}
++EXPORT_SYMBOL(seq_vprintf);
++
++void seq_printf(struct seq_file *m, const char *f, ...)
++{
++	va_list args;
++
++	va_start(args, f);
++	seq_vprintf(m, f, args);
++	va_end(args);
++}
++EXPORT_SYMBOL(seq_printf);
++
++void __seq_puts(struct seq_file *m, const char *s)
++{
++	seq_write(m, s, strlen(s));
++}
++EXPORT_SYMBOL(__seq_puts);
++
++/**
++ * seq_write - write arbitrary data to buffer
++ * @seq: seq_file identifying the buffer to which data should be written
++ * @data: data address
++ * @len: number of bytes
++ *
++ * Return 0 on success, non-zero otherwise.
++ */
++int seq_write(struct seq_file *seq, const void *data, size_t len)
++{
++	if (seq->count + len < seq->size) {
++		memcpy(seq->buf + seq->count, data, len);
++		seq->count += len;
++		return 0;
++	}
++	seq_set_overflow(seq);
++	return -1;
++}
++EXPORT_SYMBOL(seq_write);
+diff --git a/fs/seq_output.h b/fs/seq_output.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..49cb5bbab69d5f76a14ff1124e312fe93aeea55b
+--- /dev/null
++++ b/fs/seq_output.h
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * linux/fs/seq_file.c
++ *
++ * helper functions for making synthetic files from sequences of records.
++ * initial implementation -- AV, Oct 2001.
++ */
++
++#ifndef FS_SEQ_OUTPUT_H
++#define FS_SEQ_OUTPUT_H
++#include <linux/seq_file.h>
++
++static void seq_set_overflow(struct seq_file *m)
++{
++	m->count = m->size;
++}
++#endif

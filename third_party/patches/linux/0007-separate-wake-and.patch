@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 06:41:18 -0700
+Subject: [PATCH] refactor(rcuwait): separate wake and finish helpers
+
+---
+ kernel/Makefile             |  2 +-
+ kernel/exit.c               | 29 --------------------------
+ kernel/rcu/Makefile         |  2 +-
+ kernel/rcu/rcuwait_finish.c | 31 ++++++++++++++++++++++++++++
+ kernel/rcu/update.c         |  7 -------
+ kernel/rcuwait_wake.c       | 41 +++++++++++++++++++++++++++++++++++++
+ 6 files changed, 74 insertions(+), 38 deletions(-)
+ create mode 100644 kernel/rcu/rcuwait_finish.c
+ create mode 100644 kernel/rcuwait_wake.c
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 1e1a31673577d6ab58a0ca11013ff52531b421a5..bf5c711f6583cbf8ca4d97ed9ab5685e1eb4997e 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -4,7 +4,7 @@
+ #
+ 
+ obj-y     = fork.o exec_domain.o exec_state.o panic.o \
+-	    cpu.o exit.o softirq.o resource.o \
++	    cpu.o exit.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o user.o \
+ 	    signal.o sys.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 27e5cf81e78dd80a42cfe5cdeaeaf17f94dcc9ce..0d303a97e91fe84614861412a3078b673e5abe06 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -320,35 +320,6 @@ repeat:
+ 		goto repeat;
+ }
+ 
+-int rcuwait_wake_up(struct rcuwait *w)
+-{
+-	int ret = 0;
+-	struct task_struct *task;
+-
+-	rcu_read_lock();
+-
+-	/*
+-	 * Order condition vs @task, such that everything prior to the load
+-	 * of @task is visible. This is the condition as to why the user called
+-	 * rcuwait_wake() in the first place. Pairs with set_current_state()
+-	 * barrier (A) in rcuwait_wait_event().
+-	 *
+-	 *    WAIT                WAKE
+-	 *    [S] tsk = current	  [S] cond = true
+-	 *        MB (A)	      MB (B)
+-	 *    [L] cond		  [L] tsk
+-	 */
+-	smp_mb(); /* (B) */
+-
+-	task = rcu_dereference(w->task);
+-	if (task)
+-		ret = wake_up_process(task);
+-	rcu_read_unlock();
+-
+-	return ret;
+-}
+-EXPORT_SYMBOL_GPL(rcuwait_wake_up);
+-
+ /*
+  * Determine if a process group is "orphaned", according to the POSIX
+  * definition in 2.2.2.52.  Orphaned process groups are not to be affected
+diff --git a/kernel/rcu/Makefile b/kernel/rcu/Makefile
+index 0cfb009a99b9f7e9e063d690cf889d44c6ec3ad6..51653f8ae7e530a5a412b99b771529ebb739ad85 100644
+--- a/kernel/rcu/Makefile
++++ b/kernel/rcu/Makefile
+@@ -7,7 +7,7 @@ ifeq ($(CONFIG_KCSAN),y)
+ KBUILD_CFLAGS += -g -fno-omit-frame-pointer
+ endif
+ 
+-obj-y += update.o sync.o
++obj-y += update.o rcuwait_finish.o sync.o
+ obj-$(CONFIG_TREE_SRCU) += srcutree.o
+ obj-$(CONFIG_TINY_SRCU) += srcutiny.o
+ obj-$(CONFIG_RCU_TORTURE_TEST) += rcutorture.o
+diff --git a/kernel/rcu/rcuwait_finish.c b/kernel/rcu/rcuwait_finish.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c8b158cc11581843cc4889dc705aa0466e25747
+--- /dev/null
++++ b/kernel/rcu/rcuwait_finish.c
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Read-Copy Update mechanism for mutual exclusion
++ *
++ * Copyright IBM Corporation, 2001
++ *
++ * Authors: Dipankar Sarma <dipankar@in.ibm.com>
++ *	    Manfred Spraul <manfred@colorfullife.com>
++ *
++ * Based on the original work by Paul McKenney <paulmck@linux.ibm.com>
++ * and inputs from Rusty Russell, Andrea Arcangeli and Andi Kleen.
++ * Papers:
++ * http://www.rdrop.com/users/paulmck/paper/rclockpdcsproof.pdf
++ * http://lse.sourceforge.net/locking/rclock_OLS.2001.05.01c.sc.pdf (OLS2001)
++ *
++ * For detailed explanation of Read-Copy Update mechanism see -
++ *		http://lse.sourceforge.net/locking/rcupdate.html
++ *
++ */
++/* Complete function and GPL export relocated without semantic changes. */
++#include <linux/export.h>
++#include <linux/rcuwait.h>
++#include <linux/sched.h>
++
++void finish_rcuwait(struct rcuwait *w)
++{
++	rcu_assign_pointer(w->task, NULL);
++	__set_current_state(TASK_RUNNING);
++}
++EXPORT_SYMBOL_GPL(finish_rcuwait);
++
+diff --git a/kernel/rcu/update.c b/kernel/rcu/update.c
+index b62735a6788423380638979eb0b6f5174faddb5c..b9941d79e17468ea71fe275bbc74cffe18943196 100644
+--- a/kernel/rcu/update.c
++++ b/kernel/rcu/update.c
+@@ -447,13 +447,6 @@ void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *c
+ }
+ EXPORT_SYMBOL_GPL(__wait_rcu_gp);
+ 
+-void finish_rcuwait(struct rcuwait *w)
+-{
+-	rcu_assign_pointer(w->task, NULL);
+-	__set_current_state(TASK_RUNNING);
+-}
+-EXPORT_SYMBOL_GPL(finish_rcuwait);
+-
+ #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD
+ void init_rcu_head(struct rcu_head *head)
+ {
+diff --git a/kernel/rcuwait_wake.c b/kernel/rcuwait_wake.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e945a68cfc2be06440cdd978962cf6802c640b75
+--- /dev/null
++++ b/kernel/rcuwait_wake.c
+@@ -0,0 +1,41 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/exit.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++/* Complete function and GPL export relocated without semantic changes. */
++#include <linux/export.h>
++#include <linux/rcuwait.h>
++#include <linux/sched.h>
++
++int rcuwait_wake_up(struct rcuwait *w)
++{
++	int ret = 0;
++	struct task_struct *task;
++
++	rcu_read_lock();
++
++	/*
++	 * Order condition vs @task, such that everything prior to the load
++	 * of @task is visible. This is the condition as to why the user called
++	 * rcuwait_wake() in the first place. Pairs with set_current_state()
++	 * barrier (A) in rcuwait_wait_event().
++	 *
++	 *    WAIT                WAKE
++	 *    [S] tsk = current	  [S] cond = true
++	 *        MB (A)	      MB (B)
++	 *    [L] cond		  [L] tsk
++	 */
++	smp_mb(); /* (B) */
++
++	task = rcu_dereference(w->task);
++	if (task)
++		ret = wake_up_process(task);
++	rcu_read_unlock();
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(rcuwait_wake_up);
++

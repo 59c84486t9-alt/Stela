@@ -4,15 +4,49 @@ Date: Sat, 24 Oct 2026 02:15:00 -0400
 Subject: [PATCH] refactor(sched): separate shared wait support
 
 ---
+ kernel/sched/Makefile       |   4 +-
+ kernel/sched/core.c         | 101 -------------------------------
+ kernel/sched/wait_support.c | 116 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 119 insertions(+), 102 deletions(-)
+ create mode 100644 kernel/sched/wait_support.c
 
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index b1f1a367034ff6a54ef75f253eae17541e7a3496..1058c317bac288691143db66734f03796eb345a5 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
+ CONTEXT_ANALYSIS_core.o := y
++CONTEXT_ANALYSIS_wait_support.o := y
+ CONTEXT_ANALYSIS_fair.o := y
+ 
+ # The compilers are complaining about unused variables inside an if(0) scope
+@@ -23,6 +24,7 @@ ifneq ($(CONFIG_SCHED_OMIT_FRAME_POINTER),y)
+ # I turn this off for IA-64 only.  Andreas Schwab says it's also needed on m68k
+ # to get a correct value for the wait-channel (WCHAN in ps). --davidm
+ CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
++CFLAGS_wait_support.o := $(CFLAGS_core.o)
+ endif
+ 
+ # Branch profiling isn't noinstr-safe
+@@ -36,7 +38,7 @@ endif
+ # These compilation units have roughly the same size and complexity - so their
+ # build parallelizes well and finishes roughly at once:
+ #
+-obj-y += core.o
++obj-y += core.o wait_support.o
+ obj-y += fair.o
+ obj-y += build_policy.o
+ obj-y += build_utility.o
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index c104562638e3316eddae49d5a35c16f1a4cece1e..64427c1e88de3f2e0af1ce09591a06577fe6793b 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -1098,93 +1098,6 @@
- 	return false;
+@@ -1099,93 +1099,6 @@ static inline bool set_nr_if_polling(struct task_struct *p)
  }
  #endif
--
+ 
 -static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
 -{
 -	struct wake_q_node *node = &task->wake_q;
@@ -99,15 +133,14 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 -		put_task_struct(task);
 -	}
 -}
- 
+-
  /*
   * resched_curr - mark rq's current task 'to be rescheduled now'.
-@@ -8175,20 +8088,6 @@
- 		return "VOLUNTARY";
- 
+  *
+@@ -8177,20 +8090,6 @@ const char *preempt_model_str(void)
  	return "NONE";
--}
--
+ }
+ 
 -int io_schedule_prepare(void)
 -{
 -	int old_iowait = current->in_iowait;
@@ -120,39 +153,14 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 -void io_schedule_finish(int token)
 -{
 -	current->in_iowait = token;
- }
- 
+-}
+-
  /*
-diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
---- a/kernel/sched/Makefile
-+++ b/kernel/sched/Makefile
-@@ -1,6 +1,7 @@
- # SPDX-License-Identifier: GPL-2.0
- 
- CONTEXT_ANALYSIS_core.o := y
-+CONTEXT_ANALYSIS_wait_support.o := y
- CONTEXT_ANALYSIS_fair.o := y
- 
- # The compilers are complaining about unused variables inside an if(0) scope
-@@ -23,6 +24,7 @@
- # I turn this off for IA-64 only.  Andreas Schwab says it's also needed on m68k
- # to get a correct value for the wait-channel (WCHAN in ps). --davidm
- CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
-+CFLAGS_wait_support.o := $(CFLAGS_core.o)
- endif
- 
- # Branch profiling isn't noinstr-safe
-@@ -36,7 +38,7 @@
- # These compilation units have roughly the same size and complexity - so their
- # build parallelizes well and finishes roughly at once:
- #
--obj-y += core.o
-+obj-y += core.o wait_support.o
- obj-y += fair.o
- obj-y += build_policy.o
- obj-y += build_utility.o
+  * This task is about to go to sleep on IO. Increment rq->nr_iowait so
+  * that process accounting knows that this is a task in IO wait state.
 diff --git a/kernel/sched/wait_support.c b/kernel/sched/wait_support.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..2642c36a73c06b9175ed695299f5e34416473357
 --- /dev/null
 +++ b/kernel/sched/wait_support.c
 @@ -0,0 +1,116 @@
