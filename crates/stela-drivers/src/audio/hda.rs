@@ -36,6 +36,8 @@ mod extended;
 pub use extended::LinkClock;
 pub mod hdmi;
 mod lifecycle;
+mod unsolicited;
+pub use unsolicited::{JackNotificationId, UnsolicitedEvent, UnsolicitedResponse};
 pub mod pci;
 mod pins;
 mod registers;
@@ -163,6 +165,7 @@ pub struct Controller<R, T> {
     lifecycle_failed: bool,
     discovery_ready: bool,
     extended: Option<extended::ExtendedCapabilities>,
+    unsolicited: unsolicited::State,
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -249,6 +252,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             lifecycle_failed: false,
             discovery_ready: false,
             extended,
+            unsolicited: unsolicited::State::new(),
             corb,
             rirb,
             corb_entries: 0,
@@ -478,6 +482,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let extra = u32::from_le(self.rirb.read::<u32>(offset + 4));
             let value = u32::from_le(self.rirb.read::<u32>(offset));
             if extra & RESPONSE_UNSOL != 0 {
+                self.unsolicited.receive(self.token, value, extra);
                 continue;
             }
             let codec = (extra & 15) as u8;
@@ -562,6 +567,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if let Err(fault) = self.shutdown_cirrus_codecs() {
                 error.get_or_insert(fault);
             }
+            if let Err(fault) = self.shutdown_jack_notifications() {
+                error.get_or_insert(fault);
+            }
             error
         } else {
             None
@@ -630,6 +638,7 @@ mod tests {
     include!("hda/lifecycle_tests.rs");
     include!("hda/realtek/lifecycle_tests.rs");
     include!("hda/composition_tests.rs");
+    include!("hda/unsolicited/tests.rs");
 
     #[derive(Clone)]
     struct ModelClock(Rc<Cell<u64>>);
@@ -975,6 +984,7 @@ mod tests {
                 self.set(event.offset, event_value, event.bytes);
                 if event.offset == GCTL && event.value & GCTL_RESET == 0 {
                     self.replies.clear(); // Link reset discards in-flight codec responses.
+                    self.route_controls.retain(|(_, verb), _| *verb != 0xf08);
                 }
                 if event.offset == GCTL && event.value & GCTL_RESET != 0 && was_reset {
                     self.link_initializations += 1;
@@ -1426,7 +1436,8 @@ mod tests {
                         0
                     }
                 }
-                0x701 | 0x703 | 0x707 | 0x70c | 0x70f | 0x715 | 0x716 | 0x717 | 0x7e7 | 0x7ec => {
+                0x701 | 0x703 | 0x707 | 0x708 | 0x70c | 0x70f | 0x715 | 0x716 | 0x717 | 0x7e7
+                | 0x7ec => {
                     if self.cirrus_model && node == 0x11 && verb == 0x703 && command as u8 == 0 {
                         self.cirrus_errata_complete = self.cirrus_errata_stage == 6;
                     }
@@ -1473,7 +1484,7 @@ mod tests {
                     }
                     0
                 }
-                0xf01 | 0xf03 | 0xf07 | 0xf0c | 0xf0f | 0xf15 | 0xf16 | 0xf17 | 0xfec => {
+                0xf01 | 0xf03 | 0xf07 | 0xf08 | 0xf0c | 0xf0f | 0xf15 | 0xf16 | 0xf17 | 0xfec => {
                     if self.idt73_model
                         && verb == 0xf15
                         && self.idt73_gpio_input_after_write.is_some_and(|threshold| {
@@ -1625,6 +1636,12 @@ mod tests {
                 return;
             }
             if offset == GCTL {
+                if self.get(GCTL, 4) & GCTL_RESET == value & GCTL_RESET {
+                    // Ordinary UNSOL gate writes are immediate native-width
+                    // controls; only CRST transitions use the reset handshake.
+                    self.set(offset, value, bytes);
+                    return;
+                }
                 if let Some(gate) = &self.reset_gate {
                     assert!(
                         !gate.get(),

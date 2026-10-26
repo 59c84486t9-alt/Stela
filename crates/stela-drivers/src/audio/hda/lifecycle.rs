@@ -43,6 +43,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let _ = self.shutdown();
             return Err(error);
         }
+        // CRST actually disabled codec unsolicited state and the controller
+        // gate; old tags/events cannot authorize the new reset generation.
+        self.unsolicited = super::unsolicited::State::new();
         // New command epoch is live only after actual link/ring reset. Failed
         // HDMI teardown retains original owners and requires another reset.
         self.command_poisoned = false;

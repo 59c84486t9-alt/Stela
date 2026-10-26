@@ -168,6 +168,8 @@ pub enum Error {
         index: u16,
     },
     InvalidPinControl,
+    InvalidJackNotification,
+    JackNotificationTagsExhausted,
     RouteRejected,
     RouteInUse,
     /// A command timeout makes later replies ambiguous. A full controller
