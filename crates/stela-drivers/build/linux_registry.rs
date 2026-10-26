@@ -205,8 +205,11 @@ fn validate_header(bytes: &[u8], record: &Record, ordinal: u32) -> Result<()> {
 }
 fn scan(plan: &Plan, unit: &Unit, bytes: &[u8]) -> Result<Vec<Record>> {
     let file = object::File::parse(bytes).map_err(|e| format!("{}: ordinary object required: {e}", unit.object.relative.display()))?;
+    // COFF's container is 32-bit even for AMD64; its machine field supplies
+    // the architecture. ELF and Mach-O additionally require their 64-bit form.
     if file.format() != plan.target.format() || file.kind() != ObjectKind::Relocatable ||
-        file.architecture() != Architecture::X86_64 || !file.is_little_endian() || !file.is_64() {
+        file.architecture() != Architecture::X86_64 || !file.is_little_endian() ||
+        (file.format() != BinaryFormat::Coff && !file.is_64()) {
         return Err(format!("{}: wrong target/relocatable LP64 object format", unit.object.relative.display()));
     }
     if file.symbol_table().is_none() { return Err("object lacks a registration-inspectable symbol table".into()); }
@@ -514,6 +517,39 @@ pub fn generate(plan: &Plan) -> Result<Manifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Authored empty COFF containers exercise the external object-reader
+    // contract. They deliberately lack the still-mandatory capture anchor.
+    fn coff_header(machine: u16) -> [u8; 20] {
+        let mut bytes = [0; 20];
+        bytes[..2].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+    #[test]
+    fn amd64_coff_reaches_capture_validation_despite_container_width() {
+        let bytes = coff_header(object::pe::IMAGE_FILE_MACHINE_AMD64);
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        assert_eq!(file.architecture(), Architecture::X86_64);
+        assert!(!file.is_64());
+        let mut plan = policy_plan();
+        plan.target = TargetAbi::CoffWin64Lp64;
+        let error = scan(&plan, &plan.units[0], &bytes).unwrap_err();
+        assert_eq!(error, "exactly one per-TU capture anchor required; missing opt-in header");
+    }
+    #[test]
+    fn coff_architecture_and_target_mismatches_still_refuse() {
+        let mut plan = policy_plan();
+        plan.target = TargetAbi::CoffWin64Lp64;
+        for machine in [object::pe::IMAGE_FILE_MACHINE_I386, object::pe::IMAGE_FILE_MACHINE_ARM64] {
+            let error = scan(&plan, &plan.units[0], &coff_header(machine)).unwrap_err();
+            assert!(error.ends_with("wrong target/relocatable LP64 object format"));
+        }
+        for target in [TargetAbi::ElfSysv, TargetAbi::MachOSysv] {
+            plan.target = target;
+            let error = scan(&plan, &plan.units[0], &coff_header(object::pe::IMAGE_FILE_MACHINE_AMD64)).unwrap_err();
+            assert!(error.ends_with("wrong target/relocatable LP64 object format"));
+        }
+    }
     #[test]
     fn registration_identity_is_canonical_and_tu_scoped() {
         let record = parse_record("stela_linux_reg__D1__U2__p__17","D1","U2").unwrap();
@@ -609,8 +645,10 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl Drop for FixtureDirectory {
         fn drop(&mut self) {
-            if let Err(error) = std::fs::remove_dir_all(&self.0) {
-                if !std::thread::panicking() { panic!("fixture directory cleanup: {error}"); }
+            if let Err(error) = std::fs::remove_dir_all(&self.0)
+                && !std::thread::panicking()
+            {
+                panic!("fixture directory cleanup: {error}");
             }
         }
     }
