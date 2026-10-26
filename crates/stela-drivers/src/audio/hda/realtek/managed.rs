@@ -12,7 +12,7 @@ use crate::{
         Error,
         hda::{
             AnalogRoute, CodecGraph, Controller, PinOptions, PinSense, Registers, StreamId, Verb,
-            routing::RoutePolicy,
+            Widget, WidgetKind, routing::RoutePolicy,
         },
     },
     bus::i2c::Timer,
@@ -29,6 +29,22 @@ pub struct RealtekReport {
     pub eapd_pins: Vec<u8>,
     /// Actual retained-controller PCI observation; never inferred from AFG f20.
     pub pci_subsystem: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AmplifierLevel {
+    /// Actual hardware gain step, not a percentage or an inferred dB value.
+    pub gain: u8,
+    pub muted: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealtekCaptureGain {
+    pub input_index: u8,
+    /// Actual inherited/overridden input amplifier capabilities.
+    pub capabilities: u32,
+    /// Actual left, then optional right amplifier channel. A mono mixer with
+    /// one stereo source has stereo input amplifiers, as in the Linux path.
+    pub levels: Vec<AmplifierLevel>,
 }
 
 #[derive(Clone)]
@@ -472,7 +488,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             id,
             channel,
             options,
-            RoutePolicy::Standard,
+            // alc_alloc_spec sets single_adc_amp for every managed family.
+            // The selector still uses the route connection, but ADC gain is
+            // always input amplifier zero.
+            RoutePolicy::SingleAdc,
         )
     }
     pub fn poll_realtek_pin_sense(
@@ -535,6 +554,177 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 let get = if channel == 0 { 0xa000 } else { 0x8000 };
                 let actual = self.verb(Verb::long(graph.address, node, 11, get)?)?;
                 if actual == u32::MAX || actual & 0xff != u32::from(value) {
+                    return Err(Error::RouteRejected);
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.routing_failed = true;
+        }
+        result
+    }
+    fn realtek_capture_amplifier(
+        &mut self,
+        graph: &CodecGraph,
+        stream: StreamId,
+        node: u8,
+    ) -> Result<(Widget, u8, u8), Error> {
+        self.realtek_guard(graph)?;
+        // An old/foreign stream or unreserved node must not trigger even the
+        // live codec-authority reads, much less change an amplifier.
+        if self.stream_direction(stream)? != crate::audio::Direction::Capture {
+            return Err(Error::InvalidStream);
+        }
+        let route = self
+            .routes
+            .iter()
+            .find(|(owner, route)| {
+                *owner == stream
+                    && route.codec_address() == graph.address
+                    && route.direction() == crate::audio::Direction::Capture
+                    && route.nodes().contains(&node)
+            })
+            .map(|(_, route)| route.clone())
+            .ok_or(Error::RouteInUse)?;
+        let state = self.realtek_active(graph)?;
+        let widget = state
+            .graph
+            .widget(node)
+            .cloned()
+            .ok_or(Error::InvalidCodecGraph)?;
+        let caps = widget.input_amplifier.ok_or(Error::UnsupportedTopology)?;
+        if caps == u32::MAX
+            || widget.channels() > 2
+            || !matches!(
+                widget.kind,
+                WidgetKind::Input | WidgetKind::Mixer | WidgetKind::Selector | WidgetKind::Pin
+            )
+        {
+            return Err(Error::UnsupportedTopology);
+        }
+        let offset = route.nodes().iter().position(|n| *n == node).unwrap();
+        let index = if let Some(source) = route.nodes().get(offset + 1) {
+            widget
+                .connections
+                .iter()
+                .position(|n| n == source)
+                .ok_or(Error::InvalidCodecGraph)?
+        } else {
+            0
+        };
+        if index > 15 {
+            return Err(Error::UnsupportedTopology);
+        }
+        // A selector that no longer names this retained path is a lost routing
+        // epoch. Never adjust an inactive source and call it capture volume.
+        if offset + 1 < route.nodes().len()
+            && widget.kind != WidgetKind::Mixer
+            && widget.connections.len() > 1
+        {
+            let selected = self.verb(Verb::short(graph.address, node, 0xf01, 0)?)?;
+            if selected != index as u32 {
+                self.routing_failed = true;
+                return Err(Error::RouteRejected);
+            }
+        }
+        let channels = if widget.channels() == 1
+            && widget.kind == WidgetKind::Mixer
+            && widget.connections.len() == 1
+            && state
+                .graph
+                .widget(widget.connections[0])
+                .is_some_and(|source| source.capabilities & 1 != 0)
+        {
+            2
+        } else {
+            widget.channels()
+        };
+        let amplifier_index = if widget.kind == WidgetKind::Input {
+            0
+        } else {
+            index as u8
+        };
+        Ok((widget, amplifier_index, channels))
+    }
+    /// Read the actual selected capture-path amplifier, including while PCM
+    /// runs. Only an initialized live codec and this stream's reserved input
+    /// path authorize the index. Other mixer inputs remain isolated.
+    pub fn realtek_capture_gain(
+        &mut self,
+        graph: &CodecGraph,
+        stream: StreamId,
+        node: u8,
+    ) -> Result<RealtekCaptureGain, Error> {
+        let (widget, index, channels) = self.realtek_capture_amplifier(graph, stream, node)?;
+        let caps = widget.input_amplifier.unwrap();
+        let result = (|| {
+            let mut levels = Vec::with_capacity(usize::from(channels));
+            for channel in 0..channels {
+                let actual = self.verb(Verb::long(
+                    graph.address,
+                    node,
+                    11,
+                    if channel == 0 { 0x2000 } else { 0 } | u16::from(index),
+                )?)?;
+                if actual > 255
+                    || (actual & 0x7f) > ((caps >> 8) & 0x7f)
+                    || (actual & 0x80 != 0 && caps & (1 << 31) == 0)
+                {
+                    return Err(Error::RouteRejected);
+                }
+                levels.push(AmplifierLevel {
+                    gain: (actual & 0x7f) as u8,
+                    muted: actual & 0x80 != 0,
+                });
+            }
+            Ok(RealtekCaptureGain {
+                input_index: index,
+                capabilities: caps,
+                levels,
+            })
+        })();
+        if result.is_err() {
+            self.routing_failed = true;
+        }
+        result
+    }
+    /// Set an actual reserved input amplifier's gain/mute on both channels and
+    /// acknowledge each channel independently. Unsupported mute never becomes
+    /// a fabricated bit or a silent minimum-gain substitute.
+    pub fn set_realtek_capture_gain(
+        &mut self,
+        graph: &CodecGraph,
+        stream: StreamId,
+        node: u8,
+        gain: u8,
+        muted: bool,
+    ) -> Result<(), Error> {
+        let (widget, index, channels) = self.realtek_capture_amplifier(graph, stream, node)?;
+        let caps = widget.input_amplifier.unwrap();
+        if gain > ((caps >> 8) & 0x7f) as u8 {
+            return Err(Error::InvalidConfiguration);
+        }
+        if muted && caps & (1 << 31) == 0 {
+            return Err(Error::UnsupportedTopology);
+        }
+        let value = u16::from(gain) | if muted { 0x80 } else { 0 };
+        let channel_bits = if channels == 2 { 0x3000 } else { 0x2000 };
+        let result = (|| {
+            self.verb(Verb::long(
+                graph.address,
+                node,
+                3,
+                0x4000 | channel_bits | u16::from(index) << 8 | value,
+            )?)?;
+            for channel in 0..channels {
+                let actual = self.verb(Verb::long(
+                    graph.address,
+                    node,
+                    11,
+                    if channel == 0 { 0x2000 } else { 0 } | u16::from(index),
+                )?)?;
+                if actual != u32::from(value) {
                     return Err(Error::RouteRejected);
                 }
             }

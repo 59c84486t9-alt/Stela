@@ -44,9 +44,9 @@ mod registers;
 pub use pins::{AnalogEndpoint, PinConfiguration, PinConnection, PinDevice, PinSense};
 mod realtek;
 pub use realtek::{
-    Alc269CommonReport, Alc269Variant, CoefficientChange, RealtekCommonReport,
-    RealtekDualHeadphoneReport, RealtekFamily, RealtekHeadphoneReport, RealtekHeadphoneRoute,
-    RealtekOem, RealtekReport,
+    Alc269CommonReport, Alc269Variant, AmplifierLevel, CoefficientChange, RealtekCaptureGain,
+    RealtekCommonReport, RealtekDualHeadphoneReport, RealtekFamily, RealtekHeadphoneReport,
+    RealtekHeadphoneRoute, RealtekOem, RealtekReport,
 };
 mod routing;
 mod sigmatel;

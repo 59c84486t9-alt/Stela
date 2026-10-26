@@ -51,6 +51,8 @@ mod realtek_owned_models {
         }
     }
 
+    include!("capture_tests.rs");
+
     #[test]
     fn all_family_silicon_runs_real_duplex_dma_restarts_and_quiets() {
         for &id in IDS {
