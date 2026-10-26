@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
 // Copyright (C) 2019 Intel Corporation
-//! One reserved two-hop USB3 path over an actual retained native USB4 link.
-//! Linux path.c activation and tunnel.c USB3 settings; no tunnel/endpoint enable,
+//! Reserved two-hop protocol paths over an actual retained native USB4 link.
+//! Linux path.c activation and tunnel.c settings; no tunnel/endpoint enable,
 //! HopID allocator, bandwidth or platform authorization provider is fabricated.
 use super::{
     channel::{self, Channel},
@@ -28,8 +28,10 @@ pub enum Direction {
     Downstream,
     Upstream,
 }
-/// Source USB3 lane credit choice. RouterAllocated is the actual observed and
-/// reserved sw->max_usb3_credits, not the register total or a caller estimate.
+/// Source lane credit choice. RouterAllocated is the actual source-selected
+/// protocol reservation (USB3's max_usb3_credits in the public API), never the
+/// register total or an unreserved caller estimate. PCIe additionally checks
+/// its source six-credit minimum in the private protocol plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneCredits {
     LegacyBonded,
@@ -52,19 +54,22 @@ pub struct Allocation {
     pub topology_epoch: u64,
     pub grant_epoch: u64,
     pub direction: Direction,
+    /// Public USB3 endpoint. The private PCIe adapter uses this historical
+    /// storage field for its actual PCIe endpoint, selected by a private profile.
     pub usb3_down: u8,
+    /// Opposite actual protocol endpoint, under the same private profile.
     pub usb3_up: u8,
     pub hops: [(u16, u16); 2],
     pub lane_credits: LaneCredits,
     pub permission: Decision,
 }
-/// Real protected native USB3 path reservation, including permission/lifetimes.
+/// Real protected native protocol path reservation, including permission/lifetimes.
 ///
 /// # Safety
 /// This object retains exclusive actual input AND output HopIDs on all four
 /// ports, including any stale configuration at those IDs, from the shared native
 /// domain allocator. They belong to the exact retained Linked/NHI/reset/topology
-/// epoch and actual USB3-to-primary-lane mapping. Neither firmware nor another
+/// epoch and actual protocol-to-primary-lane mapping. Neither firmware nor another
 /// CM can reuse them or modify the path. Permission is a real platform/_OSC and
 /// security decision for these endpoints, with protected grant_epoch; it is not
 /// an integer tuple assertion or a default authorization. Credit mode is from
@@ -81,6 +86,10 @@ pub struct Allocation {
 /// No production implementation of these missing native services is supplied.
 pub unsafe trait Reservation: Send + Sync {
     fn allocation(&self) -> Allocation;
+    /// Real retained native admission state, checked before publication and
+    /// completion. It also pins this in-flight physical lifetime against reuse;
+    /// integer tuple equality is never a native reset/topology guard.
+    fn is_current(&self) -> bool;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -117,13 +126,14 @@ pub struct Words {
 }
 /// Active local path, retaining the original link and actual path allocation.
 /// Neither this receipt nor a pending-bit observation authorizes endpoint enable
-/// or finishes a USB3 tunnel, security/attachment admission or endpoint teardown.
+/// or finishes a protocol tunnel, security/attachment admission or endpoint teardown.
 pub struct Active {
     pub allocation: Allocation,
     pub words: [Words; 2],
     link: Option<Backing>,
     reservation: Option<Arc<dyn Reservation>>,
     changed: bool,
+    profile: Profile,
 }
 enum Backing {
     Direct(Box<Linked>),
@@ -157,8 +167,15 @@ impl Backing {
     }
 }
 impl Active {
+    pub(super) fn linked(&self) -> &Linked {
+        self.link.as_ref().expect("retained link chain").linked()
+    }
     pub(super) fn is_current(&self) -> bool {
         self.link.as_ref().is_some_and(|link| link.is_current())
+            && self
+                .reservation
+                .as_ref()
+                .is_some_and(|owner| owner.is_current())
     }
     pub(super) fn protected_allocation(&self) -> Allocation {
         self.reservation
@@ -200,7 +217,11 @@ impl Active {
     }
     pub(super) fn drain_hops(&self) -> Result<[DrainHop; 2], Error> {
         let allocation = self.protected_allocation();
-        let hops = plan(self.bandwidth_ref().linked(), allocation)?;
+        let hops = plan_profile(
+            self.link.as_ref().ok_or(Error::Topology)?.linked(),
+            allocation,
+            self.profile,
+        )?;
         Ok(core::array::from_fn(|i| {
             let hop = hops[i];
             let expected = hop.program(Words { raw: [0; 2] }, i);
@@ -216,6 +237,42 @@ impl Active {
                 ],
             }
         }))
+    }
+    /// # Safety
+    /// Exact same-epoch PCIe stop proved both endpoints disabled and all four
+    /// hops disabled/PENDING0 in source normal-stop order. Source clear_fc=false
+    /// retains FC bits; only the original local IDs/credits return to the same
+    /// reservation. Independent endpoint DMA, IRQ/IOMMU and platform lifetimes
+    /// remain with the returned real owners.
+    pub(super) unsafe fn release_direct_stopped(mut self) -> Box<Linked> {
+        let Some(Backing::Previous(mut down)) = self.link.take() else {
+            panic!("actual two-path chain")
+        };
+        let Some(Backing::Direct(link)) = down.link.take() else {
+            panic!("actual direct link owner")
+        };
+        self.reservation.take();
+        down.reservation.take();
+        link
+    }
+    /// # Safety
+    /// Native DP stop proved both endpoints disabled, all six owned hops
+    /// EN0/PENDING0 and actual video NFC returned in the same live epoch.
+    /// Only original local rights return; independent GPU/DMA/IRQ stay held.
+    pub(super) unsafe fn release_dp_stopped(mut self) -> Box<Linked> {
+        let Some(Backing::Previous(mut aux)) = self.link.take() else {
+            panic!("actual AUX return path")
+        };
+        let Some(Backing::Previous(mut video)) = aux.link.take() else {
+            panic!("actual AUX forward path")
+        };
+        let Some(Backing::Direct(link)) = video.link.take() else {
+            panic!("actual video/link chain")
+        };
+        self.reservation.take();
+        aux.reservation.take();
+        video.reservation.take();
+        link
     }
     /// # Safety
     /// The containing stopped receipt proves matching live epoch, both PE0 and
@@ -286,6 +343,7 @@ struct Hop {
     lane: bool,
     credits: u8,
     header: [u32; 8],
+    profile: Profile,
 }
 impl Hop {
     fn address(self, space: Space) -> Address {
@@ -308,18 +366,23 @@ impl Hop {
         } else {
             before.raw[0] & (127 << 17)
         };
+        let video = matches!(self.profile, Profile::DisplayVideo(_));
         let ingress = if self.lane {
-            1 << 24
+            if video { 0 } else { 1 << 24 }
         } else {
             before.raw[1] & ((1 << 24) | (1 << 26))
         };
         Words {
             raw: [
                 u32::from(self.next) | (u32::from(self.output) << 11) | credits | ENABLE,
-                2 | (3 << 8)
-                    | (2047 << 12)
+                (match self.profile {
+                    Profile::Pcie => 1 | (3 << 8),
+                    Profile::Usb3 => 2 | (3 << 8),
+                    Profile::DisplayAux => 1 | (2 << 8),
+                    Profile::DisplayVideo(_) => 1 | (1 << 8),
+                }) | (2047 << 12)
                     | ingress
-                    | if index == 0 { 1 << 25 } else { 0 }
+                    | if index == 0 && !video { 1 << 25 } else { 0 }
                     | (before.raw[1] & PENDING),
             ],
         }
@@ -340,6 +403,20 @@ fn adapter(inventory: &Inventory, port: u8) -> Result<&AdapterHeader, Error> {
         .ok_or(Error::Topology)
 }
 fn plan(link: &Linked, allocation: Allocation) -> Result<[Hop; 2], Error> {
+    plan_profile(link, allocation, Profile::Usb3)
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Profile {
+    Usb3,
+    Pcie,
+    DisplayAux,
+    DisplayVideo(u16),
+}
+fn plan_profile(
+    link: &Linked,
+    allocation: Allocation,
+    profile: Profile,
+) -> Result<[Hop; 2], Error> {
     let (parent, child) = link.retained_routers().map_err(Error::Link)?;
     let partners = link.protected_partners();
     if allocation.identity != partners.identity
@@ -352,9 +429,21 @@ fn plan(link: &Linked, allocation: Allocation) -> Result<[Hop; 2], Error> {
     if !link.link_usb4 || !matches!(link.generation, 2 | 3) {
         return Err(Error::Unsupported);
     }
+    // Router::Policy owns USB3/PCIe only. DP authorization comes from its actual
+    // separate native display reservation; no USB3/PCIe decision implies it.
+    let policies = match profile {
+        Profile::Usb3 => Some((
+            parent.retained_owner().policy().usb3,
+            child.retained_owner().policy().usb3,
+        )),
+        Profile::Pcie => Some((
+            parent.retained_owner().policy().pcie,
+            child.retained_owner().policy().pcie,
+        )),
+        Profile::DisplayAux | Profile::DisplayVideo(_) => None,
+    };
     if allocation.permission != Decision::Allowed
-        || parent.retained_owner().policy().usb3 != Decision::Allowed
-        || child.retained_owner().policy().usb3 != Decision::Allowed
+        || policies.is_some_and(|(a, b)| a != Decision::Allowed || b != Decision::Allowed)
     {
         return Err(Error::Permission);
     }
@@ -362,10 +451,27 @@ fn plan(link: &Linked, allocation: Allocation) -> Result<[Hop; 2], Error> {
     let child_inventory = child.retained_owner().target();
     let down = adapter(parent_inventory, allocation.usb3_down)?;
     let up = adapter(child_inventory, allocation.usb3_up)?;
-    if down.kind() != AdapterKind::Usb3Down || up.kind() != AdapterKind::Usb3Up {
+    let (down_kind, up_kind) = match profile {
+        Profile::Pcie => (AdapterKind::PcieDown, AdapterKind::PcieUp),
+        Profile::Usb3 => (AdapterKind::Usb3Down, AdapterKind::Usb3Up),
+        Profile::DisplayAux | Profile::DisplayVideo(_) => {
+            (AdapterKind::DisplayIn, AdapterKind::DisplayOut)
+        }
+    };
+    if down.kind() != down_kind || up.kind() != up_kind {
         return Err(Error::Topology);
     }
-    let credits = allocation.lane_credits.value()?;
+    let credits = if let Profile::DisplayVideo(nfc) = profile {
+        if nfc == 0 || nfc > 1023 || allocation.direction != Direction::Downstream {
+            return Err(Error::Credits);
+        }
+        0
+    } else {
+        allocation.lane_credits.value()?
+    };
+    if profile == Profile::Pcie && credits < 6 {
+        return Err(Error::Credits);
+    }
     let (source, destination, inputs, outputs) = match allocation.direction {
         Direction::Downstream => (
             parent_inventory,
@@ -396,7 +502,14 @@ fn plan(link: &Linked, allocation: Allocation) -> Result<[Hop; 2], Error> {
         {
             return Err(Error::HopId);
         }
-        if i == 0 && ingress != 8 || i == 1 && (next != 8 || ingress != allocation.hops[0].1) {
+        let endpoint_hop = if matches!(profile, Profile::DisplayVideo(_)) {
+            9
+        } else {
+            8
+        };
+        if i == 0 && ingress != endpoint_hop
+            || i == 1 && (next != endpoint_hop || ingress != allocation.hops[0].1)
+        {
             return Err(Error::HopId);
         }
         let lane = input.kind() == AdapterKind::Lane;
@@ -409,7 +522,12 @@ fn plan(link: &Linked, allocation: Allocation) -> Result<[Hop; 2], Error> {
                 .iter()
                 .find(|credit| credit.route == inventory.path.route() && credit.port == inputs[i])
                 .ok_or(Error::Credits)?;
-            if u32::from(actual.total()) < u32::from(actual.nonflow()) + u32::from(credits) {
+            let required = if let Profile::DisplayVideo(nfc) = profile {
+                nfc
+            } else {
+                u16::from(credits)
+            };
+            if u32::from(actual.total()) < u32::from(actual.nonflow()) + u32::from(required) {
                 return Err(Error::Credits);
             }
         }
@@ -423,6 +541,7 @@ fn plan(link: &Linked, allocation: Allocation) -> Result<[Hop; 2], Error> {
             lane,
             credits: if lane { credits } else { 7 },
             header: input.raw,
+            profile,
         });
     }
     Ok([
@@ -449,17 +568,43 @@ impl DrainHop {
 pub(super) struct Prepared {
     allocation: Allocation,
     hops: [Hop; 2],
+    profile: Profile,
 }
 pub(super) fn prepare(link: &Linked, allocation: Allocation) -> Result<Prepared, Error> {
     Ok(Prepared {
         allocation,
         hops: plan(link, allocation)?,
+        profile: Profile::Usb3,
+    })
+}
+pub(super) fn prepare_pcie(link: &Linked, allocation: Allocation) -> Result<Prepared, Error> {
+    Ok(Prepared {
+        allocation,
+        hops: plan_profile(link, allocation, Profile::Pcie)?,
+        profile: Profile::Pcie,
+    })
+}
+pub(super) fn prepare_dp(
+    link: &Linked,
+    allocation: Allocation,
+    nfc: Option<u16>,
+) -> Result<Prepared, Error> {
+    let profile = match nfc {
+        Some(n) => Profile::DisplayVideo(n),
+        None => Profile::DisplayAux,
+    };
+    Ok(Prepared {
+        allocation,
+        hops: plan_profile(link, allocation, profile)?,
+        profile,
     })
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Inventory(usize),
     Credit,
+    NfcWrite(u32),
+    NfcVerify(u32),
     Initial(usize),
     Disable(usize, Words),
     Drain(usize),
@@ -469,8 +614,8 @@ enum Stage {
     Done,
     Fault,
 }
-/// Polled actual path programming. Source USB3 counter and NFC credits are zero,
-/// so neither counter clears nor non-flow-controlled allocation writes are needed.
+/// Polled actual path programming. DP video additionally owns real lane NFC;
+/// all profiles have no allocated counters, so no counter clear is fabricated.
 pub struct Activate<R: Registers> {
     channel: Option<Channel<R>>,
     retained: Option<Active>,
@@ -483,6 +628,28 @@ pub struct Activate<R: Registers> {
     next_poll: u64,
 }
 impl<R: Registers> Activate<R> {
+    /// # Safety
+    /// The containing native CM owns the actual current link/allocator/security
+    /// grant and preflighted this exact private plan and every clock addition.
+    pub(super) unsafe fn start_pcie(
+        channel: Channel<R>,
+        link: Box<Linked>,
+        reservation: Arc<dyn Reservation>,
+        prepared: Prepared,
+        now: u64,
+        deadline: u64,
+        job_deadline: u64,
+    ) -> Self {
+        Self::initialize(
+            channel,
+            Backing::Direct(link),
+            reservation,
+            prepared,
+            now,
+            deadline,
+            job_deadline,
+        )
+    }
     /// # Safety
     /// The Channel, complete retained Linked and native allocation are the exact
     /// same physical NHI/reset/topology/grant epoch, exclusively idle/current.
@@ -644,6 +811,7 @@ impl<R: Registers> Activate<R> {
                 link: Some(link),
                 reservation: Some(reservation),
                 changed,
+                profile: prepared.profile,
             }),
             hops: prepared.hops,
             stage: Stage::Inventory(0),
@@ -684,7 +852,7 @@ impl<R: Registers> Activate<R> {
     fn request(&self) -> Result<(Hop, Address, Option<[u32; 2]>), Error> {
         let (index, space, data) = match self.stage {
             Stage::Inventory(i) => (i, Space::Port, None),
-            Stage::Credit => {
+            Stage::Credit | Stage::NfcWrite(_) | Stage::NfcVerify(_) => {
                 let hop = self.hops[1];
                 return Ok((
                     hop,
@@ -694,7 +862,11 @@ impl<R: Registers> Activate<R> {
                         offset: 4,
                         words: 1,
                     },
-                    None,
+                    if let Stage::NfcWrite(word) = self.stage {
+                        Some([word, 0])
+                    } else {
+                        None
+                    },
                 ));
             }
             Stage::Initial(i) | Stage::Drain(i) | Stage::Prepare(i) | Stage::Verify(i, _) => {
@@ -719,9 +891,13 @@ impl<R: Registers> Activate<R> {
         let (hop, address, data) = self.request()?;
         let deadline = self.deadline;
         let result = if let Some(data) = data {
-            let result = self
-                .channel()
-                .write(hop.route, address, &data, now, deadline);
+            let result = self.channel().write(
+                hop.route,
+                address,
+                &data[..usize::from(address.words)],
+                now,
+                deadline,
+            );
             if !matches!(
                 result,
                 Err(channel::Error::Busy | channel::Error::Ring(ring::Error::Full))
@@ -797,8 +973,35 @@ impl<R: Registers> Activate<R> {
                 let [raw] = data.as_slice() else {
                     return self.fail(Error::UnexpectedReceipt);
                 };
-                if (raw >> 20) & 1023 < (raw & 1023) + u32::from(self.hops[1].credits) {
+                let required = if let Profile::DisplayVideo(nfc) = self.hops[1].profile {
+                    u32::from(nfc)
+                } else {
+                    u32::from(self.hops[1].credits)
+                };
+                if (raw >> 20) & 1023 < (raw & 1023) + required {
                     return self.fail(Error::Credits);
+                }
+                if matches!(self.hops[1].profile, Profile::DisplayVideo(_)) {
+                    self.enter(
+                        Stage::NfcWrite((raw & !1023) | ((raw & 1023) + required)),
+                        now,
+                    )?;
+                } else {
+                    self.enter(Stage::Initial(0), now)?;
+                }
+            }
+            Stage::NfcWrite(word) => {
+                if !data.is_empty() {
+                    return self.fail(Error::UnexpectedReceipt);
+                }
+                self.enter(Stage::NfcVerify(word), now)?;
+            }
+            Stage::NfcVerify(expected) => {
+                let [actual] = data.as_slice() else {
+                    return self.fail(Error::UnexpectedReceipt);
+                };
+                if actual & 1023 != expected & 1023 || (actual & 1023) > ((actual >> 20) & 1023) {
+                    return self.fail(Error::Readback);
                 }
                 self.enter(Stage::Initial(0), now)?;
             }

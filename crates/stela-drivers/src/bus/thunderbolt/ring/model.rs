@@ -1104,19 +1104,28 @@ pub(crate) fn link_fixture(map: u8, mode: bool) -> LinkFixture {
 }
 
 pub(crate) fn link_fixture_with_usb3(map: u8, mode: bool, usb3: bool) -> LinkFixture {
+    link_fixture_with_protocol(map, mode, if usb3 { 0x200101 } else { 0 })
+}
+pub(crate) fn link_fixture_with_protocol(map: u8, mode: bool, protocol: u32) -> LinkFixture {
     use super::super::{link::Partners, router::Setup};
     let (source, domain, model, mut channel) = channel();
     channel.start(0).unwrap();
     let mut cursor = NativeCursor::default();
-    let mask = 64 | if mode { 16 } else { 0 } | u32::from(usb3);
+    let mask = 64
+        | if mode { 16 } else { 0 }
+        | if protocol == 0x100101 {
+            2
+        } else {
+            u32::from(protocol != 0)
+        };
     let mut parent_owner = router_owner(0, 1, mask);
     link_inventory(
         &mut parent_owner,
         if map == 0 { 2 } else { 5 },
         if map == 0 { 1 } else { 2 },
     );
-    if usb3 {
-        add_path_usb3_adapter(&mut parent_owner.target, 0x200101);
+    if protocol != 0 {
+        add_path_usb3_adapter(&mut parent_owner.target, protocol);
     }
     let parent_owner = Arc::new(parent_owner);
     let parent_drop = parent_owner.dropped.clone();
@@ -1133,8 +1142,8 @@ pub(crate) fn link_fixture_with_usb3(map: u8, mode: bool, usb3: bool) -> LinkFix
     let mut current_parent = parent_owner.target.clone();
     current_parent.header = parent.header.clone();
     child_owner.parent = Some(current_parent);
-    if usb3 {
-        add_path_usb3_adapter(&mut child_owner.target, 0x200102);
+    if protocol != 0 {
+        add_path_usb3_adapter(&mut child_owner.target, protocol + 1);
     }
     let child_owner = Arc::new(child_owner);
     let child_drop = child_owner.dropped.clone();
@@ -1409,6 +1418,11 @@ impl Drop for PathReservation {
 unsafe impl super::super::path::Reservation for PathReservation {
     fn allocation(&self) -> super::super::path::Allocation {
         self.allocation
+    }
+    fn is_current(&self) -> bool {
+        // This fixture's actual allocation remains held in its isolated epoch;
+        // no independent reset or reassignment actor exists in the model.
+        true
     }
 }
 
