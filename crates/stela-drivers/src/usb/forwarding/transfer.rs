@@ -96,10 +96,11 @@ impl Device {
                 length,
             )?)
         } else {
-            Ticket::Normal {
-                trb: controller.submit(pipe.endpoint.dci(), pipe.buffer.physical(), length)?,
+            Ticket::Normal(controller.submit_ticket(
+                pipe.endpoint.dci(),
+                pipe.buffer.physical(),
                 length,
-            }
+            )?)
         };
         let request = Request(id);
         pipe.pending = Some(Pending {
@@ -120,23 +121,32 @@ impl Device {
         if let Some(index) = self.completed.iter().position(|c| c.request == request) {
             return Ok(Some(self.completed.remove(index)));
         }
+        let address = self.pipes.iter().find_map(|(&address, pipe)| {
+            pipe.pending
+                .as_ref()
+                .is_some_and(|pending| pending.request == request)
+                .then_some(address)
+        });
+        let is_isochronous = self.iso_requests.contains_key(&request);
+        if address.is_none() && !is_isochronous {
+            return Err(BlockError::Unsupported(
+                "stale or foreign forwarded USB request",
+            ));
+        }
+        // Request admission must precede readiness: readiness can drain current
+        // events and touch MMIO even when the caller supplied a retired ticket.
         self.ready()?;
-        if self.iso_requests.contains_key(&request) {
+        if is_isochronous {
             return self.poll_isochronous(request);
         }
-        let (&address, pipe) = self
-            .pipes
-            .iter_mut()
-            .find(|(_, p)| p.pending.as_ref().is_some_and(|p| p.request == request))
-            .ok_or(BlockError::Unsupported(
-                "stale or foreign forwarded USB request",
-            ))?;
+        let address = address.unwrap();
+        let pipe = self.pipes.get_mut(&address).unwrap();
         let pending = pipe.pending.as_ref().unwrap();
         let mut native = self.controller.borrow_mut();
         let mut controller = native.device(self.physical.id)?;
         let result = match &pending.ticket {
-            Ticket::Normal { trb, length } => controller
-                .completed(pipe.endpoint.dci(), *trb, *length)
+            Ticket::Normal(ticket) => controller
+                .completed_ticket(ticket)
                 .map(|r| r.map(|bytes| (bytes, Status::Complete))),
             Ticket::Stream(ticket) => controller
                 .completed_stream(ticket)
@@ -183,7 +193,9 @@ impl Device {
 
     /// Cancellation is endpoint-wide in xHCI. All requests and packet buffers
     /// remain owned until Stop/Set Dequeue acknowledges that complete endpoint.
-    /// Packet results already collected remain visible in the final completion.
+    /// Observed terminal results survive cancellation. Ordinary stopped receive
+    /// prefixes carry Cancelled with an actual count; unknown extents carry None.
+    /// Failed acknowledgement retains the pending request and exposes no data.
     pub fn cancel(&mut self, address: u8) -> Result<(), BlockError> {
         self.validate_identity()?;
         if let Err(error) = self.ready() {
@@ -213,30 +225,87 @@ impl Device {
         // Preserve terminal events already available at cancellation, including
         // their individual residuals. A transport error cannot release a
         // buffer; native cancellation below still has to acknowledge retirement.
-        for request in &requests {
-            let _ = self.collect_isochronous(*request);
-        }
-        if let Err(error) = self
-            .controller
-            .borrow_mut()
-            .device(self.physical.id)?
-            .cancel(dci)
-        {
-            self.fenced = true;
-            return Err(error);
-        }
+        let requests: Vec<_> = requests
+            .into_iter()
+            .map(|request| (request, self.collect_isochronous(request).err()))
+            .collect();
+        // Observe terminal events before Stop, but retain every buffer and
+        // pending identity until the whole endpoint acknowledges retirement.
+        // The exact ordinary ticket also preserves a completion/receive prefix
+        // racing Stop; a ring address alone cannot carry that authority.
+        let outcome = {
+            let mut native = self.controller.borrow_mut();
+            let mut controller = native.device(self.physical.id)?;
+            let pending = self.pipes[&address].pending.as_ref();
+            let result = pending.and_then(|pending| match &pending.ticket {
+                Ticket::Normal(ticket) => controller
+                    .completed_ticket(ticket)
+                    .map(|done| done.map(|bytes| (bytes, Status::Complete))),
+                Ticket::Stream(ticket) => controller
+                    .completed_stream(ticket)
+                    .map(|done| done.map(|bytes| (bytes, Status::Complete))),
+                Ticket::Iso(ticket) => controller
+                    .completed_iso(ticket)
+                    .map(|done| done.map(|done| (done.bytes, Status::Isochronous(done.status)))),
+            });
+            let retired = match (pending, result) {
+                (
+                    Some(Pending {
+                        ticket: Ticket::Normal(ticket),
+                        ..
+                    }),
+                    None,
+                ) => controller
+                    .cancel_ticket(ticket)
+                    .map(|observed| match observed {
+                        xhci::TransferCancellation::Completed(bytes) => {
+                            (Some(bytes), Status::Complete)
+                        }
+                        xhci::TransferCancellation::Stopped(bytes) => {
+                            (Some(bytes), Status::Cancelled)
+                        }
+                        xhci::TransferCancellation::Unknown => (None, Status::Cancelled),
+                    }),
+                (_, result) => controller.cancel(dci).map(|()| match result {
+                    Some(Ok((bytes, status))) => (Some(bytes), status),
+                    Some(Err(error)) => (None, Status::Failed(error)),
+                    None => (None, Status::Cancelled),
+                }),
+            };
+            match retired {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    self.fenced = true;
+                    return Err(error);
+                }
+            }
+        };
         if let Some(pending) = self.pipes.get_mut(&address).unwrap().pending.take() {
+            let (mut actual, mut status) = outcome;
+            if actual.is_some_and(|bytes| bytes > pending.length) {
+                actual = None;
+                status = Status::Failed(BlockError::Protocol(
+                    "USB cancellation exceeds submitted DMA extent",
+                ));
+            }
+            fence(Ordering::SeqCst);
+            let pipe = &self.pipes[&address];
+            let data = if pipe.endpoint.is_in() {
+                actual.map_or_else(Vec::new, |bytes| pipe.buffer.bytes()[..bytes].to_vec())
+            } else {
+                Vec::new()
+            };
             self.completed.push(Completion {
                 request: pending.request,
                 endpoint: address,
-                status: Status::Cancelled,
-                actual: None,
-                data: Vec::new(),
+                status,
+                actual,
+                data,
                 packets: Vec::new(),
             });
         }
-        for request in requests {
-            self.finish_isochronous(request, Status::Cancelled);
+        for (request, error) in requests {
+            self.finish_isochronous(request, error.map_or(Status::Cancelled, Status::Failed));
         }
         Ok(())
     }

@@ -59,7 +59,7 @@ pub struct IsoPacketCompletion {
 }
 
 enum Ticket {
-    Normal { trb: u64, length: usize },
+    Normal(xhci::TransferTicket),
     Iso(xhci::IsoTransfer),
     Stream(xhci::StreamTransfer),
 }

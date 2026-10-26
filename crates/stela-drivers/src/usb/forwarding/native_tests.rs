@@ -50,6 +50,7 @@ struct Peer {
     fatal_after: Option<usize>,
     advance_after: Option<(usize, u32)>,
     explicit_next: BTreeMap<u8, u32>,
+    stop_event: Option<(u8, u32, usize, Vec<u8>)>,
     trap_mmio: bool,
 }
 impl Peer {
@@ -226,9 +227,16 @@ impl Peer {
         if code == 6 {
             self.base.borrow_mut().set_state(usize::from(dci), 2);
         }
-        if matches!(code, 1 | 13) {
+        if matches!(code, 1 | 13 | 26 | 28) {
+            // Stopped Short Packet reports actual bytes, unlike the residual
+            // field used by Success, Short Packet and Stopped.
+            let actual = if code == 28 {
+                residual
+            } else {
+                td.length - residual
+            };
             if dci & 1 != 0 {
-                assert_eq!(bytes.len(), td.length - residual);
+                assert_eq!(bytes.len(), actual);
                 // SAFETY: only this terminal TD's retained requested DMA extent is written.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -240,8 +248,7 @@ impl Peer {
             } else {
                 // SAFETY: fixture reads only the published OUT TD extent.
                 self.out.push(unsafe {
-                    core::slice::from_raw_parts(td.buffer as *const u8, td.length - residual)
-                        .to_vec()
+                    core::slice::from_raw_parts(td.buffer as *const u8, actual).to_vec()
                 });
             }
         }
@@ -296,6 +303,15 @@ impl Registers for RegisterPeer {
         } else {
             None
         };
+        if let Some((STOP, _, dci, _, _, _)) = command {
+            let event = self.peer.borrow_mut().stop_event.take();
+            if let Some((endpoint, code, residual, bytes)) = event {
+                assert_eq!(endpoint, dci);
+                self.peer
+                    .borrow_mut()
+                    .complete(dci, 0, code, residual, &bytes);
+            }
+        }
         self.original.write32(at, value);
         if let Some((kind, parameter, dci, stream, status, false)) = command {
             self.peer
@@ -359,6 +375,7 @@ fn fixture_with_schedule(
             fatal_after: None,
             advance_after: None,
             explicit_next: BTreeMap::new(),
+            stop_event: None,
             trap_mmio: false,
         }));
         peer = Some(shared.clone());
@@ -597,6 +614,183 @@ fn qualified_primary_streams_reuse_original_payload_dma_and_reject_stale_streams
 }
 
 #[test]
+fn cancellation_preserves_unpolled_terminal_receipts_for_each_transfer_kind() {
+    for kind in 0..3 {
+        let mut ram = vec![0u64; 512 * 1024];
+        let start = ram.as_mut_ptr() as u64;
+        // SAFETY: original payload, endpoint and event DMA outlive retirement.
+        let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+        let (mut owner, peer) = fixture(&mut dma, kind != 2);
+        let stream = if kind == 1 {
+            owner.enable_streams(&[0x81, 2], 3, &mut dma).unwrap();
+            2
+        } else {
+            0
+        };
+        let original = owner.pipes[&0x81].buffer.physical();
+        let request = owner.submit(0x81, stream, 5, &[]).unwrap();
+        peer.borrow_mut().complete(3, stream, 13, 2, &[1, 2, 3]);
+        owner.cancel(0x81).unwrap();
+        let done = owner.poll(request).unwrap().unwrap();
+        assert_eq!(done.actual, Some(3));
+        assert_eq!(done.data, [1, 2, 3]);
+        assert_eq!(
+            done.status,
+            if kind == 2 {
+                Status::Isochronous(xhci::IsoStatus::Short)
+            } else {
+                Status::Complete
+            }
+        );
+        assert!(peer.borrow().base.borrow().seen.contains(&STOP));
+        assert!(peer.borrow().base.borrow().seen.contains(&SET_DEQUEUE));
+        assert!(owner.poll(request).is_err());
+        let fresh = owner.submit(0x81, stream, 1, &[]).unwrap();
+        assert_eq!(owner.pipes[&0x81].buffer.physical(), original);
+        peer.borrow_mut().complete(3, stream, 1, 0, &[9]);
+        assert_eq!(owner.poll(fresh).unwrap().unwrap().data, [9]);
+    }
+}
+
+#[test]
+fn ordinary_cancellation_preserves_receive_boundaries_racing_actual_stop() {
+    for code in [1, 13, 26, 28] {
+        for failure in [None, Some(STOP), Some(SET_DEQUEUE)] {
+            let mut ram = vec![0u64; 512 * 1024];
+            let start = ram.as_mut_ptr() as u64;
+            // SAFETY: failed acknowledgements retain every original allocation.
+            let mut dma =
+                unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+            let (mut owner, peer) = fixture(&mut dma, true);
+            let original = owner.pipes[&0x81].buffer.physical();
+            let request = owner.submit(0x81, 0, 7, &[]).unwrap();
+            peer.borrow_mut().stop_event =
+                Some((3, code, if code == 28 { 3 } else { 4 }, vec![4, 5, 6]));
+            peer.borrow().base.borrow_mut().fail = failure.map(|command| (command, 17));
+            if failure.is_some() {
+                assert!(owner.cancel(0x81).is_err());
+                assert!(owner.fenced());
+                assert_eq!(owner.pipes[&0x81].buffer.physical(), original);
+                assert_eq!(
+                    owner.pipes[&0x81].pending.as_ref().unwrap().request,
+                    request
+                );
+                assert!(owner.take_completions().unwrap().is_empty());
+                assert!(owner.poll(request).is_err());
+                assert!(owner.submit(0x81, 0, 7, &[]).is_err());
+                continue;
+            }
+            owner.cancel(0x81).unwrap();
+            let done = owner.poll(request).unwrap().unwrap();
+            assert_eq!(done.actual, Some(3));
+            assert_eq!(done.data, [4, 5, 6]);
+            assert_eq!(
+                done.status,
+                if matches!(code, 1 | 13) {
+                    Status::Complete
+                } else {
+                    Status::Cancelled
+                }
+            );
+            assert!(!owner.fenced());
+            assert!(owner.poll(request).is_err());
+        }
+    }
+}
+
+#[test]
+fn explicit_cancellation_preserves_observed_transport_errors_and_failed_ack_ownership() {
+    for kind in 0..4 {
+        for failed_ack in [false, true] {
+            let mut ram = vec![0u64; 512 * 1024];
+            let start = ram.as_mut_ptr() as u64;
+            // SAFETY: no failed retirement releases or reallocates this DMA.
+            let mut dma =
+                unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+            let (mut owner, peer) = fixture(&mut dma, kind < 2);
+            let stream = if kind == 1 {
+                owner.enable_streams(&[0x81, 2], 3, &mut dma).unwrap();
+                1
+            } else {
+                0
+            };
+            let request = if kind == 3 {
+                owner
+                    .submit_isochronous(0x81, &[5, 2], &[], &mut dma)
+                    .unwrap()
+            } else {
+                owner.submit(0x81, stream, 5, &[]).unwrap()
+            };
+            let original = if kind == 3 {
+                owner.iso_requests[&request].buffer.physical()
+            } else {
+                owner.pipes[&0x81].buffer.physical()
+            };
+            peer.borrow_mut().complete(3, stream, 99, 0, &[]);
+            if failed_ack {
+                peer.borrow().base.borrow_mut().fail = Some((SET_DEQUEUE, 17));
+                assert!(owner.cancel(0x81).is_err());
+                assert!(owner.fenced());
+                if kind == 3 {
+                    assert_eq!(owner.iso_requests[&request].buffer.physical(), original);
+                    assert!(owner.iso_spare.is_empty());
+                } else {
+                    assert_eq!(owner.pipes[&0x81].buffer.physical(), original);
+                    assert_eq!(
+                        owner.pipes[&0x81].pending.as_ref().unwrap().request,
+                        request
+                    );
+                }
+                assert!(owner.take_completions().unwrap().is_empty());
+                continue;
+            }
+            owner.cancel(0x81).unwrap();
+            let done = owner.poll(request).unwrap().unwrap();
+            assert!(matches!(done.status, Status::Failed(_)));
+            assert_eq!(done.actual, None);
+            assert!(done.data.is_empty());
+            assert!(done.packets.iter().all(|packet| {
+                matches!(packet.status, Status::Failed(_))
+                    && packet.actual.is_none()
+                    && packet.data.is_empty()
+            }));
+            assert!(!owner.fenced());
+            assert!(owner.poll(request).is_err());
+        }
+    }
+}
+
+#[test]
+fn retired_request_refuses_before_mmio_and_preserves_current_unpolled_completion() {
+    let mut ram = vec![0u64; 512 * 1024];
+    let start = ram.as_mut_ptr() as u64;
+    // SAFETY: current and retired request records share retained fixture DMA.
+    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let (mut owner, peer) = fixture(&mut dma, true);
+    let old = owner.submit(0x81, 0, 2, &[]).unwrap();
+    peer.borrow_mut().complete(3, 0, 1, 0, &[1, 2]);
+    assert_eq!(owner.poll(old).unwrap().unwrap().data, [1, 2]);
+    let fresh = owner.submit(0x81, 0, 3, &[]).unwrap();
+    peer.borrow_mut().complete(3, 0, 1, 0, &[7, 8, 9]);
+    let before = ram.clone();
+    let commands = peer.borrow().base.borrow().seen.clone();
+    peer.borrow_mut().trap_mmio = true;
+    for retired in [old, Request(u64::MAX)] {
+        assert_eq!(
+            owner.poll(retired),
+            Err(BlockError::Unsupported(
+                "stale or foreign forwarded USB request",
+            ))
+        );
+        assert_eq!(owner.pipes[&0x81].pending.as_ref().unwrap().request, fresh);
+        assert_eq!(ram, before);
+        assert_eq!(peer.borrow().base.borrow().seen, commands);
+    }
+    peer.borrow_mut().trap_mmio = false;
+    assert_eq!(owner.poll(fresh).unwrap().unwrap().data, [7, 8, 9]);
+}
+
+#[test]
 fn transport_error_stops_all_endpoint_requests_without_reading_unknown_packet_bytes() {
     let mut ram = vec![0u64; 512 * 1024];
     let start = ram.as_mut_ptr() as u64;
@@ -620,10 +814,12 @@ fn transport_error_stops_all_endpoint_requests_without_reading_unknown_packet_by
     assert_eq!(done.packets[1].actual, None);
     assert!(done.packets[1].data.is_empty());
     assert!(matches!(done.packets[1].status, Status::Failed(_)));
-    assert_eq!(
+    // The endpoint's observed transport failure also fences the uncompleted
+    // sibling; cancellation cannot relabel that failed observation as success.
+    assert!(matches!(
         owner.poll(second).unwrap().unwrap().status,
-        Status::Cancelled
-    );
+        Status::Failed(_)
+    ));
     assert!(peer.borrow().active.is_empty());
     assert!(!owner.fenced());
     let fresh = owner.submit_isochronous(0x81, &[1], &[], &mut dma).unwrap();
