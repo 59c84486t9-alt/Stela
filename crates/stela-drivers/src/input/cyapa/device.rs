@@ -48,8 +48,8 @@ pub(super) fn power_wait_ms(raw: u8) -> u64 {
 }
 impl<B: RegisterAccess, I: Interrupt, T: Timer> Device<B, I, T> {
     fn wait(&self, micros: u64) {
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < micros {
+        let start = self.timer.start();
+        while self.timer.elapsed_us(start) < micros {
             self.timer.relax();
         }
     }
@@ -82,9 +82,9 @@ impl<B: RegisterAccess, I: Interrupt, T: Timer> Device<B, I, T> {
         }
     }
     fn poll_state(&mut self, timeout_us: u64) -> Result<(HardwareState, [u8; 3]), ErrorKind> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         loop {
-            if self.timer.now_us().wrapping_sub(start) >= timeout_us {
+            if self.timer.elapsed_us(start) >= timeout_us {
                 return Err(ErrorKind::Timeout(
                     self.last_status.map_or(HardwareState::Unknown, classify),
                 ));
@@ -92,11 +92,11 @@ impl<B: RegisterAccess, I: Interrupt, T: Timer> Device<B, I, T> {
             let mut raw = [0; 3];
             let timer = &self.timer;
             self.bus.read_register(self.address, DATA, &mut raw, || {
-                timer.now_us().wrapping_sub(start) < timeout_us
+                timer.elapsed_us(start) < timeout_us
             })?;
             self.last_status = Some(raw);
             let state = classify(raw);
-            if self.timer.now_us().wrapping_sub(start) >= timeout_us {
+            if self.timer.elapsed_us(start) >= timeout_us {
                 return Err(ErrorKind::Timeout(state));
             }
             if !matches!(

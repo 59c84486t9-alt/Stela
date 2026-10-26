@@ -22,8 +22,8 @@ enum Reply {
 }
 impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     fn wait(&self, micros: u64) {
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < micros {
+        let start = self.timer.start();
+        while self.timer.elapsed_us(start) < micros {
             self.timer.relax();
         }
     }
@@ -65,7 +65,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         };
         packet.bytes[..2].copy_from_slice(&header);
         // Only completed reads have observable bytes; a late peek leaves its body queued.
-        if deadline.is_some_and(|(start, limit)| self.timer.now_us().wrapping_sub(start) >= limit) {
+        if deadline.is_some_and(|(start, limit)| self.timer.elapsed_us(start) >= limit) {
             self.failed_packet = Some(packet);
             return Err(ErrorKind::Timeout);
         }
@@ -83,7 +83,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         self.failed_packet = Some(packet.clone());
         self.raw_read(&mut packet.bytes[..usize::from(length)])?;
         packet.received = length;
-        if deadline.is_some_and(|(start, limit)| self.timer.now_us().wrapping_sub(start) >= limit) {
+        if deadline.is_some_and(|(start, limit)| self.timer.elapsed_us(start) >= limit) {
             self.failed_packet = Some(packet);
             return Err(ErrorKind::Timeout);
         }
@@ -139,10 +139,10 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         // Old responses cannot acknowledge the command about to be sent.
         self.drain()?;
         self.raw_write(command)?;
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         loop {
             self.wait(POLL_US);
-            if self.timer.now_us().wrapping_sub(start) >= timeout_us {
+            if self.timer.elapsed_us(start) >= timeout_us {
                 return Err(ErrorKind::Timeout);
             }
             if let Some(packet) = self.packet(Some((start, timeout_us)))? {
@@ -199,7 +199,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
                 }
                 self.retain(packet)?;
             }
-            if self.timer.now_us().wrapping_sub(start) >= timeout_us {
+            if self.timer.elapsed_us(start) >= timeout_us {
                 return Err(ErrorKind::Timeout);
             }
         }

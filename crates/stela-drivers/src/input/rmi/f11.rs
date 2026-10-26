@@ -307,8 +307,11 @@ impl Engine {
         timer: &T,
     ) -> Result<(), Error> {
         if self.configuration.rezero_wait_us != 0 {
-            let start = timer.now_us();
-            while timer.now_us().wrapping_sub(start) < self.configuration.rezero_wait_us {
+            timer
+                .check_duration(self.configuration.rezero_wait_us)
+                .map_err(Error::Clock)?;
+            let start = timer.start();
+            while timer.elapsed_us(start) < self.configuration.rezero_wait_us {
                 timer.relax();
             }
             transport.write(self.capabilities.function.command, &[1])?;

@@ -8,6 +8,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Observation {
     pub native_sequence: u64,
+    /// Microseconds from the retained native controller's clock origin.
     pub received_us: u64,
     pub byte: u8,
 }
@@ -249,7 +250,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         timeout: u64,
         id_without_ack: bool,
     ) -> Result<Option<Observation>, ErrorKind> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         for _ in 0..MAX_ATTEMPTS {
             // Waiting is installed before the actual write: a genuine wrapped
             // child ACK can arrive before the parent's outer ACK.
@@ -303,7 +304,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if let Some(argument) = argument {
             self.synaptics_child_byte(argument, timeout, false)?;
         }
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         let mut result = Vec::new();
         if let Some(id) = first {
             result.push(id);
@@ -384,7 +385,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 .identities
                 .clear();
             // Source PT connection settles for at least10ms before probing.
-            let start = self.timer.now_us();
+            let start = self.timer.start();
             while !self.expired(start, 10_000) {
                 self.timer.relax();
             }

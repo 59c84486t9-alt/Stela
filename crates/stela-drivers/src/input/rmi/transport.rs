@@ -201,6 +201,7 @@ impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Smbus<B, C, T> {
         if reset_delay_us == 0 {
             return Err(Error::InvalidConfiguration);
         }
+        timer.check_duration(reset_delay_us).map_err(Error::Clock)?;
         Ok(Self {
             bus,
             companion,
@@ -221,8 +222,8 @@ impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Smbus<B, C, T> {
         self.next = 0;
         self.version = None;
         self.companion.reset_for_smbus().map_err(Error::Companion)?;
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < self.reset_delay_us {
+        let start = self.timer.start();
+        while self.timer.elapsed_us(start) < self.reset_delay_us {
             self.timer.relax();
         }
         // Reading this byte actually switches the device into SMBus mode.

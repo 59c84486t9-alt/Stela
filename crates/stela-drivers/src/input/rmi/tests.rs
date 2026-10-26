@@ -153,6 +153,12 @@ struct Ps2(Rc<RefCell<Hardware>>);
 struct Attn(Rc<RefCell<Hardware>>);
 struct Time(Rc<Cell<u64>>);
 impl i2c::Timer for Time {
+    fn start(&self) -> u64 {
+        !self.now_us().rotate_left(17)
+    }
+    fn elapsed_us(&self, marker: u64) -> u64 {
+        self.now_us().wrapping_sub((!marker).rotate_right(17))
+    }
     fn now_us(&self) -> u64 {
         self.0.get()
     }

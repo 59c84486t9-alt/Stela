@@ -24,6 +24,7 @@ pub enum State {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    Clock(crate::ClockError),
     InvalidAddress,
     NotReady,
     AlreadyActive,
@@ -111,6 +112,7 @@ impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
     /// Construction performs no hardware access. The platform must establish
     /// actual ELAN attachment, power, exclusive bus ownership and IRQ routing.
     pub fn new(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
+        timer.check_duration(200_000).map_err(ErrorKind::Clock)?;
         if !matches!(
             address,
             Address::SevenBit(0x08..=0x77) | Address::TenBit(0..=0x3ff)

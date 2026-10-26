@@ -80,6 +80,7 @@ pub enum SensorState {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Clock(crate::ClockError),
     UnsupportedController,
     UnsupportedDialect(u8),
     PciAuthority,
@@ -175,6 +176,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         timer: T,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<Self, Error> {
+        timer
+            .check_duration(RESPONSE_TIMEOUT_US)
+            .map_err(Error::Clock)?;
         registers.check_authority()?;
         let acs = registers.read32(P2C_ACS)?;
         if acs == u32::MAX {
@@ -250,7 +254,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             SENSOR_DISABLED
         };
         loop {
-            if self.timer.now_us().wrapping_sub(start) >= RESPONSE_TIMEOUT_US {
+            if self.timer.elapsed_us(start) >= RESPONSE_TIMEOUT_US {
                 return Err(Error::Timeout {
                     sensor,
                     expected,
@@ -258,7 +262,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 });
             }
             let observed = self.registers.read32(P2C_RESPONSE)?;
-            if self.timer.now_us().wrapping_sub(start) >= RESPONSE_TIMEOUT_US {
+            if self.timer.elapsed_us(start) >= RESPONSE_TIMEOUT_US {
                 return Err(Error::Timeout {
                     sensor,
                     expected,
@@ -271,10 +275,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if Self::response_matches(observed, sensor, expected) {
                 return Ok(());
             }
-            let wait = self.timer.now_us();
-            while self.timer.now_us().wrapping_sub(wait) < RESPONSE_INTERVAL_US {
+            let wait = self.timer.start();
+            while self.timer.elapsed_us(wait) < RESPONSE_INTERVAL_US {
                 self.timer.relax();
-                if self.timer.now_us().wrapping_sub(start) >= RESPONSE_TIMEOUT_US {
+                if self.timer.elapsed_us(start) >= RESPONSE_TIMEOUT_US {
                     return Err(Error::Timeout {
                         sensor,
                         expected,
@@ -290,7 +294,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         expected: u8,
         start: u64,
     ) -> Result<(), Error> {
-        if self.timer.now_us().wrapping_sub(start) >= RESPONSE_TIMEOUT_US {
+        if self.timer.elapsed_us(start) >= RESPONSE_TIMEOUT_US {
             return Err(Error::Timeout {
                 sensor,
                 expected,
@@ -311,7 +315,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     fn command(&mut self, index: usize, enable: bool) -> Result<(), Error> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         self.authority()?;
         let sensor = self.slots[index].sensor;
         // A previous uncertain command must complete before any opposite one.

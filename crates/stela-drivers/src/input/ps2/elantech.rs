@@ -374,6 +374,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if !config.mouse {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
+        timer.check_duration(500_000).map_err(ErrorKind::Clock)?;
         let mut controller = Self::new(registers, timer, config)?;
         controller.elantech = Some(Engine::default());
         Ok(controller)

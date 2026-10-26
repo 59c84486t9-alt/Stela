@@ -34,6 +34,7 @@ pub enum HardwareState {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    Clock(crate::ClockError),
     InvalidAddress,
     NotReady,
     AlreadyActive,
@@ -140,6 +141,7 @@ pub struct Device<B, I, T> {
 }
 impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     pub fn new(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
+        timer.check_duration(4_000_000).map_err(ErrorKind::Clock)?;
         if !matches!(address, Address::SevenBit(0x08..=0x77)) {
             return Err(ErrorKind::InvalidAddress.into());
         }
@@ -334,6 +336,12 @@ mod tests {
         }
     }
     impl Timer for Time {
+        fn start(&self) -> u64 {
+            !self.now_us().rotate_left(17)
+        }
+        fn elapsed_us(&self, marker: u64) -> u64 {
+            self.now_us().wrapping_sub((!marker).rotate_right(17))
+        }
         fn now_us(&self) -> u64 {
             self.0.get()
         }

@@ -195,6 +195,12 @@ impl Domain {
 }
 struct Time(AtomicU64);
 impl Timer for Arc<Time> {
+    fn start(&self) -> u64 {
+        !self.now_us().rotate_left(17)
+    }
+    fn elapsed_us(&self, marker: u64) -> u64 {
+        self.now_us().wrapping_sub((!marker).rotate_right(17))
+    }
     fn now_us(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
     }
@@ -218,6 +224,45 @@ struct RegisterState {
     response_delay: u64,
 }
 struct Model(Arc<Mutex<RegisterState>>);
+#[test]
+fn native_clock_refusal_precedes_sfh_authority_registers_and_dma() {
+    struct Untouched;
+    impl Registers for Untouched {
+        fn check_authority(&mut self) -> Result<(), Error> {
+            panic!("invalid clock checked device")
+        }
+        fn read32(&mut self, _: usize) -> Result<u32, Error> {
+            panic!("invalid clock read register")
+        }
+        fn write32(&mut self, _: usize, _: u32) -> Result<(), Error> {
+            panic!("invalid clock wrote register")
+        }
+        fn set_bus_master(&mut self, _: bool) -> Result<(), Error> {
+            panic!("invalid clock changed bus mastering")
+        }
+        unsafe fn mark_quiescent(&mut self) {
+            panic!("invalid clock changed DMA ownership")
+        }
+    }
+    for (rate, expected) in [
+        (0, crate::ClockError::Uncalibrated),
+        (u64::MAX, crate::ClockError::DurationOverflow),
+    ] {
+        let domain = Arc::new(Domain(Mutex::new(DomainState::default())));
+        // SAFETY: no live device; deliberately inaccessible register fixture.
+        let result = unsafe {
+            Controller::claim(
+                Untouched,
+                crate::Clock {
+                    ticks_per_microsecond: rate,
+                },
+                domain.clone(),
+            )
+        };
+        assert_eq!(result.err(), Some(Error::Clock(expected)));
+        assert!(domain.0.lock().unwrap().mappings.is_empty());
+    }
+}
 impl Registers for Model {
     fn check_authority(&mut self) -> Result<(), Error> {
         if self.0.lock().unwrap().identity {

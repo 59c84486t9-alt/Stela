@@ -158,6 +158,7 @@ pub enum Phase {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    Clock(crate::ClockError),
     InvalidConfiguration,
     NotInitialized,
     AlreadyInitialized,
@@ -254,6 +255,7 @@ struct Byte {
 pub struct Controller<R = PortIo, T = Clock> {
     registers: R,
     timer: T,
+    clock_origin: u64,
     config: Config,
     state: State,
     controller_config: Option<u8>,
@@ -268,7 +270,9 @@ pub struct Controller<R = PortIo, T = Clock> {
     observed_response: Option<ObservedResponse>,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
-    /// Validates configuration only; call `initialize` to touch the hardware.
+    /// Validates configuration and retains the timer origin; call `initialize`
+    /// to touch device hardware. The same stable clock/context must survive the
+    /// owner, with its origin observed within the timer's full counter period.
     pub fn new(registers: R, timer: T, config: Config) -> Result<Self, Error> {
         if (!config.keyboard && !config.mouse)
             || config.io_timeout_us == 0
@@ -278,9 +282,20 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
+        timer
+            .check_duration(
+                config
+                    .io_timeout_us
+                    .max(config.command_timeout_us)
+                    .max(config.reset_timeout_us)
+                    .max(config.packet_timeout_us),
+            )
+            .map_err(ErrorKind::Clock)?;
+        let clock_origin = timer.start();
         Ok(Self {
             registers,
             timer,
+            clock_origin,
             config,
             state: State::Fresh,
             controller_config: None,
@@ -308,7 +323,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     /// Actual queued port/data/receipt-time observations, including bytes kept
     /// during failed commands and containment. Reading this does not consume
-    /// input or grant authority to resume a faulted controller.
+    /// input or grant authority to resume a faulted controller. Receipt times
+    /// are microseconds from this owner's retained clock origin.
     pub fn retained_bytes(&self) -> impl Iterator<Item = (Port, u8, u64)> + '_ {
         self.pending
             .iter()
@@ -328,7 +344,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn expired(&self, start: u64, limit: u64) -> bool {
-        self.timer.now_us().wrapping_sub(start) >= limit
+        self.timer.elapsed_us(start) >= limit
+    }
+    fn timestamp_us(&self) -> u64 {
+        self.timer.elapsed_us(self.clock_origin)
     }
     fn status(&mut self) -> Result<u8, ErrorKind> {
         let status = self.registers.status();
@@ -339,13 +358,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     fn write_ready(&mut self) -> Result<(), ErrorKind> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         loop {
-            if self.status()? & INPUT_FULL == 0 {
-                return Ok(());
-            }
+            let status = self.status()?;
             if self.expired(start, self.config.io_timeout_us) {
                 return Err(ErrorKind::Timeout(Phase::InputReady));
+            }
+            if status & INPUT_FULL == 0 {
+                return Ok(());
             }
             self.timer.relax();
         }
@@ -389,7 +409,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(Some(Byte {
             port,
             data,
-            received_us: self.timer.now_us(),
+            received_us: self.timestamp_us(),
         }))
     }
     fn queue(&mut self, byte: Byte) -> Result<(), ErrorKind> {
@@ -430,7 +450,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.command(command)?;
         self.response(
             Port::Keyboard,
-            self.timer.now_us(),
+            self.timer.start(),
             self.config.io_timeout_us,
         )
     }
@@ -472,7 +492,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id_without_ack: bool,
     ) -> Result<Option<u8>, ErrorKind> {
         self.observed_response = None;
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         for _ in 0..MAX_ATTEMPTS {
             if port == Port::Mouse {
                 self.command(SEND_MOUSE)?;
@@ -494,7 +514,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     self.decode(Byte {
                         port,
                         data: received,
-                        received_us: self.timer.now_us(),
+                        received_us: self.timestamp_us(),
                     })?;
                     if self.expired(start, timeout) {
                         return Err(ErrorKind::Timeout(Phase::Response));
@@ -510,7 +530,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     _ => self.queue(Byte {
                         port,
                         data: received,
-                        received_us: self.timer.now_us(),
+                        received_us: self.timestamp_us(),
                     })?,
                 }
                 if self.expired(start, timeout) {
@@ -550,14 +570,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Some(id) => Ok(id),
             None => self.response(
                 Port::Mouse,
-                self.timer.now_us(),
+                self.timer.start(),
                 self.config.command_timeout_us,
             ),
         }
     }
     fn reset_device(&mut self, port: Port) -> Result<(), ErrorKind> {
         self.send_byte(port, RESET, self.config.reset_timeout_us, false)?;
-        let received = self.response(port, self.timer.now_us(), self.config.reset_timeout_us)?;
+        let received = self.response(port, self.timer.start(), self.config.reset_timeout_us)?;
         if received != BAT_OK {
             return Err(ErrorKind::DeviceReply { port, received });
         }
@@ -568,7 +588,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.command(DISABLE_MOUSE)?;
         // Discard only pre-handoff bytes while both ports are disabled. A
         // perpetually asserted OBF is a failure, not a successful flush.
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         let mut drained = 0;
         while self.read_byte()?.is_some() {
             drained += 1;
@@ -608,7 +628,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.device_command(Port::Keyboard, SET_SCAN, &[0])?;
             let scan = self.response(
                 Port::Keyboard,
-                self.timer.now_us(),
+                self.timer.start(),
                 self.config.command_timeout_us,
             )?;
             if scan != 2 {
@@ -622,7 +642,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.reset_device(Port::Mouse)?;
             let id = self.response(
                 Port::Mouse,
-                self.timer.now_us(),
+                self.timer.start(),
                 self.config.command_timeout_us,
             )?;
             if id != 0 {
@@ -838,7 +858,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.pending.is_empty()
             && self.status().map_err(|kind| self.fail(kind))? & OUTPUT_FULL == 0
         {
-            let now = self.timer.now_us();
+            let now = self.timestamp_us();
             let result = self
                 .keyboard
                 .expire(now, self.config.packet_timeout_us)

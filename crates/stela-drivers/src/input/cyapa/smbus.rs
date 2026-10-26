@@ -149,6 +149,7 @@ impl<B: I2cBlockBus, I: Interrupt, T: Timer> super::Device<Registers<B>, I, T> {
         address: smbus::Address,
     ) -> Result<Self, Error> {
         let address = Address::SevenBit(address.get());
+        timer.check_duration(4_000_000).map_err(ErrorKind::Clock)?;
         Registers::<B>::address(address)?;
         Ok(Self {
             bus: Registers {
@@ -451,6 +452,12 @@ mod tests {
         }
     }
     impl Timer for Time {
+        fn start(&self) -> u64 {
+            !self.now_us().rotate_left(17)
+        }
+        fn elapsed_us(&self, marker: u64) -> u64 {
+            self.now_us().wrapping_sub((!marker).rotate_right(17))
+        }
         fn now_us(&self) -> u64 {
             self.0.get()
         }

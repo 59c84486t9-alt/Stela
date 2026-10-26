@@ -8,6 +8,8 @@ pub mod hid_i2c;
 pub mod ps2;
 pub mod rmi;
 pub mod sfh;
+#[cfg(test)]
+mod timing_tests;
 pub mod virtio;
 
 /// The largest absolute pointer coordinate on either axis.

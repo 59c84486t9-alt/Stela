@@ -60,6 +60,7 @@ pub enum PowerState {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    Clock(crate::ClockError),
     InvalidAddress,
     InvalidConfiguration,
     NotReady,
@@ -191,6 +192,9 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         if reset_timeout_us == 0 {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
+        timer
+            .check_duration(reset_timeout_us.max(GOODIX_RESUME_DELAY_US))
+            .map_err(ErrorKind::Clock)?;
         Ok(Self {
             bus,
             interrupt,
@@ -245,8 +249,8 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         }
     }
     fn delay(&self, us: u64) {
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < us {
+        let start = self.timer.start();
+        while self.timer.elapsed_us(start) < us {
             self.timer.relax();
         }
     }
@@ -343,14 +347,14 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     // response cannot acknowledge the new command. Unknown pre-start reports
     // are counted and discarded, never delivered to a consumer.
     fn drain_before_reset(&mut self) -> Result<(), ErrorKind> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         while self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
             let length = self.read_input()?;
             if length != 0 && !(self.quirks.elan && length == u16::MAX) {
                 self.input_length(length)?;
             }
             self.discarded_before_start = self.discarded_before_start.saturating_add(1);
-            if self.timer.now_us().wrapping_sub(start) >= self.reset_timeout_us {
+            if self.timer.elapsed_us(start) >= self.reset_timeout_us {
                 return Err(ErrorKind::InputDrainTimeout);
             }
             self.timer.relax();
@@ -372,7 +376,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             self.drain_before_reset()?;
             ResetCompletion::DeviceQuirkDelay
         } else {
-            let start = self.timer.now_us();
+            let start = self.timer.start();
             loop {
                 if self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
                     let length = self.read_input()?;
@@ -384,7 +388,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
                     }
                     self.discarded_before_start = self.discarded_before_start.saturating_add(1);
                 }
-                if self.timer.now_us().wrapping_sub(start) >= self.reset_timeout_us {
+                if self.timer.elapsed_us(start) >= self.reset_timeout_us {
                     return Err(ErrorKind::ResetTimeout);
                 }
                 self.timer.relax();

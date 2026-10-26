@@ -466,6 +466,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if !config.mouse {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
+        timer.check_duration(50_001).map_err(ErrorKind::Clock)?;
         let mut controller = Self::new(registers, timer, config)?;
         controller.synaptics = Some(Engine::new(high_rate));
         Ok(controller)
@@ -563,7 +564,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         });
         self.synaptics_sliced(id)?;
         self.device_command(Port::Mouse, GET_INFO, &[])?;
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         let mut bytes = [0; 3];
         for (index, byte) in bytes.iter_mut().enumerate() {
             let result = self.response(Port::Mouse, start, self.config.command_timeout_us);

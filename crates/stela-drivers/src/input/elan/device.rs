@@ -31,8 +31,8 @@ const EARLY_WAKE_DELAY_US: u64 = 200_000;
 
 impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
     fn wait(&self, delay: u64) {
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < delay {
+        let start = self.timer.start();
+        while self.timer.elapsed_us(start) < delay {
             self.timer.relax();
         }
     }

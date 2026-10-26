@@ -10,7 +10,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     // Source retries this single-byte service after500ms.
                     // Only actual RESEND rejection proves this byte did not
                     // apply. Timeout/unknown effects must never replay.
-                    let start = self.timer.now_us();
+                    let start = self.timer.start();
                     while !self.expired(start, 500_000) {
                         if let Some(byte) = self.read_byte()? {
                             self.queue(byte)?;
@@ -42,7 +42,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         } else {
             self.device_command(Port::Mouse, 0xe9, &[])?;
         }
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         let mut bytes = [0; 3];
         for (index, byte) in bytes.iter_mut().enumerate() {
             let result = self.response(Port::Mouse, start, self.config.command_timeout_us);

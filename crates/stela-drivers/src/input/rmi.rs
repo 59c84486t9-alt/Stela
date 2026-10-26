@@ -36,6 +36,7 @@ const NOSLEEP: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Clock(crate::ClockError),
     UnsupportedPassthroughDevices(u8),
     InvalidF03QueueLength,
     InvalidGpioCount(u8),
@@ -240,6 +241,9 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         if configuration.reset_delay_us == 0 {
             return Err(Error::InvalidConfiguration);
         }
+        timer
+            .check_duration(configuration.reset_delay_us)
+            .map_err(Error::Clock)?;
         Ok(Self {
             transport,
             attention,
@@ -311,8 +315,8 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         Ok(())
     }
     fn delay(&self) {
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < self.configuration.reset_delay_us {
+        let start = self.timer.start();
+        while self.timer.elapsed_us(start) < self.configuration.reset_delay_us {
             self.timer.relax();
         }
     }

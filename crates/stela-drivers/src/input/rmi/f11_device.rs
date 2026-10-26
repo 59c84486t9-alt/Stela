@@ -11,6 +11,9 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
         self.f11.iter().map(|engine| &engine.capabilities)
     }
     pub fn initialize_f11(&mut self, configuration: f11::Configuration) -> Result<(), Error> {
+        self.timer
+            .check_duration(configuration.rezero_wait_us)
+            .map_err(Error::Clock)?;
         self.configured()?;
         if !self.f11.is_empty() {
             return Err(Error::AlreadyActive);

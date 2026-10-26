@@ -78,8 +78,8 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         if (ic_type == 0x0e && matches!(product_id, 5..=7 | 9 | 0x13))
             || (ic_type == 8 && product_id == 0x26)
         {
-            let start = self.timer.now_us();
-            while self.timer.now_us().wrapping_sub(start) < EARLY_WAKE_DELAY_US {
+            let start = self.timer.start();
+            while self.timer.elapsed_us(start) < EARLY_WAKE_DELAY_US {
                 self.timer.relax();
             }
         }
@@ -138,6 +138,9 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// reset: pending reports retain their actual hardware queue semantics.
     /// Uncertain ownership requires a platform reset and a new owner.
     pub fn initialize(&mut self) -> Result<(), Error> {
+        self.timer
+            .check_duration(EARLY_WAKE_DELAY_US)
+            .map_err(ErrorKind::Clock)?;
         if self.state == State::Uncertain {
             return Err(ErrorKind::NeedsReset.into());
         }

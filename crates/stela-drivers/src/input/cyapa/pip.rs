@@ -36,6 +36,7 @@ pub enum State {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    Clock(crate::ClockError),
     InvalidAddress,
     NotReady,
     AlreadyActive,
@@ -139,6 +140,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         address: Address,
         generation: Generation,
     ) -> Result<Self, Error> {
+        timer.check_duration(5_000_000).map_err(ErrorKind::Clock)?;
         if !matches!(address, Address::SevenBit(value @ 0x08..=0x77) if generation == Generation::Gen6 || value & 1 == 0)
         {
             return Err(ErrorKind::InvalidAddress.into());
@@ -489,6 +491,12 @@ mod tests {
         }
     }
     impl Timer for Time {
+        fn start(&self) -> u64 {
+            !self.now_us().rotate_left(17)
+        }
+        fn elapsed_us(&self, marker: u64) -> u64 {
+            self.now_us().wrapping_sub((!marker).rotate_right(17))
+        }
         fn now_us(&self) -> u64 {
             self.0.get()
         }

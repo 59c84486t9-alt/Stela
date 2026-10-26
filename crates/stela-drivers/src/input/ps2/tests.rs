@@ -5,6 +5,7 @@ use super::*;
 use alloc::{rc::Rc, vec};
 use core::cell::{Cell, RefCell};
 mod elantech_tests;
+mod timing_tests;
 
 #[test]
 fn full_reply_side_queue_preserves_every_consumed_byte_and_leaves_further_hardware_unread() {
@@ -144,7 +145,8 @@ mod synaptics_tests;
 struct Model(Rc<RefCell<Hardware>>);
 struct Hardware {
     time: Rc<Cell<u64>>,
-    busy_until: u64,
+    status_delay_us: u64,
+    busy_until: Option<u64>,
     output: VecDeque<(Port, u8, u8)>,
     config: u8,
     config_write: bool,
@@ -179,8 +181,9 @@ struct Hardware {
 impl Hardware {
     fn new(time: Rc<Cell<u64>>) -> Self {
         Self {
+            status_delay_us: 0,
             time,
-            busy_until: 0,
+            busy_until: None,
             output: VecDeque::new(),
             config: TRANSLATION | IRQ_BITS,
             config_write: false,
@@ -215,6 +218,13 @@ impl Hardware {
     }
     fn emit(&mut self, port: Port, data: u8) {
         self.output.push_back((port, data, 0));
+    }
+    fn input_busy(&self) -> bool {
+        self.busy_forever
+            || self.busy_until.is_some_and(|deadline| {
+                let remaining = deadline.wrapping_sub(self.time.get());
+                remaining != 0 && remaining <= u64::MAX / 2
+            })
     }
     fn index(port: Port) -> usize {
         if port == Port::Mouse { 1 } else { 0 }
@@ -456,11 +466,8 @@ impl Hardware {
 impl Registers for Model {
     fn status(&mut self) -> u8 {
         let h = self.0.borrow();
-        let mut value = if h.busy_forever || h.time.get() < h.busy_until {
-            INPUT_FULL
-        } else {
-            0
-        };
+        h.time.set(h.time.get().wrapping_add(h.status_delay_us));
+        let mut value = if h.input_busy() { INPUT_FULL } else { 0 };
         if let Some((port, _, error)) = h.output.front() {
             value |= OUTPUT_FULL | *error;
             if *port == Port::Mouse {
@@ -503,11 +510,8 @@ impl Registers for Model {
     }
     fn write_command(&mut self, value: u8) {
         let mut h = self.0.borrow_mut();
-        assert!(
-            h.time.get() >= h.busy_until && !h.busy_forever,
-            "write with IBF set"
-        );
-        h.busy_until = h.time.get() + 1;
+        assert!(!h.input_busy(), "write with IBF set");
+        h.busy_until = Some(h.time.get().wrapping_add(1));
         h.writes.push((true, value));
         match value {
             READ_CONFIG => {
@@ -548,11 +552,8 @@ impl Registers for Model {
     }
     fn write_data(&mut self, value: u8) {
         let mut h = self.0.borrow_mut();
-        assert!(
-            h.time.get() >= h.busy_until && !h.busy_forever,
-            "write with IBF set"
-        );
-        h.busy_until = h.time.get() + 1;
+        assert!(!h.input_busy(), "write with IBF set");
+        h.busy_until = Some(h.time.get().wrapping_add(1));
         h.writes.push((false, value));
         if h.config_write {
             h.config_write = false;
@@ -580,6 +581,12 @@ impl Registers for Model {
 }
 struct Time(Rc<Cell<u64>>);
 impl Timer for Time {
+    fn start(&self) -> u64 {
+        !self.now_us().rotate_left(17)
+    }
+    fn elapsed_us(&self, marker: u64) -> u64 {
+        self.now_us().wrapping_sub((!marker).rotate_right(17))
+    }
     fn now_us(&self) -> u64 {
         self.0.get()
     }
