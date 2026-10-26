@@ -170,22 +170,27 @@ impl Fixture {
     fn attach(
         &mut self,
     ) -> Result<(Attached, RetiredHierarchy<Model>), (BlockError, RetiredHierarchy<Model>)> {
-        let registers = self.protocol.registers();
+        self.attach_with_clock(model_clock())
+    }
+    #[allow(clippy::type_complexity)]
+    fn attach_with_clock(
+        &mut self,
+        clock: Clock,
+    ) -> Result<(Attached, RetiredHierarchy<Model>), (BlockError, RetiredHierarchy<Model>)> {
+        let protocol = &self.protocol;
         // SAFETY: this isolated fixture retains one actual configuration model,
         // its selected independent register peer and original model domain.
         // The private sequence is exactly the public native sequence; no fake
         // native MMIO authority or actual physical requester claim is supplied.
         unsafe {
-            attach_with_registers(
+            attach_with_registers_using(
                 self.host.take().unwrap(),
                 self.bar.take().unwrap(),
                 self.domain.as_ref().unwrap().clone(),
                 self.protocol.pages(),
-                Clock {
-                    ticks_per_microsecond: 0,
-                },
+                clock,
                 "composed VMD behind root and bridge".into(),
-                |_| Ok(registers),
+                (|_| Ok(protocol.registers()), protocol::attach),
             )
         }
     }
@@ -313,6 +318,32 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
 }
 
 #[test]
+fn unavailable_native_clock_refuses_before_discovery_mapping_or_queue_effects() {
+    for rate in [0, u64::MAX, u64::MAX / 2 / 127_500_000 + 1] {
+        let mut fixture = Fixture::new();
+        let events = fixture.state.lock().unwrap().events.clone();
+        let (error, returned) = fixture
+            .attach_with_clock(Clock {
+                ticks_per_microsecond: rate,
+            })
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            BlockError::Unsupported("NVMe requires a calibrated, representable operation clock")
+        );
+        assert_eq!(fixture.state.lock().unwrap().events, events);
+        let snapshot = fixture.protocol.snapshot();
+        assert_eq!(snapshot.commands, 0);
+        assert_eq!(snapshot.mmio_accesses, 0);
+        assert!(snapshot.mappings.is_empty());
+        assert!(!returned.is_ready());
+        assert_eq!(fixture.drops.load(Ordering::Relaxed), 0);
+        assert!(Arc::strong_count(fixture.domain.as_ref().unwrap()) > 1);
+    }
+}
+
+#[test]
 fn composed_failed_d0_and_posted_bme_readback_never_issue_queue_dma() {
     for failed_power_at in [Some(ROOT), Some(BRIDGE), Some(NVME), None] {
         let mut f = Fixture::new();
@@ -367,7 +398,12 @@ fn composed_bad_or_delayed_cq_and_cache_failures_fence_all_stale_siblings() {
         let before = f.protocol.snapshot();
         f.protocol.fault(fault);
         let mut output = [0xa5; 512];
+        let clock = model_clock();
+        let started = clock.try_start().unwrap();
         assert!(disk.read(0, &mut output).is_err());
+        if matches!(fault, Fault::Phase | Fault::Delayed) {
+            assert!(clock.try_elapsed_us(started).unwrap() >= 1_000);
+        }
         assert_eq!(output, [0xa5; 512]);
         if matches!(fault, Fault::Delayed) {
             f.protocol.late_completion();

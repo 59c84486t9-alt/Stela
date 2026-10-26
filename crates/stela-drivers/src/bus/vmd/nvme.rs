@@ -229,6 +229,43 @@ unsafe fn attach_with_registers<R: Registers + 'static>(
     label: String,
     registers: impl FnOnce(&FirmwareBar) -> Result<Box<dyn owned::Registers>, BlockError>,
 ) -> Result<(Attached, RetiredHierarchy<R>), (BlockError, RetiredHierarchy<R>)> {
+    // SAFETY: the native/public path always uses the unchanged owned controller
+    // policy. Only a cfg(test) model caller supplies the bounded model policy.
+    unsafe {
+        attach_with_registers_using(
+            host,
+            bar,
+            domain,
+            pages,
+            clock,
+            label,
+            (registers, owned::attach),
+        )
+    }
+}
+type AttachPolicy = unsafe fn(
+    Box<dyn owned::Registers>,
+    Box<dyn owned::Lifecycle>,
+    &dyn PageSource,
+    Arc<dyn DmaDomain>,
+    Clock,
+    String,
+) -> Result<Attached, BlockError>;
+
+#[allow(clippy::type_complexity)]
+unsafe fn attach_with_registers_using<R: Registers + 'static>(
+    host: Host<R>,
+    bar: FirmwareBar,
+    domain: Arc<dyn DmaDomain>,
+    pages: &dyn PageSource,
+    clock: Clock,
+    label: String,
+    factories: (
+        impl FnOnce(&FirmwareBar) -> Result<Box<dyn owned::Registers>, BlockError>,
+        AttachPolicy,
+    ),
+) -> Result<(Attached, RetiredHierarchy<R>), (BlockError, RetiredHierarchy<R>)> {
+    let (registers, attach_policy) = factories;
     let returned = Rc::new(RefCell::new(Returned(None)));
     let handle = RetiredHierarchy(Rc::clone(&returned));
     let result = (|| {
@@ -240,13 +277,16 @@ unsafe fn attach_with_registers<R: Registers + 'static>(
             clock,
             phase: Phase::Claimed,
         });
+        // Admit the shared NVMe controller's complete operation budget before
+        // discovery performs any actual CFGBAR/config or mapping effects.
+        crate::storage::nvme::validate_clock(clock)?;
         let prepared = Hierarchy::discover(lifecycle.host.as_mut().expect("retained"), &bar);
         lifecycle.hierarchy = Some(prepared.map_err(block)?);
         let registers = registers(&bar)?;
         // SAFETY: caller grants the actual original hierarchy/domain identity; the
         // reservation-backed mapping and consumed lifecycle refer to its selected
         // controller. No independent numeric-domain assertion is used as proof.
-        unsafe { owned::attach(registers, lifecycle, pages, domain, clock, label) }
+        unsafe { attach_policy(registers, lifecycle, pages, domain, clock, label) }
     })();
     match result {
         Ok(attached) => Ok((attached, handle)),

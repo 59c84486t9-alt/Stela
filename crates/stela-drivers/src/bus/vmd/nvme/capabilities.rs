@@ -283,6 +283,14 @@ impl Capabilities {
         config: &mut ChildConfig<'_, R>,
         clock: Clock,
     ) -> Result<(), Error> {
+        self.power_up_with_timer(config, &clock)
+    }
+    pub(super) fn power_up_with_timer<R: Registers>(
+        &self,
+        config: &mut ChildConfig<'_, R>,
+        timer: &impl crate::bus::pci::power::Timer,
+    ) -> Result<(), Error> {
+        timer.check().map_err(|_| Error::Clock)?;
         for (offset, enabled) in [(self.msi, 1), (self.msix, 0x8000)] {
             if let Some(offset) = offset
                 && word(config, offset + 2)? & enabled != 0
@@ -298,8 +306,8 @@ impl Capabilities {
         // choosing D0; another owner's pending event is not acknowledged here.
         config.write(pm + 4, 2, u32::from(control & !0x8103))?;
         match control & 3 {
-            3 => clock.delay(10_000),
-            2 => clock.delay(200),
+            3 => timer.wait_us(10_000).map_err(|_| Error::Clock)?,
+            2 => timer.wait_us(200).map_err(|_| Error::Clock)?,
             _ => {}
         }
         if word(config, pm + 4)? & 0x103 != 0 {

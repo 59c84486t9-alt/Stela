@@ -48,6 +48,7 @@ pub enum Error {
     Suspended,
     Quarantined,
     ActiveChild,
+    Clock,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

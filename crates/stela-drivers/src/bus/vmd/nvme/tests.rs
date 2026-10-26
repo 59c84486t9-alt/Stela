@@ -29,6 +29,16 @@ const NVME: usize = 2 << 20;
 const NVME_BASE: u64 = 0x8000_4000;
 const COMMAND_OFFSET: usize = COMMAND as usize;
 
+// The same finite counter scale as the shared independent NVMe peer. This is
+// an admitted software-test budget, not a measured physical CPU calibration.
+// Composed command timeouts use the explicit cfg(test) 1-ms policy; actual
+// public native attachment keeps the shared 30-s controller policy.
+fn model_clock() -> Clock {
+    Clock {
+        ticks_per_microsecond: 1000,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Event {
     Posted(usize, u8, u32),
@@ -38,6 +48,7 @@ enum Event {
     Drain,
     Unmap(u64),
     Nvme(&'static str),
+    Wait(u64),
 }
 struct State {
     parent: BTreeMap<u16, u8>,
@@ -302,9 +313,7 @@ fn lifecycle(model: Model) -> (Lifecycle<Model>, Arc<Domain>) {
             returned: Rc::new(RefCell::new(Returned(None))),
             hierarchy: Some(hierarchy),
             domain: Some(domain.clone()),
-            clock: Clock {
-                ticks_per_microsecond: 0,
-            },
+            clock: model_clock(),
             phase: Phase::Claimed,
         },
         domain,
@@ -552,14 +561,7 @@ fn stopped_siblings_remain_contained_and_a_second_nvme_is_explicitly_refused() {
             assert!(matches!(result, Err(Error::UnsupportedDevice)));
         } else {
             let mut hierarchy = result.unwrap();
-            hierarchy
-                .prepare(
-                    &mut host,
-                    Clock {
-                        ticks_per_microsecond: 0,
-                    },
-                )
-                .unwrap();
+            hierarchy.prepare(&mut host, model_clock()).unwrap();
             hierarchy.enable(&mut host).unwrap();
             assert_eq!(state.lock().unwrap().child(extra + 4, 2) & 7, 0);
         }
@@ -616,6 +618,90 @@ fn d3hot_transition_preserves_pme_status_but_refuses_failed_power_or_lost_assign
 }
 
 #[test]
+fn invalid_timing_precedes_hierarchy_and_capability_config_accesses() {
+    for rate in [0, u64::MAX, u64::MAX / 2 / 60_000_000 + 1] {
+        let model = Model::new();
+        let state = model.state.clone();
+        let (mut host, bar) = fixture(model);
+        let mut hierarchy = Hierarchy::discover(&mut host, &bar).unwrap();
+        let before = state.lock().unwrap().events.clone();
+        let clock = Clock {
+            ticks_per_microsecond: rate,
+        };
+        assert_eq!(hierarchy.prepare(&mut host, clock), Err(Error::Clock));
+        assert_eq!(state.lock().unwrap().events, before);
+        let mut config = host.config(2, 0, 0).unwrap();
+        let capabilities = capabilities::Capabilities::inspect(&mut config, false).unwrap();
+        let before = state.lock().unwrap().events.clone();
+        assert_eq!(
+            capabilities.power_up_with_timer(&mut config, &clock),
+            Err(Error::Clock)
+        );
+        assert_eq!(state.lock().unwrap().events, before);
+    }
+}
+
+#[test]
+fn exact_pm_wait_requests_follow_actual_word_effect_and_propagate_failure() {
+    struct CapturedTime {
+        state: Arc<Mutex<State>>,
+        fail: bool,
+    }
+    // SAFETY: explicit same-peer symbolic time. Actual posted config effects
+    // must precede the requested interval; no physical timer is represented.
+    unsafe impl crate::bus::pci::power::Timer for CapturedTime {
+        fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+            Ok(())
+        }
+        fn wait_us(&self, microseconds: u64) -> Result<(), crate::bus::pci::power::Error> {
+            let mut state = self.state.lock().unwrap();
+            assert_eq!(state.child(NVME + 0x84, 2) & 0x8103, 0x8000);
+            state.events.push(Event::Wait(microseconds));
+            if self.fail {
+                Err(crate::bus::pci::power::Error::Clock)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for power in [2, 3] {
+        for fail in [false, true] {
+            let model = Model::new();
+            let state = model.state.clone();
+            {
+                let mut state = state.lock().unwrap();
+                state.set(NVME + 0x40, 2, 0x8010);
+                state.set(NVME + 0x80, 2, 1);
+                state.set(NVME + 0x82, 2, 3);
+                state.set(NVME + 0x84, 2, 0x8100 | power);
+            }
+            let (mut host, _) = fixture(model);
+            let mut config = host.config(2, 0, 0).unwrap();
+            let capabilities = capabilities::Capabilities::inspect(&mut config, false).unwrap();
+            let result = capabilities.power_up_with_timer(
+                &mut config,
+                &CapturedTime {
+                    state: state.clone(),
+                    fail,
+                },
+            );
+            assert_eq!(result, if fail { Err(Error::Clock) } else { Ok(()) });
+            let waits: Vec<_> = state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Wait(us) => Some(*us),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(waits, vec![if power == 3 { 10_000 } else { 200 }]);
+        }
+    }
+}
+
+#[test]
 fn reassignment_removal_and_wrong_host_epoch_never_restart_the_controller() {
     for change in 0..7 {
         let model = Model::new();
@@ -647,16 +733,7 @@ fn reassignment_removal_and_wrong_host_epoch_never_restart_the_controller() {
                 _ => state.set_parent(0, 4, 0x28c1_8086),
             }
         }
-        assert!(
-            hierarchy
-                .prepare(
-                    &mut host,
-                    Clock {
-                        ticks_per_microsecond: 0
-                    }
-                )
-                .is_err()
-        );
+        assert!(hierarchy.prepare(&mut host, model_clock()).is_err());
         assert!(!state.lock().unwrap().any_master());
     }
 }

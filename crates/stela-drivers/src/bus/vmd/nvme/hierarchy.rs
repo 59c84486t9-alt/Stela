@@ -413,6 +413,7 @@ impl Hierarchy {
         host: &mut Host<R>,
         clock: Clock,
     ) -> Result<(), Error> {
+        crate::bus::pci::power::Timer::check(&clock).map_err(|_| Error::Clock)?;
         self.recheck(host, false)?;
         // This initial attachment profile checked parent D0 before child
         // discovery; the retained grant excludes outside PM changes.
