@@ -31,6 +31,10 @@ pub(super) enum Profile {
     IntelMrst0,
     IntelMrstOther,
     O2Legacy,
+    Gli9750,
+    Gli9755,
+    Gli9767,
+    Gli9763e,
 }
 impl Profile {
     pub fn select(vendor: u16, device: u16) -> Self {
@@ -41,6 +45,10 @@ impl Profile {
             (INTEL, MRST_SD0) => Self::IntelMrst0,
             (INTEL, MRST_SD1 | MRST_SD2) => Self::IntelMrstOther,
             (O2, O2_8220 | O2_8221 | O2_8320 | O2_8321) => Self::O2Legacy,
+            (0x17a0, 0x9750) => Self::Gli9750,
+            (0x17a0, 0x9755) => Self::Gli9755,
+            (0x17a0, 0x9767) => Self::Gli9767,
+            (0x17a0, 0xe763) => Self::Gli9763e,
             _ => Self::Standard,
         }
     }
@@ -73,13 +81,34 @@ impl Profile {
     pub fn mmc_width(self) -> u8 {
         // mrst_hc_probe_slot declares this platform's eight physical pins.
         // Controller CAP_8BIT alone is never wiring authority.
-        if self == Self::IntelMrst0 { 8 } else { 4 }
+        if matches!(self, Self::IntelMrst0 | Self::Gli9763e) {
+            8
+        } else {
+            4
+        }
     }
     pub fn retained_config(self) -> bool {
         self == Self::O2Legacy
     }
+    pub fn gli(self) -> bool {
+        matches!(
+            self,
+            Self::Gli9750 | Self::Gli9755 | Self::Gli9767 | Self::Gli9763e
+        )
+    }
+    pub fn nonremovable(self) -> bool {
+        self == Self::Gli9763e
+    }
     pub fn register_bytes(self) -> u64 {
-        if self.retained_config() { 0x200 } else { 0x100 }
+        if self == Self::Gli9750 {
+            0x900
+        } else if matches!(self, Self::Gli9767 | Self::Gli9763e) {
+            0x600
+        } else if self.retained_config() {
+            0x200
+        } else {
+            0x100
+        }
     }
 }
 

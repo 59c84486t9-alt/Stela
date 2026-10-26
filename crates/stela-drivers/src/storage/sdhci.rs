@@ -24,14 +24,19 @@ use core::{
     sync::atomic::{AtomicU64, Ordering, fence},
 };
 mod command;
+mod gli;
+mod mmc_fast;
 mod pci;
 mod protocol;
+mod uhs;
 use super::pci::{quiesce_pio, set_pio_command};
 #[cfg(test)]
 use crate::block::Transport;
 use pci::{Control, Controller, Profile};
 mod registers;
 use registers::*;
+#[cfg(test)]
+mod clock_tests;
 #[cfg(test)]
 mod model;
 #[cfg(test)]
@@ -43,6 +48,17 @@ const PCI_SLOT_INFO: u16 = 0x40;
 const TRANSFER_BYTES: usize = 64 * 1024;
 const STALE: &str = "SDHCI card publication is permanently stale";
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn validate_clock(clock: Clock) -> Result<(), BlockError> {
+    if clock.ticks_per_microsecond == 0 {
+        return Err(BlockError::Unsupported(
+            "SDHCI requires a calibrated native clock",
+        ));
+    }
+    clock.check_duration(5_000_000).map_err(|_| {
+        BlockError::Unsupported("SDHCI clock cannot represent the maximum operation deadline")
+    })
+}
 
 /// Standard PCI SD host programming interfaces, including the DMA interface.
 pub fn matches(function: &Function) -> bool {
@@ -63,13 +79,14 @@ pub fn attach(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
 ) -> Result<Attached, BlockError> {
+    validate_clock(handoff.clock)?;
     if !matches(function) {
         return Err(BlockError::Unsupported(
             "PCI function is not standard SDHCI",
         ));
     }
     let profile = Profile::select(function.vendor, function.device);
-    if profile.retained_config() {
+    if profile.retained_config() || profile.gli() {
         return Err(BlockError::Unsupported(
             "SDHCI profile requires owned PCI function attachment",
         ));
@@ -87,7 +104,8 @@ pub fn attach(
 
 /// Whether later host clock/power operations require retained PCI ownership.
 pub fn requires_owned_config(function: &Function) -> bool {
-    matches(function) && Profile::select(function.vendor, function.device).retained_config()
+    let profile = Profile::select(function.vendor, function.device);
+    matches(function) && (profile.retained_config() || profile.gli())
 }
 
 /// Consume the actual enumerated function for profiles requiring future PCI
@@ -97,6 +115,9 @@ pub fn attach_owned(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
 ) -> Result<Attached, BlockError> {
+    if matches(&function) && Profile::select(function.vendor, function.device).gli() {
+        return gli::attach(function, handoff, dma);
+    }
     if !requires_owned_config(&function) {
         return attach(&mut function, handoff, dma);
     }
@@ -137,12 +158,17 @@ fn prepare_slots(
     handoff: &Handoff,
     profile: Profile,
 ) -> Result<Vec<crate::bus::mmio::Mmio>, BlockError> {
-    if profile.retained_config() {
+    if profile.retained_config() || profile.gli() {
         quiesce_pio(function)?;
     }
     function.power_up(&handoff.clock)?;
     let info = function.config().read8(PCI_SLOT_INFO);
     let slots = profile.slots(((info >> 4) & 7) + 1);
+    if profile.gli() && slots != 1 {
+        return Err(BlockError::Unsupported(
+            "GL9750 requires one actual native slot",
+        ));
+    }
     let first = usize::from(info & 7);
     if first + usize::from(slots) > 6 {
         return Err(BlockError::Unsupported("SDHCI slot BAR inventory"));
@@ -158,7 +184,7 @@ fn prepare_slots(
             profile.register_bytes(),
         )?);
     }
-    if profile.retained_config() {
+    if profile.retained_config() || profile.gli() {
         set_pio_command(function, true)?;
     } else {
         function.enable_polled();
@@ -226,7 +252,13 @@ struct Engine {
     version: u8,
     capabilities: u32,
     base_hz: u32,
+    actual_hz: u32,
     extended_capabilities: u32,
+    max_current_ma: u32,
+    signal_voltage: SignalVoltage,
+    sd_timing: Timing,
+    tuned_at: Option<u64>,
+    uhs_failed: bool,
     rca: u16,
     data: DmaBuffer,
     descriptors: DmaBuffer,
@@ -286,11 +318,7 @@ impl Host {
                 "SDHCI retained PCI authority does not match profile",
             ));
         }
-        if clock.ticks_per_microsecond == 0 {
-            return Err(BlockError::Unsupported(
-                "SDHCI requires a calibrated native clock",
-            ));
-        }
+        validate_clock(clock)?;
         if let Some(control) = &controller {
             control.borrow().healthy()?;
         }
@@ -305,7 +333,13 @@ impl Host {
             version: 0,
             capabilities: 0,
             base_hz: 0,
+            actual_hz: 0,
             extended_capabilities: 0,
+            max_current_ma: 0,
+            signal_voltage: SignalVoltage::V3_3,
+            sd_timing: Timing::Legacy,
+            tuned_at: None,
+            uhs_failed: false,
             rca: 0,
             data,
             descriptors,
@@ -329,9 +363,11 @@ impl Host {
         if c.profile.retained_config() && !c.o2_card_present()? {
             return Ok(None);
         }
-        let state = c.registers.read32(PRESENT);
-        if state & (CARD_PRESENT | CARD_STABLE) != CARD_PRESENT | CARD_STABLE {
-            return Ok(None);
+        if !c.profile.nonremovable() {
+            let state = c.registers.read32(PRESENT);
+            if state & (CARD_PRESENT | CARD_STABLE) != CARD_PRESENT | CARD_STABLE {
+                return Ok(None);
+            }
         }
         c.medium = None;
         c.configure_host()?;
@@ -358,6 +394,20 @@ pub struct Card {
 impl Card {
     pub fn info(&self) -> &CardInfo {
         &self.info
+    }
+    /// Explicitly retune the original admitted MMC sampling mode. Ordinary
+    /// HS400 downgrades through HS200/CMD21 and restores HS400 before return.
+    /// Enhanced strobe and other timing modes remain explicitly unsupported.
+    /// This does not replay failed I/O or establish an interrupt producer.
+    pub fn retune(&mut self) -> Result<(), BlockError> {
+        let mut c = self.inner.borrow_mut();
+        c.check_live(self.generation)?;
+        let mut info = c.medium.as_ref().unwrap().info.clone();
+        let rca = c.rca;
+        crate::storage::mmc::protocol::Session::new(&mut *c, rca).retune_mmc(&mut info)?;
+        c.medium.as_mut().unwrap().info = info.clone();
+        self.info = info;
+        Ok(())
     }
 }
 impl BlockDevice for Card {
@@ -425,6 +475,24 @@ impl BlockDevice for Card {
     }
 }
 impl Engine {
+    fn check_authority(&mut self) -> Result<(), BlockError> {
+        self.healthy()?;
+        self.registers
+            .check_authority()
+            .map_err(|error| self.quarantine_authority(error))
+    }
+    fn quarantine_authority(&mut self, error: BlockError) -> BlockError {
+        self.medium = None;
+        self.fault.get_or_insert_with(|| error.clone());
+        self.uhs_failed = true;
+        self.last_failure = Some(Failure {
+            primary: error.clone(),
+            restoration: None,
+            retirement: None,
+            quarantined: true,
+        });
+        error
+    }
     fn healthy(&self) -> Result<(), BlockError> {
         self.fault.clone().map_or(Ok(()), Err)?;
         if let Some(control) = &self.controller {
@@ -433,6 +501,10 @@ impl Engine {
         Ok(())
     }
     fn live(&mut self, id: u64) -> Result<(), BlockError> {
+        self.check_live(id)?;
+        self.retune_if_needed()
+    }
+    fn check_live(&mut self, id: u64) -> Result<(), BlockError> {
         if self.medium.as_ref().is_none_or(|medium| medium.id != id) {
             return Err(BlockError::Unsupported(STALE));
         }
@@ -444,17 +516,52 @@ impl Engine {
         Ok(())
     }
     fn observe_medium(&mut self) -> Result<bool, BlockError> {
+        self.check_authority()?;
+        self.gli55_power_event()?;
         let changes = self.registers.read32(INTERRUPT) & (CARD_INSERT | CARD_REMOVE);
+        if self.profile.nonremovable() {
+            if changes != 0 {
+                self.registers.write32(INTERRUPT, changes);
+            }
+            return Ok(false);
+        }
         let present = self.registers.read32(PRESENT) & CARD_PRESENT != 0;
         let changed = changes != 0 || !present && self.medium.is_some();
         if changed {
             self.medium = None;
+            if self.profile == Profile::Gli9767
+                && let Err(error) = gli::gl9767::card_event(self.registers.as_mut())
+            {
+                self.fault = Some(error.clone());
+                return Err(error);
+            }
             self.reset(RESET_COMMAND | RESET_DATA)?;
             self.registers.write32(INTERRUPT, changes);
         }
         Ok(changed)
     }
     fn reset(&mut self, mask: u8) -> Result<(), BlockError> {
+        self.check_authority()?;
+        if self.profile == Profile::Gli9767 {
+            match gli::gl9767::before_reset(self.registers.as_mut(), self.clock, mask) {
+                Ok(()) => {}
+                Err(gli::gl9755::ClockFailure::Authority(error)) => {
+                    return Err(self.quarantine_authority(error));
+                }
+                Err(gli::gl9755::ClockFailure::Hardware(error)) => {
+                    self.medium = None;
+                    self.fault = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        }
+        if self.profile == Profile::Gli9755
+            && let Err(error) = gli::gl9755::before_reset(self.registers.as_mut(), self.clock, mask)
+        {
+            self.medium = None;
+            self.fault = Some(error.clone());
+            return Err(error);
+        }
         self.registers.write8(RESET, mask);
         if !self
             .clock
@@ -467,11 +574,41 @@ impl Engine {
             return Err(self.fault.clone().unwrap());
         }
         fence(Ordering::Acquire);
+        if self.profile == Profile::Gli9750
+            && let Err(error) = gli::initialize(self.registers.as_mut())
+        {
+            self.medium = None;
+            self.fault = Some(error.clone());
+            return Err(error);
+        }
+        if self.profile == Profile::Gli9767
+            && let Err(error) = gli::gl9767::after_reset(self.registers.as_mut())
+        {
+            self.medium = None;
+            self.fault = Some(error.clone());
+            return Err(error);
+        }
         Ok(())
     }
     fn configure_host(&mut self) -> Result<(), BlockError> {
-        self.healthy()?;
+        self.check_authority()?;
+        // A preceding CMD11 may have left the card at 1.8-V signaling. Stop
+        // its clock and remove VCC before restoring the host's 3.3-V state.
+        if self.signal_voltage == SignalVoltage::V1_8 || self.uhs_failed {
+            self.registers.write16(CLOCK, 0);
+            self.power_off()?;
+            if self.registers.read8(POWER) & POWER_ON != 0 {
+                return Err(self.uhs_failure(BlockError::Unsupported(
+                    "SDHCI rediscovery power-off did not acknowledge",
+                )));
+            }
+            self.clock.delay(1_000);
+        }
         self.reset(RESET_ALL)?;
+        self.signal_voltage = SignalVoltage::V3_3;
+        self.sd_timing = Timing::Legacy;
+        self.tuned_at = None;
+        self.uhs_failed = false;
         self.version = self.registers.read16(VERSION) as u8;
         if self.version > 5 {
             return Err(BlockError::Unsupported(
@@ -488,6 +625,8 @@ impl Engine {
             POWER_330
         } else if self.capabilities & CAP_300 != 0 {
             POWER_300
+        } else if self.capabilities & CAP_180 != 0 && self.profile == Profile::Gli9763e {
+            POWER_180
         } else if self.capabilities & CAP_180 != 0 {
             return Err(BlockError::Unsupported(
                 "SDHCI 1.8-V-only supply requires a qualified electrical profile",
@@ -497,15 +636,32 @@ impl Engine {
                 "SDHCI has no supported supply voltage",
             ));
         };
+        self.max_current_ma = if self.version >= 2 {
+            let current = self.registers.read32(MAX_CURRENT);
+            let shift = match power {
+                POWER_330 => 0,
+                POWER_300 => 8,
+                POWER_180 => 16,
+                _ => return Err(BlockError::Unsupported("SDHCI current supply selection")),
+            };
+            ((current >> shift) & 255) * 4
+        } else {
+            0
+        };
 
         let mask = if self.version >= 2 { 0xff } else { 0x3f };
         self.base_hz = ((self.capabilities >> 8) & mask) * 1_000_000;
         if self.base_hz == 0 {
             return Err(BlockError::Unsupported("SDHCI needs an actual base clock"));
         }
+        let supports_64 = if self.profile.gli() {
+            gli::dma::wide_capability(self.version, self.capabilities)
+        } else {
+            self.capabilities & CAP_64 != 0
+        };
         self.dma_mode = if self.profile.disable_adma() || self.capabilities & CAP_ADMA2 == 0 {
             None
-        } else if self.capabilities & CAP_64 != 0 {
+        } else if supports_64 {
             Some(true)
         } else if self
             .data
@@ -525,21 +681,57 @@ impl Engine {
         // The generic boundary uses ordinary SDHCI v1-v3 operation even on
         // newer controllers. V4/ADMA3 and UHS2 are never silently enabled.
         if self.version >= 2 {
-            self.registers.write16(HOST_CONTROL2, 0);
+            let mode = if self.profile.gli() { 1 << 12 } else { 0 }
+                | if power == POWER_180 { SIGNAL_180 } else { 0 };
+            self.registers.write16(HOST_CONTROL2, mode);
+            if self.registers.read16(HOST_CONTROL2)
+                & (SIGNAL_180 | UHS_MODE | EXECUTE_TUNING | TUNED_CLOCK | 3 << 12 | 1 << 15)
+                != mode
+            {
+                return Err(BlockError::Unsupported(
+                    "SDHCI initial signaling mode did not acknowledge",
+                ));
+            }
+            if power == POWER_180 {
+                self.clock.delay(100_000);
+                self.signal_voltage = SignalVoltage::V1_8;
+            }
         }
         self.registers.write8(HOST_CONTROL, 0);
         self.registers.write8(TIMEOUT, 0x0e);
         self.registers.write32(SIGNAL_ENABLE, 0);
-        self.registers.write32(INTERRUPT_ENABLE, u32::MAX);
-        self.registers
-            .write32(INTERRUPT, !(CARD_INSERT | CARD_REMOVE));
+        self.registers.write32(
+            INTERRUPT_ENABLE,
+            if self.profile.nonremovable() {
+                !(CARD_INSERT | CARD_REMOVE)
+            } else {
+                u32::MAX
+            },
+        );
+        self.clear_command_status()?;
         self.power_off()?;
         self.clock.delay(1000);
-        if !self.profile.single_power_write() {
-            self.registers.write8(POWER, power);
+        if self.profile == Profile::Gli9767 {
+            match gli::gl9767::set_power(self.registers.as_mut(), power) {
+                Ok(()) => self.clock.delay(10_000),
+                Err(gli::gl9755::ClockFailure::Authority(error)) => {
+                    return Err(self.quarantine_authority(error));
+                }
+                Err(gli::gl9755::ClockFailure::Hardware(error)) => {
+                    return Err(self.uhs_failure(error));
+                }
+            }
+        } else if self.profile == Profile::Gli9755 {
+            if let Err(error) = gli::gl9755::set_power(self.registers.as_mut(), self.clock, power) {
+                return Err(self.uhs_failure(error));
+            }
+        } else {
+            if !self.profile.single_power_write() {
+                self.registers.write8(POWER, power);
+            }
+            self.registers.write8(POWER, power | POWER_ON);
+            self.clock.delay(10_000);
         }
-        self.registers.write8(POWER, power | POWER_ON);
-        self.clock.delay(10_000);
         self.set_clock(INIT_HZ)?;
         // mmc_power_up requires >=74 card clocks/1ms after enabling f_init.
         // The pre-clock power delay cannot supply any of these card clocks.
@@ -547,39 +739,104 @@ impl Engine {
         Ok(())
     }
     fn set_clock(&mut self, hz: u32) -> Result<(), BlockError> {
+        if matches!(self.profile, Profile::Gli9755 | Profile::Gli9767) {
+            let set_clock = if self.profile == Profile::Gli9755 {
+                gli::gl9755::set_clock
+            } else {
+                gli::gl9767::set_clock
+            };
+            match set_clock(
+                self.registers.as_mut(),
+                self.clock,
+                self.version,
+                self.base_hz,
+                self.sd_timing,
+                hz,
+            ) {
+                Ok(actual) => {
+                    self.actual_hz = actual;
+                    return Ok(());
+                }
+                Err(gli::gl9755::ClockFailure::Authority(error)) => {
+                    // A changed D0/decode/requester epoch denies further MMIO.
+                    // Retain the original owner without touching stale BARs.
+                    return Err(self.quarantine_authority(error));
+                }
+                Err(gli::gl9755::ClockFailure::Hardware(error)) => {
+                    self.medium = None;
+                    self.fault = Some(error.clone());
+                    return Err(self.uhs_failure(error));
+                }
+            }
+        }
+        if self.profile == Profile::Gli9750 {
+            self.actual_hz = gli::set_clock(
+                self.registers.as_mut(),
+                self.clock,
+                self.version,
+                self.base_hz,
+                self.sd_timing,
+                hz,
+            )?;
+            return Ok(());
+        }
         self.registers.write16(CLOCK, 0);
+        if self.registers.read16(CLOCK) & CLOCK_CARD != 0 {
+            return Err(BlockError::Unsupported("SDHCI card clock did not stop"));
+        }
         if let Some(control) = &self.controller {
             control.borrow_mut().before_clock()?;
         }
+        if hz == 0 {
+            self.actual_hz = 0;
+            return self.finish_ios();
+        }
         let (divisor, actual) = clock_divisor(self.version, self.base_hz, hz)?;
         let field = (divisor & 0xff) << 8 | (divisor & 0x300) >> 2;
-        self.registers.write16(CLOCK, field | CLOCK_INTERNAL);
-        let present = if self.profile.retained_config() {
-            self.o2_card_present()?
-        } else {
-            if !self
-                .clock
-                .wait(20_000, || self.registers.read16(CLOCK) & CLOCK_STABLE != 0)
-            {
-                return Err(BlockError::Timeout);
+        if self.profile.retained_config() {
+            // The retained O2 profile qualifies its own PLL/card-detect hook.
+            self.registers.write16(CLOCK, field | CLOCK_INTERNAL);
+            if self.o2_card_present()? {
+                self.registers
+                    .write16(CLOCK, field | CLOCK_INTERNAL | CLOCK_CARD);
             }
-            true
-        };
-        if present {
-            self.registers
-                .write16(CLOCK, field | CLOCK_INTERNAL | CLOCK_CARD);
+        } else {
+            enable_clock(self.registers.as_mut(), self.clock, self.version, field)?;
         }
         if actual > hz {
             return Err(BlockError::Unsupported("SDHCI clock exceeds card limit"));
         }
+        self.actual_hz = actual;
         self.finish_ios()
     }
     fn power_off(&mut self) -> Result<(), BlockError> {
+        if self.profile.gli() && !self.uhs_failed && self.healthy().is_ok() {
+            // Normal power transitions run the actual vendor clock-off hook.
+            // A permanently fenced owner keeps the immediate containment path.
+            self.set_clock(0)?;
+        }
+        if self.profile == Profile::Gli9767 {
+            return match gli::gl9767::set_power(self.registers.as_mut(), 0) {
+                Ok(()) => Ok(()),
+                Err(gli::gl9755::ClockFailure::Authority(error)) => {
+                    Err(self.quarantine_authority(error))
+                }
+                Err(gli::gl9755::ClockFailure::Hardware(error)) => Err(error),
+            };
+        }
+        if self.profile == Profile::Gli9755 {
+            return gli::gl9755::set_power(self.registers.as_mut(), self.clock, 0);
+        }
         if let Some(control) = &self.controller {
             self.registers.write16(CLOCK, 0);
             control.borrow_mut().power_off()?;
         }
         self.registers.write8(POWER, 0);
+        if self.profile == Profile::Gli9763e && self.registers.read8(POWER) != 0 {
+            return Err(BlockError::Unsupported(
+                "GL9763E power-off did not acknowledge",
+            ));
+        }
         Ok(())
     }
     fn o2_card_present(&mut self) -> Result<bool, BlockError> {
@@ -593,6 +850,11 @@ impl Engine {
         result
     }
     fn set_high_speed_host(&mut self) -> Result<(), BlockError> {
+        self.check_authority()?;
+        if self.profile == Profile::Gli9763e {
+            return gli::gl9763e::high_speed(self.registers.as_mut())
+                .map_err(|error| self.uhs_failure(error));
+        }
         let control = self.registers.read8(HOST_CONTROL) & !HIGH_SPEED;
         let high_speed = if self.profile.no_high_speed_bit() {
             0
@@ -613,6 +875,40 @@ impl Engine {
         }
         Ok(())
     }
+}
+/// Linux sdhci_enable_clk: each internal/PLL phase has its own150-ms deadline.
+fn enable_clock(
+    r: &mut dyn Registers,
+    timer: Clock,
+    version: u8,
+    field: u16,
+) -> Result<(), BlockError> {
+    let mut control = field | CLOCK_INTERNAL;
+    r.write16(CLOCK, control);
+    if !timer.wait(150_000, || r.read16(CLOCK) & CLOCK_STABLE != 0) {
+        return Err(BlockError::Timeout);
+    }
+    if version >= 4 && r.read16(HOST_CONTROL2) & (1 << 12) != 0 {
+        control |= CLOCK_PLL;
+        // Stable is read-only and the source explicitly clears it in this store.
+        r.write16(CLOCK, control);
+        if !timer.wait(150_000, || r.read16(CLOCK) & CLOCK_STABLE != 0) {
+            return Err(BlockError::Timeout);
+        }
+    }
+    let owned = 0xffc0 | CLOCK_INTERNAL | CLOCK_PLL;
+    if r.read16(CLOCK) & owned != control {
+        return Err(BlockError::Unsupported(
+            "SDHCI internal/PLL clock did not acknowledge",
+        ));
+    }
+    r.write16(CLOCK, control | CLOCK_CARD);
+    if r.read16(CLOCK) & (owned | CLOCK_CARD) != control | CLOCK_CARD {
+        return Err(BlockError::Unsupported(
+            "SDHCI card clock did not acknowledge",
+        ));
+    }
+    Ok(())
 }
 fn clock_divisor(version: u8, base: u32, hz: u32) -> Result<(u16, u32), BlockError> {
     if hz == 0 || base == 0 {

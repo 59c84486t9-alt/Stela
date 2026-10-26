@@ -6,6 +6,10 @@ use crate::{
     block::{Identity, Transport},
 };
 use alloc::format;
+mod ddr;
+mod fast;
+mod hs;
+mod retune;
 
 const COMMAND_US: u64 = 1_000_000;
 const DATA_US: u64 = 5_000_000;
@@ -46,12 +50,38 @@ pub(in crate::storage) trait Host {
     fn voltage(&mut self) -> Result<u32, BlockError>;
     fn writable(&mut self) -> Result<bool, BlockError>;
     fn allow_kind(&self, kind: Kind) -> Result<(), BlockError>;
+    /// Exact embedded-MMC profiles declare NO_SD; never send SD probe commands
+    /// through that board's fixed eMMC transport.
+    fn probe_sd(&self) -> bool {
+        true
+    }
     // Some native engines bypass their identification divider for PIO data.
     // Refuse cards below that real physical rate before any data command.
     fn minimum_data_hz(&self) -> u32 {
         0
     }
     fn high_speed_supported(&self) -> bool;
+    fn mmc_fast_modes(&self) -> bool {
+        false
+    }
+    fn set_mmc_signal_voltage(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("host MMC fast signaling"))
+    }
+    fn set_mmc_timing(&mut self, _timing: Timing) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("host MMC fast timing"))
+    }
+    fn set_mmc_strobe(&mut self, _enable: bool) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("host MMC enhanced strobe"))
+    }
+    fn tune_mmc(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("host MMC tuning"))
+    }
+    fn mmc_switch_status(&mut self, _rca: u16, _crc_fatal: bool) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("host MMC timing switch status"))
+    }
+    fn mmc_mode_failure(&mut self, error: BlockError) -> BlockError {
+        self.retire(error)
+    }
     fn sd_uhs_modes(&self) -> SdUhsModes {
         SdUhsModes::default()
     }
@@ -121,22 +151,24 @@ impl<H: Host> Session<'_, H> {
         self.rca = 0;
         self.execute(GO_IDLE, 0, Response::None, None)?;
         let voltage = self.host.voltage()?;
-        let v2 = match self.execute(SD_SEND_IF_COND, 0x1aa, Response::Echo, None) {
-            Ok(response) if response[0] == 0x1aa => true,
-            Ok(response) if response[0] & R1_ERRORS == R1_ILLEGAL => false,
-            Ok(_) => {
-                return Err(BlockError::Unsupported(
-                    "SD SEND_IF_COND echo or voltage mismatch",
-                ));
-            }
-            Err(error) if unavailable(&error) => false,
-            Err(error) => return Err(error),
-        };
-        let sd = match self.application(0) {
-            Ok(()) => true,
-            Err(error) if unavailable(&error) => false,
-            Err(error) => return Err(error),
-        };
+        let v2 = self.host.probe_sd()
+            && match self.execute(SD_SEND_IF_COND, 0x1aa, Response::Echo, None) {
+                Ok(response) if response[0] == 0x1aa => true,
+                Ok(response) if response[0] & R1_ERRORS == R1_ILLEGAL => false,
+                Ok(_) => {
+                    return Err(BlockError::Unsupported(
+                        "SD SEND_IF_COND echo or voltage mismatch",
+                    ));
+                }
+                Err(error) if unavailable(&error) => false,
+                Err(error) => return Err(error),
+            };
+        let sd = self.host.probe_sd()
+            && match self.application(0) {
+                Ok(()) => true,
+                Err(error) if unavailable(&error) => false,
+                Err(error) => return Err(error),
+            };
         let kind = if sd { Kind::Sd } else { Kind::Mmc };
         self.host.allow_kind(kind)?;
         if sd && voltage == OCR_180 {
@@ -323,48 +355,60 @@ impl<H: Host> Session<'_, H> {
                 self.mmc_switch(EXT_PARTITION as u8, value)?;
                 ext[EXT_PARTITION] = value;
             }
+            let fast = self.fast_mode(&ext);
+            let ddr = fast.is_none() && self.ddr52_supported(&ext);
+            let hs = fast.is_none()
+                && !ddr
+                && self.host.high_speed_supported()
+                && ext[EXT_CARD_TYPE] & 3 != 0;
+            if ddr {
+                self.begin_ddr52(&mut ext, &mut info)
+                    .map_err(|error| self.host.mmc_mode_failure(error))?;
+            } else if fast.is_some() {
+                self.host
+                    .set_mmc_signal_voltage()
+                    .map_err(|error| self.host.mmc_mode_failure(error))?;
+                info.signal_voltage = SignalVoltage::V1_8;
+            } else if hs {
+                self.begin_sdr_hs(&mut ext, &mut info)
+                    .map_err(|error| self.host.mmc_mode_failure(error))?;
+            }
             // Only an exact source-declared board profile grants eight pins;
             // generic controller CAP_8BIT never establishes board wiring.
             let width = self.host.mmc_width();
             let wire_width = if width == 8 { 2 } else { 1 };
-            self.mmc_switch(EXT_BUS_WIDTH as u8, wire_width)?;
-            self.host.set_bus_width(width)?;
-            info.bus_width = width;
-            ext[EXT_BUS_WIDTH] = wire_width;
-            // Reread EXT_CSD at the new actual bus width and compare immutable
-            // identity/capacity bytes, as Linux's bus-width validation does.
-            self.execute(MMC_SEND_EXT_CSD, 0, Response::Status, Some(512))?;
-            let check = self.host.scratch();
-            if BUS_WIDTH_READ_ONLY
-                .iter()
-                .any(|index| check[*index] != ext[*index])
-            {
-                return Err(BlockError::Unsupported("MMC bus-width validation failed"));
-            }
-            if self.host.high_speed_supported() && ext[EXT_CARD_TYPE] & 3 != 0 {
-                let voltage180 = voltage == OCR_180;
-                let faster = ext[EXT_CARD_TYPE] & 2 != 0;
-                let power_index = match (voltage180, faster) {
-                    (true, false) => 201,
-                    (true, true) => 200,
-                    (false, false) => 203,
-                    (false, true) => 202,
-                };
-                let power_class = ext[power_index] >> if width == 8 { 4 } else { 0 } & 15;
-                if power_class != 0 {
-                    self.mmc_switch(187, power_class)?;
-                    ext[187] = power_class;
+            let width_result = (|| {
+                self.mmc_switch(EXT_BUS_WIDTH as u8, wire_width)?;
+                self.host.set_bus_width(width)?;
+                info.bus_width = width;
+                ext[EXT_BUS_WIDTH] = wire_width;
+                // Validate immutable identity/capacity at the new real width.
+                self.execute(MMC_SEND_EXT_CSD, 0, Response::Status, Some(512))?;
+                let check = self.host.scratch();
+                if BUS_WIDTH_READ_ONLY
+                    .iter()
+                    .any(|index| check[*index] != ext[*index])
+                {
+                    return Err(BlockError::Unsupported("MMC bus-width validation failed"));
                 }
-
-                self.mmc_switch(EXT_TIMING as u8, 1)?;
-                ext[EXT_TIMING] = 1;
-                self.host.set_high_speed()?;
-                info.timing = Timing::HighSpeed;
-                info.clock_hz = if ext[EXT_CARD_TYPE] & 2 != 0 {
-                    52_000_000
+                Ok(())
+            })();
+            if let Err(error) = width_result {
+                return Err(if fast.is_some() || ddr || hs {
+                    self.host.mmc_mode_failure(error)
                 } else {
-                    26_000_000
-                };
+                    error
+                });
+            }
+            if ddr {
+                self.finish_ddr52(voltage, &mut ext, &mut info)
+                    .map_err(|error| self.host.mmc_mode_failure(error))?;
+            } else if let Some(mode) = fast {
+                self.select_fast_mode(mode, voltage, &mut ext, &mut info)
+                    .map_err(|error| self.host.mmc_mode_failure(error))?;
+            } else if hs {
+                self.select_sdr_power_class(voltage, &mut ext, &info)
+                    .map_err(|error| self.host.mmc_mode_failure(error))?;
             }
             cache = ext[EXT_CACHE_CONTROL] & 1 != 0
                 && u32::from_le_bytes(ext[EXT_CACHE_SIZE..EXT_CACHE_SIZE + 4].try_into().unwrap())
@@ -383,7 +427,13 @@ impl<H: Host> Session<'_, H> {
         if !sector_addressed {
             self.execute(SET_BLOCK_LENGTH, 512, Response::Status, None)?;
         }
-        if !low_voltage {
+        if !low_voltage
+            && !(kind == Kind::Mmc && info.timing == Timing::HighSpeed)
+            && !matches!(
+                info.timing,
+                Timing::MmcHs200 | Timing::MmcHs400 | Timing::MmcDdr52
+            )
+        {
             info.clock_hz = self.host.set_clock(info.clock_hz)?;
         }
         let product: Vec<u8> = (0..if sd {

@@ -32,7 +32,13 @@ impl Host for Engine {
         &self.location
     }
     fn voltage(&mut self) -> Result<u32, BlockError> {
-        match self.registers.read8(POWER) & !POWER_ON {
+        let supply = self.registers.read8(POWER);
+        match supply
+            & if self.profile == Profile::Gli9755 {
+                0x0e
+            } else {
+                !POWER_ON
+            } {
             POWER_330 => Ok(OCR_330),
             POWER_300 => Ok(OCR_300),
             POWER_180 => Ok(OCR_180),
@@ -42,11 +48,56 @@ impl Host for Engine {
     fn writable(&mut self) -> Result<bool, BlockError> {
         Ok(self.registers.read32(PRESENT) & WRITE_ALLOWED != 0)
     }
-    fn allow_kind(&self, _: Kind) -> Result<(), BlockError> {
+    fn allow_kind(&self, kind: Kind) -> Result<(), BlockError> {
+        if self.profile == Profile::Gli9763e && kind != Kind::Mmc {
+            return Err(BlockError::Unsupported(
+                "GL9763E is an embedded MMC-only transport",
+            ));
+        }
         Ok(())
+    }
+    fn probe_sd(&self) -> bool {
+        self.profile != Profile::Gli9763e
     }
     fn high_speed_supported(&self) -> bool {
         self.capabilities & CAP_HIGH_SPEED != 0
+    }
+    fn mmc_fast_modes(&self) -> bool {
+        Engine::mmc_fast_modes(self)
+    }
+    fn set_mmc_signal_voltage(&mut self) -> Result<(), BlockError> {
+        self.mmc_signal_180()
+    }
+    fn set_mmc_timing(&mut self, timing: Timing) -> Result<(), BlockError> {
+        self.mmc_timing(timing)
+    }
+    fn set_mmc_strobe(&mut self, enable: bool) -> Result<(), BlockError> {
+        self.mmc_strobe(enable)
+    }
+    fn tune_mmc(&mut self) -> Result<(), BlockError> {
+        self.tune()
+    }
+    fn mmc_switch_status(&mut self, rca: u16, crc_fatal: bool) -> Result<(), BlockError> {
+        self.mmc_mode_status(rca, crc_fatal)
+    }
+    fn mmc_mode_failure(&mut self, error: BlockError) -> BlockError {
+        self.mmc_failure(error)
+    }
+    fn sd_uhs_modes(&self) -> super::super::mmc::SdUhsModes {
+        self.uhs_modes()
+    }
+    fn switch_sd_signal_voltage(&mut self) -> Result<(), BlockError> {
+        self.switch_signal_voltage()
+    }
+    fn set_sd_uhs_timing(&mut self, timing: Timing) -> Result<(), BlockError> {
+        self.set_uhs_timing(timing)
+    }
+    fn tune_sd(&mut self) -> Result<(), BlockError> {
+        self.tune()
+    }
+    fn sd_max_current_ma(&self) -> u32 {
+        // Captured from the actual selected VCC supply's MAX_CURRENT field.
+        self.max_current_ma
     }
     fn mmc_width(&self) -> u8 {
         self.profile.mmc_width()
@@ -68,7 +119,7 @@ impl Host for Engine {
     }
     fn set_clock(&mut self, requested: u32) -> Result<u32, BlockError> {
         Engine::set_clock(self, requested)?;
-        Ok(clock_divisor(self.version, self.base_hz, requested)?.1)
+        Ok(self.actual_hz)
     }
     fn scratch(&self) -> &[u8] {
         self.data.bytes()
@@ -79,6 +130,11 @@ impl Host for Engine {
 }
 impl Engine {
     pub(super) fn retire_error(&mut self, primary: BlockError) -> BlockError {
+        if self.uhs_failed {
+            // The electrical path already powered off and retained both cleanup
+            // outcomes. Shared card-protocol unwinding must not replace them.
+            return primary;
+        }
         self.medium = None;
         let retirement = if self.healthy().is_ok() {
             self.reset(RESET_COMMAND | RESET_DATA).err()

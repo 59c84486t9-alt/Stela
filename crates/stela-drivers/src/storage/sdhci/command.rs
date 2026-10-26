@@ -23,7 +23,27 @@ pub(super) struct Data {
     pub pio: bool,
 }
 
+pub(super) fn adma_address(registers: &mut dyn Registers, address: u64, wide: bool) {
+    registers.write32(ADMA_ADDRESS, address as u32);
+    if wide {
+        registers.write32(ADMA_ADDRESS_HIGH, (address >> 32) as u32);
+    }
+}
+
 impl Engine {
+    pub(super) fn clear_command_status(&mut self) -> Result<(), BlockError> {
+        // Power faults may latch between the preceding observation and this
+        // W1C store. Preserve them and observe before publishing a new command.
+        let preserve = CARD_INSERT
+            | CARD_REMOVE
+            | if matches!(self.profile, Profile::Gli9755 | Profile::Gli9767) {
+                BUS_POWER
+            } else {
+                0
+            };
+        self.registers.write32(INTERRUPT, !preserve);
+        self.gli55_power_event()
+    }
     pub(super) fn execute(
         &mut self,
         command: Opcode,
@@ -32,8 +52,13 @@ impl Engine {
         data: Option<Data>,
     ) -> Result<[u32; 4], BlockError> {
         self.healthy()?;
-        let result = self.execute_inner(command, argument, response, data);
+        let result = self.execute_inner(command, argument, response, data, false);
         if let Err(error) = result {
+            if command == SD_SWITCH_VOLTAGE {
+                // CMD11 may have taken effect even without a completion. An
+                // ordinary command/data reset cannot restore the card voltage.
+                return Err(self.uhs_failure(error));
+            }
             // Fence publication before retirement. A failed reset poisons the
             // controller permanently and preserves the complete DMA allocation.
             return Err(self.retire_error(error));
@@ -46,6 +71,7 @@ impl Engine {
         argument: u32,
         response: Response,
         data: Option<Data>,
+        tolerate_response_crc: bool,
     ) -> Result<[u32; 4], BlockError> {
         self.check_card()?;
         let inhibit = INHIBIT_COMMAND
@@ -62,8 +88,7 @@ impl Engine {
             }
             core::hint::spin_loop();
         }
-        self.registers
-            .write32(INTERRUPT, !(CARD_INSERT | CARD_REMOVE));
+        self.clear_command_status()?;
         let dma = data.is_some_and(|data| !data.pio) && self.dma_mode.is_some();
         let mut mode = 0;
         if let Some(data) = data {
@@ -80,31 +105,45 @@ impl Engine {
                 .map_err(|_| BlockError::Unsupported("SDHCI transfer block count"))?;
             let mut control = self.registers.read8(HOST_CONTROL) & !DMA_MASK;
             if dma {
+                if let Err(error) = self.registers.dma_ready() {
+                    // An unacknowledged native PCI grant cannot be recovered
+                    // by an SD command/data reset. Retain its original epoch.
+                    self.fault = Some(error.clone());
+                    return Err(error);
+                }
                 let wide = self.dma_mode.unwrap();
-                control |= if wide { ADMA64 } else { ADMA32 };
-                // One aligned descriptor covers the retained contiguous bounce
-                // range. A zero16-bit length encodes exactly65536bytes.
-                self.descriptors.write(0, 0x23u16); // VALID | END | TRAN
-                self.descriptors.write(2, data.bytes as u16);
-                self.descriptors.write(4, self.data.physical() as u32);
-                if wide {
-                    self.descriptors
-                        .write(8, (self.data.physical() >> 32) as u32);
+                if self.profile.gli() {
+                    control = gli::dma::configure(self.registers.as_mut(), wide)?;
+                    gli::dma::descriptor(
+                        &mut self.descriptors,
+                        self.data.physical(),
+                        data.bytes,
+                        wide,
+                    );
+                } else {
+                    control |= if wide { ADMA64 } else { ADMA32 };
+                    // One aligned descriptor covers the retained contiguous bounce
+                    // range. A zero16-bit length encodes exactly65536bytes.
+                    self.descriptors.write(0, 0x23u16); // VALID | END | TRAN
+                    self.descriptors.write(2, data.bytes as u16);
+                    self.descriptors.write(4, self.data.physical() as u32);
+                    if wide {
+                        self.descriptors
+                            .write(8, (self.data.physical() >> 32) as u32);
+                    }
                 }
                 fence(Ordering::Release);
-                self.registers
-                    .write32(ADMA_ADDRESS, self.descriptors.physical() as u32);
-                self.registers.write32(
-                    ADMA_ADDRESS_HIGH,
-                    if wide {
-                        (self.descriptors.physical() >> 32) as u32
-                    } else {
-                        0
-                    },
-                );
+                adma_address(self.registers.as_mut(), self.descriptors.physical(), wide);
                 mode |= DMA;
             }
             self.registers.write8(HOST_CONTROL, control);
+            if self.profile.gli()
+                && self.registers.read8(HOST_CONTROL) & DMA_MASK != control & DMA_MASK
+            {
+                return Err(BlockError::Unsupported(
+                    "GL9750 DMA selection did not acknowledge",
+                ));
+            }
             self.registers.write16(BLOCK_SIZE, data.block);
             self.registers.write16(BLOCK_COUNT, count);
             mode |= BLOCK_COUNT_ENABLE;
@@ -127,7 +166,23 @@ impl Engine {
         fence(Ordering::Release);
         self.registers
             .write16(COMMAND, u16::from(command.number()) << 8 | flags);
-        self.wait_interrupt(RESPONSE_END, COMMAND_US)?;
+        if let Err(error) = self.wait_interrupt(RESPONSE_END, COMMAND_US) {
+            let response_check = (1 << 17) | (1 << 18) | (1 << 19);
+            if tolerate_response_crc
+                && matches!(error, BlockError::Device { status }
+                    if status & response_check != 0
+                        && status & ERROR & !(response_check | (1 << 15)) == 0)
+            {
+                // Linux maps response CRC/end/index checks to EILSEQ;
+                // mmc_switch_status(false) alone permits that response error.
+                // This branch precedes card R1 decoding, so an R1 error can
+                // never be mistaken for an SDHCI interrupt with equal bits.
+                self.reset(RESET_COMMAND | RESET_DATA)?;
+                self.check_card()?;
+                return Ok([0; 4]);
+            }
+            return Err(error);
+        }
         self.registers.write32(INTERRUPT, RESPONSE_END);
         let mut result = [0; 4];
         if response == Response::Long {
@@ -171,7 +226,23 @@ impl Engine {
         self.check_card()?;
         Ok(result)
     }
-    fn check_card(&mut self) -> Result<(), BlockError> {
+    pub(super) fn mmc_mode_status(&mut self, rca: u16, crc_fatal: bool) -> Result<(), BlockError> {
+        self.healthy()?;
+        let result = self.execute_inner(
+            SEND_STATUS,
+            u32::from(rca) << 16,
+            Response::Status,
+            None,
+            !crc_fatal,
+        );
+        result.map(|_| ()).map_err(|error| self.retire_error(error))
+    }
+    pub(super) fn check_card(&mut self) -> Result<(), BlockError> {
+        self.check_authority()?;
+        self.gli55_power_event()?;
+        if self.profile.nonremovable() {
+            return Ok(());
+        }
         let interrupt = self.registers.read32(INTERRUPT);
         let state = self.registers.read32(PRESENT);
         if interrupt & (CARD_INSERT | CARD_REMOVE) != 0 || state & CARD_PRESENT == 0 {
@@ -182,7 +253,7 @@ impl Engine {
         }
         Ok(())
     }
-    fn wait_interrupt(&mut self, wanted: u32, timeout: u64) -> Result<u32, BlockError> {
+    pub(super) fn wait_interrupt(&mut self, wanted: u32, timeout: u64) -> Result<u32, BlockError> {
         let deadline = self.clock.deadline(timeout);
         loop {
             self.check_card()?;

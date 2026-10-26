@@ -1,6 +1,7 @@
 //! Real controller/card-model initialization, data and lifecycle regressions.
 use super::{model::*, *};
 use crate::bus::dma::RegionAllocator;
+mod hs;
 
 fn host(
     dma: &mut dyn DmaAllocator,
@@ -476,13 +477,28 @@ fn completed_data_with_perpetually_not_ready_card_retires_publication() {
         let mut card = host.poll().unwrap().unwrap();
         model.borrow_mut().never_ready = true;
         model.borrow_mut().reset_stuck = reset_stuck;
-        // Clock's documented zero-rate test mode expires waits immediately;
-        // real command/data completions still arrive from the device model.
-        host.inner.borrow_mut().clock = Clock {
-            ticks_per_microsecond: 0,
-        };
+        // Keep the admitted model's actual finite clock. Data completion is
+        // observed first; repeated not-ready CMD13 responses must consume the
+        // real five-second logical card-status budget before retirement.
+        let clock = host.inner.borrow().clock;
+        let started = clock.try_start().unwrap();
+        let first = model.borrow().commands.len();
         let mut bytes = [0x95; 512];
-        assert!(card.read(0, &mut bytes).is_err());
+        assert_eq!(card.read(0, &mut bytes), Err(BlockError::Timeout));
+        assert!(clock.try_elapsed_us(started).unwrap() >= 5_000_000);
+        assert!(
+            model.borrow().commands[first..]
+                .iter()
+                .any(|(cmd, _, _)| *cmd == 17)
+        );
+        assert!(
+            model.borrow().commands[first..]
+                .iter()
+                .filter(|(cmd, _, _)| *cmd == 13)
+                .count()
+                > 1
+        );
+        assert_eq!(host.last_failure().unwrap().primary, BlockError::Timeout);
         assert_eq!(bytes, [0x95; 512]);
         let before = (
             model.borrow().reads,

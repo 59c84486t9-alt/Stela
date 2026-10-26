@@ -4,8 +4,43 @@ use super::*;
 use alloc::collections::{BTreeMap, VecDeque};
 pub(super) const CLOCK_TICKS_PER_US: u64 = 1000;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum VoltageFault {
+    DatHighBefore,
+    OneDatLowBefore,
+    Enable,
+    StopClock,
+    DatLowAfter,
+    OneDatLowAfter,
+}
+
 pub(super) struct Hardware {
     pub caps: u32,
+    pub caps2: u32,
+    pub max_current: u32,
+    pub ocr_voltage: u32,
+    pub uhs_functions: u8,
+    pub voltage_fault: Option<VoltageFault>,
+    pub power_off_stuck: bool,
+    pub uhs_timing_stuck: bool,
+    pub tuning_iterations: usize,
+    pub tuning_no_clock: bool,
+    pub tuning_start_stuck: bool,
+    pub silence_voltage_response: bool,
+    pub tuning_commands: usize,
+    pub mmc_fast_checks: bool,
+    pub mmc_ddr52_checks: bool,
+    pub mmc_sdr_hs_checks: bool,
+    pub mmc_power_fault: bool,
+    pub mmc_retune_phase: Option<usize>,
+    pub mmc_fast_status_fault: Option<u8>,
+    pub mmc_timing_fault: Option<(u8, u32, bool)>,
+    pub tuning_round: usize,
+    pub voltage_started: bool,
+    voltage_changed_at: Option<u64>,
+    voltage_restart_at: Option<u64>,
+    sd_function: u8,
+    sd_current: u8,
     pub version: u16,
     pub present: bool,
     pub writable: bool,
@@ -62,6 +97,11 @@ pub(super) struct Hardware {
     storage_write: bool,
 }
 impl Hardware {
+    /// Independently latched asynchronous hardware status; ordinary Port W1C
+    /// writes consume these exact bits, including events arriving at a store.
+    pub(super) fn latch_status(&mut self, status: u32) {
+        self.status |= status;
+    }
     pub fn new(kind: Kind, high_capacity: bool) -> Self {
         let mut cid = 0u128;
         put(&mut cid, 120, 8, 0x42);
@@ -111,6 +151,31 @@ impl Hardware {
         }
         Self {
             caps: CAP_330 | CAP_ADMA2 | CAP_64 | CAP_HIGH_SPEED | CAP_8BIT | 100 << 8,
+            caps2: 0,
+            max_current: 0,
+            ocr_voltage: 3 << 20,
+            uhs_functions: 0,
+            voltage_fault: None,
+            power_off_stuck: false,
+            uhs_timing_stuck: false,
+            tuning_iterations: 3,
+            tuning_no_clock: false,
+            tuning_start_stuck: false,
+            silence_voltage_response: false,
+            tuning_commands: 0,
+            mmc_fast_checks: false,
+            mmc_ddr52_checks: false,
+            mmc_sdr_hs_checks: false,
+            mmc_power_fault: false,
+            mmc_retune_phase: None,
+            mmc_fast_status_fault: None,
+            mmc_timing_fault: None,
+            tuning_round: 0,
+            voltage_started: false,
+            voltage_changed_at: None,
+            voltage_restart_at: None,
+            sd_function: 0,
+            sd_current: 0,
             version: 2,
             present: true,
             writable: true,
@@ -255,6 +320,13 @@ impl Hardware {
             "card command without stable clock"
         );
         assert_ne!(self.byte(POWER) & POWER_ON, 0, "card command without power");
+        if self.version >= 4 && self.word(HOST_CONTROL2) & (1 << 12) != 0 {
+            assert_ne!(
+                self.word(CLOCK) & CLOCK_PLL,
+                0,
+                "v4.1 card command before actual PLL enable"
+            );
+        }
         self.status &= !(RESPONSE_END | DATA_END | READ_READY | WRITE_READY);
         if self.remove_command == Some(cmd) {
             self.present = false;
@@ -296,12 +368,19 @@ impl Hardware {
                     self.response(self.r1() | 1 << 5);
                 }
             }
-            41 if app && self.kind == Kind::Sd => {
-                self.response(1 << 31 | if self.high_capacity { 1 << 30 } else { 0 } | 3 << 20)
-            }
-            1 if self.kind == Kind::Mmc => {
-                self.response(1 << 31 | if self.high_capacity { 1 << 30 } else { 0 } | 3 << 20)
-            }
+            41 if app && self.kind == Kind::Sd => self.response(
+                1 << 31
+                    | if self.high_capacity { 1 << 30 } else { 0 }
+                    | 3 << 20
+                    | if self.uhs_functions != 0 && argument & (1 << 24) != 0 {
+                        1 << 24
+                    } else {
+                        0
+                    },
+            ),
+            1 if self.kind == Kind::Mmc => self.response(
+                1 << 31 | if self.high_capacity { 1 << 30 } else { 0 } | self.ocr_voltage,
+            ),
             2 => self.long(self.cid),
             3 => {
                 self.rca = if self.kind == Kind::Sd {
@@ -326,6 +405,51 @@ impl Hardware {
             }
             13 => {
                 assert_eq!(argument, u32::from(self.rca) << 16);
+                if self.mmc_sdr_hs_checks && self.ext[185] == 1 {
+                    assert_ne!(self.byte(HOST_CONTROL) & HIGH_SPEED, 0);
+                }
+                if self.mmc_fast_checks && self.ext[185] != 0 {
+                    let mode = match self.ext[185] & 15 {
+                        1 if self.mmc_ddr52_checks && self.ext[183] == 6
+                            || self.mmc_retune_phase == Some(1) =>
+                        {
+                            4
+                        }
+                        1 => 1,
+                        2 => 3,
+                        3 => 7,
+                        _ => panic!("unsupported MMC timing"),
+                    };
+                    assert_eq!(self.word(HOST_CONTROL2) & UHS_MODE, mode);
+                    if !self.mmc_ddr52_checks {
+                        assert_ne!(self.word(HOST_CONTROL2) & SIGNAL_180, 0);
+                    }
+                    if self.ext[185] == 2
+                        && let Some(fault) = self.mmc_fast_status_fault.take()
+                    {
+                        if fault == 8 {
+                            self.response(self.r1() | (1 << 17) | (1 << 15));
+                            self.status |= RESPONSE_END;
+                            return;
+                        }
+                        if fault != 0 {
+                            let error = match fault {
+                                1 => 1 << 17,
+                                2 => (1 << 17) | RESPONSE_END,
+                                3 => 1 << 18,
+                                4 => 1 << 19,
+                                5 => (7 << 17) | RESPONSE_END,
+                                6 => (1 << 17) | (1 << 21),
+                                _ => (1 << 17) | COMMAND_TIMEOUT,
+                            };
+                            self.status |= error | (1 << 15);
+                            return;
+                        }
+                        self.response(self.r1() | (1 << 7));
+                        self.status |= RESPONSE_END;
+                        return;
+                    }
+                }
                 self.response(if self.never_ready { 7 << 9 } else { self.r1() });
             }
             51 if app && self.kind == Kind::Sd => data = Some(self.scr.to_vec()),
@@ -334,13 +458,109 @@ impl Hardware {
             }
             6 if self.kind == Kind::Sd => {
                 let mut bytes = vec![0; 64];
-                bytes[13] = 2;
-                bytes[16] = if argument >> 31 != 0 { 1 } else { 0 };
+                bytes[13] = if self.uhs_functions != 0 {
+                    self.uhs_functions
+                } else {
+                    2
+                };
+                bytes[7] = 15;
+                if argument >> 31 != 0 {
+                    let speed = argument as u8 & 15;
+                    if speed != 15 {
+                        self.sd_function = speed;
+                    }
+                    let current = (argument >> 12) as u8 & 15;
+                    if current != 15 {
+                        self.sd_current = current;
+                    }
+                }
+                bytes[15] = self.sd_current << 4;
+                bytes[16] = self.sd_function;
                 data = Some(bytes);
+            }
+            11 if self.kind == Kind::Sd => {
+                assert_ne!(self.uhs_functions, 0);
+                assert_eq!(self.word(HOST_CONTROL2) & SIGNAL_180, 0);
+                self.voltage_started = true;
+                if self.silence_voltage_response {
+                    return;
+                }
+            }
+            19 | 21
+                if cmd == 19 && self.kind == Kind::Sd || cmd == 21 && self.kind == Kind::Mmc =>
+            {
+                assert_ne!(self.word(HOST_CONTROL2) & SIGNAL_180, 0);
+                assert_ne!(self.word(HOST_CONTROL2) & EXECUTE_TUNING, 0);
+                assert_eq!(self.word(TRANSFER_MODE), READ);
+                if cmd == 21 {
+                    assert_eq!(self.ext[185], 2);
+                    assert_eq!(self.ext[183], 2);
+                    assert_eq!(self.word(HOST_CONTROL2) & UHS_MODE, 3);
+                    assert_eq!(self.word(BLOCK_SIZE), 128);
+                    assert_eq!(
+                        self.byte(HOST_CONTROL) & (BUS8 | HIGH_SPEED),
+                        BUS8 | HIGH_SPEED
+                    );
+                } else {
+                    assert_eq!(self.word(BLOCK_SIZE), 64);
+                    assert_eq!(
+                        self.byte(HOST_CONTROL) & (BUS4 | HIGH_SPEED),
+                        BUS4 | HIGH_SPEED
+                    );
+                }
+                self.tuning_commands += 1;
+                self.tuning_round += 1;
+                if self.tuning_round == self.tuning_iterations {
+                    let control = self.word(HOST_CONTROL2) & !EXECUTE_TUNING;
+                    self.write(
+                        HOST_CONTROL2,
+                        2,
+                        u32::from(control | if self.tuning_no_clock { 0 } else { TUNED_CLOCK }),
+                    );
+                }
+                // Hardware consumes the entire pattern. Ordinary RESPONSE_END,
+                // DATA_END and FIFO access would be driver errors here.
+                self.status |= READ_READY;
+                return;
             }
             6 if self.kind == Kind::Mmc => {
                 assert_eq!(argument >> 24, 3);
                 let index = ((argument >> 16) & 255) as usize;
+                if matches!(index, 183 | 185)
+                    && let Some(phase) = self.mmc_retune_phase
+                {
+                    let expected = [(185, 1), (183, 2), (185, 2), (185, 1), (183, 6), (185, 3)];
+                    assert_eq!((index, (argument >> 8) as u8), expected[phase]);
+                    if phase == 0 {
+                        assert_ne!(
+                            self.word(CLOCK) & 0xff00,
+                            0,
+                            "HS400 downgrade before reduced clock"
+                        );
+                    }
+                    self.mmc_retune_phase = Some(phase + 1);
+                }
+                if self.mmc_sdr_hs_checks && index == 183 {
+                    assert_eq!(self.ext[185], 1, "width changed before card HS timing");
+                    assert_ne!(self.byte(HOST_CONTROL) & HIGH_SPEED, 0);
+                    let clock = self.word(CLOCK);
+                    let encoded = (clock >> 8 & 255) | (clock & 0xc0) << 2;
+                    let divisor = if encoded == 0 { 1 } else { encoded * 2 };
+                    let hz = (self.caps >> 8 & 255) * 1_000_000 / u32::from(divisor);
+                    assert!(hz >= 25_000_000, "width validated at identification clock");
+                }
+                if index == 187 && self.mmc_power_fault {
+                    self.status |= COMMAND_TIMEOUT | 1 << 15;
+                    return;
+                }
+                if index == 185
+                    && let Some((timing, status, reset_stuck)) = self.mmc_timing_fault
+                    && (argument >> 8) as u8 == timing
+                {
+                    self.reset_stuck = reset_stuck;
+                    self.status |= status | 1 << 15;
+                    return;
+                }
                 self.ext[index] = (argument >> 8) as u8;
                 if index == 34 && self.ext[index] == 3 {
                     self.notified = true;
@@ -364,6 +584,22 @@ impl Hardware {
             16 => assert_eq!(argument, 512),
             17 | 18 | 24 | 25 => {
                 assert!(self.selected);
+                if self.voltage_started {
+                    assert_ne!(self.word(HOST_CONTROL2) & SIGNAL_180, 0);
+                    assert_eq!(
+                        self.word(HOST_CONTROL2) & UHS_MODE,
+                        u16::from(self.sd_function)
+                    );
+                    if self.sd_function == 3
+                        || self.sd_function == 2 && self.caps2 & CAP_SDR50_TUNING != 0
+                    {
+                        assert_ne!(
+                            self.word(HOST_CONTROL2) & TUNED_CLOCK,
+                            0,
+                            "data before hardware tuning"
+                        );
+                    }
+                }
                 self.destination = if self.high_capacity {
                     argument as usize * 512
                 } else {
@@ -393,6 +629,10 @@ impl Hardware {
         self.status |= RESPONSE_END;
         if let Some(data) = data {
             if self.kind == Kind::Mmc {
+                if self.mmc_ddr52_checks && self.ext[183] == 6 {
+                    assert_eq!(self.word(HOST_CONTROL2) & UHS_MODE, 4);
+                    assert_ne!(self.word(HOST_CONTROL2) & SIGNAL_180, 0);
+                }
                 let host_width = if self.byte(HOST_CONTROL) & BUS8 != 0 {
                     8
                 } else if self.byte(HOST_CONTROL) & BUS4 != 0 {
@@ -403,7 +643,7 @@ impl Hardware {
                 let card_width = match self.ext[183] {
                     0 => 1,
                     1 => 4,
-                    2 => 8,
+                    2 | 6 | 0x86 => 8,
                     _ => panic!("unmodeled card bus width"),
                 };
                 if host_width > self.wired_width || host_width != card_width {
@@ -433,7 +673,19 @@ impl Hardware {
         }
     }
     fn adma(&mut self, data: Vec<u8>) {
-        let wide = self.byte(HOST_CONTROL) & DMA_MASK == ADMA64;
+        let v4 = self.word(HOST_CONTROL2) & (1 << 12) != 0;
+        let wide = if v4 {
+            self.word(HOST_CONTROL2) & (1 << 13) != 0
+        } else {
+            self.byte(HOST_CONTROL) & DMA_MASK == ADMA64
+        };
+        if v4 {
+            assert_eq!(
+                self.byte(HOST_CONTROL) & DMA_MASK,
+                ADMA32,
+                "v4 must use ADMA32 selection plus independent64bit address control"
+            );
+        }
         let table = u64::from(self.reg(ADMA_ADDRESS))
             | if wide {
                 u64::from(self.reg(ADMA_ADDRESS_HIGH)) << 32
@@ -455,6 +707,14 @@ impl Hardware {
             )
         };
         assert_eq!(attributes, 0x23);
+        if v4 && wide {
+            // SAFETY: same live 16-byte descriptor allocated by the driver.
+            assert_eq!(
+                unsafe { ((table + 12) as *const u32).read_volatile() },
+                0,
+                "reserved v4 descriptor high word"
+            );
+        }
         let length = if length == 0 {
             65536
         } else {
@@ -639,7 +899,12 @@ impl Registers for Port {
         } else if at == 0x1cc && m.o2_chip.is_some() {
             m.word(at) & !(1 << 14) | if m.pll_locked { 1 << 14 } else { 0 }
         } else if at == CLOCK {
-            m.word(at) | if m.clock_stuck { 0 } else { CLOCK_STABLE }
+            m.word(at)
+                | if m.clock_stuck || m.word(at) & CLOCK_INTERNAL == 0 {
+                    0
+                } else {
+                    CLOCK_STABLE
+                }
         } else {
             m.word(at)
         }
@@ -649,7 +914,8 @@ impl Registers for Port {
         m.reads += 1;
         match at {
             CAPABILITIES => m.caps,
-            CAPABILITIES2 => 0,
+            CAPABILITIES2 => m.caps2,
+            MAX_CURRENT => m.max_current,
             INTERRUPT => m.status,
             PRESENT => {
                 let cd = if m.o2_chip.is_some() && (m.present != m.o2_cd_mismatch) {
@@ -658,9 +924,26 @@ impl Registers for Port {
                     0
                 };
                 if m.present {
+                    let dat = if m.voltage_started {
+                        if m.voltage_restart_at.is_some() {
+                            match m.voltage_fault {
+                                Some(VoltageFault::DatLowAfter) => 0,
+                                Some(VoltageFault::OneDatLowAfter) => DATA_LINES & !(1 << 23),
+                                _ => DATA_LINES,
+                            }
+                        } else {
+                            match m.voltage_fault {
+                                Some(VoltageFault::DatHighBefore) => DATA_LINES,
+                                Some(VoltageFault::OneDatLowBefore) => DATA_LINES & !DATA0,
+                                _ => 0,
+                            }
+                        }
+                    } else {
+                        DATA_LINES
+                    };
                     cd | CARD_PRESENT
                         | CARD_STABLE
-                        | DATA0
+                        | dat
                         | if m.writable { WRITE_ALLOWED } else { 0 }
                         | if m.expected > 0 {
                             if m.transfer_read {
@@ -734,8 +1017,16 @@ impl Registers for Port {
                 m.settings_dirty = true;
             }
             if at == POWER && value & POWER_ON == 0 {
+                if m.power_off_stuck && m.voltage_started {
+                    return;
+                }
                 m.notified = false;
                 m.selected = false;
+                m.voltage_started = false;
+                m.voltage_changed_at = None;
+                m.voltage_restart_at = None;
+                m.sd_function = 0;
+                m.sd_current = 0;
             }
             m.write(at, 1, u32::from(value));
         }
@@ -743,6 +1034,69 @@ impl Registers for Port {
     fn write16(&mut self, at: usize, value: u16) {
         let mut m = self.0.borrow_mut();
         m.writes.push((at, 2, u32::from(value)));
+        if at == CLOCK && m.voltage_started {
+            if value & CLOCK_CARD == 0 && m.voltage_fault == Some(VoltageFault::StopClock) {
+                return;
+            }
+            if value & CLOCK_CARD != 0
+                && m.word(CLOCK) & CLOCK_CARD == 0
+                && m.word(HOST_CONTROL2) & SIGNAL_180 != 0
+                && m.voltage_restart_at.is_none()
+            {
+                let now = Clock {
+                    ticks_per_microsecond: 1,
+                }
+                .now_us();
+                assert!(
+                    now - m
+                        .voltage_changed_at
+                        .expect("clock restart before signal switch")
+                        >= 10_000 * CLOCK_TICKS_PER_US,
+                    "card clock restarted before voltage settles"
+                );
+                m.voltage_restart_at = Some(now);
+            }
+        }
+        if at == HOST_CONTROL2 {
+            if value & SIGNAL_180 != 0 && m.word(at) & SIGNAL_180 == 0 {
+                if m.kind == Kind::Sd {
+                    assert!(
+                        m.voltage_started,
+                        "SD host voltage changed without actual CMD11"
+                    );
+                }
+                assert_eq!(
+                    m.word(CLOCK) & CLOCK_CARD,
+                    0,
+                    "voltage changed under active card clock"
+                );
+                if m.voltage_fault == Some(VoltageFault::Enable) {
+                    return;
+                }
+                m.voltage_changed_at = Some(
+                    Clock {
+                        ticks_per_microsecond: 1,
+                    }
+                    .now_us(),
+                );
+            }
+            if (value ^ m.word(at)) & UHS_MODE != 0 {
+                assert_eq!(
+                    m.word(CLOCK) & CLOCK_CARD,
+                    0,
+                    "UHS mode changed under active card clock"
+                );
+                if m.uhs_timing_stuck {
+                    return;
+                }
+            }
+            if value & EXECUTE_TUNING != 0 && m.word(at) & EXECUTE_TUNING == 0 {
+                if m.tuning_start_stuck {
+                    return;
+                }
+                m.tuning_round = 0;
+            }
+        }
         m.write(at, 2, u32::from(value));
         if at == CLOCK {
             m.settings_dirty = true;

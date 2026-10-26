@@ -33,6 +33,9 @@ pub enum Timing {
     Sdr25,
     Sdr50,
     Sdr104,
+    MmcHs200,
+    MmcHs400,
+    MmcDdr52,
 }
 /// Only source-qualified host modes may request S18R during OCR negotiation.
 #[derive(Clone, Copy, Default)]
