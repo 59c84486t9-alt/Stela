@@ -1412,7 +1412,7 @@ struct JumpEntry {
 /// switched back) finds its entries in the lookup table still valid.
 #[derive(Debug, Clone, Copy)]
 struct Space {
-    inputs: ([mmu::Controls; 2], u64),
+    inputs: (mmu::Controls, u64),
     el: u8,
     variant: Variant,
     code: u64,
@@ -3733,7 +3733,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }) {
             return recent.number;
         }
-        let inputs = self.half_inputs(half);
+        let inputs = self.half_inputs(half, el);
         let spaces = &mut self.spaces[half];
         spaces.retain(|space| space.code == generations.1);
         let found = spaces
@@ -3772,28 +3772,44 @@ impl<H: Host, D: Devices> Machine<H, D> {
         [0, 1].map(|half| self.context(el, variant, half))
     }
 
-    /// What decides `half`'s translations besides the tables' contents:
-    /// both regimes' controls and HCR_EL2. The upper half's leave out
-    /// TTBR0's table address, which it never walks, and keep TTBR0's ASID
-    /// field only while TCR.A1 selects it and a fetch of the upper half
-    /// since its contexts were last forgotten was non-global: the ASID
-    /// selects nothing else of it, so a kernel's global text keeps one
-    /// context across every process's ASID.
-    fn half_inputs(&self, half: usize) -> ([mmu::Controls; 2], u64) {
+    /// What decides how a fetch of `half` at `el` (with the guarded level in
+    /// bit 4) translates besides the tables' contents: the controls of the
+    /// regime it walks and HCR_EL2, which selects that regime (Arm
+    /// `S1TranslationRegime`; E2H is RES1). Of SPRR's permissions a fetch
+    /// reads only its own level's register, SPRR_PERM_EL0 at EL0 and
+    /// SPRR_PERM_EL1 above, and neither PAN nor the unlock fields
+    /// (`mmu::sprr::permissions`), so the kernel's contexts outlive the
+    /// SPRR_PERM_EL0 writes XNU makes at every thread switch. The upper
+    /// half's leave out TTBR0's table address, which it never walks, and
+    /// keep TTBR0's ASID field only while TCR.A1 selects it and a fetch of
+    /// the upper half since its contexts were last forgotten was
+    /// non-global: the ASID selects nothing else of it, so a kernel's
+    /// global text keeps one context across every process's ASID.
+    fn half_inputs(&self, half: usize, el: u8) -> (mmu::Controls, u64) {
         const TCR_A1: u64 = 1 << 22;
         const TTBR_ASID: u64 = 0xffff << 48;
-        let (mut controls, hcr) = self.cpu.translation_inputs();
-        if half == 1 {
-            let private = self.private_fetches[1];
-            for controls in &mut controls {
-                controls.ttbr0 &= if private && controls.tcr & TCR_A1 == 0 {
-                    TTBR_ASID
-                } else {
-                    0
-                };
-            }
+        use crate::machine::cpu::TranslationRegime;
+        let el = el & 3;
+        let regime = if el == 2 || el == 0 && self.cpu.in_host() {
+            TranslationRegime::El20
+        } else {
+            TranslationRegime::El10
+        };
+        let mut controls = self.cpu.controls(regime);
+        if el == 0 {
+            controls.sprr.el1 = 0;
+        } else {
+            controls.sprr.el0 = 0;
         }
-        (controls, hcr)
+        controls.sprr.fields = [0; 2];
+        if half == 1 {
+            controls.ttbr0 &= if self.private_fetches[1] && controls.tcr & TCR_A1 == 0 {
+                TTBR_ASID
+            } else {
+                0
+            };
+        }
+        (controls, self.cpu.read(SystemRegister::HCR_EL2))
     }
 
     /// The checks before an instruction executes, in Arm's priority after PC
@@ -8853,72 +8869,78 @@ mod tests {
         const MSR_MAIR_EL1_X0: u32 = 0xd518_a200;
         let mut machine = machine(&[]);
         let variant = machine.current_variant(false, false);
+        let el = machine.cpu.pstate.el;
         let msr = |machine: &mut Machine<FakeHost, NoDevices>, word, value| {
             machine.cpu.state.x[0] = value;
             machine.system_instruction(word).unwrap();
         };
         let ttbr0 = machine.cpu.read(SystemRegister::TTBR0_EL1);
         let mair = machine.cpu.read(SystemRegister::MAIR_EL1);
-        let first = machine.contexts(2, variant);
+        let first = machine.contexts(el, variant);
         // Another TTBR0 table under the same ASID is another lower-half
         // context alone, and the first value finds the first contexts.
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 0x8000_4000);
-        let other = machine.contexts(2, variant);
+        let other = machine.contexts(el, variant);
         assert!(other[0] != first[0] && other[1] == first[1]);
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
-        assert_eq!(machine.contexts(2, variant), first);
+        assert_eq!(machine.contexts(el, variant), first);
         // Another ASID is another lower-half context alone while every
         // upper-half fetch was global.
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 1 << 48);
-        let asid = machine.contexts(2, variant);
+        let asid = machine.contexts(el, variant);
         assert!(asid[0] != first[0] && asid[1] == first[1]);
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
         // Any other control, too, and back.
         msr(&mut machine, MSR_MAIR_EL1_X0, mair ^ 0xff);
-        let attributes = machine.contexts(2, variant);
+        let attributes = machine.contexts(el, variant);
         assert!(attributes[0] != first[0] && attributes[1] != first[1]);
         msr(&mut machine, MSR_MAIR_EL1_X0, mair);
-        assert_eq!(machine.contexts(2, variant), first);
-        // So does SPRR_PERM_EL0, which a JIT's write toggle flips.
+        assert_eq!(machine.contexts(el, variant), first);
+        // So does SPRR_PERM_EL0, which a JIT's write toggle flips and XNU
+        // rewrites at every thread switch, for EL0's fetches alone: the
+        // kernel's fetches read SPRR_PERM_EL1.
         const MSR_SPRR_CONFIG_EL1_X0: u32 = 0xd51e_f100;
         const MSR_SPRR_PERM_EL0_X0: u32 = 0xd51e_f1a0;
         msr(&mut machine, MSR_SPRR_CONFIG_EL1_X0, 1);
-        let enabled = machine.contexts(2, variant);
+        let enabled = machine.contexts(el, variant);
+        let user = machine.contexts(0, variant);
         let invalidations = machine.host.invalidations;
         msr(&mut machine, MSR_SPRR_PERM_EL0_X0, 0x10);
-        let toggled = machine.contexts(2, variant);
-        assert!(toggled[0] != enabled[0] && toggled[1] != enabled[1]);
+        assert_eq!(machine.contexts(el, variant), enabled);
+        let toggled = machine.contexts(0, variant);
+        assert!(toggled[0] != user[0] && toggled[1] != user[1]);
         // The host's shadow learns of it from the regime alone, which
         // drops what the new permissions change.
         assert_eq!(machine.host.invalidations, invalidations);
         let regime = machine.host.regimes.last().expect("a regime");
         assert_eq!(regime.controls.sprr.el0, 0x10);
         msr(&mut machine, MSR_SPRR_PERM_EL0_X0, 0);
-        assert_eq!(machine.contexts(2, variant), enabled);
+        assert_eq!(machine.contexts(0, variant), user);
+        assert_eq!(machine.contexts(el, variant), enabled);
         msr(&mut machine, MSR_SPRR_CONFIG_EL1_X0, 0);
-        assert_eq!(machine.contexts(2, variant), first);
+        assert_eq!(machine.contexts(el, variant), first);
         // An ASIDE1 forgets the lower half's contexts, while no fetch of the
         // upper half was non-global.
         let aside1 = |machine: &mut Machine<FakeHost, NoDevices>| {
             machine.tlb_maintained(mmu::tlbi::Reach::Nothing, mmu::tlbi::Everywhere::NonGlobal)
         };
         aside1(&mut machine);
-        let maintained = machine.contexts(2, variant);
+        let maintained = machine.contexts(el, variant);
         assert!(maintained[0] != first[0] && maintained[1] == first[1]);
         // A global upper fetch keeps it; the first non-global one forgets
         // the upper half's contexts, whose ASID then selects among them.
         machine.fetched_through(1, 0x4000, true);
-        assert_eq!(machine.contexts(2, variant), maintained);
+        assert_eq!(machine.contexts(el, variant), maintained);
         machine.fetched_through(1, 0x4000, false);
-        let private = machine.contexts(2, variant);
+        let private = machine.contexts(el, variant);
         assert!(private[0] == maintained[0] && private[1] != maintained[1]);
         machine.fetched_through(1, 0x4000, false);
-        assert_eq!(machine.contexts(2, variant), private);
+        assert_eq!(machine.contexts(el, variant), private);
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 1 << 48);
-        let asid = machine.contexts(2, variant);
+        let asid = machine.contexts(el, variant);
         assert!(asid[0] != private[0] && asid[1] != private[1]);
         msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0);
-        assert_eq!(machine.contexts(2, variant), private);
+        assert_eq!(machine.contexts(el, variant), private);
         // Then both, as do a TLBI of everything, a host permission change
         // and any other change to translation.
         for change in [
@@ -8932,9 +8954,9 @@ mod tests {
             Machine::fetch_permissions_changed,
             Machine::translations_changed,
         ] {
-            let before = machine.contexts(2, variant);
+            let before = machine.contexts(el, variant);
             change(&mut machine);
-            let after = machine.contexts(2, variant);
+            let after = machine.contexts(el, variant);
             assert!(after[0] != before[0] && after[1] != before[1]);
         }
     }
