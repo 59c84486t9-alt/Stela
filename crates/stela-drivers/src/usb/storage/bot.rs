@@ -2044,7 +2044,9 @@ mod tests {
     }
     #[test]
     fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
-        let mut memory = vec![0u64; 32 * 1024];
+        // Two retained 64-KiB-aligned owners plus wrappers can require
+        // 262207 bytes from an arbitrary base, exceeding a 256-KiB fixture.
+        let mut memory = vec![0u64; 33 * 1024];
         let start = memory.as_mut_ptr() as u64;
         let mut dma = dma(&mut memory);
         let io = model(
