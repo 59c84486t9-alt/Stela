@@ -4,9 +4,8 @@
 //! serves the translation store: it proves the translations processes left
 //! in the spool and translates the installed arm64-only apps and their
 //! libraries ahead of time. It exits when a pass finds nothing to do.
-use super::{Environment, Record, sync};
+use super::{Environment, Record, Stelad, sync};
 use anyhow::{Context, Result};
-use clap::Args;
 use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::fd::AsRawFd;
@@ -42,9 +41,6 @@ const APP_SUFFIX: &str = ".app/";
 /// operation (`hosted::unsupported`: `TIME PROGRAM[PID] unsupported KIND:
 /// OPERATION (at IMAGE+OFFSET); FAILURE`); notes about a run have none.
 const REPORT_MARK: &str = "] unsupported ";
-
-#[derive(Args)]
-pub(crate) struct Stelad {}
 
 /// What `stelad` keeps between runs.
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

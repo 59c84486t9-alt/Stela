@@ -14,21 +14,35 @@
 //! lookup the process makes, resolve under the guest roots first (see
 //! `stela_runtime::hosted`); dyld finds and maps the shared cache there
 //! itself. Everything after is the hosted runtime's.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos", target_arch = "x86_64"))]
 #[path = "../tests/support/guest.rs"]
 mod guest;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) mod program;
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use crate::guest_system;
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+use anyhow::{Context, anyhow};
+use anyhow::{Result, bail};
 use clap::Args;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use program::guest_path;
-use std::ffi::{OsStr, OsString};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+use std::ffi::OsStr;
+use std::ffi::OsString;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_loader::{code_signature, load_plan, split_slices};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_runtime::hosted::activation::{self, Activator};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_runtime::hosted::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK, CPU_TYPE_ARM64};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_runtime::hosted::{self, Dylinker, Launch, Signature};
 
 /// The help heading of the developer options.
@@ -89,6 +103,7 @@ pub(crate) struct Run {
 /// The board a hosted run models: `explicit` (`--model`), else
 /// `STELA_MODEL`, else Stela's preference (`stela apps --model`), which
 /// launchers and `stelad`'s translations follow too, else the default.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) fn model(explicit: Option<&str>) -> String {
     explicit
         .map(str::to_owned)
@@ -102,6 +117,7 @@ pub(crate) fn model(explicit: Option<&str>) -> String {
 }
 
 /// The CPU subtype of a thin Mach-O slice, capability bits included.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn cpu_subtype(slice: &[u8]) -> Result<u32> {
     let word = slice.get(8..12).context("the slice has no Mach header")?;
     Ok(u32::from_le_bytes(word.try_into()?))
@@ -109,6 +125,7 @@ fn cpu_subtype(slice: &[u8]) -> Result<u32> {
 
 /// The slice exec would choose on an arm64e machine: the one of
 /// `subtype` when exec chose by subtype, else the regular grading.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn select_slice(data: &[u8], subtype: Option<u32>) -> Result<(u64, &[u8])> {
     let slices = split_slices(data)?;
     let kind = |slice: &[u8]| -> Option<(u32, u32)> {
@@ -134,6 +151,7 @@ fn select_slice(data: &[u8], subtype: Option<u32>) -> Result<(u64, &[u8])> {
         .context("the file has no arm64 slice")
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn image(path: &Path, slice_offset: u64, plan: &load_plan::LoadPlan) -> hosted::exec::Image {
     hosted::exec::Image {
         path: path.to_owned(),
@@ -154,6 +172,7 @@ fn image(path: &Path, slice_offset: u64, plan: &load_plan::LoadPlan) -> hosted::
 }
 
 /// The slice's code signature; `None` when it is unsigned.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn signature(slice: &[u8]) -> Result<Option<Signature>> {
     let Some(signature) = code_signature::read(slice)? else {
         return Ok(None);
@@ -180,6 +199,7 @@ fn signature(slice: &[u8]) -> Result<Option<Signature>> {
 }
 
 /// The image exec activates.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 struct Activated {
     /// The host file holding it.
     file: PathBuf,
@@ -192,6 +212,7 @@ struct Activated {
 /// The image exec activates for `program` and its argv: the program
 /// itself, or the interpreter its `#!` line names with the line's tokens,
 /// the script path and the arguments after argv[0].
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn activate(roots: &[PathBuf], program: &Path, argv: Vec<Vec<u8>>) -> Result<Activated> {
     let file = guest_path(roots, program);
     let data = std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?;
@@ -241,6 +262,7 @@ fn activate(roots: &[PathBuf], program: &Path, argv: Vec<Vec<u8>>) -> Result<Act
 
 /// A run the hosted runtime could not continue, introduced for people: the
 /// runtime's own text says which call it refused and why.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn stopped(program: &Path, error: anyhow::Error) -> anyhow::Error {
     anyhow!(
         "{0} stopped: it asked for something Stela's hosted macOS does not support yet.\n\n    \
@@ -272,12 +294,14 @@ impl Run {
     }
 
     /// The board to model ([`model`]).
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn model(&self) -> String {
         model(self.model.as_deref())
     }
 
     /// The host command that activates another guest image here, with the
     /// roots this run chose.
+    #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
     fn reexec(&self, roots: &[PathBuf]) -> Result<Vec<OsString>> {
         let mut command = vec![std::env::current_exe()?.into_os_string(), "run".into()];
         for root in roots {
@@ -312,6 +336,7 @@ impl Run {
     /// Whether exec could start `program` with the host's files alone:
     /// without guest system files, a program Stela could not run anyway
     /// is the better message.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn check_runnable(&self) -> Result<()> {
         let program = Path::new(&self.command[0]);
         let target = program::resolve(&[], program, std::env::var_os("PATH").as_deref())?;
@@ -325,6 +350,7 @@ impl Run {
         Ok(())
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub(crate) fn run(self) -> Result<()> {
         let model = self.model();
         if !hosted::hardware::models().any(|known| known == model) {
@@ -424,6 +450,13 @@ impl Run {
     }
 }
 
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+impl Run {
+    pub(crate) fn run(self) -> Result<()> {
+        crate::require_hosted("stela run")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,6 +540,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn a_stopped_run_shows_the_refusal_and_how_to_trace_it() {
         let message = stopped(
             Path::new("./hello"),
@@ -522,6 +556,7 @@ mod tests {
 
     /// The exec security state of an image's arm64e slice: its security
     /// config and IPC space policy, or `None` when it is unsigned.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn security(data: &[u8]) -> Result<Option<(u32, u32)>> {
         let (_, slice) = select_slice(data, None)?;
         let jop = hosted::pe::UserJop::of_subtype(cpu_subtype(slice)?);
@@ -535,6 +570,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn exec_security_follows_the_signature_and_entitlements_of_26a434_images() -> Result<()> {
         let Some(roots) = guest::guest_roots() else {
             eprintln!("skipped: no 26A434 guest roots (see tests/support/guest.rs)");
@@ -562,6 +598,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn exec_security_of_third_party_and_unsigned_images() -> Result<()> {
         let work = tempfile::tempdir()?;
         let source = work.path().join("main.c");

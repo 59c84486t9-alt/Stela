@@ -9,13 +9,16 @@ use crate::setup::host::{Host, System};
 use crate::setup::{PINNED_BUILD, download_dir};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 use std::collections::BTreeMap;
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// The product version of [`PINNED_BUILD`], the guest system's version.
 pub(crate) const PINNED_VERSION: &str = "27.0.1";
 /// Development override: a colon-separated list of guest roots.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 pub(crate) const ROOT_VARIABLE: &str = "STELA_GUEST_ROOT";
 /// The per-user Stela directory below the home directory.
 const SUPPORT_DIRECTORY: &str = "Library/Application Support/Stela";
@@ -106,6 +109,7 @@ impl Layout {
 /// files by their real paths, and the guest's `O_NOFOLLOW_ANY` lookups
 /// must meet no symbolic link above a root (such as `/var` or a linked
 /// home directory).
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 pub(crate) fn roots(explicit: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let roots = if !explicit.is_empty() {
         explicit.to_vec()
@@ -128,6 +132,7 @@ pub(crate) fn roots(explicit: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 /// `STELA_GUEST_ROOT`'s directories, each of which must exist.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn environment_roots(list: &OsString) -> Result<Vec<PathBuf>> {
     let roots: Vec<PathBuf> = std::env::split_paths(list)
         .filter(|root| !root.as_os_str().is_empty())
@@ -146,6 +151,7 @@ fn environment_roots(list: &OsString) -> Result<Vec<PathBuf>> {
 /// the install receipt beside the first guest root that has one. Roots
 /// without a receipt, and imported roots, which carry no kernelcache, give
 /// none.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 pub(crate) fn kernel_versions(roots: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     for root in roots {
         let Some(path) = root.parent().map(|directory| directory.join(RECEIPT)) else {
@@ -181,6 +187,7 @@ pub(crate) fn kernel_versions(roots: &[PathBuf]) -> Result<BTreeMap<String, Stri
 
 /// The error a run without guest system files stops with: what is missing
 /// and the one command that installs it.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn not_installed(layout: &Layout) -> anyhow::Error {
     let command = match find_ipsw() {
         Some(ipsw) => format!(
@@ -258,6 +265,7 @@ pub(crate) struct InstallSystem {
 
 impl InstallSystem {
     pub(crate) fn run(self) -> Result<()> {
+        crate::require_hosted("stela install-system")?;
         let layout = Layout::pinned()?;
         if self.remove {
             remove(&layout, self.dry_run)?;
@@ -385,6 +393,17 @@ mod tests {
         );
         std::fs::write(layout.receipt(), "{}")?;
         assert!(kernel_versions(&roots).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_roots_are_canonical_and_missing_directories_are_rejected() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        assert_eq!(
+            roots(&[directory.path().join(".")])?,
+            [directory.path().canonicalize()?]
+        );
+        assert!(roots(&[directory.path().join("missing")]).is_err());
         Ok(())
     }
 

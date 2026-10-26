@@ -9,6 +9,7 @@ mod apps;
 mod args;
 mod boot;
 mod boot_log;
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 mod bundle;
 pub mod compile;
 mod dyld_entry;
@@ -188,6 +189,17 @@ impl Command {
     }
 }
 
+/// Reject hosted commands before they inspect or change per-user state.
+fn require_hosted(command: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cfg!(all(target_os = "macos", target_arch = "x86_64")),
+        "{command} requires an Intel Mac (macOS on x86_64); this host is {} on {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    Ok(())
+}
+
 /// Parse the command line and run it, reporting errors on stderr.
 pub fn main() -> ExitCode {
     match Cli::parse().command.run() {
@@ -229,5 +241,62 @@ mod tests {
         assert!(!help.contains("compile-block") && !help.contains("decrypt-aea"));
         assert!(!help.contains("stelad"));
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn portable_commands_dispatch_without_a_hosted_runtime() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let app = directory.path().join("Test.app");
+        bundle::tests::make(&app, bundle::tests::info(&[]), &[])?;
+        assert_eq!(
+            bundle::AppBundle::open(&app)?.info_path(),
+            app.join("Contents/Info.plist")
+        );
+        let missing = directory.path().join("missing.img");
+        let error = parse(&["boot-log", missing.to_str().unwrap()])
+            .run()
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot open"), "{error:#}");
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert!(matches!(
+            parse(&["setup", "--usb", missing.to_str().unwrap(), "--dry-run"]),
+            Command::Setup(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    fn hosted_commands_reject_the_platform_before_accessing_inputs() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let missing = directory.path().join("missing");
+        let missing = missing.to_str().unwrap();
+        for words in [
+            vec![
+                "run",
+                "--root",
+                missing,
+                "--fp-profile-output",
+                missing,
+                missing,
+            ],
+            vec![missing, "--help"],
+            vec!["apps", "--scan", missing, "--add", missing, "--no-register"],
+            vec!["apps", "--uninstall"],
+            vec!["apps", "--model", "unknown"],
+            vec!["stelad"],
+            vec!["install-system", "--import", missing],
+            vec!["install-system", "--remove"],
+        ] {
+            let error = parse(&words).run().unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("requires an Intel Mac"),
+                "{words:?}: {message}"
+            );
+            assert!(message.contains(std::env::consts::OS), "{message}");
+        }
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+        Ok(())
     }
 }

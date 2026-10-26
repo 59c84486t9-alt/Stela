@@ -15,6 +15,7 @@ pub(crate) enum FileSystem {
     Fat,
     ExFat,
     Hfs,
+    #[cfg(any(test, target_os = "macos"))]
     Apfs,
     Ntfs,
     Other(String),
@@ -26,6 +27,7 @@ impl std::fmt::Display for FileSystem {
             Self::Fat => f.write_str("FAT"),
             Self::ExFat => f.write_str("exFAT"),
             Self::Hfs => f.write_str("HFS+"),
+            #[cfg(any(test, target_os = "macos"))]
             Self::Apfs => f.write_str("APFS"),
             Self::Ntfs => f.write_str("NTFS"),
             Self::Other(name) => f.write_str(name),

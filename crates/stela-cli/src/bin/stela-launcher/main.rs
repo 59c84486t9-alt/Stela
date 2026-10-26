@@ -8,26 +8,36 @@
 //! hosted launch ends, stops them when quit, appends their output to
 //! `~/Library/Logs/Stela/<name>.log` and shows the end of that log when one
 //! fails. See `docs/design/hosted-cli.md`.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod appkit;
 
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 use std::ffi::OsString;
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 use std::path::{Path, PathBuf};
 
 /// The `Info.plist` key that marks a launcher, and its fields.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 const MARKER: &str = "StelaLauncher";
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 const MARKER_TARGET: &str = "Target";
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 const MARKER_STELA: &str = "Stela";
 /// The log folder below the home directory.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 const LOGS: &str = "Library/Logs/Stela";
 /// The log lines an alert shows.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 const ALERT_LINES: usize = 12;
 /// The log bytes read for them.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 const ALERT_BYTES: u64 = 8 * 1024;
 /// The argument old LaunchServices versions add, which is no document.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 const PROCESS_SERIAL_PREFIX: &str = "-psn_";
 
 /// What this launcher starts, from its own bundle.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Launcher {
     /// The launcher's name, as Finder shows it.
@@ -41,6 +51,7 @@ struct Launcher {
 }
 
 /// The launcher of the bundle holding `executable` (`Contents/MacOS/NAME`).
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn launcher(executable: &Path, home: Option<&Path>) -> Result<Launcher, String> {
     let contents = executable
         .parent()
@@ -75,6 +86,7 @@ fn launcher(executable: &Path, home: Option<&Path>) -> Result<Launcher, String> 
 }
 
 /// Why the launcher cannot start its app, if it cannot.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn check(launcher: &Launcher) -> Result<(), String> {
     if !launcher.stela.is_file() {
         return Err(format!(
@@ -93,6 +105,7 @@ fn check(launcher: &Launcher) -> Result<(), String> {
 
 /// The arguments the launcher itself was started with (`open --args`),
 /// without LaunchServices' process serial number.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn initial_arguments(arguments: impl Iterator<Item = OsString>) -> Vec<OsString> {
     arguments
         .filter(|argument| {
@@ -104,6 +117,7 @@ fn initial_arguments(arguments: impl Iterator<Item = OsString>) -> Vec<OsString>
 }
 
 /// The command that runs the original with `arguments`.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn command(launcher: &Launcher, arguments: &[OsString]) -> std::process::Command {
     let mut command = std::process::Command::new(&launcher.stela);
     command.arg("run").arg(&launcher.target).args(arguments);
@@ -111,6 +125,7 @@ fn command(launcher: &Launcher, arguments: &[OsString]) -> std::process::Command
 }
 
 /// The last lines of the log, for an alert.
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn tail(log: &Path) -> String {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(log) else {
@@ -125,7 +140,7 @@ fn tail(log: &Path) -> String {
     lines[lines.len().saturating_sub(ALERT_LINES)..].join("\n")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn main() {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let launcher = std::env::current_exe()
@@ -144,9 +159,9 @@ fn main() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 fn main() {
-    eprintln!("stela-launcher runs only on macOS");
+    eprintln!("stela-launcher requires an Intel Mac (macOS on x86_64)");
     std::process::exit(1)
 }
 

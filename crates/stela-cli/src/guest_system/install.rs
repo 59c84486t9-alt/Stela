@@ -654,6 +654,7 @@ mod tests {
     /// The OS cryptex's release files go below its mount, its shared cache
     /// into the system volume, each listed at its guest path.
     #[test]
+    #[cfg(target_os = "macos")]
     fn a_cryptex_places_its_release_below_its_mount_and_its_cache_in_the_system() -> Result<()> {
         let work = tempfile::tempdir()?;
         let volume = work.path().join("volume");
