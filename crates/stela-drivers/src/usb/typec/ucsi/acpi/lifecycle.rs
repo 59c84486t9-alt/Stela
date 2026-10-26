@@ -25,6 +25,7 @@ impl<T: Transport, C: Timer> Controller<T, C> {
     /// Re-read capabilities and every connector from firmware after a genuine
     /// reset; no pre-suspend role/connection snapshot is republished as current.
     pub fn resume(&mut self) -> Result<(), Error> {
+        super::super::validate_timer(&self.timer)?;
         self.ready = false;
         self.initialized = false;
         self.capability = None;

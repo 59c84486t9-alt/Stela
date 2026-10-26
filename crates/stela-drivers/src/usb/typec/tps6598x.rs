@@ -26,6 +26,9 @@ pub const I2C_DRIVER_ID: &str = "tps6598x";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    TimerBudget {
+        microseconds: u64,
+    },
     I2c {
         register: u8,
         write: bool,
@@ -274,6 +277,11 @@ impl<B: Bus, C: Timer> Tps6598x<B, C> {
         Ok(u32::from_le_bytes(bytes))
     }
     fn task(&mut self, command: [u8; 4], input: &[u8], output: &mut [u8]) -> Result<(), Error> {
+        if !self.timer.supports_duration(1_000_000) {
+            return Err(Error::TimerBudget {
+                microseconds: 1_000_000,
+            });
+        }
         if input.len() > 64 || output.len() > 64 {
             return Err(Error::InvalidArgument);
         }
@@ -285,13 +293,13 @@ impl<B: Bus, C: Timer> Tps6598x<B, C> {
             self.write(DATA, input)?;
         }
         self.write(CMD, &command)?;
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         loop {
             let value = self.read32(CMD)?;
             if value == INVALID_CMD {
                 return Err(Error::InvalidCommand(command));
             }
-            if self.timer.now_us().wrapping_sub(start) >= 1_000_000 {
+            if self.timer.elapsed_us(start) >= 1_000_000 {
                 return Err(Error::Timeout { command });
             }
             if value == 0 {
@@ -384,6 +392,11 @@ impl<B: Bus, C: Timer> Tps6598x<B, C> {
         }
         if self.ready {
             return Err(Error::InvalidArgument);
+        }
+        if !self.timer.supports_duration(1_000_000) {
+            return Err(Error::TimerBudget {
+                microseconds: 1_000_000,
+            });
         }
         let result = self.initialize_inner(provider, request);
         result.map_err(|error| self.poison(error))

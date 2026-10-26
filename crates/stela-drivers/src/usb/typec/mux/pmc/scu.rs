@@ -74,6 +74,7 @@ pub enum Phase {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    TimerBudget { microseconds: u64 },
     Register { phase: Phase, error: RegisterError },
     InvalidArgument,
     InvalidStatus(u32),
@@ -156,6 +157,11 @@ impl<R: Registers, C: Timer> Scu<R, C> {
         if input.len() > 16 || output.len() > 16 || subcommand > 15 {
             return Err(Error::InvalidArgument);
         }
+        if !self.timer.supports_duration(10_000_000) {
+            return Err(Error::TimerBudget {
+                microseconds: 10_000_000,
+            });
+        }
         let status = self.status(Phase::Preflight)?;
         if status & 1 != 0 {
             return Err(Error::Busy(status));
@@ -186,13 +192,13 @@ impl<R: Registers, C: Timer> Scu<R, C> {
             | 0x100;
         fence(Ordering::SeqCst);
         self.write(Phase::Publish, 0, control)?;
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         let status = loop {
             let status = self.status(Phase::Completion)?;
             if status & 1 == 0 {
                 break status;
             }
-            if self.timer.now_us().wrapping_sub(start) >= 10_000_000 {
+            if self.timer.elapsed_us(start) >= 10_000_000 {
                 return Err(self.poison(Error::Timeout(status)));
             }
             self.timer.delay_us(100);

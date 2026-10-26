@@ -44,6 +44,7 @@ impl FirmwareInfo {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartError {
+    TimerBudget { microseconds: u64 },
     Transport(TransportError),
     InterruptDrainTimeout { last: u8 },
     FirmwareUnavailable(FirmwareInfo),
@@ -74,6 +75,11 @@ impl<B: Bus> Ccg<B> {
         max_read: NonZeroU16,
         timer: &impl Timer,
     ) -> Result<Self, StartError> {
+        if !timer.supports_duration(100_000) {
+            return Err(StartError::TimerBudget {
+                microseconds: 100_000,
+            });
+        }
         let mut this = Self {
             bus,
             address,

@@ -54,6 +54,9 @@ pub enum Mode {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    TimerBudget {
+        microseconds: u64,
+    },
     I2c {
         register: u8,
         write: bool,

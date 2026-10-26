@@ -236,6 +236,7 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
         timer: C,
         aml: Aml<'a>,
     ) -> Result<Self, Error> {
+        super::super::validate_timer(&timer)?;
         if mapping.resource() != device.resource {
             return Err(Error::MappingMismatch);
         }

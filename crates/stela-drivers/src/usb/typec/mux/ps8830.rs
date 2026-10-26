@@ -121,6 +121,11 @@ impl<B: Bus, P: Power, C: Timer> Ps8830<B, P, C> {
         Ok(())
     }
     pub fn initialize(&mut self) -> Result<(), Error> {
+        if !self.timer.supports_duration(60_000) {
+            return Err(Error::TimerBudget {
+                microseconds: 60_000,
+            });
+        }
         self.registers.healthy()?;
         if self.initialized {
             return Err(Error::NeedsPlatformReset);

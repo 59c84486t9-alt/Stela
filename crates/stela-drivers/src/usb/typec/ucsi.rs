@@ -29,6 +29,17 @@ const COMMAND_POLL_US: u64 = 1_000;
 pub trait Timer {
     fn now_us(&self) -> u64;
     fn delay_us(&self, microseconds: u64);
+    /// Providers retain a stable timebase and support the complete requested
+    /// interval. Native raw counters additionally validate their half-period.
+    fn supports_duration(&self, _microseconds: u64) -> bool {
+        true
+    }
+    fn start(&self) -> u64 {
+        self.now_us()
+    }
+    fn elapsed_us(&self, start: u64) -> u64 {
+        self.now_us().wrapping_sub(start)
+    }
 }
 impl Timer for crate::Clock {
     fn now_us(&self) -> u64 {
@@ -37,6 +48,24 @@ impl Timer for crate::Clock {
     fn delay_us(&self, microseconds: u64) {
         self.delay(microseconds);
     }
+    fn supports_duration(&self, microseconds: u64) -> bool {
+        self.check_duration(microseconds).is_ok()
+    }
+    fn start(&self) -> u64 {
+        self.try_start().expect("validated native Type-C clock")
+    }
+    fn elapsed_us(&self, start: u64) -> u64 {
+        self.try_elapsed_us(start)
+            .expect("validated native Type-C clock")
+    }
+}
+fn validate_timer(timer: &impl Timer) -> Result<(), Error> {
+    if !timer.supports_duration(COMMAND_TIMEOUT_US) {
+        return Err(Error::TimerBudget {
+            microseconds: COMMAND_TIMEOUT_US,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +106,9 @@ pub enum Phase {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    TimerBudget {
+        microseconds: u64,
+    },
     Transport {
         phase: Phase,
         error: TransportError,
@@ -317,6 +349,7 @@ pub struct Controller<T: Transport, C: Timer> {
 
 impl<T: Transport, C: Timer> Controller<T, C> {
     pub fn new(mut transport: T, timer: C) -> Result<Self, Error> {
+        validate_timer(&timer)?;
         let raw = transport.read_version().map_err(|error| Error::Transport {
             phase: Phase::Version,
             error,
@@ -377,7 +410,7 @@ impl<T: Transport, C: Timer> Controller<T, C> {
         if !self.ready {
             return Err(Error::NeedsReset);
         }
-        Ok(())
+        validate_timer(&self.timer)
     }
     fn io<U>(&mut self, phase: Phase, result: Result<U, TransportError>) -> Result<U, Error> {
         result.map_err(|error| self.poison(Error::Transport { phase, error }))
@@ -424,11 +457,11 @@ impl<T: Transport, C: Timer> Controller<T, C> {
         self.io(Phase::Submit, write)
     }
     fn expired(&self, start: u64) -> bool {
-        self.timer.now_us().wrapping_sub(start) >= COMMAND_TIMEOUT_US
+        self.timer.elapsed_us(start) >= COMMAND_TIMEOUT_US
     }
 
     fn await_command(&mut self, phase: Phase) -> Result<Cci, Error> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         loop {
             let cci = self.cci()?;
             if !cci.busy() {
@@ -499,6 +532,7 @@ impl<T: Transport, C: Timer> Controller<T, C> {
     /// An explicit reset invalidates all old snapshots, even if reset fails.
     /// Reset is the only operation permitted to recover an unresolved command.
     pub fn reset(&mut self) -> Result<(), Error> {
+        validate_timer(&self.timer)?;
         self.generation = match self.generation.checked_add(1) {
             Some(value) => value,
             None => return Err(self.poison(Error::GenerationExhausted)),
@@ -514,7 +548,7 @@ impl<T: Transport, C: Timer> Controller<T, C> {
             // Source workaround: a new ordinary command clears an old reset
             // completion. A timeout here does not prove the following reset.
             self.submit(NOTIFY)?;
-            let start = self.timer.now_us();
+            let start = self.timer.start();
             while self.cci()?.0 & COMMAND_COMPLETE == 0 {
                 if self.expired(start) {
                     break;
@@ -525,7 +559,7 @@ impl<T: Transport, C: Timer> Controller<T, C> {
         self.submit(RESET)?;
         // Linux ucsi_reset_ppm: done once the reset bit is set, resetting
         // again whenever the PPM still reports other work.
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         let mut cci = initial;
         loop {
             if self.expired(start) {
