@@ -1303,6 +1303,8 @@ fn selected_message_and_peer_corruption_never_reopen_the_global_guard() {
     any(target_os = "linux", target_os = "macos")
 )))]
 mod allocation {
+    extern crate std;
+
     use core::cell::Cell;
     use std::alloc::{GlobalAlloc, Layout, System};
     std::thread_local! { static STATE: Cell<(bool, usize)> = const { Cell::new((false, 0)) }; }
