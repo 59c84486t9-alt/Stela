@@ -305,6 +305,7 @@ impl Linux {
         );
         for (name, source, define) in [
             ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
+            ("linux_panic", "panic.c", "STELA_LINUX_PANIC_TEST"),
             ("linux_drm_formats", "drm.c", "STELA_LINUX_DRM_FORMAT_TEST"),
             ("linux_rcu", "rcu.c", "STELA_LINUX_RCU_TEST"),
             ("linux_pages", "page.c", "STELA_LINUX_PAGE_TEST"),
