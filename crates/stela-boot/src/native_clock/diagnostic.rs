@@ -1,0 +1,135 @@
+//! Explicit short native-root fixture. Actual PM/LAPIC/IDT/HLT effects are
+//! checked; these authored words are not an original Linux timer-wheel test.
+use super::*;
+
+struct Words {
+    jiffies: AtomicU64,
+    generation: AtomicU64,
+}
+
+/// # Safety
+/// Explicit bounded diagnostic on the actual retained native HostOwner. The
+/// trusted test platform preserves the PM source and guarantees no >1-second
+/// sample gap, including firmware/VMM interruptions. This authority qualifies
+/// only this short fixture; no arbitrary original driver execution is admitted.
+pub(crate) unsafe fn check(
+    owner: &mut host::HostOwner,
+    prepared: Prepared,
+) -> Result<(), WorkError> {
+    // SAFETY: caller's explicit short-root profile, not an IRQ-count inference.
+    let source = unsafe { prepared.qualify_bounded(pm::NS)? };
+    // SAFETY: real owner and unchanged retained tables/roots satisfy attach.
+    let installed = unsafe { Installed::attach(owner, source)? };
+    let observation = installed.observation()?;
+    let clock = Arc::clone(&installed.clock);
+    let idle = Arc::clone(&installed.idle);
+    let words = Arc::new(Words {
+        jiffies: AtomicU64::new(u64::MAX - 5),
+        generation: AtomicU64::new(1),
+    });
+    let initial = words.jiffies.load(Ordering::Acquire);
+    let origin = clock.now_ns()?;
+    let retained: RetainedOwner = words.clone();
+    // SAFETY: actual aligned atomic storage retained independently; same Clock,
+    // same logical HZ and genuine generation. There is no C callback/storage.
+    unsafe {
+        installed.bind_counter(
+            NonNull::from(&words.jiffies),
+            NonNull::from(&words.generation),
+            1,
+            initial,
+            origin,
+            retained,
+        )?;
+    }
+    // Bind performs one real elapsed publication in process context. Establish
+    // the busy-loop baseline AFTER it, so setup delays cannot impersonate ISR
+    // progress. The eight additional increments below must come from IRQs.
+    let busy_initial = words.jiffies.load(Ordering::Acquire);
+    // SAFETY: explicit fixture root grants physical interrupt delivery while
+    // its actual host owner, IDT/IST/xstate and all word/code owners stay live.
+    let execution = unsafe { installed.enter_driver_execution()? };
+    let limit = origin.checked_add(pm::NS).ok_or(WorkError::Exhausted)?;
+    // No service pass, software tick or process publication occurs in this
+    // loop. Only the actual existing timer ISR can advance the observed word.
+    while words
+        .jiffies
+        .load(Ordering::Acquire)
+        .wrapping_sub(busy_initial)
+        < 8
+    {
+        if clock.now_ns()? >= limit {
+            return Err(WorkError::TimedOut);
+        }
+        core::hint::spin_loop();
+    }
+    let busy_ticks = words
+        .jiffies
+        .load(Ordering::Acquire)
+        .wrapping_sub(busy_initial);
+    idle.notify()?;
+    idle.wait_until_ns(None)?; // Genuine pending event avoids sleeping.
+    let deadline = clock
+        .now_ns()?
+        .checked_add(5 * TICK_NS)
+        .ok_or(WorkError::Exhausted)?;
+    let mut waits = 0u64;
+    while clock.now_ns()? < deadline {
+        idle.wait_until_ns(Some(deadline))?;
+        waits += 1;
+    }
+    if waits == 0 {
+        return Err(WorkError::CorruptContext);
+    }
+    // Exercise the existing guest owner's timer through the same mux. Its
+    // deadline survives intervening 1-ms driver heartbeats and is retired only
+    // once actual PM time reaches it. This supplies no guest execution claim.
+    let guest_ticks =
+        u32::try_from((installed.state.apic_hz / 100).max(1)).map_err(|_| WorkError::Exhausted)?;
+    let saved = flags_disable();
+    if !arm_guest(Some(guest_ticks)) {
+        unsafe {
+            restore(saved);
+        }
+        return Err(WorkError::CorruptContext);
+    }
+    unsafe {
+        restore(saved);
+    }
+    let guest = installed.state.guest.load(Ordering::Acquire);
+    while installed.state.guest.load(Ordering::Acquire) != NONE {
+        let now = clock.now_ns()?;
+        if now >= limit {
+            return Err(WorkError::TimedOut);
+        }
+        core::hint::spin_loop();
+    }
+    if clock.now_ns()? < guest {
+        return Err(WorkError::CorruptContext);
+    }
+    installed.detach_publications()?;
+    words.generation.store(2, Ordering::Release);
+    let stopped = words.jiffies.load(Ordering::Acquire);
+    let after = clock
+        .now_ns()?
+        .checked_add(3 * TICK_NS)
+        .ok_or(WorkError::Exhausted)?;
+    while clock.now_ns()? < after {
+        core::hint::spin_loop();
+    }
+    if words.jiffies.load(Ordering::Acquire) != stopped {
+        return Err(WorkError::CorruptContext);
+    }
+    drop(execution);
+    drop(idle);
+    drop(clock);
+    // SAFETY: no original producer/task exists; real ISR views detached, all
+    // waits/borrowed execution scopes have returned and provider clones ended.
+    unsafe {
+        installed.retire()?;
+    }
+    crate::output::arguments(format_args!(
+        "CHECK native-clock PASS busy_jiffies={busy_ticks} idle_waits={waits} guest_mux=elapsed detach=quiet source={observation:?}; authored UP fixture, original Linux and hardware unqualified\n"
+    ));
+    Ok(())
+}

@@ -46,9 +46,13 @@ mod installer;
 mod la57;
 mod layout;
 mod log_file;
+#[allow(dead_code)]
+pub(crate) mod native_clock;
 pub mod native_dma;
 pub mod native_irq;
 pub mod native_memory;
+#[allow(dead_code)]
+pub(crate) mod native_mmio;
 mod native_smp;
 mod native_work_check;
 mod output;

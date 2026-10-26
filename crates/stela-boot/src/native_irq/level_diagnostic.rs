@@ -14,12 +14,12 @@ use core::{
 };
 use sha2::{Digest, Sha256};
 use stela_drivers::{
-    Clock, Handoff,
+    Clock,
     bus::{
         irq::{
             Disposition, Handler, IrqError, LineRoute, Platform, Polarity, SharedHandlers, Trigger,
         },
-        pci::{ConfigSpace, EcamWindow, Function},
+        pci::{ConfigSpace, Function},
     },
 };
 use stela_runtime::pc::acpi;
@@ -48,7 +48,6 @@ type Io = ioapic::Unit<ioapic::Mmio, super::NativePlatform>;
 pub(crate) struct Prepared {
     routing: Routing,
     unit: madt::Unit,
-    ecam: EcamWindow,
     sci: LineRoute,
     madt_hash: [u8; 32],
     fadt_hash: [u8; 32],
@@ -60,7 +59,7 @@ pub(crate) struct Prepared {
 impl Prepared {
     /// Enclosed by the source-bound TCG/Q35/SMM-off fixture qualification,
     /// before EBS. Only ACPI/PCI reads; no interrupt takeover occurs here.
-    pub(crate) fn prepare(handoff: &Handoff, rsdp: u64, fadt: &[u8]) -> Result<Self, String> {
+    pub(crate) fn prepare(rsdp: u64, fadt: &[u8]) -> Result<Self, String> {
         // SAFETY: actual firmware RSDP/tables remain mapped before EBS.
         let madt =
             unsafe { acpi::find(rsdp, b"APIC") }.map_err(|e| format!("fixture MADT: {e:?}"))?;
@@ -113,7 +112,6 @@ impl Prepared {
         Ok(Self {
             routing,
             unit,
-            ecam: handoff.ecam[0],
             sci,
             madt_hash: Sha256::digest(madt).into(),
             fadt_hash: Sha256::digest(fadt).into(),
@@ -124,9 +122,14 @@ impl Prepared {
     pub(crate) fn mapping(&self) -> Range<u64> {
         self.unit.base..self.unit.base + 4096
     }
-    /// All previous Function owners have been released after real DMA and MSI
+    /// Consume the same original Function returned after real DMA and MSI
     /// retirement. No normal driver probing can occur before this returns.
-    pub(crate) fn run(self, base: u64, clock: Clock) -> Result<String, String> {
+    pub(crate) fn run(
+        self,
+        mut function: Function,
+        base: u64,
+        clock: Clock,
+    ) -> Result<String, String> {
         // Recheck the actual mapped table after EBS, immediately before line
         // ownership. The capture/receipt cannot authorize a changed live input.
         if Sha256::digest(self.dsdt).as_slice() != self.dsdt_hash {
@@ -150,19 +153,14 @@ impl Prepared {
         self.routing
             .owner(LINE, &[(self.unit, unit.pins())])
             .map_err(|e| format!("live IOAPIC GSI owner: {e:?}"))?;
-        // SAFETY: same retained UC ECAM and stopped devices; every prior
-        // Function owner, including the retired MSI source, has been released.
-        let functions = unsafe { Function::enumerate(&self.ecam) };
-        let mut function = functions
-            .into_iter()
-            .find(|f| {
-                f.address.bus == 0
-                    && f.address.device == 2
-                    && f.address.function == 0
-                    && f.vendor == 0x1234
-                    && f.device == 0x11e8
-            })
-            .ok_or("level fixture EDU route requester missing")?;
+        if function.address.bus != 0
+            || function.address.device != 2
+            || function.address.function != 0
+            || function.vendor != 0x1234
+            || function.device != 0x11e8
+        {
+            return Err(String::from("level fixture original EDU owner mismatch"));
+        }
         if function.config().read8(0x3d) != 1
             || function.config().read16(4) & (4 | INTX_DISABLE) != INTX_DISABLE
         {

@@ -29,5 +29,9 @@ xz2 = { version = "0.1.7", features = ["static"] }
 [build-dependencies]
 object = { version = "0.37", features = ["read"] }
 
+[dev-dependencies]
+# Hosted tests exercise the boot IRQ resource decoder against the actual ACPI types.
+stela-drivers = { workspace = true, features = ["native-acpi"] }
+
 [lints]
 workspace = true

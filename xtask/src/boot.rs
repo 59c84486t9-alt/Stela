@@ -259,6 +259,24 @@ pub struct Run {
         "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_irq_work_check: bool,
+    /// Actual single-BSP MMIO mapping, context refusal, retirement and reuse.
+    #[arg(long, conflicts_with_all = [
+        "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check",
+        "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
+        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input",
+        "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check",
+        "gdb", "monitor", "icount"
+    ])]
+    native_mmio_check: bool,
+    /// Actual bounded PM/LAPIC clock, IRQ progress, idle waits and retirement.
+    #[arg(long, conflicts_with_all = [
+        "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
+        "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
+        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input",
+        "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check",
+        "gdb", "monitor", "icount"
+    ])]
+    native_clock_check: bool,
     /// Boot an existing USB disk image, such as a copy of a stick `stela
     /// setup` prepared, from its removable-media boot loader, attached as a
     /// USB mass-storage device; writes go to a temporary overlay unless
@@ -562,7 +580,29 @@ fn qemu_accelerator(icount: Option<u8>) -> &'static str {
     }
 }
 
+fn native_root_preflight(arguments: &Run) -> Result<()> {
+    if arguments.native_mmio_check || arguments.native_clock_check {
+        ensure!(
+            arguments.host_cores == 1
+                && arguments.host_threads == 1
+                && matches!(arguments.display, Display::None),
+            "native root fixture requires one headless BSP"
+        );
+    }
+    Ok(())
+}
+
+fn native_mmio_options() -> String {
+    format!("{KERNEL_OPTIONS} --native-mmio-check")
+}
+
+fn native_clock_options() -> String {
+    format!("{KERNEL_OPTIONS} --native-clock-check --native-cores 1")
+}
+
 fn launch(arguments: Run) -> Result<ExitCode> {
+    // Refuse an incompatible diagnostic topology before building or opening inputs.
+    native_root_preflight(&arguments)?;
     let limit = if arguments.usb_image.is_some() || arguments.bundle.is_some() {
         MAX_LONG_TIMEOUT_SECONDS
     } else {
@@ -589,6 +629,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .map(preboot::prepare)
         .transpose()?;
     let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
+        _ if arguments.native_mmio_check => (KERNEL.to_vec(), native_mmio_options()),
+        _ if arguments.native_clock_check => (KERNEL.to_vec(), native_clock_options()),
         _ if preboot.is_some() => (Vec::new(), preboot.as_ref().unwrap().options()),
         _ if arguments.bundle.is_some() => (
             Vec::new(),
@@ -1159,6 +1201,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         && !arguments.native_dma_isolation_check
         && !arguments.native_work_check
         && !arguments.native_irq_work_check
+        && !arguments.native_mmio_check
+        && !arguments.native_clock_check
         && arguments.scenario == Scenario::SystemKernel
     {
         let checked = verify_kernel(&serial_text);
@@ -1235,6 +1279,20 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Ok::<_, anyhow::Error>(report)
     });
     let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
+    let native_clock = arguments.native_clock_check.then(|| {
+        let observation = native_clock_proof(&serial_text);
+        json!({ "passed": observation.is_some()
+            && status.is_some() && code == IDLE_EXIT
+            && unsupported.is_none() && first_guest_panic(&serial_text).is_none()
+            && !serial_text.contains("STELA PANIC"),
+            "observation": observation })
+    });
+    let native_mmio = arguments.native_mmio_check.then(|| {
+        json!({ "passed": native_mmio_verified(&serial_text)
+            && status.is_some() && code == IDLE_EXIT
+            && unsupported.is_none() && first_guest_panic(&serial_text).is_none()
+            && !serial_text.contains("STELA PANIC") })
+    });
     let native_irq_work = arguments.native_irq_work_check.then(|| {
         json!({ "passed": native_irq_work_verified(&serial_text) && status.is_some() && code == IDLE_EXIT
             && !serial_text.contains("STELA PANIC") && !serial_text.contains("STOP UNSUPPORTED") })
@@ -1287,7 +1345,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         }),
         Err(error) => json!({ "passed": false, "reason": error }),
     });
-    let report = json!({
+    let mut report = json!({
         "command": command_line,
         "qemu": binding(&qemu)?,
         "qemu_version": qemu_version,
@@ -1340,6 +1398,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         }),
         "network": network_report,
     });
+    report["native_mmio"] = native_mmio.unwrap_or(Value::Null);
+    report["native_clock"] = native_clock.unwrap_or(Value::Null);
     fs::write(output.join("run.json"), format!("{report:#}\n"))?;
     println!("{report:#}");
     if let Some(Err(error)) = storage {
@@ -1375,10 +1435,20 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         !arguments.native_irq_work_check || report["native_irq_work"]["passed"] == true,
         "native IRQ work did not qualify actual MSI/context/deferred execution and lifecycle"
     );
+    ensure!(
+        !arguments.native_mmio_check || report["native_mmio"]["passed"] == true,
+        "native MMIO did not verify actual mappings, context refusals, retirement and reuse"
+    );
+    ensure!(
+        !arguments.native_clock_check || report["native_clock"]["passed"] == true,
+        "native clock did not verify IRQ progress, idle waits, guest mux and quiet retirement"
+    );
     if arguments.native_dma_check
         || arguments.native_dma_isolation_check
         || arguments.native_work_check
         || arguments.native_irq_work_check
+        || arguments.native_mmio_check
+        || arguments.native_clock_check
     {
         return Ok(ExitCode::SUCCESS);
     }
@@ -1651,6 +1721,123 @@ fn native_work_verified(serial: &str) -> bool {
         .any(|line| line.starts_with("CHECK native-work FAIL "))
 }
 
+/// Preserve the existing bounded fixture's raw observation, after quiet retire.
+fn native_clock_proof(serial: &str) -> Option<&str> {
+    if serial
+        .lines()
+        .any(|line| line.starts_with("CHECK native-clock FAIL"))
+    {
+        return None;
+    }
+    let mut proofs = serial
+        .lines()
+        .filter(|line| line.starts_with("CHECK native-clock PASS "));
+    let line = proofs.next()?;
+    if proofs.next().is_some() {
+        return None;
+    }
+    let observation = line
+        .split_once(" source=Observation { ")?
+        .1
+        .strip_suffix(" }; authored UP fixture, original Linux and hardware unqualified")?;
+    let (digest, rest) = observation
+        .strip_prefix("fadt_sha256: [")?
+        .split_once("], ")?;
+    let digest = digest.split(", ").collect::<Vec<_>>();
+    if digest.len() != 32 || digest.iter().any(|byte| byte.parse::<u8>().is_err()) {
+        return None;
+    }
+    // Validate the actual Debug record's framing/types, not source capability.
+    let observation_fields = [
+        ("pm_port: ", u64::from(u16::MAX)),
+        ("pm_mask: ", u64::from(u32::MAX)),
+        ("pm_hz: ", u64::MAX),
+        ("apic_hz: ", u64::MAX),
+        ("cpu: ", u64::from(u32::MAX)),
+        ("root: ", u64::MAX),
+        ("idt: ", u64::MAX),
+        ("gs: ", u64::MAX),
+        ("max_cpuid: ", u64::from(u32::MAX)),
+        ("thermal_eax: ", u64::from(u32::MAX)),
+    ];
+    let observed = rest.split(", ").collect::<Vec<_>>();
+    if observed.len() != observation_fields.len()
+        || !observed
+            .iter()
+            .zip(observation_fields)
+            .all(|(field, (key, max))| {
+                field
+                    .strip_prefix(key)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .is_some_and(|v| v <= max)
+            })
+    {
+        return None;
+    }
+    let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+    let value = |key: &str| {
+        let mut matches = fields.iter().filter_map(|field| field.strip_prefix(key));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    };
+    (value("busy_jiffies=")
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_some_and(|v| v >= 8)
+        && value("idle_waits=")
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_some_and(|v| v > 0)
+        && value("guest_mux=") == Some("elapsed")
+        && value("detach=") == Some("quiet")
+        && value("source=") == Some("Observation"))
+    .then_some(line)
+}
+
+/// The existing diagnostic owns its exact mapping and refusal observations.
+/// Its early stop does not claim that a guest system kernel completed.
+fn native_mmio_verified(serial: &str) -> bool {
+    if serial
+        .lines()
+        .any(|line| line.starts_with("CHECK native-mmio FAIL"))
+    {
+        return false;
+    }
+    let mut proofs = serial
+        .lines()
+        .filter(|line| line.starts_with("CHECK native-mmio PASS "));
+    let Some(line) = proofs.next() else {
+        return false;
+    };
+    if proofs.next().is_some() {
+        return false;
+    }
+    let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+    let value = |key: &str| fields.iter().find_map(|field| field.strip_prefix(key));
+    let hex = |key| {
+        value(key)
+            .and_then(|text| text.trim_end_matches(';').strip_prefix("0x"))
+            .and_then(|text| u64::from_str_radix(text, 16).ok())
+    };
+    [
+        "authority=actual",
+        "roots=all",
+        "native_cpus=1",
+        "effective_cache=Intel-UC",
+        "aperture=owned-PTE",
+        "map=published",
+        "retire=actual-clear+TLB",
+        "reuse=readback",
+        "foreign-root=refused",
+        "WC=refused",
+    ]
+    .iter()
+    .all(|field| fields.contains(field))
+        && value("ioapics=")
+            .and_then(|text| text.parse::<usize>().ok())
+            .is_some_and(|count| count > 0)
+        && hex("MCFG=").is_some()
+        && hex("vendor=").is_some_and(|vendor| vendor > 0 && vendor < u64::from(u32::MAX))
+}
+
 /// Old single-requester output never qualifies the two-context fixture.
 fn native_isolation_verified(serial: &str) -> bool {
     serial.lines().any(|line| {
@@ -1711,6 +1898,176 @@ fn native_level_verified(serial: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_clock_requires_unique_progress_and_quiet_retirement_proof() {
+        let full = "CHECK native-clock PASS busy_jiffies=8 idle_waits=1 guest_mux=elapsed detach=quiet source=Observation { fadt_sha256: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], pm_port: 0, pm_mask: 0, pm_hz: 0, apic_hz: 0, cpu: 0, root: 0, idt: 0, gs: 0, max_cpuid: 0, thermal_eax: 0 }; authored UP fixture, original Linux and hardware unqualified";
+        assert_eq!(native_clock_proof(full), Some(full));
+        for (field, replacement) in [
+            ("busy_jiffies=8", "busy_jiffies=7"),
+            ("busy_jiffies=8", "busy_jiffies=18446744073709551616"),
+            ("idle_waits=1", "idle_waits=0"),
+            ("idle_waits=1", "idle_waits=invalid"),
+            ("guest_mux=elapsed", "guest_mux=pending"),
+            ("detach=quiet", "detach=active"),
+            ("source=Observation", "source=unobserved"),
+        ] {
+            assert!(native_clock_proof(&full.replace(field, replacement)).is_none());
+        }
+        for extra in [
+            "busy_jiffies=8",
+            "idle_waits=1",
+            "guest_mux=elapsed",
+            "detach=quiet",
+            "source=Observation",
+        ] {
+            assert!(native_clock_proof(&format!("{full} {extra}")).is_none());
+        }
+        assert!(native_clock_proof(&format!("{full}\n{full}")).is_none());
+        assert!(native_clock_proof(&format!("{full}\nCHECK native-clock FAIL retire")).is_none());
+        assert!(native_clock_proof("CHECK native-mmio PASS roots=all").is_none());
+        assert!(native_clock_proof(full.split_once(" source=").unwrap().0).is_none());
+        assert!(
+            native_clock_proof(&format!(
+                "{} source=Observation",
+                full.split_once(" source=").unwrap().0
+            ))
+            .is_none()
+        );
+        assert!(native_clock_proof(full.split_once("; authored").unwrap().0).is_none());
+        assert!(native_clock_proof(&full.replace("thermal_eax: 0", "thermal_eax:")).is_none());
+        assert!(native_clock_proof(&full.replace("pm_port: 0", "pm_port: 65536")).is_none());
+    }
+
+    #[test]
+    fn native_clock_emits_only_system_options_and_refuses_shared_topologies() {
+        use clap::Parser;
+        let prefix = ["xtask", "boot", "run", "--output", "/tmp/native-clock"];
+        let parse = |options: Vec<&str>| {
+            let parsed = crate::Cli::try_parse_from(prefix.into_iter().chain(options))?;
+            let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+                panic!("boot run")
+            };
+            Ok::<_, clap::Error>(run)
+        };
+        let run = parse(vec!["--native-clock-check"]).unwrap();
+        assert!(run.native_clock_check);
+        assert!(native_root_preflight(&run).is_ok());
+        assert_eq!(
+            native_clock_options(),
+            format!("{KERNEL_OPTIONS} --native-clock-check --native-cores 1")
+        );
+        for conflict in [
+            "--native-mmio-check",
+            "--native-dma-check",
+            "--native-dma-isolation-check",
+            "--native-work-check",
+            "--native-irq-work-check",
+            "--network",
+            "--storage-check",
+            "--input",
+            "--audio-check",
+        ] {
+            assert!(parse(vec!["--native-clock-check", conflict]).is_err());
+            assert!(parse(vec![conflict, "--native-clock-check"]).is_err());
+        }
+        for (option, value) in [("--gdb", "1234"), ("--monitor", "1234"), ("--icount", "0")] {
+            assert!(parse(vec!["--native-clock-check", option, value]).is_err());
+        }
+        for (option, value) in [
+            ("--host-cores", "2"),
+            ("--host-threads", "2"),
+            ("--display", "cocoa"),
+        ] {
+            assert!(
+                native_root_preflight(&parse(vec!["--native-clock-check", option, value]).unwrap())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_mmio_requires_complete_actual_mapping_and_refusal_proof() {
+        let full = "CHECK native-mmio PASS authority=actual roots=all native_cpus=1 effective_cache=Intel-UC aperture=owned-PTE map=published retire=actual-clear+TLB reuse=readback foreign-root=refused WC=refused ioapics=1 MCFG=0xb0000000 vendor=0x12378086; bounded authored diagnostic, Linux and physical hardware unqualified";
+        assert!(native_mmio_verified(full));
+        for field in full.split_ascii_whitespace().skip(3).take(13) {
+            assert!(!native_mmio_verified(&full.replace(field, "unproven")));
+        }
+        for replacement in ["ioapics=0", "ioapics=invalid"] {
+            assert!(!native_mmio_verified(
+                &full.replace("ioapics=1", replacement)
+            ));
+        }
+        for replacement in ["vendor=0x0;", "vendor=0xffffffff;", "vendor=invalid;"] {
+            assert!(!native_mmio_verified(
+                &full.replace("vendor=0x12378086;", replacement)
+            ));
+        }
+        assert!(!native_mmio_verified("CHECK native-dma PASS old image"));
+        assert!(!native_mmio_verified(&format!(
+            "{full}\nCHECK native-mmio FAIL cleanup"
+        )));
+        assert!(!native_mmio_verified(&format!("{full}\n{full}")));
+    }
+
+    #[test]
+    fn native_mmio_emits_system_options_without_host_check_only_keys() {
+        let options = native_mmio_options();
+        let words = options.split_ascii_whitespace().collect::<Vec<_>>();
+        assert_eq!(words.first(), Some(&"--system"));
+        assert_eq!(
+            words
+                .iter()
+                .filter(|word| **word == "--native-mmio-check")
+                .count(),
+            1
+        );
+        assert!(options.starts_with(KERNEL_OPTIONS));
+        for forbidden in ["--host-check", "--deadline", "--key-seconds"] {
+            assert!(!words.contains(&forbidden));
+        }
+    }
+
+    #[test]
+    fn native_mmio_refuses_conflicting_cli_and_topology_before_work() {
+        use clap::Parser;
+        let prefix = ["xtask", "boot", "run", "--output", "/tmp/native-mmio"];
+        let parse = |options: Vec<&str>| {
+            let parsed = crate::Cli::try_parse_from(prefix.into_iter().chain(options))?;
+            let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+                panic!("boot run")
+            };
+            Ok::<_, clap::Error>(run)
+        };
+        let run = parse(vec!["--native-mmio-check"]).unwrap();
+        assert!(run.native_mmio_check);
+        assert!(native_root_preflight(&run).is_ok());
+        for conflict in [
+            "--native-dma-check",
+            "--native-dma-isolation-check",
+            "--native-work-check",
+            "--native-irq-work-check",
+            "--storage-check",
+            "--network",
+            "--input",
+            "--audio-check",
+        ] {
+            assert!(parse(vec!["--native-mmio-check", conflict]).is_err());
+            assert!(parse(vec![conflict, "--native-mmio-check"]).is_err());
+        }
+        for (option, value) in [("--gdb", "1234"), ("--monitor", "1234"), ("--icount", "0")] {
+            assert!(parse(vec!["--native-mmio-check", option, value]).is_err());
+            assert!(parse(vec![option, value, "--native-mmio-check"]).is_err());
+        }
+        for (option, value) in [
+            ("--host-cores", "2"),
+            ("--host-threads", "2"),
+            ("--display", "cocoa"),
+        ] {
+            let run = parse(vec!["--native-mmio-check", option, value]).unwrap();
+            assert!(native_root_preflight(&run).is_err());
+        }
+    }
 
     #[test]
     fn actual_parallel_cpu_execution_is_default_and_icount_keeps_its_required_mode() {

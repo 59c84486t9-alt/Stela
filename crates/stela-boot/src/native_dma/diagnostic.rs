@@ -239,7 +239,7 @@ impl Prepared {
             None
         } else {
             Some(crate::native_irq::level_diagnostic::Prepared::prepare(
-                handoff, rsdp, fadt,
+                rsdp, fadt,
             )?)
         };
         let second = if isolation {
@@ -581,15 +581,15 @@ impl Prepared {
             )?;
             return Ok((dma, irq));
         }
-        let irq =
+        let (irq, function) =
             crate::native_irq::diagnostic::run(function, self.edu_registers.start, self.clock)?;
-        // Release every remaining configuration-space owner before the next
-        // fixture phase exclusively re-enumerates the stopped native bus.
+        // Other fixture owners can release now; the original EDU Function
+        // passes directly from DMA through MSI retirement into the INTx phase.
         drop(self.functions);
         let level = self
             .level
             .ok_or_else(|| String::from("single fixture missing level preparation"))?
-            .run(self.edu_registers.start, self.clock)?;
+            .run(function, self.edu_registers.start, self.clock)?;
         Ok((dma, format!("{irq}; {level}")))
     }
 }

@@ -161,6 +161,9 @@ pub struct Handoff {
     /// CPUID/control observations; absent unless native cores were requested.
     pub native_processors: Region,
     pub native_resources: crate::native_smp::resources::Resources,
+    /// Sealed owned UEFI/ACPI resource inventory and empty MMIO aperture.
+    /// Zero when capture is unavailable; this alone grants no device owner.
+    pub native_mmio: Region,
     /// The firmware's real-time clock as Unix seconds, read at TSC
     /// `wall_tsc`; `None` when the firmware has no valid time.
     pub wall_seconds: Option<u64>,

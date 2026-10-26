@@ -1,5 +1,5 @@
 //! Actual EDU MSI lifecycle under the source-bound QEMU TCG fixture grant.
-use alloc::{boxed::Box, format, string::String, sync::Arc};
+use alloc::{format, string::String, sync::Arc};
 use core::{
     arch::asm,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
@@ -242,12 +242,14 @@ pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Res
     Ok(Parts { source, edu })
 }
 
-pub(crate) fn run(function: Function, base: u64, clock: Clock) -> Result<String, String> {
+pub(crate) fn run(
+    function: Function,
+    base: u64,
+    clock: Clock,
+) -> Result<(String, Function), String> {
     let Parts { source, edu } = prepare_source(function, base, clock)?;
-    let source = Box::new(source);
-    let mut registration = super::service()
-        .map_err(|error| format!("native IRQ service: {error:?}"))?
-        .request(source, edu.clone())
+    let mut registration = super::CONTROLLER
+        .request_owned(source, edu.clone())
         .map_err(|error| format!("EDU MSI request: {error:?}"))?;
     let vector = registration.vector();
     // No heap/resource lock is held. The real IDT handler acknowledges the
@@ -273,9 +275,25 @@ pub(crate) fn run(function: Function, base: u64, clock: Clock) -> Result<String,
             edu.bad_ack.load(Ordering::Relaxed)
         ));
     }
-    registration
+    let retired = registration
         .retire()
         .map_err(|error| format!("EDU MSI retire: {error:?}"))?;
+    if retired.route().vector() != vector {
+        return Err(String::from("EDU MSI retired a different route"));
+    }
+    // Recover exactly the original uniquely owned Function after actual
+    // source/IRR/ISR/callback/work drain. No second ECAM enumeration or cloned
+    // configuration/root owner is introduced by the following INTx phase.
+    // SAFETY: concrete source owns the stopped EDU/Function. Keep its original
+    // callback owner until the source is consumed immediately below.
+    let (source, handler, _route) = unsafe { retired.into_parts() };
+    let EduSource {
+        function,
+        msi: _,
+        edu: source_edu,
+    } = *source;
+    drop(source_edu);
+    drop(handler);
     if Arc::strong_count(&edu) != 1 {
         return Err(String::from(
             "retired IRQ retained handler/source unexpectedly",
@@ -295,7 +313,10 @@ pub(crate) fn run(function: Function, base: u64, clock: Clock) -> Result<String,
     if late || edu.read(0x24) != 0 {
         return Err(String::from("EDU MSI callback survived retire"));
     }
-    Ok(format!(
-        "EDU vector={vector:#x} actual_cause=0x1 device_ACK+EOI=verified mask+quiesce+IRR/ISR+inflight=drained handler_refs=released late_delivery=absent"
+    Ok((
+        format!(
+            "EDU vector={vector:#x} actual_cause=0x1 device_ACK+EOI=verified mask+quiesce+IRR/ISR+inflight=drained handler_refs=released late_delivery=absent owner_return=original_function"
+        ),
+        function,
     ))
 }

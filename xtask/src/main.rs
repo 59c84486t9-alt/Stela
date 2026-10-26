@@ -77,9 +77,16 @@ mod boot_xstate;
 #[allow(dead_code)]
 mod boot_ioapic;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
+mod boot_irq_crs;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_irq/madt.rs"]
 #[allow(dead_code)]
 mod boot_madt;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_clock/pm.rs"]
+#[allow(dead_code)] // Only pure FADT/counter tests run hosted; port I/O is UEFI-only.
+mod boot_native_clock_pm;
 
 mod agx_isa;
 mod agx_observe;

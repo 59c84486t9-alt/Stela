@@ -45,8 +45,8 @@ pub(super) mod local;
 mod profile;
 mod ram;
 mod translated;
-pub(crate) use local::Owner as HostOwner;
 use local::state;
+pub(crate) use local::{MmioRoots, Owner as HostOwner};
 pub use ram::RamRange;
 
 /// Page-table frames from the handoff pool: a permanent part for roots and a
@@ -1154,8 +1154,13 @@ pub fn native_exception(frame: &mut Frame) {
 }
 
 pub fn timer_interrupt() {
+    crate::native_clock::interrupt();
     local::interrupt();
     state().apic.eoi();
+}
+
+pub(crate) fn root_irq_active() -> bool {
+    local::irq_active()
 }
 
 /// An idle-worker doorbell only. Stop requests live in generation-bound
@@ -1653,14 +1658,18 @@ impl Host for BareHost<'_> {
         let now = self.counter();
         let state = state();
         let Some(deadline) = deadline else {
-            state.apic.write(apic::INITIAL, 0);
+            if !crate::native_clock::arm_guest(None) {
+                state.apic.write(apic::INITIAL, 0);
+            }
             return;
         };
         let guest = deadline.saturating_sub(now).max(1);
         let ticks = u128::from(guest) * u128::from(state.apic_hz) / u128::from(COUNTER_HZ);
         let ticks = ticks.clamp(1, u128::from(u32::MAX)) as u32;
-        state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
-        state.apic.write(apic::INITIAL, ticks);
+        if !crate::native_clock::arm_guest(Some(ticks)) {
+            state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
+            state.apic.write(apic::INITIAL, ticks);
+        }
     }
 
     fn wait_for_interrupt(&mut self) {

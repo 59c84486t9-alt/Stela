@@ -165,6 +165,10 @@ struct Options {
     input: bool,
     /// Opt-in diagnostic of actual native pinned RAM in the shared window.
     native_memory_check: bool,
+    /// Opt-in actual native MMIO/root/cache diagnostic; stops before guest entry.
+    native_mmio_check: bool,
+    /// Explicit short native PM/LAPIC/IRQ fixture; stops before guest entry.
+    native_clock_check: bool,
     /// Fixed physical native executors; never counts SMT siblings.
     native_cores: Option<usize>,
     /// Qualify owned AP startup/host resources, then stop before guest entry.
@@ -313,6 +317,8 @@ impl Options {
             idle_skip: false,
             input: false,
             native_memory_check: false,
+            native_mmio_check: false,
+            native_clock_check: false,
             native_cores: crate::native_smp::requested(text)?,
             native_bootstrap_check: false,
             native_shared_check: false,
@@ -376,6 +382,20 @@ impl Options {
             }
             if name == "--native-memory-check" {
                 options.native_memory_check = true;
+                continue;
+            }
+            if name == "--native-clock-check" {
+                if options.native_clock_check {
+                    return Err("duplicate native clock check");
+                }
+                options.native_clock_check = true;
+                continue;
+            }
+            if name == "--native-mmio-check" {
+                if options.native_mmio_check {
+                    return Err("duplicate native MMIO check");
+                }
+                options.native_mmio_check = true;
                 continue;
             }
             if name == "--restore-study" {
@@ -668,6 +688,32 @@ impl Options {
         }
         if !options.dram_base.is_multiple_of(LARGE) {
             return Err("guest DRAM base must be 2 MiB aligned");
+        }
+        if options.native_clock_check {
+            if options.native_cores != Some(1) {
+                return Err("native clock check requires --native-cores 1");
+            }
+            if options.native_mmio_check
+                || options.native_memory_check
+                || options.native_bootstrap_check
+                || options.native_shared_check
+                || options.native_rounds
+                || options.audio_check.is_some()
+                || options.network_check.is_some()
+                || options.storage.is_some()
+                || options.storage_ram.is_some()
+                || options.preboot.is_some()
+                || options.nor.is_some()
+                || options.input
+                || options.guest_network
+                || options.external_disks
+                || !options.usb_storage.is_empty()
+                || options.tss
+                || options.install.is_some()
+                || options.restore
+            {
+                return Err("native clock check requires an exclusive diagnostic mode");
+            }
         }
         Ok(options)
     }
@@ -1202,6 +1248,21 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     {
         output::fatal("native bootstrap check needs an explicit physical-core count");
     }
+    // Refuse physical and implicit persistent-device setup before translation
+    // stores, FDR placement, storage::open or any independent native driver.
+    if options.native_clock_check
+        && (handoff.native_resources.cores != 1
+            || handoff.storage.present
+            || handoff.files[..handoff.file_count]
+                .iter()
+                .any(|file| file.name() == translations::FILE)
+            || restore::inventory_file(handoff, stela_runtime::restore::fdr::FILE).is_some())
+    {
+        output::arguments(format_args!(
+            "CHECK native-clock FAIL unsupported physical or persistent resources\n"
+        ));
+        output::fatal("native clock fixture requires one exclusive processor and volatile input");
+    }
     if options.native_memory_check {
         output::arguments(format_args!(
             "CHECK native-memory heap cpu={heap:#x} physical={:#x} bytes={:#x}\n",
@@ -1586,6 +1647,39 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     let apic_hz = host::statistics().apic_hz;
     crate::status::done("");
+    if options.native_clock_check {
+        // SAFETY: original loader capture remains pinned in this actual
+        // HostOwner's physmap. Parsing never supplies hardware ownership.
+        let prepared = unsafe { crate::native_mmio::captured(handoff) }
+            .map_err(|_| stela_drivers::platform::work::WorkError::Unavailable)
+            .and_then(|wire| crate::native_clock::Prepared::from_fadt(wire.fadt()))
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
+                output::fatal("native clock source capture failed")
+            });
+        // SAFETY: explicit bounded UP test mode on its original HostOwner,
+        // with no other diagnostic/device owner active. The trusted fixture
+        // excludes source reset/SMM/VMM gaps over one second; this grants no
+        // arbitrary original driver execution or general PM clock profile.
+        unsafe { crate::native_clock::diagnostic::check(&mut host_owner, prepared) }
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
+                output::fatal("native clock fixture failed")
+            });
+        stop_here("bounded native clock fixture complete", 0x10);
+    }
+    if options.native_mmio_check {
+        // SAFETY: explicit bounded native diagnostic on the original retained
+        // handoff/owner. Success stops before guest entry; permanent mapping
+        // and IRQ registries retain this exact physical root until VM shutdown.
+        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
+            |error| {
+                output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
+                output::fatal("native MMIO root qualification failed")
+            },
+        );
+        stop_here("native MMIO root qualification complete", 0x10);
+    }
     crate::status::begin("Starting the other host processors");
     // SAFETY: the retained physical inventory and loader-owned reservations
     // were validated before any SIPI; the BSP Host is installed, guest entry

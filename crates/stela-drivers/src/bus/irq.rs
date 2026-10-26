@@ -114,6 +114,42 @@ pub struct RequestError {
     pub returned: Option<(Box<dyn Source>, Arc<dyn Handler>)>,
 }
 
+/// Concrete-source refusal from request_owned. Only checked, untouched owners
+/// are returned; wrong-CPU or uncertain published ownership stays quarantined.
+/// The error itself stays CPU-affine, including when S happens to be Send.
+pub struct OwnedRequestError<S: Source> {
+    pub error: IrqError,
+    pub returned: Option<UnregisteredSource<S>>,
+    owner_cpu: PhantomData<*mut ()>,
+}
+/// Untouched original owners from a checked prepublication refusal. Default
+/// Drop preserves source-before-callback release on the creating CPU. This
+/// wrapper proves no registry retirement and cannot mint a RetiredRoute.
+pub struct UnregisteredSource<S: Source> {
+    source: Box<S>,
+    handler: Arc<dyn Handler>,
+    owner_cpu: PhantomData<*mut ()>,
+}
+impl<S: Source> UnregisteredSource<S> {
+    /// Recover the exact untouched owners for device-specific fallback/retry.
+    ///
+    /// # Safety
+    /// Stay on the original qualified process CPU and retain handler until the
+    /// source is consumed/released, including independent device/DMA-dependent
+    /// lifetime obligations. No stop/drain or retired-route proof is supplied.
+    pub unsafe fn into_parts(self) -> (Box<S>, Arc<dyn Handler>) {
+        (self.source, self.handler)
+    }
+}
+impl<S: Source> core::fmt::Debug for OwnedRequestError<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OwnedRequestError")
+            .field("error", &self.error)
+            .field("returned", &self.returned.is_some())
+            .finish()
+    }
+}
+
 impl core::fmt::Debug for RequestError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RequestError")
@@ -149,6 +185,63 @@ pub trait IrqRegistration {
     fn vector(&self) -> u8;
     fn handled(&self) -> Result<u64, IrqError>;
     fn retire(&mut self) -> Result<(), IrqError>;
+    /// Complete the same stop/drain sequence and return the original source.
+    /// A failure keeps both owners in this registration for retry/quarantine.
+    fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError>;
+}
+
+/// Genuine retained physical-parent mask capability for a hard-IRQ failure.
+/// This endpoint grants no route, callback, device or DMA ownership.
+///
+/// # Safety
+/// Construct only from the actual owned pin and its nonwrapping claim epoch.
+/// `mask` checks the original CPU/epoch, performs actual IRQ-safe controller
+/// mask and readback, and refuses stale endpoints after retirement/reuse. It
+/// allocates nothing, never waits for deferred work and never finally releases
+/// an owner in the ISR. Retain the endpoint through callback completion; final
+/// Drop remains process/deferred context. An error is not successful masking.
+pub unsafe trait ParentMask: Send + Sync {
+    fn mask(&self) -> Result<(), IrqError>;
+}
+
+/// Acknowledged retirement of one actual registered route. Only the canonical
+/// registry constructs this non-cloneable, CPU-affine receipt after hardware,
+/// callback and work drain. It proves no device DMA/domain/BM retirement.
+pub struct RetiredRoute {
+    vector: u8,
+    owner_cpu: PhantomData<*mut ()>,
+}
+impl RetiredRoute {
+    pub fn vector(&self) -> u8 {
+        self.vector
+    }
+}
+
+/// The original source and callback owner after acknowledged route retirement.
+/// Source field order preserves final release while its callback context is
+/// still retained. This owner remains process/deferred and CPU-affine.
+pub struct RetiredSource<S: Source + ?Sized> {
+    source: Box<S>,
+    handler: Arc<dyn Handler>,
+    route: RetiredRoute,
+}
+impl<S: Source + ?Sized> RetiredSource<S> {
+    pub fn route(&self) -> &RetiredRoute {
+        &self.route
+    }
+
+    /// Extract the exact original source, callback and route receipt.
+    ///
+    /// # Safety
+    /// Stay on the qualified process CPU. Retain `handler` until `source` has
+    /// been consumed/released, including any source-destructor dependency on
+    /// callback-owned context, and until all independently required device/DMA
+    /// completion for callback-owned resources is acknowledged. Config/root release still
+    /// requires its actual stop and completion proofs; route drain alone does
+    /// not grant them. A failed extraction must keep the original owners.
+    pub unsafe fn into_parts(self) -> (Box<S>, Arc<dyn Handler>, RetiredRoute) {
+        (self.source, self.handler, self.route)
+    }
 }
 
 /// Fast hard-IRQ callback. Acknowledge owned real causes before returning, or
@@ -421,6 +514,34 @@ impl<P: Platform> Registry<P> {
         })
     }
 
+    /// Preserve the concrete source type through canonical IRQ retirement.
+    /// This returns the actual original PCI/config/root owner, never a clone.
+    pub fn request_owned<S: Source + 'static>(
+        &'static self,
+        source: S,
+        handler: Arc<dyn Handler>,
+    ) -> Result<OwnedRegistration<'static, P, S>, OwnedRequestError<S>> {
+        self.request(Box::new(source), handler)
+            .map(|registration| OwnedRegistration {
+                registration,
+                source: PhantomData,
+            })
+            .map_err(|refusal| OwnedRequestError {
+                error: refusal.error,
+                returned: refusal.returned.map(|(source, handler)| {
+                    // SAFETY: this same private request_owned call erased the
+                    // original Box<S>; Registry never replaces its source.
+                    let source = unsafe { Box::from_raw(Box::into_raw(source) as *mut S) };
+                    UnregisteredSource {
+                        source,
+                        handler,
+                        owner_cpu: PhantomData,
+                    }
+                }),
+                owner_cpu: PhantomData,
+            })
+    }
+
     fn quarantine(&self, slot: NonNull<Slot>) {
         // SAFETY: a quarantined slot is never detached or freed.
         let previous = unsafe { slot.as_ref() }
@@ -511,6 +632,29 @@ impl<P: Platform> Registration<'_, P> {
     /// A failed stop/drain retains the complete registration for retry; no
     /// vector/context or callback-owned pages can be reused by that failure.
     pub fn retire(&mut self) -> Result<(), IrqError> {
+        // Slot field order releases source while the callback is retained.
+        drop(self.detach()?);
+        Ok(())
+    }
+
+    /// Return the exact source only after final controller and callback drain.
+    pub fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
+        let retired = self.detach()?;
+        let Slot {
+            source, handler, ..
+        } = *retired;
+        let source = source.into_inner();
+        Ok(RetiredSource {
+            source,
+            handler,
+            route: RetiredRoute {
+                vector: self.vector,
+                owner_cpu: PhantomData,
+            },
+        })
+    }
+
+    fn detach(&mut self) -> Result<Box<Slot>, IrqError> {
         if !self.active {
             return Err(IrqError::Unregistered);
         }
@@ -565,8 +709,37 @@ impl<P: Platform> Registration<'_, P> {
         drop(guard);
         // SAFETY: real source quiescence excludes any future delivery/work,
         // and locked final IRR/ISR/inflight checks establish no remaining user.
-        unsafe { drop(Box::from_raw(self.slot.as_ptr())) };
-        Ok(())
+        Ok(unsafe { Box::from_raw(self.slot.as_ptr()) })
+    }
+}
+
+/// Concrete-source registration with the same process/CPU affinity. Private
+/// construction proves the type of its erased, uniquely retained source.
+pub struct OwnedRegistration<'a, P: Platform, S: Source + 'static> {
+    registration: Registration<'a, P>,
+    source: PhantomData<S>,
+}
+impl<P: Platform, S: Source + 'static> OwnedRegistration<'_, P, S> {
+    pub fn vector(&self) -> u8 {
+        self.registration.vector()
+    }
+    pub fn handled(&self) -> Result<u64, IrqError> {
+        self.registration.handled()
+    }
+    pub fn retire(&mut self) -> Result<RetiredSource<S>, IrqError> {
+        let RetiredSource {
+            source,
+            handler,
+            route,
+        } = self.registration.retire_source()?;
+        Ok(RetiredSource {
+            // SAFETY: request_owned alone constructs this wrapper from Box<S>;
+            // Registry never replaces it. Retirement uniquely returns that
+            // allocation after actual controller/callback/work drain.
+            source: unsafe { Box::from_raw(Box::into_raw(source) as *mut S) },
+            handler,
+            route,
+        })
     }
 }
 
@@ -587,6 +760,9 @@ impl<P: Platform> IrqRegistration for Registration<'_, P> {
     }
     fn retire(&mut self) -> Result<(), IrqError> {
         Registration::retire(self)
+    }
+    fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
+        Registration::retire_source(self)
     }
 }
 
@@ -846,6 +1022,47 @@ mod tests {
         assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
     }
     #[test]
+    fn returned_local_source_keeps_callback_context_through_its_final_release() {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let token = std::rc::Rc::new(core::cell::Cell::new(0));
+        let mut registration = registry
+            .request(
+                local_source(&model, token.clone()),
+                Arc::new(ModelHandler(model.clone())),
+            )
+            .unwrap();
+        let retired = registration.retire_source().unwrap();
+        assert_eq!(token.get(), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+        drop(retired);
+        assert_eq!(token.get(), 1);
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn untouched_typed_refusal_keeps_affine_source_and_callback_bound_for_default_drop() {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let token = std::rc::Rc::new(core::cell::Cell::new(0));
+        model.fail_target.store(true, Ordering::Relaxed);
+        let Err(refusal) = registry.request_owned(
+            LocalSource {
+                inner: ModelSource(model.clone()),
+                token: token.clone(),
+                owner: std::thread::current().id(),
+            },
+            Arc::new(ModelHandler(model.clone())),
+        ) else {
+            panic!("failed target registered")
+        };
+        assert!(refusal.returned.is_some());
+        assert_eq!(token.get(), 0);
+        drop(refusal);
+        assert_eq!(token.get(), 1);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
+    }
+    #[test]
     fn all_early_admission_errors_retain_affine_source_and_callback_owner() {
         for case in 0..4 {
             let model = Model::new();
@@ -998,6 +1215,69 @@ mod tests {
         let mut reused = request(registry, &model);
         assert_eq!(reused.vector(), vector);
         reused.retire().unwrap();
+    }
+
+    #[test]
+    fn concrete_source_handoff_returns_original_owner_only_after_acknowledged_drain() {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let mut registration = registry
+            .request_owned(
+                ModelSource(model.clone()),
+                Arc::new(ModelHandler(model.clone())),
+            )
+            .unwrap();
+        let vector = registration.vector();
+        model.pending.store(true, Ordering::Relaxed);
+        model.fail_mask.store(true, Ordering::Relaxed);
+        assert!(matches!(registration.retire(), Err(IrqError::Mask)));
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+        model.fail_mask.store(false, Ordering::Relaxed);
+        let retired = registration.retire().unwrap();
+        assert_eq!(retired.route().vector(), vector);
+        // SAFETY: this concrete modeled source has no release dependency;
+        // retain its actual callback until after explicit source destruction.
+        let (source, handler, route) = unsafe { retired.into_parts() };
+        assert!(Arc::ptr_eq(&source.0, &model));
+        assert_eq!(route.vector(), vector);
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.eois.load(Ordering::Relaxed), 1);
+        assert!(!registry.dispatch(vector));
+        assert!(matches!(registration.retire(), Err(IrqError::Unregistered)));
+        drop(source);
+        drop(handler);
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
+        let mut reused = request(registry, &model);
+        assert_eq!(reused.vector(), vector);
+        reused.retire().unwrap();
+    }
+
+    #[test]
+    fn typed_early_refusal_preserves_original_source_for_untouched_retry() {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        model.fail_target.store(true, Ordering::Relaxed);
+        let Err(refusal) = registry.request_owned(
+            ModelSource(model.clone()),
+            Arc::new(ModelHandler(model.clone())),
+        ) else {
+            panic!("failed target registered")
+        };
+        assert_eq!(refusal.error, IrqError::Route);
+        // SAFETY: preserve the original CPU and callback through exact source
+        // retry below; the refused request has not changed either owner.
+        let (source, handler) = unsafe { refusal.returned.unwrap().into_parts() };
+        assert!(Arc::ptr_eq(&source.0, &model));
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+        model.fail_target.store(false, Ordering::Relaxed);
+        let mut registration = registry.request_owned(*source, handler).unwrap();
+        assert_eq!(registry.quarantine_count(), 0);
+        drop(registration.retire().unwrap());
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]

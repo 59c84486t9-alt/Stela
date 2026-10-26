@@ -615,6 +615,14 @@ fn load(
         .and_then(|time| unix_seconds(&time));
     let power = host_power();
 
+    let native_mmio = match crate::native_mmio::Prepared::capture() {
+        Ok(prepared) => Some(prepared),
+        Err(error) => {
+            output::arguments(format_args!("NATIVE MMIO unavailable capture={error}\n"));
+            None
+        }
+    };
+
     let mut frames = FirmwareFrames;
     let mut image_rights: Vec<(u64, u64, u64)> = image
         .sections
@@ -728,6 +736,10 @@ fn load(
     }
     let bounce = native_resources.bounce[0];
 
+    if let Some(prepared) = &native_mmio {
+        prepared.aperture(&mut frames, root, cores)?;
+    }
+
     let options_region = Region {
         physical: options.as_ptr() as u64,
         bytes: options.len() as u64,
@@ -765,6 +777,16 @@ fn load(
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
     let map = unsafe { boot::exit_boot_services(None) };
+    let native_mmio_region = match native_mmio {
+        Some(prepared) => match prepared.finish(&map) {
+            Ok(()) => prepared.region(),
+            Err(error) => {
+                output::arguments(format_args!("NATIVE MMIO unavailable final-map={error}\n"));
+                Region::default()
+            }
+        },
+        None => Region::default(),
+    };
     // Stop every enabled firmware AP before offering its former code/data to
     // guest RAM, including workers that will later receive their owned SIPI.
     // The BSP alone sends ICR commands, with firmware IRQ handlers excluded.
@@ -840,6 +862,7 @@ fn load(
             apic_base,
             native_processors,
             native_resources,
+            native_mmio: native_mmio_region,
             wall_seconds,
             wall_tsc,
             guest,

@@ -1,19 +1,25 @@
 //! BSP physical MSI and owned IOAPIC line routes through the existing IDT/APIC.
 //! Production attachment, AP ownership and interrupt remapping remain explicit.
 use crate::apic::{self, Apic};
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     arch::asm,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 use stela_drivers::bus::irq::{IrqController, IrqError, Platform, Registry, Target};
+use stela_drivers::platform::work::Cpu;
 
 mod context;
+#[allow(dead_code)]
+mod crs;
 pub(crate) mod diagnostic;
 #[allow(dead_code)]
 pub mod ioapic;
 pub(crate) mod level_diagnostic;
 #[allow(dead_code)]
 pub mod madt;
+#[allow(dead_code)]
+pub(crate) mod root;
 pub(crate) mod work_diagnostic;
 
 static CONTEXT: context::Context = context::Context::new();
@@ -22,6 +28,63 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 static REGISTERS: AtomicU64 = AtomicU64::new(0);
 static BSP: AtomicU32 = AtomicU32::new(0);
 static TIMEOUT: AtomicU64 = AtomicU64::new(0);
+// Main's original immutable CPU/root view, permanently retained with this
+// static registry and its possible quarantines. Never moves HostOwner itself.
+static ROOT_ADAPTER: AtomicPtr<crate::native_clock::IrqAdapter> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+fn root_adapter() -> Option<&'static crate::native_clock::IrqAdapter> {
+    let adapter = ROOT_ADAPTER.load(Ordering::Acquire);
+    // SAFETY: publication leaks this exact Box for the permanent registry
+    // lifetime. No path removes it, including failed source retirement.
+    unsafe { adapter.as_ref() }
+}
+fn root_cpu() -> Option<&'static Arc<dyn Cpu>> {
+    root_adapter().map(|adapter| &adapter.cpu)
+}
+
+/// Join main's existing physical CPU/IDT/APIC owner for external device IRQs.
+/// No local timer register or engine vector is changed.
+///
+/// # Safety
+/// Actual post-EBS main owns the installed 0x50..0x5f IDT stubs and exclusively
+/// hands those routes to this registry. Physical delivery/remapping policy is
+/// qualified; no firmware/SMM/other CPU owns these routes. The actual root and
+/// descriptor allocations remain retained through this permanent registration.
+/// Active external routes must be stopped before leaving their qualified root
+/// execution scope; the CPU view refuses unsupported root/context changes.
+pub(crate) unsafe fn adopt(
+    execution: &crate::native_clock::DriverExecution<'_>,
+) -> Result<(), IrqError> {
+    let adapter = execution.irq_adapter().map_err(|_| IrqError::Unavailable)?;
+    if READY.load(Ordering::Acquire) {
+        return match root_cpu() {
+            Some(cpu)
+                if Arc::ptr_eq(cpu, &adapter.cpu)
+                    && BASE.load(Ordering::Relaxed) == adapter.base
+                    && REGISTERS.load(Ordering::Relaxed) == adapter.registers =>
+            {
+                NativePlatform(()).check_cpu()
+            }
+            _ => Err(IrqError::Unavailable),
+        };
+    }
+    let adapter = Box::new(adapter);
+    let saved = adapter.cpu.save_disable().map_err(|_| IrqError::WrongCpu)?;
+    // SAFETY: typed actual main-owned APIC mapping, installed IDT/CPU grant
+    // and explicit external-route handoff required above. Deadline units for
+    // this adopted path are actual fixed PM-clock monotonic nanoseconds.
+    let result = unsafe { initialize(adapter.base, adapter.registers, 2_000_000_000) };
+    if result.is_ok() {
+        ROOT_ADAPTER.store(Box::into_raw(adapter), Ordering::Release);
+        // SAFETY: the original same-CPU view is now permanently retained.
+        unsafe { root_cpu().unwrap().restore(saved) };
+    } else {
+        // SAFETY: exact enclosing CPU save, no switch or publication occurred.
+        unsafe { adapter.cpu.restore(saved) };
+    }
+    result
+}
 
 pub struct NativePlatform(());
 pub static CONTROLLER: Registry<NativePlatform> = Registry::new(NativePlatform(()));
@@ -128,6 +191,9 @@ unsafe impl Platform for NativePlatform {
         if !READY.load(Ordering::Acquire) {
             return Err(IrqError::Unavailable);
         }
+        if let Some(adapter) = root_adapter() {
+            adapter.check_irq_cpu().map_err(|_| IrqError::WrongCpu)?;
+        }
         if id(&controller())? != BSP.load(Ordering::Relaxed) {
             return Err(IrqError::WrongCpu);
         }
@@ -173,7 +239,7 @@ unsafe impl Platform for NativePlatform {
         controller().eoi();
     }
     fn ticks(&self) -> u64 {
-        apic::rdtsc()
+        root_cpu().map_or_else(apic::rdtsc, |cpu| cpu.ticks())
     }
     fn timeout_ticks(&self) -> u64 {
         TIMEOUT.load(Ordering::Relaxed)

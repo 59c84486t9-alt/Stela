@@ -50,10 +50,95 @@ impl Local {
 #[must_use = "retain the physical native host owner through every call and handler"]
 pub(crate) struct Owner {
     local: NonNull<Local>,
+    clock_leases: alloc::sync::Arc<()>,
     _pinned: PhantomData<*mut ()>,
 }
 
+/// Fixed root pages and the only RAM the actual shadow publisher may map.
+/// This immutable view pins the original physical owner; it does not move it.
+pub(crate) struct MmioRoots {
+    roots: alloc::vec::Vec<u64>,
+    ram: alloc::vec::Vec<stela_drivers::bus::mmio::owned::PhysicalSpan>,
+    _lease: alloc::sync::Arc<()>,
+}
+impl MmioRoots {
+    pub(crate) fn roots(&self) -> &[u64] {
+        &self.roots
+    }
+    pub(crate) fn ram(&self) -> &[stela_drivers::bus::mmio::owned::PhysicalSpan] {
+        &self.ram
+    }
+}
+
 impl Owner {
+    /// Observe every actual host/current/banked/loader root while the native
+    /// dispatcher owns the physical CPU. Guest publication is limited to these
+    /// retained RAM extents; the fixed shared-window entries are never rebuilt.
+    pub(crate) fn mmio_roots(
+        &mut self,
+        execution: &crate::native_clock::DriverExecution<'_>,
+        handoff: &crate::handoff::Handoff,
+    ) -> Result<MmioRoots, stela_drivers::bus::mmio::owned::Error> {
+        use stela_drivers::bus::mmio::owned::{Error, PhysicalSpan};
+        execution.check().map_err(|_| Error::Unavailable)?;
+        if handoff.native_resources.cores != 1 || current() != self.local.as_ptr() {
+            return Err(Error::Unavailable);
+        }
+        let cpu = execution.cpu().map_err(|_| Error::Unavailable)?;
+        let saved = cpu.save_disable().map_err(|_| Error::Unavailable)?;
+        let result = (|| {
+            let lease = self.retain_clock_root().map_err(|_| Error::Unavailable)?;
+            let state = state();
+            let mut roots = alloc::vec::Vec::new();
+            roots
+                .try_reserve_exact(2 + super::ROOTS * (1 + super::BANKS))
+                .map_err(|_| Error::Exhausted)?;
+            roots.push(handoff.root);
+            roots.push(state.host_root);
+            roots.extend(state.all_roots());
+            roots.sort_unstable();
+            roots.dedup();
+            let mut ram = alloc::vec::Vec::new();
+            ram.try_reserve_exact(state.ram.len())
+                .map_err(|_| Error::Exhausted)?;
+            for range in &state.ram {
+                ram.push(PhysicalSpan::new(range.host, range.bytes)?);
+            }
+            Ok(MmioRoots {
+                roots,
+                ram,
+                _lease: lease,
+            })
+        })();
+        // SAFETY: exact same-CPU enclosing save; no callback or switch occurred.
+        unsafe { cpu.restore(saved) };
+        result
+    }
+
+    /// Retain immutable clock/CPU views without moving this !Send owner. The
+    /// actual owner refuses destruction while any view can still enter it.
+    pub(crate) fn retain_clock_root(
+        &mut self,
+    ) -> Result<alloc::sync::Arc<()>, stela_drivers::platform::work::WorkError> {
+        use stela_drivers::platform::work::WorkError;
+        if current() != self.local.as_ptr() {
+            return Err(WorkError::WrongCpu);
+        }
+        if irq_active() || !native_frames_idle() {
+            return Err(WorkError::Busy);
+        }
+        let root: u64;
+        // SAFETY: read-only observation under this physical processor's owner.
+        unsafe {
+            asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags));
+        }
+        let state = state();
+        if state.native || root != state.host_root {
+            return Err(WorkError::CorruptContext);
+        }
+        Ok(self.clock_leases.clone())
+    }
+
     /// Adopt the existing canonical owner before a guest regime or frame is
     /// live. This replaces metadata; it allocates/copies no guest RAM.
     ///
@@ -223,6 +308,7 @@ pub(super) unsafe fn install(state: State) -> Owner {
     *slot = Some(state);
     Owner {
         local,
+        clock_leases: alloc::sync::Arc::new(()),
         _pinned: PhantomData,
     }
 }
@@ -259,6 +345,22 @@ pub(super) fn native_frames_idle() -> bool {
     }
 }
 
+/// Actual normal/terminal hardware-entry metadata set by the shared IDT asm.
+/// IF does not identify IRQ context; process IRQ-save still reads false here.
+pub(super) fn irq_active() -> bool {
+    let normal: u64;
+    let terminal: u64;
+    // SAFETY: permanently pinned current GS record; assembly owns the slots,
+    // setting before Rust entry and clearing only after full xstate restore.
+    unsafe {
+        asm!("mov {}, gs:[{}]", out(reg) normal, const XSTATE_ACTIVE_OFFSET,
+            options(readonly, nostack, preserves_flags));
+        asm!("mov {}, gs:[{}]", out(reg) terminal, const XSTATE_ACTIVE_OFFSET + 8,
+            options(readonly, nostack, preserves_flags));
+    }
+    normal != 0 || terminal != 0
+}
+
 pub(super) fn interrupt() {
     // SAFETY: one processor owns this record for the handler's whole lifetime.
     unsafe { &(*current()).interrupted }.store(true, Ordering::Release);
@@ -283,6 +385,9 @@ pub(super) fn clear_interrupt() {
 impl Drop for Owner {
     fn drop(&mut self) {
         assert_eq!(current(), self.local.as_ptr(), "host state owner migrated");
+        if alloc::sync::Arc::strong_count(&self.clock_leases) != 1 {
+            crate::output::fatal("native host root retained by live clock/CPU providers");
+        }
         // SAFETY: the owner is processor-local, interrupts are disabled, and
         // the caller has stopped every execution/handler using this record.
         unsafe {

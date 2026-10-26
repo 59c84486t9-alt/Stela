@@ -94,6 +94,8 @@ pub struct Unit<R: Registers, P: Platform> {
     pins: u16,
     held: AtomicBool,
     claims: UnsafeCell<[bool; MAX_PINS]>,
+    epochs: UnsafeCell<[u64; MAX_PINS]>,
+    next_epoch: UnsafeCell<u64>,
     quarantined: AtomicU64,
 }
 // SAFETY: all selector/window and claim access is serialized by IRQ-save lock.
@@ -138,6 +140,8 @@ impl<R: Registers, P: Platform> Unit<R, P> {
             pins,
             held: AtomicBool::new(false),
             claims: UnsafeCell::new([false; MAX_PINS]),
+            epochs: UnsafeCell::new([0; MAX_PINS]),
+            next_epoch: UnsafeCell::new(1),
             quarantined: AtomicU64::new(0),
         }))
     }
@@ -217,12 +221,19 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         if claims[usize::from(pin)] {
             return Err(IrqError::Exhausted);
         }
+        // Selector lock also owns the fixed pin metadata. Never wrap and make
+        // an old handler's parent-mask endpoint valid for a later claim.
+        let next_epoch = unsafe { &mut *self.next_epoch.get() };
+        let epoch = *next_epoch;
+        *next_epoch = next_epoch.checked_add(1).ok_or(IrqError::Exhausted)?;
+        unsafe { (*self.epochs.get())[usize::from(pin)] = epoch };
         claims[usize::from(pin)] = true;
         Ok(Pin {
             unit: ManuallyDrop::new(self.clone()),
             devices: ManuallyDrop::new(devices),
             line,
             pin,
+            epoch,
             target: None,
             retired: true,
         })
@@ -247,8 +258,52 @@ pub struct Pin<R: Registers, P: Platform> {
     devices: ManuallyDrop<Box<dyn Devices>>,
     line: LineRoute,
     pin: u8,
+    epoch: u64,
     target: Option<Target>,
     retired: bool,
+}
+impl<R: Registers, P: Platform> Pin<R, P> {
+    /// Pre-bind a real parent mask endpoint in process context before callback
+    /// publication. It never enables/programs a route or acquires a new pin.
+    pub fn parent_mask(&self) -> Result<ParentMask<R, P>, IrqError> {
+        self.unit.platform.check_cpu()?;
+        let _guard = self.unit.lock();
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
+        Ok(ParentMask {
+            unit: Arc::clone(&self.unit),
+            pin: self.pin,
+            epoch: self.epoch,
+        })
+    }
+}
+
+/// Constructorless actual pin/epoch endpoint, retained by the fixed callback
+/// group. Final Drop remains process/deferred, even though mask is IRQ-safe.
+pub struct ParentMask<R: Registers, P: Platform> {
+    unit: Arc<Unit<R, P>>,
+    pin: u8,
+    epoch: u64,
+}
+// SAFETY: Pin alone creates this endpoint from its actual Unit/claim. The
+// existing IRQ-save selector lock checks the nonwrapping epoch and performs
+// actual MASK/readback without allocation, callbacks or final owner release.
+unsafe impl<R: Registers, P: Platform> stela_drivers::bus::irq::ParentMask for ParentMask<R, P> {
+    fn mask(&self) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        let _guard = self.unit.lock();
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
+        let low = self.unit.low(self.pin)?;
+        self.unit.registers.write(0x10 + self.pin * 2, low | MASK);
+        if self.unit.low(self.pin)? & MASK == 0 {
+            Err(IrqError::Mask)
+        } else {
+            Ok(())
+        }
+    }
 }
 // SAFETY: devices and unit are retained, physical ownership comes from claim's
 // explicit grant. The canonical registry alone publishes/releases callbacks.
@@ -288,6 +343,9 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
             return Err(IrqError::Route);
         }
         let _guard = self.unit.lock();
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
         let low = self.unit.low(self.pin)?;
         if low & MASK == 0 || low & (REMOTE_IRR | DELIVERY) != 0 {
             return Err(IrqError::Drain);
@@ -371,6 +429,10 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
             return Err(IrqError::Drain);
         }
         self.retired = true;
+        // Controller and callback retirement completed. Keep the physical pin
+        // claim until Source Drop, while refusing every old handler endpoint.
+        let _guard = self.unit.lock();
+        unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] = 0 };
         Ok(())
     }
 }
@@ -384,6 +446,7 @@ impl<R: Registers, P: Platform> Drop for Pin<R, P> {
             let _guard = self.unit.lock();
             unsafe {
                 (*self.unit.claims.get())[usize::from(self.pin)] = false;
+                (*self.unit.epochs.get())[usize::from(self.pin)] = 0;
             }
         }
         // Actual registry retirement proved callback lifetime + CPU/IOAPIC
@@ -603,6 +666,103 @@ mod tests {
             },
         )
     }
+    #[test]
+    fn real_parent_mask_contains_asserted_level_and_stale_endpoint_cannot_mask_reused_pin() {
+        struct FailedDemux(Arc<ParentMask<Io, Cpu>>);
+        impl Handler for FailedDemux {
+            fn handle(&self) -> Disposition {
+                // Actual callback cannot ACK its device. It must acknowledge
+                // parent MASK before Registry's EOI instead of returning live.
+                stela_drivers::bus::irq::ParentMask::mask(&*self.0).unwrap();
+                Disposition::Handled
+            }
+        }
+        let (b, u, r, line) = fixture();
+        let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
+        let endpoint = Arc::new(pin.parent_mask().unwrap());
+        let mut registration = r
+            .request(Box::new(pin), Arc::new(FailedDemux(endpoint.clone())))
+            .unwrap();
+        {
+            let mut h = b.hw.lock().unwrap();
+            h.asserted = 1;
+            h.service();
+        }
+        assert!(r.dispatch(registration.vector()));
+        {
+            let h = b.hw.lock().unwrap();
+            assert_eq!(
+                h.asserted, 1,
+                "test must retain the unacknowledged child cause"
+            );
+            assert_ne!(h.regs[0x22] & MASK, 0);
+            assert_eq!(h.regs[0x22] & REMOTE_IRR, 0);
+            assert!(!h.pending, "masked parent must not retrigger after EOI");
+        }
+        registration.retire().unwrap();
+        assert_eq!(
+            stela_drivers::bus::irq::ParentMask::mask(&*endpoint),
+            Err(IrqError::Unregistered)
+        );
+        let replacement = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
+        let replacement_mask = replacement.parent_mask().unwrap();
+        let mut replacement = r
+            .request(Box::new(replacement), Arc::new(Member(b.clone(), 1, true)))
+            .unwrap();
+        assert_eq!(
+            stela_drivers::bus::irq::ParentMask::mask(&*endpoint),
+            Err(IrqError::Unregistered)
+        );
+        assert_eq!(
+            b.hw.lock().unwrap().regs[0x22] & MASK,
+            0,
+            "stale endpoint changed the new live route"
+        );
+        assert_eq!(
+            stela_drivers::bus::irq::ParentMask::mask(&replacement_mask),
+            Ok(())
+        );
+        replacement.retire().unwrap();
+    }
+
+    #[test]
+    fn parent_mask_readback_failures_are_errors_and_claim_epochs_never_wrap() {
+        let (b, u, r, line) = fixture();
+        let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
+        let endpoint = pin.parent_mask().unwrap();
+        let mut registration = r
+            .request(Box::new(pin), Arc::new(Member(b.clone(), 1, true)))
+            .unwrap();
+        b.hw.lock().unwrap().refuse_mask = true;
+        assert_eq!(
+            stela_drivers::bus::irq::ParentMask::mask(&endpoint),
+            Err(IrqError::Mask)
+        );
+        b.hw.lock().unwrap().fail_read = true;
+        assert_eq!(
+            stela_drivers::bus::irq::ParentMask::mask(&endpoint),
+            Err(IrqError::FailedRead)
+        );
+        {
+            let mut h = b.hw.lock().unwrap();
+            h.fail_read = false;
+            h.refuse_mask = false;
+        }
+        registration.retire().unwrap();
+        {
+            let _guard = u.lock();
+            unsafe { *u.next_epoch.get() = u64::MAX };
+        }
+        assert!(matches!(
+            unsafe { u.claim(line, Box::new(Contributors(b.clone()))) },
+            Err(IrqError::Exhausted)
+        ));
+        assert_eq!(
+            stela_drivers::bus::irq::ParentMask::mask(&endpoint),
+            Err(IrqError::Unregistered)
+        );
+    }
+
     #[test]
     fn true_level_retriggers_after_eoi_until_cause_ack_then_shared_group_retires() {
         let (b, u, r, line) = fixture();
