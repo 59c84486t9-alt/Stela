@@ -1,20 +1,23 @@
 // Stela's system-mode test kernel: a flat, position-independent AArch64 image
-// loaded anywhere in the first 32 MiB of guest DRAM and entered at EL1h with
-// the MMU off and DAIF masked.
+// loaded anywhere in the first 32 MiB of guest DRAM and entered at EL2h with
+// the MMU off and DAIF masked, as the kernelcache is. It first makes itself a
+// VHE host, as XNU does: HCR_EL2.E2H makes the EL1 register names below reach
+// EL2's registers, and TGE puts its EL0 tasks in the EL2&0 regime, whose
+// exceptions EL2 takes.
 //
 // It builds 16 KiB-granule tables (TTBR0: 47-bit with an identity block and
 // three EL0 pages; TTBR1: 39-bit high half mapping the DRAM block at
 // 0xffffff8000000000), turns the MMU on, continues in the high half, takes a
-// data abort and an SVC at EL1, then runs two EL0 tasks that make SVCs while
+// data abort and an SVC at EL2, then runs two EL0 tasks that make SVCs while
 // the virtual timer's FIQ switches between them. After SWITCHES switches it
 // disables the timer, leaves its results in X0-X7 and waits with nothing able
 // to wake it:
 //   x0 = 0x5354454c41204f4b ("STELA OK"), or 0xbad for an unexpected exception
 //   x1, x2 = SVCs made by task A and task B
 //   x3 = timer switches
-//   x4, x5 = ESR and FAR of the EL1 data abort
-//   x6 = ESR of the EL1 SVC, x7 = ESR of the last EL0 SVC
-//   x8, x9 = ESRs of the EL1 load and store at WINDOW_VA, x10 = its FAR
+//   x4, x5 = ESR and FAR of the EL2 data abort
+//   x6 = ESR of the EL2 SVC, x7 = ESR of the last EL0 SVC
+//   x8, x9 = ESRs of the EL2 load and store at WINDOW_VA, x10 = its FAR
 
 .set BLOCK, 0x2000000
 .set KERNEL_VA, 0xffffff8000000000
@@ -31,9 +34,11 @@
 .set SWITCHES, 6
 .set PERIOD, 240000                 // 10 ms of the 24 MHz counter
 .set MAIR, 0xff                     // Attr0 Normal WB, Attr1 Device-nGnRnE
+.set HCR, (1 << 34) | (1 << 31) | (1 << 27) // E2H, RW, TGE
 // T0SZ 17, TG0 16K, T1SZ 25, TG1 16K, inner-shareable WB walks, IPS 48 bits.
 .set TCR, 0x57519b511
-// M, C, SA, I, SPAN and the SCTLR_EL1 RES1 bits; EL0 WFI/WFE trap.
+// M, C, SA, I, SPAN and the SCTLR_EL1 RES1 bits, which SCTLR_EL2 shares under
+// E2H; EL0 WFI/WFE trap.
 .set SCTLR, 0x30d0180d
 .set KERNEL_BLOCK, 0x0040000000000701 // block, SH inner, AF, Attr0, UXN
 .set DEVICE_BLOCK, 0x0060000000000405 // block, AF, Attr1 Device, PXN, UXN
@@ -66,6 +71,9 @@
 
 .text
 _start:
+    ldr x0, =HCR
+    msr hcr_el2, x0
+    isb
     adr x19, .
     and x20, x19, #~(BLOCK - 1)         // DRAM block base
     // Zero tables, user pages, stack and data.
@@ -149,7 +157,7 @@ high:
     str w3, [x2, #0x20]                 // UTXH
     b 3b
 5:
-    // EL1 data aborts at an address no range holds: a load, then a store.
+    // EL2 data aborts at an address no range holds: a load, then a store.
     ldr x6, =WINDOW_VA
     ldr x7, [x6]
     ldr x8, [x22, #D_ABORT_ESR]
@@ -160,10 +168,10 @@ high:
     str x8, [x22, #D_WINDOW_STORE]
     ldr x8, [x22, #D_ABORT_FAR]
     str x8, [x22, #D_WINDOW_FAR]
-    // EL1 data abort: level 2 of TTBR1 maps only the first block.
+    // EL2 data abort: level 2 of TTBR1 maps only the first block.
     ldr x6, =(KERNEL_VA + 0x4000000)
     ldr x7, [x6]
-    // EL1 SVC.
+    // EL2 SVC.
     svc #0x10
     // Task B's first context; task A starts below.
     add x1, x22, #(D_CONTEXT + 0x200)
@@ -186,7 +194,7 @@ high:
     mov x8, #0
     eret
 
-// EL1 synchronous: record a data abort and skip it, or record an SVC.
+// EL2 synchronous: record a data abort and skip it, or record an SVC.
 el1_sync:
     sub sp, sp, #32
     stp x0, x1, [sp]
@@ -336,7 +344,8 @@ banner:
     .asciz "STELA TEST KERNEL: MMU ON, UART MMIO\n"
 .balign 4
 
-// The EL1 vector table; only the expected entries are reachable.
+// The vector table, VBAR_EL2's under E2H; only the expected entries are
+// reachable.
 .balign 2048
 vectors:
 .irp group, 0, 1, 2, 3

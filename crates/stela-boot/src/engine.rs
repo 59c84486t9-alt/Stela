@@ -804,14 +804,19 @@ fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>, 
     Ok(ranges)
 }
 
-/// Stela's own test kernel reads no identification register; its DC ZVA
-/// block is Stela's choice of 64 bytes.
-fn test_profile() -> CpuProfile {
+/// Stela's own test kernel reads no identification register, but the
+/// canonical memory owner declares its checked memory from them: the
+/// ID_AA64* and CTR_EL0 registers advertise what this engine implements, as
+/// a board profile's do. Its DC ZVA block is Stela's choice of 64 bytes.
+fn test_profile(target: TargetCpu, speculation: Speculation) -> CpuProfile {
+    let chip = Chip::DEFAULT;
+    let mut fixed = stela_runtime::machine::identification::derive(chip, target, true, speculation);
+    fixed.push((DCZID_EL0, 4));
     CpuProfile {
         name: "stela-test-kernel",
-        chip: Chip::DEFAULT,
+        chip,
         counter_frequency: 24_000_000,
-        fixed: alloc::vec![(DCZID_EL0, 4)],
+        fixed,
         processors: Vec::new(),
     }
 }
@@ -1754,7 +1759,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     let full_profile = match &board {
         Some(board) => board_profile(board, target, speculation),
-        None => test_profile(),
+        None => test_profile(target, speculation),
     };
     let topology_source = match (loaded_source.as_ref(), loaded_tree.as_ref(), board.as_ref()) {
         (Some(intake), Some(live), Some(source_board)) => {
@@ -1898,8 +1903,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // its per-CPU pointer in TPIDR_GL2. HCR_EL2.E2H is RES1 on this profile
     // (SPTM installs its vectors through VBAR_EL1 before it ORs TGE and E2H
     // into HCR_EL2, which reaches VBAR_EL2 only with E2H already set); the
-    // other HCR_EL2 bits reset to 0. Stela's test kernel runs at EL1.
-    let el = if options.bundle { 2 } else { 1 };
+    // other HCR_EL2 bits reset to 0. Every other image starts there too:
+    // the canonical memory owner admits MMU-off execution at EL2 alone
+    // (`docs/design/runtime.md`), and Stela's test kernel makes itself a
+    // VHE host as XNU does.
+    let el = 2;
     output::arguments(format_args!(
         "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz} \
          prediction_isolation={} faulting_data_barrier={}\n",
@@ -1910,13 +1918,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     ));
     let mut cpu = Cpu::of(profile.chip, entry, Pstate::reset(el));
     cpu.state.x[0] = x0;
-    if el == 1 {
-        // An EL1 entry gets the EL2 state boot firmware leaves for its
-        // client: the physical counter and timer are not trapped
-        // (CNTHCTL_EL2.EL1PCTEN, EL1PTEN with E2H set).
-        cpu.registers
-            .set(Register::CNTHCTL_EL2, 0, 1 << 10 | 1 << 11);
-    }
     let now = stela_runtime::machine::Host::counter(&mut bare);
     let reset = options.bundle.then_some(entry);
     // Board device firmware images travel in the bundle by guest file name.

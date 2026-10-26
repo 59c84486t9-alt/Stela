@@ -80,13 +80,13 @@ const KERNEL_RESULTS: [(usize, Option<u64>); 11] = [
     (1, None),
     (2, None),
     (3, Some(6)),
-    // EL1 data abort: EC 0x25, IL, level 2 translation fault.
+    // EL2 data abort: EC 0x25, IL, level 2 translation fault.
     (4, Some(0x9600_0006)),
     (5, Some(0xffff_ff80_0400_0000)),
-    // EL1 SVC #0x10 and EL0 SVC #1.
+    // EL2 SVC #0x10 and EL0 SVC #1.
     (6, Some(0x5600_0010)),
     (7, Some(0x5600_0001)),
-    // EL1 load and store at the Stela window's address, outside both
+    // EL2 load and store at the Stela window's address, outside both
     // ranges: level 0 translation faults, the store's with WnR.
     (8, Some(0x9600_0004)),
     (9, Some(0x9600_0044)),
@@ -103,8 +103,9 @@ const KERNEL_BANNER: &str = "GUEST| STELA TEST KERNEL: MMU ON, UART MMIO";
 enum Scenario {
     /// Four instructions on the bounded MMU-off EL1 diagnostic.
     Smoke,
-    /// The system-mode engine running Stela's own test kernel: 16 KiB
-    /// granule, high-half kernel, EL1 abort and SVC, timer FIQ, two EL0 tasks.
+    /// The system-mode engine running Stela's own test kernel: a VHE host at
+    /// EL2, 16 KiB granule, high-half kernel, EL2 abort and SVC, timer FIQ,
+    /// two EL0 tasks.
     SystemKernel,
 }
 
