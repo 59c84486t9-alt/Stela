@@ -2,6 +2,27 @@
 //! This is cfg(test) support, never a native provider or domain-identity proof.
 use super::*;
 
+/// Use the same retained attachment sequence with a captured finite test budget.
+///
+/// # Safety
+/// The caller provides the same exclusive original-controller and requester
+/// authority required by `owned::attach`; this only shortens model timeouts.
+pub(crate) unsafe fn attach(
+    registers: Box<dyn Registers>,
+    lifecycle: Box<dyn Lifecycle>,
+    source: &dyn PageSource,
+    domain: Arc<dyn DmaDomain>,
+    clock: Clock,
+    location: String,
+) -> Result<Attached, BlockError> {
+    // SAFETY: forwarded unchanged retained-owner attachment contract.
+    unsafe {
+        super::super::attach_with_timeout(
+            registers, lifecycle, source, domain, clock, location, 1_000,
+        )
+    }
+}
+
 /// Read the actual independent configuration storage at each protocol boundary.
 /// Implementors must not substitute a lifecycle's cached phase or intended write.
 pub(crate) trait Access: Send + Sync {

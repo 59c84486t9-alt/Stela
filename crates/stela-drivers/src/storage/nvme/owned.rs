@@ -346,6 +346,7 @@ impl Drop for Memory {
 /// its phase unchanged; completed hardware steps are never replayed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Teardown {
+    Unadmitted,
     Unprepared,
     Preparing,
     Active,
@@ -379,6 +380,30 @@ pub unsafe fn attach(
     clock: Clock,
     location: String,
 ) -> Result<Attached, BlockError> {
+    // SAFETY: this is the same exclusive original-controller contract; the
+    // production command budget is not exposed as an attachment capability.
+    unsafe {
+        attach_with_timeout(
+            registers,
+            lifecycle,
+            source,
+            domain,
+            clock,
+            location,
+            COMMAND_TIMEOUT_US,
+        )
+    }
+}
+
+unsafe fn attach_with_timeout(
+    registers: Box<dyn Registers>,
+    lifecycle: Box<dyn Lifecycle>,
+    source: &dyn PageSource,
+    domain: Arc<dyn DmaDomain>,
+    clock: Clock,
+    location: String,
+    command_timeout_us: u64,
+) -> Result<Attached, BlockError> {
     // Install the complete owner before fallible allocation or hardware effects.
     let mut controller = Controller {
         registers: RegisterIo::Owned(Some(registers)),
@@ -406,14 +431,17 @@ pub unsafe fn attach(
         shut_down: false,
         command_id: 0,
         clock,
+        command_timeout_us,
         fault: None,
         owned: Some(Owner {
             lifecycle,
             domain: domain.clone(),
         }),
-        teardown: Teardown::Unprepared,
+        teardown: Teardown::Unadmitted,
         ready_timeout_us: 500_000,
     };
+    validate_clock(clock)?;
+    controller.teardown = Teardown::Unprepared;
     controller.admin.submissions =
         Buffer::allocate(source, domain.clone(), PAGE, Direction::ToDevice)?;
     controller.admin.completions =
@@ -446,6 +474,12 @@ impl Controller {
         }
         self.shut_down = true;
         match self.teardown {
+            Teardown::Unadmitted => {
+                // Clock refusal authorizes neither configuration nor MMIO.
+                // Keep every original owner while the old error-only API
+                // cannot return this complete still-contained authority.
+                return Err(BlockError::Unsupported("NVMe clock admission quarantined"));
+            }
             Teardown::Preparing => {
                 // The hierarchy may still be in D3. Neither reset nor any
                 // register read is authorized. Drop retains the complete epoch.
@@ -1183,15 +1217,16 @@ mod tests {
             // SAFETY: every owner retains the same exclusive independent
             // model controller/root and domain, initially BME-contained.
             unsafe {
-                attach(
+                attach_with_timeout(
                     Box::new(Regs(self.model.clone())),
                     Box::new(Life(self.model.clone())),
                     &self.source,
                     Arc::new(Domain(self.model.clone())),
                     Clock {
-                        ticks_per_microsecond: 0,
+                        ticks_per_microsecond: 1000,
                     },
                     "VMD model requester".into(),
+                    1000,
                 )
             }
         }
@@ -1234,6 +1269,34 @@ mod tests {
                 && at("unmap") < at("retire_regs")
                 && at("retire_regs") < at("release")
         );
+    }
+    #[test]
+    fn invalid_clock_retains_unadmitted_original_owners_without_any_effect() {
+        for ticks_per_microsecond in [0, u64::MAX, u64::MAX / (2 * 255 * 500_000) + 1] {
+            let f = Fixture::new();
+            // SAFETY: the complete same-controller authority is transferred;
+            // clock refusal must retain it before PCI/MMIO or DMA allocation.
+            let result = unsafe {
+                attach(
+                    Box::new(Regs(f.model.clone())),
+                    Box::new(Life(f.model.clone())),
+                    &f.source,
+                    Arc::new(Domain(f.model.clone())),
+                    Clock {
+                        ticks_per_microsecond,
+                    },
+                    "unadmitted original NVMe".into(),
+                )
+            };
+            assert!(result.is_err());
+            let model = f.model.lock().unwrap();
+            assert!(model.events.is_empty());
+            assert!(model.maps.is_empty());
+            assert_eq!(model.register_owner_drops, 0);
+            assert_eq!(model.lifecycle_owner_drops, 0);
+            assert_eq!(f.source.next.load(Ordering::SeqCst), 0x9000_0000);
+            assert_eq!(f.source.released.load(Ordering::SeqCst), 0);
+        }
     }
     #[test]
     fn owned_bad_cqe_identity_phase_or_timeout_never_reuses_dma() {

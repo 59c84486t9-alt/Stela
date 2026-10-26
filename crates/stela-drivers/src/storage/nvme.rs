@@ -119,6 +119,7 @@ struct Controller {
     shut_down: bool,
     command_id: u16,
     clock: Clock,
+    command_timeout_us: u64,
     /// An unresolved command may still own the queues, PRPs and bounce RAM.
     /// No buffer or queue may be reused until a new, acknowledged reset.
     fault: Option<BlockError>,
@@ -260,7 +261,7 @@ impl Controller {
         )?;
         let entry = usize::from(queue.head) * 16;
         let mut failure = None;
-        let done = self.clock.wait(COMMAND_TIMEOUT_US, || {
+        let done = self.clock.wait(self.command_timeout_us, || {
             let observed = (|| {
                 let status = registers.read32(STATUS)?;
                 if status & FATAL != 0 {
@@ -408,6 +409,7 @@ pub fn attach(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
 ) -> Result<Attached, BlockError> {
+    validate_clock(handoff.clock)?;
     function.power_up(&handoff.clock)?;
     let bars = function.bars();
     let registers = RegisterIo::Legacy(registers(handoff, bars[0], 0, 0x2000)?);
@@ -424,6 +426,7 @@ pub fn attach(
         shut_down: false,
         command_id: 0,
         clock: handoff.clock,
+        command_timeout_us: COMMAND_TIMEOUT_US,
         fault: None,
         owned: None,
         teardown: owned::Teardown::Unprepared,
@@ -431,6 +434,14 @@ pub fn attach(
     };
     controller.initialize()?;
     discover(controller, format!("{}", function.address))
+}
+
+pub(crate) fn validate_clock(clock: Clock) -> Result<(), BlockError> {
+    // CAP.TO permits 255 half-second intervals. The fixed command and maximum
+    // shutdown policies are shorter; admit every later native wait upfront.
+    clock.check_duration(255 * 500_000).map_err(|_| {
+        BlockError::Unsupported("NVMe requires a calibrated, representable operation clock")
+    })
 }
 
 fn discover(
@@ -672,13 +683,15 @@ mod tests {
                 bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE).unwrap()),
                 prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
                 max_transfer: BOUNCE_BYTES,
-                shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
+                shutdown_timeout_us: 1000,
                 shut_down: false,
                 command_id: 0,
-                // Force the actual polling path to expire immediately.
+                // Exercise a real finite deadline with a short captured test
+                // policy; native attachment retains its thirty-second policy.
                 clock: Clock {
-                    ticks_per_microsecond: 0,
+                    ticks_per_microsecond: 1000,
                 },
+                command_timeout_us: 1000,
                 fault: None,
                 owned: None,
                 teardown: owned::Teardown::Unprepared,
@@ -707,10 +720,13 @@ mod tests {
     #[test]
     fn timeout_and_late_completion_cannot_reuse_any_namespace_dma() {
         let mut fixture = Fixture::new();
+        let clock = fixture.disk.controller.borrow().clock;
+        let started = clock.try_start().unwrap();
         assert_eq!(
             fixture.disk.write(0, &[0x31; 512]),
             Err(BlockError::Timeout)
         );
+        assert!(clock.try_elapsed_us(started).unwrap() >= 1000);
         let mut sibling = Namespace {
             controller: fixture.disk.controller.clone(),
             namespace: 2,
