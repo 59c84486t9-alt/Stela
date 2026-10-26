@@ -8,14 +8,17 @@
 //! The platform must establish ACPI/PnP presence, remove USB legacy emulation,
 //! mask both IRQ routes and provide exclusive controller ownership. This engine
 //! leaves IRQs and set-1 translation disabled. It does not probe unadvertised
-//! ports, active multiplexers, DMI quirks or vendor touchpad protocols. Every
+//! ports, active multiplexers or DMI quirks. [`synaptics`] and [`elantech`] supply
+//! explicit absolute touchpad profiles under this same controller. Every
 //! command is acknowledged; a failed/uncertain command quarantines this owner.
 use super::Input;
 use crate::{Clock, bus::i2c::Timer};
 use alloc::{collections::VecDeque, vec::Vec};
 
+pub mod elantech;
 mod keyboard;
 mod mouse;
+pub mod synaptics;
 
 const DATA_PORT: u16 = 0x60;
 const COMMAND_PORT: u16 = 0x64;
@@ -187,6 +190,8 @@ pub enum ErrorKind {
     PacketTimeout(Port),
     MouseSync(u8),
     DeviceReset(Port),
+    Synaptics(synaptics::Error),
+    Elantech(elantech::Error),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recovery {
@@ -198,6 +203,19 @@ pub enum Recovery {
 pub struct Error {
     pub kind: ErrorKind,
     pub recovery: Recovery,
+    /// Actual reply or framed-error byte consumed before failure, including a
+    /// late ACK. This is an observation, not proof of accepted acknowledgement.
+    /// Recovery register accesses cannot replace this original observation.
+    pub response: Option<ObservedResponse>,
+    pub recovery_error: Option<ErrorKind>,
+    /// Separate actual containment observation, never relabeled as the primary
+    /// reply or copied from it when containment performed no read.
+    pub recovery_response: Option<ObservedResponse>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservedResponse {
+    pub port: Port,
+    pub data: u8,
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -209,6 +227,9 @@ impl From<ErrorKind> for Error {
         Self {
             kind,
             recovery: Recovery::NotAttempted,
+            response: None,
+            recovery_error: None,
+            recovery_response: None,
         }
     }
 }
@@ -242,6 +263,9 @@ pub struct Controller<R = PortIo, T = Clock> {
     events: Vec<Input>,
     keyboard: keyboard::Keyboard,
     mouse: mouse::Mouse,
+    synaptics: Option<synaptics::Engine>,
+    elantech: Option<elantech::Engine>,
+    observed_response: Option<ObservedResponse>,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Validates configuration only; call `initialize` to touch the hardware.
@@ -266,6 +290,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             events: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
             mouse: mouse::Mouse::default(),
+            synaptics: None,
+            elantech: None,
+            observed_response: None,
         })
     }
     pub fn is_ready(&self) -> bool {
@@ -279,11 +306,25 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn discarded_before_start(&self) -> u64 {
         self.discarded_before_start
     }
+    /// Actual queued port/data/receipt-time observations, including bytes kept
+    /// during failed commands and containment. Reading this does not consume
+    /// input or grant authority to resume a faulted controller.
+    pub fn retained_bytes(&self) -> impl Iterator<Item = (Port, u8, u64)> + '_ {
+        self.pending
+            .iter()
+            .map(|byte| (byte.port, byte.data, byte.received_us))
+    }
     pub fn has_wheel(&self) -> bool {
-        self.mouse.protocol() != MouseProtocol::Standard
+        self.synaptics.is_none()
+            && self.elantech.is_none()
+            && self.mouse.protocol() != MouseProtocol::Standard
     }
     pub fn mouse_protocol(&self) -> Option<MouseProtocol> {
-        (self.is_ready() && self.config.mouse).then(|| self.mouse.protocol())
+        (self.is_ready()
+            && self.config.mouse
+            && self.synaptics.is_none()
+            && self.elantech.is_none())
+        .then(|| self.mouse.protocol())
     }
 
     fn expired(&self, start: u64, limit: u64) -> bool {
@@ -320,6 +361,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn read_byte(&mut self) -> Result<Option<Byte>, ErrorKind> {
+        self.read_byte_for(None)
+    }
+    fn read_byte_for(&mut self, expected: Option<Port>) -> Result<Option<Byte>, ErrorKind> {
         let status = self.status()?;
         if status & OUTPUT_FULL == 0 {
             return Ok(None);
@@ -329,8 +373,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         } else {
             Port::Mouse
         };
+        // A sibling byte needs queue space. Do not consume it merely to learn
+        // the queue is full, including during subsequent fault containment.
+        // Expected replies have their own observation slot; framed errors also
+        // retain their consumed byte with the first failure below.
+        if self.pending.len() >= QUEUE_LIMIT && expected != Some(port) && status & FRAME_ERRORS == 0
+        {
+            return Err(ErrorKind::QueueFull);
+        }
         let data = self.registers.read_data();
         if status & FRAME_ERRORS != 0 {
+            self.observed_response = Some(ObservedResponse { port, data });
             return Err(ErrorKind::Frame { port, status });
         }
         Ok(Some(Byte {
@@ -351,9 +404,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn response(&mut self, port: Port, start: u64, timeout: u64) -> Result<u8, ErrorKind> {
+        self.observed_response = None;
         loop {
-            if let Some(byte) = self.read_byte()? {
+            if let Some(byte) = self.read_byte_for(Some(port))? {
                 if byte.port == port {
+                    self.observed_response = Some(ObservedResponse {
+                        port,
+                        data: byte.data,
+                    });
+                    if self.expired(start, timeout) {
+                        return Err(ErrorKind::Timeout(Phase::Response));
+                    }
                     return Ok(byte.data);
                 }
                 self.queue(byte)?;
@@ -365,6 +426,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     fn controller_response(&mut self, command: u8) -> Result<u8, ErrorKind> {
+        self.observed_response = None;
         self.command(command)?;
         self.response(
             Port::Keyboard,
@@ -409,6 +471,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         timeout: u64,
         id_without_ack: bool,
     ) -> Result<Option<u8>, ErrorKind> {
+        self.observed_response = None;
         let start = self.timer.now_us();
         for _ in 0..MAX_ATTEMPTS {
             if port == Port::Mouse {
@@ -417,6 +480,27 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.write_data(value)?;
             loop {
                 let received = self.response(port, start, timeout)?;
+                if port == Port::Mouse
+                    && self.input_known
+                    && (self
+                        .synaptics
+                        .as_ref()
+                        .is_some_and(|engine| engine.input_byte(received))
+                        || self
+                            .elantech
+                            .as_ref()
+                            .is_some_and(|engine| engine.input_byte(received)))
+                {
+                    self.decode(Byte {
+                        port,
+                        data: received,
+                        received_us: self.timer.now_us(),
+                    })?;
+                    if self.expired(start, timeout) {
+                        return Err(ErrorKind::Timeout(Phase::Response));
+                    }
+                    continue;
+                }
                 match received {
                     ACK => return Ok(None),
                     RESEND => break,
@@ -438,9 +522,26 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Err(ErrorKind::ResendLimit { port, byte: value })
     }
     fn device_command(&mut self, port: Port, value: u8, arguments: &[u8]) -> Result<(), ErrorKind> {
+        if port == Port::Mouse
+            && self.input_known
+            && (self.synaptics.is_some() || self.elantech.is_some())
+        {
+            // Sibling commands can retain a mouse prefix. Establish its actual
+            // position before distinguishing reply FA from coordinate data FA.
+            while let Some(byte) = self.pending.pop_front() {
+                self.decode(byte)?;
+            }
+        }
         self.send_byte(port, value, self.config.command_timeout_us, false)?;
         for &argument in arguments {
             self.send_byte(port, argument, self.config.command_timeout_us, false)?;
+        }
+        Ok(())
+    }
+    fn sliced_command(&mut self, value: u8) -> Result<(), ErrorKind> {
+        self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
+        for shift in [6, 4, 2, 0] {
+            self.device_command(Port::Mouse, SET_RESOLUTION, &[(value >> shift) & 3])?;
         }
         Ok(())
     }
@@ -529,28 +630,37 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             self.device_command(Port::Mouse, DEFAULTS, &[])?;
             self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
-            self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
-            self.device_command(Port::Mouse, SET_RESOLUTION, &[2])?;
-            if self.config.wheel {
-                for rate in [200, 100, 80] {
-                    self.device_command(Port::Mouse, SET_RATE, &[rate])?;
+            if self.synaptics.is_some() {
+                self.initialize_synaptics()?;
+            } else if self.elantech.is_some() {
+                self.initialize_elantech()?;
+                self.device_command(Port::Mouse, SET_RATE, &[100])?;
+                self.device_command(Port::Mouse, SET_RESOLUTION, &[3])?;
+                self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
+            } else {
+                self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
+                self.device_command(Port::Mouse, SET_RESOLUTION, &[2])?;
+                if self.config.wheel {
+                    for rate in [200, 100, 80] {
+                        self.device_command(Port::Mouse, SET_RATE, &[rate])?;
+                    }
+                    let id = self.mouse_id()?;
+                    if !matches!(id, 0 | 3 | 4) {
+                        return Err(ErrorKind::UnsupportedMouseId(id));
+                    }
+                    for rate in [200, 200, 80] {
+                        self.device_command(Port::Mouse, SET_RATE, &[rate])?;
+                    }
+                    let protocol = match self.mouse_id()? {
+                        0 => MouseProtocol::Standard,
+                        3 => MouseProtocol::IntelliMouse,
+                        4 => MouseProtocol::Explorer,
+                        id => return Err(ErrorKind::UnsupportedMouseId(id)),
+                    };
+                    self.mouse.set_protocol(protocol);
                 }
-                let id = self.mouse_id()?;
-                if !matches!(id, 0 | 3 | 4) {
-                    return Err(ErrorKind::UnsupportedMouseId(id));
-                }
-                for rate in [200, 200, 80] {
-                    self.device_command(Port::Mouse, SET_RATE, &[rate])?;
-                }
-                let protocol = match self.mouse_id()? {
-                    0 => MouseProtocol::Standard,
-                    3 => MouseProtocol::IntelliMouse,
-                    4 => MouseProtocol::Explorer,
-                    id => return Err(ErrorKind::UnsupportedMouseId(id)),
-                };
-                self.mouse.set_protocol(protocol);
+                self.device_command(Port::Mouse, SET_RATE, &[100])?;
             }
-            self.device_command(Port::Mouse, SET_RATE, &[100])?;
         }
         // Both configured devices have now acknowledged reporting disable and
         // their new protocol is known. Only now is the keyboard response lane
@@ -576,6 +686,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(ErrorKind::NeedsReset.into());
         }
         self.state = State::Initializing;
+        self.observed_response = None;
         self.input_known = false;
         match self.initialize_inner() {
             Ok(()) => {
@@ -613,12 +724,25 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     fn fail(&mut self, kind: ErrorKind) -> Error {
         self.state = State::Faulted;
-        let recovery = if self.disable_ports().is_ok() {
+        let response = self.observed_response;
+        self.observed_response = None;
+        let containment = self.disable_ports();
+        let recovery = if containment.is_ok() {
             Recovery::PortsDisabled
         } else {
             Recovery::Failed
         };
-        Error { kind, recovery }
+        Error {
+            kind,
+            recovery,
+            response,
+            recovery_error: containment.err(),
+            recovery_response: if containment.is_err() {
+                self.observed_response
+            } else {
+                None
+            },
+        }
     }
     fn ready(&self) -> Result<(), Error> {
         match self.state {
@@ -647,6 +771,22 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 self.config.packet_timeout_us,
                 &mut self.events,
             ),
+            Port::Mouse if self.config.mouse && self.synaptics.is_some() => {
+                self.synaptics.as_mut().unwrap().feed(
+                    byte.data,
+                    byte.received_us,
+                    self.config.packet_timeout_us,
+                    &mut self.events,
+                )
+            }
+            Port::Mouse if self.config.mouse && self.elantech.is_some() => {
+                self.elantech.as_mut().unwrap().feed(
+                    byte.data,
+                    byte.received_us,
+                    self.config.packet_timeout_us,
+                    &mut self.events,
+                )
+            }
             Port::Mouse if self.config.mouse => self.mouse.feed(
                 byte.data,
                 byte.received_us,
@@ -664,7 +804,19 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// through `drain_events`; it is never silently discarded with the error.
     pub fn poll(&mut self) -> Result<Vec<Input>, Error> {
         self.ready()?;
+        self.observed_response = None;
         for _ in 0..QUEUE_LIMIT {
+            if self
+                .synaptics
+                .as_ref()
+                .is_some_and(|engine| engine.backpressured())
+                || self
+                    .elantech
+                    .as_ref()
+                    .is_some_and(|engine| engine.backpressured())
+            {
+                break;
+            }
             let byte = match self.pending.pop_front() {
                 Some(byte) => Some(byte),
                 None => self.read_byte().map_err(|kind| self.fail(kind))?,
@@ -690,7 +842,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let result = self
                 .keyboard
                 .expire(now, self.config.packet_timeout_us)
-                .and_then(|()| self.mouse.expire(now, self.config.packet_timeout_us));
+                .and_then(|()| {
+                    if let Some(engine) = &self.synaptics {
+                        engine.expire(now, self.config.packet_timeout_us)
+                    } else if let Some(engine) = &mut self.elantech {
+                        engine.expire(now, self.config.packet_timeout_us)
+                    } else {
+                        self.mouse.expire(now, self.config.packet_timeout_us)
+                    }
+                });
             if let Err(kind) = result {
                 return Err(self.fail(kind));
             }
@@ -705,17 +865,24 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn release_inputs(&mut self) -> Vec<Input> {
         self.keyboard.release(&mut self.events);
         self.mouse.release(&mut self.events);
+        if let Some(engine) = &mut self.synaptics {
+            engine.release(&mut self.events);
+        }
+        if let Some(engine) = &mut self.elantech {
+            engine.release(&mut self.events);
+        }
         self.drain_events()
     }
     /// Acknowledge reporting disable on both configured devices, then prove
     /// clock/IRQ disable by reading CTR. Failure quarantines this owner.
     pub fn stop(&mut self) -> Result<Vec<Input>, Error> {
         self.ready()?;
+        self.observed_response = None;
         let result = (|| {
             if self.config.keyboard {
                 self.device_command(Port::Keyboard, DISABLE_REPORTING, &[])?;
             }
-            if self.config.mouse {
+            if self.config.mouse && !self.stop_synaptics_mouse_inner()? {
                 self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
             }
             self.disable_ports()?;

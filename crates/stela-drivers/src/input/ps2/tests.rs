@@ -4,6 +4,141 @@
 use super::*;
 use alloc::{rc::Rc, vec};
 use core::cell::{Cell, RefCell};
+mod elantech_tests;
+
+#[test]
+fn full_reply_side_queue_preserves_every_consumed_byte_and_leaves_further_hardware_unread() {
+    let (mut c, h) = controller(Config::default());
+    c.initialize().unwrap();
+    let packet = [8, 1, 0, 0];
+    let stream: Vec<_> = packet.into_iter().cycle().take(QUEUE_LIMIT + 8).collect();
+    h.borrow_mut().inject_led = stream.iter().map(|byte| (Port::Mouse, *byte)).collect();
+    let before = h.borrow().consumed;
+    let error = c.set_leds(7).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::QueueFull);
+    assert!(c.needs_reset());
+    assert_eq!(
+        h.borrow().consumed - before,
+        QUEUE_LIMIT,
+        "no extra hardware byte may be read merely to discover the software queue is full"
+    );
+    assert_eq!(
+        c.retained_bytes()
+            .map(|(port, data, _)| {
+                assert_eq!(port, Port::Mouse);
+                data
+            })
+            .collect::<Vec<_>>(),
+        stream[..QUEUE_LIMIT]
+    );
+    assert!(h.borrow().output.len() >= 9);
+    let writes = h.borrow().writes.len();
+    assert_eq!(c.set_leds(7).unwrap_err().kind, ErrorKind::NeedsReset);
+    assert_eq!(h.borrow().writes.len(), writes);
+}
+#[test]
+fn full_side_queue_still_allows_actual_primary_ack_without_consuming_another_sibling_byte() {
+    let (mut c, h) = controller(Config::default());
+    c.initialize().unwrap();
+    h.borrow_mut().inject_led = [8, 1, 0, 0]
+        .into_iter()
+        .cycle()
+        .take(QUEUE_LIMIT)
+        .map(|byte| (Port::Mouse, byte))
+        .collect();
+    c.set_leds(7).unwrap();
+    assert_eq!(h.borrow().leds, 7);
+    assert_eq!(c.retained_bytes().count(), QUEUE_LIMIT);
+    assert!(c.is_ready());
+    let inputs = c.poll().unwrap();
+    assert_eq!(
+        inputs
+            .iter()
+            .filter(|e| **e == Input::Motion { dx: 1, dy: 0 })
+            .count(),
+        16
+    );
+    assert_eq!(c.retained_bytes().count(), 0);
+}
+#[test]
+fn consumed_framed_error_byte_survives_first_failure_even_with_full_side_queue() {
+    for queued in [0, QUEUE_LIMIT] {
+        let (mut c, h) = controller(Config::default());
+        c.initialize().unwrap();
+        for byte in [8, 1, 0, 0].into_iter().cycle().take(queued) {
+            h.borrow_mut().output.push_back((Port::Mouse, byte, 0));
+        }
+        h.borrow_mut().output.push_back((Port::Mouse, 0x5a, 0x80));
+        let error = c.set_leds(7).unwrap_err();
+        assert!(matches!(error.kind,ErrorKind::Frame {port:Port::Mouse,status} if status&0x80!=0));
+        assert_eq!(
+            error.response,
+            Some(ObservedResponse {
+                port: Port::Mouse,
+                data: 0x5a
+            })
+        );
+        let retained: Vec<_> = c.retained_bytes().collect();
+        assert!(retained.len() >= queued);
+        assert!(
+            retained
+                .iter()
+                .take(queued)
+                .all(|(port, _, _)| *port == Port::Mouse)
+        );
+        if queued == 0 {
+            assert!(
+                retained
+                    .iter()
+                    .any(|(port, data, _)| *port == Port::Keyboard && *data == ACK)
+            );
+        }
+        assert!(c.needs_reset());
+    }
+}
+#[test]
+fn original_and_containment_frame_failures_keep_their_distinct_actual_bytes() {
+    let (mut c, h) = controller(Config::default());
+    c.initialize().unwrap();
+    for byte in [8, 1, 0, 0].into_iter().cycle().take(QUEUE_LIMIT) {
+        h.borrow_mut().output.push_back((Port::Mouse, byte, 0));
+    }
+    h.borrow_mut()
+        .output
+        .extend([(Port::Mouse, 0x5a, 0x80), (Port::Mouse, 0x6b, 0x80)]);
+    let error = c.set_leds(7).unwrap_err();
+    assert!(matches!(
+        error.kind,
+        ErrorKind::Frame {
+            port: Port::Mouse,
+            ..
+        }
+    ));
+    assert_eq!(
+        error.response,
+        Some(ObservedResponse {
+            port: Port::Mouse,
+            data: 0x5a
+        })
+    );
+    assert!(matches!(
+        error.recovery_error,
+        Some(ErrorKind::Frame {
+            port: Port::Mouse,
+            ..
+        })
+    ));
+    assert_eq!(
+        error.recovery_response,
+        Some(ObservedResponse {
+            port: Port::Mouse,
+            data: 0x6b
+        })
+    );
+    assert_eq!(error.recovery, Recovery::Failed);
+    assert_eq!(c.retained_bytes().count(), QUEUE_LIMIT);
+}
+mod synaptics_tests;
 
 #[derive(Clone)]
 struct Model(Rc<RefCell<Hardware>>);
@@ -32,10 +167,14 @@ struct Hardware {
     busy_forever: bool,
     flood: bool,
     resend: Option<(Port, u8, usize)>,
+    resend_inject: Vec<(Port, u8)>,
     no_ack: Option<(Port, u8)>,
     inject_led: Vec<(Port, u8)>,
     writes: Vec<(bool, u8)>,
     consumed: usize,
+    synaptics: Option<synaptics_tests::Peripheral>,
+    elantech: Option<elantech_tests::Peripheral>,
+    delay_at_read: alloc::collections::BTreeMap<usize, u64>,
 }
 impl Hardware {
     fn new(time: Rc<Cell<u64>>) -> Self {
@@ -64,10 +203,14 @@ impl Hardware {
             busy_forever: false,
             flood: false,
             resend: None,
+            resend_inject: Vec::new(),
             no_ack: None,
             inject_led: Vec::new(),
             writes: Vec::new(),
             consumed: 0,
+            synaptics: None,
+            elantech: None,
+            delay_at_read: alloc::collections::BTreeMap::new(),
         }
     }
     fn emit(&mut self, port: Port, data: u8) {
@@ -77,19 +220,81 @@ impl Hardware {
         if port == Port::Mouse { 1 } else { 0 }
     }
     fn device(&mut self, port: Port, data: u8) {
+        if port == Port::Mouse
+            && data == DISABLE_REPORTING
+            && self.scanning[1]
+            && let Some(e) = &mut self.elantech
+        {
+            let bytes = core::mem::take(&mut e.before_disable);
+            for byte in bytes {
+                self.emit(port, byte);
+            }
+        }
+        if port == Port::Mouse
+            && self.argument[1] == Some(SET_RATE)
+            && let Some(s) = &mut self.synaptics
+        {
+            let records = if data == 0x28 {
+                core::mem::take(&mut s.before_client_ack)
+            } else if data == 0x14 {
+                core::mem::take(&mut s.before_mode_ack)
+            } else {
+                Vec::new()
+            };
+            for record in records {
+                for byte in record {
+                    self.emit(port, byte);
+                }
+            }
+        }
+        if port == Port::Mouse
+            && data == DISABLE_REPORTING
+            && self.scanning[1]
+            && let Some(s) = &mut self.synaptics
+        {
+            for byte in core::mem::take(&mut s.before_disable) {
+                self.emit(port, byte);
+            }
+        }
         if let Some((p, b, ref mut attempts)) = self.resend
             && p == port
             && b == data
             && *attempts != 0
         {
             *attempts -= 1;
+            let last = *attempts == 0;
             self.emit(port, RESEND);
+            if last {
+                for (port, byte) in core::mem::take(&mut self.resend_inject) {
+                    self.emit(port, byte);
+                }
+            }
             return;
         }
         if port == Port::Keyboard && data == SET_LEDS && self.argument[0].is_none() {
             for (p, b) in core::mem::take(&mut self.inject_led) {
                 self.emit(p, b);
             }
+        }
+        if port == Port::Mouse
+            && self.argument[1].is_none()
+            && let Some(action) = self.elantech.as_mut().and_then(|e| e.command(data))
+        {
+            if self.no_ack != Some((port, data)) {
+                if action.late_ack {
+                    self.delay_at_read
+                        .insert(self.consumed + self.output.len() + 1, 101);
+                }
+                self.emit(port, ACK);
+            }
+            for (index, byte) in action.reply.iter().enumerate() {
+                if action.late_byte == Some(index) {
+                    self.delay_at_read
+                        .insert(self.consumed + self.output.len() + 1, 101);
+                }
+                self.emit(port, *byte);
+            }
+            return;
         }
         let index = Self::index(port);
         if !(data == GET_ID && port == Port::Mouse && self.no_id_ack)
@@ -103,6 +308,81 @@ impl Hardware {
                 SET_SCAN => self.scan = data,
                 SET_LEDS => self.leds = data,
                 SET_RATE if port == Port::Mouse => {
+                    if let Some(s) = &mut self.synaptics {
+                        if data == 0x14 {
+                            s.mode = Some(s.sliced);
+                            if s.sliced == 0 {
+                                s.advanced = false;
+                                if s.busy_after_mode_zero {
+                                    self.busy_forever = true;
+                                }
+                            }
+                            if s.late_mode_ack {
+                                s.read_delay_us = 101;
+                            }
+                        } else if data == 0x28 {
+                            assert_ne!(s.queries[&2][2] & 0x80, 0);
+                            s.client_writes.push(s.sliced);
+                            if s.late_client_ack {
+                                s.read_delay_us = 101;
+                            }
+                            let replies = s
+                                .child
+                                .as_mut()
+                                .map_or_else(Vec::new, |c| c.write(s.sliced));
+                            let late = s
+                                .child
+                                .as_ref()
+                                .is_some_and(|c| c.late_response == Some(s.sliced));
+                            let delay = if s.sliced == RESET { 201 } else { 101 };
+                            let before_ack = s
+                                .child
+                                .as_ref()
+                                .is_some_and(|c| c.replies_before_parent_ack);
+                            let mut selected = Vec::new();
+                            if let Some(child) = s.child.as_mut() {
+                                for byte in replies {
+                                    child.reply_number += 1;
+                                    if child.omit_reply != Some(child.reply_number) {
+                                        selected.push((
+                                            byte,
+                                            late || child.late_reply == Some(child.reply_number),
+                                        ));
+                                    }
+                                }
+                            }
+                            let parent_ack = if before_ack {
+                                self.output.pop_back()
+                            } else {
+                                None
+                            };
+                            if before_ack {
+                                assert_eq!(parent_ack, Some((Port::Mouse, ACK, 0)));
+                            }
+                            for (byte, late) in selected {
+                                if late {
+                                    self.delay_at_read
+                                        .insert(self.consumed + self.output.len() + 6, delay);
+                                }
+                                for field in [0x84, byte, 0, 0xc4, 0, 0] {
+                                    self.emit(port, field);
+                                }
+                            }
+                            if let Some(parent_ack) = parent_ack {
+                                self.delay_at_read
+                                    .insert(self.consumed + self.output.len() + 1, 1);
+                                self.output.push_back(parent_ack);
+                            }
+                        } else {
+                            assert_eq!(data, 0xc8);
+                            assert_eq!(s.sliced, 3);
+                            s.advanced = true;
+                            if s.late_advanced_ack {
+                                s.read_delay_us = 101;
+                            }
+                        }
+                        return;
+                    }
                     self.rates.push(data);
                     if self.wheel_capable && self.rates.ends_with(&[200, 100, 80]) {
                         self.mouse_id = 3;
@@ -111,6 +391,11 @@ impl Hardware {
                         self.mouse_id = 4;
                     }
                 }
+                SET_RESOLUTION if port == Port::Mouse && self.synaptics.is_some() => {
+                    let s = self.synaptics.as_mut().unwrap();
+                    assert!(data < 4);
+                    s.sliced = (s.sliced << 2) | data;
+                }
                 SET_RATE | SET_RESOLUTION => {}
                 _ => panic!("model unknown argument command"),
             }
@@ -118,6 +403,10 @@ impl Hardware {
         }
         match data {
             RESET => {
+                if let Some(s) = &mut self.synaptics {
+                    s.mode = None;
+                    s.advanced = false;
+                }
                 self.argument[index] = None;
                 self.scanning[index] = false;
                 if port == Port::Keyboard {
@@ -136,7 +425,27 @@ impl Hardware {
                 self.scanning[index] = true;
             }
             SET_SCAN | SET_RATE | SET_LEDS | SET_RESOLUTION => self.argument[index] = Some(data),
-            SCALE_ONE_TO_ONE => {}
+            SCALE_ONE_TO_ONE => {
+                if let Some(s) = &mut self.synaptics {
+                    s.sliced = 0;
+                }
+            }
+            0xe9 if port == Port::Mouse && self.synaptics.is_some() => {
+                let s = self.synaptics.as_mut().unwrap();
+                s.queried.push(s.sliced);
+                s.query_reads_left = 4;
+                let reply = *s
+                    .queries
+                    .get(&s.sliced)
+                    .expect("actual query supported by peripheral");
+                let take = s
+                    .omit
+                    .filter(|(id, _)| *id == s.sliced)
+                    .map_or(3, |(_, count)| count);
+                for &byte in &reply[..take] {
+                    self.emit(port, byte);
+                }
+            }
             GET_ID if port == Port::Mouse => {
                 self.emit(port, self.force_id.unwrap_or(self.mouse_id))
             }
@@ -165,8 +474,29 @@ impl Registers for Model {
     fn read_data(&mut self) -> u8 {
         let mut h = self.0.borrow_mut();
         h.consumed += 1;
+        let consumed = h.consumed;
+        if let Some(delay) = h.delay_at_read.remove(&consumed) {
+            h.time.set(h.time.get().wrapping_add(delay));
+        }
         match h.output.pop_front() {
-            Some((_, data, _)) => data,
+            Some((port, data, _)) => {
+                if port == Port::Mouse {
+                    let mut delay = 0;
+                    if let Some(s) = &mut h.synaptics {
+                        delay = s.read_delay_us;
+                        if s.query_reads_left != 0 {
+                            if s.late_query_byte.is_some_and(|(id, index)| {
+                                id == s.sliced && usize::from(s.query_reads_left) == 3 - index
+                            }) {
+                                delay = 101;
+                            }
+                            s.query_reads_left -= 1;
+                        }
+                    }
+                    h.time.set(h.time.get().wrapping_add(delay));
+                }
+                data
+            }
             None if h.flood => 0,
             None => panic!("read empty output"),
         }
