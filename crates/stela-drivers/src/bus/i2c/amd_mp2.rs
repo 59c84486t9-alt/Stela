@@ -143,7 +143,11 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
         speeds: [Option<Speed>; 2],
         timeout_us: u64,
     ) -> Result<Self, (ErrorKind, (R, T, DmaBuffer))> {
-        if buffer.len() < MAX_LENGTH || timeout_us == 0 || speeds == [None, None] {
+        if buffer.len() < MAX_LENGTH
+            || timeout_us == 0
+            || timer.check_duration(timeout_us).is_err()
+            || speeds == [None, None]
+        {
             return Err((ErrorKind::Configuration, (registers, timer, buffer)));
         }
         Ok(Self {
@@ -197,15 +201,7 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
         Ok(value)
     }
     fn deadline(&self, bus: BusId) -> Result<(), Error> {
-        if self
-            .owners
-            .as_ref()
-            .unwrap()
-            .1
-            .now_us()
-            .wrapping_sub(self.started)
-            >= self.timeout_us
-        {
+        if self.owners.as_ref().unwrap().1.elapsed_us(self.started) >= self.timeout_us {
             Err(self.error(bus, ErrorKind::Timeout))
         } else {
             Ok(())
@@ -218,7 +214,7 @@ impl<R: Registers + 'static, T: Timer + 'static> Controller<R, T> {
         self.command = None;
         self.observed = None;
         self.published = false;
-        self.started = self.owners.as_ref().unwrap().1.now_us();
+        self.started = self.owners.as_ref().unwrap().1.start();
         self.speeds[usize::from(bus.0)].ok_or_else(|| self.error(bus, ErrorKind::Configuration))
     }
     fn preflight(&mut self, bus: BusId) -> Result<(), Error> {

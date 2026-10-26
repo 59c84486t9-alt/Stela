@@ -162,6 +162,8 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
     pub fn new(mut registers: R, timer: T, config: Config) -> Result<Self, Error> {
         if config.timeout_us == 0
             || config.recovery_timeout_us == 0
+            || timer.check_duration(config.timeout_us).is_err()
+            || timer.check_duration(config.recovery_timeout_us).is_err()
             || config.timing.scl_high < 6
             || config.timing.scl_low < 8
             || config
@@ -260,7 +262,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
     }
 
     fn expired(&self, start: u64, timeout: u64) -> bool {
-        self.timer.now_us().wrapping_sub(start) >= timeout
+        self.timer.elapsed_us(start) >= timeout
     }
 
     fn wait_until(
@@ -284,7 +286,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
     /// Abort releases a master holding SCL on an empty TX FIFO; disable then
     /// flushes any unread FIFO entries. Never spin forever on wedged hardware.
     fn quiesce(&mut self) -> bool {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         if self.registers.read32(ENABLE_STATUS) & ENABLE_ON != 0
             && self.registers.read32(STATUS) & STATUS_MASTER_ACTIVE != 0
         {
@@ -346,7 +348,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         address: Address,
         operations: &mut [Operation<'_>],
     ) -> Result<(), ErrorKind> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         if !self.wait_until(start, self.config.timeout_us, |registers| {
             registers.read32(STATUS) & STATUS_ACTIVE == 0
         }) {

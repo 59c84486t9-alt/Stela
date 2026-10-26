@@ -273,7 +273,11 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         info: ControllerInfo,
         config: Config,
     ) -> Result<Self, Error> {
-        if config.timeout_us < info.first_poll_us || config.poll_interval_us == 0 {
+        if config.timeout_us == 0
+            || config.timeout_us < info.first_poll_us
+            || config.poll_interval_us == 0
+            || timer.check_duration(config.timeout_us).is_err()
+        {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
         let mut controller = Self {
@@ -296,7 +300,7 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
     }
 
     fn elapsed(&self, start: u64) -> u64 {
-        self.timer.now_us().wrapping_sub(start)
+        self.timer.elapsed_us(start)
     }
 
     fn prepare(&mut self) -> Result<(), Error> {
@@ -320,7 +324,7 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
     }
 
     fn delay(&self, transaction_start: u64, delay: u64) {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         while self.elapsed(start) < delay
             && self.elapsed(transaction_start) < self.config.timeout_us
         {
@@ -337,15 +341,15 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
             if let Some(kind) = Self::status_error(status) {
                 return Err(Self::error(kind, status, Recovery::NotAttempted));
             }
-            if status & HOST_BUSY == 0 && status & INTR != 0 {
-                return Ok(());
-            }
             if self.elapsed(start) >= self.config.timeout_us {
                 return Err(Self::error(
                     ErrorKind::Timeout(Phase::Completion),
                     status,
                     Recovery::NotAttempted,
                 ));
+            }
+            if status & HOST_BUSY == 0 && status & INTR != 0 {
+                return Ok(());
             }
             self.delay(start, self.config.poll_interval_us);
         }
@@ -363,7 +367,11 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         }
     }
 
-    fn finish(&mut self, mut error: Option<Error>) -> Result<(), Error> {
+    fn finish(&mut self, error: Option<Error>) -> Result<(), Error> {
+        self.finish_transfer(error, true)
+    }
+
+    fn finish_transfer(&mut self, mut error: Option<Error>, started: bool) -> Result<(), Error> {
         let status = self.registers.read8(HOST_STATUS);
         if error.is_none() {
             error = Self::status_error(status)
@@ -378,10 +386,8 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         }
         let must_reset = status & (HOST_BUSY | BUS_ERR) != 0
             || error.is_some_and(|error| {
-                matches!(
-                    error.kind,
-                    ErrorKind::Timeout(_) | ErrorKind::ArbitrationLost
-                )
+                error.kind == ErrorKind::ArbitrationLost
+                    || started && matches!(error.kind, ErrorKind::Timeout(_))
             });
         if must_reset {
             self.ready = false;
@@ -435,7 +441,12 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         }
     }
 
-    fn transfer(&mut self, address: Address, transaction: Transaction<'_>) -> Result<(), Error> {
+    fn transfer(
+        &mut self,
+        address: Address,
+        transaction: Transaction<'_>,
+        start: u64,
+    ) -> Result<(), Error> {
         let protocol = match &transaction {
             Transaction::SendByte(byte) => {
                 self.target(address, false, Some(*byte));
@@ -482,7 +493,17 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         };
         // Do not read HSTCNT here: a read resets the block-array pointer.
         self.registers.write8(HOST_CONTROL, protocol);
-        let start = self.timer.now_us();
+        if self.elapsed(start) >= self.config.timeout_us {
+            let status = self.registers.read8(HOST_STATUS);
+            return self.finish_transfer(
+                Some(Self::error(
+                    ErrorKind::Timeout(Phase::Completion),
+                    status,
+                    Recovery::NotAttempted,
+                )),
+                false,
+            );
+        }
         self.registers.write8(HOST_CONTROL, protocol | START);
         if let Err(error) = self.wait(start) {
             return self.finish(Some(error));
@@ -507,6 +528,13 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
             block.length = count as u8;
         }
         self.finish(None)?;
+        if self.elapsed(start) >= self.config.timeout_us {
+            return Err(Self::error(
+                ErrorKind::Timeout(Phase::Completion),
+                self.registers.read8(HOST_STATUS),
+                Recovery::Cleared,
+            ));
+        }
         match transaction {
             Transaction::ReceiveByte(data) | Transaction::ReadByte { data, .. } => *data = low,
             Transaction::ReadWord { data, .. } => *data = u16::from_le_bytes([low, high]),
@@ -538,14 +566,16 @@ impl<R: Registers, T: Timer> Bus for Piix4<R, T> {
         if !self.ready {
             return Err(ErrorKind::NeedsReset.into());
         }
+        let start = self.timer.start();
         self.prepare()?;
-        self.transfer(address, transaction)
+        self.transfer(address, transaction, start)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod timer;
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::{Cell, RefCell};
 

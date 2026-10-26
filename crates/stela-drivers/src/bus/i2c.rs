@@ -66,10 +66,29 @@ pub trait Bus {
     ) -> Result<(), Error>;
 }
 
-/// A monotonic microsecond timer. `relax` lets a model or the platform advance
-/// while the production transfer loop waits; time must eventually advance.
+/// A progressing timer. Interval users must preflight their maximum duration,
+/// retain `start`'s opaque marker and use `elapsed_us`, which permits subtraction
+/// before conversion across a native counter rollover. `now_us` is only the
+/// legacy absolute quotient. Defaults preserve full-width microsecond models;
+/// other counter units must override duration/start/elapsed consistently.
 pub trait Timer {
     fn now_us(&self) -> u64;
+
+    fn check_duration(&self, microseconds: u64) -> Result<(), crate::ClockError> {
+        if microseconds > u64::MAX / 2 {
+            Err(crate::ClockError::DurationTooLong)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn start(&self) -> u64 {
+        self.now_us()
+    }
+
+    fn elapsed_us(&self, start: u64) -> u64 {
+        self.now_us().wrapping_sub(start)
+    }
 
     fn relax(&self) {
         crate::waiting();
@@ -80,6 +99,15 @@ pub trait Timer {
 impl Timer for Clock {
     fn now_us(&self) -> u64 {
         Clock::now_us(self)
+    }
+    fn check_duration(&self, microseconds: u64) -> Result<(), crate::ClockError> {
+        Clock::check_duration(self, microseconds)
+    }
+    fn start(&self) -> u64 {
+        self.try_start().expect("preflighted bus clock")
+    }
+    fn elapsed_us(&self, start: u64) -> u64 {
+        self.try_elapsed_us(start).expect("preflighted bus clock")
     }
 }
 
