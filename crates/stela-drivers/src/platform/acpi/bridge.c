@@ -4,10 +4,46 @@
 static struct stela_acpi_services services;
 static u8 active;
 static u8 hardware_enabled;
+static u8 arbitration_ready;
 static u8 core_started;
 static void *allocation_lock;
 struct allocation { struct allocation *previous, *next; u64 reserved[2]; };
 static struct allocation *allocations;
+struct retained_context {
+    struct retained_context *next;
+    acpi_status (*before_termination)(void *);
+    acpi_status (*retire)(void *);
+    acpi_status (*activate)(void *);
+    void *context;
+};
+static struct retained_context *retained_contexts;
+acpi_status stela_acpi_retain_context(acpi_status (*before_termination)(void *), acpi_status (*retire)(void *), acpi_status (*activate)(void *), void *context) {
+    if (!stela_acpi_namespace_valid()) return AE_SUPPORT;
+    if (!before_termination || !retire || !context) return AE_BAD_PARAMETER;
+    struct retained_context *entry = acpi_os_allocate(sizeof(*entry));
+    if (!entry) return AE_NO_MEMORY;
+    entry->retire = retire;
+    entry->before_termination = before_termination;
+    entry->activate = activate;
+    entry->context = context;
+    u64 flags = services.acquire_lock(services.context, allocation_lock);
+    entry->next = retained_contexts;
+    retained_contexts = entry;
+    services.release_lock(services.context, allocation_lock, flags);
+    return AE_OK;
+}
+u8 stela_acpi_arbitration_ready(void) {
+    return stela_acpi_namespace_valid() && __atomic_load_n(&arbitration_ready, __ATOMIC_ACQUIRE);
+}
+static acpi_status activate_retained_contexts(void) {
+    for (struct retained_context *entry = retained_contexts; entry; entry = entry->next) {
+        if (entry->activate) {
+            acpi_status status = entry->activate(entry->context);
+            if (ACPI_FAILURE(status)) return status;
+        }
+    }
+    return AE_OK;
+}
 /* These guards participate in ACPICA's actual table-deletion reader/writer lock.
  * They never hold the interpreter mutex. UNLOAD invalidates the whole facade;
  * native driver rebinding after deletion is not implemented. */
@@ -131,8 +167,10 @@ acpi_status stela_acpi_start(const struct stela_acpi_services *input, u8 hardwar
     memcpy(&services, input, sizeof(services));
     active = 1;
     hardware_enabled = 0;
+    __atomic_store_n(&arbitration_ready, 0, __ATOMIC_RELEASE);
     core_started = 0;
     allocations = 0;
+    retained_contexts = 0;
     namespace_guards = 0;
     __atomic_store_n(&namespace_invalid, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&namespace_epoch, 1, __ATOMIC_RELEASE);
@@ -151,6 +189,7 @@ acpi_status stela_acpi_start(const struct stela_acpi_services *input, u8 hardwar
     u32 flags = hardware ? 0 : ACPI_NO_FACS_INIT | ACPI_NO_ACPI_ENABLE | ACPI_NO_HARDWARE_INIT | ACPI_NO_EVENT_INIT | ACPI_NO_HANDLER_INIT;
     status = acpi_enable_subsystem(flags);
     if (ACPI_FAILURE(status)) return status;
+    if (hardware) __atomic_store_n(&arbitration_ready, 1, __ATOMIC_RELEASE);
     status = acpi_initialize_objects(hardware ? 0 : ACPI_NO_DEVICE_INIT);
     if (ACPI_SUCCESS(status) && hardware) hardware_enabled = 1;
     if (ACPI_SUCCESS(status) && !stela_acpi_namespace_valid()) return AE_SUPPORT;
@@ -163,6 +202,12 @@ acpi_status stela_acpi_enable_hardware(void) {
     hardware_enabled = 1; /* A failed activation cannot safely be retried in place. */
     acpi_status status = acpi_enable_subsystem(0);
     if (ACPI_FAILURE(status)) return status;
+    /* Successful enable_subsystem has mapped FACS and initialized actual SCI
+     * and global-lock handlers (or the core's observed reduced-hardware path).
+     * A software token obtained before this point is not that witness. */
+    __atomic_store_n(&arbitration_ready, 1, __ATOMIC_RELEASE);
+    status = activate_retained_contexts();
+    if (ACPI_FAILURE(status)) return status;
     status = acpi_initialize_objects(0);
     if (ACPI_SUCCESS(status)) hardware_enabled = 1;
     return status;
@@ -171,9 +216,28 @@ acpi_status stela_acpi_stop(void) {
     if (!active) return AE_NOT_EXIST;
     acpi_status status = services.quiesce(CTX);
     if (ACPI_FAILURE(status)) return status; /* Keep all C/provider state alive. */
+    /* An admitted callback may have acquired native/FACS ownership while
+     * quiescence drained it. Check after synchronization, and close driver IO
+     * admission before core termination can invoke any setup deactivation. */
+    acpi_status admission = AE_OK;
+    for (struct retained_context *entry = retained_contexts; entry; entry = entry->next) {
+        status = entry->before_termination(entry->context);
+        if (ACPI_FAILURE(status) && ACPI_SUCCESS(admission)) admission = status;
+    }
+    if (ACPI_FAILURE(admission)) return admission;
     if (core_started) {
         status = acpi_terminate();
         if (ACPI_FAILURE(status)) return status;
+        core_started = 0;
+    }
+    /* No callback can still enter driver storage. Its OSL semaphores and other
+     * provider-owned services must retire before services.destroy, not after. */
+    while (retained_contexts) {
+        struct retained_context *entry = retained_contexts;
+        status = entry->retire(entry->context);
+        if (ACPI_FAILURE(status)) return status; /* Keep context and OSL alive. */
+        retained_contexts = entry->next;
+        acpi_os_free(entry);
     }
     /* The OSL owns every allocation, including objects retained by the core on
      * partial/error paths. Quiescence + termination makes arena reclamation safe. */

@@ -53,4 +53,8 @@ acpi_status stela_acpi_guard_enter(void **, u64 *);
 void stela_acpi_guard_leave(void *);
 u8 stela_acpi_namespace_valid(void);
 acpi_status stela_acpi_bind_node(acpi_handle, u64);
+/* Retain driver callback storage until core termination, then retire it while
+ * the original OSL provider is still alive. Failed shutdown retains the list. */
+acpi_status stela_acpi_retain_context(acpi_status (*)(void *), acpi_status (*)(void *), acpi_status (*)(void *), void *);
+u8 stela_acpi_arbitration_ready(void);
 #endif

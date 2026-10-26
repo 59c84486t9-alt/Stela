@@ -3,13 +3,14 @@
 //! The platform supplies owned OSL services. There is no implicit identity map,
 //! interrupt routing, EC driver, scheduler, allocator, or permissive I/O fallback.
 //! See [`Services`] and `acpi/README.md` before installing a provider.
-use alloc::{boxed::Box, ffi::CString, string::String, vec::Vec};
+pub mod resources;
+use alloc::{boxed::Box, ffi::CString, string::String, sync::Arc, vec::Vec};
 use core::{
     cell::{Cell, RefCell},
     ffi::{CStr, c_char, c_void},
     marker::PhantomData,
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 pub type Status = u32;
@@ -145,6 +146,12 @@ unsafe extern "C" {
     fn stela_acpi_guard_leave(guard: *mut c_void);
     fn stela_acpi_namespace_valid() -> u8;
     fn stela_acpi_bind_node(candidate: *mut c_void, epoch: u64) -> Status;
+    fn stela_acpi_retain_context(
+        before_termination: unsafe extern "C" fn(*mut c_void) -> Status,
+        retire: unsafe extern "C" fn(*mut c_void) -> Status,
+        activate: Option<unsafe extern "C" fn(*mut c_void) -> Status>,
+        context: *mut c_void,
+    ) -> Status;
     fn stela_acpi_evaluate(
         handle: *mut c_void,
         path: *const c_char,
@@ -182,6 +189,13 @@ unsafe extern "C" {
         space: u32,
         handler: Region,
     ) -> Status;
+    fn acpi_install_address_space_handler_no_reg(
+        handle: *mut c_void,
+        space: u8,
+        handler: Region,
+        setup: RegionSetup,
+        context: *mut c_void,
+    ) -> Status;
     #[cfg(test)]
     fn stela_acpi_layout(field: u32) -> u64;
 }
@@ -214,7 +228,8 @@ enum HardwareState {
 pub struct Session {
     active: bool,
     hardware: Cell<HardwareState>,
-    ec_global_locks: Cell<usize>,
+    ec_global_locks: Arc<AtomicUsize>,
+    ec_resource_quarantine: Arc<AtomicBool>,
     notifications: RefCell<Vec<*mut NotifyContext>>,
     _local: PhantomData<*mut ()>,
 }
@@ -263,7 +278,8 @@ impl Session {
             } else {
                 HardwareState::InterpreterOnly
             }),
-            ec_global_locks: Cell::new(0),
+            ec_global_locks: Arc::new(AtomicUsize::new(0)),
+            ec_resource_quarantine: Arc::new(AtomicBool::new(false)),
             notifications: RefCell::new(Vec::new()),
             _local: PhantomData,
         })
@@ -272,7 +288,7 @@ impl Session {
     /// events and firmware `_INI`/`_REG` methods. Missing services remain errors.
     /// A failure may have partially enabled hardware; shut down the session before
     /// retrying. The provider's original capability attestation must still hold.
-    pub fn enable_hardware(&mut self) -> Result<(), Error> {
+    pub fn enable_hardware(&self) -> Result<(), Error> {
         let guard = self.guard()?;
         match self.hardware.get() {
             HardwareState::Enabled => return guard.check(),
@@ -382,9 +398,11 @@ impl Session {
         if !self.active {
             return Ok(());
         }
-        if self.ec_global_locks.get() != 0 {
-            // An unreleased FACS/global mutex still references this core. Keep
-            // the reservation and complete native provider alive permanently.
+        if self.ec_global_locks.load(Ordering::Acquire) != 0
+            || self.ec_resource_quarantine.load(Ordering::Acquire)
+        {
+            // An unreleased FACS mutex or an unregistered native resource with
+            // failed retirement still references this provider. Retain both.
             return Err(SUPPORT);
         }
         self.active = false;
@@ -467,13 +485,12 @@ impl super::ec::FirmwareLock for EcGlobalLock<'_> {
         self.held = Some((token, guard));
         // Native service callbacks can nest; count the current ownership after
         // the real acquisition instead of overwriting a pre-call snapshot.
-        let count = self
-            .session
+        self.session
             .ec_global_locks
-            .get()
-            .checked_add(1)
-            .ok_or(super::ec::LockError)?;
-        self.session.ec_global_locks.set(count);
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .map_err(|_| super::ec::LockError)?;
         if self.held.as_ref().unwrap().1.check().is_err() {
             // A native callback may have invalidated namespace admission while
             // acquisition waited. Release actual firmware ownership, never
@@ -492,9 +509,7 @@ impl super::ec::FirmwareLock for EcGlobalLock<'_> {
         // Cleanup remains necessary even if namespace admission was invalidated.
         checked(unsafe { acpi_release_global_lock(*token) }).map_err(|_| super::ec::LockError)?;
         self.held = None;
-        self.session
-            .ec_global_locks
-            .set(self.session.ec_global_locks.get() - 1);
+        self.session.ec_global_locks.fetch_sub(1, Ordering::AcqRel);
         Ok(())
     }
 }
@@ -591,6 +606,63 @@ impl Arguments {
     }
 }
 impl<'a> Handle<'a> {
+    pub(crate) fn ec_scope(self, root: bool) -> Self {
+        if root { self.session.root() } else { self }
+    }
+    pub(crate) fn ec_lock_count(self) -> Arc<AtomicUsize> {
+        self.session.ec_global_locks.clone()
+    }
+    pub(crate) fn ec_resource_quarantine(self) -> Arc<AtomicBool> {
+        self.session.ec_resource_quarantine.clone()
+    }
+    /// Retain callback storage through actual core termination, including failed
+    /// removal. The finalizer runs before the original OSL provider is destroyed.
+    ///
+    /// # Safety
+    /// A successful call transfers ownership of context to the core finalizer.
+    /// before_termination runs after real provider quiescence, closes native
+    /// admission and must refuse while ownership still requires the live core.
+    /// The finalizer must not enter AML or unwind, and must retire provider
+    /// resources before freeing its storage. Failed calls transfer no ownership.
+    /// An optional activation callback runs after actual FACS/SCI/GLK setup
+    /// and before device _INI. It must be idempotent after explicit attachment,
+    /// retain its namespace identity and propagate any activation failure.
+    /// Activation must not register more retained contexts or borrow a movable
+    /// Rust Session address.
+    pub(crate) unsafe fn retain_ec_context(
+        self,
+        before_termination: unsafe extern "C" fn(*mut c_void) -> Status,
+        retire: unsafe extern "C" fn(*mut c_void) -> Status,
+        activate: Option<unsafe extern "C" fn(*mut c_void) -> Status>,
+        context: *mut c_void,
+    ) -> Result<(), Error> {
+        let guard = self.session.guard()?;
+        guard.bind(self.raw)?;
+        // SAFETY: caller transfers the retained context on actual C success.
+        checked(unsafe { stela_acpi_retain_context(before_termination, retire, activate, context) })
+    }
+    pub(crate) fn ec_activation_target(self) -> Result<*mut c_void, Error> {
+        let guard = self.session.guard()?;
+        guard.bind(self.raw)?;
+        Ok(self.raw)
+    }
+    /// Match Linux EC setup: root handler coverage must not connect unrelated
+    /// devices' _REG methods. The actual EC subtree is connected separately.
+    pub(crate) unsafe fn install_ec_region(
+        self,
+        handler: Region,
+        setup: RegionSetup,
+        context: *mut c_void,
+    ) -> Result<(), Error> {
+        let guard = self.session.guard()?;
+        guard.bind(self.raw)?;
+        // SAFETY: live namespace lease validates the exact scope; caller retains
+        // the callback/context until removal or actual core termination.
+        checked(unsafe {
+            acpi_install_address_space_handler_no_reg(self.raw, 3, handler, setup, context)
+        })?;
+        guard.check()
+    }
     /// Read the owning provider's successful activation and namespace witness.
     pub fn hardware_active(self) -> bool {
         self.session.hardware_enabled()
@@ -932,7 +1004,9 @@ unsafe fn read_value<'a>(
 #[cfg(test)]
 pub(crate) mod tests {
     include!("acpi/battery_tests.rs");
+    include!("ec/native_tests.rs");
     include!("battery/native_tests.rs");
+    include!("ec/binding_native_tests.rs");
     extern crate std;
     use super::*;
     use std::{
@@ -1423,7 +1497,7 @@ pub(crate) mod tests {
         // must never be interpreted as successful activation by Rust clients.
         provider.capabilities = FULL_CAPABILITIES;
         // SAFETY: actual test provider owns all services; singleton serialized.
-        let mut session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         assert!(session.enable_hardware().is_err());
         assert!(!session.hardware_enabled());
         assert!(!session.root().hardware_active());
@@ -1439,7 +1513,7 @@ pub(crate) mod tests {
         let _serial = TEST_SERIAL.lock().unwrap();
         // SAFETY: reduced-hardware provider enters actual C activation without
         // inventing legacy hardware; singleton serialized for this whole test.
-        let mut session =
+        let session =
             unsafe { Session::start(reduced_hardware_fixture(&[]), Mode::Hardware) }.unwrap();
         assert!(session.hardware_enabled());
         let root = session.root();
@@ -1591,7 +1665,7 @@ pub(crate) mod tests {
         assert!(counts.destroyed.load(Ordering::SeqCst));
         assert_eq!(counts.port_writes.load(Ordering::SeqCst), 0);
         let (provider, counts) = fixture();
-        let mut session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
         assert!(!session.hardware_enabled());
         assert!(!session.root().hardware_active());
         assert_eq!(session.enable_hardware(), Err(SUPPORT));

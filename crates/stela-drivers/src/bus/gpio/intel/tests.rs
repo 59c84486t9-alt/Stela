@@ -457,3 +457,53 @@ fn malformed_capability_cycle_and_padbar_refuse_without_any_write() {
         assert_eq!(drops.get(), 0);
     }
 }
+
+#[test]
+fn native_supplier_dynamic_claim_preserves_direction_and_restores_before_reuse() {
+    let (transport, state, drops) = peer(modern(), 0x94);
+    let mut controller = Controller::new(transport, modern(), &[]).unwrap();
+    assert!(!controller.has_claims());
+    controller.capture(1).unwrap();
+    assert!(controller.is_claimed(1));
+    state.borrow_mut().trace.clear();
+    controller.claim_debounce(1, 0).unwrap();
+    assert!(writes(&state).is_empty());
+    controller.write_latch(1, true).unwrap();
+    assert_eq!(controller.direction(1), Ok(Direction::Input));
+    assert_eq!(state.borrow().words[&(0, 0x1010)] & 0x301, 0x101);
+    controller.release_pad(1).unwrap();
+    assert!(!controller.is_claimed(1));
+    assert!(!controller.has_claims());
+    assert_eq!(state.borrow().words[&(0, 0x1010)] & !2, 0x100);
+    controller.capture(1).unwrap();
+    controller.direction_output(1, false).unwrap();
+    controller.release_pad(1).unwrap();
+    controller.retire().unwrap();
+    drop(controller);
+    assert_eq!(drops.get(), 1);
+}
+
+#[test]
+fn native_supplier_failed_request_retains_snapshot_and_failed_restore_retains_claim() {
+    let (transport, state, drops) = peer(modern(), 0x94);
+    let mut controller = Controller::new(transport, modern(), &[]).unwrap();
+    controller.capture(0).unwrap();
+    state.borrow_mut().trace.clear();
+    assert_eq!(controller.claim_debounce(0, 1), Err(Error::InvalidDebounce));
+    assert!(writes(&state).is_empty());
+    assert!(controller.is_claimed(0));
+    controller.release_pad(0).unwrap();
+    controller.capture(0).unwrap();
+    controller.direction_output(0, true).unwrap();
+    state.borrow_mut().ignore = Some((0, 0x1000));
+    assert_eq!(controller.release_pad(0), Err(Error::Readback));
+    assert!(controller.is_claimed(0));
+    assert!(controller.has_claims());
+    assert_eq!(drops.get(), 0);
+    state.borrow_mut().ignore = None;
+    controller.release_pad(0).unwrap();
+    assert!(!controller.has_claims());
+    controller.retire().unwrap();
+    drop(controller);
+    assert_eq!(drops.get(), 1);
+}

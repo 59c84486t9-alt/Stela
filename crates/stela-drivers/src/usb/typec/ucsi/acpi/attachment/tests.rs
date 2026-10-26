@@ -372,7 +372,7 @@ fn set_resource(session: &Session, physical: u32) {
 fn genuine_activation_bind_start_notify_suspend_resume_and_retire() {
     let _serial = TEST_SERIAL.lock().unwrap();
     // SAFETY: actual fixture owns all ACPICA services; test holds singleton lock.
-    let mut session = unsafe { Session::start(provider(), Mode::InterpreterOnly) }.unwrap();
+    let session = unsafe { Session::start(provider(), Mode::InterpreterOnly) }.unwrap();
     assert!(!session.hardware_enabled());
     assert!(matches!(discover(&session), Err(Error::HardwareInactive)));
     session.enable_hardware().unwrap();

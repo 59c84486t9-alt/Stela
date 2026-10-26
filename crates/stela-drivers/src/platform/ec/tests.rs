@@ -27,6 +27,8 @@ struct Peripheral {
     accesses: usize,
     effect_failure: Option<usize>,
     access_times: Vec<u64>,
+    late_access: Option<usize>,
+    late_release: bool,
 }
 impl Peripheral {
     fn access(&mut self) -> Result<(), IoError> {
@@ -40,6 +42,9 @@ impl Peripheral {
             return Err(IoError);
         }
         self.step();
+        if self.late_access == Some(self.accesses) {
+            self.time.set(self.time.get() + 1000);
+        }
         Ok(())
     }
     fn emit(&mut self, value: u8) {
@@ -152,6 +157,9 @@ impl FirmwareLock for Gate {
             return Err(LockError);
         }
         m.locked = false;
+        if m.late_release {
+            m.time.set(m.time.get() + 1000);
+        }
         Ok(())
     }
 }
@@ -190,6 +198,8 @@ fn model(burst: bool) -> (Controller, Rc<RefCell<Peripheral>>) {
         accesses: 0,
         effect_failure: None,
         access_times: Vec::new(),
+        late_access: None,
+        late_release: false,
     }));
     let config = Config {
         timeout_us: 100,
@@ -239,6 +249,146 @@ fn query_preserves_actual_event_identity_and_zero_has_no_method() {
     assert_eq!(ec.query().unwrap(), None);
     assert_eq!(m.borrow().status & SCI, 0);
     assert!(!ec.event_pending().unwrap());
+}
+
+#[test]
+fn polled_event_receipt_uses_actual_sci_and_releases_arbitration() {
+    let (mut ec, m) = model(false);
+    assert_eq!(ec.poll_query().unwrap(), None);
+    assert!(m.borrow().commands.is_empty());
+    m.borrow_mut().queries.extend([0xab, 0x01, 0]);
+    m.borrow_mut().status |= SCI;
+    for (value, name) in [(0xab, *b"_QAB"), (0x01, *b"_Q01")] {
+        let receipt = ec.poll_query().unwrap().unwrap();
+        assert_eq!(receipt.value(), value);
+        assert_eq!(receipt.method(), name);
+        assert!(!m.borrow().locked, "AML must run outside EC arbitration");
+        // A method's EC operation region can acquire a new lease.
+        ec.write(3, value).unwrap();
+        assert_eq!(m.borrow().ram[3], value);
+    }
+    assert_eq!(ec.poll_query().unwrap(), None);
+    let commands = m.borrow().commands.len();
+    assert_eq!(ec.poll_query().unwrap(), None);
+    assert_eq!(commands, m.borrow().commands.len());
+    assert_eq!(m.borrow().lock_acquires, m.borrow().lock_releases);
+}
+
+#[test]
+fn late_hardware_acknowledgements_never_publish_success() {
+    // Delay each successful register access, including final read_data. Real
+    // provider call latency belongs to the single complete command deadline.
+    let (mut baseline, m) = model(false);
+    baseline.read(3).unwrap();
+    let accesses = m.borrow().accesses;
+    for late in 1..=accesses {
+        let (mut ec, m) = model(false);
+        m.borrow_mut().late_access = Some(late);
+        let error = ec.read(3).unwrap_err();
+        assert!(matches!(error.kind, ErrorKind::Timeout(_)), "access {late}");
+        assert_eq!(ec.needs_reset(), error.published);
+        assert!(!m.borrow().locked);
+        if late == accesses {
+            assert_eq!(
+                error.last_data,
+                Some(ObservedData {
+                    command: READ,
+                    index: 0,
+                    value: 3 ^ 0xa5
+                })
+            );
+        }
+    }
+    let (mut ec, m) = model(false);
+    m.borrow_mut().late_release = true;
+    let error = ec.write(2, 0xab).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Timeout(Phase::Completion));
+    assert_eq!(m.borrow().ram[2], 0xab);
+    assert!(error.published);
+    assert!(ec.needs_reset());
+}
+
+#[test]
+fn consumed_event_identity_survives_late_response_and_unlock_failure() {
+    let (mut baseline, m) = model(false);
+    m.borrow_mut().status |= SCI;
+    m.borrow_mut().queries.push_back(0xa7);
+    assert_eq!(baseline.poll_query().unwrap().unwrap().value(), 0xa7);
+    let accesses = m.borrow().accesses;
+    for fail_release in [false, true] {
+        let (mut ec, m) = model(false);
+        m.borrow_mut().status |= SCI;
+        m.borrow_mut().queries.push_back(0xa7);
+        if fail_release {
+            m.borrow_mut().fail_release = true;
+        } else {
+            m.borrow_mut().late_access = Some(accesses);
+        }
+        let error = ec.poll_query().unwrap_err();
+        assert_eq!(
+            error.last_data,
+            Some(ObservedData {
+                command: QUERY,
+                index: 0,
+                value: 0xa7
+            })
+        );
+        assert_eq!(error.lock_release_failed, fail_release);
+        assert!(ec.needs_reset());
+        assert!(m.borrow().queries.is_empty());
+        assert_eq!(m.borrow().commands.as_slice(), [QUERY]);
+        assert_eq!(ec.poll_query().unwrap_err().kind, ErrorKind::NeedsReset);
+        assert_eq!(m.borrow().commands.as_slice(), [QUERY]);
+    }
+}
+
+#[test]
+#[ignore = "requires a fresh unchanged Linux EC query/resource oracle trace"]
+fn unchanged_linux_query_dispatch_identity_and_io_resource_order() {
+    extern crate std;
+    let trace = std::fs::read_to_string(
+        std::env::var("STELA_EC_ORACLE").expect("fresh unchanged Linux EC oracle trace"),
+    )
+    .unwrap();
+    let mut cases = 0;
+    for line in trace.lines() {
+        let fields: Vec<_> = line.split(',').collect();
+        let number = |index: usize| fields[index].parse::<i32>().unwrap();
+        if fields[0] == "Q" {
+            let value = number(2) as u8;
+            let (mut ec, peripheral) = model(false);
+            peripheral.borrow_mut().queries.push_back(value);
+            peripheral.borrow_mut().status |= SCI;
+            let receipt = ec.poll_query().unwrap();
+            assert_eq!(receipt.is_some(), number(3) == 0);
+            assert_eq!(number(4), 1); // one actual donor QUERY transaction
+            assert_eq!(number(5), i32::from(QUERY));
+            assert_eq!(number(6), 1); // one byte, including the zero reply
+            assert_eq!(peripheral.borrow().commands.as_slice(), [QUERY]);
+            assert!(!peripheral.borrow().locked);
+            assert_eq!(number(7) != 0, value != 0); // deferred work, never Q00
+            let mode = number(1);
+            assert_eq!(number(8), i32::from(value != 0 && mode == 1));
+            assert_eq!(number(9), i32::from(value != 0 && mode == 0));
+            if let Some(receipt) = receipt {
+                assert_eq!(receipt.value(), value);
+                assert_eq!(receipt.method().as_slice(), fields[10].as_bytes());
+            }
+        } else {
+            assert_eq!(fields[0], "P");
+            let data = (number(1) as u16).to_le_bytes();
+            let command = (number(2) as u16).to_le_bytes();
+            let resources = [
+                0x47, 1, data[0], data[1], data[0], data[1], 1, 1, 0x47, 1, command[0], command[1],
+                command[0], command[1], 1, 1, 0x79, 0,
+            ];
+            let ports = discovery::Ports::from_crs(&resources).unwrap();
+            assert_eq!(i32::from(ports.data), number(1));
+            assert_eq!(i32::from(ports.command), number(2));
+        }
+        cases += 1;
+    }
+    assert_eq!(cases, 768);
 }
 #[test]
 fn invalid_regions_and_failed_firmware_lock_have_no_register_effect() {

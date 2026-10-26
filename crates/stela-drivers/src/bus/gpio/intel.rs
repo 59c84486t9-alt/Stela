@@ -6,10 +6,10 @@
 //! Modern Intel community-based GPIO/pinctrl register protocols.
 //!
 //! Profile matching describes the original tables; it grants no device, pad,
-//! firmware or interrupt ownership. Constructors remain internal until the
-//! native platform supplies those actual retained authorities. These serialized
-//! process/deferred operations do not install a parent interrupt or ACPI GPIO
-//! OpRegion handler. Lynx Point, Bay Trail and Cherryview use different engines
+//! firmware or interrupt ownership. Raw constructors remain internal to the
+//! actual native ACPI/MMIO adapter and independent peers. That adapter serves
+//! ordinary GPIO OpRegions; these serialized process/deferred operations do not
+//! install a parent interrupt. Lynx Point, Bay Trail and Cherryview use different engines
 //! and are deliberately absent from this modern register interface.
 mod engine;
 mod registers;
@@ -70,6 +70,10 @@ pub struct Profile {
     communities: &'static [Community],
 }
 impl Profile {
+    #[cfg(feature = "native-acpi")]
+    pub(in crate::bus::gpio) fn resource_bars(&self) -> impl ExactSizeIterator<Item = u8> + '_ {
+        self.communities.iter().map(|community| community.bar)
+    }
     pub fn from_acpi(hid: &str, uid: Option<&str>) -> Option<&'static Self> {
         tables::MATCHES.iter().find_map(|(id, profile)| {
             (*id == hid && profile.uid.is_none_or(|value| Some(value) == uid)).then_some(*profile)

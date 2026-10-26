@@ -20,8 +20,8 @@ pub trait RegisterIo: sealed::Sealed {
 }
 
 /// Original mapping owners stay retained through failures/quarantine. There is
-/// deliberately no public constructor until actual ACPI/pad/line ownership can
-/// be attached. A Mapping alone is not that authority.
+/// deliberately no public raw constructor: the native adapter retains actual
+/// ACPI reservations and claims. A Mapping alone is not that authority.
 pub struct NativeRegisters {
     gpio: Mapping,
     mux: Option<Mapping>,
@@ -30,8 +30,11 @@ pub struct NativeRegisters {
 }
 impl sealed::Sealed for NativeRegisters {}
 impl NativeRegisters {
-    #[allow(dead_code)] // Pending real platform admission; not a public bypass.
-    pub(super) fn from_owned_mappings(gpio: Mapping, mux: Option<Mapping>) -> Result<Self, Error> {
+    #[allow(dead_code)] // Raw construction stays internal to native admission.
+    pub(in crate::bus::gpio) fn from_owned_mappings(
+        gpio: Mapping,
+        mux: Option<Mapping>,
+    ) -> Result<Self, Error> {
         for mapping in core::iter::once(&gpio).chain(mux.iter()) {
             if mapping.attribute().map_err(|_| Error::Mapping)? != CacheAttribute::Uncached
                 || mapping.protection().map_err(|_| Error::Mapping)? != Protection::ReadWrite

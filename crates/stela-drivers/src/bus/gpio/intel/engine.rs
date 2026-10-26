@@ -105,7 +105,7 @@ pub struct Controller<R: RegisterIo> {
 }
 impl<R: RegisterIo> Controller<R> {
     #[allow(dead_code)] // Private protocol admission, never a native pad grant.
-    pub(super) fn new(
+    pub(in crate::bus::gpio) fn new(
         registers: R,
         profile: &'static Profile,
         pins: &[u16],
@@ -199,25 +199,8 @@ impl<R: RegisterIo> Controller<R> {
             if this.saved.iter().any(|saved| saved.pin == pin) {
                 return Err(Error::InvalidPad);
             }
-            let (community, group) = this.locate(pin)?;
-            this.host_owner(community, group, pin)?;
-            let value = this.read(community.descriptor.bar, community.cfg(pin, 0))?;
-            let enabled = this.read(
-                community.descriptor.bar,
-                community.descriptor.enable + usize::from(group.register) * 4,
-            )?;
-            if value & ROUTES != 0 || enabled & (1 << (pin - group.first)) != 0 {
-                return Err(Error::FirmwareInterrupt);
-            }
-            let mut words = [
-                value & !RX,
-                this.read(community.descriptor.bar, community.cfg(pin, 4))?,
-                0,
-            ];
-            if community.revision >= 0x92 {
-                words[2] = this.read(community.descriptor.bar, community.cfg(pin, 8))?;
-            }
-            this.saved.push(Saved { pin, words });
+            let snapshot = this.snapshot(pin)?;
+            this.saved.push(snapshot);
         }
         Ok(this)
     }
@@ -229,6 +212,121 @@ impl<R: RegisterIo> Controller<R> {
     }
     pub fn retired(&self) -> bool {
         self.retired
+    }
+}
+#[cfg(any(feature = "native-acpi", test))]
+impl<R: RegisterIo> Controller<R> {
+    pub(in crate::bus::gpio) fn has_claims(&self) -> bool {
+        !self.saved.is_empty()
+    }
+    pub(in crate::bus::gpio) fn is_claimed(&self, pin: u16) -> bool {
+        self.saved.iter().any(|saved| saved.pin == pin)
+    }
+    /// The native supplier's actual broker admits a line before this snapshot.
+    /// Reserve storage before any later request can change hardware.
+    pub(in crate::bus::gpio) fn capture(&mut self, pin: u16) -> Result<(), Error> {
+        if self.retired {
+            return Err(Error::Retired);
+        }
+        if self.fault {
+            return Err(Error::Faulted);
+        }
+        if self.is_claimed(pin) {
+            return Err(Error::InvalidPad);
+        }
+        self.saved.try_reserve(1).map_err(|_| Error::Allocation)?;
+        let snapshot = self.snapshot(pin)?;
+        self.saved.push(snapshot);
+        Ok(())
+    }
+    pub(in crate::bus::gpio) fn claim_debounce(
+        &mut self,
+        pin: u16,
+        micros: u32,
+    ) -> Result<(), Error> {
+        let (community, _) = self.check(pin)?;
+        if micros == 0
+            && self.read(community.descriptor.bar, community.cfg(pin, 0))? & FILTER == 0
+            && (community.revision < 0x92
+                || self.read(community.descriptor.bar, community.cfg(pin, 8))? & 31 == 0)
+        {
+            return Ok(());
+        }
+        self.debounce(pin, micros)
+    }
+    /// Raw latch writes preserve the actual ACPI Preserve direction.
+    pub(in crate::bus::gpio) fn write_latch(&mut self, pin: u16, high: bool) -> Result<(), Error> {
+        let (community, group) = self.check(pin)?;
+        self.unlocked(community, group, pin, false, true)?;
+        if self.read(community.descriptor.bar, community.cfg(pin, 0))? & MODE != 0 {
+            return Err(Error::Direction);
+        }
+        self.update(community, pin, 0, TX, if high { TX } else { 0 })
+    }
+    /// The supplier stops/drains this line's children first. Failed restoration
+    /// keeps the exact snapshot, mapping and claim available for retirement.
+    pub(in crate::bus::gpio) fn release_pad(&mut self, pin: u16) -> Result<(), Error> {
+        if self.retired {
+            return Err(Error::Retired);
+        }
+        let index = self
+            .saved
+            .iter()
+            .position(|saved| saved.pin == pin)
+            .ok_or(Error::UnownedPad)?;
+        let saved = self.saved[index];
+        let (community, group) = self.locate(pin)?;
+        self.host_owner(community, group, pin)?;
+        self.mask(community, group, pin, true)?;
+        let current = [
+            self.read(community.descriptor.bar, community.cfg(pin, 0))? & !RX,
+            self.read(community.descriptor.bar, community.cfg(pin, 4))?,
+            if community.revision >= 0x92 {
+                self.read(community.descriptor.bar, community.cfg(pin, 8))?
+            } else {
+                0
+            },
+        ];
+        if current != saved.words {
+            self.unlocked(community, group, pin, true, true)?;
+            self.update(
+                community,
+                pin,
+                0,
+                TX_DISABLE | RX_DISABLE,
+                TX_DISABLE | RX_DISABLE,
+            )?;
+            self.update(community, pin, 4, u32::MAX, saved.words[1])?;
+            if community.revision >= 0x92 {
+                self.update(community, pin, 8, u32::MAX, saved.words[2])?;
+            }
+            self.update(community, pin, 0, !RX, saved.words[0])?;
+        }
+        self.saved.remove(index);
+        Ok(())
+    }
+}
+impl<R: RegisterIo> Controller<R> {
+    fn snapshot(&mut self, pin: u16) -> Result<Saved, Error> {
+        let (community, group) = self.locate(pin)?;
+        self.host_owner(community, group, pin)?;
+        let value = self.read(community.descriptor.bar, community.cfg(pin, 0))?;
+        let enabled = self.read(
+            community.descriptor.bar,
+            community.descriptor.enable + usize::from(group.register) * 4,
+        )?;
+        if value & ROUTES != 0 || enabled & (1 << (pin - group.first)) != 0 {
+            return Err(Error::FirmwareInterrupt);
+        }
+        let mut words = [
+            value & !RX,
+            self.read(community.descriptor.bar, community.cfg(pin, 4))?,
+            0,
+        ];
+        if community.revision >= 0x92 {
+            words[2] = self.read(community.descriptor.bar, community.cfg(pin, 8))?;
+        }
+        Ok(Saved { pin, words })
     }
     fn locate(&self, pin: u16) -> Result<(LiveCommunity, Group), Error> {
         self.communities

@@ -3,8 +3,13 @@
 //!
 //! The platform must supply the actual PNP0C09/ECDT resources, firmware lock
 //! policy and exclusive native ownership. This is a polled engine, not GPE
-//! installation, AML `_Qxx` dispatch or vendor-specific EC RAM interpretation.
+//! installation or vendor-specific EC RAM interpretation. Query receipts can
+//! evaluate native AML after releasing transaction/firmware locks.
 //! Commands follow pinned Linux `drivers/acpi/ec.c`; see `THIRD_PARTY.md`.
+#[cfg(feature = "native-acpi")]
+pub mod binding;
+pub mod discovery;
+
 use crate::{Clock, bus::i2c::Timer};
 
 const OBF: u8 = 1;
@@ -118,6 +123,61 @@ pub struct Error {
     pub published: bool,
     pub lock_release_failed: bool,
     pub burst_cleanup_failed: bool,
+    /// Last actually acknowledged data byte. Retained even when its access or
+    /// final lock release crossed a deadline; never published as successful IO.
+    pub last_data: Option<ObservedData>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservedData {
+    pub command: u8,
+    pub index: usize,
+    pub value: u8,
+}
+
+/// One consumed nonzero QR_EC reply. Move it out of the EC owner lock before
+/// evaluating AML, whose operation regions can issue fresh EC transactions.
+/// A receipt is deliberately not Clone or Copy: evaluation consumes it once.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a consumed EC event must be dispatched or explicitly recorded as unhandled"]
+pub struct Query(u8);
+impl Query {
+    pub fn value(&self) -> u8 {
+        self.0
+    }
+    pub fn method(&self) -> [u8; 4] {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        [
+            b'_',
+            b'Q',
+            HEX[usize::from(self.0 >> 4)],
+            HEX[usize::from(self.0 & 15)],
+        ]
+    }
+
+    /// Process/deferred context, after releasing the EC's owner lock. The handle
+    /// must be the real matching EC namespace device. Errors preserve consumed
+    /// event identity and may follow AML side effects; never replay automatically.
+    #[cfg(feature = "native-acpi")]
+    pub fn evaluate(self, handle: super::acpi::Handle<'_>) -> Result<(), QueryFailure> {
+        let name = self.method();
+        // All four bytes come from fixed ASCII or the hexadecimal table.
+        let name = core::str::from_utf8(&name).unwrap();
+        handle
+            .evaluate(Some(name), &[])
+            .map(|_| ())
+            .map_err(|error| QueryFailure {
+                query: self.0,
+                error,
+            })
+    }
+}
+
+#[cfg(feature = "native-acpi")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueryFailure {
+    pub query: u8,
+    pub error: super::acpi::Error,
 }
 
 /// Native port register access. Construction never guesses standard port 62/66.
@@ -139,6 +199,7 @@ impl PortIo {
                 published: false,
                 lock_release_failed: false,
                 burst_cleanup_failed: false,
+                last_data: None,
             });
         }
         Ok(Self { data, command })
@@ -184,6 +245,7 @@ pub struct Ec<R = PortIo, T = Clock, G = NoGlobalLock> {
     status: u8,
     published: bool,
     last_access: Option<u64>,
+    last_data: Option<ObservedData>,
 }
 
 impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
@@ -193,6 +255,14 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
             || config.recovery_timeout_us == 0
             || config.polling_guard_us >= config.timeout_us
             || config.polling_guard_us >= config.recovery_timeout_us
+            || [
+                config.timeout_us,
+                config.lock_timeout_us,
+                config.recovery_timeout_us,
+                config.polling_guard_us,
+            ]
+            .iter()
+            .any(|duration| timer.check_duration(*duration).is_err())
         {
             return Err(Error {
                 kind: ErrorKind::InvalidConfiguration,
@@ -200,6 +270,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
                 published: false,
                 lock_release_failed: false,
                 burst_cleanup_failed: false,
+                last_data: None,
             });
         }
         Ok(Self {
@@ -211,6 +282,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
             status: 0,
             published: false,
             last_access: None,
+            last_data: None,
         })
     }
 
@@ -225,6 +297,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
             published: self.published,
             lock_release_failed: false,
             burst_cleanup_failed: false,
+            last_data: self.last_data,
         }
     }
 
@@ -233,13 +306,14 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
     }
 
     fn expired(&self, start: u64) -> bool {
-        self.timer.now_us().wrapping_sub(start) >= self.config.timeout_us
+        self.timer.elapsed_us(start) >= self.config.timeout_us
     }
 
     fn guard(&self, start: u64, phase: Phase) -> Result<(), Error> {
-        while self.last_access.is_some_and(|last| {
-            self.timer.now_us().wrapping_sub(last) < self.config.polling_guard_us
-        }) {
+        while self
+            .last_access
+            .is_some_and(|last| self.timer.elapsed_us(last) < self.config.polling_guard_us)
+        {
             if self.expired(start) {
                 return Err(self.error(ErrorKind::Timeout(phase)));
             }
@@ -256,11 +330,11 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
             self.guard(start, phase)?;
             let status = self.registers.status();
             self.status = self.io(status)?;
+            // A status provider may take time, including a successful read.
+            // Record the actual byte before refusing a late acknowledgement.
+            self.deadline(start, phase)?;
             if self.status & mask == expected {
                 return Ok(self.status);
-            }
-            if self.expired(start) {
-                return Err(self.error(ErrorKind::Timeout(phase)));
             }
             self.timer.relax();
         }
@@ -277,24 +351,41 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
         // Mark before writing: a fallible provider can report an uncertain write.
         self.published = true;
         let result = self.registers.command(command);
-        self.last_access = Some(self.timer.now_us());
+        self.last_access = Some(self.timer.start());
         self.io(result)?;
+        self.deadline(start, Phase::Command)?;
         for &byte in input {
             self.wait(start, IBF, 0, Phase::Input)?;
             let result = self.registers.write_data(byte);
-            self.last_access = Some(self.timer.now_us());
+            self.last_access = Some(self.timer.start());
             self.io(result)?;
+            self.deadline(start, Phase::Input)?;
         }
-        for byte in &mut *output {
+        for (index, byte) in output.iter_mut().enumerate() {
             self.wait(start, OBF, OBF, Phase::Output)?;
             let result = self.registers.read_data();
-            self.last_access = Some(self.timer.now_us());
-            *byte = self.io(result)?;
+            self.last_access = Some(self.timer.start());
+            let value = self.io(result)?;
+            self.last_data = Some(ObservedData {
+                command,
+                index,
+                value,
+            });
+            self.deadline(start, Phase::Output)?;
+            *byte = value;
         }
         if output.is_empty() {
             self.wait(start, IBF, 0, Phase::Completion)?;
         }
         Ok(())
+    }
+
+    fn deadline(&self, start: u64, phase: Phase) -> Result<(), Error> {
+        if self.expired(start) {
+            Err(self.error(ErrorKind::Timeout(phase)))
+        } else {
+            Ok(())
+        }
     }
 
     fn owned<V>(
@@ -305,10 +396,11 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
         if !self.ready {
             return Err(self.error(ErrorKind::NeedsReset));
         }
+        self.last_data = None;
         self.gate
             .acquire(self.config.lock_timeout_us)
             .map_err(|_| self.error(ErrorKind::FirmwareLock))?;
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         let result = (|| {
             self.wait(start, IBF, 0, Phase::Command)?;
             // Recheck after IBF drains: an inherited command can produce OBF
@@ -319,9 +411,6 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
             }
             access(self, start)
         })();
-        if result.is_err() && self.published {
-            self.ready = false;
-        }
         if self.gate.release().is_err() {
             self.ready = false;
             let mut error = result
@@ -329,6 +418,13 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
                 .unwrap_or_else(|| self.error(ErrorKind::FirmwareLock));
             error.lock_release_failed = true;
             return Err(error);
+        }
+        let result = result.and_then(|value| {
+            self.deadline(start, Phase::Completion)?;
+            Ok(value)
+        });
+        if result.is_err() && self.published {
+            self.ready = false;
         }
         result
     }
@@ -360,6 +456,23 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
         self.owned(|ec, _| Ok(ec.status & SCI != 0))
     }
 
+    /// Poll one native event without consuming QR_EC when SCI_EVT is clear.
+    /// The status test and actual QUERY share one firmware arbitration lease;
+    /// successful return releases it before the receipt can evaluate AML.
+    /// Zero is the actual no-event reply, not `_Q00`. Process/deferred context.
+    /// Repeated calls must have a caller's finite work budget; a stuck SCI must
+    /// never turn an IRQ callback into an unbounded polling loop.
+    pub fn poll_query(&mut self) -> Result<Option<Query>, Error> {
+        self.owned(|ec, start| {
+            if ec.status & SCI == 0 {
+                return Ok(None);
+            }
+            let mut value = [0];
+            ec.transfer(start, QUERY, &[], &mut value)?;
+            Ok((value[0] != 0).then_some(Query(value[0])))
+        })
+    }
+
     fn region(address: u64, width: u32) -> Result<(u8, usize), Error> {
         let bytes = match width {
             8 => 1,
@@ -373,6 +486,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
                     published: false,
                     lock_release_failed: false,
                     burst_cleanup_failed: false,
+                    last_data: None,
                 });
             }
         };
@@ -386,6 +500,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
                 published: false,
                 lock_release_failed: false,
                 burst_cleanup_failed: false,
+                last_data: None,
             });
         }
         Ok((address as u8, bytes))
@@ -420,7 +535,7 @@ impl<R: Registers, T: Timer, G: FirmwareLock> Ec<R, T, G> {
                 let bound = ec.config.timeout_us;
                 let cleanup_start = if result.is_err() {
                     ec.config.timeout_us = ec.config.recovery_timeout_us;
-                    ec.timer.now_us()
+                    ec.timer.start()
                 } else {
                     start
                 };

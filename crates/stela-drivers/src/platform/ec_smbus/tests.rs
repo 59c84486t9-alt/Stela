@@ -65,6 +65,7 @@ impl Peripheral {
             published,
             lock_release_failed: false,
             burst_cleanup_failed: false,
+            last_data: None,
         };
         if self.failed(false) {
             return Err(fault(false));
@@ -803,6 +804,7 @@ fn lost_firmware_lock_before_any_command_retains_owner_without_claiming_publicat
                 published: false,
                 lock_release_failed: true,
                 burst_cleanup_failed: false,
+                last_data: None,
             })
         }
         fn write(&mut self, _: u8, _: u8) -> Result<(), ec::Error> {

@@ -4,6 +4,65 @@
 mod oracle;
 
 #[test]
+fn native_supplier_dynamic_claim_preserves_input_latch_and_unowned_firmware() {
+    for profile in profiles() {
+        let (mut controller, state, drops) = setup(profile, &[]);
+        state.borrow_mut().pads[3] = (1 << 13) | (1 << 11) | 0x1000_0000;
+        assert!(!controller.has_claims());
+        controller.capture(p(1)).unwrap();
+        assert!(controller.is_claimed(p(1)));
+        state.borrow_mut().trace.clear();
+        controller.claim_debounce(p(1), 0).unwrap();
+        assert!(
+            state
+                .borrow()
+                .trace
+                .iter()
+                .all(|access| matches!(access, Access::Read32(_)))
+        );
+        controller.write_latch(p(1), true).unwrap();
+        assert_eq!(state.borrow().pads[1] & (1 << 23), 0);
+        assert_ne!(state.borrow().pads[1] & (1 << 22), 0);
+        assert_eq!(
+            controller.claim_debounce(p(1), 61),
+            Err(Error::FirmwareWake)
+        );
+        assert!(controller.is_claimed(p(1)));
+        controller.release_pad(p(1)).unwrap();
+        assert!(!controller.has_claims());
+        assert_eq!(state.borrow().pads[1], 0);
+        assert_eq!(state.borrow().pads[3], (1 << 13) | (1 << 11) | 0x1000_0000);
+        controller.retire().unwrap();
+        drop(controller);
+        assert_eq!(drops.get(), 1);
+    }
+}
+
+#[test]
+fn native_supplier_precapture_refusal_has_no_claim_and_failed_release_keeps_owner() {
+    for profile in profiles() {
+        let (mut controller, state, drops) = setup(profile, &[]);
+        state.borrow_mut().pads[1] = 1 << 13;
+        assert_eq!(controller.capture(p(1)), Err(Error::FirmwareWake));
+        assert!(!controller.is_claimed(p(1)));
+        assert!(!controller.has_claims());
+        state.borrow_mut().pads[1] = 0;
+        controller.capture(p(1)).unwrap();
+        controller.direction_output(p(1), true).unwrap();
+        state.borrow_mut().lock = Some(1);
+        assert_eq!(controller.release_pad(p(1)), Err(Error::Readback));
+        assert!(controller.is_claimed(p(1)));
+        assert_eq!(drops.get(), 0);
+        state.borrow_mut().lock = None;
+        controller.release_pad(p(1)).unwrap();
+        assert!(!controller.has_claims());
+        controller.retire().unwrap();
+        drop(controller);
+        assert_eq!(drops.get(), 1);
+    }
+}
+
+#[test]
 fn controller_wide_settlement_preserves_each_unowned_firmware_wake_source() {
     for profile in profiles() {
         for wake in [1 << 13, 1 << 14, 1 << 15, 1 << 27] {

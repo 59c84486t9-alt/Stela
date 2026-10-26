@@ -72,8 +72,8 @@ fn insert(bits: &mut [u64; 3], pad: Pad) {
 
 /// Owned register protocol with sticky failure containment. Dropping an
 /// unfinished/uncertain controller retains its original register transport;
-/// only successful retirement permits final transport release. No native
-/// pad authority can presently construct this type.
+/// only successful retirement permits final transport release. Native admission
+/// belongs to the actual ACPI/resource adapter; raw constructors stay internal.
 pub struct Controller<R: RegisterIo> {
     registers: ManuallyDrop<R>,
     profile: Profile,
@@ -85,11 +85,14 @@ pub struct Controller<R: RegisterIo> {
     restored: bool,
 }
 impl<R: RegisterIo> Controller<R> {
-    // This private bitmap is model inventory, not a native grant. A future
-    // integration must replace admission with an actual retained platform pad
-    // owner before making any constructor accessible outside this module.
+    // The bitmap is internal protocol inventory, never a native grant. The real
+    // resource adapter starts empty and captures each actually claimed line.
     #[allow(dead_code)]
-    pub(super) fn new(registers: R, profile: Profile, owned: [u64; 3]) -> Result<Self, Error> {
+    pub(in crate::bus::gpio) fn new(
+        registers: R,
+        profile: Profile,
+        owned: [u64; 3],
+    ) -> Result<Self, Error> {
         let mut this = Self {
             registers: ManuallyDrop::new(registers),
             profile,
@@ -130,6 +133,79 @@ impl<R: RegisterIo> Controller<R> {
     pub fn retired(&self) -> bool {
         self.retired
     }
+}
+#[cfg(any(feature = "native-acpi", test))]
+impl<R: RegisterIo> Controller<R> {
+    pub(in crate::bus::gpio) fn has_claims(&self) -> bool {
+        self.owned != [0; 3]
+    }
+    pub(in crate::bus::gpio) fn is_claimed(&self, pad: Pad) -> bool {
+        contains(&self.owned, pad)
+    }
+    pub(in crate::bus::gpio) fn capture(&mut self, pad: Pad) -> Result<(), Error> {
+        if self.retired {
+            return Err(Error::Retired);
+        }
+        if self.fault {
+            return Err(Error::Faulted);
+        }
+        if self.is_claimed(pad) {
+            return Err(Error::InvalidPad);
+        }
+        let value = self.read(pad)?;
+        if value & WAKE_POLICY != 0 {
+            return Err(Error::FirmwareWake);
+        }
+        if value & (ENABLE | UNMASK) != 0 {
+            return Err(Error::FirmwareInterrupt);
+        }
+        self.saved[usize::from(pad.0)] = value & !(STATUS | INPUT);
+        self.saved_mux[usize::from(pad.0)] = None;
+        insert(&mut self.owned, pad);
+        Ok(())
+    }
+    pub(in crate::bus::gpio) fn claim_debounce(
+        &mut self,
+        pad: Pad,
+        micros: u32,
+    ) -> Result<(), Error> {
+        self.check(pad)?;
+        if micros == 0 && self.read(pad)? & DEBOUNCE == 0 {
+            return Ok(());
+        }
+        self.debounce(pad, micros)
+    }
+    pub(in crate::bus::gpio) fn write_latch(&mut self, pad: Pad, high: bool) -> Result<(), Error> {
+        self.check(pad)?;
+        self.update(pad, VALUE, if high { VALUE } else { 0 })
+    }
+    /// The supplier masks and drains this line's actual users before release.
+    pub(in crate::bus::gpio) fn release_pad(&mut self, pad: Pad) -> Result<(), Error> {
+        if self.retired {
+            return Err(Error::Retired);
+        }
+        if !self.is_claimed(pad) {
+            return Err(Error::UnownedPad);
+        }
+        self.update(pad, ENABLE | UNMASK, 0)?;
+        self.update(pad, OUTPUT, 0)?;
+        if let Some(mux) = self.saved_mux[usize::from(pad.0)] {
+            self.access(|r| r.write_mux(pad.0, mux))?;
+            if self.access(|r| r.read_mux(pad.0))? != mux {
+                return Err(Error::Readback);
+            }
+        }
+        let saved = self.saved[usize::from(pad.0)];
+        self.write(pad, saved)?;
+        if self.read(pad)? & !(STATUS | INPUT) != saved {
+            return Err(Error::Readback);
+        }
+        self.owned[usize::from(pad.0) / 64] &= !(1 << (pad.0 % 64));
+        self.saved_mux[usize::from(pad.0)] = None;
+        Ok(())
+    }
+}
+impl<R: RegisterIo> Controller<R> {
     fn check(&self, pad: Pad) -> Result<(), Error> {
         if self.retired {
             return Err(Error::Retired);

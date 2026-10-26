@@ -19,8 +19,10 @@ pub struct NativeRegisters {
 }
 impl sealed::Sealed for NativeRegisters {}
 impl NativeRegisters {
-    #[allow(dead_code)] // No native platform pad/firmware producer exists yet.
-    pub(super) fn from_owned_mappings(windows: Vec<(u8, Mapping)>) -> Result<Self, Error> {
+    #[allow(dead_code)] // Raw construction stays internal to native admission.
+    pub(in crate::bus::gpio) fn from_owned_mappings(
+        windows: Vec<(u8, Mapping)>,
+    ) -> Result<Self, Error> {
         let mut result = Vec::new();
         result
             .try_reserve_exact(windows.len())

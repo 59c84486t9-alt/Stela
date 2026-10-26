@@ -5,16 +5,16 @@
 //!
 //! The pinned Linux driver uses the same sparse KERNCZ pad table and register
 //! layout for these four ACPI IDs; it supplies no per-ID lock or GPIO mux value.
-//! Matching an ID does not establish ownership. Consequently this cut exposes
-//! no native constructor: the platform still needs to supply a retained ACPI
-//! reservation, pad/firmware policy and parent system-interrupt source. The
-//! internal constructor is reserved for that integration and independent peers.
+//! Matching an ID does not establish ownership. The native adapter requires an
+//! actual firmware inspection and retained native MMIO reservation; raw protocol
+//! constructors remain internal to that adapter and independent peers.
 //! No public unsafe assertion, numeric GSI or caller bitmap admits hardware.
 //!
 //! `Controller` implements serialized process/deferred register operations. It
 //! is not a hard-IRQ handler and must not be put behind an IRQ-unsafe lock.
-//! Native shared-IRQ registration, ACPI GPIO OpRegions/_AEI, wake and suspend
-//! remain unfinished. No native attachment or full checklist closure is claimed.
+//! The optional native adapter serves ordinary installed ACPI GPIO OpRegions.
+//! Native shared-IRQ registration, _AEI delivery, wake and suspend remain open.
+//! Full checklist closure and physical operation remain unqualified.
 mod engine;
 mod registers;
 pub use engine::{Controller, Interrupt, Pending, Pull, ServiceReport};

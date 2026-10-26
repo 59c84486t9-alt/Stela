@@ -2,3 +2,5 @@
 //! ownership are prerequisites to native attachment, not inferred from pin IDs.
 pub mod amd;
 pub mod intel;
+#[cfg(feature = "native-acpi")]
+pub mod native;
