@@ -9,7 +9,7 @@ use super::{
     runs::{self, LEDGER, Runs},
     set_primary_profile,
 };
-use crate::tools::root;
+use crate::tools::{preserve_newlines, root};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, to_string as json};
 use std::{collections::BTreeMap, fs};
@@ -174,7 +174,7 @@ fn row_chips(row: &Value) -> Vec<String> {
     }
 }
 
-pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str) -> Result<String> {
+pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, previous: &str) -> Result<String> {
     for entry in registry {
         for test in &entry.tests {
             check_test(test)?;
@@ -286,7 +286,7 @@ pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str)
     let lines: Vec<String> = rows.values().map(row_line).collect::<Result<_>>()?;
     text.push_str(&lines.join(",\n"));
     text.push_str("\n  ]\n}\n");
-    Ok(text)
+    Ok(preserve_newlines(previous, &text))
 }
 
 fn indent(text: &str) -> String {
@@ -401,7 +401,9 @@ pub fn run(check: bool) -> Result<()> {
     if !check {
         let ledger_path = root().join(runs::LEDGER);
         let ledger = runs::run()?;
-        if fs::read_to_string(&ledger_path).unwrap_or_default() != ledger {
+        let previous = fs::read_to_string(&ledger_path).unwrap_or_default();
+        let ledger = preserve_newlines(&previous, &ledger);
+        if previous != ledger {
             fs::write(&ledger_path, ledger)?;
             println!("updated {}", ledger_path.display());
         }
@@ -486,17 +488,24 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
          identification, as each row's note gives. [System matrix]({MATRIX})\n",
         matrix["source"]["release"].as_str().unwrap_or("?"),
     ));
-    let block = format!("{README_START}\n{table}{README_END}");
+    let body = format!("\n{table}");
     if let Some((before, rest)) = readme.split_once(README_START) {
-        let (_, after) = rest
+        let (previous, after) = rest
             .split_once(README_END)
             .context("README has no system progress end marker")?;
-        return Ok(format!("{before}{block}{after}"));
+        let template = if previous.contains('\n') {
+            previous
+        } else {
+            readme
+        };
+        let body = preserve_newlines(template, &body);
+        return Ok(format!("{before}{README_START}{body}{README_END}{after}"));
     }
     let (before, after) = readme
         .split_once(INSTRUCTION_END)
         .context("README has no instruction progress end marker")?;
-    Ok(format!("{before}{INSTRUCTION_END}\n\n{block}{after}"))
+    let block = preserve_newlines(readme, &format!("\n\n{README_START}{body}{README_END}"));
+    Ok(format!("{before}{INSTRUCTION_END}{block}{after}"))
 }
 
 #[cfg(test)]
@@ -709,6 +718,30 @@ mod tests {
         later.tests = vec!["crates/stela-runtime/src/machine/engine.rs#illegal_returns_set_il_and_the_next_instruction_takes_ec_0x0e".into()];
         let rendered = render(&[implemented, later])?;
         assert_eq!(rendered["rows"][0]["statuses"]["apple-m3"], "open");
+        Ok(())
+    }
+
+    #[test]
+    fn line_endings_preserve_matrix_and_readme_round_trip() -> Result<()> {
+        let mut matrix = parse(&fs::read_to_string(root().join(MATRIX))?)?;
+        matrix.rows.retain(|id, _| id == "register:HCR_EL2");
+        let runs = m3_runs()?;
+        let canonical = render(&matrix, &[], &runs, "")?;
+        let expected: Value = serde_json::from_str(&canonical)?;
+        for newline in ["\n", "\r\n"] {
+            let original = canonical.replace('\n', newline);
+            assert_eq!(serde_json::from_str::<Value>(&original)?, expected);
+            assert_eq!(render(&parse(&original)?, &[], &runs, &original)?, original);
+            let before = format!("unchanged prefix{newline}");
+            let after = format!("{newline}unchanged suffix{newline}");
+            let readme = format!("{before}{README_START}{newline}old{newline}{README_END}{after}");
+            let rendered = render_readme(&readme, &expected)?;
+            assert!(rendered.starts_with(&before) && rendered.ends_with(&after));
+            assert!(!rendered.replace(newline, "").contains(['\r', '\n']));
+            assert_eq!(render_readme(&rendered, &expected)?, rendered);
+            let inserted = render_readme(&format!("{before}{INSTRUCTION_END}{after}"), &expected)?;
+            assert!(!inserted.replace(newline, "").contains(['\r', '\n']));
+        }
         Ok(())
     }
 }

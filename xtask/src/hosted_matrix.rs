@@ -1,7 +1,7 @@
 //! The hosted process's requirement matrix: render
 //! `stela_runtime::hosted_registry::requirements` into its document and its counts
 //! into the README, or with `check` fail if either is stale.
-use crate::tools::root;
+use crate::tools::{preserve_newlines, root};
 use anyhow::{Context, Result, bail};
 use std::fs;
 use stela_runtime::hosted_registry::requirements;
@@ -18,10 +18,16 @@ fn replace(text: &str, start: &str, end: &str, body: &str, path: &str) -> Result
     let (before, rest) = text
         .split_once(start)
         .with_context(|| format!("{path} has no {start} marker"))?;
-    let (_, after) = rest
+    let (previous, after) = rest
         .split_once(end)
         .with_context(|| format!("{path} has no {end} marker"))?;
-    Ok(format!("{before}{start}\n{body}{end}{after}"))
+    let template = if previous.contains('\n') {
+        previous
+    } else {
+        text
+    };
+    let body = preserve_newlines(template, &format!("\n{body}"));
+    Ok(format!("{before}{start}{body}{end}{after}"))
 }
 
 fn rendered() -> Result<[(String, String, String); 2]> {
@@ -78,11 +84,17 @@ mod tests {
 
     #[test]
     fn replacement_keeps_the_text_around_the_markers() -> Result<()> {
-        let text = "a\n<!-- s -->\nold\n<!-- e -->\nb\n";
-        assert_eq!(
-            replace(text, "<!-- s -->", "<!-- e -->", "new\n", "x")?,
-            "a\n<!-- s -->\nnew\n<!-- e -->\nb\n"
-        );
+        for newline in ["\n", "\r\n"] {
+            let text = "a\n<!-- s -->\nold\n<!-- e -->\nb\n".replace('\n', newline);
+            let expected = "a\n<!-- s -->\nnew\n<!-- e -->\nb\n".replace('\n', newline);
+            let rendered = replace(&text, "<!-- s -->", "<!-- e -->", "new\n", "x")?;
+            assert_eq!(rendered, expected);
+            assert_eq!(
+                replace(&rendered, "<!-- s -->", "<!-- e -->", "new\n", "x")?,
+                rendered
+            );
+            assert!(!rendered.replace(newline, "").contains(['\r', '\n']));
+        }
         assert!(replace("none", "<!-- s -->", "<!-- e -->", "", "x").is_err());
         Ok(())
     }

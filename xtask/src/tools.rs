@@ -18,6 +18,24 @@ pub fn root() -> &'static Path {
         .expect("xtask lives in the repository root")
 }
 
+/// Match newly rendered text to the previous text's newline convention, or LF
+/// for a new file. Call this on generated regions; keep surrounding input bytes.
+/// If only line endings differ, retain the previous bytes exactly.
+pub fn preserve_newlines(previous: &str, rendered: &str) -> String {
+    let rendered = rendered.replace("\r\n", "\n");
+    if previous.replace("\r\n", "\n") == rendered {
+        return previous.to_owned();
+    }
+    let crlf = previous
+        .find('\n')
+        .is_some_and(|at| at > 0 && previous.as_bytes()[at - 1] == b'\r');
+    if crlf {
+        rendered.replace('\n', "\r\n")
+    } else {
+        rendered
+    }
+}
+
 /// The cargo that launched this task, so nested builds share its toolchain.
 pub fn cargo() -> Command {
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
@@ -76,4 +94,24 @@ pub fn stop(child: &mut Child) {
         let _ = child.kill();
     }
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_endings_preserve_generated_and_unchanged_bytes() {
+        let rendered = "header\nchanged\n";
+        for newline in ["\n", "\r\n"] {
+            let previous = "header\nold\n".replace('\n', newline);
+            let expected = rendered.replace('\n', newline);
+            assert_eq!(preserve_newlines(&previous, rendered), expected);
+            assert_eq!(preserve_newlines(&expected, rendered), expected);
+        }
+        let mixed = "header\r\nunchanged\n";
+        assert_eq!(preserve_newlines(mixed, "header\nunchanged\n"), mixed);
+        assert_eq!(preserve_newlines("", rendered), rendered);
+        assert_eq!(preserve_newlines("", "new\r\n"), "new\n");
+    }
 }

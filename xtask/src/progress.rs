@@ -1,7 +1,7 @@
 //! Instruction progress: merge the registries into the Arm checklist and render
 //! the README table. Each encoding form counts once, at its best status across
 //! execution profiles; aliases and partial forms are not counted.
-use crate::tools::root;
+use crate::tools::{preserve_newlines, root};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, to_string as json};
 use std::{collections::BTreeMap, fs};
@@ -65,7 +65,10 @@ pub fn run(check: bool) -> Result<()> {
     let absent_path = root().join(forms::GENERATED);
     let absent_text = fs::read_to_string(&absent_path).unwrap_or_default();
     let features = forms::Features::from_matrix(&read_json(crate::system_matrix::MATRIX)?)?;
-    let absent = forms::render(&forms, &read_json(APPLE_PROFILES)?, &features)?;
+    let absent = preserve_newlines(
+        &absent_text,
+        &forms::render(&forms, &read_json(APPLE_PROFILES)?, &features)?,
+    );
 
     for (path, old, new) in [
         (&checklist_path, &checklist_text, &checklist),
@@ -103,11 +106,22 @@ fn status_index(status: &str) -> Result<usize> {
         .with_context(|| format!("unknown status {status}"))
 }
 
+/// Split a published section marker without changing the input text.
+fn split_marker<'a>(text: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
+    let crlf = marker.replace('\n', "\r\n");
+    let (start, bytes) = text
+        .find(marker)
+        .map(|start| (start, marker.len()))
+        .into_iter()
+        .chain(text.find(crlf.as_str()).map(|start| (start, crlf.len())))
+        .min_by_key(|&(start, _)| start)?;
+    Some((&text[..start], &text[start + bytes..]))
+}
+
 /// One checklist form per line, keyed by form id.
 fn checklist_forms(checklist: &str) -> Result<BTreeMap<String, Value>> {
-    let (_, lines) = checklist
-        .split_once(FORMS_START)
-        .context("checklist has no forms array")?;
+    let (_, lines) =
+        split_marker(checklist, FORMS_START).context("checklist has no forms array")?;
     let mut forms = BTreeMap::new();
     for line in lines.lines().take_while(|line| line.starts_with("    {")) {
         let form: Value = serde_json::from_str(line.trim().trim_end_matches(','))?;
@@ -177,9 +191,8 @@ fn exclusion(entry: &Value) -> Result<Option<&str>> {
 }
 
 fn render_checklist(checklist: &str, forms: &BTreeMap<String, Value>) -> Result<String> {
-    let (header, _) = checklist
-        .split_once(ASSESSMENT_START)
-        .context("checklist has no assessment")?;
+    let (header, _) =
+        split_marker(checklist, ASSESSMENT_START).context("checklist has no assessment")?;
     let mut overall = Counts::default();
     let mut categories: BTreeMap<&str, Counts> = BTreeMap::new();
     for form in forms.values() {
@@ -231,8 +244,8 @@ fn render_checklist(checklist: &str, forms: &BTreeMap<String, Value>) -> Result<
             Ok(format!("    {{{}}}", fields.join(",")))
         })
         .collect::<Result<_>>()?;
-    Ok(format!(
-        "{header}{ASSESSMENT_START}\n    \"implemented\": {},\n    \"partial\": {},\n    \
+    let body = format!(
+        "{ASSESSMENT_START}\n    \"implemented\": {},\n    \"partial\": {},\n    \
          \"unsupported\": {},\n    \"total\": {},\n    \"implementation_percentage\": {},\n    \
          \"categories\": {{\n{}\n    }}\n  }},\n  \"compiler_source_sha256\": \"{}\",{FORMS_START}{}\n  ]\n}}\n",
         overall.0[0],
@@ -243,7 +256,9 @@ fn render_checklist(checklist: &str, forms: &BTreeMap<String, Value>) -> Result<
         category_rows.join(",\n"),
         stela_compiler::SOURCE_SHA256,
         lines.join(",\n"),
-    ))
+    );
+    let previous = &checklist[header.len()..];
+    Ok(format!("{header}{}", preserve_newlines(previous, &body)))
 }
 
 fn render_readme(readme: &str, forms: &BTreeMap<String, Value>) -> Result<String> {
@@ -299,12 +314,16 @@ fn render_readme(readme: &str, forms: &BTreeMap<String, Value>) -> Result<String
     let (before, rest) = readme
         .split_once(README_START)
         .context("README has no progress start marker")?;
-    let (_, after) = rest
+    let (previous, after) = rest
         .split_once(README_END)
         .context("README has no progress end marker")?;
-    Ok(format!(
-        "{before}{README_START}\n{table}{README_END}{after}"
-    ))
+    let template = if previous.contains('\n') {
+        previous
+    } else {
+        readme
+    };
+    let body = preserve_newlines(template, &format!("\n{table}"));
+    Ok(format!("{before}{README_START}{body}{README_END}{after}"))
 }
 
 /// Thousands separators, as in `3,201`.
@@ -344,6 +363,55 @@ mod tests {
     fn checklist_has_every_documented_form() -> Result<()> {
         let checklist = fs::read_to_string(root().join(CHECKLIST))?;
         assert_eq!(checklist_forms(&checklist)?.len(), 4332);
+        Ok(())
+    }
+
+    #[test]
+    fn line_endings_preserve_checklist_parse_and_round_trip() -> Result<()> {
+        let form = serde_json::json!({
+            "id": "test", "instruction_id": "instruction", "mnemonic": "TEST",
+            "category": "test", "source_file": "test.xml", "encoding_mask": "ffffffff",
+            "encoding_value": "00000000", "features": [], "status": "unsupported", "profiles": [],
+        });
+        let seed = format!(
+            "{{\n  \"source\": {{\"sha256\": \"immutable source bytes\"}},\n  \"assessment\": {{}},{FORMS_START}    {}\n  ]\n}}\n",
+            json(&form)?
+        );
+        let forms = checklist_forms(&seed)?;
+        let canonical = render_checklist(&seed, &forms)?;
+        let mut changed_forms = forms.clone();
+        changed_forms.get_mut("test").unwrap()["status"] = "implemented".into();
+        let changed = render_checklist(&canonical, &changed_forms)?;
+        let expected: Value = serde_json::from_str(&changed)?;
+        for newline in ["\n", "\r\n"] {
+            let original = canonical.replace('\n', newline);
+            let parsed = checklist_forms(&original)?;
+            assert_eq!(parsed, forms);
+            assert_eq!(render_checklist(&original, &parsed)?, original);
+            let updated = render_checklist(&original, &changed_forms)?;
+            assert_eq!(updated, changed.replace('\n', newline));
+            assert_eq!(serde_json::from_str::<Value>(&updated)?, expected);
+            let (header, _) = split_marker(&original, ASSESSMENT_START).unwrap();
+            assert!(updated.starts_with(header));
+            assert_eq!(expected["source"]["sha256"], "immutable source bytes");
+            assert!(!updated.replace(newline, "").contains(['\r', '\n']));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn line_endings_preserve_readme_progress_and_surrounding_bytes() -> Result<()> {
+        let forms = checklist_forms(&fs::read_to_string(root().join(CHECKLIST))?)?;
+        for newline in ["\n", "\r\n"] {
+            let before = format!("unchanged prefix{newline}");
+            let after = format!("{newline}unchanged suffix{newline}");
+            let original =
+                format!("{before}{README_START}{newline}old{newline}{README_END}{after}");
+            let rendered = render_readme(&original, &forms)?;
+            assert!(rendered.starts_with(&before) && rendered.ends_with(&after));
+            assert!(!rendered.replace(newline, "").contains(['\r', '\n']));
+            assert_eq!(render_readme(&rendered, &forms)?, rendered);
+        }
         Ok(())
     }
 }
