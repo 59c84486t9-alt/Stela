@@ -5,10 +5,11 @@ use crate::{
     bus::{
         dma::{mapping::DmaDomain, memory::PageSource},
         mmio::owned::{Mapping, Protection},
-        pci::{ConfigSpace, Function, owned::OwnedConfig},
+        pci::{ConfigSpace, Function, owned::OwnedConfig, power::Timer},
     },
 };
 use alloc::sync::Arc;
+mod time;
 
 /// Original exclusively reserved configuration/BAR owners and the real domain
 /// and RAM allocator. Construction alone authorizes no hardware operation.
@@ -44,6 +45,7 @@ pub struct NativeResources {
 /// USBINTR0 or BMEclear alone cannot establish those IRQ/callback facts.
 pub unsafe fn attach(resources: NativeResources) -> Result<Controller, Failure> {
     Controller::initialize(Box::new(Native {
+        elapsed: time::Elapsed::new(Clock::ticks()),
         resources: Some(resources),
     }))
 }
@@ -80,6 +82,7 @@ pub(super) trait Hardware {
 }
 struct Native {
     resources: Option<NativeResources>,
+    elapsed: time::Elapsed,
 }
 impl Native {
     fn r(&mut self) -> &mut NativeResources {
@@ -105,9 +108,12 @@ impl Native {
 impl Hardware for Native {
     fn validate(&mut self) -> Result<(), Error> {
         let r = self.r();
-        if r.pci.class != CLASS || r.clock.ticks_per_microsecond == 0 {
+        if r.pci.class != CLASS {
             return Err(Error::Invalid);
         }
+        // The shared native timer checks duration multiplication before effects
+        // and uses wrapping elapsed TSC ticks, including counter rollover.
+        r.clock.check().map_err(|_| Error::Clock)?;
         if r.registers.attribute() != Ok(CacheAttribute::Uncached)
             || r.registers.protection() != Ok(Protection::ReadWrite)
         {
@@ -180,14 +186,14 @@ impl Hardware for Native {
             .unwrap_or(0)
     }
     fn now_us(&mut self) -> u64 {
-        self.r().clock.now_us()
+        let rate = self.r().clock.ticks_per_microsecond;
+        self.elapsed.sample(Clock::ticks(), rate)
     }
     fn pause(&mut self) {
         core::hint::spin_loop();
     }
     fn delay_us(&mut self, us: u64) -> Result<(), Error> {
-        self.r().clock.delay(us);
-        Ok(())
+        self.r().clock.wait_us(us).map_err(|_| Error::Clock)
     }
     fn allocate(&mut self, limit: u64) -> Result<Arena, Error> {
         let r = self.r();
@@ -208,7 +214,7 @@ impl Hardware for Native {
         Ok(())
     }
     fn drain(&mut self) -> Result<(), Error> {
-        // SAFETY: caller observed ASS0 or full HALT, no periodic engine exists.
+        // SAFETY: caller observed ASS0/PSS0 or full HALT for both engines.
         unsafe {
             self.r().domain.drain_posted_writes()?;
         }
@@ -252,7 +258,7 @@ impl Controller {
             }),
         }
     }
-    fn initialize_inner(&mut self) -> Result<(), Error> {
+    pub(super) fn initialize_inner(&mut self) -> Result<(), Error> {
         self.hw().validate()?;
         let caps = self.read(0)?;
         if caps >> 16 != 0x100 {
@@ -282,13 +288,8 @@ impl Controller {
             (if command & ASE != 0 { ASS } else { 0 }) | (if command & PSE != 0 { PSS } else { 0 }),
             TRANSITION_US,
         )?;
-        self.put(CMD, command & !(RUN | ASE | PSE))?;
-        self.wait(
-            self.operational + STS,
-            HALT | ASS | PSS,
-            HALT,
-            TRANSITION_US,
-        )?;
+        self.put(CMD, command & !(RUN | ASE | PSE | IAAD))?;
+        self.wait(self.operational + STS, HALT | ASS | PSS, HALT, HALT_US)?;
         // Initial BMEclear/reset alone cannot retire old posted writes before
         // the allocator/domain reuses RAM or IOVAs for this fresh arena.
         self.hw().drain()?;
@@ -308,6 +309,7 @@ impl Controller {
             self.put(SEGMENT, (address >> 32) as u32)?;
         }
         self.put(ASYNC, address as u32)?;
+        self.put(PERIODIC, (address + schedule::FRAME_LIST as u64) as u32)?;
         self.put(INTR, 0)?;
         self.put(STS, 0x3f)?; // Only EHCI 1.0 W1C interrupt statuses.
         self.hw().bus_master(true)?;
@@ -324,7 +326,7 @@ impl Controller {
             if value & OWNER != 0 {
                 continue;
             } // Actual companion route, not ours.
-            if value & (PORT_RESET | (1 << 6)) != 0 {
+            if value & (PORT_RESET | PORT_RESUME | PORT_SUSPEND) != 0 {
                 return Err(Error::Unsupported("EHCI inherited root transition"));
             }
             if value & ENABLE != 0 {
@@ -359,7 +361,7 @@ impl Controller {
                     if ownership & (1 << 16) == 0 && ownership & (1 << 24) != 0 {
                         break;
                     }
-                    if self.hw().now_us().saturating_sub(start) >= RESET_US {
+                    if self.hw().now_us().wrapping_sub(start) >= BIOS_HANDOFF_US {
                         return Err(Error::Timeout);
                     }
                     self.hw().pause();
@@ -383,15 +385,10 @@ impl Controller {
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
-        self.state = State::Failed;
+        self.state = State::Retiring;
         self.schedule_off()?;
         self.put(CMD, 0)?;
-        self.wait(
-            self.operational + STS,
-            HALT | ASS | PSS,
-            HALT,
-            TRANSITION_US,
-        )?;
+        self.wait(self.operational + STS, HALT | ASS | PSS, HALT, HALT_US)?;
         self.hw().bus_master(false)?;
         self.hw().drain()?;
         if let Some(arena) = self.arena.as_mut() {

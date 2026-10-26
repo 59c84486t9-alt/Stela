@@ -1,18 +1,22 @@
-//! Polled native EHCI 1.0 high-speed control and bulk backend.
+//! Polled native EHCI 1.0 high-speed control, bulk and interrupt backend.
 //!
 //! This library owns its PCI, uncached BAR and requester-domain DMA resources.
 //! It deliberately has no xHCI identities or native class-driver adapter. One
 //! transfer runs at a time. Every inspection/cancellation stops the complete
-//! asynchronous schedule, observes ASS=0 and drains actual posted DMA writes
+//! active schedule, observes ASS=PSS=0 and drains actual posted DMA writes
 //! before touching its reusable QH/qTD/bounce arena. Uncertain transitions
 //! permanently quarantine the complete attachment, not just the failed TD.
 //!
-//! Full/low-speed traffic is handed to companions; split, periodic, ISO, hub,
-//! suspend/resume and controller-specific quirks remain unsupported. These
+//! Full/low-speed traffic is handed to companions; split, ISO, hub,
+//! controller/PCI sleep and controller-specific quirks remain unsupported. These
 //! boundaries make this an incomplete EHCI-family implementation.
 mod descriptor;
+mod detach;
 mod native;
+mod periodic;
+mod recovery;
 mod schedule;
+mod suspend;
 #[cfg(test)]
 mod tests;
 
@@ -29,11 +33,14 @@ use schedule::{Arena, Pending};
 pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x20];
 pub const MAX_TRANSFER: usize = 65_536;
 const TRANSITION_US: u64 = 100_000;
-const RESET_US: u64 = 1_000_000;
+const HALT_US: u64 = 2_000; // Linux ehci_halt:16*125us.
+const RESET_US: u64 = 250_000; // Linux ehci_reset:250*1000us.
+const BIOS_HANDOFF_US: u64 = 1_000_000;
 const CMD: usize = 0;
 const STS: usize = 4;
 const INTR: usize = 8;
 const SEGMENT: usize = 0x10;
+const PERIODIC: usize = 0x14;
 const ASYNC: usize = 0x18;
 const CONFIG: usize = 0x40;
 const PORT: usize = 0x44;
@@ -41,6 +48,7 @@ const RUN: u32 = 1;
 const RESET: u32 = 2;
 const ASE: u32 = 1 << 5;
 const PSE: u32 = 1 << 4;
+const IAAD: u32 = 1 << 6;
 const HALT: u32 = 1 << 12;
 const ASS: u32 = 1 << 15;
 const PSS: u32 = 1 << 14;
@@ -49,6 +57,8 @@ const CONNECT: u32 = 1;
 const ENABLE: u32 = 1 << 2;
 const OVERCURRENT: u32 = 1 << 4;
 const PORT_RESET: u32 = 1 << 8;
+const PORT_SUSPEND: u32 = 1 << 7;
+const PORT_RESUME: u32 = 1 << 6;
 const POWER: u32 = 1 << 12;
 const OWNER: u32 = 1 << 13;
 const PORT_CHANGES: u32 = (1 << 1) | (1 << 3) | (1 << 5);
@@ -67,6 +77,7 @@ pub enum Error {
     Memory(MemoryError),
     Register,
     Exhausted,
+    Clock,
 }
 impl From<DmaError> for Error {
     fn from(value: DmaError) -> Self {
@@ -94,6 +105,23 @@ pub struct BulkPipe {
     configuration: u64,
     endpoint: u8,
 }
+/// A high-speed interrupt endpoint from an actually acknowledged configuration.
+/// Configuration/root generations permanently invalidate old copies.
+#[derive(Clone)]
+pub struct InterruptPipe {
+    device: DeviceId,
+    configuration: u64,
+    endpoint: u8,
+    interval_microframes: u16,
+}
+impl InterruptPipe {
+    pub fn endpoint_address(&self) -> u8 {
+        self.endpoint
+    }
+    pub fn interval_microframes(&self) -> u16 {
+        self.interval_microframes
+    }
+}
 impl BulkPipe {
     pub fn endpoint_address(&self) -> u8 {
         self.endpoint
@@ -109,6 +137,14 @@ pub struct TransferId {
     device: DeviceId,
     serial: u64,
 }
+/// Private ownership of one actually suspended root. Dropping it retains the
+/// suspended device, USB address and all native resources. It never reenables
+/// the old public device/pipe identities or authorizes platform sleep/reset.
+pub struct SuspendedPort {
+    owner: Rc<()>,
+    generation: u64,
+    port: u8,
+}
 #[derive(Debug, Eq, PartialEq)]
 pub struct Completion {
     pub actual: usize,
@@ -119,18 +155,22 @@ struct Device {
     generation: u64,
     address: u8,
     configuration: u64,
+    configuration_value: u8,
     endpoints: [Option<Endpoint>; 32],
+    suspended: bool,
 }
 #[derive(Clone, Copy)]
 struct Endpoint {
     toggle: bool,
     ping: bool,
     halted: bool,
+    periodic: Option<periodic::Recipe>,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum State {
     Running,
     Failed,
+    Retiring,
     Stopped,
 }
 
@@ -185,7 +225,7 @@ impl Controller {
             .ports
             .get(index)
             .and_then(Option::as_ref)
-            .is_none_or(|device| device.generation != id.generation)
+            .is_none_or(|device| device.generation != id.generation || device.suspended)
         {
             return Err(Error::Stale);
         }
@@ -199,7 +239,15 @@ impl Controller {
         let index = self.identity(id)?; // No hardware access before identity validation.
         let result = self.read(self.port_at(index));
         let value = self.guard(result)?;
-        if value & (CONNECT | ENABLE | OWNER | OVERCURRENT | PORT_RESET | PORT_CHANGES)
+        if value
+            & (CONNECT
+                | ENABLE
+                | OWNER
+                | OVERCURRENT
+                | PORT_RESET
+                | PORT_CHANGES
+                | PORT_SUSPEND
+                | PORT_RESUME)
             != CONNECT | ENABLE
         {
             self.retire_observed_root(index, value)?;
@@ -232,7 +280,9 @@ impl Controller {
     }
     fn health(&mut self) -> Result<(), Error> {
         let status = self.op(STS)?;
-        if status & (FATAL | HALT | PSS) != 0 {
+        if status & (FATAL | HALT) != 0
+            || status & PSS != 0 && !self.pending.as_ref().is_some_and(|p| p.is_periodic())
+        {
             return Err(Error::Device(status));
         }
         Ok(())
@@ -244,7 +294,7 @@ impl Controller {
             if value & mask == wanted {
                 return Ok(());
             }
-            if self.hw().now_us().saturating_sub(start) >= timeout {
+            if self.hw().now_us().wrapping_sub(start) >= timeout {
                 return Err(Error::Timeout);
             }
             self.hw().pause();
@@ -263,23 +313,28 @@ impl Controller {
     fn schedule_off(&mut self) -> Result<(), Error> {
         self.health()?;
         let command = self.op(CMD)?;
-        // Never reverse a pending schedule transition. Periodic is never ours.
-        if command & PSE != 0 {
-            return Err(Error::Unsupported("EHCI periodic schedule"));
+        // Never reverse a pending transition or stop an unowned engine.
+        let engine = if self.pending.as_ref().is_some_and(|p| p.is_periodic()) {
+            PSE
+        } else {
+            ASE
+        };
+        if command & (PSE | ASE) & !engine != 0 {
+            return Err(Error::Unsupported("EHCI unexpected active schedule"));
         }
         self.wait(
             self.operational + STS,
-            ASS,
-            if command & ASE != 0 { ASS } else { 0 },
+            ASS | PSS,
+            (if command & ASE != 0 { ASS } else { 0 }) | (if command & PSE != 0 { PSS } else { 0 }),
             TRANSITION_US,
         )?;
-        self.put(CMD, command & !ASE)?;
-        self.wait(self.operational + STS, ASS, 0, TRANSITION_US)?;
+        self.put(CMD, command & !(ASE | PSE))?;
+        self.wait(self.operational + STS, ASS | PSS, 0, TRANSITION_US)?;
         self.health()?;
-        // ASS0 is engine quiescence, not a remapper payload-write drain.
+        // ASS0/PSS0 is engine quiescence, not a remapper payload-write drain.
         self.hw().drain()?;
         let arena = self.arena.as_ref().ok_or(Error::Invalid)?;
-        // SAFETY: actual ASS0 + actual requester path drain; no periodic engines.
+        // SAFETY: actual ASS0/PSS0 + actual requester path drain.
         unsafe {
             arena.dma.sync_for_cpu(0..arena.bytes())?;
         }
@@ -287,12 +342,19 @@ impl Controller {
     }
     fn schedule_on(&mut self) -> Result<(), Error> {
         self.health()?;
-        self.wait(self.operational + STS, ASS, 0, TRANSITION_US)?;
+        self.wait(self.operational + STS, ASS | PSS, 0, TRANSITION_US)?;
         let arena = self.arena.as_ref().ok_or(Error::Invalid)?;
         arena.dma.sync_for_device(0..arena.bytes())?;
         let command = self.op(CMD)?;
-        self.put(CMD, command | ASE)?;
-        self.wait(self.operational + STS, ASS, ASS, TRANSITION_US)?;
+        let periodic = self.pending.as_ref().ok_or(Error::Invalid)?.is_periodic();
+        if command & (ASE | PSE) != 0 {
+            return Err(Error::Unsupported(
+                "EHCI schedule not disabled before publication",
+            ));
+        }
+        self.put(CMD, command | if periodic { PSE } else { ASE })?;
+        let expected = if periodic { PSS } else { ASS };
+        self.wait(self.operational + STS, ASS | PSS, expected, TRANSITION_US)?;
         self.health()
     }
 
@@ -307,6 +369,14 @@ impl Controller {
             .ok_or(Error::Invalid)?;
         if self.pending.is_some() || self.default_port.is_some_and(|owner| owner != port) {
             return Err(Error::Busy);
+        }
+        if self.ports[index]
+            .as_ref()
+            .is_some_and(|device| device.suspended)
+        {
+            return Err(Error::Unsupported(
+                "EHCI suspended root requires its retained resume owner",
+            ));
         }
         let generation = self
             .next_generation
@@ -337,7 +407,9 @@ impl Controller {
             generation,
             address: 0,
             configuration: 0,
+            configuration_value: 0,
             endpoints: [None; 32],
+            suspended: false,
         });
         self.default_port = Some(port);
         Ok(DeviceId {
@@ -410,8 +482,17 @@ impl Controller {
             }
             let result = self.read(self.port_at(index));
             let value = self.guard(result)?;
-            if value & (CONNECT | ENABLE | OWNER | OVERCURRENT | PORT_RESET | PORT_CHANGES)
-                != CONNECT | ENABLE
+            let suspended = self.ports[index].as_ref().expect("retained").suspended;
+            if value
+                & (CONNECT
+                    | ENABLE
+                    | OWNER
+                    | OVERCURRENT
+                    | PORT_RESET
+                    | PORT_CHANGES
+                    | PORT_SUSPEND
+                    | PORT_RESUME)
+                != CONNECT | ENABLE | if suspended { PORT_SUSPEND } else { 0 }
             {
                 let port = (index + 1) as u8;
                 self.retire_observed_root(index, value)?;
@@ -474,7 +555,16 @@ impl Controller {
         self.control_internal(id, setup, data, 0).map(|_| ())
     }
     fn public_control(setup: [u8; 8]) -> Result<(), Error> {
-        if setup[0] & 0x60 == 0 && matches!(setup[1], 1 | 3 | 5 | 9 | 11) {
+        let kind = setup[0] & 0x60;
+        // This backend owns roots only. Hub-port class requests can reset or
+        // power an untracked downstream address0 owner, bypassing the actual
+        // bus-address exclusion. They require a real topology owner first.
+        if kind == 0x60 || setup[0] & 0x1f > 2 {
+            return Err(Error::Unsupported(
+                "EHCI topology-owned or reserved control recipient",
+            ));
+        }
+        if kind == 0 && (setup[0] & 0x80 == 0 || matches!(setup[1], 1 | 3 | 5 | 9 | 11)) {
             return Err(Error::Unsupported("EHCI state-changing standard request"));
         }
         Ok(())

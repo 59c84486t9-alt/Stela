@@ -3,7 +3,11 @@ use super::*;
 use schedule::endpoint_index;
 const MAX_CONFIGURATION: usize = 4096;
 
-fn endpoints(bytes: &[u8]) -> Result<[bool; 32], Error> {
+struct Configured {
+    bulk: [bool; 32],
+    periodic: [Option<periodic::Recipe>; 32],
+}
+fn endpoints(bytes: &[u8]) -> Result<Configured, Error> {
     if bytes.len() < 9
         || bytes[0] != 9
         || bytes[1] != 2
@@ -15,6 +19,7 @@ fn endpoints(bytes: &[u8]) -> Result<[bool; 32], Error> {
         return Err(Error::Invalid);
     }
     let mut endpoints = [false; 32];
+    let mut periodic = [None; 32];
     let mut occupied = [false; 32];
     let mut alternates = [false; 256];
     let mut interfaces = [false; 256];
@@ -80,6 +85,11 @@ fn endpoints(bytes: &[u8]) -> Result<[bool; 32], Error> {
                             return Err(Error::Invalid);
                         }
                         endpoints[index] = true;
+                    } else if kind == 3 {
+                        periodic[address] = Some(periodic::Recipe::new(
+                            u16::from_le_bytes([record[4], record[5]]),
+                            record[6],
+                        )?);
                     }
                 }
             }
@@ -97,9 +107,72 @@ fn endpoints(bytes: &[u8]) -> Result<[bool; 32], Error> {
     {
         return Err(Error::Invalid);
     }
-    Ok(endpoints)
+    Ok(Configured {
+        bulk: endpoints,
+        periodic,
+    })
 }
 impl Controller {
+    /// Return an addressed root to the unconfigured state through actual EP0.
+    /// No active transfer is cancelled or replayed. Every old endpoint handle
+    /// retires before SET_CONFIGURATION(0) can have an ambiguous bus effect;
+    /// successful status and GET_CONFIGURATION(0) precede success. The USB
+    /// address/root and all native DMA resources remain owned for reconfigure.
+    pub fn unconfigure(&mut self, id: &DeviceId) -> Result<(), Error> {
+        let index = self.identity(id)?;
+        if self.pending.is_some() {
+            return Err(Error::Busy);
+        }
+        let device = self.ports[index].as_ref().expect("validated");
+        if device.address == 0 {
+            return Err(Error::Invalid);
+        }
+        let configuration = device
+            .configuration
+            .checked_add(1)
+            .ok_or(Error::Exhausted)?;
+        self.live(id)?;
+        let stopped = self.schedule_off();
+        self.guard(stopped)?;
+        let device = self.ports[index].as_mut().expect("retained");
+        device.configuration = configuration;
+        device.configuration_value = 0;
+        device.endpoints = [None; 32];
+        self.control_internal(id, [0, 9, 0, 0, 0, 0, 0, 0], &[], 0)?;
+        let actual = self.control_internal(id, [0x80, 8, 0, 0, 0, 0, 1, 0], &[], 1)?;
+        if actual != [0] {
+            return self.fail(Error::Invalid);
+        }
+        Ok(())
+    }
+    /// Reopen exact bulk handles from the current acknowledged configuration,
+    /// including after an actual root resume minted a fresh device generation.
+    /// This sends no SET_CONFIGURATION and preserves the retained USB toggle.
+    pub fn bulk_pipes(&self, id: &DeviceId) -> Result<Vec<BulkPipe>, Error> {
+        let index = self.identity(id)?;
+        let device = self.ports[index].as_ref().expect("validated");
+        let mut pipes = Vec::new();
+        pipes
+            .try_reserve_exact(
+                device
+                    .endpoints
+                    .iter()
+                    .flatten()
+                    .filter(|ep| ep.periodic.is_none())
+                    .count(),
+            )
+            .map_err(|_| Error::Exhausted)?;
+        for (endpoint, state) in device.endpoints.iter().enumerate() {
+            if state.is_some_and(|ep| ep.periodic.is_none()) {
+                pipes.push(BulkPipe {
+                    device: id.clone(),
+                    configuration: device.configuration,
+                    endpoint: (endpoint & 15) as u8 | if endpoint >= 16 { 0x80 } else { 0 },
+                });
+            }
+        }
+        Ok(pipes)
+    }
     /// Fetch one real configuration by descriptor index, validate its default
     /// alternate interfaces and HS bulk endpoints, then select its actual value
     /// over USB. Successful configuration invalidates every previous BulkPipe.
@@ -139,9 +212,9 @@ impl Controller {
         let admitted = endpoints(&description)?;
         let mut pipes = Vec::new();
         pipes
-            .try_reserve_exact(admitted.iter().filter(|value| **value).count())
+            .try_reserve_exact(admitted.bulk.iter().filter(|value| **value).count())
             .map_err(|_| Error::Exhausted)?;
-        for (endpoint, admitted) in admitted.iter().copied().enumerate() {
+        for (endpoint, admitted) in admitted.bulk.iter().copied().enumerate() {
             if admitted {
                 let endpoint = (endpoint & 15) as u8 | if endpoint >= 16 { 0x80 } else { 0 };
                 pipes.push(BulkPipe {
@@ -154,15 +227,25 @@ impl Controller {
         // Old pipe admission is revoked before a state-changing request that
         // might complete on the bus despite a later host-side error.
         self.ports[index].as_mut().expect("retained").configuration = configuration;
+        self.ports[index]
+            .as_mut()
+            .expect("retained")
+            .configuration_value = 0;
         self.ports[index].as_mut().expect("retained").endpoints = [None; 32];
         self.control_internal(id, [0, 9, description[5], 0, 0, 0, 0, 0], &[], 0)?;
-        for pipe in &pipes {
-            self.ports[index].as_mut().expect("live").endpoints[endpoint_index(pipe.endpoint)] =
-                Some(Endpoint {
+        self.ports[index]
+            .as_mut()
+            .expect("live")
+            .configuration_value = description[5];
+        for endpoint in 0..32 {
+            if admitted.bulk[endpoint] || admitted.periodic[endpoint].is_some() {
+                self.ports[index].as_mut().expect("live").endpoints[endpoint] = Some(Endpoint {
                     toggle: false,
                     ping: false,
                     halted: false,
+                    periodic: admitted.periodic[endpoint],
                 });
+            }
         }
         Ok(pipes)
     }

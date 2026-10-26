@@ -2,7 +2,8 @@
 //! All CPU reads/writes below require actual schedule-stop + DMA-write drain.
 use super::*;
 
-pub(super) const ARENA_BYTES: usize = 4096 + MAX_TRANSFER;
+pub(super) const FRAME_LIST: usize = 4096 + MAX_TRANSFER;
+pub(super) const ARENA_BYTES: usize = FRAME_LIST + 4096;
 const QH: usize = 0;
 const QTD_BASE: usize = 128;
 const QTD_BYTES: usize = 64;
@@ -187,20 +188,42 @@ impl Arena {
         control: bool,
         toggle: bool,
         ping: bool,
+        periodic: Option<periodic::Recipe>,
     ) -> Result<(), Error> {
-        self.write(QH, self.address as u32 | 2)?; // Self-linked sole reclamation head.
-        let packet = if control { 64 } else { 512 };
+        self.write(
+            QH,
+            if periodic.is_some() {
+                TERMINATE
+            } else {
+                self.address as u32 | 2
+            },
+        )?;
+        let packet = periodic.map_or(if control { 64 } else { 512 }, |recipe| {
+            u32::from(recipe.packet)
+        });
         self.write(
             4,
             u32::from(address)
                 | (u32::from(endpoint & 15) << 8)
                 | (2 << 12)
                 | if control { 1 << 14 } else { 0 }
-                | (1 << 15)
+                | if periodic.is_none() { 1 << 15 } else { 0 }
                 | (packet << 16)
-                | (4 << 28),
+                | if periodic.is_none() { 4 << 28 } else { 0 },
         )?;
-        self.write(8, 1 << 30)?; // MULT=1; no split/periodic masks/TT.
+        self.write(8, periodic.map_or(1 << 30, |recipe| recipe.info()))?;
+        if let Some(recipe) = periodic {
+            for frame in 0..1024 {
+                self.write(
+                    FRAME_LIST + frame * 4,
+                    if frame % recipe.frames() == 0 {
+                        self.address as u32 | 2
+                    } else {
+                        TERMINATE
+                    },
+                )?;
+            }
+        }
         self.write(QH_NEXT, self.qtd_address(0))?;
         self.write(QH_ALT, TERMINATE)?;
         self.write(
@@ -221,8 +244,12 @@ pub(super) struct Pending {
     data_count: usize,
     started: u64,
     timeout: u64,
+    periodic: Option<periodic::Recipe>,
 }
 impl Pending {
+    pub(super) fn is_periodic(&self) -> bool {
+        self.periodic.is_some()
+    }
     pub(super) fn root_port(&self) -> u8 {
         self.device.port
     }
@@ -266,7 +293,7 @@ impl Pending {
 }
 
 impl Controller {
-    fn start(
+    pub(super) fn start(
         &mut self,
         id: &DeviceId,
         endpoint: Option<u8>,
@@ -290,14 +317,19 @@ impl Controller {
         let serial = self.next_transfer.checked_add(1).ok_or(Error::Exhausted)?;
         let device = self.ports[index].as_ref().expect("live");
         let address = device.address;
-        let (toggle, ping) = if let Some(endpoint) = endpoint {
+        let (toggle, ping, periodic) = if let Some(endpoint) = endpoint {
             let ep = device.endpoints[endpoint_index(endpoint)].ok_or(Error::Stale)?;
             if ep.halted {
                 return Err(Error::Device(HALTED));
             }
-            (ep.toggle, ep.ping)
+            if ep.periodic.is_some_and(|recipe| bytes > recipe.payload()) {
+                return Err(Error::Unsupported(
+                    "EHCI interrupt exceeds one service payload",
+                ));
+            }
+            (ep.toggle, ep.ping, ep.periodic)
         } else {
-            (false, false)
+            (false, false, None)
         };
         let result = self.schedule_off();
         self.guard(result)?;
@@ -324,11 +356,19 @@ impl Controller {
             data_count: chunks,
             started: self.hw().now_us(),
             timeout,
+            periodic,
         };
         let build = (|| {
             let arena = self.arena.as_mut().ok_or(Error::Invalid)?;
             arena.clear()?;
-            arena.qh(address, endpoint.unwrap_or(0), control, toggle, ping)?;
+            arena.qh(
+                address,
+                endpoint.unwrap_or(0),
+                control,
+                toggle,
+                ping,
+                periodic,
+            )?;
             if let Some(setup) = setup {
                 arena.copy_in(SETUP_BYTES, &setup)?;
                 pending.lengths[0] = 8;
@@ -429,7 +469,7 @@ impl Controller {
         Ok(())
     }
     /// Poll the exact retained transfer. Each poll returns DMA ownership only
-    /// after ASS0 and requester drain, and resumes unchanged partial overlays.
+    /// after ASS0/PSS0 and requester drain, and resumes unchanged partial overlays.
     pub fn poll(&mut self, ticket: &TransferId) -> Result<Option<Completion>, Error> {
         self.ticket(ticket)?;
         self.live(&ticket.device)?;
@@ -460,7 +500,7 @@ impl Controller {
             Ok(None) => {
                 let pending = self.pending.as_ref().expect("retained");
                 let (started, timeout) = (pending.started, pending.timeout);
-                if self.hw().now_us().saturating_sub(started) >= timeout {
+                if self.hw().now_us().wrapping_sub(started) >= timeout {
                     return self.fail(Error::Timeout);
                 }
                 let result = self.schedule_on();
@@ -521,7 +561,8 @@ impl Controller {
         let index = self.identity(&pipe.device)?;
         let device = self.ports[index].as_ref().expect("validated");
         if device.configuration != pipe.configuration
-            || device.endpoints[endpoint_index(pipe.endpoint)].is_none()
+            || device.endpoints[endpoint_index(pipe.endpoint)]
+                .is_none_or(|ep| ep.periodic.is_some())
         {
             return Err(Error::Stale);
         }
@@ -568,6 +609,7 @@ impl Controller {
                 toggle: false,
                 ping: false,
                 halted: false,
+                periodic: None,
             });
         Ok(())
     }

@@ -11,6 +11,18 @@ use alloc::{sync::Arc, vec};
 use core::{alloc::Layout, ops::Range, ptr::NonNull};
 use std::sync::Mutex;
 extern crate std;
+#[path = "admission_tests.rs"]
+mod admission_tests;
+#[path = "configuration_tests.rs"]
+mod configuration_tests;
+#[path = "detach_tests.rs"]
+mod detach_tests;
+#[path = "periodic_tests.rs"]
+mod periodic_tests;
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
+#[path = "suspend_tests.rs"]
+mod suspend_tests;
 
 const OP: usize = 0x20;
 const QTD: usize = 128;
@@ -59,6 +71,9 @@ struct Shared {
     request: Option<[u8; 8]>,
     request_root: Option<usize>,
     addresses: [Option<u8>; 15],
+    configurations: [u8; 15],
+    configuration_ack: bool,
+    configuration_reply: Option<Vec<u8>>,
     response: Vec<u8>,
     description: Vec<u8>,
     hold_status: Option<u8>,
@@ -72,6 +87,22 @@ struct Shared {
     reset_disconnect: bool,
     high_speed: bool,
     disable_ack: bool,
+    periodic_auto: bool,
+    periodic_services: Vec<u32>,
+    device_status: [u16; 15],
+    wake_clear_ack: bool,
+    suspend_ack: bool,
+    resume_start_ack: bool,
+    resume_clear_ack: bool,
+    resume_started: [Option<u64>; 15],
+    halt_ack: bool,
+    bme_clear_ack: bool,
+    unmap_fail: bool,
+    allocate_fail: bool,
+    halt_delay_us: u64,
+    halt_issued: Option<u64>,
+    reset_delay_us: u64,
+    reset_issued: Option<u64>,
 }
 impl Shared {
     fn new() -> Self {
@@ -113,6 +144,9 @@ impl Shared {
             request: None,
             request_root: None,
             addresses: [None; 15],
+            configurations: [0; 15],
+            configuration_ack: true,
+            configuration_reply: None,
             response: Vec::new(),
             description: DESCRIPTION.to_vec(),
             hold_status: None,
@@ -126,6 +160,22 @@ impl Shared {
             reset_disconnect: false,
             high_speed: true,
             disable_ack: true,
+            periodic_auto: true,
+            periodic_services: Vec::new(),
+            device_status: [0; 15],
+            wake_clear_ack: true,
+            suspend_ack: true,
+            resume_start_ack: true,
+            resume_clear_ack: true,
+            resume_started: [None; 15],
+            halt_ack: true,
+            bme_clear_ack: true,
+            unmap_fail: false,
+            allocate_fail: false,
+            halt_delay_us: 0,
+            halt_issued: None,
+            reset_delay_us: 0,
+            reset_issued: None,
         }
     }
     fn u32(&self, offset: usize) -> u32 {
@@ -144,17 +194,30 @@ impl Shared {
         }
         assert!(self.bme && self.mapped);
         assert_eq!(self.words[(OP + SEGMENT) / 4], (self.iova >> 32) as u32);
-        assert_eq!(self.words[(OP + ASYNC) / 4], self.iova as u32);
-        assert_eq!(self.u32(0), self.iova as u32 | 2);
+        let periodic = self.words[(OP + CMD) / 4] & PSE != 0;
+        if periodic {
+            assert_eq!(self.words[(OP + CMD) / 4] & ASE, 0);
+            assert_eq!(self.u32(0), 1); // A periodic QH must terminate, never reclaim.
+        } else {
+            assert_eq!(self.words[(OP + ASYNC) / 4], self.iova as u32);
+            assert_eq!(self.u32(0), self.iova as u32 | 2);
+        }
         let info = self.u32(4);
-        assert_ne!(info & (1 << 15), 0);
+        assert_eq!(info & (1 << 15) != 0, !periodic);
         assert_eq!(info & (3 << 12), 2 << 12);
-        assert_eq!(self.u32(8), 1 << 30);
+        if periodic {
+            assert_eq!(info >> 28, 0); // Interrupt NAK reload is zero.
+            assert_eq!(self.u32(8) & 0x3fff_ff00, 0); // No C-mask or TT.
+            assert!((1..=3).contains(&(self.u32(8) >> 30)));
+        } else {
+            assert_eq!(self.u32(8), 1 << 30);
+        }
         let address = (info & 127) as u8;
         let physical: Vec<usize> = (0..15)
             .filter(|root| {
                 self.addresses[*root] == Some(address)
-                    && self.words[(OP + PORT) / 4 + root] & (CONNECT | ENABLE | OWNER | PORT_RESET)
+                    && self.words[(OP + PORT) / 4 + root]
+                        & (CONNECT | ENABLE | OWNER | PORT_RESET | PORT_SUSPEND | PORT_RESUME)
                         == CONNECT | ENABLE
             })
             .collect();
@@ -165,7 +228,16 @@ impl Shared {
         );
         let root = physical[0];
         let control = info & (1 << 14) != 0;
-        assert_eq!((info >> 16) & 0x7ff, if control { 64 } else { 512 });
+        if !control {
+            assert_ne!(
+                self.configurations[root], 0,
+                "unconfigured physical endpoint"
+            );
+        }
+        let packet = ((info >> 16) & 0x7ff) as usize;
+        if !periodic {
+            assert_eq!(packet, if control { 64 } else { 512 });
+        }
         let mut resume = self.u32(24) & ACTIVE != 0;
         let mut next = if resume { self.u32(12) } else { self.u32(16) };
         let mut visited = 0;
@@ -189,6 +261,9 @@ impl Shared {
             assert_ne!(initial & ACTIVE, 0);
             let pid = (initial >> 8) & 3;
             let requested = ((initial >> 16) & 0x7fff) as usize;
+            if periodic {
+                assert!(requested <= packet * (self.u32(8) >> 30) as usize);
+            }
             let pointer = if requested == 0 {
                 0
             } else {
@@ -237,7 +312,7 @@ impl Shared {
                     actual = 0;
                 }
                 if self.mode == Mode::Partial {
-                    actual = requested.min(512);
+                    actual = requested.min(packet);
                 }
                 if pid == 1 {
                     actual = actual.min(
@@ -256,7 +331,13 @@ impl Shared {
                 self.request_root = Some(root);
                 self.setup_trace.push(setup);
                 self.offset = 0;
-                self.response = if setup[1] == 6 && setup[3] == 2 {
+                self.response = if setup == [0x80, 0, 0, 0, 0, 0, 2, 0] {
+                    self.device_status[root].to_le_bytes().to_vec()
+                } else if setup == [0x80, 8, 0, 0, 0, 0, 1, 0] {
+                    self.configuration_reply
+                        .clone()
+                        .unwrap_or_else(|| vec![self.configurations[root]])
+                } else if setup[1] == 6 && setup[3] == 2 {
                     self.description.clone()
                 } else {
                     vec![0x5a; usize::from(u16::from_le_bytes([setup[6], setup[7]]))]
@@ -283,6 +364,12 @@ impl Shared {
                 if setup[1] == 5 {
                     self.addresses[self.request_root.unwrap()] = Some(setup[2]);
                 }
+                if setup[0] == 0 && setup[1] == 9 && self.configuration_ack {
+                    self.configurations[self.request_root.unwrap()] = setup[2];
+                }
+                if setup == [0, 1, 1, 0, 0, 0, 0, 0] && self.wake_clear_ack {
+                    self.device_status[root] &= !2;
+                }
             } else if pid == 1 {
                 if control {
                     actual = actual.min(self.response.len().saturating_sub(self.offset));
@@ -305,13 +392,13 @@ impl Shared {
                 let packets = if error != 0 {
                     0
                 } else if self.mode == Mode::Partial {
-                    actual.div_ceil(512)
+                    actual.div_ceil(packet)
                 } else if requested == 0 {
                     1
                 } else if actual == requested {
-                    actual.div_ceil(512)
+                    actual.div_ceil(packet)
                 } else {
-                    actual / 512 + 1
+                    actual / packet + 1
                 };
                 if packets % 2 != 0 {
                     bulk_toggle = !bulk_toggle;
@@ -345,6 +432,31 @@ impl Shared {
             if error != 0 || token & ACTIVE != 0 {
                 break;
             }
+        }
+    }
+    fn advance_periodic(&mut self, microframes: u32) {
+        for _ in 0..microframes {
+            self.words[(OP + 0x0c) / 4] = (self.words[(OP + 0x0c) / 4] + 1) & 0x3fff;
+            if self.words[(OP + CMD) / 4] & PSE == 0 || self.words[(OP + STS) / 4] & PSS == 0 {
+                continue;
+            }
+            let tick = self.words[(OP + 0x0c) / 4];
+            let list = self.dma_offset(self.words[(OP + PERIODIC) / 4], (self.iova >> 32) as u32);
+            assert!(list.is_multiple_of(4096));
+            let link = self.u32(list + ((tick >> 3) as usize & 1023) * 4);
+            if link & 1 != 0 {
+                continue;
+            }
+            assert_eq!(link & 31, 2);
+            assert_eq!(self.dma_offset(link & !31, (self.iova >> 32) as u32), 0);
+            if self.u32(8) & (1 << (tick & 7)) == 0 {
+                continue;
+            }
+            if self.u32(24) & ACTIVE == 0 && self.u32(16) & 1 != 0 {
+                continue;
+            }
+            self.periodic_services.push(tick);
+            self.execute();
         }
     }
 }
@@ -392,6 +504,9 @@ impl PageSource for Source {
         attribute: CacheAttribute,
     ) -> Result<PinnedPages, MemoryError> {
         assert_eq!(attribute, CacheAttribute::WriteBack);
+        if self.0.lock().unwrap().allocate_fail {
+            return Err(MemoryError::OutOfMemory);
+        }
         let bytes = bytes.next_multiple_of(4096);
         let layout = Layout::from_size_align(bytes, alignment).unwrap();
         // SAFETY: initialized private aligned test RAM, retained by Backing.
@@ -413,7 +528,7 @@ impl PageSource for Source {
 }
 struct Domain(Arc<Mutex<Shared>>);
 // SAFETY: this test-only domain maps the exact retained pins to a disjoint
-// modeled IOVA/cache, never native requester authority. Syncs assert ASS0 and
+// modeled IOVA/cache, never native requester authority. Syncs assert ASS0/PSS0 and
 // drainage; the peer alone writes the simulated device image.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
@@ -450,6 +565,9 @@ unsafe impl DmaDomain for Domain {
         assert_eq!(mapping.address, m.iova);
         assert_eq!(m.words[(OP + STS) / 4] & (ASS | PSS), 0);
         assert!(m.drained);
+        if m.unmap_fail {
+            return Err(DmaError::InvalidationFailed);
+        }
         m.mapped = false;
         m.cpu = None;
         m.unmapped += 1;
@@ -463,7 +581,7 @@ unsafe impl DmaDomain for Domain {
     ) -> Result<(), DmaError> {
         let mut m = self.0.lock().unwrap();
         assert_eq!(mapping.address, m.iova);
-        assert_eq!(m.words[(OP + STS) / 4] & ASS, 0);
+        assert_eq!(m.words[(OP + STS) / 4] & (ASS | PSS), 0);
         if m.device_sync_fail {
             return Err(DmaError::VisibilityFailed);
         }
@@ -488,7 +606,7 @@ unsafe impl DmaDomain for Domain {
     ) -> Result<(), DmaError> {
         let mut m = self.0.lock().unwrap();
         assert_eq!(mapping.address, m.iova);
-        assert_eq!(m.words[(OP + STS) / 4] & ASS, 0);
+        assert_eq!(m.words[(OP + STS) / 4] & (ASS | PSS), 0);
         assert!(m.drained);
         if m.cpu_sync_fail {
             return Err(DmaError::VisibilityFailed);
@@ -524,11 +642,32 @@ unsafe impl DmaDomain for Domain {
 struct Access(Arc<Mutex<Shared>>);
 impl Hardware for Access {
     fn validate(&mut self) -> Result<(), Error> {
+        let m = self.0.lock().unwrap();
+        assert!(
+            !m.bme && !m.mapped,
+            "fresh initialization preceded original requester containment"
+        );
         Ok(())
     }
     fn read32(&mut self, offset: usize) -> Result<u32, Error> {
         let mut m = self.0.lock().unwrap();
         m.io += 1;
+        if m.halt_ack
+            && m.halt_issued
+                .is_some_and(|issued| m.now.wrapping_sub(issued) >= m.halt_delay_us)
+        {
+            m.words[(OP + STS) / 4] |= HALT;
+            m.halt_issued = None;
+        }
+        if m.reset_ack
+            && m.reset_issued
+                .is_some_and(|issued| m.now.wrapping_sub(issued) >= m.reset_delay_us)
+            && m.words[(OP + CMD) / 4] & RESET != 0
+        {
+            m.words[(OP + CMD) / 4] = 0;
+            m.words[(OP + STS) / 4] = HALT;
+            m.reset_issued = None;
+        }
         Ok(m.words[offset / 4])
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
@@ -538,16 +677,23 @@ impl Hardware for Access {
         if offset == OP + CMD {
             m.words[offset / 4] = value;
             if value & RESET != 0 {
-                if m.reset_ack {
+                m.reset_issued = Some(m.now);
+                if m.reset_ack && m.reset_delay_us == 0 {
                     m.words[offset / 4] = 0;
                     m.words[(OP + STS) / 4] = HALT;
+                    m.reset_issued = None;
                 }
                 return Ok(());
             }
-            if value & RUN == 0 {
-                m.words[(OP + STS) / 4] |= HALT;
+            if value & RUN == 0 && m.halt_ack {
+                if m.halt_delay_us != 0 && m.words[(OP + STS) / 4] & HALT == 0 {
+                    m.halt_issued = Some(m.now);
+                } else {
+                    m.words[(OP + STS) / 4] |= HALT;
+                }
             } else {
                 m.words[(OP + STS) / 4] &= !HALT;
+                m.halt_issued = None;
             }
             if value & ASE != 0 {
                 if m.start_ack {
@@ -557,15 +703,61 @@ impl Hardware for Access {
             } else if m.stop_ack {
                 m.words[(OP + STS) / 4] &= !ASS;
             }
+            if value & PSE != 0 {
+                if m.start_ack {
+                    m.words[(OP + STS) / 4] |= PSS;
+                    if m.periodic_auto {
+                        // Search a whole retained list, honoring its actual
+                        // frame links/S-mask rather than calling a fake IRQ.
+                        let before = m.periodic_services.len();
+                        for _ in 0..8192 {
+                            m.advance_periodic(1);
+                            if m.periodic_services.len() != before {
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else if m.stop_ack {
+                m.words[(OP + STS) / 4] &= !PSS;
+            }
         } else if offset == OP + STS {
             m.words[offset / 4] &= !(value & 0x3f);
         } else if (OP + PORT..OP + PORT + 60).contains(&offset) {
             let old = m.words[offset / 4];
+            let root = (offset - OP - PORT) / 4;
             let mut next = (value & !(PORT_CHANGES | CONNECT | ENABLE))
                 | (old & (CONNECT | ENABLE))
                 | (old & PORT_CHANGES & !value);
             if value & ENABLE == 0 && (old & ENABLE == 0 || m.disable_ack) {
                 next &= !ENABLE;
+            }
+            // Suspend is hardware-cleared only after acknowledged resume,
+            // not by writing zero to PORTSC. Actual source timeout is 40ms,
+            // despite ehci-hub.c's stale "20 msec" comment.
+            next = next & !PORT_SUSPEND | old & PORT_SUSPEND;
+            if value & PORT_SUSPEND != 0 && old & PORT_SUSPEND == 0 {
+                assert_eq!(m.words[(OP + STS) / 4] & (ASS | PSS), 0);
+                assert!(m.drained, "link suspend preceded actual requester drain");
+                if m.suspend_ack {
+                    next |= PORT_SUSPEND;
+                }
+            }
+            if value & PORT_RESUME != 0 && old & PORT_RESUME == 0 {
+                assert_ne!(old & PORT_SUSPEND, 0);
+                if m.resume_start_ack {
+                    m.resume_started[root] = Some(m.now);
+                } else {
+                    next &= !PORT_RESUME;
+                }
+            }
+            if value & PORT_RESUME == 0 && old & PORT_RESUME != 0 {
+                assert!(m.now.saturating_sub(m.resume_started[root].unwrap()) >= 40_000);
+                if m.resume_clear_ack {
+                    next &= !(PORT_RESUME | PORT_SUSPEND);
+                } else {
+                    next |= PORT_RESUME | PORT_SUSPEND;
+                }
             }
             if old & PORT_RESET != 0 && value & PORT_RESET == 0 {
                 if m.reset_disconnect {
@@ -574,6 +766,7 @@ impl Hardware for Access {
                     if m.high_speed {
                         next |= ENABLE | 1 << 3;
                         m.addresses[(offset - OP - PORT) / 4] = Some(0);
+                        m.configurations[root] = 0;
                     }
                 }
             }
@@ -635,7 +828,11 @@ impl Hardware for Access {
         Arena::new(cpu, dma)
     }
     fn bus_master(&mut self, enabled: bool) -> Result<(), Error> {
-        self.0.lock().unwrap().bme = enabled;
+        let mut m = self.0.lock().unwrap();
+        if !enabled && !m.bme_clear_ack {
+            return Err(Error::Register);
+        }
+        m.bme = enabled;
         Ok(())
     }
     fn drain(&mut self) -> Result<(), Error> {
