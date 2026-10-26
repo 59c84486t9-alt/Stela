@@ -50,6 +50,7 @@
 mod bundle;
 mod doctor;
 mod ecid;
+mod fdr;
 mod firmware;
 pub(crate) mod host;
 mod installed;

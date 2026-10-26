@@ -295,7 +295,11 @@ pub(super) fn update_stela(
     };
     let mut text = String::new();
     writeln!(text, "Stela update on {}:", esp.display())?;
+    text.push_str(&super::fdr::prepare(&record, true)?);
     if from == to && record.pending.is_none() && from_generation == to_generation {
+        if !dry_run {
+            super::fdr::prepare(&record, false)?;
+        }
         writeln!(text, "  stela.efi      version {to} is already installed")?;
         if let Some(store) = &record.translations
             && (!store.config_intact() || !store.spare_ready())
@@ -437,6 +441,7 @@ pub(super) fn update_stela(
     if let Some(store) = &record.translations {
         store.publish()?;
     }
+    super::fdr::prepare(&record, false)?;
     activate_stela(&esp, &to)?;
     publish(&mut record)?;
     record.stela_version = Some(to.clone());

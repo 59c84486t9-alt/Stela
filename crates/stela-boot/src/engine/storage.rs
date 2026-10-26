@@ -130,6 +130,8 @@ pub struct Partitions<'a> {
     pub store: Option<Guid>,
     /// The USB's boot log, by its GUID; left out when it cannot open.
     pub log: Option<Guid>,
+    /// Required host-owned durable FDR file volume, when explicitly staged.
+    pub fdr: Option<Guid>,
 }
 
 /// Open the explicitly selected partitions while the loader's identity root
@@ -153,6 +155,7 @@ pub unsafe fn open(
         preboot,
         store,
         log,
+        fdr,
     } = *partitions;
     if let Some(serial) = usb_disks
         .iter()
@@ -224,6 +227,7 @@ pub unsafe fn open(
         .map(|target| Named::Disk((*target).clone()))
         .chain(medium.map(Named::Unique))
         .chain(preboot.map(|target| Named::Disk(target.clone())))
+        .chain(fdr.map(Named::Host))
         .collect();
     let required = named.len();
     let mut optional: Vec<(Named, Optional)> = store
@@ -280,6 +284,7 @@ pub unsafe fn open(
             Optional::Log => log_partition = partition,
         }
     }
+    let fdr = fdr.map(|_| service(opened.pop().expect("FDR storage"), " (FDR storage)"));
     let preboot = preboot.map(|_| {
         service(
             opened.pop().expect("the installed system"),
@@ -339,6 +344,7 @@ pub unsafe fn open(
         preboot,
         store: store_partition,
         log: log_partition,
+        fdr,
         inputs,
         links,
         usb_disks,
@@ -374,6 +380,7 @@ pub struct Opened {
     pub store: Option<Box<dyn BlockDevice>>,
     /// The partition holding the USB's boot log, found by its GUID.
     pub log: Option<Box<dyn BlockDevice>>,
+    pub fdr: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
     /// Whole disks for the guest's USB mass storage, in option order.

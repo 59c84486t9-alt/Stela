@@ -10,6 +10,7 @@
 pub(crate) mod bundle;
 mod console_lines;
 mod display;
+pub(crate) mod fdr;
 pub(crate) mod host;
 mod input;
 pub(crate) mod install;
@@ -1223,6 +1224,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .find(|file| file.name() == translations::FILE)
         .and_then(|file| translations::install(bundle::contents(file)))
         .filter(|_| handoff.storage.present);
+    let fdr_placement = restore::inventory_file(handoff, stela_runtime::restore::fdr::FILE)
+        .map(fdr::Placement::parse)
+        .transpose()
+        .unwrap_or_else(|error| output::fatal(&error));
+    let fdr_partition = fdr_placement.as_ref().map(|placement| placement.partition);
+    let mut fdr_device = None;
     // `--nor` naming the `--storage` partition keeps the machine state in
     // that partition's tail (`pc::machine_state`): one device, split below.
     let state_in_storage = options.nor.is_some() && options.nor == options.storage;
@@ -1269,6 +1276,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         && !options.external_disks
         && !options.guest_network
         && translation_store.is_none()
+        && fdr_partition.is_none()
     {
         (
             Vec::new(),
@@ -1298,6 +1306,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             preboot,
             store,
             log,
+            fdr,
             inputs,
             mut links,
             usb_disks,
@@ -1311,6 +1320,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                     preboot: options.preboot.as_ref(),
                     store: translation_store,
                     log: handoff.log_partition.map(Guid),
+                    fdr: fdr_partition,
                 },
                 &options.usb_storage,
                 options.external_disks.then(|| {
@@ -1344,6 +1354,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         if let Some(store) = store {
             translations::set_partition(store);
         }
+        fdr_device = fdr;
         // The guest's adapter is its own: the mount's client keeps the
         // first one. Without one the Mac boots with no network, which
         // is reported once.
@@ -2136,7 +2147,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 true => Verify::OnRead,
                 false => Verify::Full,
             },
-            signer,
+            restore::Services {
+                signer,
+                fdr_storage: fdr_device.take(),
+            },
         )
         .unwrap_or_else(|error| {
             output::arguments(format_args!("restore preparation refusal: {error}\n"));

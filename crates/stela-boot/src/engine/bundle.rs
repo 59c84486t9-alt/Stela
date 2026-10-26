@@ -263,11 +263,36 @@ pub fn with_inventory(
             match root.open(&diagnostic_name, FileMode::Read, FileAttribute::empty()) {
                 Ok(file) => {
                     drop(file);
-                    Some(read_bounded(
+                    let seed = read_bounded(
                         &mut root,
                         &diagnostic_path,
                         stela_runtime::restore::fdr::MAX_BYTES as u64,
-                    )?)
+                    )?;
+                    let state_path = format!("{directory}\\{}", super::fdr::STATE_FILE);
+                    let image = read_bounded(
+                        &mut root,
+                        &state_path,
+                        stela_runtime::pc::fdr_store::FILE_BYTES as u64,
+                    )
+                    .map_err(|_| "FDR diagnostic needs its preallocated fdr-state.bin")?;
+                    let partition = super::translations::partition(handle)
+                        .ok_or("FDR storage volume needs a GPT partition identity")?;
+                    // SAFETY: both regions were just read into retained loader pages.
+                    let bytes = |region: Region| unsafe {
+                        core::slice::from_raw_parts(
+                            region.physical as *const u8,
+                            region.bytes as usize,
+                        )
+                    };
+                    let path = state_path.trim_start_matches('\\').replace('\\', "/");
+                    Some(
+                        super::fdr::prepare(partition, &path, bytes(seed), bytes(image)).map_err(
+                            |error| {
+                                output::arguments(format_args!("FDR state refusal: {error}\n"));
+                                "FDR persisted state could not be loaded"
+                            },
+                        )?,
+                    )
                 }
                 Err(error) if error.status() == uefi::Status::NOT_FOUND => None,
                 Err(_) => return Err("cannot open the FDR diagnostic"),

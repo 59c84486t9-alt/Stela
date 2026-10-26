@@ -21,6 +21,8 @@ use sha2::{Digest, Sha384};
 const MAX_STAGED_ANSWERS: usize = 128;
 const MAX_STAGED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
+/// The writer returns success only after durable storage and readback.
+pub type FdrCommit = Box<dyn FnMut(&[u8]) -> Result<()>>;
 /// A transfer is a bounded recipe. A scheduler opens DataPort and polls a Job;
 /// control-only responses use the control stream at its next frame boundary.
 pub enum Plan {
@@ -219,6 +221,7 @@ const DATA_TYPES: [(&str, bool); 69] = [
 pub struct Answers<R> {
     pub store: Store<R>,
     pub fdr_diagnostic: Option<super::fdr::Diagnostic>,
+    pub fdr_commit: Option<FdrCommit>,
     pub staged: Staged,
     /// Apple's signing service, only when the user enables it (`tss`).
     pub signer: Option<tss::Signer>,
@@ -233,6 +236,7 @@ impl<R: ReadAt> Answers<R> {
         Self {
             store,
             fdr_diagnostic: None,
+            fdr_commit: None,
             staged: Staged::default(),
             signer: None,
             roots: BTreeMap::new(),
@@ -507,10 +511,23 @@ impl<R: ReadAt> Answers<R> {
                     .as_ref()
                     .map_or_else(|| Value::dict([]), super::fdr::Diagnostic::reply),
             )),
-            "FDRMemoryCommit" => Err(super::refuse(
-                "FDR memory diagnostic has no durable commit implementation; refusing acknowledgement",
-                r,
-            )),
+            "FDRMemoryCommit" => {
+                let diagnostic = self.fdr_diagnostic.as_ref().ok_or(Error::Invalid(
+                    "FDR commit without an imported machine binding",
+                ))?;
+                let records = args.required("FDRMemoryStoreData")?.clone();
+                let bytes = diagnostic.with_records(records)?;
+                self.fdr_commit.as_mut().ok_or_else(|| {
+                    super::refuse(
+                        "FDR memory store has no durable commit writer; refusing acknowledgement",
+                        r,
+                    )
+                })?(&bytes)?;
+                self.fdr_diagnostic = Some(super::fdr::Diagnostic::decode(&bytes)?);
+                // R7252c checks that a response exists before checking the
+                // original recover result. An empty dictionary is the ACK.
+                Ok(Plan::Reply(Value::dict([])))
+            }
             "RecoveryOSLocalPolicy" => self.recovery_local_policy(&identity, args),
             // restored's `set_device_time` (R 0x10003172c..0x100031778) reads
             // `SetHostTimeOnDevice` as a 64-bit CFNumber and keeps it only

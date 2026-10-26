@@ -1074,6 +1074,7 @@ mod tests {
     #[test]
     fn fdr_commit_never_acknowledges_unpersisted_records() {
         let (mut session, mut answers) = ready();
+        answers.fdr_diagnostic = Some(fdr_fixture(&answers.store, Value::dict([])));
         let mut commit = request("FDRMemoryCommit");
         let Value::Dict(entries) = &mut commit else {
             unreachable!()
@@ -1098,20 +1099,7 @@ mod tests {
     fn fdr_import_is_opt_in_and_preserves_the_original_reply_schema() {
         let store = fixture(b"payload", false);
         let records = Value::dict([("appv-own", Value::Data(vec![1, 2, 3]))]);
-        let input = Value::dict([
-            ("DiagnosticVersion", Value::Integer(1)),
-            ("ECID", Value::Signed(-111_111_111_111_111_111)),
-            ("ChipID", Value::Integer(0x8112)),
-            ("BoardID", Value::Integer(0x24)),
-            (
-                "Build",
-                Value::from(store.manifest().product_build.as_str()),
-            ),
-            ("Model", Value::from(store.manifest().model.as_str())),
-            ("FDRMemoryStoreData", records.clone()),
-        ]);
-        let bytes = super::super::plist::encode_binary(&input, Limits::default()).unwrap();
-        let diagnostic = super::super::fdr::Diagnostic::decode(&bytes).unwrap();
+        let diagnostic = fdr_fixture(&store, records.clone());
         let (_, mut answers, start) = ready_with_fdr(store, Some(diagnostic));
         assert_eq!(
             start
@@ -1145,5 +1133,81 @@ mod tests {
             panic!("not an FDR reply")
         };
         assert_eq!(reply, Value::dict([]));
+    }
+
+    fn fdr_fixture(store: &Fixture, records: Value) -> super::super::fdr::Diagnostic {
+        let input = Value::dict([
+            ("DiagnosticVersion", Value::Integer(1)),
+            ("ECID", Value::Signed(-111_111_111_111_111_111)),
+            ("ChipID", Value::Integer(0x8112)),
+            ("BoardID", Value::Integer(0x24)),
+            (
+                "Build",
+                Value::from(store.manifest().product_build.as_str()),
+            ),
+            ("Model", Value::from(store.manifest().model.as_str())),
+            ("FDRMemoryStoreData", records.clone()),
+        ]);
+        let bytes = super::super::plist::encode_binary(&input, Limits::default()).unwrap();
+        super::super::fdr::Diagnostic::decode(&bytes).unwrap()
+    }
+
+    #[test]
+    fn fdr_commit_is_durable_before_acknowledgement_and_retains_binding() {
+        use crate::pc::fdr_store::{self, Journal};
+        use alloc::rc::Rc;
+        use core::cell::RefCell;
+        use stela_drivers::block::RamDisk;
+        let store = fixture(b"payload", false);
+        let diagnostic = fdr_fixture(&store, Value::dict([]));
+        let seed = diagnostic.with_records(Value::dict([])).unwrap();
+        let mut disk = RamDisk::new("FDR", (fdr_store::FILE_BYTES / 512) as u64, 512);
+        disk.bytes = fdr_store::initial_image(&seed).unwrap();
+        let mut journal = Journal::open(&mut disk).unwrap();
+        let disk = Rc::new(RefCell::new(disk));
+        let (mut session, mut answers, _) = ready_with_fdr(store, Some(diagnostic));
+        let writer = Rc::clone(&disk);
+        answers.fdr_commit = Some(Box::new(move |bytes| {
+            journal
+                .commit(&mut *writer.borrow_mut(), bytes)
+                .map_err(|error| Error::Transport(format!("{error}")))
+        }));
+        let records = Value::dict([("class-own", Value::Data(vec![9, 8, 7]))]);
+        let commit = Value::dict([
+            ("MsgType", Value::from("DataRequestMsg")),
+            ("DataType", Value::from("FDRMemoryCommit")),
+            (
+                "Arguments",
+                Value::dict([("FDRMemoryStoreData", records.clone())]),
+            ),
+        ]);
+        assert!(matches!(
+            session.receive(commit, &mut answers).unwrap(),
+            Action::Transfer(_)
+        ));
+        let reopened = Journal::open(&mut *disk.borrow_mut()).unwrap();
+        let stored = super::super::fdr::Diagnostic::decode(reopened.snapshot().unwrap()).unwrap();
+        assert!(stored.same_identity(answers.fdr_diagnostic.as_ref().unwrap()));
+        assert_eq!(
+            stored.reply(),
+            Value::dict([("FDRMemoryStoreData", records)])
+        );
+        assert_eq!(disk.borrow().flushes, 2);
+        answers.fdr_commit = Some(Box::new(|_| {
+            Err(Error::Transport("injected persistence failure".into()))
+        }));
+        let request = Value::dict([
+            ("DataType", Value::from("FDRMemoryCommit")),
+            (
+                "Arguments",
+                Value::dict([("FDRMemoryStoreData", Value::dict([]))]),
+            ),
+        ]);
+        assert!(answers.plan(&request).is_err());
+        assert!(stored.same_identity(answers.fdr_diagnostic.as_ref().unwrap()));
+        assert_eq!(
+            stored.reply(),
+            answers.fdr_diagnostic.as_ref().unwrap().reply()
+        );
     }
 }

@@ -15,6 +15,7 @@ pub mod acpi;
 pub mod boot_log;
 pub mod display;
 pub mod fat32;
+pub mod fdr_store;
 pub mod gpt;
 pub mod machine_state;
 pub mod power;

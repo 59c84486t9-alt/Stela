@@ -1,13 +1,14 @@
 //! Explicit diagnostic import through restored's original FDR memory store.
 //! Imported signatures are opaque: only Apple's consumer decides their trust.
-//! This experiment cannot acknowledge FDRMemoryCommit or complete an install.
+//! A commit is acknowledged only after the host's durable writer succeeds.
 use super::{
     Error, Result,
     plist::{self, Limits, Value},
 };
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 pub const FILE: &str = "fdr-diagnostic.plist";
+pub const STATE_FILE: &str = "fdr-state.bin";
 pub const MAX_BYTES: usize = 1024 * 1024;
 
 pub struct Diagnostic {
@@ -39,7 +40,7 @@ impl Diagnostic {
         let Value::Dict(entries) = &records else {
             return Err(Error::Invalid("FDR memory-store dictionary"));
         };
-        if entries.is_empty() || entries.len() > 128 {
+        if entries.len() > 128 {
             return Err(Error::Limit("FDR diagnostic records"));
         }
         for (key, value) in entries {
@@ -71,6 +72,36 @@ impl Diagnostic {
 
     pub fn reply(&self) -> Value {
         Value::dict([("FDRMemoryStoreData", self.records.clone())])
+    }
+
+    /// Replace opaque records without changing the machine/build binding.
+    pub fn with_records(&self, records: Value) -> Result<Vec<u8>> {
+        let value = Value::dict([
+            ("DiagnosticVersion", Value::Integer(1)),
+            ("ECID", Value::Integer(self.ecid)),
+            ("ChipID", Value::Integer(self.chip)),
+            ("BoardID", Value::Integer(self.board)),
+            ("Build", Value::String(self.build.clone())),
+            ("Model", Value::String(self.model.clone())),
+            ("FDRMemoryStoreData", records),
+        ]);
+        let bytes = plist::encode_binary(
+            &value,
+            Limits {
+                bytes: MAX_BYTES,
+                ..Limits::default()
+            },
+        )?;
+        Self::decode(&bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.ecid == other.ecid
+            && self.chip == other.chip
+            && self.board == other.board
+            && self.build == other.build
+            && self.model == other.model
     }
 }
 
@@ -131,7 +162,7 @@ mod tests {
     #[test]
     fn malformed_store_is_refused() {
         for records in [
-            Value::dict([]),
+            Value::dict([("", Value::Data(vec![1]))]),
             Value::dict([("appv-own", Value::from("not-data"))]),
         ] {
             let mut value = input();

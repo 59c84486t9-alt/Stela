@@ -159,6 +159,12 @@ pub struct Experiment {
     ledger: usize,
     mode: Mode,
 }
+
+/// Native services retained for the whole restore session.
+pub struct Services {
+    pub signer: Option<stela_runtime::restore::tss::Signer>,
+    pub fdr_storage: Option<Box<dyn BlockDevice>>,
+}
 impl Experiment {
     /// The study runs `identity`; the install the inventory's one Erase
     /// identity, and the update its one Update identity. The payload is
@@ -172,8 +178,12 @@ impl Experiment {
         mode: Mode,
         identity: Option<usize>,
         verify: Verify,
-        signer: Option<stela_runtime::restore::tss::Signer>,
+        services: Services,
     ) -> Result<Self, String> {
+        let Services {
+            signer,
+            fdr_storage,
+        } = services;
         let manifest = inventory(handoff)?;
         let purpose = match mode {
             Mode::Update => Purpose::Update,
@@ -226,14 +236,17 @@ impl Experiment {
         }
         let mut answers = Answers::new(store);
         if let Some(bytes) = inventory_file(handoff, stela_runtime::restore::fdr::FILE) {
+            let placement = super::fdr::Placement::parse(bytes)?;
             answers.fdr_diagnostic = Some(
-                stela_runtime::restore::fdr::Diagnostic::decode(bytes)
+                stela_runtime::restore::fdr::Diagnostic::decode(placement.diagnostic)
                     .map_err(|error| format!("FDR diagnostic refused: {error}"))?,
             );
+            let device = fdr_storage.ok_or("the required FDR storage volume was not opened")?;
+            answers.fdr_commit = Some(super::fdr::writer(device, &placement)?);
             output::arguments(format_args!(
-                "FDR DIAGNOSTIC bytes={} sha256={} original Memory-store import; factory trust unqualified; durable commit unsupported\n",
-                bytes.len(),
-                stela_runtime::sha256(bytes),
+                "FDR DIAGNOSTIC bytes={} sha256={} original Memory-store import; durable host commit enabled; factory trust unqualified\n",
+                placement.diagnostic.len(),
+                stela_runtime::sha256(placement.diagnostic),
             ));
         }
         if signer.is_some() {
