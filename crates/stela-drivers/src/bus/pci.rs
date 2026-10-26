@@ -50,6 +50,24 @@ const D2_DELAY_US: u64 = 200;
 const D2: u16 = 2;
 const D3HOT: u16 = 3;
 
+/// The legacy entry requires only its actual maximum 10 ms exit delay. Keep
+/// that exact contract when sharing the provider-based PM transition path.
+struct PowerUpClock<'a>(&'a Clock);
+// SAFETY: this borrowed original Clock performs canonical checked real waits;
+// its producer's calibration/context grant remains required for every access.
+unsafe impl power::Timer for PowerUpClock<'_> {
+    fn check(&self) -> Result<(), power::Error> {
+        self.0
+            .check_duration(D3HOT_DELAY_US)
+            .map_err(|_| power::Error::Clock)
+    }
+    fn wait_us(&self, microseconds: u64) -> Result<(), power::Error> {
+        self.0
+            .try_delay(microseconds)
+            .map_err(|_| power::Error::Clock)
+    }
+}
+
 pub const CAPABILITY_POWER: u8 = 0x01;
 pub const CAPABILITY_MSI: u8 = 0x05;
 pub const CAPABILITY_VENDOR: u8 = 0x09;
@@ -311,6 +329,30 @@ impl<C: ConfigSpace> Function<C> {
     /// state's exit delay, and restore the BARs a D3hot soft reset cleared.
     /// Functions without a power management capability are always in D0.
     pub fn power_up(&mut self, clock: &Clock) -> Result<(), BlockError> {
+        self.power_up_with_timer(&PowerUpClock(clock))
+    }
+
+    /// Run the identical transition under an actual retained native timer or
+    /// an explicitly qualified symbolic device model. Validate before config
+    /// access; a provider failure never becomes a successful hardware delay.
+    pub(crate) fn power_up_with_timer(
+        &mut self,
+        timer: &impl power::Timer,
+    ) -> Result<(), BlockError> {
+        timer.check().map_err(|_| {
+            BlockError::Unsupported("PCI power transition requires calibrated timing")
+        })?;
+        self.power_up_with(|microseconds| {
+            timer.wait_us(microseconds).map_err(|_| {
+                BlockError::Unsupported("PCI power transition requires calibrated timing")
+            })
+        })
+    }
+
+    fn power_up_with(
+        &mut self,
+        mut delay: impl FnMut(u64) -> Result<(), BlockError>,
+    ) -> Result<(), BlockError> {
         let Some((offset, _)) = self
             .capabilities()
             .into_iter()
@@ -329,11 +371,11 @@ impl<C: ConfigSpace> Function<C> {
         }
         let bars: [u32; BARS] = core::array::from_fn(|i| self.config.read32(BAR0 + 4 * i as u16));
         self.config.write16(control, 0);
-        clock.delay(match state {
+        delay(match state {
             D3HOT => D3HOT_DELAY_US,
             D2 => D2_DELAY_US,
             _ => 0,
-        });
+        })?;
         if self.config.read16(control) & PM_STATE != 0 {
             return Err(BlockError::Unsupported("PCI function did not enter D0"));
         }
@@ -731,10 +773,16 @@ mod tests {
             config.bar_masks[0] = 0xffff_c000;
             let mut function =
                 Function::new(Address::default_for_tests(), SoftReset(config)).unwrap();
-            let clock = Clock {
-                ticks_per_microsecond: 0,
-            };
-            function.power_up(&clock).unwrap();
+            // This model qualifies PMCSR/BAR effects, not real time. Capture
+            // the actual requested wait instead of passing an invalid Clock.
+            let mut delays = Vec::new();
+            function
+                .power_up_with(|us| {
+                    delays.push(us);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(delays, [D3HOT_DELAY_US]);
             assert_eq!(function.config().read16(0x64), 0);
             assert_eq!(function.config().read32(BAR0), 0xfebf_0000);
         }
@@ -761,13 +809,53 @@ mod tests {
             }
         }
         let mut function = Function::new(Address::default_for_tests(), Stuck(config)).unwrap();
-        let clock = Clock {
-            ticks_per_microsecond: 0,
-        };
+        let mut delays = Vec::new();
         assert_eq!(
-            function.power_up(&clock),
+            function.power_up_with(|us| {
+                delays.push(us);
+                Ok(())
+            }),
             Err(BlockError::Unsupported("PCI function did not enter D0"))
         );
+        assert_eq!(delays, [D3HOT_DELAY_US]);
+    }
+
+    #[test]
+    fn power_up_refuses_invalid_clock_before_any_configuration_access() {
+        struct NoAccess;
+        impl ConfigSpace for NoAccess {
+            fn read32(&self, _: u16) -> u32 {
+                panic!("config access before clock admission")
+            }
+            fn write32(&mut self, _: u16, _: u32) {
+                panic!("config effect before clock admission")
+            }
+        }
+        for rate in [0, u64::MAX, u64::MAX / 2 / D3HOT_DELAY_US + 1] {
+            let mut function = Function {
+                address: Address::default_for_tests(),
+                vendor: 0x1af4,
+                device: 0x1042,
+                class: [1, 8, 2],
+                config: NoAccess,
+            };
+            assert_eq!(
+                function.power_up(&Clock {
+                    ticks_per_microsecond: rate
+                }),
+                Err(BlockError::Unsupported(
+                    "PCI power transition requires calibrated timing"
+                ))
+            );
+            assert_eq!(
+                function.power_up_with_timer(&Clock {
+                    ticks_per_microsecond: rate
+                }),
+                Err(BlockError::Unsupported(
+                    "PCI power transition requires calibrated timing"
+                ))
+            );
+        }
     }
 
     #[test]
