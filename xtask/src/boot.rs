@@ -363,8 +363,9 @@ enum PayloadMode {
 #[derive(Clone, Copy, ValueEnum)]
 enum Display {
     None,
-    /// Show the UART in a host window; adds no guest display device.
-    Cocoa,
+    /// Show the UART in a host window, Cocoa's on macOS and GTK's elsewhere;
+    /// adds no guest display device.
+    Window,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1051,8 +1052,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .args(["-display", "none"])
             .arg("-serial")
             .arg(format!("file:{}", serial.display())),
-        Display::Cocoa => command
-            .args(["-display", "cocoa", "-chardev"])
+        Display::Window => command
+            .arg("-display")
+            .arg(if cfg!(target_os = "macos") {
+                "cocoa"
+            } else {
+                "gtk"
+            })
+            .arg("-chardev")
             .arg(format!(
                 "vc,id=uart,cols=132,rows=50,logfile={}",
                 option_path(&serial)
