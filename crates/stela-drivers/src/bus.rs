@@ -10,6 +10,7 @@ pub mod lpss;
 pub mod mmio;
 pub mod pci;
 pub mod smbus;
+pub mod spi;
 pub mod thunderbolt;
 pub mod virtio;
 pub mod vmd;

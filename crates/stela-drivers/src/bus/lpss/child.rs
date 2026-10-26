@@ -71,6 +71,16 @@ impl<T: Timer + 'static> I2c<NativeRegisters, T> {
         timer: T,
         config: i2c::Config,
     ) -> Result<Self, AttachFailure> {
+        if config.timeout_us == 0
+            || config.recovery_timeout_us == 0
+            || timer.check_duration(config.timeout_us).is_err()
+            || timer.check_duration(config.recovery_timeout_us).is_err()
+        {
+            return Err(AttachFailure {
+                error: AttachError::I2c(i2c::ErrorKind::InvalidConfiguration.into()),
+                unmodified: Some((requester.into_function(), mapping)),
+            });
+        }
         // SAFETY: same actual mapped/stopped function authority as this entry.
         let registers = unsafe { NativeRegisters::claim(requester, mapping) }.map_err(
             |(error, resources)| AttachFailure {

@@ -3,8 +3,9 @@
 // intel-lpss-pci.c at a804c5742bff224d4cb4d25dd383554d598be32b.
 // Copyright (C) 2015 Intel Corporation.
 // Authors: Andy Shevchenko, Mika Westerberg, Heikki Krogerus, Jarkko Nikula.
-//! Owned PCI LPSS I²C platform resources. SPI/UART/iDMA and platform PM
-//! are separate implementations. The explicit owner composes private resource
+//! Owned PCI LPSS I²C platform resources. [`spi`] supplies the separate retained
+//! SPI reset/remap/clock and SSP PIO composition. UART/iDMA and platform PM
+//! remain separate. The explicit I²C owner composes private resource
 //! initialization with the shared DesignWare PIO engine and held-D0 lifetime.
 use super::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
@@ -13,6 +14,7 @@ use super::{
 use core::ptr::NonNull;
 
 mod child;
+pub mod spi;
 pub use child::{AttachError, AttachFailure, I2c, Retired};
 
 const PRIVATE: usize = 0x200;
@@ -598,8 +600,11 @@ mod tests {
             drops,
         )
     }
-    type NativeFixture = (Function<OwnedConfig>, Mapping, Arc<Counters>, Arc<Counters>);
+    pub(super) type NativeFixture = (Function<OwnedConfig>, Mapping, Arc<Counters>, Arc<Counters>);
     fn native_fixture() -> NativeFixture {
+        native_fixture_for(0x9d60)
+    }
+    pub(super) fn native_fixture_for(device: u16) -> NativeFixture {
         let address = Address {
             segment: 0x1234,
             bus: 2,
@@ -614,7 +619,7 @@ mod tests {
         let mapping = window.into_mapping();
         let physical = mapping.physical_span().unwrap().start();
         assert!(physical <= u64::from(u32::MAX));
-        config.write32(0, 0x9d60_8086);
+        config.write32(0, u32::from(device) << 16 | 0x8086);
         config.write32(8, 0x1180_0000);
         config.write16(PCI_COMMAND, PCI_MEMORY | PCI_INTX_DISABLE);
         // A real owned RAM mapping stands in for the exclusive actual BAR.
@@ -634,7 +639,7 @@ mod tests {
             bar_counts,
         )
     }
-    fn stop_fixture(function: Function<OwnedConfig>) -> StoppedRequester {
+    pub(super) fn stop_fixture(function: Function<OwnedConfig>) -> StoppedRequester {
         // SAFETY: actual owned fixture storage is drained, exclusively retained
         // and not exposed as any production device/coherency qualification.
         match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
@@ -642,7 +647,11 @@ mod tests {
             Err((error, _)) => panic!("valid stopped fixture: {error:?}"),
         }
     }
-    fn release_native(resources: NativeResources, config_counts: &Counters, bar_counts: &Counters) {
+    pub(super) fn release_native(
+        resources: NativeResources,
+        config_counts: &Counters,
+        bar_counts: &Counters,
+    ) {
         let (function, mut mapping) = resources;
         let mut config = function.into_config().into_mapping();
         // SAFETY: the original isolated resources have no remaining register,
@@ -655,6 +664,45 @@ mod tests {
             assert_eq!(counts.platform_drops.load(Ordering::Relaxed), 1);
         }
     }
+    #[test]
+    fn native_i2c_unavailable_or_unrepresentable_clock_returns_untouched_original_resources() {
+        for rate in [0, u64::MAX, u64::MAX / 2 / 100 + 1] {
+            let (function, mapping, config_counts, bar_counts) = native_fixture();
+            let before = {
+                let pointer = mapping.address(0, WINDOW_BYTES).unwrap();
+                // SAFETY: original stopped, exclusively held fixture aperture.
+                unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) }.to_vec()
+            };
+            let requester = stop_fixture(function);
+            // SAFETY: same actual stopped owner/mapping; failed time admission
+            // must return them before private reset/remap or child accesses.
+            let failure = unsafe {
+                I2c::attach_native(
+                    requester,
+                    mapping,
+                    crate::Clock {
+                        ticks_per_microsecond: rate,
+                    },
+                    timing(),
+                )
+            }
+            .err()
+            .unwrap();
+            assert_eq!(
+                failure.error,
+                AttachError::I2c(crate::bus::i2c::ErrorKind::InvalidConfiguration.into())
+            );
+            let resources = failure.unmodified.expect("original unchanged owners");
+            let pointer = resources.1.address(0, WINDOW_BYTES).unwrap();
+            // SAFETY: these exact original owners still retain the aperture.
+            assert_eq!(
+                unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) },
+                before
+            );
+            release_native(resources, &config_counts, &bar_counts);
+        }
+    }
+
     #[test]
     fn concrete_native_registers_use_actual_owned_mapping_and_acknowledged_reset_release() {
         let (function, mapping, config_counts, bar_counts) = native_fixture();

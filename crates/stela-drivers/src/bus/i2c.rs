@@ -22,6 +22,8 @@ pub mod amd_mp2;
 mod designware;
 
 pub use designware::{Config, DesignWare, MmioRegisters, Registers, Speed, Timing};
+#[cfg(test)]
+mod timer_tests;
 
 /// One unshifted I²C target address; the controller supplies the direction bit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
