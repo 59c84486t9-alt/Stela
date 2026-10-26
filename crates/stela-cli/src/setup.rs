@@ -2753,7 +2753,10 @@ mod tests {
             backup_state: None,
             restore_state: None,
             boot_log: false,
-            translation_store_bytes: None,
+            // The smallest store: its spare is allocated at the bound, and
+            // `snapshot` reads every file it compares. The default bound's
+            // shrinking to fit is `translations::choose`'s to test.
+            translation_store_bytes: Some(translations::MIN_PACK_BYTES),
             host_firmware: None,
             host_firmware_requirements: None,
             host_firmware_cache: None,
