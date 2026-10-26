@@ -65,6 +65,9 @@ struct stela_intel_ct {
  * Errors: -22 invalid arguments; -19 disabled; -71 malformed firmware state;
  * -32 broken transport; -16 no send credits; -28 receive output too small.
  * Corruption marks transport broken until the owner resets and reattaches.
+ * Receive uses its retained host head, following upstream's tolerance for
+ * descriptor-head rollback on some discrete platforms. Reattachment still
+ * requires the real owner's reset/drain lifecycle and exclusive ownership.
  */
 int stela_intel_ct_attach(struct stela_intel_ct *, const struct stela_intel_ct_io *,
                           void *context, uint32_t h2g_words, uint32_t g2h_words,

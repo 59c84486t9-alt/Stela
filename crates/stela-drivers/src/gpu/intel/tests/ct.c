@@ -243,6 +243,65 @@ static uint32_t random_u32(uint32_t *state)
     return *state;
 }
 
+static void descriptor_head_rollback_keeps_the_host_cursor(void)
+{
+    /* Pinned g2h_read() deliberately permits an older descriptor head on
+     * some discrete platforms. Never reread payload already consumed by the
+     * host, nor reject that observation as a new corruption policy.
+     */
+    const uint32_t heads[] = {8, RING_WORDS - 1, 0};
+    const uint32_t previous[] = {0, RING_WORDS - 2, RING_WORDS - 1};
+    for (unsigned int occupied = 0; occupied < 2; ++occupied) {
+        for (unsigned int cursor = 0; cursor < 3; ++cursor) {
+            struct model m;
+            struct stela_intel_ct ct;
+            attach(&m, &ct, true, false);
+            uint32_t head = heads[cursor];
+            uint32_t tail = (head + (occupied ? 2u : 0u)) % RING_WORDS;
+            ct.g2h_head = head;
+            m.g2h_desc[0] = previous[cursor];
+            m.g2h_desc[1] = tail;
+            m.g2h[head] = 1;
+            m.g2h[(head + 1) % RING_WORDS] = 0xe0011234;
+            uint32_t output[2] = {0xa5a5a5a5, 0x5a5a5a5a};
+            assert(stela_intel_ct_receive(&ct, output, 2) == (occupied ? 2 : 0));
+            assert(!ct.broken && ct.g2h_head == tail);
+            if (occupied) {
+                assert(output[0] == 1 && output[1] == 0xe0011234);
+                assert(m.g2h_desc[0] == tail && !strcmp(m.events, "ACCBH"));
+            } else {
+                assert(output[0] == 0xa5a5a5a5 && output[1] == 0x5a5a5a5a);
+                assert(m.g2h_desc[0] == previous[cursor] && m.event_count == 0);
+            }
+            m.event_count = 0;
+            assert(stela_intel_ct_receive(&ct, output, 2) == 0);
+            assert(!ct.broken && m.event_count == 0);
+        }
+    }
+}
+
+static void actual_receive_cursor_bounds_break_without_payload_access(void)
+{
+    const uint32_t heads[] = {RING_WORDS, UINT32_MAX, 8, 0};
+    const uint32_t tails[] = {0, 0, RING_WORDS, UINT32_MAX};
+    for (unsigned int fault = 0; fault < 4; ++fault) {
+        struct model m;
+        struct stela_intel_ct ct;
+        attach(&m, &ct, false, false);
+        ct.g2h_head = heads[fault];
+        m.g2h_desc[1] = tails[fault];
+        uint32_t output[2] = {0xa5a5a5a5, 0x5a5a5a5a};
+        assert(stela_intel_ct_receive(&ct, output, 2) == -71);
+        assert(ct.broken && ct.g2h_head == heads[fault] && m.g2h_desc[0] == 0);
+        assert(output[0] == 0xa5a5a5a5 && output[1] == 0x5a5a5a5a);
+        assert(m.event_count == 0);
+        assert(stela_intel_ct_receive(&ct, output, 2) == -32);
+        const uint32_t action = 42;
+        assert(stela_intel_ct_send(&ct, &action, 1, 0, 0) == -32);
+        assert(m.event_count == 0 && m.publications == 0 && m.notifications == 0);
+    }
+}
+
 static void independent_ring_sequences(void)
 {
     struct model m;
@@ -291,7 +350,9 @@ int main(void)
     wrap_publishes_only_nops_and_requires_retry();
     receive_wrap_and_capacity();
     failures_do_not_publish();
+    descriptor_head_rollback_keeps_the_host_cursor();
+    actual_receive_cursor_bounds_break_without_payload_access();
     independent_ring_sequences();
-    puts("Intel GuC CT mapped I/O: 5 suites / 2000 bidirectional ring sequences passed");
+    puts("Intel GuC CT mapped I/O: 7 suites / 2000 bidirectional ring sequences passed");
     return 0;
 }

@@ -152,6 +152,11 @@ int stela_intel_ct_receive(struct stela_intel_ct *ct, uint32_t *message, size_t 
     if (err) return err;
     uint32_t tail = read32(ct, STELA_INTEL_CT_G2H_DESC, DESC_TAIL);
     uint32_t head = ct->g2h_head;
+    /* Follow g2h_read(): consume from the retained host cursor. Upstream
+     * deliberately disables descriptor-head equality checks because some
+     * discrete platforms can expose an older descriptor head. That delay
+     * does not change which payload the host has already consumed.
+     */
     if (tail >= ct->g2h_size || head >= ct->g2h_size) {
         ct->broken = true;
         return PROTOCOL_ERROR;
