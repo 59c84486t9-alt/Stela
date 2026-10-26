@@ -12,6 +12,7 @@ mod aspm;
 pub mod msi;
 pub mod msix;
 pub mod owned;
+pub mod power;
 pub mod requester;
 pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link, native as native_aspm};
 
