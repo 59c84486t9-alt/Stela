@@ -5,16 +5,22 @@
 // Copyright (C) 2005-2018 Broadcom
 //! Broadcom Tigon3 hardware transport for the named BCM5720/5761/5762 cohort.
 //!
-//! `Packet::attach` composes one polled BCM5720/5762 A0 unmanaged copper queue
-//! with requester-domain DMA and explicit retirement. It is source-only until
-//! the model/oracle and Rust gates run. BCM5761 remains transport-only;
-//! managed/SerDes and all other ASIC/revision profiles explicitly refuse.
+//! `Packet::attach` composes one polled BCM5720/5761/5762 A0 unmanaged copper
+//! queue with requester-domain DMA and explicit retirement. BCM5761 requires
+//! function-zero NIC wiring and recognized NVM; its original CLKREQ setting
+//! selects the source per-speed send-BD workaround. These
+//! bounded source-reviewed packet profiles have native model qualification;
+//! hardware remains unqualified. See `tg3/THIRD_PARTY.md`. Managed, SerDes and
+//! all other ASIC/revision profiles explicitly refuse.
 //!
 //! All named chips have an APE window. MDIO takes the actual per-function APE
 //! PHY grant, even when management firmware is not running. Linux's ignored
 //! lock failures, firmware timeout fallback and silent stop timeout are
 //! deliberately errors here. An uncertain operation poisons and retains the
 //! actual register owner, never permitting a new epoch by object reconstruction.
+mod filter;
+mod geometry;
+pub use filter::ReceiveFilter;
 pub mod io;
 mod transport;
 
@@ -25,6 +31,7 @@ mod packet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Access,
+    Clock,
     Removed,
     Bounds,
     UnsupportedDevice,
@@ -79,14 +86,10 @@ pub unsafe trait Registers {
     fn ape_write32(&mut self, at: u32, value: u32) -> Result<(), Error>;
 }
 
-pub trait Delay {
-    fn delay_us(&mut self, microseconds: u64);
-}
-impl Delay for crate::Clock {
-    fn delay_us(&mut self, microseconds: u64) {
-        self.delay(microseconds);
-    }
-}
+/// Original calibrated timing retained in the device's qualified context.
+/// The shared timer checks unavailable rates and uses modular elapsed ticks;
+/// its successful waits preserve the complete requested minimum duration.
+pub use crate::bus::pci::power::Timer as Delay;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asic {

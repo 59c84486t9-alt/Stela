@@ -3,7 +3,7 @@
 // Copyright (C) 2001-2003 Jeff Garzik
 // Copyright (C) 2004 Sun Microsystems Inc.
 // Copyright (C) 2005-2018 Broadcom
-//! Signed board settings, VMain selection and read-only BCM5720 NVRAM.
+//! Signed board settings, VMain selection and read-only per-ASIC NVRAM.
 use super::{regs::*, *};
 use crate::net::Mac;
 
@@ -15,13 +15,21 @@ pub(in crate::net::tg3) struct Board {
     pub apd: bool,
     pub capacitive: bool,
     pub profile_5762: Option<super::bcm5762::Profile>,
+    pub profile_5761: Option<super::bcm5761::Profile>,
 }
 impl<R: Registers, D: Delay> Hardware<R, D> {
-    /// Only actual matching copper BCM5720/5762 A0 is a packet candidate.
+    /// Only actual matching copper BCM5720/5761/5762 A0 is a packet candidate.
     pub(super) fn packet_identity(&mut self) -> Result<Identity, Error> {
+        self.timer_ready()?;
         // Read static PCI/subsystem denials before identify changes host/MMIO
         // access controls. PCI table membership alone never authorizes packets.
         let pci = Self::checked(self.regs().config_read32(0)?)?;
+        if matches!(pci, 0x1680_14e4 | 0x1681_14e4 | 0x1688_14e4 | 0x1689_14e4)
+            && (Self::checked(self.regs().config_read32(PRODID)?)? != 0x0576_1000
+                || self.regs().function_number() != 0)
+        {
+            return Err(Error::UnsupportedRevision);
+        }
         if pci == 0x1687_14e4 {
             let revision = Self::checked(self.regs().config_read32(GEN2_PRODID)?)?;
             if revision != 0x0576_2000 {
@@ -30,7 +38,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.bcm5762_subsystem()?;
         }
         let id = self.identify()?;
-        if !matches!(id.asic, Asic::Bcm5720 | Asic::Bcm5762) {
+        if !matches!(id.asic, Asic::Bcm5720 | Asic::Bcm5761 | Asic::Bcm5762) {
             return Err(Error::UnsupportedRevision);
         }
         // Upper bits identify the ASIC, lower 12 retain revision/metal. This
@@ -43,6 +51,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         Ok(id)
     }
     pub(super) fn board(&mut self) -> Result<Board, Error> {
+        if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5761 {
+            return self.bcm5761_board();
+        }
         if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5762 {
             return self.bcm5762_board();
         }
@@ -76,7 +87,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 let status = self.read(TG3_CPMU_DRV_STATUS)?;
                 self.flush(TG3_CPMU_DRV_STATUS, (status & !(3 << shift)) | (1 << shift))?;
                 self.flush(GRC_LOCAL_CTRL, local)?;
-                self.delay.delay_us(100);
+                self.wait(100)?;
                 Ok(())
             })();
             let release = self.unlock(7);
@@ -86,10 +97,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             GRC_EEPROM_ADDR,
             EEPROM_ADDR_FSM_RESET | (EEPROM_DEFAULT_CLOCK_PERIOD << EEPROM_ADDR_CLKPERD_SHIFT),
         )?;
-        self.delay.delay_us(1000);
+        self.wait(1000)?;
         let saved_local = self.read(GRC_LOCAL_CTRL)?;
         self.flush(GRC_LOCAL_CTRL, saved_local | GRC_LCLCTRL_AUTO_SEEPROM)?;
-        self.delay.delay_us(100);
+        self.wait(100)?;
         // Decode the actual pinstrap, including Atmel non-power-of-two pages.
         // No unrecognized NVM is treated as a functional firmware source.
         let nvcfg = self.nvram_configuration()?;
@@ -163,21 +174,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if !valid_mac(mac) || mac == Mac([0, 0x10, 0x18, 0, 0, 0]) {
             return Err(Error::InvalidMac);
         }
-        let led = match cfg2 & (NIC_SRAM_DATA_CFG_LED_MODE_MASK | SHASTA_EXT_LED_MODE_MASK) {
-            NIC_SRAM_DATA_CFG_LED_MODE_PHY_1 => LED_CTRL_MODE_PHY_1,
-            NIC_SRAM_DATA_CFG_LED_MODE_PHY_2 => LED_CTRL_MODE_PHY_2,
-            NIC_SRAM_DATA_CFG_LED_MODE_MAC => LED_CTRL_MODE_MAC,
-            SHASTA_EXT_LED_SHARED => {
-                LED_CTRL_MODE_SHARED
-                    | LED_CTRL_MODE_PHY_1
-                    | LED_CTRL_MODE_PHY_2
-                    | LED_CTRL_BLINK_RATE_OVERRIDE
-                    | LED_CTRL_BLINK_RATE_MASK
-            }
-            SHASTA_EXT_LED_MAC => LED_CTRL_MODE_SHASTA_MAC,
-            SHASTA_EXT_LED_COMBO => LED_CTRL_MODE_COMBO | LED_CTRL_MODE_PHY_1 | LED_CTRL_MODE_PHY_2,
-            _ => return Err(Error::UnsupportedBoard),
-        };
+        let led = super::board::decode_led(cfg2)?;
         Ok(Board {
             mac,
             local,
@@ -185,6 +182,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             apd: cfg2 & NIC_SRAM_DATA_CFG_2_APD_EN != 0,
             capacitive: cfg2 & (1 << 17) != 0,
             profile_5762: None,
+            profile_5761: None,
         })
     }
     pub(super) fn nvram_configuration(&mut self) -> Result<u32, Error> {
@@ -194,10 +192,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.flush(NVRAM_ACCESS, access | ACCESS_ENABLE)?;
             let config = self.read(NVRAM_CFG1)?;
             let vendor = config & NVRAM_CFG1_5752VENDOR_MASK;
-            let eeprom = if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5762 {
-                matches!(vendor, FLASH_5762_EEPROM_HD | FLASH_5762_EEPROM_LD)
-            } else {
-                matches!(vendor, FLASH_5720_EEPROM_HD | FLASH_5720_EEPROM_LD)
+            let eeprom = match self.identity.ok_or(Error::NotIdentified)?.asic {
+                Asic::Bcm5762 => matches!(vendor, FLASH_5762_EEPROM_HD | FLASH_5762_EEPROM_LD),
+                Asic::Bcm5720 => matches!(vendor, FLASH_5720_EEPROM_HD | FLASH_5720_EEPROM_LD),
+                Asic::Bcm5761 => false, // Source pinstraps are buffered flash.
             };
             if eeprom {
                 self.flush(NVRAM_CFG1, config & !NVRAM_CFG1_COMPAT_BYPASS)?;
@@ -241,9 +239,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 NVRAM_CMD_RD | NVRAM_CMD_GO | NVRAM_CMD_FIRST | NVRAM_CMD_LAST | NVRAM_CMD_DONE,
             )?;
             for _ in 0..10_000 {
-                self.delay.delay_us(10);
+                self.wait(10)?;
                 if self.read(NVRAM_CMD)? & NVRAM_CMD_DONE != 0 {
-                    self.delay.delay_us(10);
+                    self.wait(10)?;
                     // All-ones is legal NVRAM data; access errors remain errors.
                     return self.regs().read32(NVRAM_RDDATA);
                 }
@@ -271,4 +269,24 @@ pub(super) fn decode_mac(high: u32, low: u32) -> Mac {
 }
 pub(super) fn valid_mac(mac: Mac) -> bool {
     mac.0 != [0; 6] && !mac.is_multicast()
+}
+
+pub(super) fn decode_led(cfg2: u32) -> Result<u32, Error> {
+    Ok(
+        match cfg2 & (NIC_SRAM_DATA_CFG_LED_MODE_MASK | SHASTA_EXT_LED_MODE_MASK) {
+            NIC_SRAM_DATA_CFG_LED_MODE_PHY_1 => LED_CTRL_MODE_PHY_1,
+            NIC_SRAM_DATA_CFG_LED_MODE_PHY_2 => LED_CTRL_MODE_PHY_2,
+            NIC_SRAM_DATA_CFG_LED_MODE_MAC => LED_CTRL_MODE_MAC,
+            SHASTA_EXT_LED_SHARED => {
+                LED_CTRL_MODE_SHARED
+                    | LED_CTRL_MODE_PHY_1
+                    | LED_CTRL_MODE_PHY_2
+                    | LED_CTRL_BLINK_RATE_OVERRIDE
+                    | LED_CTRL_BLINK_RATE_MASK
+            }
+            SHASTA_EXT_LED_MAC => LED_CTRL_MODE_SHASTA_MAC,
+            SHASTA_EXT_LED_COMBO => LED_CTRL_MODE_COMBO | LED_CTRL_MODE_PHY_1 | LED_CTRL_MODE_PHY_2,
+            _ => return Err(Error::UnsupportedBoard),
+        },
+    )
 }

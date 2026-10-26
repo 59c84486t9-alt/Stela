@@ -10,8 +10,8 @@ use crate::bus::dma::{
     memory::{CacheAttribute, CpuMapping},
 };
 pub(super) const TX: usize = 512;
+#[cfg(test)]
 pub(super) const RX: usize = 2048;
-pub(super) const RET: usize = 4096;
 pub(super) const BUFFER: usize = 4096;
 pub(super) const RX_BYTES: usize = 1536;
 const TX_RING: usize = 0;
@@ -71,33 +71,36 @@ impl Buffer {
 pub(super) struct Memory {
     buffers: Vec<Buffer>,
     active_rx: Vec<bool>,
+    geometry: super::super::geometry::Geometry,
 }
 impl Memory {
     pub(super) fn new(
         pages: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
+        geometry: super::super::geometry::Geometry,
     ) -> Result<Self, (Error, Self)> {
         let mut value = Self {
             buffers: Vec::new(),
             active_rx: Vec::new(),
+            geometry,
         };
         let result = (|| {
             value
                 .active_rx
-                .try_reserve_exact(RX)
+                .try_reserve_exact(geometry.rx)
                 .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
-            value.active_rx.resize(RX, false);
+            value.active_rx.resize(geometry.rx, false);
             value
                 .buffers
                 .try_reserve_exact(6)
                 .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
             for bytes in [
                 TX * TX_DESCRIPTOR_BYTES,
-                RX * RX_DESCRIPTOR_BYTES,
-                RET * RX_DESCRIPTOR_BYTES,
+                geometry.rx * RX_DESCRIPTOR_BYTES,
+                geometry.returns * RX_DESCRIPTOR_BYTES,
                 4096,
                 TX * BUFFER,
-                RX * BUFFER,
+                geometry.rx * BUFFER,
             ] {
                 value
                     .buffers
@@ -114,13 +117,13 @@ impl Memory {
     fn prepare(&mut self) -> Result<(), Error> {
         self.active_rx.fill(false);
         self.buffers[TX_RING].zero(TX * TX_DESCRIPTOR_BYTES)?;
-        self.buffers[RX_RING].zero(RX * RX_DESCRIPTOR_BYTES)?;
-        self.buffers[RETURNS].zero(RET * RX_DESCRIPTOR_BYTES)?;
+        self.buffers[RX_RING].zero(self.geometry.rx * RX_DESCRIPTOR_BYTES)?;
+        self.buffers[RETURNS].zero(self.geometry.returns * RX_DESCRIPTOR_BYTES)?;
         self.buffers[STATUS].zero(4096)?;
         // Actual-domain coherent observation, before hardware publication.
         self.buffers[STATUS].mapping.read_coherent_u32(16)?;
         self.buffers[RETURNS].mapping.read_coherent_u32(28)?;
-        for i in 0..RX - 1 {
+        for i in 0..self.geometry.rx - 1 {
             self.offer(i)?;
         }
         Ok(())
@@ -192,7 +195,7 @@ impl Memory {
         let opaque = self.buffers[RETURNS].mapping.read_coherent_u32(at + 28)?;
         let slot = (opaque & 0xffff) as usize;
         if opaque & !0xffff != RX_STANDARD
-            || slot >= RX
+            || slot >= self.geometry.rx
             || !self.active_rx[slot]
             || kind & RX_INVALID_RING_FLAGS != 0
             || kind & RX_END == 0
@@ -225,7 +228,7 @@ impl Memory {
         Ok((slot, Some(frame)))
     }
     pub(super) fn offer(&mut self, slot: usize) -> Result<(), Error> {
-        if slot >= RX || self.active_rx[slot] {
+        if slot >= self.geometry.rx || self.active_rx[slot] {
             return Err(Error::RingCorrupt);
         }
         let data = slot * BUFFER;

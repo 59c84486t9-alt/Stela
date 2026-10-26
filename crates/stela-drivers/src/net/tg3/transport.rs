@@ -71,6 +71,9 @@ pub struct Hardware<R: Registers, D: Delay> {
     cleanup_failure: Option<Error>,
     stopped: bool,
     core_reset_complete: bool,
+    // Source invariant captured once from this endpoint's actual initial
+    // Link Control. A later 10/100 workaround clear must not erase that fact.
+    clkreq_bug: Option<bool>,
 }
 impl<R: Registers, D: Delay> Drop for Hardware<R, D> {
     fn drop(&mut self) {
@@ -82,7 +85,15 @@ impl<R: Registers, D: Delay> Drop for Hardware<R, D> {
     }
 }
 impl<R: Registers, D: Delay> Hardware<R, D> {
-    pub fn new(registers: R, delay: D) -> Self {
+    /// Compose the original register and timing owners without device effects.
+    ///
+    /// # Safety
+    /// `registers` satisfies its native ownership contract. `delay` is the
+    /// actual calibrated timer supplied by that producer, usable in this
+    /// device's retained power/CPU context for the whole epoch. A copied numeric
+    /// rate or unqualified clock is not native timing authority. Isolated test
+    /// models supply their explicit symbolic timer instead.
+    pub unsafe fn new(registers: R, delay: D) -> Self {
         Self {
             registers: Some(registers),
             delay,
@@ -91,6 +102,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             cleanup_failure: None,
             stopped: false,
             core_reset_complete: false,
+            clkreq_bug: None,
         }
     }
     pub fn identity(&self) -> Option<Identity> {
@@ -104,6 +116,15 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     }
     pub fn engines_stopped(&self) -> bool {
         self.stopped
+    }
+    fn timer_ready(&self) -> Result<(), Error> {
+        self.delay.check().map_err(|_| Error::Clock)
+    }
+    fn wait(&mut self, microseconds: u64) -> Result<(), Error> {
+        let result = self.delay.wait_us(microseconds).map_err(|_| Error::Clock);
+        // A failed settling wait cannot certify an in-flight device effect.
+        // Poison even private packet helpers that return through Packet's error.
+        self.record(result)
     }
     fn regs(&mut self) -> &mut R {
         self.registers
@@ -137,6 +158,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         } else if self.stopped {
             Err(Error::Stopped)
         } else {
+            self.timer_ready()?;
             self.identity.ok_or(Error::NotIdentified)
         }
     }
@@ -169,6 +191,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if self.failure.is_some() {
             return Err(Error::Poisoned);
         }
+        self.timer_ready()?;
         if let Some(identity) = self.identity {
             return Ok(identity);
         }
@@ -306,7 +329,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 if self.ape_read(grant)? == bit {
                     return Ok(());
                 }
-                self.delay.delay_us(10);
+                self.wait(10)?;
             }
             Err(Error::ApeTimeout)
         })();
@@ -321,13 +344,21 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.regs().ape_write32(grant, bit)
     }
 
+    fn restore_phy_mode(&mut self, mode: u32) -> Result<(), Error> {
+        let restore = self.flush(MAC_MI_MODE, mode);
+        let settle = self.wait(80);
+        self.combine(restore, settle)
+    }
     fn phy_command(&mut self, register: u8, data: Option<u16>) -> Result<u16, Error> {
         let identity = self.identity.ok_or(Error::NotIdentified)?;
         let mode = self.read(MAC_MI_MODE)?;
         let auto_poll = mode & MI_AUTO_POLL != 0;
         if auto_poll {
             self.flush(MAC_MI_MODE, mode & !MI_AUTO_POLL)?;
-            self.delay.delay_us(80);
+            if let Err(error) = self.wait(80) {
+                let restore = self.restore_phy_mode(mode);
+                return self.combine(Err(error), restore);
+            }
         }
         let lock = PHY_LOCKS[usize::from(identity.function)];
         let acquired = self.lock(lock);
@@ -341,9 +372,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             let result = (|| {
                 self.flush(MAC_MI_COM, command)?;
                 for _ in 0..5000 {
-                    self.delay.delay_us(10);
+                    self.wait(10)?;
                     if self.read(MAC_MI_COM)? & MI_START == 0 {
-                        self.delay.delay_us(5);
+                        self.wait(5)?;
                         let value = self.read(MAC_MI_COM)?;
                         if value & MI_START != 0 {
                             return Err(Error::MdioTimeout);
@@ -358,9 +389,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             })();
             // Restore autopoll before giving back the PHY grant, as the donor.
             let restore = if auto_poll {
-                let result = self.flush(MAC_MI_MODE, mode);
-                self.delay.delay_us(80);
-                result
+                self.restore_phy_mode(mode)
             } else {
                 Ok(())
             };
@@ -369,9 +398,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             return self.combine(result, release);
         };
         let restore = if auto_poll {
-            let result = self.flush(MAC_MI_MODE, mode);
-            self.delay.delay_us(80);
-            result
+            self.restore_phy_mode(mode)
         } else {
             Ok(())
         };
@@ -487,7 +514,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 if self.sram(FIRMWARE_MBOX, None)? == !FIRMWARE_MAGIC {
                     return Ok(());
                 }
-                self.delay.delay_us(10);
+                self.wait(10)?;
             }
             Err(Error::FirmwareTimeout)
         })();
@@ -498,7 +525,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let value = self.read(at)?;
         self.flush(at, value & !ENABLE)?;
         for _ in 0..1000 {
-            self.delay.delay_us(100);
+            self.wait(100)?;
             if self.read(at)? & ENABLE == 0 {
                 return Ok(());
             }
@@ -517,6 +544,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.record(result)
     }
     pub(super) fn stop_engines_inner(&mut self) -> Result<(), Error> {
+        self.timer_ready()?;
         (|| {
             let host = Self::checked(self.regs().config_read32(MISC_HOST_CTRL)?)?;
             self.flush(u32::from(MISC_HOST_CTRL), host | MASK_PCI_INT)?;
@@ -525,7 +553,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.flush(MAILBOX_INTERRUPT, 1)?;
             let mode = self.read(MAC_RX_MODE)?;
             self.flush(MAC_RX_MODE, mode & !ENABLE)?;
-            self.delay.delay_us(10);
+            self.wait(10)?;
             // All declared parts are 5705_PLUS: RCVLSC/DMAC/MBFREE/BUFMGR/
             // MEMARB are not software-disableable and are intentionally absent.
             for at in STOP_RX.into_iter().chain(STOP_TX) {
@@ -533,7 +561,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             }
             let mode = self.read(MAC_MODE)?;
             self.flush(MAC_MODE, mode & !TRANSMIT_DATA_ENABLE)?;
-            self.delay.delay_us(40);
+            self.wait(40)?;
             self.stop_block(MAC_TX_MODE)?;
             self.stop_block(HOSTCC_MODE)?;
             self.stop_block(WDMAC_MODE)?;
@@ -551,9 +579,14 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
 #[cfg(test)]
 mod tests;
 
+mod bcm5761;
 mod bcm5762;
 pub(super) mod board;
 mod packet_hw;
 mod phy;
 mod regs;
 mod reset;
+
+mod clkreq;
+
+mod filter;

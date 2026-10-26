@@ -104,6 +104,7 @@ struct Domain {
     completions: Mutex<Vec<Range<u64>>>,
     fail_drain: AtomicBool,
     fail_unmap: AtomicBool,
+    fail_unmap_id: AtomicUsize,
     fail_sync: AtomicBool,
     incoherent: AtomicBool,
     defer: AtomicBool,
@@ -120,6 +121,7 @@ impl Domain {
             completions: Mutex::new(Vec::new()),
             fail_drain: AtomicBool::new(false),
             fail_unmap: AtomicBool::new(false),
+            fail_unmap_id: AtomicUsize::new(0),
             fail_sync: AtomicBool::new(false),
             incoherent: AtomicBool::new(false),
             defer: AtomicBool::new(false),
@@ -217,7 +219,9 @@ unsafe impl DmaDomain for Domain {
         self.require_stopped();
         assert!(self.drained.load(Ordering::Relaxed));
         assert!(self.posted.lock().unwrap().is_empty());
-        if self.fail_unmap.load(Ordering::Relaxed) {
+        if self.fail_unmap.load(Ordering::Relaxed)
+            || self.fail_unmap_id.load(Ordering::Relaxed) as u64 == mapping.id
+        {
             return Err(DmaError::InvalidationFailed);
         }
         assert!(self.maps.lock().unwrap().remove(&mapping.address).is_some());
@@ -315,9 +319,19 @@ enum DmaPath {
 #[derive(Default)]
 struct Device {
     config: BTreeMap<u16, u32>,
+    bdf_function: Option<u8>,
+    clkreq_bug: bool,
+    // Legacy fixtures isolate BD/DMA behavior; filter fixtures additionally
+    // enable the independent physical MAC/hash matcher below.
+    match_receive_filter: bool,
+    ignore_config_write: Option<u16>,
+    fail_config_write: Option<u16>,
+    removed_config_read: Option<u16>,
     mac: BTreeMap<u32, u32>,
     sram: BTreeMap<u32, u32>,
     phy: BTreeMap<u8, u16>,
+    phy_writes: Vec<(u8, u16)>,
+    ignore_phy_write: Option<(u8, u16)>,
     ape: BTreeMap<u32, u32>,
     nvram: BTreeMap<u32, u32>,
     auxiliary: BTreeMap<u16, u16>,
@@ -392,15 +406,50 @@ impl Device {
     }
     fn phy_read(&self, at: u8) -> u16 {
         match at {
+            1 if self.phy.get(&0).copied().unwrap_or(0) & 0x0800 != 0 => {
+                self.phy.get(&1).copied().unwrap_or(0) & !4
+            }
             0x18 => self.auxiliary.get(&self.aux_select).copied().unwrap_or(0),
             0x15 => self.dsp.get(&self.dsp_select).copied().unwrap_or(0),
             _ => self.phy.get(&at).copied().unwrap_or(0),
         }
     }
-    fn phy_write(&mut self, at: u8, value: u16) {
+    fn phy_write(&mut self, at: u8, value: u16, domain: &Domain) {
+        if matches!((at, value), (0x10, 8) | (0x18, 0x1b2) | (0, 0x800)) {
+            assert_eq!(self.config[&4] & 4, 0, "PHY power before BME clear");
+            assert!(self.command_clear_observed, "PHY power before BME readback");
+            for at in [
+                0x468, 0x2c00, 0x2000, 0x2400, 0x2800, 0x3000, 0x1400, 0x1800, 0xc00, 0x4800,
+                0x1000, 0x1c00, 0x45c, 0x3c00, 0x4c00,
+            ] {
+                assert_eq!(self.mac.get(&at).copied().unwrap_or(0) & 2, 0);
+            }
+            assert!(
+                domain.drained.load(Ordering::Relaxed),
+                "PHY power before DMA drain"
+            );
+            assert!(domain.posted.lock().unwrap().is_empty());
+        }
+        self.phy_writes.push((at, value));
+        if self.ignore_phy_write == Some((at, value)) {
+            return;
+        }
+        if self.is_5761() && at == 0 && value == 0x800 {
+            assert_eq!(
+                self.mac[&0x360c] & 0x1f0000,
+                0x110000,
+                "BCM5761 PDOWN before actual 12.5MHz clock"
+            );
+        }
         match at {
             0 if value & 0x8000 != 0 => {
                 self.phy.insert(0, if self.phy_stuck { value } else { 0 });
+                if !self.phy_stuck {
+                    // IEEE PHY reset removes PDOWN and restores LED/power
+                    // controls; no PCI or packet completion is implied.
+                    *self.phy.entry(0x10).or_default() &= !8;
+                    *self.auxiliary.entry(2).or_default() &= !0x1b0;
+                }
             }
             0x18 if value & 0x8007 == 7 => {
                 self.aux_select = (value >> 12) & 7;
@@ -417,7 +466,7 @@ impl Device {
             }
         }
     }
-    fn read(&mut self, at: u32) -> Result<u32, Error> {
+    fn read(&mut self, at: u32, domain: &Domain) -> Result<u32, Error> {
         let count = self.read_counts.entry(at).or_default();
         *count += 1;
         if self.fail_read_on == Some((at, *count)) {
@@ -444,7 +493,7 @@ impl Device {
                     let value = if command & 0x0800_0000 != 0 {
                         self.phy_read(at)
                     } else {
-                        self.phy_write(at, command as u16);
+                        self.phy_write(at, command as u16, domain);
                         command as u16
                     };
                     self.command = None;
@@ -474,6 +523,23 @@ impl Device {
         );
     }
     fn require_dma(&self, path: DmaPath) {
+        if matches!(path, DmaPath::Tx) && self.clkreq_bug {
+            let aux = self.phy[&0x19] & 0x700;
+            assert_eq!(
+                self.config[&0x50] & 0x100,
+                if matches!(aux, 0x100 | 0x200 | 0x300 | 0x500) {
+                    0
+                } else {
+                    0x100
+                },
+                "actual per-speed CLKREQ must prevent send BD corruption"
+            );
+        }
+        assert_eq!(
+            self.phy.get(&0).copied().unwrap_or(0) & 0x800,
+            0,
+            "PHY suspended"
+        );
         assert_eq!(self.config[&4] & 6, 6, "actual memory decode and BME");
         assert_eq!(
             self.config[&0x68] & 0x98,
@@ -482,12 +548,36 @@ impl Device {
         );
         self.require_bits(0x4000, 3, 2); // MEMARB enabled, not reset.
         self.require_bits(0x6800, 0x34, 0x34); // data/nonframe word and byte swap.
+        // Exact source profile initialization, including the offload mode bits
+        // even though the public packet API emits only plain descriptors.
+        self.require_bits(
+            0x4800,
+            0x1800_0000,
+            if self.is_5761() {
+                0x0800_0000
+            } else {
+                0x1800_0000
+            },
+        );
         if self.config[&0] == 0x1687_14e4 {
             self.require_5762_dma();
+        } else if self.is_5761() {
+            self.require_5761_dma();
+        }
+        if matches!(path, DmaPath::Tx | DmaPath::Rx) {
+            let mode = match self.phy[&0x19] & 0x700 {
+                0x100 | 0x300 => 6, // MII with actual half duplex.
+                0x200 | 0x500 => 4, // MII full duplex.
+                0x700 => 8,         // GMII full duplex.
+                _ => panic!("packet DMA without an admitted negotiated PHY mode"),
+            };
+            self.require_bits(0x400, 14, mode);
+            assert_eq!(self.phy[&4] & 0x1ff, 0x1e1);
+            assert_eq!(self.phy[&9] & 0x300, 0x200, "no 1000half advertisement");
         }
         match path {
             DmaPath::Status => {
-                self.require_bits(0x3c00, 0x187, 0x106); // 32-byte, attention, enabled.
+                self.require_bits(0x3c00, 0x187, if self.is_5761() { 0x102 } else { 0x106 });
                 self.require_bits(0x4c00, 3, 2); // host status needs write DMA.
             }
             DmaPath::Tx => {
@@ -496,7 +586,7 @@ impl Device {
                 self.require_bits(0x45c, 0x103, 0x102); // TX, A0 MBUF lockup fix.
                 self.require_bits(0x6800, 0x20000, 0x20000); // host send BDs.
                 self.require_bits(0x4800, 3, 2); // read DMA.
-                if self.config[&0] != 0x1687_14e4 {
+                if self.config[&0] == 0x165f_14e4 {
                     self.require_bits(0x4900, 4, 4); // BCM5720 RDMA FIFO overflow fix.
                     self.require_bits(0x4910, 0xf0000, 0xf0000); // 4K BD/LSO boundaries.
                 }
@@ -509,7 +599,7 @@ impl Device {
                 self.require_bits(0x400, 0xc0_0000, 0xc0_0000); // RX/frame engines.
                 self.require_bits(0x468, 0x403, 0x402); // RX and intact VLAN bytes.
                 self.require_bits(0x4c00, 3, 2);
-                self.require_bits(0x2400, 0x10003, 0x10002); // large standard ring.
+                self.require_bits(0x2400, 0x10003, if self.is_5761() { 2 } else { 0x10002 });
                 for at in [0x2c00, 0x2000, 0x2800, 0x3000] {
                     self.require_bits(at, 3, 2);
                 }
@@ -583,7 +673,15 @@ impl Device {
         panic!("unbounded TX walk")
     }
     fn receive(&mut self, frame: &[u8], errors: u32, domain: &Domain) {
-        assert_eq!(self.mac[&0x2458], (2048 << 16) | (1536 << 2));
+        if self.match_receive_filter && !self.accepts_destination(frame) {
+            return;
+        }
+        let (rx_count, ret_count, flags) = if self.is_5761() {
+            (512, 512, 512 << 16)
+        } else {
+            (2048, 4096, (2048 << 16) | (1536 << 2))
+        };
+        assert_eq!(self.mac[&0x2458], flags);
         let tail = self.mac[&0x26c] as usize;
         assert_ne!(self.rx, tail);
         let base = (u64::from(self.mac[&0x2450]) << 32) | u64::from(self.mac[&0x2454]);
@@ -597,7 +695,7 @@ impl Device {
         assert_eq!(opaque, 0x10000 | self.rx as u32);
         self.dma_read(DmaPath::Rx, domain, address, 4096); // actual offered page.
         let returns = (u64::from(self.sram[&0x200]) << 32) | u64::from(self.sram[&0x204]);
-        assert_eq!(self.sram[&0x208], 4096 << 16);
+        assert_eq!(self.sram[&0x208], (ret_count as u32) << 16);
         let returned = returns + (self.ret * 32) as u64;
         self.dma_write(DmaPath::Rx, domain, address, frame);
         self.dma_write(
@@ -616,8 +714,8 @@ impl Device {
         ] {
             self.dma_put32(DmaPath::Rx, domain, returned + offset, value);
         }
-        self.rx = (self.rx + 1) & 2047;
-        self.ret = (self.ret + 1) & 4095;
+        self.rx = (self.rx + 1) % rx_count;
+        self.ret = (self.ret + 1) % ret_count;
         self.publish_indices(domain);
     }
 }
@@ -631,17 +729,34 @@ impl Drop for Reg {
     }
 }
 struct Timer;
-impl Delay for Timer {
-    fn delay_us(&mut self, _: u64) {}
+// SAFETY: isolated DMA/register peer only; no production timing authority.
+unsafe impl Delay for Timer {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
 }
 // SAFETY: isolated symbolic device only, deliberately no native authority.
 unsafe impl Registers for Reg {
     fn function_number(&self) -> u8 {
-        3
+        let peer = self.peer.lock().unwrap();
+        if let Some(function) = peer.bdf_function {
+            function
+        } else if peer.is_5761() {
+            0
+        } else {
+            3
+        }
     } // Deliberately differs from internal port 0.
     fn config_read32(&mut self, at: u16) -> Result<u32, Error> {
         let mut p = self.peer.lock().unwrap();
-        let value = p.config.get(&at).copied().unwrap_or(0);
+        let value = if p.removed_config_read == Some(at) {
+            u32::MAX
+        } else {
+            p.config.get(&at).copied().unwrap_or(0)
+        };
         if at == 4 && value & 4 == 0 {
             p.command_clear_observed = true;
         }
@@ -649,13 +764,24 @@ unsafe impl Registers for Reg {
         Ok(value)
     }
     fn config_write32(&mut self, at: u16, value: u32) -> Result<(), Error> {
-        self.peer.lock().unwrap().config.insert(at, value);
+        let mut p = self.peer.lock().unwrap();
+        p.config.insert(at, value);
+        p.access.push((true, 0x10000 + u32::from(at), value));
         Ok(())
     }
     fn config_write16(&mut self, at: u16, value: u16) -> Result<(), Error> {
         let mut p = self.peer.lock().unwrap();
         let shift = (at & 2) * 8;
         let word = p.config.get(&(at & !3)).copied().unwrap_or(0);
+        if p.fail_config_write == Some(at) || p.ignore_config_write == Some(at) {
+            p.access
+                .push((true, 0x10000 + u32::from(at), u32::from(value)));
+            return if p.fail_config_write == Some(at) {
+                Err(Error::Access)
+            } else {
+                Ok(())
+            };
+        }
         if at == 4 && word & 4 != 0 && value & 4 == 0 && p.ignore_master_clear {
             return Ok(());
         }
@@ -674,7 +800,7 @@ unsafe impl Registers for Reg {
         Ok(())
     }
     fn read32(&mut self, at: u32) -> Result<u32, Error> {
-        self.peer.lock().unwrap().read(at)
+        self.peer.lock().unwrap().read(at, &self.domain)
     }
     fn write32(&mut self, at: u32, value: u32) -> Result<(), Error> {
         let mut p = self.peer.lock().unwrap();
@@ -687,6 +813,19 @@ unsafe impl Registers for Reg {
         p.access.push((true, at, value));
         if p.ignore_write == Some(at) {
             return Ok(());
+        }
+        if p.is_5761() && at == 0x360c && value & 0x1f0000 == 0x110000 {
+            assert_eq!(p.config[&4] & 4, 0, "5761 power clock before BME clear");
+            assert!(p.command_clear_observed);
+            assert!(self.domain.drained.load(Ordering::Relaxed));
+            assert!(self.domain.posted.lock().unwrap().is_empty());
+            assert_eq!(p.phy.get(&0).copied().unwrap_or(0) & 0x800, 0);
+            assert_eq!(p.phy[&0x10] & 8, 8, "5761 clock before LED low power");
+            assert_eq!(
+                p.auxiliary[&2] & 0x1b0,
+                0x1b0,
+                "5761 clock before AUX low power"
+            );
         }
         match at {
             0x84 => {
@@ -764,7 +903,7 @@ unsafe impl Registers for Reg {
     }
     fn ape_write32(&mut self, at: u32, value: u32) -> Result<(), Error> {
         let mut p = self.peer.lock().unwrap();
-        if (0x8400..0x8420).contains(&at) {
+        if (0x8400..0x8420).contains(&at) || (0x2c..0x4c).contains(&at) {
             p.ape.insert(at + 0x20, value);
         } else {
             p.ape.insert(at, 0);
@@ -782,13 +921,16 @@ fn parts() -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
         fail_after: None,
     };
     (
-        Hardware::new(
-            Reg {
-                peer: peer.clone(),
-                domain: domain.clone(),
-            },
-            Timer,
-        ),
+        // SAFETY: original register/domain/timer owners of this isolated peer.
+        unsafe {
+            Hardware::new(
+                Reg {
+                    peer: peer.clone(),
+                    domain: domain.clone(),
+                },
+                Timer,
+            )
+        },
         pages,
         domain,
         peer,
@@ -1452,4 +1594,16 @@ fn fatal_flow_observed_during_low_water_ack_is_never_discarded() {
     assert!(packet.retire().is_ok());
 }
 
+mod bcm5761;
+mod bcm5761_power;
 mod bcm5762;
+mod phy_link;
+mod phy_power;
+mod rdma_mode;
+mod restart;
+
+mod timing;
+
+mod clkreq;
+
+mod receive_filter;

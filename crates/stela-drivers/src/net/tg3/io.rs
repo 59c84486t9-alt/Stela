@@ -44,6 +44,10 @@ pub struct Mmio<C: ConfigSpace> {
     ape: Window,
     _owner: Arc<dyn core::any::Any>,
 }
+/// Validation failure and the same original configuration and mapping/power
+/// owners. No failure-path Drop certifies completion of their device lifetime.
+pub type WindowFailure<C> = (Error, Function<C>, Arc<dyn core::any::Any>);
+
 impl<C: ConfigSpace> Mmio<C> {
     /// # Safety
     /// `function` is the actual exclusively reserved powered PCI function.
@@ -52,6 +56,8 @@ impl<C: ConfigSpace> Mmio<C> {
     /// contract holds. Firmware and IRQ users are excluded. Config access must
     /// remain usable while core reset temporarily disables MAC memory decoding.
     /// The function and mapped windows must never be rebound by another owner.
+    /// Validation failure returns these same original owners without dropping
+    /// either. The caller retains their actual DMA/IRQ/power obligations.
     pub unsafe fn from_owned_windows(
         function: Function<C>,
         mac: NonNull<u8>,
@@ -59,15 +65,27 @@ impl<C: ConfigSpace> Mmio<C> {
         ape: NonNull<u8>,
         ape_bytes: usize,
         owner: Arc<dyn core::any::Any>,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            function,
-            mac: Window::new(mac, mac_bytes, 0x8000)?,
-            ape: Window::new(ape, ape_bytes, 0x8440)?,
-            _owner: owner,
-        })
+    ) -> Result<Self, WindowFailure<C>> {
+        let windows = (|| {
+            Ok((
+                Window::new(mac, mac_bytes, 0x8000)?,
+                Window::new(ape, ape_bytes, 0x8440)?,
+            ))
+        })();
+        match windows {
+            Ok((mac, ape)) => Ok(Self {
+                function,
+                mac,
+                ape,
+                _owner: owner,
+            }),
+            Err(error) => Err((error, function, owner)),
+        }
     }
 }
+
+#[cfg(test)]
+mod tests;
 // SAFETY: construction requires the retained actual same-function ownership;
 // consuming it keeps the sole config access and checked UC windows together.
 unsafe impl<C: ConfigSpace> Registers for Mmio<C> {

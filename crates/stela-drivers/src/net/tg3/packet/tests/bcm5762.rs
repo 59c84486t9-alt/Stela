@@ -4,7 +4,7 @@
 use super::*;
 
 impl Device {
-    fn new_5762() -> Self {
+    pub(super) fn new_5762() -> Self {
         let mut p = Self::new();
         p.config.insert(0, 0x1687_14e4);
         p.config.insert(0xf4, 0x0576_2000);
@@ -65,7 +65,7 @@ fn parts_5762() -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>
     *peer.lock().unwrap() = Device::new_5762();
     (hardware, pages, domain, peer)
 }
-fn attach_5762() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
+pub(super) fn attach_5762() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
     let (hardware, pages, domain, peer) = parts_5762();
     let packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
         Ok(packet) => packet,

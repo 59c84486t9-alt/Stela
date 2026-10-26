@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! Source tg3 ring geometry follows actual ASIC capabilities, not PCI aliases.
+use super::Asic;
+
+#[derive(Clone, Copy)]
+pub(super) struct Geometry {
+    pub rx: usize,
+    pub returns: usize,
+}
+impl Geometry {
+    pub const fn of(asic: Asic) -> Self {
+        match asic {
+            // 5761 is 5705_PLUS without LRG_PROD_RING_CAP/JUMBO_CAPABLE.
+            Asic::Bcm5761 => Self {
+                rx: 512,
+                returns: 512,
+            },
+            Asic::Bcm5720 | Asic::Bcm5762 => Self {
+                rx: 2048,
+                returns: 4096,
+            },
+        }
+    }
+}

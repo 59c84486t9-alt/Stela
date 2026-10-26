@@ -47,7 +47,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     pub fn core_reset_completed(&self) -> bool {
         self.core_reset_complete && self.failure.is_none()
     }
-    fn pcie_capability(&mut self) -> Result<u16, Error> {
+    pub(super) fn pcie_capability(&mut self) -> Result<u16, Error> {
         let command_status = Self::checked(self.regs().config_read32(PCI_COMMAND)?)?;
         if command_status & PCI_STATUS_CAP_LIST == 0 {
             return Err(Error::UnsupportedPcie);
@@ -93,7 +93,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 if self.read(NVRAM_SWARB)? & SWARB_GRANTED != 0 {
                     return Ok(());
                 }
-                self.delay.delay_us(20);
+                self.wait(20)?;
             }
             Err(Error::NvramTimeout)
         })();
@@ -108,7 +108,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             if self.sram(FIRMWARE_MBOX, None)? == !FIRMWARE_MAGIC {
                 return Ok(());
             }
-            self.delay.delay_us(10);
+            self.wait(10)?;
         }
         Err(Error::FirmwareTimeout)
     }
@@ -121,6 +121,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if self.failure.is_some() {
             return Err(Error::Poisoned);
         }
+        self.timer_ready()?;
         let identity = self.identity.ok_or(Error::NotIdentified)?;
         self.core_reset_complete = false;
         let result = (|| {
@@ -171,9 +172,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             // Do not MMIO-read here: decode may disappear until PCI config is
             // restored. The source requires both 120-us waits/config flush.
             self.write(GRC_MISC_CFG, CORE_RESET | RESET_PCIE_CLOCK)?;
-            self.delay.delay_us(120);
+            self.wait(120)?;
             Self::checked(self.regs().config_read32(PCI_COMMAND)?)?;
-            self.delay.delay_us(120);
+            self.wait(120)?;
             let control = Self::checked(self.regs().config_read32(pcie + 8)?)? as u16;
             self.regs().config_write16(pcie + 8, control & !0x0810)?;
             if Self::checked(self.regs().config_read32(pcie + 8)?)? & 0x0810 != 0 {
@@ -201,10 +202,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             self.firmware_after_reset()?;
             self.write(GRC_MODE, MAC_DATA_SWAP)?;
             self.flush(MAC_MODE, 0)?;
-            self.delay.delay_us(40);
+            self.wait(40)?;
             self.unlock(1)?;
             self.flush(MAC_MI_MODE, 0x8000)?; // CPMU's 500-kHz MDIO clock.
-            self.delay.delay_us(80);
+            self.wait(80)?;
             if identity.asic == Asic::Bcm5761 {
                 let value = self.read(POST_RESET_PCIE)?;
                 self.write(POST_RESET_PCIE, value | PCIE_POST_RESET_FIX)?;

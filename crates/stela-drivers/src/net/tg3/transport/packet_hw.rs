@@ -3,7 +3,7 @@
 // Copyright (C) 2001-2003 Jeff Garzik
 // Copyright (C) 2004 Sun Microsystems Inc.
 // Copyright (C) 2005-2018 Broadcom
-//! One BCM5720/5762 A0 host-send/standard-receive/return queue, polled status DMA.
+//! One BCM5720/5761/5762 A0 host-send/standard-receive/return queue, polled status DMA.
 use super::{board::Board, phy::Speed, regs::*, *};
 
 impl<R: Registers, D: Delay> Hardware<R, D> {
@@ -16,6 +16,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.board()
     }
     pub(in crate::net::tg3) fn packet_reset(&mut self, board: Board) -> Result<(), Error> {
+        self.timer_ready()?;
         // PHY/config access is legal in the stopped packet epoch. No packet
         // engine is enabled by reopening this serialized register transport.
         self.stopped = false;
@@ -30,6 +31,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             || observed.local != board.local
             || observed.led != board.led
             || observed.profile_5762 != board.profile_5762
+            || observed.profile_5761 != board.profile_5761
         {
             return Err(Error::UnsupportedBoard);
         }
@@ -45,17 +47,25 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         &mut self,
         board: Board,
         addresses: [u64; 4],
+        filter: &super::super::ReceiveFilter,
     ) -> Result<(), Error> {
+        self.timer_ready()?;
+        filter.validate()?;
         if !self.core_reset_completed() {
             return Err(Error::Poisoned);
         }
-        let bcm5762 = self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5762;
+        let asic = self.identity.ok_or(Error::NotIdentified)?.asic;
+        let bcm5762 = asic == Asic::Bcm5762;
+        let legacy = asic == Asic::Bcm5761;
+        let geometry = super::super::geometry::Geometry::of(asic);
         if bcm5762 && self.read(TG3_CPMU_CLCK_ORIDE_ENABLE)? & TG3_CPMU_MAC_ORIDE_ENABLE == 0 {
             return Err(Error::ConfigDidNotLatch);
         }
         let [tx, rx, returns, status] = addresses;
-        let dma = self.read(TG3PCI_DMA_RW_CTRL)? & !DMA_RWCTRL_DIS_CACHE_ALIGNMENT;
-        self.flush(TG3PCI_DMA_RW_CTRL, dma | DMA_RWCTRL_DIS_CACHE_ALIGNMENT)?;
+        if !legacy {
+            let dma = self.read(TG3PCI_DMA_RW_CTRL)? & !DMA_RWCTRL_DIS_CACHE_ALIGNMENT;
+            self.flush(TG3PCI_DMA_RW_CTRL, dma | DMA_RWCTRL_DIS_CACHE_ALIGNMENT)?;
+        }
         self.flush(
             GRC_MODE,
             GRC_MODE_WSWAP_DATA
@@ -65,7 +75,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | GRC_MODE_NO_TX_PHDR_CSUM
                 | GRC_MODE_IRQ_ON_MAC_ATTN
                 | GRC_MODE_HOST_STACKUP
-                | GRC_MODE_IRQ_ON_FLOW_ATTN,
+                | if legacy { 0 } else { GRC_MODE_IRQ_ON_FLOW_ATTN },
         )?;
         let misc = self.read(GRC_MISC_CFG)?;
         self.flush(
@@ -74,8 +84,22 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         )?;
         for (at, value) in [
             (BUFMGR_MB_RDMA_LOW_WATER, DEFAULT_MB_RDMA_LOW_WATER_5705),
-            (BUFMGR_MB_MACRX_LOW_WATER, DEFAULT_MB_MACRX_LOW_WATER_57765),
-            (BUFMGR_MB_HIGH_WATER, DEFAULT_MB_HIGH_WATER_57765),
+            (
+                BUFMGR_MB_MACRX_LOW_WATER,
+                if legacy {
+                    DEFAULT_MB_MACRX_LOW_WATER_5705
+                } else {
+                    DEFAULT_MB_MACRX_LOW_WATER_57765
+                },
+            ),
+            (
+                BUFMGR_MB_HIGH_WATER,
+                if legacy {
+                    DEFAULT_MB_HIGH_WATER_5705
+                } else {
+                    DEFAULT_MB_HIGH_WATER_57765
+                },
+            ),
             (BUFMGR_DMA_LOW_WATER, DEFAULT_DMA_LOW_WATER),
             (BUFMGR_DMA_HIGH_WATER, DEFAULT_DMA_HIGH_WATER),
         ] {
@@ -83,7 +107,13 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         self.flush(
             BUFMGR_MODE,
-            BUFMGR_MODE_ENABLE | BUFMGR_MODE_ATTN_ENABLE | BUFMGR_MODE_MBLOW_ATTN_ENAB,
+            BUFMGR_MODE_ENABLE
+                | BUFMGR_MODE_ATTN_ENABLE
+                | if legacy {
+                    0
+                } else {
+                    BUFMGR_MODE_MBLOW_ATTN_ENAB
+                },
         )?;
         let mut enabled = false;
         for _ in 0..2000 {
@@ -91,31 +121,50 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 enabled = true;
                 break;
             }
-            self.delay.delay_us(10);
+            self.wait(10)?;
         }
         if !enabled {
             return Err(Error::ConfigDidNotLatch);
         }
-        self.write(RCVBDI_STD_THRESH, 64)?; // min(128/2, (2048-1)/8).
-        self.write(STD_REPLENISH_LWM, TG3_SRAM_RX_STD_BDCACHE_SIZE_5700)?;
-        self.write(RCVBDI_JUMBO_THRESH, 12)?; // disabled jumbo ring, donor default pending=100.
-        self.write(JMB_REPLENISH_LWM, TG3_SRAM_RX_JMB_BDCACHE_SIZE_5700)?;
+        self.write(RCVBDI_STD_THRESH, if legacy { 16 } else { 64 })?;
+        if !legacy {
+            self.write(STD_REPLENISH_LWM, TG3_SRAM_RX_STD_BDCACHE_SIZE_5700)?;
+            self.write(RCVBDI_JUMBO_THRESH, 12)?; // disabled jumbo ring, donor default pending=100.
+            self.write(JMB_REPLENISH_LWM, TG3_SRAM_RX_JMB_BDCACHE_SIZE_5700)?;
+        }
         self.write(RCVDBDI_STD_BD, (rx >> 32) as u32)?;
         self.write(RCVDBDI_STD_BD + 4, rx as u32)?;
-        self.write(RCVDBDI_STD_BD + 8, (2048 << 16) | (1536 << 2))?;
-        if bcm5762 {
+        self.write(
+            RCVDBDI_STD_BD + 8,
+            ((geometry.rx as u32) << 16) | if legacy { 0 } else { 1536 << 2 },
+        )?;
+        if bcm5762 || legacy {
             self.bcm5762_write(RCVDBDI_STD_BD + 12, NIC_SRAM_RX_BUFFER_DESC)?;
         }
-        self.write(RCVDBDI_JUMBO_BD + 8, BDINFO_FLAGS_DISABLED)?;
-        self.rx_producer(2047)?;
+        if !legacy {
+            self.write(RCVDBDI_JUMBO_BD + 8, BDINFO_FLAGS_DISABLED)?;
+        }
+        self.rx_producer(geometry.rx - 1)?;
         self.flush(TG3_RX_JMB_PROD_IDX_REG, 0)?;
-        for index in 1..if bcm5762 { 2 } else { 4 } {
+        for index in 1..if legacy {
+            1
+        } else if bcm5762 {
+            2
+        } else {
+            4
+        } {
             self.sram(
                 NIC_SRAM_SEND_RCB + index * 16 + 8,
                 Some(BDINFO_FLAGS_DISABLED),
             )?;
         }
-        for index in 1..if bcm5762 { 4 } else { 17 } {
+        for index in 1..if legacy {
+            1
+        } else if bcm5762 {
+            4
+        } else {
+            17
+        } {
             self.sram(
                 NIC_SRAM_RCV_RET_RCB + index * 16 + 8,
                 Some(BDINFO_FLAGS_DISABLED),
@@ -127,8 +176,8 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.write(HOSTCC_STATUS_BLK_HOST_ADDR, (status >> 32) as u32)?;
         self.write(HOSTCC_STATUS_BLK_HOST_ADDR + 4, status as u32)?;
         self.ring_info(NIC_SRAM_SEND_RCB, tx, 512)?;
-        self.ring_info(NIC_SRAM_RCV_RET_RCB, returns, 4096)?;
-        if bcm5762 {
+        self.ring_info(NIC_SRAM_RCV_RET_RCB, returns, geometry.returns as u32)?;
+        if bcm5762 || legacy {
             self.sram(NIC_SRAM_SEND_RCB + 12, Some(NIC_SRAM_TX_BUFFER_DESC))?;
             self.sram(NIC_SRAM_RCV_RET_RCB + 12, Some(0))?;
         }
@@ -144,8 +193,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             mac.iter().map(|b| u32::from(*b)).sum::<u32>() & 0x3ff,
         )?;
         self.write(MAC_RX_MTU_SIZE, 1522)?;
-        let lengths =
-            self.read(MAC_TX_LENGTHS)? & (TX_LENGTHS_JMB_FRM_LEN_MSK | TX_LENGTHS_CNT_DWN_VAL_MSK);
+        let lengths = if legacy {
+            0
+        } else {
+            self.read(MAC_TX_LENGTHS)? & (TX_LENGTHS_JMB_FRM_LEN_MSK | TX_LENGTHS_CNT_DWN_VAL_MSK)
+        };
         self.write(
             MAC_TX_LENGTHS,
             lengths
@@ -160,13 +212,15 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         } else {
             TG3_LSO_RD_DMA_CRPTEN_CTRL
         };
-        let corruption = self.read(corruption_register)?
-            | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_BD_4K
-            | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_LSO_4K;
-        if bcm5762 {
-            self.bcm5762_write(corruption_register, corruption)?;
-        } else {
-            self.write(corruption_register, corruption)?;
+        if !legacy {
+            let corruption = self.read(corruption_register)?
+                | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_BD_4K
+                | TG3_LSO_RD_DMA_CRPTEN_CTRL_BLEN_LSO_4K;
+            if bcm5762 {
+                self.bcm5762_write(corruption_register, corruption)?;
+            } else {
+                self.write(corruption_register, corruption)?;
+            }
         }
         let statistics = self.read(RCVLPC_STATS_ENABLE)?;
         self.write(RCVLPC_STATS_ENABLE, statistics & !RCVLPC_STATSENAB_DACK_FIX)?;
@@ -196,7 +250,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         self.flush(
             HOSTCC_MODE,
-            HOSTCC_MODE_ENABLE | HOSTCC_MODE_32BYTE | HOSTCC_MODE_ATTN,
+            HOSTCC_MODE_ENABLE | HOSTCC_MODE_32BYTE | if legacy { 0 } else { HOSTCC_MODE_ATTN },
         )?;
         self.write(RCVCC_MODE, RCVCC_MODE_ENABLE | RCVCC_MODE_ATTN_ENABLE)?;
         self.write(RCVLPC_MODE, RCVLPC_MODE_ENABLE)?;
@@ -211,9 +265,9 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | MAC_MODE_RXSTAT_CLEAR
                 | MAC_MODE_TXSTAT_CLEAR,
         )?;
-        self.delay.delay_us(40);
+        self.wait(40)?;
         self.flush(GRC_LOCAL_CTRL, board.local)?;
-        self.delay.delay_us(100);
+        self.wait(100)?;
         self.flush(
             WDMAC_MODE,
             WDMAC_MODE_ENABLE
@@ -227,10 +281,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | WDMAC_MODE_LNGREAD_ENAB
                 | WDMAC_MODE_STATUS_TAG_FIX,
         )?;
-        self.delay.delay_us(40);
-        // Both profiles are 57765_PLUS. BCM5762 uses a different register
-        // and rewrites only the source margin/watermark fields; BCM5720 only
-        // adds FIFO_OFLW_FIX. Preserve every unrelated observed bit.
+        self.wait(40)?;
+        // BCM5762 uses a different register and rewrites the source
+        // margin/watermark fields. BCM5720 and BCM5761 only add FIFO_OFLW_FIX.
+        // Preserve every unrelated observed bit.
         let reserve_register = if bcm5762 {
             TG3_RDMA_RSRVCTRL_REG2
         } else {
@@ -252,10 +306,15 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if self.read(reserve_register)? != reserve {
             return Err(Error::ConfigDidNotLatch);
         }
-        let rdma = self.read(RDMAC_MODE)? & RDMAC_MODE_H2BNC_VLAN_DET;
+        let rdma = if legacy {
+            0
+        } else {
+            self.read(RDMAC_MODE)? & RDMAC_MODE_H2BNC_VLAN_DET
+        };
         self.flush(
             RDMAC_MODE,
-            rdma | RDMAC_MODE_ENABLE
+            rdma | RDMAC_MODE_IPV4_LSO_EN // source HW_TSO_2/3 mode; descriptors remain plain.
+                | RDMAC_MODE_ENABLE
                 | RDMAC_MODE_TGTABORT_ENAB
                 | RDMAC_MODE_MSTABORT_ENAB
                 | RDMAC_MODE_PARITYERR_ENAB
@@ -265,12 +324,16 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 | RDMAC_MODE_FIFOOREAD_ENAB
                 | RDMAC_MODE_LNGREAD_ENAB
                 | RDMAC_MODE_FIFO_LONG_BURST
-                | RDMAC_MODE_IPV6_LSO_EN,
+                | if legacy { 0 } else { RDMAC_MODE_IPV6_LSO_EN },
         )?;
-        self.delay.delay_us(40);
+        self.wait(40)?;
         // Observe the actual residual channel lengths before applying 5720's
         // documented workaround; no synthetic normal-channel assumption.
-        for index in 0..if bcm5762 { 0 } else { TG3_NUM_RDMA_CHANNELS } {
+        for index in 0..if bcm5762 || legacy {
+            0
+        } else {
+            TG3_NUM_RDMA_CHANNELS
+        } {
             if self.read(TG3_RDMA_LENGTH + index * 4)? > 9000 {
                 let value = self.read(TG3_LSO_RD_DMA_CRPTEN_CTRL)?;
                 self.write(
@@ -282,48 +345,55 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         }
         for (at, value) in [
             (RCVDCC_MODE, RCVDCC_MODE_ENABLE | RCVDCC_MODE_ATTN_ENABLE),
-            (SNDDATAC_MODE, SNDDATAC_MODE_ENABLE),
+            (
+                SNDDATAC_MODE,
+                SNDDATAC_MODE_ENABLE | if legacy { SNDDATAC_MODE_CDELAY } else { 0 },
+            ),
             (SNDBDC_MODE, SNDBDC_MODE_ENABLE | SNDBDC_MODE_ATTN_ENABLE),
             (RCVBDI_MODE, RCVBDI_MODE_ENABLE | RCVBDI_MODE_RCB_ATTN_ENAB),
             (
                 RCVDBDI_MODE,
-                RCVDBDI_MODE_ENABLE | RCVDBDI_MODE_INV_RING_SZ | RCVDBDI_MODE_LRG_RING_SZ,
+                RCVDBDI_MODE_ENABLE
+                    | RCVDBDI_MODE_INV_RING_SZ
+                    | if legacy { 0 } else { RCVDBDI_MODE_LRG_RING_SZ },
             ),
             (SNDDATAI_MODE, SNDDATAI_MODE_ENABLE),
+            (SNDDATAI_MODE, SNDDATAI_MODE_ENABLE | 0x8), // hardware TSO generation 2/3.
             (SNDBDI_MODE, SNDBDI_MODE_ENABLE | SNDBDI_MODE_ATTN_ENABLE),
             (SNDBDS_MODE, SNDBDS_MODE_ENABLE | SNDBDS_MODE_ATTN_ENABLE),
         ] {
             self.flush(at, value)?;
         }
-        let tx_mode = self.read(MAC_TX_MODE)? & (TX_MODE_JMB_FRM_LEN | TX_MODE_CNT_DN_MODE);
+        let tx_mode = if legacy {
+            0
+        } else {
+            self.read(MAC_TX_MODE)? & (TX_MODE_JMB_FRM_LEN | TX_MODE_CNT_DN_MODE)
+        };
         self.flush(
             MAC_TX_MODE,
             tx_mode | TX_MODE_ENABLE | TX_MODE_MBUF_LOCKUP_FIX,
         )?;
-        self.delay.delay_us(100);
-        let rx_mode = RX_MODE_ENABLE
-            | RX_MODE_IPV6_CSUM_ENABLE
-            | RX_MODE_KEEP_VLAN_TAG
-            | if bcm5762 { RX_MODE_IPV4_FRAG_FIX } else { 0 };
+        self.wait(100)?;
+        // Restore the requested table/mode before any new receive DMA can
+        // start; the same policy survives full restart and held-D0 PHY resume.
+        self.packet_filter_tables(filter)?;
+        let rx_mode = Self::receive_mode(
+            RX_MODE_ENABLE
+                | RX_MODE_IPV6_CSUM_ENABLE
+                | if bcm5762 { RX_MODE_IPV4_FRAG_FIX } else { 0 },
+            filter,
+        );
         if bcm5762 {
             self.bcm5762_write(MAC_RX_MODE, rx_mode)?;
         } else {
             self.flush(MAC_RX_MODE, rx_mode)?;
         }
-        self.delay.delay_us(10);
+        self.wait(10)?;
         self.write(MAC_LED_CTRL, board.led)?;
         self.write(MAC_MI_STAT, MAC_MI_STAT_LNKSTAT_ATTN_ENAB)?;
         self.flush(MAC_LOW_WMARK_MAX_RX_FRAME, 2)?;
         // No multicast/VLAN/checksum offload is relied upon by the software.
         // Accept broadcast, own unicast and multicast as a raw Ethernet link.
-        for at in [
-            MAC_HASH_REG_0,
-            MAC_HASH_REG_1,
-            MAC_HASH_REG_2,
-            MAC_HASH_REG_3,
-        ] {
-            self.write(at, u32::MAX)?;
-        }
         self.write(MAC_RCV_RULE_0, 0xc200_0000 & RCV_RULE_DISABLE_MASK)?;
         self.write(MAC_RCV_VALUE_0, RCV_RULE_DISABLE_MASK)?;
         self.write(MAC_RCV_RULE_1, 0x8600_0004 & RCV_RULE_DISABLE_MASK)?;
@@ -345,7 +415,11 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             HOSTCC_MODE,
             HOSTCC_MODE_ENABLE
                 | HOSTCC_MODE_32BYTE
-                | HOSTCC_MODE_ATTN
+                | if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5761 {
+                    0
+                } else {
+                    HOSTCC_MODE_ATTN
+                }
                 | HOSTCC_MODE_NOW
                 | HOSTCC_MODE_NOINT_ON_NOW,
         )
@@ -359,7 +433,12 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         let message = self.read(MSGINT_STATUS)?;
         let read_dma = self.read(RDMAC_STATUS)?;
         let write_dma = self.read(WDMAC_STATUS)?;
-        if flow & !HOSTCC_FLOW_ATTN_MBUF_LWM != 0
+        let allowed = if self.identity.ok_or(Error::NotIdentified)?.asic == Asic::Bcm5761 {
+            0
+        } else {
+            HOSTCC_FLOW_ATTN_MBUF_LWM
+        };
+        if flow & !allowed != 0
             || message & !MSGINT_STATUS_MSI_REQ != 0
             || read_dma != 0
             || write_dma != 0

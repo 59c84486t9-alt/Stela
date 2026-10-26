@@ -38,6 +38,8 @@ struct Model {
     reset_pending: bool,
     reset_firmware_ack: bool,
     ignored_config_write: Option<u16>,
+    delay_count: usize,
+    fail_delay: Option<usize>,
 }
 impl Model {
     fn event(&mut self, event: Event) -> Result<(), Error> {
@@ -58,9 +60,20 @@ impl Drop for Reg {
 }
 #[derive(Clone)]
 struct Timer(Rc<RefCell<Model>>);
-impl Delay for Timer {
-    fn delay_us(&mut self, us: u64) {
-        self.0.borrow_mut().trace.push(Event::Delay(us));
+// SAFETY: isolated symbolic timer only; no production clock authority.
+unsafe impl Delay for Timer {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        let mut model = self.0.borrow_mut();
+        model.delay_count += 1;
+        model.trace.push(Event::Delay(us));
+        if model.fail_delay == Some(model.delay_count) {
+            Err(crate::bus::pci::power::Error::Clock)
+        } else {
+            Ok(())
+        }
     }
 }
 // SAFETY: a symbolic isolated test device only; no production address/authority.
@@ -225,7 +238,11 @@ fn model(asic: Asic, function: u8) -> (Hardware<Reg, Timer>, Rc<RefCell<Model>>)
     m.sram
         .insert(SRAM_CPMU_STATUS, (u32::from(function) << 30) | CPMU_STATUS);
     let m = Rc::new(RefCell::new(m));
-    (Hardware::new(Reg(m.clone()), Timer(m.clone())), m)
+    // SAFETY: both original owners belong to this isolated symbolic device.
+    (
+        unsafe { Hardware::new(Reg(m.clone()), Timer(m.clone())) },
+        m,
+    )
 }
 fn identified(asic: Asic, function: u8) -> (Hardware<Reg, Timer>, Rc<RefCell<Model>>) {
     let (mut hardware, m) = model(asic, function);
@@ -733,5 +750,116 @@ fn absent_or_invalid_board_ownership_evidence_refuses_before_reset() {
                 .iter()
                 .any(|e| matches!(e, Event::Write(0x6804, _) | Event::Write(MAC_RX_MODE, _)))
         );
+    }
+}
+
+#[test]
+fn unavailable_native_clock_refuses_before_identification_access_and_keeps_original_owner() {
+    for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
+        for rate in [0, u64::MAX, u64::MAX / 60_000_000 + 1] {
+            let (mut previous, model) = model(asic, 0);
+            let registers = previous.release_registers();
+            // SAFETY: isolated original symbolic owner; deliberately invalid
+            // timing must refuse before the first hardware observation.
+            let mut hardware = unsafe {
+                Hardware::new(
+                    registers,
+                    crate::Clock {
+                        ticks_per_microsecond: rate,
+                    },
+                )
+            };
+            assert_eq!(hardware.identify(), Err(Error::Clock));
+            assert!(hardware.identity().is_none());
+            assert!(model.borrow().trace.is_empty());
+            drop(hardware);
+            assert_eq!(model.borrow().dropped, 0);
+        }
+    }
+}
+
+#[test]
+fn every_mdio_wait_failure_restores_autopoll_releases_original_grant_and_poison_retains() {
+    for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
+        let (mut hardware, model) = identified(asic, 1);
+        model
+            .borrow_mut()
+            .mac
+            .insert(MAC_MI_MODE, MI_AUTO_POLL | 0xc0000);
+        let before = model.borrow().delay_count;
+        hardware.read_phy(7).unwrap();
+        let count = model.borrow().delay_count - before;
+        assert!(
+            count >= 4,
+            "initial/poll/result/restore settling waits required"
+        );
+        for failing in 1..=count {
+            let (mut hardware, model) = identified(asic, 1);
+            {
+                let mut model = model.borrow_mut();
+                model.mac.insert(MAC_MI_MODE, MI_AUTO_POLL | 0xc0000);
+                model.fail_delay = Some(model.delay_count + failing);
+            }
+            assert_eq!(
+                hardware.read_phy(7),
+                Err(Error::Clock),
+                "{asic:?} wait {failing}"
+            );
+            let grant = if asic == Asic::Bcm5761 {
+                APE_LOCK_GRANT
+            } else {
+                APE_PER_LOCK_GRANT
+            };
+            let at = grant + u32::from(PHY_LOCKS[1]) * 4;
+            assert_eq!(model.borrow().mac[&MAC_MI_MODE], MI_AUTO_POLL | 0xc0000);
+            assert_eq!(model.borrow().ape.get(&at).copied().unwrap_or(0), 0);
+            if failing == 1 {
+                assert!(
+                    !model
+                        .borrow()
+                        .trace
+                        .iter()
+                        .any(|event| matches!(event, Event::Write(MAC_MI_COM, _)))
+                );
+            } else {
+                assert!(
+                    matches!(model.borrow().trace.last(), Some(Event::ApeWrite(offset, APE_DRIVER)) if *offset == at)
+                );
+            }
+            assert_eq!(hardware.failure(), Some(Error::Clock));
+            let effects = model.borrow().trace.len();
+            assert_eq!(hardware.read_phy(7), Err(Error::Poisoned));
+            assert_eq!(model.borrow().trace.len(), effects);
+            drop(hardware);
+            assert_eq!(model.borrow().dropped, 0);
+        }
+    }
+}
+
+#[test]
+fn every_actual_core_reset_wait_failure_prevents_completion_and_keeps_original_epoch() {
+    for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
+        let (mut hardware, model) = reset_model(asic);
+        let before = model.borrow().delay_count;
+        hardware.reset_unmanaged_core().unwrap();
+        let count = model.borrow().delay_count - before;
+        assert!(count > 2);
+        for failing in 1..=count {
+            let (mut hardware, model) = reset_model(asic);
+            let fail_at = model.borrow().delay_count + failing;
+            model.borrow_mut().fail_delay = Some(fail_at);
+            assert_eq!(
+                hardware.reset_unmanaged_core(),
+                Err(Error::Clock),
+                "{asic:?} wait {failing}"
+            );
+            assert!(!hardware.core_reset_completed());
+            assert_eq!(hardware.failure(), Some(Error::Clock));
+            let effects = model.borrow().trace.len();
+            assert_eq!(hardware.read_phy(2), Err(Error::Poisoned));
+            assert_eq!(model.borrow().trace.len(), effects);
+            drop(hardware);
+            assert_eq!(model.borrow().dropped, 0);
+        }
     }
 }

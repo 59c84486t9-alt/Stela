@@ -57,36 +57,22 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             return Err(Error::UnsupportedBoard);
         }
         let cfg2 = self.sram(NIC_SRAM_DATA_CFG_2, None)?;
-        let led = match cfg2 & (NIC_SRAM_DATA_CFG_LED_MODE_MASK | SHASTA_EXT_LED_MODE_MASK) {
-            NIC_SRAM_DATA_CFG_LED_MODE_PHY_1 => LED_CTRL_MODE_PHY_1,
-            NIC_SRAM_DATA_CFG_LED_MODE_PHY_2 => LED_CTRL_MODE_PHY_2,
-            NIC_SRAM_DATA_CFG_LED_MODE_MAC => LED_CTRL_MODE_MAC,
-            SHASTA_EXT_LED_SHARED => {
-                LED_CTRL_MODE_SHARED
-                    | LED_CTRL_MODE_PHY_1
-                    | LED_CTRL_MODE_PHY_2
-                    | LED_CTRL_BLINK_RATE_OVERRIDE
-                    | LED_CTRL_BLINK_RATE_MASK
-            }
-            SHASTA_EXT_LED_MAC => LED_CTRL_MODE_SHASTA_MAC,
-            SHASTA_EXT_LED_COMBO => LED_CTRL_MODE_COMBO | LED_CTRL_MODE_PHY_1 | LED_CTRL_MODE_PHY_2,
-            _ => return Err(Error::UnsupportedBoard),
-        };
+        let led = super::board::decode_led(cfg2)?;
         // tg3_get_invariants preserves 5762's actual UART selector. Unlike
         // 5720, VMain selection does not acquire GPIO/modify CPMU_DRV_STATUS.
         let local = GRC_LCLCTRL_INT_ON_ATTN
             | GRC_LCLCTRL_AUTO_SEEPROM
             | (self.read(GRC_LOCAL_CTRL)? & GRC_LCLCTRL_GPIO_UART_SEL);
         self.bcm5762_write(GRC_LOCAL_CTRL, local)?;
-        self.delay.delay_us(100);
+        self.wait(100)?;
         self.flush(
             GRC_EEPROM_ADDR,
             EEPROM_ADDR_FSM_RESET | (EEPROM_DEFAULT_CLOCK_PERIOD << EEPROM_ADDR_CLKPERD_SHIFT),
         )?;
-        self.delay.delay_us(1000);
+        self.wait(1000)?;
         let saved_local = self.read(GRC_LOCAL_CTRL)?;
         self.bcm5762_write(GRC_LOCAL_CTRL, saved_local | GRC_LCLCTRL_AUTO_SEEPROM)?;
-        self.delay.delay_us(100);
+        self.wait(100)?;
         let nvcfg = self.nvram_configuration()?;
         if nvcfg & NVRAM_CFG1_5762VENDOR_MASK == 0 {
             return Err(Error::UnsupportedBoard);
@@ -151,6 +137,7 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
                 configuration: [config, version_word, cfg2],
                 subsystem,
             }),
+            profile_5761: None,
         })
     }
 }
