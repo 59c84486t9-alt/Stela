@@ -304,6 +304,9 @@ fn address_controller_with_capabilities(
 /// Hardware model enforces the endpoint state restrictions absent from the
 /// old address model: Stop accepts Running, Reset accepts Halted, Set Dequeue
 /// accepts Stopped. It can leave DMA active on command failure.
+pub(crate) type ControlScript =
+    alloc::collections::VecDeque<(Vec<u8>, Vec<(crate::usb::bluetooth::Pipe, Vec<u8>)>)>;
+
 pub(crate) struct CancelModel {
     pub(crate) port_speed: u8,
     pub(crate) context_bytes: usize,
@@ -335,6 +338,7 @@ pub(crate) struct CancelModel {
     pub(crate) silence_transfer: Option<usize>,
     pub(crate) halt_transfer: Option<usize>,
     pub(crate) script: Option<crate::usb::bluetooth::intel::tests::Script>,
+    pub(crate) control_script: ControlScript,
     pub(crate) descriptors: Vec<(u8, u8, Vec<u8>)>,
     pub(crate) configuration_value: u8,
     pub(crate) configuration_seen_before_endpoints: Vec<u8>,
@@ -499,6 +503,22 @@ impl CancelModel {
     }
     pub(crate) fn scripted(&mut self, bulk: bool, packet: &[u8]) {
         use crate::usb::bluetooth::Pipe;
+        // Opt-in command-correlated peripheral: future replies must not be
+        // visible during the actual mandatory settling poll of an earlier HCI
+        // command. Standard zero-data USB requests do not carry HCI commands.
+        if !bulk && !packet.is_empty() && !self.control_script.is_empty() {
+            assert!(self.script.is_none(), "two HCI control peripherals");
+            let (expected, replies) = self.control_script.pop_front().unwrap();
+            assert_eq!(packet, expected, "actual EP0 command bytes");
+            for (pipe, event) in replies {
+                match pipe {
+                    Pipe::Event => &mut self.incoming_events,
+                    Pipe::Acl => &mut self.incoming_acl,
+                }
+                .push_back(event);
+            }
+            return;
+        }
         if let Some(script) = &mut self.script {
             for (pipe, event) in script.command(bulk, packet) {
                 match pipe {
@@ -857,6 +877,7 @@ fn cancellation_controller_with_context(
         silence_transfer: None,
         halt_transfer: None,
         script: None,
+        control_script: Default::default(),
         descriptors: Vec::new(),
         configuration_value: 0,
         configuration_seen_before_endpoints: Vec::new(),
