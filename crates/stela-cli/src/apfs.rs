@@ -6,8 +6,7 @@ use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use std::{
     fs::File,
-    io::Write,
-    os::unix::fs::FileExt,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 use stela_runtime::{
@@ -27,7 +26,8 @@ impl ReadAt for Image {
         self.bytes
     }
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
-        self.file.read_exact_at(buffer, offset)
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(buffer)
     }
 }
 

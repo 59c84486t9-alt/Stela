@@ -5,7 +5,7 @@
 //! `update_ticket` requires to be `/chosen/boot-manifest-hash`.
 use anyhow::{Context, Result, anyhow};
 use reqwest::blocking::Client;
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 use stela_runtime::restore::{
     self, plist,
     plist::{Limits, Value},
@@ -82,9 +82,8 @@ pub fn personalized(manifest: &[u8], index: u32, ecid: u64) -> Result<Vec<u8>> {
         ap: [0; 32],
         sep: [0; 20],
     };
-    let mut random = std::fs::File::open("/dev/urandom").context("cannot open /dev/urandom")?;
-    random.read_exact(&mut nonces.ap)?;
-    random.read_exact(&mut nonces.sep)?;
+    getrandom::getrandom(&mut nonces.ap).context("the system's random generator failed")?;
+    getrandom::getrandom(&mut nonces.sep).context("the system's random generator failed")?;
     let mut signer = tss::Signer {
         ecid,
         nonces: nonces.clone(),
