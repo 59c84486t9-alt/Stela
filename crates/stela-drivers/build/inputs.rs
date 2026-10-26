@@ -203,7 +203,7 @@ mod platform {
         // SAFETY: live File owns fd; exact stat output storage is writable.
         require!(unsafe { libc::fstat(file.as_raw_fd(), value.as_mut_ptr()) } == 0, "descriptor stat: {}", io::Error::last_os_error());
         // SAFETY: successful fstat initialized all stat fields used by convert.
-        convert(unsafe { &value.assume_init() })
+        convert(unsafe { value.assume_init_ref() })
     }
     fn directory_mode(value: &Identity) -> bool { value.mode & u64::from(libc::S_IFMT) == u64::from(libc::S_IFDIR) }
     fn regular(value: &Identity) -> bool { value.mode & u64::from(libc::S_IFMT) == u64::from(libc::S_IFREG) }
@@ -260,7 +260,7 @@ mod platform {
             // SAFETY: live retained parent, terminated name, writable stat storage.
             require!(unsafe { libc::fstatat(parent.as_raw_fd(), encoded.as_ptr(), metadata.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } == 0, "no-follow input stat {}: {}", relative.display(), io::Error::last_os_error());
             // SAFETY: successful fstatat initialized stat fields used below.
-            let before_path = convert(unsafe { &metadata.assume_init() })?;
+            let before_path = convert(unsafe { metadata.assume_init_ref() })?;
             require!(regular(&before_path) && before_path.bytes <= limit, "nonregular/symlink/oversized input: {}", relative.display());
             hook(Step::BeforeFinalOpen)?;
             let mut input = open_at(parent.as_raw_fd(), name, INPUT)?; let before = identity(&input)?;
@@ -314,7 +314,7 @@ mod platform {
             // SAFETY: retained descriptor and writable exact stat storage.
             require!(unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) } == 0, "directory stat failed");
             // SAFETY: successful fstat initialized fields read by convert.
-            let after = convert(unsafe { &metadata.assume_init() })?;
+            let after = convert(unsafe { metadata.assume_init_ref() })?;
             require!(before == after, "input directory changed during enumeration");
             names.sort(); require!(names.windows(2).all(|pair| pair[0] != pair[1]), "duplicate directory names"); Ok((after, names))
         }
