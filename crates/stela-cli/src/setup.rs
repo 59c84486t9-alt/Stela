@@ -3,17 +3,18 @@
 //! system's life.
 //!
 //! With `--target`, or with the USB's raw partition as the Mac's internal
-//! SSD, setup writes the install medium onto the USB's FAT32 data partition
-//! (`setup::medium`): the recovery members of the restore image
-//! (`restore::payload::trim`), or a whole IPSW given with `--ipsw`. It
-//! prepares each machine's restore bundle (`stela boot prepare --restore`)
-//! and adds an Install macOS startup choice (`stela.efi --install`). From a
-//! whole IPSW it restores macOS and recoveryOS onto the target, as a Mac's
-//! restore does; from the trimmed members it restores recoveryOS alone, and
-//! macOS is then installed from recoveryOS. The macOS choice boots it
-//! afterwards. The restore personalizes its root
-//! tickets and the recoveryOS LocalPolicy with Apple's signing server, so it
-//! needs `--tss`.
+//! SSD, setup writes the install medium (`setup::medium`) as
+//! `--install-image` says: offline, the whole IPSW on the USB's FAT32 data
+//! partition; online, only its inventory, and `stela.efi` streams the IPSW
+//! from Apple's servers during the install. It prepares each machine's
+//! restore bundle (`stela boot prepare --restore`) and adds an Install macOS
+//! startup choice (`stela.efi --install`), which restores macOS and
+//! recoveryOS onto the target, as a Mac's restore does. An erase restore
+//! needs the macOS system image, so `--fetch`'s recovery members
+//! (`restore::payload::trim`) only prepare the boot bundles
+//! (`docs/research/small-installer-usb.md`). The macOS choice boots it
+//! afterwards. The restore personalizes its root tickets and the recoveryOS
+//! LocalPolicy with Apple's signing server, so it needs `--tss`.
 //!
 //! One command checks the USB and the restore image without writing
 //! anything, prepares the recoveryOS boot bundle (`stela boot prepare
@@ -96,6 +97,9 @@ const INSTALL_CHOICE: &str = "Install macOS";
 const UPDATE_CHOICE: &str = "Update macOS";
 /// The engine option that restores the medium's Update identity.
 const UPDATE_RESTORE: &str = "--update-restore";
+/// The commands `--install-image` goes with.
+const INSTALL_IMAGE_ACTIONS: &str = "--install-image goes with a new setup, or with --target, \
+    --update-os or --repair (with --ipsw or --fetch), which write the install medium";
 /// Install media kept: the active build's and the one before it, for
 /// rollback.
 pub(super) const MEDIA_KEPT: usize = 2;
@@ -109,6 +113,16 @@ fn restore_choice_name(kind: Kind) -> &'static str {
     }
 }
 
+/// Where an install reads the macOS restore image (`--install-image`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum InstallImage {
+    /// The whole IPSW on the USB: the install needs no network.
+    Offline,
+    /// The IPSW on Apple's servers, streamed during the install.
+    Online,
+}
+
 #[derive(Args)]
 pub(crate) struct Setup {
     /// The USB's EFI partition, another mounted volume of the same USB, or
@@ -120,9 +134,18 @@ pub(crate) struct Setup {
     /// The macOS 27 restore image (IPSW).
     #[arg(long, conflicts_with = "fetch")]
     ipsw: Option<PathBuf>,
-    /// Download the pinned restore image from Apple instead.
+    /// Download the pinned restore image from Apple instead: its recovery
+    /// members, or the whole IPSW with `--install-image offline`.
     #[arg(long)]
     fetch: bool,
+    /// Where an install reads the macOS restore image: `offline` copies the
+    /// whole IPSW (about 27 GB) onto the USB, so the install needs no
+    /// network; `online` writes only its inventory, and `stela.efi` streams
+    /// the IPSW from Apple's servers during the install over the PC's wired
+    /// network. By default online for a disk chosen in stela.efi or an image
+    /// without the macOS system image (`--fetch`), offline otherwise.
+    #[arg(long, value_enum)]
+    install_image: Option<InstallImage>,
     /// Where `--fetch` keeps the image.
     #[arg(long)]
     download_dir: Option<PathBuf>,
@@ -432,6 +455,10 @@ struct Record {
     /// Every choice times the engine (`--profile`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     profile: bool,
+    /// Where installs read the restore image (`--install-image`); the
+    /// default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_image: Option<InstallImage>,
     /// The translation store `stela.efi` keeps its packs in, if the USB
     /// has room for one (`setup::translations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,6 +473,31 @@ const RECORD_KIND: &str = "stela_setup";
 const RECORD_SCHEMA: u32 = 7;
 
 impl Record {
+    /// Whether installs stream `ipsw`'s build from Apple's servers
+    /// (`--install-image online`) rather than read it from the USB. An erase
+    /// restore needs the macOS system image, which a recovery archive
+    /// (`restore::payload::trim`) leaves out
+    /// (`docs/research/small-installer-usb.md`), so by default an install
+    /// streams the image when the USB would not hold it, as it does for a
+    /// disk chosen in stela.efi.
+    fn remote_install(&self, ipsw: &Path) -> Result<bool> {
+        let complete = restore::payload::holds_system_image(ipsw)?;
+        match self.install_image {
+            Some(InstallImage::Online) => Ok(true),
+            Some(InstallImage::Offline) => {
+                ensure!(
+                    complete,
+                    "{} holds only the recovery members, without the macOS system image an \
+                     install restores; pass the whole IPSW with --ipsw, use --fetch to download \
+                     it, or --install-image online to stream it from Apple during the install",
+                    ipsw.display()
+                );
+                Ok(false)
+            }
+            None => Ok(!complete || self.installs.iter().all(|i| i.disk.is_chosen())),
+        }
+    }
+
     /// Bring an older schema's record to this one: its installed disk
     /// becomes the first install, its bundles (one per build, without an
     /// ECID) are listed.
@@ -580,6 +632,17 @@ impl Record {
     /// The active build's install medium.
     fn active_medium(&self) -> Option<&medium::Medium> {
         self.medium_of(&self.build)
+    }
+
+    /// The FAT32 partition that holds the IPSW's pieces: that of the active
+    /// build's offline medium, else of the last one. An online medium's
+    /// inventory sits with the boot bundles, which is no such partition.
+    fn pieces_volume(&self) -> Option<&Path> {
+        let offline = |medium: &&medium::Medium| !medium.remote;
+        self.active_medium()
+            .filter(offline)
+            .or(self.media.iter().rev().find(offline))
+            .map(|medium| medium.volume.as_path())
     }
 
     /// Whether the installs restore from install media: the setup has
@@ -1160,6 +1223,14 @@ impl Setup {
             chosen.join(" and ")
         );
         ensure!(
+            self.install_image.is_none()
+                || chosen.is_empty()
+                || self.target.is_some()
+                || self.update_os
+                || self.repair,
+            "{INSTALL_IMAGE_ACTIONS}"
+        );
+        ensure!(
             self.nor.is_none()
                 || self.target.is_some()
                 || self.reset_nvram
@@ -1268,8 +1339,9 @@ impl Setup {
             );
         }
         if self.update_os {
-            let record = read_record(environment, &self.usb)?;
+            let mut record = read_record(environment, &self.usb)?;
             check_installed_efi(environment, &record)?;
+            record.install_image = self.install_image.or(record.install_image);
             let ipsw = self.image()?;
             return update::update_os(environment, record, &ipsw, self.dry_run);
         }
@@ -1305,6 +1377,10 @@ impl Setup {
         }
         let configured =
             locate_esp(environment.host, &self.usb).is_ok_and(|esp| esp.join(RECORD).is_file());
+        ensure!(
+            !configured || self.install_image.is_none() || self.target.is_some(),
+            "{INSTALL_IMAGE_ACTIONS}"
+        );
         if configured && self.target.is_some() {
             return machines::add(environment, &self);
         }
@@ -1527,10 +1603,15 @@ pub(crate) fn download_dir() -> PathBuf {
     }
 }
 
-/// Download the pinned image, or reuse a complete earlier download.
+/// Download the pinned image, or reuse a complete earlier download: the
+/// whole IPSW for an offline install medium, else its recovery members,
+/// which prepare the boot bundles.
 fn fetch(command: &Setup) -> Result<PathBuf> {
     let directory = command.download_dir.clone().unwrap_or_else(download_dir);
-    fetch_recovery(&directory, &command.build, command.model())
+    match command.install_image {
+        Some(InstallImage::Offline) => fetch_image(&directory, &command.build, command.model()),
+        _ => fetch_recovery(&directory, &command.build, command.model()),
+    }
 }
 
 /// Copy `build`'s recovery members for `model` from Apple's servers into
@@ -1570,7 +1651,6 @@ fn fetch_recovery(directory: &Path, build: &str, model: &str) -> Result<PathBuf>
 
 /// Download `build`'s restore image for `model` from Apple's catalog into
 /// `directory`, or reuse a complete earlier download from the same entry.
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<PathBuf> {
     let images = restore::catalog()?;
     let image = restore::select(&images, Some(build), Some(model))?;
@@ -1592,7 +1672,8 @@ pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<
         // Reused only as the catalog entry it was downloaded from.
         ensure!(
             receipt.image == image && receipt.catalog_sha1_verified,
-            "{} was downloaded from another catalog entry than Apple lists for macOS {} now;              move it away, or pass it with --ipsw",
+            "{} was downloaded from another catalog entry than Apple lists for macOS {} now; \
+             move it away, or pass it with --ipsw",
             path.display(),
             image.build
         );
@@ -1770,11 +1851,10 @@ fn plan_install(
             restore.extend(prepared);
         }
     }
+    let remote = record.remote_install(ipsw)?;
     let intact = record
         .medium_of(build)
-        .is_some_and(|m| m.problems().is_empty());
-    // Installs on a disk chosen in stela.efi stream the IPSW from Apple.
-    let remote = record.installs.iter().all(|i| i.disk.is_chosen());
+        .is_some_and(|m| m.remote == remote && m.problems().is_empty());
     let medium = match intact {
         true => None,
         false if remote => Some(MediumPlan {
@@ -1859,8 +1939,8 @@ fn describe_install(record: &Record, plan: &InstallPlan, text: &mut String) -> R
     if let Some(medium) = plan.medium.as_ref().filter(|m| m.remote) {
         writeln!(
             text,
-            "  install image  {}: the macOS {} restore image's inventory; the install streams \
-             the image from Apple's servers onto the disk chosen in stela.efi",
+            "  install image  {}: the macOS {} restore image's inventory (online); the install \
+             streams the image from Apple's servers over the PC's wired network",
             medium::directory(&medium.volume, &plan.build).display(),
             plan.build,
         )?;
@@ -1868,7 +1948,7 @@ fn describe_install(record: &Record, plan: &InstallPlan, text: &mut String) -> R
         writeln!(
             text,
             "  install medium {}: the macOS {} IPSW in pieces of at most 4 GiB on the USB's FAT32 \
-             partition {} ({:.1} GB still to write)",
+             partition {} (offline; {:.1} GB still to write)",
             medium::directory(&medium.volume, &plan.build).display(),
             plan.build,
             medium.guid,
@@ -1898,6 +1978,9 @@ fn apply_install(
     let Some(plan) = plan.medium else {
         return Ok(());
     };
+    // A medium of the other kind or volume this one replaces, removed once
+    // this one is written.
+    let previous = record.medium_of(&build).cloned();
     // Recorded before the first piece, so an interrupted copy is undone.
     record.media.retain(|m| m.build != build);
     record.media.push(medium::Medium {
@@ -1931,7 +2014,8 @@ fn apply_install(
         if let Some(medium) = record.media.iter_mut().find(|m| m.build == build) {
             medium.manifest_sha256 = sha256;
         }
-        return write_record(&record.esp.clone(), record);
+        write_record(&record.esp.clone(), record)?;
+        return remove_replaced(record, &build, previous.as_ref());
     }
     let inventory = (environment.inventory)(ipsw, &record.model)?;
     ensure!(
@@ -1950,7 +2034,17 @@ fn apply_install(
     if let Some(medium) = record.media.iter_mut().find(|m| m.build == build) {
         medium.manifest_sha256 = written.manifest_sha256;
     }
-    write_record(&record.esp.clone(), record)
+    write_record(&record.esp.clone(), record)?;
+    remove_replaced(record, &build, previous.as_ref())
+}
+
+/// Remove what the medium of `build` that the one just written replaced
+/// left (`medium::remove_replaced`).
+fn remove_replaced(record: &Record, build: &str, previous: Option<&medium::Medium>) -> Result<()> {
+    match (previous, record.medium_of(build)) {
+        (Some(previous), Some(current)) => medium::remove_replaced(previous, current),
+        _ => Ok(()),
+    }
 }
 
 /// Why `--target` needs `--tss`.
@@ -2102,6 +2196,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         media: Vec::new(),
         verify_on_read: command.verify_on_read,
         profile: command.profile,
+        install_image: command.install_image,
         translations: None,
     };
     let install = match &installed {
@@ -2140,15 +2235,26 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     record.translations = store;
     record.options = record.options_text();
     record.choices_text()?;
+    let source = match install
+        .as_ref()
+        .and_then(|plan| plan.medium.as_ref())
+        .is_some_and(|medium| medium.remote)
+    {
+        true => {
+            "streaming the restore image from Apple's servers (about 27 GB) over the PC's \
+                 wired network"
+        }
+        false => "from the install medium on this USB, with no network",
+    };
     notes.push(match &installed {
-        Some(checked) if checked.disk.is_chosen() => "The Install macOS startup choice asks \
-            for a disk of the PC and the space macOS gets there, then Apple's restore installs \
-            macOS onto it as the Mac's internal SSD (ANS2), streaming the restore image from \
-            Apple's servers (about 22 GB) over the PC's network. An install may not finish yet."
-            .into(),
+        Some(checked) if checked.disk.is_chosen() => format!(
+            "The Install macOS startup choice asks for a disk of the PC and the space macOS gets \
+             there, then Apple's restore installs macOS onto it as the Mac's internal SSD \
+             (ANS2), {source}. An install may not finish yet."
+        ),
         Some(checked) => format!(
-            "The Install macOS startup choice restores macOS from the install medium onto {} \
-             as the Mac's internal SSD (ANS2). An install may not finish yet.",
+            "The Install macOS startup choice restores macOS onto {} as the Mac's internal SSD \
+             (ANS2), {source}. An install may not finish yet.",
             checked.disk.apple_region
         ),
         None => "recoveryOS's Reinstall macOS downloads the installer from Apple and \
@@ -2333,8 +2439,8 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
     let start = match disk {
         Some(disk) if disk.is_chosen() => format!(
             "choose \"{INSTALL_CHOICE}\" in Stela's startup choices, pick the PC disk and the \
-             space macOS gets, and the install downloads macOS from Apple onto it; Stela then \
-             starts the installed macOS from that disk"
+             space macOS gets, and the install restores macOS onto it; Stela then starts the \
+             installed macOS from that disk"
         ),
         Some(disk) if disk.external_disks => format!(
             "boot the PC from the USB: its internal SSD ({}) is blank, so Stela offers \
@@ -2754,6 +2860,7 @@ mod tests {
             usb: usb.to_path_buf(),
             ipsw: Some(f.ipsw.clone()),
             fetch: false,
+            install_image: None,
             download_dir: None,
             volume: None,
             efi: Some(f.efi.clone()),
@@ -3463,6 +3570,92 @@ mod tests {
         })
         .unwrap();
         assert!(erased(&f));
+    }
+
+    #[test]
+    fn an_install_reads_the_image_from_the_usb_offline_or_streams_it_online() {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        // Online: the USB holds the inventory alone, and the Install choice
+        // names no partition to read the IPSW from.
+        let mut online = installed_command(&f);
+        online.install_image = Some(InstallImage::Online);
+        let report = setup(&environment(&f.host), online).unwrap();
+        assert!(report.contains("streaming the restore image"), "{report}");
+        let written = record(&f);
+        assert_eq!(written.install_image, Some(InstallImage::Online));
+        let medium = written.active_medium().cloned().unwrap();
+        assert!(medium.remote && medium.problems().is_empty(), "{medium:?}");
+        let choices = fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap();
+        let install = choices
+            .lines()
+            .find(|line| line.starts_with(INSTALL_CHOICE))
+            .unwrap();
+        assert!(install.contains(&medium.options()), "{install}");
+        assert!(!install.contains("--install-source"), "{install}");
+        // The choice is the setup's; other commands do not take it.
+        let others: [fn(&mut Setup); 2] = [
+            |c| c.install_image = Some(InstallImage::Offline),
+            |c| {
+                c.status = true;
+                c.install_image = Some(InstallImage::Offline);
+            },
+        ];
+        for configure in others {
+            let error = rerun(&f, configure).unwrap_err().to_string();
+            assert!(error.contains("--install-image goes with"), "{error}");
+        }
+        // Repair turns it offline: the IPSW in pieces on the USB.
+        let switch = |image| {
+            rerun(&f, |c| {
+                c.repair = true;
+                c.ipsw = Some(f.ipsw.clone());
+                c.install_image = Some(image);
+            })
+            .unwrap();
+            record(&f).active_medium().cloned().unwrap()
+        };
+        let offline = switch(InstallImage::Offline);
+        assert!(
+            !offline.remote && offline.problems().is_empty(),
+            "{offline:?}"
+        );
+        let first_piece = offline
+            .directory()
+            .join(stela_runtime::payload::piece_name(0));
+        assert!(first_piece.is_file());
+        // Back online, the pieces go.
+        let online = switch(InstallImage::Online);
+        assert!(online.remote && online.problems().is_empty(), "{online:?}");
+        assert!(!first_piece.exists());
+    }
+
+    #[test]
+    fn an_offline_install_needs_the_system_image_a_recovery_archive_leaves_out() {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let recovery = f._dir.path().join("Recovery.ipsw");
+        restore::payload::trim(
+            fs::File::open(&f.ipsw).unwrap(),
+            restore::payload::SYNTHETIC_MODEL,
+            &recovery,
+        )
+        .unwrap();
+        assert!(restore::payload::holds_system_image(&f.ipsw).unwrap());
+        assert!(!restore::payload::holds_system_image(&recovery).unwrap());
+        let mut offline = installed_command(&f);
+        offline.ipsw = Some(recovery.clone());
+        offline.install_image = Some(InstallImage::Offline);
+        offline.dry_run = true;
+        let error = format!("{:#}", setup(&environment(&f.host), offline).unwrap_err());
+        assert!(error.contains("only the recovery members"), "{error}");
+        // By default such an image streams the install instead.
+        let mut default = installed_command(&f);
+        default.ipsw = Some(recovery);
+        setup(&environment(&f.host), default).unwrap();
+        let record = record(&f);
+        assert_eq!(record.install_image, None);
+        assert!(record.active_medium().unwrap().remote);
     }
 
     #[test]

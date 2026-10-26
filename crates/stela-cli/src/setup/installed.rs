@@ -508,8 +508,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
             ))
         }
         Contents::Blank => notes.push(format!(
-            "{} is blank: install macOS onto it from recoveryOS (Disk Utility, then Reinstall \
-             macOS)",
+            "{} is blank: install macOS onto it with the Install macOS startup choice",
             region.identifier
         )),
         Contents::Other if request.erase_target => notes.push(format!(
