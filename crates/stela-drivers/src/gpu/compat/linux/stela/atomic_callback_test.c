@@ -233,6 +233,137 @@ void stela_linux_atomic_callback_prepared_fixture(struct stela_linux_task *task,
 	assert(!stela_linux_task_scope_end(task));
 }
 
+static void passive_wrong_end(void)
+{
+	struct stela_linux_atomic_callback scope;
+	stela_linux_atomic_softirq_dispatch_begin(&scope);
+	stela_linux_atomic_callback_end(&scope);
+}
+
+static void passive_unbalanced_end(void)
+{
+	struct stela_linux_atomic_callback scope;
+	stela_linux_atomic_softirq_dispatch_begin(&scope);
+	preempt_disable();
+	stela_linux_atomic_softirq_dispatch_end(&scope);
+}
+
+static void passive_hard_entry(void)
+{
+	struct stela_linux_atomic_callback hard, passive;
+	stela_linux_atomic_callback_begin(&hard);
+	stela_linux_atomic_softirq_dispatch_begin(&passive);
+}
+
+static void passive_rebalanced_prepare(void)
+{
+	struct stela_linux_atomic_callback scope;
+	preempt_disable();
+	preempt_disable();
+	raw_local_irq_disable();
+	stela_linux_atomic_softirq_dispatch_begin(&scope);
+	preempt_count_sub(2);
+	raw_local_irq_enable();
+	call_rcu(&retirement, forbidden_retirement);
+	assert(stela_linux_task_park(false) == -EBUSY);
+	assert(stela_linux_task_yield() == -EBUSY);
+	assert(stela_linux_atomic_callback_active());
+	stela_test_witness_passed();
+}
+
+static void bh_wrong_end(void)
+{
+	struct stela_linux_atomic_callback scope;
+	preempt_count_add(SOFTIRQ_DISABLE_OFFSET);
+	stela_linux_atomic_callback_bh_begin(&scope);
+	stela_linux_atomic_callback_end(&scope);
+}
+
+static void bh_missing_disable(void)
+{
+	struct stela_linux_atomic_callback scope;
+	stela_linux_atomic_callback_bh_begin(&scope);
+}
+
+static void bh_rebalanced_prepare(void)
+{
+	struct stela_linux_atomic_callback scope;
+	preempt_count_add(SOFTIRQ_DISABLE_OFFSET);
+	stela_linux_atomic_callback_bh_begin(&scope);
+	preempt_count_sub(SOFTIRQ_DISABLE_OFFSET);
+	call_rcu(&retirement, forbidden_retirement);
+	assert(stela_linux_task_park(false) == -EBUSY);
+	assert(stela_linux_task_yield() == -EBUSY);
+	assert(stela_linux_atomic_callback_active());
+	stela_test_witness_passed();
+}
+
+static void bh_callback_fixture(void)
+{
+	struct stela_linux_atomic_callback scope;
+	for (unsigned int depth = 0; depth < 4; depth++) {
+		preempt_count_add(SOFTIRQ_DISABLE_OFFSET + depth);
+		struct stela_linux_lease before;
+		stela_linux_lease_snapshot(&before);
+		stela_linux_atomic_callback_bh_begin(&scope);
+		assert(preempt_count() == (int)(SOFTIRQ_DISABLE_OFFSET + depth));
+		assert(stela_linux_lease_matches(&before));
+		preempt_disable();
+		preempt_enable_no_resched();
+		assert(stela_linux_task_yield() == -EBUSY);
+		stela_linux_atomic_callback_bh_end(&scope);
+		assert(preempt_count() == (int)(SOFTIRQ_DISABLE_OFFSET + depth));
+		assert(stela_linux_lease_matches(&before) && !stela_linux_atomic_callback_active());
+		preempt_count_sub(SOFTIRQ_DISABLE_OFFSET + depth);
+	}
+	assert(stela_test_traps(bh_wrong_end));
+	assert(stela_test_traps(bh_missing_disable));
+	assert(stela_test_witnessed(bh_rebalanced_prepare));
+}
+
+static void soft_and_passive_fixture(void)
+{
+	struct stela_linux_atomic_callback scope;
+	struct stela_linux_lease entry;
+	stela_linux_lease_snapshot(&entry);
+	stela_linux_atomic_callback_begin_soft(&scope);
+	assert(preempt_count() == (int)SOFTIRQ_OFFSET && !irqs_disabled());
+	assert(stela_linux_atomic_callback_active() && !stela_linux_quiescent());
+	assert(stela_linux_task_park(false) == -EBUSY);
+	stela_linux_atomic_callback_end(&scope);
+	assert(stela_linux_lease_matches(&entry) && !preempt_count());
+	for (unsigned int depth = 0; depth < 4; depth++) {
+		for (unsigned int disabled = 0; disabled < 2; disabled++) {
+			preempt_count_add(depth);
+			if (disabled)
+				raw_local_irq_disable();
+			struct stela_linux_lease before;
+			stela_linux_lease_snapshot(&before);
+			stela_linux_atomic_softirq_dispatch_begin(&scope);
+			assert(preempt_count() == (int)depth);
+			assert(stela_linux_lease_matches(&before));
+			/* Model only bookkeeping here; whole original dispatch is tested
+			 * by its producer's separate complete-source fixtures. */
+			preempt_count_add(SOFTIRQ_OFFSET);
+			raw_local_irq_enable();
+			assert(stela_linux_task_yield() == -EBUSY);
+			preempt_count_sub(SOFTIRQ_OFFSET);
+			if (disabled)
+				raw_local_irq_disable();
+			stela_linux_atomic_softirq_dispatch_end(&scope);
+			assert(preempt_count() == (int)depth && stela_linux_lease_matches(&before));
+			assert(current == expected_task && !stela_linux_atomic_callback_active());
+			raw_local_irq_enable();
+			preempt_count_sub(depth);
+		}
+	}
+	assert(stela_test_traps(passive_wrong_end));
+	assert(stela_test_traps(passive_unbalanced_end));
+	assert(stela_test_traps(passive_hard_entry));
+	assert(stela_test_witnessed(passive_rebalanced_prepare));
+	assert(stela_linux_lease_matches(&entry) && stela_linux_quiescent());
+}
+
 void stela_linux_atomic_callback_fixture(void)
 {
 	struct stela_linux_atomic_callback scope;
@@ -276,5 +407,7 @@ void stela_linux_atomic_callback_fixture(void)
 	assert(stela_test_witnessed(rebalanced_prepare));
 	assert(!stela_linux_atomic_callback_active() && stela_linux_quiescent());
 	assert(stela_linux_lease_matches(&lease) && current == expected_task);
+	soft_and_passive_fixture();
+	bh_callback_fixture();
 	printf("Linux atomic callback: retained current, exact restoration and before-effect guards passed\n");
 }
