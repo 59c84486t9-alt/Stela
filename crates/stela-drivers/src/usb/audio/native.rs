@@ -14,13 +14,39 @@ use alloc::vec::Vec;
 struct DiscoveryControl<'a> {
     shared: &'a Shared,
     id: SlotId,
+    time: NativeTime,
+}
+// Four full-speed bInterval16 services are the largest class timeout. UAC3
+// recovery (65535 * 50us), native control and feedback budgets are smaller.
+const MAX_AUDIO_BUDGET_US: u64 = (8u64 << 15) * 125 * 4;
+const CLOCK_REQUIREMENT: &str = "qualified representable USB audio timing";
+#[derive(Clone, Copy)]
+struct NativeTime {
+    clock: crate::Clock,
+    origin: u64,
+}
+impl NativeTime {
+    fn new(clock: crate::Clock) -> Result<Self, BlockError> {
+        clock
+            .check_duration(MAX_AUDIO_BUDGET_US)
+            .map_err(|_| BlockError::Unsupported(CLOCK_REQUIREMENT))?;
+        let origin = clock
+            .try_start()
+            .map_err(|_| BlockError::Unsupported(CLOCK_REQUIREMENT))?;
+        Ok(Self { clock, origin })
+    }
+    fn now_us(self) -> u64 {
+        self.clock
+            .try_elapsed_us(self.origin)
+            .expect("admitted native USB audio clock")
+    }
 }
 impl Control for DiscoveryControl<'_> {
     fn control(&mut self, r: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
         self.shared.borrow_mut().device(self.id)?.control(r, out)
     }
     fn now_us(&self) -> u64 {
-        self.shared.borrow().clock.now_us()
+        self.time.now_us()
     }
     fn relax(&mut self) {
         crate::waiting();
@@ -56,6 +82,7 @@ impl Arena {
 pub struct Native {
     shared: Shared,
     id: SlotId,
+    time: NativeTime,
     playback: Arena,
     capture: Arena,
     status_plan: Result<Option<super::status::StatusPlan>, super::Error>,
@@ -87,7 +114,7 @@ impl Control for Native {
             .control(request, out)
     }
     fn now_us(&self) -> u64 {
-        self.shared.borrow().clock.now_us()
+        self.time.now_us()
     }
     fn relax(&mut self) {
         crate::waiting();
@@ -184,10 +211,12 @@ impl UsbAudio {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
         shared.borrow_mut().device(device.id)?;
+        let time = NativeTime::new(shared.borrow().clock)?;
         let binding = plan
             .discover(&mut DiscoveryControl {
                 shared: &shared,
                 id: device.id,
+                time,
             })
             .map_err(|error| match error {
                 super::Error::Transport(e) => e,
@@ -199,6 +228,7 @@ impl UsbAudio {
         let native = Native {
             shared,
             id: device.id,
+            time,
             playback: Arena::new(dma)?,
             capture: Arena::new(dma)?,
             status_plan,
@@ -214,6 +244,75 @@ impl UsbAudio {
 mod tests {
     use super::*;
     use crate::usb::xhci;
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
+
+    #[test]
+    fn native_audio_clock_admission_precedes_discovery_ep0_and_dma() {
+        struct NoAllocation;
+        impl DmaAllocator for NoAllocation {
+            fn allocate(&mut self, _: usize, _: usize) -> Result<DmaBuffer, BlockError> {
+                panic!("invalid audio clock reached DMA allocation")
+            }
+        }
+        for rate in [0, u64::MAX, u64::MAX / 2 / MAX_AUDIO_BUDGET_US + 1] {
+            let mut backing = vec![0u64; 256 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: exclusive native peer RAM outlives controller retirement.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let raw = crate::usb::audio::test_configuration();
+            let (mut controller, model) = xhci::model::high_speed_media_controller(&mut dma, &raw);
+            controller.set_configuration(1, 1).unwrap();
+            let device = Device {
+                id: controller.test_device_id(1).unwrap(),
+                slot: 1,
+                speed: xhci::HIGH_SPEED,
+                location: "native audio invalid-clock preflight peer".into(),
+                descriptor: [18, 1, 0, 2, 0, 0, 0, 64, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+                configurations: vec![raw.clone()],
+                configuration: raw.clone(),
+                manufacturer: None,
+                product: None,
+                serial: None,
+                language: None,
+                vendor_ethernet_tcr: None,
+                vendor_ethernet_revision: None,
+            };
+            let all = xhci::interfaces(&raw);
+            let plan = Plan::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
+            controller.clock.ticks_per_microsecond = rate;
+            controller.forbid_mmio();
+            let setup = model.borrow().setup.clone();
+            let commands = model.borrow().seen.clone();
+            let before = backing.clone();
+            assert!(matches!(
+                UsbAudio::attach(
+                    Rc::new(RefCell::new(controller)),
+                    &device,
+                    plan,
+                    &mut NoAllocation
+                ),
+                Err(BlockError::Unsupported(CLOCK_REQUIREMENT))
+            ));
+            assert_eq!(model.borrow().setup, setup);
+            assert_eq!(model.borrow().seen, commands);
+            assert_eq!(backing, before);
+        }
+    }
+
+    #[test]
+    fn native_audio_retains_raw_origin_for_wrapping_elapsed_clock() {
+        let time = NativeTime {
+            clock: crate::Clock {
+                ticks_per_microsecond: 3,
+            },
+            origin: u64::MAX - 9,
+        };
+        // Exercise the same shared conversion primitive as try_elapsed_us with
+        // deterministic raw observations; no physical RDTSC wrap is asserted.
+        assert_eq!(time.clock.elapsed_at(time.origin, 14), Ok(8));
+        assert_eq!(time.clock.elapsed_at(time.origin, 20), Ok(10));
+    }
     #[test]
     fn native_recheck_never_records_or_retires_foreign_pending_dma() {
         for halted in [false, true] {
@@ -232,6 +331,7 @@ mod tests {
             let mut native = Native {
                 shared: shared.clone(),
                 id: shared.borrow().test_device_id(1).unwrap(),
+                time: NativeTime::new(shared.borrow().clock).unwrap(),
                 playback: Arena::new(&mut dma).unwrap(),
                 capture: Arena::new(&mut dma).unwrap(),
                 status_plan: Ok(None),
