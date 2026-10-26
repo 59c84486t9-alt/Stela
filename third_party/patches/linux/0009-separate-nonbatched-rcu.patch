@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 15:41:49 -0400
+Subject: [PATCH] refactor(mm): separate nonbatched RCU free helpers
+
+---
+ mm/Makefile      |  2 +-
+ mm/kvfree_rcu.c  | 35 +++++++++++++++++++++++++++++++++++
+ mm/slab_common.c | 23 +----------------------
+ 3 files changed, 37 insertions(+), 23 deletions(-)
+ create mode 100644 mm/kvfree_rcu.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index eff9f9e7e061c1a870446da0a39307a449474319..ea45571f15d1d8a0c5c3be86d9cca1fe1aa4ed2a 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -52,7 +52,7 @@ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
+ 			   maccess.o page-writeback.o folio-compat.o \
+ 			   readahead.o swap.o truncate.o vmscan.o shrinker.o \
+ 			   shmem.o util.o mmzone.o vmstat.o backing-dev.o \
+-			   mm_init.o percpu.o slab_common.o \
++			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+ 			   debug.o gup.o mmap_lock.o vma_init.o $(mmu-y)
+diff --git a/mm/kvfree_rcu.c b/mm/kvfree_rcu.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..4aa728cb91c632a9d753269c947b29bfc2ffe98f
+--- /dev/null
++++ b/mm/kvfree_rcu.c
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Slab allocator functions that are independent of the allocator strategy
++ *
++ * (C) 2012 Christoph Lameter <cl@gentwo.org>
++ */
++/* Complete nonbatched RCU-free helpers mechanically separated from slab_common.c.
++ * Bodies, exports and the ordinary Linux callback/free services are unchanged. */
++#include <linux/slab.h>
++#include <linux/kasan.h>
++#include <linux/rcupdate.h>
++#include "slab.h"
++
++#ifndef CONFIG_KVFREE_RCU_BATCHED
++
++void kvfree_call_rcu(struct rcu_head *head, void *ptr)
++{
++	if (head) {
++		kasan_record_aux_stack(ptr);
++		call_rcu(head, kvfree_rcu_cb);
++		return;
++	}
++
++	// kvfree_rcu(one_arg) call.
++	might_sleep();
++	synchronize_rcu();
++	kvfree(ptr);
++}
++EXPORT_SYMBOL_GPL(kvfree_call_rcu);
++
++void __init kvfree_rcu_init(void)
++{
++}
++
++#endif
+diff --git a/mm/slab_common.c b/mm/slab_common.c
+index 2475fc0e5e419b89fe1b3a367a894181037a5efb..b7a73855d073e39c4a24aa5ee799433bf571bad6 100644
+--- a/mm/slab_common.c
++++ b/mm/slab_common.c
+@@ -1280,28 +1280,7 @@ EXPORT_TRACEPOINT_SYMBOL(kmem_cache_alloc);
+ EXPORT_TRACEPOINT_SYMBOL(kfree);
+ EXPORT_TRACEPOINT_SYMBOL(kmem_cache_free);
+ 
+-#ifndef CONFIG_KVFREE_RCU_BATCHED
+-
+-void kvfree_call_rcu(struct rcu_head *head, void *ptr)
+-{
+-	if (head) {
+-		kasan_record_aux_stack(ptr);
+-		call_rcu(head, kvfree_rcu_cb);
+-		return;
+-	}
+-
+-	// kvfree_rcu(one_arg) call.
+-	might_sleep();
+-	synchronize_rcu();
+-	kvfree(ptr);
+-}
+-EXPORT_SYMBOL_GPL(kvfree_call_rcu);
+-
+-void __init kvfree_rcu_init(void)
+-{
+-}
+-
+-#else /* CONFIG_KVFREE_RCU_BATCHED */
++#ifdef CONFIG_KVFREE_RCU_BATCHED
+ 
+ /*
+  * This rcu parameter is runtime-read-only. It reflects

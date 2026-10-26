@@ -11,14 +11,59 @@
 #include <linux/gfp.h>
 #include <linux/minmax.h>
 #include <linux/slab.h>
+#include <linux/rbtree.h>
+#include <linux/log2.h>
+#include <stela/allocation.h>
 #include <linux/string.h>
 #include <stela/linux.h>
 
 /* The platform allocation's size and alignment; the object starts one
  * alignment into it. */
 struct header {
-	size_t size, align;
+ size_t size, align;
+ struct rb_node node;
 };
+
+/* Only actual canonical allocations enter this index. No candidate pointer
+ * is dereferenced to decide ownership; original Linux rbtree owns balancing.
+ * The one entered UP owner excludes concurrent mutation and native ISR entry.
+ */
+static struct rb_root allocations = RB_ROOT;
+
+static void index_allocation(struct header *header)
+{
+ struct rb_node **link = &allocations.rb_node, *parent = NULL;
+ unsigned long address = (unsigned long)(header + 1);
+ while (*link) {
+  parent = *link;
+  struct header *entry = rb_entry(parent, struct header, node);
+  unsigned long key = (unsigned long)(entry + 1);
+  if (address == key) __builtin_trap();
+  link = address < key ? &parent->rb_left : &parent->rb_right;
+ }
+ rb_link_node(&header->node, parent, link);
+ rb_insert_color(&header->node, &allocations);
+}
+
+bool stela_linux_kmalloc_range(const void *pointer, size_t bytes,
+                              struct stela_linux_allocation *out)
+{
+ (void)stela_linux_owner();
+ struct rb_node *node = allocations.rb_node;
+ struct header *found = NULL;
+ unsigned long address = (unsigned long)pointer;
+ while (node) {
+  struct header *entry = rb_entry(node, struct header, node);
+  if (address < (unsigned long)(entry + 1)) node = node->rb_left;
+  else { found = entry; node = node->rb_right; }
+ }
+ if (!found) return false;
+ unsigned long base = (unsigned long)(found + 1);
+ size_t logical = found->size - found->align, offset = address - base;
+ if (offset >= logical || bytes > logical - offset) return false;
+ *out = (struct stela_linux_allocation){.object = found + 1, .bytes = logical};
+ return true;
+}
 
 kmem_buckets kmalloc_caches[NR_KMALLOC_TYPES];
 
@@ -57,7 +102,7 @@ static void *allocate(size_t size, gfp_t flags, size_t minimum_align)
 	if (!request_supported(flags))
 		return NULL;
 	size_t align = max(alignment(size), minimum_align);
-	align = max(align, sizeof(struct header));
+	align = max(align, roundup_pow_of_two(sizeof(struct header)));
 	if (size > SIZE_MAX - align)
 		return NULL;
 	u8 *base = gfpflags_allow_blocking(flags) ?
@@ -67,6 +112,7 @@ static void *allocate(size_t size, gfp_t flags, size_t minimum_align)
 		return NULL;
 	struct header *header = (struct header *)(base + align) - 1;
 	*header = (struct header){.size = align + size, .align = align};
+	index_allocation(header);
 	return base + align;
 }
 
@@ -92,12 +138,57 @@ void *__kmalloc_large_noprof(size_t size, gfp_t flags)
 	return allocate(size, flags, PAGE_SIZE);
 }
 
+/* This native raw allocator's bucket is its exact logical capacity, not
+ * SLUB's private size-class table. No header/alignment padding is exposed. */
+size_t kmalloc_size_roundup(size_t size)
+{
+ return size;
+}
+
+/* This is the genuine !NUMA, !profiling placement/debug policy. Zone,
+ * reserve/no-fail and nonblocking requests still pass allocate's actual
+ * canonical policy checks; no flags are masked away here. */
+static_assert(!IS_ENABLED(CONFIG_NUMA));
+static_assert(!IS_ENABLED(CONFIG_SLAB_BUCKETS));
+static_assert(!IS_ENABLED(CONFIG_MEM_ALLOC_PROFILING));
+void *__kmalloc_node_track_caller_noprof(DECL_KMALLOC_PARAMS(size, b, token),
+                                       gfp_t flags, int node, unsigned long caller)
+{
+ (void)node;
+ (void)caller;
+ return allocate(size, flags, ARCH_KMALLOC_MINALIGN);
+}
+
+size_t ksize(const void *object)
+{
+ if (ZERO_OR_NULL_PTR(object))
+  return 0;
+ struct stela_linux_allocation allocation;
+ if ((!stela_linux_kmalloc_range(object, 1, &allocation) &&
+      !stela_linux_cache_range(object, 1, &allocation)) || allocation.object != object) {
+  /* The original API requires a live allocation. Refuse foreign, interior
+   * and freed addresses without inspecting their preceding bytes. */
+  WARN_ON_ONCE(1);
+  return 0;
+ }
+ return allocation.bytes;
+}
+
 void kfree(const void *object)
 {
 	if (ZERO_OR_NULL_PTR(object))
 		return;
-	const struct header *header = (const struct header *)object - 1;
-	stela_linux_heap_free((u8 *)object - header->align, header->size, header->align);
+ struct stela_linux_allocation allocation;
+ if (!stela_linux_kmalloc_range(object, 1, &allocation) || allocation.object != object) {
+  if (stela_linux_cache_range(object, 1, &allocation) && allocation.object == object) {
+   kmem_cache_free(allocation.cache, allocation.object);
+   return;
+  }
+  __builtin_trap();
+ }
+ struct header *header = (struct header *)allocation.object - 1;
+ rb_erase(&header->node, &allocations);
+ stela_linux_heap_free((u8 *)object - header->align, header->size, header->align);
 }
 
 char *kstrdup(const char *s, gfp_t gfp)

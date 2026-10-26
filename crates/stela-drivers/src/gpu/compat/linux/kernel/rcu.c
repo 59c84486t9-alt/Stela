@@ -7,6 +7,7 @@
 #include <linux/preempt.h>
 #include <linux/rcupdate.h>
 #include <stela/linux.h>
+#include <stela/allocation.h>
 
 /* Cookies are opaque. Odd 1 denotes already completed; real epochs are even.
  * Exhaustion stops rather than making an old cookie appear current again. */
@@ -18,6 +19,13 @@ static struct rcu_head **tail = &pending;
 static unsigned long epoch;
 static bool requested;
 static bool invoking;
+static const struct rcu_head *invoking_head;
+
+bool stela_linux_rcu_callback_current(const struct rcu_head *head)
+{
+ (void)stela_linux_owner();
+ return invoking && head && invoking_head == head;
+}
 
 static void require_quiescence(void)
 {
@@ -74,12 +82,14 @@ void rcu_barrier(void)
 		list->next = NULL;
 		/* Match the callback's nonblocking softirq execution contract,
 		 * without pretending a physical softirq/IRQ was delivered. */
+		invoking_head = list;
 		preempt_count_add(SOFTIRQ_OFFSET);
 		function(list);
 		if (stela_linux_owner() != owner || preempt_count() != (int)SOFTIRQ_OFFSET ||
 		    irqs_disabled())
 			__builtin_trap();
 		preempt_count_sub(SOFTIRQ_OFFSET);
+		invoking_head = NULL;
 		list = next;
 	}
 	invoking = false;

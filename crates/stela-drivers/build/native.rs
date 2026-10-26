@@ -212,6 +212,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/idr.c")),
             PathBuf::from(format!("{LINUX}/lib/radix-tree.c")),
             PathBuf::from(format!("{LINUX}/lib/xarray.c")),
+            PathBuf::from(format!("{LINUX}/lib/rbtree.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
@@ -308,6 +309,23 @@ impl Linux {
             &format!("{COMPAT}/stela/kobject_test.c"),
             &archives,
         );
+        // This fixture observes actual calls with the ELF linker's --wrap.
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+            let mut deferred = build.clone();
+            for symbol in [
+                "stela_linux_heap_alloc",
+                "stela_linux_heap_free",
+                "call_rcu",
+            ] {
+                deferred.flag(format!("-Wl,--wrap={symbol}"));
+            }
+            tests.add(
+                &deferred,
+                "linux_deferred_free",
+                &format!("{COMPAT}/stela/deferred_free_test.c"),
+                &archives,
+            );
+        }
         for (name, source, define) in [
             ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
             ("linux_panic", "panic.c", "STELA_LINUX_PANIC_TEST"),
@@ -413,6 +431,7 @@ impl Linux {
             Path::new(COMPAT),
             Path::new(INCLUDE),
             Path::new(X86_UAPI),
+            Path::new(LINUX).join("mm").as_path(),
         ]) {
             println!("cargo:rerun-if-changed={}", directory.display());
         }
@@ -427,6 +446,7 @@ impl Linux {
                 X86_UAPI.into(),
                 self.wrappers.join("uapi"),
                 format!("{INCLUDE}/uapi").into(),
+                format!("{LINUX}/mm").into(),
             ])
         {
             build.flag("-isystem").flag(directory);
