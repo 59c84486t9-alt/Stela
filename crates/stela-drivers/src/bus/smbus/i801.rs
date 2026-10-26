@@ -23,8 +23,9 @@
 //! unsafe [`PortIo::claim`] contract requires that ownership before any I/O.
 //! MMIO-only devices need a separate register accessor. [`i2c_block`] adds
 //! fixed-length I²C blocks with retained PCI configuration ownership and opt-in
-//! hardware PEC through that owner. Raw I801 handles still refuse PEC. Block
-//! process calls, SMBALERT and Host Notify remain unsupported.
+//! hardware PEC and E32B block process calls through that owner. Raw I801 handles
+//! still refuse PEC; SMBALERT and Host Notify remain unsupported.
+//! The retained owner also exposes payload-free SMBus Quick without PEC.
 //!
 //! Read-to-acquire INUSE semantics are documented in Intel's Host Status
 //! Register Address (HSTS), offset 0, Core Ultra SoC I/O Registers, ID 795260.
@@ -63,11 +64,13 @@ const HOST_ENABLED: u8 = 1;
 const HOST_SMI: u8 = 1 << 1;
 const HOST_I2C: u8 = 1 << 2;
 
+const PROTOCOL_QUICK: u8 = 0;
 const PROTOCOL_BYTE: u8 = 0x04;
 const PROTOCOL_BYTE_DATA: u8 = 0x08;
 const PROTOCOL_WORD_DATA: u8 = 0x0c;
 const PROTOCOL_PROCESS_CALL: u8 = 0x10;
 const PROTOCOL_BLOCK: u8 = 0x14;
+const PROTOCOL_BLOCK_PROCESS_CALL: u8 = 0x1c;
 
 /// Ordered byte access to a single exclusively owned host controller.
 pub trait Registers {
@@ -119,6 +122,11 @@ impl ControllerInfo {
 
     pub fn has_block_buffer(self) -> bool {
         self.block_buffer
+    }
+
+    /// Linux advertises block process calls from ICH5; ICH4 only has E32B/PEC.
+    pub fn has_block_process_call(self) -> bool {
+        self.block_buffer && self.device != 0x24c3
     }
 
     /// Exact pinned FEATURE_SMBUS_PEC profiles: ICH4 and later. This reports
@@ -228,7 +236,11 @@ impl<R: Registers, T: Timer> I801<R, T> {
         host_configuration: u8,
         config: Config,
     ) -> Result<Self, Error> {
-        if config.timeout_us == 0 || config.recovery_timeout_us == 0 {
+        if config.timeout_us == 0
+            || config.recovery_timeout_us == 0
+            || timer.check_duration(config.timeout_us).is_err()
+            || timer.check_duration(config.recovery_timeout_us).is_err()
+        {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
         if host_configuration & HOST_ENABLED == 0 {
@@ -254,7 +266,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
     }
 
     fn expired(&self, start: u64, timeout: u64) -> bool {
-        self.timer.now_us().wrapping_sub(start) >= timeout
+        self.timer.elapsed_us(start) >= timeout
     }
 
     fn error(kind: ErrorKind, status: u8) -> Error {
@@ -365,7 +377,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
         let mut recovery = Recovery::Cleared;
         if status & HOST_BUSY != 0 {
             self.registers.write8(HOST_CONTROL, KILL);
-            let start = self.timer.now_us();
+            let start = self.timer.start();
             loop {
                 status = self.registers.read8(HOST_STATUS);
                 if status & HOST_BUSY == 0 && status & FAILED != 0 {
@@ -508,6 +520,25 @@ impl<R: Registers, T: Timer> I801<R, T> {
         Ok(())
     }
 
+    fn quick_until(&mut self, address: Address, read: bool, start: u64) -> Result<(), Error> {
+        if !self.ready {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        if let Err(error) = self.prepare() {
+            if error.kind == ErrorKind::BufferModeRejected {
+                self.ready = false;
+            }
+            return Err(error);
+        }
+        // QUICK carries only an address/direction, with no command/data or PEC.
+        self.set_target(address, read, None);
+        let result = self
+            .start_transfer(PROTOCOL_QUICK, start)
+            .and_then(|()| self.wait(start, Phase::Completion).map(|_| ()));
+        self.finish(result.err())?;
+        self.completed_deadline(start)
+    }
+
     fn block(
         &mut self,
         address: Address,
@@ -645,7 +676,7 @@ impl<R: Registers, T: Timer> Bus for I801<R, T> {
         transaction: Transaction<'_>,
         pec: bool,
     ) -> Result<(), Error> {
-        let start = self.timer.now_us();
+        let start = self.timer.start();
         self.transaction_until(address, transaction, pec, start)
     }
 }

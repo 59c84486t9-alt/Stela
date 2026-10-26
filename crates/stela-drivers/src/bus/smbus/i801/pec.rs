@@ -9,21 +9,18 @@
 //! The pinned donor enables AUXCTL.CRC, not HOSTCNT.PEC_EN. Generation and
 //! verification belong to the controller; payload buffers contain no software
 //! CRC byte. This finite implementation admits byte/byte-data/word-data and
-//! E32B SMBus blocks on ICH4+ profiles. Process calls and BYTE_DONE PEC blocks
-//! remain explicit Stela limits, although the Linux donor supports them.
+//! process calls and E32B or BYTE_DONE SMBus blocks on ICH4+ profiles.
+//! Process-call sequencing also follows the unchanged simple/access functions
+//! at cc9de5d4b5ab6459f5774946aa3195ad51236fa8; prior evidence stays separate.
 use super::*;
+mod block_process;
+mod byte_block;
 
 impl<R: Registers, T: Timer> I801<R, T> {
     pub(super) fn pec_supported(&self, transaction: &Transaction<'_>) -> Result<(), Error> {
         // At the pinned source all exact PCI profiles with E32B also carry
         // FEATURE_SMBUS_PEC (ICH4+); ICH3 and earlier deliberately do not.
-        if !self.info.has_hardware_pec()
-            || matches!(transaction, Transaction::ProcessCall { .. })
-            || (matches!(
-                transaction,
-                Transaction::WriteBlock { .. } | Transaction::ReadBlock { .. }
-            ) && !self.config.use_block_buffer)
-        {
+        if !self.info.has_hardware_pec() {
             return Err(ErrorKind::UnsupportedPec.into());
         }
         if let Transaction::WriteBlock { data, .. } = transaction
@@ -119,13 +116,14 @@ impl<R: Registers, T: Timer> I801<R, T> {
             transaction,
             Transaction::WriteBlock { .. } | Transaction::ReadBlock { .. }
         );
+        let buffered = block && self.config.use_block_buffer;
         let mut bytes = Block::default();
         let mut word = [0; 2];
         let transfer = (|| {
             if self.registers.read8(AUX_STATUS) & AUX_CRC_ERROR != 0 {
                 return Err(ErrorKind::PecStatusStuck.into());
             }
-            let enabled = auxiliary | AUX_CRC | if block { AUX_BUFFER } else { 0 };
+            let enabled = auxiliary | AUX_CRC | if buffered { AUX_BUFFER } else { 0 };
             self.registers.write8(AUX_CONTROL, enabled);
             if self.registers.read8(AUX_CONTROL) != enabled {
                 return Err(ErrorKind::PecModeRejected.into());
@@ -162,9 +160,13 @@ impl<R: Registers, T: Timer> I801<R, T> {
                 Transaction::WriteBlock { command, data } => {
                     self.set_target(address, false, Some(*command));
                     self.registers.write8(HOST_DATA0, data.len() as u8);
-                    self.registers.read8(HOST_CONTROL); // real E32B index reset
-                    for &byte in *data {
-                        self.registers.write8(BLOCK_DATA, byte);
+                    if buffered {
+                        self.registers.read8(HOST_CONTROL); // real E32B index reset
+                        for &byte in *data {
+                            self.registers.write8(BLOCK_DATA, byte);
+                        }
+                    } else {
+                        self.registers.write8(BLOCK_DATA, data[0]);
                     }
                     PROTOCOL_BLOCK
                 }
@@ -172,15 +174,35 @@ impl<R: Registers, T: Timer> I801<R, T> {
                     self.set_target(address, true, Some(*command));
                     PROTOCOL_BLOCK
                 }
-                Transaction::ProcessCall { .. } => unreachable!("refused before I/O"),
+                Transaction::ProcessCall {
+                    command, request, ..
+                } => {
+                    // One combined write/repeated-read; hardware PEC covers
+                    // both address phases and request/response words.
+                    self.set_target(address, false, Some(*command));
+                    let [low, high] = request.to_le_bytes();
+                    self.registers.write8(HOST_DATA0, low);
+                    self.registers.write8(HOST_DATA1, high);
+                    PROTOCOL_PROCESS_CALL
+                }
             };
             self.start_transfer(protocol, start)?;
+            if block && !buffered {
+                bytes = self.pec_block_bytes(
+                    start,
+                    match &transaction {
+                        Transaction::WriteBlock { data, .. } => Some(*data),
+                        _ => None,
+                    },
+                )?;
+                return Ok(());
+            }
             self.wait(start, Phase::Completion)?;
             match &transaction {
                 Transaction::ReceiveByte(_) | Transaction::ReadByte { .. } => {
                     word[0] = self.registers.read8(HOST_DATA0);
                 }
-                Transaction::ReadWord { .. } => {
+                Transaction::ReadWord { .. } | Transaction::ProcessCall { .. } => {
                     word[0] = self.registers.read8(HOST_DATA0);
                     word[1] = self.registers.read8(HOST_DATA1);
                 }
@@ -211,6 +233,7 @@ impl<R: Registers, T: Timer> I801<R, T> {
                 *output = word[0];
             }
             Transaction::ReadWord { data, .. } => *data = u16::from_le_bytes(word),
+            Transaction::ProcessCall { response, .. } => *response = u16::from_le_bytes(word),
             Transaction::ReadBlock { data, .. } => *data = bytes,
             _ => {}
         }

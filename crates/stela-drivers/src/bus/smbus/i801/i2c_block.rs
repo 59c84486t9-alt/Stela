@@ -255,7 +255,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         if write.is_none() && (!host.info.block_buffer || host.info.device == 0x24c3) {
             return Err(ErrorKind::UnsupportedTransaction.into());
         }
-        let start = self.owners.as_ref().unwrap().0.timer.now_us();
+        let start = self.owners.as_ref().unwrap().0.timer.start();
         self.ready()?;
         self.deadline(start)?;
         self.active = true;
@@ -336,7 +336,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
                 .0
                 .pec_supported(&transaction)?;
         }
-        let start = self.owners.as_ref().unwrap().0.timer.now_us();
+        let start = self.owners.as_ref().unwrap().0.timer.start();
         self.ready()?;
         self.deadline(start)?;
         self.active = true;
@@ -355,6 +355,69 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         };
         self.complete(result, false, start)
     }
+    /// One count-prefixed SMBus block process call, with no intermediate STOP.
+    /// Request and reply counts are independently 1..=32. This requires source-
+    /// listed ICH5+ block-process capability and enabled E32B policy; no byte-
+    /// handshake fallback or automatic replay exists. The reply remains private
+    /// through CRC/mode cleanup, the actual PCI guard and the final deadline.
+    pub fn process_block(
+        &mut self,
+        address: Address,
+        command: u8,
+        request: &[u8],
+        response: &mut Block,
+        pec: bool,
+    ) -> Result<(), Error> {
+        if self.failure.is_some() {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        let host = &self.owners.as_ref().unwrap().0;
+        if !host.info.has_block_process_call() || !host.config.use_block_buffer {
+            return Err(ErrorKind::UnsupportedTransaction.into());
+        }
+        if !(1..=MAX_BLOCK).contains(&request.len()) {
+            return Err(ErrorKind::InvalidBlockLength(request.len()).into());
+        }
+        let start = host.timer.start();
+        self.ready()?;
+        self.deadline(start)?;
+        self.active = true;
+        match self
+            .owners
+            .as_mut()
+            .unwrap()
+            .0
+            .block_process_until(address, command, request, pec, start)
+        {
+            Ok(bytes) => {
+                self.complete(Ok(()), false, start)?;
+                *response = bytes;
+                Ok(())
+            }
+            Err(error) => self.complete(Err(error), false, start),
+        }
+    }
+
+    /// SMBus Quick: one address/direction and ACK, with no command, payload or
+    /// PEC. This is not an arbitrary empty I²C transfer. Completion still passes
+    /// the original host cleanup, actual PCI guard and whole-operation deadline.
+    pub fn quick(&mut self, address: Address, read: bool) -> Result<(), Error> {
+        if self.failure.is_some() {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        let start = self.owners.as_ref().unwrap().0.timer.start();
+        self.ready()?;
+        self.deadline(start)?;
+        self.active = true;
+        let result = self
+            .owners
+            .as_mut()
+            .unwrap()
+            .0
+            .quick_until(address, read, start);
+        self.complete(result, false, start)
+    }
+
     pub fn release(mut self) -> Result<(I801<R, T>, C), Self> {
         if self.active
             || self.failure.is_some()

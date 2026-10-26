@@ -9,6 +9,9 @@ use core::cell::{Cell, RefCell};
 const ALERT: u8 = 1 << 5;
 const AUX_OTHER: u8 = 0x80;
 const CONFIG_OTHER: u8 = 0xa0;
+mod block_process;
+mod quick;
+mod timer;
 
 #[derive(Clone)]
 struct Time(Rc<Cell<u64>>);
@@ -84,28 +87,78 @@ struct Hardware {
     jump_write: Option<(u8, u64)>,
     jump_configuration: bool,
     late_status: Option<u8>,
+    byte_index: usize,
+    payload_done: bool,
+    byte_read: bool,
+    byte_error_at: Option<usize>,
+    premature_at: Option<usize>,
+    last_at: Option<usize>,
 }
 impl Hardware {
+    fn byte_block(&self) -> bool {
+        self.registers[usize::from(HOST_CONTROL)] & 0x1c == PROTOCOL_BLOCK
+            && self.registers[usize::from(AUX_CONTROL)] & AUX_BUFFER == 0
+    }
     fn step(&mut self) {
-        if !self.active || self.hang || self.time.now_us().wrapping_sub(self.due) >= (1u64 << 63) {
+        if !self.active
+            || self.hang
+            || (self.kill_stuck && self.kills != 0)
+            || self.time.now_us().wrapping_sub(self.due) >= (1u64 << 63)
+        {
+            return;
+        }
+        if self.byte_block() && !self.payload_done {
+            if self.status & BYTE_DONE != 0 {
+                return;
+            }
+            if self.byte_error_at == Some(self.byte_index) {
+                self.active = false;
+                self.status = (self.status & (INUSE | ALERT)) | DEV_ERR;
+                return;
+            }
+            if self.premature_at == Some(self.byte_index) {
+                self.active = false;
+                self.status = (self.status & (INUSE | ALERT)) | INTR;
+                return;
+            }
+            if self.registers[usize::from(HOST_ADDRESS)] & 1 != 0 {
+                self.registers[5] = self.reply.len() as u8;
+            }
+            self.status |= BYTE_DONE;
             return;
         }
         self.active = false;
         let protocol = self.registers[usize::from(HOST_CONTROL)] & 0x1c;
         let address = self.registers[usize::from(HOST_ADDRESS)];
-        let read = address & 1 != 0;
+        let process = protocol == PROTOCOL_PROCESS_CALL;
+        let block_process = protocol == PROTOCOL_BLOCK_PROCESS_CALL;
+        let read = address & 1 != 0 || process || block_process;
         let command = self.registers[usize::from(HOST_COMMAND)];
         let crc = self.registers[usize::from(AUX_CONTROL)] & AUX_CRC != 0;
         let mut wire = Vec::new();
-        if protocol == PROTOCOL_BYTE {
+        if protocol == PROTOCOL_QUICK {
+            assert!(!crc, "SMBus Quick has no packet CRC");
+            wire.push(address);
+        } else if protocol == PROTOCOL_BYTE {
             wire.push(address);
             wire.push(if read { self.reply[0] } else { command });
         } else {
             wire.extend_from_slice(&[address & !1, command]);
-            if read {
-                wire.push(address);
+            if process {
+                assert_eq!(address & 1, 0, "process call starts with write address");
+                wire.extend_from_slice(&self.registers[5..7]);
             }
-            if protocol == PROTOCOL_BLOCK {
+            if block_process {
+                assert_eq!(address & 1, 0);
+                let count = usize::from(self.registers[5]);
+                assert_eq!(self.buffer.len(), count);
+                wire.push(count as u8);
+                wire.extend_from_slice(&self.buffer);
+            }
+            if read {
+                wire.push(address | 1);
+            }
+            if protocol == PROTOCOL_BLOCK || block_process {
                 if read {
                     wire.push(self.reply.len() as u8);
                     wire.extend_from_slice(&self.reply);
@@ -126,7 +179,11 @@ impl Hardware {
                     &self.registers[5..7]
                 };
                 wire.extend_from_slice(
-                    &bytes[..if protocol == PROTOCOL_WORD_DATA { 2 } else { 1 }],
+                    &bytes[..if protocol == PROTOCOL_WORD_DATA || process {
+                        2
+                    } else {
+                        1
+                    }],
                 );
             }
         }
@@ -149,14 +206,14 @@ impl Hardware {
             wire.push(packet);
         }
         self.wire.push(wire);
-        if read {
-            self.registers[5] = if protocol == PROTOCOL_BLOCK {
+        if read && protocol != PROTOCOL_QUICK {
+            self.registers[5] = if protocol == PROTOCOL_BLOCK || block_process {
                 self.reply.len() as u8
             } else {
                 self.reply[0]
             };
             self.registers[6] = self.reply.get(1).copied().unwrap_or(0);
-            if protocol == PROTOCOL_BLOCK {
+            if protocol == PROTOCOL_BLOCK || block_process {
                 self.buffer = self.reply.clone();
             }
         }
@@ -206,9 +263,16 @@ impl Registers for Regs {
                 h.registers[2]
             }
             BLOCK_DATA => {
-                let value = h.buffer[h.index];
-                h.index += 1;
-                value
+                if h.active && h.byte_block() {
+                    assert_ne!(h.status & BYTE_DONE, 0);
+                    assert!(!h.byte_read, "each handshake consumes one payload byte");
+                    h.byte_read = true;
+                    h.reply[h.byte_index]
+                } else {
+                    let value = h.buffer[h.index];
+                    h.index += 1;
+                    value
+                }
             }
             _ => h.registers[usize::from(offset)],
         };
@@ -232,7 +296,33 @@ impl Registers for Regs {
             h.jump_write = None;
         }
         match offset {
-            HOST_STATUS => h.status &= !(value & !HOST_BUSY),
+            HOST_STATUS => {
+                if value & BYTE_DONE != 0 && h.active && h.byte_block() {
+                    assert_ne!(h.status & BYTE_DONE, 0, "acknowledge an observed byte");
+                    let read = h.registers[4] & 1 != 0;
+                    let count = if read {
+                        h.reply.len()
+                    } else {
+                        usize::from(h.registers[5])
+                    };
+                    if read {
+                        assert!(h.byte_read, "ACK cannot discard an unread payload byte");
+                        if count > 1 && h.byte_index + 1 == count {
+                            assert_ne!(h.registers[2] & LAST_BYTE, 0);
+                        }
+                    } else {
+                        assert!(
+                            h.buffer.len() >= (h.byte_index + 2).min(count),
+                            "next byte must precede ACK"
+                        );
+                    }
+                    h.byte_index += 1;
+                    h.byte_read = false;
+                    h.payload_done = h.byte_index == count;
+                    h.due = h.time.now_us().wrapping_add(3);
+                }
+                h.status &= !(value & !HOST_BUSY);
+            }
             AUX_STATUS => {
                 if !h.sticky_crc {
                     h.registers[usize::from(offset)] &= !value;
@@ -249,6 +339,9 @@ impl Registers for Regs {
                 h.registers[13] = stored;
             }
             HOST_CONTROL => {
+                if value & LAST_BYTE != 0 && h.active && h.byte_block() {
+                    h.last_at = Some(h.byte_index);
+                }
                 h.registers[2] = value;
                 if value & KILL != 0 {
                     h.kills += 1;
@@ -265,6 +358,10 @@ impl Registers for Regs {
                     assert_ne!(h.status & INUSE, 0);
                     assert_eq!(value & 0x81, 0, "hardware PEC uses AUXCRC, not PEC_EN/IRQ");
                     h.active = true;
+                    h.byte_index = 0;
+                    h.payload_done = false;
+                    h.byte_read = false;
+                    h.last_at = None;
                     h.status |= HOST_BUSY;
                     h.due = h.time.now_us().wrapping_add(3);
                     let auxiliary = h.registers[13];
@@ -273,7 +370,20 @@ impl Registers for Regs {
                 }
             }
             BLOCK_DATA => {
-                if h.index == 0 {
+                if h.registers[13] & AUX_BUFFER == 0 {
+                    if h.active {
+                        assert_ne!(h.status & BYTE_DONE, 0, "one next-byte latch per handshake");
+                        assert_eq!(
+                            h.buffer.len(),
+                            h.byte_index + 1,
+                            "next byte cannot be supplied twice"
+                        );
+                    } else {
+                        // Without E32B this is one staging latch, not a FIFO.
+                        h.buffer.clear();
+                        h.index = 0;
+                    }
+                } else if h.index == 0 {
                     h.buffer.clear();
                 }
                 h.buffer.push(value);
@@ -358,6 +468,12 @@ fn fixture(device: u16, buffer: bool) -> Fixture {
         jump_write: None,
         jump_configuration: false,
         late_status: None,
+        byte_index: 0,
+        payload_done: false,
+        byte_read: false,
+        byte_error_at: None,
+        premature_at: None,
+        last_at: None,
     }));
     state.borrow_mut().registers[13] = AUX_OTHER;
     let register_drop = Rc::new(Cell::new(0));
@@ -435,6 +551,11 @@ fn request(
             command: 0xa7,
             data: block,
         },
+        4 => Transaction::ProcessCall {
+            command: 0xa7,
+            request: 0x3921,
+            response: word,
+        },
         _ => unreachable!(),
     };
     host.transaction(address(), transaction, true)
@@ -479,12 +600,12 @@ fn retained_actual_pci_owner_drives_crc_wire_for_all_admitted_protocols() {
                 true,
             )
             .unwrap();
-        for kind in 0..4 {
+        for kind in 0..5 {
             let (mut byte, mut word, mut block) = (0xa5, 0xa5a5, Block::default());
             request(&mut f.host, kind, &mut byte, &mut word, &mut block).unwrap();
             match kind {
                 0 | 1 => assert_eq!(byte, 0x76),
-                2 => assert_eq!(word, 0x9876),
+                2 | 4 => assert_eq!(word, 0x9876),
                 3 => assert_eq!(block.as_slice(), &[0x76, 0x98, 0x4c]),
                 _ => unreachable!(),
             }
@@ -505,13 +626,15 @@ fn retained_actual_pci_owner_drives_crc_wire_for_all_admitted_protocols() {
             vec![0x58, 0xa7, 0x59, 0x76],
             vec![0x58, 0xa7, 0x59, 0x76, 0x98],
             vec![0x58, 0xa7, 0x59, 3, 0x76, 0x98, 0x4c],
+            vec![0x58, 0xa7, 0x21, 0x39, 0x59, 0x76, 0x98],
         ];
-        for (wire, bytes) in h.wire.iter().zip(payloads) {
+        for (wire, bytes) in h.wire.iter().zip(&payloads) {
             assert_eq!(&wire[..wire.len() - 1], bytes);
             assert_eq!(host_crc(wire), 0, "complete wire including packet CRC");
         }
-        assert_eq!(h.identity_reads, 14);
-        assert_eq!(h.configuration_reads, 14);
+        assert_eq!(h.wire.len(), payloads.len());
+        assert_eq!(h.identity_reads, 16);
+        assert_eq!(h.configuration_reads, 16);
     }
 }
 
@@ -560,7 +683,7 @@ fn block_crc_covers_real_count_and_every_payload_byte_lengths_one_through_32() {
 
 #[test]
 fn independent_bad_packet_never_publishes_any_caller_read_output() {
-    for kind in 0..4 {
+    for kind in 0..5 {
         for no_device_flag in [false, true] {
             let mut f = fixture(0x7e22, true);
             f.state.borrow_mut().corrupt_packet = true;
@@ -591,7 +714,7 @@ fn independent_bad_packet_never_publishes_any_caller_read_output() {
 }
 
 #[test]
-fn raw_host_old_profiles_process_calls_and_unbuffered_pec_refuse_before_io() {
+fn raw_host_and_old_profiles_refuse_pec_before_io() {
     for device in [0x2413, 0x2423, 0x2443, 0x2483] {
         assert!(
             !ControllerInfo::from_pci_id(0x8086, device)
@@ -610,45 +733,6 @@ fn raw_host_old_profiles_process_calls_and_unbuffered_pec_refuse_before_io() {
         assert!(h.accesses.is_empty());
         assert_eq!((h.identity_reads, h.configuration_reads), (0, 0));
     }
-    for buffer in [false, true] {
-        let mut f = fixture(0x7e22, buffer);
-        let mut response = 0xa5a5;
-        assert_eq!(
-            f.host
-                .transaction(
-                    address(),
-                    Transaction::ProcessCall {
-                        command: 1,
-                        request: 2,
-                        response: &mut response
-                    },
-                    true
-                )
-                .unwrap_err()
-                .kind,
-            ErrorKind::UnsupportedPec
-        );
-        if !buffer {
-            assert_eq!(
-                f.host
-                    .transaction(
-                        address(),
-                        Transaction::WriteBlock {
-                            command: 1,
-                            data: &[2]
-                        },
-                        true
-                    )
-                    .unwrap_err()
-                    .kind,
-                ErrorKind::UnsupportedPec
-            );
-        }
-        assert_eq!(response, 0xa5a5);
-        let h = f.state.borrow();
-        assert!(h.accesses.is_empty());
-        assert_eq!((h.identity_reads, h.configuration_reads), (0, 0));
-    }
     let f = fixture(0x7e22, true);
     let (mut raw, cfg) = f.host.release().ok().unwrap();
     assert_eq!(
@@ -660,6 +744,414 @@ fn raw_host_old_profiles_process_calls_and_unbuffered_pec_refuse_before_io() {
     assert!(f.state.borrow().accesses.is_empty());
     drop((raw, cfg));
     assert_eq!((f.register_drop.get(), f.configuration_drop.get()), (1, 1));
+}
+
+#[test]
+fn process_call_pec_combines_both_words_and_addresses_without_a_second_start() {
+    for device in [0x24c3, 0x7e22] {
+        for buffered in [false, true] {
+            let mut f = fixture(device, buffered);
+            for address in [8, 0x2c, 0x77] {
+                for command in [0, 0xff] {
+                    for request in [0u16, 1, 0x80ff, 0xffff] {
+                        let reply = request ^ 0x956a;
+                        f.state.borrow_mut().reply = reply.to_le_bytes().to_vec();
+                        let mut response = 0xa5a5;
+                        let before = f.state.borrow().starts.len();
+                        f.host
+                            .transaction(
+                                Address::new(address).unwrap(),
+                                Transaction::ProcessCall {
+                                    command,
+                                    request,
+                                    response: &mut response,
+                                },
+                                true,
+                            )
+                            .unwrap();
+                        assert_eq!(response, reply);
+                        let h = f.state.borrow();
+                        assert_eq!(h.starts.len(), before + 1);
+                        let [lo, hi] = request.to_le_bytes();
+                        let [rlo, rhi] = reply.to_le_bytes();
+                        let wire = h.wire.last().unwrap();
+                        assert_eq!(
+                            &wire[..7],
+                            &[address << 1, command, lo, hi, (address << 1) | 1, rlo, rhi]
+                        );
+                        assert_eq!(wire.len(), 8, "one combined packet CRC");
+                        assert_eq!(host_crc(wire), 0);
+                        assert_eq!(h.starts.last().unwrap().0, START | PROTOCOL_PROCESS_CALL);
+                        drop(h);
+                        check_clean(&f);
+                    }
+                }
+            }
+            // A normal read cannot inherit either the previous request or CRC mode.
+            f.host
+                .transaction(
+                    address(),
+                    Transaction::WriteWord {
+                        command: 1,
+                        data: 2,
+                    },
+                    false,
+                )
+                .unwrap();
+            assert_eq!(f.state.borrow().starts.last().unwrap().1 & AUX_CRC, 0);
+            drop(f.host.release().ok().unwrap());
+            assert_eq!((f.register_drop.get(), f.configuration_drop.get()), (1, 1));
+        }
+    }
+}
+
+#[test]
+fn byte_done_crc_preserves_all_payloads_and_final_handshake_before_packet_completion() {
+    for device in [0x24c3, 0x7e22] {
+        let mut f = fixture(device, false);
+        for length in 1..=MAX_BLOCK {
+            let data: Vec<u8> = (0..length)
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(19))
+                .collect();
+            f.host
+                .transaction(
+                    address(),
+                    Transaction::WriteBlock {
+                        command: 0x51,
+                        data: &data,
+                    },
+                    true,
+                )
+                .unwrap();
+            f.state.borrow_mut().reply = data.clone();
+            let mut output = Block::default();
+            f.host
+                .transaction(
+                    address(),
+                    Transaction::ReadBlock {
+                        command: 0x51,
+                        data: &mut output,
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(output.as_slice(), data);
+            let h = f.state.borrow();
+            for read in [false, true] {
+                let wire = &h.wire[h.wire.len() - if read { 1 } else { 2 }];
+                let at = if read { 3 } else { 2 };
+                assert_eq!(usize::from(wire[at]), length);
+                assert_eq!(&wire[at + 1..wire.len() - 1], data);
+                assert_eq!(host_crc(wire), 0);
+            }
+            assert_eq!(h.byte_index, length);
+            assert!(h.payload_done);
+            assert!(
+                h.starts
+                    .iter()
+                    .all(|(_, aux, _)| aux & (AUX_CRC | AUX_BUFFER) == AUX_CRC)
+            );
+            drop(h);
+            check_clean(&f);
+        }
+    }
+}
+
+#[test]
+fn byte_done_bad_packet_mid_transfer_errors_and_premature_completion_never_publish() {
+    for length in [1, 2, 17, 32] {
+        for fault in 0..4 {
+            for at in [0, length / 2, length - 1] {
+                let mut f = fixture(0x7e22, false);
+                f.state.borrow_mut().reply = vec![0x76; length];
+                match fault {
+                    0 => f.state.borrow_mut().corrupt_packet = true,
+                    1 => f.state.borrow_mut().byte_error_at = Some(at),
+                    2 => f.state.borrow_mut().premature_at = Some(at),
+                    3 => f.state.borrow_mut().jump_read = Some((BLOCK_DATA, at + 1, 1000)),
+                    _ => unreachable!(),
+                }
+                let mut output = Block::from_slice(&[0xa5, 0x5a]).unwrap();
+                let error = f
+                    .host
+                    .transaction(
+                        address(),
+                        Transaction::ReadBlock {
+                            command: 0x51,
+                            data: &mut output,
+                        },
+                        true,
+                    )
+                    .unwrap_err();
+                assert_eq!(output.as_slice(), &[0xa5, 0x5a]);
+                assert!(match fault {
+                    0 => matches!(error.kind, ErrorKind::PecMismatch { .. }),
+                    1 => error.kind == ErrorKind::Device,
+                    2 => error.kind == ErrorKind::UnexpectedCompletion,
+                    3 => matches!(error.kind, ErrorKind::Timeout(_)),
+                    _ => false,
+                });
+                check_clean(&f);
+            }
+        }
+    }
+}
+
+#[test]
+fn byte_done_malformed_counts_and_failed_kill_bound_recovery_and_retain_owners() {
+    for length in [0, 33] {
+        for stuck in [false, true] {
+            let mut f = fixture(0x7e22, false);
+            f.state.borrow_mut().reply = vec![0x76; length];
+            f.state.borrow_mut().kill_stuck = stuck;
+            let mut output = Block::from_slice(&[0xa5]).unwrap();
+            let error = f
+                .host
+                .transaction(
+                    address(),
+                    Transaction::ReadBlock {
+                        command: 1,
+                        data: &mut output,
+                    },
+                    true,
+                )
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidBlockLength(length));
+            assert_eq!(output.as_slice(), &[0xa5]);
+            assert_eq!(f.state.borrow().read_counts[usize::from(BLOCK_DATA)], 0);
+            assert_eq!(f.state.borrow().kills, 1);
+            assert_eq!(
+                error.recovery,
+                if stuck {
+                    Recovery::Failed
+                } else {
+                    Recovery::Killed
+                }
+            );
+            if !stuck {
+                check_clean(&f);
+            }
+            drop(f.host);
+            assert_eq!(
+                (f.register_drop.get(), f.configuration_drop.get()),
+                if stuck { (0, 0) } else { (1, 1) }
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a fresh unchanged Linux BYTE_DONE PEC trace"]
+fn unchanged_linux_byte_done_payload_ack_last_byte_and_pec_policy() {
+    extern crate std;
+    let trace = std::fs::read_to_string(
+        std::env::var("STELA_I801_BYTE_PEC_ORACLE").expect("fresh byte PEC trace"),
+    )
+    .unwrap();
+    let mut lines = trace.lines();
+    assert_eq!(
+        lines.next(),
+        Some("I801_BYTE_PEC cc9de5d4b5ab6459f5774946aa3195ad51236fa8 2048")
+    );
+    let mut count = 0;
+    for (id, line) in lines.enumerate() {
+        let v: Vec<usize> = line
+            .split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 16);
+        assert_eq!(v[0], id);
+        let mut f = fixture(0x7e22, false);
+        let data: Vec<u8> = (0..v[2])
+            .map(|i| (i as u8).wrapping_mul(37).wrapping_add(v[2] as u8))
+            .collect();
+        f.state.borrow_mut().reply = data.clone();
+        f.state.borrow_mut().completion_status = v[4] as u8;
+        f.state.borrow_mut().corrupt_packet = v[5] != 0;
+        let mut output = Block::from_slice(&[0xa5, 0x5a]).unwrap();
+        let transaction = if v[1] != 0 {
+            Transaction::ReadBlock {
+                command: 0x51,
+                data: &mut output,
+            }
+        } else {
+            Transaction::WriteBlock {
+                command: 0x51,
+                data: &data,
+            }
+        };
+        let result = f.host.transaction(address(), transaction, v[3] != 0);
+        let class = match result {
+            Ok(()) => {
+                if v[1] != 0 {
+                    assert_eq!(output.as_slice(), data);
+                }
+                0
+            }
+            Err(error) => {
+                assert_eq!(output.as_slice(), &[0xa5, 0x5a]);
+                match error.kind {
+                    ErrorKind::Failed => 1,
+                    ErrorKind::Device => 2,
+                    ErrorKind::PecMismatch {
+                        auxiliary_status: AUX_CRC_ERROR,
+                    } => 3,
+                    ErrorKind::ArbitrationLost => 4,
+                    other => panic!("unexpected byte PEC failure: {other:?}"),
+                }
+            }
+        };
+        assert_eq!(class, v[6]);
+        let h = f.state.borrow();
+        assert_eq!(h.starts.len(), 1);
+        assert_eq!(usize::from(h.starts[0].0), v[7]);
+        assert_eq!(usize::from(h.starts[0].1), v[8]);
+        assert_eq!(usize::from(h.starts[0].2), v[9]);
+        assert_eq!(h.byte_index, v[10]);
+        assert_eq!(h.last_at.unwrap_or(255), v[11]);
+        let wire = h.wire.last().unwrap();
+        let at = if v[1] != 0 { 4 } else { 3 };
+        let payload = &wire[at..at + v[2]];
+        let hash = payload.iter().fold(2166136261u32, |h, b| {
+            (h ^ u32::from(*b)).wrapping_mul(16777619)
+        });
+        assert_eq!(hash as usize, v[12]);
+        assert_eq!(payload, data);
+        assert_eq!(usize::from(h.registers[13]), v[13]);
+        assert_eq!(usize::from(h.status & (INUSE | STATUS_FLAGS)), v[14]);
+        assert_eq!(usize::from(h.registers[12]), v[15]);
+        count += 1;
+    }
+    assert_eq!(count, 2048);
+}
+
+#[test]
+fn process_call_crc_cleanup_or_kill_failure_retains_both_original_owners() {
+    for fault in 0..3 {
+        let mut f = fixture(0x7e22, false);
+        match fault {
+            0 => f.state.borrow_mut().reject_crc_clear = true,
+            1 => {
+                f.state.borrow_mut().corrupt_packet = true;
+                f.state.borrow_mut().sticky_crc = true;
+            }
+            2 => {
+                f.state.borrow_mut().hang = true;
+                f.state.borrow_mut().kill_stuck = true;
+            }
+            _ => unreachable!(),
+        }
+        let mut response = 0xa5a5;
+        let error = f
+            .host
+            .transaction(
+                address(),
+                Transaction::ProcessCall {
+                    command: 0xff,
+                    request: 0x8123,
+                    response: &mut response,
+                },
+                true,
+            )
+            .unwrap_err();
+        assert_eq!(error.recovery, Recovery::Failed);
+        assert_eq!(response, 0xa5a5);
+        assert_eq!(f.state.borrow().starts.len(), 1);
+        let accesses = f.state.borrow().accesses.len();
+        assert_eq!(
+            f.host
+                .transaction(address(), Transaction::SendByte(1), false)
+                .unwrap_err()
+                .kind,
+            ErrorKind::NeedsReset
+        );
+        assert_eq!(f.state.borrow().accesses.len(), accesses);
+        assert!(f.host.release().is_err());
+        assert_eq!((f.register_drop.get(), f.configuration_drop.get()), (0, 0));
+    }
+}
+
+#[test]
+#[ignore = "requires a fresh unchanged Linux process-call PEC trace"]
+fn unchanged_linux_process_call_registers_and_pec_error_policy() {
+    extern crate std;
+    let trace = std::fs::read_to_string(
+        std::env::var("STELA_I801_PROCESS_PEC_ORACLE").expect("fresh oracle trace path"),
+    )
+    .unwrap();
+    let mut lines = trace.lines();
+    assert_eq!(
+        lines.next(),
+        Some("I801_PROCESS_PEC cc9de5d4b5ab6459f5774946aa3195ad51236fa8 3072")
+    );
+    let mut count = 0;
+    for (id, line) in lines.enumerate() {
+        let v: Vec<usize> = line
+            .split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert_eq!(v.len(), 17);
+        assert_eq!(v[0], id);
+        let mut f = fixture(0x7e22, id % 2 == 0);
+        f.state.borrow_mut().reply = (v[4] as u16).to_le_bytes().to_vec();
+        f.state.borrow_mut().completion_status = v[6] as u8;
+        f.state.borrow_mut().corrupt_packet = v[7] != 0;
+        let mut response = 0xa5a5;
+        let result = f.host.transaction(
+            Address::new(v[1] as u8).unwrap(),
+            Transaction::ProcessCall {
+                command: v[2] as u8,
+                request: v[3] as u16,
+                response: &mut response,
+            },
+            v[5] != 0,
+        );
+        let class = match result {
+            Ok(()) => {
+                assert_eq!(response, v[4] as u16);
+                assert_eq!(usize::from(response), v[13]);
+                0
+            }
+            Err(error) => {
+                assert_eq!(response, 0xa5a5, "native stages failed response");
+                assert_eq!(v[13], v[3], "Linux retains input union on failure");
+                match error.kind {
+                    ErrorKind::Failed => 1,
+                    ErrorKind::Device => 2,
+                    ErrorKind::PecMismatch {
+                        auxiliary_status: AUX_CRC_ERROR,
+                    } => 3,
+                    ErrorKind::ArbitrationLost => 4,
+                    other => panic!("unexpected process-call failure: {other:?}"),
+                }
+            }
+        };
+        assert_eq!(class, v[8]);
+        let h = f.state.borrow();
+        assert_eq!(h.starts.len(), 1);
+        assert_eq!(usize::from(h.starts[0].0), v[9]);
+        assert_eq!(usize::from(h.starts[0].2), v[10]);
+        assert_eq!(v[11] | v[12] << 8, v[3]);
+        let wire = h.wire.last().unwrap();
+        assert_eq!(
+            &wire[..7],
+            &[
+                v[10] as u8,
+                v[2] as u8,
+                v[11] as u8,
+                v[12] as u8,
+                v[10] as u8 | 1,
+                v[4] as u8,
+                (v[4] >> 8) as u8
+            ]
+        );
+        assert_eq!(wire.len(), 7 + v[5]);
+        assert_eq!(usize::from(h.registers[13]), v[14]);
+        assert_eq!(usize::from(h.status & (INUSE | STATUS_FLAGS)), v[15]);
+        assert_eq!(usize::from(h.registers[12]), v[16]);
+        count += 1;
+    }
+    assert_eq!(count, 3072);
 }
 
 #[test]
@@ -766,7 +1258,7 @@ fn crc_enable_readback_stale_status_and_exact_aux_restore_are_real_guards() {
 #[test]
 fn real_pci_identity_and_host_mode_revalidation_precede_read_publication() {
     for removed in [false, true] {
-        for kind in 0..4 {
+        for kind in 0..5 {
             let mut f = fixture(0x7e22, true);
             f.state.borrow_mut().remove_on_completion = removed;
             f.state.borrow_mut().change_config_on_completion = !removed;
@@ -804,7 +1296,7 @@ fn real_pci_identity_and_host_mode_revalidation_precede_read_publication() {
 
 #[test]
 fn one_deadline_includes_final_data_aux_restoration_and_actual_pci_guard() {
-    for kind in 0..4 {
+    for kind in 0..5 {
         for stage in 0..3 {
             let mut f = fixture(0x7e22, true);
             if stage == 2 {
@@ -814,7 +1306,7 @@ fn one_deadline_includes_final_data_aux_restoration_and_actual_pci_guard() {
                     AUX_CONTROL
                 } else if kind == 3 {
                     BLOCK_DATA
-                } else if kind == 2 {
+                } else if kind == 2 || kind == 4 {
                     HOST_DATA1
                 } else {
                     HOST_DATA0
