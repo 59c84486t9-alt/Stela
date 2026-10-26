@@ -41,6 +41,16 @@ pub struct SystemPageUpdate {
     pub override_pte: bool,
 }
 
+/// Exact invalid-entry policy selected by the initialized GMC/VM owner.
+/// `flags` must encode an invalid entry for that actual table and generation;
+/// clearing address bits alone does not invalidate a GPU translation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemPageClear {
+    pub table_offset: usize,
+    pub count: u32,
+    pub flags: u64,
+}
+
 /// Actual initialized GMC entry operations, borrowed for synchronous calls.
 /// These functions must not unwind or retain the table pointer.
 pub struct GmcCpuCallbacks<'a> {
@@ -215,6 +225,71 @@ impl RamPageTable {
                 })?;
         }
         Ok(written)
+    }
+
+    /// Replace bounded system-memory leaf PTEs with the initialized owner's
+    /// invalid encoding, then make those CPU stores visible through the real
+    /// DMA domain. Address bits are zero; `flags` supplies the actual GMC policy.
+    /// No source-address override is run for an invalid entry.
+    ///
+    /// Success reports CPU entries written. It does not remove an existing GPU
+    /// translation or authorize releasing its backing: GPU HDP/TLB invalidation
+    /// and completion remain mandatory, even after successful DMA visibility.
+    /// A visibility failure retains modified entries and reports their count.
+    ///
+    /// # Safety
+    /// The actual initialized VM owner must hold the same reservations, table
+    /// level/index, reset and CPU-write exclusion as `write_system_pages`.
+    /// `flags` must be that generation's invalid system-memory leaf encoding,
+    /// with no valid/access bits, PRT/sparse marker or physical address bits.
+    /// Sparse/fault mappings require their original separate VM path. The
+    /// callbacks must belong to this initialized GMC and implement its actual
+    /// entry stores.
+    /// All old source/table leases and VM references must remain retained until
+    /// actual GPU HDP/TLB invalidation and hardware completion establish that
+    /// stale translations and in-flight requests cannot access them. No new
+    /// writer or submission may race the clear/publication/retirement sequence.
+    /// Required process/deferred context applies. This operation itself proves
+    /// neither GPU quiescence nor the absence of cached translations.
+    pub unsafe fn clear_system_pages(
+        &mut self,
+        update: SystemPageClear,
+        gmc: &mut GmcCpuCallbacks<'_>,
+    ) -> Result<u32, UpdateError> {
+        let fail = |error| UpdateError { error, written: 0 };
+        self.dma.address().map_err(|e| fail(StorageError::Dma(e)))?;
+        let table_bytes = (update.count as usize)
+            .checked_mul(size_of::<u64>())
+            .ok_or_else(|| fail(StorageError::InvalidRange))?;
+        if !update.table_offset.is_multiple_of(size_of::<u64>())
+            || update
+                .table_offset
+                .checked_add(table_bytes)
+                .is_none_or(|end| end > self.bytes())
+        {
+            return Err(fail(StorageError::InvalidRange));
+        }
+        if update.count == 0 {
+            return Ok(0);
+        }
+        let table = self
+            .cpu
+            .address(update.table_offset, table_bytes)
+            .map_err(|_| fail(StorageError::MappingUnavailable))?;
+        for index in 0..update.count {
+            // SAFETY: the owner supplies the actual invalid-entry encoding and
+            // initialized GMC store; preflight bounds every destination entry.
+            unsafe {
+                (gmc.set_pte_pde)(gmc.context, table.as_ptr().cast(), index, 0, update.flags)
+            };
+        }
+        self.dma
+            .sync_for_device(update.table_offset..update.table_offset + table_bytes)
+            .map_err(|error| UpdateError {
+                error: StorageError::Dma(error),
+                written: update.count,
+            })?;
+        Ok(update.count)
     }
 
     /// Release only after removal from all GPU page directories/VM roots,
@@ -475,6 +550,21 @@ mod tests {
         };
         unsafe { table.write_system_pages(source, request, &mut callbacks) }
     }
+    fn clear(
+        table: &mut RamPageTable,
+        request: SystemPageClear,
+        gmc: &mut ModelGmc,
+    ) -> Result<u32, UpdateError> {
+        // SAFETY: isolated CPU model, no device or cached GPU translations.
+        let mut callbacks = unsafe {
+            GmcCpuCallbacks::borrow_initialized(
+                ptr::from_mut(gmc).cast(),
+                model_override,
+                model_set,
+            )
+        };
+        unsafe { table.clear_system_pages(request, &mut callbacks) }
+    }
     fn entry(table: &RamPageTable, offset: usize) -> u64 {
         let pointer = table.cpu.address(offset, 8).unwrap();
         // SAFETY: the synchronous model has completed its writes and has no device.
@@ -672,6 +762,160 @@ mod tests {
                 usize::from(!fail_unmap)
             );
             assert_eq!(Arc::strong_count(&domain), if fail_unmap { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn clear_preserves_neighbors_and_uses_invalid_encoding_without_address_override() {
+        let pages = ModelSource::default();
+        let domain = Arc::new(ModelDomain::default());
+        let mut table = table(&pages, domain.clone(), 24);
+        let mut source = source_mapping(&pages, domain.clone());
+        assert_eq!(
+            update(&mut table, &source, request(), &mut ModelGmc::default()),
+            Ok(2)
+        );
+        let neighbor = entry(&table, 16);
+        let mut gmc = ModelGmc::default();
+        assert_eq!(
+            clear(
+                &mut table,
+                SystemPageClear {
+                    table_offset: 8,
+                    count: 1,
+                    flags: 0x20
+                },
+                &mut gmc,
+            ),
+            Ok(1)
+        );
+        assert_eq!(entry(&table, 0), 0);
+        // Synthetic invalid-policy marker, not a hardware capability claim.
+        assert_eq!(entry(&table, 8), 0x20);
+        assert_eq!(entry(&table, 16), neighbor);
+        assert_eq!((gmc.writes, gmc.overrides), (1, 0));
+        assert_eq!(domain.start.load(Ordering::Relaxed), 8);
+        assert_eq!(domain.end.load(Ordering::Relaxed), 16);
+        assert_eq!(pages.released.load(Ordering::Relaxed), 0);
+        // SAFETY: model has no GPU/TLB users; real callers must drain both.
+        unsafe {
+            table.unmap().unwrap();
+            source.unmap().unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_clear_visibility_reports_modified_entries_and_retains_backing() {
+        let pages = ModelSource::default();
+        let domain = Arc::new(ModelDomain::default());
+        let mut table = table(&pages, domain.clone(), 24);
+        let mut source = source_mapping(&pages, domain.clone());
+        assert_eq!(
+            update(&mut table, &source, request(), &mut ModelGmc::default()),
+            Ok(2)
+        );
+        domain.fail_sync.store(true, Ordering::Relaxed);
+        let request = SystemPageClear {
+            table_offset: 8,
+            count: 2,
+            flags: 0,
+        };
+        assert_eq!(
+            clear(&mut table, request, &mut ModelGmc::default()),
+            Err(UpdateError {
+                error: StorageError::Dma(DmaError::VisibilityFailed),
+                written: 2
+            })
+        );
+        assert_eq!((entry(&table, 8), entry(&table, 16)), (0, 0));
+        assert_eq!(pages.released.load(Ordering::Relaxed), 0);
+        assert!(table.domain_address().is_ok() && source.address().is_ok());
+        domain.fail_sync.store(false, Ordering::Relaxed);
+        assert_eq!(clear(&mut table, request, &mut ModelGmc::default()), Ok(2));
+        // SAFETY: the synchronous model has no stale GPU translations or DMA.
+        unsafe {
+            table.unmap().unwrap();
+            source.unmap().unwrap();
+        }
+    }
+
+    #[test]
+    fn clear_preflights_ranges_and_active_mapping_before_any_store() {
+        let pages = ModelSource::default();
+        let domain = Arc::new(ModelDomain::default());
+        let mut table = table(&pages, domain.clone(), 24);
+        let mut gmc = ModelGmc::default();
+        for (table_offset, count) in [
+            (1, 1),
+            (16, 2),
+            (usize::MAX, 1),
+            (24, 1),
+            (32, 0),
+            (0, u32::MAX),
+        ] {
+            assert_eq!(
+                clear(
+                    &mut table,
+                    SystemPageClear {
+                        table_offset,
+                        count,
+                        flags: 0
+                    },
+                    &mut gmc
+                ),
+                Err(UpdateError {
+                    error: StorageError::InvalidRange,
+                    written: 0
+                })
+            );
+        }
+        assert_eq!((gmc.writes, gmc.overrides), (0, 0));
+        assert_eq!(domain.syncs.load(Ordering::Relaxed), 0);
+        // SAFETY: table was never exposed to hardware in this model.
+        unsafe {
+            table.unmap().unwrap();
+        }
+        assert_eq!(
+            clear(
+                &mut table,
+                SystemPageClear {
+                    table_offset: 0,
+                    count: 1,
+                    flags: 0
+                },
+                &mut gmc
+            ),
+            Err(UpdateError {
+                error: StorageError::Dma(DmaError::Unmapped),
+                written: 0
+            })
+        );
+        assert_eq!(gmc.writes, 0);
+    }
+
+    #[test]
+    fn empty_clear_at_table_end_does_not_claim_visibility() {
+        let pages = ModelSource::default();
+        let domain = Arc::new(ModelDomain::default());
+        let mut table = table(&pages, domain.clone(), 24);
+        let mut gmc = ModelGmc::default();
+        assert_eq!(
+            clear(
+                &mut table,
+                SystemPageClear {
+                    table_offset: 24,
+                    count: 0,
+                    flags: 0
+                },
+                &mut gmc
+            ),
+            Ok(0)
+        );
+        assert_eq!((gmc.writes, gmc.overrides), (0, 0));
+        assert_eq!(domain.syncs.load(Ordering::Relaxed), 0);
+        // SAFETY: no device has ever observed this model allocation.
+        unsafe {
+            table.unmap().unwrap();
         }
     }
 
