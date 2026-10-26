@@ -1,0 +1,758 @@
+//! Windows: disks are `\\.\PhysicalDriveN`, which setup names `diskN`, and
+//! their partitions `diskNpM` by partition number. The storage control codes
+//! give each disk's bus, serial number and partition table; the volume
+//! functions give each volume's disk, file system and mount paths. Partitions
+//! are read and written through the physical drive, a sector at a time as
+//! Windows requires, and a USB is erased by writing setup's own layout to
+//! its whole disk, with its volumes locked and dismounted.
+use super::{Cpu, Disk, FileSystem, Host, Partition, PartitionInfo, Volume};
+use anyhow::{Context, Result, ensure};
+use std::{
+    ffi::OsStr,
+    fs::File,
+    io,
+    mem::{offset_of, size_of},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::{FileExt, OpenOptionsExt},
+        io::AsRawHandle,
+    },
+    path::{Path, PathBuf},
+    ptr,
+};
+use windows_sys::{
+    Win32::{
+        Foundation::{
+            ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ,
+            GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        },
+        Storage::FileSystem::{
+            BusType1394, BusTypeFileBackedVirtual, BusTypeMmc, BusTypeNvme, BusTypeSd, BusTypeUsb,
+            DeleteVolumeMountPointW, FILE_SHARE_READ, FILE_SHARE_WRITE, FindFirstVolumeW,
+            FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetLogicalDrives,
+            GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+            GetVolumePathNamesForVolumeNameW, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            SetVolumeMountPointW,
+        },
+        System::{
+            IO::DeviceIoControl,
+            Ioctl::{
+                DISK_EXTENT, DISK_GEOMETRY_EX, DRIVE_LAYOUT_INFORMATION_EX, FSCTL_DISMOUNT_VOLUME,
+                FSCTL_LOCK_VOLUME, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_DISK_UPDATE_PROPERTIES,
+                IOCTL_STORAGE_QUERY_PROPERTY, NVMeDataTypeIdentify, PARTITION_INFORMATION_EX,
+                PARTITION_STYLE_GPT, PARTITION_STYLE_MBR, PropertyStandardQuery, ProtocolTypeNvme,
+                STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY,
+                STORAGE_PROTOCOL_DATA_DESCRIPTOR, STORAGE_PROTOCOL_SPECIFIC_DATA,
+                StorageAdapterProtocolSpecificProperty, StorageDeviceProperty, VOLUME_DISK_EXTENTS,
+            },
+            SystemInformation::GetSystemWindowsDirectoryW,
+        },
+    },
+    core::GUID,
+};
+
+/// How setup gets the rights its raw reads and writes need.
+pub(crate) const ADMIN: &str = "a terminal run as administrator";
+/// A whole disk as `--usb` names it.
+pub(crate) const DISK_EXAMPLE: &str = "PhysicalDrive2";
+/// What lists each partition's GPT GUID.
+pub(crate) const PARTITION_LISTING: &str =
+    "`Get-Partition | Format-List DiskNumber,PartitionNumber,Guid`";
+
+/// The EFI system partition's GPT type.
+const ESP: GUID = GUID::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
+/// Physical drive numbers setup looks for.
+const DRIVES: u32 = 128;
+
+/// The computer `stela setup` runs on.
+pub(crate) struct System;
+
+/// `text` as a NUL-terminated wide string.
+fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
+    text.as_ref().encode_wide().chain([0]).collect()
+}
+
+/// A wide string up to its NUL.
+fn narrow(wide: &[u16]) -> String {
+    let end = wide.iter().position(|c| *c == 0).unwrap_or(wide.len());
+    std::ffi::OsString::from_wide(&wide[..end])
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn last_error() -> io::Error {
+    io::Error::last_os_error()
+}
+
+/// `path`, a device or volume, opened for `access` with others still
+/// reading and writing it; access 0 asks only for its control codes.
+fn open(path: &str, access: u32) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+}
+
+/// The bytes of a plain C structure.
+fn bytes_of<T: Copy>(value: &T) -> &[u8] {
+    // SAFETY: `T` is a plain structure of `size_of::<T>()` bytes.
+    unsafe { std::slice::from_raw_parts(ptr::from_ref(value).cast(), size_of::<T>()) }
+}
+
+/// A plain C structure at `offset` of `bytes`, which must hold it.
+fn read<T: Copy>(bytes: &[u8], offset: usize) -> Option<T> {
+    let end = offset.checked_add(size_of::<T>())?;
+    // SAFETY: the bytes are in bounds; the read tolerates any alignment.
+    (end <= bytes.len()).then(|| unsafe { ptr::read_unaligned(bytes[offset..].as_ptr().cast()) })
+}
+
+/// Send `code` with `input` to `file`; the answer, growing the buffer from
+/// `capacity` while the device asks for more.
+fn control(file: &File, code: u32, input: &[u8], capacity: usize) -> io::Result<Vec<u8>> {
+    let mut size = capacity.max(64);
+    loop {
+        let mut output = vec![0u8; size];
+        let mut returned = 0u32;
+        // SAFETY: both buffers are valid for the lengths given.
+        let done = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                code,
+                input.as_ptr().cast(),
+                input.len() as u32,
+                output.as_mut_ptr().cast(),
+                size as u32,
+                &mut returned,
+                ptr::null_mut(),
+            )
+        };
+        if done != 0 {
+            output.truncate(returned as usize);
+            return Ok(output);
+        }
+        let error = last_error();
+        let more = matches!(
+            error.raw_os_error().map(|code| code as u32),
+            Some(ERROR_INSUFFICIENT_BUFFER | ERROR_MORE_DATA)
+        );
+        if !more || size >= 1 << 20 {
+            return Err(error);
+        }
+        size *= 4;
+    }
+}
+
+fn guid_text(guid: &GUID) -> String {
+    let d = guid.data4;
+    format!(
+        "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        guid.data1, guid.data2, guid.data3, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
+    )
+}
+
+fn same_guid(a: &GUID, b: &GUID) -> bool {
+    (a.data1, a.data2, a.data3, a.data4) == (b.data1, b.data2, b.data3, b.data4)
+}
+
+/// `diskN` → N; `diskNpM` → (N, M).
+fn disk_number(identifier: &str) -> Result<u32> {
+    identifier
+        .strip_prefix("disk")
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse().ok())
+        .with_context(|| format!("{identifier} is not a whole disk such as disk2"))
+}
+
+fn partition_number(identifier: &str) -> Result<(u32, u32)> {
+    identifier
+        .strip_prefix("disk")
+        .and_then(|rest| rest.split_once('p'))
+        .and_then(|(disk, partition)| Some((disk.parse().ok()?, partition.parse().ok()?)))
+        .filter(|(_, partition)| *partition > 0)
+        .with_context(|| format!("{identifier} is not a partition such as disk2p1"))
+}
+
+fn drive_path(disk: u32) -> String {
+    format!(r"\\.\PhysicalDrive{disk}")
+}
+
+/// What a disk's storage descriptor says.
+struct Descriptor {
+    removable: bool,
+    bus: i32,
+    name: String,
+    serial: Option<String>,
+}
+
+fn descriptor(drive: &File) -> io::Result<Descriptor> {
+    let query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery,
+        AdditionalParameters: [0],
+    };
+    let bytes = control(drive, IOCTL_STORAGE_QUERY_PROPERTY, bytes_of(&query), 1024)?;
+    let header: STORAGE_DEVICE_DESCRIPTOR =
+        read(&bytes, 0).ok_or_else(|| io::Error::other("short storage descriptor"))?;
+    let text = |offset: u32| -> Option<String> {
+        let tail = bytes.get(usize::try_from(offset).ok().filter(|o| *o != 0)?..)?;
+        let end = tail.iter().position(|b| *b == 0).unwrap_or(tail.len());
+        Some(String::from_utf8_lossy(&tail[..end]).trim().to_owned()).filter(|t| !t.is_empty())
+    };
+    let name = [text(header.VendorIdOffset), text(header.ProductIdOffset)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(Descriptor {
+        removable: header.RemovableMedia,
+        bus: header.BusType,
+        name,
+        serial: text(header.SerialNumberOffset),
+    })
+}
+
+/// An NVMe disk's controller serial number, from its Identify Controller
+/// data (bytes 4 to 23), as `stela.efi` reads it.
+fn nvme_serial(drive: &File) -> Option<String> {
+    const IDENTIFY_BYTES: usize = 4096;
+    const CONTROLLER: u32 = 1;
+    let header = offset_of!(STORAGE_PROPERTY_QUERY, AdditionalParameters);
+    let data = size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>();
+    let mut input = vec![0u8; header + data + IDENTIFY_BYTES];
+    input[..4].copy_from_slice(&StorageAdapterProtocolSpecificProperty.to_le_bytes());
+    input[4..8].copy_from_slice(&PropertyStandardQuery.to_le_bytes());
+    let request = STORAGE_PROTOCOL_SPECIFIC_DATA {
+        ProtocolType: ProtocolTypeNvme,
+        DataType: NVMeDataTypeIdentify as u32,
+        ProtocolDataRequestValue: CONTROLLER,
+        ProtocolDataRequestSubValue: 0,
+        ProtocolDataOffset: data as u32,
+        ProtocolDataLength: IDENTIFY_BYTES as u32,
+        FixedProtocolReturnData: 0,
+        ProtocolDataRequestSubValue2: 0,
+        ProtocolDataRequestSubValue3: 0,
+        ProtocolDataRequestSubValue4: 0,
+    };
+    input[header..header + data].copy_from_slice(bytes_of(&request));
+    let output = control(drive, IOCTL_STORAGE_QUERY_PROPERTY, &input, input.len()).ok()?;
+    let answer: STORAGE_PROTOCOL_DATA_DESCRIPTOR = read(&output, 0)?;
+    let at = offset_of!(STORAGE_PROTOCOL_DATA_DESCRIPTOR, ProtocolSpecificData)
+        + answer.ProtocolSpecificData.ProtocolDataOffset as usize;
+    let serial = output.get(at + 4..at + 24)?;
+    Some(String::from_utf8_lossy(serial).trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// One partition-table entry.
+struct Entry {
+    number: u32,
+    offset: u64,
+    bytes: u64,
+    content: String,
+    guid: String,
+}
+
+fn layout(drive: &File) -> io::Result<Vec<Entry>> {
+    let bytes = control(drive, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, &[], 8192)?;
+    let header: DRIVE_LAYOUT_INFORMATION_EX =
+        read(&bytes, 0).ok_or_else(|| io::Error::other("short drive layout"))?;
+    let first = offset_of!(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry);
+    let mut entries = Vec::new();
+    for index in 0..header.PartitionCount as usize {
+        let Some(entry) = read::<PARTITION_INFORMATION_EX>(
+            &bytes,
+            first + index * size_of::<PARTITION_INFORMATION_EX>(),
+        ) else {
+            break;
+        };
+        if entry.PartitionNumber == 0 || entry.PartitionLength <= 0 {
+            continue;
+        }
+        // SAFETY: the partition style says which member the union holds.
+        let (content, guid) = unsafe {
+            match entry.PartitionStyle {
+                PARTITION_STYLE_GPT => {
+                    let gpt = entry.Anonymous.Gpt;
+                    let content = if same_guid(&gpt.PartitionType, &ESP) {
+                        "EFI".into()
+                    } else {
+                        guid_text(&gpt.PartitionType)
+                    };
+                    (content, guid_text(&gpt.PartitionId))
+                }
+                PARTITION_STYLE_MBR => {
+                    let kind = entry.Anonymous.Mbr.PartitionType;
+                    let content = if kind == 0xef {
+                        "EFI".into()
+                    } else {
+                        format!("{kind:#04x}")
+                    };
+                    (content, String::new())
+                }
+                _ => (String::new(), String::new()),
+            }
+        };
+        entries.push(Entry {
+            number: entry.PartitionNumber,
+            offset: entry.StartingOffset as u64,
+            bytes: entry.PartitionLength as u64,
+            content,
+            guid,
+        });
+    }
+    Ok(entries)
+}
+
+/// A drive's size and logical sector size.
+fn geometry(drive: &File) -> io::Result<(u64, u32)> {
+    let bytes = control(drive, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, &[], 256)?;
+    let geometry: DISK_GEOMETRY_EX =
+        read(&bytes, 0).ok_or_else(|| io::Error::other("short drive geometry"))?;
+    Ok((
+        geometry.DiskSize as u64,
+        geometry.Geometry.BytesPerSector.max(512),
+    ))
+}
+
+/// One mounted-or-not volume and where it lies.
+struct WinVolume {
+    /// `\\?\Volume{GUID}\`.
+    name: String,
+    disk: u32,
+    offset: u64,
+    paths: Vec<PathBuf>,
+}
+
+impl WinVolume {
+    /// The volume's device, without the trailing backslash, to open.
+    fn device(&self) -> &str {
+        self.name.trim_end_matches('\\')
+    }
+}
+
+/// The single disk extent of the volume `name`, `\\?\Volume{GUID}\`.
+fn extent(name: &str) -> Option<DISK_EXTENT> {
+    let volume = open(name.trim_end_matches('\\'), 0).ok()?;
+    let bytes = control(&volume, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &[], 256).ok()?;
+    let header: VOLUME_DISK_EXTENTS = read(&bytes, 0)?;
+    // A volume spanning disks belongs to none of them.
+    (header.NumberOfDiskExtents == 1).then_some(header.Extents[0])
+}
+
+fn volumes() -> Result<Vec<WinVolume>> {
+    let mut volumes = Vec::new();
+    let mut name = [0u16; 64];
+    // SAFETY: the buffer's length is given.
+    let search = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
+    if search == INVALID_HANDLE_VALUE {
+        return Err(last_error()).context("cannot list this computer's volumes");
+    }
+    loop {
+        let volume = narrow(&name);
+        if let Some(extent) = extent(&volume) {
+            volumes.push(WinVolume {
+                paths: mount_paths(&volume),
+                disk: extent.DiskNumber,
+                offset: extent.StartingOffset as u64,
+                name: volume,
+            });
+        }
+        // SAFETY: as above.
+        if unsafe { FindNextVolumeW(search, name.as_mut_ptr(), name.len() as u32) } == 0 {
+            let error = last_error();
+            // SAFETY: the search handle is open.
+            unsafe { FindVolumeClose(search) };
+            if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                return Ok(volumes);
+            }
+            return Err(error).context("cannot list this computer's volumes");
+        }
+    }
+}
+
+/// Where volume `name` is mounted: drive letters and folders.
+fn mount_paths(name: &str) -> Vec<PathBuf> {
+    let volume = wide(name);
+    let mut buffer = vec![0u16; 1024];
+    let mut needed = 0u32;
+    // SAFETY: the buffer's length is given.
+    let done = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            volume.as_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut needed,
+        )
+    };
+    if done == 0 {
+        return Vec::new();
+    }
+    buffer
+        .split(|c| *c == 0)
+        .take_while(|path| !path.is_empty())
+        .map(|path| PathBuf::from(narrow(path)))
+        .collect()
+}
+
+/// The volume `path` is on, `\\?\Volume{GUID}\`, and its root.
+fn volume_of(path: &Path) -> Result<(String, Vec<u16>)> {
+    let path = std::path::absolute(path)?;
+    let mut root = [0u16; 1024];
+    // SAFETY: a NUL-terminated path and a buffer of the length given.
+    if unsafe { GetVolumePathNameW(wide(&path).as_ptr(), root.as_mut_ptr(), root.len() as u32) }
+        == 0
+    {
+        return Err(last_error()).with_context(|| format!("cannot inspect {}", path.display()));
+    }
+    let end = root.iter().position(|c| *c == 0).unwrap_or(root.len());
+    let root = root[..=end].to_vec();
+    let mut name = [0u16; 64];
+    // SAFETY: as above.
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), name.len() as u32)
+    } == 0
+    {
+        return Err(last_error()).with_context(|| format!("cannot inspect {}", path.display()));
+    }
+    Ok((narrow(&name), root))
+}
+
+/// The disk number of the volume holding Windows.
+fn system_disk() -> Option<u32> {
+    let mut directory = [0u16; 512];
+    // SAFETY: a buffer of the length given.
+    let length =
+        unsafe { GetSystemWindowsDirectoryW(directory.as_mut_ptr(), directory.len() as u32) };
+    if length == 0 || length as usize >= directory.len() {
+        return None;
+    }
+    let (volume, _) = volume_of(Path::new(&narrow(&directory))).ok()?;
+    extent(&volume).map(|extent| extent.DiskNumber)
+}
+
+/// Bytes `[offset, offset + length)` of `drive`, read in whole sectors.
+fn read_sectors(drive: &File, sector: u64, offset: u64, length: usize) -> Result<Vec<u8>> {
+    let first = offset / sector * sector;
+    let end = (offset + length as u64).div_ceil(sector) * sector;
+    let mut bytes = vec![0u8; usize::try_from(end - first)?];
+    let mut done = 0;
+    while done < bytes.len() {
+        let read = drive.seek_read(&mut bytes[done..], first + done as u64)?;
+        ensure!(read > 0, "the disk ended at byte {}", first + done as u64);
+        done += read;
+    }
+    let skip = usize::try_from(offset - first)?;
+    Ok(bytes[skip..skip + length].to_vec())
+}
+
+/// Write `data` at `offset` of `drive`, merging partial sectors with what
+/// they hold.
+fn write_sectors(drive: &File, sector: u64, offset: u64, data: &[u8]) -> Result<()> {
+    let first = offset / sector * sector;
+    let end = (offset + data.len() as u64).div_ceil(sector) * sector;
+    let bytes = if first == offset && end == offset + data.len() as u64 {
+        data.to_vec()
+    } else {
+        let mut bytes = read_sectors(drive, sector, first, usize::try_from(end - first)?)?;
+        let skip = usize::try_from(offset - first)?;
+        bytes[skip..skip + data.len()].copy_from_slice(data);
+        bytes
+    };
+    let mut done = 0;
+    while done < bytes.len() {
+        let written = drive.seek_write(&bytes[done..], first + done as u64)?;
+        ensure!(
+            written > 0,
+            "the disk took no bytes at {}",
+            first + done as u64
+        );
+        done += written;
+    }
+    drive.sync_all()?;
+    Ok(())
+}
+
+impl System {
+    /// Partition `identifier`'s disk, table entry and the disk's sector size.
+    fn entry(&self, identifier: &str) -> Result<(u32, Entry, u64)> {
+        let (disk, number) = partition_number(identifier)?;
+        let drive = open(&drive_path(disk), 0)
+            .with_context(|| format!("this computer has no disk {disk}"))?;
+        let entry = layout(&drive)?
+            .into_iter()
+            .find(|entry| entry.number == number)
+            .with_context(|| format!("disk {disk} has no partition {number}"))?;
+        let (_, sector) = geometry(&drive)?;
+        Ok((disk, entry, u64::from(sector)))
+    }
+
+    /// The volume on partition `identifier`, when Windows made one.
+    fn volume_on(&self, identifier: &str) -> Result<Option<WinVolume>> {
+        let (disk, entry, _) = self.entry(identifier)?;
+        Ok(volumes()?
+            .into_iter()
+            .find(|volume| volume.disk == disk && volume.offset == entry.offset))
+    }
+
+    /// Open partition `identifier`'s drive for `access`; with its start,
+    /// length and sector size.
+    fn raw(&self, identifier: &str, access: u32) -> Result<(File, Entry, u64)> {
+        let (disk, entry, sector) = self.entry(identifier)?;
+        let drive = open(&drive_path(disk), access).with_context(|| {
+            format!("cannot open disk {disk}; setup reads and writes it from {ADMIN}")
+        })?;
+        Ok((drive, entry, sector))
+    }
+}
+
+impl Host for System {
+    fn volume(&self, path: &Path) -> Result<Volume> {
+        let (name, root) = volume_of(path)?;
+        let mut filesystem = [0u16; 64];
+        // SAFETY: a NUL-terminated root and a buffer of the length given.
+        let done = unsafe {
+            GetVolumeInformationW(
+                root.as_ptr(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                filesystem.as_mut_ptr(),
+                filesystem.len() as u32,
+            )
+        };
+        if done == 0 {
+            return Err(last_error()).with_context(|| format!("cannot inspect {}", path.display()));
+        }
+        let mut free = 0u64;
+        // SAFETY: as above, with one out-value.
+        if unsafe {
+            GetDiskFreeSpaceExW(root.as_ptr(), &mut free, ptr::null_mut(), ptr::null_mut())
+        } == 0
+        {
+            return Err(last_error()).with_context(|| format!("cannot inspect {}", path.display()));
+        }
+        let filesystem = match narrow(&filesystem).as_str() {
+            "FAT32" | "FAT" | "FAT16" | "FAT12" => FileSystem::Fat,
+            "exFAT" => FileSystem::ExFat,
+            "NTFS" => FileSystem::Ntfs,
+            other => FileSystem::Other(other.into()),
+        };
+        Ok(Volume {
+            filesystem,
+            free_bytes: free,
+            disk: extent(&name).map(|extent| format!("disk{}", extent.DiskNumber)),
+        })
+    }
+
+    fn disks(&self) -> Result<Vec<Disk>> {
+        let volumes = volumes()?;
+        let system = system_disk();
+        let mut disks = Vec::new();
+        for number in 0..DRIVES {
+            let Ok(drive) = open(&drive_path(number), 0) else {
+                continue;
+            };
+            let Ok(descriptor) = descriptor(&drive) else {
+                continue;
+            };
+            let entries = layout(&drive).unwrap_or_default();
+            // A virtual disk (VHD) stands in for a USB, as a disk image does
+            // on a Mac.
+            let removable = descriptor.removable
+                || [
+                    BusTypeUsb,
+                    BusTypeSd,
+                    BusTypeMmc,
+                    BusType1394,
+                    BusTypeFileBackedVirtual,
+                ]
+                .contains(&descriptor.bus);
+            disks.push(Disk {
+                identifier: format!("disk{number}"),
+                name: descriptor.name,
+                internal: !removable,
+                system: system == Some(number),
+                partitions: entries
+                    .into_iter()
+                    .map(|entry| Partition {
+                        identifier: format!("disk{number}p{}", entry.number),
+                        mount: volumes
+                            .iter()
+                            .find(|v| v.disk == number && v.offset == entry.offset)
+                            .and_then(|v| v.paths.first().cloned()),
+                        content: entry.content,
+                    })
+                    .collect(),
+            });
+        }
+        Ok(disks)
+    }
+
+    fn partition(&self, identifier: &str) -> Result<PartitionInfo> {
+        let (disk, entry, _) = self.entry(identifier)?;
+        let mount = volumes()?
+            .into_iter()
+            .find(|volume| volume.disk == disk && volume.offset == entry.offset)
+            .and_then(|volume| volume.paths.into_iter().next());
+        Ok(PartitionInfo {
+            identifier: identifier.into(),
+            disk: format!("disk{disk}"),
+            guid: entry.guid,
+            bytes: entry.bytes,
+            content: entry.content,
+            mount,
+            container: None,
+        })
+    }
+
+    fn serial(&self, disk: &str) -> Result<Option<String>> {
+        let number = disk_number(disk)?;
+        let drive = open(&drive_path(number), 0)
+            .with_context(|| format!("this computer has no disk {number}"))?;
+        let descriptor = descriptor(&drive)?;
+        Ok(if descriptor.bus == BusTypeNvme {
+            // The storage descriptor's NVMe serial may be the namespace's
+            // EUI-64 instead; the controller's own comes from Identify.
+            nvme_serial(&drive)
+        } else if descriptor.bus == BusTypeFileBackedVirtual {
+            None
+        } else {
+            descriptor.serial
+        })
+    }
+
+    fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+        let (drive, entry, sector) = self.raw(identifier, GENERIC_READ)?;
+        ensure!(
+            offset + length as u64 <= entry.bytes,
+            "{identifier} ends before byte {}",
+            offset + length as u64
+        );
+        read_sectors(&drive, sector, entry.offset + offset, length)
+    }
+
+    fn write(&self, identifier: &str, offset: u64, bytes: &[u8]) -> Result<()> {
+        let (drive, entry, sector) = self.raw(identifier, GENERIC_READ | GENERIC_WRITE)?;
+        ensure!(
+            offset + bytes.len() as u64 <= entry.bytes,
+            "{identifier} ends before byte {}",
+            offset + bytes.len() as u64
+        );
+        write_sectors(&drive, sector, entry.offset + offset, bytes)
+            .with_context(|| format!("cannot write {identifier} (is a volume on it mounted?)"))
+    }
+
+    fn unmount(&self, partition: &PartitionInfo) -> Result<()> {
+        let Some(volume) = self.volume_on(&partition.identifier)? else {
+            return Ok(());
+        };
+        for path in &volume.paths {
+            // SAFETY: a NUL-terminated mount path.
+            if unsafe { DeleteVolumeMountPointW(wide(path).as_ptr()) } == 0 {
+                return Err(last_error())
+                    .with_context(|| format!("cannot unmount {} ({ADMIN})", path.display()));
+            }
+        }
+        let handle = open(volume.device(), GENERIC_READ | GENERIC_WRITE)
+            .with_context(|| format!("cannot open {} ({ADMIN})", partition.identifier))?;
+        control(&handle, FSCTL_DISMOUNT_VOLUME, &[], 0)
+            .with_context(|| format!("cannot dismount {}", partition.identifier))?;
+        Ok(())
+    }
+
+    fn mount(&self, identifier: &str) -> Result<PathBuf> {
+        let volume = self
+            .volume_on(identifier)?
+            .with_context(|| format!("Windows has no volume on {identifier}"))?;
+        if let Some(path) = volume.paths.first() {
+            return Ok(path.clone());
+        }
+        // SAFETY: no arguments.
+        let used = unsafe { GetLogicalDrives() };
+        let letter = (b'D'..=b'Z')
+            .find(|letter| used & (1 << (letter - b'A')) == 0)
+            .context("every drive letter is taken")?;
+        let path = format!("{}:\\", letter as char);
+        // SAFETY: two NUL-terminated paths.
+        if unsafe { SetVolumeMountPointW(wide(&path).as_ptr(), wide(&volume.name).as_ptr()) } == 0 {
+            return Err(last_error())
+                .with_context(|| format!("cannot mount {identifier} at {path} ({ADMIN})"));
+        }
+        Ok(PathBuf::from(path))
+    }
+
+    fn erase(&self, disk: &str, name: &str) -> Result<()> {
+        let number = disk_number(disk)?;
+        // Every volume on the disk, locked and dismounted until Windows has
+        // read the new partition table.
+        let mut locked = Vec::new();
+        for volume in volumes()?.into_iter().filter(|v| v.disk == number) {
+            let handle = open(volume.device(), GENERIC_READ | GENERIC_WRITE)
+                .with_context(|| format!("cannot open a volume of {disk} ({ADMIN})"))?;
+            control(&handle, FSCTL_LOCK_VOLUME, &[], 0).with_context(|| {
+                format!(
+                    "a volume of {disk} ({}) is in use; close what has it open",
+                    volume
+                        .paths
+                        .first()
+                        .map_or(volume.name.clone(), |p| p.display().to_string())
+                )
+            })?;
+            control(&handle, FSCTL_DISMOUNT_VOLUME, &[], 0)?;
+            locked.push(handle);
+        }
+        let mut drive = open(&drive_path(number), GENERIC_READ | GENERIC_WRITE)
+            .with_context(|| format!("cannot open {disk} to erase it ({ADMIN})"))?;
+        let (bytes, sector) = geometry(&drive)?;
+        let layout = crate::setup::format::layout(bytes, sector, name, &mut |bytes| {
+            getrandom::getrandom(bytes).context("the system's random generator failed")
+        })?;
+        super::write_layout(&mut drive, &layout)?;
+        control(&drive, IOCTL_DISK_UPDATE_PROPERTIES, &[], 0)
+            .with_context(|| format!("{disk} was erased, but Windows did not reread it"))?;
+        drop(drive);
+        drop(locked);
+        // Windows mounts the new volumes as it finds them.
+        let data = format!("{disk}p2");
+        let mut last = None;
+        for _ in 0..100 {
+            match self.mount(&data) {
+                Ok(_) => return Ok(()),
+                Err(error) => last = Some(error),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        Err(last.expect("tried"))
+            .context(format!("{disk} was erased, but its volume is not mounted"))
+    }
+
+    fn whole_disk(&self, usb: &Path) -> Result<Option<String>> {
+        if usb.is_dir() {
+            return Ok(None);
+        }
+        let Some(name) = usb.to_str() else {
+            return Ok(None);
+        };
+        let name = name.to_ascii_lowercase();
+        let name = name.strip_prefix(r"\\.\").unwrap_or(&name);
+        let Some(number) = name
+            .strip_prefix("physicaldrive")
+            .or_else(|| name.strip_prefix("disk"))
+            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            return Ok(None);
+        };
+        let identifier = format!("disk{number}");
+        Ok(self
+            .disks()?
+            .into_iter()
+            .any(|disk| disk.identifier == identifier)
+            .then_some(identifier))
+    }
+
+    fn cpu(&self) -> Result<Cpu> {
+        super::cpu()
+    }
+}

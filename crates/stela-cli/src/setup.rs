@@ -52,6 +52,7 @@ mod doctor;
 mod ecid;
 mod fdr;
 mod firmware;
+mod format;
 pub(crate) mod host;
 mod installed;
 mod machines;
@@ -111,8 +112,9 @@ fn restore_choice_name(kind: Kind) -> &'static str {
 #[derive(Args)]
 pub(crate) struct Setup {
     /// The USB's EFI partition, another mounted volume of the same USB, or
-    /// the whole USB disk (such as disk5), which setup erases first into an
-    /// EFI partition and a FAT32 volume.
+    /// the whole USB disk (such as disk5 on macOS, /dev/sdb on Linux or
+    /// PhysicalDrive2 on Windows), which setup erases first into an EFI
+    /// partition and a FAT32 volume.
     #[arg(long)]
     usb: PathBuf,
     /// The macOS 27 restore image (IPSW).
@@ -1378,20 +1380,22 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
     let esp = match partition {
         Some(partition) => match &partition.mount {
             Some(mount) => mount.clone(),
-            // macOS leaves a USB's EFI partition unmounted.
+            // Hosts leave a USB's EFI partition unmounted.
             None => host.mount(&partition.identifier).with_context(|| {
                 format!(
                     "{} is on the same disk as EFI partition {}, which could not be mounted \
-                     (setup needs sudo)",
+                     (setup needs {})",
                     usb.display(),
-                    partition.identifier
+                    partition.identifier,
+                    host::ADMIN
                 )
             })?,
         },
         None => bail!(
-            "{} is on a disk without an EFI partition. Erase the USB in Disk Utility with the \
-             GUID Partition Map scheme, which gives it one, then run setup again.",
-            usb.display()
+            "{} is on a disk without an EFI partition. Setup erases a USB into one when --usb \
+             names its whole disk (such as {}), which deletes everything on it.",
+            usb.display(),
+            host::DISK_EXAMPLE
         ),
     };
     // A USB setup prepared owns its loader, damaged or old as it may be.
@@ -2274,8 +2278,8 @@ fn state_line(disk: &installed::InstalledDisk) -> String {
 }
 
 fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
-    if let Some(disk) = whole_disk(&command.usb) {
-        let host = environment.host;
+    let host = environment.host;
+    if let Some(disk) = host.whole_disk(&command.usb)? {
         let found = host.disks()?.into_iter().find(|d| d.identifier == disk);
         let found = found.with_context(|| format!("this computer lists no disk {disk}"))?;
         ensure!(
@@ -2345,15 +2349,6 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
 
 /// The FAT32 volume setup erases a USB into.
 const USB_VOLUME: &str = "STELA";
-
-/// The whole disk `usb` names (`disk5` or `/dev/disk5`), when it names one
-/// rather than a mounted volume.
-fn whole_disk(usb: &Path) -> Option<String> {
-    let name = usb.to_str()?;
-    let name = name.strip_prefix("/dev/").unwrap_or(name);
-    let number = name.strip_prefix("disk")?;
-    (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then(|| name.into())
-}
 
 /// Directories from `root` down to `path` that do not exist yet, deepest
 /// first.
@@ -3004,7 +2999,7 @@ mod tests {
         let error = setup(&environment(&host), command(&f, dir.path()))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("GUID Partition Map"), "{error}");
+        assert!(error.contains("names its whole disk"), "{error}");
         let mut host = FakeHost::new(f.host.volumes.clone(), f.host.disks.clone());
         // An unmounted EFI partition is mounted, or the error says why not.
         host.disks[1].partitions[0].mount = None;
@@ -3315,15 +3310,21 @@ mod tests {
 
     #[test]
     fn a_whole_usb_disk_is_erased_first_and_an_internal_one_refused() {
-        assert_eq!(
-            whole_disk(Path::new("/dev/disk5")).as_deref(),
-            Some("disk5")
-        );
-        assert_eq!(whole_disk(Path::new("disk12")).as_deref(), Some("disk12"));
-        for volume in ["/Volumes/STELA", "disk5s1", "disk", "/dev/rdisk5"] {
-            assert_eq!(whole_disk(Path::new(volume)), None, "{volume}");
-        }
         let f = fixture(64 * GIB, true);
+        let whole = |usb: &str| f.host.whole_disk(Path::new(usb)).unwrap();
+        assert_eq!(whole("/dev/disk5").as_deref(), Some("disk5"));
+        assert_eq!(whole("disk0").as_deref(), Some("disk0"));
+        let esp = f.esp.to_str().unwrap();
+        for volume in [
+            esp,
+            "/Volumes/STELA",
+            "disk5s1",
+            "disk",
+            "/dev/rdisk5",
+            "disk12",
+        ] {
+            assert_eq!(whole(volume), None, "{volume}");
+        }
         let mut dry = command(&f, Path::new("disk5"));
         dry.dry_run = true;
         let report = setup(&environment(&f.host), dry).unwrap();

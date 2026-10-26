@@ -36,6 +36,16 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha1 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 
+# Setup's disk backend on Windows: storage and volume control codes.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_SystemInformation",
+] }
+
 [dev-dependencies]
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 

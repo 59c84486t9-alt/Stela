@@ -1666,6 +1666,7 @@ dependencies = [
  "stela-loader",
  "stela-runtime",
  "tempfile",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip",
 ]

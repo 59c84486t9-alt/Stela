@@ -211,7 +211,8 @@ pub(super) fn confirm(
     ensure!(
         info.guid.eq_ignore_ascii_case(guid),
         "{identifier} is not this install's {what} (partition {guid}); its identifier may have \
-         changed. Find the partition with that GUID (`diskutil info`) and pass it with {}",
+         changed. Find the partition with that GUID ({}) and pass it with {}",
+        super::host::PARTITION_LISTING,
         match role {
             Role::AppleRegion => "--target",
             Role::Nor => "--nor",
