@@ -128,6 +128,9 @@ impl Controller {
             in_flight: 0,
         });
         let input_address = input.device_address();
+        // A failed Address Device may leave the output context untouched.
+        // Publish its CPU-owned zeros before DCBAA exposes the device pointer.
+        during("publish initial device context", output.sync_dirty())?;
         self.dcbaa
             .write(usize::from(slot) * 8, output.device_address());
         self.slots[usize::from(slot)] = Some(Slot {

@@ -685,12 +685,15 @@ impl Controller {
     fn sync_command_buffers(&self) -> Result<(), BlockError> {
         self.dcbaa.sync_dirty()?;
         for state in self.slots.iter().flatten() {
-            state.input.sync_dirty()?;
             for endpoint in state.endpoints.iter().flatten() {
+                endpoint.ring.buffer.sync_dirty()?;
                 if let Some(streams) = &endpoint.streams {
                     streams.sync_device()?;
                 }
             }
+            // Address/Configure may fetch these dequeues before the first TD.
+            // Fresh and reinitialized rings must already show unowned TRBs.
+            state.input.sync_dirty()?;
         }
         Ok(())
     }

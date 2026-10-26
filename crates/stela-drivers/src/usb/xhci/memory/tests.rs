@@ -18,6 +18,8 @@ use core::{
 extern crate std;
 use std::sync::Mutex;
 
+mod address;
+
 struct Backing {
     pointer: NonNull<u8>,
     layout: Layout,
