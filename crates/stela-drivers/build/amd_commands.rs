@@ -63,6 +63,7 @@ pub fn build() {
         .env("PYTHONDONTWRITEBYTECODE", "1");
     compile.arg("-C").arg(&build).args([
         "compiler/libstela_amd_commands.a",
+        "compiler/libstela-amd-commands-test.a",
         "subprojects/mesa/src/amd/common/libamd_common.a",
     ]);
     if let Some(jobs) = env::var_os("NUM_JOBS") {
@@ -81,21 +82,8 @@ pub fn build() {
     // Mesa's whole common archive: the linker keeps only the command encoders
     // and drops its unused device-query code, whose libdrm calls never link.
     println!("cargo:rustc-link-lib=static=amd_common");
-    // The command tests' immutable radeon_info fixture; only cfg(test) links it.
-    cc::Build::new()
-        .file(manifest.join("src/gpu/amd/tests/commands_fixture.c"))
-        .include(source.join("include"))
-        .include(source.join("src"))
-        .include(build.join("subprojects/mesa/src"))
-        .include(build.join("subprojects/mesa/src/amd/common"))
-        .std("c11")
-        .warnings_into_errors(true)
-        .cargo_metadata(false)
-        .compile("stela-amd-commands-test");
-    println!(
-        "cargo:rustc-link-search=native={}",
-        env::var("OUT_DIR").expect("Cargo supplies OUT_DIR")
-    );
+    // The immutable radeon_info fixture uses the same Meson-detected header
+    // configuration as the encoder; only Rust's cfg(test) links its archive.
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed=../../third_party/libdrm");
     for input in [

@@ -858,6 +858,14 @@ if with_amd
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [libamd_common],
   )
+  # Rust's command tests borrow immutable metadata, not a hardware device.
+  # Keep the fixture separate while inheriting Mesa's detected host settings.
+  stela_amd_commands_fixture = static_library(
+    'stela-amd-commands-test',
+    '../amd/tests/commands_fixture.c',
+    include_directories : [inc_include, inc_src, inc_gpu, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+  )
 
   stela_amd_compute = static_library(
     'stela_amd_compute',
