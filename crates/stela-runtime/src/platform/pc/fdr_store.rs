@@ -463,13 +463,12 @@ mod tests {
                 phase: n,
                 bytes: count,
             }) = self.fault
+                && n == phase
             {
-                if n == phase {
-                    let offset = lba as usize * self.identity().block_size as usize;
-                    let count = count.min(bytes.len());
-                    self.durable[offset..offset + count].copy_from_slice(&bytes[..count]);
-                    return Err(Self::failure());
-                }
+                let offset = lba as usize * self.identity().block_size as usize;
+                let count = count.min(bytes.len());
+                self.durable[offset..offset + count].copy_from_slice(&bytes[..count]);
+                return Err(Self::failure());
             }
             self.cache.write(lba, bytes)?;
             if matches!(self.fault, Some(Fault::After(n)) if n == phase) {
