@@ -37,37 +37,12 @@
 //!   guest code, so it fails with EINVAL and is reported.
 use super::{Call, Kernel, Outcome, forward};
 use crate::hosted::darwin::{EACCES, EINVAL, ENOTSUP, EPERM};
+#[cfg(test)]
+pub(crate) use crate::hosted_registry::bsd::system::CALLS;
 use anyhow::Result;
 
 /// `PT_STEP`.
 const PT_STEP: i32 = 9;
-
-pub(super) const CALLS: &[&str] = &[
-    "ptrace",
-    "swapon",
-    "debug_syscall_reject",
-    "sys_debug_syscall_reject_config",
-    "__mach_bridge_remote_time",
-    "objc_bp_assist_cfg_np",
-    "kas_info",
-    "stack_snapshot_with_config",
-    "microstackshot",
-    "grab_pgo_data",
-    "sys_panic_with_data",
-    "tracker_action",
-    "sys_record_system_event",
-    "sys_coalition_policy_set",
-    "sys_coalition_policy_get",
-    "graftdmg",
-    "ungraftdmg",
-    "oslog_coproc_reg",
-    "oslog_coproc",
-    "pid_suspend",
-    "pid_resume",
-    "pid_shutdown_sockets",
-    "funmount",
-    "pivot_root",
-];
 
 /// The superuser-only calls that describe the kernel itself.
 const KERNEL_DESCRIPTIONS: &[&str] = &[

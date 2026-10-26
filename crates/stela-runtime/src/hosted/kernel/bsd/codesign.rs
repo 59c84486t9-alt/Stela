@@ -16,6 +16,7 @@ use crate::code_signature;
 use crate::hosted::darwin::{EFAULT, EINVAL, ENOENT, ERANGE, ESRCH};
 use crate::hosted::pe::UserJop;
 use crate::hosted::{memory, threads::lock};
+pub(crate) use crate::hosted_registry::bsd::codesign::CALLS;
 use anyhow::{Context, Result, bail, ensure};
 
 const CS_OPS_STATUS: u64 = 0;
@@ -424,8 +425,6 @@ fn integer_value(value: &str) -> Option<u64> {
     let (text, _) = value.strip_prefix("<integer>")?.split_once("</integer>")?;
     text.trim().parse().ok()
 }
-
-pub(super) const CALLS: &[&str] = &["csops", "csops_audittoken"];
 
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     if !CALLS.contains(&call.entry.name) {

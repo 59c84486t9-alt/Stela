@@ -1,5 +1,5 @@
 //! How the hosted kernel services each kind of request, for the
-//! requirement matrix ([`crate::hosted::requirements`]): the same tables
+//! requirement matrix ([`crate::hosted_registry::requirements`]): the same tables
 //! the dispatchers consult, so a row's status is the dispatcher's own
 //! behavior.
 use super::{bsd, mach};

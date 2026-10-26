@@ -27,13 +27,6 @@ use crate::hosted::threads::{lock, try_lock};
 use anyhow::Result;
 use std::sync::{Mutex, MutexGuard};
 
-pub(super) const CALLS: &[&str] = &[
-    "umask",
-    "umask_extended",
-    "__pthread_chdir",
-    "__pthread_fchdir",
-];
-
 /// `ALLPERMS`: the mode bits a mask keeps.
 const ALL_PERMISSIONS: u64 = 0o7777;
 /// The `fcntl` commands the gate orders: `F_SETFD`, `F_DUPFD` and

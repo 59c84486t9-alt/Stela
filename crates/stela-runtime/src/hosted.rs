@@ -30,7 +30,7 @@ pub mod jit;
 pub mod kernel;
 pub mod memory;
 pub mod pe;
-pub mod requirements;
+pub use crate::hosted_registry::requirements;
 pub mod shared_region;
 pub mod tables;
 mod threads;

@@ -4,7 +4,7 @@
 //!
 //! A call whose arguments and effects are the same in the x86-64 and arm64
 //! LP64 ABIs, and which acts only on this process's own resources, is
-//! forwarded to the host kernel unchanged ([`forwarded`]): guest pointers are
+//! forwarded to the host kernel unchanged ([`Family::Forwarded`]): guest pointers are
 //! host pointers here and both kernels munge results alike. Calls whose
 //! meaning depends on the CPU, the page size, the clock or the execution
 //! state are serviced by their family. A call no family services, or an
@@ -13,6 +13,7 @@
 //! or option with the call's own error.
 use crate::hosted::darwin::{EINTR, ENOSYS};
 use crate::hosted::unsupported::{self, Failure, Kind};
+pub(crate) use crate::hosted_registry::bsd::{Family, REFUSED, family};
 // Kept for the MIG routines that still name it through this module.
 use super::{Kernel, Pe, Trap};
 use crate::darwin::{BsdReturnType, catalog};
@@ -25,7 +26,6 @@ pub(super) mod aio;
 mod codesign;
 pub(super) mod files;
 mod fork;
-mod forwarded;
 pub(super) mod kqworkloop;
 pub(super) mod kqworkq;
 mod linking;
@@ -240,139 +240,6 @@ fn complete(trap: &mut Trap, return_type: BsdReturnType, outcome: Outcome) -> Re
     }
     Ok(())
 }
-
-/// Who services a BSD call: the host kernel unchanged, or one family of
-/// the hosted kernel's own models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Family {
-    Forwarded,
-    Process,
-    Memory,
-    Time,
-    Sysctl,
-    CodeSigning,
-    Threads,
-    Workqueue,
-    Signals,
-    System,
-    Files,
-    AsynchronousIo,
-    Additions,
-}
-
-impl Family {
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Forwarded => "forwarded",
-            Self::Process => "process",
-            Self::Memory => "memory",
-            Self::Time => "time",
-            Self::Sysctl => "sysctl",
-            Self::CodeSigning => "code signing",
-            Self::Threads => "threads",
-            Self::Workqueue => "workqueue",
-            Self::Signals => "signals",
-            Self::System => "system",
-            Self::Files => "descriptor table",
-            Self::AsynchronousIo => "asynchronous I/O",
-            Self::Additions => "26A434 additions",
-        }
-    }
-}
-
-/// The modeled families and the calls each services.
-const MODELED: &[(Family, &[&str])] = &[
-    (Family::Process, process::CALLS),
-    (Family::Memory, memory::CALLS),
-    (Family::Time, time::CALLS),
-    (Family::Sysctl, sysctl::CALLS),
-    (Family::CodeSigning, codesign::CALLS),
-    (Family::Threads, thread::CALLS),
-    (Family::Workqueue, workqueue::CALLS),
-    (Family::Signals, signal::CALLS),
-    (Family::System, system::CALLS),
-    (Family::Files, files::CALLS),
-    (Family::AsynchronousIo, aio::CALLS),
-];
-
-/// The family servicing the call `name`, or `None` for a call the hosted
-/// kernel refuses.
-pub(crate) fn family(name: &str) -> Option<Family> {
-    if forwarded::forwarded(name) {
-        return Some(Family::Forwarded);
-    }
-    MODELED
-        .iter()
-        .find(|(_, calls)| calls.contains(&name))
-        .map(|&(family, _)| family)
-}
-
-/// The calls whose forwarding a model of part of their arguments
-/// precedes, with that model: guest-root path resolution and file code
-/// signatures.
-pub(crate) fn overlay(name: &str) -> Option<&'static str> {
-    if signatures::CALLS.contains(&name) {
-        Some(signatures::OVERLAY)
-    } else if aio::CLOSING.contains(&name) {
-        Some(aio::OVERLAY)
-    } else if paths::overlays(name) {
-        Some(paths::OVERLAY)
-    } else {
-        None
-    }
-}
-
-/// Calls serviced with a named limit: what of the arm64 kernel's contract
-/// the hosted kernel does not provide.
-pub(crate) const LIMITS: &[(&str, &str)] = &[
-    ("sysctl", sysctl::LIMIT),
-    ("sys_sysctlbyname", sysctl::LIMIT),
-    (
-        "mmap",
-        "a host-forwarded call writing into an RWX MAP_JIT page meets the view of the thread \
-         holding the execution lock, which the calling thread gives up while the hosted kernel \
-         services the call",
-    ),
-    (
-        "ptrace",
-        "PT_STEP fails with EINVAL and is reported: the host would single-step the target's x86 \
-         host thread",
-    ),
-    (
-        "sigaction",
-        "a caught signal reaches a thread waiting in a Mach trap or a hosted-kernel wait only \
-         when the wait ends",
-    ),
-    (
-        "sigprocmask",
-        "another thread's host mask follows at its next kernel exit or time slice",
-    ),
-    (
-        "posix_spawn",
-        "binary preferences naming an x86-64 slice fail with EBADARCH and are reported: the \
-         slice runs under Rosetta on Apple silicon, and running it natively would show it the \
-         x86 host instead; an exception-port action fails with EINVAL",
-    ),
-    (
-        "vfork",
-        "the child has its own copy of memory, not the parent's",
-    ),
-    (
-        "mremap_encrypted",
-        "decrypting a range fails with ENOTSUP, as XNU without a text crypter, and is \
-         reported: the text crypter is Apple silicon's FairPlay kernel extension, which the host does not provide for arm64 images; an address with no guest \
-         file mapping at or above it can find one of the hosted runtime's own",
-    ),
-    (
-        "kqueue_workloop_ctl",
-        "a workloop's fixed priority, policy and CPU limit are not applied to its servicer, \
-         which is scheduled by QoS; a work interval or a bound thread fails with EINVAL and \
-         is reported",
-    ),
-];
-
-/// Calls the hosted kernel refuses, stopping the run with the reason.
-pub(crate) const REFUSED: &[(&str, &str)] = &[];
 
 fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let name = call.entry.name;

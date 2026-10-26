@@ -514,12 +514,6 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
     Ok(Lookup::Absent)
 }
 
-pub(super) const CALLS: &[&str] = &["sysctl", "sys_sysctlbyname"];
-
-pub(super) const LIMIT: &str = "static ARM namespace metadata is published independently of value support; \
-    unmodeled contents and dynamic driver variables are refused, and installed-system identity \
-    is read-only, including for privileged writers";
-
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "sysctl" => by_number(kernel, call)?,

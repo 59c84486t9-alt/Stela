@@ -67,6 +67,7 @@ use crate::hosted::darwin::{
 use crate::hosted::host::task;
 use crate::hosted::memory::{self, PAGE_BYTES};
 use crate::hosted::threads::{lock, try_lock};
+pub(crate) use crate::hosted_registry::bsd::aio::CLOSING;
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{
@@ -74,31 +75,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-
-pub(super) const CALLS: &[&str] = &[
-    "aio_read",
-    "aio_write",
-    "aio_fsync",
-    "lio_listio",
-    "aio_error",
-    "aio_return",
-    "aio_suspend",
-    "aio_suspend_nocancel",
-    "aio_cancel",
-];
-
-/// The forwarded calls that close a descriptor, which first wait for its
-/// asynchronous I/O (`fp_close_and_unlock` calling `_aio_close`).
-pub(super) const CLOSING: &[&str] = &[
-    "sys_close",
-    "sys_close_nocancel",
-    "guarded_close_np",
-    "sys_dup2",
-];
-
-/// The model the forwarding of [`CLOSING`] follows.
-pub(crate) const OVERLAY: &str = "a descriptor's queued asynchronous I/O is cancelled and its \
-     running I/O waited for before it closes";
 
 const ESPIPE: u64 = 29;
 const EINPROGRESS: u64 = 36;

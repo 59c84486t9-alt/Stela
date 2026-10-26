@@ -35,7 +35,7 @@ mod bsd;
 pub(crate) mod control;
 mod mach;
 mod platform;
-pub mod services;
+pub use crate::hosted_registry::services;
 mod status;
 
 pub use bsd::Signature;

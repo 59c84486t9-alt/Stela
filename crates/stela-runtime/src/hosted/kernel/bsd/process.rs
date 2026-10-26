@@ -125,17 +125,6 @@ impl Label {
     }
 }
 
-pub(super) const CALLS: &[&str] = &[
-    "exit",
-    "execve",
-    "__mac_execve",
-    "posix_spawn",
-    "fork",
-    "vfork",
-    "proc_info",
-    "proc_info_extended_id",
-];
-
 pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(match call.entry.name {
         "exit" => {

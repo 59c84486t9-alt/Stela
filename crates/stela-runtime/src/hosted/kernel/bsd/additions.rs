@@ -40,70 +40,10 @@ use crate::darwin::BsdReturnType;
 use crate::hosted::darwin::{EFAULT, EINVAL, ENOTSUP, EPERM, F_GETFL, F_SETFD, O_CLOEXEC};
 use crate::hosted::forward;
 use crate::hosted::unsupported::{self, Failure};
+#[cfg(test)]
+pub(crate) use crate::hosted_registry::bsd::additions::{ADDITIONS, CALLS, LIMITS};
+pub(crate) use crate::hosted_registry::bsd::additions::{UNIMPLEMENTED, addition};
 use anyhow::{Result, bail};
-
-/// Each addition's number and its libsystem_kernel stub's call name.
-pub(crate) const ADDITIONS: &[(u16, &str)] = &[
-    (148, "pipe2"),
-    (149, "dup3"),
-    (214, "fchflagsat"),
-    (215, "getumask"),
-    (246, "aio_readv"),
-    (247, "aio_writev"),
-    (249, "fsctlat"),
-    (352, "guarded_ftruncate_np"),
-    (519, "register_uexc_handler"),
-];
-
-/// The additions [`call`] services.
-pub(crate) const CALLS: &[&str] = &[
-    "pipe2",
-    "dup3",
-    "fchflagsat",
-    "getumask",
-    "fsctlat",
-    "guarded_ftruncate_np",
-    "register_uexc_handler",
-    "aio_readv",
-    "aio_writev",
-];
-
-/// Additions serviced with a named limit: what of the arm64 kernel's
-/// contract the hosted kernel does not provide.
-pub(crate) const LIMITS: &[(&str, &str)] = &[
-    (
-        "dup3",
-        "O_CLOFORK of a descriptor the host cannot guard (other than a file, pipe, socket, \
-         kqueue or network policy) fails with EINVAL and is reported",
-    ),
-    (
-        "fchflagsat",
-        "with an AT_ flag the flags are set through setattrlistat, which succeeds rather than \
-         failing with ENOTSUP on a file system without file flags",
-    ),
-    (
-        "fsctlat",
-        "an FSOPT_RESOLVE_BENEATH lookup fails with EINVAL and is reported: the host's fsctl \
-         does not confine a path beneath its starting directory",
-    ),
-    (
-        "register_uexc_handler",
-        "answers EPERM as without -enable_uexc; with it in the host's boot arguments it also \
-         answers EPERM and is reported, as the handler would need guest exception delivery",
-    ),
-];
-
-/// Why an addition [`call`] does not service fails with `nosys`.
-pub(crate) const UNIMPLEMENTED: &str =
-    "a 26A434 addition at a number the pinned catalog reserves: not implemented";
-
-/// The addition at `number`, if any.
-pub(crate) fn addition(number: u16) -> Option<&'static str> {
-    ADDITIONS
-        .iter()
-        .find(|&&(entry, _)| entry == number)
-        .map(|&(_, name)| name)
-}
 
 /// A request the hosted kernel cannot complete with the arm64 kernel's
 /// contract: the failure the guest sees, and why. A refusal without one

@@ -13,15 +13,6 @@ use anyhow::Result;
 /// `KERN_CLOCK_MACH_ABSOLUTE_TIME`, the eventlink deadline clock.
 const KERN_CLOCK_MACH_ABSOLUTE_TIME: u64 = 1;
 
-pub(super) const CALLS: &[&str] = &[
-    "gettimeofday",
-    "settimeofday",
-    "mach_eventlink_wait_until",
-    "mach_eventlink_signal_wait_until",
-    "kevent",
-    "kevent64",
-];
-
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "gettimeofday" => gettimeofday(kernel, call)?,

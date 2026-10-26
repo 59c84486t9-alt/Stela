@@ -321,28 +321,6 @@ pub(crate) const WORKQ_THREADMASK: u32 = (bit(4) // SIGILL
 /// `sigcantmask`.
 const CANT_MASK: u32 = bit(SIGKILL) | bit(SIGSTOP);
 
-pub(super) const CALLS: &[&str] = &[
-    "sigaction",
-    "sigprocmask",
-    "__pthread_sigmask",
-    "__pthread_kill",
-    "sigaltstack",
-    "sigpending",
-    "kill",
-    "__sigwait",
-    "__sigwait_nocancel",
-    "__disable_threadsignal",
-    "__pthread_markcancel",
-    "__pthread_canceled",
-    "setitimer",
-    "getitimer",
-    "sigreturn",
-    "sigsuspend",
-    "sigsuspend_nocancel",
-    "pselect",
-    "pselect_nocancel",
-];
-
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "sigaction" => sigaction(kernel, call)?,

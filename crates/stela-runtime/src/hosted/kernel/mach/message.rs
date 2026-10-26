@@ -42,6 +42,7 @@ use crate::hosted::darwin::{
 use crate::hosted::threads::lock;
 use crate::hosted::unsupported::{self, Failure, Kind};
 use crate::hosted::{forward, memory};
+pub(crate) use crate::hosted_registry::mach::message::{FORWARDED_ROUTINES, IPC_ONLY};
 use crate::mach::mig;
 use anyhow::{Context as _, Result, bail};
 
@@ -107,22 +108,6 @@ const PLATFORM_IOS: u32 = 2;
 const PLATFORM_TVOS: u32 = 3;
 const PLATFORM_WATCHOS: u32 = 4;
 const PLATFORM_MACCATALYST: u32 = 6;
-
-/// Subsystems whose requests act only on IPC state, which this task shares
-/// with the host task, and are forwarded.
-pub(super) const IPC_ONLY: &[&str] = &["mach_port"];
-
-/// Kernel-object routines whose answer is the same for an arm64 process:
-/// forwarded unchanged. `host_get_clock_service` names a clock whose
-/// `mach_timespec_t` time is the host's time base in either ABI, and
-/// requests to the clock port it returns are the host kernel's.
-/// `semaphore_create` and `semaphore_destroy` make and drop this task's own
-/// semaphores, which the forwarded semaphore traps then use.
-pub(super) const FORWARDED_ROUTINES: &[(&str, &str)] = &[
-    ("mach_host", "host_get_clock_service"),
-    ("task", "semaphore_create"),
-    ("task", "semaphore_destroy"),
-];
 
 pub(super) fn send(
     kernel: &mut Kernel,

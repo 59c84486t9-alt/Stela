@@ -22,6 +22,7 @@ use super::{Call, Kernel, Outcome};
 use crate::code_signature::{self, CodeSignature};
 use crate::hosted::darwin::{E2BIG, EBADEXEC, EBADF, EFAULT, EINVAL, ENOENT, ENOTSUP, EPERM};
 use crate::hosted::{memory, threads::lock};
+pub(crate) use crate::hosted_registry::bsd::signatures::CALLS;
 use anyhow::Result;
 
 const F_ADDSIGS: u64 = 59;
@@ -91,11 +92,6 @@ fn identity(descriptor: u64) -> Option<(u64, u64)> {
     (kind == libc::S_IFREG || kind == libc::S_IFDIR)
         .then_some((status.st_dev as u64, status.st_ino))
 }
-
-/// The calls whose code-signature commands are kept here.
-pub(super) const CALLS: &[&str] = &["sys_fcntl", "sys_fcntl_nocancel"];
-pub(super) const OVERLAY: &str =
-    "file code signatures (F_ADDFILESIGS*, F_CHECK_LV, F_GETSIGSINFO) are kept here";
 
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     if !CALLS.contains(&call.entry.name) {

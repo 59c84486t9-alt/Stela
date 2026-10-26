@@ -6,16 +6,17 @@
 //! every BSD system call, Mach trap and platform call a stub in the guest
 //! shared cache or dyld issues. The MIG rows are every routine of the
 //! kernel-served subsystems in the pinned MIG catalog. Each row's status
-//! is the dispatcher's own ([`super::kernel::services`]): forwarded to the
+//! is the dispatcher's own ([`crate::hosted_registry::services`]): forwarded to the
 //! host kernel, modeled by a family of the hosted kernel, either with a
 //! named limit, or refused with a reason. `cargo xtask progress` renders
 //! the matrix into `docs/research/hosted-requirements.md` and its counts
 //! into the README.
-use super::kernel::services::{self, Service};
 use crate::darwin::catalog as bsd_catalog;
+use crate::hosted_registry::services::{self, Service};
 use crate::mach::{catalog as mach_catalog, mig};
 use std::fmt::Write as _;
 
+#[path = "requirements/census.rs"]
 pub mod census;
 
 /// The images a call site is in.

@@ -12,6 +12,7 @@
 use super::{Call, Kernel, Outcome, forward};
 use crate::hosted::darwin::{EFAULT, MAX_PATH, O_ACCMODE, O_CREAT, O_RDONLY};
 use crate::hosted::memory;
+pub(crate) use crate::hosted_registry::bsd::paths::shape;
 use anyhow::Result;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -21,29 +22,6 @@ use std::path::{Path, PathBuf};
 const O_TRUNC: u32 = 0x400;
 const F_GETPATH: u64 = 50;
 const F_GETPATH_NOFIRMLINK: u64 = 102;
-
-pub(super) const OVERLAY: &str =
-    "absolute read-only lookups resolve under the guest roots, and reported paths are the guest's";
-
-/// Whether the guest-root lookups apply to the call `name`.
-pub(super) fn overlays(name: &str) -> bool {
-    shape(name).is_some() || matches!(name, "fsgetpath" | "fsgetpath_ext")
-}
-
-/// Which argument is the path and, for an open, which the flags.
-fn shape(name: &str) -> Option<(usize, Option<usize>)> {
-    Some(match name {
-        "open" | "open_nocancel" => (0, Some(1)),
-        "openat" | "openat_nocancel" => (1, Some(2)),
-        "open_dprotected_np" => (0, Some(1)),
-        "guarded_open_np" => (0, Some(3)),
-        "stat" | "stat64" | "lstat" | "lstat64" | "access" | "readlink" | "getattrlist"
-        | "statfs" | "statfs64" | "pathconf" | "getxattr" | "listxattr" | "stat_extended"
-        | "lstat_extended" | "stat64_extended" | "lstat64_extended" => (0, None),
-        "fstatat" | "fstatat64" | "faccessat" | "readlinkat" | "getattrlistat" => (1, None),
-        _ => return None,
-    })
-}
 
 /// `host` as the guest names it: the path below the root it lies in.
 fn unroot(roots: &[PathBuf], host: &[u8]) -> Option<Vec<u8>> {
