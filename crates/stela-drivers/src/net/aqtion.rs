@@ -39,6 +39,7 @@ pub enum Error {
     Readback { register: usize, observed: u32 },
     RingHead(u32),
     Stopped,
+    Clock,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 impl From<DmaError> for Error {
@@ -140,27 +141,28 @@ unsafe impl Registers for MappedRegisters {
         Ok(())
     }
 }
-pub trait Timer {
-    fn delay(&self, microseconds: u64);
-}
-impl Timer for Clock {
-    fn delay(&self, microseconds: u64) {
-        self.delay(microseconds);
-    }
-}
+pub use crate::bus::pci::power::Timer;
 struct Hardware<R, T> {
     registers: R,
     timer: T,
     reset_ownership: Cell<firmware::ResetOwnership>,
 }
 impl<R: Registers, T: Timer> Hardware<R, T> {
+    fn check_timing(&self) -> Result<()> {
+        self.timer.check().map_err(|_| Error::Clock)
+    }
+    fn delay(&self, microseconds: u64) -> Result<()> {
+        self.timer.wait_us(microseconds).map_err(|_| Error::Clock)
+    }
     fn read(&self, offset: usize) -> Result<u32> {
         let value = self.registers.read(offset)?;
-        if value == u32::MAX {
-            Err(Error::Removed)
-        } else {
-            Ok(value)
+        // Linux aq_hw_read_reg permits all-ones data unless the independent
+        // alive register also reports removal. Both declared hardware caps
+        // select0x10; firmware RAM and MAC padding may legitimately be all ones.
+        if value == u32::MAX && self.registers.read(0x10)? == u32::MAX {
+            return Err(Error::Removed);
         }
+        Ok(value)
     }
     fn write(&self, offset: usize, value: u32) -> Result<()> {
         self.registers.write(offset, value)
@@ -189,7 +191,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
             if ready(word) {
                 return Ok(word);
             }
-            self.timer.delay(interval);
+            self.delay(interval)?;
         }
         Err(Error::Timeout { register })
     }
@@ -212,15 +214,16 @@ enum PciPower {
 }
 fn power_up<C: ConfigSpace>(
     function: &mut Function<C>,
-    clock: &Clock,
+    timer: &impl Timer,
     power: &mut PciPower,
 ) -> Result<()> {
+    timer.check().map_err(|_| Error::Clock)?;
     *power = PciPower::Unknown;
     if function.config().read16(4) == u16::MAX || function.config().read16(6) == u16::MAX {
         return Err(Error::Removed);
     }
     function
-        .power_up(clock)
+        .power_up_with_timer(timer)
         .map_err(|_| Error::Unsupported("AQtion PCI D0 transition failed"))?;
     *power = PciPower::D0;
     Ok(())
@@ -315,6 +318,7 @@ impl Aqtion {
             dropping: false,
         };
         let result = (|| {
+            owner.hw().check_timing()?;
             if profile.is_none() || owner.function.as_ref().unwrap().class != [2, 0, 0] {
                 return Err(Error::Unsupported("AQtion device/profile"));
             }
@@ -366,8 +370,7 @@ impl Aqtion {
     /// Restore acknowledged D0, then rebuild firmware/queues. A failed PCI
     /// transition retains the owner and may be retried without touching MMIO.
     pub fn resume(&mut self) -> Result<()> {
-        let clock = self.hw().timer;
-        self.resume_with_clock(&clock)
+        self.resume_owned()
     }
 }
 impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
@@ -383,11 +386,16 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
     pub fn firmware_version(&self) -> Option<u32> {
         self.firmware.map(|f| f.version)
     }
-    fn resume_with_clock(&mut self, clock: &Clock) -> Result<()> {
+    fn resume_owned(&mut self) -> Result<()> {
+        self.require_rebuildable()?;
         if self.power == PciPower::D0 {
             return Err(Error::Unsupported("AQtion is already in D0"));
         }
-        power_up(self.function.as_mut().unwrap(), clock, &mut self.power)?;
+        power_up(
+            self.function.as_mut().unwrap(),
+            &self.hardware.as_ref().unwrap().timer,
+            &mut self.power,
+        )?;
         if self.state == State::Suspended {
             self.state = State::Stopped;
         }
@@ -399,13 +407,18 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         }
         Ok(())
     }
+    fn require_rebuildable(&self) -> Result<()> {
+        if self.memory.as_ref().is_none_or(Memory::is_retiring) {
+            return Err(Error::Stopped);
+        }
+        Ok(())
+    }
     fn start(&mut self) -> Result<()> {
+        self.require_rebuildable()?;
+        self.hw().check_timing()?;
         self.require_d0()?;
         if self.state == State::Running {
             return Err(Error::Unsupported("AQtion already running"));
-        }
-        if self.memory.is_none() {
-            return Err(Error::Stopped);
         }
         self.state = State::Faulted;
         let function = self.function.as_mut().unwrap();
@@ -450,6 +463,7 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         if matches!(self.state, State::Stopped | State::Suspended) {
             return Ok(());
         }
+        self.hw().check_timing()?;
         self.require_d0()?;
         self.state = State::Faulted;
         self.hw().stop_queues()?;
@@ -497,7 +511,8 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         self.start()
     }
     /// Explicitly reclaim DMA only after the acknowledged ordinary stop/drain.
-    /// A failed unmap retains the complete owner for retry.
+    /// A failed unmap retains the complete owner for retirement retry. Starting
+    /// retirement permanently revokes queue rebuild, including on first failure.
     pub fn retire(&mut self) -> Result<()> {
         self.stop()?;
         if let Some(m) = self.memory.as_mut() {
@@ -545,7 +560,7 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
             if next != self.tx_head {
                 break;
             }
-            self.hw().timer.delay(100);
+            self.hw().delay(100)?;
             self.tx_reap()?;
         }
         if next == self.tx_head {

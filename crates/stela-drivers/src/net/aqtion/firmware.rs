@@ -24,6 +24,7 @@ pub(super) struct ResetOwnership {
 }
 impl<R: Registers, T: Timer> Hardware<R, T> {
     pub(super) fn reset(&self, profile: Profile) -> Result<()> {
+        self.check_timing()?;
         let held = self.reset_ownership.get();
         if held.reset_issued || held.semaphore_uncertain || held.acquired != 0 {
             return Err(Error::Unsupported(
@@ -32,15 +33,20 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
         }
         if profile.generation == Generation::Antigua {
             self.write(0xf08, 1)?;
+            // Record before the actual reset store: failure cannot prove the
+            // router missed it, including failure of a subsequent real wait.
+            let mut held = self.reset_ownership.get();
+            held.reset_issued = true;
+            self.reset_ownership.set(held);
             self.write(0x3040, 1)?;
-            self.wait(0x3040, 10, 200000, |v| v & (1 << 24) != 0)?;
+            self.wait(0x3040, 10, 200000, |v| v != u32::MAX && v & (1 << 24) != 0)?;
             let mut status = 0;
             for _ in 0..=200000 {
                 status = self.read(0x3040)?;
                 if status & 0xb8000000 != 0 || self.read(0xf00)? & 1 != 0 {
                     break;
                 }
-                self.timer.delay(10);
+                self.delay(10)?;
             }
             if status & 0x38000000 != 0 {
                 return Err(Error::Firmware { status });
@@ -53,6 +59,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
             if status & (1 << 31) == 0 {
                 return Err(Error::Timeout { register: 0x3040 });
             }
+            self.reset_ownership.set(ResetOwnership::default());
             return Ok(());
         }
         let ver = self.read(0x18)?;
@@ -108,7 +115,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
                     self.reset_ownership.set(held);
                     return Ok(());
                 }
-                Ok(_) => self.timer.delay(1),
+                Ok(_) => self.delay(1)?,
                 Err(error) => {
                     // A failed read-to-acquire can itself have taken the lock.
                     // No observed ownership permits releasing that semaphore.
@@ -155,7 +162,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
             self.write(0x388, 0xdead)?;
             let spi = self.read(0x53c)?;
             self.write(0x53c, spi | 0x10)?;
-            self.global_reset()?;
+            self.global_reset(0xffffbfff)?;
             self.write(0x404, 0x40e0)?;
             let status = self.wait(0x388, 10000, 10_000_000, |v| {
                 v & 0xffff != 0 && v & 0xffff != 0xdead
@@ -166,7 +173,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
                 ));
             }
         } else {
-            self.timer.delay(50_000);
+            self.delay(50_000)?;
             let spi = self.read(0x53c)?;
             self.write(0x53c, spi | 0x10)?;
             // FLB issues its first real reset here, before MAC kickstart and
@@ -177,24 +184,24 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
             self.write(0x520, 1)?;
             let spi = self.read(0x53c)?;
             self.write(0x53c, spi | 0x10)?;
-            self.timer.delay(10_000);
+            self.delay(10_000)?;
             self.write(0x53c, spi & !0x10)?;
             self.write(0x404, 0x180e0)?;
             self.wait(0x704, 10000, 10_000_000, |v| v & 0x10 != 0)?;
             self.write(0x404, 0x80e0)?;
-            self.timer.delay(50_000);
+            self.delay(50_000)?;
             self.write(0x3a0, 1)?;
-            self.global_reset()?;
+            self.global_reset(0xbfff)?;
         }
         self.wait(0x18, 10000, 10_000_000, |v| v != 0)?;
-        self.timer.delay(15_000);
+        self.delay(15_000)?;
         Ok(())
     }
-    fn global_reset(&self) -> Result<()> {
+    fn global_reset(&self, preserve: u32) -> Result<()> {
         self.set(f::RX_RX_REG_RES_DIS_SET, 0, 0)?;
         self.set(f::TX_TX_REG_RES_DIS_SET, 0, 0)?;
         self.write(0x4000, self.read(0x4000)? & !(1 << 29))?;
-        self.issue_reset(0xffffbfff)
+        self.issue_reset(preserve)
     }
     fn ram_read(&self, address: u32, words: &mut [u32]) -> Result<()> {
         if address == 0
@@ -224,7 +231,7 @@ impl<R: Registers, T: Timer> Hardware<R, T> {
         for _ in 0..1000 {
             let before = self.read(OUT)?;
             if before as u16 != (before >> 16) as u16 {
-                self.timer.delay(1000);
+                self.delay(1000)?;
                 continue;
             }
             for (i, w) in words.iter_mut().enumerate() {

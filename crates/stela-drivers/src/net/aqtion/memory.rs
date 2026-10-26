@@ -39,6 +39,7 @@ impl Buffer {
     }
 }
 pub(super) struct Memory {
+    retiring: bool,
     tx: Buffer,
     rx: Buffer,
     tx_data: Buffer,
@@ -47,11 +48,15 @@ pub(super) struct Memory {
 impl Memory {
     pub fn new(pages: &dyn PageSource, domain: Arc<dyn DmaDomain>) -> Result<Self> {
         Ok(Self {
+            retiring: false,
             tx: Buffer::new(pages, domain.clone(), 4096)?,
             rx: Buffer::new(pages, domain.clone(), 4096)?,
             tx_data: Buffer::new(pages, domain.clone(), COUNT * BUFFER)?,
             rx_data: Buffer::new(pages, domain, COUNT * BUFFER)?,
         })
+    }
+    pub fn is_retiring(&self) -> bool {
+        self.retiring
     }
     pub fn tx_address(&self) -> Result<u64> {
         self.tx.address(0)
@@ -150,6 +155,9 @@ impl Memory {
         Ok(frame)
     }
     pub fn retire(&mut self) -> Result<()> {
+        // Revoke rebuild before any actual invalidation. A failed unmap may
+        // already have retired a prefix; retry may only finish this retirement.
+        self.retiring = true;
         for buffer in [
             &mut self.tx,
             &mut self.rx,

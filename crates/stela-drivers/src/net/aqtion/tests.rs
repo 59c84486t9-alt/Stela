@@ -109,6 +109,8 @@ struct Domain {
     posted: Mutex<Vec<(u64, Vec<u8>)>>,
     fail_drain: AtomicBool,
     fail_unmap: AtomicBool,
+    unmap_calls: AtomicUsize,
+    fail_unmap_at: AtomicUsize,
     fail_sync: AtomicBool,
     incoherent: AtomicBool,
 }
@@ -237,7 +239,10 @@ unsafe impl DmaDomain for Domain {
         })
     }
     unsafe fn unmap(&self, m: DomainMapping) -> core::result::Result<(), DmaError> {
-        if self.fail_unmap.load(Ordering::Relaxed) {
+        let call = self.unmap_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_unmap.load(Ordering::Relaxed)
+            || self.fail_unmap_at.load(Ordering::Relaxed) == call
+        {
             return Err(DmaError::InvalidationFailed);
         }
         self.require_bus_master_disabled();
@@ -323,6 +328,7 @@ enum Fault {
     Reset,
     HostBoot,
     BootFailure,
+    BootAllOnes,
     RamSemaphore,
     RamCompletion,
     FirmwareAck,
@@ -338,6 +344,9 @@ struct Peer {
     fault: Cell<Fault>,
     profile: Profile,
     elapsed: Cell<u64>,
+    timing: Cell<bool>,
+    waits: RefCell<Vec<u64>>,
+    fail_wait: Cell<Option<usize>>,
     domain: Arc<Domain>,
     sent: RefCell<Vec<Vec<u8>>>,
     tx_head: Cell<usize>,
@@ -365,6 +374,9 @@ impl Peer {
             fault: Cell::new(Fault::None),
             profile,
             elapsed: Cell::new(0),
+            timing: Cell::new(true),
+            waits: RefCell::new(Vec::new()),
+            fail_wait: Cell::new(None),
             domain,
             sent: RefCell::new(Vec::new()),
             tx_head: Cell::new(0),
@@ -549,6 +561,8 @@ unsafe impl Registers for Rc<Peer> {
                 offset,
                 if self.fault.get() == Fault::Reset {
                     0
+                } else if self.fault.get() == Fault::BootAllOnes {
+                    u32::MAX
                 } else if self.fault.get() == Fault::BootFailure {
                     0x11000000
                 } else {
@@ -631,8 +645,22 @@ unsafe impl Registers for Rc<Peer> {
         Ok(())
     }
 }
-impl Timer for Rc<Peer> {
-    fn delay(&self, us: u64) {
+// SAFETY: explicit isolated device-model clock. Successful symbolic waits
+// advance this same retained peer's time and acknowledge its pending hardware.
+unsafe impl Timer for Rc<Peer> {
+    fn check(&self) -> core::result::Result<(), crate::bus::pci::power::Error> {
+        if self.timing.get() {
+            Ok(())
+        } else {
+            Err(crate::bus::pci::power::Error::Clock)
+        }
+    }
+    fn wait_us(&self, us: u64) -> core::result::Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        self.waits.borrow_mut().push(us);
+        if self.fail_wait.get() == Some(self.waits.borrow().len()) {
+            return Err(crate::bus::pci::power::Error::Clock);
+        }
         self.elapsed.set(self.elapsed.get() + us);
         self.pending_ack
             .borrow_mut()
@@ -644,6 +672,7 @@ impl Timer for Rc<Peer> {
                     true
                 }
             });
+        Ok(())
     }
 }
 fn hardware(peer: &Rc<Peer>) -> Hardware<Rc<Peer>, Rc<Peer>> {
@@ -1106,11 +1135,8 @@ fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
     let reads = peer.reads.borrow().len();
     *pm.mode.lock().unwrap() = PmMode::RefuseD0;
     let access_start = pm.accesses.lock().unwrap().len();
-    let clock = Clock {
-        ticks_per_microsecond: 0,
-    };
     assert_eq!(
-        net.resume_with_clock(&clock),
+        net.resume_owned(),
         Err(Error::Unsupported("AQtion PCI D0 transition failed"))
     );
     assert_eq!(
@@ -1134,7 +1160,7 @@ fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
     assert_eq!(peer.reads.borrow().len(), reads);
     *pm.mode.lock().unwrap() = PmMode::Normal;
     let access_start = pm.accesses.lock().unwrap().len();
-    net.resume_with_clock(&clock).unwrap();
+    net.resume_owned().unwrap();
     assert_eq!(
         pm.pm_accesses_since(access_start),
         [
@@ -1190,10 +1216,7 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
         if !retire {
             *pm.mode.lock().unwrap() = PmMode::Normal;
             // The model answers config again; the retained native PMCSR is D3hot.
-            net.resume_with_clock(&Clock {
-                ticks_per_microsecond: 0,
-            })
-            .unwrap();
+            net.resume_owned().unwrap();
             assert_eq!(net.power, PciPower::D0);
             assert_eq!(net.state(), State::Running);
             assert_eq!(domain.engine_epoch.load(Ordering::Relaxed), 2);
@@ -1213,13 +1236,7 @@ fn initial_native_d0_failure_retains_uninitialized_owner_without_mmio() {
     *pm.mode.lock().unwrap() = PmMode::RefuseD0;
     let access_start = pm.accesses.lock().unwrap().len();
     assert_eq!(
-        power_up(
-            net.function.as_mut().unwrap(),
-            &Clock {
-                ticks_per_microsecond: 0
-            },
-            &mut net.power
-        ),
+        power_up(net.function.as_mut().unwrap(), &peer, &mut net.power),
         Err(Error::Unsupported("AQtion PCI D0 transition failed"))
     );
     assert_eq!(
@@ -1254,10 +1271,7 @@ fn modeled_removed_config_resume_retains_owners_and_never_uses_powered_off_mmio(
         let writes = peer.writes.borrow().len();
         let access_start = pm.accesses.lock().unwrap().len();
         *pm.mode.lock().unwrap() = PmMode::Removed;
-        let clock = Clock {
-            ticks_per_microsecond: 0,
-        };
-        assert_eq!(net.resume_with_clock(&clock), Err(Error::Removed));
+        assert_eq!(net.resume_owned(), Err(Error::Removed));
         assert_eq!(
             &pm.accesses.lock().unwrap()[access_start..],
             &[ConfigAccess::Read16(4, u16::MAX)]
@@ -1273,7 +1287,7 @@ fn modeled_removed_config_resume_retains_owners_and_never_uses_powered_off_mmio(
         assert_eq!(peer.reads.borrow().len(), reads);
         assert_eq!(peer.writes.borrow().len(), writes);
         *pm.mode.lock().unwrap() = PmMode::Normal;
-        net.resume_with_clock(&clock).unwrap();
+        net.resume_owned().unwrap();
         assert_eq!(net.power, PciPower::D0);
         assert_eq!(domain.engine_epoch.load(Ordering::Relaxed), 2);
         net.retire().unwrap();
@@ -1746,10 +1760,7 @@ fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
     assert_eq!(peer.reads.borrow().len(), reads);
     *pm.mode.lock().unwrap() = PmMode::Normal;
     let access_start = pm.accesses.lock().unwrap().len();
-    net.resume_with_clock(&Clock {
-        ticks_per_microsecond: 0,
-    })
-    .unwrap();
+    net.resume_owned().unwrap();
     assert_eq!(
         pm.pm_accesses_since(access_start),
         [ConfigAccess::Read16(0x44, 0)]
@@ -2126,8 +2137,12 @@ mod registers_oracle {
         }
     }
     struct NoDelay;
-    impl Timer for NoDelay {
-        fn delay(&self, _: u64) {
+    // SAFETY: scalar-only isolated peer; any attempted wait traps.
+    unsafe impl Timer for NoDelay {
+        fn check(&self) -> core::result::Result<(), crate::bus::pci::power::Error> {
+            Ok(())
+        }
+        fn wait_us(&self, _: u64) -> core::result::Result<(), crate::bus::pci::power::Error> {
             panic!("LLH field operations must not delay")
         }
     }
@@ -2361,3 +2376,11 @@ mod registers_oracle {
         assert!(parse_trace("").is_err());
     }
 }
+
+mod timing;
+
+mod retirement;
+
+mod reset_source;
+
+mod liveness;
