@@ -2,13 +2,13 @@
 
 use alloc::sync::Arc;
 use core::ptr::NonNull;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use std::fs::File;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageKind {
     Anonymous,
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     PrivateFile,
     PublishedAliases,
 }
@@ -33,7 +33,7 @@ impl NativeMapping {
     /// synchronization, and every access must finish before rights are revoked,
     /// pages are remapped or the last owner is released. File mappings
     /// additionally require stable files. Adoption changes no rights.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) unsafe fn adopt(base: NonNull<u8>, bytes: usize) -> Self {
         Self { base, bytes }
     }
@@ -47,7 +47,7 @@ unsafe impl Send for NativeMapping {}
 // the mapping lives until the last owner drops.
 unsafe impl Sync for NativeMapping {}
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 impl Drop for NativeMapping {
     fn drop(&mut self) {
         // SAFETY: adoption transferred the unmap obligation for this exact
@@ -56,20 +56,20 @@ impl Drop for NativeMapping {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageError {
     AliasExtentMismatch,
     AliasesOverlap,
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 impl core::fmt::Display for StorageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "retained native storage failed: {self:?}")
     }
 }
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 impl core::error::Error for StorageError {}
 
 /// One physical storage lifetime, optionally with its two native aliases. A
@@ -78,7 +78,7 @@ impl core::error::Error for StorageError {}
 pub(super) struct NativeStorage {
     primary: NativeMapping,
     publisher: Option<NativeMapping>,
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     _file: Option<File>,
     kind: StorageKind,
 }
@@ -97,7 +97,7 @@ impl core::fmt::Debug for NativeStorage {
 impl NativeStorage {
     /// Initialize private loader RAM before publishing any backing/view. Final
     /// host permissions never include Execute; guest source fetch uses Read.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) fn initialized_ram(
         initial: &[u8],
         leading: usize,
@@ -165,6 +165,21 @@ impl NativeStorage {
         Ok(Self::anonymous(mapping))
     }
 
+    /// Hosts without POSIX mappings back no guest memory.
+    #[cfg(all(feature = "std", not(host_memory)))]
+    pub(super) fn initialized_ram(
+        _initial: &[u8],
+        _leading: usize,
+        _bytes: usize,
+        _readable: bool,
+        _writable: bool,
+    ) -> Result<Arc<Self>, crate::platform::memory::Error> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "UNSUPPORTED guest memory: it needs a host with POSIX memory mappings",
+        ))
+    }
+
     #[cfg(not(feature = "std"))]
     pub(super) fn initialized_ram(
         initial: &[u8],
@@ -189,13 +204,13 @@ impl NativeStorage {
         Arc::new(Self {
             primary,
             publisher: None,
-            #[cfg(feature = "std")]
+            #[cfg(host_memory)]
             _file: None,
             kind: StorageKind::Anonymous,
         })
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) fn private_file(primary: NativeMapping, file: File) -> Arc<Self> {
         Arc::new(Self {
             primary,
@@ -214,7 +229,7 @@ impl NativeStorage {
     /// descriptor or mapping can modify/truncate it. Address/length checks alone
     /// cannot establish physical alias identity. The guest alias stays read-only;
     /// publisher mutation obeys the enclosing serialized writer contract.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) unsafe fn published_aliases(
         primary: NativeMapping,
         publisher: NativeMapping,

@@ -1,17 +1,17 @@
 //! Anonymous guest data allocation.
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::DIRECT_RAM_USER_END;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::host_protection;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::storage::NativeMapping;
 use super::storage::NativeStorage;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::{Allocation, MemoryRegion};
 use super::{MAX_FILE_MEMORY_BYTES, MAX_IMAGE_MEMORY_BYTES, OwnedMemory};
 use alloc::sync::Arc;
-#[cfg(not(feature = "std"))]
+#[cfg(not(host_memory))]
 use alloc::vec::Vec;
 use serde::Serialize;
 
@@ -255,7 +255,7 @@ impl OwnedMemory {
 /// An unpublished mapping borrowing the same non-Send/Sync `OwnedMemory` owner.
 /// Initialization is private and serialized; it never grants host execute rights.
 // The freestanding mount does not create host mappings.
-#[cfg_attr(not(feature = "std"), allow(dead_code))]
+#[cfg_attr(not(host_memory), allow(dead_code))]
 pub struct PendingDataAllocation<'a> {
     owner: &'a mut OwnedMemory,
     storage: Option<Arc<NativeStorage>>,
@@ -344,7 +344,7 @@ impl PendingDataAllocation<'_> {
         Ok(snapshot)
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub fn publish(self) -> Result<DataAllocation, AllocateDataError> {
         self.publish_with(|base, bytes, protection| {
             // SAFETY: the transaction exclusively owns this complete mapping.
@@ -363,12 +363,12 @@ impl PendingDataAllocation<'_> {
         })
     }
 
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     pub fn publish(self) -> Result<DataAllocation, AllocateDataError> {
         Err(AllocateDataError::UnsupportedPlatform)
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     fn publish_with(
         mut self,
         protect: impl FnOnce(u64, u64, i32) -> Result<(), Option<i32>>,
@@ -482,16 +482,16 @@ impl PendingDataAllocation<'_> {
 }
 
 // Uninhabited without std: the freestanding mount creates no host mappings.
-#[cfg_attr(not(feature = "std"), allow(dead_code))]
+#[cfg_attr(not(host_memory), allow(dead_code))]
 struct NewMapping {
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     _unmounted: core::convert::Infallible,
     base: u64,
     bytes: u64,
 }
 
 impl NewMapping {
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     fn into_storage(self) -> Arc<NativeStorage> {
         // SAFETY: native placement/trim checked this complete fresh RW extent;
         // initialization is serialized and exposes no Rust guest references.
@@ -507,27 +507,27 @@ impl NewMapping {
         NativeStorage::anonymous(mapping)
     }
 
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     fn into_storage(self) -> Arc<NativeStorage> {
         match self._unmounted {}
     }
 }
 
 impl Drop for NewMapping {
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     fn drop(&mut self) {
         // SAFETY: this newly created extent is still exclusively owned.
         unsafe {
             libc::munmap(self.base as usize as *mut libc::c_void, self.bytes as usize);
         }
     }
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     fn drop(&mut self) {
         match self._unmounted {}
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 fn map_anonymous(
     placement: DataPlacement,
     bytes: u64,
@@ -648,7 +648,7 @@ fn map_anonymous(
     Ok(mapping)
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(not(host_memory))]
 fn map_anonymous(
     placement: DataPlacement,
     bytes: u64,

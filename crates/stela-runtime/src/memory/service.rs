@@ -5,7 +5,7 @@ use super::{
     PendingDataAllocation, ProtectionError, SharedBindingError,
     domain::{DataPolicy, MemoryServiceLoan, MemoryThread},
 };
-#[cfg(not(feature = "std"))]
+#[cfg(not(host_memory))]
 use alloc::vec::Vec;
 use stela_compiler::context::memory::MemoryStatus;
 
@@ -99,7 +99,7 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
 
     /// Protect owned data only, with the transaction's view retirement, host
     /// rollback and quarantine.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub fn protect_data(
         &mut self,
         address: u64,
@@ -134,7 +134,7 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
         )
     }
 
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     pub fn protect_data(
         &mut self,
         address: u64,

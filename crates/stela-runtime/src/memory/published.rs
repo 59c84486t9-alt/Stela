@@ -1,22 +1,22 @@
 //! Read-only guest regions the runtime publishes through a private writable alias.
 use super::binding::SharedBinding;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::page_rounded;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::storage::NativeMapping;
 use super::storage::NativeStorage;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::{DIRECT_RAM_USER_END, host_page_size};
 use super::{MemoryRegion, SharedBindingError, backing, domain};
 use alloc::rc::Rc;
 use alloc::sync::Arc;
-#[cfg(not(feature = "std"))]
+#[cfg(not(host_memory))]
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use anyhow::{Context, bail};
 use anyhow::{Result, ensure};
 use core::marker::PhantomData;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use std::os::fd::AsRawFd;
 
 /// Runtime-published data with a permanently read-only, non-executable guest
@@ -42,7 +42,7 @@ impl core::fmt::Debug for PublishedReadOnlyRegion {
 impl PublishedReadOnlyRegion {
     /// Create a private unlinked backing object; no external file descriptor,
     /// writable guest address or Rust reference into either mapping escapes.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub fn map(guest_base: u64, initial: &[u8]) -> Result<Self> {
         use std::io::Write;
         ensure!(
@@ -151,7 +151,7 @@ impl PublishedReadOnlyRegion {
         })
     }
 
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     pub fn map(guest_base: u64, initial: &[u8]) -> Result<Self> {
         let _ = (guest_base, initial);
         anyhow::bail!("freestanding publication aliases are not mounted")
