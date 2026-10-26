@@ -91,7 +91,7 @@ use stela_compiler::{
         simd::fp8_conversion,
         system::{
             exception::{AuthenticationKey, Operation as ExceptionOperation},
-            registers::{Direction, Encoding, RegisterAccess},
+            registers::{Direction, Encoding, RegisterAccess, decode as decode_register},
             synchronization::{Operation as Synchronization, WaitKind},
         },
     },
@@ -1472,13 +1472,14 @@ struct Variant {
 /// and plainness follow from System registers and PSTATE alone, so a read
 /// the engine found plain stays plain, with the same value, until derived
 /// state may change ([`Machine::derived_changed`]). They are the thread
-/// pointers, Apple's GL2 thread pointer and GXF status, and DAIF; and the
-/// virtual count and Apple's alias of it, whose cells hold the offset they
-/// subtract from the clock's count ([`COUNT_MIRRORS`]).
-const MIRRORED: [Encoding; 9] = {
+/// pointers, Apple's GL2 thread pointer and GXF status, SPRR_PERM_EL0
+/// ([`SPRR_PERM_MIRROR`]) and DAIF; and the virtual count and Apple's alias
+/// of it, whose cells hold the offset they subtract from the clock's count
+/// ([`COUNT_MIRRORS`]).
+const MIRRORED: [Encoding; 10] = {
     use registers::encodings::{
-        CNTVCT_ALIAS_EL0, DAIF, GXF_STATUS_EL1, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2,
-        TPIDRRO_EL0,
+        CNTVCT_ALIAS_EL0, DAIF, GXF_STATUS_EL1, SPRR_PERM_EL0, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2,
+        TPIDR_GL2, TPIDRRO_EL0,
     };
     use stela_compiler::aarch64::system::registers::CNTVCT_EL0;
     [
@@ -1488,6 +1489,7 @@ const MIRRORED: [Encoding; 9] = {
         TPIDR_EL2,
         TPIDR_GL2,
         GXF_STATUS_EL1,
+        SPRR_PERM_EL0,
         CNTVCT_EL0,
         CNTVCT_ALIAS_EL0,
         DAIF,
@@ -1496,6 +1498,10 @@ const MIRRORED: [Encoding; 9] = {
 
 /// Rt 31 in MRS: XZR, which discards the value.
 const ZERO_REGISTER: u8 = 31;
+
+/// MRS's L bit (21), which makes an MSR (register) word the MRS of the
+/// same register and Xt.
+const MRS_READ: u32 = 1 << 21;
 
 /// The cells of the [`MIRRORED`] registers, in its order: native code reads
 /// `cells`, the running PE's at its EL and GXF state. A read's value and
@@ -1585,6 +1591,17 @@ const _: () = assert!(matches!(
 const _: () = assert!(matches!(
     MIRRORED[COUNT_MIRRORS[1]],
     registers::encodings::CNTVCT_ALIAS_EL0
+));
+
+/// The [`MIRRORED`] index of SPRR_PERM_EL0, which dyld and JIT runtimes
+/// write around each write to their protected pages and read back at once.
+/// An SPRR_PERM write keeps derived state ([`Machine::permissions_changed`])
+/// but closes these cells; a write of SPRR_PERM_EL0 itself reopens the one
+/// open before it ([`Machine::permission_write`]).
+const SPRR_PERM_MIRROR: usize = COUNT_MIRRORS[0] - 1;
+const _: () = assert!(matches!(
+    MIRRORED[SPRR_PERM_MIRROR],
+    registers::encodings::SPRR_PERM_EL0
 ));
 
 /// MRS DAIF's value for PSTATE's D, A, I and F masks: bits 9:6.
@@ -2633,6 +2650,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// an SPRR_PERM write, which XNU makes around its writes to protected
     /// data and at thread switches, thousands of times a second.
     fn permissions_changed(&mut self) {
+        self.mirrors.close(SPRR_PERM_MIRROR);
         self.advance_translation_generation();
         self.statistics.translation_changes += 1;
         self.sync_host_regime();
@@ -6205,22 +6223,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// that completes as a plain read, taking no exception, opens its cell
     /// with the value read.
     fn register_instruction(&mut self, word: u32, access: RegisterAccess) -> Step {
+        if access.encoding() == registers::encodings::SPRR_PERM_EL0
+            && access.direction() == Direction::Write
+        {
+            return self.permission_write(word, access);
+        }
         let Some(index) = mirrored(access) else {
             return self.register_access(word, access);
         };
-        let before = (
-            self.cpu.pc + INSTRUCTION,
-            self.cpu.pstate.el,
-            self.cpu.pstate.guarded,
-            self.statistics.exceptions,
-        );
+        let before = self.completion_point();
         let step = self.register_access(word, access);
-        let after = (
-            self.cpu.pc,
-            self.cpu.pstate.el,
-            self.cpu.pstate.guarded,
-            self.statistics.exceptions,
-        );
+        let after = self.position();
         let read = self.cpu.state.x[usize::from(access.rt())];
         // A count read opens its cell only where it read the clock's last
         // count less the offset: a chip that answers through another view,
@@ -6235,6 +6248,46 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.mirrors[index] = register_read::Cell { readable: 1, value };
         }
         step
+    }
+
+    /// MSR SPRR_PERM_EL0. Like every SPRR_PERM write it closes the
+    /// register's cells, but a cell open before it reopens with what a read
+    /// now returns: the write changes neither the controls the read's
+    /// plainness follows from (SPRR_CONFIG_EL1, HACR_EL2, HCR_EL2 and the
+    /// EL) nor which SPRR_PERM register it reads, so dyld's read-back after
+    /// each toggle completes natively.
+    fn permission_write(&mut self, word: u32, access: RegisterAccess) -> Step {
+        let open = self.mirrors[SPRR_PERM_MIRROR].readable != 0;
+        let before = self.completion_point();
+        let step = self.register_access(word, access);
+        if step.is_err() || !open || self.position() != before {
+            return step;
+        }
+        let read = decode_register(word | MRS_READ).expect("MSR has an MRS form");
+        let physical = self.now();
+        if let RegisterOutcome::Read(value) = self.cpu.apple_access(read, physical) {
+            let value = self.degraded_read(read, value);
+            self.mirrors[SPRR_PERM_MIRROR] = register_read::Cell { readable: 1, value };
+        }
+        step
+    }
+
+    /// The PC, EL, GXF state and exception count of the PE, which an
+    /// instruction that completes without an exception leaves as
+    /// [`Self::completion_point`] gives before it.
+    fn position(&self) -> (u64, u8, bool, u64) {
+        (
+            self.cpu.pc,
+            self.cpu.pstate.el,
+            self.cpu.pstate.guarded,
+            self.statistics.exceptions,
+        )
+    }
+
+    /// [`Self::position`] once the current instruction completes plainly.
+    fn completion_point(&self) -> (u64, u8, bool, u64) {
+        let (pc, el, guarded, exceptions) = self.position();
+        (pc + INSTRUCTION, el, guarded, exceptions)
     }
 
     /// MRS and MSR: the generated accessor of an architectural register, or
@@ -11253,6 +11306,76 @@ mod tests {
             assert_ne!(regime.controls, controls);
             assert_eq!(machine.mirrors[thread].readable, 1);
         }
+    }
+
+    /// MRS SPRR_PERM_EL0 completes from its cell, which a write of the
+    /// register reopens with the value it stored, so dyld's toggle and its
+    /// read-back take one exit; any other SPRR_PERM write closes it.
+    #[test]
+    fn sprr_perm_el0_writes_reopen_its_open_cell() {
+        const MRS: u32 = 0xd53e_f1a8; // mrs x8, sprr_perm_el0
+        const MSR: u32 = 0xd51e_f1a9; // msr sprr_perm_el0, x9
+        const MSR_SPRR_CONFIG: u32 = 0xd51e_f109; // msr sprr_config_el1, x9
+        const MSR_SPRR_PERM_EL1: u32 = 0xd51e_f1c9; // msr sprr_perm_el1, x9
+        const MRS_TPIDR: u32 = 0xd538_d088; // mrs x8, tpidr_el1
+        let index = |encoding| MIRRORED.iter().position(|&e| e == encoding).unwrap();
+        let thread = index(registers::encodings::TPIDR_EL1);
+        assert_eq!(
+            mirrored_read(0, MRS),
+            Some((SPRR_PERM_MIRROR, 8)),
+            "the read has a thunk"
+        );
+        let mut machine = machine(&[MRS]);
+        machine.cpu.state.x[9] = 1;
+        machine.system_instruction(MSR_SPRR_CONFIG).unwrap();
+        // Closed, a write leaves the cell closed.
+        machine.cpu.state.x[9] = 0x10;
+        machine.system_instruction(MSR).unwrap();
+        assert_eq!(machine.mirrors[SPRR_PERM_MIRROR].readable, 0);
+        machine.system_instruction(MRS).unwrap();
+        machine.system_instruction(MRS_TPIDR).unwrap();
+        assert_eq!(
+            machine.mirrors[SPRR_PERM_MIRROR],
+            register_read::Cell {
+                readable: 1,
+                value: 0x10
+            }
+        );
+        // Open, the write reopens it with the new value, and closes the
+        // other states' cells; translation changes alone.
+        machine.mirrors.banks[0][SPRR_PERM_MIRROR].readable = 1;
+        let generation = machine.translation_generation;
+        let exits = machine.statistics.exceptions;
+        machine.cpu.state.x[9] = 0x30;
+        machine.system_instruction(MSR).unwrap();
+        assert!(machine.translation_generation > generation);
+        assert_eq!(machine.statistics.exceptions, exits);
+        assert_eq!(
+            machine.mirrors[SPRR_PERM_MIRROR],
+            register_read::Cell {
+                readable: 1,
+                value: 0x30
+            }
+        );
+        assert_eq!(machine.mirrors.banks[0][SPRR_PERM_MIRROR].readable, 0);
+        machine.system_instruction(MRS).unwrap();
+        assert_eq!(machine.cpu.state.x[8], 0x30);
+        assert_eq!(machine.mirrors[thread].readable, 1);
+        // Another SPRR_PERM register's write closes it, and only it.
+        machine.cpu.state.x[9] = 0x22;
+        machine.system_instruction(MSR_SPRR_PERM_EL1).unwrap();
+        assert_eq!(machine.mirrors[SPRR_PERM_MIRROR].readable, 0);
+        assert_eq!(machine.mirrors[thread].readable, 1);
+        // Without SPRR the write is UNDEFINED and opens nothing.
+        machine.system_instruction(MRS).unwrap();
+        machine.cpu.state.x[9] = 0;
+        machine.system_instruction(MSR_SPRR_CONFIG).unwrap();
+        assert_eq!(*machine.mirrors, Mirrors::default());
+        let exits = machine.statistics.exceptions;
+        machine.cpu.state.x[9] = 0x40;
+        machine.system_instruction(MSR).unwrap();
+        assert!(machine.statistics.exceptions > exits);
+        assert_eq!(machine.mirrors[SPRR_PERM_MIRROR].readable, 0);
     }
 
     /// An exception keeps the device lines; a System register write that
