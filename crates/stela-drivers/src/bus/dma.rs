@@ -6,6 +6,7 @@ pub mod amd;
 pub mod mapping;
 pub mod memory;
 pub mod pages;
+pub mod region;
 
 mod sealed {
     pub trait DmaValue {}
