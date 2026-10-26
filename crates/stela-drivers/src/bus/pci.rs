@@ -11,6 +11,7 @@ use core::{fmt, ops::Range};
 mod aspm;
 pub mod msi;
 pub mod msix;
+pub mod native;
 pub mod owned;
 pub mod power;
 pub mod requester;

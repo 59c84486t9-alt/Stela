@@ -20,6 +20,7 @@ pub enum ConfigError {
     CacheAttribute,
     Protection,
     CpuAddress,
+    Access { offset: u16, width: usize },
     Mapping(MappingError),
 }
 
@@ -43,12 +44,12 @@ pub struct ConfigRetention {
 impl ConfigRetention {
     /// Refuse an original mapping that was dropped, quarantined or retired.
     pub fn check_live(&self) -> Result<(), MappingError> {
-        self.view.address(0, FUNCTION_BYTES).map(|_| ())
+        self.view.check_current()
     }
 
     /// Compare actual retained authorities, never caller-supplied numeric IDs.
     pub fn matches_mapping(&self, mapping: &Mapping) -> Result<bool, MappingError> {
-        mapping.shares_authority(&self.view)
+        mapping.shares_mapping(&self.view)
     }
 }
 
@@ -146,6 +147,19 @@ impl OwnedConfig {
         self.window
     }
 
+    /// Compare an actual consumed requester binding with this exact retained
+    /// configuration mapping. Matching numeric BDF/physical addresses do not
+    /// qualify. This establishes no current device quiescence.
+    pub fn matches_binding(
+        &self,
+        binding: &super::requester::RequesterBinding,
+    ) -> Result<bool, MappingError> {
+        if self.address != binding.address() {
+            return Ok(false);
+        }
+        binding.matches_mapping(&self.mapping)
+    }
+
     pub(super) fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
         Ok(ConfigRetention {
             view: self.mapping.view(0..FUNCTION_BYTES)?,
@@ -158,25 +172,79 @@ impl OwnedConfig {
         self.mapping
     }
 
-    fn register<T>(&self, offset: u16) -> NonNull<T> {
-        let offset = usize::from(offset);
+    fn try_register<T>(&self, offset: u16) -> Result<NonNull<T>, ConfigError> {
+        let start = usize::from(offset);
         let width = size_of::<T>();
-        assert!(
-            offset.is_multiple_of(width),
-            "unaligned PCI configuration access"
-        );
-        assert!(
-            offset
+        if !start.is_multiple_of(width)
+            || !start
                 .checked_add(width)
-                .is_some_and(|end| end <= FUNCTION_BYTES),
-            "PCI configuration access outside owned function"
-        );
+                .is_some_and(|end| end <= FUNCTION_BYTES)
+        {
+            return Err(ConfigError::Access { offset, width });
+        }
         // Recheck live registry state for each operation instead of retaining
         // a raw pointer across a possible later mapping quarantine.
         self.mapping
-            .address(offset, width)
-            .expect("live owned PCI configuration mapping")
-            .cast()
+            .address(start, width)
+            .map(NonNull::cast)
+            .map_err(ConfigError::Mapping)
+    }
+
+    fn register<T>(&self, offset: u16) -> NonNull<T> {
+        self.try_register(offset)
+            .expect("aligned live owned PCI configuration register")
+    }
+
+    /// Fallible exact-width accesses for native service boundaries. Revalidate
+    /// the original mapping/context after the volatile effect as well. An error
+    /// after a write does not establish that the write had no hardware effect.
+    pub fn try_read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        // SAFETY: complete checked native byte, under the original attach grant.
+        let value = unsafe { self.try_register::<u8>(offset)?.as_ptr().read_volatile() };
+        self.try_register::<u8>(offset)?;
+        Ok(value)
+    }
+    pub fn try_read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        // SAFETY: complete checked aligned native word.
+        let value = unsafe { self.try_register::<u16>(offset)?.as_ptr().read_volatile() };
+        self.try_register::<u16>(offset)?;
+        Ok(u16::from_le(value))
+    }
+    pub fn try_read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        // SAFETY: complete checked aligned native dword.
+        let value = unsafe { self.try_register::<u32>(offset)?.as_ptr().read_volatile() };
+        self.try_register::<u32>(offset)?;
+        Ok(u32::from_le(value))
+    }
+    pub fn try_write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        // SAFETY: a byte store never replays a neighboring W1C register.
+        unsafe {
+            self.try_register::<u8>(offset)?
+                .as_ptr()
+                .write_volatile(value)
+        };
+        self.try_register::<u8>(offset)?;
+        Ok(())
+    }
+    pub fn try_write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        // SAFETY: an aligned word store never widens into adjacent Status.
+        unsafe {
+            self.try_register::<u16>(offset)?
+                .as_ptr()
+                .write_volatile(value.to_le())
+        };
+        self.try_register::<u16>(offset)?;
+        Ok(())
+    }
+    pub fn try_write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        // SAFETY: complete checked aligned native dword store.
+        unsafe {
+            self.try_register::<u32>(offset)?
+                .as_ptr()
+                .write_volatile(value.to_le())
+        };
+        self.try_register::<u32>(offset)?;
+        Ok(())
     }
 }
 
@@ -248,6 +316,10 @@ pub(crate) mod tests {
         pub(crate) unmaps: AtomicUsize,
         pub(crate) resource_drops: AtomicUsize,
         pub(crate) platform_drops: AtomicUsize,
+        pub(crate) contexts: AtomicUsize,
+        pub(crate) fail_context_at: AtomicUsize,
+        pub(crate) fail_after_word: AtomicUsize,
+        pub(crate) fail_after_value: AtomicUsize,
     }
 
     struct Backing {
@@ -304,6 +376,27 @@ pub(crate) mod tests {
     unsafe impl MappingPlatform for Model {
         fn check_context(&self, space: AddressSpace) -> Result<(), MappingError> {
             assert_eq!(space, SPACE);
+            let call = self.counters.contexts.fetch_add(1, Ordering::Relaxed) + 1;
+            if self.counters.fail_context_at.load(Ordering::Relaxed) == call {
+                return Err(MappingError::Unavailable);
+            }
+            let watched = self.counters.fail_after_word.load(Ordering::Relaxed);
+            if watched != 0 {
+                let offset = watched - 1;
+                assert!(offset <= 8188 && offset.is_multiple_of(4));
+                // SAFETY: isolated fixture owns this actual aligned RAM and
+                // all operations are sequential; observe the real store.
+                let value = unsafe {
+                    self.pointer()
+                        .as_ptr()
+                        .add(offset)
+                        .cast::<u32>()
+                        .read_volatile()
+                };
+                if value as usize == self.counters.fail_after_value.load(Ordering::Relaxed) {
+                    return Err(MappingError::Unavailable);
+                }
+            }
             Ok(())
         }
         unsafe fn map(
@@ -408,6 +501,10 @@ pub(crate) mod tests {
             Err((error, _)) => panic!("valid owned fixture: {error:?}"),
         };
         (config, counters)
+    }
+
+    pub(crate) fn fixture_pointer(config: &OwnedConfig, offset: u16) -> NonNull<u8> {
+        config.try_register(offset).unwrap()
     }
 
     fn retire(mut mapping: Mapping, counters: &Counters) {
