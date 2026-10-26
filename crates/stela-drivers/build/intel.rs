@@ -52,12 +52,13 @@ const PACKERS: [(&str, &[u32]); 4] = [
 
 /// Hosted tests of the adapters, which run in Stela's Linux environment, and
 /// of the encoders and packet adapters, which use the host's C library.
-const LINUX_TESTS: [&str; 9] = [
+const LINUX_TESTS: [&str; 10] = [
     "activation",
     "firmware",
     "ggtt_probe",
     "guc_reset",
     "huc_firmware",
+    "mmio_wait",
     "pat",
     "pt_walk",
     "wopcm",

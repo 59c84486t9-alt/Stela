@@ -219,7 +219,7 @@ int stela_intel_activation_init(void *storage, size_t bytes,
     ret = io->prepare(context, (uint32_t)desc->platform, revision, desc->is_dgfx);
     if (ret) return ret;
     int64_t time = io->now_ns(context);
-    if (time < 0 || time > INT64_MAX - INT64_C(100000000)) return -22;
+    if (time < 0 || time > INT64_MAX - INT64_C(2000000000)) return -22;
     struct stela_intel_activation *state = storage;
     const struct stela_linux_owner owner = owner_of(state);
     stela_linux_enter(&owner);

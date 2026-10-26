@@ -35,8 +35,11 @@ pub struct PciIdentity {
 /// Ordered naturally-aligned MMIO32 operations must use the provided canonical
 /// CPU pointer, honor original read-flush WA and posting/ordering semantics,
 /// never conflate it with a physical/guest address and never fail/unwind.
-/// The clock is qualified monotonic nonnegative nanoseconds, sufficiently below
-/// i64::MAX for a 100ms deadline. Delay honors atomic/sleepable context. All calls
+/// The clock is qualified monotonic nonnegative nanoseconds and remains below
+/// i64::MAX throughout every admitted deadline and actual sleep/overshoot. GuC
+/// MMIO needs up to two seconds per wait and retains the actual owner throughout
+/// repeated retries; this contract alone does not admit running firmware or its
+/// requests. Delay honors atomic/sleepable context. All calls
 /// and final Drop occur on the allowed native CPU/process context; no callback
 /// may reenter, activate guest services, or manufacture power/IRQ/coherence.
 /// `finish` drains actual probe accesses/posted writes and prevents new accesses

@@ -4,6 +4,7 @@
  * through its canonical uncached mapping. */
 #include "device.h"
 #include <linux/minmax.h>
+#include <linux/delay.h>
 #include <linux/sizes.h>
 #include <linux/string.h>
 #include "regs/xe_gt_regs.h"
@@ -115,23 +116,32 @@ int stela_intel_mmio_wait32(const struct stela_intel_activation_io *io, void *co
     bool atomic)
 {
     io->invariant(context, !(offset & 3) && (uint64_t)offset + 4 <= XE_REG_ADDR_MAX);
-    int64_t end = io->now_ns(context) + (int64_t)timeout_us * 1000;
-    uint32_t wait = 10, read = io->read32(context, offset);
-    int ret = 0;
-    while ((read & mask) != value) {
-        int64_t now = io->now_ns(context);
-        if (now > end) {
-            read = io->read32(context, offset);
-            ret = (read & mask) == value ? 0 : -ETIMEDOUT;
+    int64_t start = io->now_ns(context), duration = (int64_t)timeout_us * 1000;
+    /* A bad calibration/epoch must not authorize register access or signed
+     * deadline overflow. Keep the output untouched when no read took place. */
+    if (start < 0 || start > INT64_MAX - duration) return -EINVAL;
+    int64_t end = start + duration;
+    uint32_t wait = 10, read;
+    int ret = -ETIMEDOUT;
+    for (;;) {
+        read = io->read32(context, offset);
+        if ((read & mask) == value) {
+            ret = 0;
             break;
         }
-        uint32_t left = (uint32_t)((end - now) / 1000) + 1;
-        if (wait > left) wait = left;
-        io->delay_us(context, wait, atomic ? wait : wait << 1, atomic);
-        if (wait < 1000) wait <<= 1;
-        read = io->read32(context, offset);
+        int64_t now = io->now_ns(context);
+        if (now >= end) break;
+        uint64_t left = (uint64_t)(end - now) / 1000;
+        if (wait > left) wait = (uint32_t)left;
+        uint32_t delay = atomic ? min(wait, MAX_UDELAY_MS * 1000U) : wait;
+        io->delay_us(context, delay, atomic ? delay : wait << 1, atomic);
+        wait = min(wait << 1, 100000U);
     }
-    *out = read;
+    if (ret) {
+        read = io->read32(context, offset);
+        if ((read & mask) == value) ret = 0;
+    }
+    if (out) *out = read;
     return ret;
 }
 
@@ -142,6 +152,7 @@ int xe_mmio_wait32(struct xe_mmio *mmio, struct xe_reg reg, u32 mask, u32 val, u
     u32 addr = offset(dev, mmio, reg), read;
     int ret = stela_intel_mmio_wait32(dev->io, dev->context, addr, mask, val, timeout_us, &read,
                                       atomic);
+    if (ret == -EINVAL) return ret; /* The clock refused before any read. */
     observe(dev, addr, read, false);
     if (out_val) *out_val = read;
     return ret;

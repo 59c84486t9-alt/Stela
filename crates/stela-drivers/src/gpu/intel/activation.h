@@ -16,8 +16,11 @@
  * writes order all required preceding accesses, reads honor original WA read
  * flushing. delay preserves atomic vs sleepable context, never substitutes a
  * 3-minute spin for a sleepable PCODE wait. invariant must fail-stop on false.
- * now_ns is nonnegative, monotonic, and cannot approach INT64_MAX during the
- * largest 100ms wait. All public calls require one real exclusive probe owner.
+ * now_ns is nonnegative, monotonic, and stays below INT64_MAX throughout each
+ * admitted wait and its real sleep/overshoot. GuC MMIO's largest single wait is
+ * 2 seconds; repeated retries retain the same live owner through genuine sleeps.
+ * This contract does not establish running firmware or admit a GuC request.
+ * All public calls require one real exclusive probe owner.
  */
 struct stela_intel_activation_io {
     int (*check_context)(void *);
@@ -67,8 +70,10 @@ int stela_intel_activation_wake(struct stela_intel_activation *);
  */
 int stela_intel_activation_sleep(struct stela_intel_activation *);
 /* Private to the native adapters: Linux's xe_mmio_wait32 contract. Poll with
- * doubling delays until (read & mask) == value or the timeout passes, then
- * check once more; *out is the last read. Returns 0 or -ETIMEDOUT. */
+ * doubling delays capped at 100 ms (atomic delays capped at MAX_UDELAY_MS),
+ * stop at the deadline, then check once more; *out is the last read, if present.
+ * Returns 0 or -ETIMEDOUT. Invalid
+ * clock/deadline returns -EINVAL before any register read or output change. */
 int stela_intel_mmio_wait32(const struct stela_intel_activation_io *, void *,
     uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeout_us, uint32_t *out,
     bool atomic);
