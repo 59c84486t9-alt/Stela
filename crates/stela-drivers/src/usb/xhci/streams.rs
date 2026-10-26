@@ -178,7 +178,7 @@ struct Stream {
 }
 
 pub(super) struct Streams {
-    array: DmaBuffer,
+    array: memory::Buffer,
     layout: Layout,
     rings: Vec<Stream>,
     recovery: bool,
@@ -186,20 +186,31 @@ pub(super) struct Streams {
 }
 
 impl Streams {
+    #[cfg(test)]
     pub fn new(
         dma: &mut dyn DmaAllocator,
         layout: Layout,
         profile: dma::Profile,
         cadence: bool,
     ) -> Result<Self, BlockError> {
+        Self::with_memory(dma, layout, profile, cadence, None)
+    }
+
+    pub(super) fn with_memory(
+        dma: &mut dyn DmaAllocator,
+        layout: Layout,
+        profile: dma::Profile,
+        cadence: bool,
+        memory: Option<&Rc<memory::Native>>,
+    ) -> Result<Self, BlockError> {
         let bytes = layout.contexts as usize * STREAM_CONTEXT_BYTES;
-        let mut array = profile.allocate(dma, bytes, 64)?;
+        let mut array = profile.allocate_memory(dma, bytes, 64, memory)?;
         let mut rings = Vec::new();
         rings
             .try_reserve_exact(usize::from(layout.usable))
             .map_err(|_| BlockError::NoDmaMemory)?;
         for stream in 1..=layout.usable {
-            let ring = Ring::with_profile(dma, profile)?;
+            let ring = Ring::with_memory(dma, profile, memory)?;
             array.write(
                 usize::from(stream) * STREAM_CONTEXT_BYTES,
                 ring.dequeue_pointer() | PRIMARY_TRANSFER_RING,
@@ -215,13 +226,21 @@ impl Streams {
         })
     }
 
+    pub(super) fn sync_device(&self) -> Result<(), BlockError> {
+        self.array.sync_dirty()?;
+        for stream in &self.rings {
+            stream.ring.buffer.sync_dirty()?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn allocation_geometry(&self) -> Vec<(u64, usize)> {
-        core::iter::once((self.array.physical(), self.array.len()))
+        core::iter::once((self.array.device_address(), self.array.len()))
             .chain(
                 self.rings
                     .iter()
-                    .map(|s| (s.ring.buffer.physical(), s.ring.buffer.len())),
+                    .map(|s| (s.ring.buffer.device_address(), s.ring.buffer.len())),
             )
             .collect()
     }
@@ -247,7 +266,7 @@ impl Streams {
     }
 
     pub fn context(&self) -> (u32, u64) {
-        (self.layout.info(), self.array.physical())
+        (self.layout.info(), self.array.device_address())
     }
 
     fn stream(&mut self, id: u16) -> Result<&mut Stream, BlockError> {
@@ -297,6 +316,28 @@ impl Streams {
 }
 
 impl Controller {
+    pub(super) fn cancel_native_stream(
+        &mut self,
+        ticket: &StreamTransfer,
+    ) -> Result<(), BlockError> {
+        let slot = self.validate_id(ticket.device_id())?;
+        let valid = self.slots[usize::from(slot)]
+            .as_ref()
+            .and_then(|state| state.endpoints[usize::from(ticket.dci)].as_ref())
+            .and_then(|endpoint| endpoint.streams.as_ref())
+            .and_then(|streams| streams.rings.get(usize::from(ticket.stream) - 1))
+            .and_then(|stream| stream.active.as_ref())
+            .is_some_and(|active| {
+                (active.id, active.trb, active.length) == (ticket.id, ticket.trb, ticket.length)
+            });
+        if !valid {
+            return Err(BlockError::Unsupported(
+                "stale or foreign native stream cancellation",
+            ));
+        }
+        self.cancel_owned(slot, ticket.dci)
+    }
+
     /// Pure planning query for an addressed slot in this controller epoch.
     /// The result is a negotiable limit, not an allocation/configuration ACK.
     /// It intentionally works before SET_CONFIGURATION so a selector can fall
@@ -409,6 +450,23 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<StreamTransfer, BlockError> {
+        self.device_id(slot)?;
+        if self.native_memory.is_some() {
+            return Err(BlockError::Unsupported(
+                "native xHCI requires a retained typed payload",
+            ));
+        }
+        self.submit_stream_buffer(slot, dci, stream_id, buffer, length)
+    }
+
+    pub(in crate::usb::xhci) fn submit_stream_buffer(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        stream_id: u16,
+        buffer: u64,
+        length: usize,
+    ) -> Result<StreamTransfer, BlockError> {
         let device = self.device_id(slot)?;
         self.validate_id(device)?;
         self.endpoint_ready_owned(slot, dci)?;
@@ -443,7 +501,7 @@ impl Controller {
         let direction = if endpoint.is_in { ISP } else { 0 };
         let trb = stream
             .ring
-            .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)])[0];
+            .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)])?[0];
         stream.active = Some(Active {
             id,
             trb,
@@ -852,17 +910,18 @@ mod tests {
                 parent: None,
             },
             retiring: false,
-            input: dma.allocate(33 * context_bytes, 64).unwrap(),
-            _output: output,
+            input: dma.allocate(33 * context_bytes, 64).unwrap().into(),
+            _output: output.into(),
             context: [u32::from(SUPER_SPEED) << 20 | 1 << 27, 1 << 16, 0, 0],
             endpoints: Default::default(),
             retired_rings: Default::default(),
-            control: dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap(),
+            control: dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap().into(),
             speed: SUPER_SPEED,
             current_configuration: Some(1),
         }));
         (
             Controller {
+                native_memory: None,
                 registers: Box::new(Model(model.clone())),
                 clock: Clock {
                     ticks_per_microsecond: 1,
@@ -880,11 +939,11 @@ mod tests {
                 max_slots: 1,
                 max_ports: 1,
                 port_major: vec![3],
-                dcbaa: dma.allocate(16, 64).unwrap(),
+                dcbaa: dma.allocate(16, 64).unwrap().into(),
                 _scratchpads: Vec::new(),
                 commands,
-                events,
-                _event_table: dma.allocate(16, 64).unwrap(),
+                events: events.into(),
+                _event_table: dma.allocate(16, 64).unwrap().into(),
                 event_index: 0,
                 event_cycle: true,
                 legacy_slot_fenced: vec![false; slots.len()],

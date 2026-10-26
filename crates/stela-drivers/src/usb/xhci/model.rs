@@ -264,6 +264,7 @@ fn address_controller_with_capabilities(
         iso::Capabilities::new(0x100, 0, 0)
     };
     let controller = Controller {
+        native_memory: None,
         registers,
         clock,
         operational: 0x40,
@@ -279,11 +280,11 @@ fn address_controller_with_capabilities(
         max_slots: 1,
         max_ports: 1,
         port_major: vec![2],
-        dcbaa: dma.allocate(16, 64).unwrap(),
+        dcbaa: dma.allocate(16, 64).unwrap().into(),
         _scratchpads: Vec::new(),
         commands,
-        events,
-        _event_table: dma.allocate(16, 64).unwrap(),
+        events: events.into(),
+        _event_table: dma.allocate(16, 64).unwrap().into(),
         event_index: 0,
         event_cycle: true,
         slots: vec![None, None],
@@ -324,6 +325,10 @@ pub(crate) struct CancelModel {
     pub(crate) setup: Vec<([u8; 8], Vec<u8>)>,
     pub(crate) incoming_events: alloc::collections::VecDeque<Vec<u8>>,
     pub(crate) incoming_acl: alloc::collections::VecDeque<Vec<u8>>,
+    /// Opt-in independent test peripherals, keyed by actual configured DCI.
+    pub(crate) incoming_bulk:
+        alloc::collections::BTreeMap<usize, alloc::collections::VecDeque<Vec<u8>>>,
+    pub(crate) outgoing_bulk: alloc::collections::BTreeMap<usize, Vec<Vec<u8>>>,
     pub(crate) outgoing: Vec<Vec<u8>>,
     pub(crate) fatal_status: u32,
     pub(crate) fatal_on_command: Option<u32>,
@@ -376,7 +381,10 @@ impl CancelModel {
         self.event_index += 1;
     }
     pub(crate) fn receive(&mut self, dci: usize) {
-        let queue = if (self.asix.is_some() || self.asix_legacy.is_some())
+        let queue = if let Some(queue) = self.incoming_bulk.get_mut(&dci) {
+            assert!((3..32).contains(&dci) && !dci.is_multiple_of(2));
+            queue
+        } else if (self.asix.is_some() || self.asix_legacy.is_some())
             && dci >= 3
             && !dci.is_multiple_of(2)
         {
@@ -656,6 +664,7 @@ impl CancelModel {
         } else {
             self.indices[dci] += 1;
             if dci == 4
+                || self.outgoing_bulk.contains_key(&dci)
                 || ((self.asix.is_some() || self.asix_legacy.is_some())
                     && dci >= 2
                     && dci.is_multiple_of(2))
@@ -664,8 +673,13 @@ impl CancelModel {
                 // completion below acknowledges its bytes.
                 let packet =
                     unsafe { core::slice::from_raw_parts(parameter as *const u8, length).to_vec() };
-                self.scripted(true, &packet);
-                self.outgoing.push(packet);
+                if let Some(queue) = self.outgoing_bulk.get_mut(&dci) {
+                    assert!((2..32).contains(&dci) && dci.is_multiple_of(2));
+                    queue.push(packet);
+                } else {
+                    self.scripted(true, &packet);
+                    self.outgoing.push(packet);
+                }
                 if self.silence_transfer == Some(dci) {
                     self.active[dci] = Some((at, parameter, length));
                 } else {
@@ -696,6 +710,10 @@ impl Registers for CancelRegisters {
                 | if model.connected { CCS | PED } else { 0 };
         }
         if offset == 0x40 + USBSTS {
+            let registered: Vec<_> = model.incoming_bulk.keys().copied().collect();
+            for dci in registered {
+                model.receive(dci);
+            }
             if model.asix.is_some() || model.asix_legacy.is_some() {
                 for dci in (3..32).step_by(2) {
                     model.receive(dci);
@@ -831,6 +849,8 @@ fn cancellation_controller_with_context(
         setup: Vec::new(),
         incoming_events: Default::default(),
         incoming_acl: Default::default(),
+        incoming_bulk: Default::default(),
+        outgoing_bulk: Default::default(),
         outgoing: Vec::new(),
         fatal_status: 0,
         fatal_on_command: None,

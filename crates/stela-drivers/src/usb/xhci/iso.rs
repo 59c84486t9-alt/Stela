@@ -426,6 +426,26 @@ fn trb_control(recipe: Recipe, length: usize, frame: u32) -> u32 {
 }
 
 impl Controller {
+    pub(super) fn cancel_native_iso(&mut self, ticket: &IsoTransfer) -> Result<(), BlockError> {
+        let slot = self.validate_id(ticket.device_id())?;
+        let valid = self.slots[usize::from(slot)]
+            .as_ref()
+            .and_then(|state| state.endpoints[usize::from(ticket.dci)].as_ref())
+            .and_then(|endpoint| endpoint.iso.as_ref())
+            .is_some_and(|queue| {
+                queue
+                    .active
+                    .iter()
+                    .any(|active| active.id == ticket.id && active.trb == ticket.trb)
+            });
+        if !valid {
+            return Err(BlockError::Unsupported(
+                "stale or foreign native ISO cancellation",
+            ));
+        }
+        self.cancel_owned(slot, ticket.dci)
+    }
+
     /// Preflight a bounded list of requests against the current native endpoint.
     /// This neither reserves ring space nor publishes DMA: the returned values
     /// are requests, and every `submit_iso_scheduled` must revalidate them. Time
@@ -483,7 +503,7 @@ impl Controller {
         };
         for offset in 0..packet_count {
             let index = (transfer.ring.index + offset) % (RING_TRBS - 1);
-            let trb = transfer.ring.buffer.physical() + (index * TRB) as u64;
+            let trb = transfer.ring.buffer.device_address() + (index * TRB) as u64;
             if queue.active.iter().any(|active| active.trb == trb) {
                 return Err(BlockError::Unsupported("isochronous ring is full"));
             }
@@ -564,6 +584,23 @@ impl Controller {
         length: usize,
         requested: IsoSchedule,
     ) -> Result<IsoTransfer, BlockError> {
+        self.device_id(slot)?;
+        if self.native_memory.is_some() {
+            return Err(BlockError::Unsupported(
+                "native xHCI requires a retained typed payload",
+            ));
+        }
+        self.submit_iso_scheduled_buffer(slot, dci, buffer, length, requested)
+    }
+
+    pub(in crate::usb::xhci) fn submit_iso_scheduled_buffer(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+        requested: IsoSchedule,
+    ) -> Result<IsoTransfer, BlockError> {
         let device = self.device_id(slot)?;
         self.validate_id(device)?;
         self.endpoint_ready_owned(slot, dci)?;
@@ -631,7 +668,7 @@ impl Controller {
             bytes: length,
             done: None,
         });
-        transfer.ring.push(&[(buffer, length as u32, control)]);
+        transfer.ring.push(&[(buffer, length as u32, control)])?;
         queue.next = Some((start + interval) % MICROFRAMES);
         self.doorbell(slot, dci);
         Ok(IsoTransfer {
@@ -1041,17 +1078,18 @@ pub(super) mod tests {
                 parent: None,
             },
             retiring: false,
-            input: dma.allocate(33 * context_bytes, 64).unwrap(),
-            _output: output,
+            input: dma.allocate(33 * context_bytes, 64).unwrap().into(),
+            _output: output.into(),
             context: [u32::from(speed) << 20 | 1 << 27, 1 << 16, 0, 0],
             endpoints: Default::default(),
             retired_rings: Default::default(),
-            control: dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap(),
+            control: dma.allocate(CONTROL_BYTES, CONTROL_BYTES).unwrap().into(),
             speed,
             current_configuration: Some(1),
         }));
         (
             Controller {
+                native_memory: None,
                 registers: Box::new(Model(model.clone())),
                 clock: Clock {
                     ticks_per_microsecond: 1,
@@ -1069,11 +1107,11 @@ pub(super) mod tests {
                 max_slots: 1,
                 max_ports: 1,
                 port_major: vec![2],
-                dcbaa: dma.allocate(16, 64).unwrap(),
+                dcbaa: dma.allocate(16, 64).unwrap().into(),
                 _scratchpads: Vec::new(),
                 commands,
-                events,
-                _event_table: dma.allocate(16, 64).unwrap(),
+                events: events.into(),
+                _event_table: dma.allocate(16, 64).unwrap().into(),
                 event_index: 0,
                 event_cycle: true,
                 legacy_slot_fenced: vec![false; slots.len()],
@@ -2911,6 +2949,10 @@ pub(super) mod tests {
         }
         pub(crate) fn set_mfindex(&self, value: u32) {
             self.hardware.borrow_mut().mfindex = value;
+        }
+        /// Service actual queued FrameID/interval words at this model tick.
+        pub(crate) fn service_at(&self, dci: u8, microframe: u32, code: u32) {
+            self.hardware.borrow_mut().service_at(dci, microframe, code);
         }
         /// Complete the oldest actual queued service on this endpoint.
         pub(crate) fn complete(&self, dci: u8, code: u32, residual: usize) {

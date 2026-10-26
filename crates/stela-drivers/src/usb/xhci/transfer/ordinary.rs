@@ -116,6 +116,22 @@ impl Controller {
         buffer: u64,
         length: usize,
     ) -> Result<TransferTicket, BlockError> {
+        self.device_id(slot)?;
+        if self.native_memory.is_some() {
+            return Err(BlockError::Unsupported(
+                "native xHCI requires a retained typed payload",
+            ));
+        }
+        self.submit_ticket_buffer(slot, dci, buffer, length)
+    }
+
+    pub(in crate::usb::xhci) fn submit_ticket_buffer(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        buffer: u64,
+        length: usize,
+    ) -> Result<TransferTicket, BlockError> {
         let device = self.device_id(slot)?;
         self.validate_id(device)?;
         self.endpoint_ready_owned(slot, dci)?;
@@ -146,7 +162,7 @@ impl Controller {
         let direction = if transfer.is_in { ISP } else { 0 };
         transfer
             .ring
-            .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)]);
+            .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)])?;
         transfer.in_flight += 1;
         self.doorbell(slot, dci);
         Ok(TransferTicket {
@@ -294,7 +310,9 @@ impl Controller {
         ))
     }
 
-    /// One TD, waited for.
+    /// One TD with a budget covering publication and observed completion.
+    /// An already expired budget publishes no TD. Actual DMA retirement after
+    /// expiry may outlast the budget; failed retirement retains endpoint poison.
     pub fn transfer(
         &mut self,
         slot: u8,
@@ -315,10 +333,32 @@ impl Controller {
         length: usize,
         microseconds: u64,
     ) -> Result<usize, BlockError> {
+        // Admit the complete caller budget before publishing any actual TD.
+        // The budget includes submission; invalid timing cannot leave a new
+        // DMA owner behind an infallible legacy Clock panic.
+        let deadline = self.clock.try_deadline(microseconds).map_err(|_| {
+            BlockError::Unsupported(
+                "xHCI transfer timeout clock unavailable or duration out of range",
+            )
+        })?;
+        if deadline.passed() {
+            return Err(BlockError::Timeout);
+        }
         let ticket = self.submit_ticket_owned(slot, dci, buffer, length)?;
-        let deadline = self.clock.deadline(microseconds);
         loop {
-            if let Some(result) = self.completed_ticket(&ticket) {
+            if deadline.passed() {
+                self.cancel_owned(slot, dci)?;
+                return Err(BlockError::Timeout);
+            }
+            let observed = self.completed_ticket(&ticket);
+            // Polling can itself consume the rest of the caller's budget.
+            // A late actual completion is not success within this deadline;
+            // stop/dequeue still must acknowledge before the buffer returns.
+            if deadline.passed() {
+                self.cancel_owned(slot, dci)?;
+                return Err(BlockError::Timeout);
+            }
+            if let Some(result) = observed {
                 return match result {
                     Ok(bytes) => Ok(bytes),
                     Err(error) => {
@@ -337,10 +377,6 @@ impl Controller {
                     }
                 };
             }
-            if deadline.passed() {
-                self.cancel_owned(slot, dci)?;
-                return Err(BlockError::Timeout);
-            }
             crate::waiting();
             core::hint::spin_loop();
         }
@@ -352,6 +388,157 @@ mod tests {
     use super::*;
     use crate::bus::dma::RegionAllocator;
     use crate::usb::xhci::model::*;
+    #[test]
+    fn invalid_synchronous_budget_refuses_before_mmio_and_preserves_current_actual_dma_receipt() {
+        struct NoAccess;
+        impl Registers for NoAccess {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("invalid budget read controller")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("invalid budget wrote controller")
+            }
+        }
+        let mut memory = vec![0u64; 64 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        // SAFETY: actual fixture RAM remains retained through every owner.
+        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let (mut c, peer) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(128, 64).unwrap();
+        let old = c.submit_ticket(1, 3, buffer.physical(), 64).unwrap();
+        peer.borrow_mut()
+            .event(old.trb, SUCCESS, TRANSFER_EVENT, 3, 0);
+        let before = memory.clone();
+        let cursor = (c.event_index, c.event_cycle);
+        let registers = core::mem::replace(&mut c.registers, Box::new(NoAccess));
+        for (rate, duration, error) in [
+            (
+                0,
+                1,
+                BlockError::Unsupported(
+                    "xHCI transfer timeout clock unavailable or duration out of range",
+                ),
+            ),
+            (
+                3,
+                u64::MAX,
+                BlockError::Unsupported(
+                    "xHCI transfer timeout clock unavailable or duration out of range",
+                ),
+            ),
+            (
+                1,
+                u64::MAX / 2 + 1,
+                BlockError::Unsupported(
+                    "xHCI transfer timeout clock unavailable or duration out of range",
+                ),
+            ),
+            (1, 0, BlockError::Timeout),
+        ] {
+            c.clock.ticks_per_microsecond = rate;
+            assert_eq!(
+                c.transfer(1, 3, buffer.physical() + 64, 64, duration),
+                Err(error)
+            );
+            assert_eq!(memory, before);
+            assert_eq!((c.event_index, c.event_cycle), cursor);
+            let ep = c.slots[1].as_ref().unwrap().endpoints[3].as_ref().unwrap();
+            assert_eq!(ep.in_flight, 1);
+            assert!(ep.ring.normal.contains(old.id, old.trb));
+            assert!(peer.borrow().active[3].is_some());
+            assert!(!c.command_poisoned);
+        }
+        c.registers = registers;
+        c.clock.ticks_per_microsecond = 1;
+        assert_eq!(c.completed_ticket(&old), Some(Ok(64)));
+    }
+
+    #[test]
+    fn expired_valid_budget_retires_actual_late_td_and_never_credits_late_completion() {
+        struct Empty;
+        impl Registers for Empty {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("temporary owner read")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("temporary owner wrote")
+            }
+        }
+        struct Delayed {
+            inner: Box<dyn Registers>,
+            after_submit: bool,
+            armed: bool,
+        }
+        impl Delayed {
+            fn expire(&mut self) {
+                self.armed = false;
+                // Explicit test TSC scale: consume four times the complete
+                // caller budget after an actual TD was published (and, when
+                // polling, after its actual device-side completion).
+                let start = Clock::ticks();
+                while Clock::ticks().wrapping_sub(start) < 12_000_000 {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+        impl Registers for Delayed {
+            fn read32(&mut self, at: usize) -> u32 {
+                let value = self.inner.read32(at);
+                if self.armed && !self.after_submit && at == 0x40 + USBSTS {
+                    self.expire();
+                }
+                value
+            }
+            fn write32(&mut self, at: usize, value: u32) {
+                self.inner.write32(at, value);
+                if at == 0x1004 {
+                    self.armed = true;
+                    if self.after_submit {
+                        self.expire();
+                    }
+                }
+            }
+        }
+        for after_submit in [false, true] {
+            for failing in [None, Some(STOP_ENDPOINT), Some(SET_DEQUEUE)] {
+                let mut memory = vec![0u64; 64 * 1024];
+                let start = memory.as_mut_ptr() as u64;
+                // SAFETY: actual native-layout fixture RAM outlives every owner.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+                let (mut c, peer) = cancellation_controller(&mut dma);
+                let mut buffer = dma.allocate(64, 64).unwrap();
+                buffer.bytes_mut().fill(0xa5);
+                peer.borrow_mut().incoming_events.push_back(vec![0x79; 64]);
+                peer.borrow_mut().fail = failing.map(|kind| (kind, 17));
+                let inner = core::mem::replace(&mut c.registers, Box::new(Empty));
+                c.registers = Box::new(Delayed {
+                    inner,
+                    after_submit,
+                    armed: false,
+                });
+                let result = c.transfer(1, 3, buffer.physical(), 64, 3_000_000);
+                assert_eq!(buffer.bytes(), &[0x79; 64]); // Real device-side DMA completed.
+                let endpoint = c.slots[1].as_ref().unwrap().endpoints[3].as_ref().unwrap();
+                assert!(peer.borrow().seen.contains(&STOP_ENDPOINT));
+                if failing.is_none() {
+                    assert_eq!(result, Err(BlockError::Timeout));
+                    assert!(peer.borrow().seen.contains(&SET_DEQUEUE));
+                    assert!(!endpoint.poisoned);
+                    assert_eq!(endpoint.in_flight, 0);
+                    assert!(peer.borrow().active[3].is_none());
+                    c.endpoint_ready(1, 3).unwrap();
+                } else {
+                    assert_eq!(result, Err(BlockError::Device { status: 17 }));
+                    assert!(endpoint.poisoned);
+                    // Even when polling observed the real terminal event,
+                    // failed Stop/dequeue keeps endpoint/context ownership.
+                    assert!(c.endpoint_ready(1, 3).is_err());
+                    assert_eq!(buffer.bytes(), &[0x79; 64]);
+                }
+            }
+        }
+    }
     #[test]
     fn retired_device_ticket_is_pure_before_readiness_and_preserves_current_dma() {
         struct NoAccess;
@@ -871,7 +1058,9 @@ mod tests {
             if fail_dequeue {
                 model.borrow_mut().fail = Some((SET_DEQUEUE, 17));
             }
-            let result = controller.transfer(1, 5, buffer.physical(), 64, 1000);
+            // Clock1 is a shortened test TSC scale; this case exercises STALL
+            // retirement, not a sub-microsecond whole-operation deadline.
+            let result = controller.transfer(1, 5, buffer.physical(), 64, 50_000_000);
             assert!(result.is_err());
             assert_eq!(model.borrow().seen, vec![RESET_ENDPOINT, SET_DEQUEUE]);
             assert_eq!(controller.endpoint_ready(1, 5).is_err(), fail_dequeue);

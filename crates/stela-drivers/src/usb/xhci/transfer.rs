@@ -233,7 +233,8 @@ impl Controller {
             if !is_in {
                 state.control.bytes_mut()[..length].copy_from_slice(out);
             }
-            state.control.physical()
+            state.control.sync_dirty()?;
+            state.control.device_address()
         };
         let transfer_type = match (length, is_in) {
             (0, _) => 0,
@@ -257,7 +258,7 @@ impl Controller {
                 .as_mut()
                 .ok_or(BlockError::Unsupported("xHCI control endpoint"))?
                 .ring;
-            ring.push(&trbs)
+            ring.push(&trbs)?
         };
         self.doorbell(slot, 1);
         let status_address = *addresses.last().unwrap();
@@ -327,6 +328,10 @@ impl Controller {
             return Ok(Vec::new());
         }
         let state = self.slot(slot)?;
+        // SAFETY: the actual Status completion retired this EP0 TD's Data stage.
+        unsafe {
+            state.control.sync_cpu(0..received)?;
+        }
         Ok(state.control.bytes()[..received].to_vec())
     }
 
@@ -449,7 +454,7 @@ impl Controller {
             Ok(controller
                 .slot(slot)?
                 ._output
-                .read::<u32>(usize::from(dci) * context)
+                .coherent_u32(usize::from(dci) * context)?
                 & 7)
         };
         let mut current = state(self)?;
@@ -824,7 +829,9 @@ mod tests {
             if fail_stop {
                 model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
             }
-            let result = controller.transfer(1, 5, buffer.physical(), 512, 1);
+            // Keep a valid publication window in this shortened Clock1 model;
+            // the actual held TD then consumes the budget and must stop.
+            let result = controller.transfer(1, 5, buffer.physical(), 512, 3_000_000);
             if fail_stop {
                 assert!(matches!(
                     result,
@@ -859,7 +866,7 @@ mod tests {
                 assert!(model.borrow().active[5].is_none());
                 model.borrow_mut().incoming_acl.push_back(vec![1, 2, 3]);
                 assert_eq!(
-                    controller.transfer(1, 5, buffer.physical(), 512, 1000),
+                    controller.transfer(1, 5, buffer.physical(), 512, 50_000_000),
                     Ok(3)
                 );
                 assert_eq!(&buffer.bytes()[..3], &[1, 2, 3]);

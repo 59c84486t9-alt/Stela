@@ -66,6 +66,14 @@ impl Profile {
         RING_TRBS * TRB * if self.overfetch { 2 } else { 1 }
     }
 
+    pub(super) fn maximum(self) -> u64 {
+        if self.bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.bits) - 1
+        }
+    }
+
     pub fn check(self, address: u64, bytes: usize) -> Result<(), BlockError> {
         let last = address.checked_add(bytes.saturating_sub(1) as u64);
         let maximum = if self.bits == 64 {
@@ -82,17 +90,22 @@ impl Profile {
         }
     }
 
-    pub fn allocate(
+    pub(super) fn allocate_memory(
         self,
         dma: &mut dyn DmaAllocator,
         bytes: usize,
         align: usize,
-    ) -> Result<DmaBuffer, BlockError> {
-        let buffer = dma.allocate(bytes, align)?;
-        if buffer.len() < bytes || !buffer.physical().is_multiple_of(align as u64) {
+        native: Option<&Rc<memory::Native>>,
+    ) -> Result<memory::Buffer, BlockError> {
+        let buffer = if let Some(native) = native {
+            native.allocate(bytes, align, self.maximum())?
+        } else {
+            dma.allocate(bytes, align)?.into()
+        };
+        if buffer.len() < bytes || !buffer.device_address().is_multiple_of(align as u64) {
             return Err(BlockError::Unsupported("invalid xHCI DMA allocation"));
         }
-        self.check(buffer.physical(), bytes)?;
+        self.check(buffer.device_address(), bytes)?;
         Ok(buffer)
     }
 }

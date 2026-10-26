@@ -1301,6 +1301,7 @@ pub(crate) mod tests {
             uas_abort: abort_peer::State::default(),
         }));
         let mut controller = Controller {
+            native_memory: None,
             registers: Box::new(Model(hardware.clone())),
             clock: Clock {
                 ticks_per_microsecond: 1,
@@ -1318,11 +1319,11 @@ pub(crate) mod tests {
             max_slots,
             max_ports: 1,
             port_major: vec![if speed >= SUPER_SPEED { 3 } else { 2 }],
-            dcbaa,
+            dcbaa: dcbaa.into(),
             _scratchpads: Vec::new(),
             commands,
-            events,
-            _event_table: dma.allocate(16, 64).unwrap(),
+            events: events.into(),
+            _event_table: dma.allocate(16, 64).unwrap().into(),
             event_index: 0,
             event_cycle: true,
             slots: core::iter::repeat_with(|| None)
@@ -1690,12 +1691,12 @@ pub(crate) mod tests {
                         ..source
                     },
                     retiring: other_state == 1,
-                    input,
-                    _output: output,
+                    input: input.into(),
+                    _output: output.into(),
                     context: [0; 4],
                     endpoints: Default::default(),
                     retired_rings: Default::default(),
-                    control,
+                    control: control.into(),
                     speed: HIGH_SPEED,
                     current_configuration: Some(0),
                 });

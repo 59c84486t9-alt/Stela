@@ -30,7 +30,7 @@ impl Event {
 
 /// A producer ring of one segment closed by a toggling Link TRB.
 pub(super) struct Ring {
-    pub(super) buffer: DmaBuffer,
+    pub(super) buffer: memory::Buffer,
     pub(super) index: usize,
     pub(super) cycle: bool,
     pub(super) normal: transfer::Queue,
@@ -42,16 +42,25 @@ impl Ring {
         Self::with_profile(dma, dma::Profile::SPEC)
     }
 
+    #[cfg(test)]
     pub(super) fn with_profile(
         dma: &mut dyn DmaAllocator,
         profile: dma::Profile,
+    ) -> Result<Self, BlockError> {
+        Self::with_memory(dma, profile, None)
+    }
+
+    pub(super) fn with_memory(
+        dma: &mut dyn DmaAllocator,
+        profile: dma::Profile,
+        memory: Option<&Rc<memory::Native>>,
     ) -> Result<Self, BlockError> {
         // A segment cannot cross a 64 KiB boundary (xHCI 1.2 4.9.2).
         // Its whole allocation (including a quirk's dummy second page) is
         // aligned to its size, keeping both within one 64 KiB boundary.
         let bytes = profile.segment_bytes();
-        let mut buffer = profile.allocate(dma, bytes, bytes)?;
-        let physical = buffer.physical();
+        let mut buffer = profile.allocate_memory(dma, bytes, bytes, memory)?;
+        let physical = buffer.device_address();
         buffer.write((RING_TRBS - 1) * TRB, physical);
         Ok(Self {
             buffer,
@@ -65,14 +74,14 @@ impl Ring {
     pub(super) fn reinitialize(&mut self) {
         self.buffer.bytes_mut().fill(0);
         self.buffer
-            .write((RING_TRBS - 1) * TRB, self.buffer.physical());
+            .write((RING_TRBS - 1) * TRB, self.buffer.device_address());
         self.index = 0;
         self.cycle = true;
         self.normal = transfer::Queue::default();
     }
 
     pub(super) fn address(&self) -> u64 {
-        self.buffer.physical() + (self.index * TRB) as u64
+        self.buffer.device_address() + (self.index * TRB) as u64
     }
 
     /// The enqueue pointer with its cycle state, for CRCR or Set TR Dequeue.
@@ -82,7 +91,7 @@ impl Ring {
 
     /// Writes one TD, its first TRB owned last, and returns each TRB's
     /// address.
-    pub(super) fn push(&mut self, trbs: &[(u64, u32, u32)]) -> Vec<u64> {
+    pub(super) fn push(&mut self, trbs: &[(u64, u32, u32)]) -> Result<Vec<u64>, BlockError> {
         let mut addresses = Vec::with_capacity(trbs.len());
         let mut first = None;
         for (n, &(parameter, status, control)) in trbs.iter().enumerate() {
@@ -111,11 +120,15 @@ impl Ring {
                 self.cycle = !self.cycle;
             }
         }
+        // Make the complete TD and Link visible while its first Cycle still
+        // belongs to software. Only then publish that actual ownership word.
+        self.buffer.sync_dirty()?;
         if let Some((at, control, cycle)) = first {
             fence(Ordering::Release);
             self.buffer.write(at + 12, control | cycle);
+            self.buffer.sync_device(at + 12..at + 16)?;
         }
-        addresses
+        Ok(addresses)
     }
 }
 
@@ -170,10 +183,12 @@ mod tests {
         let mut dma = unsafe { RegionAllocator::new(start..start + 8192) };
         let mut ring = Ring::new(&mut dma).unwrap();
         for _ in 0..RING_TRBS - 2 {
-            ring.push(&[(0, 0, NORMAL << 10)]);
+            ring.push(&[(0, 0, NORMAL << 10)]).unwrap();
         }
         assert!(ring.cycle);
-        let addresses = ring.push(&[(1, 0, NORMAL << 10), (2, 0, NORMAL << 10)]);
+        let addresses = ring
+            .push(&[(1, 0, NORMAL << 10), (2, 0, NORMAL << 10)])
+            .unwrap();
         assert_eq!(addresses[1], ring.buffer.physical());
         assert!(!ring.cycle);
         let link: u32 = ring.buffer.read((RING_TRBS - 1) * TRB + 12);

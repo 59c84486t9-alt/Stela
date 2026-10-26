@@ -223,7 +223,11 @@ impl<'a> Quiesced<'a> {
                 continue;
             }
             fence(Ordering::Acquire);
-            let endpoint_state = state._output.read::<u32>(dci * context) & 7;
+            let endpoint_state = state
+                ._output
+                .coherent_u32(dci * context)
+                .map_err(|error| ("observe actual endpoint DMA context", error))?
+                & 7;
             if unaddressed && dci == 1 && endpoint_state == ENDPOINT_DISABLED {
                 continue;
             }
@@ -245,7 +249,11 @@ impl<'a> Quiesced<'a> {
             fence(Ordering::Acquire);
             for (dci, endpoint) in state.endpoints.iter().enumerate().skip(1) {
                 if let Some(endpoint) = endpoint {
-                    let actual = state._output.read::<u32>(dci * context) & 7;
+                    let actual = state
+                        ._output
+                        .coherent_u32(dci * context)
+                        .map_err(|error| ("observe actual endpoint DMA context", error))?
+                        & 7;
                     if endpoint.poisoned
                         || ownership == Ownership::Vacant
                             && (endpoint.in_flight != 0 || !endpoint.ring.normal.idle())

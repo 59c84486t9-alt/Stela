@@ -78,7 +78,7 @@ impl Controller {
             for (n, word) in words.iter().enumerate() {
                 state.input.write(context + 4 * n, *word);
             }
-            (state.input.physical(), words)
+            (state.input.device_address(), words)
         };
         self.command(input.0, 0, CONFIGURE_ENDPOINT << 10 | u32::from(slot) << 24)?;
         self.ready()?;

@@ -7,7 +7,18 @@ use super::*;
 /// connection and connect change, clearing a change it reports.
 pub(super) fn debounce(
     clock: Clock,
+    sample: impl FnMut() -> Result<(bool, bool), BlockError>,
+) -> Result<bool, BlockError> {
+    clock_ready(clock)?;
+    debounce_with_delay(sample, || {
+        crate::bus::pci::power::Timer::wait_us(&clock, DEBOUNCE_STEP_US)
+            .map_err(|_| BlockError::Unsupported("xHCI debounce clock unavailable"))
+    })
+}
+
+fn debounce_with_delay(
     mut sample: impl FnMut() -> Result<(bool, bool), BlockError>,
+    mut delay: impl FnMut() -> Result<(), BlockError>,
 ) -> Result<bool, BlockError> {
     let mut connection = None;
     let mut stable = 0;
@@ -26,7 +37,7 @@ pub(super) fn debounce(
         if total >= DEBOUNCE_TIMEOUT_US {
             return Err(BlockError::Unsupported("USB port connection never settled"));
         }
-        clock.delay(DEBOUNCE_STEP_US);
+        delay()?;
         total += DEBOUNCE_STEP_US;
     }
 }
@@ -116,8 +127,9 @@ impl Controller {
             enabled: true,
             in_flight: 0,
         });
-        let input_address = input.physical();
-        self.dcbaa.write(usize::from(slot) * 8, output.physical());
+        let input_address = input.device_address();
+        self.dcbaa
+            .write(usize::from(slot) * 8, output.device_address());
         self.slots[usize::from(slot)] = Some(Slot {
             generation,
             parent_id,
@@ -162,7 +174,7 @@ impl Controller {
             state
                 .input
                 .write(2 * context + 4, u32::from(max_packet) << 16);
-            state.input.physical()
+            state.input.device_address()
         };
         self.command(
             input_address,
@@ -791,9 +803,6 @@ mod tests {
 
     #[test]
     fn port_connections_count_after_a_steady_hundred_milliseconds() {
-        let clock = Clock {
-            ticks_per_microsecond: 0,
-        };
         // A bounce (connected, changed, gone, back) restarts the window.
         let samples = [(true, true), (false, true), (true, true), (true, false)];
         let mut taken = samples
@@ -801,21 +810,54 @@ mod tests {
             .copied()
             .chain(core::iter::repeat((true, false)));
         let mut count = 0;
-        let connected = debounce(clock, || {
-            count += 1;
-            Ok(taken.next().unwrap())
-        });
+        let mut waits = 0;
+        let connected = debounce_with_delay(
+            || {
+                count += 1;
+                Ok(taken.next().unwrap())
+            },
+            || {
+                waits += 1;
+                Ok(())
+            },
+        );
         assert_eq!(connected, Ok(true));
         // Three changing samples, then four steady ones of 25 ms each.
         assert_eq!(count, 3 + (DEBOUNCE_STABLE_US / DEBOUNCE_STEP_US) as usize);
-        assert_eq!(debounce(clock, || Ok((false, false))), Ok(false));
+        assert_eq!(waits, count - 1);
+        assert_eq!(
+            debounce_with_delay(|| Ok((false, false)), || Ok(())),
+            Ok(false)
+        );
         let mut flapping = false;
         assert_eq!(
-            debounce(clock, || {
-                flapping = !flapping;
-                Ok((flapping, true))
-            }),
+            debounce_with_delay(
+                || {
+                    flapping = !flapping;
+                    Ok((flapping, true))
+                },
+                || Ok(())
+            ),
             Err(BlockError::Unsupported("USB port connection never settled"))
+        );
+    }
+
+    #[test]
+    fn unavailable_debounce_timing_refuses_before_port_sampling_and_failed_wait_is_explicit() {
+        for rate in [0, u64::MAX, (u64::MAX / 2) / 60_000_000 + 1] {
+            assert!(
+                debounce(
+                    Clock {
+                        ticks_per_microsecond: rate
+                    },
+                    || panic!("unavailable clock sampled real port")
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            debounce_with_delay(|| Ok((true, false)), || Err(BlockError::Timeout)),
+            Err(BlockError::Timeout)
         );
     }
 

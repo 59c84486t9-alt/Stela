@@ -42,7 +42,7 @@ struct Hub {
     endpoint: Endpoint,
     ports: u8,
     ssp: Option<hub::descriptor::Ssp>,
-    bitmap: DmaBuffer,
+    bitmap: memory::Buffer,
     pending: Option<u64>,
     retired: bool,
     recovery: Option<Recovery>,
@@ -154,7 +154,7 @@ impl Host {
                 } else {
                     None
                 };
-                let bitmap = c.dma_profile.allocate(dma, 64, 64)?;
+                let bitmap = c.allocate(dma, 64, 64)?;
                 Ok(Hub {
                     device: device.clone(),
                     attachment,
@@ -431,7 +431,7 @@ impl Host {
                 owner.bitmap.bytes_mut().fill(0);
                 owner.pending = Some(c.device(owner.device.id)?.submit(
                     owner.endpoint.dci(),
-                    owner.bitmap.physical(),
+                    owner.bitmap.device_address(),
                     length,
                 )?);
                 return Ok(());
@@ -487,7 +487,7 @@ impl Host {
             self.controller
                 .borrow_mut()
                 .device(owner.device.id)?
-                .submit(owner.endpoint.dci(), owner.bitmap.physical(), length)?,
+                .submit(owner.endpoint.dci(), owner.bitmap.device_address(), length)?,
         );
         Ok(())
     }

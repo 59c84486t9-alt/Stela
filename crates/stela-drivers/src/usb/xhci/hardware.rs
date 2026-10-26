@@ -258,10 +258,11 @@ impl Controller {
         // CRCR only accepts a 64-byte-aligned pointer, so restart this empty
         // ring at its base; transfer and event rings keep their exact cursors.
         self.commands.buffer.bytes_mut()[..RING_TRBS * TRB].fill(0);
-        let base = self.commands.buffer.physical();
+        let base = self.commands.buffer.device_address();
         self.commands.buffer.write((RING_TRBS - 1) * TRB, base);
         self.commands.index = 0;
         self.commands.cycle = true;
+        self.commands.buffer.sync_dirty()?;
         self.registers
             .write64(self.operational + CRCR, self.commands.dequeue_pointer());
         let snapshot = Snapshot::read(self);

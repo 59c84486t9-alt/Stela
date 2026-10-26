@@ -16,6 +16,10 @@ struct State {
     save: usize,
     restore: usize,
     refuse_suspend: bool,
+    refuse_resume: bool,
+    resume_started: Option<u64>,
+    resume_durations: Vec<u64>,
+    minimum_resume_ticks: u64,
 }
 impl RegisterIo for Registers {
     fn read32(&mut self, at: usize) -> u32 {
@@ -27,8 +31,24 @@ impl RegisterIo for Registers {
             let mut bus = self.bus.0.borrow_mut();
             let port = bus.root_status.as_mut().unwrap();
             let requested = value & PLS;
-            if requested != U3 << PLS_SHIFT || !self.state.borrow().refuse_suspend {
-                let previous = *port & PLS;
+            let previous = *port & PLS;
+            let refused = requested == U3 << PLS_SHIFT && self.state.borrow().refuse_suspend
+                || previous == RESUME << PLS_SHIFT
+                    && requested == 0
+                    && self.state.borrow().refuse_resume;
+            if !refused {
+                if requested == RESUME << PLS_SHIFT && previous != requested {
+                    self.state.borrow_mut().resume_started = Some(Clock::ticks());
+                }
+                if previous == RESUME << PLS_SHIFT && requested == 0 {
+                    let mut state = self.state.borrow_mut();
+                    let elapsed = Clock::ticks().wrapping_sub(state.resume_started.take().unwrap());
+                    assert!(
+                        elapsed >= state.minimum_resume_ticks,
+                        "actual USB2 root left Resume before source 40ms"
+                    );
+                    state.resume_durations.push(elapsed);
+                }
                 *port = *port & !PLS | requested;
                 if previous != requested {
                     *port |= LINK_CHANGE;
@@ -52,6 +72,200 @@ impl RegisterIo for Registers {
     fn size(&self) -> Option<usize> {
         Some(0x2000)
     }
+}
+
+#[test]
+fn actual_usb2_root_resume_preserves_source_forty_millisecond_signal_before_u0() {
+    for speed in [HIGH_SPEED, SUPER_SPEED] {
+        let mut memory = vec![0u64; 512 * 1024];
+        let (mut host, devices, hardware, state, mut dma) =
+            fixture_with_leaf(&mut memory, speed, false, Node::bot_disk(speed));
+        let mut original = bind_root_disk(&host, &devices, &mut dma);
+        let payload = [0x6c; 512];
+        original.disks[0].write(2, &payload).unwrap();
+        // Independent test TSC scale, not a measured host-clock calibration.
+        // The model's physical PORTSC
+        // assertion uses the original source macro, not the production constant.
+        host.controller.borrow_mut().clock.ticks_per_microsecond = 1_000;
+        state.borrow_mut().minimum_resume_ticks = 40_000 * 1_000;
+        let suspended = host.suspend();
+        assert!(
+            suspended.added.failures.is_empty(),
+            "{:?}",
+            suspended.added.failures
+        );
+        let mut resumed = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
+        assert!(
+            resumed.added.failures.is_empty(),
+            "{:?}",
+            resumed.added.failures
+        );
+        assert!(host.sleep.awake());
+        assert_eq!(hardware.borrow().root_status.unwrap() & PLS, 0);
+        assert_eq!(
+            state.borrow().resume_durations.len(),
+            usize::from(speed == HIGH_SPEED)
+        );
+        assert_eq!(resumed.added.disks.len(), 1);
+        let mut actual = [0; 512];
+        resumed.added.disks[0].read(2, &mut actual).unwrap();
+        assert_eq!(actual, payload);
+        assert!(original.disks[0].read(2, &mut actual).is_err());
+    }
+}
+
+#[test]
+fn unavailable_root_timing_preserves_live_consumers_before_any_suspend_effect() {
+    for rate in [0, u64::MAX] {
+        let mut memory = vec![0u64; 512 * 1024];
+        let (mut host, devices, hardware, state, mut dma) = fixture(&mut memory, HIGH_SPEED, false);
+        let mut consumer = RawConsumer::retain(&host, &devices[0], &mut dma);
+        host.controller.borrow_mut().clock.ticks_per_microsecond = rate;
+        let before = {
+            let bus = hardware.borrow();
+            (
+                bus.mmio_reads,
+                bus.mmio_writes,
+                bus.commands.clone(),
+                bus.requests.clone(),
+                bus.root_status,
+            )
+        };
+        let refused = host.suspend();
+        assert_eq!(refused.added.failures.len(), 1);
+        assert!(refused.removed.is_empty());
+        assert!(host.sleep.awake());
+        assert_eq!(state.borrow().save, 0);
+        let after = {
+            let bus = hardware.borrow();
+            (
+                bus.mmio_reads,
+                bus.mmio_writes,
+                bus.commands.clone(),
+                bus.requests.clone(),
+                bus.root_status,
+            )
+        };
+        assert_eq!(before, after);
+        host.controller.borrow_mut().clock.ticks_per_microsecond = 1;
+        assert!(consumer.submit().is_ok());
+    }
+}
+
+#[test]
+fn missing_actual_root_u0_acknowledgement_retains_fenced_original_consumers() {
+    let mut memory = vec![0u64; 512 * 1024];
+    let (mut host, devices, hardware, state, mut dma) = fixture(&mut memory, HIGH_SPEED, false);
+    let mut consumer = RawConsumer::retain(&host, &devices[0], &mut dma);
+    let suspended = host.suspend();
+    assert!(suspended.added.failures.is_empty());
+    state.borrow_mut().refuse_resume = true;
+    let before = hardware.borrow().commands.len();
+    let refused = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
+    assert!(
+        refused
+            .added
+            .failures
+            .iter()
+            .any(|(_, error)| *error == BlockError::Timeout)
+    );
+    assert!(refused.added.devices.is_empty());
+    assert!(matches!(host.sleep, Sleep::Failed));
+    assert_eq!(
+        hardware.borrow().root_status.unwrap() & PLS,
+        RESUME << PLS_SHIFT
+    );
+    assert!(
+        hardware.borrow().commands[before..]
+            .iter()
+            .all(|(kind, _)| *kind != reset::DISABLE_SLOT)
+    );
+    consumer.assert_fenced(&hardware);
+}
+
+#[test]
+fn unavailable_resume_timing_retains_private_snapshot_without_an_extra_consumer_fence() {
+    for rate in [0, u64::MAX] {
+        let mut memory = vec![0u64; 512 * 1024];
+        let (mut host, devices, hardware, state, mut dma) =
+            fixture_with_leaf(&mut memory, HIGH_SPEED, false, Node::bot_disk(HIGH_SPEED));
+        let mut original = bind_root_disk(&host, &devices, &mut dma);
+        let payload = [0x7d; 512];
+        original.disks[0].write(3, &payload).unwrap();
+        assert!(host.suspend().added.failures.is_empty());
+        let before = {
+            let bus = hardware.borrow();
+            (
+                bus.mmio_reads,
+                bus.mmio_writes,
+                bus.commands.clone(),
+                bus.requests.clone(),
+                bus.root_status,
+            )
+        };
+        let prior_roots = match &host.sleep {
+            Sleep::Suspended(snapshot) => snapshot.roots.clone(),
+            _ => panic!("actual suspend snapshot required"),
+        };
+        let prior_slots: Vec<_> = host
+            .controller
+            .borrow()
+            .slots
+            .iter()
+            .map(|slot| slot.as_ref().map(|slot| (slot.retiring, slot.suspended)))
+            .collect();
+        host.controller.borrow_mut().clock.ticks_per_microsecond = rate;
+        let refused = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
+        assert_eq!(refused.added.failures.len(), 1);
+        assert!(refused.added.devices.is_empty() && refused.removed.is_empty());
+        match &host.sleep {
+            Sleep::Suspended(snapshot) => assert_eq!(snapshot.roots, prior_roots),
+            _ => panic!("pure timing refusal lost original private snapshot"),
+        }
+        let after = {
+            let bus = hardware.borrow();
+            (
+                bus.mmio_reads,
+                bus.mmio_writes,
+                bus.commands.clone(),
+                bus.requests.clone(),
+                bus.root_status,
+            )
+        };
+        assert_eq!(before, after);
+        let current_slots: Vec<_> = host
+            .controller
+            .borrow()
+            .slots
+            .iter()
+            .map(|slot| slot.as_ref().map(|slot| (slot.retiring, slot.suspended)))
+            .collect();
+        assert_eq!(current_slots, prior_slots);
+        assert_eq!(state.borrow().restore, 0);
+        host.controller.borrow_mut().clock.ticks_per_microsecond = 1;
+        let mut resumed = host.resume(&mut dma, &crate::firmware::HandoffProvider::new(None));
+        assert!(
+            resumed.added.failures.is_empty(),
+            "{:?}",
+            resumed.added.failures
+        );
+        assert!(host.sleep.awake());
+        assert_eq!(state.borrow().restore, 1);
+        assert_eq!(resumed.added.disks.len(), 1);
+        let mut actual = [0; 512];
+        resumed.added.disks[0].read(3, &mut actual).unwrap();
+        assert_eq!(actual, payload);
+        assert!(original.disks[0].read(3, &mut actual).is_err());
+    }
+}
+
+fn bind_root_disk(host: &Host, devices: &[Device], dma: &mut RegionAllocator) -> Found {
+    assert_eq!(devices.len(), 1);
+    let mut found = Found::default();
+    crate::usb::xhci::bind::bind(&host.controller, devices[0].clone(), dma, &mut found);
+    assert!(found.failures.is_empty(), "{:?}", found.failures);
+    assert_eq!(found.disks.len(), 1);
+    found
 }
 
 type Fixture = (

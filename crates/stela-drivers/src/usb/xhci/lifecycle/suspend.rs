@@ -5,6 +5,7 @@
 //! xhci_bus_suspend/xhci_bus_resume provide the physical ordering. Canceled
 //! class TDs are never replayed: resume resets and publishes fresh generations.
 use super::*;
+mod time;
 
 const LINK_STROBE: u32 = 1 << 16;
 const LINK_CHANGE: u32 = 1 << 22;
@@ -12,8 +13,10 @@ const OVER_CURRENT: u32 = 1 << 3;
 const U3: u32 = 3;
 const RESUME: u32 = 15;
 const SUSPEND_SETTLE_US: u64 = 10_000;
-const RESUME_SIGNAL_US: u64 = 20_000;
+// xhci_bus_resume uses include/linux/usb.h USB_RESUME_TIMEOUT, 40ms.
+const RESUME_SIGNAL_US: u64 = 40_000;
 const LINK_TIMEOUT_US: u64 = 100_000;
+const RESUME_LINK_TIMEOUT_US: u64 = 10_000;
 const RESUME_RECOVERY_US: u64 = 10_000;
 
 #[derive(Default)]
@@ -47,6 +50,13 @@ impl Host {
                 "USB suspend".into(),
                 BlockError::Unsupported("USB topology is already suspended or failed"),
             ));
+            return changes;
+        }
+        if let Err(error) = time::check(self.controller.borrow().clock) {
+            changes
+                .added
+                .failures
+                .push(("USB suspend timing".into(), error));
             return changes;
         }
         self.reconcile(&mut changes);
@@ -139,7 +149,7 @@ impl Host {
             c.root_link_write(port, actual, U3, LINK_CHANGE);
             c.wait_root_link(port, before, U3, false)?;
         }
-        c.clock.delay(SUSPEND_SETTLE_US);
+        time::delay(c.clock, SUSPEND_SETTLE_US)?;
         c.suspend_controller()?;
         for hub in &mut self.hubs {
             hub.pending = None;
@@ -157,6 +167,15 @@ impl Host {
         firmware: &dyn crate::firmware::Provider,
     ) -> Changes {
         let mut changes = Changes::default();
+        if matches!(&self.sleep, Sleep::Suspended(_))
+            && let Err(error) = time::check(self.controller.borrow().clock)
+        {
+            changes
+                .added
+                .failures
+                .push(("USB resume timing".into(), error));
+            return changes;
+        }
         let previous = core::mem::replace(&mut self.sleep, Sleep::Failed);
         let Sleep::Suspended(snapshot) = previous else {
             self.sleep = previous;
@@ -243,6 +262,7 @@ impl Host {
 
     fn restore_suspend(&mut self, snapshot: &Snapshot) -> Result<(), BlockError> {
         let mut c = self.controller.borrow_mut();
+        time::check(c.clock)?;
         c.validate_suspend_snapshot(snapshot)?;
         c.resume_controller()?;
         for &(port, before) in &snapshot.roots {
@@ -257,7 +277,7 @@ impl Host {
             let usb2 = c.port_major[usize::from(port - 1)] == 2;
             c.root_link_write(port, actual, if usb2 { RESUME } else { 0 }, LINK_CHANGE);
             if usb2 {
-                c.clock.delay(RESUME_SIGNAL_US);
+                time::delay(c.clock, RESUME_SIGNAL_US)?;
                 let actual = c.read_suspend_port(port);
                 root_session(before, actual)?;
                 c.root_link_write(port, actual, 0, LINK_CHANGE);
@@ -266,7 +286,7 @@ impl Host {
             let actual = c.read_suspend_port(port);
             c.root_link_write(port, actual, 0, LINK_CHANGE);
         }
-        c.clock.delay(RESUME_RECOVERY_US);
+        time::delay(c.clock, RESUME_RECOVERY_US)?;
         // Restore parents before sending controls through their EP0 to children.
         for &(id, attachment) in snapshot.topology.iter().rev() {
             if !c.known_id(id)
@@ -376,7 +396,14 @@ impl Controller {
         link: u32,
         change: bool,
     ) -> Result<(), BlockError> {
-        let deadline = self.clock.deadline(LINK_TIMEOUT_US);
+        let deadline = time::Deadline::new(
+            self.clock,
+            if change {
+                RESUME_LINK_TIMEOUT_US
+            } else {
+                LINK_TIMEOUT_US
+            },
+        )?;
         loop {
             self.ready()?;
             let actual = self.read_suspend_port(port);
@@ -387,7 +414,7 @@ impl Controller {
             if deadline.passed() {
                 return Err(BlockError::Timeout);
             }
-            self.clock.delay(100);
+            time::delay(self.clock, 100)?;
         }
     }
 

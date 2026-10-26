@@ -8,9 +8,9 @@
 use super::*;
 
 pub(super) struct Resources {
-    pub(super) output: DmaBuffer,
-    pub(super) input: DmaBuffer,
-    pub(super) control: DmaBuffer,
+    pub(super) output: memory::Buffer,
+    pub(super) input: memory::Buffer,
+    pub(super) control: memory::Buffer,
     pub(super) ring: Ring,
 }
 
@@ -168,23 +168,23 @@ impl Cache {
         let mut all = Vec::new();
         for state in self.slots.iter().flatten() {
             all.extend([
-                (state.input.physical(), state.input.len()),
-                (state._output.physical(), state._output.len()),
-                (state.control.physical(), state.control.len()),
+                (state.input.device_address(), state.input.len()),
+                (state._output.device_address(), state._output.len()),
+                (state.control.device_address(), state.control.len()),
             ]);
             for ep in state.endpoints.iter().flatten() {
-                all.push((ep.ring.buffer.physical(), ep.ring.buffer.len()));
+                all.push((ep.ring.buffer.device_address(), ep.ring.buffer.len()));
                 if let Some(streams) = &ep.streams {
                     all.extend(streams.allocation_geometry());
                 }
             }
             for ring in state.retired_rings.iter().flatten() {
-                all.push((ring.buffer.physical(), ring.buffer.len()));
+                all.push((ring.buffer.device_address(), ring.buffer.len()));
             }
         }
         for endpoints in &self.endpoints {
             for ep in endpoints.iter().flatten() {
-                all.push((ep.ring.buffer.physical(), ep.ring.buffer.len()));
+                all.push((ep.ring.buffer.device_address(), ep.ring.buffer.len()));
                 if let Some(streams) = &ep.streams {
                     all.extend(streams.allocation_geometry());
                 }
@@ -192,7 +192,7 @@ impl Cache {
         }
         for rings in &self.rings {
             for ring in rings.iter().flatten() {
-                all.push((ring.buffer.physical(), ring.buffer.len()));
+                all.push((ring.buffer.device_address(), ring.buffer.len()));
             }
         }
         all.sort_unstable();
@@ -295,12 +295,10 @@ impl Controller {
         }
         let context = self.context();
         Ok(Resources {
-            output: self.dma_profile.allocate(dma, 32 * context, 64)?,
-            input: self.dma_profile.allocate(dma, 33 * context, 64)?,
-            control: self
-                .dma_profile
-                .allocate(dma, CONTROL_BYTES, CONTROL_BYTES)?,
-            ring: Ring::with_profile(dma, self.dma_profile)?,
+            output: self.allocate(dma, 32 * context, 64)?,
+            input: self.allocate(dma, 33 * context, 64)?,
+            control: self.allocate(dma, CONTROL_BYTES, CONTROL_BYTES)?,
+            ring: self.allocate_ring(dma)?,
         })
     }
 }

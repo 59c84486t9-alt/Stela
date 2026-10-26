@@ -78,6 +78,7 @@ fn unpublished_profile(
         uas_abort: abort_peer::State::default(),
     }));
     let mut controller = Controller {
+        native_memory: None,
         registers: Box::new(Model(hardware.clone())),
         clock: Clock {
             ticks_per_microsecond: 1,
@@ -95,11 +96,11 @@ fn unpublished_profile(
         max_slots,
         max_ports: 1,
         port_major: vec![if speed >= SUPER_SPEED { 3 } else { 2 }],
-        dcbaa,
+        dcbaa: dcbaa.into(),
         _scratchpads: Vec::new(),
         commands,
-        events,
-        _event_table: dma.allocate(16, 64).unwrap(),
+        events: events.into(),
+        _event_table: dma.allocate(16, 64).unwrap().into(),
         event_index: 0,
         event_cycle: true,
         slots: core::iter::repeat_with(|| None)
@@ -305,7 +306,7 @@ fn generations(kind: Kind) {
                     assert_eq!(
                         c.device(current)
                             .unwrap()
-                            .transfer(2, command.physical(), 32, 1000),
+                            .transfer(2, command.physical(), 32, 50_000_000),
                         Ok(32)
                     );
                     c.device(current)

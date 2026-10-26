@@ -50,8 +50,8 @@ impl Controller {
                 "USB2 split endpoint has no Configure ACK",
             ));
         }
-        let word0 = state._output.read::<u32>(usize::from(dci) * context);
-        let word1 = state._output.read::<u32>(usize::from(dci) * context + 4);
+        let word0 = state._output.coherent_u32(usize::from(dci) * context)?;
+        let word1 = state._output.coherent_u32(usize::from(dci) * context + 4)?;
         let kind = word1 >> ENDPOINT_TYPE_SHIFT & ENDPOINT_TYPE_MASK;
         // TT buffer recovery is for control/bulk, never interrupt/isochronous.
         if matches!(kind, 1 | 3 | 5 | 7) {
@@ -71,7 +71,7 @@ impl Controller {
                 "USB2 TT clear requires acknowledged endpoint stop",
             ));
         }
-        let address = state._output.read::<u32>(12) & DEVICE_ADDRESS_MASK;
+        let address = state._output.coherent_u32(12)? & DEVICE_ADDRESS_MASK;
         if address == 0 {
             return Err(BlockError::Unsupported(
                 "USB2 TT clear requires actual addressed slot context",

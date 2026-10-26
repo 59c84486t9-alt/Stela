@@ -114,7 +114,7 @@ impl Controller {
                 if !endpoint.enabled
                     || endpoint.poisoned
                     || endpoint.in_flight != 0
-                    || state._output.read::<u32>(dci * self.context()) & 7 != ENDPOINT_STOPPED
+                    || state._output.coherent_u32(dci * self.context())? & 7 != ENDPOINT_STOPPED
                 {
                     return Err(BlockError::Unsupported(
                         "USB suspend requires acknowledged subtree endpoint stops",

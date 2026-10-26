@@ -78,12 +78,12 @@ fn superspeed_cold_hub_uses_actual_contexts_depth_power_routes_and_bulk_io() {
         let mut payload = dma.allocate(64, 64).unwrap();
         payload.bytes_mut().fill(0xee);
         assert_eq!(
-            controller.transfer(child.slot, 3, payload.physical(), 64, 1000),
+            controller.transfer(child.slot, 3, payload.physical(), 64, 50_000_000),
             Ok(64)
         );
         assert_eq!(payload.bytes(), &[child.slot; 64]);
         assert_eq!(
-            controller.transfer(child.slot, 4, payload.physical(), 64, 1000),
+            controller.transfer(child.slot, 4, payload.physical(), 64, 50_000_000),
             Ok(64)
         );
         assert_eq!(model.borrow().outgoing, [vec![child.slot; 64]]);
@@ -591,7 +591,7 @@ fn failed_later_port_preserves_prior_child_dma_and_does_not_authorize_behind_hub
         .unwrap();
     let payload = dma.allocate(64, 64).unwrap();
     assert_eq!(
-        controller.transfer(child.slot, 3, payload.physical(), 64, 1000),
+        controller.transfer(child.slot, 3, payload.physical(), 64, 50_000_000),
         Ok(64)
     );
     let commands = model.borrow().commands.len();
@@ -609,7 +609,7 @@ fn failed_later_port_preserves_prior_child_dma_and_does_not_authorize_behind_hub
     assert_eq!(model.borrow().commands.len(), commands);
     assert!(controller.live_slot(child.slot).is_ok());
     assert_eq!(
-        controller.transfer(child.slot, 3, payload.physical(), 64, 1000),
+        controller.transfer(child.slot, 3, payload.physical(), 64, 50_000_000),
         Ok(64)
     );
     let old_output = controller.slot(child.slot).unwrap()._output.physical();

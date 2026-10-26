@@ -200,11 +200,12 @@ impl Controller {
                 }
                 let streamed = stream_endpoints.contains(&endpoint.address);
                 let stream = if streamed {
-                    Some(streams::Streams::new(
+                    Some(streams::Streams::with_memory(
                         dma,
                         layout.unwrap(),
                         self.dma_profile,
                         self.stream_policy == streams::Policy::Cadence,
+                        self.native_memory.as_ref(),
                     )?)
                 } else {
                     None
@@ -216,7 +217,7 @@ impl Controller {
                 };
                 let ring = match retained {
                     Some(ring) => ring,
-                    None => Ring::with_profile(dma, self.dma_profile)?,
+                    None => self.allocate_ring(dma)?,
                 };
                 Ok((ring, stream))
             })();
@@ -295,7 +296,7 @@ impl Controller {
             for (n, word) in words.iter().enumerate() {
                 state.input.write(context + 4 * n, *word);
             }
-            state.input.physical()
+            state.input.device_address()
         };
         let result = self.command(
             input_address,
@@ -541,8 +542,8 @@ mod tests {
                 let slot = controller.slots[1].as_mut().unwrap();
                 slot.speed = speed;
                 slot.context[0] = slot.context[0] & !(15 << 20) | u32::from(speed) << 20;
-                slot.input = dma.allocate(33 * context, 64).unwrap();
-                slot._output = dma.allocate(32 * context, 64).unwrap();
+                slot.input = dma.allocate(33 * context, 64).unwrap().into();
+                slot._output = dma.allocate(32 * context, 64).unwrap().into();
                 model.borrow_mut().output = slot._output.physical();
                 model.borrow_mut().context_bytes = context;
                 model.borrow_mut().set_state(1, 1);

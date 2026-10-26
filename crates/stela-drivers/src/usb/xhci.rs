@@ -76,8 +76,10 @@ mod hub;
 mod identity;
 mod iso;
 mod lifecycle;
+mod memory;
 #[cfg(test)]
 pub(crate) mod model;
+pub mod native;
 mod power;
 mod quirks;
 pub mod renesas;
@@ -373,8 +375,8 @@ struct Slot {
     suspended: bool,
     attachment: Attachment,
     retiring: bool,
-    input: DmaBuffer,
-    _output: DmaBuffer,
+    input: memory::Buffer,
+    _output: memory::Buffer,
     /// The slot context as software last set it.
     context: [u32; 4],
     endpoints: [Option<Transfer>; 32],
@@ -382,7 +384,7 @@ struct Slot {
     /// Preserve the acknowledged producer pointer/cycle rather than restarting
     /// at an old TRB address or recycling the caller's backing DMA arena.
     retired_rings: [Option<Ring>; 32],
-    control: DmaBuffer,
+    control: memory::Buffer,
     speed: u8,
     /// None after an unresolved SET_CONFIGURATION; Some(0) is Address state.
     current_configuration: Option<u8>,
@@ -421,11 +423,12 @@ pub struct Controller {
     /// capabilities.
     port_major: Vec<u8>,
     power: power::Ledger,
-    dcbaa: DmaBuffer,
-    _scratchpads: Vec<DmaBuffer>,
+    native_memory: Option<Rc<memory::Native>>,
+    dcbaa: memory::Buffer,
+    _scratchpads: Vec<memory::Buffer>,
     commands: Ring,
-    events: DmaBuffer,
-    _event_table: DmaBuffer,
+    events: memory::Buffer,
+    _event_table: memory::Buffer,
     event_index: usize,
     event_cycle: bool,
     slots: Vec<Option<Slot>>,
@@ -481,13 +484,26 @@ impl Controller {
     }
 
     fn with_hardware_profile(
-        mut registers: Box<dyn Registers>,
+        registers: Box<dyn Registers>,
         clock: Clock,
         dma: &mut dyn DmaAllocator,
         location: String,
         policy: hardware::Policy,
         after_reset: impl FnOnce() -> Result<(), BlockError>,
     ) -> Result<Self, BlockError> {
+        Self::with_memory_profile(registers, clock, dma, location, policy, after_reset, None)
+    }
+
+    fn with_memory_profile(
+        mut registers: Box<dyn Registers>,
+        clock: Clock,
+        dma: &mut dyn DmaAllocator,
+        location: String,
+        policy: hardware::Policy,
+        after_reset: impl FnOnce() -> Result<(), BlockError>,
+        native_memory: Option<Rc<memory::Native>>,
+    ) -> Result<Self, BlockError> {
+        clock_ready(clock)?;
         let profile = policy.dma;
         let capability = registers.read32(0);
         let operational = (capability & 0xff) as usize;
@@ -574,7 +590,9 @@ impl Controller {
                 "xHCI controller without 4 KiB pages",
             ));
         }
-        let mut allocate = |bytes: usize, align: usize| profile.allocate(dma, bytes, align);
+        let mut allocate = |bytes: usize, align: usize| {
+            profile.allocate_memory(dma, bytes, align, native_memory.as_ref())
+        };
         registers.write32(operational + CONFIG, max_slots as u32);
         let mut dcbaa = allocate((max_slots + 1) * 8, 64)?;
         let scratchpad_count =
@@ -584,25 +602,40 @@ impl Controller {
             let mut array = allocate(scratchpad_count * 8, 64)?;
             for n in 0..scratchpad_count {
                 let page = allocate(4096, 4096)?;
-                array.write(n * 8, page.physical());
+                array.write(n * 8, page.device_address());
                 scratchpads.push(page);
             }
-            dcbaa.write(0, array.physical());
+            dcbaa.write(0, array.device_address());
             scratchpads.push(array);
         }
-        let commands = Ring::with_profile(dma, profile)?;
-        let events = profile.allocate(dma, profile.segment_bytes(), profile.segment_bytes())?;
-        let mut event_table = profile.allocate(dma, 16, 64)?;
-        event_table.write(0, events.physical());
+        let commands = Ring::with_memory(dma, profile, native_memory.as_ref())?;
+        let events = profile.allocate_memory(
+            dma,
+            profile.segment_bytes(),
+            profile.segment_bytes(),
+            native_memory.as_ref(),
+        )?;
+        let mut event_table = profile.allocate_memory(dma, 16, 64, native_memory.as_ref())?;
+        event_table.write(0, events.device_address());
         event_table.write(8, RING_TRBS as u32);
+        dcbaa.sync_dirty()?;
+        for buffer in &scratchpads {
+            buffer.sync_dirty()?;
+        }
+        commands.buffer.sync_dirty()?;
+        events.sync_dirty()?;
+        event_table.sync_dirty()?;
+        // Native coherent polling must be qualified by the actual domain
+        // before publishing any controller pointer or starting DMA.
+        events.coherent_u32(12)?;
         // All buffers satisfy the same immutable aperture before any pointer
         // register is published, including the event and command segments.
-        registers.write64(operational + DCBAAP, dcbaa.physical());
+        registers.write64(operational + DCBAAP, dcbaa.device_address());
         registers.write64(operational + CRCR, commands.dequeue_pointer());
         registers.write32(runtime + IMAN, 1); // clear IP; IE stays off
         registers.write32(runtime + ERSTSZ, 1);
-        registers.write64(runtime + ERDP, events.physical());
-        registers.write64(runtime + ERSTBA, event_table.physical());
+        registers.write64(runtime + ERDP, events.device_address());
+        registers.write64(runtime + ERSTBA, event_table.device_address());
         hardware::start(&mut *registers, clock, operational)?;
         let iso_caps =
             iso::Capabilities::new((capability >> 16) as u16, parameters2, capabilities1);
@@ -629,6 +662,7 @@ impl Controller {
             max_slots,
             max_ports,
             port_major,
+            native_memory,
             dcbaa,
             _scratchpads: scratchpads,
             commands,
@@ -648,6 +682,33 @@ impl Controller {
         })
     }
 
+    fn sync_command_buffers(&self) -> Result<(), BlockError> {
+        self.dcbaa.sync_dirty()?;
+        for state in self.slots.iter().flatten() {
+            state.input.sync_dirty()?;
+            for endpoint in state.endpoints.iter().flatten() {
+                if let Some(streams) = &endpoint.streams {
+                    streams.sync_device()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn allocate(
+        &self,
+        dma: &mut dyn DmaAllocator,
+        bytes: usize,
+        align: usize,
+    ) -> Result<memory::Buffer, BlockError> {
+        self.dma_profile
+            .allocate_memory(dma, bytes, align, self.native_memory.as_ref())
+    }
+
+    fn allocate_ring(&self, dma: &mut dyn DmaAllocator) -> Result<Ring, BlockError> {
+        Ring::with_memory(dma, self.dma_profile, self.native_memory.as_ref())
+    }
+
     fn doorbell(&mut self, slot: u8, target: u8) {
         fence(Ordering::SeqCst);
         self.registers
@@ -657,11 +718,25 @@ impl Controller {
     /// The next event on the ring, if the controller has posted one.
     fn next_event(&mut self) -> Option<Event> {
         let at = self.event_index * TRB;
-        let control: u32 = self.events.read(at + 12);
+        let control = match self.events.coherent_u32(at + 12) {
+            Ok(control) => control,
+            Err(_) => {
+                self.command_poisoned = true;
+                self.hardware = hardware::State::Failed;
+                return None;
+            }
+        };
         if (control & CYCLE != 0) != self.event_cycle {
             return None;
         }
         fence(Ordering::Acquire);
+        // SAFETY: this exact TRB's observed Cycle grants software ownership.
+        // The controller cannot reuse it until the later ERDP publication.
+        if unsafe { self.events.sync_cpu(at..at + TRB) }.is_err() {
+            self.command_poisoned = true;
+            self.hardware = hardware::State::Failed;
+            return None;
+        }
         let event = Event {
             parameter: self.events.read(at),
             status: self.events.read(at + 8),
@@ -672,7 +747,7 @@ impl Controller {
             self.event_index = 0;
             self.event_cycle = !self.event_cycle;
         }
-        let dequeue = self.events.physical() + (self.event_index * TRB) as u64;
+        let dequeue = self.events.device_address() + (self.event_index * TRB) as u64;
         self.registers.write64(self.runtime + ERDP, dequeue | EHB);
         Some(event)
     }
@@ -726,9 +801,15 @@ impl Controller {
         microseconds: u64,
         wanted: impl Fn(&Event) -> bool,
     ) -> Result<Event, BlockError> {
-        let deadline = self.clock.deadline(microseconds);
+        let deadline = self.clock.try_deadline(microseconds).map_err(|_| {
+            BlockError::Unsupported("xHCI event timeout clock unavailable or duration out of range")
+        })?;
         loop {
             self.drain();
+            if let Some(memory) = &self.native_memory {
+                memory.ready()?;
+            }
+            self.hardware.ready()?;
             if let Some(event) = self.take(&wanted) {
                 return Ok(event);
             }
@@ -747,6 +828,9 @@ impl Controller {
     /// completion cannot establish a new command generation or undo poison.
     fn ready(&mut self) -> Result<(), BlockError> {
         self.hardware.ready()?;
+        if let Some(memory) = &self.native_memory {
+            memory.ready()?;
+        }
         self.drain();
         if let Some(status) = self.error {
             self.command_poisoned = true;
@@ -762,7 +846,8 @@ impl Controller {
 
     fn command(&mut self, parameter: u64, status: u32, control: u32) -> Result<Event, BlockError> {
         self.ready()?;
-        let address = self.commands.push(&[(parameter, status, control)])[0];
+        self.sync_command_buffers()?;
+        let address = self.commands.push(&[(parameter, status, control)])?[0];
         self.doorbell(0, 0);
         let event = match self.wait_event(COMMAND_US, |e| {
             e.kind() == COMMAND_COMPLETION && e.parameter == address
@@ -815,6 +900,14 @@ impl Controller {
         input.bytes_mut()[..bytes.min(33 * context)].fill(0);
         Ok(())
     }
+}
+
+/// All fixed controller/port waits fit this interval. Caller-supplied budgets
+/// also pass fallible admission at their actual submission boundary.
+fn clock_ready(clock: Clock) -> Result<(), BlockError> {
+    clock
+        .check_duration(60_000_000)
+        .map_err(|_| BlockError::Unsupported("xHCI requires an available calibrated clock"))
 }
 
 /// Polls `ready` against the registers until it holds or time runs out.
@@ -905,6 +998,7 @@ pub fn attach_with_firmware_diagnostics(
     dma: &mut dyn DmaAllocator,
     firmware: &dyn crate::firmware::Provider,
 ) -> Result<Found, renesas::Error> {
+    clock_ready(handoff.clock)?;
     let stream_policy = streams::pci_policy(function)?;
     let dma_profile = dma::Profile::pci(function.vendor, function.device);
     let quirks = quirks::Profile::pci(function)?;
@@ -1013,6 +1107,45 @@ mod tests {
     use super::model::*;
     use super::*;
     use crate::bus::dma::RegionAllocator;
+
+    #[test]
+    fn unavailable_native_clock_refuses_before_any_controller_register_or_dma_effect() {
+        struct Trap;
+        impl Registers for Trap {
+            fn read32(&mut self, _: usize) -> u32 {
+                panic!("unavailable clock read controller")
+            }
+            fn write32(&mut self, _: usize, _: u32) {
+                panic!("unavailable clock wrote controller")
+            }
+        }
+        impl DmaAllocator for Trap {
+            fn allocate(&mut self, _: usize, _: usize) -> Result<DmaBuffer, BlockError> {
+                panic!("unavailable clock allocated DMA")
+            }
+        }
+        for rate in [
+            0,
+            u64::MAX,
+            u64::MAX / 60_000_000 + 1,
+            (u64::MAX / 2) / 60_000_000 + 1,
+        ] {
+            let result = Controller::new(
+                Box::new(Trap),
+                Clock {
+                    ticks_per_microsecond: rate,
+                },
+                &mut Trap,
+                "unavailable-clock owner".into(),
+            );
+            assert!(matches!(
+                result,
+                Err(BlockError::Unsupported(
+                    "xHCI requires an available calibrated clock"
+                ))
+            ));
+        }
+    }
 
     #[test]
     fn completion_codes_are_named() {
