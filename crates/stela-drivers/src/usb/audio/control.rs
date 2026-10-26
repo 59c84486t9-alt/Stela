@@ -68,7 +68,7 @@ pub(super) fn access(bits: u32, selector: u8) -> Result<(bool, bool), Error> {
         _ => Err(Error::Descriptor("reserved control access")),
     }
 }
-fn get<C: Control>(
+pub(super) fn get<C: Control>(
     io: &mut C,
     interface: u8,
     entity: u8,
@@ -92,7 +92,7 @@ fn get<C: Control>(
     }
     Ok(reply)
 }
-fn set<C: Control>(
+pub(super) fn set<C: Control>(
     io: &mut C,
     interface: u8,
     entity: u8,
@@ -348,7 +348,13 @@ impl Graph {
             io.relax();
         }
     }
-    fn feature(&self, id: u8, channel: u8, selector: u8, write: bool) -> Result<(), Error> {
+    pub(super) fn feature(
+        &self,
+        id: u8,
+        channel: u8,
+        selector: u8,
+        write: bool,
+    ) -> Result<(), Error> {
         let Entity::Feature { controls, .. } = self.entity(id)? else {
             return Err(Error::Descriptor("not a feature unit"));
         };

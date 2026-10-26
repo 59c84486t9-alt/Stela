@@ -25,6 +25,8 @@ pub use uac1::EndpointRates;
 
 mod control;
 mod descriptors;
+mod feature;
+pub use feature::{FeatureControl, FeatureRange, FeatureValue};
 mod mixer;
 mod native;
 mod packet;

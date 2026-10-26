@@ -583,6 +583,40 @@ impl<T: Transport> AudioDevice<T> {
             .graph
             .set_volume(&mut self.transport, entity, channel, volume_db256)
     }
+    pub fn feature_value(
+        &mut self,
+        entity: u8,
+        channel: u8,
+        feature: super::FeatureControl,
+    ) -> Result<super::FeatureValue, Error> {
+        self.ready()?;
+        self.binding
+            .graph
+            .feature_value(&mut self.transport, entity, channel, feature)
+    }
+    pub fn feature_ranges(
+        &mut self,
+        entity: u8,
+        channel: u8,
+        feature: super::FeatureControl,
+    ) -> Result<Vec<super::FeatureRange>, Error> {
+        self.ready()?;
+        self.binding
+            .graph
+            .feature_ranges(&mut self.transport, entity, channel, feature)
+    }
+    pub fn set_feature_value(
+        &mut self,
+        entity: u8,
+        channel: u8,
+        feature: super::FeatureControl,
+        value: super::FeatureValue,
+    ) -> Result<(), Error> {
+        self.ready()?;
+        self.binding
+            .graph
+            .set_feature_value(&mut self.transport, entity, channel, feature, value)
+    }
     pub fn mixer_volume(&mut self, entity: u8, input: u8, output: u8) -> Result<i16, Error> {
         self.ready()?;
         self.binding

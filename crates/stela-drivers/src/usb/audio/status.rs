@@ -171,9 +171,13 @@ impl StatusPlan {
             Entity::ClockSelector { controls, .. } | Entity::Selector { controls, .. } => {
                 channel == 0 && access(u32::from(*controls), 1)
             }
-            Entity::Feature { controls, .. } if selector <= 2 => controls
-                .get(usize::from(channel))
-                .is_some_and(|bits| access(*bits, 16)),
+            Entity::Feature { controls, .. }
+                if selector <= 2 || super::FeatureControl::from_selector(selector).is_some() =>
+            {
+                controls
+                    .get(usize::from(channel))
+                    .is_some_and(|bits| access(*bits, 16))
+            }
             // Terminal bmControls and memory-space authority are not retained in
             // the current graph. Mixer MCN uses a different address convention.
             _ => return Err(Error::Unsupported("UAC2 status entity control layout")),
@@ -185,7 +189,8 @@ impl StatusPlan {
         }
         let range_supported = matches!(self.graph.entity(raw[5])?,
             Entity::ClockSource { .. } if selector == 1)
-            || matches!(self.graph.entity(raw[5])?, Entity::Feature { .. } if selector == 2);
+            || matches!(self.graph.entity(raw[5])?, Entity::Feature { .. }
+                if selector == 2 || super::FeatureControl::from_selector(selector).is_some_and(|feature| feature.has_range()));
         if attribute == StatusAttribute::Range && !range_supported {
             return Err(Error::Unsupported("UAC2 status RANGE on CUR-only control"));
         }

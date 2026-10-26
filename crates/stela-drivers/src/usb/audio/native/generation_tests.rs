@@ -128,6 +128,20 @@ pub(crate) fn refuse(peer: &mut Peer, target: &Shared) {
     refused!(peer.owner.start_capture(0, 48_000));
     let mut output = [0xa5; 192];
     refused!(peer.owner.read_capture(&mut output));
+    refused!(
+        peer.owner
+            .feature_value(2, 0, crate::usb::audio::FeatureControl::Bass)
+    );
+    refused!(
+        peer.owner
+            .feature_ranges(2, 0, crate::usb::audio::FeatureControl::Delay)
+    );
+    refused!(peer.owner.set_feature_value(
+        2,
+        0,
+        crate::usb::audio::FeatureControl::AutomaticGain,
+        crate::usb::audio::FeatureValue::Enabled(true)
+    ));
     assert_eq!(output, [0xa5; 192]);
     refused!(peer.owner.poll());
     refused!(peer.owner.stop_playback());

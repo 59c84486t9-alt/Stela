@@ -425,6 +425,51 @@ fn actual_descriptor_advertised_clock_selector_multiplier_and_feature_attributes
 }
 
 #[test]
+fn actual_scalar_feature_status_accepts_advertised_cur_and_numeric_range_only() {
+    let mut raw = configuration();
+    let at = raw
+        .windows(5)
+        .position(|d| d == [18, 0x24, 6, 2, 1])
+        .unwrap();
+    for channel in 0..3 {
+        raw[at + 5 + channel * 4..at + 9 + channel * 4]
+            .copy_from_slice(&0x03ff_ffffu32.to_le_bytes());
+    }
+    let mut backing = memory();
+    let mut dma = allocator(&mut backing);
+    let (audio, model, _) = peer_configuration(&mut dma, &raw);
+    let mut owner = audio.status_notifications(&mut dma).unwrap().unwrap();
+    owner.start().unwrap();
+    for selector in [3, 4, 5, 7, 8, 9, 10, 11, 12, 13] {
+        let attributes: &[u8] = if [7, 9, 10, 13].contains(&selector) {
+            &[1]
+        } else {
+            &[1, 2]
+        };
+        for &attribute in attributes {
+            let notice = [0, attribute, 2, selector, 0, 2];
+            model
+                .borrow_mut()
+                .incoming_events
+                .push_back(notice.to_vec());
+            assert_eq!(owner.poll().unwrap(), 1);
+            assert_eq!(owner.next_notice().unwrap().unwrap().raw, notice);
+            assert_eq!(owner.poll().unwrap(), 0);
+        }
+    }
+    for selector in [7, 9, 10, 13] {
+        model
+            .borrow_mut()
+            .incoming_events
+            .push_back(vec![0, 1, 0, 3, 0, 2, 0, 2, 0, selector, 0, 2]);
+        assert!(owner.poll().is_err());
+        assert_eq!(owner.next_event().unwrap(), None);
+        assert_eq!(owner.poll().unwrap(), 0);
+    }
+    owner.stop().unwrap();
+}
+
+#[test]
 fn dropping_pending_owner_retains_boot_dma_and_cannot_mint_replacement_authority() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
