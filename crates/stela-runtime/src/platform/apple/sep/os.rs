@@ -152,12 +152,18 @@ impl SepOs {
         Ok(self)
     }
 
-    /// Drain the observed `sks`/`pnon`/`scrd` traffic recorded this run.
+    /// Drain observed traffic and sanitized unsupported system-key metadata.
+    /// The latter is available without enabling raw traffic observation.
     pub fn observations(&mut self) -> Vec<String> {
-        self.observe
+        let mut lines: Vec<_> = self
+            .observe
             .as_mut()
             .map(|journal| journal.drain().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(services) = self.services.as_mut() {
+            lines.extend(services.keystore.diagnostics());
+        }
+        lines
     }
 
     /// The xART service state, when installed.
@@ -1036,6 +1042,36 @@ mod tests {
         assert_eq!(ram.bytes[0x8000 + 88..0x8000 + 92], 65u32.to_le_bytes());
         p256::PublicKey::from_sec1_bytes(&ram.bytes[0x8000 + 92..0x8000 + 157]).unwrap();
         assert_eq!(&ram.bytes[0x8000 + 157..0x8000 + 160], &[0; 3]);
+    }
+
+    #[test]
+    fn unsupported_system_key_metadata_drains_without_raw_observation() {
+        let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+        os.set_strict(false);
+        map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
+        register(&mut os, keystore::ID, 0x8000, 0x8000);
+        let request =
+            keystore::tests::system_request_with_operation(2, 7, keystore::tests::SIK_QUERY);
+        let frame = Frame {
+            service: keystore::ID,
+            tag: 0x22,
+            opcode: 17,
+            parameter: 0,
+            data: (request.len() as u32) << 16,
+        };
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        ram.bytes[..request.len()].copy_from_slice(&request);
+        assert!(reply(&mut os, frame).unwrap().is_empty());
+        let (result, outbox) = dma_step(&mut os, &mut ram);
+        assert!(result.is_err());
+        assert_eq!(outbox, [keystore::failure(frame)]);
+        assert!(os.observe.is_none());
+        let lines = os.observations();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("operation=Some(7)"));
+        assert!(lines[0].contains("parameter_operation=oskgp"));
+        assert!(!lines[0].contains("input="));
+        assert!(os.observations().is_empty());
     }
 
     #[test]

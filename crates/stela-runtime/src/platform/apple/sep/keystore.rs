@@ -60,9 +60,10 @@ mod system_key;
 use super::{
     endpoint::Service,
     message::Frame,
+    observe::Journal,
     transaction::{Answer, Payload, Refusal},
 };
-use alloc::{vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -134,6 +135,7 @@ pub struct Environment {
 pub struct KeyStore {
     environment: Option<Environment>,
     system_keys: Option<system_key::SystemKeys>,
+    diagnostics: Journal,
 }
 
 impl KeyStore {
@@ -141,11 +143,18 @@ impl KeyStore {
         Self {
             environment: None,
             system_keys: Some(system_key::SystemKeys::new(root)),
+            diagnostics: Journal::default(),
         }
     }
 
     pub fn environment(&self) -> Option<Environment> {
         self.environment
+    }
+
+    /// Drain bounded, value-free metadata for unsupported system-key requests.
+    /// Independent of opt-in raw traffic observation.
+    pub(super) fn diagnostics(&mut self) -> impl Iterator<Item = String> + '_ {
+        self.diagnostics.drain()
     }
 
     /// Answer one AP request: read its message, write the reply message
@@ -175,8 +184,16 @@ impl KeyStore {
         let message = Message::parse(&bytes).map_err(refuse)?;
         let mut fields = message.fields();
         if command == system_key::PERFORM_OPERATION {
-            let operation =
-                system_key::public_query(message.variant(), &mut fields).map_err(refuse)?;
+            let operation = match system_key::public_query(message.variant(), &mut fields) {
+                Ok(operation) => operation,
+                Err(reason) => {
+                    self.diagnostics.record(system_key::diagnostic(
+                        message.variant(),
+                        &mut message.fields(),
+                    ));
+                    return Err(refuse(reason));
+                }
+            };
             let keys = self
                 .system_keys
                 .as_mut()
@@ -423,19 +440,122 @@ pub(crate) mod tests {
     pub(crate) const SIK_QUERY: &[u8] = b"\x31\x20\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01\x30\x0a\x0c\x01o\x0c\x05oskgp";
 
     pub(crate) fn system_request(version: u32, query: &[u8]) -> Vec<u8> {
+        system_request_with_operation(version, 2, query)
+    }
+
+    pub(crate) fn system_request_with_operation(
+        version: u32,
+        operation: u32,
+        query: &[u8],
+    ) -> Vec<u8> {
         let mut request = message(version, 0, 1, &[]);
         let body = Message::parse(&request).unwrap().body;
         request.truncate(body);
         request.extend_from_slice(&0u32.to_le_bytes()); // variant
         request.extend_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
         request.extend_from_slice(&u32::MAX.to_le_bytes());
-        request.extend_from_slice(&2u32.to_le_bytes());
+        request.extend_from_slice(&operation.to_le_bytes());
         request.extend_from_slice(&(query.len() as u32).to_le_bytes());
         request.extend_from_slice(query);
         request.resize(request.len().next_multiple_of(4), 0);
         let hash = digest(&request);
         request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
         request
+    }
+
+    #[test]
+    fn userspace_and_kernel_public_queries_return_the_same_identity() {
+        let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+        let mut expected = None;
+        for version in [1, 2] {
+            for operation in [0, 2] {
+                let request = system_request_with_operation(version, operation, SIK_QUERY);
+                let (reply, output) = ask(
+                    &mut keystore,
+                    frame(system_key::PERFORM_OPERATION, 19, request.len()),
+                    request,
+                );
+                assert_eq!(reply.unwrap().parameter, 0);
+                let message = Message::parse(&output).unwrap();
+                let mut fields = message.fields();
+                let public = fields.blob().unwrap();
+                p256::PublicKey::from_sec1_bytes(public).unwrap();
+                if let Some(expected) = &expected {
+                    assert_eq!(public, expected);
+                } else {
+                    expected = Some(public.to_vec());
+                }
+                fields.end().unwrap();
+                assert_eq!(keystore.diagnostics().count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_system_metadata_is_sanitized_and_keeps_failure_semantics() {
+        let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+        let mut query = SIK_QUERY.to_vec();
+        query[11] = 4;
+        query[21] = 3;
+        let request = system_request_with_operation(2, 7, &query);
+        let (reply, output) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 20, request.len()),
+            request,
+        );
+        assert_eq!(reply.unwrap_err().answer.unwrap().frame.parameter, FAILURE);
+        assert!(output.is_empty());
+        assert_eq!(
+            keystore.diagnostics().collect::<Vec<_>>(),
+            [
+                "sks refused command=0x22 variant=0 handle=Some(4294967295) operation=Some(7) parameter_operation=oskgp system_key_type=Some(3) reference_key_type=None generation=Some(4) parsed=true"
+            ]
+        );
+        // Guest-controlled unknown strings and opaque parameter data must
+        // never be copied into diagnostics, even when DER parsing succeeds.
+        let query = b"\x31\x11\x30\x0f\x0c\x01o\x0c\x0aDO-NOT-LOG";
+        let request = system_request_with_operation(2, 0, query);
+        let (_, output) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 21, request.len()),
+            request,
+        );
+        assert!(output.is_empty());
+        let diagnostics = keystore.diagnostics().collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("parameter_operation=unknown"));
+        assert!(diagnostics[0].contains("parsed=true"));
+        assert!(!diagnostics[0].contains("DO-NOT-LOG"));
+        assert!(!diagnostics[0].contains("1311768467463790320")); // session
+        assert_eq!(keystore.diagnostics().count(), 0);
+    }
+
+    #[test]
+    fn unauthenticated_and_malformed_requests_do_not_expose_parameter_bytes() {
+        let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+        let mut request = system_request_with_operation(2, 7, SIK_QUERY);
+        request[DIGEST_START] ^= 1;
+        let (reply, output) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 20, request.len()),
+            request,
+        );
+        assert!(reply.is_err());
+        assert!(output.is_empty());
+        assert_eq!(keystore.diagnostics().count(), 0);
+        let request = system_request_with_operation(2, 7, b"DO-NOT-LOG");
+        let (reply, output) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 21, request.len()),
+            request,
+        );
+        assert!(reply.is_err());
+        assert!(output.is_empty());
+        let diagnostics = keystore.diagnostics().collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("operation=Some(7)"));
+        assert!(diagnostics[0].contains("parsed=false"));
+        assert!(!diagnostics[0].contains("DO-NOT-LOG"));
     }
 
     #[test]
