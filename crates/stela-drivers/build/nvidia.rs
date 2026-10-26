@@ -30,6 +30,8 @@ pub fn port() {
     // NVIDIA's Unix resource manager for an OS with its own interface layer.
     build
         .define("NV_BSD", None)
+        // cpuopsys.h must not also select the hosted compiler's Linux OS.
+        .flag("-U__linux__")
         .include(&generated)
         .include(port)
         // FreeBSD headers NVIDIA's interface layer includes, where none exist.
