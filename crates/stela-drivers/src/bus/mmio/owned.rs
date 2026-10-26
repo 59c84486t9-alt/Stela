@@ -280,6 +280,9 @@ pub enum MapFailure {
 ///
 /// # Safety
 /// `check_context` must reject unsupported CPU/address-space and ISR contexts.
+/// It is a pure admission observation: no allocation, device-register/DMA operation,
+/// root/cache mutation, Linux reentry, waiting or unwinding is permitted.
+/// Architectural CPU/root/control-register observations are permitted.
 /// Map validates the genuine ResourceBacking/epoch and maps the exact reserved
 /// full span into every participating native root, writable iff requested and
 /// always NX. It must prove the *effective* requested UC/WC type across actual

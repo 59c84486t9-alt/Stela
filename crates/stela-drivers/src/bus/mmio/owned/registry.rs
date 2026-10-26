@@ -684,6 +684,16 @@ impl Mapping {
     fn lease(&self) -> Result<&Shared<Lease>, Error> {
         self.lease.as_ref().ok_or(Error::Retired)
     }
+    /// Observe actual provider execution context and retained lease lifetime,
+    /// without a device access, root mutation, allocation or retirement.
+    pub fn check_current(&self) -> Result<(), Error> {
+        let lease = self.lease()?;
+        lease
+            .authority
+            .platform
+            .check_context(lease.authority.address_space)?;
+        lease.address(0..lease.bytes).map(|_| ())
+    }
     pub fn bytes(&self) -> Result<usize, Error> {
         Ok(self.lease()?.bytes)
     }
@@ -701,10 +711,12 @@ impl Mapping {
         Ok(self.lease()?.record.request.protection)
     }
     pub fn address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
+        self.check_current()?;
         self.lease()?
             .address(offset..offset.checked_add(bytes).ok_or(Error::InvalidRange)?)
     }
     pub fn view(&self, range: Range<usize>) -> Result<MappingView, Error> {
+        self.check_current()?;
         let lease = self.lease()?;
         lease.address(range.clone())?;
         Ok(MappingView {
@@ -717,10 +729,22 @@ impl Mapping {
     /// This establishes mapping-service provenance only; it grants no PCI
     /// root, IOMMU route, device, alias, reset, writer or completion authority.
     pub fn shares_authority(&self, view: &MappingView) -> Result<bool, Error> {
+        self.check_current()?;
+        view.check_current()?;
         let lease = self.lease()?;
         lease.address(0..lease.bytes)?;
         view.address(0, view.bytes())?;
         Ok(Arc::ptr_eq(&lease.authority, &view.lease.authority))
+    }
+    /// Compare the exact original installed lease, rather than another mapping
+    /// managed by the same platform authority. Both views must still be live.
+    pub fn shares_mapping(&self, view: &MappingView) -> Result<bool, Error> {
+        self.check_current()?;
+        view.check_current()?;
+        let lease = self.lease()?;
+        lease.address(0..lease.bytes)?;
+        view.address(0, view.bytes())?;
+        Ok(Shared::ptr_eq(lease, &view.lease))
     }
     /// # Safety
     /// All device, CPU, callback and worker accesses through every raw pointer
@@ -808,10 +832,19 @@ pub struct MappingView {
     range: Range<usize>,
 }
 impl MappingView {
+    /// Pure current-context/lifetime observation of this exact retained view.
+    pub fn check_current(&self) -> Result<(), Error> {
+        self.lease
+            .authority
+            .platform
+            .check_context(self.lease.authority.address_space)?;
+        self.lease.address(self.range.clone()).map(|_| ())
+    }
     pub fn bytes(&self) -> usize {
         self.range.end - self.range.start
     }
     pub fn address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
+        self.check_current()?;
         let end = offset
             .checked_add(bytes)
             .filter(|end| *end <= self.bytes())
@@ -1118,6 +1151,56 @@ mod tests {
                 Protection::ReadWrite,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn exact_lease_pairing_distinguishes_other_mapping_in_same_authority() {
+        let (_, authority, resource, _) = basic();
+        let mut first = map(&authority, resource);
+        let view = first.view(0..4096).unwrap();
+        let (resource, _) = make_resource(
+            PhysicalSpan::new(BASE + 0x10000, 16384).unwrap(),
+            ResourceKind::Registers,
+        );
+        let mut second = map(&authority, resource);
+        assert_eq!(first.shares_mapping(&view), Ok(true));
+        assert_eq!(second.shares_authority(&view), Ok(true));
+        assert_eq!(second.shares_mapping(&view), Ok(false));
+        drop(view);
+        // SAFETY: these isolated mappings have no outside pointer/worker use.
+        unsafe { first.retire() }.unwrap();
+        // SAFETY: same stopped isolated owner, distinct original lease/token.
+        unsafe { second.retire() }.unwrap();
+    }
+
+    #[test]
+    fn current_context_refusal_precedes_pointer_view_and_provenance_publication() {
+        let (model, authority, resource, _) = basic();
+        let mut mapping = map(&authority, resource);
+        let view = mapping.view(0..4096).unwrap();
+        let pointer = mapping.address(0, 4).unwrap();
+        let before_calls = model.calls();
+        let before_events = model.state.lock().unwrap().events.clone();
+        model.allowed.store(false, Ordering::Release);
+        assert_eq!(mapping.check_current(), Err(Error::Unavailable));
+        assert_eq!(view.check_current(), Err(Error::Unavailable));
+        assert_eq!(mapping.address(0, 4), Err(Error::Unavailable));
+        assert_eq!(view.address(0, 4), Err(Error::Unavailable));
+        assert_eq!(mapping.view(0..4096).err(), Some(Error::Unavailable));
+        assert_eq!(mapping.shares_mapping(&view), Err(Error::Unavailable));
+        assert_eq!(mapping.shares_authority(&view), Err(Error::Unavailable));
+        assert_eq!(model.calls(), before_calls);
+        assert_eq!(model.state.lock().unwrap().events, before_events);
+        assert_eq!(model.live(), 1);
+        model.allowed.store(true, Ordering::Release);
+        assert_eq!(mapping.address(0, 4), Ok(pointer));
+        assert_eq!(view.address(0, 4), Ok(pointer));
+        assert_eq!(mapping.shares_mapping(&view), Ok(true));
+        drop(view);
+        // SAFETY: isolated sequential fixture, every pointer/view user stopped;
+        // genuine original context was restored before this actual unmap.
+        unsafe { mapping.retire() }.unwrap();
+        assert_eq!(model.live(), 0);
     }
     fn device_regions() -> Vec<DeviceCacheRegion> {
         vec![
