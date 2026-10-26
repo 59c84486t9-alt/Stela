@@ -4,7 +4,9 @@
 //! removes a launcher.
 //!
 //! It needs the 26A434 guest roots ([`support::guest`]) and `xcrun clang`;
-//! without them it says so and checks nothing.
+//! without them it says so and checks nothing. Running programs is an Intel
+//! Mac's alone.
+#![cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod support {
     pub mod guest;
 }

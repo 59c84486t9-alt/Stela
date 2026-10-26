@@ -87,7 +87,7 @@ pub(crate) enum Command {
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     Apps(apps::Apps),
     /// Prepare a USB that boots Stela to install macOS 27, or undo it.
-    Setup(setup::Setup),
+    Setup(Box<setup::Setup>),
     /// Print the boot log stela.efi keeps on a machine-state partition, from a
     /// disk image or a raw partition.
     BootLog(boot_log::BootLog),

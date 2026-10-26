@@ -1503,8 +1503,13 @@ fn default_efi_image() -> Option<PathBuf> {
     [beside, built].into_iter().find(|path| path.is_file())
 }
 
-/// Where `--fetch` keeps downloaded restore images.
+/// Where `--fetch` keeps downloaded restore images: the host's per-user cache.
 pub(crate) fn download_dir() -> PathBuf {
+    if cfg!(windows)
+        && let Some(local) = std::env::var_os("LOCALAPPDATA")
+    {
+        return PathBuf::from(local).join("Stela/images");
+    }
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
     if cfg!(target_os = "macos") {
         home.join("Library/Caches/Stela/images")
@@ -4763,9 +4768,10 @@ mod tests {
         // Back up before the reset.
         let file = f._dir.path().join("machine.state");
         rerun(&f, |c| c.backup_state = Some(file.clone())).unwrap();
-        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
         assert_eq!(
-            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&file).unwrap().permissions())
+                & 0o777,
             0o600
         );
         assert!(

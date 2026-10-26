@@ -30,8 +30,9 @@ pub(crate) use windows::{ADMIN, DISK_EXAMPLE, PARTITION_LISTING, System};
 pub(crate) enum FileSystem {
     Fat,
     ExFat,
+    // Windows mounts no HFS+ volumes, and only macOS mounts APFS ones.
+    #[cfg_attr(windows, allow(dead_code))]
     Hfs,
-    // Only macOS mounts APFS volumes.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Apfs,
     Ntfs,
