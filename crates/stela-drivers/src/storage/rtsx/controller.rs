@@ -131,8 +131,16 @@ pub(super) struct Configuration {
     reverse_wp: bool,
     pub no_mmc: bool,
     pub vendor_valid: bool,
+    aspm: u8,
 }
 impl Configuration {
+    pub(super) fn rts5229_drive(&self, voltage180: bool) -> u8 {
+        [1, 2, 5, 3][if voltage180 {
+            self.drive_1v8
+        } else {
+            self.drive
+        }]
+    }
     pub(super) fn drive_1v8(&self) -> u8 {
         [0x99, 0xaa, 0xfe, 0xb3][self.drive_1v8]
     }
@@ -164,24 +172,32 @@ impl Configuration {
             ltr_active: ltr && actual.l1ss.is_some(),
             force_clock_request,
             card_drive: 0x41,
-            drive: 3,
+            drive: if profile == ChipProfile::Rts5229 {
+                0
+            } else {
+                3
+            },
             drive_1v8: 3,
             reverse_socket: false,
             reverse_cd: false,
             reverse_wp: false,
             no_mmc: false,
             vendor_valid: setting1 & 0x0100_0000 == 0,
+            aspm: 2,
         };
         if config.vendor_valid {
             let setting2 = pci.read32(VENDOR_SETTING2);
             config.card_drive = (config.card_drive & 0x3f) | (((setting1 >> 25) as u8 & 1) << 6);
             config.drive = ((setting2 >> 5) & 3) as usize;
             config.drive_1v8 = ((setting1 >> 26) & 3) as usize;
-            config.reverse_socket = setting2 & 0x4000 != 0;
-            config.reverse_cd = setting2 & 0x0080_0000 != 0;
-            config.reverse_wp = setting2 & 0x0040_0000 != 0;
-            config.no_mmc = setting2 & 0x10 != 0;
-            config.rtd3 = profile == ChipProfile::Rts522a && setting2 & 2 != 0;
+            config.aspm = ((setting1 >> 28) & 3) as u8;
+            if profile != ChipProfile::Rts5229 {
+                config.reverse_socket = setting2 & 0x4000 != 0;
+                config.reverse_cd = setting2 & 0x0080_0000 != 0;
+                config.reverse_wp = setting2 & 0x0040_0000 != 0;
+                config.no_mmc = setting2 & 0x10 != 0;
+                config.rtd3 = profile == ChipProfile::Rts522a && setting2 & 2 != 0;
+            }
         }
         Ok(config)
     }
@@ -195,6 +211,7 @@ impl Engine {
         clock: Clock,
         location: String,
     ) -> Result<Self, BlockError> {
+        validate_clock(clock)?;
         let mut engine = Self {
             pci,
             registers,
@@ -213,6 +230,7 @@ impl Engine {
             timing_mode: Timing::Legacy,
             signal_voltage: SignalVoltage::V3_3,
             tuning_rejection_observed: false,
+            silicon_version: 0,
         };
         engine.healthy()?;
         engine.registers.write32(BIER, 0);
@@ -236,6 +254,11 @@ impl Engine {
             if command & HAIMR_TRANS_START == 0 && data & HAIMR_TRANS_START == 0 {
                 break;
             }
+        }
+        // Source init_params observes the actual revision before PHY/extra
+        // initialization; a failed read grants no electrical profile effects.
+        if engine.config.profile == ChipProfile::Rts5229 {
+            engine.silicon_version = engine.read_reg(DUMMY_REG_RESET_0)? & 15;
         }
         engine.write_reg(DMACTL, 0x80, 0x80)?;
         engine.write_reg(RBCTL, 0x80, 0x80)?;
@@ -364,10 +387,14 @@ impl Engine {
                     "RTSX ASPM disable did not acknowledge",
                 ));
             }
-            if old & 2 != 0 {
+            if old & 2 != 0
+                || self.config.profile == ChipProfile::Rts5229 && self.config.aspm & 2 != 0
+            {
                 self.clock.delay(10_000);
             }
-            self.write_reg(PM_CTRL3, D3_DELINK_MODE_EN, 0)?;
+            if self.config.profile != ChipProfile::Rts5229 {
+                self.write_reg(PM_CTRL3, D3_DELINK_MODE_EN, 0)?;
+            }
             self.phy(0, 0xba42)?;
         }
         for (at, mask, value) in [
@@ -402,6 +429,11 @@ impl Engine {
             return self.failed(BlockError::Unsupported(
                 "RTSX clock-request setup did not acknowledge",
             ));
+        }
+        if self.config.profile == ChipProfile::Rts5229 {
+            self.rts5229_initialize()?;
+            self.clock.delay(1_000);
+            return self.active_ltr();
         }
         for (at, mask, value) in [
             (GPIO_CTL, 2, 2),
@@ -444,6 +476,21 @@ impl Engine {
         // Native full-on ordering: ASPM disabled before active LTR. RTS5227's
         // zero-initialized active latency is zero; later chips set other values.
         self.clock.delay(1_000);
+        self.active_ltr()?;
+        if self.config.profile == ChipProfile::Rts522a {
+            self.write_reg(
+                L1SUB_CONFIG3,
+                0xff,
+                if self.config.l1ss_control & 8 != 0 {
+                    0x78
+                } else {
+                    0
+                },
+            )?;
+        }
+        Ok(())
+    }
+    fn active_ltr(&mut self) -> Result<(), BlockError> {
         if self.config.ltr_active {
             let latency = if self.config.profile == ChipProfile::Rts522a {
                 0x883cu32
@@ -459,20 +506,12 @@ impl Engine {
                 LTR_TX_EN_1 | LTR_LATENCY_MODE_SW,
             )?;
         }
-        if self.config.profile == ChipProfile::Rts522a {
-            self.write_reg(
-                L1SUB_CONFIG3,
-                0xff,
-                if self.config.l1ss_control & 8 != 0 {
-                    0x78
-                } else {
-                    0
-                },
-            )?;
-        }
         Ok(())
     }
     pub(super) fn driving(&mut self) -> Result<(), BlockError> {
+        if self.config.profile == ChipProfile::Rts5229 {
+            return self.rts5229_drive(false);
+        }
         let value = [0x13, 0x96, 0x7f, 0x96][self.config.drive];
         for at in [SD30_CLK_DRIVE_SEL, SD30_CMD_DRIVE_SEL, SD30_DAT_DRIVE_SEL] {
             self.write_reg(at, 0xff, value)?;
@@ -495,7 +534,12 @@ impl Engine {
         )?;
         self.write_reg_before(PWR_GATE_CTRL, LDO3318_PWR_MASK, 0, Some(budget))?;
         self.write_reg_before(CARD_PULL_CTL2, 0xff, 0x55, Some(budget))?;
-        self.write_reg_before(CARD_PULL_CTL3, 0xff, 0xd5, Some(budget))?;
+        let pull = if self.config.profile == ChipProfile::Rts5229 && self.silicon_version == 2 {
+            0xe5
+        } else {
+            0xd5
+        };
+        self.write_reg_before(CARD_PULL_CTL3, 0xff, pull, Some(budget))?;
         if self.config.profile == ChipProfile::Rts522a {
             self.rts522a_clear_ocp(budget)?;
         }
@@ -504,31 +548,47 @@ impl Engine {
     pub(super) fn configure_card(&mut self) -> Result<(), BlockError> {
         self.power_off()?;
         self.clock.delay(100_000);
-        self.phy(
-            8,
-            if self.config.profile == ChipProfile::Rts522a {
-                0x57e4
-            } else {
-                0x4fe4
-            },
-        )?;
-        self.driving()?;
+        if self.config.profile == ChipProfile::Rts5229 {
+            self.rts5229_voltage(false)?;
+        } else {
+            self.phy(
+                8,
+                if self.config.profile == ChipProfile::Rts522a {
+                    0x57e4
+                } else {
+                    0x4fe4
+                },
+            )?;
+            self.driving()?;
+        }
         self.signal_voltage = SignalVoltage::V3_3;
         self.write_reg(CARD_SELECT, 7, SD_MOD_SEL)?;
         self.write_reg(CARD_SHARE_MODE, CARD_SHARE_MASK, CARD_SHARE_48_SD)?;
         self.write_reg(CARD_CLK_EN, SD_CLK_EN, SD_CLK_EN)?;
         self.write_reg(CARD_PULL_CTL2, 0xff, 0xaa)?;
-        self.write_reg(CARD_PULL_CTL3, 0xff, 0xe9)?;
+        let pull = if self.config.profile == ChipProfile::Rts5229 && self.silicon_version == 2 {
+            0xd9
+        } else {
+            0xe9
+        };
+        self.write_reg(CARD_PULL_CTL3, 0xff, pull)?;
         if self.config.profile == ChipProfile::Rts522a {
             self.rts522a_enable_ocp()?;
         }
         self.write_reg(CARD_PWR_CTL, SD_POWER_MASK, SD_PARTIAL_POWER_ON)?;
         self.write_reg(PWR_GATE_CTRL, LDO3318_PWR_MASK, 2)?;
-        self.clock.delay(20_000);
+        self.clock
+            .delay(if self.config.profile == ChipProfile::Rts5229 {
+                150
+            } else {
+                20_000
+            });
         self.write_reg(CARD_PWR_CTL, SD_POWER_MASK, SD_POWER_ON)?;
         self.write_reg(PWR_GATE_CTRL, LDO3318_PWR_MASK, 6)?;
-        self.write_reg(CARD_OE, SD_OUTPUT_EN, SD_OUTPUT_EN)?;
-        self.write_reg(CARD_OE, MS_OUTPUT_EN, MS_OUTPUT_EN)?;
+        if self.config.profile != ChipProfile::Rts5229 {
+            self.write_reg(CARD_OE, SD_OUTPUT_EN, SD_OUTPUT_EN)?;
+            self.write_reg(CARD_OE, MS_OUTPUT_EN, MS_OUTPUT_EN)?;
+        }
         self.clock.delay(1_000);
         self.write_reg(CARD_OE, SD_OUTPUT_EN, SD_OUTPUT_EN)?;
         self.timing(false)?;

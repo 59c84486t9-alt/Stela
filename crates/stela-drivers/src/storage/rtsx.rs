@@ -2,8 +2,9 @@
 // Native adaptation of rtsx_pcr.c, rts5227.c and rtsx_pci_sdmmc.c.
 // Copyright(c) 2009-2013 Realtek Semiconductor Corp. All rights reserved.
 // Authors: Wei WANG, Roger Tseng. See ../THIRD_PARTY.md.
-//! Native RTS5227/RTS522A PCIe SD/MMC reader with actual HAIMR and ping-pong PIO.
-//! Command-buffer/data DMA, Memory Stick, UHS/DDR and global PM remain separate.
+//! Native RTS5227/RTS522A/RTS5229 SD/MMC with actual HAIMR and ping-pong PIO.
+//! RTS522A has separate UHS hooks. Command/data DMA, Memory Stick, remaining
+//! profile timing modes and global PM require their own native implementations.
 pub use super::mmc::{CardInfo, Failure, Kind, SignalVoltage, Timing};
 use crate::{
     Clock, Handoff,
@@ -22,6 +23,7 @@ use core::{
 mod command;
 mod controller;
 mod registers;
+mod rts5229;
 mod rts522a;
 mod tuning;
 use command::Budget;
@@ -32,24 +34,28 @@ const VENDOR: u16 = 0x10ec;
 enum ChipProfile {
     Rts5227,
     Rts522a,
+    Rts5229,
 }
 impl ChipProfile {
     fn device(self) -> u16 {
         match self {
             Self::Rts5227 => 0x5227,
             Self::Rts522a => 0x522a,
+            Self::Rts5229 => 0x5229,
         }
     }
     fn name(self) -> &'static str {
         match self {
             Self::Rts5227 => "RTS5227",
             Self::Rts522a => "RTS522A",
+            Self::Rts5229 => "RTS5229",
         }
     }
     fn select(device: u16) -> Option<Self> {
         match device {
             0x5227 => Some(Self::Rts5227),
             0x522a => Some(Self::Rts522a),
+            0x5229 => Some(Self::Rts5229),
             _ => None,
         }
     }
@@ -77,14 +83,10 @@ pub struct Attached {
 pub fn attach(mut function: Function, handoff: &Handoff) -> Result<Attached, BlockError> {
     if !matches(&function) {
         return Err(BlockError::Unsupported(
-            "PCI function is not a qualified RTS5227/RTS522A",
+            "PCI function is not a qualified RTS5227/RTS522A/RTS5229",
         ));
     }
-    if handoff.clock.ticks_per_microsecond == 0 {
-        return Err(BlockError::Unsupported(
-            "RTSX requires a calibrated native clock",
-        ));
-    }
+    validate_clock(handoff.clock)?;
     let admission = controller::admission(&mut function)?;
     super::pci::quiesce_pio(&mut function)?;
     function.power_up(&handoff.clock)?;
@@ -111,6 +113,12 @@ pub fn attach(mut function: Function, handoff: &Handoff) -> Result<Attached, Blo
         host,
         card,
         failure,
+    })
+}
+
+fn validate_clock(clock: Clock) -> Result<(), BlockError> {
+    clock.check_duration(5_000_000).map_err(|_| {
+        BlockError::Unsupported("RTSX requires a calibrated, representable operation clock")
     })
 }
 
@@ -291,6 +299,7 @@ struct Engine {
     timing_mode: Timing,
     signal_voltage: SignalVoltage,
     tuning_rejection_observed: bool,
+    silicon_version: u8,
 }
 impl Engine {
     fn healthy(&mut self) -> Result<(), BlockError> {
@@ -395,6 +404,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    mod rts5229;
 
     use super::*;
     use crate::bus::pci::Address;
@@ -872,7 +882,8 @@ mod tests {
                 assert_eq!(self.regs[0x3d69] & 4, 4, "card clock on");
                 assert_eq!(self.regs[0x3d55] & 4, 4, "SD outputs on");
                 assert_eq!(self.regs[0x3d61], 0xaa);
-                assert_eq!(self.regs[0x3d62], 0xe9);
+                let revision_c = self.config[2..4] == [0x29, 0x52] && self.regs[0x3e90] & 15 == 2;
+                assert_eq!(self.regs[0x3d62], if revision_c { 0xd9 } else { 0xe9 });
                 assert_eq!(self.regs[0x3d5c] & 7, 2);
                 assert_eq!(self.regs[0x3d52] & 15, 4);
                 if transfer.mode != 15 {
@@ -1147,7 +1158,11 @@ mod tests {
                 if value & 3 == 0 && self.timeline {
                     assert!(
                         Self::ticks() - self.partial_at.expect("partial power first")
-                            >= 20_000 * 1000
+                            >= if self.config[2..4] == [0x29, 0x52] {
+                                150
+                            } else {
+                                20_000
+                            } * 1000
                     );
                 }
                 if value & 3 == 3 {
@@ -1399,6 +1414,37 @@ mod tests {
         Ok(Host {
             inner: Rc::new(RefCell::new(engine)),
         })
+    }
+    #[test]
+    fn invalid_operation_clock_refuses_before_original_controller_access() {
+        for ticks_per_microsecond in [0, u64::MAX, u64::MAX / (2 * 5_000_000) + 1] {
+            let chip = Chip::new(false, true);
+            let mut function = function(&chip);
+            let admission = controller::admission(&mut function).unwrap();
+            super::super::pci::quiesce_pio(&mut function).unwrap();
+            let config = controller::Configuration::capture(&mut function, admission).unwrap();
+            super::super::pci::set_pio_command(&mut function, true).unwrap();
+            let before = (
+                chip.borrow().config.clone(),
+                chip.borrow().effects.len(),
+                chip.borrow().accesses,
+            );
+            assert!(
+                Engine::new(
+                    Box::new(function),
+                    Box::new(Mmio(chip.clone())),
+                    config,
+                    Clock {
+                        ticks_per_microsecond
+                    },
+                    "unadmitted RTSX clock".into()
+                )
+                .is_err()
+            );
+            assert_eq!(chip.borrow().config, before.0);
+            assert_eq!(chip.borrow().effects.len(), before.1);
+            assert_eq!(chip.borrow().accesses, before.2);
+        }
     }
     fn measured_host_clock() -> Clock {
         // The recovery scenario exercises real Clock/Deadline code. Its clock
@@ -2445,7 +2491,7 @@ mod tests {
             );
             assert_eq!(chip.borrow().config[4] & 4, 0);
         }
-        for device in [0x5229u16, 0x5249, 0x525a] {
+        for device in [0x5209u16, 0x5249, 0x525a] {
             let chip = Chip::new(false, false);
             chip.borrow_mut().config[2..4].copy_from_slice(&device.to_le_bytes());
             assert!(!matches(&function(&chip)));
