@@ -8,6 +8,7 @@
 pub mod answers;
 pub mod asr;
 pub mod driver;
+pub mod fdr;
 pub mod native;
 pub mod plist;
 pub mod proxy;

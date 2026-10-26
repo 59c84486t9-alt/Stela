@@ -365,6 +365,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
             RESTORE_INVENTORY_FILE,
             RESTORE_BLOCKS_FILE,
             INSTALL_PIECES_FILE,
+            stela_runtime::restore::fdr::FILE,
         ];
         if files
             .iter()
@@ -373,6 +374,9 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
             return Err("a bundle file takes a name the restore inventory reserves");
         }
         files.push((String::from(RESTORE_INVENTORY_FILE), inventory.manifest));
+        if let Some(diagnostic) = inventory.fdr_diagnostic {
+            files.push((String::from(stela_runtime::restore::fdr::FILE), diagnostic));
+        }
         if let Some(blocks) = inventory.blocks {
             files.push((String::from(RESTORE_BLOCKS_FILE), blocks));
         }

@@ -225,6 +225,17 @@ impl Experiment {
                 .map_err(|e| format!("{e}"))?;
         }
         let mut answers = Answers::new(store);
+        if let Some(bytes) = inventory_file(handoff, stela_runtime::restore::fdr::FILE) {
+            answers.fdr_diagnostic = Some(
+                stela_runtime::restore::fdr::Diagnostic::decode(bytes)
+                    .map_err(|error| format!("FDR diagnostic refused: {error}"))?,
+            );
+            output::arguments(format_args!(
+                "FDR DIAGNOSTIC bytes={} sha256={} original Memory-store import; factory trust unqualified; durable commit unsupported\n",
+                bytes.len(),
+                stela_runtime::sha256(bytes),
+            ));
+        }
         if signer.is_some() {
             answers.signer = signer;
             // The bundle boots under the AP ticket Apple personalized for it,

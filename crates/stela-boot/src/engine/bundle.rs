@@ -188,6 +188,8 @@ pub fn read(directory: &str) -> Result<Vec<(String, Region)>, &'static str> {
 /// The restore inventory as it was read, and what it names beside itself.
 pub struct Inventory {
     pub manifest: Region,
+    /// Explicit opt-in experiment beside the inventory; never factory trust.
+    pub fdr_diagnostic: Option<Region>,
     /// Its members' precomputed block hashes (`payload::BlockHashes`), when
     /// it names them.
     pub blocks: Option<Region>,
@@ -254,9 +256,26 @@ pub fn with_inventory(
             payload::Layout::Pieces { block_hashes, .. } => Some(block_hashes),
             _ => None,
         })?;
+        let diagnostic_path = format!("{directory}\\{}", stela_runtime::restore::fdr::FILE);
+        let diagnostic_name = CString16::try_from(diagnostic_path.as_str())
+            .map_err(|_| "FDR diagnostic path is not UCS-2")?;
+        let fdr_diagnostic =
+            match root.open(&diagnostic_name, FileMode::Read, FileAttribute::empty()) {
+                Ok(file) => {
+                    drop(file);
+                    Some(read_bounded(
+                        &mut root,
+                        &diagnostic_path,
+                        stela_runtime::restore::fdr::MAX_BYTES as u64,
+                    )?)
+                }
+                Err(error) if error.status() == uefi::Status::NOT_FOUND => None,
+                Err(_) => return Err("cannot open the FDR diagnostic"),
+            };
         check(&mut root, directory, &parsed)?;
         found = Some(Inventory {
             manifest,
+            fdr_diagnostic,
             blocks,
             pieces,
         });

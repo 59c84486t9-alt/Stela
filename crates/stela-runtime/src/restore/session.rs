@@ -148,6 +148,10 @@ impl Session {
             }
         }
         hw.required("UniqueChipID")?.bits()?;
+        if let Some(diagnostic) = &answers.fdr_diagnostic {
+            let manifest = answers.store.manifest();
+            diagnostic.check(hw, &manifest.product_build, &manifest.model)?;
+        }
         let info = identity.info()?;
         let behavior = info.required("RestoreBehavior")?;
         let mut opts = BTreeMap::new();
@@ -213,6 +217,15 @@ impl Session {
             ),
         );
         let mut options = Value::Dict(opts);
+        if answers.fdr_diagnostic.is_some() {
+            // R70dc0..70df4 selects Memory by presence; R70ed0 imports
+            // the host dictionary. This names a host diagnostic, not a
+            // target filesystem path or an installed Hardware store.
+            let Value::Dict(entries) = &mut options else {
+                unreachable!()
+            };
+            entries.insert("FDRMemoryStorePath".into(), Value::from(super::fdr::FILE));
+        }
         route.options(&mut options)?;
         self.route = route;
         self.phase = Phase::Starting;
@@ -635,8 +648,15 @@ mod tests {
     type Fixture = super::super::store::Store<crate::payload::tests::Memory>;
     /// A session past StartRestore, and the StartRestore request it sent.
     fn ready_with(store: Fixture) -> (Session, Answers<crate::payload::tests::Memory>, Value) {
+        ready_with_fdr(store, None)
+    }
+    fn ready_with_fdr(
+        store: Fixture,
+        diagnostic: Option<super::super::fdr::Diagnostic>,
+    ) -> (Session, Answers<crate::payload::tests::Memory>, Value) {
         let mut s = Session::new();
         let mut a = Answers::new(store);
+        a.fdr_diagnostic = diagnostic;
         a.store.prepare().unwrap();
         assert_eq!(
             s.query_type()
@@ -1049,5 +1069,81 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn fdr_commit_never_acknowledges_unpersisted_records() {
+        let (mut session, mut answers) = ready();
+        let mut commit = request("FDRMemoryCommit");
+        let Value::Dict(entries) = &mut commit else {
+            unreachable!()
+        };
+        entries.insert(
+            "Arguments".into(),
+            Value::dict([(
+                "FDRMemoryStoreData",
+                Value::dict([("appv-own", Value::Data(vec![4, 5, 6]))]),
+            )]),
+        );
+        let Err(Error::Refused { reason, request }) = session.receive(commit.clone(), &mut answers)
+        else {
+            panic!("commit was acknowledged without persistence")
+        };
+        assert!(reason.contains("durable commit"));
+        assert_eq!(*request, commit);
+        assert_eq!(session.phase(), Phase::Failed);
+    }
+
+    #[test]
+    fn fdr_import_is_opt_in_and_preserves_the_original_reply_schema() {
+        let store = fixture(b"payload", false);
+        let records = Value::dict([("appv-own", Value::Data(vec![1, 2, 3]))]);
+        let input = Value::dict([
+            ("DiagnosticVersion", Value::Integer(1)),
+            ("ECID", Value::Signed(-111_111_111_111_111_111)),
+            ("ChipID", Value::Integer(0x8112)),
+            ("BoardID", Value::Integer(0x24)),
+            (
+                "Build",
+                Value::from(store.manifest().product_build.as_str()),
+            ),
+            ("Model", Value::from(store.manifest().model.as_str())),
+            ("FDRMemoryStoreData", records.clone()),
+        ]);
+        let bytes = super::super::plist::encode_binary(&input, Limits::default()).unwrap();
+        let diagnostic = super::super::fdr::Diagnostic::decode(&bytes).unwrap();
+        let (_, mut answers, start) = ready_with_fdr(store, Some(diagnostic));
+        assert_eq!(
+            start
+                .required("RestoreOptions")
+                .unwrap()
+                .required("FDRMemoryStorePath")
+                .unwrap()
+                .string()
+                .unwrap(),
+            super::super::fdr::FILE
+        );
+        let Plan::Reply(reply) = answers
+            .plan(&Value::dict([("DataType", Value::from("FDRTrustData"))]))
+            .unwrap()
+        else {
+            panic!("not an FDR reply")
+        };
+        assert_eq!(reply, Value::dict([("FDRMemoryStoreData", records)]));
+        let (_, mut ordinary, start) = ready_with(fixture(b"payload", false));
+        assert!(
+            start
+                .required("RestoreOptions")
+                .unwrap()
+                .get("FDRMemoryStorePath")
+                .is_none()
+        );
+        let Plan::Reply(reply) = ordinary
+            .plan(&Value::dict([("DataType", Value::from("FDRTrustData"))]))
+            .unwrap()
+        else {
+            panic!("not an FDR reply")
+        };
+        assert_eq!(reply, Value::dict([]));
     }
 }

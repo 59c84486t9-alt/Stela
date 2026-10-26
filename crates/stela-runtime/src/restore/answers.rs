@@ -218,6 +218,7 @@ const DATA_TYPES: [(&str, bool); 69] = [
 ];
 pub struct Answers<R> {
     pub store: Store<R>,
+    pub fdr_diagnostic: Option<super::fdr::Diagnostic>,
     pub staged: Staged,
     /// Apple's signing service, only when the user enables it (`tss`).
     pub signer: Option<tss::Signer>,
@@ -231,6 +232,7 @@ impl<R: ReadAt> Answers<R> {
     pub fn new(store: Store<R>) -> Self {
         Self {
             store,
+            fdr_diagnostic: None,
             staged: Staged::default(),
             signer: None,
             roots: BTreeMap::new(),
@@ -500,7 +502,15 @@ impl<R: ReadAt> Answers<R> {
                 "ReceiptManifest",
                 identity.value.required("Manifest")?.clone(),
             )]))),
-            "FDRTrustData" => Ok(Plan::Reply(Value::dict([]))),
+            "FDRTrustData" => Ok(Plan::Reply(
+                self.fdr_diagnostic
+                    .as_ref()
+                    .map_or_else(|| Value::dict([]), super::fdr::Diagnostic::reply),
+            )),
+            "FDRMemoryCommit" => Err(super::refuse(
+                "FDR memory diagnostic has no durable commit implementation; refusing acknowledgement",
+                r,
+            )),
             "RecoveryOSLocalPolicy" => self.recovery_local_policy(&identity, args),
             // restored's `set_device_time` (R 0x10003172c..0x100031778) reads
             // `SetHostTimeOnDevice` as a 64-bit CFNumber and keeps it only
