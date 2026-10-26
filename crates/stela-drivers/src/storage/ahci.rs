@@ -178,6 +178,7 @@ pub struct AhciDisk {
     bounce: DmaBuffer,
     identity: Identity,
     clock: Clock,
+    command_timeout_us: u64,
     /// Failed commands require acknowledged reset and re-identification.
     /// The queue, FIS and bounce allocations remain reserved for this boot.
     fault: Option<BlockError>,
@@ -196,6 +197,7 @@ pub fn attach(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
 ) -> Result<Attached, BlockError> {
+    validate_clock(handoff.clock)?;
     function.power_up(&handoff.clock)?;
     let bars = function.bars();
     let hba = registers(handoff, bars[5], 0, PORT_BASE)?;
@@ -274,10 +276,17 @@ fn port_map(capabilities: u32, implemented: u32) -> u32 {
     u32::MAX >> (MAX_PORTS - ports)
 }
 
+fn validate_clock(clock: Clock) -> Result<(), BlockError> {
+    clock.check_duration(COMMAND_TIMEOUT_US).map_err(|_| {
+        BlockError::Unsupported("AHCI requires a calibrated, representable operation clock")
+    })
+}
+
 /// Stop the command list engine, then FIS reception, each waiting for the
 /// port to report it stopped (AHCI 1.3.1 §10.1.2; Linux `ahci_stop_engine`,
 /// `ahci_stop_fis_rx`).
 fn stop_port(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
+    validate_clock(clock)?;
     let command = port.read32(PORT_COMMAND);
     if command & (COMMAND_START | COMMAND_LIST_RUNNING) != 0 {
         port.write32(PORT_COMMAND, command & !COMMAND_START);
@@ -375,6 +384,7 @@ impl AhciDisk {
                 read_only: false,
             },
             clock,
+            command_timeout_us: COMMAND_TIMEOUT_US,
             fault: None,
         };
         disk.issue(ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, false)?;
@@ -478,7 +488,7 @@ impl AhciDisk {
         port.write32(PORT_INTERRUPTS, u32::MAX);
         port.write32(PORT_ISSUE, 1);
         let mut interrupts = 0;
-        let done = self.clock.wait(COMMAND_TIMEOUT_US, || {
+        let done = self.clock.wait(self.command_timeout_us, || {
             interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
             interrupts != 0 || port.read32(PORT_ISSUE) & 1 == 0
         });
@@ -656,8 +666,9 @@ mod tests {
                         read_only: false,
                     },
                     clock: Clock {
-                        ticks_per_microsecond: 0,
+                        ticks_per_microsecond: 1000,
                     },
+                    command_timeout_us: 1000,
                     fault: None,
                 },
                 _registers: registers,
@@ -671,6 +682,7 @@ mod tests {
         for behavior in [Behavior::Timeout, Behavior::TaskError] {
             let mut fixture = Fixture::new();
             let model = PortModel::new(behavior);
+            let started = fixture.disk.clock.try_start().unwrap();
             let error = match behavior {
                 Behavior::Timeout => BlockError::Timeout,
                 _ => BlockError::Device {
@@ -683,6 +695,9 @@ mod tests {
                     .issue_on(&model, ATA_READ_DMA_EXT, 0, 1, 512, false),
                 Err(error.clone())
             );
+            if matches!(behavior, Behavior::Timeout) {
+                assert!(fixture.disk.clock.try_elapsed_us(started).unwrap() >= 1000);
+            }
             // A still-running command engine never supplies an acknowledged
             // reset merely because the CPU's timeout elapsed.
             assert_eq!(
@@ -754,8 +769,10 @@ mod tests {
             ),
             writes: RefCell::new(Vec::new()),
         };
+        // This peer acknowledges both engine stops immediately; its finite
+        // clock remains admitted even when no waiting is needed.
         let clock = Clock {
-            ticks_per_microsecond: 0,
+            ticks_per_microsecond: 1000,
         };
         stop_port(&port, clock).unwrap();
         let enables: Vec<u32> = port
@@ -766,6 +783,29 @@ mod tests {
             .collect();
         assert_eq!(enables, [COMMAND_FIS_RECEIVE, 0]);
         assert_eq!(port.command.get(), 0);
+    }
+
+    #[test]
+    fn invalid_clock_never_attempts_an_engine_transition() {
+        for ticks_per_microsecond in [0, u64::MAX, u64::MAX / (2 * COMMAND_TIMEOUT_US) + 1] {
+            let command =
+                COMMAND_START | COMMAND_LIST_RUNNING | COMMAND_FIS_RECEIVE | COMMAND_FIS_RUNNING;
+            let port = Engines {
+                command: Cell::new(command),
+                writes: RefCell::new(Vec::new()),
+            };
+            assert!(
+                stop_port(
+                    &port,
+                    Clock {
+                        ticks_per_microsecond
+                    }
+                )
+                .is_err()
+            );
+            assert!(port.writes.borrow().is_empty());
+            assert_eq!(port.command.get(), command);
+        }
     }
 
     #[test]
