@@ -149,11 +149,12 @@ pub(crate) struct Setup {
     #[arg(long)]
     uninstall: bool,
     /// The PC's partition that becomes the Mac's internal SSD, such as
-    /// disk1s2: macOS is installed onto it from recoveryOS and booted from it.
+    /// disk1s2 on macOS, /dev/nvme0n1p2 on Linux or disk1p2 on Windows:
+    /// macOS is installed onto it from recoveryOS and booted from it.
     /// Without --nor its last 8 MiB keep the machine state (NVRAM, the SEP's
     /// state and the boot log), which the guest never sees. On an existing
     /// setup, it adds another install.
-    #[arg(long)]
+    #[arg(long, value_parser = partition_name)]
     target: Option<String>,
     /// Optional: a separate PC partition (at least 1 MiB and 64 KiB) for the
     /// machine state instead of the target's tail: the Mac's NOR flash, where
@@ -161,7 +162,7 @@ pub(crate) struct Setup {
     /// also keeps stela.efi's boot log. Later commands name the install's
     /// machine-state partition again with it (the target itself when its
     /// tail holds the state).
-    #[arg(long)]
+    #[arg(long, value_parser = partition_name)]
     nor: Option<String>,
     /// The serial number of the disk holding `--target` and `--nor`, when
     /// this computer cannot read it.
@@ -287,6 +288,12 @@ pub(crate) struct Setup {
         requires = "host_firmware_requirements"
     )]
     host_firmware_cache: Option<PathBuf>,
+}
+
+/// A partition's name, given as is or by its device path (`/dev/disk1s2`,
+/// `/dev/sdb1`), as `--usb` takes a whole disk.
+fn partition_name(value: &str) -> Result<String, String> {
+    Ok(value.strip_prefix("/dev/").unwrap_or(value).to_owned())
 }
 
 #[derive(Args)]
@@ -2522,6 +2529,28 @@ mod tests {
     use stela_runtime::machine::apple::nor::nvram::Variables;
 
     const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn partitions_are_named_alone_or_by_device_path() {
+        use clap::Parser as _;
+        let crate::Command::Setup(setup) = crate::Cli::try_parse_from([
+            "stela",
+            "setup",
+            "--usb",
+            "/dev/sdb",
+            "--target",
+            "/dev/nvme0n1p2",
+            "--nor",
+            "sdc3",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a setup");
+        };
+        assert_eq!(setup.target.as_deref(), Some("nvme0n1p2"));
+        assert_eq!(setup.nor.as_deref(), Some("sdc3"));
+    }
 
     /// A computer whose volumes and disks the test declares.
     pub(super) struct FakeHost {
