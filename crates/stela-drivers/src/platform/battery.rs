@@ -119,6 +119,11 @@ pub struct Battery<'a> {
     snapshot: Option<Snapshot>,
     /// None after a failed/uncertain _BTP, removal or new information.
     alarm: Option<u32>,
+    /// Actual `_BIX` execution error when Linux's `_BIF` fallback was attempted.
+    /// Retained even if the fallback itself fails; absence is not execution.
+    information_fallback: Option<acpi::Error>,
+    /// Most recent `_STA` error that Linux's defined status default consumed.
+    status_fallback: Option<acpi::Error>,
 }
 impl<'a> Battery<'a> {
     /// Use a handle from the native session's PNP0C0A device discovery.
@@ -138,6 +143,8 @@ impl<'a> Battery<'a> {
             trip: has(handle, Method::Trip)?,
             snapshot: None,
             alarm: None,
+            information_fallback: None,
+            status_fallback: None,
         })
     }
 
@@ -145,11 +152,20 @@ impl<'a> Battery<'a> {
         self.snapshot.as_ref()
     }
 
+    pub fn information_fallback(&self) -> Option<acpi::Error> {
+        self.information_fallback
+    }
+
+    pub fn status_fallback(&self) -> Option<acpi::Error> {
+        self.status_fallback
+    }
+
     /// No stale snapshot survives a failed evaluation or observed removal.
     /// Notifications 0x80/0x81 and resume can all call the same fresh path.
     pub fn refresh(&mut self) -> Result<Option<&Snapshot>, Error> {
         self.snapshot = None;
         self.alarm = None;
+        self.information_fallback = None;
         let status = self.status()?;
         if status & PRESENT == 0 {
             return Ok(None);
@@ -159,7 +175,8 @@ impl<'a> Battery<'a> {
                 Ok(value) => parse_information(value, true)?,
                 // Linux falls back when _BIX evaluation fails, not when its
                 // successfully returned package is malformed.
-                Err(Error::Firmware(_, _)) => {
+                Err(Error::Firmware(_, error)) => {
+                    self.information_fallback = Some(error);
                     parse_information(self.evaluate(Method::Information)?, false)?
                 }
                 Err(error) => return Err(error),
@@ -234,12 +251,17 @@ impl<'a> Battery<'a> {
             .ok_or(Error::Malformed(method))
     }
 
-    fn status(&self) -> Result<u32, Error> {
+    fn status(&mut self) -> Result<u32, Error> {
+        self.status_fallback = None;
         match self.evaluate(Method::Status) {
             Ok(value) => integer(value, Method::Status),
-            // Linux/ACPI default covers device status only; it does not
-            // invent the separate battery-present bit.
-            Err(Error::Firmware(_, NOT_FOUND)) => Ok(0x0f),
+            // Match Linux bus.c::acpi_bus_get_status_handle, including an
+            // existing AML method that fails AE_NOT_FOUND during execution.
+            // The defined default does not invent the battery-present bit.
+            Err(Error::Firmware(_, NOT_FOUND)) => {
+                self.status_fallback = Some(NOT_FOUND);
+                Ok(0x0f)
+            }
             Err(error) => Err(error),
         }
     }

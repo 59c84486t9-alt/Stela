@@ -932,6 +932,7 @@ unsafe fn read_value<'a>(
 #[cfg(test)]
 pub(crate) mod tests {
     include!("acpi/battery_tests.rs");
+    include!("battery/native_tests.rs");
     extern crate std;
     use super::*;
     use std::{
