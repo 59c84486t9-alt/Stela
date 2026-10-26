@@ -1,12 +1,18 @@
 //! The engines a workload runs in: the hosted PE, the ordinary block
 //! runtime, and the native blocks of one build run by a minimal dispatcher.
+use super::ADDRESS_SPACE;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+use super::RET;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use super::fixtures::{Arena, PADDING, PADDING_SPAN, PADDING_STEP};
-use super::{ADDRESS_SPACE, RET};
 use anyhow::{Result, bail, ensure};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use std::sync::Arc;
 use stela_compiler::{GuestAddress, GuestState, TargetCpu, block::BlockProfile};
 use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_runtime::hosted::{hardware::Hardware, host::ProcessHost, pe, tables::Tables};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_runtime::machine::{Chip, Machine, NoDevices, Stop};
 
 /// One prepared function in one engine.
@@ -18,6 +24,7 @@ pub(super) trait Runner {
     fn native(&self) -> Option<(usize, String)>;
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(super) struct Hosted {
     machine: Box<Machine<ProcessHost, NoDevices>>,
     entry: u64,
@@ -112,6 +119,7 @@ pub(super) fn digest(blocks: &[NativeBlock]) -> (usize, String) {
     )
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 impl Hosted {
     /// The engine, its code arena already holding the code of a padding
     /// function the round sizes: the hosted engine places each block after
@@ -160,6 +168,7 @@ impl Hosted {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 impl Runner for Hosted {
     fn call(&mut self, state: &GuestState) -> Result<(GuestState, u64)> {
         let blocks = self.machine.statistics.blocks;

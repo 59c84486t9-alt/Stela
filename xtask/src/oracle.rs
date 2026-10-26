@@ -21,6 +21,7 @@ use std::{
 use stela_compiler::GuestState;
 
 pub mod native;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub mod system;
 
 /// Guest address of the page that holds each case's code. The zero-filled,
@@ -127,12 +128,13 @@ pub const STAGE2_NORMAL: u64 = (1 << 10) | (3 << 8) | (3 << 6) | (0xf << 2);
 /// The harness's HCR_EL2 as the engine mirrors it: E2H, RW and VM, with APK,
 /// API, EnSCXT and FIEN. The harness also sets ATA, for QEMU's MTE, which
 /// the profile lacks.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub const HCR_BASE: u64 = 1 | (1 << 31) | (1 << 34) | (1 << 40) | (1 << 41) | (1 << 47) | (1 << 53);
 const STAGE2_BLOCK: u64 = 1;
 const STAGE2_PAGE: u64 = 3;
 const DATA_PAGES: usize = DATA_BYTES / 0x1000;
 
-/// One case's HCR_EL2 additions to [`HCR_BASE`] and its stage-2
+/// One case's HCR_EL2 additions to the harness's baseline and its stage-2
 /// descriptors: the 2 MiB block of the code page, the page holding the data
 /// window's stage-1 level-3 table, and each data window page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

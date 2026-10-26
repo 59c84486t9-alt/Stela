@@ -33,7 +33,9 @@ mod hosted;
 use crate::tools::root;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
-use engines::{Blocks, Hosted, Native, NativeBlock, Profile, Runner, compile_blocks};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+use engines::Hosted;
+use engines::{Blocks, Native, NativeBlock, Profile, Runner, compile_blocks};
 use fixtures::{
     ARENA, CODE, STOP, Source, WORKLOADS, arm64e_slice, function, prepare, state_digest,
 };
@@ -158,6 +160,11 @@ impl Bench {
     pub fn run(self) -> Result<()> {
         if let Some(BenchCommand::Hosted(task)) = self.command {
             return task.run();
+        }
+        // Paired process runs include the Darwin hosted engine. Native-code
+        // and compile-only workers remain usable without that host adapter.
+        if self.worker.is_none() || self.native_code.is_none() && self.dump_native.is_none() {
+            crate::hosted_platform::require("paired process benchmarks")?;
         }
         ensure!(
             !cfg!(debug_assertions),
@@ -582,11 +589,18 @@ fn worker(fixtures: &Path, mode: Mode, calls: &[u64], target_ms: u64, round: usi
         let workload = &WORKLOADS[index as usize];
         let code = unhex(fixture["code"].as_str().context("code")?)?;
         for engine in engines {
-            let (mut arena, state, expected) = prepare(workload.input, &code)?;
+            let (arena, state, expected) = prepare(workload.input, &code)?;
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+            let mut arena = arena;
             let entry = arena.address(CODE);
             let stop = arena.address(STOP);
             let mut runner: Box<dyn Runner> = match engine {
+                #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
                 Engine::Hosted => Box::new(Hosted::new(entry, stop, &code, &mut arena, round)?),
+                #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+                Engine::Hosted => {
+                    bail!("the hosted benchmark engine requires an Intel Mac (macOS on x86_64)")
+                }
                 Engine::Blocks => Box::new(Blocks::new(entry, stop, &code)?),
                 Engine::NativeBlocks | Engine::NativeHosted => Box::new(Native::new(
                     &dumped_blocks(&dump, index, engine, entry)?,

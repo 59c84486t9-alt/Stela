@@ -279,9 +279,12 @@ impl Drop for Arena {
 pub(super) const CODE: usize = 0;
 pub(super) const STOP: usize = PAGE - 4;
 /// The hosted engine's padding function, below the stack.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(super) const PADDING: usize = PAGE;
 /// Padding instructions: round times the step, modulo the span.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(super) const PADDING_STEP: usize = 7;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(super) const PADDING_SPAN: usize = 32;
 pub(super) const STACK_TOP: usize = 2 * PAGE;
 pub(super) const DATA: usize = 2 * PAGE;

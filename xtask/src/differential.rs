@@ -721,6 +721,7 @@ struct Report {
 
 impl Differential {
     pub fn run(self) -> Result<()> {
+        self.require_host_platform()?;
         if let Some(target) = self.target {
             ensure!(
                 target.supported(),
@@ -855,6 +856,52 @@ impl Differential {
         Ok(())
     }
 
+    /// Refuse unavailable requested lanes before starting QEMU, creating
+    /// evidence, or adding comparison/coverage credit. Compiler admission is
+    /// independent of the host that will execute a translation.
+    fn require_host_platform(&self) -> Result<()> {
+        if crate::hosted_platform::AVAILABLE {
+            return Ok(());
+        }
+        if self.system_matrix || self.regions > 0 && self.selects_regions() {
+            return crate::hosted_platform::require("system-mode differential execution");
+        }
+        for (name, mode) in registry::REGISTRIES {
+            let registry = registry::load(root(), name)?;
+            for form in registry["forms"].as_array().context("forms")? {
+                let id = form["id"].as_str().context("form id")?;
+                if self.selects_form(form, id, mode) && is_system_mode(form) {
+                    return crate::hosted_platform::require("system-mode differential execution");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn selects_form(&self, form: &Value, id: &str, mode: Mode) -> bool {
+        !(mode == Mode::Service && !is_system_mode(form)
+            || form["status"] == "unsupported" && !is_system_mode(form)
+            || mode == Mode::Leaf && id == LEAF_TERMINATOR
+            || self
+                .form
+                .as_ref()
+                .is_some_and(|filter| !id.contains(filter.as_str()))
+            || self
+                .profile
+                .as_ref()
+                .is_some_and(|profile| form["profile"] != profile.as_str())
+            || self.checked_memory && !matches!(mode, Mode::Leaf | Mode::Block))
+    }
+
+    fn selects_regions(&self) -> bool {
+        !(self.checked_memory
+            || self.profile.is_some()
+            || self
+                .form
+                .as_ref()
+                .is_some_and(|filter| !regions::FORM.contains(filter.as_str())))
+    }
+
     /// Run `batch` from random states on the oracle and natively, then empty it.
     fn compare(
         &self,
@@ -863,6 +910,9 @@ impl Differential {
         batch: &mut Vec<Subject>,
         report: &mut Report,
     ) -> Result<()> {
+        if batch.iter().any(|subject| subject.system) {
+            crate::hosted_platform::require("system-mode differential execution")?;
+        }
         let mut case_subjects = Vec::new();
         let mut cases = Vec::new();
         for (subject_index, subject) in batch.iter().enumerate() {
@@ -1082,18 +1132,7 @@ impl Differential {
             let registry = registry::load(root(), name)?;
             for form in registry["forms"].as_array().context("forms")? {
                 let id = form["id"].as_str().context("form id")?;
-                if mode == Mode::Service && !is_system_mode(form)
-                    || form["status"] == "unsupported" && !is_system_mode(form)
-                    || mode == Mode::Leaf && id == LEAF_TERMINATOR
-                    || self
-                        .form
-                        .as_ref()
-                        .is_some_and(|filter| !id.contains(filter.as_str()))
-                    || self
-                        .profile
-                        .as_ref()
-                        .is_some_and(|profile| form["profile"] != profile.as_str())
-                {
+                if !self.selects_form(form, id, mode) {
                     continue;
                 }
                 let lane = Lane {
@@ -1102,9 +1141,6 @@ impl Differential {
                     registry: &registry,
                     form,
                 };
-                if self.checked_memory && !matches!(mode, Mode::Leaf | Mode::Block) {
-                    continue;
-                }
                 let samples = form["smoke_samples"].as_array().context("samples")?;
                 let mut seen = BTreeSet::new();
                 for sample in samples {
@@ -1204,13 +1240,7 @@ impl Differential {
         skipped: &mut usize,
         mut each: impl FnMut(&mut Random, Subject) -> Result<()>,
     ) -> Result<()> {
-        if self.checked_memory
-            || self.profile.is_some()
-            || self
-                .form
-                .as_ref()
-                .is_some_and(|filter| !regions::FORM.contains(filter.as_str()))
-        {
+        if !self.selects_regions() {
             return Ok(());
         }
         for _ in 0..self.regions {

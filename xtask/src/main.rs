@@ -93,6 +93,7 @@ mod dit;
 mod floor_audit;
 mod gpu;
 mod hosted_matrix;
+mod hosted_platform;
 mod oracle;
 mod progress;
 mod restore_dry_run;

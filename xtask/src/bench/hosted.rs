@@ -158,6 +158,7 @@ struct Run {
 
 impl HostedBench {
     pub fn run(self) -> Result<()> {
+        crate::hosted_platform::require("hosted process benchmarks")?;
         ensure!(
             self.rounds > 0 && self.scale > 0,
             "positive rounds and work scale required"

@@ -1,10 +1,10 @@
 //! The hosted process's requirement matrix: render
-//! `stela_runtime::hosted::requirements` into its document and its counts
+//! `stela_runtime::hosted_registry::requirements` into its document and its counts
 //! into the README, or with `check` fail if either is stale.
 use crate::tools::root;
 use anyhow::{Context, Result, bail};
 use std::fs;
-use stela_runtime::hosted::requirements;
+use stela_runtime::hosted_registry::requirements;
 
 const DOCUMENT: &str = "docs/research/hosted-requirements.md";
 const DOCUMENT_START: &str = "<!-- stela-hosted-requirements:start -->";

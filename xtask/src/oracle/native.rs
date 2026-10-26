@@ -52,10 +52,12 @@ pub(super) struct Windows {
 }
 
 impl Windows {
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub(super) fn code_pointer(&self) -> *const u8 {
         self.code.as_ptr()
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub(super) fn data_pointer(&self) -> *mut u8 {
         self.data.as_ptr()
     }
@@ -118,6 +120,7 @@ pub struct Executable {
 }
 
 impl Executable {
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub(super) fn address(&self) -> usize {
         self.pointer.as_ptr() as usize
     }
@@ -153,17 +156,20 @@ impl Executable {
     }
 
     /// Whether `address` lies in this mapping's code.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub(super) fn contains(&self, address: usize) -> bool {
         (self.address()..self.address() + self.bytes).contains(&address)
     }
 
     /// The host addresses of the mapping, first and one past the last.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub(super) fn range(&self) -> (u64, u64) {
         let start = self.address() as u64;
         (start, start + self.bytes as u64)
     }
 
     /// Overwrite the code at `address` with `bytes`.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub(super) fn patch(&mut self, address: usize, bytes: &[u8]) -> Result<()> {
         ensure!(
             self.contains(address) && address + bytes.len() <= self.address() + self.bytes,
@@ -366,7 +372,12 @@ impl Translation {
             // SAFETY: `system` admitted only blocks that reach their exit
             // without a native memory access, but for a DC ZVA, whose cases
             // zero inside the data window.
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
             return unsafe { super::system::run(case, target()) };
+            #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+            anyhow::bail!(
+                "system-mode differential execution requires an Intel Mac (macOS on x86_64)"
+            );
         }
         let windows = windows()?.lock().expect("native windows lock");
         // SAFETY: both windows are owned and sized as copied here.
