@@ -252,6 +252,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_link_is_digested_by_its_target_name_not_followed() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let upstream = temporary.path().join("upstream");

@@ -98,6 +98,7 @@ mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_matrix;
 mod oracle;
+mod pages;
 mod progress;
 mod restore_dry_run;
 mod soc_facts;

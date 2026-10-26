@@ -1495,8 +1495,9 @@ impl ReadAt for Range {
         self.bytes
     }
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
-        use std::os::unix::fs::FileExt;
-        self.file.read_exact_at(buffer, self.start + offset)
+        use std::io::{Read, Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(self.start + offset))?;
+        self.file.read_exact(buffer)
     }
 }
 

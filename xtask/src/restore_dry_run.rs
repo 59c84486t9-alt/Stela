@@ -19,8 +19,7 @@ use plist::{Dictionary, Value};
 use std::{
     collections::BTreeSet,
     fs::File,
-    io::Cursor,
-    os::unix::fs::FileExt,
+    io::{Cursor, Read, Seek, SeekFrom},
     path::PathBuf,
     process::ExitCode,
     task::Poll,
@@ -115,7 +114,8 @@ impl ReadAt for ArchiveFile {
         self.1
     }
     fn read_at(&mut self, offset: u64, b: &mut [u8]) -> std::io::Result<()> {
-        self.0.read_exact_at(b, offset)
+        self.0.seek(SeekFrom::Start(offset))?;
+        self.0.read_exact(b)
     }
 }
 type Reader = Extent<ArchiveFile>;

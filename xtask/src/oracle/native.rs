@@ -2,6 +2,7 @@
 use super::{
     CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Outcome, Scalable,
 };
+use crate::pages::{self, Access};
 use anyhow::{Context, Result, ensure};
 use std::{
     ptr::NonNull,
@@ -72,45 +73,23 @@ pub(super) fn windows() -> Result<&'static Mutex<Windows>> {
     if let Some(windows) = WINDOWS.get() {
         return Ok(windows);
     }
+    let map = |address, bytes, access| {
+        pages::map(Some(address), bytes, access).with_context(|| format!("cannot map {address:#x}"))
+    };
     let windows = Windows {
-        code: map_at(CODE_REGION, CODE_REGION_BYTES, libc::PROT_READ)?,
-        data: map_at(DATA_WINDOW, DATA_BYTES, libc::PROT_READ | libc::PROT_WRITE)?,
+        code: map(CODE_REGION, CODE_REGION_BYTES, Access::Read)?,
+        data: map(DATA_WINDOW, DATA_BYTES, Access::ReadWrite)?,
     };
     Ok(WINDOWS.get_or_init(|| Mutex::new(windows)))
 }
 
-/// Map fresh zeroed memory at exactly `address`, refusing to replace a mapping.
-fn map_at(address: u64, bytes: usize, protection: libc::c_int) -> Result<NonNull<u8>> {
-    // SAFETY: a hinted anonymous mapping never replaces existing memory; the
-    // result is checked against the requested address before use.
-    let pointer = unsafe {
-        libc::mmap(
-            address as *mut libc::c_void,
-            bytes,
-            protection,
-            libc::MAP_PRIVATE | libc::MAP_ANON,
-            -1,
-            0,
-        )
-    };
-    ensure!(pointer != libc::MAP_FAILED, "cannot map {address:#x}");
-    if pointer as u64 != address {
-        // SAFETY: release the mapping the kernel placed elsewhere.
-        unsafe { libc::munmap(pointer, bytes) };
-        anyhow::bail!("{address:#x} is already mapped in this process");
-    }
-    NonNull::new(pointer.cast()).context("null mapping")
-}
-
-/// Change the protection of one page of the code region.
+/// Change the access of one page of the code region.
 ///
 /// # Safety
 /// `page` must be a page of the code region mapping.
-unsafe fn protect(page: *mut u8, protection: libc::c_int) -> Result<()> {
+unsafe fn protect(page: *mut u8, access: Access) -> Result<()> {
     // SAFETY: the caller passes a page of a mapping this process owns.
-    let status = unsafe { libc::mprotect(page.cast(), PAGE_BYTES, protection) };
-    ensure!(status == 0, "cannot protect the code page");
-    Ok(())
+    unsafe { pages::protect(page, PAGE_BYTES, access) }.context("cannot protect the code page")
 }
 
 /// Executable copy of native code, unmapped on drop.
@@ -123,29 +102,17 @@ impl Executable {
     pub(super) fn new(code: &[u8]) -> Result<Self> {
         ensure!(!code.is_empty(), "empty native code");
         let bytes = code.len().next_multiple_of(PAGE_BYTES);
-        // SAFETY: fresh anonymous RW memory, checked before use.
-        let pointer = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        ensure!(pointer != libc::MAP_FAILED, "cannot map native code");
         let executable = Self {
-            pointer: NonNull::new(pointer.cast()).context("null mapping")?,
+            pointer: pages::map(None, bytes, Access::ReadWrite)
+                .context("cannot map native code")?,
             bytes,
         };
+        let pointer = executable.pointer.as_ptr();
         // SAFETY: the mapping holds at least `code.len()` writable bytes.
         unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), executable.pointer.as_ptr(), code.len());
-            ensure!(
-                libc::mprotect(pointer, bytes, libc::PROT_READ | libc::PROT_EXEC) == 0,
-                "cannot make native code executable"
-            );
+            std::ptr::copy_nonoverlapping(code.as_ptr(), pointer, code.len());
+            pages::protect(pointer, bytes, Access::ReadExecute)
+                .context("cannot make native code executable")?;
         }
         Ok(executable)
     }
@@ -175,18 +142,14 @@ impl Executable {
             self.contains(address) && address + bytes.len() <= self.address() + self.bytes,
             "a patch outside the native code"
         );
-        let pointer = self.pointer.as_ptr().cast();
+        let pointer = self.pointer.as_ptr();
         // SAFETY: the owned mapping, writable only while it is copied into.
         unsafe {
-            ensure!(
-                libc::mprotect(pointer, self.bytes, libc::PROT_READ | libc::PROT_WRITE) == 0,
-                "cannot make native code writable"
-            );
+            pages::protect(pointer, self.bytes, Access::ReadWrite)
+                .context("cannot make native code writable")?;
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
-            ensure!(
-                libc::mprotect(pointer, self.bytes, libc::PROT_READ | libc::PROT_EXEC) == 0,
-                "cannot make native code executable"
-            );
+            pages::protect(pointer, self.bytes, Access::ReadExecute)
+                .context("cannot make native code executable")?;
         }
         Ok(())
     }
@@ -195,7 +158,7 @@ impl Executable {
 impl Drop for Executable {
     fn drop(&mut self) {
         // SAFETY: this object owns the whole mapping.
-        unsafe { libc::munmap(self.pointer.as_ptr().cast(), self.bytes) };
+        unsafe { pages::unmap(self.pointer.as_ptr(), self.bytes) };
     }
 }
 
@@ -456,13 +419,13 @@ pub(super) unsafe fn install_case(windows: &Windows, case: &Case) -> Result<()> 
             .code
             .as_ptr()
             .add((CODE_PAGE - CODE_REGION) as usize);
-        protect(page, libc::PROT_READ | libc::PROT_WRITE)?;
+        protect(page, Access::ReadWrite)?;
         let code = std::slice::from_raw_parts_mut(page, PAGE_BYTES);
         code.fill(0);
         for (word, bytes) in case.code.iter().zip(code.as_chunks_mut::<4>().0) {
             bytes.copy_from_slice(&word.to_le_bytes());
         }
-        protect(page, libc::PROT_READ)?;
+        protect(page, Access::Read)?;
         std::slice::from_raw_parts_mut(windows.data.as_ptr(), DATA_BYTES)
             .copy_from_slice(&case.data);
     }
