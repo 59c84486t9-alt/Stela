@@ -1,29 +1,38 @@
-//! The `stela` command line: run arm64 macOS programs and apps on an
-//! Intel Mac, and compile, run and inspect original ARM code.
+//! The `stela` command line: prepare a USB that boots Stela to install macOS
+//! on a PC, compile, run and inspect original ARM code, and, on an Intel Mac,
+//! run arm64 macOS programs and apps.
 use clap::{Parser, Subcommand};
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use std::ffi::OsString;
 use std::process::ExitCode;
 
 mod apfs;
+// Running arm64 programs needs the hosted runtime, which only an Intel Mac
+// has (`stela_runtime::hosted`).
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod apps;
 mod args;
 mod boot;
 mod boot_log;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod bundle;
 pub mod compile;
 mod dyld_entry;
 pub mod efi;
 mod execute;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod guest_system;
 mod images;
 mod input;
 mod loader;
 pub mod registry;
 pub mod restore;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod run;
 mod setup;
 
 /// The help's closing examples.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const EXAMPLES: &str = "Examples:
   stela install-system          Install the macOS 27 system files programs run against (once)
   stela ./hello                 Run an arm64 program or #! script
@@ -31,15 +40,31 @@ const EXAMPLES: &str = "Examples:
   stela apps                    Add launchers for arm64-only apps to ~/Applications/Stela
 
 The research and development commands are described in docs/development.md.";
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+const EXAMPLES: &str = "Examples:
+  stela setup --usb DIR --fetch Prepare a USB that boots Stela to install macOS 27
+
+Running arm64 programs and apps needs an Intel Mac. The research and
+development commands are described in docs/development.md.";
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const ABOUT: &str = "Run arm64 macOS programs and apps on an Intel Mac";
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+const ABOUT: &str = "Prepare a USB that boots Stela to install macOS on a PC";
 
 #[derive(Parser)]
+#[cfg_attr(
+    all(target_os = "macos", target_arch = "x86_64"),
+    command(
+        override_usage = "stela PROGRAM [ARGS]...\n       stela <COMMAND>",
+        allow_external_subcommands = true
+    )
+)]
 #[command(
     name = "stela",
     version,
-    about = "Run arm64 macOS programs and apps on an Intel Mac",
-    override_usage = "stela PROGRAM [ARGS]...\n       stela <COMMAND>",
+    about = ABOUT,
     after_help = EXAMPLES,
-    allow_external_subcommands = true,
     arg_required_else_help = true
 )]
 pub(crate) struct Cli {
@@ -51,12 +76,15 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Run an arm64 program, #! script or app bundle (the same as `stela
     /// PROGRAM`).
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     Run(run::Run),
     /// Install the macOS 27 system files arm64 programs run against, from
     /// its restore image (IPSW).
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     InstallSystem(guest_system::InstallSystem),
     /// Make native launchers in ~/Applications/Stela for arm64-only apps, so
     /// they open from Finder, the Dock and Open With.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     Apps(apps::Apps),
     /// Prepare a USB that boots Stela to install macOS 27, or undo it.
     Setup(setup::Setup),
@@ -64,10 +92,12 @@ pub(crate) enum Command {
     /// disk image or a raw partition.
     BootLog(boot_log::BootLog),
     /// A program to run: `stela PROGRAM [ARGS]...`.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     #[command(external_subcommand)]
     Program(Vec<OsString>),
     /// The per-user service launchd starts: launchers, translations ahead
     /// of time and unsupported-operation notifications.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     #[command(hide = true)]
     Stelad(apps::Stelad),
     /// Report detected x86 capabilities and the named SIMD output catalog.
@@ -152,12 +182,17 @@ pub(crate) enum Command {
 impl Command {
     fn run(self) -> anyhow::Result<()> {
         match self {
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
             Self::Run(command) => command.run(),
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
             Self::InstallSystem(command) => command.run(),
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
             Self::Apps(command) => command.run(),
             Self::Setup(command) => command.run(),
             Self::BootLog(command) => command.run(),
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
             Self::Program(words) => run::Run::shorthand(words)?.run(),
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
             Self::Stelad(command) => command.run(),
             Self::CpuInfo => compile::cpu_info(),
             Self::CompileLeaf(command) => command.run(),
@@ -204,6 +239,7 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn parse(words: &[&str]) -> Command {
         Cli::try_parse_from(std::iter::once("stela").chain(words.iter().copied()))
             .unwrap()
@@ -211,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn a_first_word_that_is_no_command_is_the_program_with_its_own_arguments() {
         let Command::Program(words) = parse(&["./hello", "--help", "-v"]) else {
             panic!("not a program");
@@ -222,12 +259,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn the_help_shows_the_simple_usage_and_hides_the_research_commands() {
         let help = Cli::command().render_help().to_string();
         assert!(help.contains("stela PROGRAM [ARGS]..."), "{help}");
         assert!(help.contains("install-system") && help.contains("apps"));
         assert!(!help.contains("compile-block") && !help.contains("decrypt-aea"));
         assert!(!help.contains("stelad"));
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    fn other_hosts_offer_setup_and_no_program_runs() {
+        let help = Cli::command().render_help().to_string();
+        assert!(
+            help.contains("setup") && help.contains("boot-log"),
+            "{help}"
+        );
+        assert!(!help.contains("install-system") && !help.contains("PROGRAM"));
+        assert!(Cli::try_parse_from(["stela", "./hello"]).is_err());
+        assert!(!help.contains("compile-block") && !help.contains("decrypt-aea"));
         Cli::command().debug_assert();
     }
 }

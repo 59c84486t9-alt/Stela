@@ -1554,6 +1554,7 @@ fn fetch_recovery(directory: &Path, build: &str, model: &str) -> Result<PathBuf>
 
 /// Download `build`'s restore image for `model` from Apple's catalog into
 /// `directory`, or reuse a complete earlier download from the same entry.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<PathBuf> {
     let images = restore::catalog()?;
     let image = restore::select(&images, Some(build), Some(model))?;

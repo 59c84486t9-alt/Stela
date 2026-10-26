@@ -8,6 +8,8 @@
 //! hosted launch ends, stops them when quit, appends their output to
 //! `~/Library/Logs/Stela/<name>.log` and shows the end of that log when one
 //! fails. See `docs/design/hosted-cli.md`.
+// Elsewhere the launcher only refuses to run; its tests still check the logic.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[cfg(target_os = "macos")]
 mod appkit;
 

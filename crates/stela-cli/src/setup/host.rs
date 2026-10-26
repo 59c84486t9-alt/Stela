@@ -15,6 +15,8 @@ pub(crate) enum FileSystem {
     Fat,
     ExFat,
     Hfs,
+    // Only macOS mounts APFS volumes.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Apfs,
     Ntfs,
     Other(String),
