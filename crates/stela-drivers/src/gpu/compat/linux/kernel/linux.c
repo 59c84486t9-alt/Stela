@@ -7,6 +7,7 @@
 #include <linux/processor.h>
 #include <linux/preempt.h>
 #include <linux/thread_info.h>
+#include <stela/atomic_callback.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/task.h>
@@ -45,7 +46,7 @@ bool stela_linux_lease_matches(const struct stela_linux_lease *lease)
 
 void stela_linux_lease_suspend(const struct stela_linux_lease *lease)
 {
-	if (!stela_linux_lease_matches(lease))
+	if (stela_linux_atomic_callback_active() || !stela_linux_lease_matches(lease))
 		__builtin_trap();
 	owner = NULL;
 	entry_generation = 0;
@@ -58,7 +59,8 @@ bool stela_linux_lease_resume(const struct stela_linux_lease *lease)
 {
 	/* Validate the saved continuation before ANY mutation. The internal task
 	 * state machine additionally owns resume-once/actual-owner authority. */
-	if ((lease->owner != NULL) != (lease->generation != 0) ||
+	if (stela_linux_atomic_callback_active() ||
+	    (lease->owner != NULL) != (lease->generation != 0) ||
 	    lease->generation > entry_serial ||
 	    (lease->irq_flags != ARCH_IRQ_ENABLED && lease->irq_flags != ARCH_IRQ_DISABLED) ||
 	    (!lease->owner && lease->irq_flags != ARCH_IRQ_ENABLED) || owner || entry_generation ||
@@ -163,7 +165,8 @@ void arch_local_irq_restore(unsigned long flags)
 bool stela_linux_quiescent(void)
 {
 	(void)stela_linux_owner();
-	return !preempt_count() && irq_flags == ARCH_IRQ_ENABLED;
+	return !stela_linux_atomic_callback_active() &&
+	       !preempt_count() && irq_flags == ARCH_IRQ_ENABLED;
 }
 
 /* Only depth bookkeeping is needed in this nonpreemptible, non-interrupting

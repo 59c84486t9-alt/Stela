@@ -31,6 +31,8 @@ use core::{
 
 #[cfg(target_arch = "x86_64")]
 mod context;
+#[cfg(target_arch = "x86_64")]
+pub mod service;
 
 pub type Callback = unsafe extern "C" fn(*mut c_void);
 pub type RetainedOwner = Arc<dyn Any + Send + Sync>;
@@ -68,6 +70,7 @@ enum Lane {
     Foreground,
     General,
     Notify,
+    Service,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextId(u64);
@@ -215,6 +218,7 @@ pub struct Queue<const N: usize> {
     owner: ManuallyDrop<RetainedOwner>,
     state: ManuallyDrop<UnsafeCell<State<N>>>,
     held: AtomicBool,
+    inspection: AtomicBool,
     retired: AtomicBool,
 }
 // SAFETY: same-CPU IRQ-save exclusion protects all state; foreign CPUs fail
@@ -276,6 +280,7 @@ impl<const N: usize> Queue<N> {
                 poisoned: false,
             })),
             held: AtomicBool::new(false),
+            inspection: AtomicBool::new(false),
             retired: AtomicBool::new(false),
         }))
     }
@@ -499,6 +504,7 @@ const _: () = {
 pub enum LeaveReason {
     Yield = 0,
     Blocked = 1,
+    Reschedule = 2,
 }
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -554,6 +560,7 @@ pub unsafe trait SwitchBinding: Send + Sync {
 
 #[cfg(target_arch = "x86_64")]
 struct WakeSignal {
+    service: bool,
     sequence: AtomicU64,
     pending: AtomicBool,
 }
@@ -576,6 +583,18 @@ impl<const N: usize> WakeHandle<N> {
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
+    pub(crate) fn closed(&self) -> Result<bool, WorkError> {
+        self.queue.process()?;
+        Ok(self.queue.retired.load(Ordering::Acquire)
+            || self.queue.abandoned.load(Ordering::Acquire)
+            || self.signal.sequence.load(Ordering::Acquire) != self.sequence)
+    }
+    /// Immutable actual constructor role, not a live task or entry grant.
+    #[cfg(feature = "linux-kernel")]
+    pub(crate) fn service_reserved(&self) -> Result<bool, WorkError> {
+        self.queue.process()?;
+        Ok(self.signal.service)
+    }
     /// Qualified same-CPU process/IRQ admission only; never resume inline or
     /// change the foreign condition. Close permits wakes for admitted jobs.
     /// Release/acquire pending plus final IF exclusion covers wake at park.
@@ -595,6 +614,7 @@ impl<const N: usize> WakeHandle<N> {
         {
             return Err(WorkError::Closed);
         }
+        self.queue.inspection.store(true, Ordering::Release);
         self.signal.pending.store(true, Ordering::Release);
         Ok(())
     }
@@ -648,6 +668,7 @@ enum TaskState {
 }
 #[cfg(target_arch = "x86_64")]
 struct Task {
+    lane: Lane,
     stack: Stack,
     id: ContextId,
     frame: context::Frame,
@@ -659,7 +680,8 @@ struct Task {
     signal: Arc<WakeSignal>,
 }
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
-/// task one is serial Notify; remaining stacks run general work. The dispatcher
+/// task one is serial Notify; an optional service reserves task two, with all
+/// remaining stacks running general work. The dispatcher
 /// itself has no fabricated thread ID. All switching happens with IF=0.
 #[cfg(target_arch = "x86_64")]
 pub struct Runtime<const N: usize> {
@@ -669,6 +691,8 @@ pub struct Runtime<const N: usize> {
     current: Cell<usize>,
     cursor: Cell<usize>,
     retired: Cell<bool>,
+    service_started: Cell<bool>,
+    service_domain: ManuallyDrop<UnsafeCell<Option<Arc<service::Domain<N>>>>>,
     _local: PhantomData<*mut ()>,
     _pinned: PhantomPinned,
 }
@@ -709,15 +733,32 @@ impl<const N: usize> Runtime<N> {
         stacks: Vec<Stack>,
         controls: context::Controls,
     ) -> Result<Pin<Box<Self>>, WorkError> {
+        Self::with_service_controls(queue, stacks, controls, false)
+    }
+    fn with_service_controls(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        controls: context::Controls,
+        reserve_service: bool,
+    ) -> Result<Pin<Box<Self>>, WorkError> {
+        if reserve_service && stacks.len() < 5 {
+            return Err(WorkError::Unavailable);
+        }
         let mut tasks = Vec::new();
         tasks
             .try_reserve_exact(stacks.len())
             .map_err(|_| WorkError::Full)?;
-        for stack in stacks {
+        for (index, stack) in stacks.into_iter().enumerate() {
             let id = NEXT_CONTEXT
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .map_err(|_| WorkError::Exhausted)?;
             tasks.push(Task {
+                lane: match index {
+                    0 => Lane::Foreground,
+                    1 => Lane::Notify,
+                    2 if reserve_service => Lane::Service,
+                    _ => Lane::General,
+                },
                 stack,
                 id: ContextId(id),
                 frame: context::Frame::new(controls),
@@ -727,6 +768,7 @@ impl<const N: usize> Runtime<N> {
                 draining: false,
                 binding: None,
                 signal: Arc::new(WakeSignal {
+                    service: reserve_service && index == 2,
                     sequence: AtomicU64::new(0),
                     pending: AtomicBool::new(false),
                 }),
@@ -746,6 +788,8 @@ impl<const N: usize> Runtime<N> {
             current: Cell::new(NONE),
             cursor: Cell::new(0),
             retired: Cell::new(false),
+            service_started: Cell::new(false),
+            service_domain: ManuallyDrop::new(UnsafeCell::new(None)),
             _local: PhantomData,
             _pinned: PhantomPinned,
         });
@@ -766,6 +810,66 @@ impl<const N: usize> Runtime<N> {
     }
     pub fn queue(&self) -> &Arc<Queue<N>> {
         &self.queue
+    }
+    fn domain(&self) -> Option<&Arc<service::Domain<N>>> {
+        // SAFETY: same-CPU access; one setup publication precedes all jobs.
+        unsafe { (&*self.service_domain.get()).as_ref() }
+    }
+    pub fn attach_service_domain(
+        self: Pin<&Self>,
+        domain: Arc<service::Domain<N>>,
+    ) -> Result<(), WorkError> {
+        self.queue.process()?;
+        if self.retired.get() {
+            return Err(WorkError::Closed);
+        }
+        if self.current.get() != NONE || self.service_started.get() || self.domain().is_some() {
+            return Err(WorkError::Busy);
+        }
+        // SAFETY: immutable actual constructor role, on qualified dispatcher.
+        if unsafe { (*self.task(2)).lane } != Lane::Service {
+            return Err(WorkError::Unavailable);
+        }
+        domain.register(self)?;
+        // SAFETY: first publication before jobs; no callback/drop/borrow crosses it.
+        unsafe { *self.service_domain.get() = Some(domain) };
+        Ok(())
+    }
+    /// Start the optional reserved service once, on its actual distinct stack.
+    /// The ordinary General/Notify queue cannot submit into this private lane.
+    ///
+    /// # Safety
+    /// The queue's retained owner covers callback/code/context through genuine
+    /// stop, drain and join. The callback binds its real task and supplied clock
+    /// domain before driver admission, never unwinds or returns with an entered
+    /// owner. Reservation alone supplies no timer/IRQ-work/RT service or clock.
+    pub unsafe fn start_service(
+        self: Pin<&Self>,
+        callback: Callback,
+        context: *mut c_void,
+    ) -> Result<Ticket, WorkError> {
+        self.queue.process()?;
+        if self.retired.get() {
+            return Err(WorkError::Closed);
+        }
+        if self.current.get() != NONE || self.service_started.get() {
+            return Err(WorkError::Busy);
+        }
+        // SAFETY: all runtimes have at least four tasks; immutable lane metadata
+        // belongs to this qualified dispatcher and is never caller role bits.
+        if unsafe { (*self.task(2)).lane } != Lane::Service {
+            return Err(WorkError::Unavailable);
+        }
+        let ticket = self.queue.enqueue_lane(Lane::Service, callback, context)?;
+        self.service_started.set(true);
+        Ok(ticket)
+    }
+    /// Check actual CPU/current/RSP before identifying the reserved service.
+    pub fn service_current(&self) -> Result<bool, WorkError> {
+        self.current_id()?;
+        // SAFETY: current_id validated the actual retained continuation.
+        let task = unsafe { &*self.task(self.current.get()) };
+        Ok(task.signal.service)
     }
     pub fn current_id(&self) -> Result<ContextId, WorkError> {
         let id = self.queue.current_id()?;
@@ -936,6 +1040,25 @@ impl<const N: usize> Runtime<N> {
     pub fn yield_now(self: Pin<&Self>) -> Result<(), WorkError> {
         self.suspend(LeaveReason::Yield).map(|_| ())
     }
+    /// Involuntary cooperative boundary, distinct from explicit yield-to-tail.
+    /// Default round-robin stays unchanged; future FIFO ordering consumes this
+    /// distinct reason instead of treating it as an explicit yield.
+    pub fn reschedule(self: Pin<&Self>) -> Result<(), WorkError> {
+        self.suspend(LeaveReason::Reschedule).map(|_| ())
+    }
+    /// Actual process/current check precedes retained clock/provider entry.
+    pub fn reschedule_requested(self: Pin<&Self>) -> Result<bool, WorkError> {
+        self.current_id()?;
+        let Some(domain) = self.domain() else {
+            return Ok(false);
+        };
+        if self.service_current()? {
+            return Ok(false);
+        }
+        // Capture before inspection. A later wake must survive this query.
+        let requested = self.queue.inspection.swap(false, Ordering::AcqRel);
+        Ok(domain.inspect_and_wake()? || requested)
+    }
     /// Suspend once only if the retained foreign predicate is still blocked.
     /// Linux-owned process PREPARE must precede this call. Skipped/error leaves
     /// its original entered lease intact; its wrapper clears prepared state.
@@ -1013,22 +1136,28 @@ impl<const N: usize> Runtime<N> {
         if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
+        let due_service = if let Some(domain) = self.domain() {
+            if !self.service_started.get() {
+                return Err(WorkError::Unavailable);
+            }
+            match domain.inspect_and_wake() {
+                Ok(due) => due,
+                Err(error) => self.queue.cpu.fatal(error),
+            }
+        } else {
+            false
+        };
         let flags = self.queue.cpu.save_disable()?;
         // SAFETY: the task list's length never changes after construction.
         let count = unsafe { (*self.tasks.get()).len() };
         let mut selected = None;
         for n in 0..count {
-            let i = (self.cursor.get() + n) % count;
+            let i = (if due_service { 2 } else { self.cursor.get() } + n) % count;
             // SAFETY: no task runs while the dispatcher steps, so this is the only
             // reference to task `i`.
             let task = unsafe { &mut (*self.task(i)) };
             if task.state == TaskState::Idle {
-                let lane = match i {
-                    0 => Lane::Foreground,
-                    1 => Lane::Notify,
-                    _ => Lane::General,
-                };
-                match self.queue.next(lane) {
+                match self.queue.next(task.lane) {
                     Ok(Some(job)) => {
                         task.job = Some(job);
                         task.state = TaskState::Ready;
@@ -1060,7 +1189,9 @@ impl<const N: usize> Runtime<N> {
             unsafe { self.queue.cpu.restore(flags) };
             return Ok(false);
         };
-        self.cursor.set((i + 1) % count);
+        if !(due_service && i == 2) {
+            self.cursor.set((i + 1) % count);
+        }
         // SAFETY: task `i` is idle or waiting, and IRQs are disabled.
         unsafe {
             (*self.task(i)).state = TaskState::Running;
@@ -1085,6 +1216,20 @@ impl<const N: usize> Runtime<N> {
         // SAFETY: the dispatcher resumed with `flags` from its own save_disable.
         unsafe { self.queue.cpu.restore(flags) };
         Ok(true)
+    }
+    /// One real dispatch, or one owned idle/event wait followed by dispatch.
+    /// Due inspection only wakes; all service callbacks run on its real stack.
+    pub fn step_or_idle(self: Pin<&Self>) -> Result<bool, WorkError> {
+        if self.step()? {
+            return Ok(true);
+        }
+        let Some(domain) = self.domain() else {
+            return Ok(false);
+        };
+        if let Err(error) = domain.idle() {
+            self.queue.cpu.fatal(error);
+        }
+        self.step()
     }
     /// Foreground AML/driver calls receive a real distinct task/stack identity.
     /// Dispatcher/root/IRQ callers never receive an invented ACPICA thread ID.
@@ -1170,12 +1315,13 @@ impl<const N: usize> Runtime<N> {
                 {
                     return Err(WorkError::WouldDeadlock);
                 }
-                let mut queued_lanes = [false; 3];
+                let mut queued_lanes = [false; 4];
                 for job in s.jobs.iter().flatten().filter(|job| !job.running) {
                     let lane = match job.lane {
                         Lane::Foreground => 0,
                         Lane::Notify => 1,
                         Lane::General => 2,
+                        Lane::Service => 3,
                     };
                     queued_lanes[lane] = true;
                 }
@@ -1194,10 +1340,11 @@ impl<const N: usize> Runtime<N> {
                                         task.signal.pending.load(Ordering::Acquire)
                                     }
                                     TaskState::Idle => {
-                                        queued_lanes[match i {
-                                            0 => 0,
-                                            1 => 1,
-                                            _ => 2,
+                                        queued_lanes[match task.lane {
+                                            Lane::Foreground => 0,
+                                            Lane::Notify => 1,
+                                            Lane::General => 2,
+                                            Lane::Service => 3,
                                         }]
                                     }
                                     TaskState::Running => false,
@@ -1232,6 +1379,9 @@ impl<const N: usize> Runtime<N> {
     /// Timeout/failed drain is not retirement authority and retains every owner.
     pub unsafe fn retire(self: Pin<&Self>) -> Result<(), WorkError> {
         self.queue.process()?;
+        if self.domain().is_some_and(|domain| !domain.retired()) {
+            return Err(WorkError::Pending);
+        }
         if self.current.get() != NONE {
             return Err(WorkError::Pending);
         }
@@ -1314,6 +1464,8 @@ impl<const N: usize> Drop for Runtime<N> {
         if self.retired.get() {
             // SAFETY: retirement proved no task frame or stack is still live.
             unsafe { ManuallyDrop::drop(&mut self.tasks) };
+            // SAFETY: successful retirement also required actual domain release.
+            unsafe { ManuallyDrop::drop(&mut self.service_domain) };
         } else {
             quarantine();
         }
@@ -1350,6 +1502,22 @@ impl<const N: usize> Executor<N> {
             runtime: ManuallyDrop::new(Runtime::new(queue, stacks)?),
         })
     }
+    /// Reserve one actual service continuation in addition to Foreground,
+    /// Notify and at least two General continuations. Start/bind the service
+    /// explicitly before admitting dependent Linux operations.
+    pub fn new_with_service(queue: Arc<Queue<N>>, stacks: Vec<Stack>) -> Result<Self, WorkError> {
+        Runtime::<N>::validate_stacks(&queue, &stacks)?;
+        if stacks.len() < 5 {
+            return Err(WorkError::Unavailable);
+        }
+        // SAFETY: same qualified native construction boundary as new().
+        let controls = unsafe { context::controls()? };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_service_controls(
+                queue, stacks, controls, true,
+            )?),
+        })
+    }
     /// Genuine hosted continuation mechanism test only. StackBacking must own
     /// real mapped guarded stacks; Cpu is an explicit hosted model. This never
     /// qualifies CPL0/IRQ/native roots or registers a native producer.
@@ -1363,6 +1531,20 @@ impl<const N: usize> Executor<N> {
         let controls = unsafe { context::read_controls() };
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_controls(queue, stacks, controls)?),
+        })
+    }
+    #[cfg(all(test, feature = "linux-kernel"))]
+    pub(crate) fn new_hosted_service_for_test(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+    ) -> Result<Self, WorkError> {
+        Runtime::<N>::validate_stacks(&queue, &stacks)?;
+        // SAFETY: actual hosted stack mechanism only, as new_hosted_for_test.
+        let controls = unsafe { context::read_controls() };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_service_controls(
+                queue, stacks, controls, true,
+            )?),
         })
     }
     /// The returned actual pinned runtime is what a retained native provider
@@ -1548,7 +1730,10 @@ mod tests {
             }
         }
         fn stacks(dropped: Arc<AtomicU64>) -> Vec<Stack> {
-            (0..4)
+            stacks_count(dropped, 4)
+        }
+        fn stacks_count(dropped: Arc<AtomicU64>, count: usize) -> Vec<Stack> {
+            (0..count)
                 .map(|_| {
                     #[cfg(target_os = "macos")]
                     let anonymous = 0x1000;
@@ -1658,6 +1843,11 @@ mod tests {
             f.event(11);
         }
         fn setup() -> (Executor<16>, Arc<Fixture>, Arc<CpuModel>, Arc<AtomicU64>) {
+            setup_with_service(false)
+        }
+        fn setup_with_service(
+            reserve_service: bool,
+        ) -> (Executor<16>, Arc<Fixture>, Arc<CpuModel>, Arc<AtomicU64>) {
             let cpu = CpuModel::new();
             let f = Arc::new(Fixture {
                 cpu: cpu.clone(),
@@ -1671,9 +1861,12 @@ mod tests {
             // Explicit hosted actual-stack mechanism test. Native construction
             // additionally qualifies CPL0 CR0/CR4/IRQ behavior; this is not a
             // native provider or IRQ delivery attestation.
-            let runtime = Runtime::with_controls(q, stacks(dropped.clone()), unsafe {
-                context::read_controls()
-            })
+            let runtime = Runtime::with_service_controls(
+                q,
+                stacks_count(dropped.clone(), if reserve_service { 5 } else { 4 }),
+                unsafe { context::read_controls() },
+                reserve_service,
+            )
             .unwrap();
             f.runtime.store(
                 runtime.as_ref().get_ref() as *const _ as u64,
@@ -1687,6 +1880,62 @@ mod tests {
                 cpu,
                 dropped,
             )
+        }
+        unsafe extern "C" fn reserved_service(p: *mut c_void) {
+            let f = unsafe { fixture(p) };
+            let runtime = unsafe { f.runtime() };
+            assert_eq!(runtime.service_current(), Ok(true));
+            f.event(50);
+            runtime.yield_now().unwrap();
+            assert_eq!(runtime.service_current(), Ok(true));
+            f.event(51);
+        }
+        #[test]
+        fn optional_service_owns_a_fifth_distinct_guarded_stack_and_cannot_use_default_lane() {
+            let (ordinary, _, _, ordinary_dropped) = setup();
+            let runtime = ordinary.runtime();
+            // SAFETY: rejected before admission; no callback/context is retained.
+            assert_eq!(
+                unsafe { runtime.start_service(noop, core::ptr::null_mut()) },
+                Err(WorkError::Unavailable)
+            );
+            runtime.queue().close().unwrap();
+            unsafe { runtime.retire() }.unwrap();
+            drop(ordinary);
+            assert_eq!(ordinary_dropped.load(Ordering::Relaxed), 4);
+
+            let (executor, f, cpu, dropped) = setup_with_service(true);
+            let runtime = executor.runtime();
+            let context = Arc::as_ptr(&f) as *mut c_void;
+            // SAFETY: fixture retains callback/context/code through actual join.
+            let service = unsafe { runtime.start_service(reserved_service, context) }.unwrap();
+            assert!(f.events.lock().unwrap().is_empty());
+            unsafe { runtime.call_foreground(foreground, context, 10000) }.unwrap();
+            assert!(runtime.queue().completed(service).unwrap());
+            assert_eq!(
+                unsafe { runtime.start_service(reserved_service, context) },
+                Err(WorkError::Busy)
+            );
+            let events = f.events.lock().unwrap();
+            let service_id = events.iter().find(|event| event.0 == 50).unwrap().1;
+            assert_eq!(
+                events.iter().find(|event| event.0 == 51).unwrap().1,
+                service_id
+            );
+            let mut ids: Vec<_> = events.iter().map(|event| event.1).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(
+                ids.len(),
+                5,
+                "Foreground/Notify/service/two General identities"
+            );
+            drop(events);
+            runtime.queue().close().unwrap();
+            unsafe { runtime.retire() }.unwrap();
+            drop(executor);
+            assert_eq!(dropped.load(Ordering::Relaxed), 5);
+            assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
         }
         #[test]
         fn actual_x86_continuations_have_distinct_stacks_ids_fifo_and_control_state() {

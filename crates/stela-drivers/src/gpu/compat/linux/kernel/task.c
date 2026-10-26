@@ -11,6 +11,7 @@
 #include <linux/sched/task.h>
 #include <linux/sched/signal.h>
 #include <linux/string.h>
+#include <stela/atomic_callback.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/task.h>
@@ -48,12 +49,49 @@ struct stela_linux_task {
 	int prepared_count;
 	bool attached, active, suspended, prepared;
 	bool io_blocked, load_blocked, finalizing;
+	bool scope_boundary;
 };
 
 /* The real same-CPU Runtime owns publication. This does not authorize C entry
  * from another CPU, an ISR, or an unretained stack. The current callback checks
  * actual CPU/IRQ/RSP before any admitted task service uses mutable metadata. */
 static struct stela_linux_task *active;
+
+/* Actual attached stack leases only. Registration/retirement are bounded IF0
+ * hooks on the single qualified CPU; no native ISR can read this catalog.
+ * Rust's retained binding owns each metadata pointer through actual detach.
+ * A closed job remains registered until detach but never owns live storage. */
+#define STACK_TASKS 16U
+static struct stela_linux_task *stack_tasks[STACK_TASKS];
+
+static unsigned int stack_slot(const struct stela_linux_task *task)
+{
+	for (unsigned int slot = 0; slot < STACK_TASKS; slot++)
+		if (stack_tasks[slot] == task)
+			return slot;
+	return STACK_TASKS;
+}
+
+static int stack_admit(const struct stela_linux_task_context *view)
+{
+	int free_slot = -ENOSPC;
+	for (unsigned int slot = 0; slot < STACK_TASKS; slot++) {
+		const struct stela_linux_task *task = stack_tasks[slot];
+		if (!task) {
+			if (free_slot < 0)
+				free_slot = (int)slot;
+			continue;
+		}
+		/* Both guard and usable mapping remain exclusively retained even
+		 * between jobs. Never admit a second owner of overlapping ranges. */
+		if ((view->guard_start < task->context.stack_end &&
+		     task->context.guard_start < view->stack_end) ||
+		    (view->queue_id == task->context.queue_id &&
+		     view->context_id == task->context.context_id))
+			return -EINVAL;
+	}
+	return free_slot;
+}
 
 static bool view_valid(const struct stela_linux_task_context *view, bool live)
 {
@@ -129,6 +167,27 @@ struct task_struct *stela_linux_current(void)
 	return &task->linux_task;
 }
 
+struct task_struct *stela_linux_task_stack_owner(const void *storage, size_t bytes)
+{
+	/* Establish real CPU/current/RSP/owner BEFORE any mutable catalog read.
+	 * Merely supplying a pointer or being inside a mapped stack is no grant. */
+	struct stela_linux_task *caller = current_record();
+	(void)stela_linux_owner();
+	unsigned long begin = (unsigned long)storage;
+	if (!bytes || bytes > ULONG_MAX - begin)
+		return NULL;
+	unsigned long end = begin + bytes;
+	for (unsigned int slot = 0; slot < STACK_TASKS; slot++) {
+		struct stela_linux_task *task = stack_tasks[slot];
+		if (!task || !task->attached || !task->context.sequence ||
+		    task->context.queue_id != caller->context.queue_id)
+			continue;
+		if (begin >= task->context.stack_start && end <= task->context.stack_end)
+			return &task->linux_task;
+	}
+	return NULL;
+}
+
 /* Only admitted same-CPU C code and IF=0 switch hooks access these counters.
  * They describe actual committed sleepers, not token nesting or all Linux rq
  * statistics. A native CPU-idle/accounting consumer remains unbound. */
@@ -162,12 +221,13 @@ static void wake_account(struct stela_linux_task *task)
 	task->linux_task.is_blocked = 0;
 }
 
-static bool quiet_except_usage(const struct stela_linux_task *task)
+static bool quiet_except_usage_flags(const struct stela_linux_task *task, unsigned long allowed)
 {
 	/* Linux's sigisemptyset() takes a mutable set: test a copy. */
 	sigset_t pending = task->linux_task.pending.signal;
 
-	return !task->linux_task.thread_info.preempt_count && !task->linux_task.thread_info.flags &&
+	return !task->linux_task.thread_info.preempt_count &&
+	       !(task->linux_task.thread_info.flags & ~allowed) &&
 	       READ_ONCE(task->linux_task.__state) == TASK_RUNNING &&
 	       task->linux_task.flags == PF_KTHREAD && !task->linux_task.blocked_on &&
 	       !task->linux_task.blocked_donor && !task->linux_task.wake_q.next &&
@@ -176,6 +236,11 @@ static bool quiet_except_usage(const struct stela_linux_task *task)
 	       sigisemptyset(&pending) &&
 	       list_empty(&task->linux_task.pending.list) &&
 	       refcount_read(&task->linux_task.stack_refcount) == 1;
+}
+
+static bool quiet_except_usage(const struct stela_linux_task *task)
+{
+	return quiet_except_usage_flags(task, 0);
 }
 
 static bool quiet(const struct stela_linux_task *task)
@@ -213,11 +278,15 @@ int stela_linux_task_attach(struct stela_linux_task *task,
 	struct stela_linux_lease lease;
 	stela_linux_lease_snapshot(&lease);
 	if (!task || task->attached || !quiet(task) || !view_valid(view, true) ||
-	    !actual_stack(view) || !ops || !ops->is_current || !ops->wake_target || !binding ||
+	    !actual_stack(view) || !ops || !ops->is_current || !ops->wake_target ||
+	    !ops->service_reserved || !binding ||
 	    __atomic_load_n(&active, __ATOMIC_ACQUIRE) || lease.owner ||
 	    lease.irq_flags != ARCH_IRQ_ENABLED || stela_thread_info.preempt_count ||
 	    stela_thread_info.flags)
 		return -EINVAL;
+	int slot = stack_admit(view);
+	if (slot < 0)
+		return slot;
 	/* Initial attach precedes publication of the first real WakeHandle. The
 	 * Runtime caller already validated CPU/IRQ/current/stack and retains us. */
 	task->context = *view;
@@ -229,6 +298,7 @@ int stela_linux_task_attach(struct stela_linux_task *task,
 	task->active = true;
 	task->linux_task.on_cpu = 1;
 	task->linux_task.on_rq = 1;
+	stack_tasks[(unsigned int)slot] = task;
 	__atomic_store_n(&active, task, __ATOMIC_RELEASE);
 	return 0;
 }
@@ -238,7 +308,8 @@ int stela_linux_task_scope_begin(struct stela_linux_task *task,
 {
 	if (!task || !live_here(task, &task->context) || task->scope ||
 	    task->prepared || task->suspended || !quiet(task) ||
-	    !ops || !ops->park || !ops->yield || !scope)
+	    !ops || !ops->park || !ops->yield || !ops->reschedule ||
+	    !ops->reschedule_requested || !scope)
 		return -EINVAL;
 	struct stela_linux_lease lease;
 	stela_linux_lease_snapshot(&lease);
@@ -251,13 +322,40 @@ int stela_linux_task_scope_begin(struct stela_linux_task *task,
 
 int stela_linux_task_scope_end(struct stela_linux_task *task)
 {
-	if (!task || !live_here(task, &task->context) || !task->scope ||
-	    task->prepared || task->suspended || !quiet(task))
+	if (stela_linux_atomic_callback_active() || !task ||
+	    !live_here(task, &task->context) || !task->scope || task->scope_boundary ||
+	    task->prepared || task->suspended ||
+	    !quiet_except_usage_flags(task, _TIF_NEED_RESCHED) ||
+	    refcount_read(&task->linux_task.usage) != 1)
 		return -EBUSY;
 	struct stela_linux_lease lease;
 	stela_linux_lease_snapshot(&lease);
 	if (lease.owner || lease.irq_flags != ARCH_IRQ_ENABLED)
 		return -EBUSY;
+	for (;;) {
+		bool forced = test_tsk_thread_flag(&task->linux_task, TIF_NEED_RESCHED);
+		clear_tsk_thread_flag(&task->linux_task, TIF_NEED_RESCHED);
+		bool requested = task->scope_ops->reschedule_requested(task->scope);
+		if (!forced && !requested)
+			break;
+		{
+			/* The body exited its owner and drained RCU/pages already. Its local
+			 * owner no longer exists: retain only this actual pinned Runtime scope
+			 * and a private outside-owner preparation marker through the switch. */
+			task->scope_boundary = true;
+			int result = task->scope_ops->reschedule(task->scope);
+			if (result || !live_here(task, &task->context) ||
+			    !task->scope_boundary || task->prepared || task->suspended ||
+			    !quiet_except_usage_flags(task, _TIF_NEED_RESCHED) ||
+			    refcount_read(&task->linux_task.usage) != 1 || !stela_linux_lease_matches(&lease))
+				__builtin_trap();
+			task->scope_boundary = false;
+		}
+		/* A peer can post a new scheduler request during the ownerless switch.
+		 * Consume it only through another real boundary, never a silent clear. */
+		if (!test_tsk_thread_flag(&task->linux_task, TIF_NEED_RESCHED))
+			break;
+	}
 	task->scope = NULL;
 	task->scope_ops = NULL;
 	return 0;
@@ -268,7 +366,8 @@ int stela_linux_task_scope_end(struct stela_linux_task *task)
  * reader's legality from the numeric count. RCU/BH/IRQ suspension is forbidden. */
 static int prepare(struct stela_linux_task *task, int count)
 {
-	if (!live_here(task, &task->context) || !task->scope || task->prepared ||
+	if (stela_linux_atomic_callback_active() || task->scope_boundary ||
+	    !live_here(task, &task->context) || !task->scope || task->prepared ||
 	    task->suspended || preempt_count() != count || irqs_disabled())
 		return -EBUSY;
 	struct stela_linux_lease lease;
@@ -291,9 +390,10 @@ static int prepare(struct stela_linux_task *task, int count)
 
 static bool prepared_here(struct stela_linux_task *task)
 {
-	return task->prepared && task->scope && !task->suspended &&
+	return !stela_linux_atomic_callback_active() &&
+	       task->prepared && task->scope && !task->suspended &&
 	       task->linux_task.thread_info.preempt_count == task->prepared_count &&
-	       !(task->linux_task.thread_info.flags & ~_TIF_SIGPENDING) &&
+	       !(task->linux_task.thread_info.flags & ~(_TIF_SIGPENDING | _TIF_NEED_RESCHED)) &&
 	       task->lease.owner && task->lease.irq_flags == ARCH_IRQ_ENABLED &&
 	       stela_linux_lease_matches(&task->lease);
 }
@@ -312,14 +412,22 @@ int stela_linux_task_still_blocked(struct stela_linux_task *task,
 int stela_linux_task_leave(struct stela_linux_task *task,
 	const struct stela_linux_task_context *view, unsigned int reason)
 {
-	if (!live_here(task, view) || reason > 1)
+	/* The private delivery scope cannot be defeated by rebalancing public
+	 * preempt/IRQ state. Refuse before task accounting or lease mutation. */
+	if (stela_linux_atomic_callback_active())
+		return -EBUSY;
+	if (!live_here(task, view) || reason > 2)
 		return -EINVAL;
 	struct stela_linux_lease lease;
 	stela_linux_lease_snapshot(&lease);
 	if (lease.owner) {
 		if (!prepared_here(task) ||
-		    (reason == 0 && (task->prepared_count || READ_ONCE(task->linux_task.__state))) ||
+		    (reason != 1 && (task->prepared_count || READ_ONCE(task->linux_task.__state))) ||
 		    (reason == 1 && (READ_ONCE(task->linux_task.__state) & ~(unsigned int)(TASK_NORMAL | TASK_WAKEKILL))))
+			return -EBUSY;
+	} else if (task->scope_boundary) {
+		if (reason != 2 || !task->scope || task->prepared || task->suspended ||
+		    !quiet(task) || lease.irq_flags != ARCH_IRQ_ENABLED)
 			return -EBUSY;
 	} else if (reason || task->scope || task->prepared || !quiet(task) ||
 		   lease.irq_flags != ARCH_IRQ_ENABLED) {
@@ -404,8 +512,12 @@ int stela_linux_task_detach(struct stela_linux_task *task,
 	    lease.irq_flags != ARCH_IRQ_ENABLED || stela_thread_info.preempt_count ||
 	    stela_thread_info.flags)
 		return -EBUSY;
+	unsigned int slot = stack_slot(task);
+	if (slot == STACK_TASKS)
+		__builtin_trap();
 	/* The unsafe Runtime caller established real producer/waiter quiescence.
 	 * Reference counts cannot prove arbitrary held-mutex or foreign lifetimes. */
+	stack_tasks[slot] = NULL;
 	task->attached = false;
 	task->binding = NULL;
 	task->ops = NULL;
@@ -416,6 +528,8 @@ void stela_linux_task_release(struct stela_linux_task *task)
 {
 	if (!task || task->attached || task->active || task->suspended || task->scope ||
 	    task->prepared || !quiet(task))
+		__builtin_trap();
+	if (stack_slot(task) != STACK_TASKS)
 		__builtin_trap();
 	/* Consume the actual retained baseline only after independent detach and
 	 * unique Rust metadata ownership; extra public C refs must already end. */
@@ -484,12 +598,59 @@ int stela_linux_task_yield(void)
 	return finish_prepared(task, result);
 }
 
+int __cond_resched(void)
+{
+	struct stela_linux_task *task = current_record();
+	(void)stela_linux_owner();
+	/* Legal nonblocking no-op in critical context, before provider/drain or
+	 * flag effects. The private guard survives public counter rebalance. */
+	if (stela_linux_atomic_callback_active() || preempt_count() || irqs_disabled())
+		return 0;
+	if (!task->scope || task->scope_boundary || task->prepared || task->suspended ||
+	    READ_ONCE(task->linux_task.__state) != TASK_RUNNING)
+		__builtin_trap();
+	bool forced = test_tsk_thread_flag(&task->linux_task, TIF_NEED_RESCHED);
+	clear_tsk_thread_flag(&task->linux_task, TIF_NEED_RESCHED);
+	bool requested = task->scope_ops->reschedule_requested(task->scope);
+	if (!forced && !requested)
+		return 0;
+	if (prepare(task, 0))
+		__builtin_trap();
+	int result = task->scope_ops->reschedule(task->scope);
+	if (result || finish_prepared(task, result))
+		__builtin_trap();
+	return 1;
+}
+
 /* The whole original mutex uses precisely this scheduler boundary. Invalid
  * outer atomic/read-side nesting is a contract violation, not busy polling. */
 void schedule_preempt_disabled(void)
 {
 	if (preempt_count() != 1 || stela_linux_task_park(true) < 0)
 		__builtin_trap();
+	__set_current_state(TASK_RUNNING);
+}
+
+/* Generic process waits (including original rcuwait) enter at preempt0.
+ * They never borrow the normal-mutex scheduler level or infer an RT wait.
+ * A running caller yields fairly; a sleeping caller uses the same real
+ * PREPARE/drain, signal recheck and atomic predicate/park transition. */
+void schedule(void)
+{
+	struct task_struct *task = stela_linux_current();
+	unsigned int state = READ_ONCE(task->__state);
+	bool admitted_state = state == TASK_RUNNING || state == TASK_INTERRUPTIBLE ||
+		state == TASK_UNINTERRUPTIBLE || state == TASK_KILLABLE;
+	if (stela_linux_atomic_callback_active() || preempt_count() || irqs_disabled() ||
+	    !admitted_state ||
+	    (task->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER)) != PF_KTHREAD || task->plug)
+		__builtin_trap();
+	int result = state == TASK_RUNNING ? stela_linux_task_yield() : stela_linux_task_park(false);
+	if (result < 0)
+		__builtin_trap();
+	/* A pending immutable Runtime wake can skip the actual switch without
+	 * a C wake_up_process/arrive hook. Scheduler return is still runnable. */
+	__set_current_state(TASK_RUNNING);
 }
 
 static int wake_state(struct task_struct *linux_task, unsigned int state)
@@ -554,6 +715,13 @@ int stela_linux_task_signal(struct stela_linux_task *task, u64 expected_sequence
 		return -EINVAL;
 	if (!task->attached)
 		return -ESTALE;
+	/* Wait cancellation requires a live body, never its returned owner. */
+	if (!task->scope || task->scope_boundary)
+		return -EBUSY;
+	/* Reserved Timer/IRQ service shutdown is explicit stop/drain/join, not
+	 * ordinary wait cancellation. Refuse before refs, signal bits or wakes. */
+	if (task->ops->service_reserved(task->binding))
+		return -EOPNOTSUPP;
 	get_task_struct(&task->linux_task);
 	sigaddset(&task->linux_task.pending.signal, signal_number);
 	set_tsk_thread_flag(&task->linux_task, TIF_SIGPENDING);

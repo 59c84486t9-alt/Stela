@@ -20,11 +20,14 @@ use core::{
 struct TaskOps {
     is_current: unsafe extern "C" fn(*mut c_void, *const TaskContext) -> bool,
     wake_target: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+    service_reserved: unsafe extern "C" fn(*mut c_void) -> bool,
 }
 #[repr(C)]
 struct ScopeOps {
     park: unsafe extern "C" fn(*mut c_void) -> i32,
     yield_now: unsafe extern "C" fn(*mut c_void) -> i32,
+    reschedule: unsafe extern "C" fn(*mut c_void) -> i32,
+    reschedule_requested: unsafe extern "C" fn(*mut c_void) -> bool,
 }
 #[repr(C)]
 struct CTask {
@@ -84,6 +87,7 @@ fn status(value: i32) -> Result<(), WorkError> {
     match value {
         0 => Ok(()),
         -16 => Err(WorkError::Busy),
+        -28 => Err(WorkError::Full),
         _ => Err(WorkError::CorruptContext),
     }
 }
@@ -91,10 +95,13 @@ impl<const N: usize> TaskBinding<N> {
     const OPS: TaskOps = TaskOps {
         is_current: Self::current,
         wake_target: Self::wake_target,
+        service_reserved: Self::service_reserved,
     };
     const SCOPE_OPS: ScopeOps = ScopeOps {
         park: Self::park,
         yield_now: Self::yield_now,
+        reschedule: Self::reschedule,
+        reschedule_requested: Self::reschedule_requested,
     };
 
     /// Allocate original task metadata before entering a Linux owner.
@@ -182,6 +189,20 @@ impl<const N: usize> TaskBinding<N> {
             Err(_) => -1,
         }
     }
+    unsafe extern "C" fn service_reserved(binding: *mut c_void) -> bool {
+        // SAFETY: C retained this binding and validated the target generation.
+        // The first immutable signal owns the constructor's actual stack role,
+        // even after an ordinary task reused its stack for a later job.
+        let this = unsafe { &*binding.cast::<Self>() };
+        if let Ok(first) = this.first()
+            && let Ok(reserved) = first.service_reserved()
+        {
+            return reserved;
+        }
+        // An invalid role provider cannot silently authorize signal mutation.
+        // SAFETY: fail closed before the C caller's first signal/ref effect.
+        unsafe { core::arch::asm!("ud2", options(noreturn)) };
+    }
 
     fn validate(&self, context: &TaskContext) -> Result<(), WorkError> {
         let handle = self.current_wake()?;
@@ -268,6 +289,33 @@ impl<const N: usize> TaskBinding<N> {
             Ok(()) => 0,
             Err(WorkError::Busy) => -16,
             Err(_) => -22,
+        }
+    }
+
+    unsafe extern "C" fn reschedule(scope: *mut c_void) -> i32 {
+        // SAFETY: same pinned shared Runtime scope; C proved a genuine process
+        // preparation or its private outside-owner scope-end preparation.
+        match unsafe { &*scope.cast::<Scope<'_, N>>() }
+            .runtime
+            .reschedule()
+        {
+            Ok(()) => 0,
+            Err(WorkError::Busy) => -16,
+            Err(_) => -22,
+        }
+    }
+    unsafe extern "C" fn reschedule_requested(scope: *mut c_void) -> bool {
+        // SAFETY: C checks actual current, critical state and scope before this
+        // bounded clock/query callback. It invokes no C delivery or switch.
+        match unsafe { &*scope.cast::<Scope<'_, N>>() }
+            .runtime
+            .reschedule_requested()
+        {
+            Ok(requested) => requested,
+            Err(_) => {
+                // SAFETY: invalid/closed providers cannot become a false query.
+                unsafe { core::arch::asm!("ud2", options(noreturn)) };
+            }
         }
     }
 
@@ -414,6 +462,8 @@ impl<const N: usize> TargetTask<N> {
     /// Call on the real same-CPU entered Linux process continuation described
     /// by `caller`, with shared service roots retained. Do not call from IRQ,
     /// IF0 switch hooks, a dispatcher, or outside run_scoped/Linux entry.
+    /// Target wait cancellation returns Busy once its body has returned (or
+    /// no C body is active); generic immutable wakes remain valid.
     pub unsafe fn signal(
         &self,
         caller: Pin<&Runtime<N>>,
@@ -429,6 +479,7 @@ impl<const N: usize> TargetTask<N> {
             0 => Ok(()),
             -116 => Err(WorkError::Closed),
             -16 => Err(WorkError::Busy),
+            -95 => Err(WorkError::Unavailable),
             _ => Err(WorkError::CorruptContext),
         }
     }
@@ -462,6 +513,7 @@ pub(crate) mod tests {
     //! assertions are retained. This plain Rust child is not whole-C ASan/UBSan.
     extern crate std;
     use super::*;
+    use crate::platform::work::service;
     use crate::platform::work::{Cpu, Executor, Kind, Queue, Stack, StackBacking};
     use alloc::{boxed::Box, vec::Vec};
     use core::{
@@ -605,6 +657,17 @@ pub(crate) mod tests {
         fn stela_linux_task_test_unprepared_end();
         fn stela_linux_task_test_foreground(context: *mut c_void);
         fn stela_linux_task_test_worker(context: *mut c_void);
+        fn stela_linux_task_test_schedule_worker(context: *mut c_void);
+        fn stela_linux_task_test_pending_schedule(context: *mut c_void);
+        fn stela_linux_task_test_service_wait(context: *mut c_void);
+        fn stela_linux_task_test_service_cancel(context: *mut c_void);
+        fn stela_linux_task_test_clock_service(context: *mut c_void);
+        fn stela_linux_task_test_runnable_boundary(context: *mut c_void);
+        fn stela_linux_task_test_closed_stack();
+        fn stela_linux_atomic_callback_prepared_fixture(
+            task: *mut CTask,
+            context: *const TaskContext,
+        );
         fn mmap(
             address: *mut c_void,
             bytes: usize,
@@ -639,7 +702,10 @@ pub(crate) mod tests {
         }
     }
     fn stacks(dropped: &Arc<AtomicU64>, usable: usize) -> Vec<Stack> {
-        (0..4)
+        stacks_count(dropped, usable, 4)
+    }
+    fn stacks_count(dropped: &Arc<AtomicU64>, usable: usize, count: usize) -> Vec<Stack> {
+        (0..count)
             .map(|_| {
                 #[cfg(target_os = "macos")]
                 let anonymous = 0x1000;
@@ -706,7 +772,15 @@ pub(crate) mod tests {
     struct Fixture {
         cpu: Arc<CpuModel>,
         runtime: AtomicPtr<Runtime<16>>,
-        bindings: [Mutex<Option<Arc<TaskBinding<16>>>>; 2],
+        bindings: [Mutex<Option<Arc<TaskBinding<16>>>>; 3],
+        service_target: Mutex<Option<TargetTask<16>>>,
+        scope_target: Mutex<Option<TargetTask<16>>>,
+        service_domain: Mutex<Option<Arc<service::Domain<16>>>>,
+        ticks: AtomicU64,
+        tick_goal: AtomicU64,
+        boundary_mode: AtomicU64,
+        boundary_ready: AtomicBool,
+        clock_reads: Arc<AtomicU64>,
         wake: Mutex<Option<WakeHandle<16>>>,
         late: Mutex<Option<WakeHandle<16>>>,
         trees: AtomicU64,
@@ -717,7 +791,15 @@ pub(crate) mod tests {
             Arc::new(Self {
                 cpu,
                 runtime: AtomicPtr::new(ptr::null_mut()),
-                bindings: [Mutex::new(None), Mutex::new(None)],
+                bindings: core::array::from_fn(|_| Mutex::new(None)),
+                service_target: Mutex::new(None),
+                scope_target: Mutex::new(None),
+                service_domain: Mutex::new(None),
+                ticks: AtomicU64::new(0),
+                tick_goal: AtomicU64::new(2),
+                boundary_mode: AtomicU64::new(0),
+                boundary_ready: AtomicBool::new(false),
+                clock_reads: Arc::new(AtomicU64::new(0)),
                 wake: Mutex::new(None),
                 late: Mutex::new(None),
                 trees: AtomicU64::new(0),
@@ -753,6 +835,10 @@ pub(crate) mod tests {
         unsafe { binding.run_scoped(f.runtime(), stela_linux_task_test_worker, context) }.unwrap();
         let wake = f.wake.lock().unwrap().take().unwrap();
         wake.wake().unwrap();
+        // SAFETY: the same retained real worker now exercises original
+        // schedule's distinct process preempt0 sleep/wake boundary.
+        unsafe { binding.run_scoped(f.runtime(), stela_linux_task_test_schedule_worker, context) }
+            .unwrap();
     }
     unsafe extern "C" fn unprepared(context: *mut c_void) {
         let f = unsafe { fixture(context) };
@@ -776,6 +862,12 @@ pub(crate) mod tests {
         let f = unsafe { fixture(context) };
         let runtime = unsafe { f.runtime() };
         let binding = f.binding(0);
+        let prepared_view = runtime.current_context().unwrap();
+        // SAFETY: this real attached current has no Linux owner/scope yet. The
+        // C fixture retains its own scope and checks before-effect refusal.
+        unsafe {
+            stela_linux_atomic_callback_prepared_fixture(binding.task.as_ptr(), &prepared_view)
+        };
         let wake = binding.current_wake().unwrap();
         *f.late.lock().unwrap() = Some(wake.clone());
         *f.wake.lock().unwrap() = Some(wake);
@@ -791,8 +883,15 @@ pub(crate) mod tests {
             runtime.current_context().unwrap().context_id,
             view.context_id
         );
+        binding.current_wake().unwrap().wake().unwrap();
+        // SAFETY: this actual job and scope retain the pending generic wake;
+        // the C fixture checks schedule's state restoration without a switch.
+        unsafe { binding.run_scoped(runtime, stela_linux_task_test_pending_schedule, context) }
+            .unwrap();
     }
     unsafe extern "C" fn trees_body(_: *mut c_void) {
+        // SAFETY: actual reused foreground job, old worker metadata retained.
+        unsafe { stela_linux_task_test_closed_stack() };
         // SAFETY: retained actual C task, entered by the unchanged fixture body.
         assert_eq!(unsafe { stela_linux_trees_fixture() }, 0);
     }
@@ -924,7 +1023,9 @@ pub(crate) mod tests {
         runtime.queue().close().unwrap();
         assert_eq!(unsafe { runtime.retire() }, Err(WorkError::Pending));
         for slot in &f.bindings {
-            let binding = slot.lock().unwrap().take().unwrap();
+            let Some(binding) = slot.lock().unwrap().take() else {
+                continue;
+            };
             // SAFETY: both actual callbacks completed, no C waiter/foreign producer;
             // no registered IRQ producer or C task reference escapes this child.
             let retained =
@@ -939,6 +1040,475 @@ pub(crate) mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 8);
         assert_eq!(quarantined(), 0);
         unsafe { stela_linux_task_test_taskless() };
+        service_roundtrip();
+        clock_service_roundtrip(0);
+        clock_service_roundtrip(1);
+        clock_service_roundtrip(2);
+        stack_catalog_capacity();
+    }
+
+    unsafe extern "C" fn service_wait(context: *mut c_void) {
+        let f = unsafe { fixture(context) };
+        let runtime = unsafe { f.runtime() };
+        assert_eq!(runtime.service_current(), Ok(true));
+        let binding = f.binding(2);
+        *f.service_target.lock().unwrap() = Some(binding.target_current().unwrap());
+        // SAFETY: actual reserved continuation and retained fixture/code roots.
+        unsafe { binding.run_scoped(runtime, stela_linux_task_test_service_wait, context) }
+            .unwrap();
+    }
+    unsafe extern "C" fn service_cancel_and_wake(context: *mut c_void) {
+        let f = unsafe { fixture(context) };
+        let target = f.service_target.lock().unwrap().as_ref().unwrap().clone();
+        let runtime = unsafe { f.runtime() };
+        // SAFETY: callback from the actual entered same-CPU foreground C owner.
+        assert_eq!(
+            unsafe { target.signal(runtime, WaitSignal::Interrupt) },
+            Err(WorkError::Unavailable)
+        );
+        assert_eq!(
+            unsafe { target.signal(runtime, WaitSignal::Fatal) },
+            Err(WorkError::Unavailable)
+        );
+        target.wake.wake().unwrap();
+    }
+    #[repr(C)]
+    struct ServiceCall {
+        context: *mut c_void,
+        cancel_and_wake: unsafe extern "C" fn(*mut c_void),
+    }
+    unsafe extern "C" fn service_caller(context: *mut c_void) {
+        let f = unsafe { fixture(context) };
+        let runtime = unsafe { f.runtime() };
+        assert_eq!(runtime.service_current(), Ok(false));
+        let binding = f.binding(0);
+        let mut call = ServiceCall {
+            context,
+            cancel_and_wake: service_cancel_and_wake,
+        };
+        // SAFETY: stack-local call and real scope remain live through C return.
+        unsafe {
+            binding.run_scoped(
+                runtime,
+                stela_linux_task_test_service_cancel,
+                (&mut call as *mut ServiceCall).cast(),
+            )
+        }
+        .unwrap();
+    }
+    fn service_roundtrip() {
+        let cpu = CpuModel::new();
+        let f = Fixture::new(cpu.clone());
+        let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
+        let dropped = Arc::new(AtomicU64::new(0));
+        let executor =
+            Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 5))
+                .unwrap();
+        let runtime = executor.runtime();
+        f.runtime.store(
+            runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+            Ordering::Release,
+        );
+        let context = Arc::as_ptr(&f) as *mut c_void;
+        // SAFETY: fixture roots retain both actual callbacks through join below.
+        let service = unsafe { runtime.start_service(service_wait, context) }.unwrap();
+        assert!(runtime.step().unwrap());
+        assert!(!runtime.queue().completed(service).unwrap());
+        unsafe { runtime.call_foreground(service_caller, context, 10000) }.unwrap();
+        runtime.drain(10000).unwrap();
+        assert!(runtime.queue().completed(service).unwrap());
+        assert_eq!(
+            unsafe { runtime.start_service(service_wait, context) },
+            Err(WorkError::Busy)
+        );
+        let target = f.service_target.lock().unwrap().take().unwrap();
+        assert_eq!(target.wake.wake(), Err(WorkError::Closed));
+        drop(target);
+        runtime.queue().close().unwrap();
+        for slot in &f.bindings {
+            let Some(binding) = slot.lock().unwrap().take() else {
+                continue;
+            };
+            // SAFETY: all real service/caller frames completed; no C/IRQ producer.
+            let retained =
+                unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
+            drop(retained);
+            assert!(unsafe { binding.release_quiescent() }.is_ok());
+        }
+        unsafe { runtime.retire() }.unwrap();
+        drop(executor);
+        assert_eq!(dropped.load(Ordering::Relaxed), 5);
+        assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
+        assert_eq!(quarantined(), 0);
+    }
+
+    struct ServiceClock {
+        cpu: Arc<dyn Cpu>,
+        reads: Arc<AtomicU64>,
+        start: std::time::Instant,
+    }
+    // SAFETY: actual retained hosted monotonic clock; no native IRQ attestation.
+    unsafe impl service::Clock for ServiceClock {
+        fn cpu(&self) -> &Arc<dyn Cpu> {
+            &self.cpu
+        }
+        fn now_ns(&self) -> Result<u64, WorkError> {
+            self.cpu.check_cpu()?;
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.start
+                .elapsed()
+                .as_nanos()
+                .try_into()
+                .map_err(|_| WorkError::Exhausted)
+        }
+    }
+    struct ServiceIdle {
+        clock: Arc<dyn service::Clock>,
+        owner: thread::Thread,
+        waits: AtomicU64,
+    }
+    // SAFETY: actual hosted park/unpark event token; no native ISR is admitted.
+    // Unpark is retained across check-to-park and never runs a callback inline.
+    unsafe impl service::Idle for ServiceIdle {
+        fn clock(&self) -> &Arc<dyn service::Clock> {
+            &self.clock
+        }
+        fn notify(&self) -> Result<(), WorkError> {
+            self.owner.unpark();
+            Ok(())
+        }
+        fn wait_until_ns(&self, deadline: Option<u64>) -> Result<(), WorkError> {
+            self.clock.cpu().check_cpu()?;
+            self.waits.fetch_add(1, Ordering::Relaxed);
+            if let Some(deadline) = deadline {
+                let now = self.clock.now_ns()?;
+                if now < deadline {
+                    thread::park_timeout(std::time::Duration::from_nanos(deadline - now));
+                }
+            } else {
+                thread::park();
+            }
+            Ok(())
+        }
+    }
+    #[repr(C)]
+    struct ClockServiceCall {
+        context: *mut c_void,
+        boundary: unsafe extern "C" fn(*mut c_void) -> bool,
+    }
+    unsafe extern "C" fn clock_boundary(context: *mut c_void) -> bool {
+        let f = unsafe { fixture(context) };
+        let runtime = unsafe { f.runtime() };
+        assert_eq!(runtime.service_current(), Ok(true));
+        let domain = f.service_domain.lock().unwrap().as_ref().unwrap().clone();
+        if let Some(batch) = domain.begin(runtime).unwrap() {
+            assert!(batch.tick() && !batch.raised() && !batch.timer());
+            if f.boundary_mode.load(Ordering::Relaxed) == 0
+                || f.boundary_ready.load(Ordering::Acquire)
+            {
+                f.ticks.fetch_add(1, Ordering::Relaxed);
+            }
+            if f.boundary_mode.load(Ordering::Relaxed) == 2 {
+                let target = f.scope_target.lock().unwrap().as_ref().unwrap().clone();
+                // SAFETY: actual same-CPU entered service; target has genuinely
+                // returned its body and is in its private scope-end switch.
+                assert_eq!(
+                    unsafe { target.signal(runtime, WaitSignal::Interrupt) },
+                    Err(WorkError::Busy)
+                );
+                assert_eq!(
+                    unsafe { target.signal(runtime, WaitSignal::Fatal) },
+                    Err(WorkError::Busy)
+                );
+                target.wake.wake().unwrap();
+            }
+            // SAFETY: actual reserved task delivered this fixture's counter
+            // consumer. No original IRQ-work/timer storage is admitted by it.
+            unsafe { domain.finish(runtime, batch, None) }.unwrap();
+        }
+        f.ticks.load(Ordering::Relaxed) >= f.tick_goal.load(Ordering::Relaxed)
+    }
+    unsafe extern "C" fn clock_service(context: *mut c_void) {
+        let f = unsafe { fixture(context) };
+        let runtime = unsafe { f.runtime() };
+        let binding = f.binding(2);
+        let domain = f.service_domain.lock().unwrap().as_ref().unwrap().clone();
+        domain.bind_current(runtime).unwrap();
+        let mut call = ClockServiceCall {
+            context,
+            boundary: clock_boundary,
+        };
+        // SAFETY: real retained C task/stack and stack-local callback descriptor.
+        unsafe {
+            binding.run_scoped(
+                runtime,
+                stela_linux_task_test_clock_service,
+                (&mut call as *mut ClockServiceCall).cast(),
+            )
+        }
+        .unwrap();
+        domain.stop_producers().unwrap();
+    }
+    #[repr(C)]
+    struct RunnableBoundaryCall {
+        context: *mut c_void,
+        mode: u32,
+        make_due: unsafe extern "C" fn(*mut c_void),
+        reads: unsafe extern "C" fn(*mut c_void) -> u64,
+        ticks: unsafe extern "C" fn(*mut c_void) -> u64,
+    }
+    unsafe extern "C" fn boundary_make_due(context: *mut c_void) {
+        let f = unsafe { fixture(context) };
+        f.boundary_ready.store(true, Ordering::Release);
+        // Real elapsed hosted time, with the actual Runtime task still Running.
+        // This invokes no Runtime park/yield, fake tick or service callback.
+        thread::sleep(std::time::Duration::from_millis(2));
+    }
+    unsafe extern "C" fn boundary_reads(context: *mut c_void) -> u64 {
+        unsafe { fixture(context) }
+            .clock_reads
+            .load(Ordering::Relaxed)
+    }
+    unsafe extern "C" fn boundary_ticks(context: *mut c_void) -> u64 {
+        unsafe { fixture(context) }.ticks.load(Ordering::Relaxed)
+    }
+    unsafe extern "C" fn runnable_boundary(context: *mut c_void) {
+        let f = unsafe { fixture(context) };
+        let runtime = unsafe { f.runtime() };
+        let binding = f.binding(0);
+        if f.boundary_mode.load(Ordering::Relaxed) == 2 {
+            *f.scope_target.lock().unwrap() = Some(binding.target_current().unwrap());
+        }
+        let mut call = RunnableBoundaryCall {
+            context,
+            mode: f.boundary_mode.load(Ordering::Relaxed) as u32,
+            make_due: boundary_make_due,
+            reads: boundary_reads,
+            ticks: boundary_ticks,
+        };
+        // SAFETY: actual same-CPU C scope retains descriptor and providers.
+        unsafe {
+            binding.run_scoped(
+                runtime,
+                stela_linux_task_test_runnable_boundary,
+                (&mut call as *mut RunnableBoundaryCall).cast(),
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            f.ticks.load(Ordering::Relaxed),
+            1,
+            "cond_resched/scope-end must deliver before this runnable task returns"
+        );
+        f.scope_target.lock().unwrap().take();
+    }
+    fn clock_service_roundtrip(mode: u64) {
+        let cpu = CpuModel::new();
+        let f = Fixture::new(cpu.clone());
+        f.boundary_mode.store(mode, Ordering::Relaxed);
+        f.tick_goal
+            .store(if mode == 0 { 2 } else { 1 }, Ordering::Relaxed);
+        let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
+        let dropped = Arc::new(AtomicU64::new(0));
+        let executor =
+            Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 5))
+                .unwrap();
+        let runtime = executor.runtime();
+        f.runtime.store(
+            runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+            Ordering::Release,
+        );
+        let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
+            cpu: cpu.clone(),
+            reads: f.clock_reads.clone(),
+            start: std::time::Instant::now(),
+        });
+        let idle = Arc::new(ServiceIdle {
+            clock: clock.clone(),
+            owner: thread::current(),
+            waits: AtomicU64::new(0),
+        });
+        let domain = service::Domain::new(clock, idle.clone()).unwrap();
+        runtime.attach_service_domain(domain.clone()).unwrap();
+        *f.service_domain.lock().unwrap() = Some(domain.clone());
+        let context = Arc::as_ptr(&f) as *mut c_void;
+        // SAFETY: fixture and registered domain retain all actual code/providers.
+        let ticket = unsafe { runtime.start_service(clock_service, context) }.unwrap();
+        if mode == 0 {
+            let mut attempts = 0;
+            while !runtime.queue().completed(ticket).unwrap() {
+                assert!(
+                    attempts < 32,
+                    "real service did not complete after bounded event waits"
+                );
+                runtime.step_or_idle().unwrap();
+                attempts += 1;
+            }
+            assert!(idle.waits.load(Ordering::Relaxed) > 0);
+            assert_eq!(
+                cpu.time.load(Ordering::Relaxed),
+                0,
+                "Cpu::ticks is not nanoseconds"
+            );
+        } else {
+            assert!(runtime.step().unwrap()); // actual service setup/block
+            // SAFETY: rooted actual caller; it must remain Runtime-runnable.
+            unsafe { runtime.call_foreground(runnable_boundary, context, 10000) }.unwrap();
+            assert!(runtime.queue().completed(ticket).unwrap());
+            assert_eq!(idle.waits.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(
+            f.ticks.load(Ordering::Relaxed),
+            f.tick_goal.load(Ordering::Relaxed)
+        );
+        domain.stop_producers().unwrap();
+        // SAFETY: actual service job completed, no original C timer/work/storage
+        // was admitted; the fixture consumer has no outstanding callback/user.
+        unsafe { domain.retire() }.unwrap();
+        for slot in &f.bindings {
+            let Some(binding) = slot.lock().unwrap().take() else {
+                continue;
+            };
+            // SAFETY: actual service and caller jobs/consumers are now joined.
+            let retained =
+                unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
+            drop(retained);
+            assert!(unsafe { binding.release_quiescent() }.is_ok());
+        }
+        runtime.queue().close().unwrap();
+        unsafe { runtime.retire() }.unwrap();
+        f.service_domain.lock().unwrap().take();
+        drop(domain);
+        drop(executor);
+        assert_eq!(dropped.load(Ordering::Relaxed), 5);
+        assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
+        assert_eq!(quarantined(), 0);
+    }
+
+    struct CatalogFixture {
+        cpu: Arc<CpuModel>,
+        runtime: AtomicPtr<Runtime<16>>,
+        bindings: Mutex<Vec<Arc<TaskBinding<16>>>>,
+        refused: AtomicBool,
+    }
+    impl CatalogFixture {
+        fn new(cpu: Arc<CpuModel>) -> Arc<Self> {
+            Arc::new(Self {
+                cpu,
+                runtime: AtomicPtr::new(ptr::null_mut()),
+                bindings: Mutex::new(Vec::new()),
+                refused: AtomicBool::new(false),
+            })
+        }
+        unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
+            self.cpu.check_cpu().unwrap();
+            // SAFETY: actual fixture owner retains this pinned runtime through
+            // all admitted callbacks, detach and process-context metadata free.
+            unsafe { Pin::new_unchecked(&*self.runtime.load(Ordering::Acquire)) }
+        }
+        fn publish(&self, runtime: Pin<&Runtime<16>>) {
+            self.runtime.store(
+                runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+                Ordering::Release,
+            );
+        }
+        fn detach(&self, runtime: Pin<&Runtime<16>>) {
+            let bindings = core::mem::take(&mut *self.bindings.lock().unwrap());
+            for binding in bindings {
+                // SAFETY: all real jobs completed, no source/storage/foreign refs.
+                let retained =
+                    unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
+                drop(retained);
+                assert!(unsafe { binding.release_quiescent() }.is_ok());
+            }
+        }
+    }
+    unsafe extern "C" fn catalog_bind(context: *mut c_void) {
+        // SAFETY: rooted fixture owns this pointer through actual completion.
+        let f = unsafe { &*context.cast::<CatalogFixture>() };
+        let binding = unsafe { TaskBinding::<16>::new() }.unwrap();
+        binding.bind_current(unsafe { f.runtime() }).unwrap();
+        f.bindings.lock().unwrap().push(binding);
+    }
+    unsafe extern "C" fn catalog_refused(context: *mut c_void) {
+        // SAFETY: same rooted actual fixture/stack, with a full original catalog.
+        let f = unsafe { &*context.cast::<CatalogFixture>() };
+        let runtime = unsafe { f.runtime() };
+        let before = runtime.current_context().unwrap();
+        let binding = unsafe { TaskBinding::<16>::new() }.unwrap();
+        assert_eq!(binding.bind_current(runtime), Err(WorkError::Full));
+        assert_eq!(runtime.current_context(), Ok(before));
+        // SAFETY: admission failed before original metadata/publication effects.
+        assert!(unsafe { binding.release_quiescent() }.is_ok());
+        f.refused.store(true, Ordering::Release);
+    }
+    fn stack_catalog_capacity() {
+        let cpu = CpuModel::new();
+        let dropped = Arc::new(AtomicU64::new(0));
+        let first = CatalogFixture::new(cpu.clone());
+        let queue = unsafe { Queue::<16>::new(cpu.clone(), first.clone()) }.unwrap();
+        let executor =
+            Executor::new_hosted_for_test(queue, stacks_count(&dropped, 16 * 1024, 16)).unwrap();
+        let runtime = executor.runtime();
+        first.publish(runtime);
+        let context = Arc::as_ptr(&first) as *mut c_void;
+        unsafe { runtime.queue().execute(Kind::Notify, catalog_bind, context) }.unwrap();
+        for _ in 0..14 {
+            unsafe {
+                runtime
+                    .queue()
+                    .execute(Kind::General, catalog_bind, context)
+            }
+            .unwrap();
+        }
+        unsafe { runtime.call_foreground(catalog_bind, context, 10000) }.unwrap();
+        runtime.drain(10000).unwrap();
+        let mut ids: Vec<_> = first
+            .bindings
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|binding| binding.context_id().unwrap().get())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 16);
+        let second = CatalogFixture::new(cpu.clone());
+        let queue = unsafe { Queue::<16>::new(cpu.clone(), second.clone()) }.unwrap();
+        let refused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
+        let rejected = refused.runtime();
+        second.publish(rejected);
+        unsafe {
+            rejected.call_foreground(catalog_refused, Arc::as_ptr(&second) as *mut c_void, 10000)
+        }
+        .unwrap();
+        assert!(second.refused.load(Ordering::Acquire));
+        rejected.queue().close().unwrap();
+        unsafe { rejected.retire() }.unwrap();
+        drop(refused);
+        runtime.queue().close().unwrap();
+        first.detach(runtime);
+        unsafe { runtime.retire() }.unwrap();
+        drop(executor);
+        assert_eq!(dropped.load(Ordering::Relaxed), 20);
+        // Every retired slot is available to actual fresh mappings again.
+        let third = CatalogFixture::new(cpu.clone());
+        let queue = unsafe { Queue::<16>::new(cpu.clone(), third.clone()) }.unwrap();
+        let reused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
+        let available = reused.runtime();
+        third.publish(available);
+        unsafe {
+            available.call_foreground(catalog_bind, Arc::as_ptr(&third) as *mut c_void, 10000)
+        }
+        .unwrap();
+        assert_eq!(third.bindings.lock().unwrap().len(), 1);
+        available.queue().close().unwrap();
+        third.detach(available);
+        unsafe { available.retire() }.unwrap();
+        drop(reused);
+        assert_eq!(dropped.load(Ordering::Relaxed), 24);
+        assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
+        assert_eq!(quarantined(), 0);
     }
 
     #[repr(C)]

@@ -217,6 +217,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcuwait_wake.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcu/rcuwait_finish.c")),
         ];
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
@@ -249,6 +251,7 @@ impl Linux {
                 .files([
                     format!("{COMPAT}/kernel/trees.c"),
                     format!("{COMPAT}/stela/task_test.c"),
+                    format!("{COMPAT}/stela/atomic_callback_test.c"),
                     format!("{COMPAT}/stela/mutex_test.c"),
                 ])
                 .objects(helper_objects)

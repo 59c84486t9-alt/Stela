@@ -23,6 +23,9 @@ struct stela_linux_task_ops {
 	/* Exact active-job signal; caller already proved a real same-CPU C
 	 * current and retained target lifetime. No allocation/switch/final drop. */
 	int (*wake_target)(void *binding, u64 expected_sequence);
+	/* Immutable real Runtime reservation; never caller-controlled task flags.
+	 * Used only after first waker publication and target generation validation. */
+	bool (*service_reserved)(void *binding);
 };
 
 struct stela_linux_task_scope_ops {
@@ -30,6 +33,10 @@ struct stela_linux_task_scope_ops {
 	 * escape. park: 0 skipped, 1 resumed; yield: 0 resumed; negative errno. */
 	int (*park)(void *scope);
 	int (*yield)(void *scope);
+	int (*reschedule)(void *scope);
+	/* Read actual pending wake/due service state only at eligible process
+	 * boundaries. A failed/closed provider is terminal, never false. */
+	bool (*reschedule_requested)(void *scope);
 };
 
 /* Private serialized Linux lease. Suspend is not exit: no callbacks or owner
@@ -68,10 +75,19 @@ int stela_linux_task_scope_begin(struct stela_linux_task *task,
 int stela_linux_task_scope_end(struct stela_linux_task *task);
 /* Internal prepared transition hooks. The selected original mutex scheduler
  * adapter owns the sole preempt level; count==1 alone does not distinguish
- * that level from an outer RCU reader. General schedule APIs remain separate. */
+ * that level from an outer RCU reader. Generic schedule enters at count0 and
+ * never borrows the normal-mutex level or a private RT wait kind. */
 int stela_linux_task_park(bool scheduler_preempt_disabled);
 int stela_linux_task_yield(void);
 struct task_struct *stela_linux_current(void);
+/* Borrowed actual task owning this complete live-generation stack range on
+ * the current real Runtime queue; NULL for unowned/closed/overflowing ranges.
+ * Requires actual entered same-CPU current before any catalog/storage access.
+ * Reads no storage bytes. Bounds exclude guards and non-stack metadata. This
+ * proves neither an inner frame's lifetime nor arbitrary pointer ownership.
+ * A timer consumer must independently retain its original storage/frame,
+ * arm/task reference and real producer lifetime through cancel/drain. */
+struct task_struct *stela_linux_task_stack_owner(const void *storage, size_t bytes);
 struct thread_info *stela_linux_thread_info(void);
 /* Narrow kernel-wait cancellation, not POSIX process/siginfo delivery. Values
  * 1/2 post actual SIGUSR1/SIGKILL bits. Target metadata is retained separately;
