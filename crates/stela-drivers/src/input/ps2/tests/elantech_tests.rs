@@ -1,8 +1,14 @@
 //! Actual Elantech sliced/custom commands, register effects and i8042 reports.
 use super::*;
 use alloc::collections::BTreeMap;
+#[path = "elantech_tests/controls_tests.rs"]
+mod controls_tests;
+#[path = "elantech_tests/trackpoint_tests.rs"]
+mod trackpoint_tests;
 #[path = "elantech_tests/v3_tests.rs"]
 mod v3_tests;
+#[path = "elantech_tests/v4_tests.rs"]
+mod v4_tests;
 pub(super) struct Action {
     pub(super) reply: Vec<u8>,
     pub(super) late_ack: bool,
@@ -11,12 +17,15 @@ pub(super) struct Action {
 pub(super) struct Peripheral {
     pub(super) queries: BTreeMap<u8, [u8; 3]>,
     pub(super) registers: BTreeMap<u8, u8>,
+    pub(super) parameter_writes: Vec<(u8, [u8; 2])>,
+    parameter_registers: BTreeMap<u8, [u8; 2]>,
     pub(super) writes: Vec<(u8, u8)>,
     pub(super) knock: [u8; 3],
     pub(super) readback: Option<[u8; 3]>,
     pub(super) omit: Option<(usize, usize)>,
     pub(super) late: Option<(usize, usize)>,
     pub(super) late_write: Option<u8>,
+    pub(super) late_write_number: Option<usize>,
     pub(super) before_disable: Vec<u8>,
     pub(super) firmware_second: Option<[u8; 3]>,
     scale_count: u8,
@@ -55,6 +64,7 @@ impl Peripheral {
         match byte {
             RESET | DEFAULTS => {
                 self.registers.clear();
+                self.parameter_registers.clear();
                 self.scale_count = 0;
                 self.slices.clear();
                 self.custom.clear();
@@ -72,20 +82,36 @@ impl Peripheral {
                 self.custom.clear();
                 return None;
             }
-            SET_RATE | GET_ID => return None,
+            SET_RATE | GET_ID => {
+                if byte == SET_RATE && self.queries.get(&1) == Some(&[0x38, 0x1f, 0x17]) {
+                    self.registers.insert(7, 0);
+                }
+                return None;
+            }
             SCALE_ONE_TO_ONE => {
                 let command = if self.slices.len() == 3 {
                     Some(self.slices.clone())
-                } else if self.custom.len() == 3 {
+                } else if self.custom.len() == 3 || self.custom.len() == 4 {
                     Some(self.custom.clone())
                 } else {
                     None
                 };
                 if let Some(command) = command {
                     assert!(matches!(command[0], 0x11 | 0));
-                    self.registers.insert(command[1], command[2]);
-                    self.writes.push((command[1], command[2]));
-                    action.late_ack = self.late_write == Some(command[1]);
+                    let value = if command.len() == 4 {
+                        let parameters = [command[2], command[3]];
+                        self.parameter_writes.push((command[1], parameters));
+                        self.parameter_registers.insert(command[1], parameters);
+                        command[3]
+                    } else {
+                        command[2]
+                    };
+                    self.registers.insert(command[1], value);
+                    self.writes.push((command[1], value));
+                    action.late_ack = self.late_write == Some(command[1])
+                        && self
+                            .late_write_number
+                            .is_none_or(|number| number == self.writes.len());
                     self.slices.clear();
                     self.custom.clear();
                 }
@@ -111,8 +137,19 @@ impl Peripheral {
                     None
                 };
                 let bytes = if let Some(reg) = register {
-                    self.readback
-                        .unwrap_or([*self.registers.get(&reg).unwrap_or(&0), 0xa5, 0x5a])
+                    self.readback.unwrap_or_else(|| {
+                        if let Some(parameters) = self.parameter_registers.get(&reg)
+                            && parameters[0] != 0
+                        {
+                            return [parameters[0], parameters[1], 0xfe];
+                        }
+                        let value = *self.registers.get(&reg).unwrap_or(&0);
+                        if (self.queries[&1][0] & 15) >= 6 {
+                            [0xa5, value, 0x5a]
+                        } else {
+                            [value, 0xa5, 0x5a]
+                        }
+                    })
                 } else if self.slices.len() == 1 || self.custom.len() == 1 {
                     let id = if self.slices.len() == 1 {
                         self.slices[0]
@@ -156,6 +193,12 @@ impl Peripheral {
     }
 }
 fn target(firmware: u32) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
+    target_profile(firmware, false)
+}
+fn target_profile(
+    firmware: u32,
+    trackpoint: bool,
+) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
     let (base, h) = controller(Config::default());
     h.borrow_mut().elantech = Some(Peripheral {
         queries: [
@@ -173,12 +216,15 @@ fn target(firmware: u32) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
         ]
         .into(),
         registers: BTreeMap::new(),
+        parameter_writes: Vec::new(),
+        parameter_registers: BTreeMap::new(),
         writes: Vec::new(),
         knock: [0x3c, 3, 0xc8],
         readback: None,
         omit: None,
         late: None,
         late_write: None,
+        late_write_number: None,
         before_disable: Vec::new(),
         firmware_second: None,
         scale_count: 0,
@@ -191,8 +237,12 @@ fn target(firmware: u32) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
         info_count: 0,
         firmware_queries: 0,
     });
-    let c = Controller::new_elantech(Model(h.clone()), Time(h.borrow().time.clone()), base.config)
-        .unwrap();
+    let constructor = if trackpoint {
+        Controller::new_elantech_trackpoint
+    } else {
+        Controller::new_elantech
+    };
+    let c = constructor(Model(h.clone()), Time(h.borrow().time.clone()), base.config).unwrap();
     (c, h)
 }
 #[test]
@@ -677,6 +727,8 @@ fn unchanged_linux_elantech_reports_match_actual_configured_i8042_device() {
         assert_eq!(frame.bytes(), raw);
         let hardware = c.elantech_capabilities().unwrap().hardware;
         match frame.report {
+            elantech::Report::Multitouch(_) => panic!("v1/v2 has no v4 report"),
+            elantech::Report::Trackpoint(_) => panic!("ordinary profile has no trackpoint"),
             elantech::Report::Head { .. } => panic!("v1/v2 has no head record"),
             elantech::Report::Debounce => {
                 assert_eq!(fields[5], "B");
@@ -795,7 +847,7 @@ fn source_v2_admits_every_successful_register_read_without_fabricating_echo_conf
 }
 #[test]
 fn failed_profiles_and_changed_observed_identity_never_arm_register_programming() {
-    for (firmware, kind) in [(0, 0), (0x030001, 1), (0x060f01, 1)] {
+    for (firmware, kind) in [(0, 0), (0x030001, 1), (0x100f01, 1)] {
         let (mut c, h) = target(firmware);
         let error = c.initialize().unwrap_err();
         assert!(match kind {

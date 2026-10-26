@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Elantech source: Copyright (C) 2007-2009 Arjan Opmeer.
 // Trademarks are the property of their respective owners.
-//! Actual Elantech v1/v2/v3 PS/2 configuration and input under the i8042 owner.
-//! V4, integrated trackpoints and board-selected middle buttons are separate
-//! profiles. Raw reports and source-generated fallback values remain distinct.
+//! Actual Elantech v1-v4 PS/2 configuration and input under the i8042 owner.
+//! Queried v3/v4 pointing sticks share this owner; an optional attachment can
+//! require their presence. Board overrides and guest device binding are separate.
+//! Raw reports, accumulated positions and software tracking remain distinct.
 use super::*;
+mod controls;
 mod device;
+mod trackpoint;
+pub use controls::RegisterControl;
+pub use trackpoint::{ReportIdChange, TrackpointReport};
 mod v3;
+mod v4;
+pub use v4::{V4Frame, V4Info, V4Slot, V4State, V4Update};
 const FRAME_LIMIT: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +23,9 @@ pub enum Error {
     Version(u32),
     IdentityChanged,
     Trackpoint,
+    TrackpointAbsent,
+    TrackpointHardware(u8),
+    ReportId([u8; 3]),
     BrokenAbsolute,
     Geometry,
     Register(u8),
@@ -32,6 +42,9 @@ pub enum QueryKind {
     Samples,
     FirmwareId,
     RangeSamples,
+    IcBody,
+    Resolution,
+    ReportId,
     Register(u8),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +92,8 @@ pub struct Capabilities {
     pub jumpy_cursor: bool,
     pub crc_enabled: bool,
     pub buttonpad: bool,
+    pub trackpoint: bool,
+    pub v4: Option<V4Info>,
     pub registers: Vec<RegisterWrite>,
     /// Source initialization criterion passed. V2/v3 require a successful read,
     /// without claiming that its returned byte echoes the programmed value.
@@ -113,6 +128,8 @@ pub struct Contact {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Report {
+    Trackpoint(TrackpointReport),
+    Multitouch(V4Frame),
     Contacts(Contact),
     Debounce,
     StartupSuppressed,
@@ -152,6 +169,11 @@ pub(super) struct Engine {
     buttons: u8,
     single_finger_reports: u8,
     head: Option<(u64, (i32, i32))>,
+    multitouch: V4State,
+    controls: Vec<RegisterControl>,
+    trackpoint_required: bool,
+    trackpoint_buttons: u8,
+    report_id: Option<ReportIdChange>,
 }
 impl Engine {
     pub(super) fn backpressured(&self) -> bool {
@@ -170,6 +192,11 @@ impl Engine {
     pub(super) fn release(&mut self, inputs: &mut Vec<Input>) {
         self.position = 0;
         self.single_finger_reports = 0;
+        self.multitouch.release();
+        if self.trackpoint_buttons != 0 {
+            self.trackpoint_buttons = 0;
+            inputs.push(Input::MouseButtons(0));
+        }
         if self.buttons != 0 {
             self.buttons = 0;
             inputs.push(
@@ -215,8 +242,15 @@ impl Engine {
             return Ok(());
         }
         let p = self.packet;
+        if c.trackpoint && p[3] & 15 == 6 && (c.hardware == 4 || c.hardware == 3 && !c.crc_enabled)
+        {
+            return self.report_trackpoint(inputs);
+        }
         if c.hardware == 3 {
             return self.report_v3(inputs);
+        }
+        if c.hardware == 4 {
+            return self.report_v4(inputs);
         }
         let debounce = c.hardware == 2 && p == [0x84, 0xff, 0xff, 0x02, 0xff, 0xff];
         let valid = if c.hardware == 1 {
@@ -368,8 +402,9 @@ impl Engine {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Explicit ordinary Elantech attachment under the same native i8042 grant.
-    /// Actual firmware selects v1/v2/v3. Other versions/trackpoints/board-selected
-    /// middle-button profiles are separate, never silently generic mice.
+    /// Actual firmware selects v1-v4 and queried v3/v4 pointing-stick presence.
+    /// Older integrated/board override profiles remain explicit unsupported
+    /// operations, never silently generic mice.
     pub fn new_elantech(registers: R, timer: T, config: Config) -> Result<Self, super::Error> {
         if !config.mouse {
             return Err(ErrorKind::InvalidConfiguration.into());
@@ -381,6 +416,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     pub fn elantech_capabilities(&self) -> Option<&Capabilities> {
         self.elantech.as_ref()?.capabilities.as_ref()
+    }
+    /// Source software MT state. Tracking IDs and accumulated/default coordinates
+    /// are separate from actual absolute-head provenance in each slot.
+    pub fn elantech_multitouch(&self) -> Option<&V4State> {
+        let engine = self.elantech.as_ref()?;
+        (engine.capabilities.as_ref()?.hardware == 4).then_some(&engine.multitouch)
     }
     pub fn elantech_queries(&self) -> Option<&[Query]> {
         Some(&self.elantech.as_ref()?.queries)

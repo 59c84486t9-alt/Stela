@@ -33,10 +33,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             bytes: [0; 3],
             received: 0,
         });
-        if matches!(kind, QueryKind::Register(_))
-            && self
-                .elantech_capabilities()
-                .is_some_and(|c| c.hardware >= 2)
+        if matches!(kind, QueryKind::ReportId)
+            || (matches!(kind, QueryKind::Register(_))
+                && self
+                    .elantech_capabilities()
+                    .is_some_and(|c| c.hardware >= 2))
         {
             self.elan_register_command(0xe9)?;
         } else {
@@ -115,27 +116,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 acknowledged: false,
                 readback: None,
             });
-        if hardware == 1 {
-            for byte in [0x11, reg, value] {
-                self.sliced_command(byte)?;
-            }
-        } else {
-            for byte in [
-                0xf8,
-                if hardware == 2 { 0x11 } else { 0 },
-                0xf8,
-                reg,
-                0xf8,
-                value,
-            ] {
-                self.elan_register_command(byte)?;
-            }
-        }
-        if hardware >= 2 {
-            self.elan_register_command(SCALE_ONE_TO_ONE)?;
-        } else {
-            self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
-        }
+        self.elan_write_bytes(reg, value, hardware)?;
         self.elantech
             .as_mut()
             .unwrap()
@@ -148,8 +129,73 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .acknowledged = true;
         Ok(())
     }
+    pub(super) fn elan_write_bytes(
+        &mut self,
+        reg: u8,
+        value: u8,
+        hardware: u8,
+    ) -> Result<(), ErrorKind> {
+        if hardware == 1 {
+            for byte in [0x11, reg, value] {
+                self.sliced_command(byte)?;
+            }
+        } else {
+            let bytes: &[u8] = if hardware == 4 {
+                &[0xf8, 0, 0xf8, reg, 0xf8, 0, 0xf8, value]
+            } else {
+                &[
+                    0xf8,
+                    if hardware == 2 { 0x11 } else { 0 },
+                    0xf8,
+                    reg,
+                    0xf8,
+                    value,
+                ]
+            };
+            for &byte in bytes {
+                self.elan_register_command(byte)?;
+            }
+        }
+        if hardware >= 2 {
+            self.elan_register_command(SCALE_ONE_TO_ONE)?;
+        } else {
+            self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
+        }
+        Ok(())
+    }
+    fn elan_change_report_id(&mut self) -> Result<(), ErrorKind> {
+        self.elantech.as_mut().unwrap().report_id = Some(ReportIdChange {
+            requested: [0x10, 3],
+            write_acknowledged: false,
+            readback: None,
+            verified: false,
+        });
+        // Source elantech_write_reg_params uses both literal parameter bytes.
+        for byte in [0xf8, 0, 0xf8, 7, 0xf8, 0x10, 0xf8, 3, SCALE_ONE_TO_ONE] {
+            self.elan_register_command(byte)?;
+        }
+        self.elantech
+            .as_mut()
+            .unwrap()
+            .report_id
+            .as_mut()
+            .unwrap()
+            .write_acknowledged = true;
+        for byte in [0xf8, 0, 0xf8, 7] {
+            self.elan_register_command(byte)?;
+        }
+        let observed = self.elan_reply(QueryKind::ReportId)?;
+        let change = self.elantech.as_mut().unwrap().report_id.as_mut().unwrap();
+        change.readback = Some(observed);
+        if observed[..2] != [0x10, 3] {
+            return Err(ErrorKind::Elantech(Error::ReportId(observed)));
+        }
+        change.verified = true;
+        Ok(())
+    }
     pub(in crate::input::ps2) fn initialize_elantech(&mut self) -> Result<(), ErrorKind> {
         self.elantech.as_mut().unwrap().queries.clear();
+        self.elantech.as_mut().unwrap().report_id = None;
         if let Some(c) = &mut self.elantech.as_mut().unwrap().capabilities {
             c.mode_accepted = false;
         }
@@ -181,12 +227,22 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             match (firmware >> 16) & 15 {
                 2 | 4 => 2,
                 5 => 3,
+                6..=15 => 4,
                 _ => return Err(ErrorKind::Elantech(Error::Version(firmware))),
             }
         };
         let capabilities = self.elan_info(2, QueryKind::Capabilities, hardware)?;
-        if capabilities[0] & 0x80 != 0 {
-            return Err(ErrorKind::Elantech(Error::Trackpoint));
+        let trackpoint = capabilities[0] & 0x80 != 0;
+        let integrated = self.elantech.as_ref().unwrap().trackpoint_required;
+        if integrated && !trackpoint {
+            return Err(ErrorKind::Elantech(Error::TrackpointAbsent));
+        }
+        if trackpoint && hardware < 3 {
+            return Err(ErrorKind::Elantech(if integrated {
+                Error::TrackpointHardware(hardware)
+            } else {
+                Error::Trackpoint
+            }));
         }
         let samples = if hardware > 1 {
             Some(self.elan_info(3, QueryKind::Samples, hardware)?)
@@ -196,6 +252,37 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if hardware == 3 && samples.is_some_and(|sample| sample[1] == 0x74) {
             return Err(ErrorKind::Elantech(Error::BrokenAbsolute));
         }
+        let pattern = if (firmware >> 16) & 15 == 15 && firmware as u8 <= 2 {
+            firmware as u8
+        } else {
+            0
+        };
+        let ic_body = if pattern != 0 {
+            Some(self.elan_info(5, QueryKind::IcBody, hardware)?)
+        } else {
+            None
+        };
+        let ic_version = ic_body.map_or(((firmware >> 16) & 15) as u16, |v| {
+            u16::from_be_bytes([v[0], v[1]])
+        });
+        let product = samples.map_or(0, |v| u16::from_be_bytes([v[0], v[1]]));
+        let product_id = if pattern == 0 { product & 255 } else { product };
+        if self.elantech_capabilities().is_some_and(|old| {
+            old.firmware != firmware
+                || old.capabilities != capabilities
+                || old.samples != samples
+                || old.v4.is_some_and(|info| info.ic_body != ic_body)
+        }) {
+            return Err(ErrorKind::Elantech(Error::IdentityChanged));
+        }
+        if trackpoint && ic_version == 0x11 && matches!(product_id, 8 | 9 | 0x0d | 0x0e) {
+            self.elan_change_report_id()?;
+        }
+        let resolution = if hardware == 4 {
+            Some(self.elan_info(4, QueryKind::Resolution, hardware)?)
+        } else {
+            None
+        };
         let mut firmware_id = None;
         let bounds = if hardware == 1 {
             Bounds {
@@ -203,7 +290,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 maximum: (544, 352),
                 source: RangeSource::NominalV1,
             }
-        } else if hardware == 3 {
+        } else if hardware >= 3 {
             let id = self.elan_info(0, QueryKind::FirmwareId, hardware)?;
             firmware_id = Some(id);
             Bounds {
@@ -279,6 +366,44 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             jumpy_cursor: matches!(firmware, 0x020022 | 0x020600),
             crc_enabled: firmware & 0x4000 != 0,
             buttonpad: hardware >= 3 && firmware & 0x1000 != 0,
+            trackpoint,
+            v4: if let Some(resolution) = resolution {
+                let x_traces = capabilities[1];
+                if x_traces < 2 || u16::from(x_traces) > bounds.maximum.0 {
+                    return Err(ErrorKind::Elantech(Error::Geometry));
+                }
+                let y_traces = capabilities[2];
+                let convert_res = |v: u8| (u16::from(v) * 10 + 790) * 10 / 254;
+                let product = u16::from_be_bytes([samples.unwrap()[0], samples.unwrap()[1]]);
+                Some(V4Info {
+                    pattern,
+                    ic_body,
+                    ic_version: ic_body.map_or(((firmware >> 16) & 15) as u16, |v| {
+                        u16::from_be_bytes([v[0], v[1]])
+                    }),
+                    product_id: if pattern == 0 { product & 255 } else { product },
+                    resolution,
+                    counts_per_mm: (
+                        convert_res(resolution[1] & 15),
+                        convert_res(resolution[1] >> 4),
+                    ),
+                    bus: resolution[2],
+                    traces: (
+                        x_traces,
+                        if y_traces >= 2 && u16::from(y_traces) <= bounds.maximum.1 {
+                            y_traces
+                        } else {
+                            0
+                        },
+                    ),
+                    trace_width: bounds.maximum.0 / u16::from(x_traces - 1),
+                    middle_button: firmware & 0x0f2000 == 0x0f2000
+                        && firmware & 255 != 0
+                        && firmware & 0x1000 == 0,
+                })
+            } else {
+                None
+            },
             registers: Vec::new(),
             mode_accepted: false,
         };
@@ -288,6 +413,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 || old.capabilities != c.capabilities
                 || old.samples != c.samples
                 || old.firmware_id != c.firmware_id
+                || old.v4 != c.v4
                 || old.bounds != c.bounds)
         {
             return Err(ErrorKind::Elantech(Error::IdentityChanged));
@@ -297,25 +423,61 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             &[(0x10, 0x16), (0x11, 0x8f)]
         } else if hardware == 2 {
             &[(0x10, 0x54), (0x11, 0x88), (0x21, 0x60)]
-        } else {
+        } else if hardware == 3 {
             &[(0x10, 0x0b)]
+        } else {
+            &[(0x07, 1)]
         };
         for &(reg, value) in registers {
             self.elan_write(reg, value, hardware)?;
         }
-        let readback = self.elan_read(0x10, hardware)?;
-        let engine = self.elantech.as_mut().unwrap();
-        engine.capabilities.as_mut().unwrap().registers[0].readback = Some(readback);
-        if hardware == 1 && readback[0] & 4 == 0 {
-            return Err(ErrorKind::Elantech(Error::Readback {
-                expected: if hardware == 1 { 0x16 } else { 0x54 },
-                observed: readback[0],
-            }));
+        if hardware != 4 {
+            let readback = self.elan_read(0x10, hardware)?;
+            self.elantech
+                .as_mut()
+                .unwrap()
+                .capabilities
+                .as_mut()
+                .unwrap()
+                .registers[0]
+                .readback = Some(readback);
+            if hardware == 1 && readback[0] & 4 == 0 {
+                return Err(ErrorKind::Elantech(Error::Readback {
+                    expected: 0x16,
+                    observed: readback[0],
+                }));
+            }
         }
+        let engine = self.elantech.as_mut().unwrap();
         engine.capabilities.as_mut().unwrap().mode_accepted = true;
         engine.position = 0;
         engine.last_fault = None;
         engine.single_finger_reports = 0;
+        Ok(())
+    }
+    pub(in crate::input::ps2) fn begin_elantech_rate_change(&mut self) {
+        if let Some(c) = self.elantech.as_mut().and_then(|e| e.capabilities.as_mut())
+            && c.firmware == 0x381f17
+        {
+            // This firmware loses reg07 on a rate change. The earlier mode ACK
+            // cannot establish its current state after an uncertain rate write.
+            c.mode_accepted = false;
+        }
+    }
+    pub(in crate::input::ps2) fn restore_elantech_rate_mode(&mut self) -> Result<(), ErrorKind> {
+        if self
+            .elantech_capabilities()
+            .is_some_and(|c| c.firmware == 0x381f17)
+        {
+            self.elan_write(7, 1, 4)?;
+            self.elantech
+                .as_mut()
+                .unwrap()
+                .capabilities
+                .as_mut()
+                .unwrap()
+                .mode_accepted = true;
+        }
         Ok(())
     }
     /// Read a genuine source-qualified register while reporting is quiesced.

@@ -654,7 +654,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 self.initialize_synaptics()?;
             } else if self.elantech.is_some() {
                 self.initialize_elantech()?;
+                self.begin_elantech_rate_change();
                 self.device_command(Port::Mouse, SET_RATE, &[100])?;
+                self.restore_elantech_rate_mode()?;
                 self.device_command(Port::Mouse, SET_RESOLUTION, &[3])?;
                 self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
             } else {

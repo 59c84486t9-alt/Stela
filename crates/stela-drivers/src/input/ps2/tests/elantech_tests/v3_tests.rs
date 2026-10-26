@@ -283,6 +283,8 @@ fn unchanged_linux_v3_head_tail_reports_match_actual_configured_i8042_device() {
         assert_eq!(polled.frames.len(), 1);
         assert_eq!(polled.frames[0].bytes(), raw);
         match polled.frames[0].report {
+            elantech::Report::Multitouch(_) => panic!("v3 has no v4 report"),
+            elantech::Report::Trackpoint(_) => panic!("ordinary profile has no trackpoint"),
             elantech::Report::Debounce => {
                 assert_eq!(fields[3], "B");
                 assert!(polled.inputs.is_empty());
