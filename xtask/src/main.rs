@@ -84,6 +84,9 @@ mod boot_madt;
 mod agx_isa;
 mod agx_observe;
 mod amx;
+// The bench, the hosted matrix and the oracle's system lane run the hosted
+// engine, which only an Intel Mac has (`stela_runtime::hosted`).
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod bench;
 mod boot;
 mod check;
@@ -92,6 +95,7 @@ mod differential;
 mod dit;
 mod floor_audit;
 mod gpu;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_matrix;
 mod oracle;
 mod progress;
@@ -127,6 +131,7 @@ enum Task {
     /// Time unchanged real-program functions in the process engines, against
     /// a baseline build (release builds only); `bench hosted` times
     /// same-source programs natively and as hosted processes.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     Bench(bench::Bench),
     /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
     AmxReference(amx::AmxReference),
@@ -168,6 +173,7 @@ fn main() -> ExitCode {
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         Task::Differential(task) => task.run().map(|()| ExitCode::SUCCESS),
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         Task::Bench(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
@@ -181,11 +187,26 @@ fn main() -> ExitCode {
         Task::RestoreDryRun(task) => task.run(),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
-            .and_then(|()| hosted_matrix::run(check))
+            .and_then(|()| hosted_matrix(check))
             .map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");
         ExitCode::FAILURE
     })
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn hosted_matrix(check: bool) -> anyhow::Result<()> {
+    hosted_matrix::run(check)
+}
+
+/// Elsewhere the hosted matrix is left as it is, and said so.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn hosted_matrix(_check: bool) -> anyhow::Result<()> {
+    eprintln!(
+        "UNSUPPORTED hosted requirement matrix: rendering it needs the hosted runtime, \
+         which only an Intel Mac has; it was neither updated nor checked"
+    );
+    Ok(())
 }

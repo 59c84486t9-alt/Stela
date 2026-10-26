@@ -51,6 +51,8 @@ pub(super) struct Windows {
     data: NonNull<u8>,
 }
 
+/// What the system lane's runner maps its guest memory onto.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 impl Windows {
     pub(super) fn code_pointer(&self) -> *const u8 {
         self.code.as_ptr()
@@ -118,10 +120,6 @@ pub struct Executable {
 }
 
 impl Executable {
-    pub(super) fn address(&self) -> usize {
-        self.pointer.as_ptr() as usize
-    }
-
     pub(super) fn new(code: &[u8]) -> Result<Self> {
         ensure!(!code.is_empty(), "empty native code");
         let bytes = code.len().next_multiple_of(PAGE_BYTES);
@@ -150,6 +148,14 @@ impl Executable {
             );
         }
         Ok(executable)
+    }
+}
+
+/// What the system lane's runner reads and patches.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl Executable {
+    pub(super) fn address(&self) -> usize {
+        self.pointer.as_ptr() as usize
     }
 
     /// Whether `address` lies in this mapping's code.
@@ -325,6 +331,10 @@ impl Translation {
     /// Admit a System word the system-mode profile exits on, after only
     /// hints and ISBs it compiles inline, which access no memory.
     pub fn system(words: &[u32]) -> Result<Self> {
+        ensure!(
+            cfg!(all(target_os = "macos", target_arch = "x86_64")),
+            "the system lane runs translations in the hosted runner, which only an Intel Mac has"
+        );
         const HINT_MASK: u32 = 0xffff_f01f;
         const HINT: u32 = 0xd503_201f;
         const ISB_MASK: u32 = 0xffff_f0ff;
@@ -362,6 +372,7 @@ impl Translation {
     /// stays inside the windows. Checked cases may fault: all accesses remain
     /// mediated by the retained memory domain.
     pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         if let Self::System = self {
             // SAFETY: `system` admitted only blocks that reach their exit
             // without a native memory access, but for a DC ZVA, whose cases

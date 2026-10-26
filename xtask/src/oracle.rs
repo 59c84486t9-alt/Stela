@@ -21,6 +21,8 @@ use std::{
 use stela_compiler::GuestState;
 
 pub mod native;
+// The system lane runs in the hosted runner, which only an Intel Mac has.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub mod system;
 
 /// Guest address of the page that holds each case's code. The zero-filled,
@@ -127,6 +129,7 @@ pub const STAGE2_NORMAL: u64 = (1 << 10) | (3 << 8) | (3 << 6) | (0xf << 2);
 /// The harness's HCR_EL2 as the engine mirrors it: E2H, RW and VM, with APK,
 /// API, EnSCXT and FIEN. The harness also sets ATA, for QEMU's MTE, which
 /// the profile lacks.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub const HCR_BASE: u64 = 1 | (1 << 31) | (1 << 34) | (1 << 40) | (1 << 41) | (1 << 47) | (1 << 53);
 const STAGE2_BLOCK: u64 = 1;
 const STAGE2_PAGE: u64 = 3;
