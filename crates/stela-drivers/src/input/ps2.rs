@@ -542,6 +542,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Err(ErrorKind::ResendLimit { port, byte: value })
     }
     fn device_command(&mut self, port: Port, value: u8, arguments: &[u8]) -> Result<(), ErrorKind> {
+        // Pending packet decoding can fail before send_byte starts. An earlier
+        // successful command's ACK is not a response to this new operation.
+        self.observed_response = None;
         if port == Port::Mouse
             && self.input_known
             && (self.synaptics.is_some() || self.elantech.is_some())

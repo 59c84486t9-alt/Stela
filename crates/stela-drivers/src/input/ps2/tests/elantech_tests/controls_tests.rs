@@ -103,6 +103,38 @@ fn mutable_register_bad_attribute_and_full_retention_queue_refuse_before_effects
 }
 
 #[test]
+fn pending_bad_packet_before_live_control_retains_fragment_without_stale_response_or_new_command() {
+    for write in [false, true] {
+        let (mut c, h) = configured(4);
+        let raw = [8, 0x21, 0x43, 0x11, 0x65, 0x87];
+        // Route actual mouse bytes into the owner side queue while the sibling
+        // keyboard command receives its own real ACK. No internal queue/state
+        // injection bypasses the actual controller read/routing path.
+        h.borrow_mut().inject_led = raw.iter().map(|data| (Port::Mouse, *data)).collect();
+        c.set_leds(1).unwrap();
+        assert_eq!(c.observed_response.unwrap().data, ACK);
+        assert_eq!(c.observed_response.unwrap().port, Port::Keyboard);
+        assert_eq!(c.pending.len(), 6);
+        let writes = h.borrow().writes.len();
+        let error = if write {
+            c.write_elantech_register(0x20, 0xa5).unwrap_err()
+        } else {
+            c.read_elantech_register(0x20).unwrap_err()
+        };
+        assert_eq!(error.kind, ErrorKind::Elantech(elantech::Error::Packet));
+        assert_eq!(error.response, None);
+        assert_eq!(c.elantech_fragment(), Some(raw.as_slice()));
+        // Containment uses controller port-disable commands, never a new
+        // mouse register/device command after the actual packet failure.
+        assert!(mouse_wire(&h.borrow(), writes).is_empty());
+        if write {
+            let control = c.elantech_register_controls().unwrap()[0];
+            assert!(!control.quiesced && !control.acknowledged && !control.reporting_resumed);
+        }
+    }
+}
+
+#[test]
 fn mutable_register_quiesce_write_and_resume_failures_retain_acknowledged_effects_without_replay() {
     for hardware in 1..=4 {
         for stage in 0..3 {
