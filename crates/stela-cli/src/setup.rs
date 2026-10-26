@@ -2279,6 +2279,7 @@ fn state_line(disk: &installed::InstalledDisk) -> String {
 
 fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
     let host = environment.host;
+    let mut erase = None;
     if let Some(disk) = host.whole_disk(&command.usb)? {
         let found = host.disks()?.into_iter().find(|d| d.identifier == disk);
         let found = found.with_context(|| format!("this computer lists no disk {disk}"))?;
@@ -2294,7 +2295,12 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
                 found.name
             ));
         }
-        eprintln!("Erasing {disk} ({})", found.name);
+        erase = Some((disk, found.name));
+    }
+    // The image first: a USB is erased only for a setup that can go on.
+    let ipsw = command.image()?;
+    if let Some((disk, name)) = erase {
+        eprintln!("Erasing {disk} ({name})");
         host.erase(&disk, USB_VOLUME)?;
         let volume = host
             .disks()?
@@ -2304,7 +2310,6 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
             .with_context(|| format!("{disk} has no mounted volume after it was erased"))?;
         command.usb = volume;
     }
-    let ipsw = command.image()?;
     let plan = plan(environment, &command, ipsw)?;
     let mut report = describe(&plan)?;
     if command.dry_run {
@@ -3335,6 +3340,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("internal disk"), "{error}");
+        // Without an image, the USB is left as it was: no erase is tried.
+        let mut no_image = command(&f, Path::new("disk5"));
+        no_image.ipsw = None;
+        let error = setup(&environment(&f.host), no_image)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pass --ipsw"), "{error}");
     }
 
     #[test]
