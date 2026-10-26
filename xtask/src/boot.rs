@@ -222,6 +222,11 @@ pub struct Run {
     /// guest skips ahead to its next timer.
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=10))]
     icount: Option<u8>,
+    /// Run the x86 guest on the host's processor through KVM instead of
+    /// translating it with TCG, with the host's CPU model unless `--cpu`
+    /// names one. Needs a Linux host with `/dev/kvm`.
+    #[arg(long, conflicts_with = "icount")]
+    kvm: bool,
     /// Attach a GPT disk image through virtio-blk, NVMe and AHCI, have the
     /// mount overwrite and read back one partition of each, and verify the
     /// mount's hashes and every byte of the images.
@@ -555,8 +560,10 @@ fn overlay(qemu: &Path, base: &Path, overlay: &Path) -> Result<()> {
     Ok(())
 }
 
-fn qemu_accelerator(icount: Option<u8>) -> &'static str {
-    if icount.is_some() {
+fn qemu_accelerator(icount: Option<u8>, kvm: bool) -> &'static str {
+    if kvm {
+        "kvm"
+    } else if icount.is_some() {
         "tcg,thread=single"
     } else {
         "tcg,thread=multi"
@@ -816,7 +823,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // log. System mode places the guest beside the window with LA57, which
     // the selected CPU exposes unless `--no-la57` hides it.
     let cpu = qemu_cpu(
-        arguments.cpu.as_deref(),
+        arguments.cpu.as_deref().or(arguments.kvm.then_some("host")),
         arguments.no_la57,
         usb || system
             || arguments.native_dma_check
@@ -846,7 +853,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         ))
         .args([
             "-accel",
-            qemu_accelerator(arguments.icount),
+            qemu_accelerator(arguments.icount, arguments.kvm),
             "-cpu",
             &cpu,
             "-smp",
@@ -1052,18 +1059,18 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .args(["-display", "none"])
             .arg("-serial")
             .arg(format!("file:{}", serial.display())),
-        Display::Window => command
-            .arg("-display")
-            .arg(if cfg!(target_os = "macos") {
-                "cocoa"
-            } else {
-                "gtk"
-            })
-            .arg("-chardev")
+        // Cocoa sizes its text console from the chardev; GTK's VTE console
+        // sizes itself and refuses the options.
+        Display::Window if cfg!(target_os = "macos") => command
+            .args(["-display", "cocoa", "-chardev"])
             .arg(format!(
                 "vc,id=uart,cols=132,rows=50,logfile={}",
                 option_path(&serial)
             ))
+            .args(["-serial", "chardev:uart"]),
+        Display::Window => command
+            .args(["-display", "gtk", "-chardev"])
+            .arg(format!("vc,id=uart,logfile={}", option_path(&serial)))
             .args(["-serial", "chardev:uart"]),
     };
     match arguments.monitor {
@@ -1308,7 +1315,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "no_la57": arguments.no_la57,
         "qemu_host_cores": arguments.host_cores,
         "qemu_host_threads": arguments.host_threads,
-        "qemu_accelerator": qemu_accelerator(arguments.icount),
+        "qemu_accelerator": qemu_accelerator(arguments.icount, arguments.kvm),
         "native_dma": native_dma,
         "native_work": native_work,
         "native_irq_work": native_irq_work,
@@ -1722,10 +1729,11 @@ mod tests {
 
     #[test]
     fn actual_parallel_cpu_execution_is_default_and_icount_keeps_its_required_mode() {
-        assert_eq!(qemu_accelerator(None), "tcg,thread=multi");
+        assert_eq!(qemu_accelerator(None, false), "tcg,thread=multi");
         for shift in 0..=10 {
-            assert_eq!(qemu_accelerator(Some(shift)), "tcg,thread=single");
+            assert_eq!(qemu_accelerator(Some(shift), false), "tcg,thread=single");
         }
+        assert_eq!(qemu_accelerator(None, true), "kvm");
     }
 
     #[test]
