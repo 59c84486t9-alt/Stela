@@ -98,7 +98,7 @@ pub struct ResetRequest {
 pub struct Access<'a> {
     /// The CPU performing the access; selects per-CPU register views.
     pub cpu: CpuIndex,
-    /// Current system counter value in 24 MHz ticks (`counter::SystemCounter`).
+    /// Current system counter value in 24 MHz ticks (`counter::FREQUENCY_HZ`).
     pub now: u64,
     pub interrupts: &'a mut dyn InterruptSink,
     reset: Option<ResetRequest>,
