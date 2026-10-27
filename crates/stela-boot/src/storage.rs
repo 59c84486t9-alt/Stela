@@ -29,11 +29,15 @@ use stela_runtime::pc::{
     storage::{self, Target},
 };
 use uefi::{
-    boot::{self, AllocateType, MemoryType, Tpl},
+    boot::{self, AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, Tpl},
+    proto::nvme::{NvmeQueueType, NvmeRequestBuilder, pass_thru::NvmePassThru},
     table::cfg::ConfigTableEntry,
 };
 
 const DMA_PAGES: usize = 2048;
+/// `max_host_mem_size_mb`: the most host memory buffer one NVMe controller
+/// gets.
+const HOST_MEMORY_MAXIMUM: u64 = 128 << 20;
 /// Bytes the check writes: several transfers, past one PRP list page.
 const CHECK_BYTES: usize = 1024 * 1024 + 3 * 4096;
 
@@ -80,6 +84,49 @@ pub fn prepare(
     }))
 }
 
+/// The pages host memory buffers take in the DMA pool, for each NVMe
+/// controller the firmware drives, as `nvme_setup_host_mem` sizes them:
+/// HMPRE capped at `max_host_mem_size_mb`, none when HMMIN exceeds that,
+/// and a page for each descriptor list.
+fn host_memory_pages() -> usize {
+    let Ok(handles) = boot::find_handles::<NvmePassThru>() else {
+        return 0;
+    };
+    let required = |handle| {
+        // SAFETY: one Identify Controller while boot services run; the
+        // firmware keeps driving the controller.
+        let pass_thru = unsafe {
+            boot::open_protocol::<NvmePassThru>(
+                OpenProtocolParams {
+                    handle,
+                    agent: boot::image_handle(),
+                    controller: None,
+                },
+                OpenProtocolAttributes::GetProtocol,
+            )
+        }
+        .ok()?;
+        let request = NvmeRequestBuilder::new(pass_thru.io_align(), 0x06, NvmeQueueType::ADMIN)
+            .with_timeout(Duration::from_secs(1))
+            .with_cdw10(1)
+            .with_transfer_buffer(4096)
+            .ok()?
+            .build();
+        let response = pass_thru.controller().execute_command(request).ok()?;
+        let identify = response.transfer_buffer()?;
+        let pages = |at: usize| {
+            let bytes = identify.get(at..at + 4)?;
+            Some(u64::from(u32::from_le_bytes(bytes.try_into().ok()?)) * 4096)
+        };
+        let (preferred, minimum) = (pages(272)?, pages(276)?);
+        if preferred == 0 || minimum > HOST_MEMORY_MAXIMUM {
+            return None;
+        }
+        Some(preferred.min(HOST_MEMORY_MAXIMUM) as usize / crate::paging::PAGE + 1)
+    };
+    handles.iter().copied().filter_map(required).sum()
+}
+
 /// What the storage drivers need after ExitBootServices: the ECAM windows,
 /// DMA pages below 4 GiB, the TSC rate and every range to map uncached.
 /// Runs before ExitBootServices.
@@ -88,13 +135,24 @@ pub fn discover() -> Result<Handoff, &'static str> {
     // SAFETY: the firmware's RSDP, its tables mapped while boot services last.
     let mcfg = unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| "no valid ACPI MCFG table")?;
     let ecam = acpi::mcfg(mcfg).map_err(|_| "invalid ACPI MCFG table")?;
-    let dma = boot::allocate_pages(
-        AllocateType::MaxAddress(0xffff_ffff),
-        MemoryType::LOADER_DATA,
-        DMA_PAGES,
-    )
-    .map_err(|_| "firmware has no DMA pages below 4 GiB")?
-    .as_ptr() as u64;
+    let allocate = |pages| {
+        boot::allocate_pages(
+            AllocateType::MaxAddress(0xffff_ffff),
+            MemoryType::LOADER_DATA,
+            pages,
+        )
+        .map(|pages| pages.as_ptr() as u64)
+    };
+    // Without room for the host memory buffers the controllers run without
+    // them, as Linux's do when that allocation fails.
+    let extra = host_memory_pages();
+    let (dma, pages) = match allocate(DMA_PAGES + extra) {
+        Ok(dma) => (dma, DMA_PAGES + extra),
+        Err(_) => (
+            allocate(DMA_PAGES).map_err(|_| "firmware has no DMA pages below 4 GiB")?,
+            DMA_PAGES,
+        ),
+    };
     // SAFETY: RDTSC has no memory effects.
     let start = unsafe { core::arch::x86_64::_rdtsc() };
     boot::stall(Duration::from_millis(10));
@@ -123,7 +181,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
         wifi_platform: Default::default(),
         ecam,
         mapped,
-        dma: dma..dma + (DMA_PAGES * crate::paging::PAGE) as u64,
+        dma: dma..dma + (pages * crate::paging::PAGE) as u64,
         clock: Clock {
             ticks_per_microsecond: (ticks / 10_000).max(1),
         },
