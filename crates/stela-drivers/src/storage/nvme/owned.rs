@@ -442,6 +442,8 @@ unsafe fn attach_with_timeout(
         }),
         teardown: Teardown::Unadmitted,
         ready_timeout_us: 500_000,
+        version: 0,
+        resets: 0,
     };
     validate_clock(clock)?;
     controller.teardown = Teardown::Unprepared;
@@ -696,6 +698,9 @@ mod tests {
         heads: [u16; 2],
         phases: [bool; 2],
         disk: Vec<u8>,
+        /// Namespace 1's size and capacity, and its EUI64.
+        blocks: u64,
+        eui64: [u8; 8],
         prepared: bool,
         bme: bool,
         enabled: bool,
@@ -754,6 +759,8 @@ mod tests {
                 heads: [0; 2],
                 phases: [true; 2],
                 disk: vec![0; 1024 * 512],
+                blocks: 1024,
+                eui64: [0x11; 8],
                 prepared: false,
                 bme: false,
                 enabled: false,
@@ -925,7 +932,9 @@ mod tests {
                         2 => data[..4].copy_from_slice(&1u32.to_le_bytes()),
                         0 => {
                             assert_eq!(command[1], 1);
-                            data[..8].copy_from_slice(&1024u64.to_le_bytes());
+                            data[..8].copy_from_slice(&self.blocks.to_le_bytes());
+                            data[8..16].copy_from_slice(&self.blocks.to_le_bytes());
+                            data[120..128].copy_from_slice(&self.eui64);
                             data[128..132].copy_from_slice(&(9u32 << 16).to_le_bytes());
                         }
                         _ => panic!("unsupported model CNS"),
@@ -1380,6 +1389,9 @@ mod tests {
                 controller: disk.controller.clone(),
                 namespace: disk.namespace,
                 identity: disk.identity.clone(),
+                ids: disk.ids.clone(),
+                scanned: disk.scanned,
+                removed: None,
             };
             let before = f.model.lock().unwrap().sync_cpu;
             f.model.lock().unwrap().mutation = mutation;
@@ -1466,6 +1478,34 @@ mod tests {
         disk.retire_owned().unwrap();
         assert!(f.model.lock().unwrap().released);
     }
+    #[test]
+    fn a_reset_rescans_namespaces_like_nvme_scan_ns() {
+        let f = Fixture::new();
+        let mut a = f.attach().unwrap();
+        let disk = &mut a.namespaces[0];
+        let reset = |f: &Fixture, disk: &mut Namespace| {
+            let mut m = f.model.lock().unwrap();
+            m.delay_io = 1;
+            m.abortable = false;
+            drop(m);
+            disk.write(4, &[0x6b; 512]).unwrap();
+        };
+        // The namespace grew: the reset's rescan updates its size.
+        f.model.lock().unwrap().blocks = 2048;
+        reset(&f, disk);
+        assert_eq!(disk.identity().blocks, 1024);
+        disk.flush().unwrap();
+        assert_eq!(disk.identity().blocks, 2048);
+        // Its EUI64 changed: nvme_validate_ns removes it.
+        f.model.lock().unwrap().eui64 = [0x22; 8];
+        reset(&f, disk);
+        assert_eq!(disk.read(0, &mut [0; 512]), Err(REMOVED));
+        assert_eq!(disk.flush(), Err(REMOVED));
+        f.model.lock().unwrap().eui64 = [0x11; 8];
+        assert_eq!(disk.flush(), Err(REMOVED));
+        disk.retire_owned().unwrap();
+    }
+
     #[test]
     fn owned_controller_that_keeps_timing_out_fails_after_five_resets() {
         let f = Fixture::new();

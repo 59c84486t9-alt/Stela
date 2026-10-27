@@ -45,6 +45,10 @@ const SHUTDOWN_MAXIMUM_US: u64 = 60_000_000;
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
 /// The first version with the active namespace list (Linux `NVME_VS(1, 1, 0)`).
 const VERSION_1_1: u32 = 0x0001_0100;
+/// Identify Namespace reports an NGUID from 1.2 and the identification
+/// descriptor list exists from 1.3.
+const VERSION_1_2: u32 = 0x0001_0200;
+const VERSION_1_3: u32 = 0x0001_0300;
 /// 64-byte submission and 16-byte completion entries, 4 KiB pages, NVM set.
 const CONFIGURATION_VALUE: u32 = ENABLE | 6 << 16 | 4 << 20;
 
@@ -61,6 +65,7 @@ const IO_READ: u8 = 0x02;
 const IDENTIFY_NAMESPACE: u32 = 0;
 const IDENTIFY_CONTROLLER: u32 = 1;
 const IDENTIFY_ACTIVE_NAMESPACES: u32 = 2;
+const IDENTIFY_DESCRIPTORS: u32 = 3;
 
 /// Identify Controller fields (NVMe Base 2.1 Figure 312).
 const CONTROLLER_SERIAL: core::ops::Range<usize> = 4..24;
@@ -70,6 +75,9 @@ const CONTROLLER_RTD3_ENTRY: core::ops::Range<usize> = 88..92;
 const CONTROLLER_NAMESPACES: core::ops::Range<usize> = 516..520;
 /// Identify Namespace fields (NVM Command Set 1.1 Figure 114).
 const NAMESPACE_SIZE: core::ops::Range<usize> = 0..8;
+const NAMESPACE_CAPACITY: core::ops::Range<usize> = 8..16;
+const NAMESPACE_NGUID: core::ops::Range<usize> = 104..120;
+const NAMESPACE_EUI64: core::ops::Range<usize> = 120..128;
 const NAMESPACE_FORMAT: usize = 26;
 const NAMESPACE_ATTRIBUTES: usize = 99;
 const NAMESPACE_WRITE_PROTECTED: u8 = 1 << 0;
@@ -90,6 +98,71 @@ const ADMIN_TIMEOUT_US: u64 = 60_000_000;
 const COMMAND_RETRIES: u32 = 5;
 /// The completion status field's Do Not Retry bit.
 const STATUS_DO_NOT_RETRY: u32 = 1 << 14;
+
+/// Namespace Identification Descriptor types (NVMe Base 2.1 Figure 315).
+const DESCRIPTOR_EUI64: u8 = 1;
+const DESCRIPTOR_NGUID: u8 = 2;
+const DESCRIPTOR_UUID: u8 = 3;
+const DESCRIPTOR_CSI: u8 = 4;
+/// I/O to a namespace Linux's rescan removed.
+const REMOVED: BlockError = BlockError::Protocol("the NVMe namespace changed or was removed");
+
+/// Linux `nvme_ns_ids`: what identifies a namespace across rescans.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Ids {
+    eui64: [u8; 8],
+    nguid: [u8; 16],
+    uuid: [u8; 16],
+    csi: u8,
+}
+
+impl Ids {
+    /// Linux `nvme_identify_ns_descs` parsing: descriptors until a zero
+    /// length, stopping at one whose length is wrong for its type.
+    fn from_descriptors(data: &[u8]) -> Self {
+        let mut ids = Self::default();
+        let mut at = 0;
+        while at + 4 <= data.len() {
+            let (kind, length) = (data[at], usize::from(data[at + 1]));
+            if length == 0 {
+                break;
+            }
+            let Some(value) = data.get(at + 4..at + 4 + length) else {
+                break;
+            };
+            let expected = match kind {
+                DESCRIPTOR_EUI64 => 8,
+                DESCRIPTOR_NGUID | DESCRIPTOR_UUID => 16,
+                DESCRIPTOR_CSI => 1,
+                // Unknown types are skipped.
+                _ => length,
+            };
+            if length != expected {
+                break;
+            }
+            match kind {
+                DESCRIPTOR_EUI64 => ids.eui64.copy_from_slice(value),
+                DESCRIPTOR_NGUID => ids.nguid.copy_from_slice(value),
+                DESCRIPTOR_UUID => ids.uuid.copy_from_slice(value),
+                DESCRIPTOR_CSI => ids.csi = value[0],
+                _ => {}
+            }
+            at += 4 + length;
+        }
+        ids
+    }
+
+    /// Linux `nvme_ns_info_from_identify`: EUI64 and NGUID from Identify
+    /// Namespace when the descriptors gave none.
+    fn fill(&mut self, version: u32, data: &[u8]) {
+        if version >= VERSION_1_1 && self.eui64 == [0; 8] {
+            self.eui64.copy_from_slice(&data[NAMESPACE_EUI64]);
+        }
+        if version >= VERSION_1_2 && self.nguid == [0; 16] {
+            self.nguid.copy_from_slice(&data[NAMESPACE_NGUID]);
+        }
+    }
+}
 
 /// How a command was lost, when it produced no completion to report.
 enum Lost {
@@ -153,6 +226,10 @@ struct Controller {
     owned: Option<owned::Owner>,
     teardown: owned::Teardown,
     ready_timeout_us: u64,
+    /// The VS register, read at discovery.
+    version: u32,
+    /// Completed controller resets; each one rescans the namespaces.
+    resets: u64,
 }
 
 impl Controller {
@@ -538,7 +615,22 @@ impl Controller {
             self.io.submissions.publish();
             self.admin_command(command)?;
         }
+        // nvme_start_ctrl queues a namespace scan.
+        self.resets += 1;
         Ok(())
+    }
+
+    /// Linux `nvme_identify_ns_descs`: none before NVMe 1.3. `None` when the
+    /// controller refused the list; the scan then skips the namespace.
+    fn descriptors(&mut self, namespace: u32) -> Result<Option<Ids>, BlockError> {
+        if self.version < VERSION_1_3 {
+            return Ok(Some(Ids::default()));
+        }
+        match self.identify(IDENTIFY_DESCRIPTORS, namespace) {
+            Ok(data) => Ok(Some(Ids::from_descriptors(data))),
+            Err(BlockError::Device { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Flush callers before this method; acknowledged SHST prevents further
@@ -638,6 +730,11 @@ pub struct Namespace {
     controller: Rc<RefCell<Controller>>,
     namespace: u32,
     identity: Identity,
+    ids: Ids,
+    /// The controller reset count this namespace was last scanned at.
+    scanned: u64,
+    /// Set once a rescan removed the namespace.
+    removed: Option<BlockError>,
 }
 
 /// Reset `function`'s controller, bring up its queues and return its usable
@@ -670,6 +767,8 @@ pub fn attach(
         owned: None,
         teardown: owned::Teardown::Unprepared,
         ready_timeout_us: 500_000,
+        version: 0,
+        resets: 0,
     };
     controller.initialize()?;
     discover(controller, format!("{}", function.address))
@@ -708,6 +807,7 @@ fn discover(
     // Linux `nvme_scan_work`: the active list from NVMe 1.1, otherwise (or
     // when the controller refuses it) every namespace ID in turn.
     let version = controller.registers.read32(VERSION)?;
+    controller.version = version;
     let listed = if version >= VERSION_1_1 {
         controller
             .identify(IDENTIFY_ACTIVE_NAMESPACES, 0)
@@ -735,23 +835,30 @@ fn discover(
     let mut found = Vec::new();
     let max_transfer = controller.max_transfer;
     for namespace in candidates {
+        let Some(mut ids) = controller.descriptors(namespace)? else {
+            continue;
+        };
         let data = controller.identify(IDENTIFY_NAMESPACE, namespace)?;
+        ids.fill(version, data);
         match plain_format(data, max_transfer) {
             // An inactive namespace reads as all zeros in a sequential scan.
             Ok(None) if sequential => {}
             Ok(None) => attached
                 .failures
                 .push((namespace, BlockError::Unsupported("empty NVMe namespace"))),
-            Ok(Some(format)) => found.push((namespace, format)),
+            Ok(Some(format)) => found.push((namespace, format, ids)),
             Err(error) => attached.failures.push((namespace, error)),
         }
     }
     let controller = Rc::new(RefCell::new(controller));
     attached.namespaces = found
         .into_iter()
-        .map(|(namespace, format)| Namespace {
+        .map(|(namespace, format, ids)| Namespace {
             controller: controller.clone(),
             namespace,
+            ids,
+            scanned: 0,
+            removed: None,
             identity: Identity {
                 transport: Transport::Nvme,
                 location: format!("{location} namespace {namespace}"),
@@ -818,6 +925,54 @@ impl Namespace {
         let block = self.identity.block_size as usize;
         controller.max_transfer / block * block
     }
+
+    /// Linux `nvme_scan_ns` and `nvme_validate_ns` after a controller reset:
+    /// a namespace no longer allocated, or whose identifiers changed, is
+    /// removed; otherwise its size and format are updated. A refused
+    /// Identify leaves the namespace as it was.
+    fn rescan(&mut self, controller: &mut Controller) -> Result<(), BlockError> {
+        if let Some(error) = &self.removed {
+            return Err(error.clone());
+        }
+        if self.scanned == controller.resets {
+            return Ok(());
+        }
+        let resets = controller.resets;
+        let Some(mut ids) = controller.descriptors(self.namespace)? else {
+            self.scanned = resets;
+            return Ok(());
+        };
+        let (version, max_transfer) = (controller.version, controller.max_transfer);
+        let data = match controller.identify(IDENTIFY_NAMESPACE, self.namespace) {
+            Ok(data) => data,
+            Err(BlockError::Device { .. }) => {
+                self.scanned = resets;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        ids.fill(version, data);
+        let allocated = data[NAMESPACE_CAPACITY] != [0; 8];
+        let format = plain_format(data, max_transfer);
+        self.scanned = resets;
+        match format {
+            Ok(Some(format)) if allocated && ids == self.ids => {
+                self.identity.blocks = format.blocks;
+                self.identity.block_size = format.block_size;
+                self.identity.read_only = format.read_only;
+                Ok(())
+            }
+            Err(error) if allocated && ids == self.ids => {
+                // nvme_update_ns_info hides a namespace it cannot use.
+                self.removed = Some(error.clone());
+                Err(error)
+            }
+            _ => {
+                self.removed = Some(REMOVED);
+                Err(REMOVED)
+            }
+        }
+    }
 }
 
 impl BlockDevice for Namespace {
@@ -826,9 +981,11 @@ impl BlockDevice for Namespace {
     }
 
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
-        self.identity.check(lba, buffer.len())?;
-        let mut controller = self.controller.borrow_mut();
+        let controller = self.controller.clone();
+        let mut controller = controller.borrow_mut();
         controller.ready()?;
+        self.rescan(&mut controller)?;
+        self.identity.check(lba, buffer.len())?;
         let block = self.identity.block_size as usize;
         let chunk = self.chunk_bytes(&controller);
         for (index, part) in buffer.chunks_mut(chunk).enumerate() {
@@ -841,9 +998,11 @@ impl BlockDevice for Namespace {
     }
 
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
-        self.identity.check_write(lba, data.len())?;
-        let mut controller = self.controller.borrow_mut();
+        let controller = self.controller.clone();
+        let mut controller = controller.borrow_mut();
         controller.ready()?;
+        self.rescan(&mut controller)?;
+        self.identity.check_write(lba, data.len())?;
         let block = self.identity.block_size as usize;
         let chunk = self.chunk_bytes(&controller);
         for (index, part) in data.chunks(chunk).enumerate() {
@@ -859,10 +1018,11 @@ impl BlockDevice for Namespace {
         let mut command = [0u32; 16];
         command[0] = u32::from(IO_FLUSH);
         command[1] = self.namespace;
-        self.controller
-            .borrow_mut()
-            .execute(true, command)
-            .map(|_| ())
+        let controller = self.controller.clone();
+        let mut controller = controller.borrow_mut();
+        controller.ready()?;
+        self.rescan(&mut controller)?;
+        controller.execute(true, command).map(|_| ())
     }
 
     /// Flush, then shut the controller down once for all its namespaces.
@@ -924,6 +1084,8 @@ mod tests {
                 owned: None,
                 teardown: owned::Teardown::Unprepared,
                 ready_timeout_us: 500_000,
+                version: 0,
+                resets: 0,
             };
             Self {
                 _registers: registers,
@@ -931,6 +1093,9 @@ mod tests {
                 disk: Namespace {
                     controller: Rc::new(RefCell::new(controller)),
                     namespace: 1,
+                    ids: Ids::default(),
+                    scanned: 0,
+                    removed: None,
                     identity: Identity {
                         transport: Transport::Nvme,
                         location: "fixture".into(),
@@ -962,6 +1127,9 @@ mod tests {
             controller: fixture.disk.controller.clone(),
             namespace: 2,
             identity: fixture.disk.identity.clone(),
+            ids: Ids::default(),
+            scanned: 0,
+            removed: None,
         };
         {
             let c = fixture.disk.controller.borrow();
@@ -1118,6 +1286,45 @@ mod tests {
             page[NAMESPACE_FORMATS + 4 * index..][..4].copy_from_slice(&descriptor.to_le_bytes());
         }
         page
+    }
+
+    #[test]
+    fn identification_descriptors_parse_like_nvme_identify_ns_descs() {
+        let mut page = vec![0u8; PAGE];
+        let mut at = 0;
+        for (kind, value) in [
+            (DESCRIPTOR_EUI64, &[1u8; 8][..]),
+            (9, &[7; 5][..]),
+            (DESCRIPTOR_UUID, &[3; 16][..]),
+            (DESCRIPTOR_CSI, &[2][..]),
+        ] {
+            page[at] = kind;
+            page[at + 1] = value.len() as u8;
+            page[at + 4..at + 4 + value.len()].copy_from_slice(value);
+            at += 4 + value.len();
+        }
+        let ids = Ids::from_descriptors(&page);
+        assert_eq!(
+            ids,
+            Ids {
+                eui64: [1; 8],
+                nguid: [0; 16],
+                uuid: [3; 16],
+                csi: 2
+            }
+        );
+        // A wrong length ends the list; Identify Namespace then fills EUI64
+        // from 1.1 and NGUID from 1.2.
+        page[1] = 9;
+        let mut ids = Ids::from_descriptors(&page);
+        assert_eq!(ids, Ids::default());
+        let mut data = vec![0u8; PAGE];
+        data[NAMESPACE_EUI64].fill(5);
+        data[NAMESPACE_NGUID].fill(6);
+        ids.fill(VERSION_1_1, &data);
+        assert_eq!((ids.eui64, ids.nguid), ([5; 8], [0; 16]));
+        ids.fill(VERSION_1_2, &data);
+        assert_eq!(ids.nguid, [6; 16]);
     }
 
     #[test]

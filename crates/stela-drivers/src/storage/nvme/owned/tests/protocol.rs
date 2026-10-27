@@ -107,6 +107,9 @@ impl Protocol {
             controller: namespace.controller.clone(),
             namespace: namespace.namespace,
             identity: namespace.identity.clone(),
+            ids: namespace.ids.clone(),
+            scanned: namespace.scanned,
+            removed: namespace.removed.clone(),
         }
     }
     pub(crate) fn snapshot(&self) -> Snapshot {
