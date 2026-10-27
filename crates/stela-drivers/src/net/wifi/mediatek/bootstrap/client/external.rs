@@ -105,7 +105,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.station
             .validate_external_authentication(session)
             .map_err(Error::Station)?;
-        if s.phase != Phase::Joining {
+        if s.phase != Phase::Joining || s.six_ghz.is_some() {
             return Err(Error::WrongPhase);
         }
         if !policy.allow_management_tx(session.channel()) {

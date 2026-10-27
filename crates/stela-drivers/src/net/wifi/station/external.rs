@@ -153,38 +153,62 @@ impl Station {
         now: u64,
         budget: u64,
     ) -> Result<Arc<Session>, Error> {
-        if self.phase != Phase::Idle { return Err(Error::Busy); }
+        if self.phase != Phase::Idle {
+            return Err(Error::Busy);
+        }
         self.clock(now)?;
         let bss = observation.bss();
         if bss.channel.band != super::super::Band::Ghz6
-            || bss.bssid.is_multicast() || bss.bssid.0 == [0;6]
-            || bss.bssid == self.local || bss.transmitter != bss.bssid
-        { return Err(Error::InvalidAddress); }
-        let ssid = bss.ssid.as_ref().ok_or(Error::Wire(wire::Error::Invalid("6GHz SSID absent")))?;
-        if ssid.len() > 32 || budget == 0 || budget > MAX_EXCHANGE_US {
-            return Err(Error::Wire(wire::Error::Invalid("external authentication bounds")));
+            || bss.bssid.is_multicast()
+            || bss.bssid.0 == [0; 6]
+            || bss.bssid == self.local
+            || bss.transmitter != bss.bssid
+        {
+            return Err(Error::InvalidAddress);
         }
-        selection.validate_peer(&bss.elements).map_err(Error::Wire)?;
+        let ssid = bss
+            .ssid
+            .as_ref()
+            .ok_or(Error::Wire(wire::Error::Invalid("6GHz SSID absent")))?;
+        if ssid.len() > 32 || budget == 0 || budget > MAX_EXCHANGE_US {
+            return Err(Error::Wire(wire::Error::Invalid(
+                "external authentication bounds",
+            )));
+        }
+        selection
+            .validate_peer(&bss.elements)
+            .map_err(Error::Wire)?;
         let channel = bss.channel;
         let peer = bss.bssid;
         let ssid = ssid.clone();
         Ok(Arc::new(Session {
             epoch: NEXT_ASSOCIATION.next().ok_or(Error::Overflow)?,
-            local: self.local, peer, channel, ssid,
+            local: self.local,
+            peer,
+            channel,
+            ssid,
             deadline: now.checked_add(budget).ok_or(Error::Overflow)?,
-            six_ghz: Some(SixGhzBinding { observation, selection, local }),
+            six_ghz: Some(SixGhzBinding {
+                observation,
+                selection,
+                local,
+            }),
         }))
     }
     /// Only a native callback holding both actual transport providers calls
     /// this after qualifying the original prepared Session and both clocks.
     pub(crate) fn commit_six_ghz_authentication(
-        &mut self, session: Arc<Session>, now: u64,
+        &mut self,
+        session: Arc<Session>,
+        now: u64,
     ) -> Result<(), Error> {
         if self.phase != Phase::Idle || session.local != self.local || session.six_ghz.is_none() {
             return Err(Error::Stale);
         }
         self.clock(now)?;
-        if now >= session.deadline { return Err(Error::Timeout); }
+        if now >= session.deadline {
+            return Err(Error::Timeout);
+        }
         self.epoch = session.epoch;
         self.serial = 0;
         self.external = Some(session);

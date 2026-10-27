@@ -16,10 +16,12 @@ use super::{Band, Channel, scan as scan_protocol, station};
 mod association;
 mod authentication;
 mod six_ghz_authentication;
-pub use six_ghz_authentication::{SixGhzAuthenticationOperation, SixGhzAuthenticationUse, SixGhzTransportProfile};
-pub(crate) use six_ghz_authentication::{SixGhzAuthenticationBinding, SixGhzAuthenticationGuard};
 pub use authentication::PmfAuthenticationOperation;
 pub(crate) use authentication::{PmfAuthenticationBinding, PmfAuthenticationGuard};
+pub(crate) use six_ghz_authentication::{SixGhzAuthenticationBinding, SixGhzAuthenticationGuard};
+pub use six_ghz_authentication::{
+    SixGhzAuthenticationOperation, SixGhzAuthenticationUse, SixGhzTransportProfile,
+};
 mod scan;
 pub use scan::{ScanAdmission, ScanOperation};
 pub mod database;
@@ -147,7 +149,10 @@ pub trait HardwareLease {
     }
     /// Explicit actual6GHz transport selection and complete enabled hardware
     /// envelope; country/legacy/PMF permissions never imply this permission.
-    fn allows_six_ghz_authentication(&mut self, _operation: &SixGhzAuthenticationOperation<'_>) -> bool {
+    fn allows_six_ghz_authentication(
+        &mut self,
+        _operation: &SixGhzAuthenticationOperation<'_>,
+    ) -> bool {
         false
     }
     /// Qualify the complete context-bound autonomous radio profile. The default
@@ -223,7 +228,10 @@ pub trait OsLease {
     }
     /// Explicit actual6GHz transport selection and complete enabled hardware
     /// envelope; country/legacy/PMF permissions never imply this permission.
-    fn allows_six_ghz_authentication(&mut self, _operation: &SixGhzAuthenticationOperation<'_>) -> bool {
+    fn allows_six_ghz_authentication(
+        &mut self,
+        _operation: &SixGhzAuthenticationOperation<'_>,
+    ) -> bool {
         false
     }
     /// Qualify the complete context-bound autonomous radio profile. The default

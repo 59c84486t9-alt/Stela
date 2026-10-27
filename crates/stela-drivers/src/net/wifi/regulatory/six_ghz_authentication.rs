@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Fresh held board and OS authority for finite6GHz SAE transport only.
 //! None of these observations authenticate SAE or permit an association.
-use super::{AssociationOwner, Error, HardwareLease, HardwarePolicy, NativeContext, OsLease, OsPolicy, Owner};
+use super::{
+    AssociationOwner, Error, HardwareLease, HardwarePolicy, NativeContext, OsLease, OsPolicy, Owner,
+};
 use crate::net::wifi::{frame::Mpdu, station::external::Session};
 use alloc::sync::Arc;
 
@@ -39,9 +41,15 @@ pub struct SixGhzAuthenticationOperation<'a> {
     purpose: SixGhzAuthenticationUse<'a>,
 }
 impl SixGhzAuthenticationOperation<'_> {
-    pub fn session(&self) -> &Arc<Session> { self.session }
-    pub fn profile(&self) -> &SixGhzTransportProfile { self.profile }
-    pub const fn purpose(&self) -> SixGhzAuthenticationUse<'_> { self.purpose }
+    pub fn session(&self) -> &Arc<Session> {
+        self.session
+    }
+    pub fn profile(&self) -> &SixGhzTransportProfile {
+        self.profile
+    }
+    pub const fn purpose(&self) -> SixGhzAuthenticationUse<'_> {
+        self.purpose
+    }
 }
 /// Equality fences retain original identity, never prior permission.
 #[derive(Clone)]
@@ -60,24 +68,49 @@ pub(crate) struct SixGhzAuthenticationGuard<'a> {
 }
 impl SixGhzAuthenticationGuard<'_> {
     pub(crate) fn qualify(
-        &mut self, session: &Arc<Session>, profile: &SixGhzTransportProfile,
-        old: Option<&SixGhzAuthenticationBinding>, purpose: SixGhzAuthenticationUse<'_>,
+        &mut self,
+        session: &Arc<Session>,
+        profile: &SixGhzTransportProfile,
+        old: Option<&SixGhzAuthenticationBinding>,
+        purpose: SixGhzAuthenticationUse<'_>,
     ) -> Result<SixGhzAuthenticationBinding, Error> {
-        if session.six_ghz_observation().is_none() || session.six_ghz_selection().is_none()
+        if session.six_ghz_observation().is_none()
+            || session.six_ghz_selection().is_none()
             || session.six_ghz_local_capabilities().is_none()
-        { return Err(Error::Mismatch); }
+        {
+            return Err(Error::Mismatch);
+        }
         let revision = self.os.revision();
-        if old.is_some_and(|old| old.owner != self.owner || old.native != self.native
-            || old.revision != revision || !Arc::ptr_eq(&old.session, session) || old.profile != *profile)
-        { return Err(Error::Stale); }
-        let operation = SixGhzAuthenticationOperation { session, profile, purpose };
+        if old.is_some_and(|old| {
+            old.owner != self.owner
+                || old.native != self.native
+                || old.revision != revision
+                || !Arc::ptr_eq(&old.session, session)
+                || old.profile != *profile
+        }) {
+            return Err(Error::Stale);
+        }
+        let operation = SixGhzAuthenticationOperation {
+            session,
+            profile,
+            purpose,
+        };
         let channel = session.channel();
         if self.hardware.lookup_channel(channel.band, channel.number) != Some(channel)
             || !self.hardware.allows_six_ghz_authentication(&operation)
-        { return Err(Error::HardwareDenied); }
-        if !self.os.allows_six_ghz_authentication(&operation) { return Err(Error::OsDenied); }
-        Ok(SixGhzAuthenticationBinding { owner:self.owner, native:self.native, revision,
-            session: session.clone(), profile: profile.clone() })
+        {
+            return Err(Error::HardwareDenied);
+        }
+        if !self.os.allows_six_ghz_authentication(&operation) {
+            return Err(Error::OsDenied);
+        }
+        Ok(SixGhzAuthenticationBinding {
+            owner: self.owner,
+            native: self.native,
+            revision,
+            session: session.clone(),
+            profile: profile.clone(),
+        })
     }
 }
 impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
@@ -87,15 +120,22 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     /// publish_association. Transport selection is not supplicant completion.
     /// Cleanup of original armed work remains possible without new permission.
     pub(crate) unsafe fn with_six_ghz_authentication<N: AssociationOwner, T>(
-        &mut self, native_owner: &mut N,
+        &mut self,
+        native_owner: &mut N,
         consume: impl FnOnce(&mut N, &mut SixGhzAuthenticationGuard<'_>) -> T,
     ) -> Result<T, Error> {
         let mut hardware = self.hardware.acquire().ok_or(Error::HardwareUnavailable)?;
         let native = hardware.context();
         let mut os = self.os.acquire(native).ok_or(Error::OsUnavailable)?;
-        let mut guard = SixGhzAuthenticationGuard { owner: self.identity, native, hardware: &mut hardware, os: &mut os };
+        let mut guard = SixGhzAuthenticationGuard {
+            owner: self.identity,
+            native,
+            hardware: &mut hardware,
+            os: &mut os,
+        };
         let result = consume(native_owner, &mut guard);
-        drop(os); drop(hardware);
+        drop(os);
+        drop(hardware);
         Ok(result)
     }
 }

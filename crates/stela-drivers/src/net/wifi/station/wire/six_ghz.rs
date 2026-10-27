@@ -130,16 +130,23 @@ impl Profile {
         if !bytes.is_empty() {
             return Err(Error::Unsupported("trailing 6GHz RSN fields"));
         }
-        Ok(Self { pairwise, akms, capabilities, pmkids })
+        Ok(Self {
+            pairwise,
+            akms,
+            capabilities,
+            pmkids,
+        })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::net::wifi) mod tests {
     use super::*;
     pub(in crate::net::wifi) fn selected() -> Vec<u8> {
-        vec![48, 26, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 4,
-            1, 0, 0, 15, 172, 8, 0xc0, 0, 0, 0, 0, 15, 172, 6, 244, 1, H2E]
+        vec![
+            48, 26, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 8, 0xc0, 0, 0, 0,
+            0, 15, 172, 6, 244, 1, H2E,
+        ]
     }
     #[test]
     fn exact_sae_h2e_selection_retains_bytes_and_requires_ap_offer() {
@@ -149,26 +156,41 @@ mod tests {
         assert_eq!(selection.rsn(), &bytes[2..28]);
         assert_eq!(selection.rsnx(), &[H2E]);
         selection.validate_peer(&bytes).unwrap();
-        for at in [7, 13, 19, 20, 21, 27, 30] {
-            let mut bad = bytes.clone(); bad[at] = 0;
+        for at in [7, 13, 19, 20, 27, 30] {
+            let mut bad = bytes.clone();
+            bad[at] = 0;
             assert!(Selection::new(bad.clone()).is_err(), "selected {at}");
             assert!(selection.validate_peer(&bad).is_err(), "AP {at}");
         }
         assert!(selection.validate_peer(&[]).is_err());
-        assert!(selection.validate_peer(&[bytes.clone(), bytes].concat()).is_err());
+        assert!(
+            selection
+                .validate_peer(&[bytes.clone(), bytes].concat())
+                .is_err()
+        );
     }
     #[test]
     fn all_truncations_duplicate_security_and_selected_extensions_refuse() {
         let bytes = selected();
-        for end in 0..bytes.len() { assert!(Selection::new(bytes[..end].to_vec()).is_err()); }
-        for extra in [vec![48, 0], vec![244, 1, H2E], vec![244, 2, H2E, 0], vec![1, 1, 12]] {
+        for end in 0..bytes.len() {
+            assert!(Selection::new(bytes[..end].to_vec()).is_err());
+        }
+        for extra in [
+            vec![48, 0],
+            vec![244, 1, H2E],
+            vec![244, 2, H2E, 0],
+            vec![1, 1, 12],
+        ] {
             assert!(Selection::new([bytes.clone(), extra].concat()).is_err());
         }
-        let mut rsnx = bytes.clone(); rsnx[30] |= 1;
+        let mut rsnx = bytes.clone();
+        rsnx[30] |= 1;
         assert!(Selection::new(rsnx).is_err());
-        let mut ft = bytes.clone(); ft[19] = 9;
+        let mut ft = bytes.clone();
+        ft[19] = 9;
         assert!(Selection::new(ft).is_err());
-        let mut extra = bytes.clone(); extra[30] |= 0x40;
+        let mut extra = bytes.clone();
+        extra[30] |= 0x40;
         assert!(Selection::new(extra).is_err());
     }
 }

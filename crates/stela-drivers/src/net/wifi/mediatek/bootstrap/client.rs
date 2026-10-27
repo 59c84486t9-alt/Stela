@@ -13,6 +13,7 @@ pub mod management;
 mod modern;
 mod packet;
 mod pmf;
+mod six_ghz;
 pub use wifi::station::NativeBssObservation as PmfBssObservation;
 mod policy;
 pub use policy::{
@@ -185,6 +186,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     edca: Option<edca::Observed<C>>,
     authentication_deadline: Option<u64>,
     authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
+    /// The bound 6 GHz transport until its peer retires after drain.
+    six_ghz: Option<six_ghz::Bound>,
 }
 /// On uncertain/live Drop retain the entire controller, station, real key
 /// material history and actual resources. No new owner may reset their PN.
@@ -265,6 +268,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 edca: None,
                 authentication_deadline: None,
                 authentication_end: None,
+                six_ghz: None,
             })),
         })
     }
@@ -728,7 +732,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::ModernAdmissionRequired);
         }
-        self.poll_inner(now, source, policy, None)
+        self.poll_inner(now, source, policy, None, None)
     }
 
     fn poll_inner(
@@ -737,7 +741,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         source: &dyn PageSource,
         policy: &mut (impl station::RegulatoryPolicy + scan::Policy),
         mut guard: Option<&mut wifi::regulatory::PmfAuthenticationGuard<'_>>,
+        mut six: Option<&mut wifi::regulatory::SixGhzAuthenticationGuard<'_>>,
     ) -> Result<Vec<Event>, Error> {
+        // A live 6 GHz transport is serviced only under its held providers;
+        // cleanup after removal needs none.
+        if self.state().six_ghz.is_some() && six.is_none() && self.phase() == Phase::Joining {
+            return Err(Error::WrongPhase);
+        }
         if self.station().phase() == station::Phase::ExternalAuthenticating {
             self.poll_station(now, source, policy)?;
         }
@@ -882,6 +892,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     s.asynchronous.push(f);
                     continue;
                 }
+                if let Some(guard) = six.as_deref_mut() {
+                    Self::qualify_six(s, guard, six_ghz::Use::Receive(&frame), now)?;
+                }
                 let received = s
                     .station
                     .receive_external_authentication(&session, frame, now)
@@ -979,6 +992,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Ok(());
         }
         Self::abort_channel(s)?;
+        let six = s.six_ghz.as_ref().map(|six| six.codec().clone());
         // Explicit key removal precedes peer destruction. Retain their canonical
         // histories and actual ACKs until independent old-user drain completes.
         for (key, receipt) in [
@@ -997,7 +1011,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Self::command(
             s,
             Command::BssInfo,
-            &p.disable_beacon_pm().map_err(Error::Codec)?,
+            &match &six {
+                Some(codec) => codec.disable_beacon_pm(),
+                None => p.disable_beacon_pm(),
+            }
+            .map_err(Error::Codec)?,
         )?;
         s.transport_facts
             .try_reserve(1)
@@ -1008,20 +1026,34 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .mailbox
             .as_mut()
             .unwrap()
-            .initial(&p.filter_request(false).map_err(Error::Codec)?)
+            .initial(
+                &match &six {
+                    Some(codec) => codec.filter_request(false),
+                    None => p.filter_request(false),
+                }
+                .map_err(Error::Codec)?,
+            )
             .map_err(Error::Transport)?;
         s.transport_facts.push(fact);
         Self::command(
             s,
             Command::StationRecord,
-            &p.peer_request(false, false).map_err(Error::Codec)?,
+            &match &six {
+                Some(codec) => codec.peer_request(false),
+                None => p.peer_request(false, false),
+            }
+            .map_err(Error::Codec)?,
         )?;
         s.controller
             .state_mut()
             .control
             .clear_peer_admission(p.wcid)
             .map_err(|e| Error::Bootstrap(super::Error::Control(e)))?;
-        Self::command(s, Command::BssInfo, &Self::bss_request(s, p, false)?)?;
+        let bss = match &six {
+            Some(codec) => codec.bss_request().map_err(Error::Codec)?,
+            None => Self::bss_request(s, p, false)?,
+        };
+        Self::command(s, Command::BssInfo, &bss)?;
         s.phase = Phase::NeedsDrain;
         Ok(())
     }
@@ -1101,6 +1133,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.pmf_selected = None;
         s.pmf_authentication = None;
         s.authentication_deadline = None;
+        s.six_ghz = None;
         Ok(())
     }
     /// Actual interface disable ACKs then WFDMA disable/idle observation. This

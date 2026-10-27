@@ -159,8 +159,11 @@ impl Profile {
         self.peer_request_validated(enable, associated, modern, modern.is_some())
     }
     fn peer_request_validated(
-        self, enable: bool, associated: bool,
-        modern: Option<&modern::Configuration>, allow_six: bool,
+        self,
+        enable: bool,
+        associated: bool,
+        modern: Option<&modern::Configuration>,
+        allow_six: bool,
     ) -> Result<Vec<u8>, Error> {
         self.validate_inner(allow_six)?;
         let mut out = vec![0; 8];
@@ -268,7 +271,11 @@ impl Profile {
     pub fn filter_request(self, enable: bool) -> Result<super::init::Request, Error> {
         self.filter_request_validated(enable, false)
     }
-    fn filter_request_validated(self, enable: bool, allow_six: bool) -> Result<super::init::Request, Error> {
+    fn filter_request_validated(
+        self,
+        enable: bool,
+        allow_six: bool,
+    ) -> Result<super::init::Request, Error> {
         self.validate_inner(allow_six)?;
         let mut b = vec![0; 72];
         // Actual primary PHY band_idx is 0 for this single-PHY profile,
@@ -283,7 +290,12 @@ impl Profile {
     pub fn roc(self, token: u8, duration_ms: u32) -> Result<super::init::Request, Error> {
         self.roc_validated(token, duration_ms, false)
     }
-    fn roc_validated(self, token: u8, duration_ms: u32, allow_six: bool) -> Result<super::init::Request, Error> {
+    fn roc_validated(
+        self,
+        token: u8,
+        duration_ms: u32,
+        allow_six: bool,
+    ) -> Result<super::init::Request, Error> {
         self.validate_inner(allow_six)?;
         if duration_ms == 0 {
             return Err(Error::InvalidTiming);
@@ -293,7 +305,11 @@ impl Profile {
         b[8] = self.interface.bss_index;
         b[9] = token;
         b[10] = self.channel.number as u8;
-        b[12] = match self.channel.band { Band::Ghz2 => 1, Band::Ghz5 => 2, Band::Ghz6 => 3 };
+        b[12] = match self.channel.band {
+            Band::Ghz2 => 1,
+            Band::Ghz5 => 2,
+            Band::Ghz6 => 3,
+        };
         b[14] = self.channel.number as u8;
         b[17] = self.channel.number as u8;
         put32(&mut b, 20, duration_ms);
@@ -303,7 +319,11 @@ impl Profile {
     pub fn abort_roc(self, token: u8) -> Result<super::init::Request, Error> {
         self.abort_roc_validated(token, false)
     }
-    fn abort_roc_validated(self, token: u8, allow_six: bool) -> Result<super::init::Request, Error> {
+    fn abort_roc_validated(
+        self,
+        token: u8,
+        allow_six: bool,
+    ) -> Result<super::init::Request, Error> {
         self.validate_inner(allow_six)?;
         let mut b = vec![0; 16];
         put16(&mut b, 4, 1);
@@ -325,7 +345,10 @@ impl Profile {
         self.bss_request_validated(enable, modern, modern.is_some())
     }
     fn bss_request_validated(
-        self, enable: bool, modern: Option<&modern::Configuration>, allow_six: bool,
+        self,
+        enable: bool,
+        modern: Option<&modern::Configuration>,
+        allow_six: bool,
     ) -> Result<Vec<u8>, Error> {
         self.validate_inner(allow_six)?;
         let c = self.interface;

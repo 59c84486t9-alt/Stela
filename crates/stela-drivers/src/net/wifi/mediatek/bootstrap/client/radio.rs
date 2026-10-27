@@ -159,11 +159,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.roc_deadline.is_none() {
             return Ok(());
         }
-        let req = s
-            .profile
-            .ok_or(Error::WrongProfile)?
-            .abort_roc(s.roc_token)
-            .map_err(Error::Codec)?;
+        let req = match s.six_ghz.as_ref() {
+            Some(six) => six.codec().abort_roc(s.roc_token),
+            None => s.profile.ok_or(Error::WrongProfile)?.abort_roc(s.roc_token),
+        }
+        .map_err(Error::Codec)?;
         s.transport_facts
             .try_reserve(1)
             .map_err(|_| Error::NoMemory)?;
@@ -189,6 +189,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let token = s.roc_token.checked_add(1).ok_or(Error::NeedsDrain)?;
         let p = s.profile.ok_or(Error::WrongProfile)?;
         let req = p.roc(token, 1000).map_err(Error::Codec)?;
+        let abort = p.abort_roc(token).map_err(Error::Codec)?;
+        Self::await_grant(s, p, token, &req, &abort)
+    }
+    /// Publish one ROC request and wait for its matching grant, which assigns
+    /// the profile's hardware band.
+    pub(super) fn await_grant(
+        s: &mut Owned<I, Q, C>,
+        p: Profile,
+        token: u8,
+        req: &crate::net::wifi::mediatek::mcu::init::Request,
+        abort: &crate::net::wifi::mediatek::mcu::init::Request,
+    ) -> Result<(), Error> {
         s.transport_facts
             .try_reserve(1)
             .map_err(|_| Error::NoMemory)?;
@@ -203,7 +215,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .mailbox
             .as_mut()
             .unwrap()
-            .initial(&req)
+            .initial(req)
             .map_err(Error::Transport)?;
         s.transport_facts.push(fact);
         let clock = s.controller.state().control.clock;
@@ -235,10 +247,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                             && g.center == g.channel
                             && g.center2 == 0
                             && g.band
-                                == if p.channel.band == wifi::Band::Ghz2 {
-                                    1
-                                } else {
-                                    2
+                                == match p.channel.band {
+                                    wifi::Band::Ghz2 => 1,
+                                    wifi::Band::Ghz5 => 2,
+                                    wifi::Band::Ghz6 => 3,
                                 }
                             && g.width == 0
                             && g.sco == 0
@@ -268,7 +280,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 // Source set_roc's timeout sends the actual matching abort.
                 // Generic abort completion still cannot retire uncertain radio
                 // users or establish a new peer/notification epoch.
-                let abort = p.abort_roc(token).map_err(Error::Codec)?;
                 s.transport_facts
                     .try_reserve(1)
                     .map_err(|_| Error::NoMemory)?;
@@ -278,7 +289,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .mailbox
                     .as_mut()
                     .unwrap()
-                    .initial(&abort)
+                    .initial(abort)
                     .map_err(Error::Transport)?;
                 s.transport_facts.push(fact);
                 return Err(Error::GrantTimeout);
