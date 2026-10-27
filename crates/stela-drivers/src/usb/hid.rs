@@ -66,6 +66,9 @@ const FIRST_RETRY_MS: u64 = 13;
 const LONGEST_RETRY_MS: u64 = 100;
 const RETRY_WINDOW_US: u64 = 1_000_000;
 const MICROSECONDS_PER_MILLISECOND: u64 = 1_000;
+/// include/linux/usb.h USB_CTRL_SET_TIMEOUT, the `usb_interrupt_msg` bound
+/// `usbhid_output_report` uses.
+const OUTPUT_TIMEOUT_US: u64 = 5_000_000;
 const BOOT_PROTOCOL: u16 = 0;
 const REPORT_PROTOCOL: u16 = 1;
 /// The Keyboard/Keypad usages the native keyboard reports.
@@ -73,13 +76,18 @@ const KEY_USAGES: core::ops::RangeInclusive<u32> = 0x04..=0xdd;
 const MODIFIER_USAGES: core::ops::RangeInclusive<u32> = 0xe0..=0xe7;
 
 pub(super) fn plan(interface: &Interface) -> Result<Plan, &'static str> {
-    let endpoint = interface
+    let endpoint =
+        interrupt(interface, true).ok_or("HID interface without an interrupt IN endpoint")?;
+    Ok(Plan::Hid(endpoint, interrupt(interface, false)))
+}
+
+/// `usbhid_start`: the first interrupt endpoint in each direction.
+fn interrupt(interface: &Interface, input: bool) -> Option<Endpoint> {
+    interface
         .endpoints
         .iter()
         .copied()
-        .find(|e| e.kind() == 3 && e.is_in())
-        .ok_or("HID interface without an interrupt IN endpoint")?;
-    Ok(Plan::Hid(endpoint))
+        .find(|e| e.kind() == 3 && e.is_in() == input)
 }
 
 /// Fetch the exact descriptor named by this interface's HID descriptor.
@@ -232,6 +240,9 @@ pub struct UsbInput {
     buffer: DmaBuffer,
     /// Bytes one interrupt transfer asks for: the longest input report.
     length: usize,
+    /// The interrupt OUT endpoint and a buffer for the longest output
+    /// report, when the interface has both.
+    output: Option<(Endpoint, DmaBuffer)>,
     /// The queued TD, if one is out.
     queued: Option<u64>,
     /// Transfer errors being retried.
@@ -365,6 +376,21 @@ impl UsbInput {
             return Err(BlockError::Unsupported("HID input report without data"));
         }
         let buffer = dma.allocate(length, length.next_power_of_two())?;
+        let longest = descriptor.as_ref().map_or(0, |descriptor| {
+            descriptor
+                .reports
+                .iter()
+                .filter(|layout| layout.kind == ReportType::Output)
+                .map(|layout| layout.wire_bytes())
+                .max()
+                .unwrap_or(0)
+        });
+        let output = match interrupt(interface, false) {
+            Some(out) if longest != 0 => {
+                Some((out, dma.allocate(longest, longest.next_power_of_two())?))
+            }
+            _ => None,
+        };
         Ok(Some(Self {
             controller,
             id: device.id,
@@ -376,6 +402,7 @@ impl UsbInput {
             endpoint,
             buffer,
             length,
+            output,
             queued: None,
             retry: None,
             reports,
@@ -816,6 +843,51 @@ mod tests {
         let mut device = model::device(Vec::new());
         device.id = controller.borrow().test_device_id(1).unwrap();
         device
+    }
+
+    #[test]
+    fn output_reports_take_the_interrupt_out_endpoint_like_usbhid_output_report() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: this allocation outlives all model/controller DMA references.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, hardware) = model::cancellation_controller(&mut dma);
+        hardware
+            .borrow_mut()
+            .descriptors
+            .push((REPORT_DESCRIPTOR, 0, GAMEPAD.to_vec()));
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        let mut interface = interface(GAMEPAD, 0, 0);
+        // The model's slot owns endpoint 2 OUT.
+        interface.endpoints.push(Endpoint {
+            address: 0x02,
+            attributes: 3,
+            max_packet: 16,
+            interval: 1,
+            companion: None,
+        });
+        assert!(matches!(plan(&interface), Ok(Plan::Hid(_, Some(out))) if out.address == 2));
+        let mut input = UsbInput::new(
+            shared.clone(),
+            &device(&shared),
+            &interface,
+            interface.endpoints[0],
+            &mut dma,
+        )
+        .unwrap()
+        .unwrap();
+        let setups = hardware.borrow().setup.len();
+        assert_eq!(input.output_report(2, &[2, 0x41]), Ok(2));
+        assert_eq!(hardware.borrow().outgoing, [vec![2, 0x41]]);
+        assert!(input.output_report(3, &[3, 0x41]).is_err());
+        assert_eq!(hardware.borrow().setup.len(), setups);
+        // Without the endpoint, SET_REPORT carries it.
+        input.output = None;
+        assert_eq!(input.output_report(2, &[2, 0x42]), Ok(2));
+        assert_eq!(
+            hardware.borrow().setup.last().unwrap(),
+            &([0x21, SET_REPORT, 2, 2, 4, 0, 2, 0], vec![2, 0x42])
+        );
     }
 
     #[test]

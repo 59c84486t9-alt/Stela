@@ -51,7 +51,7 @@ impl UsbInput {
     }
 
     /// Synchronous SET_REPORT on EP0 supports LED output, gamepad control and
-    /// digitizer feature negotiation without fabricating an interrupt-OUT path.
+    /// digitizer feature negotiation.
     /// Success means actual status-stage ACK. Errors preserve uncertain effects;
     /// this method never automatically retries a state-changing report.
     pub fn set_report(&mut self, kind: ReportType, id: u8, bytes: &[u8]) -> Result<(), BlockError> {
@@ -83,6 +83,37 @@ impl UsbInput {
             .device(self.id)?
             .control(request, bytes)?;
         Ok(())
+    }
+
+    /// Linux `usbhid_output_report`: an output report goes out on the
+    /// interrupt OUT endpoint, waiting up to USB_CTRL_SET_TIMEOUT, and the
+    /// bytes it moved are returned. Without the endpoint it takes SET_REPORT,
+    /// as callers of `hid_hw_output_report` fall back to `hid_hw_raw_request`.
+    /// Numbered reports carry their ID; report zero sends none.
+    pub fn output_report(&mut self, id: u8, bytes: &[u8]) -> Result<usize, BlockError> {
+        if self.output.is_none() {
+            return self
+                .set_report(ReportType::Output, id, bytes)
+                .map(|()| bytes.len());
+        }
+        self.control_ready()?;
+        let length = self.control_length(ReportType::Output, id)?;
+        if bytes.len() != length || (id != 0 && bytes.first() != Some(&id)) {
+            return Err(BlockError::Protocol(
+                "invalid USB HID output report length or ID",
+            ));
+        }
+        // As with SET_REPORT, an output report may change device modes.
+        self.touch = None;
+        self.invalidate_receiver(receiver::Error::ExternalControl);
+        let (endpoint, buffer) = self.output.as_mut().unwrap();
+        buffer.bytes_mut()[..length].copy_from_slice(bytes);
+        self.controller.borrow_mut().device(self.id)?.transfer(
+            endpoint.dci(),
+            buffer.physical(),
+            length,
+            OUTPUT_TIMEOUT_US,
+        )
     }
 
     /// HID duration units are 4 ms; report zero addresses all input reports.
