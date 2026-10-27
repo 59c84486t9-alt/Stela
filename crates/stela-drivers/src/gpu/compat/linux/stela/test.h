@@ -13,10 +13,10 @@ void *calloc(size_t count, size_t size);
 void *aligned_alloc(size_t alignment, size_t size);
 void free(void *object);
 
-/* TEST ONLY: serialized observation windows with no concurrent controller or
- * allocator calls. Counts ATTEMPTS at every explicitly wired route, including
- * failed ones, not success/bytes. begin resets counters without touching live
- * ownership; end disarms refusal before returning the final snapshot. Page
+/* TEST ONLY: per-thread observation windows; other threads' allocator calls
+ * are neither counted nor refused. Counts ATTEMPTS at every explicitly wired
+ * route, including failed ones, not success/bytes. begin resets counters
+ * without touching live ownership; end disarms refusal before returning the final snapshot. Page
  * fixture providers and canonical-Rust trampolines must wire their real route:
  * these counters do not observe an unwired allocation backend. */
 #define STELA_TEST_ALLOC_HEAP 0U

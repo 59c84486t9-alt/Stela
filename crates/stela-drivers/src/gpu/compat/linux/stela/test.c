@@ -34,39 +34,39 @@ void stela_test_allocations_begin(bool refuse);
 struct stela_test_allocations stela_test_allocations_snapshot(void);
 struct stela_test_allocations stela_test_allocations_end(void);
 bool stela_test_allocation_attempt(unsigned int route);
-static _Atomic uint64_t allocation_attempts[3];
-static _Atomic bool refuse_allocations;
+/* Per thread: a fixture counts and refuses only its own thread's attempts.
+ * Other threads of the test process, such as the harness thread that spawned
+ * the fixture's, keep allocating while a window is armed. */
+static _Thread_local uint64_t allocation_attempts[3];
+static _Thread_local bool refuse_allocations;
 
 void stela_test_allocations_begin(bool refuse)
 {
- /* The fixture excludes all concurrent calls, including another controller. */
- atomic_store_explicit(&refuse_allocations, false, memory_order_relaxed);
  for (unsigned int i = 0; i < 3; i++)
-  atomic_store_explicit(&allocation_attempts[i], 0, memory_order_relaxed);
- atomic_store_explicit(&refuse_allocations, refuse, memory_order_release);
+  allocation_attempts[i] = 0;
+ refuse_allocations = refuse;
 }
 
 struct stela_test_allocations stela_test_allocations_snapshot(void)
 {
  return (struct stela_test_allocations){
-  .heap = atomic_load_explicit(&allocation_attempts[0], memory_order_relaxed),
-  .heap_try = atomic_load_explicit(&allocation_attempts[1], memory_order_relaxed),
-  .pages = atomic_load_explicit(&allocation_attempts[2], memory_order_relaxed),
+  .heap = allocation_attempts[0],
+  .heap_try = allocation_attempts[1],
+  .pages = allocation_attempts[2],
  };
 }
 
 struct stela_test_allocations stela_test_allocations_end(void)
 {
- atomic_store_explicit(&refuse_allocations, false, memory_order_release);
+ refuse_allocations = false;
  return stela_test_allocations_snapshot();
 }
 
 bool stela_test_allocation_attempt(unsigned int route)
 {
- if (route >= 3 || atomic_fetch_add_explicit(&allocation_attempts[route], 1,
-       memory_order_relaxed) == UINT64_MAX)
+ if (route >= 3 || allocation_attempts[route]++ == UINT64_MAX)
   abort();
- return !atomic_load_explicit(&refuse_allocations, memory_order_acquire);
+ return !refuse_allocations;
 }
 
 #ifndef STELA_TEST_CANONICAL_RUST_HEAP

@@ -1388,8 +1388,8 @@ mod allocation {
         fn stela_test_allocations_end() -> Counts;
     }
     pub fn arm() {
-        // SAFETY: isolated exact child excludes concurrent allocation users;
-        // this is the existing canonical hosted-heap fixture ABI.
+        // SAFETY: the window covers this thread only, so the harness thread
+        // keeps allocating; this is the existing canonical hosted-heap ABI.
         unsafe { stela_test_allocations_begin(true) };
     }
     pub fn disarm() -> usize {
