@@ -408,7 +408,7 @@ fn native_gl9755_overcurrent_removes_both_rails_preserves_cleanup_and_fences_ali
             assert_eq!(Port(card.clone()).read8(POWER), 0);
         }
         let writes = card.borrow().writes.len();
-        assert_eq!(alias.flush(), Err(BlockError::Unsupported(STALE)));
+        assert_eq!(alias.flush_cache(), Err(BlockError::Unsupported(STALE)));
         assert_eq!(host.poll().err(), Some(primary));
         assert_eq!(writes, card.borrow().writes.len());
     }
@@ -581,7 +581,7 @@ fn native_gl9755_engine_lost_pci_identity_power_decode_or_requester_authority_fe
             (reads, writes),
             "lost authority never authorizes cleanup on the stale BAR"
         );
-        assert_eq!(disk.flush(), Err(BlockError::Unsupported(STALE)));
+        assert_eq!(disk.flush_cache(), Err(BlockError::Unsupported(STALE)));
         assert_eq!(host.poll().err(), Some(primary));
         assert_eq!(
             (card.borrow().reads, card.borrow().writes.len()),

@@ -121,6 +121,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
         firmware: None,
         bluetooth_platform: bluetooth_platform::capture(),
         wifi_platform: Default::default(),
+        completion: None,
         ecam,
         mapped,
         dma: dma..dma + (DMA_PAGES * crate::paging::PAGE) as u64,

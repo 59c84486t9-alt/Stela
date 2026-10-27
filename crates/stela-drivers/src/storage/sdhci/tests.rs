@@ -107,7 +107,7 @@ fn removed_and_replaced_card_never_revives_old_disk_or_clone() {
         );
         assert_eq!(poison, [0x95; 512]);
         assert_eq!(stale.write(0, &poison), Err(BlockError::Unsupported(STALE)));
-        assert_eq!(stale.flush(), Err(BlockError::Unsupported(STALE)));
+        assert_eq!(stale.flush_cache(), Err(BlockError::Unsupported(STALE)));
     }
     assert_eq!(
         (
@@ -358,7 +358,7 @@ fn completed_host_data_does_not_override_actual_card_error_status() {
             matches!(card.read(0,&mut bytes),Err(BlockError::Device{status:actual}) if actual & status!=0)
         );
         assert_eq!(bytes, [0x95; 512]);
-        assert_eq!(card.flush(), Err(BlockError::Unsupported(STALE)));
+        assert_eq!(card.flush_cache(), Err(BlockError::Unsupported(STALE)));
     }
 }
 
@@ -656,7 +656,7 @@ fn ene_exact_pci_profiles_apply_real_power_pio_and_ios_reset_sequences() {
                 model.borrow().writes.len(),
                 model.borrow().commands.len(),
             );
-            assert_eq!(old.flush(), Err(BlockError::Unsupported(STALE)));
+            assert_eq!(old.flush_cache(), Err(BlockError::Unsupported(STALE)));
             assert_eq!(
                 (
                     model.borrow().reads,
@@ -706,7 +706,7 @@ fn ene_failed_post_settings_reset_retires_old_aliases_and_pins_controller() {
     let mut bytes = [0x95; 512];
     assert_eq!(old.read(0, &mut bytes), Err(BlockError::Unsupported(STALE)));
     assert_eq!(bytes, [0x95; 512]);
-    assert_eq!(clone.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(clone.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert!(host.poll().is_err());
     assert_eq!(
         (

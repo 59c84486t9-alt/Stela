@@ -10,7 +10,7 @@ use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::arch::asm;
 use stela_drivers::{
     Handoff,
-    block::{BlockDevice, BlockError, Identity, Shared, Window},
+    block::{BlockDevice, BlockError, Command, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
     input::virtio::VirtioInput,
     probe::probe,
@@ -73,10 +73,49 @@ impl BlockDevice for Service {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.inner.write(lba, data)
     }
-    fn flush(&mut self) -> Result<(), BlockError> {
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.flush()
+        self.inner.flush_cache()
+    }
+    fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.write_fua(lba, data)
+    }
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.discard(lba, blocks)
+    }
+    fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.write_zeroes(lba, blocks, unmap)
+    }
+    fn depth(&self) -> usize {
+        self.inner.depth()
+    }
+    fn room(&self) -> bool {
+        self.inner.room()
+    }
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.start(command)
+    }
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.finish(tag)
+    }
+    fn posted(&self) -> bool {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.posted()
+    }
+    fn signals(&self) -> bool {
+        self.inner.signals()
     }
 }
 
@@ -172,6 +211,12 @@ pub unsafe fn open(
     }
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
+    // Disks that can signal their completions wake this processor, which
+    // runs the engine's devices.
+    let handoff = &Handoff {
+        completion: super::host::completion_signal(),
+        ..handoff.clone()
+    };
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
     let mut disks = unsafe { probe(handoff, &mut dma) };
     for (address, error) in &disks.failures {

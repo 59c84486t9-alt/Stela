@@ -25,6 +25,38 @@ pub fn initialize() {
         out(UART + 4, 0x0b);
     }
 }
+/// Whether the transmitter is empty: its FIFO takes 16 bytes now.
+pub fn ready() -> bool {
+    // SAFETY: reads the line status register of the configured UART.
+    let status = unsafe { input(UART + 5) };
+    status & 0x20 != 0
+}
+/// Send `bytes`, line feeds as CR LF, into a transmit FIFO that
+/// [`ready`] found empty: at most 16 bytes in all, sent without polling,
+/// as one string output, which a hypervisor takes in one exit.
+pub fn burst(bytes: &[u8]) {
+    let mut fifo = [0u8; 16];
+    let mut length = 0;
+    for &byte in bytes {
+        if byte == b'\n' {
+            fifo[length] = b'\r';
+            length += 1;
+        }
+        fifo[length] = byte;
+        length += 1;
+    }
+    // SAFETY: the configured UART's transmit register, with room for all of
+    // them; RSI and RCX address and count `fifo`, and DF is clear.
+    unsafe {
+        asm!(
+            "rep outsb",
+            in("dx") UART,
+            inout("rsi") fifo.as_ptr() => _,
+            inout("rcx") length => _,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+}
 fn send(byte: u8) {
     // Bounded polling has no allocator/runtime callback or lock. A broken
     // UART cannot convert panic into deadlock or resumed execution.
@@ -39,15 +71,21 @@ fn send(byte: u8) {
     }
 }
 pub struct Serial;
-impl fmt::Write for Serial {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        for byte in value.bytes() {
+impl Serial {
+    /// Send `bytes`, which may end or start inside a character.
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
             // QEMU's terminal treats LF and CR independently.
             if byte == b'\n' {
                 send(b'\r');
             }
             send(byte);
         }
+    }
+}
+impl fmt::Write for Serial {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.write_bytes(value.as_bytes());
         Ok(())
     }
 }

@@ -34,6 +34,10 @@ const MODE_HEADER: usize = 4;
 const WRITE_PROTECT: u8 = 0x80;
 /// Caching mode page byte 2: write cache enable (SBC-4 6.5.5).
 const WRITE_CACHE_ENABLE: u8 = 0x04;
+/// The device-specific parameter's DPOFUA bit: the unit takes FUA writes.
+const DPOFUA: u8 = 0x10;
+/// READ/WRITE (10) and (16) byte 1: Force Unit Access.
+pub(super) const FUA: u8 = 0x08;
 
 pub(super) fn request_sense() -> [u8; 6] {
     [REQUEST_SENSE, 0, 0, 0, SENSE_BYTES as u8, 0]
@@ -59,6 +63,17 @@ pub(super) fn synchronize_cache() -> [u8; 10] {
 pub(super) fn write_protected(mode: &[u8]) -> Option<bool> {
     (mode.len() >= MODE_HEADER && usize::from(mode[0]) + 1 >= MODE_HEADER)
         .then(|| mode[2] & WRITE_PROTECT != 0)
+}
+
+/// A WRITE (10) of no blocks with FUA, to ask a transport's quirks whether
+/// the unit may take FUA writes.
+pub(super) fn write_10_fua() -> [u8; 10] {
+    [WRITE_10, FUA, 0, 0, 0, 0, 0, 0, 0, 0]
+}
+
+/// The mode header's DPOFUA bit, as Linux `sd_read_cache_type` reads it.
+pub(super) fn fua_supported(mode: &[u8]) -> bool {
+    mode.len() >= MODE_HEADER && mode[2] & DPOFUA != 0
 }
 
 /// The Caching page's WCE bit, when mode data holds the page.

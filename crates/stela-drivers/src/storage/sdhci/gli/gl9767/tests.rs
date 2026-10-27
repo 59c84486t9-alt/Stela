@@ -494,7 +494,7 @@ fn native_gl9767_observed_removal_changes_debounce_and_fences_every_old_alias() 
         63 << 16 | 3 << 22
     );
     let accesses = (card.borrow().reads, card.borrow().writes.len());
-    assert_eq!(disk.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(disk.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert_eq!(accesses, (card.borrow().reads, card.borrow().writes.len()));
 }
 
@@ -548,7 +548,7 @@ fn native_gl9767_pio_flush_and_reset_reject_express_or_lost_power_decode_without
             }
             assert_eq!(accesses, (card.borrow().reads, card.borrow().writes.len()));
             assert!(host.last_failure().unwrap().quarantined);
-            assert_eq!(alias.flush(), Err(BlockError::Unsupported(STALE)));
+            assert_eq!(alias.flush_cache(), Err(BlockError::Unsupported(STALE)));
             assert_eq!(accesses, (card.borrow().reads, card.borrow().writes.len()));
         }
     }
@@ -578,7 +578,7 @@ fn native_gl9767_one_ocp_latch_at_command_clear_contains_power_once_and_preserve
         assert!(retained.quarantined);
         let accesses = (card.borrow().reads, card.borrow().writes.len());
         assert!(host.poll().is_err());
-        assert_eq!(disk.flush(), Err(BlockError::Unsupported(STALE)));
+        assert_eq!(disk.flush_cache(), Err(BlockError::Unsupported(STALE)));
         assert_eq!(accesses, (card.borrow().reads, card.borrow().writes.len()));
     }
 }
@@ -603,7 +603,7 @@ fn native_gl9767_absent_card_debounce_never_accepts_allones_after_effect_readbac
             .any(|(at, _, value)| *at == HOST_OPERATION && value & (255 << 16) == 255 << 16)
     );
     let accesses = (card.borrow().reads, card.borrow().writes.len());
-    assert_eq!(disk.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(disk.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert!(host.poll().is_err());
     assert_eq!(accesses, (card.borrow().reads, card.borrow().writes.len()));
 }
@@ -631,7 +631,7 @@ fn native_gl9767_ocp_primary_survives_secondary_power_authority_loss_without_sta
     assert!(state.borrow().contained);
     let accesses = (card.borrow().reads, card.borrow().writes.len());
     assert_eq!(host.poll().err(), Some(primary));
-    assert_eq!(disk.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(disk.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert_eq!(accesses, (card.borrow().reads, card.borrow().writes.len()));
 }
 

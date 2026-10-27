@@ -73,6 +73,10 @@ pub struct Handoff {
     pub bluetooth_platform: usb::bluetooth::intel::DsbrCapture,
     /// Copied status metadata; raw bytes belong to the permanent firmware catalog.
     pub wifi_platform: net::wifi::intel::platform::Observations,
+    /// The message a disk sends when it completes a command, where the
+    /// engine takes one: it wakes the core that looks for completions
+    /// ([`block::BlockDevice::signals`]). `None` leaves every disk polled.
+    pub completion: Option<bus::irq::MsiMessage>,
 }
 
 impl Handoff {
@@ -354,6 +358,7 @@ mod tests {
             firmware: None,
             bluetooth_platform: Default::default(),
             wifi_platform: Default::default(),
+            completion: None,
             ecam: Vec::new(),
             mapped: vec![0x1000..0x3000, 0x8000..0x9000],
             dma: 0..0,
@@ -380,6 +385,7 @@ mod tests {
             firmware: Some(catalog.clone()),
             bluetooth_platform: Default::default(),
             wifi_platform: Default::default(),
+            completion: None,
         };
         let cloned = handoff.clone();
         assert!(Arc::ptr_eq(cloned.firmware.as_ref().unwrap(), &catalog));

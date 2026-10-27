@@ -18,7 +18,7 @@ use core::{
     fmt::{self, Write},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use stela_drivers::block::{BlockDevice, BlockError};
+use stela_drivers::block::{BlockDevice, BlockError, Submission};
 use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
 
 /// `isa-debug-exit` under QEMU; an unused port on a PC.
@@ -27,11 +27,204 @@ const EXIT_PORT: u16 = 0xf4;
 /// One engine-wide value. The mount runs on one processor and its handlers
 /// only print; every access is a `try_borrow`, so output that arrives while
 /// the value is in use (a line printed during a flush) is skipped instead of
-/// re-entering it.
+/// re-entering it. Values other processors reach too are reached only under
+/// a lock: the record under [`WRITING`], the guest's lines under the board's.
 pub(crate) struct Global<T>(pub(crate) RefCell<T>);
-// SAFETY: one processor runs the mount, and no access blocks or assumes
-// the value is free.
+// SAFETY: one processor at a time reaches each value (above), and no access
+// blocks or assumes the value is free.
 unsafe impl<T> Sync for Global<T> {}
+
+/// A processor writes the record and the serial port. Others wait for it at
+/// most [`WRITING_WAIT_MICROS`], longer than a long line takes at the serial
+/// port's speed, then write to the serial port alone: the holder may be this
+/// processor itself, interrupted or failing inside a write.
+static WRITING: AtomicBool = AtomicBool::new(false);
+const WRITING_WAIT_MICROS: u64 = 250_000;
+/// Spins to wait while the counter's rate is not known yet.
+const WRITING_WAIT_SPINS: u64 = 1 << 22;
+
+/// Run `f` while no other processor writes the record; `None` when the
+/// wait ran out.
+fn exclusive<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let hz = TSC_HZ.load(Ordering::Relaxed);
+    let started = rdtsc();
+    let mut spins = 0u64;
+    while WRITING
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        spins += 1;
+        let waited = match hz {
+            0 => spins >= WRITING_WAIT_SPINS,
+            hz => rdtsc().wrapping_sub(started) >= hz / 1_000_000 * WRITING_WAIT_MICROS,
+        };
+        if waited {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+    let result = f();
+    WRITING.store(false, Ordering::Release);
+    Some(result)
+}
+
+/// Output for the serial port while every PE runs on a core of its own
+/// ([`queue_serial`]). The port takes 16 bytes per transmit FIFO, each
+/// burst a port access a hypervisor traps and a real port drains at its
+/// baud rate, so a long report sent where it is printed would hold that
+/// processor, and the PE it runs, for a quarter second or more. Queued
+/// bytes go out from a PE that waits for an interrupt anyway
+/// ([`send_queued`]). Reached only under [`WRITING`], which covers copies
+/// into and out of the queue and never a port access.
+static SERIAL_QUEUE: Global<Option<Queue>> = Global(RefCell::new(None));
+const SERIAL_QUEUE_BYTES: usize = 8 << 20;
+/// Whether the queue holds bytes, read without the lock.
+static SERIAL_QUEUED: AtomicBool = AtomicBool::new(false);
+/// One processor at a time feeds the port from the queue, so its bursts
+/// neither interleave nor overrun the FIFO it found empty; the others do
+/// not wait for it.
+static SENDING: AtomicBool = AtomicBool::new(false);
+/// The bytes [`send_queued`] sends at once: with each line feed sent as two,
+/// at most the 16 a 16550's transmit FIFO takes once it is empty.
+const SERIAL_BURST: usize = 8;
+
+/// A ring of bytes not yet sent.
+struct Queue {
+    bytes: Box<[u8]>,
+    head: usize,
+    len: usize,
+    /// Bytes left out while the queue was full, not reported yet: the
+    /// record and the logs keep them.
+    dropped: usize,
+}
+
+impl Queue {
+    /// Queue `data`, or count it as dropped while the queue cannot take it
+    /// whole: a writer never waits for the port. The first output that
+    /// fits again begins with a note of how much was dropped.
+    fn push(&mut self, data: &[u8]) {
+        if self.dropped != 0 {
+            let note = alloc::format!(
+                "
+[serial: {} bytes dropped]
+",
+                self.dropped
+            );
+            if self.room() < note.len() + data.len() {
+                self.dropped += data.len();
+                return;
+            }
+            self.dropped = 0;
+            self.copy(note.as_bytes());
+        }
+        if self.room() < data.len() {
+            self.dropped = data.len();
+            return;
+        }
+        self.copy(data);
+    }
+
+    fn room(&self) -> usize {
+        self.bytes.len() - self.len
+    }
+
+    /// Append `data`, which fits.
+    fn copy(&mut self, data: &[u8]) {
+        let size = self.bytes.len();
+        let tail = (self.head + self.len) % size;
+        let first = data.len().min(size - tail);
+        self.bytes[tail..tail + first].copy_from_slice(&data[..first]);
+        self.bytes[..data.len() - first].copy_from_slice(&data[first..]);
+        self.len += data.len();
+        SERIAL_QUEUED.store(true, Ordering::Release);
+    }
+
+    /// Move the oldest bytes into `out`, as many as fit; how many.
+    fn take(&mut self, out: &mut [u8]) -> usize {
+        let count = out.len().min(self.len);
+        for slot in &mut out[..count] {
+            *slot = self.bytes[self.head];
+            self.head = (self.head + 1) % self.bytes.len();
+        }
+        self.len -= count;
+        SERIAL_QUEUED.store(self.len != 0, Ordering::Release);
+        count
+    }
+}
+
+/// Queue the serial port's output from now on, for [`send_queued`].
+pub fn queue_serial() {
+    let queue = Queue {
+        bytes: alloc::vec![0; SERIAL_QUEUE_BYTES].into_boxed_slice(),
+        head: 0,
+        len: 0,
+        dropped: 0,
+    };
+    let _ = exclusive(|| {
+        if let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut() {
+            *slot = Some(queue);
+        }
+    });
+}
+
+/// Send a burst of queued bytes if the port takes it now without waiting;
+/// whether this processor should send more. Never waits for another
+/// processor: while one sends, the others leave the port to it.
+pub fn send_queued() -> bool {
+    if !SERIAL_QUEUED.load(Ordering::Acquire)
+        || SENDING
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+    {
+        return false;
+    }
+    if crate::serial::ready() {
+        let mut burst = [0u8; SERIAL_BURST];
+        let taken = exclusive(|| {
+            SERIAL_QUEUE
+                .0
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut slot| slot.as_mut().map(|queue| queue.take(&mut burst)))
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+        crate::serial::burst(&burst[..taken]);
+    }
+    SENDING.store(false, Ordering::Release);
+    SERIAL_QUEUED.load(Ordering::Acquire)
+}
+
+/// Send `bytes` to the serial port: queued once [`queue_serial`] ran, else
+/// here and now. Under [`WRITING`].
+fn serial(bytes: &[u8]) {
+    if let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut()
+        && let Some(queue) = slot.as_mut()
+    {
+        queue.push(bytes);
+        return;
+    }
+    Serial.write_bytes(bytes);
+}
+
+/// Send what the serial queue holds here and stop queueing: the boot is
+/// stopping, and no PE may wait again.
+fn unqueue_serial() {
+    let _ = exclusive(|| {
+        if let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut()
+            && let Some(mut queue) = slot.take()
+        {
+            let mut burst = [0u8; SERIAL_BURST];
+            loop {
+                let taken = queue.take(&mut burst);
+                if taken == 0 {
+                    break;
+                }
+                Serial.write_bytes(&burst[..taken]);
+            }
+        }
+    });
+}
 
 /// The newest output bytes since the first line, which every log reads
 /// from its own position.
@@ -49,6 +242,45 @@ struct Sink {
     /// Its stores so far and the counter ticks they took.
     stores: u64,
     ticks: u64,
+    /// The counter when the store in progress began.
+    began: Option<u64>,
+    /// The store's request in progress on the device.
+    request: Option<Submission>,
+}
+
+impl Sink {
+    /// Move the store in progress on: collect the running request's result
+    /// and start the next; with `wait`, until the store is done.
+    fn advance(&mut self, wait: bool) -> Result<(), BlockError> {
+        loop {
+            if let Some(request) = self.request.as_mut() {
+                let Some(finished) = request.poll(&mut *self.device) else {
+                    if !wait {
+                        return Ok(());
+                    }
+                    core::hint::spin_loop();
+                    continue;
+                };
+                self.request = None;
+                self.writer.completed(finished)?;
+            }
+            let Some(request) = self.writer.next_request() else {
+                if let Some(began) = self.began.take() {
+                    self.flushed = rdtsc();
+                    self.stores += 1;
+                    self.ticks += self.flushed.wrapping_sub(began);
+                }
+                return Ok(());
+            };
+            match Submission::new(request, self.device.identity()) {
+                Ok(request) => self.request = Some(request),
+                Err(error) => {
+                    let _ = self.writer.completed(Err(error.clone()));
+                    return Err(error);
+                }
+            }
+        }
+    }
 }
 
 /// Seconds between the USB log's stores while the engine runs.
@@ -166,7 +398,7 @@ fn firmware_console(text: &str) {
 struct Output;
 impl Write for Output {
     fn write_str(&mut self, value: &str) -> fmt::Result {
-        let _ = Serial.write_str(value);
+        serial(value.as_bytes());
         if RAW_SCREEN.load(Ordering::Relaxed) {
             console::write(&[(value, console::Color::Text)]);
         }
@@ -208,7 +440,7 @@ pub fn add_log(
     mut device: Box<dyn BlockDevice>,
     kind: Log,
 ) -> Result<(), Unopened> {
-    let stored = match RECORD.0.try_borrow() {
+    let stored = exclusive(|| match RECORD.0.try_borrow() {
         Ok(record) => {
             let Ok(reached) = record.copy_since(0, |bytes| {
                 writer.append(bytes);
@@ -217,7 +449,8 @@ pub fn add_log(
             reached
         }
         Err(_) => 0,
-    };
+    })
+    .unwrap_or(0);
     writer.flush(&mut *device).map_err(Unopened::Store)?;
     writer.verify(&mut *device).map_err(Unopened::Unkept)?;
     if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
@@ -229,6 +462,8 @@ pub fn add_log(
             flushed: rdtsc(),
             stores: 0,
             ticks: 0,
+            began: None,
+            request: None,
         });
     }
     Ok(())
@@ -243,59 +478,79 @@ pub fn close_logs() {
     }
 }
 
-/// Store in every open log the output it does not hold yet. A USB log that
-/// fails is reported and closed; a failed machine-state store stops the
-/// machine. Output printed during the flush is not recorded.
+/// Store in every open log the output it does not hold yet, waiting for
+/// the stores. A USB log that fails is reported and closed; a failed
+/// machine-state store stops the machine. Output printed during the flush
+/// is not recorded.
 pub fn flush_log() {
-    flush_where(|_| true);
+    flush_where(|_| true, true);
 }
 
-/// [`flush_log`] for the logs whose store is due: the machine state's
-/// every call, the USB's every [`USB_FLUSH_SECONDS`].
+/// Begin storing the logs whose store is due, the machine state's every
+/// call and the USB's every [`USB_FLUSH_SECONDS`], and move every store in
+/// progress on; never waits for a device ([`advance_logs`]).
 pub fn flush_due() {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     let now = rdtsc();
-    flush_where(|sink| {
-        sink.kind != Log::Usb || now.wrapping_sub(sink.flushed) >= USB_FLUSH_SECONDS * hz
-    });
+    flush_where(
+        |sink| sink.kind != Log::Usb || now.wrapping_sub(sink.flushed) >= USB_FLUSH_SECONDS * hz,
+        false,
+    );
 }
 
-fn flush_where(due: impl Fn(&Sink) -> bool) {
+/// Move the log stores in progress on; nothing to do while none runs.
+pub fn advance_logs() {
+    if STORING.load(Ordering::Acquire) {
+        flush_where(|_| false, false);
+    }
+}
+
+/// A log store is in progress ([`advance_logs`]).
+static STORING: AtomicBool = AtomicBool::new(false);
+
+fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
     if FLUSHING.swap(true, Ordering::Acquire) {
         return;
     }
     let mut failed = Vec::new();
-    if let (Ok(mut sinks), Ok(record)) = (SINKS.0.try_borrow_mut(), RECORD.0.try_borrow()) {
-        let mut index = 0;
-        while index < sinks.len() {
-            if !due(&sinks[index]) {
-                index += 1;
-                continue;
+    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
+        // A log whose store is in progress takes new bytes at its next one.
+        let due: Vec<bool> = sinks
+            .iter()
+            .map(|sink| !sink.writer.storing() && due(sink))
+            .collect();
+        // Take the record's new bytes while no processor adds to it, then
+        // store them without holding the others' output up.
+        let _ = exclusive(|| {
+            let Ok(record) = RECORD.0.try_borrow() else {
+                return;
+            };
+            for (sink, _) in sinks.iter_mut().zip(&due).filter(|(_, due)| **due) {
+                let Ok(reached) = record.copy_since(sink.stored, |bytes| {
+                    sink.writer.append(bytes);
+                    Ok::<_, Infallible>(())
+                });
+                sink.stored = reached;
             }
-            let Sink {
-                writer,
-                device,
-                stored,
-                flushed,
-                stores,
-                ticks,
-                ..
-            } = &mut sinks[index];
-            let Ok(reached) = record.copy_since(*stored, |bytes| {
-                writer.append(bytes);
-                Ok::<_, Infallible>(())
-            });
-            *stored = reached;
-            let started = rdtsc();
-            let result = writer.flush(&mut **device);
-            *flushed = rdtsc();
-            *stores += 1;
-            *ticks += flushed.wrapping_sub(started);
-            match result {
+        });
+        let mut index = 0;
+        let mut position = 0;
+        while index < sinks.len() {
+            let is_due = due[position];
+            position += 1;
+            let sink = &mut sinks[index];
+            if is_due && sink.writer.begin_store() {
+                sink.began = Some(rdtsc());
+            }
+            match sink.advance(wait) {
                 Ok(()) => index += 1,
                 Err(error) => failed.push((sinks.remove(index).kind, error)),
             }
         }
+        STORING.store(
+            sinks.iter().any(|sink| sink.writer.storing()),
+            Ordering::Release,
+        );
     }
     FLUSHING.store(false, Ordering::Release);
     for (kind, error) in failed {
@@ -343,12 +598,16 @@ pub fn report_log_stores() {
 }
 
 pub fn arguments(args: fmt::Arguments<'_>) {
-    let _ = Output.write_fmt(args);
+    if exclusive(|| Output.write_fmt(args)).is_none() {
+        let _ = Serial.write_fmt(args);
+    }
 }
 
 /// Report `code` to QEMU's `isa-debug-exit`, which ends a harness run
 /// there; on a PC the port is unused and execution continues.
 pub fn debug_exit(code: u32) {
+    // The run may end here: whatever waits for the serial port goes first.
+    unqueue_serial();
     // SAFETY: an otherwise unused PC port.
     unsafe {
         asm!("out dx, eax", in("dx") EXIT_PORT, in("eax") code, options(nostack, preserves_flags));

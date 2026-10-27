@@ -238,9 +238,7 @@ pub use super::mmc::{CardInfo, Failure, Kind, SignalVoltage, Timing};
 struct Medium {
     id: u64,
     identity: Identity,
-    kind: Kind,
     sector_addressed: bool,
-    cache: bool,
     info: CardInfo,
     notify: bool,
 }
@@ -445,13 +443,15 @@ impl BlockDevice for Card {
         }
         Ok(())
     }
-    fn flush(&mut self) -> Result<(), BlockError> {
+    /// An eMMC cache flush (EXT_CSD FLUSH_CACHE), the only cache the
+    /// medium reports.
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
         let mut c = self.inner.borrow_mut();
         c.live(self.generation)?;
-        let medium = c.medium.as_ref().unwrap();
-        if medium.kind == Kind::Mmc && medium.cache {
-            c.mmc_switch(32, 1)?;
+        if !self.identity.features.write_cache {
+            return Err(BlockError::Unsupported("the card reports no cache"));
         }
+        c.mmc_switch(32, 1)?;
         c.wait_card_ready()
     }
     fn shutdown(&mut self, power_off: bool) -> Result<(), BlockError> {
@@ -1027,7 +1027,7 @@ mod owned_tests {
                     chip.borrow().reads,
                     chip.borrow().writes.len(),
                 );
-                assert_eq!(clone.flush(), Err(BlockError::Unsupported(STALE)));
+                assert_eq!(clone.flush_cache(), Err(BlockError::Unsupported(STALE)));
                 assert_eq!(
                     (
                         slot.borrow().reads,

@@ -412,20 +412,29 @@ unsafe fn attach_with_timeout(
             submissions: Buffer::Empty,
             completions: Buffer::Empty,
             id: 0,
+            entries: ADMIN_ENTRIES,
             tail: 0,
             head: 0,
             phase: true,
+            consumed: 0,
         },
         io: Queue {
             submissions: Buffer::Empty,
             completions: Buffer::Empty,
             id: 1,
+            entries: IO_ENTRIES,
             tail: 0,
             head: 0,
             phase: true,
+            consumed: 0,
         },
         bounce: Buffer::Empty,
         prp_list: Buffer::Empty,
+        // The DMA domain's buffers change hands whole: one command at a time.
+        slots: alloc::vec::Vec::new(),
+        tags: alloc::vec![Tag::Free],
+        recovery: None,
+        signalled: false,
         max_transfer: BOUNCE_BYTES,
         shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
         shut_down: false,
@@ -877,6 +886,7 @@ mod tests {
                             data[4..24].fill(b'S');
                             data[24..64].fill(b'M');
                             data[516..520].copy_from_slice(&1u32.to_le_bytes());
+                            data[525] = 1; // A volatile write cache.
                         }
                         2 => data[..4].copy_from_slice(&1u32.to_le_bytes()),
                         0 => {

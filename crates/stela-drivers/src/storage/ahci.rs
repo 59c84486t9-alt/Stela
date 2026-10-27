@@ -5,7 +5,7 @@
 //! and each port fails on its own.
 use crate::{
     Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity, Transport, ascii},
+    block::{BlockDevice, BlockError, Features, Identity, Transport, ascii},
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
@@ -120,6 +120,16 @@ const IDENTIFY_SERIAL: core::ops::Range<usize> = 10..20;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
 const COMMANDS_2_LBA48: u16 = 1 << 10;
+/// Words 85 (enabled features) and 87 (its validity): the volatile write
+/// cache is on, as Linux `ata_id_wcache_enabled` reads it.
+const IDENTIFY_ENABLED_1: usize = 85;
+const ENABLED_1_WRITE_CACHE: u16 = 1 << 5;
+const IDENTIFY_DEFAULT: usize = 87;
+/// Word 169 bit 0: DATA SET MANAGEMENT with the TRIM bit.
+const IDENTIFY_DATA_SET_MANAGEMENT: usize = 169;
+const DATA_SET_MANAGEMENT_TRIM: u16 = 1;
+const WORD_VALID_MASK: u16 = 0xc000;
+const WORD_VALID: u16 = 0x4000;
 const IDENTIFY_LBA48_SECTORS: core::ops::Range<usize> = 100..104;
 const IDENTIFY_SECTOR_SIZE: usize = 106;
 const SECTOR_SIZE_VALID_MASK: u16 = 0xc000;
@@ -143,6 +153,12 @@ const COMMAND_PRDT_SHIFT: u32 = 16;
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
+/// DATA SET MANAGEMENT, its TRIM feature, and the ranges one 512-byte block
+/// of them holds, each at most 65535 sectors (Linux `ATA_MAX_TRIM_RNUM`).
+const ATA_DATA_SET_MANAGEMENT: u8 = 0x06;
+const TRIM: u16 = 1;
+const TRIM_RANGES: u64 = 64;
+const TRIM_RANGE_SECTORS: u64 = 0xffff;
 const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
 const ATA_IDENTIFY: u8 = 0xec;
 
@@ -382,6 +398,7 @@ impl AhciDisk {
                 blocks: 0,
                 block_size: ATA_SECTOR_BYTES,
                 read_only: false,
+                features: Features::default(),
             },
             clock,
             command_timeout_us: COMMAND_TIMEOUT_US,
@@ -423,6 +440,17 @@ impl AhciDisk {
         disk.identity.model = string(IDENTIFY_MODEL);
         disk.identity.blocks = blocks;
         disk.identity.block_size = block_size;
+        // libata's `ata_dev_config_fua` uses FUA only with NCQ, which this
+        // driver does not queue: a durable write is followed by a flush.
+        disk.identity.features = Features {
+            write_cache: word(IDENTIFY_DEFAULT) & WORD_VALID_MASK == WORD_VALID
+                && word(IDENTIFY_ENABLED_1) & ENABLED_1_WRITE_CACHE != 0,
+            fua: false,
+            max_transfer: BOUNCE_BYTES,
+            discard: (word(IDENTIFY_DATA_SET_MANAGEMENT) & DATA_SET_MANAGEMENT_TRIM != 0)
+                .then_some(TRIM_RANGES * TRIM_RANGE_SECTORS),
+            write_zeroes: None,
+        };
         Ok(Some(disk))
     }
 
@@ -437,13 +465,13 @@ impl AhciDisk {
         write: bool,
     ) -> Result<(), BlockError> {
         let port = self.port;
-        self.issue_on(&port, command, lba, count, bytes, write)
+        self.issue_on(&port, (command, 0), lba, count, bytes, write)
     }
 
     fn issue_on(
         &mut self,
         port: &impl CommandPort,
-        command: u8,
+        (command, features): (u8, u16),
         lba: u64,
         count: u16,
         bytes: usize,
@@ -456,7 +484,7 @@ impl AhciDisk {
             FIS_REGISTER_HOST_TO_DEVICE,
             FIS_COMMAND,
             command,
-            0,
+            features as u8,
             lba as u8,
             (lba >> 8) as u8,
             (lba >> 16) as u8,
@@ -468,7 +496,7 @@ impl AhciDisk {
             (lba >> 24) as u8,
             (lba >> 32) as u8,
             (lba >> 40) as u8,
-            0,
+            (features >> 8) as u8,
             count as u8,
             (count >> 8) as u8,
         ];
@@ -555,8 +583,43 @@ impl BlockDevice for AhciDisk {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), BlockError> {
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
         self.issue(ATA_FLUSH_CACHE_EXT, 0, 0, 0, false)
+    }
+
+    /// TRIM in one block of ranges, as libata's `ata_format_dsm_trim_descr`
+    /// writes them: each the starting logical sector in bits 47:0 and the
+    /// count in bits 63:48.
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        let bytes = usize::try_from(blocks)
+            .ok()
+            .and_then(|blocks| blocks.checked_mul(self.identity.block_size as usize))
+            .ok_or(BlockError::Unsupported("a TRIM past one block of ranges"))?;
+        self.identity.check_write(lba, bytes)?;
+        let (mut sector, mut sectors) = (lba, blocks);
+        if sectors > TRIM_RANGES * TRIM_RANGE_SECTORS {
+            return Err(BlockError::Unsupported("a TRIM past one block of ranges"));
+        }
+        self.ready()?;
+        let ranges = &mut self.bounce.bytes_mut()[..ATA_SECTOR_BYTES as usize];
+        ranges.fill(0);
+        for range in ranges.chunks_mut(8) {
+            if sectors == 0 {
+                break;
+            }
+            let count = sectors.min(TRIM_RANGE_SECTORS);
+            range.copy_from_slice(&(sector | count << 48).to_le_bytes());
+            (sector, sectors) = (sector + count, sectors - count);
+        }
+        let port = self.port;
+        self.issue_on(
+            &port,
+            (ATA_DATA_SET_MANAGEMENT, TRIM),
+            0,
+            1,
+            ATA_SECTOR_BYTES as usize,
+            true,
+        )
     }
 
     /// Flush, and before power-off spin the disk down, as Linux libata's
@@ -664,6 +727,10 @@ mod tests {
                         blocks: 1024,
                         block_size: 512,
                         read_only: false,
+                        features: Features {
+                            write_cache: true,
+                            ..Features::default()
+                        },
                     },
                     clock: Clock {
                         ticks_per_microsecond: 1000,
@@ -692,7 +759,7 @@ mod tests {
             assert_eq!(
                 fixture
                     .disk
-                    .issue_on(&model, ATA_READ_DMA_EXT, 0, 1, 512, false),
+                    .issue_on(&model, (ATA_READ_DMA_EXT, 0), 0, 1, 512, false),
                 Err(error.clone())
             );
             if matches!(behavior, Behavior::Timeout) {
@@ -720,7 +787,7 @@ mod tests {
             assert_eq!(
                 fixture
                     .disk
-                    .issue_on(&model, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false),
+                    .issue_on(&model, (ATA_FLUSH_CACHE_EXT, 0), 0, 0, 0, false),
                 Err(error.clone())
             );
             assert_eq!(fixture.disk.write(0, &[0x44; 512]), Err(error.clone()));
@@ -835,7 +902,7 @@ mod tests {
         assert_eq!(
             fixture
                 .disk
-                .issue_on(&Fatal(&model), ATA_READ_DMA_EXT, 0, 1, 512, false),
+                .issue_on(&Fatal(&model), (ATA_READ_DMA_EXT, 0), 0, 1, 512, false),
             Err(BlockError::Device {
                 status: INTERRUPT_INTERFACE_FATAL
             })
@@ -849,14 +916,14 @@ mod tests {
         let model = PortModel::new(Behavior::Complete);
         fixture
             .disk
-            .issue_on(&model, ATA_WRITE_DMA_EXT, 7, 1, 512, true)
+            .issue_on(&model, (ATA_WRITE_DMA_EXT, 0), 7, 1, 512, true)
             .unwrap();
         assert!(fixture.disk.fault.is_none());
         assert_eq!(fixture.disk.table.bytes()[2], ATA_WRITE_DMA_EXT);
         assert_eq!(fixture.disk.commands.read::<u32>(0), 5 | 1 << 6 | 1 << 16);
         fixture
             .disk
-            .issue_on(&model, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false)
+            .issue_on(&model, (ATA_FLUSH_CACHE_EXT, 0), 0, 0, 0, false)
             .unwrap();
         assert!(fixture.disk.fault.is_none());
         assert_eq!(fixture.disk.commands.read::<u32>(0), 5);

@@ -29,6 +29,9 @@ const COMMAND_IO: u16 = 1 << 0;
 const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_BUS_MASTER: u16 = 1 << 2;
 const COMMAND_INTX_DISABLE: u16 = 1 << 10;
+/// MSI-X Message Control: enable, and mask every vector.
+const MSIX_ENABLE: u16 = 1 << 15;
+const MSIX_FUNCTION_MASK: u16 = 1 << 14;
 const STATUS_CAPABILITIES: u16 = 1 << 4;
 /// Memory BAR type field: 64-bit (PCI 3.0 §6.2.5.1).
 const BAR_MEMORY_64: u32 = 2 << 1;
@@ -466,6 +469,29 @@ impl<C: ConfigSpace> Function<C> {
             command | COMMAND_MEMORY | COMMAND_BUS_MASTER | COMMAND_INTX_DISABLE,
         );
     }
+
+    /// Turn on MSI-X for a function [`Self::enable_polled`] set up, as
+    /// Linux's `msix_capability_init` does: enabled with every vector masked
+    /// while `program` writes the table, then the function mask cleared.
+    /// The function's other vectors stay masked as `program` leaves them.
+    pub fn enable_msix<T>(
+        &mut self,
+        msix: MsiX,
+        program: impl FnOnce() -> Result<T, BlockError>,
+    ) -> Result<T, BlockError> {
+        let control = u16::from(msix.offset) + 2;
+        let value = self.config.read16(control);
+        self.config
+            .write16(control, value | MSIX_ENABLE | MSIX_FUNCTION_MASK);
+        let programmed = program();
+        let value = self.config.read16(control);
+        let value = match programmed {
+            Ok(_) => value & !MSIX_FUNCTION_MASK,
+            Err(_) => value & !MSIX_ENABLE,
+        };
+        self.config.write16(control, value);
+        programmed
+    }
 }
 
 impl Function {
@@ -668,6 +694,22 @@ mod tests {
         assert_eq!(function.config().words[20] >> 16 & 1, 0);
         let command = function.config().read16(COMMAND);
         assert_eq!(command & 0x406, 0x406);
+    }
+
+    /// MSI-X opens once its table is written, and a failure to write it
+    /// leaves MSI-X off.
+    #[test]
+    fn msix_opens_only_after_its_table_is_written() {
+        let mut function = Function::new(Address::default_for_tests(), fake()).unwrap();
+        let msix = function.interrupts().msix.unwrap();
+        function.enable_polled();
+        function.enable_msix(msix, || Ok(())).unwrap();
+        assert_eq!(function.config().words[16] >> 30, 0b10, "enabled, unmasked");
+        assert_eq!(
+            function.enable_msix(msix, || Err::<(), _>(BlockError::Timeout)),
+            Err(BlockError::Timeout)
+        );
+        assert_eq!(function.config().words[16] >> 31, 0, "left off");
     }
 
     #[test]

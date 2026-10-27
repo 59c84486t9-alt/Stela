@@ -113,6 +113,7 @@ impl Storage {
             firmware: None,
             bluetooth_platform: self.bluetooth_platform,
             wifi_platform: self.wifi_platform,
+            completion: None,
             ecam: self.ecam[..self.ecam_count].to_vec(),
             mapped: self.mapped[..self.mapped_count]
                 .iter()

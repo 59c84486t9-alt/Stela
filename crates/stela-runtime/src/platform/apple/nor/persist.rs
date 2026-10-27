@@ -8,13 +8,13 @@
 //! supplies an empty proxy until the guest saves. Committed changes are
 //! stored by erase sector.
 use super::{CAPACITY, Image, SECTOR_SIZE};
-use alloc::{format, string::String, vec};
-use stela_drivers::block::BlockDevice;
+use alloc::{format, string::String, vec, vec::Vec};
+use stela_drivers::block::{BlockDevice, Identity, Request};
 
 /// The image `device` holds, and whether it was blank and has just been
 /// initialized.
 pub fn load(device: &mut dyn BlockDevice) -> Result<(Image, bool), String> {
-    let block_size = sector_blocks(device)?.1;
+    let block_size = sector_blocks(device.identity())?.1;
     let mut bytes = vec![0; CAPACITY];
     device
         .read(0, &mut bytes)
@@ -39,17 +39,27 @@ pub fn load(device: &mut dyn BlockDevice) -> Result<(Image, bool), String> {
 
 /// Store the sector at `offset`, durably.
 pub fn store(device: &mut dyn BlockDevice, offset: usize, sector: &[u8]) -> Result<(), String> {
-    let (per_sector, block_size) = sector_blocks(device)?;
-    if !offset.is_multiple_of(SECTOR_SIZE) || sector.len() != SECTOR_SIZE || offset >= CAPACITY {
-        return Err("a NOR store is one whole sector inside the image".into());
-    }
-    let lba = (offset / SECTOR_SIZE) as u64 * per_sector;
-    device
-        .write(lba, sector)
-        .and_then(|()| device.flush())
+    let block_size = device.identity().block_size;
+    request(device.identity(), offset, sector.to_vec())?
+        .run(device)
+        .map(drop)
         .map_err(|error| {
             format!("NOR partition write at {offset:#x} ({block_size}-byte blocks): {error}")
         })
+}
+
+/// The durable write that stores `sector`, at `offset`, on a device of
+/// `identity`.
+pub fn request(identity: &Identity, offset: usize, sector: Vec<u8>) -> Result<Request, String> {
+    let per_sector = sector_blocks(identity)?.0;
+    if !offset.is_multiple_of(SECTOR_SIZE) || sector.len() != SECTOR_SIZE || offset >= CAPACITY {
+        return Err("a NOR store is one whole sector inside the image".into());
+    }
+    Ok(Request::Write {
+        lba: (offset / SECTOR_SIZE) as u64 * per_sector,
+        data: sector,
+        durable: true,
+    })
 }
 
 /// Save `bank` into `image`'s next NVRAM bank ([`Image::save_bank`]) and
@@ -69,8 +79,7 @@ pub fn save_bank(
 
 /// Blocks per sector and the block size; the partition must hold the image
 /// in whole sectors.
-fn sector_blocks(device: &dyn BlockDevice) -> Result<(u64, u32), String> {
-    let identity = device.identity();
+fn sector_blocks(identity: &Identity) -> Result<(u64, u32), String> {
     let block_size = identity.block_size;
     if block_size == 0 || !SECTOR_SIZE.is_multiple_of(block_size as usize) {
         return Err(format!(

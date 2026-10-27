@@ -3,15 +3,16 @@
 //! SEP's roots and anti-replay store ([`sep_state`]), then, when the
 //! partition holds it, the boot log ([`boot_log`]). The image is loaded
 //! before the bundle, which hands the kernel its newest valid bank; every
-//! sector a committed program or erase changes is stored durably between
-//! engine slices, and at the stop, as is the pending output.
+//! sector a committed program or erase changes is stored durably by the
+//! host's service, the guest not waiting, and at the stop, as is the
+//! pending output.
 //!
 //! When `--nor` names the `--storage` partition, [`split`] keeps the same
 //! layout in that partition's last bytes ([`machine_state`]) and gives the
 //! ANS2 model only the rest, so the guest never sees the machine state.
 use crate::output;
-use alloc::{boxed::Box, format};
-use stela_drivers::block::{BlockDevice, BlockError, Shared};
+use alloc::{boxed::Box, collections::BTreeMap, format, vec::Vec};
+use stela_drivers::block::{BlockDevice, BlockError, Shared, Submission};
 use stela_runtime::{
     boot_bundle::Nvram,
     machine::apple::{
@@ -41,6 +42,12 @@ pub fn split(partition: Box<dyn BlockDevice>) -> (Box<dyn BlockDevice>, Box<dyn 
 
 pub struct HostNor {
     device: Box<dyn BlockDevice>,
+    /// Changed sectors by offset, waiting for the store in progress; a
+    /// newer copy of a sector replaces the waiting one.
+    waiting: BTreeMap<usize, Vec<u8>>,
+    /// The store in progress: its sectors' writes run together, and they
+    /// are durable before the next store begins.
+    running: Option<Submission>,
 }
 
 impl HostNor {
@@ -78,26 +85,72 @@ impl HostNor {
         output::arguments(format_args!("NOR persistent fresh={fresh} bank={bank}\n"));
         open_log(&disk, block, available);
         (
-            Self { device },
+            Self {
+                device,
+                waiting: BTreeMap::new(),
+                running: None,
+            },
             image,
             Nvram { bank, proxy },
             sep_state::Location::Partition { disk, first },
         )
     }
 
-    /// Store the sectors the guest changed. Diagnostic log flushing has its
-    /// own wall-time cadence in the outer run loop. A failed
-    /// store stops the machine: NVRAM the guest believes committed must not
-    /// be lost silently.
-    pub fn poll(&mut self, devices: &mut AppleDevices) {
-        self.store_sectors(devices);
+    /// The sectors the guest changed, taken from its devices, for
+    /// [`Self::store`] to write without them.
+    pub fn dirty(devices: &mut AppleDevices) -> Vec<(usize, Vec<u8>)> {
+        devices.nor_dirty()
     }
 
-    fn store_sectors(&mut self, devices: &mut AppleDevices) {
-        for (offset, sector) in devices.nor_dirty() {
-            if let Err(error) = persist::store(&mut *self.device, offset, &sector) {
-                output::arguments(format_args!("NOR refusal: {error}\n"));
-                output::fatal("a NOR sector could not be stored");
+    /// Store the sectors the guest changed, without waiting for the
+    /// device: they join the next store, which begins once the one in
+    /// progress is durable. A failed store stops the machine: NVRAM the
+    /// guest believes committed must not be lost silently.
+    pub fn store(&mut self, dirty: Vec<(usize, Vec<u8>)>) {
+        self.waiting.extend(dirty);
+        self.advance(false);
+    }
+
+    /// Complete every store, the caller waiting: at the stop.
+    pub fn finish(&mut self) {
+        self.advance(true);
+    }
+
+    fn advance(&mut self, wait: bool) {
+        loop {
+            if let Some(running) = self.running.as_mut() {
+                match running.poll(&mut *self.device) {
+                    None if wait => {
+                        core::hint::spin_loop();
+                        continue;
+                    }
+                    None => return,
+                    Some(Err(error)) => {
+                        output::arguments(format_args!(
+                            "NOR refusal: NOR partition store: {error}\n"
+                        ));
+                        output::fatal("a NOR sector could not be stored");
+                    }
+                    Some(Ok(_)) => self.running = None,
+                }
+            }
+            if self.waiting.is_empty() {
+                return;
+            }
+            let identity = self.device.identity();
+            let store = core::mem::take(&mut self.waiting)
+                .into_iter()
+                .map(|(offset, sector)| persist::request(identity, offset, sector))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|requests| {
+                    Submission::batch(requests, identity).map_err(|error| format!("{error}"))
+                });
+            match store {
+                Ok(store) => self.running = Some(store),
+                Err(error) => {
+                    output::arguments(format_args!("NOR refusal: {error}\n"));
+                    output::fatal("a NOR sector could not be stored");
+                }
             }
         }
     }

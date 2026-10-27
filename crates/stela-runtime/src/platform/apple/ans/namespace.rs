@@ -18,6 +18,7 @@
 //! of a marked block return zeros, and a guest write unmarks what it covers.
 //! The host's bytes are never zeroed, which would write the whole medium.
 //! docs/research/ans2.md owns the design (`Formatting the medium`).
+use super::host::HostDisk;
 use alloc::{collections::BTreeMap, vec::Vec};
 use stela_drivers::block::{BlockDevice, BlockError};
 
@@ -136,7 +137,7 @@ impl Erased {
 }
 
 pub(super) struct Medium {
-    pub device: alloc::boxed::Box<dyn BlockDevice>,
+    pub device: HostDisk,
     pub namespaces: Vec<Namespace>,
     host_blocks_per_lba: u64,
     erased: Erased,
@@ -198,7 +199,7 @@ impl Medium {
             })
             .collect();
         Ok(Self {
-            device,
+            device: HostDisk::new(device),
             namespaces,
             host_blocks_per_lba: ratio,
             erased: Erased::default(),
@@ -209,6 +210,13 @@ impl Medium {
         id.checked_sub(1)
             .and_then(|i| self.namespaces.get(i as usize))
             .copied()
+    }
+
+    /// The host blocks of `blocks` blocks of namespace `id` at `lba`: the
+    /// first and how many.
+    pub fn host_extent(&self, id: u32, lba: u64, blocks: u64) -> Option<(u64, u64)> {
+        let address = self.address(id, lba, blocks)?;
+        Some((address, blocks * self.host_blocks_per_lba))
     }
 
     pub fn address(&self, id: u32, lba: u64, blocks: u64) -> Option<u64> {
@@ -238,6 +246,33 @@ impl Medium {
         Ok(())
     }
 
+    /// The host address of a read of `blocks` blocks of namespace `id` at
+    /// `lba`, for the host disk to serve later, and the byte ranges of it
+    /// that read as zeros; no address when every block does.
+    pub fn plan_read(&self, id: u32, lba: u64, blocks: u64) -> Option<ReadPlan> {
+        let address = self.address(id, lba, blocks)?;
+        let start = address / self.host_blocks_per_lba;
+        let end = start + blocks;
+        let at = |block: u64| ((block - start) * u64::from(BLOCK_BYTES)) as usize;
+        Some(ReadPlan {
+            address: (!self.erased.covers(start, end)).then_some(address),
+            zeros: self
+                .erased
+                .overlapping(start, end)
+                .map(|(s, e)| (at(s), at(e)))
+                .collect(),
+        })
+    }
+
+    /// `blocks` blocks of namespace `id` at `lba` were written: they hold
+    /// guest data from now on, so they leave the erased runs.
+    pub fn written(&mut self, id: u32, lba: u64, blocks: u64) {
+        if let Some(address) = self.address(id, lba, blocks) {
+            let start = address / self.host_blocks_per_lba;
+            self.erased.remove(start, start + blocks);
+        }
+    }
+
     /// Write `data` to namespace `id` at `lba`. The written blocks hold
     /// guest data from now on, so they leave the erased runs; a failed write
     /// leaves them erased, its effect on the medium indeterminate.
@@ -263,8 +298,8 @@ impl Medium {
 
     /// Deallocate `blocks` blocks of namespace `id` from `lba`, as Dataset
     /// Management with the Deallocate attribute does: like a namespace
-    /// erase, but for one range. The blocks read as zeros at once (the
-    /// controller reports DLFEAT 001b). `None` when the range leaves the
+    /// erase, but for one range. The blocks read as zeros at once.
+    /// `None` when the range leaves the
     /// namespace; nothing changes.
     pub fn deallocate(&mut self, id: u32, lba: u64, blocks: u64) -> Option<()> {
         let namespace = self.namespace(id)?;
@@ -280,6 +315,25 @@ impl Medium {
     /// Blocks erased and not written since, which read as zeros.
     pub fn erased_blocks(&self) -> u64 {
         self.erased.blocks
+    }
+}
+
+/// A read [`Medium::plan_read`] planned: the host address to read, unless
+/// every block is erased, and the byte ranges that read as zeros.
+pub(super) struct ReadPlan {
+    pub address: Option<u64>,
+    pub zeros: Vec<(usize, usize)>,
+}
+
+impl ReadPlan {
+    /// The read's bytes: the host's, or zeros without them, with the
+    /// erased ranges zeroed.
+    pub fn finish(&self, bytes: usize, host: Option<Vec<u8>>) -> Vec<u8> {
+        let mut data = host.unwrap_or_else(|| alloc::vec![0; bytes]);
+        for &(start, end) in &self.zeros {
+            data[start..end].fill(0);
+        }
+        data
     }
 }
 
