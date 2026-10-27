@@ -1,7 +1,7 @@
 //! The `stela` command line: prepare a USB that boots Stela to install macOS
 //! on a PC, compile, run and inspect original ARM code, and, on an Intel Mac,
 //! run arm64 macOS programs and apps.
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -25,6 +25,7 @@ mod guest_system;
 mod images;
 mod input;
 mod loader;
+mod progress;
 pub mod restore;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod run;
@@ -66,12 +67,14 @@ const ABOUT: &str = "Prepare a USB that boots Stela to install macOS on a PC";
     after_help = EXAMPLES,
     arg_required_else_help = true
 )]
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) enum Command {
     /// Run an arm64 program, #! script or app bundle (the same as `stela
     /// PROGRAM`).
@@ -85,7 +88,7 @@ pub(crate) enum Command {
     /// they open from Finder, the Dock and Open With.
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     Apps(apps::Apps),
-    /// Prepare a USB that boots Stela to install macOS 27, or undo it.
+    /// Create a macOS installer USB interactively, or manage an existing USB.
     Setup(Box<setup::Setup>),
     /// Print the boot log stela.efi keeps on a machine-state partition, from a
     /// disk image or a raw partition.
@@ -178,6 +181,8 @@ pub(crate) enum Command {
     Efi(efi::EfiCommand),
 }
 
+// Windows ships only the installer; the commands stay for other hosts and tests.
+#[cfg_attr(windows, allow(dead_code))]
 impl Command {
     fn run(self) -> anyhow::Result<()> {
         match self {
@@ -222,26 +227,57 @@ impl Command {
     }
 }
 
-/// Reject hosted commands before they inspect or change per-user state.
-fn require_hosted(command: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        cfg!(all(target_os = "macos", target_arch = "x86_64")),
-        "{command} requires an Intel Mac (macOS on x86_64); this host is {} on {}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
-    Ok(())
-}
-
 /// Parse the command line and run it, reporting errors on stderr.
 pub fn main() -> ExitCode {
-    match Cli::parse().command.run() {
+    #[cfg(windows)]
+    let result = installer();
+    #[cfg(not(windows))]
+    let result = commands();
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            eprintln!(
+                "{} {error:#}",
+                console::style("error:").for_stderr().red().bold()
+            );
             ExitCode::FAILURE
         }
+    };
+    setup::hold_window(code == ExitCode::SUCCESS);
+    code
+}
+
+#[cfg(not(windows))]
+fn commands() -> anyhow::Result<()> {
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    if let Command::Setup(setup) = &mut cli.command {
+        setup.build_explicit = matches
+            .subcommand_matches("setup")
+            .and_then(|m| m.value_source("build"))
+            == Some(clap::parser::ValueSource::CommandLine);
     }
+    cli.command.run()
+}
+
+/// `stela.exe` is the installer alone: running it opens the setup wizard, and
+/// its arguments are setup's own flags. The research commands and running
+/// arm64 programs belong to other hosts.
+#[cfg(windows)]
+#[derive(Parser)]
+#[command(name = "stela", version, about = ABOUT)]
+struct Installer {
+    #[command(flatten)]
+    setup: setup::Setup,
+}
+
+#[cfg(windows)]
+fn installer() -> anyhow::Result<()> {
+    let matches = Installer::command().get_matches();
+    let mut installer = Installer::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    installer.setup.build_explicit =
+        matches.value_source("build") == Some(clap::parser::ValueSource::CommandLine);
+    installer.setup.run()
 }
 
 #[cfg(test)]
@@ -249,7 +285,6 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     fn parse(words: &[&str]) -> Command {
         Cli::try_parse_from(std::iter::once("stela").chain(words.iter().copied()))
             .unwrap()
@@ -269,11 +304,35 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    #[cfg(windows)]
+    fn the_windows_executable_is_the_installer_alone() {
+        // No arguments opens the wizard; setup's own flags stay scriptable.
+        Installer::command()
+            .try_get_matches_from(["stela"])
+            .unwrap();
+        let scripted = Installer::command()
+            .try_get_matches_from(["stela", "--ipsw", "a.ipsw", "--profile"])
+            .unwrap();
+        assert!(scripted.get_flag("profile") && scripted.contains_id("ipsw"));
+        assert!(Installer::try_parse_from(["stela", "setup"]).is_err());
+        assert!(Installer::try_parse_from(["stela", "boot-log"]).is_err());
+        let help = Installer::command().render_help().to_string();
+        assert!(!help.contains("Commands:"), "{help}");
+        Installer::command().debug_assert();
+    }
+
+    #[test]
     fn the_help_shows_the_simple_usage_and_hides_the_research_commands() {
         let help = Cli::command().render_help().to_string();
-        assert!(help.contains("stela PROGRAM [ARGS]..."), "{help}");
-        assert!(help.contains("install-system") && help.contains("apps"));
+        if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            assert!(help.contains("stela PROGRAM [ARGS]..."), "{help}");
+            assert!(help.contains("install-system") && help.contains("apps"));
+        } else {
+            assert!(
+                help.contains("setup") && !help.contains("install-system"),
+                "{help}"
+            );
+        }
         assert!(!help.contains("compile-block") && !help.contains("decrypt-aea"));
         assert!(!help.contains("stelad"));
         Cli::command().debug_assert();
@@ -324,15 +383,21 @@ mod tests {
             vec!["install-system", "--import", missing],
             vec!["install-system", "--remove"],
         ] {
-            let error = parse(&words).run().unwrap_err();
-            let message = error.to_string();
             assert!(
-                message.contains("requires an Intel Mac"),
-                "{words:?}: {message}"
+                Cli::try_parse_from(std::iter::once("stela").chain(words.iter().copied())).is_err(),
+                "{words:?}"
             );
-            assert!(message.contains(std::env::consts::OS), "{message}");
         }
         assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
         Ok(())
+    }
+
+    #[test]
+    fn setup_without_a_usb_enters_the_wizard_and_preserves_test_options() {
+        assert!(matches!(parse(&["setup"]), Command::Setup(_)));
+        assert!(matches!(
+            parse(&["setup", "--ipsw", "local.ipsw", "--profile"]),
+            Command::Setup(_)
+        ));
     }
 }

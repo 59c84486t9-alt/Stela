@@ -37,6 +37,8 @@ use stela_runtime::payload::{
     PIECE_HASHES_FILE, Piece, install_directory, piece_name, piece_sizes,
 };
 
+pub(super) mod download;
+
 /// Bytes read at a time: a whole number of hash blocks.
 const BUFFER: usize = 64 * HASH_BLOCK_BYTES as usize;
 
@@ -312,12 +314,17 @@ fn stream(
     Ok(())
 }
 
-fn hash_file(path: &Path, size: u64) -> Result<(String, Vec<u8>)> {
+fn hash_file(
+    path: &Path,
+    size: u64,
+    progress: &crate::progress::Phase,
+) -> Result<(String, Vec<u8>)> {
     let mut file =
         fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut hashes = Hashes::default();
     stream(&mut file, size, |bytes| {
         hashes.update(bytes);
+        progress.advance(bytes.len() as u64);
         Ok(())
     })?;
     Ok(hashes.finish())
@@ -339,6 +346,7 @@ fn piece(
     size: u64,
     partial: Option<&Path>,
     mut whole: Option<&mut Whole>,
+    progress: &crate::progress::Phase,
 ) -> Result<(String, Vec<u8>)> {
     ipsw.seek(SeekFrom::Start(offset))?;
     let mut out = partial
@@ -358,7 +366,9 @@ fn piece(
                 .write_all(bytes)
                 .with_context(|| format!("cannot write {}", path.display())),
             _ => Ok(()),
-        }
+        }?;
+        progress.advance(bytes.len() as u64);
+        Ok(())
     })?;
     if let Some(out) = out {
         out.sync_all()?;
@@ -413,6 +423,7 @@ pub(super) fn write(
     let mut piece_blocks = Vec::new();
     let mut written = Written::default();
     let mut offset = 0;
+    let progress = crate::progress::Phase::bytes("Writing and verifying the USB image", total * 2);
     for (index, &size) in sizes.iter().enumerate() {
         let name = piece_name(index);
         let path = directory.join(&name);
@@ -426,18 +437,20 @@ pub(super) fn write(
             size,
             (!present).then_some(partial.as_path()),
             Some(&mut whole),
+            &progress,
         )?;
-        let keep = present && hash_file(&path, size)? == source;
+        let keep = present && hash_file(&path, size, &progress)? == source;
         if keep {
             written.kept += 1;
         } else {
             if present {
                 // A complete piece whose bytes differ: written again.
-                piece(&mut file, offset, size, Some(&partial), None)?;
+                progress.add_work(size * 2);
+                piece(&mut file, offset, size, Some(&partial), None, &progress)?;
             }
             // Read back, so a USB that loses writes is found now.
             ensure!(
-                hash_file(&partial, size)? == source,
+                hash_file(&partial, size, &progress)? == source,
                 "{} does not read back as written; the USB may be failing",
                 partial.display()
             );
@@ -505,6 +518,7 @@ pub(super) fn write(
     let json = manifest.to_json();
     efi::write_atomic(&manifest_path, json.as_bytes(), false)?;
     written.manifest_sha256 = stela_runtime::sha256(json.as_bytes());
+    progress.finish();
     Ok(written)
 }
 

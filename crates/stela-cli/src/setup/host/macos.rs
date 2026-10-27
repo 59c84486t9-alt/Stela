@@ -69,6 +69,11 @@ impl Host for System {
                 .collect();
             disks.push(Disk {
                 name: text(&info, "MediaName"),
+                bytes: info
+                    .as_dictionary()
+                    .and_then(|d| d.get("TotalSize").or_else(|| d.get("Size")))
+                    .and_then(Value::as_unsigned_integer)
+                    .unwrap_or(0),
                 internal: flag("Internal"),
                 system: system_disks.contains(&identifier),
                 partitions,

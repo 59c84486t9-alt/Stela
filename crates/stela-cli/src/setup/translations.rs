@@ -111,6 +111,7 @@ impl Store {
             return Ok(());
         }
         let path = self.directory().join(SPARE);
+        let progress = crate::progress::Phase::spinner("Preparing the translation cache");
         let file =
             fs::File::create(&path).with_context(|| format!("cannot create {}", path.display()))?;
         file.set_len(self.pack_bytes)
@@ -121,7 +122,9 @@ impl Store {
                     self.pack_bytes,
                     path.display()
                 )
-            })
+            })?;
+        progress.finish();
+        Ok(())
     }
 
     /// Whether `store.cfg` says what the record does.

@@ -375,13 +375,14 @@ pub(super) fn install(prepared: &Path, destination: &Path) -> Result<String> {
     recover(destination)?;
     let (partial, previous) = siblings(destination)?;
     fs::create_dir_all(&partial)?;
+    let progress = crate::progress::Phase::bytes("Writing boot files", bytes(prepared)?);
     for file in fs::read_dir(prepared)? {
         let file = file?;
         let target = partial.join(file.file_name());
-        fs::copy(file.path(), &target)?;
-        fs::File::open(&target)?.sync_all()?;
+        crate::progress::copy(&file.path(), &target, &progress)?;
     }
     sync_parent(&partial.join(MANIFEST));
+    progress.finish();
     if destination.exists() {
         fs::rename(destination, &previous)?;
     }

@@ -1,8 +1,9 @@
-//! Read Apple's public macOS IPSW feed and download original images.
+//! Discover signed macOS IPSWs through IPSW.me and download originals from Apple.
 pub mod aea;
 pub mod archive;
 pub mod components;
 pub mod disk;
+mod history;
 pub mod manifest;
 pub mod payload;
 pub mod remote;
@@ -62,18 +63,19 @@ fn client() -> Result<Client> {
 }
 
 pub fn catalog() -> Result<Vec<Image>> {
-    // Bound metadata responses; image downloads are streamed separately.
-    let response = client()?
-        .get(CATALOG_URL)
-        .timeout(Duration::from_secs(60))
-        .send()?
-        .error_for_status()?;
-    let mut bytes = Vec::new();
-    response
-        .take(16 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 16 * 1024 * 1024, "catalog too large");
-    parse_catalog(&bytes)
+    Ok(release_catalog()?.images.clone())
+}
+
+pub(crate) fn model_names() -> Result<BTreeMap<String, String>> {
+    Ok(release_catalog()?.models.clone())
+}
+
+fn release_catalog() -> Result<&'static history::Releases> {
+    static CATALOG: std::sync::OnceLock<history::Releases> = std::sync::OnceLock::new();
+    if CATALOG.get().is_none() {
+        let _ = CATALOG.set(history::load()?);
+    }
+    Ok(CATALOG.get().expect("a successfully loaded catalog"))
 }
 
 fn string(dict: &plist::Dictionary, key: &str) -> Result<String> {
@@ -337,6 +339,14 @@ pub fn download(image: &Image, output: &Path) -> Result<Receipt> {
     download_with_client(image, output, &client()?)
 }
 
+pub(crate) fn open_image(image: &Image) -> Result<remote::Remote> {
+    ensure!(
+        apple_url(&Url::parse(&image.url)?),
+        "image must be hosted on Apple's HTTPS servers"
+    );
+    remote::Remote::open(client()?, &image.url)
+}
+
 fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result<Receipt> {
     ensure!(
         !output.exists() && !sidecar(output, ".json").exists(),
@@ -413,13 +423,14 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
         .truncate(offset == 0)
         .append(offset > 0)
         .open(&part)?;
-    eprintln!(
-        "Downloading {} {} from byte {offset}; partial: {}",
-        image.version,
-        image.build,
-        part.display()
-    );
     let mut written = offset;
+    let progress = total
+        .map(|total| {
+            let progress = crate::progress::Phase::bytes("Downloading macOS", total);
+            progress.position(offset);
+            progress
+        })
+        .unwrap_or_else(|| crate::progress::Phase::spinner("Downloading macOS"));
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let n = response.read(&mut buffer)?;
@@ -428,6 +439,7 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
         }
         file.write_all(&buffer[..n])?;
         written += n as u64;
+        progress.advance(n as u64);
         ensure!(
             total.is_none_or(|t| written <= t),
             "response exceeds advertised size"
@@ -439,6 +451,7 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
         written > 0 && total.is_none_or(|t| t == written),
         "incomplete image; rerun to resume"
     );
+    progress.finish();
     publish(image, output, &part, &metadata, written)
 }
 
@@ -453,6 +466,7 @@ fn publish(
     let mut buffer = vec![0u8; 1024 * 1024];
     let mut sha256 = Sha256::new();
     let mut sha1 = sha1::Sha1::new();
+    let progress = crate::progress::Phase::bytes("Verifying downloaded macOS", written);
     loop {
         let n = file.read(&mut buffer)?;
         if n == 0 {
@@ -460,6 +474,7 @@ fn publish(
         }
         sha256.update(&buffer[..n]);
         sha1.update(&buffer[..n]);
+        progress.advance(n as u64);
     }
     if let Some(expected) = &image.sha1 {
         ensure!(
@@ -479,6 +494,7 @@ fn publish(
     stela_runtime::write_json(&sidecar(output, ".json"), &receipt)?;
     std::fs::remove_file(part)?;
     std::fs::remove_file(metadata)?;
+    progress.finish();
     Ok(receipt)
 }
 

@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Read, Write},
+    io::{BufReader, Read, Seek, Write},
     path::Path,
 };
 
@@ -24,7 +24,11 @@ pub struct MemberDigest {
     pub im4p_description: Option<String>,
 }
 
-fn read_limited(archive: &mut Archive, name: &str, maximum: u64) -> Result<Vec<u8>> {
+fn read_limited<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    maximum: u64,
+) -> Result<Vec<u8>> {
     ensure!(
         super::manifest::safe_member(name),
         "unsafe archive member name"
@@ -54,7 +58,7 @@ pub fn has_member(image: &Path, name: &str) -> Result<bool> {
 /// Read one member whole, refusing members larger than `maximum`.
 pub fn read_member(image: &Path, name: &str, maximum: u64) -> Result<Vec<u8>> {
     read_limited(
-        &mut zip::ZipArchive::new(File::open(image)?)?,
+        &mut zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, File::open(image)?))?,
         name,
         maximum,
     )

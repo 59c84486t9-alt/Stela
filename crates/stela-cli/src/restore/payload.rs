@@ -436,18 +436,89 @@ pub fn inventory(
         (whole.join().expect("hash worker panicked"), members)
     });
     let hashed = members?;
+    finish_inventory(
+        image,
+        selection,
+        metadata,
+        hashed,
+        ipsw?,
+        KeyOptions {
+            fetch: fetch_keys,
+            output: key_dir,
+            input: keys_in,
+        },
+    )
+}
+
+/// Inventory a verified, joined IPSW without creating a full host-side file.
+pub(crate) fn inventory_from<R: Read + Seek>(
+    source: R,
+    image: &Path,
+    model: &str,
+    digest: (u64, String),
+) -> Result<Inventory> {
+    let mut archive = ZipArchive::new(source)?;
+    let selection = select(&mut archive, model)?;
+    let metadata = aea_metadata(&mut archive, image, &selection.names)?;
+    let total = selection
+        .names
+        .iter()
+        .map(|name| Ok(archive.by_name(name)?.size()))
+        .collect::<Result<Vec<u64>>>()?
+        .iter()
+        .sum();
+    let progress = crate::progress::Phase::bytes("Checking macOS files", total);
+    let hashed = selection
+        .names
+        .iter()
+        .map(|name| {
+            stream(&mut archive, name, |bytes| {
+                progress.advance(bytes.len() as u64);
+                Ok(())
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    progress.finish();
+    finish_inventory(
+        image,
+        selection,
+        metadata,
+        hashed,
+        digest,
+        KeyOptions {
+            fetch: true,
+            output: None,
+            input: None,
+        },
+    )
+}
+
+struct KeyOptions<'a> {
+    fetch: bool,
+    output: Option<&'a Path>,
+    input: Option<&'a Path>,
+}
+
+fn finish_inventory(
+    image: &Path,
+    selection: Selection,
+    metadata: Vec<(String, aea::Metadata)>,
+    hashed: Vec<Hashed>,
+    digest: (u64, String),
+    options: KeyOptions<'_>,
+) -> Result<Inventory> {
     let (blocks, block_entry) = block_hashes(&hashed);
     let mut keys = Vec::new();
     // Prefer the user's offline key directory; fetch from Apple only when
     // asked and no offline keys are given.
-    let aea_keys = if let Some(dir) = keys_in {
+    let aea_keys = if let Some(dir) = options.input {
         local_keys(&metadata, dir)?
-    } else if fetch_keys || key_dir.is_some() {
+    } else if options.fetch || options.output.is_some() {
         self::fetch_keys(&metadata)?
     } else {
         Vec::new()
     };
-    if let Some(directory) = key_dir {
+    if let Some(directory) = options.output {
         fs::create_dir_all(directory)?;
         for key in &aea_keys {
             let path = directory.join(format!("{}.pem", key.header_sha256));
@@ -473,7 +544,7 @@ pub fn inventory(
         },
         hashed.into_iter().map(|h| h.member).collect(),
         Vec::new(),
-        ipsw.map(|(bytes, sha256)| (bytes, Some(sha256)))?,
+        (digest.0, Some(digest.1)),
     )?;
     let keyed = PayloadManifest {
         aea_keys,
@@ -605,6 +676,12 @@ pub fn trim<R: Read + Seek>(source: R, model: &str, output: &Path) -> Result<u64
         names.push(RESTORE_PLIST);
     }
     names.extend(selection.names.iter().map(String::as_str));
+    let total = names.iter().try_fold(0u64, |total, name| -> Result<u64> {
+        total
+            .checked_add(archive.by_name(name)?.size())
+            .context("boot archive size overflow")
+    })?;
+    let progress = crate::progress::Phase::bytes("Downloading boot files", total);
     let part = output.with_extension("part");
     let mut writer = zip::ZipWriter::new(File::create(&part)?);
     let mut written = 0;
@@ -612,27 +689,32 @@ pub fn trim<R: Read + Seek>(source: R, model: &str, output: &Path) -> Result<u64
         let index = archive
             .index_for_name(name)
             .with_context(|| format!("the IPSW lacks {name}"))?;
-        if archive.by_index_raw(index)?.compression() == CompressionMethod::Stored {
-            written += archive.by_index_raw(index)?.size();
-            writer
-                .raw_copy_file(archive.by_index_raw(index)?)
-                .with_context(|| format!("copy {name}"))?;
-            continue;
-        }
         let mut member = archive.by_index(index)?;
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .large_file(member.size() >= u32::MAX as u64)
             .last_modified_time(member.last_modified().unwrap_or_default());
         writer.start_file(name, options)?;
-        let count =
-            std::io::copy(&mut member, &mut writer).with_context(|| format!("inflate {name}"))?;
+        let mut count = 0u64;
+        let mut buffer = vec![0; 1024 * 1024];
+        loop {
+            let size = member
+                .read(&mut buffer)
+                .with_context(|| format!("read {name}"))?;
+            if size == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..size])?;
+            count += size as u64;
+            progress.advance(size as u64);
+        }
         ensure!(count == member.size(), "{name} is truncated");
         written += count;
     }
     writer.set_raw_comment(RECOVERY_COMMENT.into());
     writer.finish()?.sync_all()?;
     fs::rename(&part, output)?;
+    progress.finish();
     Ok(written)
 }
 

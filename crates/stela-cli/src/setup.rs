@@ -48,9 +48,11 @@
 //! interrupted one. Every path takes `--dry-run`. A `stela.efi` whose mount
 //! interface (`stela_loader::mount_interface`) differs from this `stela`'s is
 //! refused.
+mod assets;
 mod bundle;
 mod doctor;
 mod ecid;
+mod elevation;
 mod fdr;
 mod firmware;
 mod format;
@@ -61,13 +63,15 @@ mod medium;
 mod state;
 mod translations;
 mod update;
+mod wizard;
 
+pub(crate) use elevation::hold_window;
 pub(crate) use installed::NextBoot;
 
 use crate::{boot, efi, restore};
 use anyhow::{Context, Result, bail, ensure};
 use bundle::Kind;
-use clap::Args;
+use clap::{Args, builder::TypedValueParser};
 use ecid::Ecid;
 use host::{FileSystem, Host};
 use serde::{Deserialize, Serialize};
@@ -123,13 +127,33 @@ pub(crate) enum InstallImage {
     Online,
 }
 
+fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
+    let complete = restore::payload::holds_system_image(ipsw)?;
+    match choice {
+        Some(InstallImage::Online) => Ok(true),
+        Some(InstallImage::Offline) => {
+            ensure!(
+                complete,
+                "{} holds only the recovery members, without the macOS system image an \
+                 install restores; pass the whole IPSW with --ipsw, use --fetch to download \
+                 it, or --install-image online to stream it from Apple during the install",
+                ipsw.display()
+            );
+            Ok(false)
+        }
+        None => Ok(!complete),
+    }
+}
+
 #[derive(Args)]
 pub(crate) struct Setup {
+    #[arg(skip)]
+    pub(crate) build_explicit: bool,
     /// The USB's EFI partition, another mounted volume of the same USB, or
     /// the whole USB disk (such as disk5 on macOS, /dev/sdb on Linux or
     /// PhysicalDrive2 on Windows), which setup erases first into an EFI
     /// partition and a FAT32 volume.
-    #[arg(long)]
+    #[arg(long, default_value = "", value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from))]
     usb: PathBuf,
     /// The macOS 27 restore image (IPSW).
     #[arg(long, conflicts_with = "fetch")]
@@ -483,21 +507,7 @@ impl Record {
     /// stays local by default, including when the target disk will be
     /// chosen later on another PC.
     fn remote_install(&self, ipsw: &Path) -> Result<bool> {
-        let complete = restore::payload::holds_system_image(ipsw)?;
-        match self.install_image {
-            Some(InstallImage::Online) => Ok(true),
-            Some(InstallImage::Offline) => {
-                ensure!(
-                    complete,
-                    "{} holds only the recovery members, without the macOS system image an \
-                     install restores; pass the whole IPSW with --ipsw, use --fetch to download \
-                     it, or --install-image online to stream it from Apple during the install",
-                    ipsw.display()
-                );
-                Ok(false)
-            }
-            None => Ok(!complete),
-        }
+        image_is_remote(ipsw, self.install_image)
     }
 
     /// Bring an older schema's record to this one: its installed disk
@@ -913,8 +923,10 @@ type Prepare = dyn Fn(&Path, &str, Option<Ecid>, bool, &Path) -> Result<()>;
 type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
 
 /// Inputs that the command line fixes and tests replace.
+#[derive(Clone, Copy)]
 struct Environment<'a> {
     host: &'a dyn Host,
+    download: Option<&'a medium::download::Download>,
     /// `stela boot prepare --recovery`; tests use synthetic IPSWs, which
     /// have no kernel, and write a stand-in.
     prepare: &'a Prepare,
@@ -1028,6 +1040,8 @@ struct Prepared {
     bytes: u64,
 }
 
+type PreparedSetup = (String, String, Vec<Prepared>);
+
 impl Prepared {
     fn path(&self) -> PathBuf {
         self.directory.path().join("recovery")
@@ -1083,8 +1097,11 @@ fn prepare_kind(
             Kind::Update => environment.prepare_update,
         };
         let personalized = tss && kind != Kind::Recovery;
+        let progress =
+            crate::progress::Phase::spinner(format!("Preparing {} boot files", kind.label()));
         prepare(ipsw, model, ecid, personalized, &output)
             .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
+        progress.finish();
         let generation = bundle::generation(&output)?;
         ensure!(
             generation == environment.generation(),
@@ -1162,13 +1179,20 @@ fn check_space(host: &dyn Host, volume: &Path, prepared: &[Prepared]) -> Result<
 }
 
 impl Setup {
-    pub(crate) fn run(self) -> Result<()> {
+    pub(crate) fn run(mut self) -> Result<()> {
+        if self.usb.as_os_str().is_empty() {
+            wizard::check_creation(&self)?;
+            if !self.dry_run && elevation::relaunch()? {
+                return Ok(());
+            }
+        }
         debug_assert_eq!(
             stela_loader::boot_bundle::SCHEMA_VERSION,
             mount_interface::CURRENT.bundle_schema
         );
         let environment = Environment {
             host: &host::System,
+            download: None,
             prepare: &prepare_recovery,
             prepare_restore: &prepare_restore,
             prepare_update: &prepare_update,
@@ -1182,7 +1206,32 @@ impl Setup {
             interface: mount_interface::CURRENT,
             bundle_revision: stela_loader::boot_bundle::REVISION,
         };
-        print!("{}", self.dispatch(&environment)?);
+        let interactive = self.usb.as_os_str().is_empty();
+        if interactive && !self.dry_run && self.efi.is_none() {
+            assets::preflight(&environment)?;
+        }
+        if interactive && !wizard::configure(&mut self, environment.host)? {
+            return Ok(());
+        }
+        let dry_run = self.dry_run;
+        let profile = self.profile;
+        let report = self.dispatch(&environment)?;
+        if interactive && !dry_run {
+            let profile = if profile {
+                "\nProfiling is on. Keep EFI/stela/boot.log after your run."
+            } else {
+                ""
+            };
+            cliclack::note(
+                "Next steps",
+                format!(
+                    "Boot the target PC from this USB and choose Install macOS.\nLater Apple policy signing may still need an internet connection.{profile}"
+                ),
+            )?;
+            cliclack::outro("Your installer USB is ready")?;
+        } else {
+            print!("{report}");
+        }
         Ok(())
     }
 
@@ -1597,19 +1646,7 @@ fn default_efi_image() -> Option<PathBuf> {
 
 /// Where `--fetch` keeps downloaded restore images: the host's per-user cache.
 pub(crate) fn download_dir() -> PathBuf {
-    if cfg!(windows)
-        && let Some(local) = std::env::var_os("LOCALAPPDATA")
-    {
-        return PathBuf::from(local).join("Stela/images");
-    }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    if cfg!(target_os = "macos") {
-        home.join("Library/Caches/Stela/images")
-    } else {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map_or_else(|| home.join(".cache"), PathBuf::from)
-            .join("stela/images")
-    }
+    std::env::temp_dir().join("Stela/images")
 }
 
 /// Download the pinned image, or reuse a complete earlier download: the
@@ -1643,18 +1680,14 @@ fn fetch_recovery(directory: &Path, build: &str, model: &str) -> Result<PathBuf>
             "{} is not a recovery archive; move it away",
             path.display()
         );
-        eprintln!("Using the earlier copy {}", path.display());
+        eprintln!("Using downloaded boot files");
         return Ok(path);
     }
     let images = restore::catalog()?;
     let image = restore::select(&images, Some(build), Some(model))?;
     fs::create_dir_all(directory)?;
-    eprintln!(
-        "Copying macOS {build}'s recovery members for {model} from {}",
-        image.url
-    );
     let bytes = restore::fetch_recovery(&image, model, &path)?;
-    eprintln!("Copied {:.2} GB to {}", bytes as f64 / 1e9, path.display());
+    eprintln!("Downloaded {:.2} GB of boot files", bytes as f64 / 1e9);
     Ok(path)
 }
 
@@ -1686,9 +1719,8 @@ pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<
             path.display(),
             image.build
         );
-        eprintln!("Using the earlier download {}", path.display());
+        eprintln!("Using the downloaded macOS image");
     } else {
-        eprintln!("Downloading {} to {}", image.url, path.display());
         restore::download(&image, &path)?;
     }
     Ok(path)
@@ -1860,7 +1892,7 @@ fn plan_install(
             restore.extend(prepared);
         }
     }
-    let remote = record.remote_install(ipsw)?;
+    let remote = environment.download.is_none() && record.remote_install(ipsw)?;
     let intact = record
         .medium_of(build)
         .is_some_and(|m| m.remote == remote && m.problems().is_empty());
@@ -1878,7 +1910,10 @@ fn plan_install(
         false => {
             let receipt = restore::receipt(ipsw)?;
             let (volume, guid) = medium::locate(host, &record.esp, install_volume)?;
-            let ipsw_bytes = fs::metadata(ipsw)?.len();
+            let ipsw_bytes = match environment.download {
+                Some(download) => download.bytes,
+                None => fs::metadata(ipsw)?.len(),
+            };
             let need = medium::needed_bytes(&volume, build, ipsw_bytes, environment.piece_bytes);
             let created = missing_directories(&volume, &medium::directory(&volume, build));
             Some(MediumPlan {
@@ -1887,7 +1922,13 @@ fn plan_install(
                 remote,
                 ipsw_bytes,
                 need,
-                expected: medium::Expected::of(receipt.as_ref()),
+                expected: match environment.download {
+                    Some(download) => medium::Expected {
+                        sha256: None,
+                        sha1: download.image.sha1.clone(),
+                    },
+                    None => medium::Expected::of(receipt.as_ref()),
+                },
                 created,
             })
         }
@@ -2008,12 +2049,10 @@ fn apply_install(
     created.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     record.created_directories = created;
     write_record(&record.esp.clone(), record)?;
-    eprintln!(
-        "Writing the install medium to {}",
-        medium::directory(&plan.volume, &build).display()
-    );
     if plan.remote {
+        let progress = crate::progress::Phase::spinner("Preparing the online install inventory");
         let inventory = (environment.remote_inventory)(ipsw, &record.model)?;
+        progress.finish();
         ensure!(
             inventory.manifest.product_build == build,
             "Apple's servers hold macOS build {}, not {build}",
@@ -2026,7 +2065,17 @@ fn apply_install(
         write_record(&record.esp.clone(), record)?;
         return remove_replaced(record, &build, previous.as_ref());
     }
+    if let Some(download) = environment.download {
+        let written = download.write(&plan.volume, &record.model, environment.piece_bytes)?;
+        if let Some(medium) = record.media.iter_mut().find(|m| m.build == build) {
+            medium.manifest_sha256 = written.manifest_sha256;
+        }
+        write_record(&record.esp.clone(), record)?;
+        return remove_replaced(record, &build, previous.as_ref());
+    }
+    let progress = crate::progress::Phase::spinner("Checking installation files");
     let inventory = (environment.inventory)(ipsw, &record.model)?;
+    progress.finish();
     ensure!(
         inventory.manifest.product_build == build,
         "{} holds macOS build {}, not {build}",
@@ -2077,7 +2126,12 @@ struct Plan {
     notes: Vec<String>,
 }
 
-fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result<Plan> {
+fn plan(
+    environment: &Environment<'_>,
+    command: &Setup,
+    ipsw: PathBuf,
+    early: Option<PreparedSetup>,
+) -> Result<Plan> {
     let host = environment.host;
     let esp = locate_esp(host, &command.usb)?;
     if esp.join(RECORD).exists() {
@@ -2151,11 +2205,13 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     update::check_firmware_support(&esp, &efi_image)?;
     // The bundle is prepared on this computer before the USB changes, which
     // also measures it for the space check.
-    let (product_version, build, prepared) =
-        prepare_bundles(environment, &ipsw, command.model(), None, &[Some(ecid)])?;
+    let (product_version, build, prepared) = match early {
+        Some(prepared) => prepared,
+        None => prepare_bundles(environment, &ipsw, command.model(), None, &[Some(ecid)])?,
+    };
     // With an installed disk, its two restore bundles (each smaller than
     // the recoveryOS one) go on the same volume.
-    let bundles = prepared[0].bytes * if installed.is_some() { 3 } else { 1 };
+    let bundles: u64 = prepared.iter().map(|bundle| bundle.bytes).sum();
     let volume = choose_volume(host, &esp, &command.usb, command.volume.as_deref(), bundles)?;
     let installs = installed
         .iter()
@@ -2207,6 +2263,10 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         install_image: command.install_image,
         translations: None,
     };
+    let missing_restore: Vec<_> = restore_bundles(&[Some(ecid)])
+        .into_iter()
+        .filter(|&(kind, ecid)| !prepared.iter().any(|b| b.kind == kind && b.ecid == ecid))
+        .collect();
     let install = match &installed {
         Some(_) => Some(plan_install(
             environment,
@@ -2214,8 +2274,8 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
             &record.build,
             command.install_volume.as_deref(),
             &ipsw,
-            &restore_bundles(&[Some(ecid)]),
-            prepared[0].bytes,
+            &missing_restore,
+            bundles,
         )?),
         None => None,
     };
@@ -2319,8 +2379,10 @@ fn describe(plan: &Plan) -> Result<String> {
     for prepared in &plan.prepared {
         writeln!(
             text,
-            "  recoveryOS     {} ({:.1} GB)",
-            bundle::directory(
+            "  {:<14} {} ({:.1} GB)",
+            prepared.kind.label(),
+            bundle::directory_of(
+                prepared.kind,
                 &record.volume,
                 &prepared.build,
                 prepared.ecid,
@@ -2424,11 +2486,105 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
                 found.name
             ));
         }
-        erase = Some((disk, found.name));
+        host.check_erase_access(&disk)?;
+        let identity = wizard::Usb::from_disk(&found, host);
+        erase = Some((disk, found.name, found.bytes, identity));
     }
-    // The image first: a USB is erased only for a setup that can go on.
-    let ipsw = command.image()?;
-    if let Some((disk, name)) = erase {
+    // Downloaded boot archives are temporary. A full image goes directly to
+    // USB after preparation and signing; an explicit cache directory keeps the
+    // scripted cache behavior for developer workflows.
+    let temporary = (command.fetch && command.download_dir.is_none() && !command.dry_run)
+        .then(tempfile::tempdir)
+        .transpose()?;
+    let mut download = None;
+    let ipsw = if let Some(temporary) = &temporary
+        && command.install_image == Some(InstallImage::Offline)
+    {
+        let image = restore::select(
+            &restore::catalog()?,
+            Some(&command.build),
+            Some(command.model()),
+        )?;
+        let boot = temporary.path().join("boot.ipsw");
+        download = Some(medium::download::Download::prepare(
+            image,
+            command.model(),
+            &boot,
+        )?);
+        boot
+    } else {
+        if let Some(temporary) = &temporary {
+            command.download_dir = Some(temporary.path().to_owned());
+        }
+        command.image()?
+    };
+    let environment = &Environment {
+        download: download.as_ref(),
+        ..*environment
+    };
+    if !command.dry_run {
+        if command.efi.is_none() {
+            command.efi = Some(assets::resolve(environment)?);
+        }
+        read_efi(environment, command.efi.as_ref().unwrap())?;
+    }
+    let mut early = None;
+    if let Some((disk, _, capacity, _)) = &erase {
+        for path in std::iter::once(&ipsw).chain(command.efi.iter()) {
+            ensure!(
+                host.volume(path)?.disk.as_deref() != Some(disk),
+                "{} is on the USB being erased; move installer inputs to another disk first",
+                path.display()
+            );
+        }
+        if let Some(path) = &command.efi {
+            read_efi(environment, path)?;
+        }
+        let remote = download.is_none() && image_is_remote(&ipsw, command.install_image)?;
+        // The portable installer knows its identity before the target PC is
+        // connected. Prepare and sign once, and measure it before erasing USB.
+        if command.target.is_none() && command.tss {
+            let ecid = command.ecid.map_or_else(Ecid::generate, Ok)?;
+            command.ecid = Some(ecid);
+            let (version, build, mut prepared) =
+                prepare_bundles(environment, &ipsw, command.model(), None, &[Some(ecid)])?;
+            for kind in bundle::RESTORE_KINDS {
+                prepared.extend(
+                    prepare_kind(
+                        environment,
+                        kind,
+                        true,
+                        &ipsw,
+                        command.model(),
+                        Some(&build),
+                        &[Some(ecid)],
+                    )?
+                    .2,
+                );
+            }
+            let image_bytes = if remote {
+                0
+            } else {
+                match &download {
+                    Some(download) => download.bytes,
+                    None => fs::metadata(&ipsw)?.len(),
+                }
+            };
+            let required = prepared.iter().map(|p| p.bytes).sum::<u64>()
+                + image_bytes
+                + format::ESP_BYTES
+                + 4 * MARGIN;
+            ensure!(
+                *capacity == 0 || *capacity >= required,
+                "the USB needs at least {:.1} GB for this installer (it has {:.1} GB); use a larger USB or online mode",
+                required as f64 / 1e9,
+                *capacity as f64 / 1e9
+            );
+            early = Some((version, build, prepared));
+        }
+    }
+    if let Some((disk, name, _, identity)) = erase {
+        identity.verify(host)?;
         eprintln!("Erasing {disk} ({name})");
         host.erase(&disk, USB_VOLUME)?;
         let volume = host
@@ -2439,7 +2595,7 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
             .with_context(|| format!("{disk} has no mounted volume after it was erased"))?;
         command.usb = volume;
     }
-    let plan = plan(environment, &command, ipsw)?;
+    let plan = plan(environment, &command, ipsw, early)?;
     let mut report = describe(&plan)?;
     if command.dry_run {
         report.push_str("Dry run: nothing was changed.\n");
@@ -2793,6 +2949,7 @@ mod tests {
         Disk {
             identifier: id.into(),
             name: format!("Disk {id}"),
+            bytes: 128 * GIB,
             internal: id != "disk5",
             system: id == "disk0",
             partitions: contents
@@ -2868,6 +3025,7 @@ mod tests {
 
     fn command(f: &Fixture, usb: &Path) -> Setup {
         Setup {
+            build_explicit: false,
             usb: usb.to_path_buf(),
             ipsw: Some(f.ipsw.clone()),
             fetch: false,
@@ -2974,6 +3132,7 @@ mod tests {
     fn environment(host: &FakeHost) -> Environment<'_> {
         Environment {
             host,
+            download: None,
             prepare: &fake_prepare,
             prepare_restore: &fake_prepare_restore,
             prepare_update: &fake_prepare_update,
@@ -3510,6 +3669,54 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("pass --ipsw"), "{error}");
+    }
+
+    #[test]
+    fn portable_usb_preparation_refuses_signing_failures_and_small_disks_before_erase() {
+        let mut f = fixture(64 * GIB, true);
+        let before = (snapshot(&f.esp), snapshot(&f.data));
+        let mut opted = command(&f, Path::new("disk5"));
+        opted.tss = true;
+        let fail = |_: &Path, _: &str, _: Option<Ecid>, _: bool, _: &Path| {
+            bail!("signing service unavailable")
+        };
+        let env = Environment {
+            prepare_restore: &fail,
+            ..environment(&f.host)
+        };
+        let error = setup(&env, opted).unwrap_err();
+        assert!(format!("{error:#}").contains("signing service unavailable"));
+        assert_eq!((snapshot(&f.esp), snapshot(&f.data)), before);
+
+        f.host
+            .disks
+            .iter_mut()
+            .find(|d| d.identifier == "disk5")
+            .unwrap()
+            .bytes = 1;
+        let mut opted = command(&f, Path::new("disk5"));
+        opted.tss = true;
+        let error = setup(&environment(&f.host), opted).unwrap_err();
+        assert!(
+            error.to_string().contains("USB needs at least"),
+            "{error:#}"
+        );
+        assert_eq!((snapshot(&f.esp), snapshot(&f.data)), before);
+    }
+
+    #[test]
+    fn a_usb_replaced_while_preparing_is_refused_even_at_the_same_disk_number() {
+        let mut f = fixture(64 * GIB, true);
+        f.host.serials.insert("disk5".into(), "original".into());
+        let selected = wizard::Usb::from_disk(&f.host.disks[1], &f.host);
+        selected.verify(&f.host).unwrap();
+        f.host.serials.insert("disk5".into(), "replacement".into());
+        assert!(selected.verify(&f.host).is_err());
+        f.host.serials.insert("disk5".into(), "original".into());
+        f.host.disks[1].system = true;
+        assert!(selected.verify(&f.host).is_err());
+        f.host.disks.pop();
+        assert!(selected.verify(&f.host).is_err());
     }
 
     #[test]

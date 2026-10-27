@@ -228,6 +228,7 @@ impl Host for System {
                     || matches!(d.tran.as_deref(), Some("usb" | "mmc"));
                 Disk {
                     system: d.holds_root(),
+                    bytes: d.size,
                     name: match d.model.as_deref().map(str::trim) {
                         Some(model) if !model.is_empty() => model.to_owned(),
                         _ if d.kind == "loop" => "loop device".into(),
@@ -362,6 +363,15 @@ impl Host for System {
         self.partition(identifier)?
             .mount
             .with_context(|| format!("{device} was mounted nowhere"))
+    }
+
+    fn check_erase_access(&self, disk: &str) -> Result<()> {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!("/dev/{disk}"))
+            .with_context(|| format!("USB access requires {ADMIN}"))?;
+        Ok(())
     }
 
     fn erase(&self, disk: &str, name: &str) -> Result<()> {

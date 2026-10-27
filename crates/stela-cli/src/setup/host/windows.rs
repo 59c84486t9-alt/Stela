@@ -572,6 +572,7 @@ impl Host for System {
             disks.push(Disk {
                 identifier: format!("disk{number}"),
                 name: descriptor.name,
+                bytes: geometry(&drive).map_or(0, |(bytes, _)| bytes),
                 internal: !removable,
                 system: system == Some(number),
                 partitions: entries
@@ -726,6 +727,15 @@ impl Host for System {
         }
         Err(last.expect("tried"))
             .context(format!("{disk} was erased, but its volume is not mounted"))
+    }
+
+    fn check_erase_access(&self, disk: &str) -> Result<()> {
+        open(
+            &drive_path(disk_number(disk)?),
+            GENERIC_READ | GENERIC_WRITE,
+        )
+        .with_context(|| format!("USB access requires {ADMIN}"))?;
+        Ok(())
     }
 
     fn whole_disk(&self, usb: &Path) -> Result<Option<String>> {

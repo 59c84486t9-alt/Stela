@@ -371,6 +371,8 @@ fn mount(
 
 #[derive(Args)]
 pub(crate) struct Prepare {
+    #[arg(skip)]
+    quiet: bool,
     #[arg(long, required_unless_present = "disk", conflicts_with = "disk")]
     ipsw: Option<PathBuf>,
     /// The `Ap,ProductType`, such as Mac14,3.
@@ -530,9 +532,10 @@ pub(crate) fn prepare(arguments: &[String]) -> Result<()> {
         #[command(flatten)]
         prepare: Prepare,
     }
-    let line = <Line as clap::Parser>::try_parse_from(
+    let mut line = <Line as clap::Parser>::try_parse_from(
         std::iter::once("prepare".to_owned()).chain(arguments.iter().cloned()),
     )?;
+    line.prepare.quiet = true;
     line.prepare.run()
 }
 
@@ -1165,18 +1168,20 @@ impl Prepare {
         }
         stela_runtime::write_json(&self.output.join(MANIFEST_FILE), &written)?;
         let manifest = &bundle.manifest;
-        eprintln!(
-            "{} {} {}: {} regions to {:#x}; entry {} at {:#x}, x0 {:#x}; {}",
-            manifest.target.product_type,
-            manifest.target.product_build,
-            manifest.target.variant,
-            manifest.regions.len(),
-            manifest.top_of_kernel_data,
-            manifest.entry.image,
-            manifest.entry.physical_address,
-            manifest.entry_x0,
-            self.output.join(MANIFEST_FILE).display()
-        );
+        if !self.quiet {
+            eprintln!(
+                "{} {} {}: {} regions to {:#x}; entry {} at {:#x}, x0 {:#x}; {}",
+                manifest.target.product_type,
+                manifest.target.product_build,
+                manifest.target.variant,
+                manifest.regions.len(),
+                manifest.top_of_kernel_data,
+                manifest.entry.image,
+                manifest.entry.physical_address,
+                manifest.entry_x0,
+                self.output.join(MANIFEST_FILE).display()
+            );
+        }
         Ok(())
     }
 }

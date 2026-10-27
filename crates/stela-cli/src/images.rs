@@ -12,7 +12,7 @@ pub(crate) enum ImagesCommand {
         model: Option<String>,
     },
     Fetch {
-        /// Omit to select the newest unambiguous version in Apple's catalog.
+        /// Omit to select the newest unambiguous signed release in the catalog.
         #[arg(long)]
         build: Option<String>,
         #[arg(long)]

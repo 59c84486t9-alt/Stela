@@ -13,7 +13,7 @@ use anyhow::{Result, bail, ensure};
 use stela_runtime::pc::gpt::{self, Guid, Partition};
 
 /// The EFI system partition diskutil makes.
-const ESP_BYTES: u64 = 200 << 20;
+pub(super) const ESP_BYTES: u64 = 200 << 20;
 /// Partitions start on 1 MiB boundaries.
 const ALIGNMENT: u64 = 1 << 20;
 /// The Microsoft basic data partition type of a FAT volume.

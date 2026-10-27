@@ -74,6 +74,7 @@ pub(crate) struct Partition {
 pub(crate) struct Disk {
     pub(crate) identifier: String,
     pub(crate) name: String,
+    pub(crate) bytes: u64,
     pub(crate) internal: bool,
     /// It holds the volume this computer runs from.
     pub(crate) system: bool,
@@ -124,6 +125,10 @@ pub(crate) trait Host {
     fn mount(&self, identifier: &str) -> Result<PathBuf>;
     /// This computer's CPU, for a disk it boots itself.
     fn cpu(&self) -> Result<Cpu>;
+    /// Check write access before downloading or signing for a whole USB.
+    fn check_erase_access(&self, _disk: &str) -> Result<()> {
+        Ok(())
+    }
     /// Erase whole disk `disk` into a GPT with an EFI partition and a FAT32
     /// volume named `name` on the rest, mounted.
     fn erase(&self, disk: &str, name: &str) -> Result<()> {
