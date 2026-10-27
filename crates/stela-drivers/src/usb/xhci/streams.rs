@@ -667,6 +667,8 @@ mod tests {
         commands: Vec<(u32, u16, u64)>,
         fail_command: Option<(u32, u16)>,
         silent_command: Option<u32>,
+        /// A silenced command, keeping CRCR.CRR set until it is aborted.
+        stuck: Option<u64>,
         fatal: bool,
         cadence: bool,
         /// Reset Endpoint commands with Transfer State Preserve.
@@ -703,6 +705,13 @@ mod tests {
             }
             self.event_index += 1;
         }
+        /// A command abort: the stuck command completes aborted, then the ring stops.
+        fn abort(&mut self) {
+            if let Some(at) = self.stuck.take() {
+                self.event(at, COMMAND_ABORTED, COMMAND_COMPLETION, 0, 0);
+                self.event(0, COMMAND_RING_STOPPED, COMMAND_COMPLETION, 0, 0);
+            }
+        }
         fn command(&mut self) {
             let address = self.command_base + (self.command_index * TRB) as u64;
             let parameter = Self::long(address);
@@ -714,6 +723,7 @@ mod tests {
             self.commands.push((kind, stream, parameter));
             self.command_index = (self.command_index + 1) % (RING_TRBS - 1);
             if self.silent_command == Some(kind) {
+                self.stuck = Some(address);
                 return;
             }
             let mut code = if self.fail_command == Some((kind, stream)) {
@@ -902,12 +912,15 @@ mod tests {
         fn read32(&mut self, offset: usize) -> u32 {
             if offset == 0x40 + USBSTS && self.0.borrow().fatal {
                 HSE
+            } else if offset == 0x40 + CRCR && self.0.borrow().stuck.is_some() {
+                CRCR_RUNNING
             } else {
                 0
             }
         }
         fn write32(&mut self, offset: usize, value: u32) {
             match offset {
+                0x58 if value & CRCR_ABORT != 0 => self.0.borrow_mut().abort(),
                 0x1000 => self.0.borrow_mut().command(),
                 0x1004 => self
                     .0
@@ -950,6 +963,7 @@ mod tests {
             commands: Vec::new(),
             fail_command: None,
             silent_command: None,
+            stuck: None,
             fatal: false,
             cadence: false,
             soft_resets: 0,
@@ -1014,6 +1028,7 @@ mod tests {
                 pending: Vec::new(),
                 error: None,
                 command_poisoned: false,
+                command_ring_stopped: false,
                 location: String::from("stream model"),
             },
             model,
@@ -1041,6 +1056,7 @@ mod tests {
             commands: Vec::new(),
             fail_command: None,
             silent_command: None,
+            stuck: None,
             fatal: false,
             cadence: false,
             soft_resets: 0,
@@ -1769,7 +1785,8 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(!transfer.enabled && transfer.poisoned && transfer.streams.is_some());
-        assert!(controller.command_poisoned);
+        // The aborted command leaves the command ring usable.
+        assert!(!controller.command_poisoned);
         let data = dma.allocate(64, 64).unwrap();
         assert!(
             controller

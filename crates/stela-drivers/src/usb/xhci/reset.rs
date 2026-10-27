@@ -486,6 +486,9 @@ pub(crate) mod tests {
         pub reset_writes: usize,
         pub accesses: usize,
         pub trap_mmio: bool,
+        /// An unanswered command keeps CRCR.CRR set; aborts are ignored, so a
+        /// timeout finds the host dead.
+        stuck: Option<u64>,
         pub fault: Fault,
         pub hang_next: bool,
         pub device_task: bool,
@@ -538,6 +541,9 @@ pub(crate) mod tests {
             }
         }
         fn event(&mut self, parameter: u64, status: u32, kind: u32, slot: u8, dci: u8) {
+            if kind == COMMAND_COMPLETION && self.stuck == Some(parameter) {
+                self.stuck = None;
+            }
             let index = self.event_count % RING_TRBS;
             let cycle = if (self.event_count / RING_TRBS) & 1 == 0 {
                 1
@@ -558,6 +564,7 @@ pub(crate) mod tests {
         }
         fn command(&mut self) {
             let (at, parameter, status, control) = Self::take(&mut self.commands);
+            self.stuck = Some(at);
             let kind = control >> 10 & 63;
             let slot = (control >> 24) as u8;
             let dci = (control >> 16 & 31) as u8;
@@ -1097,6 +1104,8 @@ pub(crate) mod tests {
                 } else {
                     0
                 }
+            } else if offset == 0x40 + CRCR {
+                if s.stuck.is_some() { CRCR_RUNNING } else { 0 }
             } else if offset == 0x40 + PORTSC {
                 if s.fault == Fault::ChangeAfterReset
                     && s.resets > 0
@@ -1286,6 +1295,7 @@ pub(crate) mod tests {
             reset_writes: 0,
             accesses: 0,
             trap_mmio: false,
+            stuck: None,
             fault: Fault::None,
             hang_next: false,
             device_task: false,
@@ -1339,6 +1349,7 @@ pub(crate) mod tests {
             pending: Vec::new(),
             error: None,
             command_poisoned: false,
+            command_ring_stopped: false,
             location: "reset model".into(),
         };
         let mut device = controller

@@ -446,7 +446,9 @@ fn failed_or_uncertain_hub_configuration_never_sends_depth_or_power() {
             .as_ref()
             .unwrap();
         assert!(!endpoint.enabled && endpoint.poisoned);
-        assert_eq!(controller.command_poisoned, silent);
+        // A Configure Endpoint that never completes is aborted; the command
+        // ring carries on.
+        assert!(!controller.command_poisoned);
     }
 }
 

@@ -331,6 +331,8 @@ pub(in super::super) struct Hardware {
     pub commands: Vec<(u32, u8)>,
     pub fail: Option<(u32, u8)>,
     pub silent: Option<(u32, u8)>,
+    /// A silenced command, keeping CRCR.CRR set until it is aborted.
+    stuck: Option<u64>,
     pub outgoing: Vec<Vec<u8>>,
     pub loss_after_child_route: Option<u32>,
     pub silent_configuration: Option<u8>,
@@ -364,6 +366,7 @@ impl Hardware {
             commands: Vec::new(),
             fail: None,
             silent: None,
+            stuck: None,
             outgoing: Vec::new(),
             loss_after_child_route: None,
             silent_configuration: None,
@@ -411,6 +414,13 @@ impl Hardware {
         );
         self.events += 1;
     }
+    /// A command abort: the stuck command completes aborted, then the ring stops.
+    fn abort(&mut self) {
+        if let Some(at) = self.stuck.take() {
+            self.event(at, COMMAND_ABORTED, COMMAND_COMPLETION, 0, 0, 0);
+            self.event(0, COMMAND_RING_STOPPED, COMMAND_COMPLETION, 0, 0, 0);
+        }
+    }
     fn command(&mut self) {
         let (at, parameter, _, control) = self.command.as_mut().unwrap().next();
         let kind = control >> 10 & 0x3f;
@@ -418,6 +428,7 @@ impl Hardware {
         let dci = (control >> 16 & 31) as u8;
         self.commands.push((kind, slot));
         if self.silent == Some((kind, slot)) {
+            self.stuck = Some(at);
             return;
         }
         let code = if self.fail == Some((kind, slot)) {
@@ -965,6 +976,7 @@ impl Registers for RegistersModel {
                 if state.running { 0 } else { HCH }
             }
             0x48 => 1,
+            0x58 if state.stuck.is_some() => CRCR_RUNNING,
             0x80 => {
                 (if state.nodes[&0].speed >= SUPER_SPEED {
                     3
@@ -984,6 +996,9 @@ impl Registers for RegistersModel {
         let mut state = self.0.borrow_mut();
         state.mmio_writes += 1;
         state.registers.insert(at, value);
+        if at == 0x40 + CRCR && value & CRCR_ABORT != 0 {
+            state.abort();
+        }
         if at == 0x440 {
             let actual_speed = state.nodes[&0].speed;
             if let Some(status) = state.root_status.as_mut() {

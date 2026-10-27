@@ -126,6 +126,8 @@ const ERSTBA: usize = 0x30;
 const ERDP: usize = 0x38;
 
 const RUN: u32 = 1;
+const CRCR_ABORT: u32 = 1 << 2;
+const CRCR_RUNNING: u32 = 1 << 3;
 const HCRST: u32 = 1 << 1;
 const HCH: u32 = 1;
 const HSE: u32 = 1 << 2;
@@ -189,6 +191,7 @@ const EVALUATE_CONTEXT: u32 = 13;
 const RESET_ENDPOINT: u32 = 14;
 pub(crate) const STOP_ENDPOINT: u32 = 15;
 pub(crate) const SET_DEQUEUE: u32 = 16;
+const NO_OP_COMMAND: u32 = 23;
 const TRANSFER_EVENT: u32 = 32;
 const COMMAND_COMPLETION: u32 = 33;
 
@@ -196,6 +199,8 @@ pub const SUCCESS: u32 = 1;
 pub const STALL: u32 = 6;
 pub const SHORT_PACKET: u32 = 13;
 pub(crate) const CONTEXT_STATE_ERROR: u32 = 19;
+const COMMAND_RING_STOPPED: u32 = 24;
+const COMMAND_ABORTED: u32 = 25;
 const ENDPOINT_RUNNING: u32 = 1;
 const ENDPOINT_HALTED: u32 = 2;
 const ENDPOINT_STOPPED: u32 = 3;
@@ -248,6 +253,10 @@ const CONFIGURATION_INVENTORY_BYTES: usize = 64 * 1024;
 const RESET_US: u64 = 1_000_000;
 const HALT_US: u64 = 20_000;
 const COMMAND_US: u64 = 5_000_000;
+/// Linux xhci_abort_cmd_ring: CRR must clear within five seconds and the
+/// Command Ring Stopped event follow within two.
+const ABORT_US: u64 = 5_000_000;
+const RING_STOP_US: u64 = 2_000_000;
 const CONTROL_US: u64 = 5_000_000;
 const PORT_RESET_US: u64 = 500_000;
 const RESET_RECOVERY_US: u64 = 10_000;
@@ -444,7 +453,18 @@ pub struct Controller {
     /// An unacknowledged command still owns its ring entry. Never wrap/reuse
     /// that entry or mutate command-dependent DMA without a controller reset.
     command_poisoned: bool,
+    /// Linux CMD_RING_STATE_ABORTED: an abort got no Command Ring Stopped
+    /// event, so the ring is not rung until a command times out.
+    command_ring_stopped: bool,
     pub location: String,
+}
+
+/// What a command timeout left: its own completion, a restarted ring to wait
+/// on, or a No Op standing in for the aborted command.
+enum Timeout {
+    Completed(Event),
+    Waiting,
+    Retired,
 }
 
 /// A controller shared by the class drivers of its devices.
@@ -678,6 +698,7 @@ impl Controller {
             pending: Vec::new(),
             error: None,
             command_poisoned: false,
+            command_ring_stopped: false,
             location,
         })
     }
@@ -851,14 +872,25 @@ impl Controller {
         self.ready()?;
         self.sync_command_buffers()?;
         let address = self.commands.push(&[(parameter, status, control)])?[0];
-        self.doorbell(0, 0);
-        let event = match self.wait_event(COMMAND_US, |e| {
-            e.kind() == COMMAND_COMPLETION && e.parameter == address
-        }) {
-            Ok(event) => event,
-            Err(error) => {
-                self.command_poisoned = true;
-                return Err(error);
+        // Linux xhci_ring_cmd_db rings only a running command ring.
+        if !self.command_ring_stopped {
+            self.doorbell(0, 0);
+        }
+        let mut retired = false;
+        let event = loop {
+            match self.wait_event(COMMAND_US, |e| {
+                e.kind() == COMMAND_COMPLETION && e.parameter == address
+            }) {
+                Ok(event) => break event,
+                Err(BlockError::Timeout) => match self.command_timeout(address, control)? {
+                    Timeout::Completed(event) => break event,
+                    Timeout::Waiting => {}
+                    Timeout::Retired => retired = true,
+                },
+                Err(error) => {
+                    self.command_poisoned = true;
+                    return Err(error);
+                }
             }
         };
         // wait_event may have observed both a completion and fatal USBSTS.
@@ -867,10 +899,87 @@ impl Controller {
             self.command_poisoned = true;
             return Err(BlockError::Device { status });
         }
+        // An aborted command turned No Op reports Command Ring Stopped.
+        if retired {
+            return Err(BlockError::Timeout);
+        }
         match event.code() {
             SUCCESS => Ok(event),
             status => Err(BlockError::Device { status }),
         }
+    }
+
+    /// Linux xhci_handle_command_timeout for the one outstanding command.
+    fn command_timeout(&mut self, address: u64, control: u32) -> Result<Timeout, BlockError> {
+        // A Stop Endpoint the controller never answers means the host died.
+        if control >> 10 & 0x3f == STOP_ENDPOINT {
+            self.died();
+            return Err(BlockError::Timeout);
+        }
+        let at = self.operational + CRCR;
+        let low = self.registers.read32(at);
+        if u64::from(low) | u64::from(self.registers.read32(at + 4)) << 32 == u64::MAX {
+            self.died();
+            return Err(BlockError::Timeout);
+        }
+        if self.command_ring_stopped || low & CRCR_RUNNING == 0 {
+            // xhci_handle_stopped_cmd_ring: restart the ring and wait again.
+            self.command_ring_stopped = false;
+            self.doorbell(0, 0);
+            return Ok(Timeout::Waiting);
+        }
+        // xhci_abort_cmd_ring. The upper half names the next command, so a
+        // ring that stops before it is written keeps a valid pointer.
+        self.registers
+            .write64(at, self.commands.address() | u64::from(CRCR_ABORT));
+        if hardware::handshake(
+            &mut *self.registers,
+            self.clock,
+            self.operational,
+            CRCR,
+            CRCR_RUNNING,
+            0,
+            ABORT_US,
+        )
+        .is_err()
+        {
+            self.died();
+            return Err(BlockError::Timeout);
+        }
+        match self.wait_event(RING_STOP_US, |e| {
+            e.kind() == COMMAND_COMPLETION && e.code() == COMMAND_RING_STOPPED
+        }) {
+            Ok(_) => {}
+            // xhci_cleanup_command_queue: the command is reported aborted.
+            Err(BlockError::Timeout) => {
+                self.command_ring_stopped = true;
+                return Err(BlockError::Timeout);
+            }
+            Err(error) => {
+                self.command_poisoned = true;
+                return Err(error);
+            }
+        }
+        // Its completion precedes Command Ring Stopped unless the controller
+        // had not fetched it; a completion that raced the abort stands.
+        match self.take(|e| e.kind() == COMMAND_COMPLETION && e.parameter == address) {
+            Some(event) if event.code() == COMMAND_ABORTED => Err(BlockError::Timeout),
+            Some(event) => Ok(Timeout::Completed(event)),
+            None => {
+                // xhci_handle_stopped_cmd_ring: it becomes a No Op, which the
+                // restarted ring retires.
+                self.commands.no_op(address)?;
+                self.doorbell(0, 0);
+                Ok(Timeout::Retired)
+            }
+        }
+    }
+
+    /// Linux xhci_halt and xhci_hc_died: no further command or transfer.
+    fn died(&mut self) {
+        self.command_poisoned = true;
+        self.hardware = hardware::State::Died;
+        let _ = hardware::halt(&mut *self.registers, self.clock, self.operational, HALT_US);
     }
 
     fn port_offset(&self, port: u8) -> usize {
@@ -1225,6 +1334,54 @@ mod tests {
         assert_eq!(controller.commands.buffer.bytes(), command_bytes);
         assert_eq!(model.borrow().setup.len(), setup_count);
         assert_eq!(model.borrow().seen.len(), command_count);
+    }
+
+    #[test]
+    fn timed_out_commands_are_aborted_like_linux() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: exclusive live test DMA through controller/model use.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut c, model) = cancellation_controller(&mut dma);
+        let stuck = |c: &mut Controller, reply| {
+            {
+                let mut model = model.borrow_mut();
+                model.silence = Some(EVALUATE_CONTEXT);
+                model.abort_reply = reply;
+                model.seen.clear();
+            }
+            let result = c.command(0, 0, EVALUATE_CONTEXT << 10 | 1 << 24);
+            model.borrow_mut().silence = None;
+            result.map(|_| ())
+        };
+        // Aborted: the caller times out and the ring keeps serving commands.
+        assert_eq!(stuck(&mut c, AbortReply::Aborted), Err(BlockError::Timeout));
+        assert!(!c.command_poisoned && !c.command_ring_stopped);
+        c.command(0, 0, EVALUATE_CONTEXT << 10 | 1 << 24).unwrap();
+        // A completion that raced the abort stands.
+        assert!(stuck(&mut c, AbortReply::Completed).is_ok());
+        // An unfetched command becomes a No Op the restarted ring retires.
+        assert_eq!(
+            stuck(&mut c, AbortReply::Unfetched),
+            Err(BlockError::Timeout)
+        );
+        assert_eq!(model.borrow().seen, [EVALUATE_CONTEXT, NO_OP_COMMAND]);
+        // No Command Ring Stopped: the ring is rung again only once the next
+        // command times out.
+        assert_eq!(
+            stuck(&mut c, AbortReply::Unstopped),
+            Err(BlockError::Timeout)
+        );
+        assert!(c.command_ring_stopped && !c.command_poisoned);
+        model.borrow_mut().seen.clear();
+        c.command(0, 0, EVALUATE_CONTEXT << 10 | 1 << 24).unwrap();
+        assert_eq!(model.borrow().seen, [EVALUATE_CONTEXT]);
+        assert!(!c.command_ring_stopped);
+        // CRR never clears: the host died.
+        assert_eq!(stuck(&mut c, AbortReply::Ignored), Err(BlockError::Timeout));
+        assert!(c.command_poisoned);
+        assert!(matches!(c.hardware, hardware::State::Died));
+        assert!(c.command(0, 0, EVALUATE_CONTEXT << 10 | 1 << 24).is_err());
     }
 
     #[test]

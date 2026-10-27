@@ -295,6 +295,7 @@ fn address_controller_with_capabilities(
         pending: Vec::new(),
         error: None,
         command_poisoned: false,
+        command_ring_stopped: false,
         location: String::from("test xhci"),
     };
     model.borrow_mut().dcbaa = controller.dcbaa.physical();
@@ -306,6 +307,21 @@ fn address_controller_with_capabilities(
 /// accepts Stopped. It can leave DMA active on command failure.
 pub(crate) type ControlScript =
     alloc::collections::VecDeque<(Vec<u8>, Vec<(crate::usb::bluetooth::Pipe, Vec<u8>)>)>;
+
+/// How the model answers a command abort (xHCI 4.6.1.2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbortReply {
+    /// Command Aborted, then Command Ring Stopped.
+    Aborted,
+    /// The command completed first; then Command Ring Stopped.
+    Completed,
+    /// The command was never fetched; only Command Ring Stopped.
+    Unfetched,
+    /// CRR clears but no event follows.
+    Unstopped,
+    /// CRR never clears.
+    Ignored,
+}
 
 pub(crate) struct CancelModel {
     pub(crate) port_speed: u8,
@@ -337,6 +353,9 @@ pub(crate) struct CancelModel {
     pub(crate) fatal_on_command: Option<u32>,
     pub(crate) silence_transfer: Option<usize>,
     pub(crate) halt_transfer: Option<usize>,
+    /// A silenced command, keeping CRCR.CRR set until it is aborted.
+    pub(crate) stuck: Option<u64>,
+    pub(crate) abort_reply: AbortReply,
     /// Transaction errors each endpoint reports before transferring.
     pub(crate) transaction_errors: [usize; 32],
     /// Endpoints reset with Transfer State Preserve, in order.
@@ -439,6 +458,7 @@ impl CancelModel {
         let dci = (control >> 16 & 0x1f) as usize;
         self.seen.push(kind);
         if self.silence == Some(kind) {
+            self.stuck = Some(at);
             return;
         }
         let mut code = SUCCESS;
@@ -509,6 +529,23 @@ impl CancelModel {
             self.fatal_status = HSE;
         }
         self.event(at, code, COMMAND_COMPLETION, 0, 0);
+    }
+    /// A command abort: the stuck command completes aborted, then the ring stops.
+    pub(crate) fn abort(&mut self) {
+        if self.abort_reply == AbortReply::Ignored {
+            return;
+        }
+        let Some(at) = self.stuck.take() else {
+            return;
+        };
+        match self.abort_reply {
+            AbortReply::Aborted => self.event(at, COMMAND_ABORTED, COMMAND_COMPLETION, 0, 0),
+            AbortReply::Completed => self.event(at, SUCCESS, COMMAND_COMPLETION, 0, 0),
+            // The next doorbell fetches it again.
+            AbortReply::Unfetched => self.command_index -= 1,
+            AbortReply::Unstopped | AbortReply::Ignored => return,
+        }
+        self.event(0, COMMAND_RING_STOPPED, COMMAND_COMPLETION, 0, 0);
     }
     pub(crate) fn scripted(&mut self, bulk: bool, packet: &[u8]) {
         use crate::usb::bluetooth::Pipe;
@@ -742,6 +779,13 @@ pub(crate) struct CancelRegisters(Rc<RefCell<CancelModel>>);
 impl Registers for CancelRegisters {
     fn read32(&mut self, offset: usize) -> u32 {
         let mut model = self.0.borrow_mut();
+        if offset == 0x40 + CRCR {
+            return if model.stuck.is_some() {
+                CRCR_RUNNING
+            } else {
+                0
+            };
+        }
         if offset == 0x40 + PORTSC {
             return PP
                 | u32::from(model.port_speed) << PORT_SPEED_SHIFT
@@ -765,7 +809,9 @@ impl Registers for CancelRegisters {
         0
     }
     fn write32(&mut self, offset: usize, value: u32) {
-        if offset == 0x1000 {
+        if offset == 0x40 + CRCR && value & CRCR_ABORT != 0 {
+            self.0.borrow_mut().abort();
+        } else if offset == 0x1000 {
             self.0.borrow_mut().command();
         } else if offset == 0x1004 {
             self.0.borrow_mut().transfer(value as usize);
@@ -894,6 +940,8 @@ fn cancellation_controller_with_context(
         fatal_on_command: None,
         silence_transfer: None,
         halt_transfer: None,
+        stuck: None,
+        abort_reply: AbortReply::Aborted,
         transaction_errors: [0; 32],
         soft_resets: Vec::new(),
         script: None,

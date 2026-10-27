@@ -89,6 +89,18 @@ impl Ring {
         self.address() | u64::from(self.cycle)
     }
 
+    /// Linux trb_to_noop: a command the controller never fetched becomes a
+    /// No Op Command with its cycle bit kept.
+    pub(super) fn no_op(&mut self, address: u64) -> Result<(), BlockError> {
+        let at = (address - self.buffer.device_address()) as usize;
+        let cycle = self.buffer.read::<u32>(at + 12) & CYCLE;
+        self.buffer.write(at, 0u64);
+        self.buffer.write(at + 8, 0u32);
+        fence(Ordering::Release);
+        self.buffer.write(at + 12, NO_OP_COMMAND << 10 | cycle);
+        self.buffer.sync_device(at..at + TRB)
+    }
+
     /// Writes one TD, its first TRB owned last, and returns each TRB's
     /// address.
     pub(super) fn push(&mut self, trbs: &[(u64, u32, u32)]) -> Result<Vec<u64>, BlockError> {

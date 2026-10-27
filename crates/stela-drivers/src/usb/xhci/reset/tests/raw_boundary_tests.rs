@@ -61,6 +61,7 @@ fn unpublished_profile(
         reset_writes: 0,
         accesses: 0,
         trap_mmio: false,
+        stuck: None,
         fault: Fault::None,
         hang_next: false,
         device_task: false,
@@ -114,6 +115,7 @@ fn unpublished_profile(
         pending: Vec::new(),
         error: None,
         command_poisoned: false,
+        command_ring_stopped: false,
         location: "reset model".into(),
     };
     let slot = controller.address(attachment(speed), &mut dma).unwrap();
