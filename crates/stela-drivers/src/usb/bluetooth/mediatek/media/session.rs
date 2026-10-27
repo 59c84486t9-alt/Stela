@@ -3,12 +3,24 @@
 //! Shared MT7925 media and Realtek CVSD SCO owner. Stream retirement never authorizes a shared
 //! connectivity reset, power transition or Wi-Fi sibling retirement.
 use super::{Bindings, Error, Kind, Pair, Result, Voice, framing};
+use crate::usb::bluetooth::mediatek::{coredump::Collector, packet::DUMP_HANDLE};
 use crate::{
     block::BlockError,
     bus::dma::DmaAllocator,
     usb::bluetooth::{Hci, InitializationReport, Io, Packet, State},
 };
 use alloc::vec::Vec;
+
+/// The MediaTek dump collector for a validated MediaTek initialization.
+fn collector<B: Io>(hci: &Hci<B>) -> Option<Collector> {
+    match hci.initialization() {
+        Some(Ok(InitializationReport::MediaTek(report))) => Some(Collector::new(
+            report.identity.device_id,
+            report.identity.firmware_version,
+        )),
+        _ => None,
+    }
+}
 
 /// One completed media USB observation. Loss is explicit, never a successful
 /// empty packet; the backend may reuse DMA only after a terminal completion.
@@ -100,6 +112,8 @@ pub struct Session<B: MediaIo> {
     sco_frames: framing::Framer,
     iso_frames: framing::Framer,
     pending: Vec<Received>,
+    /// MediaTek firmware dump assembly; other vendors have none.
+    coredump: Option<Collector>,
     lifecycle: Lifecycle,
     setup: Option<SetupReport>,
     last_reset: Option<SetupReport>,
@@ -115,6 +129,7 @@ impl<B: MediaIo> Session<B> {
         let result = Self::prepare(&mut hci, dma, command_credits);
         match result {
             Ok((bindings, setup, pending)) => Ok(Self {
+                coredump: collector(&hci),
                 hci,
                 bindings,
                 setup: Some(setup),
@@ -176,6 +191,7 @@ impl<B: MediaIo> Session<B> {
         })();
         match result {
             Ok(bindings) => Ok(Self {
+                coredump: None,
                 hci,
                 bindings,
                 sco: None,
@@ -516,6 +532,24 @@ impl<B: MediaIo> Session<B> {
                 .into_iter()
                 .map(Received::Hci),
         );
+        // btmtk_usb_recv_acl forwards each dump frame as a diagnostic and
+        // also feeds btmtk_process_coredump.
+        if let Some(collector) = self.coredump.as_mut() {
+            let now = self.hci.io.now_us();
+            let mut ended = collector.expire(now);
+            for received in &output {
+                if let Received::Hci(Packet::Diagnostic(frame)) = received
+                    && frame.len() >= 2
+                    && u16::from_le_bytes([frame[0], frame[1]]) == DUMP_HANDLE
+                    && ended.is_none()
+                {
+                    ended = collector.feed(frame, now);
+                }
+            }
+            if let Some(dump) = ended {
+                return Err(self.fail(Error::ControllerDump(alloc::boxed::Box::new(dump))));
+            }
+        }
         for kind in [Kind::Iso, Kind::Sco] {
             if kind == Kind::Iso && !self.bindings.has_iso() {
                 continue;

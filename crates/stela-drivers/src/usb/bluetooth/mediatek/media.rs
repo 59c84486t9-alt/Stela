@@ -37,6 +37,10 @@ pub enum Error {
         status: u8,
         event: alloc::vec::Vec<u8>,
     },
+    /// The controller crashed and its memory dump ended. Linux resets the
+    /// controller now; without the shared subsystem reset this attachment
+    /// needs a fresh rebind.
+    ControllerDump(alloc::boxed::Box<super::coredump::Coredump>),
     Cleanup {
         cause: alloc::boxed::Box<Error>,
         media: Option<BlockError>,
@@ -135,6 +139,7 @@ pub(in crate::usb::bluetooth) mod tests {
     #[derive(Default)]
     struct Model {
         events: VecDeque<Vec<u8>>,
+        acl: VecDeque<Vec<u8>>,
         sco: VecDeque<Read>,
         iso: VecDeque<Read>,
         writes: Vec<(Kind, Vec<u8>)>,
@@ -193,10 +198,9 @@ pub(in crate::usb::bluetooth) mod tests {
             Ok(())
         }
         fn receive(&mut self, p: Pipe) -> core::result::Result<Option<Vec<u8>>, BlockError> {
-            Ok(if p == Pipe::Event {
-                self.events.pop_front()
-            } else {
-                None
+            Ok(match p {
+                Pipe::Event => self.events.pop_front(),
+                Pipe::Acl => self.acl.pop_front(),
             })
         }
         fn write_acl(&mut self, _: &[u8]) -> core::result::Result<(), BlockError> {
@@ -373,6 +377,49 @@ pub(in crate::usb::bluetooth) mod tests {
             r.identity.chip = super::super::Chip::Mt7922;
         }
         assert!(Session::start(wrong, &mut NoDma, 1).is_err());
+    }
+    #[test]
+    fn a_firmware_dump_is_delivered_as_diagnostics_then_ends_the_session() {
+        use super::super::coredump::End;
+        use crate::usb::bluetooth::Packet;
+        let dump = |payload: &[u8]| {
+            let mut frame = vec![0x6f, 0xfc];
+            frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            frame.extend_from_slice(payload);
+            frame
+        };
+        let ended = |error| match error {
+            Error::Cleanup { cause, .. } => match *cause {
+                Error::ControllerDump(dump) => *dump,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        s.poll().unwrap();
+        for index in 0..255u8 {
+            s.hci.io.acl.push_back(dump(&[index; 4]));
+            assert_eq!(
+                s.poll().unwrap(),
+                [Received::Hci(Packet::Diagnostic(dump(&[index; 4])))]
+            );
+        }
+        s.hci.io.acl.push_back(dump(b"coredump end\0"));
+        let dump = ended(s.poll().unwrap_err());
+        assert_eq!((dump.end, dump.frames), (End::Complete, 256));
+        assert_eq!(dump.device_id, 0x7925);
+        assert_eq!(s.lifecycle(), Lifecycle::Failed);
+        assert!(s.hci.io.actions.ends_with(&["media-close", "base-close"]));
+
+        // A dump that stalls ends after five seconds without new frames.
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        s.poll().unwrap();
+        s.hci.io.acl.push_back(vec![0x6f, 0xfc, 1, 0, 1]);
+        s.poll().unwrap();
+        s.hci.io.now.set(s.hci.io.now.get() + 5_000_000);
+        let dump = ended(s.poll().unwrap_err());
+        assert_eq!((dump.end, dump.frames), (End::Timeout, 1));
     }
     #[test]
     fn media_loss_alt_transition_and_quiescence_never_reassemble_old_partial() {

@@ -9,6 +9,7 @@
 //! Each function retains its genuine resource owner. Neither USB IDs nor an
 //! initializer/media close grants shared CONNV3 reset authority;
 //! automatic shared recovery/retry remains unsupported while siblings may live.
+pub mod coredump;
 mod firmware;
 mod identity;
 mod initialize;
