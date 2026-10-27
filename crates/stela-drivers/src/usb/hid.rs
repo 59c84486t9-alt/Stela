@@ -273,7 +273,14 @@ impl UsbInput {
                     index,
                     0,
                 );
-                c.device(device.id)?.control(request, &[])?;
+                // Linux usbhid sends no SET_PROTOCOL: report protocol is the
+                // default after reset, so a device refusing to confirm it
+                // still works. Boot fallback depends on the switch.
+                match c.device(device.id)?.control(request, &[]) {
+                    Ok(_) => {}
+                    Err(BlockError::Device { status: STALL }) if protocol == REPORT_PROTOCOL => {}
+                    Err(error) => return Err(error),
+                }
                 // Reports on change only; a device may refuse.
                 match c.device(device.id)?.control(
                     setup(TYPE_CLASS | RECIPIENT_INTERFACE, SET_IDLE, 0, index, 0),
@@ -942,6 +949,52 @@ mod tests {
         assert_eq!(hardware.borrow().seen.len(), commands);
         assert_eq!(input.first_error(), error);
         assert!(shared.borrow().endpoint_poisoned(1, 3));
+    }
+
+    #[test]
+    fn a_refused_report_protocol_switch_keeps_the_interface_but_boot_fallback_fails() {
+        let keyboard = super::tests::NUMBERED_KEYBOARD;
+        for described in [true, false] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: live exclusive test allocation bounds every controller DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, hardware) = model::cancellation_controller(&mut dma);
+            if described {
+                hardware
+                    .borrow_mut()
+                    .descriptors
+                    .push((REPORT_DESCRIPTOR, 0, keyboard.to_vec()));
+            }
+            hardware.borrow_mut().stall_control = Some(SET_PROTOCOL);
+            let shared: Shared = Rc::new(RefCell::new(controller));
+            let interface = interface(&keyboard, BOOT, KEYBOARD);
+            let input = UsbInput::new(
+                shared.clone(),
+                &device(&shared),
+                &interface,
+                interface.endpoints[0],
+                &mut dma,
+            );
+            if !described {
+                // Without a usable descriptor only boot reports can be read.
+                assert_eq!(input.err(), Some(BlockError::Device { status: STALL }));
+                continue;
+            }
+            let mut input = input.unwrap().unwrap();
+            hardware.borrow_mut().stall_control = None;
+            hardware
+                .borrow_mut()
+                .incoming_events
+                .push_back(vec![1, 0, 0, 4, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                input.poll(),
+                [Input::Key {
+                    usage: 4,
+                    pressed: true
+                }]
+            );
+        }
     }
 
     #[test]
