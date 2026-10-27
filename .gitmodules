@@ -18,11 +18,3 @@
 	path = third_party/libdrm
 	url = https://gitlab.freedesktop.org/mesa/drm.git
 	shallow = true
-[submodule "venus-protocol"]
-	path = third_party/venus-protocol
-	url = https://gitlab.freedesktop.org/virgl/venus-protocol.git
-	shallow = true
-[submodule "virglrenderer"]
-	path = third_party/virglrenderer
-	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git
-	shallow = true
