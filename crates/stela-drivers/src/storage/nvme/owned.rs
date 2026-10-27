@@ -452,6 +452,8 @@ unsafe fn attach_with_timeout(
         }),
         teardown: Teardown::Unadmitted,
         ready_timeout_us: 500_000,
+        configuration: CONFIGURATION_VALUE & !ENABLE,
+        independent_identify: false,
         version: 0,
         scans: 0,
         retry_delays: [0; 3],
@@ -766,6 +768,9 @@ mod tests {
         event_request: Option<u32>,
         event_configs: Vec<u32>,
         logs: Vec<u32>,
+        /// The namespace's command set and NSTAT.NRDY.
+        csi: u8,
+        not_ready: bool,
         prepared: bool,
         bme: bool,
         enabled: bool,
@@ -838,6 +843,8 @@ mod tests {
                 event_request: None,
                 event_configs: Vec::new(),
                 logs: Vec::new(),
+                csi: 0,
+                not_ready: false,
                 prepared: false,
                 bme: false,
                 enabled: false,
@@ -1029,6 +1036,12 @@ mod tests {
                             }
                         }
                         2 => data[..4].copy_from_slice(&1u32.to_le_bytes()),
+                        3 => {
+                            data[..4].copy_from_slice(&[1, 8, 0, 0]);
+                            data[4..12].copy_from_slice(&self.eui64);
+                            data[12..17].copy_from_slice(&[4, 1, 0, 0, self.csi]);
+                        }
+                        8 => data[14] = u8::from(!self.not_ready),
                         0 => {
                             assert_eq!(command[1], 1);
                             data[..8].copy_from_slice(&self.blocks.to_le_bytes());
@@ -1684,6 +1697,32 @@ mod tests {
         assert!(m.event_request.is_some());
         drop(m);
         disk.retire_owned().unwrap();
+    }
+
+    #[test]
+    fn namespaces_are_scanned_like_nvme_scan_ns_with_io_command_sets() {
+        // NVMe 2.0 with I/O command sets: CC.CSS enables them all and the
+        // command-set-independent Identify Namespace reports readiness.
+        let fixture = |csi, not_ready| {
+            let f = Fixture::new();
+            let mut m = f.model.lock().unwrap();
+            m.registers.insert(4, 1 << 5 | 1 << 11);
+            m.registers.insert(8, 0x0002_0000);
+            (m.csi, m.not_ready) = (csi, not_ready);
+            drop(m);
+            f
+        };
+        // A namespace not ready is passed over, a zoned one is unsupported.
+        let attached = |f: Fixture| {
+            let a = f.attach().unwrap();
+            (a.namespaces.len(), a.failures.len())
+        };
+        assert_eq!(attached(fixture(0, true)), (0, 0));
+        assert_eq!(attached(fixture(2, false)), (0, 1));
+        let f = fixture(0, false);
+        let a = f.attach().unwrap();
+        assert_eq!(a.namespaces.len(), 1);
+        assert_eq!(f.model.lock().unwrap().registers[&0x14] >> 4 & 7, 6);
     }
 
     #[test]

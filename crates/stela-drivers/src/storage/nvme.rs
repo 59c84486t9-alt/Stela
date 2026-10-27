@@ -51,8 +51,17 @@ const VERSION_1_1: u32 = 0x0001_0100;
 /// descriptor list exists from 1.3.
 const VERSION_1_2: u32 = 0x0001_0200;
 const VERSION_1_3: u32 = 0x0001_0300;
+const VERSION_2_0: u32 = 0x0002_0000;
 /// 64-byte submission and 16-byte completion entries, 4 KiB pages, NVM set.
 const CONFIGURATION_VALUE: u32 = ENABLE | 6 << 16 | 4 << 20;
+/// CC.CSS: every I/O command set the controller supports.
+const COMMAND_SETS_ALL: u32 = 6 << 4;
+/// CAP.CSS's I/O command sets, and CAP.CRMS's CRWMS and CRIMS.
+const CAPABILITY_COMMAND_SETS: u64 = 1 << 43;
+const CAPABILITY_READY_WITH_MEDIA: u64 = 1 << 59;
+const CAPABILITY_READY_INDEPENDENT: u64 = 1 << 60;
+/// CRTO: CRWMT in its low half, in 500 ms units.
+const READY_TIMEOUTS: usize = 0x68;
 
 const ADMIN_DELETE_SUBMISSION: u8 = 0x00;
 const ADMIN_CREATE_SUBMISSION: u8 = 0x01;
@@ -112,6 +121,10 @@ const IDENTIFY_NAMESPACE: u32 = 0;
 const IDENTIFY_CONTROLLER: u32 = 1;
 const IDENTIFY_ACTIVE_NAMESPACES: u32 = 2;
 const IDENTIFY_DESCRIPTORS: u32 = 3;
+/// The command-set-independent Identify Namespace and its NSTAT.NRDY.
+const IDENTIFY_INDEPENDENT_NAMESPACE: u32 = 8;
+const INDEPENDENT_STATUS: usize = 14;
+const NAMESPACE_READY: u8 = 1;
 
 /// Identify Controller fields (NVMe Base 2.1 Figure 312).
 const CONTROLLER_SERIAL: core::ops::Range<usize> = 4..24;
@@ -173,6 +186,9 @@ const DESCRIPTOR_EUI64: u8 = 1;
 const DESCRIPTOR_NGUID: u8 = 2;
 const DESCRIPTOR_UUID: u8 = 3;
 const DESCRIPTOR_CSI: u8 = 4;
+/// Command set identifiers: NVM and zoned namespaces.
+const CSI_NVM: u8 = 0;
+const CSI_ZONED: u8 = 2;
 /// I/O to a namespace Linux's rescan removed.
 const REMOVED: BlockError = BlockError::Protocol("the NVMe namespace changed or was removed");
 
@@ -358,6 +374,10 @@ struct Controller {
     owned: Option<owned::Owner>,
     teardown: owned::Teardown,
     ready_timeout_us: u64,
+    /// CC without EN, and how long enabling may take (CAP.TO or CRTO).
+    configuration: u32,
+    /// CAP.CRMS.CRIMS: namespaces report readiness of their own.
+    independent_identify: bool,
     /// The VS register, read at discovery.
     version: u32,
     /// Queued namespace scans: one per reset and namespace-change notice.
@@ -521,7 +541,7 @@ impl Controller {
         }
         let capabilities = self.registers.read64(CAPABILITIES)?;
         self.doorbell_stride = 4usize << (capabilities >> 32 & 0xf);
-        self.ready_timeout_us = ((capabilities >> 24 & 0xff).max(1)) * 500_000;
+        self.ready_timeout_us = ready_wait_us(capabilities >> 24 & 0xff);
         if capabilities >> 37 & 1 == 0 {
             return Err(BlockError::Unsupported(
                 "NVMe controller without the NVM command set",
@@ -539,6 +559,10 @@ impl Controller {
         }
         if 4 * self.doorbell_stride + DOORBELLS > 0x2000 {
             return Err(BlockError::Unsupported("NVMe doorbell stride"));
+        }
+        self.configuration = CONFIGURATION_VALUE & !ENABLE;
+        if capabilities & CAPABILITY_COMMAND_SETS != 0 {
+            self.configuration |= COMMAND_SETS_ALL;
         }
         self.registers.write32(CONFIGURATION, 0)?;
         self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
@@ -564,8 +588,19 @@ impl Controller {
         if let Some(owner) = self.owned.as_mut() {
             owner.lifecycle.enable_dma()?;
         }
-        self.registers.write32(CONFIGURATION, CONFIGURATION_VALUE)?;
-        self.wait_status(self.ready_timeout_us, |status| {
+        // nvme_enable_ctrl: configure, then enable and wait as long as CAP.TO
+        // or a longer CRTO.CRWMT allows. CRIME stays clear, as in Linux.
+        self.registers.write32(CONFIGURATION, self.configuration)?;
+        let capabilities = self.registers.read64(CAPABILITIES)?;
+        let mut timeout = capabilities >> 24 & 0xff;
+        if capabilities & CAPABILITY_READY_WITH_MEDIA != 0 {
+            let media = self.registers.read32(READY_TIMEOUTS)? & 0xffff;
+            timeout = timeout.max(u64::from(media));
+        }
+        self.independent_identify = capabilities & CAPABILITY_READY_INDEPENDENT != 0;
+        self.registers
+            .write32(CONFIGURATION, self.configuration | ENABLE)?;
+        self.wait_status(ready_wait_us(timeout), |status| {
             status & (READY | FATAL) != 0
         })?;
         self.check_fatal()
@@ -1146,6 +1181,34 @@ impl Controller {
 
     /// Linux `nvme_identify_ns_descs`: none before NVMe 1.3. `None` when the
     /// controller refused the list; the scan then skips the namespace.
+    /// Linux `nvme_scan_ns` before it adds or validates a namespace: its
+    /// identifiers and whether the command-set-independent Identify
+    /// Namespace described it, or `None` when Linux passes it over for
+    /// refused descriptors, a command set the controller does not run, or a
+    /// namespace that is not ready.
+    fn namespace_ids(&mut self, namespace: u32) -> Result<Option<(Ids, bool)>, BlockError> {
+        let Some(ids) = self.descriptors(namespace)? else {
+            return Ok(None);
+        };
+        if ids.csi != CSI_NVM && self.configuration & COMMAND_SETS_ALL == 0 {
+            return Ok(None);
+        }
+        if self.independent_identify
+            || (ids.csi != CSI_NVM && ids.csi != CSI_ZONED)
+            || self.version >= VERSION_2_0
+        {
+            match self.identify(IDENTIFY_INDEPENDENT_NAMESPACE, namespace) {
+                Ok(data) => {
+                    let ready = data[INDEPENDENT_STATUS] & NAMESPACE_READY != 0;
+                    return Ok(ready.then_some((ids, true)));
+                }
+                Err(BlockError::Device { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some((ids, false)))
+    }
+
     fn descriptors(&mut self, namespace: u32) -> Result<Option<Ids>, BlockError> {
         if self.version < VERSION_1_3 {
             return Ok(Some(Ids::default()));
@@ -1291,6 +1354,8 @@ pub fn attach(
         owned: None,
         teardown: owned::Teardown::Unprepared,
         ready_timeout_us: 500_000,
+        configuration: CONFIGURATION_VALUE & !ENABLE,
+        independent_identify: false,
         version: 0,
         scans: 0,
         retry_delays: [0; 3],
@@ -1302,10 +1367,17 @@ pub fn attach(
     discover(controller, format!("{}", function.address), &mut { dma })
 }
 
+/// Linux `nvme_wait_ready`'s bound for a ready timeout in 500 ms units:
+/// whole seconds, rounded up.
+fn ready_wait_us(units: u64) -> u64 {
+    units.div_ceil(2) * MICROSECONDS_PER_SECOND
+}
+
 pub(crate) fn validate_clock(clock: Clock) -> Result<(), BlockError> {
-    // CAP.TO permits 255 half-second intervals. The fixed command and maximum
-    // shutdown policies are shorter; admit every later native wait upfront.
-    clock.check_duration(255 * 500_000).map_err(|_| {
+    // CRTO.CRWMT permits 65535 half-second intervals, beyond CAP.TO's 255.
+    // The fixed command and maximum shutdown policies are shorter; admit
+    // every later native wait upfront.
+    clock.check_duration(ready_wait_us(0xffff)).map_err(|_| {
         BlockError::Unsupported("NVMe requires a calibrated, representable operation clock")
     })
 }
@@ -1384,11 +1456,20 @@ fn discover(
     let mut found = Vec::new();
     let max_transfer = controller.max_transfer;
     for namespace in candidates {
-        let Some(mut ids) = controller.descriptors(namespace)? else {
+        let Some((mut ids, independent)) = controller.namespace_ids(namespace)? else {
             continue;
         };
+        // Zoned and other command sets need drivers Stela does not have.
+        if ids.csi != CSI_NVM {
+            attached
+                .failures
+                .push((namespace, BlockError::Unsupported("NVMe I/O command set")));
+            continue;
+        }
         let data = controller.identify(IDENTIFY_NAMESPACE, namespace)?;
-        ids.fill(version, data);
+        if !independent {
+            ids.fill(version, data);
+        }
         match plain_format(data, max_transfer) {
             // An inactive namespace reads as all zeros in a sequential scan.
             Ok(None) if sequential => {}
@@ -1489,7 +1570,7 @@ impl Namespace {
             return Ok(());
         }
         let scans = controller.scans;
-        let Some(mut ids) = controller.descriptors(self.namespace)? else {
+        let Some((mut ids, independent)) = controller.namespace_ids(self.namespace)? else {
             self.scanned = scans;
             return Ok(());
         };
@@ -1502,7 +1583,9 @@ impl Namespace {
             }
             Err(error) => return Err(error),
         };
-        ids.fill(version, data);
+        if !independent {
+            ids.fill(version, data);
+        }
         let allocated = data[NAMESPACE_CAPACITY] != [0; 8];
         let format = plain_format(data, max_transfer);
         self.scanned = scans;
@@ -1635,6 +1718,8 @@ mod tests {
                 owned: None,
                 teardown: owned::Teardown::Unprepared,
                 ready_timeout_us: 500_000,
+                configuration: CONFIGURATION_VALUE & !ENABLE,
+                independent_identify: false,
                 version: 0,
                 scans: 0,
                 retry_delays: [0; 3],
