@@ -48,9 +48,11 @@ fn discovery_binary() -> Vec<u8> {
     binary
 }
 
-/// Expires every wait at once.
+/// Calibrated at one tick per microsecond, so on the real TSC each wait
+/// expires within a fraction of a millisecond. An uncalibrated clock is
+/// refused rather than expiring at once.
 const CLOCK: Clock = Clock {
-    ticks_per_microsecond: 0,
+    ticks_per_microsecond: 1,
 };
 
 struct Config;
