@@ -13,6 +13,13 @@ path = "src/main.rs"
 name = "stela-launcher"
 path = "src/bin/stela-launcher/main.rs"
 
+[features]
+default = ["boot-image"]
+# Build the matching stela.efi with stela, for setup to embed (see build.rs).
+# It needs clang and the sources `cargo xtask gpu fetch` checks out, so xtask
+# leaves it out.
+boot-image = []
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

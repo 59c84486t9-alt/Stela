@@ -178,8 +178,7 @@ pub(crate) struct Setup {
     /// is too small.
     #[arg(long)]
     volume: Option<PathBuf>,
-    /// The `stela.efi` to install; found beside `stela` or in the build tree
-    /// by default.
+    /// The `stela.efi` to install instead of the one built into `stela`.
     #[arg(long)]
     efi: Option<PathBuf>,
     /// The Mac model Stela presents (MacBookPro18,3, M1 Pro, by default).
@@ -971,8 +970,8 @@ fn read_efi(environment: &Environment<'_>, path: &Path) -> Result<Vec<u8>> {
         mount_interface::mismatch(environment.interface, mount_interface::find(&image))
     {
         bail!(
-            "{} is not the stela.efi this stela installs: {reason}. Use the stela and stela.efi \
-             of one build (`cargo build --release` and `cargo xtask boot build --release`).",
+            "{} is not the stela.efi this stela installs: {reason}. Omit --efi to install the \
+             stela.efi built into this stela.",
             path.display()
         );
     }
@@ -1207,9 +1206,6 @@ impl Setup {
             bundle_revision: stela_loader::boot_bundle::REVISION,
         };
         let interactive = self.usb.as_os_str().is_empty();
-        if interactive && !self.dry_run && self.efi.is_none() {
-            assets::preflight(&environment)?;
-        }
         if interactive && !wizard::configure(&mut self, environment.host)? {
             return Ok(());
         }
@@ -1382,8 +1378,7 @@ impl Setup {
             let record = read_record(environment, &self.usb)?;
             let image = match &self.efi {
                 Some(path) => path.clone(),
-                None => default_efi_image()
-                    .context("no stela.efi found beside stela or in the build tree; pass --efi")?,
+                None => assets::resolve()?,
             };
             let ipsw = (self.ipsw.is_some() || self.fetch)
                 .then(|| self.image())
@@ -1635,13 +1630,6 @@ fn choose_volume(
         "No volume of the USB can hold the recoveryOS bundle:\n{reasons}Add a FAT32 data \
          partition of at least 4 GB beside the EFI partition, then pass it with --volume."
     )
-}
-
-fn default_efi_image() -> Option<PathBuf> {
-    let beside = std::env::current_exe().ok()?.parent()?.join("stela.efi");
-    let built = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/boot/x86_64-unknown-uefi/release/stela.efi");
-    [beside, built].into_iter().find(|path| path.is_file())
 }
 
 /// Where `--fetch` keeps downloaded restore images: the host's per-user cache.
@@ -2196,10 +2184,7 @@ fn plan(
     };
     let efi_path = match &command.efi {
         Some(path) => path.clone(),
-        None => default_efi_image().context(
-            "no stela.efi found beside stela or in the build tree; build it with \
-             `cargo xtask boot build --release`, or pass --efi",
-        )?,
+        None => assets::resolve()?,
     };
     let efi_image = read_efi(environment, &efi_path)?;
     update::check_firmware_support(&esp, &efi_image)?;
@@ -2524,7 +2509,7 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
     };
     if !command.dry_run {
         if command.efi.is_none() {
-            command.efi = Some(assets::resolve(environment)?);
+            command.efi = Some(assets::resolve()?);
         }
         read_efi(environment, command.efi.as_ref().unwrap())?;
     }

@@ -42,7 +42,7 @@ stela-compiler = { path = "crates/stela-compiler" }
 stela-drivers = { path = "crates/stela-drivers" }
 stela-runtime = { path = "crates/stela-runtime" }
 stela-loader = { path = "crates/stela-loader" }
-stela-cli = { path = "crates/stela-cli" }
+stela-cli = { path = "crates/stela-cli", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
