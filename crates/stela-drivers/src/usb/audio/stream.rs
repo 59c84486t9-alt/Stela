@@ -797,7 +797,7 @@ impl<T: Transport> AudioDevice<T> {
             }
             let p = self.playback.as_mut().ok_or(Error::NotRunning)?;
             p.packetizer
-                .feedback(&packet.buffer.bytes()[..bytes], self.binding.speed)?;
+                .feedback(&packet.buffer.bytes()[..bytes], self.binding.speed);
             p.last_feedback = self.transport.now_us();
             self.progress.feedback_updates += 1;
         }
