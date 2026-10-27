@@ -310,6 +310,10 @@ impl<R: ReadAt> Answers<R> {
         if !recovery_os(args)? {
             return Ok(current.clone());
         }
+        self.recovery_identity()
+    }
+    fn recovery_identity(&self) -> Result<Identity> {
+        let current = self.store.identity();
         let matches: Vec<_> = self
             .store
             .identities()
@@ -325,7 +329,7 @@ impl<R: ReadAt> Answers<R> {
         };
         Ok((*identity).clone())
     }
-    fn global_path(&self, identity: &Identity, args: &Value, cryptex: bool) -> Result<String> {
+    fn global_path_name(&self, identity: &Identity, args: &Value, cryptex: bool) -> Result<String> {
         let variant = manifest_variant(identity.info()?, args)?;
         let prefix = args
             .get("GlobalManifestPrefix")
@@ -342,10 +346,41 @@ impl<R: ReadAt> Answers<R> {
             "Firmware/Manifests/restore/{}{variant}/{prefix}.{class}{suffix}.im4m",
             if cryptex { "cryptex1/" } else { "" }
         );
-        if !safe_path(&path) || !self.store.manifest().global_manifests.contains(&path) {
+        if !safe_path(&path) {
+            return Err(Error::Invalid("unsafe global manifest path"));
+        }
+        Ok(path)
+    }
+    fn global_path(&self, identity: &Identity, args: &Value, cryptex: bool) -> Result<String> {
+        let path = self.global_path_name(identity, args, cryptex)?;
+        if !self.store.manifest().global_manifests.contains(&path) {
             return Err(Error::Invalid("global manifest not in immutable inventory"));
         }
         Ok(path)
+    }
+    /// Resolve a source global manifest, or explicitly omit one that the
+    /// device marked optional. Reference restore hosts finish an empty file
+    /// transfer for this case; they do not substitute the ordinary AP ticket.
+    fn source_global_path(&self, identity: &Identity, args: &Value) -> Result<Option<String>> {
+        let path = self.global_path_name(identity, args, false)?;
+        if self.store.manifest().global_manifests.contains(&path) {
+            return Ok(Some(path));
+        }
+        let supports_global_signing = identity
+            .info()?
+            .get("VariantSupportsGlobalSigning")
+            .map(Value::boolean)
+            .transpose()?
+            .unwrap_or(false);
+        let optional = args
+            .get("GlobalManifestOptional")
+            .map(Value::boolean)
+            .transpose()?
+            .unwrap_or(false);
+        if !supports_global_signing || optional {
+            return Ok(None);
+        }
+        Err(Error::Invalid("global manifest not in immutable inventory"))
     }
     fn global(&mut self, identity: &Identity, args: &Value, cryptex: bool) -> Result<Ticket> {
         let path = self.global_path(identity, args, cryptex)?;
@@ -529,6 +564,13 @@ impl<R: ReadAt> Answers<R> {
                 Ok(Plan::Reply(Value::dict([])))
             }
             "RecoveryOSLocalPolicy" => self.recovery_local_policy(&identity, args),
+            "RecoveryOSVersionData" => {
+                let recovery = self.recovery_identity()?;
+                Ok(Plan::Reply(Value::dict([(
+                    "RecoveryOSVersionData",
+                    Value::Data(recovery_version_data(recovery.info()?)?),
+                )])))
+            }
             // restored's `set_device_time` (R 0x10003172c..0x100031778) reads
             // `SetHostTimeOnDevice` as a 64-bit CFNumber and keeps it only
             // within a day after its own estimate.
@@ -584,7 +626,12 @@ impl<R: ReadAt> Answers<R> {
             "SourceBootObjectV4" | "SourceBootObjectV5" | "PersonalizedBootObjectV3" => {
                 let name = args.required("ImageName")?.string()?;
                 let path = match name {
-                    "__GlobalManifest__" => self.global_path(&identity, args, false)?,
+                    "__GlobalManifest__" => match self.source_global_path(&identity, args)? {
+                        Some(path) => path,
+                        // An empty File plan emits only FileDataDone, the
+                        // protocol's explicit optional-missing response.
+                        None => return Ok(Plan::File(Vec::new())),
+                    },
                     "__RestoreVersion__" => "RestoreVersion.plist".into(),
                     "__SystemVersion__" => "SystemVersion.plist".into(),
                     _ => identity.path(name)?.into(),
@@ -600,7 +647,7 @@ impl<R: ReadAt> Answers<R> {
                     bytes,
                 }]))
             }
-            "FUDData" | "PersonalizedData" => self.image_data(&identity, args, kind),
+            "FUDData" | "PersonalizedData" | "EANData" => self.image_data(&identity, args, kind),
             "FirmwareUpdaterData" => self.updater(&identity, args),
             "FirmwareUpdaterPreflight" | "DeviceRestoreInfoPreflight" => Err(Error::Invalid(
                 "updater-specific preflight semantics unqualified; no empty success",
@@ -844,14 +891,17 @@ impl<R: ReadAt> Answers<R> {
         )])))
     }
     fn image_data(&mut self, identity: &Identity, args: &Value, kind: &str) -> Result<Plan> {
-        let (list_key, data_key, flag) = if kind == "FUDData" {
-            ("FUDImageList", "FUDImageData", "IsFUDFirmware")
-        } else {
-            (
+        // Reference restore_send_image_data uses the same protocol with
+        // these keys. Early-access firmware is distinct from iBoot's EAN
+        // firmware, already requested through PersonalizedData.
+        let (list_key, data_key, flag) = match kind {
+            "FUDData" => ("FUDImageList", "FUDImageData", "IsFUDFirmware"),
+            "EANData" => ("EANImageList", "EANData", "IsEarlyAccessFirmware"),
+            _ => (
                 "ImageList",
                 "ImageData",
                 args.required("ImageType")?.string()?,
-            )
+            ),
         };
         let Value::Dict(manifest) = identity.value.required("Manifest")? else {
             return Err(Error::Invalid("manifest dictionary"));
@@ -904,11 +954,6 @@ impl<R: ReadAt> Answers<R> {
                 (data_key, Value::Data(data)),
                 ("ImageName", Value::from(name)),
             ])));
-        }
-        if matches.is_empty() {
-            return Err(Error::Invalid(
-                "no manifest images match required image request",
-            ));
         }
         let mut data = BTreeMap::new();
         let mut total = 0;
@@ -1081,6 +1126,26 @@ fn recovery_os(args: &Value) -> Result<bool> {
         .transpose()?
         .unwrap_or(false))
 }
+/// Reference restore_send_recovery_os_version_data sends an XML plist of
+/// these recovery-identity Info fields. This is version metadata, not a
+/// manufactured policy, ticket or installed-state acknowledgement.
+fn recovery_version_data(info: &Value) -> Result<Vec<u8>> {
+    let mut fields = BTreeMap::new();
+    for (source, destination) in [
+        ("BuildNumber", "BuildNumber"),
+        ("Variant", "Variant"),
+        ("BuildTrain", "BuildTrain"),
+        ("ProductMarketingVersion", "ProductVersion"),
+    ] {
+        if let Some(value) = info.get(source) {
+            fields.insert(destination.into(), Value::from(value.string()?));
+        }
+    }
+    if fields.is_empty() {
+        return Err(Error::Invalid("recovery version metadata is absent"));
+    }
+    plist::encode_xml(&Value::Dict(fields), Limits::default())
+}
 /// The variant directory of a global manifest: the request's `Variant`, else
 /// the identity's macOS variant. An erase or upgrade identity names it as
 /// `MacOSVariant`; the `macOS Customer` identity restored selects with
@@ -1150,6 +1215,70 @@ fn cpio_header(name: &str, mode: u64, size: u64) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_version_metadata_preserves_original_fields_and_xml_types() {
+        let info = Value::dict([
+            ("BuildNumber", Value::from("fixture-build")),
+            ("Variant", Value::from("fixture-recovery")),
+            ("BuildTrain", Value::from("fixture-train")),
+            ("ProductMarketingVersion", Value::from("1.2.3")),
+            ("ProductVersion", Value::from("unrelated source field")),
+        ]);
+        let bytes = recovery_version_data(&info).unwrap();
+        assert!(bytes.starts_with(b"<?xml"));
+        assert_eq!(
+            plist::decode(&bytes, Limits::default()).unwrap(),
+            Value::dict([
+                ("BuildNumber", Value::from("fixture-build")),
+                ("Variant", Value::from("fixture-recovery")),
+                ("BuildTrain", Value::from("fixture-train")),
+                ("ProductVersion", Value::from("1.2.3")),
+            ])
+        );
+        assert!(recovery_version_data(&Value::dict([])).is_err());
+        assert!(recovery_version_data(&Value::dict([("BuildNumber", Value::Integer(1))])).is_err());
+    }
+
+    #[test]
+    fn ean_uses_early_access_flags_and_preserves_ticket_checks() {
+        use super::super::store::tests::{fixture, set_component_info};
+        let request =
+            |args| Value::dict([("DataType", Value::from("EANData")), ("Arguments", args)]);
+        let list = request(Value::dict([("EANImageList", Value::Boolean(true))]));
+        let mut store = fixture(b"x", false);
+        set_component_info(&mut store, "OS", "IsiBootEANFirmware", Value::Boolean(true));
+        let mut answers = Answers::new(store);
+        let Plan::Reply(empty) = answers.plan(&list).unwrap() else {
+            panic!("EAN list must be a reply")
+        };
+        assert_eq!(empty, Value::dict([("EANImageList", Value::Array(vec![]))]));
+        let Plan::Reply(empty_data) = answers.plan(&request(Value::dict([]))).unwrap() else {
+            panic!("an empty manifest set must have an empty data dictionary")
+        };
+        assert_eq!(empty_data, Value::dict([("EANData", Value::dict([]))]));
+
+        set_component_info(
+            &mut answers.store,
+            "OS",
+            "IsEarlyAccessFirmware",
+            Value::Boolean(true),
+        );
+        let Plan::Reply(names) = answers.plan(&list).unwrap() else {
+            panic!("EAN list must be a reply")
+        };
+        assert_eq!(
+            names,
+            Value::dict([("EANImageList", Value::Array(vec![Value::from("OS")]))])
+        );
+        // A listed component still needs a real covered image; listing must
+        // not substitute an empty successful firmware transfer.
+        let data = request(Value::dict([("ImageName", Value::from("OS"))]));
+        let Err(Error::Refused { request: kept, .. }) = answers.plan(&data) else {
+            panic!("an uncovered component must refuse")
+        };
+        assert_eq!(*kept, data);
+    }
 
     #[test]
     fn a_payload_has_the_system_image_only_while_its_inventory_holds_the_os_member() {
@@ -1265,6 +1394,66 @@ mod tests {
         let named = Value::dict([("Variant", Value::from("Other"))]);
         assert_eq!(manifest_variant(&erase, &named).unwrap(), "Other");
         assert!(manifest_variant(&none, &none).is_err());
+    }
+    #[test]
+    fn an_absent_optional_source_global_manifest_finishes_an_empty_file() {
+        use super::super::store::tests::{fixture, set_info};
+
+        let request = |optional: Option<Value>| {
+            let mut arguments = BTreeMap::from([
+                ("ImageName".into(), Value::from("__GlobalManifest__")),
+                ("Variant".into(), Value::from("macOS Customer")),
+                (
+                    "GlobalManifestPrefix".into(),
+                    Value::from("centauri/centauri"),
+                ),
+            ]);
+            if let Some(optional) = optional {
+                arguments.insert("GlobalManifestOptional".into(), optional);
+            }
+            Value::dict([
+                ("DataType", Value::from("SourceBootObjectV4")),
+                ("Arguments", Value::Dict(arguments)),
+            ])
+        };
+
+        // Reference restore hosts treat a variant that does not advertise
+        // global signing as optional even without an explicit request flag.
+        let Plan::File(segments) = Answers::new(fixture(b"x", false))
+            .plan(&request(None))
+            .unwrap()
+        else {
+            panic!("missing optional manifest must be an empty file transfer")
+        };
+        assert!(segments.is_empty());
+
+        // A signing variant normally requires the requested manifest.
+        let mut required = fixture(b"x", false);
+        set_info(
+            &mut required,
+            "VariantSupportsGlobalSigning",
+            Value::Boolean(true),
+        );
+        let Err(error) = Answers::new(required).plan(&request(None)) else {
+            panic!("missing required manifest must refuse")
+        };
+        assert!(format!("{error}").contains("global manifest not in immutable inventory"));
+
+        // The device can explicitly make that same request optional. The
+        // empty File plan is framed by Job as FileDataDone with no FileData.
+        let mut optional = fixture(b"x", false);
+        set_info(
+            &mut optional,
+            "VariantSupportsGlobalSigning",
+            Value::Boolean(true),
+        );
+        let Plan::File(segments) = Answers::new(optional)
+            .plan(&request(Some(Value::Boolean(true))))
+            .unwrap()
+        else {
+            panic!("explicitly optional manifest must be an empty file transfer")
+        };
+        assert!(segments.is_empty());
     }
     /// An advertised type with no answer and a type outside the vocabulary
     /// refuse with distinct reasons, each with the whole request.

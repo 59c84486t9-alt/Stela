@@ -1113,6 +1113,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
     let qemu_version = qemu_version(&qemu)?;
+    // Keep launch-time input identities: another build can replace these
+    // paths while a long restore is still running. Completion must not bind
+    // the old run to the replacement's bytes.
+    let qemu_binding = binding(&qemu)?;
+    let image_binding = binding(&image)?;
+    let source_binding = source.exists().then(|| binding(&source)).transpose()?;
 
     let started = Instant::now();
     let mut child = command
@@ -1127,7 +1133,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // The local launcher can be a shell wrapper. Observe its running image
     // after exec, keeping the launcher binding and QEMU version separately.
     std::thread::sleep(Duration::from_millis(10));
-    let qemu_process_image = process_image(child.id());
+    let qemu_process_image = process_image(child.id()).and_then(|path| binding(&path).ok());
     // A paused debugging session has no deadline.
     let limit = match arguments.gdb {
         Some(_) => Duration::MAX,
@@ -1249,7 +1255,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             json!(mount_exit.as_ref().and_then(|result| result.as_ref().ok()));
         Ok::<_, anyhow::Error>(report)
     });
-    let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
     let native_irq_work = arguments.native_irq_work_check.then(|| {
         json!({ "passed": native_irq_work_verified(&serial_text) && status.is_some() && code == IDLE_EXIT
             && !serial_text.contains("STELA PANIC") && !serial_text.contains("STOP UNSUPPORTED") })
@@ -1304,12 +1309,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     });
     let report = json!({
         "command": command_line,
-        "qemu": binding(&qemu)?,
+        "qemu": qemu_binding,
         "qemu_version": qemu_version,
         "host_firmware": host_firmware,
         "qemu_process_image": qemu_process_image,
-        "image": binding(&image)?,
-        "source": source.exists().then(|| binding(&source)).transpose()?,
+        "image": image_binding,
+        "source": source_binding,
         "usb_image": arguments.usb_image,
         "usb_serial": arguments.usb_image.as_ref().map(|_| &arguments.usb_serial),
         "usb_writable": arguments.usb_writable,

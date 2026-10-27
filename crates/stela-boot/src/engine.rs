@@ -44,6 +44,7 @@ use core::{
 use host::{Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_loader::{
+    apple_device_tree::DeviceTree,
     boot_bundle,
     boot_selection::{self, BootVolume},
     handoff::BootCommand as FirmwareBootCommand,
@@ -154,6 +155,11 @@ struct Options {
     verify_on_read: bool,
     /// Restore with the inventory's Update identity (`--update-restore`).
     update_restore: bool,
+    /// Use restored's original development-board policy to retain and report
+    /// FDR failures while allowing the erase restore to continue
+    /// (`--development-restore`). This is deliberately degraded and never an
+    /// assertion that factory data was provisioned.
+    development_restore: bool,
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
@@ -280,6 +286,97 @@ pub(crate) fn number(value: &str) -> Result<u64, &'static str> {
     .map_err(|_| "invalid number in system options")
 }
 
+/// Present the selected board through restored's original development-board
+/// predicate. MobileGestalt's `HWModelStr` (`HW.target` in restored's log) is
+/// the first string of the root `compatible` list. Keep the original hardware
+/// model as its second string so platform matching still sees it, and keep the
+/// root `target-sub-type` consistent with the development identity.
+///
+/// 26A434 restored accepts an FDR failure only when its last three characters
+/// are `DEV` and the independent restore option is true. The assigned tree has
+/// a fixed serialized span, so replace a conventional `AP` suffix when the
+/// property's existing word-aligned slot can hold the result; otherwise use the
+/// final three characters. The product model already has its own root property,
+/// so omit its duplicate from `compatible` if the new development alias needs
+/// that space. Preserve the original board and platform compatibility strings.
+fn development_restore_hardware_model(tree: &mut DeviceTree) -> Result<String, String> {
+    let value = tree
+        .property("/", "target-sub-type")
+        .filter(|property| !property.placeholder)
+        .ok_or("the selected Apple board has no concrete target-sub-type")?
+        .value
+        .clone();
+    let compatible = tree
+        .property("/", "compatible")
+        .filter(|property| !property.placeholder)
+        .ok_or("the selected Apple board has no concrete compatible list")?
+        .value
+        .clone();
+    let product = tree
+        .property("/", "model")
+        .filter(|property| !property.placeholder)
+        .and_then(|property| property.as_str())
+        .ok_or("the selected Apple board has no concrete product model")?
+        .as_bytes()
+        .to_vec();
+    let value = value.as_slice();
+    let Some(value) = value.strip_suffix(&[0]) else {
+        return Err("the selected Apple board target-sub-type is not NUL terminated".into());
+    };
+    if value.is_empty() || value.contains(&0) {
+        return Err("the selected Apple board target-sub-type is not one string".into());
+    }
+    let target = core::str::from_utf8(value)
+        .map_err(|_| "the selected Apple board target-sub-type is not UTF-8")?;
+    if !target.is_ascii() || target.len() < 4 {
+        return Err("the selected Apple board target-sub-type is not a hardware model".into());
+    }
+    let target = if target.ends_with("DEV") {
+        String::from(target)
+    } else {
+        let base = target.strip_suffix("AP").unwrap_or(target);
+        let preferred = format!("{base}DEV");
+        let available = (value.len() + 1).next_multiple_of(size_of::<u32>());
+        if preferred.len() < available {
+            preferred
+        } else {
+            format!("{}DEV", &target[..target.len() - 3])
+        }
+    };
+    let mut encoded = target.as_bytes().to_vec();
+    encoded.push(0);
+    let entries: Vec<_> = compatible
+        .split(|&byte| byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let Some((hardware, rest)) = entries.split_first() else {
+        return Err("the selected Apple board compatible list is empty".into());
+    };
+    if *hardware != value {
+        return Err("the selected Apple board hardware model is not first in compatible".into());
+    }
+    let mut development_compatible = Vec::with_capacity(compatible.len());
+    development_compatible.extend_from_slice(target.as_bytes());
+    development_compatible.push(0);
+    development_compatible.extend_from_slice(value);
+    development_compatible.push(0);
+    for entry in rest.iter().copied().filter(|entry| *entry != product) {
+        development_compatible.extend_from_slice(entry);
+        development_compatible.push(0);
+    }
+    if development_compatible.len() > compatible.len() {
+        return Err(
+            "the selected Apple board compatible slot cannot hold a development alias".into(),
+        );
+    }
+    development_compatible.resize(compatible.len(), 0);
+    tree.set_property("/", "target-sub-type", encoded)
+        .map_err(|error| format!("development target-sub-type: {error}"))?;
+    tree.set_property("/", "compatible", development_compatible)
+        .map_err(|error| format!("development compatible list: {error}"))?;
+    Ok(target)
+}
+
 impl Options {
     fn parse(text: &str) -> Result<Self, &'static str> {
         let mut options = Self {
@@ -309,6 +406,7 @@ impl Options {
             install_source: None,
             verify_on_read: false,
             update_restore: false,
+            development_restore: false,
             survey: false,
             idle_skip: false,
             input: false,
@@ -443,6 +541,10 @@ impl Options {
             }
             if name == UPDATE_RESTORE_OPTION {
                 options.update_restore = true;
+                continue;
+            }
+            if name == "--development-restore" {
+                options.development_restore = true;
                 continue;
             }
             if name == "--idle-skip" {
@@ -640,12 +742,19 @@ impl Options {
         if options.update_restore && options.install.is_none() {
             return Err("--update-restore applies to --install");
         }
+        if options.development_restore
+            && (options.install.is_none() || options.update_restore || options.strict)
+        {
+            return Err(
+                "--development-restore requires a non-strict erase --install and refuses --update-restore",
+            );
+        }
         if options.verify_on_read && options.install.is_none() && !options.restore {
             return Err("--verify-on-read applies to --install and --restore-study");
         }
         if options.install.is_some() && !options.tss {
             return Err(
-                "--install needs --tss: the restore personalizes the recoveryOS LocalPolicy with Apple's signing server",
+                "--install needs --tss: required boot firmware is not covered by the IPSW's global ticket",
             );
         }
         if options.preboot.is_none()
@@ -1258,140 +1367,132 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let remote_image = options.install.is_some() && options.install_source.is_none();
     let wants_network =
         (options.tss && restoring) || remote_image || options.network_check.is_some();
-    let (
-        services,
-        medium,
-        preboot,
-        host_input,
-        mut host_network,
-        usb_disks,
-        guest_network,
-        host_disks,
-    ) = if targets.is_empty()
-        && options.install_source.is_none()
-        && options.preboot.is_none()
-        && !options.input
-        && !wants_network
-        && options.usb_storage.is_empty()
-        && !options.external_disks
-        && !options.guest_network
-        && translation_store.is_none()
-        && fdr_partition.is_none()
-    {
-        (
-            Vec::new(),
-            None,
-            None,
-            None,
-            None,
-            Vec::new(),
-            None,
-            storage::HostDisks::none(),
-        )
-    } else {
-        let mut storage_handoff = handoff
-            .storage
-            .handoff()
-            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-        storage_handoff.firmware = host_firmware.clone();
-        if options.audio_check.is_some() {
-            // The audio check retains the final slice even after shutdown.
-            storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
-        }
-        crate::status::begin("Starting the PC's disks and USB devices");
-        // SAFETY: before host::install, with sole ownership of DMA/controllers.
-        let storage::Opened {
-            services,
-            medium,
-            preboot,
-            store,
-            log,
-            fdr,
-            inputs,
-            mut links,
-            usb_disks,
-            disks,
-        } = unsafe {
-            storage::open(
-                &storage_handoff,
-                &storage::Partitions {
-                    targets: &targets,
-                    medium: options.install_source,
-                    preboot: options.preboot.as_ref(),
-                    store: translation_store,
-                    log: handoff.log_partition.map(Guid),
-                    fdr: fdr_partition,
-                },
-                &options.usb_storage,
-                options.external_disks.then(|| {
-                    stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
-                        .saturating_sub(options.usb_storage.len())
-                }),
+    let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
+        if targets.is_empty()
+            && options.install_source.is_none()
+            && options.preboot.is_none()
+            && !options.input
+            && !wants_network
+            && options.usb_storage.is_empty()
+            && !options.external_disks
+            && !options.guest_network
+            && translation_store.is_none()
+            && fdr_partition.is_none()
+        {
+            (
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                storage::HostDisks::none(),
             )
-        }
-        .unwrap_or_else(|error| {
-            output::arguments(format_args!("host storage refusal: {error}\n"));
-            output::fatal(&format!("host storage could not be opened: {error}"))
-        });
-        let count = |count: usize, one: &str, many: &str| {
-            format!("{count} {}", if count == 1 { one } else { many })
-        };
-        let partitions = count(
-            services.len() + usize::from(medium.is_some()),
-            "partition",
-            "partitions",
-        );
-        crate::status::done(&match usb_disks.len() {
-            0 => partitions,
-            disks => format!(
-                "{partitions}, and {} macOS sees as USB drives",
-                count(disks, "disk", "disks")
-            ),
-        });
-        if let Some(log) = log {
-            crate::log_file::resume(log);
-        }
-        if let Some(store) = store {
-            translations::set_partition(store);
-        }
-        fdr_device = fdr;
-        // The guest's adapter is its own: the mount's client keeps the
-        // first one. Without one the Mac boots with no network, which
-        // is reported once.
-        let guest_network = options
-            .guest_network
-            .then(|| {
-                network::GuestNetwork::open(&mut links, wants_network)
+        } else {
+            let mut storage_handoff = handoff
+                .storage
+                .handoff()
+                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+            storage_handoff.firmware = host_firmware.clone();
+            if options.audio_check.is_some() {
+                // The audio check retains the final slice even after shutdown.
+                storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
+            }
+            crate::status::begin("Starting the PC's disks and USB devices");
+            // SAFETY: before host::install, with sole ownership of DMA/controllers.
+            let storage::Opened {
+                services,
+                medium,
+                preboot,
+                store,
+                log,
+                fdr,
+                inputs,
+                mut links,
+                usb_disks,
+                disks,
+            } = unsafe {
+                storage::open(
+                    &storage_handoff,
+                    &storage::Partitions {
+                        targets: &targets,
+                        medium: options.install_source,
+                        preboot: options.preboot.as_ref(),
+                        store: translation_store,
+                        log: handoff.log_partition.map(Guid),
+                        fdr: fdr_partition,
+                    },
+                    &options.usb_storage,
+                    options.external_disks.then(|| {
+                        stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
+                            .saturating_sub(options.usb_storage.len())
+                    }),
+                )
+            }
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("host storage refusal: {error}\n"));
+                output::fatal(&format!("host storage could not be opened: {error}"))
+            });
+            let count = |count: usize, one: &str, many: &str| {
+                format!("{count} {}", if count == 1 { one } else { many })
+            };
+            let partitions = count(
+                services.len() + usize::from(medium.is_some()),
+                "partition",
+                "partitions",
+            );
+            crate::status::done(&match usb_disks.len() {
+                0 => partitions,
+                disks => format!(
+                    "{partitions}, and {} macOS sees as USB drives",
+                    count(disks, "disk", "disks")
+                ),
+            });
+            if let Some(log) = log {
+                crate::log_file::resume(log);
+            }
+            if let Some(store) = store {
+                translations::set_partition(store);
+            }
+            fdr_device = fdr;
+            // The guest's adapter is its own: the mount's client keeps the
+            // first one. Without one the Mac boots with no network, which
+            // is reported once.
+            let guest_network = options
+                .guest_network
+                .then(|| {
+                    network::GuestNetwork::open(&mut links, wants_network)
+                        .inspect_err(|error| {
+                            output::arguments(format_args!("guest network refusal: {error}\n"));
+                            crate::status::warn(error);
+                        })
+                        .ok()
+                })
+                .flatten();
+            // A missing network is reported here and refused only by what
+            // needs it, so the mount still boots and logs how far it gets.
+            let network = wants_network.then(|| {
+                crate::status::begin("Getting a network address");
+                network::HostNetwork::open(links, storage_handoff.clock)
+                    .inspect(|network| crate::status::done(network.describe()))
+                    .map(|network| network::Shared(Rc::new(RefCell::new(network))))
                     .inspect_err(|error| {
-                        output::arguments(format_args!("guest network refusal: {error}\n"));
+                        output::arguments(format_args!("host network refusal: {error}\n"));
                         crate::status::warn(error);
                     })
-                    .ok()
-            })
-            .flatten();
-        // A missing network is reported here and refused only by what
-        // needs it, so the mount still boots and logs how far it gets.
-        let network = wants_network.then(|| {
-            crate::status::begin("Getting a network address");
-            network::HostNetwork::open(links, storage_handoff.clock)
-                .inspect(|network| crate::status::done(network.describe()))
-                .map(|network| network::Shared(Rc::new(RefCell::new(network))))
-                .inspect_err(|error| {
-                    output::arguments(format_args!("host network refusal: {error}\n"));
-                    crate::status::warn(error);
-                })
-        });
-        (
-            services,
-            medium,
-            preboot,
-            options.input.then(|| input::HostInput::new(inputs)),
-            network,
-            usb_disks,
-            guest_network,
-            disks,
-        )
-    };
+            });
+            (
+                services,
+                medium,
+                preboot,
+                options.input.then(|| input::HostInput::new(inputs)),
+                network,
+                usb_disks,
+                guest_network,
+                disks,
+            )
+        };
     let built = preboot.map(|partition| from_disk(partition, &options));
     // A bundle runs at the DRAM base it was prepared for, its SoC's.
     if options.bundle && !options.dram_explicit {
@@ -1808,11 +1909,21 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         _ => output::fatal("selected bundle source, live tree and board must be retained together"),
     };
-    let assigned = topology_source.as_ref().map(|source| {
+    let mut assigned = topology_source.as_ref().map(|source| {
         source
             .prepare(&roster, full_profile.clone())
             .unwrap_or_else(|error| output::fatal(&error))
     });
+    if options.development_restore {
+        let assigned = assigned.as_mut().unwrap_or_else(|| {
+            output::fatal("--development-restore needs a selected original Apple board")
+        });
+        let target = development_restore_hardware_model(&mut assigned.tree)
+            .unwrap_or_else(|error| output::fatal(&error));
+        output::arguments(format_args!(
+            "DEVELOPMENT RESTORE hw-model={target} FDR failures remain logged and unprovisioned\n"
+        ));
+    }
     // SAFETY: all raw guest input copies have ended; AP executors are parked,
     // and no guest/device DMA producer has entered. The same loader bytes are
     // retained for every subsequent native CPU and synchronous device writer.
@@ -2103,21 +2214,19 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         crate::status::done(profile.name);
     }
     let restore = source.map(|source| {
+        let boot_ecid = tree
+            .and_then(stela_runtime::machine::adt::Node::root)
+            .and_then(|root| root.child("chosen"))
+            .and_then(|chosen| chosen.property("unique-chip-id"))
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map(u64::from_le_bytes)
+            .filter(|&ecid| ecid != 0);
         // `--tss` hands the restore client Apple's signing service, for the
         // machine whose ECID the bundle names (`/chosen unique-chip-id`).
         let signer = options.tss.then(|| {
-            let ecid = tree
-                .and_then(stela_runtime::machine::adt::Node::root)
-                .and_then(|root| root.child("chosen"))
-                .and_then(|chosen| chosen.property("unique-chip-id"))
-                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-                .map(u64::from_le_bytes)
-                .filter(|&ecid| ecid != 0)
-                .unwrap_or_else(|| {
-                    output::fatal(
-                        "--tss needs the bundle's machine ECID (stela boot prepare --ecid)",
-                    )
-                });
+            let ecid = boot_ecid.unwrap_or_else(|| {
+                output::fatal("--tss needs the bundle's machine ECID (stela boot prepare --ecid)")
+            });
             stela_runtime::restore::tss::Signer {
                 ecid,
                 // The restore takes the boot ROM's and the SEP ROM's nonces
@@ -2126,16 +2235,40 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                     ap: [0; 32],
                     sep: [0; 20],
                 },
-                transport: match host_network.take().expect("--tss opens the host network") {
-                    Ok(network) => alloc::boxed::Box::new(network),
-                    Err(reason) => alloc::boxed::Box::new(network::Offline(reason)),
+                transport: match host_network.as_ref().expect("--tss opens the host network") {
+                    Ok(network) => alloc::boxed::Box::new(network.clone()),
+                    Err(reason) => alloc::boxed::Box::new(network::Offline(reason.clone())),
                 },
             }
         });
-        let mode = match (&options.install, options.update_restore) {
-            (Some(_), false) => restore::Mode::Install,
-            (Some(_), true) => restore::Mode::Update,
-            (None, _) => restore::Mode::Study,
+        // Development restores retain the original DEV-board FDR failure
+        // policy without exposing Apple's FDR service. TSS, when selected,
+        // uses the host signer directly; the image reader also owns its own
+        // network access independently of this guest reverse proxy.
+        let proxy_network = (options.tss && !options.development_restore)
+            .then(|| {
+                host_network
+                    .as_ref()
+                    .and_then(|network| network.as_ref().ok())
+                    .cloned()
+            })
+            .flatten();
+        output::arguments(format_args!(
+            "RESTORE PROXY wiring host={} ready={} enabled={}\n",
+            host_network.is_some(),
+            matches!(host_network, Some(Ok(_))),
+            proxy_network.is_some()
+        ));
+        let mode = match (
+            &options.install,
+            options.update_restore,
+            options.development_restore,
+        ) {
+            (Some(_), false, true) => restore::Mode::DevelopmentInstall,
+            (Some(_), false, false) => restore::Mode::Install,
+            (Some(_), true, false) => restore::Mode::Update,
+            (None, _, false) => restore::Mode::Study,
+            _ => unreachable!("validated restore-mode combination"),
         };
         restore::Experiment::new(
             source,
@@ -2150,6 +2283,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             restore::Services {
                 signer,
                 fdr_storage: fdr_device.take(),
+                network: proxy_network,
             },
         )
         .unwrap_or_else(|error| {

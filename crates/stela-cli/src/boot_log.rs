@@ -267,11 +267,13 @@ pub(crate) mod tests {
 
     const GUID: &str = "5E1A0000-0000-4000-8000-0000000000C0";
 
-    /// A 16 MiB GPT image with a machine-state partition at 1 MiB, whose log
-    /// has two boots when it holds one.
+    /// A GPT image with a machine-state partition at 1 MiB, whose log has two
+    /// boots when it holds one.
     fn image(path: &Path, partition_bytes: u64) {
-        let blocks = 16 * 1024 * 1024 / 512;
-        let mut bytes = vec![0u8; 16 * 1024 * 1024];
+        let mib = 1024 * 1024;
+        let disk_bytes = (partition_bytes + 2 * mib).max(16 * mib);
+        let blocks = disk_bytes / 512;
+        let mut bytes = vec![0u8; disk_bytes as usize];
         let partition = Partition {
             kind: "0FC63DAF-8483-4772-8E79-3D69D8477DE4".parse().unwrap(),
             unique: GUID.parse().unwrap(),
@@ -305,7 +307,7 @@ pub(crate) mod tests {
     fn the_log_is_read_from_a_gpt_image_by_guid_or_offset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("machine-state.img");
-        image(&path, 8 * 1024 * 1024);
+        image(&path, boot_log::PARTITION_BYTES);
         let expected = "=== STELA BOOT 1 ===\nfirst boot\n=== STELA BOOT 2 ===\nsecond boot\n";
         let log = command(&path, Some(&GUID.to_lowercase()), None)
             .load()
@@ -338,8 +340,8 @@ pub(crate) mod tests {
     fn the_log_is_read_from_an_apple_region_s_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("region.img");
-        // A 12 MiB partition keeps its machine state from 4 MiB.
-        let partition_bytes = 12 * 1024 * 1024;
+        // A 20 MiB partition keeps its machine state from 4 MiB.
+        let partition_bytes = 20 * 1024 * 1024;
         image(&path, partition_bytes);
         let mut bytes = std::fs::read(&path).unwrap();
         let tail = machine_state::split(partition_bytes)

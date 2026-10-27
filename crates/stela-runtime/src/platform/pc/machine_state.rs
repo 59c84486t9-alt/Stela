@@ -15,7 +15,7 @@ use core::fmt;
 use stela_drivers::block::{BlockDevice, BlockError, Shared, Window};
 
 /// The machine state kept at the end of the partition, before alignment.
-pub const MACHINE_STATE_BYTES: u64 = 8 << 20;
+pub const MACHINE_STATE_BYTES: u64 = 16 << 20;
 // The tail always holds the whole layout, the boot log included.
 const _: () = assert!(MACHINE_STATE_BYTES >= super::boot_log::PARTITION_BYTES);
 /// Where the machine state starts: a multiple of this from the partition's
@@ -117,19 +117,19 @@ mod tests {
         assert!(layout.state_bytes >= MACHINE_STATE_BYTES);
         assert!(layout.state_bytes < MACHINE_STATE_BYTES + ALIGNMENT);
         assert_eq!(layout.state_offset(), layout.namespace_bytes);
-        // A whole number of MiB keeps exactly the 8 MiB.
+        // A whole number of MiB keeps exactly the 16 MiB.
         assert_eq!(
             split(100 * mib).unwrap(),
             Split {
-                namespace_bytes: 92 * mib,
-                state_bytes: 8 * mib
+                namespace_bytes: 84 * mib,
+                state_bytes: 16 * mib
             }
         );
         assert_eq!(
             split(MINIMUM_BYTES).unwrap(),
             Split {
                 namespace_bytes: mib,
-                state_bytes: 8 * mib
+                state_bytes: 16 * mib
             }
         );
         let error = split(MINIMUM_BYTES - 1).unwrap_err();
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn the_windows_share_one_device_and_the_namespace_never_reaches_the_state() {
-        let blocks = (12 << 20) / 512 + 3;
+        let blocks = (20 << 20) / 512 + 3;
         let (mut namespace, mut state, layout) =
             split_device(Box::new(RamDisk::new("s", blocks, 512))).unwrap();
         assert_eq!(layout.namespace_bytes, 4 << 20);

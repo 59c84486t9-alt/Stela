@@ -11,7 +11,9 @@
 //! 0x1c92f48 reads the three 32-bit bank properties; `select` 0x1ca1d40
 //! bounds the index and `read` 0x1ca1bd8 addresses bank * bank-size.
 //! `AppleARMNORFlashDevice::initDeviceWithProvider` 0x1c5b948 interprets
-//! each child's `reg` as 8-byte (u32 offset, u32 length) records.
+//! each child's `reg` as 8-byte (u32 offset, u32 length) records. The J473
+//! 26A434 `mBoot` table at file 0x1b0110 provides three firmware records,
+//! two syscfg records and one NVRAM record.
 //! XNU `IONVRAMCHRPHandler.cpp` validates CHRP checksums and Adler-32.
 use crate::apple_device_tree::DeviceTree;
 use alloc::vec::Vec;
@@ -21,6 +23,22 @@ use stela_runtime::machine::apple::nor::{self, Image, nvram};
 const CHOSEN: &str = "/chosen";
 const PROXY: &str = "nvram-proxy-data";
 const SPINOR: &str = "/arm-io/spi1/spinor";
+// The J473 26A434 DeviceTree still carries the earlier one-MiB placeholder
+// geometry even though mBoot's table describes the physical eight-MiB
+// layout. Accept only that exact source template (or an already normalized
+// tree), then publish the mBoot-derived regions from `nor`.
+const TEMPLATE_CAPACITY: u32 = 0x100000;
+const TEMPLATE_FIRMWARE: &[(u32, u32)] = &[(0, 0xc0000)];
+const TEMPLATE_ANVRAM: &[(u32, u32)] = &[(0xc0000, 0x20000)];
+const TEMPLATE_SYSCFG: &[(u32, u32)] = &[(0xe0000, 0x20000)];
+
+fn reg(regions: &[(u32, u32)]) -> Vec<u8> {
+    regions
+        .iter()
+        .flat_map(|&(offset, bytes)| [offset, bytes])
+        .flat_map(u32::to_le_bytes)
+        .collect()
+}
 
 /// Publish one image's current bank; the engine reconstructs the erased
 /// regions and installs these exact proxy bytes into its NOR before entry.
@@ -35,46 +53,43 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
         "NVRAM proxy slot is empty, not a template reservation"
     );
     if let Some(spinor) = tree.node(SPINOR) {
-        let ranges: Vec<u8> = [0u32, 0, nor::CAPACITY as u32]
+        let assigned_ranges: Vec<u8> = [0u32, 0, nor::CAPACITY as u32]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let template_ranges: Vec<u8> = [0u32, 0, TEMPLATE_CAPACITY]
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
         ensure!(
-            spinor.property("ranges").is_some_and(|p| p.value == ranges),
+            spinor
+                .property("ranges")
+                .is_some_and(|p| { p.value == template_ranges || p.value == assigned_ranges }),
             "unsupported SPI NOR address ranges"
         );
-        for (name, (offset, bytes)) in [
-            ("firmware", nor::FIRMWARE),
-            ("anvram", nor::ANVRAM),
-            ("syscfg", nor::SYSCFG),
+        for (name, template, assigned) in [
+            ("firmware", reg(TEMPLATE_FIRMWARE), reg(&nor::FIRMWARE)),
+            ("anvram", reg(TEMPLATE_ANVRAM), reg(&[nor::ANVRAM])),
+            ("syscfg", reg(TEMPLATE_SYSCFG), reg(&nor::SYSCFG)),
         ] {
             let path = alloc::format!("{SPINOR}/{name}");
-            let reg: Vec<u8> = [offset, bytes]
-                .into_iter()
-                .flat_map(u32::to_le_bytes)
-                .collect();
             let node = tree
                 .node(&path)
                 .ok_or_else(|| anyhow::anyhow!("missing {path}"))?;
             ensure!(
-                node.property("reg")
-                    .is_some_and(|p| p.value.is_empty() || p.value == reg),
+                node.property("reg").is_some_and(|p| {
+                    p.value.is_empty() || p.value == template || p.value == assigned
+                }),
                 "unsupported {path} partition"
             );
         }
-        for (name, (offset, bytes)) in [
-            ("firmware", nor::FIRMWARE),
-            ("anvram", nor::ANVRAM),
-            ("syscfg", nor::SYSCFG),
+        tree.set_property(SPINOR, "ranges", assigned_ranges)?;
+        for (name, value) in [
+            ("firmware", reg(&nor::FIRMWARE)),
+            ("anvram", reg(&[nor::ANVRAM])),
+            ("syscfg", reg(&nor::SYSCFG)),
         ] {
-            tree.set_property(
-                &alloc::format!("{SPINOR}/{name}"),
-                "reg",
-                [offset, bytes]
-                    .into_iter()
-                    .flat_map(u32::to_le_bytes)
-                    .collect(),
-            )?;
+            tree.set_property(&alloc::format!("{SPINOR}/{name}"), "reg", value)?;
         }
     }
     let image = Image::fresh();
@@ -106,7 +121,7 @@ mod tests {
     use crate::apple_device_tree::Node;
     use alloc::vec;
     #[test]
-    fn boot_firmware_assigns_only_empty_partition_ranges() {
+    fn boot_firmware_normalizes_only_the_observed_template_partition_ranges() {
         let mut root = Node::named("device-tree").unwrap();
         let mut chosen = Node::named("chosen").unwrap();
         chosen
@@ -116,15 +131,19 @@ mod tests {
         flash
             .set_property(
                 "ranges",
-                [0u32, 0, nor::CAPACITY as u32]
+                [0u32, 0, TEMPLATE_CAPACITY]
                     .into_iter()
                     .flat_map(u32::to_le_bytes)
                     .collect(),
             )
             .unwrap();
-        for name in ["firmware", "anvram", "syscfg"] {
+        for (name, value) in [
+            ("firmware", reg(TEMPLATE_FIRMWARE)),
+            ("anvram", reg(TEMPLATE_ANVRAM)),
+            ("syscfg", reg(TEMPLATE_SYSCFG)),
+        ] {
             let mut n = Node::named(name).unwrap();
-            n.set_property("reg", vec![]).unwrap();
+            n.set_property("reg", value).unwrap();
             flash.children.push(n);
         }
         let mut spi = Node::named("spi1").unwrap();
@@ -135,13 +154,29 @@ mod tests {
         let mut tree = DeviceTree { root };
         assert!(publish(&mut tree).unwrap());
         assert_eq!(
-            tree.property(&alloc::format!("{SPINOR}/anvram"), "reg")
-                .unwrap()
-                .value,
-            [nor::ANVRAM.0, nor::ANVRAM.1]
+            tree.property(SPINOR, "ranges").unwrap().value,
+            [0u32, 0, nor::CAPACITY as u32]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            tree.property(&alloc::format!("{SPINOR}/anvram"), "reg")
+                .unwrap()
+                .value,
+            reg(&[nor::ANVRAM])
+        );
+        assert_eq!(
+            tree.property(&alloc::format!("{SPINOR}/firmware"), "reg")
+                .unwrap()
+                .value,
+            reg(&nor::FIRMWARE)
+        );
+        assert_eq!(
+            tree.property(&alloc::format!("{SPINOR}/syscfg"), "reg")
+                .unwrap()
+                .value,
+            reg(&nor::SYSCFG)
         );
         tree.set_property(&alloc::format!("{SPINOR}/syscfg"), "reg", vec![0; 8])
             .unwrap();

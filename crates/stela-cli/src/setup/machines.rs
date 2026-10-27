@@ -352,13 +352,12 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
         } else {
             writeln!(
                 text,
-                "  TSS            off: nothing is sent to Apple's signing server"
+                "  TSS/FDR        off: no machine identity or nonces are sent to Apple's services"
             )?;
             if record.active_medium().is_some() {
                 writeln!(
                     text,
-                    "  choices.cfg    drops the Install macOS choice: the restore needs \
-                     --tss"
+                    "  choices.cfg    drops the Install macOS choice: the restore needs --tss"
                 )?;
             }
         }

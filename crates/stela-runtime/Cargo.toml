@@ -24,7 +24,7 @@ sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 # Stela-owned SEP system identity keys; constant-time no_std curve arithmetic.
-p256 = { version = "0.13.2", default-features = false, features = ["arithmetic"] }
+p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdsa"] }
 # Public RSA verification for Image4 evidence; no private-key operations.
 crypto-bigint = { version = "0.5", default-features = false }
 # The AES engine model's cipher: constant-time, no_std, AES-NI when present.

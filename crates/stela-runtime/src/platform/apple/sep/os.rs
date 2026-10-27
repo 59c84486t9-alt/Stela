@@ -243,7 +243,7 @@ impl SepOs {
         };
         let result = match frame.service {
             xart::MASTER_ID | xart::SLAVE_ID => services.xart.request(frame, &mut payload, entropy),
-            keystore::ID => services.keystore.request(frame, &mut payload),
+            keystore::ID => services.keystore.request(frame, &mut payload, entropy),
             boot_policy::ID => services
                 .xart
                 .policy_store_mut()

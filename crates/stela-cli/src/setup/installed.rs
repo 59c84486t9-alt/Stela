@@ -561,7 +561,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let state_bytes = CAPACITY + sep_state::BYTES as usize;
     ensure!(
         area.bytes >= state_bytes as u64,
-        "{} is smaller than the {state_bytes:#x} bytes of the 1 MiB NOR image and the SEP's \
+        "{} is smaller than the {state_bytes:#x} bytes of the 8 MiB NOR image and the SEP's \
          state ({:#x} bytes also keep the optional boot log)",
         nor.identifier,
         boot_log::PARTITION_BYTES
