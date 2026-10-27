@@ -98,6 +98,7 @@ fn unpublished_profile(
         max_slots,
         max_ports: 1,
         port_major: vec![if speed >= SUPER_SPEED { 3 } else { 2 }],
+        lpm: lpm::Host::default(),
         dcbaa: dcbaa.into(),
         _scratchpads: Vec::new(),
         commands,

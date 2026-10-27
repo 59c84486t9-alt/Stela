@@ -76,6 +76,7 @@ mod hub;
 mod identity;
 mod iso;
 mod lifecycle;
+mod lpm;
 mod memory;
 #[cfg(test)]
 pub(crate) mod model;
@@ -106,6 +107,7 @@ pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
 // Capability registers.
 const HCSPARAMS1: usize = 0x04;
 const HCSPARAMS2: usize = 0x08;
+const HCSPARAMS3: usize = 0x0c;
 const HCCPARAMS1: usize = 0x10;
 const HCCPARAMS2: usize = 0x1c;
 const DBOFF: usize = 0x14;
@@ -435,6 +437,8 @@ pub struct Controller {
     /// Each root port's USB major revision from the Supported Protocol
     /// capabilities.
     port_major: Vec<u8>,
+    /// USB 2 hardware LPM.
+    lpm: lpm::Host,
     power: power::Ledger,
     native_memory: Option<Rc<memory::Native>>,
     dcbaa: memory::Buffer,
@@ -533,6 +537,7 @@ impl Controller {
         let operational = (capability & 0xff) as usize;
         let parameters1 = registers.read32(HCSPARAMS1);
         let parameters2 = registers.read32(HCSPARAMS2);
+        let parameters3 = registers.read32(HCSPARAMS3);
         let capabilities1 = registers.read32(HCCPARAMS1);
         let doorbells = (registers.read32(DBOFF) & !3) as usize;
         let runtime = (registers.read32(RTSOFF) & !0x1f) as usize;
@@ -556,6 +561,7 @@ impl Controller {
             return Err(outside());
         }
         let mut port_major = vec![0u8; usize::from(max_ports)];
+        let mut port_protocol = vec![0u32; usize::from(max_ports)];
         if extended != 0 {
             let mut at = extended;
             loop {
@@ -583,6 +589,9 @@ impl Controller {
                             ((ports & 0xff) as usize, (ports >> 8 & 0xff) as usize);
                         for port in first.max(1)..(first + count).min(port_major.len() + 1) {
                             port_major[port - 1] = (header >> 24) as u8;
+                            if header >> 24 == 2 {
+                                port_protocol[port - 1] = ports;
+                            }
                         }
                     }
                     _ => {}
@@ -686,6 +695,7 @@ impl Controller {
             max_slots,
             max_ports,
             port_major,
+            lpm: lpm::Host::new((capability >> 16) as u16, parameters3 >> 16, port_protocol),
             native_memory,
             dcbaa,
             _scratchpads: scratchpads,

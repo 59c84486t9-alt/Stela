@@ -176,6 +176,8 @@ impl Controller {
             self.identify_parent(attachment, original_parent, device.location.clone(), dma);
         if let Ok(fresh) = &result {
             self.slot(fresh.slot).unwrap().consumer = consumer;
+            // usb_reset_and_verify_device turns hardware LPM back on.
+            self.initial_usb2_lpm(fresh, attachment);
         }
         if result.is_err() {
             // A failed fresh enumeration may already have acknowledged Address
@@ -355,6 +357,9 @@ impl Controller {
                 "USB reset root device is disconnected or unpowered",
             ));
         }
+        // usb_reset_and_verify_device turns hardware LPM off first; a
+        // failure is ignored, as in Linux.
+        let _ = self.disable_usb2_lpm(port);
         // Clear all prior change bits to establish a fresh PRC/event transition.
         self.write_port(port, before & PORT_CHANGES);
         self.drain();
@@ -1334,6 +1339,7 @@ pub(crate) mod tests {
             max_slots,
             max_ports: 1,
             port_major: vec![if speed >= SUPER_SPEED { 3 } else { 2 }],
+            lpm: lpm::Host::default(),
             dcbaa: dcbaa.into(),
             _scratchpads: Vec::new(),
             commands,

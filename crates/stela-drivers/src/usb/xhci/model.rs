@@ -280,6 +280,7 @@ fn address_controller_with_capabilities(
         max_slots: 1,
         max_ports: 1,
         port_major: vec![2],
+        lpm: lpm::Host::default(),
         dcbaa: dma.allocate(16, 64).unwrap().into(),
         _scratchpads: Vec::new(),
         commands,

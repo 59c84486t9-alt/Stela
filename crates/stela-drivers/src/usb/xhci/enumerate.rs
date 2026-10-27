@@ -354,6 +354,7 @@ impl Controller {
         {
             failures.push((format!("{location} {} enumerate hub", device.name()), error));
         }
+        self.initial_usb2_lpm(&device, attachment);
         // Selection failures still preserve the entire descriptor
         // inventory for diagnostics and future generic forwarding.
         if let Ok(slot) = self.slot(device.slot) {
