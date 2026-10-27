@@ -328,6 +328,16 @@ impl Archive {
             Some(progress) if progress.produced <= offset => progress,
             _ => self.start_member(reader, entry)?,
         };
+        if entry.method == Method::Stored {
+            // No inflater state depends on skipped input. Interleaved member
+            // reads can discard a cursor; replaying a multi-gigabyte stored
+            // image here would read every preceding byte again.
+            let skip = offset - progress.produced;
+            progress.next += skip;
+            progress.remaining_input -= skip;
+            progress.remaining_output -= skip;
+            progress.produced = offset;
+        }
         let mut discard = [0; 4096];
         while progress.produced < offset {
             let want = (offset - progress.produced).min(discard.len() as u64) as usize;
@@ -618,6 +628,46 @@ pub(crate) mod tests {
             self.served.set(self.served.get() + bytes.len() as u64);
             self.inner.read_at(offset, bytes)
         }
+    }
+
+    #[test]
+    fn stored_resume_seeks_without_reading_skipped_bytes() {
+        let big = sample(400_000);
+        let bytes = archive(&[("m", &big, false)], true);
+        let mut memory = Counting {
+            inner: Memory(bytes),
+            served: core::cell::Cell::new(0),
+        };
+        let archive = Archive::open(&mut memory).unwrap();
+        let entry = archive.find("m").unwrap();
+        let mut cursor = None;
+        for offset in [300_000, 350_000, 100, 399_900] {
+            memory.served.set(0);
+            let mut out = [0; 100];
+            archive
+                .read_member_resuming(&mut memory, entry, &mut cursor, offset, &mut out)
+                .unwrap();
+            assert_eq!(out, big[offset as usize..offset as usize + out.len()]);
+            assert!(memory.served.get() <= LOCAL_BYTES as u64 + out.len() as u64);
+            assert_eq!(
+                cursor.as_ref().unwrap().produced(),
+                offset + out.len() as u64
+            );
+        }
+        // Interleaving another member drops Store's cursor; restarting at a
+        // distant offset must still read only its local header and payload.
+        memory.served.set(0);
+        let mut out = [0; 100];
+        archive
+            .read_member_resuming(&mut memory, entry, &mut None, 300_000, &mut out)
+            .unwrap();
+        assert_eq!(out, big[300_000..300_100]);
+        assert_eq!(memory.served.get(), LOCAL_BYTES as u64 + out.len() as u64);
+        assert!(
+            archive
+                .read_member_resuming(&mut memory, entry, &mut cursor, entry.bytes, &mut out)
+                .is_err()
+        );
     }
 
     #[test]

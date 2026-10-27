@@ -4,11 +4,16 @@
 //! 0x1c7d364 (9f), `_readRDSR` 0x1c7d1b8 (05), `_writeEnable`
 //! 0x1c7d048 (06/04), `_programBytes` 0x1c7c894 (02), `_eraseSector`
 //! 0x1c7c480 (20), `_eraseBlock` 0x1c7c288 (d8), `readBuffer`
-//! 0x1c9ffdc (03). The identifier table at 0x1c7b7a0 accepts ef6514.
-//! Stela chooses that identifier for a 1 MiB emulated die, with 256-byte
+//! 0x1c9ffdc (03). `_identifyNORDevice` at 0x1c7b7a0 selects ef6017's
+//! geometry through 0x1c7ba1c..0x1c7ba28 -> 0x1c7bfe4 -> 0x1c7c030;
+//! the constants at 0x1759f0 are 2048 sectors, 4096 bytes, 256-byte pages
+//! and 50. The former ef6514 selects only 256 sectors at 0x175a20 (1 MiB).
+//! Stela reports the matching identifier for its 8 MiB die, with 256-byte
 //! pages, 4 KiB sectors and 64 KiB blocks. It is not a claim about the
-//! physical board's flash vendor. J473AP `spinor/ranges` spans 1 MiB;
-//! its partition `reg`s are empty, so Stela's boot firmware assigns them.
+//! physical board's flash vendor. The 26A434 J473 `mBoot` image's table at
+//! file 0x1b0110 supplies the 8 MiB capacity and partition regions below;
+//! boot firmware normalizes the DeviceTree's placeholder partition `reg`s
+//! and publishes that resolved geometry to the kernel.
 //!
 //! Commands commit on CS rising. This functional die completes program and
 //! erase at that boundary (zero busy latency), so WIP is always clear;
@@ -18,16 +23,18 @@ use alloc::{collections::BTreeSet, vec, vec::Vec};
 pub mod nvram;
 pub mod persist;
 
-pub const CAPACITY: usize = 0x100000;
+pub const CAPACITY: usize = 0x800000;
 pub const PAGE_SIZE: usize = 256;
 pub const SECTOR_SIZE: usize = 0x1000;
 pub const BLOCK_SIZE: usize = 0x10000;
-pub const JEDEC_ID: [u8; 3] = [0xef, 0x65, 0x14];
+pub const JEDEC_ID: [u8; 3] = [0xef, 0x60, 0x17];
 pub const ERASED: u8 = 0xff;
-/// Stela boot-chain partition choices, all erase-block aligned.
-pub const FIRMWARE: (u32, u32) = (0, 0xc0000);
-pub const ANVRAM: (u32, u32) = (0xc0000, 0x20000);
-pub const SYSCFG: (u32, u32) = (0xe0000, 0x20000);
+/// J473 boot-firmware regions: header space, then the two iBoot slots.
+pub const FIRMWARE: [(u32, u32); 3] = [(0, 0x20000), (0x20000, 0x2c0000), (0x2e0000, 0x2c0000)];
+/// The CHRP NVRAM partition. Its two active banks occupy its first 128 KiB.
+pub const ANVRAM: (u32, u32) = (0x700000, 0x100000);
+/// J473 diagnostic-data regions.
+pub const SYSCFG: [(u32, u32); 2] = [(0x5a0000, 0x2000), (0x5a4000, 0x20000)];
 const WEL: u8 = 2;
 const READ: u8 = 0x03;
 const FAST_READ: u8 = 0x0b;
@@ -56,7 +63,7 @@ impl Image {
     }
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, &'static str> {
         if bytes.len() != CAPACITY {
-            return Err("NOR image is not 1 MiB");
+            return Err("NOR image is not 8 MiB");
         }
         Ok(Self(bytes))
     }
@@ -333,22 +340,33 @@ mod tests {
     #[test]
     fn inactive_nvram_bank_program_block_erase_wrdi_and_fast_read() {
         let mut nor = Nor::new(Image::fresh());
+        let inactive = ANVRAM.0 as usize + nvram::BANK_SIZE;
+        let addressed = |command, offset: usize, tail: &[u8]| {
+            let mut bytes = vec![
+                command,
+                (offset >> 16) as u8,
+                (offset >> 8) as u8,
+                offset as u8,
+            ];
+            bytes.extend_from_slice(tail);
+            bytes
+        };
         command(&mut nor, &[WRITE_ENABLE]);
         command(&mut nor, &[WRITE_DISABLE]);
-        command(&mut nor, &[PROGRAM, 0x0d, 0, 0, 0x42]);
+        command(&mut nor, &addressed(PROGRAM, inactive, &[0x42]));
         assert_eq!(nor.image.bank(1).unwrap()[0], ERASED);
         command(&mut nor, &[WRITE_ENABLE]);
         command(&mut nor, &[WRITE_STATUS, 0]);
         assert_eq!(command(&mut nor, &[READ_STATUS, 0xff])[1], 0);
         command(&mut nor, &[WRITE_ENABLE]);
-        command(&mut nor, &[PROGRAM, 0x0d, 0, 0, 0x42]);
+        command(&mut nor, &addressed(PROGRAM, inactive, &[0x42]));
         assert_eq!(
-            command(&mut nor, &[FAST_READ, 0x0d, 0, 0, 0, 0xff])[5],
+            command(&mut nor, &addressed(FAST_READ, inactive, &[0, 0xff]))[5],
             0x42
         );
         assert_eq!(nor.image.bank(1).unwrap()[0], 0x42);
         command(&mut nor, &[WRITE_ENABLE]);
-        command(&mut nor, &[ERASE_BLOCK, 0x0d, 0x21, 0]);
+        command(&mut nor, &addressed(ERASE_BLOCK, inactive + 0x2100, &[]));
         assert!(nor.image.bank(1).unwrap().iter().all(|&b| b == ERASED));
         assert_eq!(nvram::validate(nor.image.bank(0).unwrap()), Ok(()));
     }
@@ -356,10 +374,9 @@ mod tests {
     #[test]
     fn jedec_status_program_erase_and_read_share_the_image() {
         let mut nor = Nor::new(Image::fresh());
-        assert_eq!(
-            command(&mut nor, &[READ_ID, 0xff, 0xff, 0xff]),
-            [0xff, 0xef, 0x65, 0x14]
-        );
+        let id = command(&mut nor, &[READ_ID, 0xff, 0xff, 0xff]);
+        assert_eq!(id, [0xff, 0xef, 0x60, 0x17]);
+        assert_eq!(1usize << u32::from(id[3]), nor.image.bytes().len());
         command(&mut nor, &[PROGRAM, 0, 0, 0, 0x12]);
         assert_eq!(nor.image.bytes()[0], ERASED);
         command(&mut nor, &[WRITE_ENABLE]);
@@ -427,7 +444,7 @@ mod tests {
             let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
             image.0[start + PAGE_SIZE..start + nvram::BANK_SIZE].fill(ERASED);
         }
-        image.0[SYSCFG.0 as usize + 10] = 0x42;
+        image.0[SYSCFG[0].0 as usize + 10] = 0x42;
         let before = image.clone();
         assert!(image.current_bank().is_err());
         let (bank, proxy) = image.boot_bank().unwrap();
@@ -462,8 +479,17 @@ mod tests {
         let saved = variables.encode().unwrap();
         let untouched = image.bank(0).unwrap().to_vec();
         let mut nor = Nor::new(image);
+        let bank = ANVRAM.0 as usize + nvram::BANK_SIZE;
         command(&mut nor, &[WRITE_ENABLE]);
-        command(&mut nor, &[ERASE_BLOCK, 0x0d, 0, 0]);
+        command(
+            &mut nor,
+            &[
+                ERASE_BLOCK,
+                (bank >> 16) as u8,
+                (bank >> 8) as u8,
+                bank as u8,
+            ],
+        );
         for (page, bytes) in saved.chunks(PAGE_SIZE).enumerate() {
             let address = ANVRAM.0 as usize + nvram::BANK_SIZE + page * PAGE_SIZE;
             let mut program = vec![
@@ -492,7 +518,7 @@ mod tests {
                 .all(|&b| b == ERASED)
         );
         assert!(
-            image.bytes()[SYSCFG.0 as usize..]
+            image.bytes()[ANVRAM.0 as usize + nvram::BANK_SIZE..]
                 .iter()
                 .all(|&b| b == ERASED)
         );

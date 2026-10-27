@@ -336,6 +336,54 @@ pub fn events() -> Vec<Step> {
 pub fn answers(route: Route, ctx: &Ctx) -> Vec<Step> {
     let mut out = vec![];
     out.push(step(
+        "RecoveryOSVersionData",
+        None,
+        Transfer::Control,
+        routed(
+            route,
+            "RecoveryOSVersionData",
+            oracle(
+                |ctx| {
+                    ensure!(ctx.chosen(true).is_some(), "no recovery identity");
+                    Ok("recovery identity selected".into())
+                },
+                |ctx, o| {
+                    let Outcome::Reply(Value::Dictionary(reply)) = o else {
+                        return Err(anyhow!("no recovery version reply"));
+                    };
+                    let bytes = reply
+                        .get("RecoveryOSVersionData")
+                        .and_then(Value::as_data)
+                        .context("no recovery version data")?;
+                    ensure!(bytes.starts_with(b"<?xml"), "version data must be XML");
+                    let got = Value::from_reader_xml(std::io::Cursor::new(bytes))?;
+                    let source = ctx
+                        .chosen(true)
+                        .context("no recovery identity")?
+                        .get("Info")
+                        .and_then(Value::as_dictionary)
+                        .context("no recovery Info")?;
+                    let mut expected = Dictionary::new();
+                    for (from, to) in [
+                        ("BuildNumber", "BuildNumber"),
+                        ("Variant", "Variant"),
+                        ("BuildTrain", "BuildTrain"),
+                        ("ProductMarketingVersion", "ProductVersion"),
+                    ] {
+                        if let Some(value) = source.get(from) {
+                            expected.insert(to.into(), value.clone());
+                        }
+                    }
+                    ensure!(
+                        got == Value::Dictionary(expected),
+                        "version fields differ from recovery Info"
+                    );
+                    Ok("XML version fields match the original recovery identity".into())
+                },
+            ),
+        ),
+    ));
+    out.push(step(
         "HostSystemTime",
         None,
         Transfer::Control,
@@ -825,36 +873,32 @@ pub fn images(route: Route, ctx: &Ctx) -> Vec<Step> {
             members,
         ));
     }
-    // EANData (copy_ibfw_ean, R 0x36e7c): the iBoot EAN images.
-    let ean = flagged("IsiBootEANFirmware");
-    for args in [
+    // EANData requests early-access images, not the separate iBoot EAN
+    // set transferred by PersonalizedData. Reference restore_send_image_data.
+    let ean = flagged("IsEarlyAccessFirmware");
+    out.push(list_step(
+        route,
+        "EANData",
         dict([("EANImageList", Value::Boolean(true))]),
-        Dictionary::new(),
-    ] {
-        let ean = ean.clone();
-        out.push(step(
+        "EANImageList",
+        ean.clone(),
+    ));
+    for name in &ean {
+        out.push(image_step(
+            route,
             "EANData",
-            Some(args),
-            Transfer::Control,
-            routed(
-                route,
-                "EANData",
-                oracle(
-                    move |ctx| {
-                        for n in &ean {
-                            personalizable(ctx, n)?;
-                        }
-                        Ok("the global ticket covers every EAN image".into())
-                    },
-                    |_, _| {
-                        Err(anyhow!(
-                            "answered EANData, which this host does not implement"
-                        ))
-                    },
-                ),
-            ),
+            dict([("ImageName", s(name))]),
+            "EANData",
+            name,
         ));
     }
+    out.push(all_step(
+        route,
+        "EANData",
+        Dictionary::new(),
+        "EANData",
+        ean,
+    ));
     out
 }
 
@@ -942,7 +986,6 @@ fn all_step(
             kind,
             oracle(
                 move |ctx| {
-                    ensure!(!names.is_empty(), "no component carries the flag");
                     let mut bytes = 0;
                     for n in &names {
                         personalizable(ctx, n)?;
@@ -963,6 +1006,10 @@ fn all_step(
                         .get(key)
                         .and_then(Value::as_dictionary)
                         .ok_or_else(|| anyhow!("no {key} dictionary"))?;
+                    ensure!(
+                        images.len() == checked.len(),
+                        "{key} image count differs from manifest flags"
+                    );
                     for n in &checked {
                         let b = images
                             .get(n)

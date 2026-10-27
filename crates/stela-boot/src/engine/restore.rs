@@ -13,6 +13,7 @@
 //! requirements.
 use super::{
     bundle::{self, Bytes},
+    network,
     remote::Remote,
 };
 use crate::{
@@ -20,18 +21,21 @@ use crate::{
     output,
     system::{RESTORE_BLOCKS_FILE, RESTORE_INVENTORY_FILE},
 };
-use alloc::{boxed::Box, format, rc::Rc, string::String};
+use alloc::{boxed::Box, collections::VecDeque, format, rc::Rc, string::String, vec::Vec};
 use core::{cell::RefCell, task::Poll};
 use stela_drivers::block::BlockDevice;
 use stela_runtime::{
-    machine::apple::{AppleDevices, MuxStream, UsbId},
+    machine::apple::{AppleDevices, MuxStream, UsbClient, UsbId},
+    net::Transfer,
     payload::{PayloadManifest, Purpose, ReadAt},
     restore::{
         answers::Answers,
-        driver::Driver,
+        driver::{Driver, Ports},
+        proxy::{Control, Destination, Event as ProxyEvent, Peer, Version},
         route::Route,
         source::Extent,
         store::{Store, Verify},
+        stream::ByteStream,
     },
 };
 
@@ -45,6 +49,9 @@ pub enum Mode {
     /// system image when the payload holds it ([`Route::Stock`]), else
     /// without ([`Route::Recovery`]).
     Install,
+    /// The original restore's explicit development-board policy: retain and
+    /// report FDR failures, but allow restored to continue past them.
+    DevelopmentInstall,
     /// The same, with the inventory's Update identity: restored_update
     /// installs over the installed system and keeps its data.
     Update,
@@ -56,6 +63,7 @@ impl Mode {
     fn label(self) -> &'static str {
         match self {
             Self::Install => "INSTALL",
+            Self::DevelopmentInstall => "DEVELOPMENT INSTALL",
             Self::Update => "UPDATE",
             Self::Study => "RESTORE STUDY",
         }
@@ -155,6 +163,7 @@ pub fn inventory_file(handoff: &Handoff, name: &str) -> Option<&'static [u8]> {
 pub struct Experiment {
     usb: UsbId,
     driver: Driver<Source, MuxStream>,
+    proxy: Option<ReverseProxy>,
     terminal: bool,
     ledger: usize,
     mode: Mode,
@@ -164,6 +173,377 @@ pub struct Experiment {
 pub struct Services {
     pub signer: Option<stela_runtime::restore::tss::Signer>,
     pub fdr_storage: Option<Box<dyn BlockDevice>>,
+    pub network: Option<network::Shared>,
+}
+
+/// libimobiledevice uses one 1 MiB buffer per direction. Keep the same finite
+/// bound while retaining bytes under either guest or host TCP backpressure.
+const PROXY_BUFFER: usize = network::RELAY_BUFFER;
+const PROXY_READ: usize = 64 << 10;
+const PROXY_CONNECTIONS: usize = 4;
+// libimobiledevice's reference client gives each control receive 20 seconds.
+// A translated restore guest can need materially longer than a host-native
+// device to parse and answer the v2 plist, so use that same protocol bound.
+const PROXY_NEGOTIATION_MILLIS: u64 = 20_000;
+
+struct MuxIo<'a, 'b> {
+    ports: &'a mut UsbClient<'b>,
+    handle: MuxStream,
+}
+impl ByteStream for MuxIo<'_, '_> {
+    fn read(&mut self, bytes: &mut [u8]) -> Poll<stela_runtime::restore::Result<usize>> {
+        Ports::read(self.ports, self.handle, bytes)
+    }
+    fn write(&mut self, bytes: &[u8]) -> Poll<stela_runtime::restore::Result<usize>> {
+        Ports::write(self.ports, self.handle, bytes)
+    }
+}
+
+struct ProxyConnection {
+    guest_port: u16,
+    version: Version,
+    guest: Option<MuxStream>,
+    peer: Peer,
+    peer_state: &'static str,
+    destination: Option<Destination>,
+    remote: Option<Transfer>,
+    to_remote: VecDeque<u8>,
+    to_guest: VecDeque<u8>,
+    guest_closed: bool,
+    remote_closed: bool,
+    closing: bool,
+    out_bytes: u64,
+    in_bytes: u64,
+}
+
+impl ProxyConnection {
+    fn new(guest_port: u16, version: Version) -> Self {
+        let peer = Peer::new(version);
+        let peer_state = peer.state();
+        Self {
+            guest_port,
+            version,
+            guest: None,
+            peer,
+            peer_state,
+            destination: None,
+            remote: None,
+            to_remote: VecDeque::with_capacity(PROXY_BUFFER),
+            to_guest: VecDeque::with_capacity(PROXY_BUFFER),
+            guest_closed: false,
+            remote_closed: false,
+            closing: false,
+            out_bytes: 0,
+            in_bytes: 0,
+        }
+    }
+
+    fn refuse(&mut self, reason: impl core::fmt::Display) {
+        let destination = self
+            .destination
+            .as_ref()
+            .map(|d| format!("{}:{}", d.host, d.port))
+            .unwrap_or_else(|| String::from("unparsed destination"));
+        output::arguments(format_args!(
+            "RESTORE PROXY connection {destination} refused: {reason}\n"
+        ));
+        self.closing = true;
+    }
+}
+
+impl ProxyConnection {
+    /// One bounded operation in each direction. `true` means both owners were
+    /// retired and the scheduler may remove this connection.
+    fn poll(&mut self, ports: &mut UsbClient<'_>, network: &network::Shared) -> bool {
+        if self.guest.is_none() && !self.closing {
+            match Ports::open(ports, self.guest_port) {
+                Poll::Pending => return false,
+                Poll::Ready(Ok(handle)) => self.guest = Some(handle),
+                Poll::Ready(Err(error)) => self.refuse(error),
+            }
+        }
+        if self.destination.is_none()
+            && !self.closing
+            && let Some(handle) = self.guest
+        {
+            let mut stream = MuxIo { ports, handle };
+            let result = self.peer.poll(&mut stream);
+            let state = self.peer.state();
+            if state != self.peer_state {
+                output::arguments(format_args!(
+                    "RESTORE PROXY peer port={} protocol={:?} state={state}\n",
+                    self.guest_port, self.version
+                ));
+                self.peer_state = state;
+            }
+            match result {
+                Poll::Pending => return false,
+                Poll::Ready(Err(_)) if self.peer.ping_answered() => {
+                    output::arguments(format_args!(
+                        "RESTORE PROXY ping complete protocol={:?}\n",
+                        self.version
+                    ));
+                    self.closing = true;
+                }
+                Poll::Ready(Err(error)) => {
+                    if let Some(header) = self.peer.observed_header() {
+                        output::arguments(format_args!(
+                            "RESTORE PROXY framing header={:02x}:{:02x}:{:02x}\n",
+                            header[0], header[1], header[2]
+                        ));
+                    }
+                    self.refuse(error);
+                }
+                Poll::Ready(Ok(destination)) => {
+                    output::arguments(format_args!(
+                        "RESTORE PROXY connect {}:{} protocol={:?}\n",
+                        destination.host, destination.port, self.version
+                    ));
+                    match network
+                        .0
+                        .borrow_mut()
+                        .connect(&destination.host, destination.port)
+                    {
+                        Ok(remote) => {
+                            self.remote = Some(remote);
+                            self.destination = Some(destination);
+                        }
+                        Err(error) => {
+                            self.destination = Some(destination);
+                            self.refuse(error);
+                        }
+                    }
+                }
+            }
+        }
+        if !self.closing {
+            let handle = self.guest.expect("opened before relay");
+
+            if self.to_remote.is_empty() && !self.guest_closed {
+                let mut bytes = [0; PROXY_READ];
+                match Ports::read(ports, handle, &mut bytes) {
+                    Poll::Pending => {}
+                    Poll::Ready(Ok(0)) => self.guest_closed = true,
+                    Poll::Ready(Ok(n)) if n <= bytes.len() => {
+                        self.to_remote.extend(&bytes[..n]);
+                        self.out_bytes += n as u64;
+                    }
+                    Poll::Ready(Ok(_)) => self.refuse("invalid guest proxy read length"),
+                    Poll::Ready(Err(error)) => self.refuse(error),
+                }
+            }
+            if !self.to_remote.is_empty() && !self.closing {
+                let sent = {
+                    let remote = self.remote.as_mut().expect("connected before relay");
+                    let (first, _) = self.to_remote.as_slices();
+                    network.0.borrow_mut().relay_write(remote, first)
+                };
+                match sent {
+                    Ok(0) => {}
+                    Ok(n) if n <= self.to_remote.len() => {
+                        self.to_remote.drain(..n);
+                    }
+                    Ok(_) => self.refuse("invalid remote proxy write length"),
+                    Err(error) => self.refuse(error),
+                }
+            }
+            if self.to_guest.is_empty() && !self.remote_closed && !self.closing {
+                let to_guest = &mut self.to_guest;
+                let mut closed = false;
+                let received = {
+                    let remote = self.remote.as_mut().expect("connected before relay");
+                    network.0.borrow_mut().relay_read(remote, |bytes, eof| {
+                        if to_guest.len().saturating_add(bytes.len()) > PROXY_BUFFER {
+                            return Err(stela_runtime::net::NetError::Invalid(
+                                "reverse proxy receive buffer",
+                            ));
+                        }
+                        to_guest.extend(bytes);
+                        closed |= eof;
+                        Ok(eof)
+                    })
+                };
+                match received {
+                    Ok(_) => self.remote_closed |= closed,
+                    Err(error) => self.refuse(error),
+                }
+            }
+            if !self.to_guest.is_empty() && !self.closing {
+                let written = {
+                    let (first, _) = self.to_guest.as_slices();
+                    Ports::write(ports, handle, first)
+                };
+                match written {
+                    Poll::Pending => {}
+                    Poll::Ready(Ok(n)) if n != 0 && n <= self.to_guest.len() => {
+                        self.to_guest.drain(..n);
+                        self.in_bytes += n as u64;
+                    }
+                    Poll::Ready(Ok(_)) => self.refuse("invalid guest proxy write length"),
+                    Poll::Ready(Err(error)) => self.refuse(error),
+                }
+            }
+            self.closing |= (self.guest_closed && self.to_remote.is_empty())
+                || (self.remote_closed && self.to_guest.is_empty());
+        }
+        if self.closing {
+            if let Some(remote) = self.remote.take() {
+                network.0.borrow_mut().close(remote);
+            }
+            if let Some(handle) = self.guest {
+                match Ports::close(ports, handle) {
+                    Poll::Pending => return false,
+                    Poll::Ready(Err(error)) => output::arguments(format_args!(
+                        "RESTORE PROXY guest close refused: {error}\n"
+                    )),
+                    Poll::Ready(Ok(())) => {}
+                }
+                self.guest = None;
+            }
+            let destination = self
+                .destination
+                .as_ref()
+                .map(|d| format!("{}:{}", d.host, d.port))
+                .unwrap_or_else(|| String::from("unparsed destination"));
+            output::arguments(format_args!(
+                "RESTORE PROXY closed {destination} out={} in={}\n",
+                self.out_bytes, self.in_bytes
+            ));
+            return true;
+        }
+        false
+    }
+}
+
+struct ReverseProxy {
+    control: Control<MuxStream>,
+    connections: Vec<ProxyConnection>,
+    network: network::Shared,
+    stopped: bool,
+    restarting: bool,
+    tsc_hz: u64,
+    negotiation_deadline: u64,
+    control_progress: (Version, u8, u64, u64),
+    waiting_reported: bool,
+}
+impl ReverseProxy {
+    fn new(network: network::Shared, tsc_hz: u64) -> Self {
+        let control = Control::new();
+        let now = super::host::rdtsc();
+        output::arguments(format_args!(
+            "RESTORE PROXY enabled control_port={} negotiation_ms={PROXY_NEGOTIATION_MILLIS}\n",
+            stela_runtime::restore::proxy::CONTROL_PORT
+        ));
+        Self {
+            control_progress: control.progress(),
+            control,
+            connections: Vec::new(),
+            network,
+            stopped: false,
+            restarting: false,
+            tsc_hz,
+            negotiation_deadline: now.saturating_add(
+                (tsc_hz / 1000)
+                    .saturating_mul(PROXY_NEGOTIATION_MILLIS)
+                    .max(1),
+            ),
+            waiting_reported: false,
+        }
+    }
+
+    fn arm_negotiation_deadline(&mut self, now: u64) {
+        self.negotiation_deadline = now.saturating_add(
+            (self.tsc_hz / 1000)
+                .saturating_mul(PROXY_NEGOTIATION_MILLIS)
+                .max(1),
+        );
+    }
+
+    fn poll(&mut self, ports: &mut UsbClient<'_>) {
+        let now = super::host::rdtsc();
+        if self.restarting {
+            match self.control.restart(ports) {
+                Poll::Pending => {}
+                Poll::Ready(Ok(())) => {
+                    self.restarting = false;
+                    self.control_progress = self.control.progress();
+                    self.arm_negotiation_deadline(now);
+                }
+                Poll::Ready(Err(error)) => {
+                    output::arguments(format_args!(
+                        "RESTORE PROXY control retirement refused: {error}\n"
+                    ));
+                    self.stopped = true;
+                }
+            }
+        }
+        if !self.stopped {
+            let result = if self.restarting {
+                Poll::Pending
+            } else {
+                self.control.poll(ports)
+            };
+            match result {
+                Poll::Pending => {
+                    if !self.restarting && !self.control.ready() {
+                        let progress = self.control.progress();
+                        if progress != self.control_progress {
+                            self.control_progress = progress;
+                            self.arm_negotiation_deadline(now);
+                        } else if now >= self.negotiation_deadline {
+                            if !self.waiting_reported {
+                                output::arguments(format_args!(
+                                    "RESTORE PROXY waiting for guest service: control negotiation timed out\n"
+                                ));
+                                self.waiting_reported = true;
+                            }
+                            self.restarting = true;
+                        }
+                    }
+                }
+                Poll::Ready(Ok(ProxyEvent::Connection { port, version })) => {
+                    if self.waiting_reported {
+                        output::arguments(format_args!(
+                            "RESTORE PROXY control available protocol={version:?}\n"
+                        ));
+                        self.waiting_reported = false;
+                    }
+                    if self.connections.len() == PROXY_CONNECTIONS {
+                        output::arguments(format_args!(
+                            "RESTORE PROXY refused connection: {PROXY_CONNECTIONS} active\n"
+                        ));
+                        self.stopped = true;
+                    } else {
+                        self.connections.push(ProxyConnection::new(port, version));
+                    }
+                }
+                Poll::Ready(Ok(ProxyEvent::Shutdown)) => {
+                    output::arguments(format_args!("RESTORE PROXY shutdown\n"));
+                    self.stopped = true;
+                    for connection in &mut self.connections {
+                        connection.closing = true;
+                    }
+                }
+                Poll::Ready(Err(error)) => {
+                    if !self.waiting_reported {
+                        output::arguments(format_args!(
+                            "RESTORE PROXY waiting for guest service: {error}\n"
+                        ));
+                        self.waiting_reported = true;
+                    }
+                    self.restarting = true;
+                }
+            }
+        }
+        let mut at = 0;
+        while at < self.connections.len() {
+            if self.connections[at].poll(ports, &self.network) {
+                self.connections.remove(at);
+            } else {
+                at += 1;
+            }
+        }
+    }
 }
 impl Experiment {
     /// The study runs `identity`; the install the inventory's one Erase
@@ -183,11 +563,12 @@ impl Experiment {
         let Services {
             signer,
             fdr_storage,
+            network,
         } = services;
         let manifest = inventory(handoff)?;
         let purpose = match mode {
             Mode::Update => Purpose::Update,
-            Mode::Install | Mode::Study => Purpose::Erase,
+            Mode::Install | Mode::DevelopmentInstall | Mode::Study => Purpose::Erase,
         };
         let identity = match identity {
             Some(identity) => identity,
@@ -207,10 +588,17 @@ impl Experiment {
             }
             (false, Verify::Full) => Verify::Full,
         };
+        let personalized = signer.is_some();
+        if mode == Mode::DevelopmentInstall && !personalized {
+            return Err(String::from(
+                "the development install needs --tss for required boot firmware",
+            ));
+        }
         output::arguments(format_args!(
             "{} build={} source_sha256={} manifest_sha256={} identity={} bytes={} hashes={} verify={}\n",
             match mode {
                 Mode::Study => "RESTORE STUDY UNQUALIFIED",
+                Mode::DevelopmentInstall => "DEVELOPMENT INSTALL TSS-ENABLED FDR-OFFLINE",
                 mode => mode.label(),
             },
             manifest.product_build,
@@ -235,7 +623,29 @@ impl Experiment {
                 .map_err(|e| format!("{e}"))?;
         }
         let mut answers = Answers::new(store);
+        let route = match mode {
+            Mode::Install if answers.has_system_image() => Route::Stock,
+            Mode::Install => Route::Recovery,
+            Mode::DevelopmentInstall if !answers.has_system_image() => {
+                return Err(String::from(
+                    "--development-restore needs a payload containing the macOS system image",
+                ));
+            }
+            Mode::DevelopmentInstall => Route::Development,
+            Mode::Update => Route::Stock,
+            Mode::Study => Route::StelaFirmwareStudy,
+        };
+        if mode == Mode::DevelopmentInstall && network.is_some() {
+            return Err(String::from(
+                "the development restore refuses an FDR reverse-proxy network",
+            ));
+        }
         if let Some(bytes) = inventory_file(handoff, stela_runtime::restore::fdr::FILE) {
+            if mode == Mode::DevelopmentInstall {
+                return Err(String::from(
+                    "the development restore refuses an FDR diagnostic/archive",
+                ));
+            }
             let placement = super::fdr::Placement::parse(bytes)?;
             answers.fdr_diagnostic = Some(
                 stela_runtime::restore::fdr::Diagnostic::decode(placement.diagnostic)
@@ -273,16 +683,11 @@ impl Experiment {
                 seconds + (super::host::rdtsc() - tsc) / hz
             }));
         }
-        let route = match mode {
-            Mode::Install if answers.has_system_image() => Route::Stock,
-            Mode::Install => Route::Recovery,
-            Mode::Update => Route::Stock,
-            Mode::Study => Route::StelaFirmwareStudy,
-        };
         let driver = Driver::new(answers, route).map_err(|e| format!("{e}"))?;
         Ok(Self {
             usb,
             driver,
+            proxy: network.map(|network| ReverseProxy::new(network, handoff.tsc_hz)),
             terminal: false,
             ledger: 0,
             mode,
@@ -297,6 +702,9 @@ impl Experiment {
         let mut client = devices
             .usb_client(self.usb)
             .unwrap_or_else(|e| output::fatal(e));
+        if let Some(proxy) = &mut self.proxy {
+            proxy.poll(&mut client);
+        }
         let result = self.driver.poll(&mut client);
         for message in &self.driver.session.ledger()[self.ledger..] {
             output::arguments(format_args!("{label} ledger={message:?}\n"));
@@ -311,6 +719,9 @@ impl Experiment {
                     match self.mode {
                         Mode::Install =>
                             "INSTALL protocol complete; restart into recoveryOS (Stela)",
+                        Mode::DevelopmentInstall => {
+                            "DEVELOPMENT INSTALL protocol complete; TSS enabled, FDR offline/unprovisioned; installed boot remains unqualified"
+                        }
                         Mode::Update => "UPDATE protocol complete; reboot into macOS (Stela)",
                         Mode::Study => {
                             "RESTORE STUDY protocol complete; installed boot is unqualified"
@@ -326,6 +737,7 @@ impl Experiment {
                     "{} failed: {}",
                     match self.mode {
                         Mode::Install => "the install",
+                        Mode::DevelopmentInstall => "the development install",
                         Mode::Update => "the update",
                         Mode::Study => "the restore study",
                     },

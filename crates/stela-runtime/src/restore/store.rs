@@ -548,6 +548,36 @@ pub(crate) mod tests {
     pub(crate) fn set_aea_keys(store: &mut Store<Memory>, keys: Vec<crate::payload::AeaKey>) {
         store.manifest.aea_keys = keys;
     }
+    /// Set one Info field on the selected fixture identity.
+    pub(crate) fn set_info(store: &mut Store<Memory>, key: &str, value: Value) {
+        let Value::Dict(identity) = &mut store.identities[store.current].value else {
+            panic!("fixture identity is not a dictionary")
+        };
+        let Value::Dict(info) = identity.get_mut("Info").expect("fixture Info") else {
+            panic!("fixture Info is not a dictionary")
+        };
+        info.insert(key.into(), value);
+    }
+    pub(crate) fn set_component_info(
+        store: &mut Store<Memory>,
+        component: &str,
+        key: &str,
+        value: Value,
+    ) {
+        let Value::Dict(identity) = &mut store.identities[store.current].value else {
+            panic!("fixture identity")
+        };
+        let Value::Dict(manifest) = identity.get_mut("Manifest").unwrap() else {
+            panic!("fixture manifest")
+        };
+        let Value::Dict(entry) = manifest.get_mut(component).unwrap() else {
+            panic!("fixture component")
+        };
+        let Value::Dict(info) = entry.get_mut("Info").unwrap() else {
+            panic!("fixture component Info")
+        };
+        info.insert(key.into(), value);
+    }
     /// Drop a member from a store's inventory, as a trimmed medium leaves it.
     pub(crate) fn drop_member(store: &mut Store<Memory>, name: &str) {
         store.manifest.members.retain(|m| m.name != name);

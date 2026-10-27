@@ -272,13 +272,23 @@ pub(super) fn decrypt(
         "AEA1 archive holds {written} bytes, not {}",
         root.file_bytes
     );
-    let mut padding = Vec::new();
-    input.read_to_end(&mut padding)?;
-    if !padding.is_empty() {
-        let padding_key = HeaderKey::derive(&*main, b"AEA_PAK");
-        let mut mac =
-            HmacSha256::new_from_slice(padding_key.mac_key()).expect("HMAC takes any key length");
-        mac.update(&padding);
+    let padding_key = HeaderKey::derive(&*main, b"AEA_PAK");
+    let mut mac =
+        HmacSha256::new_from_slice(padding_key.mac_key()).expect("HMAC takes any key length");
+    let mut padding = [0u8; 16 * 1024];
+    let mut padded = false;
+    loop {
+        let count = match input.read(&mut padding) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            break;
+        }
+        mac.update(&padding[..count]);
+        padded = true;
+    }
+    if padded {
         ensure!(
             mac.verify_slice(&expected).is_ok(),
             "the AEA1 archive's padding fails its MAC"

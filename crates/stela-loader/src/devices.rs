@@ -1546,7 +1546,10 @@ mod tests {
             vec![node(
                 "spinor",
                 Some(soc::NOR.as_bytes()),
-                vec![node("anvram", Some(soc::NVRAM.as_bytes()), vec![])],
+                vec![
+                    node("firmware", Some(soc::BOOT_FIRMWARE.as_bytes()), vec![]),
+                    node("anvram", Some(soc::NVRAM.as_bytes()), vec![]),
+                ],
             )],
         );
         spi.set_property(
@@ -1570,6 +1573,10 @@ mod tests {
         };
         assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/spi0"]);
         assert!(tree.property("/arm-io/gpio", COMPATIBLE).is_some());
+        assert!(
+            tree.property("/arm-io/spi1/spinor/firmware", COMPATIBLE)
+                .is_some()
+        );
         tree.node_mut("/arm-io/spi1").unwrap().children.clear();
         assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/gpio", "/arm-io/spi1"]);
     }

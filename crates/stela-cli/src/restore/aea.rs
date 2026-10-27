@@ -25,6 +25,9 @@ const ARCHIVE_KEY_BYTES: usize = 32;
 
 mod container;
 
+#[cfg(test)]
+mod benchmark;
+
 #[derive(Debug, Serialize)]
 pub struct Entry {
     pub key: String,
