@@ -61,6 +61,17 @@ const ADMIN_ABORT: u8 = 0x08;
 const ADMIN_SET_FEATURES: u8 = 0x09;
 /// Host Behavior Support, with its ACRE and LBAFEE bytes.
 const FEATURE_HOST_BEHAVIOR: u32 = 0x16;
+/// Host Memory Buffer: CDW11 EHM and MR, CDW12 HSIZE in pages, CDW13-14
+/// the descriptor list and CDW15 its entry count.
+const FEATURE_HOST_MEMORY: u32 = 0x0d;
+const HOST_MEMORY_ENABLE: u32 = 1 << 0;
+const HOST_MEMORY_RETURN: u32 = 1 << 1;
+/// `max_host_mem_size_mb`, and the largest chunk Linux tries first
+/// (`PAGE_SIZE * MAX_ORDER_NR_PAGES` on x86-64).
+const HOST_MEMORY_MAXIMUM: u64 = 128 << 20;
+const HOST_MEMORY_CHUNK: u64 = 4 << 20;
+/// One descriptor: address, size in pages, reserved.
+const HOST_MEMORY_DESCRIPTOR: usize = 16;
 const HOST_BEHAVIOR_ACRE: usize = 0;
 const HOST_BEHAVIOR_LBAFEE: usize = 2;
 const HOST_BEHAVIOR_BYTES: usize = 512;
@@ -83,6 +94,11 @@ const CONTROLLER_ATTRIBUTES: usize = 96;
 const ATTRIBUTE_EXTENDED_LBA: u32 = 1 << 15;
 /// CRDT1–3, in units of 100 ms.
 const CONTROLLER_RETRY_DELAYS: usize = 128;
+/// HMPRE and HMMIN in 4 KiB units, HMMINDS in 4 KiB units, HMMAXD.
+const CONTROLLER_HOST_MEMORY_PREFERRED: usize = 272;
+const CONTROLLER_HOST_MEMORY_MINIMUM: usize = 276;
+const CONTROLLER_HOST_MEMORY_DESCRIPTOR_MINIMUM: usize = 332;
+const CONTROLLER_HOST_MEMORY_DESCRIPTORS: usize = 336;
 const CONTROLLER_NAMESPACES: core::ops::Range<usize> = 516..520;
 /// Identify Namespace fields (NVM Command Set 1.1 Figure 114).
 const NAMESPACE_SIZE: core::ops::Range<usize> = 0..8;
@@ -246,6 +262,56 @@ struct Controller {
     resets: u64,
     /// CRDT1–3 from Identify Controller, in 100 ms units.
     retry_delays: [u16; 3],
+    /// The host memory buffer, kept across resets, and whether the
+    /// controller uses it (`dev->hmb`).
+    host_memory: Option<HostMemory>,
+    host_memory_enabled: bool,
+}
+
+/// Linux's host memory buffer: its descriptor list and chunks.
+struct HostMemory {
+    descriptors: Buffer,
+    chunks: Vec<Buffer>,
+    bytes: u64,
+    /// The controller accepted it, so a re-enable may ask for its contents
+    /// back (`host_mem_descs` retained).
+    returnable: bool,
+}
+
+/// What Identify Controller asks of a host memory buffer, in bytes.
+#[derive(Clone, Copy)]
+struct HostMemoryRequest {
+    preferred: u64,
+    minimum: u64,
+    descriptor_minimum: u64,
+    descriptors: u32,
+}
+
+impl HostMemoryRequest {
+    fn from_identify(identify: &[u8]) -> Self {
+        let pages = |at| u64::from(le32(identify, at)) * PAGE as u64;
+        Self {
+            preferred: pages(CONTROLLER_HOST_MEMORY_PREFERRED),
+            minimum: pages(CONTROLLER_HOST_MEMORY_MINIMUM),
+            descriptor_minimum: pages(CONTROLLER_HOST_MEMORY_DESCRIPTOR_MINIMUM),
+            descriptors: u32::from(u16::from_le_bytes([
+                identify[CONTROLLER_HOST_MEMORY_DESCRIPTORS],
+                identify[CONTROLLER_HOST_MEMORY_DESCRIPTORS + 1],
+            ])),
+        }
+    }
+}
+
+/// Allocations for a host memory buffer: its descriptor list, then its
+/// chunks.
+trait HostMemorySource {
+    fn allocate(&mut self, bytes: usize, chunk: bool) -> Result<Buffer, BlockError>;
+}
+
+impl HostMemorySource for &mut dyn DmaAllocator {
+    fn allocate(&mut self, bytes: usize, _chunk: bool) -> Result<Buffer, BlockError> {
+        DmaAllocator::allocate(*self, bytes, PAGE).map(Buffer::Legacy)
+    }
 }
 
 impl Controller {
@@ -641,6 +707,9 @@ impl Controller {
             }
         }
         self.bounce.bytes_mut()[..PAGE].copy_from_slice(&kept);
+        // nvme_setup_host_mem: the kept buffer is offered back.
+        self.host_memory_enabled = false;
+        self.enable_host_memory()?;
         for command in self.create_queue_commands()? {
             self.io.submissions.publish();
             self.admin_command(command)?;
@@ -648,6 +717,118 @@ impl Controller {
         // nvme_start_ctrl queues a namespace scan.
         self.resets += 1;
         Ok(())
+    }
+
+    /// Linux `nvme_alloc_host_mem_multi`: chunks of `chunk` bytes up to the
+    /// preferred size and descriptor limit; `None` when not one chunk fits.
+    fn allocate_host_memory(
+        request: HostMemoryRequest,
+        preferred: u64,
+        chunk: u64,
+        source: &mut dyn HostMemorySource,
+    ) -> Option<HostMemory> {
+        let mut entries = preferred.div_ceil(chunk);
+        if request.descriptors != 0 {
+            entries = entries.min(u64::from(request.descriptors));
+        }
+        let mut descriptors = source
+            .allocate(entries as usize * HOST_MEMORY_DESCRIPTOR, false)
+            .ok()?;
+        let mut chunks = Vec::new();
+        let mut bytes = 0u64;
+        while bytes < preferred && (chunks.len() as u64) < entries {
+            let length = chunk.min(preferred - bytes);
+            let Ok(buffer) = source.allocate(length as usize, true) else {
+                break;
+            };
+            let at = chunks.len() * HOST_MEMORY_DESCRIPTOR;
+            descriptors.write(at, buffer.address().ok()?);
+            descriptors.write(at + 8, (length / PAGE as u64) as u32);
+            chunks.push(buffer);
+            bytes += length;
+        }
+        if bytes == 0 {
+            return None;
+        }
+        descriptors.give().ok()?;
+        for chunk in &mut chunks {
+            chunk.give().ok()?;
+        }
+        Some(HostMemory {
+            descriptors,
+            chunks,
+            bytes,
+            returnable: false,
+        })
+    }
+
+    /// Linux `nvme_setup_host_mem` at discovery: allocate the preferred size,
+    /// capped at `max_host_mem_size_mb`, from the largest chunks down to the
+    /// minimum descriptor size, and hand it over. A controller works without
+    /// one when it cannot be had.
+    fn setup_host_memory(
+        &mut self,
+        request: HostMemoryRequest,
+        source: &mut dyn HostMemorySource,
+    ) -> Result<(), BlockError> {
+        if request.preferred == 0 || request.minimum > HOST_MEMORY_MAXIMUM {
+            return Ok(());
+        }
+        let preferred = request.preferred.min(HOST_MEMORY_MAXIMUM);
+        let smallest = request.descriptor_minimum.max(2 * PAGE as u64);
+        let mut chunk = preferred.min(HOST_MEMORY_CHUNK);
+        while chunk >= smallest {
+            if let Some(memory) = Self::allocate_host_memory(request, preferred, chunk, source) {
+                if request.minimum == 0 || memory.bytes >= request.minimum {
+                    self.host_memory = Some(memory);
+                    return self.enable_host_memory();
+                }
+                // nvme_free_host_mem: the controller never saw it.
+                drop(memory);
+            }
+            chunk /= 2;
+        }
+        Ok(())
+    }
+
+    /// Linux `nvme_set_host_mem` with EHM, and MR for a buffer the controller
+    /// already filled. A refusal leaves the controller without one.
+    fn enable_host_memory(&mut self) -> Result<(), BlockError> {
+        let Some(memory) = self.host_memory.as_ref() else {
+            return Ok(());
+        };
+        let mut bits = HOST_MEMORY_ENABLE;
+        if memory.returnable {
+            bits |= HOST_MEMORY_RETURN;
+        }
+        let list = memory.descriptors.address()?;
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_SET_FEATURES);
+        command[10] = FEATURE_HOST_MEMORY;
+        command[11] = bits;
+        command[12] = (memory.bytes / PAGE as u64) as u32;
+        command[13] = list as u32;
+        command[14] = (list >> 32) as u32;
+        command[15] = memory.chunks.len() as u32;
+        match self.admin_command(command) {
+            Ok(_) => {
+                self.host_memory_enabled = true;
+                if let Some(memory) = self.host_memory.as_mut() {
+                    memory.returnable = true;
+                }
+                Ok(())
+            }
+            Err(BlockError::Device { .. }) => {
+                // nvme_free_host_mem: the next setup offers it afresh. The
+                // pages stay reserved, never reused for anything else.
+                self.host_memory_enabled = false;
+                if let Some(memory) = self.host_memory.as_mut() {
+                    memory.returnable = false;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Linux `nvme_configure_host_options`, from the Identify Controller data
@@ -828,9 +1009,11 @@ pub fn attach(
         version: 0,
         resets: 0,
         retry_delays: [0; 3],
+        host_memory: None,
+        host_memory_enabled: false,
     };
     controller.initialize()?;
-    discover(controller, format!("{}", function.address))
+    discover(controller, format!("{}", function.address), &mut { dma })
 }
 
 pub(crate) fn validate_clock(clock: Clock) -> Result<(), BlockError> {
@@ -844,8 +1027,10 @@ pub(crate) fn validate_clock(clock: Clock) -> Result<(), BlockError> {
 fn discover(
     mut controller: Controller,
     location: alloc::string::String,
+    host_memory: &mut dyn HostMemorySource,
 ) -> Result<Attached, BlockError> {
     let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
+    let request = HostMemoryRequest::from_identify(identify);
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
     // The maximum transfer, in minimum pages as a power of two; 0 is none.
@@ -864,6 +1049,7 @@ fn discover(
             Err(error) => return Err(error),
         }
     }
+    controller.setup_host_memory(request, host_memory)?;
 
     for command in controller.create_queue_commands()? {
         controller.io.submissions.publish();
@@ -1153,6 +1339,8 @@ mod tests {
                 version: 0,
                 resets: 0,
                 retry_delays: [0; 3],
+                host_memory: None,
+                host_memory_enabled: false,
             };
             Self {
                 _registers: registers,

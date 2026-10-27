@@ -445,6 +445,8 @@ unsafe fn attach_with_timeout(
         version: 0,
         resets: 0,
         retry_delays: [0; 3],
+        host_memory: None,
+        host_memory_enabled: false,
     };
     validate_clock(clock)?;
     controller.teardown = Teardown::Unprepared;
@@ -462,13 +464,31 @@ unsafe fn attach_with_timeout(
         BOUNCE_BYTES,
         Direction::Bidirectional,
     )?;
-    controller.prp_list = Buffer::allocate(source, domain, PAGE, Direction::ToDevice)?;
+    controller.prp_list = Buffer::allocate(source, domain.clone(), PAGE, Direction::ToDevice)?;
     // Polling live CQ memory requires the domain's independently qualified
     // coherent observation; refuse absent support before enabling the engine.
     controller.admin.completions.coherent(12)?;
     controller.io.completions.coherent(12)?;
     controller.initialize()?;
-    discover(controller, location)
+    discover(controller, location, &mut Pages { source, domain })
+}
+
+/// Host memory buffer pages from the controller's own page source, mapped
+/// into its domain.
+struct Pages<'a> {
+    source: &'a dyn PageSource,
+    domain: Arc<dyn DmaDomain>,
+}
+
+impl super::HostMemorySource for Pages<'_> {
+    fn allocate(&mut self, bytes: usize, chunk: bool) -> Result<Buffer, BlockError> {
+        let direction = if chunk {
+            Direction::Bidirectional
+        } else {
+            Direction::ToDevice
+        };
+        Buffer::allocate(self.source, self.domain.clone(), bytes, direction)
+    }
 }
 
 impl Controller {
@@ -516,6 +536,9 @@ impl Controller {
             self.teardown = Teardown::Drained;
         }
         if self.teardown == Teardown::Drained {
+            let host_memory = self.host_memory.iter_mut().flat_map(|memory| {
+                core::iter::once(&mut memory.descriptors).chain(&mut memory.chunks)
+            });
             for buffer in [
                 &mut self.admin.submissions,
                 &mut self.admin.completions,
@@ -523,7 +546,10 @@ impl Controller {
                 &mut self.io.completions,
                 &mut self.bounce,
                 &mut self.prp_list,
-            ] {
+            ]
+            .into_iter()
+            .chain(host_memory)
+            {
                 // SAFETY: actual stop/containment/drain remain acknowledged;
                 // each successful unmap becomes Empty before the next step.
                 // Retry therefore only visits still-retained RAM mappings.
@@ -547,6 +573,9 @@ impl Drop for Controller {
     fn drop(&mut self) {
         if self.owned.is_some() && self.retire_owned().is_err() {
             self.registers.quarantine();
+            let host_memory = self.host_memory.iter_mut().flat_map(|memory| {
+                core::iter::once(&mut memory.descriptors).chain(&mut memory.chunks)
+            });
             for buffer in [
                 &mut self.admin.submissions,
                 &mut self.admin.completions,
@@ -554,7 +583,10 @@ impl Drop for Controller {
                 &mut self.io.completions,
                 &mut self.bounce,
                 &mut self.prp_list,
-            ] {
+            ]
+            .into_iter()
+            .chain(host_memory)
+            {
                 buffer.quarantine();
             }
             if let Some(owner) = self.owned.take() {
@@ -705,6 +737,11 @@ mod tests {
         /// CRDT1–3, and the Host Behavior Support pages set.
         retry_delays: [u16; 3],
         host_behavior: Vec<[u8; 3]>,
+        /// HMPRE, HMMIN, HMMINDS and HMMAXD; Host Memory Buffer feature
+        /// commands as CDW11-15 with the first descriptor; refuse them.
+        host_memory: (u32, u32, u32, u16),
+        host_memory_sets: Vec<([u32; 5], (u64, u32))>,
+        refuse_host_memory: bool,
         prepared: bool,
         bme: bool,
         enabled: bool,
@@ -767,6 +804,9 @@ mod tests {
                 eui64: [0x11; 8],
                 retry_delays: [0; 3],
                 host_behavior: Vec::new(),
+                host_memory: (0, 0, 0, 0),
+                host_memory_sets: Vec::new(),
+                refuse_host_memory: false,
                 prepared: false,
                 bme: false,
                 enabled: false,
@@ -937,6 +977,11 @@ mod tests {
                             for (index, delay) in self.retry_delays.iter().enumerate() {
                                 data[128 + 2 * index..][..2].copy_from_slice(&delay.to_le_bytes());
                             }
+                            let (preferred, minimum, smallest, entries) = self.host_memory;
+                            data[272..276].copy_from_slice(&preferred.to_le_bytes());
+                            data[276..280].copy_from_slice(&minimum.to_le_bytes());
+                            data[332..336].copy_from_slice(&smallest.to_le_bytes());
+                            data[336..338].copy_from_slice(&entries.to_le_bytes());
                         }
                         2 => data[..4].copy_from_slice(&1u32.to_le_bytes()),
                         0 => {
@@ -949,6 +994,20 @@ mod tests {
                         _ => panic!("unsupported model CNS"),
                     }
                     self.write_iova(u64::from(command[6]) | u64::from(command[7]) << 32, &data);
+                }
+                (0, 9) if command[10] == 0x0d => {
+                    let list = u64::from(command[13]) | u64::from(command[14]) << 32;
+                    let first = self.read_iova(list, 16);
+                    let first = (
+                        u64::from_le_bytes(first[..8].try_into().unwrap()),
+                        u32::from_le_bytes(first[8..12].try_into().unwrap()),
+                    );
+                    self.host_memory_sets
+                        .push((core::array::from_fn(|i| command[11 + i]), first));
+                    if self.refuse_host_memory {
+                        // Invalid Field in Command.
+                        status = 2;
+                    }
                 }
                 (0, 9) => {
                     assert_eq!(command[10], 0x16);
@@ -1268,7 +1327,9 @@ mod tests {
         }
         fn enable_dma(&mut self) -> Result<(), BlockError> {
             let mut m = self.0.lock().unwrap();
-            assert!(m.prepared && !m.enabled && m.maps.len() == 6);
+            // The six queue and bounce buffers, and any host memory buffer
+            // kept across a reset.
+            assert!(m.prepared && !m.enabled && m.maps.len() >= 6);
             m.bme = true;
             m.record("bme_on");
             Ok(())
@@ -1520,6 +1581,61 @@ mod tests {
         disk.flush().unwrap();
         assert_eq!(f.model.lock().unwrap().host_behavior.len(), 2);
         disk.retire_owned().unwrap();
+    }
+
+    #[test]
+    fn host_memory_is_set_up_and_returned_after_resets_like_nvme_setup_host_mem() {
+        // None preferred: no Host Memory Buffer feature.
+        let f = Fixture::new();
+        drop(f.attach().unwrap());
+        assert!(f.model.lock().unwrap().host_memory_sets.is_empty());
+        // 1 MiB preferred, 512 KiB minimum: one 1 MiB chunk, enabled.
+        let f = Fixture::new();
+        f.model.lock().unwrap().host_memory = (256, 128, 0, 0);
+        let mut a = f.attach().unwrap();
+        let disk = &mut a.namespaces[0];
+        {
+            let m = f.model.lock().unwrap();
+            let [bits, size, _, _, entries] = m.host_memory_sets[0].0;
+            assert_eq!((bits, size, entries), (1, 256, 1));
+            assert_eq!(m.host_memory_sets[0].1.1, 256);
+            assert_ne!(m.host_memory_sets[0].1.0, 0);
+        }
+        // A reset offers the same buffer back with MR.
+        let mut m = f.model.lock().unwrap();
+        m.delay_io = 1;
+        m.abortable = false;
+        drop(m);
+        disk.flush().unwrap();
+        {
+            let m = f.model.lock().unwrap();
+            assert_eq!(m.host_memory_sets.len(), 2);
+            assert_eq!(m.host_memory_sets[1].0[0], 3);
+            assert_eq!(m.host_memory_sets[1].1, m.host_memory_sets[0].1);
+        }
+        // A refusal leaves the controller without one; the next reset offers
+        // it afresh, without MR.
+        let mut m = f.model.lock().unwrap();
+        m.refuse_host_memory = true;
+        m.delay_io = 1;
+        drop(m);
+        disk.flush().unwrap();
+        let mut m = f.model.lock().unwrap();
+        m.refuse_host_memory = false;
+        m.delay_io = 1;
+        drop(m);
+        disk.flush().unwrap();
+        assert_eq!(f.model.lock().unwrap().host_memory_sets[3].0[0], 1);
+        disk.retire_owned().unwrap();
+
+        // A descriptor limit caps the buffer: 8 MiB preferred in 4 MiB
+        // chunks, at most one descriptor.
+        let f = Fixture::new();
+        f.model.lock().unwrap().host_memory = (2048, 0, 0, 1);
+        drop(f.attach().unwrap());
+        let m = f.model.lock().unwrap();
+        let [bits, size, _, _, entries] = m.host_memory_sets[0].0;
+        assert_eq!((bits, size, entries), (1, 1024, 1));
     }
 
     #[test]
