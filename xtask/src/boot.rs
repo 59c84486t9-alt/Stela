@@ -275,6 +275,8 @@ pub struct Run {
     ])]
     native_irq_work_check: bool,
     /// Actual single-BSP MMIO mapping, context refusal, retirement and reuse.
+    /// The root's wall time is an owned HPET, so it passes only with `--hpet`;
+    /// without one the mount refuses at `stage=hpet-wholeblock`.
     #[arg(long, conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check",
         "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
