@@ -38,6 +38,16 @@ fn warning() -> Style {
     Style::new().true_color(255, 135, 0).bold()
 }
 
+/// The timeline's glyphs, for the progress phases that continue it.
+pub(super) fn rail() -> crate::progress::Rail {
+    crate::progress::Rail {
+        active: accent().apply_to(STEP_ACTIVE).to_string(),
+        done: selection().apply_to(STEP_SUBMIT).to_string(),
+        stopped: Style::new().red().apply_to(STEP_CANCEL).to_string(),
+        bar: accent().apply_to(BAR).to_string(),
+    }
+}
+
 impl Stela {
     pub(super) fn bar(&self, state: &ThemeState) -> String {
         self.bar_color(state).apply_to(BAR).to_string()

@@ -131,6 +131,7 @@ pub(super) fn configure(command: &mut Setup, host: &dyn Host) -> Result<bool> {
 
 fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
     cliclack::set_theme(theme::Stela::default());
+    crate::progress::follow(theme::rail());
     cliclack::intro(
         theme::accent()
             .bold()
