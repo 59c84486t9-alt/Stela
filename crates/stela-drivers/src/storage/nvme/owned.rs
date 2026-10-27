@@ -120,7 +120,7 @@ fn register_error() -> BlockError {
 fn dma_error() -> BlockError {
     BlockError::Protocol("NVMe requester-domain DMA")
 }
-fn map_dma_error(error: DmaError) -> BlockError {
+pub(super) fn map_dma_error(error: DmaError) -> BlockError {
     match error {
         DmaError::IommuUnavailable => BlockError::Unsupported("NVMe requester IOMMU domain"),
         DmaError::CoherenceUnavailable => BlockError::Unsupported("NVMe coherent CQ observation"),
@@ -365,7 +365,8 @@ pub(super) struct Owner {
 
 /// Initialize real admin/I/O queues and discover ordinary NVM namespaces using
 /// the same command/namespace engine as the boot NVMe API. This is a synchronous
-/// polled transport; it does not claim interrupts, hotplug or live reset recovery.
+/// polled transport; it does not claim interrupts or hotplug. A reset after a
+/// timeout clears BME and drains the domain before the CPU reuses any buffer.
 /// # Safety
 /// The supplied register/lifecycle owners and domain must denote the same
 /// actual exclusive controller, its requester and every DMA alias/root/reset
@@ -432,6 +433,8 @@ unsafe fn attach_with_timeout(
         command_id: 0,
         clock,
         command_timeout_us,
+        // Linux's admin timeout is twice its I/O timeout.
+        admin_timeout_us: command_timeout_us.saturating_mul(2),
         fault: None,
         owned: Some(Owner {
             lifecycle,
@@ -723,6 +726,17 @@ mod tests {
         commands: usize,
         sync_cpu: usize,
         pending: Option<(usize, [u32; 16])>,
+        /// Which queues hold an outstanding command.
+        busy: [bool; 2],
+        /// I/O commands still to hold unanswered, one each.
+        delay_io: usize,
+        /// Whether an Abort completes the held command.
+        abortable: bool,
+        /// Statuses for the next I/O completions.
+        statuses: alloc::collections::VecDeque<u32>,
+        /// CSTS.CFS, until the controller is reset.
+        fatal: bool,
+        aborts: usize,
     }
     impl Model {
         fn new() -> Self {
@@ -770,6 +784,12 @@ mod tests {
                 commands: 0,
                 sync_cpu: 0,
                 pending: None,
+                busy: [false; 2],
+                delay_io: 0,
+                abortable: false,
+                statuses: Default::default(),
+                fatal: false,
+                aborts: 0,
             }
         }
         fn registers_available(&self) -> bool {
@@ -850,7 +870,7 @@ mod tests {
                 self.registers_available()
                     && self.dma_enabled()
                     && self.enabled
-                    && !self.outstanding
+                    && !self.busy[queue]
             );
             assert_eq!(tail, (self.heads[queue] + 1) % 16);
             let bytes =
@@ -859,17 +879,41 @@ mod tests {
                 u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
             });
             self.commands += 1;
+            self.busy[queue] = true;
             self.outstanding = true;
             self.drained = false;
             self.record("command");
-            if matches!(self.mutation, Mutation::Delayed) {
+            if queue == 1 && (matches!(self.mutation, Mutation::Delayed) || self.delay_io > 0) {
+                self.delay_io = self.delay_io.saturating_sub(1);
                 self.pending = Some((queue, command));
                 return;
             }
             self.complete(queue, command);
         }
         fn complete(&mut self, queue: usize, command: [u32; 16]) {
+            let mut result = 0u32;
+            let mut status = 0u32;
+            if queue == 1 {
+                status = self.statuses.pop_front().unwrap_or(0);
+            }
             match (queue, command[0] as u8) {
+                // Abort: complete the held command with Command Abort
+                // Requested, or report it not aborted (Dword 0 bit 0).
+                (0, 8) => {
+                    self.aborts += 1;
+                    let held = self
+                        .pending
+                        .filter(|(q, c)| command[10] == (c[0] >> 16) << 16 | *q as u32);
+                    if self.abortable
+                        && let Some((q, c)) = held
+                    {
+                        self.pending = None;
+                        self.statuses.push_front(7);
+                        self.complete(q, c);
+                    } else {
+                        result = 1;
+                    }
+                }
                 (0, 6) => {
                     let mut data = vec![0; 4096];
                     match command[10] {
@@ -908,6 +952,11 @@ mod tests {
                     assert_eq!(command[10] & 0xffff, 1);
                     assert_ne!(self.queues[1].0, 0, "deleting an absent SQ");
                     self.queues[1].0 = 0;
+                    // Its held command is aborted with the queue.
+                    if self.pending.is_some_and(|(q, _)| q == 1) {
+                        self.pending = None;
+                        self.busy[1] = false;
+                    }
                 }
                 (0, 4) => {
                     assert_eq!(command[10] & 0xffff, 1);
@@ -945,13 +994,16 @@ mod tests {
                 _ => {}
             }
             let mut cqe = [0u8; 16];
+            cqe[..4].copy_from_slice(&result.to_le_bytes());
             cqe[8..12].copy_from_slice(&(sqid << 16 | head).to_le_bytes());
-            cqe[12..16].copy_from_slice(&(u32::from(phase) << 16 | cid).to_le_bytes());
+            cqe[12..16]
+                .copy_from_slice(&(status << 17 | u32::from(phase) << 16 | cid).to_le_bytes());
             self.write_iova(
                 self.queues[queue].1 + u64::from(self.heads[queue]) * 16,
                 &cqe,
             );
-            self.outstanding = false;
+            self.busy[queue] = false;
+            self.outstanding = self.busy.iter().any(|busy| *busy);
             self.record("completion");
         }
     }
@@ -1093,7 +1145,9 @@ mod tests {
                 return Err(register_error());
             }
             if offset == 0x1c {
-                return Ok(u32::from(m.enabled || m.stuck_ready) | if m.stopped { 8 } else { 0 });
+                return Ok(u32::from(m.enabled || m.stuck_ready)
+                    | u32::from(m.fatal) << 1
+                    | if m.stopped { 8 } else { 0 });
             }
             Ok(*m.registers.get(&offset).unwrap_or(&0))
         }
@@ -1114,10 +1168,16 @@ mod tests {
                     } else {
                         m.record("stop");
                         if !m.stuck_ready {
+                            // A controller reset ends every queue and command.
                             m.enabled = false;
                             m.outstanding = false;
+                            m.busy = [false; 2];
                             m.pending = None;
                             m.stopped = true;
+                            m.fatal = false;
+                            m.queues[1] = (0, 0);
+                            m.heads = [0; 2];
+                            m.phases = [true; 2];
                         }
                     }
                     if value & (3 << 14) == 1 << 14 {
@@ -1311,14 +1371,8 @@ mod tests {
         }
     }
     #[test]
-    fn owned_bad_cqe_identity_phase_or_timeout_never_reuses_dma() {
-        for mutation in [
-            Mutation::Cid,
-            Mutation::Sqid,
-            Mutation::Head,
-            Mutation::Phase,
-            Mutation::Delayed,
-        ] {
+    fn owned_bad_cqe_identity_never_reuses_dma() {
+        for mutation in [Mutation::Cid, Mutation::Sqid, Mutation::Head] {
             let f = Fixture::new();
             let mut a = f.attach().unwrap();
             let disk = &mut a.namespaces[0];
@@ -1346,21 +1400,87 @@ mod tests {
         }
     }
     #[test]
-    fn owned_late_completion_does_not_reopen_poisoned_siblings() {
+    fn owned_timeouts_abort_then_reset_contain_dma_and_retry_like_linux() {
+        // An abort that completes the held write: it is retried, no reset.
+        let f = Fixture::new();
+        let mut a = f.attach().unwrap();
+        let disk = &mut a.namespaces[0];
+        let start = {
+            let mut m = f.model.lock().unwrap();
+            m.delay_io = 1;
+            m.abortable = true;
+            m.events.len()
+        };
+        disk.write(3, &[0x5a; 512]).unwrap();
+        {
+            let m = f.model.lock().unwrap();
+            assert_eq!(m.aborts, 1);
+            assert!(!m.events[start..].contains(&"stop"));
+            assert_eq!(m.disk[3 * 512..4 * 512], [0x5a; 512]);
+        }
+
+        // An abort that does not: the controller is reset with its DMA
+        // contained, then brought back and the write retried.
+        f.model.lock().unwrap().delay_io = 1;
+        f.model.lock().unwrap().abortable = false;
+        let before = f.model.lock().unwrap().events.len();
+        disk.write(4, &[0x6b; 512]).unwrap();
+        {
+            let m = f.model.lock().unwrap();
+            let events = &m.events[before..];
+            let at = |event| events.iter().position(|e| *e == event).unwrap();
+            assert!(at("stop") < at("bme_off") && at("bme_off") < at("drain"));
+            assert!(at("drain") < at("enable"));
+            assert_eq!(m.disk[4 * 512..5 * 512], [0x6b; 512]);
+        }
+        let mut read = [0; 512];
+        disk.read(4, &mut read).unwrap();
+        assert_eq!(read, [0x6b; 512]);
+
+        // A fatal controller is reset before the command is sent.
+        f.model.lock().unwrap().fatal = true;
+        disk.flush().unwrap();
+        assert!(!f.model.lock().unwrap().fatal);
+
+        // An error status without DNR is retried; with DNR it is not.
+        f.model.lock().unwrap().statuses.extend([2, 2]);
+        disk.flush().unwrap();
+        f.model
+            .lock()
+            .unwrap()
+            .statuses
+            .push_back(STATUS_DO_NOT_RETRY | 2);
+        assert_eq!(
+            disk.flush(),
+            Err(BlockError::Device {
+                status: STATUS_DO_NOT_RETRY | 2
+            })
+        );
+        // Five retries, as nvme_max_retries allows.
+        f.model.lock().unwrap().statuses.extend([2; 7]);
+        let commands = f.model.lock().unwrap().commands;
+        assert_eq!(disk.flush(), Err(BlockError::Device { status: 2 }));
+        assert_eq!(f.model.lock().unwrap().commands, commands + 6);
+        f.model.lock().unwrap().statuses.clear();
+        disk.flush().unwrap();
+        disk.retire_owned().unwrap();
+        assert!(f.model.lock().unwrap().released);
+    }
+    #[test]
+    fn owned_controller_that_keeps_timing_out_fails_after_five_resets() {
         let f = Fixture::new();
         let mut a = f.attach().unwrap();
         let disk = &mut a.namespaces[0];
         f.model.lock().unwrap().mutation = Mutation::Delayed;
         assert_eq!(disk.flush(), Err(BlockError::Timeout));
         {
-            let mut m = f.model.lock().unwrap();
-            m.mutation = Mutation::None;
-            let (q, c) = m.pending.take().unwrap();
-            m.complete(q, c);
+            let m = f.model.lock().unwrap();
+            assert_eq!(m.aborts, 6);
+            assert_eq!(m.events.iter().filter(|e| **e == "drain").count(), 6);
         }
-        let mut output = [0xa5; 512];
-        assert_eq!(disk.read(0, &mut output), Err(BlockError::Timeout));
-        assert_eq!(output, [0xa5; 512]);
+        // Each reset succeeded, so the controller still serves commands.
+        f.model.lock().unwrap().mutation = Mutation::None;
+        disk.flush().unwrap();
         disk.retire_owned().unwrap();
     }
     #[test]

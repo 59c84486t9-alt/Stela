@@ -53,6 +53,7 @@ const ADMIN_CREATE_SUBMISSION: u8 = 0x01;
 const ADMIN_DELETE_COMPLETION: u8 = 0x04;
 const ADMIN_CREATE_COMPLETION: u8 = 0x05;
 const ADMIN_IDENTIFY: u8 = 0x06;
+const ADMIN_ABORT: u8 = 0x08;
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
@@ -83,6 +84,28 @@ const PAGE: usize = 4096;
 const ENTRIES: u16 = 16;
 const BOUNCE_BYTES: usize = 128 * 1024;
 const COMMAND_TIMEOUT_US: u64 = 30_000_000;
+/// Linux `NVME_ADMIN_TIMEOUT`.
+const ADMIN_TIMEOUT_US: u64 = 60_000_000;
+/// Linux `nvme_max_retries`.
+const COMMAND_RETRIES: u32 = 5;
+/// The completion status field's Do Not Retry bit.
+const STATUS_DO_NOT_RETRY: u32 = 1 << 14;
+
+/// How a command was lost, when it produced no completion to report.
+enum Lost {
+    /// Linux resets the controller: a timeout, or a fatal controller status.
+    Reset(BlockError),
+    /// The controller broke the protocol or its registers failed.
+    Fatal(BlockError),
+}
+
+/// One wait for a completion queue entry.
+enum Reaped {
+    Done(u32, u32),
+    TimedOut,
+    /// CSTS.CFS: the controller reported a fatal status.
+    Fatal(u32),
+}
 
 struct Queue {
     submissions: Buffer,
@@ -122,8 +145,10 @@ struct Controller {
     command_id: u16,
     clock: Clock,
     command_timeout_us: u64,
+    admin_timeout_us: u64,
     /// An unresolved command may still own the queues, PRPs and bounce RAM.
-    /// No buffer or queue may be reused until a new, acknowledged reset.
+    /// Set when a reset cannot recover the controller; no buffer or queue is
+    /// reused afterwards.
     fault: Option<BlockError>,
     owned: Option<owned::Owner>,
     teardown: owned::Teardown,
@@ -138,9 +163,14 @@ impl Controller {
         if self.shut_down {
             return Err(BlockError::Unsupported("NVMe controller is shut down"));
         }
+        Ok(())
+    }
+
+    /// CSTS.CFS, as an error.
+    fn check_fatal(&self) -> Result<(), BlockError> {
         let status = self.registers.read32(STATUS)?;
         if status & FATAL != 0 {
-            return Err(self.poison(BlockError::Device { status }));
+            return Err(BlockError::Device { status });
         }
         Ok(())
     }
@@ -204,6 +234,12 @@ impl Controller {
         self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
         self.admin.completions.give()?;
         self.io.completions.give()?;
+        self.configure_admin_queue()
+    }
+
+    /// Linux `nvme_pci_configure_admin_queue` after the controller is
+    /// disabled: program the admin queue and enable the controller.
+    fn configure_admin_queue(&mut self) -> Result<(), BlockError> {
         // Empty SQs are CPU-owned until their first command publication. The
         // controller cannot consume any SQE before the corresponding doorbell.
         let entries = u32::from(ENTRIES - 1);
@@ -222,22 +258,124 @@ impl Controller {
         self.wait_status(self.ready_timeout_us, |status| {
             status & (READY | FATAL) != 0
         })?;
-        self.ready()
+        self.check_fatal()
     }
 
-    /// A failure after publication poisons every sibling. Only a positively
-    /// identified CQE can authorize SQ/PRP/data CPU reuse.
+    /// The Create I/O Completion Queue and Create I/O Submission Queue
+    /// commands for the single polled I/O queue pair.
+    fn create_queue_commands(&self) -> Result<[[u32; 16]; 2], BlockError> {
+        let entries = u32::from(ENTRIES - 1);
+        let completion = self.io.completions.address()?;
+        let submission = self.io.submissions.address()?;
+        let mut create_completion = [0u32; 16];
+        create_completion[0] = u32::from(ADMIN_CREATE_COMPLETION);
+        create_completion[6] = completion as u32;
+        create_completion[7] = (completion >> 32) as u32;
+        create_completion[10] = entries << 16 | 1;
+        create_completion[11] = 1; // physically contiguous, no interrupt
+        let mut create_submission = create_completion;
+        create_submission[0] = u32::from(ADMIN_CREATE_SUBMISSION);
+        create_submission[6] = submission as u32;
+        create_submission[7] = (submission >> 32) as u32;
+        create_submission[11] = 1 << 16 | 1; // completion queue 1, contiguous
+        Ok([create_completion, create_submission])
+    }
+
+    fn identify_command(&self, cns: u32, namespace: u32) -> Result<[u32; 16], BlockError> {
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_IDENTIFY);
+        command[1] = namespace;
+        let page = self.bounce.address()?;
+        command[6] = page as u32;
+        command[7] = (page >> 32) as u32;
+        command[10] = cns;
+        Ok(command)
+    }
+
+    /// Linux's command error handling. A timed-out I/O command is aborted and
+    /// given another timeout; then, or at once for an admin command or a
+    /// fatal controller, the controller is reset. I/O is retried after a
+    /// reset or an error status without DNR, up to `nvme_max_retries`; admin
+    /// commands fail fast. A failed reset poisons every sibling. Only a
+    /// positively identified CQE or an acknowledged reset authorizes
+    /// SQ/PRP/data CPU reuse.
     fn execute(&mut self, io: bool, command: [u32; 16]) -> Result<u32, BlockError> {
         self.ready()?;
-        match self.execute_inner(io, command) {
-            Ok((result, 0)) => Ok(result),
-            Ok((_, status)) => Err(BlockError::Device { status }),
-            Err(error) => Err(self.poison(error)),
+        let mut retries = 0;
+        loop {
+            match self.run(io, command) {
+                Ok((result, 0)) => return Ok(result),
+                Ok((_, status)) => {
+                    if !io || status & STATUS_DO_NOT_RETRY != 0 || retries == COMMAND_RETRIES {
+                        return Err(BlockError::Device { status });
+                    }
+                }
+                Err(Lost::Reset(error)) => {
+                    if let Err(failure) = self.reset() {
+                        return Err(self.poison(failure));
+                    }
+                    if !io || retries == COMMAND_RETRIES {
+                        return Err(error);
+                    }
+                }
+                Err(Lost::Fatal(error)) => return Err(self.poison(error)),
+            }
+            retries += 1;
         }
     }
-    fn execute_inner(&mut self, io: bool, command: [u32; 16]) -> Result<(u32, u32), BlockError> {
+
+    /// One command to its completion, with `nvme_timeout`'s abort.
+    fn run(&mut self, io: bool, command: [u32; 16]) -> Result<(u32, u32), Lost> {
+        let status = self.registers.read32(STATUS).map_err(Lost::Fatal)?;
+        if status & FATAL != 0 {
+            return Err(Lost::Reset(BlockError::Device { status }));
+        }
+        let id = self.submit(io, command).map_err(Lost::Fatal)?;
+        let timeout = if io {
+            self.command_timeout_us
+        } else {
+            self.admin_timeout_us
+        };
+        match self.reap(io, id, timeout).map_err(Lost::Fatal)? {
+            Reaped::Done(result, status) => {
+                // SAFETY: the only outstanding command completed.
+                unsafe { self.reclaim() }.map_err(Lost::Fatal)?;
+                return Ok((result, status));
+            }
+            Reaped::Fatal(status) => return Err(Lost::Reset(BlockError::Device { status })),
+            Reaped::TimedOut if !io => return Err(Lost::Reset(BlockError::Timeout)),
+            Reaped::TimedOut => {}
+        }
+        let mut abort = [0u32; 16];
+        abort[0] = u32::from(ADMIN_ABORT);
+        abort[10] = u32::from(id) << 16 | u32::from(self.io.id);
+        let abort_id = self.submit(false, abort).map_err(Lost::Fatal)?;
+        let completed = match self
+            .reap(true, id, self.command_timeout_us)
+            .map_err(Lost::Fatal)?
+        {
+            Reaped::Done(result, status) => (result, status),
+            Reaped::Fatal(status) => return Err(Lost::Reset(BlockError::Device { status })),
+            Reaped::TimedOut => return Err(Lost::Reset(BlockError::Timeout)),
+        };
+        match self
+            .reap(false, abort_id, self.admin_timeout_us)
+            .map_err(Lost::Fatal)?
+        {
+            Reaped::Done(..) => {
+                // SAFETY: the command and its abort both completed.
+                unsafe { self.reclaim() }.map_err(Lost::Fatal)?;
+            }
+            // The abort itself timed out: Linux resets for it, and the
+            // command's own completion stands.
+            _ => self.reset().map_err(Lost::Fatal)?,
+        }
+        Ok(completed)
+    }
+
+    /// Write `command` at the queue tail and ring its doorbell.
+    fn submit(&mut self, io: bool, command: [u32; 16]) -> Result<u16, BlockError> {
         let stride = self.doorbell_stride;
-        let registers = &self.registers;
         self.command_id = self.command_id.wrapping_add(1);
         let id = self.command_id;
         let queue = if io { &mut self.io } else { &mut self.admin };
@@ -257,17 +395,28 @@ impl Controller {
         queue.submissions.give()?;
         queue.tail = (queue.tail + 1) % ENTRIES;
         fence(Ordering::SeqCst);
-        registers.write32(
+        self.registers.write32(
             DOORBELLS + 2 * usize::from(queue.id) * stride,
             u32::from(queue.tail),
         )?;
+        Ok(id)
+    }
+
+    /// Wait for command `id`'s entry at the completion queue head and retire
+    /// it. Only an entry naming exactly this command and queue is accepted.
+    fn reap(&mut self, io: bool, id: u16, timeout: u64) -> Result<Reaped, BlockError> {
+        let stride = self.doorbell_stride;
+        let registers = &self.registers;
+        let queue = if io { &mut self.io } else { &mut self.admin };
         let entry = usize::from(queue.head) * 16;
         let mut failure = None;
-        let done = self.clock.wait(self.command_timeout_us, || {
+        let mut fatal = None;
+        let done = self.clock.wait(timeout, || {
             let observed = (|| {
                 let status = registers.read32(STATUS)?;
                 if status & FATAL != 0 {
-                    return Err(BlockError::Device { status });
+                    fatal = Some(status);
+                    return Ok(true);
                 }
                 Ok((queue.completions.coherent(entry + 12)? >> 16 & 1 == 1) == queue.phase)
             })();
@@ -282,12 +431,15 @@ impl Controller {
         if let Some(error) = failure {
             return Err(error);
         }
+        if let Some(status) = fatal {
+            return Ok(Reaped::Fatal(status));
+        }
         if !done {
-            return Err(BlockError::Timeout);
+            return Ok(Reaped::TimedOut);
         }
         let status = registers.read32(STATUS)?;
         if status & FATAL != 0 {
-            return Err(BlockError::Device { status });
+            return Ok(Reaped::Fatal(status));
         }
         // The domain qualifies the coherent observation; this barrier orders
         // later CQ words after the device's final phase/status publication.
@@ -302,13 +454,6 @@ impl Controller {
         {
             return Err(BlockError::Device { status: 0xffff });
         }
-        // SAFETY: exact outstanding command completed; no other command can
-        // access these ranges until this synchronous call permits another.
-        unsafe {
-            queue.submissions.take()?;
-            self.bounce.take()?;
-            self.prp_list.take()?;
-        }
         queue.head = (queue.head + 1) % ENTRIES;
         if queue.head == 0 {
             queue.phase = !queue.phase;
@@ -317,7 +462,83 @@ impl Controller {
             DOORBELLS + (2 * usize::from(queue.id) + 1) * stride,
             u32::from(queue.head),
         )?;
-        Ok((result, tail_word >> 17 & 0x7fff))
+        Ok(Reaped::Done(result, tail_word >> 17 & 0x7fff))
+    }
+
+    /// Return the submission queues, PRP list and bounce buffer to the CPU.
+    ///
+    /// # Safety
+    /// Every published command completed, or the controller acknowledged a
+    /// reset and its DMA was contained.
+    unsafe fn reclaim(&mut self) -> Result<(), BlockError> {
+        // SAFETY: forwarded from the caller.
+        unsafe {
+            self.admin.submissions.take()?;
+            self.io.submissions.take()?;
+            self.bounce.take()?;
+            self.prp_list.take()?;
+        }
+        Ok(())
+    }
+
+    /// One admin command inside error handling, which never recurses.
+    fn admin_command(&mut self, command: [u32; 16]) -> Result<u32, BlockError> {
+        match self.run(false, command) {
+            Ok((result, 0)) => Ok(result),
+            Ok((_, status)) => Err(BlockError::Device { status }),
+            Err(Lost::Reset(error) | Lost::Fatal(error)) => Err(error),
+        }
+    }
+
+    /// Linux `nvme_dev_disable` and `nvme_reset_work`: delete the I/O queues
+    /// of a live controller, disable it and contain its DMA, then configure
+    /// the admin queue again, identify the controller and recreate the I/O
+    /// queues.
+    fn reset(&mut self) -> Result<(), BlockError> {
+        let status = self.registers.read32(STATUS)?;
+        let dead = status & FATAL != 0 || status & READY == 0;
+        // A still-outstanding admin command (an unanswered abort) leaves no
+        // admin queue to delete with.
+        if !dead && self.admin.head == self.admin.tail {
+            self.delete_io_queues()?;
+        }
+        let configuration = self.registers.read32(CONFIGURATION)?;
+        self.registers.write32(
+            CONFIGURATION,
+            configuration & !(ENABLE | SHUTDOWN_NOTIFICATION),
+        )?;
+        self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
+        if let Some(owner) = self.owned.as_mut() {
+            // pci_disable_device: bus mastering off and posted writes drained.
+            owner.lifecycle.disable_dma()?;
+            // SAFETY: the engine acknowledged its reset and BME is off.
+            unsafe { owner.domain.drain_posted_writes() }.map_err(owned::map_dma_error)?;
+        }
+        // SAFETY: the controller acknowledged its reset and its DMA is
+        // contained; no command owns any queue or buffer.
+        unsafe {
+            self.reclaim()?;
+            for queue in [&mut self.admin, &mut self.io] {
+                queue.completions.take()?;
+                queue.completions.bytes_mut()[..usize::from(ENTRIES) * 16].fill(0);
+                queue.completions.give()?;
+                queue.head = 0;
+                queue.tail = 0;
+                queue.phase = true;
+            }
+        }
+        self.configure_admin_queue()?;
+        // Identify through the bounce buffer's first page, keeping the data a
+        // retried write still needs there.
+        let kept = self.bounce.bytes()[..PAGE].to_vec();
+        let identify = self.identify_command(IDENTIFY_CONTROLLER, 0)?;
+        self.admin_command(identify)?;
+        self.bounce.bytes_mut()[..PAGE].copy_from_slice(&kept);
+        for command in self.create_queue_commands()? {
+            self.io.submissions.publish();
+            self.admin_command(command)?;
+        }
+        Ok(())
     }
 
     /// Flush callers before this method; acknowledged SHST prevents further
@@ -327,6 +548,9 @@ impl Controller {
             return Ok(());
         }
         self.ready()?;
+        if let Err(error) = self.check_fatal() {
+            return Err(self.poison(error));
+        }
         self.delete_io_queues()?;
         let result = (|| {
             let configuration = self.registers.read32(CONFIGURATION)?;
@@ -345,18 +569,18 @@ impl Controller {
         Ok(())
     }
 
-    /// Linux `nvme_dev_disable` deletes the I/O queues, submission queue
-    /// first, before the shutdown notification. A refused deletion does not
-    /// stop the shutdown; a lost controller does.
+    /// Linux `nvme_delete_io_queues`, submission queue first. A refused
+    /// deletion is ignored and a timed-out one ends the deletions, as in
+    /// Linux; a broken protocol poisons.
     fn delete_io_queues(&mut self) -> Result<(), BlockError> {
         for opcode in [ADMIN_DELETE_SUBMISSION, ADMIN_DELETE_COMPLETION] {
             let mut command = [0u32; 16];
             command[0] = u32::from(opcode);
             command[10] = u32::from(self.io.id);
-            match self.execute(false, command) {
+            match self.run(false, command) {
                 Ok(_) => {}
-                Err(BlockError::Device { .. }) if self.fault.is_none() => {}
-                Err(error) => return Err(error),
+                Err(Lost::Reset(_)) => break,
+                Err(Lost::Fatal(error)) => return Err(self.poison(error)),
             }
         }
         Ok(())
@@ -364,13 +588,7 @@ impl Controller {
 
     /// An admin Identify into the first bounce page.
     fn identify(&mut self, cns: u32, namespace: u32) -> Result<&[u8], BlockError> {
-        let mut command = [0u32; 16];
-        command[0] = u32::from(ADMIN_IDENTIFY);
-        command[1] = namespace;
-        let page = self.bounce.address()?;
-        command[6] = page as u32;
-        command[7] = (page >> 32) as u32;
-        command[10] = cns;
+        let command = self.identify_command(cns, namespace)?;
         self.execute(false, command)?;
         Ok(&self.bounce.bytes()[..PAGE])
     }
@@ -447,6 +665,7 @@ pub fn attach(
         command_id: 0,
         clock: handoff.clock,
         command_timeout_us: COMMAND_TIMEOUT_US,
+        admin_timeout_us: ADMIN_TIMEOUT_US,
         fault: None,
         owned: None,
         teardown: owned::Teardown::Unprepared,
@@ -468,7 +687,6 @@ fn discover(
     mut controller: Controller,
     location: alloc::string::String,
 ) -> Result<Attached, BlockError> {
-    let entries = u32::from(ENTRIES - 1);
     let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
@@ -482,21 +700,10 @@ fn discover(
     }
     controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
 
-    let completion = controller.io.completions.address()?;
-    let submission = controller.io.submissions.address()?;
-    let mut command = [0u32; 16];
-    command[0] = u32::from(ADMIN_CREATE_COMPLETION);
-    command[6] = completion as u32;
-    command[7] = (completion >> 32) as u32;
-    command[10] = entries << 16 | 1;
-    command[11] = 1; // physically contiguous, no interrupt
-    controller.execute(false, command)?;
-    command[0] = u32::from(ADMIN_CREATE_SUBMISSION);
-    command[6] = submission as u32;
-    command[7] = (submission >> 32) as u32;
-    command[11] = 1 << 16 | 1; // completion queue 1, contiguous
-    controller.io.submissions.publish();
-    controller.execute(false, command)?;
+    for command in controller.create_queue_commands()? {
+        controller.io.submissions.publish();
+        controller.execute(false, command)?;
+    }
 
     // Linux `nvme_scan_work`: the active list from NVMe 1.1, otherwise (or
     // when the controller refuses it) every namespace ID in turn.
@@ -712,6 +919,7 @@ mod tests {
                     ticks_per_microsecond: 1000,
                 },
                 command_timeout_us: 1000,
+                admin_timeout_us: 1000,
                 fault: None,
                 owned: None,
                 teardown: owned::Teardown::Unprepared,
@@ -738,50 +946,45 @@ mod tests {
     }
 
     #[test]
-    fn timeout_and_late_completion_cannot_reuse_any_namespace_dma() {
+    fn a_timeout_aborts_then_a_controller_that_stays_down_poisons_its_siblings() {
+        let _clock = crate::test_clock::virtualize();
         let mut fixture = Fixture::new();
-        let clock = fixture.disk.controller.borrow().clock;
-        let started = clock.try_start().unwrap();
+        fixture.disk.controller.borrow_mut().clock = Clock {
+            ticks_per_microsecond: 1,
+        };
+        // Nothing answers: the write times out, its abort goes unanswered,
+        // and the controller never reports ready again after its reset.
         assert_eq!(
             fixture.disk.write(0, &[0x31; 512]),
             Err(BlockError::Timeout)
         );
-        assert!(clock.try_elapsed_us(started).unwrap() >= 1000);
         let mut sibling = Namespace {
             controller: fixture.disk.controller.clone(),
             namespace: 2,
             identity: fixture.disk.identity.clone(),
         };
-        let (submission, prps, doorbell) = {
-            let mut c = fixture.disk.controller.borrow_mut();
-            // The timed-out device now delivers its late completion and DMA.
-            c.io.completions.write(8, 1u32 << 16 | 1);
-            c.io.completions.write(12, 1u32 << 16 | 1);
-            c.bounce.bytes_mut().fill(0x9d);
-            (
-                c.io.submissions.bytes().to_vec(),
-                c.prp_list.bytes().to_vec(),
-                c.registers.read32(DOORBELLS + 8).unwrap(),
-            )
-        };
-        let mut output = vec![0x55; BOUNCE_BYTES];
+        {
+            let c = fixture.disk.controller.borrow();
+            // The abort names the write's command and queue.
+            let abort = &c.admin.submissions.bytes()[..64];
+            assert_eq!(abort[0], ADMIN_ABORT);
+            assert_eq!(
+                u32::from_le_bytes(abort[40..44].try_into().unwrap()),
+                1 << 16 | 1
+            );
+            // The reset re-enabled the controller with the admin queue.
+            assert_eq!(
+                c.registers.read32(CONFIGURATION).unwrap(),
+                CONFIGURATION_VALUE
+            );
+            assert_eq!(c.fault, Some(BlockError::Timeout));
+            assert_eq!(c.command_id, 2);
+        }
+        let mut output = vec![0x55; 512];
         assert_eq!(sibling.read(0, &mut output), Err(BlockError::Timeout));
         assert!(output.iter().all(|byte| *byte == 0x55));
-        assert_eq!(
-            fixture.disk.write(1, &[0xe6; 512]),
-            Err(BlockError::Timeout)
-        );
         assert_eq!(sibling.flush(), Err(BlockError::Timeout));
-        let mut c = fixture.disk.controller.borrow_mut();
-        assert_eq!(
-            c.transfer(IO_READ, 1, 0, 256, BOUNCE_BYTES),
-            Err(BlockError::Timeout)
-        );
-        assert!(c.bounce.bytes().iter().all(|byte| *byte == 0x9d));
-        assert_eq!(c.io.submissions.bytes(), submission);
-        assert_eq!(c.prp_list.bytes(), prps);
-        assert_eq!(c.registers.read32(DOORBELLS + 8).unwrap(), doorbell);
-        assert_eq!((c.command_id, c.io.tail, c.io.head), (1, 1, 0));
+        assert_eq!(fixture.disk.controller.borrow().command_id, 2);
     }
 
     #[test]
@@ -858,9 +1061,16 @@ mod tests {
         {
             let mut c = fixture.disk.controller.borrow_mut();
             c.io.completions.write(8, 1u32 << 16 | 1);
-            c.io.completions.write(12, 2u32 << 17 | 1 << 16 | 1);
+            // Invalid Field, with Do Not Retry.
+            c.io.completions
+                .write(12, (STATUS_DO_NOT_RETRY | 2) << 17 | 1 << 16 | 1);
         }
-        assert_eq!(fixture.disk.flush(), Err(BlockError::Device { status: 2 }));
+        assert_eq!(
+            fixture.disk.flush(),
+            Err(BlockError::Device {
+                status: STATUS_DO_NOT_RETRY | 2
+            })
+        );
         {
             let mut c = fixture.disk.controller.borrow_mut();
             assert!(c.fault.is_none());
@@ -873,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn fatal_status_poison_precedes_cpu_dma_access_and_does_not_reopen() {
+    fn a_fatal_controller_is_reset_first_and_poisons_when_it_stays_fatal() {
         let mut fixture = Fixture::new();
         fixture
             .disk
@@ -893,9 +1103,9 @@ mod tests {
             .unwrap();
         assert_eq!(fixture.disk.flush(), Err(error));
         let c = fixture.disk.controller.borrow();
+        // Nothing was submitted to the fatal controller.
         assert_eq!((c.command_id, c.io.tail, c.io.head), (0, 0, 0));
         assert!(c.io.submissions.bytes().iter().all(|byte| *byte == 0));
-        assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
         assert_eq!(c.registers.read32(DOORBELLS + 8).unwrap(), 0);
     }
 
