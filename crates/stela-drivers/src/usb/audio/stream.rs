@@ -640,16 +640,24 @@ impl<T: Transport> AudioDevice<T> {
             .graph
             .feature_value(&mut self.transport, entity, channel, feature)
     }
-    pub fn feature_ranges(
+    /// A numeric feature control's range, probed before its first use.
+    pub fn feature_range(
         &mut self,
         entity: u8,
         channel: u8,
         feature: super::FeatureControl,
-    ) -> Result<Vec<super::FeatureRange>, Error> {
+    ) -> Result<super::MixerRange, Error> {
         self.ready()?;
-        self.binding
-            .graph
-            .feature_ranges(&mut self.transport, entity, channel, feature)
+        let key = (entity, feature.selector(), channel);
+        if let Some(range) = self.mixer_ranges.get(&key) {
+            return Ok(*range);
+        }
+        let range =
+            self.binding
+                .graph
+                .feature_range(&mut self.transport, entity, channel, feature)?;
+        self.mixer_ranges.insert(key, range);
+        Ok(range)
     }
     pub fn set_feature_value(
         &mut self,
@@ -659,9 +667,19 @@ impl<T: Transport> AudioDevice<T> {
         value: super::FeatureValue,
     ) -> Result<(), Error> {
         self.ready()?;
-        self.binding
-            .graph
-            .set_feature_value(&mut self.transport, entity, channel, feature, value)
+        let range = if feature.has_range() {
+            Some(self.feature_range(entity, channel, feature)?)
+        } else {
+            None
+        };
+        self.binding.graph.set_feature_value(
+            &mut self.transport,
+            entity,
+            channel,
+            feature,
+            range,
+            value,
+        )
     }
     pub fn mixer_volume(&mut self, entity: u8, input: u8, output: u8) -> Result<i16, Error> {
         self.ready()?;

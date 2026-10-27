@@ -135,7 +135,7 @@ pub(crate) fn refuse(peer: &mut Peer, target: &Shared) {
     );
     refused!(
         peer.owner
-            .feature_ranges(2, 0, crate::usb::audio::FeatureControl::Delay)
+            .feature_range(2, 0, crate::usb::audio::FeatureControl::Delay)
     );
     refused!(peer.owner.set_feature_value(
         2,

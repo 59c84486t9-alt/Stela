@@ -28,7 +28,7 @@ mod control;
 pub use connector::ConnectorStatus;
 mod descriptors;
 mod feature;
-pub use feature::{FeatureControl, FeatureRange, FeatureValue};
+pub use feature::{FeatureControl, FeatureValue};
 mod mixer;
 mod native;
 mod packet;

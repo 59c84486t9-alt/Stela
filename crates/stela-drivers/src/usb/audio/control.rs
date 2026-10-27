@@ -272,17 +272,9 @@ impl Graph {
         if pin == 0 || usize::from(pin) > sources.len() || !access(u32::from(*controls), 1)?.1 {
             return Err(Error::Unsupported("signal selector choice is not writable"));
         }
+        // mixer_ctl_selector_put writes with no readback.
         let selector = if self.protocol == super::UAC1 { 0 } else { 1 };
-        set(io, self.control_interface, id, selector, 0, &[pin])?;
-        let request = if self.protocol == super::UAC1 {
-            0x81
-        } else {
-            1
-        };
-        if get(io, self.control_interface, id, selector, 0, request, 1)? != [pin] {
-            return Err(Error::ControlReadback);
-        }
-        Ok(())
+        set(io, self.control_interface, id, selector, 0, &[pin])
     }
     /// The source's frequency ranges. Like Linux
     /// `parse_uac2_sample_rate_range`, invalid triplets are skipped.

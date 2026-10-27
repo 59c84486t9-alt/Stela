@@ -2,8 +2,10 @@
 //! Descriptor-qualified scalar feature controls, adapted from Linux mixer.c.
 //! Copyright (c) 2002 Takashi Iwai; original audio.c contributions by Alan Cox
 //! and Thomas Sailer. See audio/THIRD_PARTY.md for exact donor and limits.
-use super::{Control, Error, Graph, UAC1, UAC2, UAC3, control};
-use alloc::vec::Vec;
+use super::{
+    Control, Error, Graph, MixerRange, UAC1, UAC2, UAC3,
+    control::{self, Width},
+};
 
 /// Standard scalar feature controls beyond the existing mute/volume API.
 /// Graphic equalizer, overflow/underflow and latency have distinct protocols.
@@ -30,25 +32,6 @@ pub enum FeatureValue {
     GainDb256(i16),
     Delay(u32),
     Enabled(bool),
-}
-
-/// One actual numeric range in the selected control's native device units.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FeatureRange {
-    pub min: i64,
-    pub max: i64,
-    pub resolution: u32,
-}
-impl FeatureRange {
-    fn contains(self, value: i64) -> bool {
-        value >= self.min
-            && value <= self.max
-            && if self.resolution == 0 {
-                value == self.min && self.min == self.max
-            } else {
-                (value - self.min) % i64::from(self.resolution) == 0
-            }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -105,49 +88,37 @@ impl FeatureControl {
     }
 }
 impl Layout {
-    fn bytes(self) -> usize {
-        match self {
-            Self::Tone | Self::Boolean => 1,
-            Self::Gain | Self::Delay16 => 2,
-            Self::Delay32 => 4,
-        }
-    }
-    fn numeric(self, bytes: &[u8], resolution: bool) -> i64 {
-        match self {
-            Self::Tone if !resolution => i64::from(bytes[0] as i8),
-            Self::Gain if !resolution => i64::from(i16::from_le_bytes(bytes.try_into().unwrap())),
-            Self::Tone | Self::Boolean => i64::from(bytes[0]),
-            Self::Gain | Self::Delay16 => i64::from(u16::from_le_bytes(bytes.try_into().unwrap())),
-            Self::Delay32 => i64::from(u32::from_le_bytes(bytes.try_into().unwrap())),
-        }
-    }
-    fn decode(self, bytes: &[u8]) -> Result<FeatureValue, Error> {
-        Ok(match self {
-            Self::Tone => FeatureValue::Tone(bytes[0] as i8),
-            Self::Gain => FeatureValue::GainDb256(i16::from_le_bytes(bytes.try_into().unwrap())),
-            Self::Delay16 | Self::Delay32 => FeatureValue::Delay(self.numeric(bytes, false) as u32),
-            Self::Boolean => match bytes[0] {
-                0 => FeatureValue::Enabled(false),
-                1 => FeatureValue::Enabled(true),
-                _ => return Err(Error::ControlReadback),
-            },
-        })
-    }
-    fn encode(self, value: FeatureValue) -> Result<(i64, [u8; 4]), Error> {
-        let (numeric, bytes) = match (self, value) {
-            (Self::Tone, FeatureValue::Tone(v)) => (i64::from(v), [v as u8, 0, 0, 0]),
-            (Self::Gain, FeatureValue::GainDb256(v)) => {
-                let [lo, hi] = v.to_le_bytes();
-                (i64::from(v), [lo, hi, 0, 0])
-            }
-            (Self::Delay16, FeatureValue::Delay(v)) if v <= u32::from(u16::MAX) => {
-                (i64::from(v), v.to_le_bytes())
-            }
-            (Self::Delay32, FeatureValue::Delay(v)) => (i64::from(v), v.to_le_bytes()),
-            (Self::Boolean, FeatureValue::Enabled(v)) => (i64::from(v), [u8::from(v), 0, 0, 0]),
-            _ => return Err(Error::Format),
+    /// The donor's `audio_feature_info` value types: S8 tone, S16 gain, U16
+    /// or (UAC2 and later) U32 delay, booleans.
+    fn width(self) -> Width {
+        let (bytes, signed) = match self {
+            Self::Tone => (1, true),
+            Self::Boolean => (1, false),
+            Self::Gain => (2, true),
+            Self::Delay16 => (2, false),
+            Self::Delay32 => (4, false),
         };
-        Ok((numeric, bytes))
+        Width { bytes, signed }
+    }
+    /// A boolean reads as `!!val`, as `get_relative_value` has it.
+    fn decode(self, bytes: &[u8]) -> FeatureValue {
+        let value = self.width().decode(bytes);
+        match self {
+            Self::Tone => FeatureValue::Tone(value as i8),
+            Self::Gain => FeatureValue::GainDb256(value as i16),
+            Self::Delay16 | Self::Delay32 => FeatureValue::Delay(value as u32),
+            Self::Boolean => FeatureValue::Enabled(value != 0),
+        }
+    }
+    fn numeric(self, value: FeatureValue) -> Result<i64, Error> {
+        Ok(match (self, value) {
+            (Self::Tone, FeatureValue::Tone(v)) => i64::from(v),
+            (Self::Gain, FeatureValue::GainDb256(v)) => i64::from(v),
+            (Self::Delay16, FeatureValue::Delay(v)) if v <= u32::from(u16::MAX) => i64::from(v),
+            (Self::Delay32, FeatureValue::Delay(v)) => i64::from(v),
+            (Self::Boolean, FeatureValue::Enabled(v)) => i64::from(v),
+            _ => return Err(Error::Format),
+        })
     }
 }
 
@@ -169,84 +140,50 @@ impl Graph {
             feature.selector(),
             channel,
             request,
-            layout.bytes() as u16,
+            layout.width().bytes,
         )?;
-        layout.decode(&bytes)
+        Ok(layout.decode(&bytes))
     }
-    /// Read actual numeric ranges before a set. Booleans have CUR only.
-    pub fn feature_ranges<C: Control>(
+    /// Probe a numeric control's range once, before its first set, as
+    /// `get_min_max_with_quirks` does. Booleans have CUR only.
+    pub fn feature_range<C: Control>(
         &self,
         io: &mut C,
         id: u8,
         channel: u8,
         feature: FeatureControl,
-    ) -> Result<Vec<FeatureRange>, Error> {
+    ) -> Result<MixerRange, Error> {
         let layout = feature.layout(self.protocol)?;
         self.feature(id, channel, feature.selector(), false)?;
         if !feature.has_range() {
             return Err(Error::Unsupported("boolean feature control has no RANGE"));
         }
-        let width = layout.bytes();
-        let get = |io: &mut C, request, bytes| {
-            control::get(
-                io,
-                self.control_interface,
-                id,
-                feature.selector(),
-                channel,
-                request,
-                bytes,
-            )
-        };
-        let bytes = if self.protocol == UAC1 {
-            let mut bytes = Vec::with_capacity(width * 3);
-            for request in [0x82, 0x83, 0x84] {
-                bytes.extend_from_slice(&get(io, request, width as u16)?);
-            }
-            bytes
-        } else {
-            let count = u16::from_le_bytes(get(io, 2, 2)?.try_into().unwrap());
-            if !(1..=64).contains(&count) {
-                return Err(Error::Descriptor("scalar feature range count"));
-            }
-            let bytes = get(io, 2, (2 + usize::from(count) * 3 * width) as u16)?;
-            if u16::from_le_bytes(bytes[..2].try_into().unwrap()) != count {
-                return Err(Error::ControlReadback);
-            }
-            bytes[2..].to_vec()
-        };
-        let mut ranges = Vec::with_capacity(bytes.len() / (3 * width));
-        for raw in bytes.chunks_exact(3 * width) {
-            let range = FeatureRange {
-                min: layout.numeric(&raw[..width], false),
-                max: layout.numeric(&raw[width..width * 2], false),
-                resolution: layout.numeric(&raw[width * 2..], true) as u32,
-            };
-            if range.min > range.max || (range.resolution == 0 && range.min != range.max) {
-                return Err(Error::Descriptor("scalar feature range"));
-            }
-            ranges.push(range);
-        }
-        Ok(ranges)
+        control::probe_range(
+            io,
+            self.protocol,
+            self.control_interface,
+            id,
+            feature.selector(),
+            channel,
+            layout.width(),
+        )
     }
+    /// Write CUR with no readback. A numeric value lands on the step at or
+    /// below it in the probed `range`, clamped, as `get_abs_value` does.
     pub fn set_feature_value<C: Control>(
         &self,
         io: &mut C,
         id: u8,
         channel: u8,
         feature: FeatureControl,
+        range: Option<MixerRange>,
         value: FeatureValue,
     ) -> Result<(), Error> {
         let layout = feature.layout(self.protocol)?;
         self.feature(id, channel, feature.selector(), true)?;
-        let (numeric, bytes) = layout.encode(value)?;
-        if feature.has_range()
-            && !self
-                .feature_ranges(io, id, channel, feature)?
-                .iter()
-                .any(|range| range.contains(numeric))
-        {
-            return Err(Error::Format);
+        let mut numeric = layout.numeric(value)?;
+        if feature.has_range() {
+            numeric = range.ok_or(Error::Format)?.snap(numeric);
         }
         control::set(
             io,
@@ -254,12 +191,8 @@ impl Graph {
             id,
             feature.selector(),
             channel,
-            &bytes[..layout.bytes()],
-        )?;
-        if self.feature_value(io, id, channel, feature)? != value {
-            return Err(Error::ControlReadback);
-        }
-        Ok(())
+            &layout.width().encode(numeric),
+        )
     }
 }
 
