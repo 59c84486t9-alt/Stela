@@ -78,7 +78,7 @@ fn mhz(width: Width) -> u32 {
     }
 }
 
-fn frequency(band: Band, channel: u8) -> Result<u32, Error> {
+pub(super) fn frequency(band: Band, channel: u8) -> Result<u32, Error> {
     let n = u32::from(channel);
     match band {
         Band::Ghz2 if (1..=13).contains(&n) => Ok(2407 + 5 * n),
@@ -313,7 +313,7 @@ impl Operations {
         self.channel(control, negotiated.mode, caps)
     }
 
-    fn channel(
+    pub(super) fn channel(
         &self,
         control: Channel,
         mode: Mode,
