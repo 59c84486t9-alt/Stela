@@ -1678,7 +1678,7 @@ pub(crate) mod tests {
         let mut cs1 = ef.clone();
         cs1[15] = 8 << 2;
         assert_eq!(
-            [&ef, &eapol, &cs1].map(|frame| data::data_tid(&context, frame)),
+            [&ef, &eapol, &cs1].map(|frame| data::data_tid(&context, None, frame)),
             [Some(3), Some(3), Some(1)]
         );
     }

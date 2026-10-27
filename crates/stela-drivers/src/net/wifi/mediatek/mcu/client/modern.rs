@@ -322,7 +322,6 @@ impl Configuration {
                 || ac.ecw_max > 15
                 || ac.aifsn < old.aifsn
                 || ac.txop_32us > old.txop_32us
-                || ac.admission_control != old.admission_control
             {
                 return Err(Error::InvalidNegotiation);
             }

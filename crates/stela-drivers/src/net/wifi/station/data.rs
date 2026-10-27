@@ -5,7 +5,9 @@
 //! work plan: its MPDU is plaintext, and required hardware cipher/MIC work must
 //! be completed by the selected actual vendor path before successful TX.
 
-use super::{AssociationContext, Phase, PortPolicy, RegulatoryPolicy, Station};
+use super::{
+    AssociationContext, Phase, PortPolicy, RegulatoryPolicy, Station, phy::AccessCategory,
+};
 use crate::net::{
     MAX_FRAME, Mac,
     wifi::{
@@ -490,9 +492,8 @@ impl Station {
 
     /// Single-MSDU QoS with source-backed device sequence assignment. The
     /// exact current acknowledged context supplies WMM; a copied capability or
-    /// TID cannot bypass it. A TID whose access category requires admission
-    /// is downgraded as `ieee80211_downgrade_queue` does; TSPEC admission is
-    /// the OS's. No BA/A-MSDU permission is implied.
+    /// TID cannot bypass it. The TID is sent as given: `data_tid` chooses it
+    /// as `ieee80211_select_queue` does. No BA/A-MSDU permission is implied.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_qos_msdu_refs<K: BorrowMut<KeySlot>>(
         &mut self,
@@ -507,7 +508,6 @@ impl Station {
         self.validate_association_context(context)
             .map_err(|_| Error::Stale)?;
         qos_access(context, tid)?;
-        let tid = downgrade(context, tid);
         let mut plan =
             self.prepare_msdu_refs(epoch, ethernet, class, SequenceOwner::Device, keys, policy)?;
         plan.plaintext
@@ -727,12 +727,9 @@ fn qos_access(context: &AssociationContext, tid: u8) -> Result<(), Error> {
 /// Linux `ieee80211_downgrade_queue` without an admitted TSPEC: a priority
 /// whose access category requires admission control moves to the next
 /// lower category until one does not; background is used regardless.
-fn downgrade(context: &AssociationContext, mut priority: u8) -> u8 {
-    let Some(wmm) = &context.negotiated().wmm else {
-        return priority;
-    };
+fn downgrade(categories: &[AccessCategory], mut priority: u8) -> u8 {
     let acm = |priority: u8| {
-        wmm.access_categories
+        categories
             .iter()
             .any(|ac| ac.aci == ACI[usize::from(priority)] && ac.admission_control)
     };
@@ -754,9 +751,15 @@ fn downgrade(context: &AssociationContext, mut priority: u8) -> u8 {
 /// without QoS. EAPOL takes priority 7; other frames are classified by
 /// `cfg80211_classify8021d`. A QoS Map comes from the OS's interworking
 /// configuration, and none reaches the station, so the RFC 8325 default
-/// applies.
-pub fn data_tid(context: &AssociationContext, ethernet: &[u8]) -> Option<u8> {
-    context.negotiated().wmm.as_ref()?;
+/// applies. `current` holds the AP's latest access categories, whose
+/// admission-control flags it may change in later beacons.
+pub fn data_tid(
+    context: &AssociationContext,
+    current: Option<&[AccessCategory; 4]>,
+    ethernet: &[u8],
+) -> Option<u8> {
+    let wmm = context.negotiated().wmm.as_ref()?;
+    let categories = current.unwrap_or(&wmm.access_categories);
     let ethertype = |at: usize| {
         ethernet
             .get(at..at + 2)
@@ -767,7 +770,7 @@ pub fn data_tid(context: &AssociationContext, ethernet: &[u8]) -> Option<u8> {
     } else {
         classify8021d(ethernet)
     };
-    Some(downgrade(context, priority))
+    Some(downgrade(categories, priority))
 }
 
 /// Linux `cfg80211_classify8021d` without a QoS Map. A VLAN tag's nonzero

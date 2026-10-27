@@ -856,7 +856,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     /// The QoS TID of a data frame on the current association, as
     /// `ieee80211_select_queue` chooses it; `None` for non-QoS data.
     pub fn data_tid(&self, ethernet: &[u8]) -> Option<u8> {
-        station::data::data_tid(self.client.modern_context()?, ethernet)
+        let current = self.client.applied_edca().map(|e| &e.access_categories);
+        station::data::data_tid(self.client.modern_context()?, current, ethernet)
     }
     pub fn transmit(
         &mut self,

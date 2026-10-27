@@ -102,16 +102,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         };
         let parameters = observed.parameters.ok_or(Error::Unsupported)?;
         let negotiated = modern.context().negotiated();
-        let original = negotiated.wmm.as_ref().ok_or(Error::Unsupported)?;
+        negotiated.wmm.as_ref().ok_or(Error::Unsupported)?;
         let original_ap = negotiated.peer().wmm().ok_or(Error::Unsupported)?;
-        // Canonical TX ACM and U-APSD continue to use the immutable association.
-        // Never update firmware to a different access/admission contract alone.
+        // U-APSD continues to use the immutable association. Admission
+        // control is host-side: data TIDs follow the applied flags, as
+        // `ieee80211_sta_wmm_params` updates `wmm_acm`.
         if observed.qos_info & 0x80 != original_ap.qos_info & 0x80
-            || parameters.iter().any(|ac| {
-                ac.ecw_min == 0
-                    || original.access_categories[usize::from(ac.aci)].admission_control
-                        != ac.admission_control
-            })
+            || parameters.iter().any(|ac| ac.ecw_min == 0)
         {
             return Err(Error::Unsupported);
         }
