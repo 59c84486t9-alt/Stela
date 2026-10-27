@@ -19,6 +19,8 @@ use crate::{
 use alloc::{format, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 
+mod quirks;
+
 pub const CLASS: [u8; 3] = [0x01, 0x06, 0x01];
 /// `ahci_pci_tbl`: AMD uses the RAID class only for AHCI controllers.
 const VENDOR_AMD: u16 = 0x1022;
@@ -197,6 +199,10 @@ const PRDT_BYTE_COUNT: usize = 0x8c;
 /// IDENTIFY DEVICE words (ACS-3 Â§7.12.7).
 const IDENTIFY_CONFIG: usize = 0;
 const IDENTIFY_SERIAL: core::ops::Range<usize> = 10..20;
+const IDENTIFY_FIRMWARE: core::ops::Range<usize> = 23..27;
+/// `ata_id_is_sata` reads the major version and hardware reset words.
+const IDENTIFY_MAJOR_VERSION: usize = 80;
+const IDENTIFY_HARDWARE_RESET: usize = 93;
 /// Word 49 bit 11: IORDY supported; word 51 bits 15:8: the old PIO mode;
 /// word 53 bits 1 and 2: words 64 and 88 valid; words 64 and 88: advanced
 /// PIO and UDMA modes (`ata_id_xfermask`).
@@ -357,6 +363,8 @@ const VERDICT_SHORT_US: u64 = 5 * 60 * 1_000_000;
 const VERDICT_LONG_US: u64 = 10 * 60 * 1_000_000;
 /// The disk left the port or another device answered in its place.
 const DETACHED: BlockError = BlockError::Protocol("the SATA disk detached or changed");
+/// `-EAGAIN` from configuration: another EH round without prejudice.
+const AGAIN: BlockError = BlockError::Protocol("the SATA link needs another reset");
 
 /// Command register side effects, allowing hardware-like W1C and completion
 /// tests against the actual table and DMA algorithm.
@@ -413,6 +421,8 @@ pub struct AhciDisk {
     /// `ATA_QUIRK_NO_DMA_LOG`, set for good when READ LOG DMA EXT fails.
     log_dma: bool,
     no_dma_log: bool,
+    /// `dev->quirks`: the table's, which configuration accumulates.
+    quirks: u32,
 }
 
 /// NCQ as Linux `ata_dev_config_ncq` configures it. The block interface
@@ -451,6 +461,8 @@ struct Lpm {
     /// `ata_id_has_hipm` and `ata_id_has_dipm` for the last IDENTIFY data.
     hipm: bool,
     dipm: bool,
+    /// `ATA_QUIRK_NOLPM`: the device's LPM is broken; max_power is forced.
+    broken: bool,
 }
 
 impl Lpm {
@@ -475,7 +487,7 @@ impl Lpm {
     /// policies needs the FADT low-power S0 flag, which the handoff does not
     /// carry; the S3 default stands.
     fn target(&self) -> u8 {
-        if self.allowed {
+        if self.allowed && !self.broken {
             LPM_MED_POWER_WITH_DIPM
         } else {
             LPM_MAX_POWER
@@ -610,6 +622,10 @@ struct Identified {
     fpdma_aa: bool,
     ncq_autosense: bool,
     read_log_dma: bool,
+    /// `ata_dev_quirks` for the model number and firmware revision.
+    quirks: u32,
+    /// Word 76's supported SATA speeds.
+    sata_speeds: u16,
 }
 
 /// What `ata_id_xfermask`, `ata_id_has_iordy` and `ata_id_is_cfa` read.
@@ -619,6 +635,8 @@ struct Transfer {
     udma: u32,
     iordy: bool,
     compact_flash: bool,
+    /// `ata_id_is_sata`.
+    sata: bool,
 }
 
 impl Transfer {
@@ -644,6 +662,7 @@ impl Transfer {
             compact_flash: config == 0x848a
                 || config == 0x844a
                 || word(IDENTIFY_COMMANDS_2) & 0xc004 == 0x4004,
+            sata: word(IDENTIFY_HARDWARE_RESET) == 0 && word(IDENTIFY_MAJOR_VERSION) as i16 >= 0x20,
         }
     }
 }
@@ -704,6 +723,17 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
     {
         return Err(BlockError::Unsupported("SATA logical sector size"));
     }
+    // ata_id_c_string: up to a NUL, without trailing spaces.
+    let c_string = |words: core::ops::Range<usize>| {
+        let mut bytes: Vec<u8> = words.flat_map(|index| word(index).to_be_bytes()).collect();
+        if let Some(end) = bytes.iter().position(|byte| *byte == 0) {
+            bytes.truncate(end);
+        }
+        while bytes.last() == Some(&b' ') {
+            bytes.pop();
+        }
+        bytes
+    };
     let sata_valid = !matches!(word(IDENTIFY_SATA_CAPABILITY), 0 | 0xffff);
     Ok(Identified {
         model: string(IDENTIFY_MODEL),
@@ -721,6 +751,8 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
         ncq_autosense: word(IDENTIFY_SATA_FEATURES) & SATA_FEATURE_NCQ_AUTOSENSE != 0,
         read_log_dma: word(IDENTIFY_ENABLED_2) & ENABLED_2_WORDS_119_120 != 0
             && word(IDENTIFY_COMMANDS_3) & COMMANDS_3_READ_LOG_DMA != 0,
+        quirks: quirks::quirks(&c_string(IDENTIFY_MODEL), &c_string(IDENTIFY_FIRMWARE)),
+        sata_speeds: word(IDENTIFY_SATA_CAPABILITY) & 0xe,
     })
 }
 
@@ -1215,12 +1247,17 @@ impl AhciDisk {
             },
             log_dma: false,
             no_dma_log: false,
+            quirks: 0,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
         disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
             .map_err(|failure| failure.error)?;
         let found = identify(disk.bounce.bytes())?;
+        if found.quirks & quirks::DISABLE != 0 {
+            stop_port(&port, clock)?;
+            return Err(BlockError::Unsupported("SATA device libata disables"));
+        }
         disk.sense_reporting = found.sense_reporting.1;
         disk.flush = found.flush;
         disk.identity.serial = found.serial.clone();
@@ -1238,7 +1275,12 @@ impl AhciDisk {
             configured = disk.configure_lpm(&port, DEVICE_TRIES);
         }
         if let Err(error) = configured {
-            disk.reconfigure(&port, true, false, error, DEVICE_TRIES - 1)?;
+            let tries = if error == AGAIN {
+                DEVICE_TRIES
+            } else {
+                DEVICE_TRIES - 1
+            };
+            disk.reconfigure(&port, true, false, error, tries)?;
         }
         Ok(Some(disk))
     }
@@ -1540,14 +1582,16 @@ impl AhciDisk {
                 return Ok(());
             };
             // ata_eh_handle_dev_fail: another device gets one more chance,
-            // and the last chance runs slower.
-            tries -= 1;
-            if error == DETACHED {
-                tries = tries.min(1);
-            }
-            if tries == 1 {
-                self.lower_speed_limit(port);
-                self.lower_transfer_limit(StepDown::Pio);
+            // and the last chance runs slower; -EAGAIN costs no try.
+            if error != AGAIN {
+                tries -= 1;
+                if error == DETACHED {
+                    tries = tries.min(1);
+                }
+                if tries == 1 {
+                    self.lower_speed_limit(port);
+                    self.lower_transfer_limit(StepDown::Pio);
+                }
             }
             if tries == 0 {
                 return Err(error);
@@ -1777,18 +1821,33 @@ impl AhciDisk {
     }
 
     /// What Linux `ata_dev_configure`, which `ata_dev_revalidate` reruns,
-    /// asks of the disk. `ata_dev_config_ncq` enables first-party DMA
-    /// auto-activation; a failure other than the device's refusal marks it
-    /// broken and fails the configuration. Then Sense Data Reporting, which
+    /// asks of the disk. The quirk table's entry accumulates; a 1.5 Gbps
+    /// limit on a faster link asks for another reset. `ata_dev_config_ncq`
+    /// enables first-party DMA auto-activation; a failure other than the
+    /// device's refusal marks it broken and fails the configuration.
+    /// `ata_dev_config_lpm` forces max_power for broken LPM and turns DIPM
+    /// off on a host without it, as Software Settings Preservation may have
+    /// kept it on. Then Sense Data Reporting, which
     /// a hard reset turns off again (`ata_dev_config_sense_reporting` only
     /// logs a refusal). The kept IDENTIFY data says it is enabled only once
     /// a revalidation rereads it.
     fn configure(&mut self, port: &impl CommandPort, found: &Identified) -> Result<(), BlockError> {
         let buffer = self.bounce.physical();
-        self.ncq.device = self.ncq.host && found.ncq;
+        self.quirks |= found.quirks;
+        // ata_do_link_spd_quirk.
+        if self.quirks & quirks::LINK_1_5_GBPS != 0 && self.speed_limit > 0b1 {
+            self.speed_limit = 0b1;
+            if self.speed > 1 {
+                return Err(AGAIN);
+            }
+        }
+        let ncq = found.ncq && self.quirks & quirks::NONCQ == 0;
+        self.ncq.device = self.ncq.host && ncq;
         self.ncq.autosense = found.ncq_autosense;
+        self.ncq.aa_broken |= self.quirks & quirks::BROKEN_FPDMA_AA != 0;
         self.log_dma = found.read_log_dma;
-        if found.ncq && self.ncq.host && found.fpdma_aa && !self.ncq.aa_broken {
+        self.no_dma_log |= self.quirks & quirks::NO_DMA_LOG != 0;
+        if ncq && self.ncq.host && found.fpdma_aa && !self.ncq.aa_broken {
             let enabled = self.internal(
                 port,
                 ATA_SET_FEATURES,
@@ -1803,6 +1862,23 @@ impl AhciDisk {
                 self.ncq.aa_broken = true;
                 return Err(failure.error);
             }
+        }
+        // WD_BROKEN_LPM covers 1.5 Gbps-only disks; NO_LPM_ON_ATI needs an
+        // ATI host, which an AMD one is not.
+        if self.quirks & quirks::NOLPM != 0
+            || self.quirks & quirks::WD_BROKEN_LPM != 0 && found.sata_speeds == 0x2
+        {
+            self.lpm.broken = true;
+        }
+        if !self.lpm.host_dipm() && found.dipm {
+            let _ = self.internal(
+                port,
+                ATA_SET_FEATURES,
+                FEATURE_SATA_DISABLE,
+                SATA_DIPM,
+                0,
+                buffer,
+            );
         }
         if found.sense_reporting == (true, false) {
             let _ = self.internal(port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer);
@@ -1997,6 +2073,9 @@ impl AhciDisk {
         // ata_dev_xfermask: no MWDMA on AHCI, no cable limit on SATA.
         self.pio_mask &= HOST_PIO_MASK & self.transfer.pio;
         self.udma_mask &= HOST_UDMA_MASK & self.transfer.udma;
+        if self.quirks & quirks::NODMA != 0 {
+            self.udma_mask = 0;
+        }
         let pio = highest_mode(self.pio_mask, MODE_PIO_0)
             .ok_or(BlockError::Unsupported("SATA disk without PIO support"))?;
         // libata_dma_mask leaves CompactFlash in PIO, as without UDMA; these
@@ -2012,8 +2091,10 @@ impl AhciDisk {
         self.mode = mode;
         // ata_dev_set_xfermode: with IORDY in use the mode is sent;
         // otherwise there is nothing to set.
+        // NOSETXFER skips it between a SATA host and a SATA device.
         let mut refused = false;
-        if pio > MODE_PIO_2 || self.transfer.iordy {
+        let skip = self.quirks & quirks::NOSETXFER != 0 && self.transfer.sata;
+        if !skip && (pio > MODE_PIO_2 || self.transfer.iordy) {
             let buffer = self.bounce.physical();
             match self.internal(
                 port,
@@ -2395,6 +2476,7 @@ mod tests {
                     ncq: Ncq::default(),
                     log_dma: false,
                     no_dma_log: false,
+                    quirks: 0,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -2995,6 +3077,50 @@ mod tests {
         assert!(fixture.disk.ncq.off);
         read(&mut fixture, &Link::new(&[])).unwrap();
         assert_eq!(fixture.disk.table.bytes()[2], ATA_READ_DMA_EXT);
+    }
+
+    #[test]
+    fn quirks_configure_the_disk_like_ata_dev_configure() {
+        // An NCQ disk with auto-activation, by model and firmware revision.
+        let page = |model: &str, firmware: &str| {
+            let mut page = identify_page("S1", 1024);
+            for (words, text) in [(IDENTIFY_MODEL, model), (IDENTIFY_FIRMWARE, firmware)] {
+                let mut bytes = text.as_bytes().to_vec();
+                bytes.resize(2 * words.len(), b' ');
+                page[2 * words.start..2 * words.end].copy_from_slice(&bytes);
+                for pair in page[2 * words.start..2 * words.end].chunks_mut(2) {
+                    pair.swap(0, 1);
+                }
+            }
+            for (word, value) in [(76u16, 1u16 << 8 | 0x6), (78, 0x04)] {
+                let at = 2 * usize::from(word);
+                page[at..at + 2].copy_from_slice(&value.to_le_bytes());
+            }
+            identify(&page).unwrap()
+        };
+        let configure = |found: &Identified| {
+            let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+            fixture.disk.ncq.host = true;
+            (fixture.disk.configure(&Link::new(&[]), found), fixture)
+        };
+
+        // Without a quirk: NCQ and auto-activation.
+        let (result, fixture) = configure(&page("Fixture SSD", "1.0"));
+        assert_eq!(result, Ok(()));
+        assert!(fixture.disk.ncq.enabled());
+        assert_eq!(fixture.disk.quirks, 0);
+        // Seagate's NCQ and FLUSH CACHE firmware bug: neither.
+        let (result, fixture) = configure(&page("ST31500341AS", "SD17"));
+        assert_eq!(result, Ok(()));
+        assert!(!fixture.disk.ncq.enabled());
+        assert_eq!(fixture.disk.table.bytes()[2], 0);
+        // Broken LPM forces max_power.
+        let (_, fixture) = configure(&page("ADATA SU680", "1.0"));
+        assert_eq!(fixture.disk.lpm.target(), LPM_MAX_POWER);
+        // A 1.5 Gbps limit on a 3 Gbps link takes another reset.
+        let (result, fixture) = configure(&page("WD My Book", "1.0"));
+        assert_eq!(result, Err(AGAIN));
+        assert_eq!(fixture.disk.speed_limit, 0b1);
     }
 
     #[test]
