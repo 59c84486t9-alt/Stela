@@ -257,14 +257,14 @@ impl Controller {
             .take(|e| e.kind() == TRANSFER_EVENT && e.slot() == slot && e.endpoint() == ticket.dci)
         {
             let state = self.slot(slot).unwrap();
-            let translated = state.context[2] & TT_SLOT != 0;
+            let tt_info = state.context[2];
             let endpoint = state.endpoints[usize::from(ticket.dci)].as_mut().unwrap();
             if endpoint
                 .ring
                 .normal
-                .soft_retry(&event, no_soft_retry, translated)
+                .soft_retry(&event, no_soft_retry, tt_info)
             {
-                match self.soft_reset(slot, ticket.dci) {
+                match self.soft_reset(slot, ticket.dci, &[u32::from(ticket.dci)]) {
                     Ok(()) => continue,
                     Err(error) => {
                         // The TD stays halted on the ring; fence it as failed.
@@ -298,21 +298,6 @@ impl Controller {
             endpoint.in_flight -= 1;
         }
         done
-    }
-
-    /// Linux xhci_handle_halted_endpoint(EP_SOFT_RESET): Reset Endpoint with
-    /// TSP keeps the halted TD in place, and its completion rings the
-    /// endpoint again. Like xhci_handle_cmd_reset_ep, the completion code is
-    /// ignored; only a command the controller never completed is an error.
-    fn soft_reset(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        let target = u32::from(slot) << 24 | u32::from(dci) << 16;
-        match self.command(0, 0, RESET_ENDPOINT << 10 | TSP | target) {
-            Ok(_) => {}
-            Err(BlockError::Device { .. }) if !self.command_poisoned => {}
-            Err(error) => return Err(error),
-        }
-        self.doorbell(slot, dci);
-        Ok(())
     }
 
     /// Cancels this endpoint's complete queue and preserves the requested

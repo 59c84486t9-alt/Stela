@@ -130,7 +130,7 @@ impl Queue {
         &mut self,
         event: &Event,
         no_soft_retry: bool,
-        translated: bool,
+        tt_info: u32,
     ) -> bool {
         let valid = self.active.iter().any(|td| {
             td.trb == event.parameter
@@ -141,12 +141,7 @@ impl Queue {
         if !valid || self.recovery || event.code() != USB_TRANSACTION_ERROR {
             return false;
         }
-        if no_soft_retry {
-            return false;
-        }
-        let errors = self.errors;
-        self.errors += 1;
-        errors <= MAX_SOFT_RETRY && !translated
+        retry_in_place(&mut self.errors, no_soft_retry, tt_info)
     }
 
     pub(in crate::usb::xhci) fn cancellation_snapshot(

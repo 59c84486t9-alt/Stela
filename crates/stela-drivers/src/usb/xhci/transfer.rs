@@ -19,7 +19,44 @@ const INCOMPATIBLE_DEVICE: u32 = 22;
 const EVENT_DATA: u32 = 1 << 2;
 pub(super) use queue::Queue;
 
+/// Linux process_bulk_intr_td's test for a transaction error: never retried
+/// with XHCI_NO_SOFT_RETRY (err_count untouched); otherwise counted, and
+/// retried in place while within MAX_SOFT_RETRY on a slot not behind a TT.
+pub(super) fn retry_in_place(errors: &mut u32, no_soft_retry: bool, tt_info: u32) -> bool {
+    if no_soft_retry {
+        return false;
+    }
+    let previous = *errors;
+    *errors = previous.saturating_add(1);
+    previous <= MAX_SOFT_RETRY && tt_info & TT_SLOT == 0
+}
+
 impl Controller {
+    /// Linux xhci_handle_halted_endpoint(EP_SOFT_RESET): Reset Endpoint with
+    /// TSP keeps the halted TD in place, and its completion rings every
+    /// pending ring again (ring_doorbell_for_active_rings). Like
+    /// xhci_handle_cmd_reset_ep, the completion code is ignored; only a
+    /// command the controller never completed is an error.
+    pub(super) fn soft_reset(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        doorbells: &[u32],
+    ) -> Result<(), BlockError> {
+        let target = u32::from(slot) << 24 | u32::from(dci) << 16;
+        match self.command(0, 0, RESET_ENDPOINT << 10 | TSP | target) {
+            Ok(_) => {}
+            Err(BlockError::Device { .. }) if !self.command_poisoned => {}
+            Err(error) => return Err(error),
+        }
+        fence(Ordering::SeqCst);
+        for value in doorbells {
+            self.registers
+                .write32(self.doorbells + 4 * usize::from(slot), *value);
+        }
+        Ok(())
+    }
+
     /// Recovers a halted endpoint: Reset Endpoint, then its dequeue pointer
     /// moved past the failed TD (4.6.8, 4.6.10).
     pub(super) fn recover(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
