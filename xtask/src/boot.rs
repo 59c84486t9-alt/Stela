@@ -71,8 +71,17 @@ const TARGET_SERIAL: &str = "STELA-TARGET-01";
 const SYNTHETIC_SLICE_BYTES: u64 = 400_000;
 
 /// Stela's system-mode test kernel (`boot/kernel.S`), loaded 16 KiB into the
-/// J473AP DRAM base.
+/// J473AP DRAM base. Empty when xtask was built without clang.
 const KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kernel.bin"));
+
+fn kernel() -> Result<Vec<u8>> {
+    ensure!(
+        !KERNEL.is_empty(),
+        "the system-mode test kernel was not assembled because clang was not found \
+         when xtask was built; install clang (or set CLANG) and run again"
+    );
+    Ok(KERNEL.to_vec())
+}
 const KERNEL_OPTIONS: &str = "--system --load 0x800004000 --entry 0x800004000";
 /// What the test kernel must leave in X0-X11 when it idles; X1 and X2, its
 /// tasks' SVC counts, need only be nonzero.
@@ -638,8 +647,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .map(preboot::prepare)
         .transpose()?;
     let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
-        _ if arguments.native_mmio_check => (KERNEL.to_vec(), native_mmio_options()),
-        _ if arguments.native_clock_check => (KERNEL.to_vec(), native_clock_options()),
+        _ if arguments.native_mmio_check => (kernel()?, native_mmio_options()),
+        _ if arguments.native_clock_check => (kernel()?, native_clock_options()),
         _ if preboot.is_some() => (Vec::new(), preboot.as_ref().unwrap().options()),
         _ if arguments.bundle.is_some() => (
             Vec::new(),
@@ -651,7 +660,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             arguments.append.unwrap_or_else(|| SMOKE_OPTIONS.into()),
         ),
         (None, Scenario::SystemKernel) => (
-            KERNEL.to_vec(),
+            kernel()?,
             arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
         ),
     };

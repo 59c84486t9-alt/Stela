@@ -13,11 +13,24 @@ fn main() {
     for (source, image, architecture) in FIXTURES {
         println!("cargo:rerun-if-changed={source}");
         let object_path = out.join(image).with_extension("o");
-        let status = Command::new(&clang)
+        let status = match Command::new(&clang)
             .args([TARGET, architecture, "-c", source, "-o"])
             .arg(&object_path)
             .status()
-            .expect("run clang to assemble an AArch64 fixture");
+        {
+            // Every other task builds without clang; the scenarios that load
+            // this fixture refuse to run until it is assembled.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                println!(
+                    "cargo:warning=clang was not found; {source} is not assembled and its boot scenarios are unavailable"
+                );
+                println!("cargo:rerun-if-env-changed=CLANG");
+                println!("cargo:rerun-if-env-changed=PATH");
+                fs::write(out.join(image), []).expect("write empty fixture image");
+                continue;
+            }
+            result => result.expect("run clang to assemble an AArch64 fixture"),
+        };
         assert!(status.success(), "clang failed to assemble {source}");
         let data = fs::read(&object_path).expect("read assembled fixture");
         let file = object::File::parse(&*data).expect("parse assembled fixture");
