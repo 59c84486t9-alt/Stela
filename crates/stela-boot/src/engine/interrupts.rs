@@ -162,37 +162,10 @@ stela_xstate_slot:
     sub rsp, {metadata_bytes}
     and rsp, -64
 
-    // No Rust or FP/SIMD instruction precedes this actual control preflight.
-    mov rax, cr0
-    test rax, 12
-    jnz stela_xstate_refuse
-    mov rax, cr4
-    mov r8, rax
-    and eax, 1536
-    cmp eax, 1536
-    jne stela_xstate_refuse
-    test r8, 8388608
-    jnz stela_xstate_refuse
-    mov ecx, 0xc0000080
-    rdmsr
-    test eax, 16384
-    jnz stela_xstate_refuse
-    test qword ptr gs:[{msr_flags}], 1
-    jz stela_xstate_no_xss
-    mov ecx, 0xda0
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_refuse
-stela_xstate_no_xss:
-    test qword ptr gs:[{msr_flags}], 2
-    jz stela_xstate_no_xfd
-    mov ecx, 0x1c4
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_refuse
-stela_xstate_no_xfd:
-    test r8, 262144
-    jnz stela_xstate_save_extended
+    // No Rust or FP/SIMD instruction precedes this save. The controls are
+    // those configuration qualified (`EntryAbi::extended`).
+    cmp qword ptr gs:[{extended}], 0
+    jne stela_xstate_save_extended
     mov qword ptr [rsp + r11 + {format}], {fxsave}
     mov qword ptr [rsp + r11 + {mask}], 0
     fxsave64 [rsp]
@@ -250,41 +223,13 @@ stela_xstate_saved:
     je stela_xstate_terminal
     call qword ptr gs:[{handler}]
 
-    // The handler may not change the physical state contract underneath an
-    // outstanding image. Refuse before partial restoration if it did.
+    // The handler may not change the state contract underneath an
+    // outstanding image. Refuse before partial restoration if XCR0 changed.
     mov r11, gs:[{image_bytes}]
-    mov rax, cr0
-    test rax, 12
-    jnz stela_xstate_refuse
-    mov rax, cr4
-    mov r8, rax
-    and eax, 1536
-    cmp eax, 1536
-    jne stela_xstate_refuse
-    test r8, 8388608
-    jnz stela_xstate_refuse
-    mov ecx, 0xc0000080
-    rdmsr
-    test eax, 16384
-    jnz stela_xstate_refuse
-    test qword ptr gs:[{msr_flags}], 1
-    jz stela_xstate_restore_no_xss
-    mov ecx, 0xda0
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_refuse
-stela_xstate_restore_no_xss:
-    test qword ptr gs:[{msr_flags}], 2
-    jz stela_xstate_restore_no_xfd
-    mov ecx, 0x1c4
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_refuse
-stela_xstate_restore_no_xfd:
     cmp qword ptr [rsp + r11 + {format}], {fxsave}
     je stela_xstate_restore_legacy
-    test r8, 262144
-    jz stela_xstate_refuse
+    cmp qword ptr gs:[{extended}], 0
+    je stela_xstate_refuse
     xor ecx, ecx
     xgetbv
     mov r9d, eax
@@ -312,8 +257,8 @@ stela_xstate_restore_extended:
     fxrstor64 [rsp]
     jmp stela_xstate_restored
 stela_xstate_restore_legacy:
-    test r8, 262144
-    jnz stela_xstate_refuse
+    cmp qword ptr gs:[{extended}], 0
+    jne stela_xstate_refuse
     fxrstor64 [rsp]
 stela_xstate_restored:
     mov qword ptr gs:[{active}], 0
@@ -363,7 +308,7 @@ stela_interrupt_mxcsr:
     image_bytes = const host::local::XSTATE_IMAGE_BYTES_OFFSET,
     supported_mask = const host::local::XSTATE_SUPPORTED_MASK_OFFSET,
     available = const host::local::XSTATE_AVAILABLE_OFFSET,
-    msr_flags = const host::local::XSTATE_MSR_FLAGS_OFFSET,
+    extended = const host::local::XSTATE_EXTENDED_OFFSET,
     active = const host::local::XSTATE_ACTIVE_OFFSET,
     handler = const host::local::HANDLER_OFFSET,
     terminal_handler = sym terminal_interrupt,

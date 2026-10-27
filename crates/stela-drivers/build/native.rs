@@ -68,9 +68,6 @@ pub fn configure() -> cc::Build {
             .flag(format!("--target={NATIVE_TARGET}"))
             .flag("-mno-stack-arg-probe")
             .flag("-mno-incremental-linker-compatible");
-        if !selected("CC") {
-            build.compiler("clang");
-        }
         if !selected("AR") {
             build.archiver(rust_archiver());
         }
@@ -97,6 +94,10 @@ pub fn hosted() -> Option<cc::Build> {
 }
 
 fn common(build: &mut cc::Build) {
+    // The warning set is clang's; a host's default cc may be GCC.
+    if !selected("CC") {
+        build.compiler("clang");
+    }
     build.std("gnu11").warnings_into_errors(true);
     for warning in WARNINGS {
         build.flag(warning);

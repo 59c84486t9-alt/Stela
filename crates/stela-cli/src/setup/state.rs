@@ -294,17 +294,23 @@ pub(super) fn backup(
     writeln!(
         text,
         "  holds          the NOR image (NVRAM) and the SEP's area, with the machine's keys: \
-         keep the file private; it is created readable by its owner only"
+         keep the file private; {}",
+        if cfg!(unix) {
+            "it is created readable by its owner only"
+        } else {
+            "it gets the access of the folder it is created in"
+        }
     )?;
     if command.dry_run {
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
     }
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // Windows gives a new file its folder's access rules instead.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
         .open(path)
         .with_context(|| format!("cannot create {}", path.display()))?;
     writeln!(file, "{MAGIC}")?;

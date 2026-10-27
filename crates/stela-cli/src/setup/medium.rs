@@ -527,6 +527,34 @@ pub(super) fn write_remote(
     Ok(stela_runtime::sha256(json.as_bytes()))
 }
 
+/// Remove what `previous`, the medium of the same build that `current`
+/// replaced, left: its whole directory when it was elsewhere, or the IPSW's
+/// pieces when an online medium took its directory. The files `current`
+/// wrote stay.
+pub(super) fn remove_replaced(previous: &Medium, current: &Medium) -> Result<()> {
+    let directory = previous.removable_directory()?;
+    if directory != current.directory() {
+        if directory.is_dir() {
+            fs::remove_dir_all(&directory)
+                .with_context(|| format!("removing {}", directory.display()))?;
+        }
+        return Ok(());
+    }
+    if previous.remote || !current.remote {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("ipsw.") || name == PIECE_HASHES_FILE {
+            fs::remove_file(entry.path())
+                .with_context(|| format!("removing {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

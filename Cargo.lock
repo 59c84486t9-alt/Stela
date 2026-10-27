@@ -1646,10 +1646,15 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "stela-cli"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "anyhow",
  "base64 0.22.1",
  "clap",
+ "ctr",
+ "getrandom 0.2.17",
  "hex",
+ "hkdf",
+ "hmac",
  "hpke",
  "libc",
  "miniz_oxide",
@@ -1665,6 +1670,7 @@ dependencies = [
  "stela-loader",
  "stela-runtime",
  "tempfile",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip",
 ]

@@ -437,7 +437,10 @@ pub(crate) mod tests {
 
     // Authored encoding of the source-recovered public SIK dictionary:
     // SET { SEQUENCE { "skg", 1 }, { "skt", 1 }, { "o", "oskgp" } }.
-    pub(crate) const SIK_QUERY: &[u8] = b"\x31\x20\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01\x30\x0a\x0c\x01o\x0c\x05oskgp";
+    /// As run12's restore ramdisk sent it: ascending keys `o`, `skg`, `skt`.
+    pub(crate) const SIK_QUERY: &[u8] = b"\x31\x20\x30\x0a\x0c\x01o\x0c\x05oskgp\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01";
+    /// The same pairs in DER's encoded-pair order, which the AP never sends.
+    const DER_ORDER_QUERY: &[u8] = b"\x31\x20\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01\x30\x0a\x0c\x01o\x0c\x05oskgp";
 
     pub(crate) fn system_request(version: u32, query: &[u8]) -> Vec<u8> {
         system_request_with_operation(version, 2, query)
@@ -495,8 +498,8 @@ pub(crate) mod tests {
     fn unsupported_system_metadata_is_sanitized_and_keeps_failure_semantics() {
         let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
         let mut query = SIK_QUERY.to_vec();
-        query[11] = 4;
-        query[21] = 3;
+        query[23] = 4;
+        query[33] = 3;
         let request = system_request_with_operation(2, 7, &query);
         let (reply, output) = ask(
             &mut keystore,
@@ -508,9 +511,21 @@ pub(crate) mod tests {
         assert_eq!(
             keystore.diagnostics().collect::<Vec<_>>(),
             [
-                "sks refused command=0x22 variant=0 handle=Some(4294967295) operation=Some(7) parameter_operation=oskgp system_key_type=Some(3) reference_key_type=None generation=Some(4) parsed=true"
+                "sks refused command=0x22 variant=0 handle=Some(4294967295) operation=Some(7) parameter_operation=oskgp system_key_type=Some(3) reference_key_type=None generation=Some(4) keys=o,skg,skt parsed=true"
             ]
         );
+        // The encoder's pair order is reported, not refused, so a request
+        // the strict parser rejects as unsorted still shows which it was.
+        let request = system_request_with_operation(2, 0, DER_ORDER_QUERY);
+        let (reply, _) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 20, request.len()),
+            request,
+        );
+        assert!(reply.is_err());
+        let diagnostics = keystore.diagnostics().collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("keys=skg,skt,o parsed=true"));
         // Guest-controlled unknown strings and opaque parameter data must
         // never be copied into diagnostics, even when DER parsing succeeds.
         let query = b"\x31\x11\x30\x0f\x0c\x01o\x0c\x0aDO-NOT-LOG";
@@ -524,7 +539,7 @@ pub(crate) mod tests {
         let diagnostics = keystore.diagnostics().collect::<Vec<_>>();
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].contains("parameter_operation=unknown"));
-        assert!(diagnostics[0].contains("parsed=true"));
+        assert!(diagnostics[0].contains("keys=o parsed=true"));
         assert!(!diagnostics[0].contains("DO-NOT-LOG"));
         assert!(!diagnostics[0].contains("1311768467463790320")); // session
         assert_eq!(keystore.diagnostics().count(), 0);
@@ -595,19 +610,20 @@ pub(crate) mod tests {
     #[test]
     fn unsupported_or_malformed_system_queries_never_publish_success() {
         let mut dictionaries = vec![vec![], SIK_QUERY[..SIK_QUERY.len() - 1].to_vec()];
-        for index in [11, 21, 33] {
+        for index in [23, 33, 13] {
             // generation, type and operation
             let mut bad = SIK_QUERY.to_vec();
             bad[index] ^= 1;
             dictionaries.push(bad);
         }
         let mut duplicate = SIK_QUERY.to_vec();
-        duplicate[16..19].copy_from_slice(b"skg");
+        duplicate[28..31].copy_from_slice(b"skg");
         dictionaries.push(duplicate);
         let mut unsorted = SIK_QUERY.to_vec();
-        unsorted[2..12].copy_from_slice(&SIK_QUERY[12..22]);
-        unsorted[12..22].copy_from_slice(&SIK_QUERY[2..12]);
+        unsorted[14..24].copy_from_slice(&SIK_QUERY[24..34]);
+        unsorted[24..34].copy_from_slice(&SIK_QUERY[14..24]);
         dictionaries.push(unsorted);
+        dictionaries.push(DER_ORDER_QUERY.to_vec());
         let mut trailing = SIK_QUERY.to_vec();
         trailing.push(0);
         dictionaries.push(trailing);

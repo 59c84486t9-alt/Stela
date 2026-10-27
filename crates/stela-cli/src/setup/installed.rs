@@ -211,7 +211,8 @@ pub(super) fn confirm(
     ensure!(
         info.guid.eq_ignore_ascii_case(guid),
         "{identifier} is not this install's {what} (partition {guid}); its identifier may have \
-         changed. Find the partition with that GUID (`diskutil info`) and pass it with {}",
+         changed. Find the partition with that GUID ({}) and pass it with {}",
+        super::host::PARTITION_LISTING,
         match role {
             Role::AppleRegion => "--target",
             Role::Nor => "--nor",
@@ -507,8 +508,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
             ))
         }
         Contents::Blank => notes.push(format!(
-            "{} is blank: install macOS onto it from recoveryOS (Disk Utility, then Reinstall \
-             macOS)",
+            "{} is blank: install macOS onto it with the Install macOS startup choice",
             region.identifier
         )),
         Contents::Other if request.erase_target => notes.push(format!(

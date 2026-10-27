@@ -1,27 +1,27 @@
 //! Placing guest regions at their exact addresses, from bytes or files.
 use super::DataProtectionLimit;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::storage::NativeMapping;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::storage::NativeStorage;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::{
     Allocation, DIRECT_RAM_USER_END, DataInheritance, MAX_FILE_MEMORY_BYTES,
     MAX_IMAGE_MEMORY_BYTES, MemoryRegion, host_page_size,
 };
 use super::{MemoryRegionSpec, OwnedMemory};
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use alloc::collections::BTreeMap;
-#[cfg(not(feature = "std"))]
+#[cfg(not(host_memory))]
 use alloc::vec::Vec;
 use anyhow::Result;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use anyhow::{Context, bail, ensure};
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use core::marker::PhantomData;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use std::fs::File;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use std::os::fd::AsRawFd;
 
 /// Exact-address private mapping of existing ordinary file bytes, without a
@@ -33,7 +33,7 @@ use std::os::fd::AsRawFd;
 /// from modifying the file; it does not freeze unrelated writes/truncation to
 /// that inode. Source identity, provenance and stability for the entire mapping
 /// lifetime are the caller's responsibility. Truncation can cause native faults.
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 #[derive(Debug)]
 pub struct FileMemoryRegionSpec {
     pub guest_address: u64,
@@ -45,13 +45,13 @@ pub struct FileMemoryRegionSpec {
     pub executable: bool,
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 pub(super) enum InitialMemory {
     Anonymous(Vec<u8>),
     File { file: File, offset: u64 },
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 pub(super) struct MappingSpec {
     guest_address: u64,
     virtual_bytes: u64,
@@ -61,7 +61,7 @@ pub(super) struct MappingSpec {
     initial: InitialMemory,
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 impl From<MemoryRegionSpec> for MappingSpec {
     fn from(spec: MemoryRegionSpec) -> Self {
         Self {
@@ -75,7 +75,7 @@ impl From<MemoryRegionSpec> for MappingSpec {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 impl From<FileMemoryRegionSpec> for MappingSpec {
     fn from(spec: FileMemoryRegionSpec) -> Self {
         Self {
@@ -92,7 +92,7 @@ impl From<FileMemoryRegionSpec> for MappingSpec {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 pub(super) fn page_rounded(bytes: u64, page: u64) -> Result<u64> {
     Ok(bytes
         .checked_add(page - 1)
@@ -101,7 +101,7 @@ pub(super) fn page_rounded(bytes: u64, page: u64) -> Result<u64> {
 }
 
 impl OwnedMemory {
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub fn map(specs: Vec<MemoryRegionSpec>) -> Result<Self> {
         Self::map_specs(
             specs.into_iter().map(MappingSpec::from).collect(),
@@ -110,13 +110,13 @@ impl OwnedMemory {
         )
     }
 
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     pub fn map(specs: Vec<MemoryRegionSpec>) -> Result<Self> {
         let _ = specs;
         anyhow::bail!("freestanding guest RAM mappings are not mounted")
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub fn map_with_data_limits(
         specs: Vec<MemoryRegionSpec>,
         limits: Vec<DataProtectionLimit>,
@@ -153,7 +153,7 @@ impl OwnedMemory {
         )
     }
 
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     pub fn map_with_data_limits(
         specs: Vec<MemoryRegionSpec>,
         limits: Vec<DataProtectionLimit>,
@@ -170,7 +170,7 @@ impl OwnedMemory {
     /// truncation through other descriptors or processes. Private copy-on-write
     /// writes through this owner do not change the file. Renaming a path to
     /// another file does not affect the mapping.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub unsafe fn map_files(specs: Vec<FileMemoryRegionSpec>) -> Result<Self> {
         Self::map_specs(
             specs.into_iter().map(MappingSpec::from).collect(),
@@ -179,7 +179,7 @@ impl OwnedMemory {
         )
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) fn map_specs(
         mut specs: Vec<MappingSpec>,
         limit: u64,

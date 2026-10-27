@@ -18,82 +18,74 @@
 //! boot-uuid` names its volume as iBoot names a Recovery volume
 //! (`stela_loader::root_selection::Root::RamImage`), with no `rd=`: with
 //! `rd=md0` APFS would take `md0` again for the image root
-//! (`stela_loader::boot_policy::refuse_ramdisk_image_root`). The volume is
-//! made with the host's `hdiutil` and checked with Stela's own APFS reader
-//! before use.
-use crate::apfs::open_image;
+//! (`stela_loader::boot_policy::refuse_ramdisk_image_root`).
+//!
+//! The volume is an APFS container with no partition map, so block zero is
+//! the container superblock. DiskImages reads it as a raw read-write image
+//! (`KDIReadWriteDiskImage`) whose whole disk an APFS container scheme
+//! claims, a case its `findAppropriateIOMediaObject` names ("whole=TRUE,
+//! leaf=FALSE AppleAPFSContainerScheme child"). Stela writes it itself
+//! (`format`), so every host makes the same volume, and checks it with its
+//! own APFS reader before use.
 use anyhow::{Context, Result, bail, ensure};
-use std::{ffi::OsString, path::Path, process::Command};
+use std::path::Path;
 use stela_runtime::{
     apfs::{self, Container, btree::Seal},
     payload::ReadAt,
 };
+
+mod format;
 
 /// The BaseSystem image's path on the volume, as iBoot names it below a
 /// Recovery volume's boot objects.
 pub const IMAGE_PATH: &str = "usr/standalone/firmware/arm64eBaseSystem.dmg";
 /// The image-boot argument naming [`IMAGE_PATH`] from the volume's root.
 pub const IMAGE_BOOT_ARG: &str = "rp0=file:///usr/standalone/firmware/arm64eBaseSystem.dmg";
-const HDIUTIL: &str = "/usr/bin/hdiutil";
 const VOLUME_NAME: &str = "Stela recoveryOS";
-const STAGE_DIRECTORY: &str = "recovery-volume";
-/// `hdiutil` names a raw image `.dmg`, adding the suffix to any other name.
-const VOLUME_FILE: &str = "recovery-volume.dmg";
 
-/// `hdiutil create` for an unsealed APFS container of `stage`'s files, with
-/// no partition map, as a raw image: block zero is the container superblock.
-/// DiskImages reads it as a raw read-write image (`KDIReadWriteDiskImage`)
-/// whose whole disk an APFS container scheme claims, a case its
-/// `findAppropriateIOMediaObject` names ("whole=TRUE, leaf=FALSE
-/// AppleAPFSContainerScheme child").
-fn create_arguments(stage: &Path, output: &Path) -> Vec<OsString> {
-    let mut arguments: Vec<OsString> = [
-        "create", "-quiet", "-fs", "APFS", "-layout", "NONE", "-format", "UDRW", "-volname",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect();
-    arguments.push(VOLUME_NAME.into());
-    arguments.push("-srcfolder".into());
-    arguments.push(stage.into());
-    arguments.push(output.into());
-    arguments
+/// The volume for `image`, the decrypted BaseSystem UDIF image, at most
+/// `limit` bytes. Returns the volume image and its volume's UUID, which
+/// `/chosen boot-uuid` names.
+pub fn build(image: &Path, limit: u64) -> Result<(Vec<u8>, String)> {
+    let mut file =
+        std::fs::File::open(image).with_context(|| format!("cannot read {}", image.display()))?;
+    let image_bytes = file.metadata()?.len();
+    let identity = format::Identity {
+        volume_uuid: random_uuid()?,
+        container_uuid: random_uuid()?,
+        time: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+            .try_into()?,
+    };
+    let volume = format::container(
+        VOLUME_NAME,
+        IMAGE_PATH,
+        &mut file,
+        image_bytes,
+        &identity,
+        limit,
+    )
+    .context("cannot write the recoveryOS volume")?;
+    let uuid = check(&volume, image_bytes)?;
+    Ok((volume, uuid))
 }
 
-/// The volume for `image`, the decrypted BaseSystem UDIF image, built in
-/// `work` (on the same file system as `image`, which is linked, not copied,
-/// into the staging tree). At most `limit` bytes. Returns the volume image
-/// and its volume's UUID, which `/chosen boot-uuid` names.
-pub fn build(image: &Path, work: &Path, limit: u64) -> Result<(Vec<u8>, String)> {
-    let image_bytes = std::fs::metadata(image)
-        .with_context(|| format!("cannot read {}", image.display()))?
-        .len();
-    let stage = work.join(STAGE_DIRECTORY);
-    let target = stage.join(IMAGE_PATH);
-    std::fs::create_dir_all(target.parent().expect("the image path has directories"))?;
-    std::fs::hard_link(image, &target)
-        .with_context(|| format!("cannot link {} into the volume", image.display()))?;
-    let output = work.join(VOLUME_FILE);
-    let status = Command::new(HDIUTIL)
-        .args(create_arguments(&stage, &output))
-        .status()
-        .with_context(|| format!("cannot run {HDIUTIL}"))?;
-    ensure!(status.success(), "hdiutil create failed: {status}");
-    let bytes = std::fs::metadata(&output)?.len();
-    ensure!(
-        bytes <= limit,
-        "the recoveryOS volume is {bytes} bytes, more than {limit}"
-    );
-    let uuid = check(&output, image_bytes)?;
-    Ok((std::fs::read(&output)?, uuid))
+/// A random (version 4) UUID.
+fn random_uuid() -> Result<[u8; 16]> {
+    let mut uuid = [0u8; 16];
+    getrandom::getrandom(&mut uuid).map_err(|error| anyhow::anyhow!("no random bytes: {error}"))?;
+    uuid[6] = (uuid[6] & 0x0f) | 0x40;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+    Ok(uuid)
 }
 
 /// The volume must be one unsealed APFS container at offset zero whose one
 /// volume holds the image at [`IMAGE_PATH`] with its full length. Returns
 /// the volume's UUID in the upper-case form of its `IOMedia` `UUID`, which
 /// AppleFileSystemDriver compares with `boot-uuid`.
-fn check(volume_image: &Path, image_bytes: u64) -> Result<String> {
-    let mut source = open_image(volume_image)?;
+fn check(volume_image: &[u8], image_bytes: u64) -> Result<String> {
+    let mut source = Memory(volume_image);
     let offsets = apfs::containers(&mut source)?;
     ensure!(
         offsets == [0],
@@ -125,17 +117,18 @@ fn check(volume_image: &Path, image_bytes: u64) -> Result<String> {
 }
 
 /// An image's bytes as a reader source.
-struct Memory(Vec<u8>);
+struct Memory<B>(B);
 
-impl ReadAt for Memory {
+impl<B: AsRef<[u8]>> ReadAt for Memory<B> {
     type Error = &'static str;
     fn len(&self) -> u64 {
-        self.0.len() as u64
+        self.0.as_ref().len() as u64
     }
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
         let start = usize::try_from(offset).map_err(|_| "offset out of range")?;
         let bytes = self
             .0
+            .as_ref()
             .get(start..start + buffer.len())
             .ok_or("read past the end")?;
         buffer.copy_from_slice(bytes);
@@ -181,36 +174,11 @@ pub fn check_root_hash(seal: &Seal, im4p: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn the_image_boot_argument_names_the_image_path_from_the_root() {
         assert_eq!(IMAGE_BOOT_ARG, format!("rp0=file:///{IMAGE_PATH}"));
         assert!(stela_loader::boot_policy::require_image_boot(IMAGE_BOOT_ARG).is_ok());
-    }
-
-    #[test]
-    fn hdiutil_makes_a_raw_unpartitioned_apfs_image_of_the_stage() {
-        let arguments = create_arguments(Path::new("/w/stage"), Path::new("/w/out.img"));
-        let text: Vec<_> = arguments.iter().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(
-            text,
-            [
-                "create",
-                "-quiet",
-                "-fs",
-                "APFS",
-                "-layout",
-                "NONE",
-                "-format",
-                "UDRW",
-                "-volname",
-                VOLUME_NAME,
-                "-srcfolder",
-                "/w/stage",
-                "/w/out.img"
-            ]
-        );
     }
 
     fn gunzip(data: &[u8]) -> Vec<u8> {
@@ -220,27 +188,42 @@ mod tests {
         miniz_oxide::inflate::decompress_to_vec(&data[10..data.len() - 8]).unwrap()
     }
 
-    /// `make-recovery-volume.sh`'s volume, holding 4096 bytes as the image.
-    fn fixture_volume(work: &Path) -> PathBuf {
-        let path = work.join("volume.dmg");
-        let compressed =
-            include_bytes!("../../tests/fixtures/recovery-volume/recovery-volume.img.gz");
-        std::fs::write(&path, gunzip(compressed)).unwrap();
-        path
-    }
-
     #[test]
     fn the_volume_must_hold_the_whole_image_unsealed_at_its_path() {
-        let work = tempfile::tempdir().unwrap();
-        let volume = fixture_volume(work.path());
+        // `make-recovery-volume.sh`'s volume from Apple's `hdiutil`, holding
+        // 4096 bytes as the image.
+        let volume = gunzip(include_bytes!(
+            "../../tests/fixtures/recovery-volume/recovery-volume.img.gz"
+        ));
         let uuid = check(&volume, 4096).unwrap();
         // The form `/chosen boot-uuid` takes: 36 characters, upper case.
         assert!(stela_loader::boot_selection::parse_uuid(uuid.as_bytes()).is_some());
         assert_eq!((uuid.len(), uuid.to_ascii_uppercase()), (36, uuid.clone()));
         assert!(check(&volume, 4095).is_err());
-        let blank = work.path().join("blank.img");
-        std::fs::write(&blank, vec![0u8; 8192]).unwrap();
-        assert!(check(&blank, 0).is_err());
+        assert!(check(&[0u8; 8192], 0).is_err());
+    }
+
+    #[test]
+    fn the_written_volume_holds_the_image_as_the_reader_finds_it() {
+        let work = tempfile::tempdir().unwrap();
+        let image = work.path().join("BaseSystem.dmg");
+        let content: Vec<u8> = (0..3 * 4096 + 100).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(&image, &content).unwrap();
+        let (volume, uuid) = build(&image, 64 << 20).unwrap();
+        assert_eq!(volume.len() % 4096, 0);
+        assert!(stela_loader::boot_selection::parse_uuid(uuid.as_bytes()).is_some());
+
+        let mut container = Container::open(Memory(&volume[..]), 0).unwrap();
+        let volumes = container.volumes().unwrap();
+        assert_eq!(volumes[0].name, VOLUME_NAME);
+        let inode = volumes[0]
+            .lookup(&mut container.device, IMAGE_PATH, false)
+            .unwrap();
+        assert_eq!(
+            volumes[0].read(&mut container.device, &inode).unwrap(),
+            content
+        );
+        assert!(build(&image, 1 << 20).is_err());
     }
 
     fn der(tag: u8, body: &[u8]) -> Vec<u8> {

@@ -4,8 +4,9 @@
 //! blob; reply variant 0 and one raw result blob. The public system-key
 //! wrapper uses handle -1, operation 2 (constant at 0x725890); the userspace
 //! perform-operation dispatch sets operation 0 (0x2d36078). Its DER
-//! dictionary is a SET of SEQUENCE { UTF8 key, value } pairs, sorted by
-//! complete encoded pair. `o=oskgp`, `skt=1`, `skg=1` requests the SIK.
+//! dictionary is a SET of SEQUENCE { UTF8 key, value } pairs in ascending
+//! key order, as the 26A434 restore ramdisk sends it (`o`, `skg`, `skt`),
+//! not DER's encoded-pair order. `o=oskgp`, `skt=1`, `skg=1` requests the SIK.
 //!
 //! P-256 is Stela's system-identity policy, not a recovered Apple hardware
 //! KDF or an Apple-certified identity. The genuine private scalar is derived
@@ -102,13 +103,13 @@ pub(super) fn public_query(
     let mut previous: Option<&[u8]> = None;
     let (mut operation, mut key_type, mut generation) = (false, false, false);
     while !pairs.0.is_empty() {
-        let pair = pairs.take(16)?;
-        if previous.is_some_and(|p| p >= pair.encoded) {
-            return Err("SEP system-key dictionary is duplicated or not DER sorted");
+        let mut entry = Cursor(pairs.take(16)?.value);
+        let key = entry.take(12)?.value;
+        if previous.is_some_and(|p| p >= key) {
+            return Err("SEP system-key dictionary is duplicated or not key sorted");
         }
-        previous = Some(pair.encoded);
-        let mut entry = Cursor(pair.value);
-        match entry.take(12)?.value {
+        previous = Some(key);
+        match key {
             b"o" => {
                 if operation || entry.take(12)?.value != b"oskgp" {
                     return Err("SEP system-key operation is not implemented");
@@ -156,11 +157,12 @@ pub(super) fn diagnostic(variant: u32, fields: &mut Fields<'_>) -> String {
     .is_ok();
     let parameters = parameters.unwrap_or_default();
     format!(
-        "sks refused command=0x22 variant={variant} handle={handle:?} operation={operation:?} parameter_operation={} system_key_type={:?} reference_key_type={:?} generation={:?} parsed={parsed}",
+        "sks refused command=0x22 variant={variant} handle={handle:?} operation={operation:?} parameter_operation={} system_key_type={:?} reference_key_type={:?} generation={:?} keys={} parsed={parsed}",
         parameters.operation,
         parameters.system_key_type,
         parameters.reference_key_type,
         parameters.generation,
+        parameters.keys,
     )
 }
 
@@ -169,6 +171,9 @@ struct ParameterDiagnostic {
     system_key_type: Option<u32>,
     reference_key_type: Option<u32>,
     generation: Option<u32>,
+    /// Allowlisted key names in arrival order, `?` for any other key: the
+    /// encoder's pair order, which the strict parser requires ascending.
+    keys: String,
 }
 
 impl Default for ParameterDiagnostic {
@@ -178,6 +183,7 @@ impl Default for ParameterDiagnostic {
             system_key_type: None,
             reference_key_type: None,
             generation: None,
+            keys: String::new(),
         }
     }
 }
@@ -188,7 +194,6 @@ impl ParameterDiagnostic {
         let set = outer.take(17)?;
         outer.end()?;
         let mut pairs = Cursor(set.value);
-        let mut previous: Option<&[u8]> = None;
         let mut result = Self::default();
         let mut has_operation = false;
         // Bounded diagnostic work even for a large, otherwise valid request.
@@ -197,12 +202,19 @@ impl ParameterDiagnostic {
                 return Ok(result);
             }
             let pair = pairs.take(16)?;
-            if previous.is_some_and(|p| p >= pair.encoded) {
-                return Err("SEP diagnostic dictionary is duplicated or not DER sorted");
-            }
-            previous = Some(pair.encoded);
             let mut entry = Cursor(pair.value);
-            match entry.take(12)?.value {
+            let key = entry.take(12)?.value;
+            if !result.keys.is_empty() {
+                result.keys.push(',');
+            }
+            result.keys.push_str(match key {
+                b"o" => "o",
+                b"skt" => "skt",
+                b"kt" => "kt",
+                b"skg" => "skg",
+                _ => "?",
+            });
+            match key {
                 b"o" => {
                     if has_operation {
                         return Err("SEP diagnostic operation is duplicated");

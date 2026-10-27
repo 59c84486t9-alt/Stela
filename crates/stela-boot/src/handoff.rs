@@ -6,7 +6,9 @@ use stela_runtime::{machine::mmu::placement::Placement, pc};
 
 pub const MAGIC: u64 = 0x5354_454c_4153_5953; // "SYSALETS"
 pub const MAX_GUEST_RANGES: usize = 128;
-pub const MAX_FILES: usize = 16;
+/// A restore bundle's files (13 for a MacBookPro18,3 with its USB-C port
+/// controllers' firmware) and the install inventory's four, with room.
+pub const MAX_FILES: usize = 32;
 pub const MAX_NAME: usize = 48;
 pub const MAX_ECAM: usize = 4;
 pub const MAX_MAPPED: usize = 32;

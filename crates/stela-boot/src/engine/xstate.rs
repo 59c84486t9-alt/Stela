@@ -88,8 +88,12 @@ pub(crate) struct EntryAbi {
     pub(crate) image_bytes: u64,
     pub(crate) supported_mask: u64,
     pub(crate) xsave_available: u64,
-    /// Bit0 qualifies IA32_XSS; bit1 qualifies IA32_XFD.
-    pub(crate) msr_flags: u64,
+    /// 1 when the controls `configure_xstate` qualified enable XSAVE
+    /// (CR4.OSXSAVE). Entries use these qualified controls, which stay fixed
+    /// for the owner's lifetime, instead of reading CR0, CR4, EFER, IA32_XSS
+    /// and IA32_XFD again: under a hypervisor each read is a VM exit, and
+    /// every native block entry and return crosses this boundary.
+    pub(crate) extended: u64,
     /// Space from the original frame needed for image, saved format/mask and
     /// worst-case downward alignment. The original Frame remains untouched.
     pub(crate) entry_bytes: u64,
@@ -101,7 +105,7 @@ impl EntryAbi {
         image_bytes: 0,
         supported_mask: 0,
         xsave_available: 0,
-        msr_flags: 0,
+        extended: 0,
         entry_bytes: 0,
     };
 }
@@ -149,7 +153,7 @@ impl Layout {
                 image_bytes: LEGACY_BYTES as u64,
                 supported_mask: X87 | SSE,
                 xsave_available: 0,
-                msr_flags: 0,
+                extended: 0,
                 entry_bytes: (LEGACY_BYTES + ENTRY_METADATA_BYTES + IMAGE_ALIGNMENT - 1) as u64,
             },
             components: [Component::default(); 62],
@@ -218,7 +222,7 @@ impl Layout {
             image_bytes: rounded as u64,
             supported_mask: supported,
             xsave_available: 1,
-            msr_flags: u64::from(layout.xss) | (u64::from(layout.xfd) << 1),
+            extended: 0,
             entry_bytes: rounded
                 .checked_add(ENTRY_METADATA_BYTES + IMAGE_ALIGNMENT - 1)
                 .ok_or(LayoutError::ResourceLimit)? as u64,
@@ -331,8 +335,9 @@ impl XstateOwner {
     }
 
     /// Validate actual controls before preparing an entry/transition. The
-    /// assembly entry itself must independently use actual CR4/XCR0 before
-    /// saving, without calling Rust first and clobbering interrupted state.
+    /// assembly entries use the controls this qualified at configuration
+    /// ([`EntryAbi::extended`]) and the actual XCR0, without calling Rust
+    /// first and clobbering interrupted state.
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn check(&self) -> Result<SaveFormat, LayoutError> {
         privilege()?;
@@ -512,36 +517,8 @@ stela_xstate_save_owned:
     lea rax, [rdi + r11]
     cmp rsi, rax
     jne stela_xstate_boundary_refuse
-    mov rax, cr0
-    test rax, 12
-    jnz stela_xstate_boundary_refuse
-    mov rax, cr4
-    mov r8, rax
-    and eax, 1536
-    cmp eax, 1536
-    jne stela_xstate_boundary_refuse
-    test r8, 8388608
-    jnz stela_xstate_boundary_refuse
-    mov ecx, 0xc0000080
-    rdmsr
-    test eax, 16384
-    jnz stela_xstate_boundary_refuse
-    test qword ptr gs:[{msr_flags}], 1
-    jz stela_xstate_boundary_no_xss
-    mov ecx, 0xda0
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_boundary_refuse
-stela_xstate_boundary_no_xss:
-    test qword ptr gs:[{msr_flags}], 2
-    jz stela_xstate_boundary_no_xfd
-    mov ecx, 0x1c4
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_boundary_refuse
-stela_xstate_boundary_no_xfd:
-    test r8, 262144
-    jnz stela_xstate_boundary_save_extended
+    cmp qword ptr gs:[{extended}], 0
+    jne stela_xstate_boundary_save_extended
     mov qword ptr [rsi + {format}], {fxsave}
     mov qword ptr [rsi + {mask}], 0
     fxsave64 [rdi]
@@ -597,38 +574,10 @@ stela_xstate_restore_owned:
     lea rax, [rdi + r11]
     cmp rsi, rax
     jne stela_xstate_boundary_refuse
-    mov rax, cr0
-    test rax, 12
-    jnz stela_xstate_boundary_refuse
-    mov rax, cr4
-    mov r8, rax
-    and eax, 1536
-    cmp eax, 1536
-    jne stela_xstate_boundary_refuse
-    test r8, 8388608
-    jnz stela_xstate_boundary_refuse
-    mov ecx, 0xc0000080
-    rdmsr
-    test eax, 16384
-    jnz stela_xstate_boundary_refuse
-    test qword ptr gs:[{msr_flags}], 1
-    jz stela_xstate_boundary_restore_no_xss
-    mov ecx, 0xda0
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_boundary_refuse
-stela_xstate_boundary_restore_no_xss:
-    test qword ptr gs:[{msr_flags}], 2
-    jz stela_xstate_boundary_restore_no_xfd
-    mov ecx, 0x1c4
-    rdmsr
-    or eax, edx
-    jnz stela_xstate_boundary_refuse
-stela_xstate_boundary_restore_no_xfd:
     cmp qword ptr [rsi + {format}], {fxsave}
     je stela_xstate_boundary_restore_legacy
-    test r8, 262144
-    jz stela_xstate_boundary_refuse
+    cmp qword ptr gs:[{extended}], 0
+    je stela_xstate_boundary_refuse
     cmp qword ptr gs:[{available}], 1
     jne stela_xstate_boundary_refuse
     xor ecx, ecx
@@ -659,8 +608,8 @@ stela_xstate_boundary_restore_extended:
 stela_xstate_boundary_restored:
     ret
 stela_xstate_boundary_restore_legacy:
-    test r8, 262144
-    jnz stela_xstate_boundary_refuse
+    cmp qword ptr gs:[{extended}], 0
+    jne stela_xstate_boundary_refuse
     cmp qword ptr [rsi + {mask}], 0
     jne stela_xstate_boundary_refuse
     fxrstor64 [rdi]
@@ -675,7 +624,7 @@ stela_xstate_boundary_halt:
     image_bytes = const super::host::local::XSTATE_IMAGE_BYTES_OFFSET,
     supported_mask = const super::host::local::XSTATE_SUPPORTED_MASK_OFFSET,
     available = const super::host::local::XSTATE_AVAILABLE_OFFSET,
-    msr_flags = const super::host::local::XSTATE_MSR_FLAGS_OFFSET,
+    extended = const super::host::local::XSTATE_EXTENDED_OFFSET,
     max_image_bytes = const MAX_IMAGE_BYTES,
     refused_mask = const !ADMITTED_MASK,
     format = const ENTRY_FORMAT_OFFSET,

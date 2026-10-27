@@ -8,12 +8,22 @@ mod device_access;
 mod device_read;
 mod device_write;
 mod exclusive;
+// Both profiles count on every host; the hosted runner, on Intel Macs, is
+// their only reader.
 #[cfg(all(feature = "std", feature = "native-profile"))]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub(crate) mod floating_profile;
 mod guarded;
 mod hosted;
 pub mod installed_code;
 #[cfg(all(feature = "std", feature = "native-profile"))]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub(crate) mod metrics;
 mod monitor;
 mod native_timing;

@@ -2,13 +2,17 @@
 //! and tier, a check that the FMA tier emits no EVEX, and nanoseconds per
 //! operation for each tier the host supports against the Rust model. Time with
 //! a release build: `cargo run --release -p xtask -- amx-kernels`.
-use crate::tools::{exec, which};
+use crate::{
+    pages::{self, Access},
+    tools::{exec, which},
+};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use std::{
     fs,
     path::PathBuf,
     process::Command,
+    ptr::NonNull,
     time::{Duration, Instant},
 };
 use stela_compiler::{
@@ -301,51 +305,36 @@ type Entry = unsafe extern "sysv64" fn(*mut u8, *const u8, *const u8, u64);
 
 /// A private RX copy of a kernel library.
 struct Executable {
-    pointer: *mut libc::c_void,
+    pointer: NonNull<u8>,
     length: usize,
 }
 
 impl Executable {
     fn new(code: &[u8]) -> Result<Self> {
-        // SAFETY: fresh private anonymous RW memory, made RX after the copy.
+        let executable = Self {
+            pointer: pages::map(None, code.len(), Access::ReadWrite)?,
+            length: code.len(),
+        };
+        let pointer = executable.pointer.as_ptr();
+        // SAFETY: fresh private RW memory of `code.len()` bytes, made RX after
+        // the copy.
         unsafe {
-            let pointer = libc::mmap(
-                core::ptr::null_mut(),
-                code.len(),
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            );
-            ensure!(
-                pointer != libc::MAP_FAILED,
-                "{}",
-                std::io::Error::last_os_error()
-            );
-            let executable = Self {
-                pointer,
-                length: code.len(),
-            };
-            core::ptr::copy_nonoverlapping(code.as_ptr(), pointer.cast(), code.len());
-            ensure!(
-                libc::mprotect(pointer, code.len(), libc::PROT_READ | libc::PROT_EXEC) == 0,
-                "{}",
-                std::io::Error::last_os_error()
-            );
-            Ok(executable)
+            core::ptr::copy_nonoverlapping(code.as_ptr(), pointer, code.len());
+            pages::protect(pointer, code.len(), Access::ReadExecute)?;
         }
+        Ok(executable)
     }
 
     fn entry(&self, offset: usize) -> Entry {
         assert!(offset < self.length);
         // SAFETY: the offset starts a kernel inside the RX mapping.
-        unsafe { core::mem::transmute(self.pointer.cast::<u8>().add(offset)) }
+        unsafe { core::mem::transmute(self.pointer.as_ptr().add(offset)) }
     }
 }
 
 impl Drop for Executable {
     fn drop(&mut self) {
         // SAFETY: the mapping is owned and no entry outlives `run`.
-        unsafe { libc::munmap(self.pointer, self.length) };
+        unsafe { pages::unmap(self.pointer.as_ptr(), self.length) };
     }
 }
