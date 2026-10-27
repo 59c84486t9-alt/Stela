@@ -197,6 +197,7 @@ mod tests {
             entities: vec![
                 Entity::ClockSource {
                     id: 10,
+                    attributes: 0,
                     controls: 3,
                 },
                 Entity::Input {

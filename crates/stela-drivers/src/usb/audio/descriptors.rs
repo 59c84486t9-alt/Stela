@@ -25,6 +25,8 @@ const USB_STREAMING: u16 = 0x0101;
 pub enum Entity {
     ClockSource {
         id: u8,
+        /// bmAttributes: clock type in bits 1:0, 0 for external.
+        attributes: u8,
         controls: u8,
     },
     ClockSelector {
@@ -347,6 +349,7 @@ fn graph(control: &Interface) -> Result<Graph, Error> {
                 controls(u32::from(d[5]), 2)?;
                 Some(Entity::ClockSource {
                     id: d[3],
+                    attributes: d[4],
                     controls: d[5],
                 })
             }

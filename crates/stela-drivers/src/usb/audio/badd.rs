@@ -181,6 +181,7 @@ fn graph(profile: BasicProfile, control: u8, playback: u8, capture: u8) -> Resul
     }
     let mut entities = vec![Entity::ClockSource {
         id: CLOCK,
+        attributes: 0,
         controls: 0,
     }];
     if playback != 0 {

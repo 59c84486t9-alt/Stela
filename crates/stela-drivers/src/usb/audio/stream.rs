@@ -111,6 +111,9 @@ pub struct AudioDevice<T: Transport> {
     power_owners: Vec<super::PowerDomain>,
     /// First failure is retained even if cleanup itself fails.
     pub last_fault: Option<Error>,
+    /// The last rate change's (requested, running) rates when the clock
+    /// reported another; 0 running means it could not be read.
+    pub clock_mismatch: Option<(u32, u32)>,
 }
 
 impl AudioDevice<super::Native> {
@@ -148,6 +151,7 @@ impl<T: Transport> AudioDevice<T> {
             poisoned: false,
             power_owners: Vec::new(),
             last_fault: None,
+            clock_mismatch: None,
         })
     }
     #[cfg(test)]
@@ -289,16 +293,29 @@ impl<T: Transport> AudioDevice<T> {
             .map(|p| (p.clock, p.rate))
             .chain(self.capture.iter().map(|c| (c.clock, c.rate)))
         {
+            // Linux shares one clock reference per terminal clock ID.
             if let StreamClock::Entity(other_clock) = other_clock
-                && other_clock.source == clock.source
-                && other_clock.source_rate(other_rate)? != clock.source_rate(rate)?
+                && other_clock.terminal == clock.terminal
+                && other_rate != rate
             {
                 return Err(Error::Busy);
             }
         }
-        self.binding
+        // ALSA constrains hw_params to the format's announced rates.
+        if !self
+            .binding
+            .graph
+            .rates(&mut self.transport, clock)?
+            .contains(rate)
+        {
+            return Err(Error::RateUnsupported);
+        }
+        let running = self
+            .binding
             .graph
             .set_rate(&mut self.transport, clock, rate)?;
+        // Linux notes a different running rate and streams on.
+        self.clock_mismatch = (running != rate).then_some((rate, running));
         Ok(StreamClock::Entity(clock))
     }
     fn format(&self, index: usize, direction: Direction) -> Result<Format, Error> {
@@ -1073,8 +1090,6 @@ pub(crate) mod tests {
     struct Model {
         overrides: BTreeMap<[u8; 8], Vec<u8>>,
         selection: u8,
-        numerator: u16,
-        denominator: u16,
         rate: u32,
         time: u64,
         valid: bool,
@@ -1095,8 +1110,6 @@ pub(crate) mod tests {
         fn new() -> Self {
             Self {
                 selection: 1,
-                numerator: 2,
-                denominator: 1,
                 rate: 48_000,
                 valid: true,
                 ..Self::default()
@@ -1125,7 +1138,7 @@ pub(crate) mod tests {
             assert_eq!(r[2], 0);
             if r[0] == 0x21 {
                 match (entity, sel) {
-                    (11 | 14, 1) => self.selection = out[0],
+                    (11 | 14 | 16, 1) => self.selection = out[0],
                     (10, 1) => self.rate = u32::from_le_bytes(out.try_into().unwrap()),
                     (2, 1) => self.muted = out[0] != 0,
                     (2, 2) => self.volume = i16::from_le_bytes(out.try_into().unwrap()),
@@ -1135,9 +1148,7 @@ pub(crate) mod tests {
             }
             assert_eq!(r[0], 0xa1);
             let data = match (entity, sel, r[1]) {
-                (11 | 14, 1, 1) => vec![self.selection],
-                (12, 1, 1) => self.numerator.to_le_bytes().to_vec(),
-                (12, 2, 1) => self.denominator.to_le_bytes().to_vec(),
+                (11 | 14 | 16, 1, 1) => vec![self.selection],
                 (10, 1, 1) => self.rate.to_le_bytes().to_vec(),
                 (10, 2, 1) => vec![u8::from(self.valid)],
                 (10, 1, 2) => {
@@ -1224,25 +1235,144 @@ pub(crate) mod tests {
         let mut a = AudioDevice::new(Model::new(), binding(), &mut dma).unwrap();
         f(&mut a);
     }
+    const CURRENT_RATE: [u8; 8] = [0xa1, 1, 0, 1, 0, 10, 4, 0];
+    const SET_RATE: [u8; 8] = [0x21, 1, 0, 1, 0, 10, 4, 0];
+    const VALIDITY: [u8; 8] = [0xa1, 1, 0, 2, 0, 10, 1, 0];
+    /// Answer both halves of the clock-10 range read with these triplets.
+    fn ranges(m: &mut Model, triplets: &[[u32; 3]]) {
+        let mut reply = (triplets.len() as u16).to_le_bytes().to_vec();
+        for value in triplets.iter().flatten() {
+            reply.extend_from_slice(&value.to_le_bytes());
+        }
+        m.overrides
+            .insert(setup(0xa1, 2, 0x100, 0xa00, 2), reply[..2].to_vec());
+        m.overrides
+            .insert(setup(0xa1, 2, 0x100, 0xa00, reply.len() as u16), reply);
+    }
+    fn set_clock_controls(graph: &mut Graph, id: u8, bits: u8) {
+        for entity in &mut graph.entities {
+            if let Entity::ClockSource {
+                id: source,
+                controls,
+                ..
+            } = entity
+                && *source == id
+            {
+                *controls = bits;
+            }
+        }
+    }
     #[test]
-    fn controls_use_ranges_exact_requests_and_actual_readback() {
-        let g = binding().graph;
+    fn rates_are_set_and_validated_as_linux_set_sample_rate_v2v3_does() {
+        let mut g = binding().graph;
         let mut m = Model::new();
         let c = g.resolve_clock(&mut m, 10).unwrap();
-        g.set_rate(&mut m, c, 44_100).unwrap();
+        assert_eq!(
+            c,
+            ResolvedClock {
+                terminal: 10,
+                source: 10
+            }
+        );
+        let Rates::Table(table) = g.rates(&mut m, c).unwrap() else {
+            panic!("discrete ranges announce a table");
+        };
+        assert_eq!((table.len(), table[0], table[519]), (520, 44_100, 96_000));
+        assert!(!g.rates(&mut m, c).unwrap().contains(44_101));
+        assert_eq!(g.set_rate(&mut m, c, 44_100), Ok(44_100));
         assert_eq!(m.rate, 44_100);
-        assert_eq!(g.set_rate(&mut m, c, 44_101), Err(Error::RateUnsupported));
         g.set_mute(&mut m, 2, 0, true).unwrap();
         g.set_volume(&mut m, 2, 0, -256).unwrap();
         assert_eq!(m.volume, -256);
         assert_eq!(g.set_volume(&mut m, 2, 0, -257), Err(Error::Format));
+        assert_eq!(setup(0xa1, 1, 0x100, 0xa00, 4), CURRENT_RATE);
+
+        // A clock that keeps running elsewhere is reported, not refused.
+        m.overrides
+            .insert(CURRENT_RATE, 48_000u32.to_le_bytes().to_vec());
+        assert_eq!(g.set_rate(&mut m, c, 44_100), Ok(48_000));
+        // An unreadable frequency counts as 0 and the previous rate stands.
+        m.overrides.insert(CURRENT_RATE, vec![0; 3]);
+        assert_eq!(g.current_rate(&mut m, c), 0);
+        assert_eq!(g.set_rate(&mut m, c, 48_000), Ok(0));
+        m.overrides.clear();
+        // A refused write fails the change.
+        m.overrides.insert(SET_RATE, vec![0]);
+        assert_eq!(g.set_rate(&mut m, c, 96_000), Err(Error::ControlLength));
+        m.overrides.clear();
+        // A read-only frequency is left as it runs.
+        set_clock_controls(&mut g, 10, 0b0101);
+        assert_eq!(g.set_rate(&mut m, c, 96_000), Ok(48_000));
+        assert_eq!(m.rate, 48_000);
+        set_clock_controls(&mut g, 10, 0b0111);
+
+        // Validity is one read: no settling wait.
         m.valid = false;
         assert_eq!(g.valid_clock(&mut m, c), Err(Error::ClockInvalid));
-        assert!(m.time >= 100000);
-        assert_eq!(
-            setup(0xa1, 1, 0x100, 0xa00, 4),
-            [0xa1, 1, 0, 1, 0, 10, 4, 0]
+        assert_eq!(g.set_rate(&mut m, c, 44_100), Err(Error::ClockInvalid));
+        assert_eq!(m.time, 0);
+        // The UAC2 quirk: an internal single-rate source wired to the terminal.
+        ranges(&mut m, &[[48_000, 48_000, 0]]);
+        assert_eq!(g.rates(&mut m, c), Ok(Rates::Table(vec![48_000])));
+        assert_eq!(g.valid_clock(&mut m, c), Ok(()));
+        m.overrides.clear();
+        // Without a readable validity control the clock is assumed valid.
+        set_clock_controls(&mut g, 10, 0b0011);
+        assert_eq!(g.valid_clock(&mut m, c), Ok(()));
+        set_clock_controls(&mut g, 10, 0b0111);
+        m.valid = true;
+        m.overrides.insert(VALIDITY, vec![]);
+        assert_eq!(g.valid_clock(&mut m, c), Err(Error::ClockInvalid));
+    }
+    #[test]
+    fn sample_rate_ranges_parse_like_linux() {
+        let g = binding().graph;
+        let mut m = Model::new();
+        let c = g.resolve_clock(&mut m, 10).unwrap();
+        // Negative as a signed int, then max below min: both skipped.
+        ranges(
+            &mut m,
+            &[
+                [0x8000_0000, 0x8000_0000, 0],
+                [48_000, 44_100, 0],
+                [8_000, 192_000, 1],
+            ],
         );
+        assert_eq!(
+            g.rates(&mut m, c),
+            Ok(Rates::Continuous {
+                min: 8_000,
+                max: 192_000
+            })
+        );
+        assert!(g.rates(&mut m, c).unwrap().contains(12_345));
+        // Linux stops at MAX_NR_RATES.
+        ranges(&mut m, &[[1, 4_000, 2]]);
+        let Rates::Table(table) = g.rates(&mut m, c).unwrap() else {
+            panic!("resolution 2 is discrete");
+        };
+        assert_eq!((table.len(), table[1023]), (1024, 2_047));
+    }
+    #[test]
+    fn a_running_rate_mismatch_is_recorded_and_streaming_continues() {
+        run(|a| {
+            a.transport
+                .overrides
+                .insert(CURRENT_RATE, 44_100u32.to_le_bytes().to_vec());
+            a.start_capture(1, 48000).unwrap();
+            assert_eq!(a.clock_mismatch, Some((48_000, 44_100)));
+            a.poll().unwrap();
+            a.stop_capture().unwrap();
+            a.transport.overrides.clear();
+            a.start_capture(1, 48000).unwrap();
+            assert_eq!(a.clock_mismatch, None);
+            a.stop_capture().unwrap();
+            assert_eq!(
+                a.start_playback(0, 47_950, &[0; 24], true),
+                Err(Error::RateUnsupported)
+            );
+            a.shutdown().unwrap();
+        });
     }
     #[test]
     fn finite_pcm_is_exact_across_many_packet_ring_wraps_and_restart() {
@@ -1365,7 +1495,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn selected_clock_multiplier_and_control_short_or_false_readback_are_not_success() {
+    fn clock_paths_are_found_like_linux_uac_clock_find_source() {
         let mut graph = binding().graph;
         graph.entities.extend([
             Entity::ClockSelector {
@@ -1378,54 +1508,75 @@ pub(crate) mod tests {
                 source: 11,
                 controls: 5,
             },
+            Entity::Selector {
+                id: 14,
+                sources: vec![1, 4],
+                controls: 3,
+            },
+            Entity::ClockSource {
+                id: 15,
+                attributes: 1,
+                controls: 0b0011,
+            },
+            Entity::ClockSelector {
+                id: 16,
+                sources: vec![10, 15],
+                controls: 3,
+            },
         ]);
-        graph.entities.push(Entity::Selector {
-            id: 14,
-            sources: vec![1, 4],
-            controls: 3,
-        });
         let mut m = Model::new();
         graph.signal_selection(&mut m, 14, 2).unwrap();
         assert_eq!(m.selection, 2);
-        m.selection = 1;
+        // Multipliers pass through unread; a one-input selector is not read
+        // but its pin is written.
+        m.selection = 0;
         let c = graph.resolve_clock(&mut m, 12).unwrap();
         assert_eq!(
             c,
             ResolvedClock {
-                source: 10,
-                numerator: 2,
-                denominator: 1
+                terminal: 12,
+                source: 10
             }
         );
-        graph.set_rate(&mut m, c, 88200).unwrap();
-        assert_eq!(m.rate, 44100);
-        graph.clock_selection(&mut m, 11, 1).unwrap();
-        m.selection = 0;
-        assert_eq!(graph.resolve_clock(&mut m, 12), Err(Error::ClockInvalid));
-        m.selection = 1;
-        m.denominator = 0;
-        assert_eq!(graph.resolve_clock(&mut m, 12), Err(Error::ClockInvalid));
-        m.denominator = 1;
-        m.overrides
-            .insert(setup(0xa1, 1, 0x100, 0xa00, 4), vec![0; 3]);
-        assert_eq!(graph.current_rate(&mut m, c), Err(Error::ControlLength));
-        m.overrides.clear();
-        m.overrides.insert(setup(0x21, 1, 0x100, 0xa00, 4), vec![]);
-        assert_eq!(
-            graph.set_rate(&mut m, c, 96000),
-            Err(Error::ControlReadback)
-        );
-        assert_eq!(
-            graph.current_rate(
-                &mut m,
-                ResolvedClock {
-                    source: 10,
-                    numerator: 1,
-                    denominator: 0
-                }
-            ),
-            Err(Error::ClockInvalid)
-        );
+        assert_eq!(m.selection, 1);
+        assert_eq!(graph.set_rate(&mut m, c, 88_200), Ok(88_200));
+        assert_eq!(m.rate, 88_200);
+        // An invalid current input moves a writable selector to a valid one.
+        m.valid = false;
+        assert_eq!(graph.resolve_clock(&mut m, 16).unwrap().source, 15);
+        assert_eq!(m.selection, 2);
+        // An illegal selection is replaced by the first valid input.
+        m.valid = true;
+        m.selection = 7;
+        assert_eq!(graph.resolve_clock(&mut m, 16).unwrap().source, 10);
+        assert_eq!(m.selection, 1);
+        // A read-only selector keeps its invalid input, unvalidated, for the
+        // rate change to validate.
+        if let Some(Entity::ClockSelector { controls, .. }) = graph
+            .entities
+            .iter_mut()
+            .find(|entity| matches!(entity, Entity::ClockSelector { id: 16, .. }))
+        {
+            *controls = 1;
+        }
+        m.valid = false;
+        let c = graph.resolve_clock(&mut m, 16).unwrap();
+        assert_eq!(c.source, 10);
+        assert_eq!(graph.set_rate(&mut m, c, 48_000), Err(Error::ClockInvalid));
+        // A one-input selector's failed write is a firmware bug Linux
+        // ignores; another selector's leaves no usable path.
+        m.valid = true;
+        m.overrides.insert(setup(0xa1, 1, 0x100, 0xb00, 1), vec![]);
+        assert_eq!(graph.resolve_clock(&mut m, 12).unwrap().source, 10);
+        if let Some(Entity::ClockSelector { controls, .. }) = graph
+            .entities
+            .iter_mut()
+            .find(|entity| matches!(entity, Entity::ClockSelector { id: 16, .. }))
+        {
+            *controls = 3;
+        }
+        m.overrides.insert(setup(0xa1, 1, 0x100, 0x1000, 1), vec![]);
+        assert_eq!(graph.resolve_clock(&mut m, 16), Err(Error::ClockInvalid));
     }
     #[test]
     fn raw_endpoint_counts_reserved_usage_and_implicit_association_are_checked() {

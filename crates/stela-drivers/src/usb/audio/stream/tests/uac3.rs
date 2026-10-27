@@ -540,11 +540,7 @@ fn uac3_mixer_signal_and_clock_selectors_and_multiplier_use_discovered_layouts()
         a.start_playback(0, 48000, &pcm, true).unwrap();
         assert!(matches!(
             a.playback.as_ref().unwrap().clock,
-            StreamClock::Entity(ResolvedClock {
-                source: 21,
-                numerator: 1,
-                denominator: 1
-            })
+            StreamClock::Entity(ResolvedClock { source: 21, .. })
         ));
         a.poll().unwrap();
         assert_eq!(a.transport.inner.output, pcm);
