@@ -756,6 +756,7 @@ fn downgrade(categories: &[AccessCategory], mut priority: u8) -> u8 {
 pub fn data_tid(
     context: &AssociationContext,
     current: Option<&[AccessCategory; 4]>,
+    qos_map: Option<&QosMap>,
     ethernet: &[u8],
 ) -> Option<u8> {
     let wmm = context.negotiated().wmm.as_ref()?;
@@ -768,15 +769,66 @@ pub fn data_tid(
     let priority = if ethertype(12) == EAPOL {
         7
     } else {
-        classify8021d(ethernet)
+        classify8021d(ethernet, qos_map)
     };
     Some(downgrade(categories, priority))
 }
 
-/// Linux `cfg80211_classify8021d` without a QoS Map. A VLAN tag's nonzero
-/// priority stands, as for a tag the stack carries beside the frame;
-/// otherwise the encapsulated protocol is classified.
-fn classify8021d(ethernet: &[u8]) -> u8 {
+/// An interworking QoS Map the OS sets for the association, as
+/// `cfg80211_qos_map`: DSCP exceptions, then each priority's DSCP range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QosMap {
+    exceptions: [(u8, u8); 21],
+    count: u8,
+    ranges: [(u8, u8); 8],
+}
+
+impl QosMap {
+    /// `nl80211_set_qos_map`'s QoS Map Set field: up to 21 (DSCP, priority)
+    /// exceptions, then eight (low, high) DSCP ranges.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        if !bytes.len().is_multiple_of(2) || !(16..=16 + 2 * 21).contains(&bytes.len()) {
+            return Err(Error::Unsupported("QoS Map length"));
+        }
+        let (exceptions, ranges) = bytes.split_at(bytes.len() - 16);
+        let mut map = Self {
+            exceptions: [(0, 0); 21],
+            count: 0,
+            ranges: [(0, 0); 8],
+        };
+        for (slot, e) in map.exceptions.iter_mut().zip(exceptions.as_chunks::<2>().0) {
+            if e[1] > 7 {
+                return Err(Error::Unsupported("QoS Map priority"));
+            }
+            *slot = (e[0], e[1]);
+            map.count += 1;
+        }
+        for (slot, r) in map.ranges.iter_mut().zip(ranges.as_chunks::<2>().0) {
+            *slot = (r[0], r[1]);
+        }
+        Ok(map)
+    }
+
+    /// The priority the map gives `dscp`: an exception, else the first
+    /// priority whose range holds it.
+    fn priority(&self, dscp: u8) -> Option<u8> {
+        self.exceptions[..usize::from(self.count)]
+            .iter()
+            .find(|&&(exception, _)| exception == dscp)
+            .map(|&(_, priority)| priority)
+            .or_else(|| {
+                (0..8u8).find(|&up| {
+                    let (low, high) = self.ranges[usize::from(up)];
+                    (low..=high).contains(&dscp)
+                })
+            })
+    }
+}
+
+/// Linux `cfg80211_classify8021d`. A VLAN tag's nonzero priority stands, as
+/// for a tag the stack carries beside the frame; otherwise the encapsulated
+/// protocol is classified, through the QoS Map when one is set.
+fn classify8021d(ethernet: &[u8], qos_map: Option<&QosMap>) -> u8 {
     const VLAN: u16 = 0x8100;
     let mut at = 12;
     let field = |at: usize| ethernet.get(at..at + 2).map(|b| [b[0], b[1]]);
@@ -798,8 +850,24 @@ fn classify8021d(ethernet: &[u8]) -> u8 {
         Some(0x8917) => return 7,
         _ => return 0,
     };
-    // RFC 8325: the DSCP's three high bits.
-    dscp >> 5
+    if let Some(priority) = qos_map.and_then(|map| map.priority(dscp >> 2)) {
+        return priority;
+    }
+    // RFC 8325: the DSCP's three high bits, except the service classes
+    // section 4 maps elsewhere.
+    match dscp >> 2 {
+        // AF11-13 high-throughput data and CS2 OAM.
+        10 | 12 | 14 | 16 => 0,
+        // AF21-23 low-latency data.
+        18 | 20 | 22 => 3,
+        // CS3 broadcast video and AF31-33 multimedia streaming.
+        24 | 26 | 28 | 30 => 4,
+        // VA voice admit and EF telephony.
+        44 | 46 => 6,
+        // CS6 network control.
+        48 => 7,
+        _ => dscp >> 5,
+    }
 }
 
 #[cfg(test)]
@@ -815,21 +883,39 @@ mod tests {
             frame
         };
         let mut ipv4 = [0u8; 20];
-        ipv4[1] = 46 << 2; // EF
-        assert_eq!(classify8021d(&frame(0x0800, &ipv4)), 5);
-        assert_eq!(classify8021d(&frame(0x0800, &ipv4[..19])), 0);
+        ipv4[1] = 46 << 2; // EF, which RFC 8325 maps to 6.
+        assert_eq!(classify8021d(&frame(0x0800, &ipv4), None), 6);
+        assert_eq!(classify8021d(&frame(0x0800, &ipv4[..19]), None), 0);
         let mut ipv6 = [0u8; 40];
         ipv6[0] = 0x60 | (56 << 2) >> 4; // CS7
-        assert_eq!(classify8021d(&frame(0x86dd, &ipv6)), 7);
-        assert_eq!(classify8021d(&frame(0x8847, &[0, 0, 0b1010, 0])), 5);
-        assert_eq!(classify8021d(&frame(0x8917, &[])), 7);
-        assert_eq!(classify8021d(&frame(0x0806, &[0; 28])), 0);
+        assert_eq!(classify8021d(&frame(0x86dd, &ipv6), None), 7);
+        assert_eq!(classify8021d(&frame(0x8847, &[0, 0, 0b1010, 0]), None), 5);
+        assert_eq!(classify8021d(&frame(0x8917, &[]), None), 7);
+        assert_eq!(classify8021d(&frame(0x0806, &[0; 28]), None), 0);
+        let dscp = |value: u8| {
+            let mut ipv4 = [0u8; 20];
+            ipv4[1] = value << 2;
+            frame(0x0800, &ipv4)
+        };
+        let rfc8325 = [10, 16, 18, 24, 30, 40, 44, 48].map(|d| classify8021d(&dscp(d), None));
+        assert_eq!(rfc8325, [0, 0, 3, 4, 4, 5, 6, 7]);
         // A tagged frame's PCP, or its inner protocol when the PCP is zero.
         let mut tagged = frame(0x8100, &[0x60, 0, 0x08, 0]);
         tagged.extend_from_slice(&ipv4);
-        assert_eq!(classify8021d(&tagged), 3);
+        assert_eq!(classify8021d(&tagged, None), 3);
         tagged[14] = 0;
-        assert_eq!(classify8021d(&tagged), 5);
+        assert_eq!(classify8021d(&tagged, None), 6);
+        // A QoS Map's exception, then its ranges, then RFC 8325.
+        let mut set = vec![46, 5];
+        for up in 0..8u8 {
+            set.extend_from_slice(&[up * 8, up * 8 + 3]);
+        }
+        let map = QosMap::parse(&set).unwrap();
+        let mapped = [46, 18, 7].map(|d| classify8021d(&dscp(d), Some(&map)));
+        assert_eq!(mapped, [5, 2, 0]);
+        assert!(QosMap::parse(&set[1..]).is_err());
+        set[1] = 8;
+        assert!(QosMap::parse(&set).is_err());
     }
 
     #[test]

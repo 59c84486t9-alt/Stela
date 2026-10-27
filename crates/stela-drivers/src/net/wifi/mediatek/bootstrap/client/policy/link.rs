@@ -301,6 +301,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Ok(result?)
     }
+    /// Set or clear the OS's interworking QoS Map, which classifies data
+    /// frames' DSCP as `cfg80211_classify8021d` does.
+    pub fn set_qos_map(&mut self, map: Option<&[u8]>) -> Result<(), LinkControlError> {
+        Ok(self.state_mut().client.set_qos_map(map)?)
+    }
     /// Set or stop the firmware RSSI monitor; crossings arrive as
     /// `Event::Rssi` notices.
     pub fn set_rssi_monitor(

@@ -102,6 +102,8 @@ pub struct ManagedClient<I: BarIo, Q: QueueIo, C: 'static> {
     revoked: bool,
     peer: Option<Channel>,
     observed: Vec<Observed>,
+    /// The OS's interworking QoS Map, `sdata->qos_map`.
+    qos_map: Option<station::data::QosMap>,
 }
 fn copy_bss(b: &scan::result::Bss) -> Result<scan::result::Bss, PolicyError> {
     fn copy(v: &[u8]) -> Result<Vec<u8>, PolicyError> {
@@ -614,6 +616,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             revoked: false,
             peer: None,
             observed: Vec::new(),
+            qos_map: None,
         })
     }
     fn live(&self) -> Result<(), PolicyError> {
@@ -975,7 +978,26 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     /// `ieee80211_select_queue` chooses it; `None` for non-QoS data.
     pub fn data_tid(&self, ethernet: &[u8]) -> Option<u8> {
         let current = self.client.applied_edca().map(|e| &e.access_categories);
-        station::data::data_tid(self.client.modern_context()?, current, ethernet)
+        station::data::data_tid(
+            self.client.modern_context()?,
+            current,
+            self.qos_map.as_ref(),
+            ethernet,
+        )
+    }
+    /// `ieee80211_set_qos_map`: the OS's QoS Map Set field for the current
+    /// association, or `None` to stop mapping. As `nl80211_key_allowed`
+    /// requires, the station must be associated.
+    pub fn set_qos_map(&mut self, map: Option<&[u8]>) -> Result<(), PolicyError> {
+        self.live()?;
+        if self.client.station().phase() != station::Phase::Associated {
+            return Err(PolicyError::Client(Error::WrongPhase));
+        }
+        self.qos_map = map
+            .map(station::data::QosMap::parse)
+            .transpose()
+            .map_err(|e| PolicyError::Client(Error::Data(e)))?;
+        Ok(())
     }
     pub fn transmit(
         &mut self,
