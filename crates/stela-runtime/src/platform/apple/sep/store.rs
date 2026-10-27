@@ -24,7 +24,7 @@ const HEADER_BYTES: usize = 18;
 pub const NONCE_BYTES: usize = 20;
 const RECORD_BYTES: usize = 1 + NONCE_BYTES;
 const MAX_SLOTS: usize = 256;
-const HASH_BYTES: usize = 48;
+pub const HASH_BYTES: usize = 48;
 /// A BootPolicy nonce (recoveryOS and macOS LocalPolicy): the SEP keeps the
 /// raw nonce; its SHA-384 digest is the policy's `ronh`/`lpnh`.
 pub const POLICY_NONCE_BYTES: usize = 32;
