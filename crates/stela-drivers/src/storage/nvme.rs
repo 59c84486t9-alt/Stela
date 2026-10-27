@@ -48,7 +48,9 @@ const VERSION_1_1: u32 = 0x0001_0100;
 /// 64-byte submission and 16-byte completion entries, 4 KiB pages, NVM set.
 const CONFIGURATION_VALUE: u32 = ENABLE | 6 << 16 | 4 << 20;
 
+const ADMIN_DELETE_SUBMISSION: u8 = 0x00;
 const ADMIN_CREATE_SUBMISSION: u8 = 0x01;
+const ADMIN_DELETE_COMPLETION: u8 = 0x04;
 const ADMIN_CREATE_COMPLETION: u8 = 0x05;
 const ADMIN_IDENTIFY: u8 = 0x06;
 const IO_FLUSH: u8 = 0x00;
@@ -325,6 +327,7 @@ impl Controller {
             return Ok(());
         }
         self.ready()?;
+        self.delete_io_queues()?;
         let result = (|| {
             let configuration = self.registers.read32(CONFIGURATION)?;
             self.registers.write32(
@@ -339,6 +342,23 @@ impl Controller {
             return Err(self.poison(error));
         }
         self.shut_down = true;
+        Ok(())
+    }
+
+    /// Linux `nvme_dev_disable` deletes the I/O queues, submission queue
+    /// first, before the shutdown notification. A refused deletion does not
+    /// stop the shutdown; a lost controller does.
+    fn delete_io_queues(&mut self) -> Result<(), BlockError> {
+        for opcode in [ADMIN_DELETE_SUBMISSION, ADMIN_DELETE_COMPLETION] {
+            let mut command = [0u32; 16];
+            command[0] = u32::from(opcode);
+            command[10] = u32::from(self.io.id);
+            match self.execute(false, command) {
+                Ok(_) => {}
+                Err(BlockError::Device { .. }) if self.fault.is_none() => {}
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 
@@ -932,7 +952,23 @@ mod tests {
             .registers
             .write32(STATUS, READY | SHUTDOWN_COMPLETE)
             .unwrap();
+        // The I/O submission queue's deletion is refused (Invalid Queue
+        // Identifier); its completion queue's succeeds.
+        let completion = |c: &mut Controller, slot: usize, id: u32, status: u32| {
+            c.admin.completions.write(16 * slot + 8, id);
+            c.admin
+                .completions
+                .write(16 * slot + 12, status << 17 | 1 << 16 | id);
+        };
+        completion(&mut controller, 0, 1, 1);
+        completion(&mut controller, 1, 2, 0);
         controller.shutdown().unwrap();
+        let submitted = controller.admin.submissions.bytes();
+        for (slot, opcode) in [(0, ADMIN_DELETE_SUBMISSION), (1, ADMIN_DELETE_COMPLETION)] {
+            let entry = &submitted[64 * slot..64 * slot + 64];
+            assert_eq!(entry[0], opcode);
+            assert_eq!(u32::from_le_bytes(entry[40..44].try_into().unwrap()), 1);
+        }
         assert_eq!(
             controller.registers.read32(CONFIGURATION).unwrap(),
             CONFIGURATION_VALUE | SHUTDOWN_NORMAL

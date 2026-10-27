@@ -902,6 +902,18 @@ mod tests {
                     );
                     self.queues[1].0 = u64::from(command[6]) | u64::from(command[7]) << 32;
                 }
+                // Delete I/O SQ, then its CQ: a CQ with a live SQ is Invalid
+                // Queue Deletion (NVMe Base 2.1 §5.2.2).
+                (0, 0) => {
+                    assert_eq!(command[10] & 0xffff, 1);
+                    assert_ne!(self.queues[1].0, 0, "deleting an absent SQ");
+                    self.queues[1].0 = 0;
+                }
+                (0, 4) => {
+                    assert_eq!(command[10] & 0xffff, 1);
+                    assert_eq!(self.queues[1].0, 0, "CQ deleted before its SQ");
+                    self.queues[1].1 = 0;
+                }
                 (1, 0) => assert_eq!(command[1], 1),
                 (1, opcode @ (1 | 2)) => {
                     assert_eq!(command[1], 1);
