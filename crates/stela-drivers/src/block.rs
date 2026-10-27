@@ -264,7 +264,64 @@ pub enum Command {
     },
 }
 
+/// The kinds of command a disk's I/O accounting tells apart, as Linux's
+/// `/proc/diskstats` does: Write Zeroes counts as a write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Read,
+    Write,
+    Flush,
+    Discard,
+}
+
+impl Direction {
+    pub const ALL: [Self; 4] = [Self::Read, Self::Write, Self::Flush, Self::Discard];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Flush => "flush",
+            Self::Discard => "discard",
+        }
+    }
+}
+
+/// One [`Direction`]'s accounting: a `/proc/diskstats` group's fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Commands completed, and requests merged into another before it ran.
+    pub ios: u64,
+    pub merges: u64,
+    pub bytes: u64,
+    /// Counter ticks from each command's submission to its completion.
+    pub ticks: u64,
+}
+
+/// A [`Shared`] disk's I/O accounting since it was shared, as Linux's
+/// `/proc/diskstats`, in time-stamp counter ticks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// By [`Direction`].
+    pub directions: [Counts; 4],
+    /// Ticks with a command at the device (`io_ticks`).
+    pub busy: u64,
+    /// The most commands at the device at once.
+    pub deepest: usize,
+}
+
 impl Command {
+    /// What the accounting counts `self` as, and the bytes it moves.
+    fn accounted(&self, block: usize) -> (Direction, u64) {
+        match self {
+            Self::Read { bytes, .. } => (Direction::Read, *bytes as u64),
+            Self::Write { data, .. } => (Direction::Write, data.len() as u64),
+            Self::Flush => (Direction::Flush, 0),
+            Self::Discard { blocks, .. } => (Direction::Discard, blocks * block as u64),
+            Self::WriteZeroes { blocks, .. } => (Direction::Write, blocks * block as u64),
+        }
+    }
+
     /// Check `self` against `identity`, a view of a larger device, and move
     /// it to the blocks from `first`.
     pub fn within(self, identity: &Identity, first: u64) -> Result<Self, BlockError> {
@@ -784,21 +841,28 @@ struct Disk {
     requests: UnsafeCell<Requests>,
 }
 
-/// The owners' commands, by ticket: those waiting in order, those the
-/// device runs and the results no owner has taken yet.
+/// The owners' commands, by ticket: those waiting in order with the
+/// counter when each was submitted, those the device runs and the results
+/// no owner has taken yet; and the disk's accounting, with the counter
+/// when the device last went from idle to running a command.
 #[derive(Default)]
 struct Requests {
-    waiting: VecDeque<(u32, Command)>,
+    waiting: VecDeque<(u32, Command, u64)>,
     running: Vec<Merged>,
     finished: BTreeMap<u32, Finished>,
     next: u32,
+    stats: Stats,
+    busy_since: u64,
 }
 
 /// A device command and the tickets merged into it: each ticket's offset
-/// and length in a read's data.
+/// and length in a read's data. What the accounting counts it as, and when
+/// its first ticket was submitted.
 struct Merged {
     tag: u32,
     tickets: Vec<(u32, usize, usize)>,
+    accounted: (Direction, u64),
+    submitted: u64,
 }
 
 // SAFETY: a device reaches the disk only through its own state and the
@@ -884,9 +948,56 @@ impl Held<'_> {
         let requests = self.requests();
         let ticket = requests.next;
         requests.next = requests.next.wrapping_add(1);
-        requests.waiting.push_back((ticket, command));
+        requests
+            .waiting
+            .push_back((ticket, command, crate::Clock::ticks()));
         self.advance();
         ticket
+    }
+
+    /// Count a command `accounted` as, with `merges` requests joined into
+    /// it, submitted at `submitted` and completed at `now`.
+    fn account(
+        &mut self,
+        (direction, bytes): (Direction, u64),
+        merges: u64,
+        submitted: u64,
+        now: u64,
+    ) {
+        let counts = &mut self.requests().stats.directions[direction as usize];
+        counts.ios += 1;
+        counts.merges += merges;
+        counts.bytes += bytes;
+        counts.ticks += now.wrapping_sub(submitted);
+    }
+
+    /// Run `run` on the device, which runs nothing else meanwhile, as one
+    /// command `accounted` as and submitted at `submitted`.
+    fn direct<T>(
+        &mut self,
+        accounted: (Direction, u64),
+        submitted: u64,
+        run: impl FnOnce(&mut Box<dyn BlockDevice>) -> T,
+    ) -> T {
+        let started = crate::Clock::ticks();
+        let result = run(&mut **self);
+        let now = crate::Clock::ticks();
+        let stats = &mut self.requests().stats;
+        stats.busy += now.wrapping_sub(started);
+        stats.deepest = stats.deepest.max(1);
+        self.account(accounted, 0, submitted, now);
+        result
+    }
+
+    /// The disk's accounting, its device's time running a command so far
+    /// included.
+    fn stats(&mut self) -> Stats {
+        let requests = self.requests();
+        let mut stats = requests.stats;
+        if !requests.running.is_empty() {
+            stats.busy += crate::Clock::ticks().wrapping_sub(requests.busy_since);
+        }
+        stats
     }
 
     /// Collect the device's completed commands, then start those waiting
@@ -901,6 +1012,13 @@ impl Held<'_> {
                 continue;
             };
             let merged = self.requests().running.swap_remove(index);
+            let now = crate::Clock::ticks();
+            let merges = merged.tickets.len() as u64 - 1;
+            self.account(merged.accounted, merges, merged.submitted, now);
+            let requests = self.requests();
+            if requests.running.is_empty() {
+                requests.stats.busy += now.wrapping_sub(requests.busy_since);
+            }
             let finished = &mut self.requests().finished;
             for (ticket, offset, bytes) in merged.tickets {
                 let part = match &result {
@@ -919,11 +1037,12 @@ impl Held<'_> {
             if queued && !self.room() {
                 return;
             }
-            let Some((ticket, mut command)) = self.requests().waiting.pop_front() else {
+            let Some((ticket, mut command, submitted)) = self.requests().waiting.pop_front() else {
                 return;
             };
             if !queued {
-                let result = self.execute(command);
+                let accounted = command.accounted(block);
+                let result = self.direct(accounted, submitted, |device| device.execute(command));
                 self.requests().finished.insert(ticket, result);
                 continue;
             }
@@ -933,7 +1052,7 @@ impl Held<'_> {
             };
             let mut tickets = vec![(ticket, 0, first)];
             let mut offset = first;
-            while let Some((next, following)) = self.requests().waiting.front() {
+            while let Some((next, following, _)) = self.requests().waiting.front() {
                 let Some(bytes) = merge(&mut command, following, block, limit) else {
                     break;
                 };
@@ -941,8 +1060,21 @@ impl Held<'_> {
                 offset += bytes;
                 self.requests().waiting.pop_front();
             }
+            let accounted = command.accounted(block);
             match self.start(command) {
-                Ok(tag) => self.requests().running.push(Merged { tag, tickets }),
+                Ok(tag) => {
+                    let requests = self.requests();
+                    if requests.running.is_empty() {
+                        requests.busy_since = crate::Clock::ticks();
+                    }
+                    requests.running.push(Merged {
+                        tag,
+                        tickets,
+                        accounted,
+                        submitted,
+                    });
+                    requests.stats.deepest = requests.stats.deepest.max(requests.running.len());
+                }
                 Err(error) => {
                     for (ticket, ..) in tickets {
                         self.requests().finished.insert(ticket, Err(error.clone()));
@@ -987,7 +1119,10 @@ impl Shared {
         let ticket = {
             let mut disk = self.lock();
             if disk.idle() {
-                return disk.execute(command);
+                let accounted = command.accounted(disk.identity().block_size as usize);
+                return disk.direct(accounted, crate::Clock::ticks(), |device| {
+                    device.execute(command)
+                });
             }
             disk.submit(command)
         };
@@ -998,6 +1133,11 @@ impl Shared {
             crate::waiting();
             core::hint::spin_loop();
         }
+    }
+
+    /// The disk's I/O accounting since it was shared.
+    pub fn stats(&self) -> Stats {
+        self.lock().stats()
     }
 
     /// Whether `other` shares this same disk.
@@ -1096,7 +1236,11 @@ impl BlockDevice for Window {
         self.identity.check(lba, buffer.len())?;
         let mut disk = self.disk.lock();
         if disk.idle() {
-            return disk.read(self.first + lba, buffer);
+            let accounted = (Direction::Read, buffer.len() as u64);
+            let lba = self.first + lba;
+            return disk.direct(accounted, crate::Clock::ticks(), |device| {
+                device.read(lba, buffer)
+            });
         }
         drop(disk);
         let command = Command::Read {
@@ -1112,7 +1256,11 @@ impl BlockDevice for Window {
         self.identity.check_write(lba, data.len())?;
         let mut disk = self.disk.lock();
         if disk.idle() {
-            return disk.write(self.first + lba, data);
+            let accounted = (Direction::Write, data.len() as u64);
+            let lba = self.first + lba;
+            return disk.direct(accounted, crate::Clock::ticks(), |device| {
+                device.write(lba, data)
+            });
         }
         drop(disk);
         self.run(Command::Write {
@@ -1796,6 +1944,12 @@ mod tests {
                 (true, 1, 1536)
             ]
         );
+        // Accounted as Linux's diskstats: a command each, merges apart.
+        let stats = disk.stats();
+        let [read, write, ..] = stats.directions;
+        assert_eq!((read.ios, read.merges, read.bytes), (1, 1, 1536));
+        assert_eq!((write.ios, write.merges, write.bytes), (3, 1, 2048));
+        assert_eq!(stats.deepest, 1);
     }
 
     fn cached(fua: bool, max_transfer: usize) -> Identity {

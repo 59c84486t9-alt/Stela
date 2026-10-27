@@ -111,6 +111,10 @@ impl HostPowerControl {
         control
     }
 
+    pub fn disks(&self) -> &super::storage::HostDisks {
+        &self.disks
+    }
+
     fn arm_button(&self) -> bool {
         let Some(power) = self.power.filter(|power| power.fixed_power_button) else {
             output::arguments(format_args!(

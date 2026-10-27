@@ -167,7 +167,8 @@ pub struct Clock {
 }
 
 impl Clock {
-    fn ticks() -> u64 {
+    /// The raw time-stamp counter, for intervals another party converts.
+    pub(crate) fn ticks() -> u64 {
         #[cfg(test)]
         if let Some(ticks) = test_clock::read() {
             return ticks;

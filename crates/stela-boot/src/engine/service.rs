@@ -145,6 +145,7 @@ impl Service {
             {
                 output::arguments(format_args!("{line}\n"));
             }
+            power.disks().report(*tsc_hz);
             *reported = now;
         }
     }

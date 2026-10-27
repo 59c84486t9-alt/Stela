@@ -10,7 +10,7 @@ use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::arch::asm;
 use stela_drivers::{
     Handoff,
-    block::{BlockDevice, BlockError, Command, Finished, Identity, Shared, Window},
+    block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
     input::virtio::VirtioInput,
     probe::probe,
@@ -119,10 +119,10 @@ impl BlockDevice for Service {
     }
 }
 
-/// The host disks [`open`] took, each once, to shut down before the PC
-/// restarts or turns off.
+/// The host disks [`open`] took, each once with its serial, to report
+/// their I/O and to shut down before the PC restarts or turns off.
 pub struct HostDisks {
-    disks: Vec<Shared>,
+    disks: Vec<(String, Shared)>,
     root: u64,
 }
 
@@ -135,8 +135,39 @@ impl HostDisks {
     }
 
     fn add(&mut self, disk: &Shared) {
-        if !self.disks.iter().any(|taken| taken.same(disk)) {
-            self.disks.push(disk.clone());
+        if !self.disks.iter().any(|(_, taken)| taken.same(disk)) {
+            let serial = disk.whole().identity().serial.clone();
+            self.disks.push((serial, disk.clone()));
+        }
+    }
+
+    /// Each disk's I/O since it was opened, as Linux's `/proc/diskstats`:
+    /// per kind its commands, KiB, mean microseconds from submission to
+    /// completion and requests merged; the device's busy milliseconds and
+    /// the most commands it ran at once.
+    pub fn report(&self, tsc_hz: u64) {
+        let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+        for (serial, disk) in &self.disks {
+            let stats = disk.stats();
+            let mut line = format!("HOST DISK IO serial={serial}");
+            for direction in Direction::ALL {
+                let counts = stats.directions[direction as usize];
+                if counts.ios != 0 {
+                    line.push_str(&format!(
+                        " {}={}/{}KiB/{}us/{}",
+                        direction.name(),
+                        counts.ios,
+                        counts.bytes >> 10,
+                        micros(counts.ticks) / u128::from(counts.ios),
+                        counts.merges,
+                    ));
+                }
+            }
+            output::arguments(format_args!(
+                "{line} busy_ms={} deepest={}\n",
+                micros(stats.busy) / 1000,
+                stats.deepest
+            ));
         }
     }
 
@@ -148,7 +179,7 @@ impl HostDisks {
         }
         // SAFETY: open() captured the loader root, as for every service call.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        for disk in &self.disks {
+        for (_, disk) in &self.disks {
             if let Err(error) = disk.shutdown(power_off) {
                 output::arguments(format_args!("HOST DISK shutdown failed: {error}\n"));
             }
