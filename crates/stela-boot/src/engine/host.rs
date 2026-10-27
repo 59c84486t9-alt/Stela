@@ -45,6 +45,7 @@ pub(super) mod local;
 mod profile;
 mod ram;
 mod translated;
+pub(crate) use local::context::{RootContext, RootExecution, RootProcessScope};
 use local::state;
 pub(crate) use local::{MmioRoots, Owner as HostOwner};
 pub use ram::RamRange;
@@ -248,6 +249,8 @@ pub struct State {
     pool: Pool,
     /// Engine root without any guest mapping.
     host_root: u64,
+    /// Original actual loader root retained from install, never caller metadata.
+    window_root: u64,
     roots: [u64; ROOTS],
     /// The roots of other SPRR_PERM_EL0 and SPRR_PERM_EL1 pairs.
     banks: [Bank; BANKS],
@@ -430,6 +433,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
             registered_ram: None,
             pool,
             host_root,
+            window_root: config.window_root,
             roots,
             banks,
             bank_switches: 0,

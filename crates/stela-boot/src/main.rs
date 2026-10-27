@@ -54,6 +54,10 @@ pub mod native_memory;
 #[allow(dead_code)]
 pub(crate) mod native_mmio;
 mod native_smp;
+#[allow(dead_code)]
+mod native_stack_check;
+#[allow(dead_code)]
+mod native_stacks;
 mod native_work_check;
 mod output;
 mod paging;

@@ -1,10 +1,9 @@
 //! One physical root's fixed-clock producer, multiplexed through the engine's
 //! existing local APIC timer/vector. No Linux callback enters from this ISR.
 //!
-//! The admitted UP profile keeps all PM reads less than half a counter wrap
-//! apart (2.34 s for a 24-bit timer), including IF-off sections. Suspend, root
-//! replacement and migration require explicit retirement. This is a fixed PM
-//! clock, not Linux clocksource selection, NTP or suspend-time accounting.
+//! General wall time is an exclusively owned actual HPET64 source, read with
+//! coherent32 sampling. The old bounded PM path exists only for its explicit
+//! short fixture. No source grants NTP, suspend or cross-CPU synchronization.
 use crate::{
     apic::{self, Apic},
     engine::{host, interrupts},
@@ -22,9 +21,13 @@ use stela_drivers::platform::work::{
     Cpu, RetainedOwner, WorkError,
     service::{Clock, Idle, RaisedWork},
 };
+mod counter;
 pub(crate) mod diagnostic;
+pub(crate) mod hpet;
 mod pm;
-pub(crate) use pm::Prepared;
+mod source;
+pub(crate) use counter::Counter as HpetCounter;
+pub(crate) use source::Prepared;
 const IF: u64 = 1 << 9;
 const TICK_NS: u64 = 1_000_000;
 const NONE: u64 = u64::MAX;
@@ -99,7 +102,8 @@ fn root() -> u64 {
 /// Immutable CPU view. The actual !Send HostOwner remains on its processor;
 /// its root lease refuses owner destruction while any view still exists.
 pub(crate) struct RootCpu {
-    _lease: Arc<()>,
+    context: Arc<host::RootContext>,
+    root_scope: Arc<host::RootProcessScope>,
     base: u64,
     registers: u64,
     id: u32,
@@ -110,7 +114,7 @@ pub(crate) struct RootCpu {
     max_cpuid: u32,
     thermal_eax: u32,
     source: Prepared,
-    previous: AtomicU32,
+    previous: AtomicU64,
     elapsed: AtomicU64,
     closed: AtomicBool,
 }
@@ -122,23 +126,13 @@ impl RootCpu {
         if self.closed.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        // Attach matched this architectural topology ID against the actual
-        // LAPIC ID under the original host owner. Re-observe CPUID/MSR here;
-        // context admission must not read device MMIO on an unqualified root.
-        if apic::base_msr() != self.base || processor_id() != self.id {
-            return Err(WorkError::WrongCpu);
-        }
-        // SAFETY: native root registration retains the existing installed
-        // descriptor/GS allocations on this processor, including other roots.
-        let observed = unsafe { interrupts::observe() };
-        if observed.gs != self.gs || observed.idt != self.idt || observed.task != self.task {
-            return Err(WorkError::CorruptContext);
-        }
-        Ok(())
+        // Canonical actual Owner context/epoch checks current architectural
+        // CPU and one of its immutable original roots before device access.
+        self.root_scope.check_irq_cpu()
     }
     /// Caller holds local IRQ exclusion; all fields are separate from State.
     fn sample(&self) -> Result<u64, WorkError> {
-        // SAFETY: this CPU's retained fixed SystemIO source is root-independent.
+        // SAFETY: exact retained source; HPET validates actual IRQ CPU/root before MMIO.
         let raw = unsafe { self.source.read()? };
         let elapsed = self
             .elapsed
@@ -150,7 +144,7 @@ impl RootCpu {
             .ok_or(WorkError::Exhausted)?;
         self.previous.store(raw, Ordering::Relaxed);
         self.elapsed.store(elapsed, Ordering::Release);
-        pm::ns(elapsed)
+        self.source.ns(elapsed)
     }
     fn now(&self) -> Result<u64, WorkError> {
         self.check_cpu()?;
@@ -351,12 +345,8 @@ pub(crate) struct Installed {
     _local: PhantomData<*mut ()>,
 }
 
-#[derive(Debug)]
 pub(crate) struct Observation {
-    pub(crate) fadt_sha256: [u8; 32],
-    pub(crate) pm_port: u16,
-    pub(crate) pm_mask: u32,
-    pub(crate) pm_hz: u64,
+    pub(crate) source: source::Observation,
     pub(crate) apic_hz: u64,
     pub(crate) cpu: u32,
     pub(crate) root: u64,
@@ -364,6 +354,21 @@ pub(crate) struct Observation {
     pub(crate) gs: u64,
     pub(crate) max_cpuid: u32,
     pub(crate) thermal_eax: u32,
+}
+impl core::fmt::Debug for Observation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut record = f.debug_struct("Observation");
+        self.source.debug_fields(&mut record);
+        record
+            .field("apic_hz", &self.apic_hz)
+            .field("cpu", &self.cpu)
+            .field("root", &self.root)
+            .field("idt", &self.idt)
+            .field("gs", &self.gs)
+            .field("max_cpuid", &self.max_cpuid)
+            .field("thermal_eax", &self.thermal_eax)
+            .finish()
+    }
 }
 
 /// Explicit main-owned permission for physical IRQ delivery during driver
@@ -415,6 +420,13 @@ impl IrqAdapter {
     }
 }
 impl DriverExecution<'_> {
+    pub(crate) fn context(&self) -> &Arc<host::RootContext> {
+        self.installed.context()
+    }
+    pub(crate) fn root_scope(&self) -> Result<Arc<host::RootProcessScope>, WorkError> {
+        self.check()?;
+        self.installed.root_scope()
+    }
     pub(crate) fn check(&self) -> Result<(), WorkError> {
         self.installed.state.process()?;
         if !self.installed.state.executing.load(Ordering::Acquire)
@@ -473,9 +485,10 @@ impl Drop for DriverExecution<'_> {
 }
 impl Installed {
     /// # Safety
-    /// Post-EBS actual owning CPU. `source` is this platform's retained FADT PM
-    /// timer, exclusively readable here; fixed IO decode cannot be reconfigured.
-    /// Every PM sample gap stays below half its wrap including all IF-off work.
+    /// Post-EBS actual owning CPU and canonical time-free RootExecution.
+    /// HPET source owns its actual UC mapping/controller and the SAME context.
+    /// No stop/reset/counter-write/rate/decode/suspend discontinuity is allowed.
+    /// PM is admitted only under its separate explicit complete sample-gap bound.
     /// No suspend/reset/migration/root replacement occurs before final release.
     /// Existing all-root IDT/GS/xstate/clock code mappings remain retained. The
     /// hardware timer is quiescent and its sole owner hands it to this mux.
@@ -485,8 +498,12 @@ impl Installed {
     /// without ARAT requires a separate real broadcast/deadline producer.
     pub(crate) unsafe fn attach(
         owner: &mut host::HostOwner,
+        root_execution: &host::RootExecution,
         source: Prepared,
     ) -> Result<Self, WorkError> {
+        owner.check_root(root_execution)?;
+        let context = root_execution.context().clone();
+        source.admit(&context)?;
         let max_cpuid = core::arch::x86_64::__cpuid(0).eax;
         if max_cpuid < 6 {
             return Err(WorkError::Unavailable);
@@ -498,13 +515,16 @@ impl Installed {
         if thermal_eax & (1 << 2) == 0 {
             return Err(WorkError::Unavailable);
         }
-        source.admit()?;
+        // Keep a source owner outside the IRQ-off closure so failed admission
+        // cannot perform its final Mapping/root owner release before restore.
+        let deferred_source = source.clone();
         let flags = flags_disable();
         let result = (|| {
             if !ACTIVE.load(Ordering::Acquire).is_null() {
                 return Err(WorkError::Busy);
             }
-            let lease = owner.retain_clock_root()?;
+            owner.check_root(root_execution)?;
+            let root_scope = root_execution.process_scope()?;
             let base = apic::base_msr();
             let registers = crate::layout::physical(base & apic::BASE_ADDRESS);
             let apic = Apic::new(base, registers);
@@ -526,10 +546,12 @@ impl Installed {
             if host::root_irq_active() {
                 return Err(WorkError::InterruptContext);
             }
-            // SAFETY: caller retains the actual fixed SystemIO resource.
+            // SAFETY: exact canonical actual source/root ownership retained;
+            // HPET validates the original CPU/root before coherent MMIO reads.
             let previous = unsafe { source.read()? };
             let cpu = Arc::new(RootCpu {
-                _lease: lease,
+                context,
+                root_scope,
                 base,
                 registers,
                 id: apic.id(),
@@ -540,7 +562,7 @@ impl Installed {
                 max_cpuid,
                 thermal_eax,
                 source,
-                previous: AtomicU32::new(previous),
+                previous: AtomicU64::new(previous),
                 elapsed: AtomicU64::new(0),
                 closed: AtomicBool::new(false),
             });
@@ -581,7 +603,15 @@ impl Installed {
         unsafe {
             restore(flags);
         }
+        drop(deferred_source);
         result
+    }
+    pub(crate) fn context(&self) -> &Arc<host::RootContext> {
+        &self.state.cpu.context
+    }
+    pub(crate) fn root_scope(&self) -> Result<Arc<host::RootProcessScope>, WorkError> {
+        self.state.process()?;
+        Ok(self.state.cpu.root_scope.clone())
     }
     pub(crate) fn cpu(&self) -> Arc<dyn Cpu> {
         self.state.cpu_view.clone()
@@ -590,10 +620,7 @@ impl Installed {
         self.state.process()?;
         let cpu = &self.state.cpu;
         Ok(Observation {
-            fadt_sha256: cpu.source.fadt_sha256,
-            pm_port: cpu.source.port,
-            pm_mask: cpu.source.mask,
-            pm_hz: pm::HZ,
+            source: cpu.source.observation(),
             apic_hz: self.state.apic_hz,
             cpu: cpu.id,
             root: cpu.root,
@@ -750,7 +777,13 @@ impl Installed {
     /// view, so that later qualified release would instead quarantine it.
     /// Only direct CPU/Clock/Idle Arc clones whose destructors do not validate
     /// that closed view may remain for later release. Drop those final clones
-    /// before dropping the real !Send HostOwner. Main's actual NativeDomain
+    /// before closing RootExecution or dropping the real !Send HostOwner.
+    /// The physical root epoch remains active through any later direct clone
+    /// release. For HPET, a real caller-retained HpetCounter must survive this
+    /// retirement, then stop/drain and retire its actual mapping before that
+    /// epoch ends. No automatic Drop is permission to unmap a live source.
+    /// Permanent adopted IRQ/kernel-image roots have no finite epoch closure.
+    /// Main's actual NativeDomain
     /// teardown must enforce this ordering; this method does not perform it.
     /// A full original kernel image retains kthreadd/global workers for its
     /// lifetime, so Installed, DriverExecution and HostOwner remain rooted for

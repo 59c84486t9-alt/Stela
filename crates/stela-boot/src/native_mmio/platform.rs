@@ -1,8 +1,9 @@
 use super::*;
+mod hpet;
+mod publication;
 use crate::{
-    engine::host::MmioRoots,
-    native_clock::{DriverExecution, ProcessScope},
-    native_smp::{firmware, memory_types::Image, topology::Snapshot},
+    engine::host::{MmioRoots, RootContext, RootExecution, RootProcessScope},
+    native_smp::{memory_types::Image, topology::Snapshot},
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
@@ -12,21 +13,20 @@ use core::{
     ptr::{self, NonNull},
     sync::atomic::{AtomicBool, AtomicPtr, Ordering},
 };
-use stela_drivers::{
-    bus::{
-        mmio::owned::{
-            AddressSpace, Authority, CacheAttribute, ExistingAlias, InstalledMapping, MapFailure,
-            MapRequest, MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking,
-            ResourceKind,
-        },
-        pci::EcamWindow,
+pub(crate) use hpet::{ExclusiveHpet, HpetMapping};
+pub(crate) use publication::{QualifiedRam, RootPublication};
+use stela_drivers::bus::{
+    mmio::owned::{
+        AddressSpace, Authority, CacheAttribute, ExistingAlias, InstalledMapping, MapFailure,
+        MapRequest, MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking,
+        ResourceKind,
     },
-    platform::work::Cpu,
+    pci::EcamWindow,
 };
 
 struct Resources {
     wire: &'static Wire,
-    _roots: MmioRoots,
+    _roots: Arc<MmioRoots>,
 }
 struct Backing {
     owner: Arc<Resources>,
@@ -49,16 +49,17 @@ struct Allocation {
     pages: usize,
 }
 struct Platform {
-    cpu: Arc<dyn Cpu>,
-    scope: AtomicPtr<ProcessScope>,
+    context: Arc<RootContext>,
+    scope: AtomicPtr<RootProcessScope>,
     space: AddressSpace,
     snapshot: Snapshot,
     resources: Arc<Resources>,
     held: AtomicBool,
+    ram_publisher: AtomicBool,
     mappings: UnsafeCell<Vec<Allocation>>,
 }
 // SAFETY: source/root metadata is immutable. Foreign CPUs fail the actual
-// RootCpu check before touching the affine scope pointer. Mappings are accessed
+// time-free RootContext check before touching the affine scope pointer. Mappings are accessed
 // under held on the sole admitted CPU; scope publication/removal masks IRQs.
 unsafe impl Send for Platform {}
 unsafe impl Sync for Platform {}
@@ -209,8 +210,8 @@ impl Drop for Guard<'_> {
 // completion is guessed. Every uncertainty keeps the allocation reserved.
 unsafe impl MappingPlatform for Platform {
     fn check_context(&self, space: AddressSpace) -> Result<(), Error> {
-        self.cpu.check_cpu().map_err(failed)?;
-        if self.cpu.in_interrupt() || space != self.space {
+        self.context.check_current().map_err(failed)?;
+        if self.context.in_interrupt() || space != self.space {
             return Err(Error::Unavailable);
         }
         let scope = self.scope.load(Ordering::Acquire);
@@ -358,53 +359,57 @@ pub(crate) struct Source {
 /// failed retirement cannot let the dispatcher leave the root execution scope.
 pub(crate) struct Session {
     source: Arc<Platform>,
-    scope: Arc<ProcessScope>,
+    scope: Arc<RootProcessScope>,
     _local: PhantomData<*mut ()>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
         if self.scope.check().is_err() {
             self.source
-                .cpu
+                .context
                 .fatal(stela_drivers::platform::work::WorkError::CorruptContext);
         }
         let saved = self
             .source
-            .cpu
+            .context
             .save_disable()
-            .unwrap_or_else(|e| self.source.cpu.fatal(e));
+            .unwrap_or_else(|e| self.source.context.fatal(e));
         let live = match self.source.lock() {
-            Ok(mut guard) => !guard.mappings().is_empty(),
+            Ok(mut guard) => {
+                !guard.mappings().is_empty() || self.source.ram_publisher.load(Ordering::Acquire)
+            }
             Err(_) => true,
         };
         if live {
             self.source
-                .cpu
+                .context
                 .fatal(stela_drivers::platform::work::WorkError::Busy);
         }
         self.source.scope.store(ptr::null_mut(), Ordering::Release);
-        unsafe { self.source.cpu.restore(saved) };
+        unsafe { self.source.context.restore(saved) };
     }
 }
 impl Source {
     /// # Safety
     /// Actual post-EBS dispatcher on its single admitted processor. `wire` is
-    /// the sealed capture retained by this exact handoff; `roots` came from
-    /// the same live HostOwner. Firmware/SMM and native device ownership are
+    /// the sealed capture retained by this exact handoff; execution owns the
+    /// actual HostOwner canonical fixed root catalog. Firmware/SMM and native device ownership are
     /// transferred separately by the typed claim methods below. No guest or
     /// outside root/cache publisher runs concurrently with this scope.
     pub(crate) unsafe fn activate(
         wire: &'static Wire,
-        roots: MmioRoots,
-        execution: &DriverExecution<'_>,
+        execution: &RootExecution,
     ) -> Result<(Self, Session), Error> {
         if !wire.valid() {
             return Err(Error::Unavailable);
         }
         let scope = execution.process_scope().map_err(failed)?;
-        let cpu = scope.cpu().map_err(failed)?;
-        // SAFETY: actual exclusive post-EBS process scope, no migration/cache writer.
-        let snapshot = unsafe { firmware::observe() }.map_err(failed)?;
+        let context = scope.context().clone();
+        let roots = context.roots().clone();
+        let snapshot = context.memory_snapshot().map_err(failed)?;
+        if !roots.roots().contains(&wire.root) {
+            return Err(Error::Unavailable);
+        }
         let vendor = snapshot.get(0, 0).ok_or(Error::Unavailable)?;
         if [vendor.ebx, vendor.edx, vendor.ecx] != [0x756e_6547, 0x4965_6e69, 0x6c65_746e]
             || !snapshot.pat_valid
@@ -429,12 +434,13 @@ impl Source {
             _roots: roots,
         });
         let platform = Arc::new(Platform {
-            cpu,
+            context,
             scope: AtomicPtr::new(Arc::as_ptr(&scope).cast_mut()),
             space,
             snapshot,
             resources,
             held: AtomicBool::new(false),
+            ram_publisher: AtomicBool::new(false),
             mappings: UnsafeCell::new(Vec::new()),
         });
         platform.check_context(space)?;
@@ -445,7 +451,12 @@ impl Source {
             crate::layout::physical(0),
         )
         .map_err(failed)?;
-        let aliases = inventory(&platform)?;
+        let aliases = inventory(&platform, None)?;
+        for index in 0..ENTRIES {
+            if unsafe { platform.leaf(index)?.read_volatile() } != 0 {
+                return Err(Error::Unavailable);
+            }
+        }
         // SAFETY: complete actual root-set/UEFI RAM aliases were inventoried;
         // the dedicated leaf table is owned and shared by each retained root.
         let authority = unsafe { Authority::activate(platform.clone(), space, aliases) }?;
@@ -467,22 +478,22 @@ impl Source {
     }
     /// Re-enter the same retained root epoch after all earlier mappings retired.
     /// Future guest shadow aliases remain confined to the imported real RAM.
-    pub(crate) fn enter(&self, execution: &DriverExecution<'_>) -> Result<Session, Error> {
-        self.platform.cpu.check_cpu().map_err(failed)?;
+    pub(crate) fn enter(&self, execution: &RootExecution) -> Result<Session, Error> {
+        self.platform.context.check_current().map_err(failed)?;
         self.platform.controls()?;
         let scope = execution.process_scope().map_err(failed)?;
-        let cpu = scope.cpu().map_err(failed)?;
-        if !Arc::ptr_eq(&cpu, &self.platform.cpu) {
+        let context = scope.context();
+        if !Arc::ptr_eq(context, &self.platform.context) {
             return Err(Error::Unavailable);
         }
-        let saved = cpu.save_disable().map_err(failed)?;
+        let saved = context.save_disable().map_err(failed)?;
         let published = self.platform.scope.compare_exchange(
             ptr::null_mut(),
             Arc::as_ptr(&scope).cast_mut(),
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        unsafe { cpu.restore(saved) };
+        unsafe { context.restore(saved) };
         published.map_err(|_| Error::Busy)?;
         Ok(Session {
             source: self.platform.clone(),
@@ -608,7 +619,7 @@ impl Source {
     }
 }
 
-fn inventory(platform: &Platform) -> Result<Vec<ExistingAlias>, Error> {
+fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<ExistingAlias>, Error> {
     let wire = platform.resources.wire;
     let roots = platform.resources._roots.roots();
     if !roots.contains(&(platform.snapshot.cr3 & ADDRESS)) {
@@ -624,6 +635,7 @@ fn inventory(platform: &Platform) -> Result<Vec<ExistingAlias>, Error> {
         visited: &mut Vec<(u64, u32)>,
         aliases: &mut Vec<ExistingAlias>,
         image: &Image,
+        write_table: Option<u64>,
     ) -> Result<(), Error> {
         if visited.contains(&(table, level)) {
             return Ok(());
@@ -660,8 +672,10 @@ fn inventory(platform: &Platform) -> Result<Vec<ExistingAlias>, Error> {
                 // This is the only table page the adapter writes. Every data
                 // alias of it must agree with its proven WB CPU access and WB
                 // page-walker fetch policy; UC/WC/WT/unknown aliases refuse.
-                if physical < p.resources.wire.leaf + PAGE
-                    && p.resources.wire.leaf < physical + bytes
+                if ((physical < p.resources.wire.leaf + PAGE
+                    && p.resources.wire.leaf < physical + bytes)
+                    || write_table
+                        .is_some_and(|table| physical < table + PAGE && table < physical + bytes))
                     && (p.snapshot.pat >> (8 * pat_index)) & 0xff != 6
                 {
                     return Err(Error::CacheConflict);
@@ -680,7 +694,15 @@ fn inventory(platform: &Platform) -> Result<Vec<ExistingAlias>, Error> {
                 if entry & ((1 << 3) | (1 << 4)) != 0 {
                     return Err(Error::UnsupportedCache);
                 }
-                walk(p, entry & ADDRESS, level - 1, visited, aliases, image)?;
+                walk(
+                    p,
+                    entry & ADDRESS,
+                    level - 1,
+                    visited,
+                    aliases,
+                    image,
+                    write_table,
+                )?;
             }
         }
         Ok(())
@@ -696,6 +718,7 @@ fn inventory(platform: &Platform) -> Result<Vec<ExistingAlias>, Error> {
             &mut visited,
             &mut aliases,
             &image,
+            write_table,
         )?;
     }
     for physical in platform.resources._roots.ram() {
@@ -716,11 +739,6 @@ fn inventory(platform: &Platform) -> Result<Vec<ExistingAlias>, Error> {
             table = entry & ADDRESS;
         }
         if table != wire.leaf {
-            return Err(Error::Unavailable);
-        }
-    }
-    for index in 0..ENTRIES {
-        if unsafe { platform.leaf(index)?.read_volatile() } != 0 {
             return Err(Error::Unavailable);
         }
     }

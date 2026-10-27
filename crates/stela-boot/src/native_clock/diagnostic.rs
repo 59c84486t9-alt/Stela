@@ -19,7 +19,8 @@ pub(crate) unsafe fn check(
     // SAFETY: caller's explicit short-root profile, not an IRQ-count inference.
     let source = unsafe { prepared.qualify_bounded(pm::NS)? };
     // SAFETY: real owner and unchanged retained tables/roots satisfy attach.
-    let installed = unsafe { Installed::attach(owner, source)? };
+    let root_execution = owner.enter_root()?;
+    let installed = unsafe { Installed::attach(owner, &root_execution, source)? };
     let observation = installed.observation()?;
     let clock = Arc::clone(&installed.clock);
     let idle = Arc::clone(&installed.idle);

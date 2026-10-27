@@ -37,11 +37,13 @@ pub(crate) struct Wire {
     madt_bytes: usize,
     mcfg_bytes: usize,
     fadt_bytes: usize,
+    hpet_bytes: usize,
     roots: [RootWindow; MAX_ROOTS],
     memory: [Memory; MAX_MEMORY],
     madt: [u8; TABLE_BYTES],
     mcfg: [u8; TABLE_BYTES],
     fadt: [u8; TABLE_BYTES],
+    hpet: [u8; 56],
 }
 impl Wire {
     pub(super) fn valid(&self) -> bool {
@@ -51,6 +53,7 @@ impl Wire {
             && self.madt_bytes <= TABLE_BYTES
             && self.mcfg_bytes <= TABLE_BYTES
             && self.fadt_bytes <= TABLE_BYTES
+            && matches!(self.hpet_bytes, 0 | 56)
             && self.cores == 1
             && matches!(self.levels, 4 | 5)
     }
@@ -62,6 +65,9 @@ impl Wire {
     }
     pub(crate) fn fadt(&self) -> &[u8] {
         &self.fadt[..self.fadt_bytes]
+    }
+    pub(super) fn hpet(&self) -> &[u8] {
+        &self.hpet[..self.hpet_bytes]
     }
     pub(super) fn roots(&self) -> &[RootWindow] {
         &self.roots[..self.root_count]
@@ -173,6 +179,16 @@ impl Prepared {
             }
             destination[..source.len()].copy_from_slice(source);
             *length = source.len();
+        }
+        // HPET is optional for other clocks. Absence, invalid checksum or
+        // unsupported original length leaves the typed HPET factory unavailable;
+        // no default address/capability is reconstructed.
+        // SAFETY: same actual pre-EBS readable firmware ACPI root as above.
+        if let Ok(source) = unsafe { acpi::find(rsdp, b"HPET") }
+            && source.len() == wire.hpet.len()
+        {
+            wire.hpet.copy_from_slice(source);
+            wire.hpet_bytes = source.len();
         }
         Ok(Self {
             region: Region {

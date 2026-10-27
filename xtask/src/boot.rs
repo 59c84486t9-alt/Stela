@@ -283,6 +283,9 @@ pub struct Run {
         "gdb", "monitor", "icount"
     ])]
     native_mmio_check: bool,
+    /// Expose QEMU's real HPET to the owned Root/MMIO diagnostic.
+    #[arg(long, requires = "native_mmio_check")]
+    hpet: bool,
     /// Actual bounded PM/LAPIC clock, IRQ progress, idle waits and retirement.
     #[arg(long, conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
@@ -598,7 +601,17 @@ fn qemu_accelerator(icount: Option<u8>, kvm: bool) -> &'static str {
     }
 }
 
+fn qemu_machine(keyboard: &str, hpet: bool) -> String {
+    let hpet = if hpet { "on" } else { "off" };
+    format!("q35,smm=off,sata=off,usb=off,smbus=off,hpet={hpet},i8042={keyboard},vmport=off")
+}
+
 fn native_root_preflight(arguments: &Run) -> Result<()> {
+    // Clap conflicts can supersede `requires`; enforce the HPET mode before work.
+    ensure!(
+        !arguments.hpet || arguments.native_mmio_check,
+        "--hpet requires the owned --native-mmio-check diagnostic"
+    );
     if arguments.native_mmio_check || arguments.native_clock_check {
         ensure!(
             arguments.host_cores == 1
@@ -900,9 +913,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     });
     command
         .arg("-machine")
-        .arg(format!(
-            "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042={keyboard},vmport=off"
-        ))
+        .arg(qemu_machine(keyboard, arguments.hpet))
         .args([
             "-accel",
             qemu_accelerator(arguments.icount, arguments.kvm),
@@ -1320,7 +1331,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         json!({ "passed": native_mmio_verified(&serial_text)
             && status.is_some() && code == IDLE_EXIT
             && unsupported.is_none() && first_guest_panic(&serial_text).is_none()
-            && !serial_text.contains("STELA PANIC") })
+            && !serial_text.contains("STELA PANIC"),
+            "observation": native_mmio_observation(&serial_text),
+            "stack_observation": native_stack_observation(&serial_text) })
     });
     let native_irq_work = arguments.native_irq_work_check.then(|| {
         json!({ "passed": native_irq_work_verified(&serial_text) && status.is_some() && code == IDLE_EXIT
@@ -1429,6 +1442,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     });
     report["native_mmio"] = native_mmio.unwrap_or(Value::Null);
     report["native_clock"] = native_clock.unwrap_or(Value::Null);
+    report["hpet"] = json!(arguments.hpet);
     fs::write(output.join("run.json"), format!("{report:#}\n"))?;
     println!("{report:#}");
     if let Some(Err(error)) = storage {
@@ -1805,47 +1819,88 @@ fn native_clock_proof(serial: &str) -> Option<&str> {
 /// The existing diagnostic owns its exact mapping and refusal observations.
 /// Its early stop does not claim that a guest system kernel completed.
 fn native_mmio_verified(serial: &str) -> bool {
+    native_mmio_observation(serial).is_some()
+}
+
+fn native_stack_observation(serial: &str) -> Option<&str> {
+    let mut lines = serial
+        .lines()
+        .filter(|line| line.starts_with("CHECK native-stack "));
+    let line = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let pair = line
+        .strip_prefix("CHECK native-stack finite=4 actual_rsp=")?
+        .strip_suffix(" source=retired parent=clear+TLB; no Linux owner or CPU-time grant")?;
+    let (first, second) = pair.split_once(',')?;
+    let address = |text: &str| u64::from_str_radix(text.strip_prefix("0x")?, 16).ok();
+    let (first, second) = (address(first)?, address(second)?);
+    (first != 0 && second != 0 && first != second).then_some(line)
+}
+
+fn native_mmio_observation(serial: &str) -> Option<&str> {
     if serial
         .lines()
         .any(|line| line.starts_with("CHECK native-mmio FAIL"))
     {
-        return false;
+        return None;
     }
     let mut proofs = serial
         .lines()
         .filter(|line| line.starts_with("CHECK native-mmio PASS "));
-    let Some(line) = proofs.next() else {
-        return false;
-    };
+    let line = proofs.next()?;
     if proofs.next().is_some() {
-        return false;
+        return None;
+    }
+    if !line.ends_with("; bounded authored diagnostic, Linux and physical hardware unqualified") {
+        return None;
     }
     let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
-    let value = |key: &str| fields.iter().find_map(|field| field.strip_prefix(key));
+    let value = |key: &str| {
+        let mut values = fields.iter().filter_map(|field| field.strip_prefix(key));
+        let first = values.next()?;
+        values.next().is_none().then_some(first)
+    };
     let hex = |key| {
         value(key)
             .and_then(|text| text.trim_end_matches(';').strip_prefix("0x"))
             .and_then(|text| u64::from_str_radix(text, 16).ok())
     };
-    [
-        "authority=actual",
-        "roots=all",
-        "native_cpus=1",
-        "effective_cache=Intel-UC",
-        "aperture=owned-PTE",
-        "map=published",
-        "retire=actual-clear+TLB",
-        "reuse=readback",
-        "foreign-root=refused",
-        "WC=refused",
+    let bus = |text: &str| {
+        (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<u8>().ok())
+            .flatten()
+    };
+    let buses = value("buses=")
+        .and_then(|text| text.split_once("..="))
+        .and_then(|(start, end)| Some((bus(start)?, bus(end)?)))
+        .is_some_and(|(start, end)| start <= end);
+    ([
+        ("authority=", "actual"),
+        ("roots=", "all"),
+        ("native_cpus=", "1"),
+        ("effective_cache=", "Intel-UC"),
+        ("aperture=", "owned-PTE"),
+        ("map=", "published"),
+        ("retire=", "actual-clear+TLB"),
+        ("reuse=", "readback"),
+        ("foreign-root=", "refused"),
+        ("WC=", "refused"),
+        ("clock=", "HPET64"),
+        ("retained_hpet=", "1"),
+        ("root_lifetime=", "kernel-image"),
     ]
     .iter()
-    .all(|field| fields.contains(field))
+    .all(|(key, expected)| value(key) == Some(*expected))
         && value("ioapics=")
             .and_then(|text| text.parse::<usize>().ok())
             .is_some_and(|count| count > 0)
         && hex("MCFG=").is_some()
         && hex("vendor=").is_some_and(|vendor| vendor > 0 && vendor < u64::from(u32::MAX))
+        && buses
+        && native_stack_observation(serial).is_some())
+    .then_some(line)
 }
 
 /// Old single-requester output never qualifies the two-context fixture.
@@ -1998,10 +2053,34 @@ mod tests {
 
     #[test]
     fn native_mmio_requires_complete_actual_mapping_and_refusal_proof() {
-        let full = "CHECK native-mmio PASS authority=actual roots=all native_cpus=1 effective_cache=Intel-UC aperture=owned-PTE map=published retire=actual-clear+TLB reuse=readback foreign-root=refused WC=refused ioapics=1 MCFG=0xb0000000 vendor=0x12378086; bounded authored diagnostic, Linux and physical hardware unqualified";
-        assert!(native_mmio_verified(full));
-        for field in full.split_ascii_whitespace().skip(3).take(13) {
-            assert!(!native_mmio_verified(&full.replace(field, "unproven")));
+        let stack = "CHECK native-stack finite=4 actual_rsp=0x9000,0xa000 source=retired parent=clear+TLB; no Linux owner or CPU-time grant";
+        let mmio = "CHECK native-mmio PASS authority=actual roots=all native_cpus=1 effective_cache=Intel-UC aperture=owned-PTE map=published retire=actual-clear+TLB reuse=readback foreign-root=refused WC=refused clock=HPET64 retained_hpet=1 root_lifetime=kernel-image ioapics=1 MCFG=0xb0000000 buses=0..=0 vendor=0x12378086; bounded authored diagnostic, Linux and physical hardware unqualified";
+        let full = format!("{stack}\n{mmio}");
+        assert!(native_mmio_verified(&full));
+        assert_eq!(native_mmio_observation(&full), Some(mmio));
+        assert_eq!(native_stack_observation(&full), Some(stack));
+        for field in [
+            "authority=actual",
+            "roots=all",
+            "native_cpus=1",
+            "effective_cache=Intel-UC",
+            "aperture=owned-PTE",
+            "map=published",
+            "retire=actual-clear+TLB",
+            "reuse=readback",
+            "foreign-root=refused",
+            "WC=refused",
+            "clock=HPET64",
+            "retained_hpet=1",
+            "root_lifetime=kernel-image",
+            "buses=0..=0",
+            "source=retired",
+            "parent=clear+TLB",
+        ] {
+            assert!(
+                !native_mmio_verified(&full.replace(field, "unproven")),
+                "{field}"
+            );
         }
         for replacement in ["ioapics=0", "ioapics=invalid"] {
             assert!(!native_mmio_verified(
@@ -2018,6 +2097,105 @@ mod tests {
             "{full}\nCHECK native-mmio FAIL cleanup"
         )));
         assert!(!native_mmio_verified(&format!("{full}\n{full}")));
+        assert!(!native_mmio_verified(mmio));
+        assert!(!native_mmio_verified(stack));
+        assert!(!native_mmio_verified(&format!("{full}\n{stack}")));
+        assert!(!native_mmio_verified(
+            &full.replace("clock=HPET64", "clock=HPET64 clock=PM24")
+        ));
+        assert!(!native_mmio_verified(&full.replace(
+            "kernel-image ioapics",
+            "kernel-image retained_hpet=0 ioapics"
+        )));
+        for pair in [
+            "0x0,0xa000",
+            "0x9000,0x0",
+            "0x9000,0x9000",
+            "9000,0xa000",
+            "0x10000000000000000,0xa000",
+            "0x9000,0xa000,0xb000",
+        ] {
+            assert!(
+                !native_mmio_verified(&full.replace("0x9000,0xa000", pair)),
+                "{pair}"
+            );
+        }
+        for suffix in [
+            "; no Linux owner or CPU-time grant",
+            "; bounded authored diagnostic, Linux and physical hardware unqualified",
+        ] {
+            assert!(!native_mmio_verified(&full.replace(suffix, "")));
+        }
+        assert!(!native_mmio_verified("CHECK native-mmio FAIL MissingSdt"));
+        assert!(!native_mmio_verified(&full.replace("buses=0..=0", "")));
+        for range in [
+            "1..=0",
+            "0..=256",
+            "-1..=0",
+            "+0..=0",
+            "0x0..=0",
+            "0..0",
+            "0..=",
+            "0..=0..=0",
+        ] {
+            assert!(
+                !native_mmio_verified(&full.replace("buses=0..=0", &format!("buses={range}"))),
+                "{range}"
+            );
+        }
+        assert!(!native_mmio_verified(
+            &full.replace("buses=0..=0", "buses=0..=0 buses=1..=1")
+        ));
+        assert!(native_mmio_verified(
+            &full.replace("buses=0..=0", "buses=1..=255")
+        ));
+    }
+
+    #[test]
+    fn native_mmio_hpet_is_explicit_and_restricted_before_work() {
+        use clap::Parser;
+        let prefix = ["xtask", "boot", "run", "--output", "/tmp/native-mmio-hpet"];
+        let parse = |options: Vec<&str>| {
+            let parsed = crate::Cli::try_parse_from(prefix.into_iter().chain(options))?;
+            let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+                panic!("boot run")
+            };
+            Ok::<_, clap::Error>(run)
+        };
+        let default = parse(vec!["--native-mmio-check"]).unwrap();
+        assert!(!default.hpet);
+        let enabled = parse(vec!["--native-mmio-check", "--hpet"]).unwrap();
+        assert!(enabled.hpet);
+        assert!(native_root_preflight(&enabled).is_ok());
+        assert!(parse(vec!["--hpet"]).is_err());
+        for options in [
+            vec!["--native-clock-check", "--hpet"],
+            vec!["--network", "--hpet"],
+            vec!["--module", "not-opened-by-preflight", "--hpet"],
+        ] {
+            let invalid = parse(options).unwrap();
+            assert!(invalid.hpet && !invalid.native_mmio_check);
+            assert!(native_root_preflight(&invalid).is_err());
+        }
+        assert!(
+            native_root_preflight(
+                &parse(vec!["--native-mmio-check", "--hpet", "--host-cores", "2"]).unwrap()
+            )
+            .is_err()
+        );
+        let off = qemu_machine("off", false);
+        assert_eq!(
+            off,
+            "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042=off,vmport=off"
+        );
+        assert_eq!(
+            qemu_machine("off", true),
+            off.replace("hpet=off", "hpet=on")
+        );
+        assert_eq!(
+            qemu_machine("on", false),
+            off.replace("i8042=off", "i8042=on")
+        );
     }
 
     #[test]

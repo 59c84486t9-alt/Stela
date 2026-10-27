@@ -9,7 +9,7 @@ pub(crate) mod diagnostic;
 mod platform;
 
 pub(crate) use capture::{Prepared, Wire};
-pub(crate) use platform::Source;
+pub(crate) use platform::{ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication, Source};
 
 use stela_drivers::bus::mmio::owned::Error;
 const PAGE: u64 = 4096;

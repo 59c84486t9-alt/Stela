@@ -1,6 +1,7 @@
 //! State owned by this physical host processor for its executor lifetime.
 //! GS is private to Stela at CPL0, including translated execution and faults.
 use super::State;
+pub(crate) mod context;
 use core::{
     arch::asm,
     cell::UnsafeCell,
@@ -51,6 +52,7 @@ impl Local {
 pub(crate) struct Owner {
     local: NonNull<Local>,
     clock_leases: alloc::sync::Arc<()>,
+    root_context: alloc::sync::Weak<context::RootContext>,
     _pinned: PhantomData<*mut ()>,
 }
 
@@ -71,50 +73,6 @@ impl MmioRoots {
 }
 
 impl Owner {
-    /// Observe every actual host/current/banked/loader root while the native
-    /// dispatcher owns the physical CPU. Guest publication is limited to these
-    /// retained RAM extents; the fixed shared-window entries are never rebuilt.
-    pub(crate) fn mmio_roots(
-        &mut self,
-        execution: &crate::native_clock::DriverExecution<'_>,
-        handoff: &crate::handoff::Handoff,
-    ) -> Result<MmioRoots, stela_drivers::bus::mmio::owned::Error> {
-        use stela_drivers::bus::mmio::owned::{Error, PhysicalSpan};
-        execution.check().map_err(|_| Error::Unavailable)?;
-        if handoff.native_resources.cores != 1 || current() != self.local.as_ptr() {
-            return Err(Error::Unavailable);
-        }
-        let cpu = execution.cpu().map_err(|_| Error::Unavailable)?;
-        let saved = cpu.save_disable().map_err(|_| Error::Unavailable)?;
-        let result = (|| {
-            let lease = self.retain_clock_root().map_err(|_| Error::Unavailable)?;
-            let state = state();
-            let mut roots = alloc::vec::Vec::new();
-            roots
-                .try_reserve_exact(2 + super::ROOTS * (1 + super::BANKS))
-                .map_err(|_| Error::Exhausted)?;
-            roots.push(handoff.root);
-            roots.push(state.host_root);
-            roots.extend(state.all_roots());
-            roots.sort_unstable();
-            roots.dedup();
-            let mut ram = alloc::vec::Vec::new();
-            ram.try_reserve_exact(state.ram.len())
-                .map_err(|_| Error::Exhausted)?;
-            for range in &state.ram {
-                ram.push(PhysicalSpan::new(range.host, range.bytes)?);
-            }
-            Ok(MmioRoots {
-                roots,
-                ram,
-                _lease: lease,
-            })
-        })();
-        // SAFETY: exact same-CPU enclosing save; no callback or switch occurred.
-        unsafe { cpu.restore(saved) };
-        result
-    }
-
     /// Retain immutable clock/CPU views without moving this !Send owner. The
     /// actual owner refuses destruction while any view can still enter it.
     pub(crate) fn retain_clock_root(
@@ -157,7 +115,11 @@ impl Owner {
             return Err("native Host owner migrated");
         }
         let state = state();
-        if state.native || state.regime.is_some() || state.registered_ram.is_some() {
+        if self.root_context.strong_count() != 0
+            || state.native
+            || state.regime.is_some()
+            || state.registered_ram.is_some()
+        {
             return Err("native RAM adoption requires pristine owner-local dispatch");
         }
         state.ram = ram
@@ -310,6 +272,7 @@ pub(super) unsafe fn install(state: State) -> Owner {
     Owner {
         local,
         clock_leases: alloc::sync::Arc::new(()),
+        root_context: alloc::sync::Weak::new(),
         _pinned: PhantomData,
     }
 }
