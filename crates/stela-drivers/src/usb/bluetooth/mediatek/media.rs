@@ -286,7 +286,8 @@ pub(in crate::usb::bluetooth) mod tests {
     }
     fn hci(model: Model) -> Hci<Model> {
         use super::super::{
-            Chip, FirmwareMetadata, Identity, OwnedReport, RecoveryPolicy, UsbIdentity, WmtEvent,
+            Chip, FirmwareMetadata, HostPolicy, Identity, OwnedReport, RecoveryPolicy, UsbIdentity,
+            WmtEvent,
         };
         use crate::usb::bluetooth::FirmwareReceipt;
         let mut h = Hci::from_io(binding(), model);
@@ -330,6 +331,11 @@ pub(in crate::usb::bluetooth) mod tests {
             local_version: [0; 9],
             address: [1; 6],
             recovery: RecoveryPolicy::FreshRebindRequired,
+            policy: HostPolicy::for_device(UsbIdentity {
+                vendor: 0x13d3,
+                product: 0x3602,
+                revision: 0x100,
+            }),
         }))));
         h
     }

@@ -3,8 +3,8 @@
 //! btmtk USB register, WMT patch/status and protocol-enable sequence. Native
 //! synchronization, standard post-enable HCI checks and quarantine are Stela glue.
 use super::{
-    Attempt, Error, Hci, Identity, Io, OwnedReport, Patch, RecoveryPolicy, RegisterObservation,
-    Result, SectionDisposition, SectionReceipt, UsbIdentity, WmtEvent, wmt,
+    Attempt, Error, Hci, HostPolicy, Identity, Io, OwnedReport, Patch, RecoveryPolicy,
+    RegisterObservation, Result, SectionDisposition, SectionReceipt, UsbIdentity, WmtEvent, wmt,
 };
 use crate::{
     firmware::{Provider, Requirement},
@@ -410,6 +410,7 @@ impl<B: Io> Engine<'_, B> {
         // A coalesced event after the last desired CC must be retained as
         // auxiliary evidence or rejected explicitly, never dropped with Engine.
         self.drain_auxiliary()?;
+        let policy = HostPolicy::for_device(identity.usb);
         Ok(OwnedReport {
             identity,
             firmware: Box::new(self.attempt.firmware.take().unwrap()),
@@ -421,6 +422,7 @@ impl<B: Io> Engine<'_, B> {
             local_version: raw,
             address,
             recovery: RecoveryPolicy::FreshRebindRequired,
+            policy,
         })
     }
 }
