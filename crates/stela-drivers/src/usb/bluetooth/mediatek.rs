@@ -12,6 +12,7 @@
 mod firmware;
 mod identity;
 mod initialize;
+pub(super) mod packet;
 mod wmt;
 pub use firmware::{FirmwareMetadata, Fragment, Patch, Section, SectionMetadata};
 pub use identity::{Chip, Identity, UsbIdentity};

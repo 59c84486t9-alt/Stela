@@ -95,7 +95,18 @@ impl<B: Io> Engine<'_, B> {
         for p in self.hci.poll()? {
             match p {
                 Packet::Event(e) => self.pending.push_back(e),
-                Packet::Acl(a) | Packet::Diagnostic(a) => {
+                // Firmware debug logs have no consumer before the session;
+                // a firmware dump means the controller failed.
+                Packet::Diagnostic(d)
+                    if d.len() >= 2
+                        && u16::from_le_bytes([d[0], d[1]]) != super::packet::DUMP_HANDLE => {}
+                Packet::Diagnostic(a) => {
+                    return Err(Error::protocol(
+                        "MT79xx firmware dump while initializing",
+                        &a,
+                    ));
+                }
+                Packet::Acl(a) => {
                     return Err(Error::protocol(
                         "unexpected ACL while initializing MT79xx",
                         &a,
