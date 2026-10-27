@@ -39,7 +39,6 @@ void stela_acpi_flush_cpu_cache(void);
 #define strncat stela_acpi_strncat
 #define strcmp stela_acpi_strcmp
 #define strncmp stela_acpi_strncmp
-#define strchr stela_acpi_strchr
 #define strrchr stela_acpi_strrchr
 #define strstr stela_acpi_strstr
 #define strtoul stela_acpi_strtoul
@@ -58,7 +57,9 @@ char *strcat(char *, const char *);
 char *strncat(char *, const char *, size_t);
 int strcmp(const char *, const char *);
 int strncmp(const char *, const char *, size_t);
-char *strchr(const char *, int);
+/* ACPICA's acgccex.h undefines a strchr macro, so its private name is the
+ * assembler's: no other C library's strchr meets it at link time. */
+char *strchr(const char *, int) __asm__("stela_acpi_strchr");
 char *strrchr(const char *, int);
 char *strstr(const char *, const char *);
 unsigned long strtoul(const char *, char **, int);
