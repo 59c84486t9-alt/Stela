@@ -2,7 +2,10 @@
 //! Controller setup follows Linux `drivers/ata/ahci.c` and `libahci.c` at
 //! a804c5742bff224d4cb4d25dd383554d598be32b: firmware-programmed capability
 //! and port registers survive HBA reset, legacy Intel port enables are set,
-//! and each port fails on its own.
+//! and each port fails on its own. A failed command goes through libata's
+//! error handler: the AHCI error interrupt and taskfile are classified as
+//! `ahci_error_intr` and `ata_eh_link_autopsy` do, the engine restarts or the
+//! link is hard reset and the disk revalidated, and sd's retries apply.
 use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity, Transport, ascii},
@@ -71,7 +74,6 @@ const COMMAND_SPIN_UP: u32 = 1 << 1;
 const COMMAND_FIS_RECEIVE: u32 = 1 << 4;
 const COMMAND_FIS_RUNNING: u32 = 1 << 14;
 const COMMAND_LIST_RUNNING: u32 = 1 << 15;
-const TASK_FILE_ERROR: u32 = 1 << 0;
 const TASK_FILE_BUSY: u32 = 0x88;
 /// Port interrupt status bits that end a command (Linux `PORT_IRQ_ERROR`).
 const INTERRUPT_TASK_FILE_ERROR: u32 = 1 << 30;
@@ -82,6 +84,13 @@ const INTERRUPT_BAD_PORT_MULTIPLIER: u32 = 1 << 23;
 const INTERRUPT_PHY_READY_CHANGE: u32 = 1 << 22;
 const INTERRUPT_CONNECT_CHANGE: u32 = 1 << 6;
 const INTERRUPT_UNKNOWN_FIS: u32 = 1 << 4;
+/// Linux `PORT_IRQ_FREEZE`: the errors that freeze the port.
+const INTERRUPT_FREEZE: u32 = INTERRUPT_HOST_BUS_FATAL
+    | INTERRUPT_INTERFACE_FATAL
+    | INTERRUPT_CONNECT_CHANGE
+    | INTERRUPT_PHY_READY_CHANGE
+    | INTERRUPT_UNKNOWN_FIS
+    | INTERRUPT_BAD_PORT_MULTIPLIER;
 const INTERRUPT_ERROR: u32 = INTERRUPT_TASK_FILE_ERROR
     | INTERRUPT_HOST_BUS_FATAL
     | INTERRUPT_HOST_BUS_DATA
@@ -90,13 +99,47 @@ const INTERRUPT_ERROR: u32 = INTERRUPT_TASK_FILE_ERROR
     | INTERRUPT_PHY_READY_CHANGE
     | INTERRUPT_CONNECT_CHANGE
     | INTERRUPT_UNKNOWN_FIS;
+/// ATA status and error register bits (Linux `include/linux/ata.h`).
+const STATUS_BUSY: u8 = 1 << 7;
+const STATUS_READY: u8 = 1 << 6;
+const STATUS_FAULT: u8 = 1 << 5;
+const STATUS_REQUEST: u8 = 1 << 3;
+const STATUS_ERROR: u8 = 1 << 0;
+const ERROR_INTERFACE_CRC: u8 = 1 << 7;
+const ERROR_UNCORRECTABLE: u8 = 1 << 6;
+const ERROR_ID_NOT_FOUND: u8 = 1 << 4;
+const ERROR_ADDRESS_MARK: u8 = 1 << 0;
+/// Device register obsolete bits (`ATA_DEVICE_OBS`).
+const DEVICE_OBSOLETE: u8 = 0xa0;
+/// SError bits (Linux `SERR_*`).
+const SERROR_DATA: u32 = 1 << 8;
+const SERROR_PERSISTENT: u32 = 1 << 9;
+const SERROR_PROTOCOL: u32 = 1 << 10;
+const SERROR_INTERNAL: u32 = 1 << 11;
+const SERROR_PHY_READY_CHANGE: u32 = 1 << 16;
+const SERROR_DEVICE_EXCHANGED: u32 = 1 << 26;
+/// Linux `AC_ERR_*`: what a failed command is charged with.
+const ERR_DEVICE: u32 = 1 << 0;
+const ERR_HSM: u32 = 1 << 1;
+const ERR_TIMEOUT: u32 = 1 << 2;
+const ERR_MEDIA: u32 = 1 << 3;
+const ERR_ATA_BUS: u32 = 1 << 4;
+const ERR_HOST_BUS: u32 = 1 << 5;
+const ERR_SYSTEM: u32 = 1 << 6;
+const ERR_INVALID: u32 = 1 << 7;
 /// SStatus.DET: a device is present and Phy communication is established.
 const DEVICE_PRESENT: u32 = 3;
 const SATA_STATUS_DETECTION: u32 = 0xf;
 /// SControl.DET: perform interface initialization (COMRESET).
 const SATA_CONTROL_DETECTION: u32 = 0xf;
 const SATA_CONTROL_RESET: u32 = 1;
-/// Device signatures (AHCI 1.3.1 §3.3.9, Linux `SATA_SIGNATURE`s).
+/// `sata_link_hardreset`: keep SPD, disable partial and slumber, then
+/// COMRESET (DET 1) and release it (DET 0).
+const SATA_CONTROL_SPEED: u32 = 0x0f0;
+const SATA_CONTROL_COMRESET: u32 = 0x301;
+const SATA_CONTROL_RESUMED: u32 = 0x300;
+const SATA_CONTROL_RESUME_MASK: u32 = 0xf0f;
+/// Device signatures (AHCI 1.3.1 Â§3.3.9, Linux `SATA_SIGNATURE`s).
 const SIGNATURE_ATA: u32 = 0x0000_0101;
 const SIGNATURE_ATAPI: u32 = 0xeb14_0101;
 const SIGNATURE_PORT_MULTIPLIER: u32 = 0x9669_0101;
@@ -105,17 +148,17 @@ const PORT_REGISTERS: u64 = 0x80;
 const PORT_BASE: u64 = 0x100;
 const MAX_PORTS: u32 = 32;
 
-/// Host-to-device Register FIS (SATA 3.x §10.5.6): type, the Command bit,
+/// Host-to-device Register FIS (SATA 3.x Â§10.5.6): type, the Command bit,
 /// and the device register's LBA mode bit.
 const FIS_REGISTER_HOST_TO_DEVICE: u8 = 0x27;
 const FIS_COMMAND: u8 = 0x80;
 const DEVICE_LBA: u8 = 0x40;
 /// Command table: the FIS area, then the first PRDT entry's address and
-/// byte count (AHCI 1.3.1 §4.2.3).
+/// byte count (AHCI 1.3.1 Â§4.2.3).
 const TABLE_HEADER_BYTES: usize = 0x90;
 const PRDT_ADDRESS: usize = 0x80;
 const PRDT_BYTE_COUNT: usize = 0x8c;
-/// IDENTIFY DEVICE words (ACS-3 §7.12.7).
+/// IDENTIFY DEVICE words (ACS-3 Â§7.12.7).
 const IDENTIFY_SERIAL: core::ops::Range<usize> = 10..20;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
@@ -136,11 +179,17 @@ const IDENTIFY_LOGICAL_WORDS: usize = 117;
 const ATA_SECTOR_BYTES: u32 = 512;
 
 /// The 32-slot command list (1 KiB aligned) followed by the received-FIS
-/// area (256 bytes), and one command table (AHCI 1.3.1 §4.2).
+/// area (256 bytes), and one command table (AHCI 1.3.1 Â§4.2).
 const COMMAND_LIST_BYTES: usize = 1024;
 const RECEIVED_FIS_BYTES: usize = 256;
+/// The received D2H Register FIS, set to BSY before a hardreset.
+const RECEIVED_D2H: usize = COMMAND_LIST_BYTES + 0x40;
+const FIS_BYTES: usize = 20;
 const COMMAND_TABLE_BYTES: usize = 4096;
 const COMMAND_TABLE_ALIGN: usize = 128;
+/// Revalidation IDENTIFY data, in the command table past its one PRDT entry,
+/// so a failed write's data stays in the bounce buffer for its retry.
+const IDENTIFY_DATA: usize = 0x200;
 
 /// Command header DW0: FIS length in dwords, direction, PRDT entries.
 const COMMAND_FIS_DWORDS: u32 = 5;
@@ -162,6 +211,20 @@ const STOP_FIS_TIMEOUT_US: u64 = 1_000_000;
 const COMRESET_HOLD_US: u64 = 1_000;
 const SPIN_UP_TIMEOUT_US: u64 = 10_000_000;
 const COMMAND_TIMEOUT_US: u64 = 30_000_000;
+/// `ata_eh_reset_timeouts`: one hardreset per entry.
+const RESET_TIMEOUTS_US: [u64; 4] = [10_000_000, 10_000_000, 35_000_000, 5_000_000];
+/// `ATA_EH_DEV_TRIES`: revalidations before the disk is disabled.
+const DEVICE_TRIES: usize = 3;
+/// `SD_MAX_RETRIES`.
+const COMMAND_RETRIES: u32 = 5;
+/// `ATA_LINK_RESUME_TRIES`, each followed by a 200 ms settle.
+const RESUME_TRIES: usize = 5;
+const RESUME_SETTLE_US: u64 = 200_000;
+/// `sata_deb_timing_normal` and `_hotplug`: interval, stable duration, limit.
+const DEBOUNCE_NORMAL: [u64; 3] = [5_000, 100_000, 2_000_000];
+const DEBOUNCE_HOTPLUG: [u64; 3] = [25_000, 500_000, 2_000_000];
+/// The disk left the port or another device answered in its place.
+const DETACHED: BlockError = BlockError::Protocol("the SATA disk detached or changed");
 
 /// Command register side effects, allowing hardware-like W1C and completion
 /// tests against the actual table and DMA algorithm.
@@ -187,8 +250,8 @@ pub struct AhciDisk {
     identity: Identity,
     clock: Clock,
     command_timeout_us: u64,
-    /// Failed commands require acknowledged reset and re-identification.
-    /// The queue, FIS and bounce allocations remain reserved for this boot.
+    /// Set when error handling cannot recover the disk, as libata disables
+    /// it. The queue, FIS and bounce allocations remain reserved for this boot.
     fault: Option<BlockError>,
     /// The cache flush command, or `None` when the write cache is off.
     flush: Option<u8>,
@@ -211,6 +274,231 @@ fn flush_command(word: impl Fn(usize) -> u16) -> Option<u8> {
             ATA_FLUSH_CACHE
         },
     )
+}
+
+/// What IDENTIFY DEVICE says about a disk.
+struct Identified {
+    model: alloc::string::String,
+    serial: alloc::string::String,
+    blocks: u64,
+    block_size: u32,
+    flush: Option<u8>,
+}
+
+fn identify(data: &[u8]) -> Result<Identified, BlockError> {
+    let word = |index: usize| u16::from_le_bytes([data[2 * index], data[2 * index + 1]]);
+    // ATA strings hold two characters per word, high byte first.
+    let string = |words: core::ops::Range<usize>| {
+        let bytes: Vec<u8> = words.flat_map(|index| word(index).to_be_bytes()).collect();
+        ascii(&bytes)
+    };
+    if word(IDENTIFY_COMMANDS_2) & COMMANDS_2_LBA48 == 0 {
+        return Err(BlockError::Unsupported(
+            "SATA disk without 48-bit addressing",
+        ));
+    }
+    let blocks = IDENTIFY_LBA48_SECTORS
+        .rev()
+        .fold(0u64, |value, index| value << 16 | u64::from(word(index)));
+    let sector = word(IDENTIFY_SECTOR_SIZE);
+    let block_size = if sector & SECTOR_SIZE_VALID_MASK == SECTOR_SIZE_VALID
+        && sector & SECTOR_SIZE_LOGICAL_LONG != 0
+    {
+        // The logical sector size in 16-bit words.
+        (u32::from(word(IDENTIFY_LOGICAL_WORDS))
+            | u32::from(word(IDENTIFY_LOGICAL_WORDS + 1)) << 16)
+            * 2
+    } else {
+        ATA_SECTOR_BYTES
+    };
+    if !(ATA_SECTOR_BYTES..=BOUNCE_BYTES as u32).contains(&block_size)
+        || !block_size.is_power_of_two()
+    {
+        return Err(BlockError::Unsupported("SATA logical sector size"));
+    }
+    Ok(Identified {
+        model: string(IDENTIFY_MODEL),
+        serial: string(IDENTIFY_SERIAL),
+        blocks,
+        block_size,
+        flush: flush_command(word),
+    })
+}
+
+/// A failed command as libata's error handler sees it.
+#[derive(Debug)]
+struct Failure {
+    error: BlockError,
+    /// The `AC_ERR_*` mask.
+    mask: u32,
+    /// The port froze: only a reset recovers it.
+    frozen: bool,
+    /// `ATA_EH_RESET` was requested.
+    reset: bool,
+    /// `ata_ehi_hotplugged`: debounce with the hotplug timing.
+    hotplug: bool,
+}
+
+/// Linux `ahci_error_intr`, `ata_eh_analyze_serror` and `ata_eh_analyze_tf`
+/// for a single non-NCQ command on a port without a multiplier.
+fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool) -> Failure {
+    let mut mask = 0;
+    let mut reset = false;
+    let mut hotplug = false;
+    if interrupts & INTERRUPT_TASK_FILE_ERROR != 0 {
+        mask |= ERR_DEVICE;
+    }
+    if interrupts & INTERRUPT_UNKNOWN_FIS != 0 {
+        mask |= ERR_HSM;
+        reset = true;
+    }
+    if interrupts & (INTERRUPT_HOST_BUS_FATAL | INTERRUPT_HOST_BUS_DATA) != 0 {
+        mask |= ERR_HOST_BUS;
+        reset = true;
+    }
+    if interrupts & INTERRUPT_INTERFACE_FATAL != 0 {
+        mask |= ERR_ATA_BUS;
+        reset = true;
+    }
+    if interrupts & (INTERRUPT_CONNECT_CHANGE | INTERRUPT_PHY_READY_CHANGE) != 0
+        || serror & (SERROR_PHY_READY_CHANGE | SERROR_DEVICE_EXCHANGED) != 0
+    {
+        hotplug = true;
+    }
+    if serror & (SERROR_PERSISTENT | SERROR_DATA) != 0 {
+        mask |= ERR_ATA_BUS;
+        reset = true;
+    }
+    if serror & SERROR_PROTOCOL != 0 {
+        mask |= ERR_HSM;
+        reset = true;
+    }
+    if serror & SERROR_INTERNAL != 0 {
+        mask |= ERR_SYSTEM;
+        reset = true;
+    }
+    if hotplug {
+        mask |= ERR_ATA_BUS;
+        reset = true;
+    }
+    // A timed-out command freezes the port.
+    let frozen = interrupts & INTERRUPT_FREEZE != 0 || timed_out;
+    if timed_out {
+        mask |= ERR_TIMEOUT;
+    }
+    let status = task_file as u8;
+    let error = (task_file >> 8) as u8;
+    if status & (STATUS_BUSY | STATUS_REQUEST | STATUS_READY) != STATUS_READY {
+        mask |= ERR_HSM;
+        reset = true;
+    } else if status & (STATUS_ERROR | STATUS_FAULT) != 0 {
+        mask |= ERR_DEVICE;
+        if error & ERROR_INTERFACE_CRC != 0 {
+            mask |= ERR_ATA_BUS;
+        }
+        if error & (ERROR_UNCORRECTABLE | ERROR_ADDRESS_MARK) != 0 {
+            mask |= ERR_MEDIA;
+        }
+        if error & ERROR_ID_NOT_FOUND != 0 {
+            mask |= ERR_INVALID;
+        }
+        if mask & (ERR_HSM | ERR_TIMEOUT | ERR_ATA_BUS) != 0 {
+            reset = true;
+        }
+    }
+    // Device errors are probably spurious beside an ATA bus error.
+    if mask & ERR_ATA_BUS != 0 {
+        mask &= !(ERR_DEVICE | ERR_MEDIA | ERR_INVALID);
+    }
+    let error = if timed_out {
+        BlockError::Timeout
+    } else if interrupts & !INTERRUPT_TASK_FILE_ERROR != 0 {
+        BlockError::Device { status: interrupts }
+    } else {
+        BlockError::Device { status: task_file }
+    };
+    Failure {
+        error,
+        mask,
+        frozen,
+        reset,
+        hotplug,
+    }
+}
+
+/// Linux `ata_eh_worth_retry`.
+fn worth_retry(mask: u32, io: bool) -> bool {
+    if mask & ERR_MEDIA != 0 {
+        return false;
+    }
+    if io {
+        return true;
+    }
+    if mask & ERR_INVALID != 0 {
+        return false;
+    }
+    mask != ERR_DEVICE
+}
+
+/// Linux `ahci_start_engine`.
+fn start_engine(port: &impl CommandPort) {
+    port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_START);
+    port.read32(PORT_COMMAND);
+}
+
+/// Linux `ahci_stop_engine`: clear ST and wait for the command list to stop.
+fn stop_engine(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
+    let command = port.read32(PORT_COMMAND);
+    if command & (COMMAND_START | COMMAND_LIST_RUNNING) == 0 {
+        return Ok(());
+    }
+    if command == u32::MAX {
+        return Err(BlockError::Unsupported(
+            "the AHCI controller is unavailable",
+        ));
+    }
+    port.write32(PORT_COMMAND, command & !COMMAND_START);
+    if !clock.wait(STOP_ENGINE_TIMEOUT_US, || {
+        port.read32(PORT_COMMAND) & COMMAND_LIST_RUNNING == 0
+    }) {
+        return Err(BlockError::Timeout);
+    }
+    Ok(())
+}
+
+/// Linux `sata_link_debounce`: wait until SStatus.DET holds still for the
+/// stable duration, or a DET of 1 settles, before the limit.
+fn debounce(
+    port: &impl CommandPort,
+    clock: Clock,
+    timing: [u64; 3],
+    limit_us: u64,
+) -> Result<(), BlockError> {
+    let [interval, duration, timeout] = timing;
+    let limit = limit_us.min(timeout);
+    let start = clock.try_start().map_err(|_| BlockError::Timeout)?;
+    let elapsed = || clock.try_elapsed_us(start).map_err(|_| BlockError::Timeout);
+    let mut last = port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION;
+    let mut last_at = 0;
+    loop {
+        clock.delay(interval);
+        let now = elapsed()?;
+        let current = port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION;
+        if current == last {
+            if current == 1 && now < limit {
+                continue;
+            }
+            if now > last_at + duration {
+                return Ok(());
+            }
+            continue;
+        }
+        last = current;
+        last_at = now;
+        if now > limit {
+            return Err(BlockError::Timeout);
+        }
+    }
 }
 
 /// The disks behind one controller, and the ports that failed on their own.
@@ -312,19 +600,11 @@ fn validate_clock(clock: Clock) -> Result<(), BlockError> {
 }
 
 /// Stop the command list engine, then FIS reception, each waiting for the
-/// port to report it stopped (AHCI 1.3.1 §10.1.2; Linux `ahci_stop_engine`,
+/// port to report it stopped (AHCI 1.3.1 Â§10.1.2; Linux `ahci_stop_engine`,
 /// `ahci_stop_fis_rx`).
 fn stop_port(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
     validate_clock(clock)?;
-    let command = port.read32(PORT_COMMAND);
-    if command & (COMMAND_START | COMMAND_LIST_RUNNING) != 0 {
-        port.write32(PORT_COMMAND, command & !COMMAND_START);
-        if !clock.wait(STOP_ENGINE_TIMEOUT_US, || {
-            port.read32(PORT_COMMAND) & COMMAND_LIST_RUNNING == 0
-        }) {
-            return Err(BlockError::Timeout);
-        }
-    }
+    stop_engine(port, clock)?;
     port.write32(
         PORT_COMMAND,
         port.read32(PORT_COMMAND) & !COMMAND_FIS_RECEIVE,
@@ -417,43 +697,15 @@ impl AhciDisk {
             fault: None,
             flush: None,
         };
-        disk.issue(ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, false)?;
-        let data = disk.bounce.bytes();
-        let word = |index: usize| u16::from_le_bytes([data[2 * index], data[2 * index + 1]]);
-        // ATA strings hold two characters per word, high byte first.
-        let string = |words: core::ops::Range<usize>| {
-            let bytes: Vec<u8> = words.flat_map(|index| word(index).to_be_bytes()).collect();
-            ascii(&bytes)
-        };
-        if word(IDENTIFY_COMMANDS_2) & COMMANDS_2_LBA48 == 0 {
-            return Err(BlockError::Unsupported(
-                "SATA disk without 48-bit addressing",
-            ));
-        }
-        let blocks = IDENTIFY_LBA48_SECTORS
-            .rev()
-            .fold(0u64, |value, index| value << 16 | u64::from(word(index)));
-        let sector = word(IDENTIFY_SECTOR_SIZE);
-        let block_size = if sector & SECTOR_SIZE_VALID_MASK == SECTOR_SIZE_VALID
-            && sector & SECTOR_SIZE_LOGICAL_LONG != 0
-        {
-            // The logical sector size in 16-bit words.
-            (u32::from(word(IDENTIFY_LOGICAL_WORDS))
-                | u32::from(word(IDENTIFY_LOGICAL_WORDS + 1)) << 16)
-                * 2
-        } else {
-            ATA_SECTOR_BYTES
-        };
-        if !(ATA_SECTOR_BYTES..=BOUNCE_BYTES as u32).contains(&block_size)
-            || !block_size.is_power_of_two()
-        {
-            return Err(BlockError::Unsupported("SATA logical sector size"));
-        }
-        disk.flush = flush_command(word);
-        disk.identity.serial = string(IDENTIFY_SERIAL);
-        disk.identity.model = string(IDENTIFY_MODEL);
-        disk.identity.blocks = blocks;
-        disk.identity.block_size = block_size;
+        let port = disk.port;
+        let buffer = disk.bounce.physical();
+        disk.internal(&port, ATA_IDENTIFY, ATA_SECTOR_BYTES as usize, buffer)?;
+        let found = identify(disk.bounce.bytes())?;
+        disk.flush = found.flush;
+        disk.identity.serial = found.serial;
+        disk.identity.model = found.model;
+        disk.identity.blocks = found.blocks;
+        disk.identity.block_size = found.block_size;
         Ok(Some(disk))
     }
 
@@ -471,6 +723,8 @@ impl AhciDisk {
         self.issue_on(&port, command, lba, count, bytes, write)
     }
 
+    /// One command through libata's error handling: recover the port after a
+    /// failure, then retry as sd does when `ata_eh_worth_retry` agrees.
     fn issue_on(
         &mut self,
         port: &impl CommandPort,
@@ -481,6 +735,55 @@ impl AhciDisk {
         write: bool,
     ) -> Result<(), BlockError> {
         self.ready()?;
+        // Only reads and writes carry ATA_QCFLAG_IO.
+        let io = matches!(command, ATA_READ_DMA_EXT | ATA_WRITE_DMA_EXT);
+        let buffer = self.bounce.physical();
+        let mut retries = 0;
+        loop {
+            let Err(failure) = self.attempt(port, command, lba, count, bytes, write, buffer) else {
+                return Ok(());
+            };
+            if let Err(error) = self.recover(port, &failure) {
+                self.fault = Some(error.clone());
+                return Err(error);
+            }
+            if !worth_retry(failure.mask, io) || retries == COMMAND_RETRIES {
+                return Err(failure.error);
+            }
+            retries += 1;
+        }
+    }
+
+    /// An internal command (`ata_exec_internal`): a failure kicks the engine
+    /// so it forgets the command, and is returned as is.
+    fn internal(
+        &mut self,
+        port: &impl CommandPort,
+        command: u8,
+        bytes: usize,
+        buffer: u64,
+    ) -> Result<(), BlockError> {
+        self.ready()?;
+        self.attempt(port, command, 0, 0, bytes, false, buffer)
+            .or_else(|failure| {
+                stop_engine(port, self.clock)?;
+                start_engine(port);
+                Err(failure.error)
+            })
+    }
+
+    /// Issue the command once and wait for its completion or error.
+    #[allow(clippy::too_many_arguments)]
+    fn attempt(
+        &mut self,
+        port: &impl CommandPort,
+        command: u8,
+        lba: u64,
+        count: u16,
+        bytes: usize,
+        write: bool,
+        buffer: u64,
+    ) -> Result<(), Failure> {
         let table = self.table.physical();
         self.table.bytes_mut()[..TABLE_HEADER_BYTES].fill(0);
         let fis = [
@@ -506,7 +809,7 @@ impl AhciDisk {
         self.table.bytes_mut()[..fis.len()].copy_from_slice(&fis);
         let entries = u32::from(bytes > 0);
         if bytes > 0 {
-            self.table.write(PRDT_ADDRESS, self.bounce.physical());
+            self.table.write(PRDT_ADDRESS, buffer);
             self.table.write(PRDT_BYTE_COUNT, bytes as u32 - 1);
         }
         let flags = COMMAND_FIS_DWORDS
@@ -524,21 +827,140 @@ impl AhciDisk {
             interrupts != 0 || port.read32(PORT_ISSUE) & 1 == 0
         });
         fence(Ordering::SeqCst);
-        let task_file = port.read32(PORT_TASK_FILE);
-        if interrupts & !INTERRUPT_TASK_FILE_ERROR != 0 {
-            // Host bus, interface or link errors leave the port frozen.
-            let error = BlockError::Device { status: interrupts };
-            self.fault = Some(error.clone());
-            return Err(error);
+        if done && interrupts == 0 {
+            return Ok(());
         }
-        if interrupts != 0 || task_file & TASK_FILE_ERROR != 0 {
-            let error = BlockError::Device { status: task_file };
-            self.fault = Some(error.clone());
-            return Err(error);
+        // AHCI needs SError cleared; otherwise it might lock up.
+        let serror = port.read32(PORT_SATA_ERROR);
+        port.write32(PORT_SATA_ERROR, serror);
+        port.write32(PORT_INTERRUPTS, port.read32(PORT_INTERRUPTS));
+        Err(classify(
+            interrupts,
+            serror,
+            port.read32(PORT_TASK_FILE),
+            !done,
+        ))
+    }
+
+    /// Linux `ahci_error_handler` and `ata_eh_recover`: restart an unfrozen
+    /// engine; when a reset is due, hard reset the link (one try per
+    /// `ata_eh_reset_timeouts` entry) and revalidate the disk, up to
+    /// `ATA_EH_DEV_TRIES` times. An error disables the disk.
+    fn recover(&mut self, port: &impl CommandPort, failure: &Failure) -> Result<(), BlockError> {
+        if !failure.frozen {
+            stop_engine(port, self.clock)?;
+            start_engine(port);
         }
-        if !done {
-            self.fault = Some(BlockError::Timeout);
-            return Err(BlockError::Timeout);
+        if !failure.reset {
+            return Ok(());
+        }
+        let mut hotplug = failure.hotplug;
+        let mut last = failure.error.clone();
+        for _ in 0..DEVICE_TRIES {
+            let mut online = None;
+            for timeout in RESET_TIMEOUTS_US {
+                match self.hardreset(port, timeout, hotplug) {
+                    Ok(present) => {
+                        online = Some(present);
+                        break;
+                    }
+                    Err(error) => last = error,
+                }
+            }
+            match online {
+                None => return Err(last),
+                Some(false) => return Err(DETACHED),
+                Some(true) => {}
+            }
+            match self.revalidate(port) {
+                Ok(()) => return Ok(()),
+                Err(error) if error == DETACHED => return Err(error),
+                Err(error) => last = error,
+            }
+            hotplug = false;
+        }
+        Err(last)
+    }
+
+    /// Linux `ahci_do_hardreset` with `sata_link_hardreset`: whether an ATA
+    /// disk is online afterwards.
+    fn hardreset(
+        &mut self,
+        port: &impl CommandPort,
+        timeout_us: u64,
+        hotplug: bool,
+    ) -> Result<bool, BlockError> {
+        let clock = self.clock;
+        let start = clock.try_start().map_err(|_| BlockError::Timeout)?;
+        let elapsed = || clock.try_elapsed_us(start).map_err(|_| BlockError::Timeout);
+        // Its failure is not fatal here, as in Linux.
+        let _ = stop_engine(port, clock);
+        // Clear the D2H reception area to BSY to wait for the new D2H FIS.
+        let mut d2h = [0u8; FIS_BYTES];
+        d2h[0] = FIS_REGISTER_HOST_TO_DEVICE;
+        d2h[2] = STATUS_BUSY;
+        d2h[7] = DEVICE_OBSOLETE;
+        self.commands.bytes_mut()[RECEIVED_D2H..RECEIVED_D2H + FIS_BYTES].copy_from_slice(&d2h);
+        port.write32(PORT_SATA_ERROR, port.read32(PORT_SATA_ERROR));
+        port.write32(PORT_INTERRUPTS, port.read32(PORT_INTERRUPTS));
+        let speed = port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED;
+        port.write32(PORT_SATA_CONTROL, speed | SATA_CONTROL_COMRESET);
+        port.read32(PORT_SATA_CONTROL);
+        clock.delay(COMRESET_HOLD_US);
+        // sata_link_resume
+        let mut resumed = false;
+        let mut control = port.read32(PORT_SATA_CONTROL);
+        for _ in 0..RESUME_TRIES {
+            port.write32(
+                PORT_SATA_CONTROL,
+                control & SATA_CONTROL_SPEED | SATA_CONTROL_RESUMED,
+            );
+            clock.delay(RESUME_SETTLE_US);
+            control = port.read32(PORT_SATA_CONTROL);
+            if control & SATA_CONTROL_RESUME_MASK == SATA_CONTROL_RESUMED {
+                resumed = true;
+                break;
+            }
+        }
+        let result = (|| {
+            if resumed {
+                let timing = if hotplug {
+                    DEBOUNCE_HOTPLUG
+                } else {
+                    DEBOUNCE_NORMAL
+                };
+                debounce(port, clock, timing, timeout_us.saturating_sub(elapsed()?))?;
+                port.write32(PORT_SATA_ERROR, port.read32(PORT_SATA_ERROR));
+            }
+            if port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION != DEVICE_PRESENT {
+                return Ok(false);
+            }
+            // ata_wait_ready with ahci_check_ready.
+            let remaining = timeout_us.saturating_sub(elapsed()?);
+            if !clock.wait(remaining, || {
+                port.read32(PORT_TASK_FILE) as u8 & STATUS_BUSY == 0
+            }) {
+                return Err(BlockError::Timeout);
+            }
+            Ok(true)
+        })();
+        start_engine(port);
+        // ahci_dev_classify: only an ATA disk is the same device.
+        Ok(result? && port.read32(PORT_SIGNATURE) == SIGNATURE_ATA)
+    }
+
+    /// Linux `ata_dev_revalidate`: IDENTIFY again and require the same model,
+    /// serial and capacity (`ata_dev_same_device`).
+    fn revalidate(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
+        let buffer = self.table.physical() + IDENTIFY_DATA as u64;
+        self.internal(port, ATA_IDENTIFY, ATA_SECTOR_BYTES as usize, buffer)?;
+        let data = &self.table.bytes()[IDENTIFY_DATA..IDENTIFY_DATA + ATA_SECTOR_BYTES as usize];
+        let found = identify(data).map_err(|_| DETACHED)?;
+        if found.model != self.identity.model
+            || found.serial != self.identity.serial
+            || found.blocks != self.identity.blocks
+        {
+            return Err(DETACHED);
         }
         Ok(())
     }
@@ -598,7 +1020,9 @@ impl BlockDevice for AhciDisk {
     fn shutdown(&mut self, power_off: bool) -> Result<(), BlockError> {
         self.flush()?;
         if power_off {
-            self.issue(ATA_STANDBY_IMMEDIATE, 0, 0, 0, false)?;
+            let port = self.port;
+            let buffer = self.bounce.physical();
+            self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, buffer)?;
         }
         Ok(())
     }
@@ -611,54 +1035,157 @@ mod tests {
     use alloc::boxed::Box;
     use core::cell::{Cell, RefCell};
 
+    /// How the disk answers the next issued command.
     #[derive(Clone, Copy)]
-    enum Behavior {
-        Complete,
+    enum Fault {
+        /// TFES with this taskfile (status | error << 8).
+        TaskFile(u32),
+        /// The command never completes.
         Timeout,
-        TaskError,
+        /// An interface fatal error with an unrecovered data SError.
+        Interface,
+        /// The disk leaves: PhyRdy changes and the link stays down.
+        Gone,
     }
 
-    struct PortModel {
+    /// A port and link that answer engine, COMRESET and command register
+    /// writes like an AHCI port with one ATA disk.
+    struct Link {
         registers: RefCell<[u32; 32]>,
-        behavior: Cell<Behavior>,
+        faults: RefCell<alloc::collections::VecDeque<Fault>>,
         writes: RefCell<Vec<(usize, u32)>>,
+        issued: Cell<usize>,
+        present: Cell<bool>,
     }
 
-    impl PortModel {
-        fn new(behavior: Behavior) -> Self {
+    const READY: u32 = 0x50;
+
+    impl Link {
+        fn new(faults: &[Fault]) -> Self {
             let mut registers = [0u32; 32];
-            registers[PORT_COMMAND / 4] = COMMAND_START | COMMAND_LIST_RUNNING;
+            registers[PORT_COMMAND / 4] =
+                COMMAND_START | COMMAND_LIST_RUNNING | COMMAND_FIS_RECEIVE | COMMAND_FIS_RUNNING;
+            registers[PORT_TASK_FILE / 4] = READY;
+            registers[PORT_SATA_STATUS / 4] = 0x123;
+            registers[PORT_SATA_CONTROL / 4] = 0x300;
+            registers[PORT_SIGNATURE / 4] = SIGNATURE_ATA;
             Self {
                 registers: RefCell::new(registers),
-                behavior: Cell::new(behavior),
+                faults: RefCell::new(faults.iter().copied().collect()),
                 writes: RefCell::new(Vec::new()),
+                issued: Cell::new(0),
+                present: Cell::new(true),
             }
+        }
+
+        fn writes_to(&self, offset: usize) -> Vec<u32> {
+            self.writes
+                .borrow()
+                .iter()
+                .filter(|(at, _)| *at == offset)
+                .map(|(_, value)| *value)
+                .collect()
         }
     }
 
-    impl CommandPort for PortModel {
+    impl CommandPort for Link {
         fn read32(&self, offset: usize) -> u32 {
-            let mut registers = self.registers.borrow_mut();
-            if registers[PORT_ISSUE / 4] & 1 != 0 {
-                match self.behavior.get() {
-                    Behavior::Complete if offset == PORT_ISSUE => registers[PORT_ISSUE / 4] = 0,
-                    Behavior::TaskError => {
-                        registers[PORT_INTERRUPTS / 4] |= INTERRUPT_TASK_FILE_ERROR;
-                        registers[PORT_TASK_FILE / 4] |= TASK_FILE_ERROR;
-                    }
-                    _ => {}
-                }
-            }
-            registers[offset / 4]
+            self.registers.borrow()[offset / 4]
         }
         fn write32(&self, offset: usize, value: u32) {
             self.writes.borrow_mut().push((offset, value));
             let mut registers = self.registers.borrow_mut();
             match offset {
                 PORT_INTERRUPTS | PORT_SATA_ERROR => registers[offset / 4] &= !value,
+                PORT_COMMAND => {
+                    let mut command = value & !(COMMAND_LIST_RUNNING | COMMAND_FIS_RUNNING);
+                    if value & COMMAND_START != 0 {
+                        command |= COMMAND_LIST_RUNNING;
+                    } else {
+                        // Clearing ST clears PxCI.
+                        registers[PORT_ISSUE / 4] = 0;
+                    }
+                    if value & COMMAND_FIS_RECEIVE != 0 {
+                        command |= COMMAND_FIS_RUNNING;
+                    }
+                    registers[PORT_COMMAND / 4] = command;
+                }
+                PORT_SATA_CONTROL => {
+                    registers[offset / 4] = value;
+                    if value & SATA_CONTROL_DETECTION == SATA_CONTROL_RESET {
+                        registers[PORT_SATA_STATUS / 4] = 0;
+                        registers[PORT_TASK_FILE / 4] = 0x80;
+                    } else if self.present.get() {
+                        registers[PORT_SATA_STATUS / 4] = 0x123;
+                        registers[PORT_TASK_FILE / 4] = READY;
+                    }
+                }
+                PORT_ISSUE => {
+                    assert_ne!(registers[PORT_COMMAND / 4] & COMMAND_LIST_RUNNING, 0);
+                    self.issued.set(self.issued.get() + 1);
+                    match self.faults.borrow_mut().pop_front() {
+                        None => registers[PORT_TASK_FILE / 4] = READY,
+                        Some(fault) => {
+                            registers[PORT_ISSUE / 4] = value;
+                            match fault {
+                                Fault::TaskFile(task_file) => {
+                                    registers[PORT_TASK_FILE / 4] = task_file;
+                                    registers[PORT_INTERRUPTS / 4] |= INTERRUPT_TASK_FILE_ERROR;
+                                }
+                                Fault::Timeout => registers[PORT_TASK_FILE / 4] = 0xd0,
+                                Fault::Interface => {
+                                    registers[PORT_INTERRUPTS / 4] |= INTERRUPT_INTERFACE_FATAL;
+                                    registers[PORT_SATA_ERROR / 4] |= SERROR_DATA;
+                                }
+                                Fault::Gone => {
+                                    self.present.set(false);
+                                    registers[PORT_INTERRUPTS / 4] |= INTERRUPT_PHY_READY_CHANGE;
+                                    registers[PORT_SATA_ERROR / 4] |= SERROR_PHY_READY_CHANGE;
+                                    registers[PORT_SATA_STATUS / 4] = 0;
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => registers[offset / 4] = value,
             }
         }
+    }
+
+    /// IDENTIFY DEVICE data for an LBA48 disk.
+    fn identify_page(serial: &str, blocks: u64) -> [u8; 512] {
+        let mut page = [0u8; 512];
+        let mut put = |index: usize, value: u16| {
+            page[2 * index..2 * index + 2].copy_from_slice(&value.to_le_bytes())
+        };
+        for (words, text) in [(IDENTIFY_SERIAL, serial), (IDENTIFY_MODEL, "Fixture SSD")] {
+            let mut bytes = text.as_bytes().to_vec();
+            bytes.resize(2 * words.len(), b' ');
+            for (index, pair) in words.zip(bytes.chunks(2)) {
+                put(index, u16::from_be_bytes([pair[0], pair[1]]));
+            }
+        }
+        put(IDENTIFY_COMMANDS_2, WORD_VALID | COMMANDS_2_LBA48);
+        for (offset, index) in IDENTIFY_LBA48_SECTORS.enumerate() {
+            put(index, (blocks >> (16 * offset)) as u16);
+        }
+        page
+    }
+
+    /// A disk identified from `identify_page`, answering revalidation with
+    /// `page`, on a virtual one-tick-per-microsecond clock.
+    fn recovering(page: [u8; 512]) -> (Fixture, crate::test_clock::Guard) {
+        let clock = crate::test_clock::virtualize();
+        let mut fixture = Fixture::new();
+        let found = identify(&identify_page("S1", 1024)).unwrap();
+        fixture.disk.identity.model = found.model;
+        fixture.disk.identity.serial = found.serial;
+        fixture.disk.identity.blocks = found.blocks;
+        fixture.disk.clock = Clock {
+            ticks_per_microsecond: 1,
+        };
+        fixture.disk.table.bytes_mut()[IDENTIFY_DATA..IDENTIFY_DATA + 512].copy_from_slice(&page);
+        (fixture, clock)
     }
 
     struct Fixture {
@@ -713,61 +1240,129 @@ mod tests {
     }
 
     #[test]
-    fn timeout_or_task_error_never_restarts_or_reuses_port_dma() {
-        for behavior in [Behavior::Timeout, Behavior::TaskError] {
-            let mut fixture = Fixture::new();
-            let model = PortModel::new(behavior);
-            let started = fixture.disk.clock.try_start().unwrap();
-            let error = match behavior {
-                Behavior::Timeout => BlockError::Timeout,
-                _ => BlockError::Device {
-                    status: TASK_FILE_ERROR,
-                },
-            };
+    fn device_errors_restart_the_engine_and_follow_ata_eh_worth_retry() {
+        // An aborted read is retried after the engine restarts.
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        let link = Link::new(&[Fault::TaskFile(0x0451)]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Ok(())
+        );
+        assert_eq!(link.issued.get(), 2);
+        let starts: Vec<u32> = link
+            .writes_to(PORT_COMMAND)
+            .iter()
+            .map(|command| command & COMMAND_START)
+            .collect();
+        assert_eq!(starts, [0, COMMAND_START]);
+        assert!(link.writes_to(PORT_SATA_CONTROL).is_empty());
+        assert!(fixture.disk.fault.is_none());
+
+        // A media error is not retried, and the disk stays usable.
+        let link = Link::new(&[Fault::TaskFile(0x4051)]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Err(BlockError::Device { status: 0x4051 })
+        );
+        assert_eq!(link.issued.get(), 1);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Ok(())
+        );
+
+        // Nor is a plain device error on a command that is not I/O.
+        let link = Link::new(&[Fault::TaskFile(0x0451)]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false),
+            Err(BlockError::Device { status: 0x0451 })
+        );
+        assert_eq!(link.issued.get(), 1);
+
+        // I/O is retried five times, as sd allows.
+        let link = Link::new(&[Fault::TaskFile(0x0451); 7]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 0, 1, 512, true),
+            Err(BlockError::Device { status: 0x0451 })
+        );
+        assert_eq!(link.issued.get(), 6);
+        assert!(fixture.disk.fault.is_none());
+    }
+
+    #[test]
+    fn timeouts_and_link_errors_hard_reset_revalidate_and_retry() {
+        for fault in [Fault::Timeout, Fault::Interface, Fault::TaskFile(0x8051)] {
+            let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+            fixture.disk.bounce.bytes_mut()[..512].fill(0x44);
+            let link = Link::new(&[fault]);
             assert_eq!(
                 fixture
                     .disk
-                    .issue_on(&model, ATA_READ_DMA_EXT, 0, 1, 512, false),
-                Err(error.clone())
+                    .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true),
+                Ok(())
             );
-            if matches!(behavior, Behavior::Timeout) {
-                assert!(fixture.disk.clock.try_elapsed_us(started).unwrap() >= 1000);
-            }
-            // A still-running command engine never supplies an acknowledged
-            // reset merely because the CPU's timeout elapsed.
-            assert_eq!(
-                model.registers.borrow()[PORT_COMMAND / 4],
-                COMMAND_START | COMMAND_LIST_RUNNING
-            );
+            // The write, the revalidating IDENTIFY, and the write again.
+            assert_eq!(link.issued.get(), 3);
+            let controls: Vec<u32> = link
+                .writes_to(PORT_SATA_CONTROL)
+                .iter()
+                .map(|control| control & 0xf0f)
+                .collect();
+            assert_eq!(controls, [0x301, 0x300]);
+            // The retried write still carries its data.
             assert!(
-                !model
-                    .writes
-                    .borrow()
+                fixture.disk.bounce.bytes()[..512]
                     .iter()
-                    .any(|(offset, _)| *offset == PORT_COMMAND)
+                    .all(|byte| *byte == 0x44)
             );
-            fixture.disk.bounce.bytes_mut().fill(0x9d); // Late device DMA.
-            let commands = fixture.disk.commands.bytes().to_vec();
-            let table = fixture.disk.table.bytes().to_vec();
-            let writes = model.writes.borrow().len();
-            model.behavior.set(Behavior::Complete);
-            model.registers.borrow_mut()[PORT_ISSUE / 4] = 0;
+            assert_eq!(fixture.disk.table.bytes()[2], ATA_WRITE_DMA_EXT);
+            assert_eq!(
+                fixture.disk.commands.bytes()[RECEIVED_D2H..RECEIVED_D2H + 8],
+                [0x27, 0, 0x80, 0, 0, 0, 0, 0xa0]
+            );
+            assert!(fixture.disk.fault.is_none());
+        }
+    }
+
+    #[test]
+    fn a_disk_that_leaves_or_changes_is_disabled() {
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        let link = Link::new(&[Fault::Gone]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Err(DETACHED)
+        );
+        assert_eq!(fixture.disk.fault, Some(DETACHED));
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Err(DETACHED)
+        );
+        assert_eq!(link.issued.get(), 1);
+
+        for page in [identify_page("S2", 1024), identify_page("S1", 2048)] {
+            let (mut fixture, _clock) = recovering(page);
+            let link = Link::new(&[Fault::Timeout]);
             assert_eq!(
                 fixture
                     .disk
-                    .issue_on(&model, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false),
-                Err(error.clone())
+                    .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+                Err(DETACHED)
             );
-            assert_eq!(fixture.disk.write(0, &[0x44; 512]), Err(error.clone()));
-            let mut output = [0x66; 512];
-            assert_eq!(fixture.disk.read(0, &mut output), Err(error.clone()));
-            assert_eq!(fixture.disk.flush(), Err(error));
-            assert_eq!(output, [0x66; 512]);
-            assert!(fixture.disk.bounce.bytes().iter().all(|byte| *byte == 0x9d));
-            assert_eq!(fixture.disk.commands.bytes(), commands);
-            assert_eq!(fixture.disk.table.bytes(), table);
-            assert_eq!(model.writes.borrow().len(), writes);
-            assert!(fixture.disk.port.read32(PORT_ISSUE) == 0);
+            assert_eq!(link.issued.get(), 2);
+            assert_eq!(fixture.disk.fault, Some(DETACHED));
         }
     }
 
@@ -851,37 +1446,9 @@ mod tests {
     }
 
     #[test]
-    fn host_bus_and_interface_errors_fail_the_command_at_once() {
-        let mut fixture = Fixture::new();
-        let model = PortModel::new(Behavior::Timeout);
-        model.registers.borrow_mut()[PORT_INTERRUPTS / 4] = 0;
-        struct Fatal<'a>(&'a PortModel);
-        impl CommandPort for Fatal<'_> {
-            fn read32(&self, offset: usize) -> u32 {
-                if offset == PORT_INTERRUPTS {
-                    return INTERRUPT_INTERFACE_FATAL;
-                }
-                self.0.read32(offset)
-            }
-            fn write32(&self, offset: usize, value: u32) {
-                self.0.write32(offset, value)
-            }
-        }
-        assert_eq!(
-            fixture
-                .disk
-                .issue_on(&Fatal(&model), ATA_READ_DMA_EXT, 0, 1, 512, false),
-            Err(BlockError::Device {
-                status: INTERRUPT_INTERFACE_FATAL
-            })
-        );
-        assert!(fixture.disk.fault.is_some());
-    }
-
-    #[test]
     fn acknowledged_completions_keep_the_real_command_path_usable() {
         let mut fixture = Fixture::new();
-        let model = PortModel::new(Behavior::Complete);
+        let model = Link::new(&[]);
         fixture
             .disk
             .issue_on(&model, ATA_WRITE_DMA_EXT, 7, 1, 512, true)
