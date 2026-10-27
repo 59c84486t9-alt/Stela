@@ -1,5 +1,6 @@
 //! Build the pinned freestanding ACPICA implementation only when requested,
 //! from Linux's unchanged `drivers/acpi/acpica` with Stela's host header.
+use crate::tools::{rust_archiver, selected};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -38,21 +39,8 @@ fn expose(source: &Path, link: &Path) {
     }
 }
 
-fn run(command: &mut Command) {
-    let status = command.status().unwrap_or_else(|error| {
-        panic!(
-            "cannot run {:?} for ACPICA ({error}); install clang or set CC and AR",
-            command.get_program()
-        )
-    });
-    assert!(status.success(), "ACPICA tool failed: {command:?}");
-}
-
 pub fn build() {
-    println!("cargo:rerun-if-env-changed=CC");
-    println!("cargo:rerun-if-env-changed=AR");
     println!("cargo:rerun-if-env-changed=STELA_ACPI_SANITIZE");
-    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     if env::var_os("CARGO_FEATURE_NATIVE_ACPI").is_none() {
         return;
     }
@@ -71,30 +59,12 @@ pub fn build() {
     let coff = target == "x86_64-unknown-uefi";
     let sanitize = env::var_os("STELA_ACPI_SANITIZE").is_some();
     assert!(!sanitize || !coff, "sanitizers are hosted test tools");
-    let c_target = if coff {
-        "x86_64-pc-windows-msvc"
-    } else {
-        &target
-    };
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     // ACPICA includes `acpi/...`; this root exposes Linux's `include/acpi`
     // alone, so no other Linux header can stand in for a C library one.
     let headers = out.join("acpica-include");
     fs::create_dir_all(&headers).unwrap();
     expose(Path::new(HEADERS), &headers.join("acpi"));
-    let compiler = env::var_os("CC").unwrap_or_else(|| "clang".into());
-    let archiver = env::var_os("AR").unwrap_or_else(|| {
-        let output = Command::new(env::var_os("RUSTC").unwrap())
-            .args(["--print", "sysroot"])
-            .output()
-            .expect("find Rust toolchain archiver");
-        assert!(output.status.success());
-        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
-            .join("lib/rustlib")
-            .join(env::var("HOST").unwrap())
-            .join("bin/llvm-ar")
-            .into_os_string()
-    });
     // The debugger and resource dump are outside the configured interpreter.
     let mut sources: Vec<_> = fs::read_dir(ACPICA)
         .unwrap()
@@ -108,87 +78,68 @@ pub fn build() {
     sources.sort();
     sources.push(base.join("bridge.c"));
     sources.push(base.join("libc.c"));
-    let mut objects = Vec::new();
-    for source in sources {
-        let object = out
-            .join(source.file_stem().unwrap())
-            .with_extension(if coff { "obj" } else { "o" });
-        let mut command = Command::new(&compiler);
-        command
-            .args([
-                "-target",
-                c_target,
-                "-std=c11",
-                "-O2",
-                "-ffreestanding",
-                "-fno-builtin",
-                "-fno-strict-aliasing",
-                "-fwrapv",
-                "-fno-stack-protector",
-                "-fno-asynchronous-unwind-tables",
-                "-fno-unwind-tables",
-                "-mno-red-zone",
-                "-mno-sse",
-                "-mno-sse2",
-                "-mno-mmx",
-                "-DSTELA_ACPI",
-                "-DACPI_PCI_CONFIGURED",
-                "-Werror=implicit-function-declaration",
-            ])
-            .arg("-I")
-            .arg(&headers)
-            .arg("-I")
-            .arg(ACPICA)
-            .arg("-I")
-            .arg(base.join("include"))
-            .arg("-I")
-            .arg(&base);
-        if target == "x86_64-apple-darwin" {
-            command.arg(format!(
-                "-mmacosx-version-min={}",
-                env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "10.12".into())
-            ));
-        }
-        if sanitize {
-            command.args([
-                "-fsanitize=address,undefined",
-                "-fno-sanitize-recover=all",
-                "-fno-omit-frame-pointer",
-            ]);
-        }
-        if coff {
-            command.args(["-mno-stack-arg-probe", "-mno-incremental-linker-compatible"]);
-        }
-        command.arg("-c").arg(&source).arg("-o").arg(&object);
-        run(&mut command);
-        objects.push(object);
+    let mut build = cc::Build::new();
+    if !selected("CC") {
+        build.compiler("clang");
     }
-    let archive = out.join("libstela_acpica.a");
-    let _ = fs::remove_file(&archive);
-    run(Command::new(archiver)
-        .arg("crs")
-        .arg(&archive)
-        .args(&objects));
-    println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=stela_acpica");
+    build
+        .std("c11")
+        .opt_level(2)
+        .debug(false)
+        .warnings(false)
+        .flag("-ffreestanding")
+        .flag("-fno-builtin")
+        .flag("-fno-strict-aliasing")
+        .flag("-fwrapv")
+        .flag("-fno-stack-protector")
+        .flag("-fno-asynchronous-unwind-tables")
+        .flag("-fno-unwind-tables")
+        .flag("-mno-red-zone")
+        .flag("-mno-sse")
+        .flag("-mno-sse2")
+        .flag("-mno-mmx")
+        .flag("-Werror=implicit-function-declaration")
+        .define("STELA_ACPI", None)
+        .define("ACPI_PCI_CONFIGURED", None)
+        .include(&headers)
+        .include(ACPICA)
+        .include(base.join("include"))
+        .include(&base)
+        .files(&sources);
+    if coff {
+        // ACPICA's UEFI objects are COFF with the Win64 C ABI; clang uses
+        // this last target over the one cc derives.
+        build
+            .flag("--target=x86_64-pc-windows-msvc")
+            .flag("-mno-stack-arg-probe")
+            .flag("-mno-incremental-linker-compatible");
+        if !selected("AR") {
+            build.archiver(rust_archiver());
+        }
+    }
+    if sanitize {
+        build
+            .flag("-fsanitize=address,undefined")
+            .flag("-fno-sanitize-recover=all")
+            .flag("-fno-omit-frame-pointer");
+    }
+    build.compile("stela_acpica");
     if sanitize {
         // Rust links with -nodefaultlibs. Select this compiler's runtime explicitly
         // instead of accidentally mixing a different linker driver's sanitizer.
+        let compiler = build.get_compiler();
+        let print = |argument: &str| {
+            let output = Command::new(compiler.path())
+                .arg(argument)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+        };
         let runtime = if target == "x86_64-apple-darwin" {
-            let output = Command::new(&compiler)
-                .arg("--print-resource-dir")
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
-                .join("lib/darwin/libclang_rt.asan_osx_dynamic.dylib")
+            print("--print-resource-dir").join("lib/darwin/libclang_rt.asan_osx_dynamic.dylib")
         } else {
-            let output = Command::new(&compiler)
-                .arg("--print-file-name=libclang_rt.asan-x86_64.so")
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+            print("--print-file-name=libclang_rt.asan-x86_64.so")
         };
         assert!(
             runtime.is_file(),

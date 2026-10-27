@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 # Native x86 ACPICA interpreter; builds freestanding C with clang.
-native-acpi = []
+native-acpi = ["dep:cc"]
 # Common native Linux kernel services; selecting this attaches no GPU.
 linux-kernel = ["dep:cc"]
 # `block::RamDisk`, the in-memory disk the runtime's tests run models on.

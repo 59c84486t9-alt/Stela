@@ -51,7 +51,20 @@ pub fn tables() -> PathBuf {
     let generator = staging.join(format!("gen_crc32table{}", env::consts::EXE_SUFFIX));
     // This is upstream host C, not a kernel translation unit. Its original
     // main has unused argc/argv, so retain -Wall rather than add -Wextra.
-    run(cc::Build::new()
+    let mut build = cc::Build::new();
+    // Clang, as for the port itself, unless the caller chose a host compiler:
+    // MSVC's cl takes none of these GCC-style options.
+    let chosen = [
+        "HOST_CC",
+        &format!("CC_{host}"),
+        &format!("CC_{}", host.replace('-', "_")),
+    ]
+    .iter()
+    .any(|name| env::var_os(name).is_some());
+    if !chosen {
+        build.compiler("clang");
+    }
+    run(build
         .host(&host)
         .target(&host)
         .cargo_metadata(false)

@@ -18,6 +18,13 @@ mod nouveau_firmware;
 #[cfg(feature = "nvidia-port")]
 #[path = "build/nvidia.rs"]
 mod nvidia;
+#[cfg(any(
+    feature = "native-acpi",
+    feature = "nvidia-port",
+    feature = "linux-kernel"
+))]
+#[path = "build/tools.rs"]
+mod tools;
 
 fn main() {
     nouveau_firmware::validate();
