@@ -120,6 +120,13 @@ const IDENTIFY_SERIAL: core::ops::Range<usize> = 10..20;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
 const COMMANDS_2_LBA48: u16 = 1 << 10;
+const COMMANDS_2_FLUSH_EXT: u16 = 1 << 13;
+/// Words 83 and 87 are valid when bits 15:14 read 01b.
+const WORD_VALID_MASK: u16 = 0xc000;
+const WORD_VALID: u16 = 0x4000;
+const IDENTIFY_ENABLED_1: usize = 85;
+const ENABLED_1_WRITE_CACHE: u16 = 1 << 5;
+const IDENTIFY_DEFAULTS: usize = 87;
 const IDENTIFY_LBA48_SECTORS: core::ops::Range<usize> = 100..104;
 const IDENTIFY_SECTOR_SIZE: usize = 106;
 const SECTOR_SIZE_VALID_MASK: u16 = 0xc000;
@@ -142,6 +149,7 @@ const COMMAND_PRDT_SHIFT: u32 = 16;
 
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
+const ATA_FLUSH_CACHE: u8 = 0xe7;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
 const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
 const ATA_IDENTIFY: u8 = 0xec;
@@ -182,6 +190,27 @@ pub struct AhciDisk {
     /// Failed commands require acknowledged reset and re-identification.
     /// The queue, FIS and bounce allocations remain reserved for this boot.
     fault: Option<BlockError>,
+    /// The cache flush command, or `None` when the write cache is off.
+    flush: Option<u8>,
+}
+
+/// Linux's flush: none unless the write cache is enabled
+/// (`ata_id_wcache_enabled`, which sd reads as WCE), then FLUSH CACHE EXT
+/// when the disk has it (`ata_id_has_flush_ext`), else FLUSH CACHE.
+fn flush_command(word: impl Fn(usize) -> u16) -> Option<u8> {
+    if word(IDENTIFY_DEFAULTS) & WORD_VALID_MASK != WORD_VALID
+        || word(IDENTIFY_ENABLED_1) & ENABLED_1_WRITE_CACHE == 0
+    {
+        return None;
+    }
+    let commands = word(IDENTIFY_COMMANDS_2);
+    Some(
+        if commands & WORD_VALID_MASK == WORD_VALID && commands & COMMANDS_2_FLUSH_EXT != 0 {
+            ATA_FLUSH_CACHE_EXT
+        } else {
+            ATA_FLUSH_CACHE
+        },
+    )
 }
 
 /// The disks behind one controller, and the ports that failed on their own.
@@ -386,6 +415,7 @@ impl AhciDisk {
             clock,
             command_timeout_us: COMMAND_TIMEOUT_US,
             fault: None,
+            flush: None,
         };
         disk.issue(ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, false)?;
         let data = disk.bounce.bytes();
@@ -419,6 +449,7 @@ impl AhciDisk {
         {
             return Err(BlockError::Unsupported("SATA logical sector size"));
         }
+        disk.flush = flush_command(word);
         disk.identity.serial = string(IDENTIFY_SERIAL);
         disk.identity.model = string(IDENTIFY_MODEL);
         disk.identity.blocks = blocks;
@@ -556,7 +587,10 @@ impl BlockDevice for AhciDisk {
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
-        self.issue(ATA_FLUSH_CACHE_EXT, 0, 0, 0, false)
+        match self.flush {
+            Some(command) => self.issue(command, 0, 0, 0, false),
+            None => self.ready(),
+        }
     }
 
     /// Flush, and before power-off spin the disk down, as Linux libata's
@@ -670,6 +704,7 @@ mod tests {
                     },
                     command_timeout_us: 1000,
                     fault: None,
+                    flush: Some(ATA_FLUSH_CACHE_EXT),
                 },
                 _registers: registers,
                 _memory: memory,
@@ -869,5 +904,43 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn flush_follows_the_write_cache_and_the_extended_command_like_linux() {
+        let identify = |defaults: u16, enabled: u16, commands: u16| {
+            move |index: usize| match index {
+                IDENTIFY_DEFAULTS => defaults,
+                IDENTIFY_ENABLED_1 => enabled,
+                IDENTIFY_COMMANDS_2 => commands,
+                _ => 0,
+            }
+        };
+        let cache = ENABLED_1_WRITE_CACHE;
+        let ext = WORD_VALID | COMMANDS_2_LBA48 | COMMANDS_2_FLUSH_EXT;
+        assert_eq!(
+            flush_command(identify(WORD_VALID, cache, ext)),
+            Some(ATA_FLUSH_CACHE_EXT)
+        );
+        // Without the extended command, or with word 83 unsigned.
+        assert_eq!(
+            flush_command(identify(WORD_VALID, cache, ext & !COMMANDS_2_FLUSH_EXT)),
+            Some(ATA_FLUSH_CACHE)
+        );
+        assert_eq!(
+            flush_command(identify(WORD_VALID, cache, ext & !WORD_VALID)),
+            Some(ATA_FLUSH_CACHE)
+        );
+        // A disabled or unreported write cache needs no flush.
+        assert_eq!(flush_command(identify(WORD_VALID, 0, ext)), None);
+        assert_eq!(flush_command(identify(0, cache, ext)), None);
+
+        let mut fixture = Fixture::new();
+        fixture.disk.flush = None;
+        let issued = fixture.disk.port.read32(PORT_ISSUE);
+        assert_eq!(fixture.disk.flush(), Ok(()));
+        assert_eq!(fixture.disk.port.read32(PORT_ISSUE), issued);
+        fixture.disk.fault = Some(BlockError::Timeout);
+        assert_eq!(fixture.disk.flush(), Err(BlockError::Timeout));
     }
 }
