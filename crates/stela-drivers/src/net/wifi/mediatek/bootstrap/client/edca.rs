@@ -223,6 +223,55 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
+    /// Whether the firmware holds the BSS in dynamic power save.
+    pub fn power_save(&self) -> bool {
+        self.state().power_save
+    }
+
+    /// Linux `mt7925_mcu_uni_bss_ps` for BSS_CHANGED_PS: the firmware saves
+    /// power between beacons while `enable`, waking for traffic itself.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn set_power_save_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        enable: bool,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let body = profile.power_save_request(enable).map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.power_save = enable;
+        Ok(())
+    }
+
     /// Linux `mt7925_mcu_set_rssimonitor` for BSS_CHANGED_CQM: firmware RSSI
     /// events past `threshold` dBm with `hysteresis`, or none for `None`.
     /// Firmware without RSSI_NOTIFY_EVT_EN, for which Linux leaves

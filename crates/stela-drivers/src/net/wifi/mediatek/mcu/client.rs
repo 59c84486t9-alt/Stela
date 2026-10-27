@@ -252,6 +252,15 @@ impl Profile {
         t[6] = self.dtim_period;
         Ok(b)
     }
+    /// Linux `mt7925_mcu_uni_bss_ps`: the BSS in dynamic power save, or
+    /// awake.
+    pub fn power_save_request(self, enable: bool) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let t = tlv(&mut b, 21, 8);
+        t[4] = if enable { 2 } else { 0 };
+        Ok(b)
+    }
     /// Linux `mt7925_mcu_set_rssimonitor`: firmware RSSI events above
     /// `high` or below `low` dBm while `enable`.
     pub fn rssi_monitor_request(self, enable: bool, high: i8, low: i8) -> Result<Vec<u8>, Error> {

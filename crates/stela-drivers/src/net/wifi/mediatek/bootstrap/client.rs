@@ -221,6 +221,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     cqm: cqm::Cqm,
     /// The AP's announced channel switch.
     csa: csa::State,
+    /// The firmware holds the BSS in dynamic power save.
+    power_save: bool,
     /// The channel the firmware operates when a beacon narrowed it.
     channel: Option<ChannelDefinition>,
     /// A channel a beacon changed, not yet sent; `None` inside when the
@@ -312,6 +314,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 slot_time: None,
                 cqm: cqm::Cqm::default(),
                 csa: csa::State::default(),
+                power_save: false,
                 channel: None,
                 channel_change: None,
                 authentication_deadline: None,
@@ -1207,6 +1210,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.channel = None;
         s.channel_change = None;
         s.csa = csa::State::default();
+        s.power_save = false;
         s.management = None;
         s.pmf_selected = None;
         s.pmf_authentication = None;

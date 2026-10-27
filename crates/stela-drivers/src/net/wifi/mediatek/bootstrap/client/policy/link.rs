@@ -301,6 +301,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Ok(result?)
     }
+    /// The OS's power save setting, on by default as Linux's
+    /// CONFIG_CFG80211_DEFAULT_PS; it applies while the port is open.
+    pub fn set_power_save(&mut self, enabled: bool) {
+        self.state_mut().client.set_power_save(enabled);
+    }
     /// Set or clear the OS's interworking QoS Map, which classifies data
     /// frames' DSCP as `cfg80211_classify8021d` does.
     pub fn set_qos_map(&mut self, map: Option<&[u8]>) -> Result<(), LinkControlError> {
@@ -447,6 +452,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 Err(error) => {
                     soft_rx = false;
                     failure.get_or_insert(error);
+                }
+            }
+        }
+        // ieee80211_recalc_ps_vif: power save while the authorized port is
+        // up and the OS allows it.
+        if Self::active(s) {
+            let enable = Self::up(s) && s.client.power_save_allowed();
+            if enable != s.client.client.power_save() {
+                match s.client.update_power_save(enable) {
+                    Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
+                    Err(error) => {
+                        soft_rx = false;
+                        failure.get_or_insert(error);
+                    }
                 }
             }
         }
@@ -1229,6 +1248,8 @@ mod tests {
         link.service().unwrap();
         link.configure().unwrap();
         secure(&mut link);
+        // The authorized port enters power save first.
+        link.service().unwrap();
         // A beacon turning on Short Slot Time moves the BSS to 9 us, as
         // mt7925_mcu_set_timing sends it.
         let mut short = beacon.clone();

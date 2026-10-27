@@ -104,6 +104,8 @@ pub struct ManagedClient<I: BarIo, Q: QueueIo, C: 'static> {
     observed: Vec<Observed>,
     /// The OS's interworking QoS Map, `sdata->qos_map`.
     qos_map: Option<station::data::QosMap>,
+    /// The OS's power save setting, `ifmgd->powersave`.
+    power_save: bool,
 }
 fn copy_bss(b: &scan::result::Bss) -> Result<scan::result::Bss, PolicyError> {
     fn copy(v: &[u8]) -> Result<Vec<u8>, PolicyError> {
@@ -617,6 +619,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             peer: None,
             observed: Vec::new(),
             qos_map: None,
+            // CONFIG_CFG80211_DEFAULT_PS
+            power_save: true,
         })
     }
     fn live(&self) -> Result<(), PolicyError> {
@@ -867,6 +871,42 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         unsafe {
             self.client
                 .set_rssi_monitor_modern(&mut self.authority, admission, monitor)
+        }
+        .map_err(PolicyError::Client)
+    }
+    /// The OS's power save setting, as `iw set power_save` changes it.
+    pub fn set_power_save(&mut self, enabled: bool) {
+        self.power_save = enabled;
+    }
+    /// `ieee80211_powersave_allowed` once the port is authorized: the OS
+    /// enabled power save and the AP gave a valid AID.
+    pub fn power_save_allowed(&self) -> bool {
+        self.power_save
+            && self
+                .client
+                .modern_context()
+                .is_some_and(|context| context.response().power_save_allowed)
+    }
+    /// `ieee80211_recalc_ps_vif`: tell the firmware whether to save power.
+    pub fn update_power_save(&mut self, enable: bool) -> Result<(), PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .set_power_save_modern(&mut self.authority, admission, enable)
         }
         .map_err(PolicyError::Client)
     }

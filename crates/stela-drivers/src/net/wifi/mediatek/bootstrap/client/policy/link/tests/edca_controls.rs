@@ -258,6 +258,36 @@ fn a_new_association_forgets_the_last_aps_channel_and_timing() {
 }
 
 #[test]
+fn power_save_follows_the_authorized_port_like_ieee80211_recalc_ps_vif() {
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    assert!(!link.state().client.client.power_save());
+    secure(&mut link);
+    link.service().unwrap();
+    let last = || {
+        let response = model.response.lock().unwrap();
+        response.client_commands.last().unwrap().clone()
+    };
+    // mt7925_mcu_uni_bss_ps: the PS TLV in dynamic power save.
+    let command = last();
+    assert_eq!(
+        (&command[48 + 4..48 + 6], command[48 + 8]),
+        (&[21, 0][..], 2)
+    );
+    assert!(link.state().client.client.power_save());
+    link.set_power_save(false);
+    link.service().unwrap();
+    let command = last();
+    assert_eq!(
+        (&command[48 + 4..48 + 6], command[48 + 8]),
+        (&[21, 0][..], 0)
+    );
+    assert!(!link.state().client.client.power_save());
+    assert!(link.carrier());
+    stop(&mut link, &model);
+}
+
+#[test]
 fn rssi_monitor_without_firmware_rssi_events_watches_beacons_like_mac80211() {
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
