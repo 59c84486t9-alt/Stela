@@ -8,12 +8,22 @@ mod device_access;
 mod device_read;
 mod device_write;
 mod exclusive;
+// The profiles' reports belong to the hosted runtime, which only an Intel
+// Mac builds (`crate::hosted`); elsewhere the engine records them unread.
 #[cfg(all(feature = "std", feature = "native-profile"))]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub(crate) mod floating_profile;
 mod guarded;
 mod hosted;
 pub mod installed_code;
 #[cfg(all(feature = "std", feature = "native-profile"))]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub(crate) mod metrics;
 mod monitor;
 mod native_timing;
