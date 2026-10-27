@@ -116,6 +116,8 @@ const RCTL_EN: u32 = 1 << 1;
 const RCTL_SBP: u32 = 1 << 2;
 const RCTL_LPE: u32 = 1 << 5;
 const RXDCTL_ENABLE: u32 = 1 << 25;
+const TCTL_EN: u32 = 1 << 1;
+const DRV_LOAD: u32 = 1 << 28;
 /// igc_reset: the 34 KiB receive packet buffer less one standard frame
 /// (1500 MTU, header, FCS and VLAN tag) and one 9728-byte jumbo frame,
 /// at 16-byte granularity; XON resumes 16 bytes below it.
@@ -377,6 +379,23 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         self.registers.write(EIMC, u32::MAX);
         self.read(ICR)?;
         Ok(())
+    }
+
+    /// Linux igc_down's register sequence: stop receive and transmit, give
+    /// in-flight frames 10 ms, then igc_reset's MAC reset after the bus master
+    /// drain. Only a completed reset proves the controller writes no ring.
+    pub(super) fn stop(&self) -> Result<(), BlockError> {
+        self.modify(RCTL, RCTL_EN, 0)?;
+        self.modify(TCTL, TCTL_EN, 0)?;
+        self.read(STATUS)?;
+        self.timer.delay(10_000);
+        self.reset()
+    }
+
+    /// igc_release_hw_control: hand the controller back to manageability
+    /// firmware once the driver no longer owns it.
+    pub(super) fn release_control(&self) -> Result<(), BlockError> {
+        self.modify(CTRL_EXT, DRV_LOAD, 0)
     }
 
     fn put_hw_semaphore(&self) -> Result<(), BlockError> {
@@ -712,7 +731,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             1 << 6,
         )?;
         self.modify(PHPM, 1 << 5, 0)?;
-        self.modify(CTRL_EXT, 0, 1 << 28)?;
+        self.modify(CTRL_EXT, 0, DRV_LOAD)?;
         // Explicit no-EEE profile: neither inherited LPI nor EEE advertisements.
         self.modify(IPCNFG, 0x1c, 0)?;
         self.modify(EEER, 7 << 16, 0)?;
@@ -1257,6 +1276,48 @@ pub(super) mod tests {
         model.state.borrow_mut().registers.insert(STATUS, u32::MAX);
         assert!(statistics.accumulate(&model).is_err());
         assert_eq!(statistics, before);
+    }
+
+    #[test]
+    fn stop_disables_both_directions_before_the_reset_and_release_returns_control() {
+        let model = Model::ready(false);
+        {
+            let mut state = model.state.borrow_mut();
+            state.registers.extend([
+                (RCTL, RCTL_EN | 1 << 15),
+                (TCTL, TCTL_EN | 1 << 3),
+                (CTRL_EXT, DRV_LOAD | 1),
+            ]);
+        }
+        let hw = Hardware::new(&model, &model).unwrap();
+        hw.stop().unwrap();
+        hw.release_control().unwrap();
+        let state = model.state.borrow();
+        let position = |entry| state.writes.iter().position(|&w| w == entry).unwrap();
+        let reset = state
+            .writes
+            .iter()
+            .position(|&(r, v)| r == CTRL && v & MAC_RESET != 0)
+            .unwrap();
+        assert!(position((RCTL, 1 << 15)) < reset);
+        assert!(position((TCTL, 1 << 3)) < reset);
+        assert_eq!(state.registers[&CTRL_EXT], 1);
+        assert!(model.elapsed.get() >= 20_000);
+        drop(state);
+
+        // An incomplete drain or reset is never a stop.
+        for stuck in [0, 1] {
+            let model = Model::ready(false);
+            if stuck == 0 {
+                model.master_stuck.set(true);
+            } else {
+                model.reset_stuck.set(true);
+            }
+            assert_eq!(
+                Hardware::new(&model, &model).unwrap().stop(),
+                Err(BlockError::Timeout)
+            );
+        }
     }
 
     #[test]

@@ -32,7 +32,10 @@ use crate::{
     registers,
 };
 use alloc::{format, string::String, vec::Vec};
-use core::sync::atomic::{Ordering, fence};
+use core::{
+    mem::ManuallyDrop,
+    sync::atomic::{Ordering, fence},
+};
 
 const VENDOR: u16 = 0x8086;
 /// The I220, I221, I225 and I226 parts with a programmed NVM (`igc_hw.h`).
@@ -41,6 +44,7 @@ const DEVICES: [u16; 14] = [
     0x125d, 0x125e,
 ];
 
+const STATUS: usize = 0x0008;
 const RCTL: usize = 0x0100;
 const TCTL: usize = 0x0400;
 const RAL: usize = 0x5400;
@@ -63,6 +67,10 @@ const TXDCTL: usize = 0xe028;
 const REGISTER_BYTES: u64 = 0x1_2018; // Includes EERD for validated programmed NVM.
 
 const RAH_AV: u32 = 1 << 31;
+const STATUS_TXOFF: u32 = 1 << 4;
+/// igc_clean_tx_irq's hang check: a descriptor the controller has held this
+/// long, scaled by igc_watchdog_task's tx_timeout_factor at 10 Mb/s.
+const TRANSMIT_HANG_US: u64 = 1_000_000;
 const RCTL_EN: u32 = 1 << 1;
 const RCTL_MPE: u32 = 1 << 4;
 const RCTL_BAM: u32 = 1 << 15;
@@ -122,8 +130,12 @@ fn received(status: u32, length: u16) -> Option<Option<usize>> {
 
 pub struct Igc {
     device: Mmio,
-    receive: Ring,
-    transmit: Ring,
+    /// Released only after a completed stop: an unstopped controller may
+    /// still write either ring, so Drop then keeps both allocations.
+    receive: ManuallyDrop<Ring>,
+    transmit: ManuallyDrop<Ring>,
+    /// Since when the transmit ring has had no free descriptor.
+    stalled: Option<u64>,
     /// Discard the rest of a split/oversized frame through its actual EOP.
     discarding: bool,
     /// An absent/failed MMIO function requires a fresh attachment.
@@ -172,8 +184,9 @@ impl Igc {
         )?;
         let mut net = Self {
             device,
-            receive: Ring::new(dma)?,
-            transmit: Ring::new(dma)?,
+            receive: ManuallyDrop::new(Ring::new(dma)?),
+            transmit: ManuallyDrop::new(Ring::new(dma)?),
+            stalled: None,
             discarding: false,
             faulted: false,
             link: link::Supervisor::new(),
@@ -255,6 +268,33 @@ impl Igc {
         Ok(())
     }
 
+    /// Linux igc_down: record the counters, then stop the controller. Errors
+    /// leave its DMA state uncertain.
+    fn stop(&mut self) -> Result<(), BlockError> {
+        let _ = self.statistics.accumulate(&self.device);
+        hardware::Hardware::new(&self.device, &self.clock)?.stop()
+    }
+
+    /// Linux igc_reinit_locked, as igc_reset_task runs it for a transmit
+    /// hang: a completed stop, full reinitialization, and both rings
+    /// restarted empty on their existing buffers. The carrier then follows
+    /// a fresh link check. Any failure leaves the adapter faulted.
+    fn reinitialize(&mut self) -> Result<(), BlockError> {
+        let result = (|| {
+            self.stop()?;
+            self.phy_identity = hardware::Hardware::new(&self.device, &self.clock)?.initialize()?;
+            self.receive.reset();
+            self.transmit.reset();
+            self.discarding = false;
+            self.stalled = None;
+            self.link = link::Supervisor::new();
+            self.start_receive()?;
+            self.start_transmit()
+        })();
+        self.faulted |= result.is_err();
+        result
+    }
+
     /// The negotiated link while the carrier is up: speed, duplex and the
     /// pause frames both sides agreed on.
     pub fn negotiated(&self) -> Option<Negotiated> {
@@ -289,12 +329,16 @@ impl Igc {
         };
         if change == link::Change::Down && self.transmit.pending() {
             let device = self.device;
-            self.faulted = !TRANSMIT_QUEUE.flush(
+            let flushed = TRANSMIT_QUEUE.flush(
                 &mut self.transmit,
                 self.clock,
                 |offset| device.read32(offset),
                 |offset, value| device.write32(offset, value),
             );
+            // A queue that will not stop needs the reset Linux uses here.
+            if !flushed {
+                let _ = self.reinitialize();
+            }
         }
         match self.faulted {
             true => Err(LinkError::Adapter(format!(
@@ -302,6 +346,58 @@ impl Igc {
                 self.location
             ))),
             false => Ok(self.link.carrier().is_some()),
+        }
+    }
+}
+
+impl Igc {
+    /// A full transmit ring. Linux treats descriptors held past the hang
+    /// timeout as a hang unless PAUSE frames hold the transmitter off
+    /// (STATUS.TXOFF), and resets the controller for it.
+    fn transmit_stalled(&mut self) -> LinkError {
+        let now = self.clock.now_us();
+        let since = *self.stalled.get_or_insert(now);
+        let status = self.device.read32(STATUS);
+        let factor = match self.link.carrier() {
+            Some(link) if link.speed == 10 => 14,
+            _ => 1,
+        };
+        let held = now.saturating_sub(since);
+        if status == u32::MAX {
+            self.faulted = true;
+        } else if status & STATUS_TXOFF == 0 && held >= TRANSMIT_HANG_US * factor {
+            let reset = self.reinitialize();
+            return LinkError::Adapter(format!(
+                "Intel I225/I226 {} transmit hang; controller reset {}",
+                self.location,
+                if reset.is_ok() { "completed" } else { "failed" }
+            ));
+        }
+        LinkError::Adapter(format!(
+            "Intel I225/I226 {} transmit ring full{}",
+            self.location,
+            if status & STATUS_TXOFF != 0 && status != u32::MAX {
+                " while paused by flow control"
+            } else {
+                ""
+            }
+        ))
+    }
+}
+
+impl Drop for Igc {
+    /// Linux igc_down then igc_release_hw_control. The rings are freed only
+    /// once the controller verifiably stopped; otherwise they stay allocated.
+    fn drop(&mut self) {
+        if self.stop().is_ok() {
+            let _ =
+                hardware::Hardware::new(&self.device, &self.clock).map(|hw| hw.release_control());
+            // SAFETY: the completed MAC reset stopped every descriptor and
+            // buffer access, and neither ring is used after this.
+            unsafe {
+                ManuallyDrop::drop(&mut self.receive);
+                ManuallyDrop::drop(&mut self.transmit);
+            }
         }
     }
 }
@@ -321,11 +417,9 @@ impl Link for Igc {
             return Err(LinkError::NoCarrier);
         }
         if !self.transmit.free(self.clock, transmitted) {
-            return Err(LinkError::Adapter(format!(
-                "Intel I225/I226 {} transmit ring stalled",
-                self.location
-            )));
+            return Err(self.transmit_stalled());
         }
+        self.stalled = None;
         advanced::queue_frame(&mut self.transmit, frame, frame.len().max(MIN_TRANSMIT));
         self.device.write32(TDT, self.transmit.next as u32);
         Ok(())
@@ -390,8 +484,9 @@ mod tests {
             let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
             let mut net = Igc {
                 device,
-                receive: Ring::new(&mut dma).unwrap(),
-                transmit: Ring::new(&mut dma).unwrap(),
+                receive: ManuallyDrop::new(Ring::new(&mut dma).unwrap()),
+                transmit: ManuallyDrop::new(Ring::new(&mut dma).unwrap()),
+                stalled: None,
                 discarding: false,
                 faulted: false,
                 link: link::Supervisor::established(LINK),
@@ -432,6 +527,50 @@ mod tests {
         fixture.net.link = link::Supervisor::established(LINK);
         fixture.net.transmit(&[2; 60]).unwrap();
         assert_eq!(fixture.registers[TDT / 4], 1);
+    }
+
+    #[test]
+    fn a_held_ring_resets_only_after_the_hang_timeout_and_never_while_paused() {
+        let _clock = crate::test_clock::virtualize();
+        let error = |fixture: &mut Fixture| match fixture.net.transmit(&[2; 60]) {
+            Err(LinkError::Adapter(message)) => message,
+            other => panic!("{other:?}"),
+        };
+        let full = || {
+            let mut fixture = Fixture::new();
+            for _ in 0..DESCRIPTORS - 1 {
+                fixture.net.transmit(&[1; 60]).unwrap();
+            }
+            fixture
+        };
+        // A descriptor held past one second is a hang; the reset then runs
+        // (and here cannot complete).
+        let mut fixture = full();
+        let mut attempts = 0;
+        let message = loop {
+            attempts += 1;
+            let message = error(&mut fixture);
+            if !message.ends_with("transmit ring full") {
+                break message;
+            }
+        };
+        assert!(attempts > 1);
+        assert!(message.ends_with("transmit hang; controller reset failed"));
+        assert!(fixture.net.faulted);
+        assert!(error(&mut fixture).ends_with("reinitialization required"));
+
+        // PAUSE frames from the partner hold the transmitter off indefinitely;
+        // time held while paused still counts once they stop, as in Linux.
+        let mut fixture = full();
+        fixture.registers[STATUS / 4] = STATUS_TXOFF;
+        for _ in 0..attempts * 2 {
+            assert!(
+                error(&mut fixture).ends_with("transmit ring full while paused by flow control")
+            );
+        }
+        assert!(!fixture.net.faulted);
+        fixture.registers[STATUS / 4] = 0;
+        assert!(error(&mut fixture).ends_with("transmit hang; controller reset failed"));
     }
 
     #[test]
