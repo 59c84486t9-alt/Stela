@@ -1648,6 +1648,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn admission_controlled_categories_downgrade_like_ieee80211_downgrade_queue() {
+        let j = modern_join();
+        let b = beacon(&j);
+        // Voice and video require admission control.
+        let mut elements = modern_ies(true);
+        let mut at = 0;
+        while at + 2 <= elements.len() {
+            let len = usize::from(elements[at + 1]);
+            if elements[at] == 221 && elements[at + 2..at + 6] == [0, 0x50, 0xf2, 2] {
+                for record in (at + 10..at + 2 + len).step_by(4) {
+                    if (elements[record] >> 5) & 3 >= 2 {
+                        elements[record] |= 0x10;
+                    }
+                }
+            }
+            at += 2 + len;
+        }
+        let ticket = Ticket {
+            epoch: 1,
+            serial: 2,
+        };
+        let context =
+            AssociationContext::build(ticket, &j, &b, &response_metadata(elements)).unwrap();
+        let mut ef = vec![0; 34];
+        ef[12..16].copy_from_slice(&[8, 0, 0x45, 46 << 2]);
+        let mut eapol = vec![0; 14];
+        eapol[12..].copy_from_slice(&[0x88, 0x8e]);
+        let mut cs1 = ef.clone();
+        cs1[15] = 8 << 2;
+        assert_eq!(
+            [&ef, &eapol, &cs1].map(|frame| data::data_tid(&context, frame)),
+            [Some(3), Some(3), Some(1)]
+        );
+    }
+
+    #[test]
     fn generic_missing_ht_vht_wmm_fallback_retains_actual_beacon_but_not_he_eht() {
         let j = modern_join();
         let b = beacon(&j);

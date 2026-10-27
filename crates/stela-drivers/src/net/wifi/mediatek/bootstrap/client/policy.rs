@@ -853,6 +853,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .authorize_port(epoch)
             .map_err(PolicyError::Client)
     }
+    /// The QoS TID of a data frame on the current association, as
+    /// `ieee80211_select_queue` chooses it; `None` for non-QoS data.
+    pub fn data_tid(&self, ethernet: &[u8]) -> Option<u8> {
+        station::data::data_tid(self.client.modern_context()?, ethernet)
+    }
     pub fn transmit(
         &mut self,
         epoch: u64,

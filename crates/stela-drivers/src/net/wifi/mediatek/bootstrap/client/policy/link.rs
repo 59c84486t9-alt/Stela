@@ -559,9 +559,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Managed
             .station()
             .association_epoch()
             .ok_or(LinkError::NoCarrier)?;
+        let tid = s.client.data_tid(frame);
         let result = s
             .client
-            .transmit(epoch, frame, TxClass::Data, None, &s.source);
+            .transmit(epoch, frame, TxClass::Data, tid, &s.source);
         s.deferred_error = failure;
         Self::reconcile(s);
         result

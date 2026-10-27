@@ -490,8 +490,9 @@ impl Station {
 
     /// Single-MSDU QoS with source-backed device sequence assignment. The
     /// exact current acknowledged context supplies WMM; a copied capability or
-    /// TID cannot bypass it. Host per-TID sequences and TSPEC/ACM admission are
-    /// not implemented by this entry point. No BA/A-MSDU permission is implied.
+    /// TID cannot bypass it. A TID whose access category requires admission
+    /// is downgraded as `ieee80211_downgrade_queue` does; TSPEC admission is
+    /// the OS's. No BA/A-MSDU permission is implied.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_qos_msdu_refs<K: BorrowMut<KeySlot>>(
         &mut self,
@@ -506,6 +507,7 @@ impl Station {
         self.validate_association_context(context)
             .map_err(|_| Error::Stale)?;
         qos_access(context, tid)?;
+        let tid = downgrade(context, tid);
         let mut plan =
             self.prepare_msdu_refs(epoch, ethernet, class, SequenceOwner::Device, keys, policy)?;
         plan.plaintext
@@ -703,8 +705,10 @@ fn subframes(mut bytes: &[u8], receiver: Mac, split_member: bool) -> Result<Vec<
     }
 }
 
+/// The WMM access category of each 802.1D priority, `ieee802_1d_to_ac`.
+const ACI: [u8; 8] = [0, 1, 1, 0, 2, 2, 3, 3];
+
 fn qos_access(context: &AssociationContext, tid: u8) -> Result<(), Error> {
-    const ACI: [u8; 8] = [0, 1, 1, 0, 2, 2, 3, 3];
     let aci = *ACI
         .get(usize::from(tid))
         .ok_or(Error::Unsupported("QoS TID above7"))?;
@@ -713,20 +717,117 @@ fn qos_access(context: &AssociationContext, tid: u8) -> Result<(), Error> {
         .wmm
         .as_ref()
         .ok_or(Error::Unsupported("missing actual WMM"))?;
-    let ac = wmm
-        .access_categories
+    wmm.access_categories
         .iter()
         .find(|ac| ac.aci == aci)
         .ok_or(Error::Unsupported("missing WMM access category"))?;
-    if ac.admission_control {
-        return Err(Error::Unsupported("unadmitted WMM access category"));
-    }
     Ok(())
+}
+
+/// Linux `ieee80211_downgrade_queue` without an admitted TSPEC: a priority
+/// whose access category requires admission control moves to the next
+/// lower category until one does not; background is used regardless.
+fn downgrade(context: &AssociationContext, mut priority: u8) -> u8 {
+    let Some(wmm) = &context.negotiated().wmm else {
+        return priority;
+    };
+    let acm = |priority: u8| {
+        wmm.access_categories
+            .iter()
+            .any(|ac| ac.aci == ACI[usize::from(priority)] && ac.admission_control)
+    };
+    while acm(priority) {
+        // `wme_downgrade_ac`: voice to video, video to best effort, best
+        // effort to background.
+        priority = match priority {
+            6 | 7 => 5,
+            4 | 5 => 3,
+            0 | 3 => 2,
+            _ => break,
+        };
+    }
+    priority
+}
+
+/// Linux `ieee80211_select_queue` for a station: the QoS TID of an outgoing
+/// Ethernet frame, or `None` when the association has no WMM and data goes
+/// without QoS. EAPOL takes priority 7; other frames are classified by
+/// `cfg80211_classify8021d`. A QoS Map comes from the OS's interworking
+/// configuration, and none reaches the station, so the RFC 8325 default
+/// applies.
+pub fn data_tid(context: &AssociationContext, ethernet: &[u8]) -> Option<u8> {
+    context.negotiated().wmm.as_ref()?;
+    let ethertype = |at: usize| {
+        ethernet
+            .get(at..at + 2)
+            .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]))
+    };
+    let priority = if ethertype(12) == EAPOL {
+        7
+    } else {
+        classify8021d(ethernet)
+    };
+    Some(downgrade(context, priority))
+}
+
+/// Linux `cfg80211_classify8021d` without a QoS Map. A VLAN tag's nonzero
+/// priority stands, as for a tag the stack carries beside the frame;
+/// otherwise the encapsulated protocol is classified.
+fn classify8021d(ethernet: &[u8]) -> u8 {
+    const VLAN: u16 = 0x8100;
+    let mut at = 12;
+    let field = |at: usize| ethernet.get(at..at + 2).map(|b| [b[0], b[1]]);
+    if field(at).map(u16::from_be_bytes) == Some(VLAN) {
+        let priority = field(at + 2).map_or(0, |tci| tci[0] >> 5);
+        if priority > 0 {
+            return priority;
+        }
+        at += 4;
+    }
+    let body = ethernet.get(at + 2..).unwrap_or_default();
+    let dscp = match field(at).map(u16::from_be_bytes) {
+        // IPv4 and IPv6 DSCP from a whole header.
+        Some(0x0800) if body.len() >= 20 => body[1] & 0xfc,
+        Some(0x86dd) if body.len() >= 40 => (body[0] << 4 | body[1] >> 4) & 0xfc,
+        // MPLS unicast and multicast: the label's traffic class.
+        Some(0x8847 | 0x8848) if body.len() >= 4 => return (body[2] >> 1) & 7,
+        // 802.21 is network control.
+        Some(0x8917) => return 7,
+        _ => return 0,
+    };
+    // RFC 8325: the DSCP's three high bits.
+    dscp >> 5
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_frames_classify_like_cfg80211_classify8021d() {
+        let frame = |ethertype: u16, body: &[u8]| {
+            let mut frame = vec![0; 12];
+            frame.extend_from_slice(&ethertype.to_be_bytes());
+            frame.extend_from_slice(body);
+            frame
+        };
+        let mut ipv4 = [0u8; 20];
+        ipv4[1] = 46 << 2; // EF
+        assert_eq!(classify8021d(&frame(0x0800, &ipv4)), 5);
+        assert_eq!(classify8021d(&frame(0x0800, &ipv4[..19])), 0);
+        let mut ipv6 = [0u8; 40];
+        ipv6[0] = 0x60 | (56 << 2) >> 4; // CS7
+        assert_eq!(classify8021d(&frame(0x86dd, &ipv6)), 7);
+        assert_eq!(classify8021d(&frame(0x8847, &[0, 0, 0b1010, 0])), 5);
+        assert_eq!(classify8021d(&frame(0x8917, &[])), 7);
+        assert_eq!(classify8021d(&frame(0x0806, &[0; 28])), 0);
+        // A tagged frame's PCP, or its inner protocol when the PCP is zero.
+        let mut tagged = frame(0x8100, &[0x60, 0, 0x08, 0]);
+        tagged.extend_from_slice(&ipv4);
+        assert_eq!(classify8021d(&tagged), 3);
+        tagged[14] = 0;
+        assert_eq!(classify8021d(&tagged), 5);
+    }
 
     #[test]
     #[ignore = "requires fresh pinned full A-MSDU helper trace via STELA_WIFI_AMSDU_ORACLE"]
