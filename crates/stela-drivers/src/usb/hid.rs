@@ -602,7 +602,7 @@ impl UsbInput {
         let Some(keys) = &self.reports.keys else {
             return;
         };
-        let Some(mut held) = keys.pressed(body) else {
+        let Some(mut held) = keys.pressed_after(body, &self.held) else {
             return;
         };
         let before = held.len();

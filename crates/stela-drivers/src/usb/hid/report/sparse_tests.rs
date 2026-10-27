@@ -23,7 +23,11 @@ fn agree(bytes: &[u8], body: &[u8]) -> Option<Vec<u32>> {
     let result = keys.pressed(body);
     let complete = Descriptor::parse(bytes).unwrap().decode(body);
     match complete {
-        Err(DecodeError::KeyboardError(_)) => assert_eq!(result, None),
+        // Linux keeps reading: error codes are no keys, and ErrorRollOver
+        // keeps the item's previous (here empty) state.
+        Err(DecodeError::KeyboardError(_)) => {
+            assert!(result.as_ref().unwrap().iter().all(|usage| *usage > 3));
+        }
         Ok(frame) => {
             let mut expected = Vec::new();
             for sample in frame.samples {
@@ -78,8 +82,8 @@ fn sparse_reordered_duplicate_and_mixed_page_slots_keep_their_exact_indices() {
     );
     assert_eq!(
         agree(&bytes, &[10, 15, 16]),
-        None,
-        "mapped keyboard POSTFail rejects the state"
+        Some(vec![5, 0xe1]),
+        "mapped keyboard POSTFail is no key"
     );
     let mixed = descriptor(&[0x000c_0001, KEY | 4, 0x000c_0003], 0, 2, 8, 1);
     assert!(
@@ -221,7 +225,11 @@ fn mapped_error_codes_are_checked_after_lookup_and_malformed_ranges_stay_explici
     for error in 1..=3 {
         let bytes = descriptor(&[KEY | 4, KEY | error], 0, 1, 8, 1);
         assert_eq!(agree(&bytes, &[0]), Some(vec![4]));
-        assert_eq!(agree(&bytes, &[1]), None);
+        assert_eq!(agree(&bytes, &[1]), Some(vec![]));
+        // Only ErrorRollOver keeps the previous key.
+        let keys = parse(&bytes).unwrap().keys.unwrap();
+        let after = keys.pressed_after(&[1], &[4]).unwrap();
+        assert_eq!(after, if error == 1 { vec![4] } else { vec![] });
     }
     let malformed = descriptor(&[KEY | 4], 5, 4, 8, 1);
     assert!(parse(&malformed).is_err());

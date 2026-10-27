@@ -19,9 +19,10 @@
 //! A pointer is the first report with Generic Desktop X and Y, its Button
 //! 1-3 and wheel when present. A keyboard is the first report with
 //! Keyboard/Keypad page (07h) fields: modifier and key bitmaps (variable
-//! items) and key arrays. The arrays' ErrorRollOver, POSTFail and
-//! ErrorUndefined (usages 01h-03h, HID Usage Tables 10) say the report
-//! holds no key state, so such a report changes nothing.
+//! items) and key arrays. As Linux `hid_input_array_field`, an array item
+//! holding ErrorRollOver (usage 01h) is ignored and keeps its previous keys
+//! while the report's bitmaps still apply; POSTFail and ErrorUndefined
+//! (02h-03h, HID Usage Tables 10) are not keys.
 use super::usages::Local;
 use alloc::{sync::Arc, vec::Vec};
 
@@ -34,8 +35,9 @@ const GENERIC_DESKTOP_WHEEL: u32 = 0x0001_0038;
 const BUTTON_1: u32 = 0x0009_0001;
 const BUTTON_5: u32 = 0x0009_0005;
 const KEYBOARD_PAGE: u32 = 0x07;
-/// The array usages that report an error state instead of keys.
-const KEY_ERRORS: core::ops::RangeInclusive<u32> = 0x01..=0x03;
+const ERROR_ROLL_OVER: u32 = 0x01;
+/// Array values that are no key: none, ErrorRollOver, POSTFail, ErrorUndefined.
+const NOT_KEYS: core::ops::RangeInclusive<u32> = 0x00..=0x03;
 
 /// A long item's prefix (6.2.2.3).
 const LONG_ITEM: u8 = 0xfe;
@@ -235,34 +237,58 @@ impl Keys {
     }
 
     /// The Keyboard/Keypad usages `body` reports held, or `None` for a
-    /// report in an error state.
-    pub fn pressed(&self, body: &[u8]) -> Option<Vec<u32>> {
+    /// report too short to read. `before` is what the previous report held.
+    pub fn pressed_after(&self, body: &[u8], before: &[u32]) -> Option<Vec<u32>> {
         let mut held = Vec::new();
         for (field, usage) in &self.variables {
             if field.read(body)? != 0 {
                 held.push(*usage);
             }
         }
-        for (field, array) in &self.arrays {
-            let raw = field.read(body)?;
-            let Some(qualified) = array.select(raw, field.size) else {
-                continue;
-            };
-            if qualified >> 16 != KEYBOARD_PAGE {
-                continue;
+        // The slots of one array main item share its usage table.
+        for item in self
+            .arrays
+            .chunk_by(|(_, a), (_, b)| Arc::ptr_eq(&a.usages, &b.usages))
+        {
+            let mut keys = Vec::new();
+            let mut rolled_over = false;
+            for (field, array) in item {
+                let raw = field.read(body)?;
+                let Some(qualified) = array.select(raw, field.size) else {
+                    continue;
+                };
+                if qualified >> 16 != KEYBOARD_PAGE {
+                    continue;
+                }
+                let usage = qualified & 0xffff;
+                rolled_over |= usage == ERROR_ROLL_OVER;
+                if !NOT_KEYS.contains(&usage) && !keys.contains(&usage) {
+                    keys.push(usage);
+                }
             }
-            let usage = qualified & 0xffff;
-            if usage == 0 {
-                continue;
+            if rolled_over {
+                let table = &item[0].1.usages;
+                keys = before
+                    .iter()
+                    .copied()
+                    .filter(|usage| {
+                        table.contains(&(KEYBOARD_PAGE << 16 | usage))
+                            && !self.variables.iter().any(|(_, v)| v == usage)
+                    })
+                    .collect();
             }
-            if KEY_ERRORS.contains(&usage) {
-                return None;
-            }
-            if !held.contains(&usage) {
-                held.push(usage);
+            for usage in keys {
+                if !held.contains(&usage) {
+                    held.push(usage);
+                }
             }
         }
         Some(held)
+    }
+    /// `pressed_after` from an empty previous report.
+    #[cfg(test)]
+    pub fn pressed(&self, body: &[u8]) -> Option<Vec<u32>> {
+        self.pressed_after(body, &[])
     }
 }
 
@@ -619,7 +645,13 @@ mod tests {
             boot.pressed(&[0, 0, 0x1d, 0, 0, 0, 0, 0]),
             Some(alloc::vec![0x1d])
         );
-        assert_eq!(boot.pressed(&[0, 0, 1, 1, 1, 1, 1, 1]), None);
+        assert_eq!(boot.pressed(&[0, 0, 1, 1, 1, 1, 1, 1]), Some(alloc::vec![]));
+        // Rollover keeps the array's keys, but the modifier bitmap applies:
+        // Left Control releases and Left Shift presses.
+        assert_eq!(
+            boot.pressed_after(&[2, 0, 1, 1, 1, 1, 1, 1], &[0xe0, 0x04]),
+            Some(alloc::vec![0xe1, 0x04])
+        );
         assert_eq!(boot.pressed(&[0; 4]), None, "a short report holds no state");
     }
 
@@ -634,6 +666,10 @@ mod tests {
         assert_eq!(keys.pressed(&[0x04, 0x04]), Some(alloc::vec![0x04]));
         // 0x66 is past the logical maximum: no usage.
         assert_eq!(keys.pressed(&[0x66, 0x05]), Some(alloc::vec![0x05]));
-        assert_eq!(keys.pressed(&[0x02, 0x00]), None, "POSTFail");
+        assert_eq!(
+            keys.pressed(&[0x02, 0x05]),
+            Some(alloc::vec![0x05]),
+            "POSTFail"
+        );
     }
 }
