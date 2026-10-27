@@ -8,6 +8,7 @@ mod ba;
 mod edca;
 mod external;
 pub use edca::AppliedEdca;
+mod cqm;
 mod local;
 pub mod management;
 mod modern;
@@ -214,8 +215,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     edca: Option<edca::Observed<C>>,
     /// A slot time the AP's beacon changed, not yet sent.
     slot_time: Option<u16>,
-    /// The RSSI monitor's threshold, `cqm_rssi_thold`, while one is set.
-    rssi_threshold: Option<i32>,
+    /// The OS's RSSI monitor and the AP's averaged beacon signal.
+    cqm: cqm::Cqm,
     /// The channel the firmware operates when a beacon narrowed it.
     channel: Option<ChannelDefinition>,
     /// A channel a beacon changed, not yet sent; `None` inside when the
@@ -305,7 +306,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 management: None,
                 edca: None,
                 slot_time: None,
-                rssi_threshold: None,
+                cqm: cqm::Cqm::default(),
                 channel: None,
                 channel_change: None,
                 authentication_deadline: None,
@@ -829,6 +830,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         s.txs.expire(now);
         let mut events: Vec<_> = s.txs.ready.drain(..).map(Event::TxStatus).collect();
+        events.append(&mut s.cqm.ready);
         while let Some(received) = s.pending_rx.pop_front() {
             let receive::ReceivedFrame { queue, frame: f } = received;
             if f.drop {
@@ -874,9 +876,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 if event.event_id == 0x41
                     && event.is_unsolicited()
                     && s.phase == Phase::Associated
-                    && let Some(threshold) = s.rssi_threshold
+                    && let Some(monitor) = s.cqm.monitor.filter(|m| m.firmware)
                 {
-                    events.extend(rssi_events(event.payload, threshold));
+                    events.extend(rssi_events(event.payload, monitor.threshold));
                     continue;
                 }
                 if event.event_id == 12

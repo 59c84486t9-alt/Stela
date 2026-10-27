@@ -86,6 +86,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         // mac80211 `ieee80211_config_bw`: the AP's operation narrowed to the
         // association, applied when it differs from the current channel.
+        if let (Some(signal), Some(association)) =
+            (frame.radio.signal_dbm, s.station.association_epoch())
+        {
+            s.cqm.beacon(association, i32::from(signal));
+        }
         let context = modern.context().clone();
         let current = s.channel.unwrap_or(context.definition());
         s.channel_change = match context.beacon_definition(elements) {
@@ -205,8 +210,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
 
     /// Linux `mt7925_mcu_set_rssimonitor` for BSS_CHANGED_CQM: firmware RSSI
     /// events past `threshold` dBm with `hysteresis`, or none for `None`.
-    /// Only firmware reporting RSSI_NOTIFY_EVT_EN supports it, as Linux
-    /// sets IEEE80211_VIF_SUPPORTS_CQM_RSSI only then.
+    /// Firmware without RSSI_NOTIFY_EVT_EN, for which Linux leaves
+    /// IEEE80211_VIF_SUPPORTS_CQM_RSSI clear, is watched from beacons.
     ///
     /// # Safety
     /// As `update_slot_time_modern`.
@@ -226,11 +231,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .policy
             .as_ref()
             .and_then(|policy| policy.capabilities().observed().chip_flags());
-        if flags.unwrap_or(0) & 2 == 0 {
-            return Err(Error::Unsupported);
-        }
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
+        }
+        // Without firmware RSSI events mac80211 watches beacons instead.
+        if flags.unwrap_or(0) & 2 == 0 {
+            s.cqm.set(monitor, false);
+            return Ok(());
         }
         Self::command_ready(s)?;
         let profile = s.profile.ok_or(Error::WrongPhase)?;
@@ -262,7 +269,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             )
         }
         .map_err(Error::Regulatory)??;
-        s.rssi_threshold = monitor.map(|(threshold, _)| threshold);
+        s.cqm.set(monitor, true);
         Ok(())
     }
 
