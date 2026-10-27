@@ -295,6 +295,16 @@ impl Buffer {
             b.published = true;
         }
     }
+    /// CPU writes to a submission ring the controller may still read.
+    ///
+    /// # Safety
+    /// The buffer is device-read-only, and no entry the controller has yet
+    /// to fetch is rewritten.
+    pub(super) unsafe fn resume_writes(&mut self) {
+        if let Self::Owned(b) = self {
+            b.cpu_owned = true;
+        }
+    }
     pub(super) fn give(&mut self) -> Result<(), BlockError> {
         if let Self::Owned(b) = self {
             if b.cpu_owned {
@@ -443,10 +453,11 @@ unsafe fn attach_with_timeout(
         teardown: Teardown::Unadmitted,
         ready_timeout_us: 500_000,
         version: 0,
-        resets: 0,
+        scans: 0,
         retry_delays: [0; 3],
         host_memory: None,
         host_memory_enabled: false,
+        events: super::Events::default(),
     };
     validate_clock(clock)?;
     controller.teardown = Teardown::Unprepared;
@@ -730,6 +741,9 @@ mod tests {
         queues: [(u64, u64); 2],
         heads: [u16; 2],
         phases: [bool; 2],
+        /// Submission queue heads; the admin one runs ahead of its completion
+        /// head while an Asynchronous Event Request is held.
+        sq_heads: [u16; 2],
         disk: Vec<u8>,
         /// Namespace 1's size and capacity, and its EUI64.
         blocks: u64,
@@ -746,6 +760,12 @@ mod tests {
         /// table set.
         apst: bool,
         apst_sets: Vec<u64>,
+        /// OAES; the held Asynchronous Event Request; Asynchronous Event
+        /// Configurations set and log pages read.
+        async_events: u32,
+        event_request: Option<u32>,
+        event_configs: Vec<u32>,
+        logs: Vec<u32>,
         prepared: bool,
         bme: bool,
         enabled: bool,
@@ -803,6 +823,7 @@ mod tests {
                 queues: [(0, 0); 2],
                 heads: [0; 2],
                 phases: [true; 2],
+                sq_heads: [0; 2],
                 disk: vec![0; 1024 * 512],
                 blocks: 1024,
                 eui64: [0x11; 8],
@@ -813,6 +834,10 @@ mod tests {
                 refuse_host_memory: false,
                 apst: false,
                 apst_sets: Vec::new(),
+                async_events: 0,
+                event_request: None,
+                event_configs: Vec::new(),
+                logs: Vec::new(),
                 prepared: false,
                 bme: false,
                 enabled: false,
@@ -931,13 +956,20 @@ mod tests {
                     && self.enabled
                     && !self.busy[queue]
             );
-            assert_eq!(tail, (self.heads[queue] + 1) % 16);
-            let bytes =
-                self.read_iova(self.queues[queue].0 + u64::from(self.heads[queue]) * 64, 64);
+            assert_eq!(tail, (self.sq_heads[queue] + 1) % 16);
+            let bytes = self.read_iova(
+                self.queues[queue].0 + u64::from(self.sq_heads[queue]) * 64,
+                64,
+            );
+            self.sq_heads[queue] = tail;
             let command: [u32; 16] = core::array::from_fn(|i| {
                 u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
             });
             self.commands += 1;
+            if queue == 0 && command[0] as u8 == 0x0c {
+                assert_eq!(self.event_request.replace(command[0] >> 16), None);
+                return;
+            }
             self.busy[queue] = true;
             self.outstanding = true;
             self.drained = false;
@@ -988,6 +1020,7 @@ mod tests {
                             data[276..280].copy_from_slice(&minimum.to_le_bytes());
                             data[332..336].copy_from_slice(&smallest.to_le_bytes());
                             data[336..338].copy_from_slice(&entries.to_le_bytes());
+                            data[92..96].copy_from_slice(&self.async_events.to_le_bytes());
                             if self.apst {
                                 (data[263], data[265], data[2048 + 32 + 3]) = (1, 1, 2);
                                 // 1 ms entry and exit latency.
@@ -1020,6 +1053,11 @@ mod tests {
                         // Invalid Field in Command.
                         status = 2;
                     }
+                }
+                (0, 9) if command[10] == 0x0b => self.event_configs.push(command[11]),
+                (0, 2) => {
+                    assert_eq!(command[1], u32::MAX);
+                    self.logs.push(command[10] & 0xff);
                 }
                 (0, 9) if command[10] == 0x0c => {
                     assert_eq!(command[11], 1);
@@ -1086,7 +1124,7 @@ mod tests {
             }
             let mut cid = command[0] >> 16;
             let mut sqid = queue as u32;
-            let mut head = u32::from((self.heads[queue] + 1) % 16);
+            let mut head = u32::from(self.sq_heads[queue]);
             let mut phase = self.phases[queue];
             match self.mutation {
                 Mutation::Cid => cid ^= 0x10,
@@ -1107,6 +1145,15 @@ mod tests {
             self.busy[queue] = false;
             self.outstanding = self.busy.iter().any(|busy| *busy);
             self.record("completion");
+        }
+        /// Complete the held Asynchronous Event Request with `result`.
+        fn post_event(&mut self, result: u32) {
+            let cid = self.event_request.take().expect("a held event request");
+            let mut cqe = [0u8; 16];
+            cqe[..4].copy_from_slice(&result.to_le_bytes());
+            cqe[8..12].copy_from_slice(&u32::from(self.sq_heads[0]).to_le_bytes());
+            cqe[12..16].copy_from_slice(&(u32::from(self.phases[0]) << 16 | cid).to_le_bytes());
+            self.write_iova(self.queues[0].1 + u64::from(self.heads[0]) * 16, &cqe);
         }
     }
     struct Domain(Arc<Mutex<Model>>);
@@ -1280,6 +1327,8 @@ mod tests {
                             m.queues[1] = (0, 0);
                             m.heads = [0; 2];
                             m.phases = [true; 2];
+                            m.sq_heads = [0; 2];
+                            m.event_request = None;
                         }
                     }
                     if value & (3 << 14) == 1 << 14 {
@@ -1599,6 +1648,41 @@ mod tests {
         drop(m);
         disk.flush().unwrap();
         assert_eq!(f.model.lock().unwrap().host_behavior.len(), 2);
+        disk.retire_owned().unwrap();
+    }
+
+    #[test]
+    fn async_events_are_handled_and_requested_again_like_nvme_complete_async_event() {
+        let f = Fixture::new();
+        // Namespace attribute and firmware activation notices, and one Linux
+        // leaves disabled.
+        f.model.lock().unwrap().async_events = 1 << 8 | 1 << 9 | 1 << 10;
+        let mut a = f.attach().unwrap();
+        let disk = &mut a.namespaces[0];
+        let event = |result| {
+            let mut m = f.model.lock().unwrap();
+            m.post_event(result);
+            m.blocks += 1024;
+        };
+        // A namespace change clears the changed list and rescans: the
+        // namespace grew.
+        event(2);
+        disk.flush().unwrap();
+        assert_eq!(disk.identity().blocks, 2048);
+        // A firmware activation reads the slot log once processing resumes.
+        event(2 | 1 << 8);
+        disk.flush().unwrap();
+        assert_eq!(disk.identity().blocks, 2048);
+        // A persistent internal error resets the controller, whose rescan
+        // sees the namespace grow again.
+        event(3 << 8);
+        disk.flush().unwrap();
+        assert_eq!(disk.identity().blocks, 4096);
+        let m = f.model.lock().unwrap();
+        assert_eq!(m.event_configs, [1 << 8 | 1 << 9; 2]);
+        assert_eq!(m.logs, [4, 3]);
+        assert!(m.event_request.is_some());
+        drop(m);
         disk.retire_owned().unwrap();
     }
 

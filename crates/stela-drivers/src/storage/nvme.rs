@@ -33,6 +33,8 @@ const DOORBELLS: usize = 0x1000;
 const ENABLE: u32 = 1;
 const READY: u32 = 1;
 const FATAL: u32 = 1 << 1;
+/// CSTS.PP: processing paused for a firmware activation.
+const PROCESSING_PAUSED: u32 = 1 << 5;
 /// CC.SHN normal shutdown and CSTS.SHST (NVMe Base 2.1 §3.1.4.5–6).
 const SHUTDOWN_NOTIFICATION: u32 = 3 << 14;
 const SHUTDOWN_NORMAL: u32 = 1 << 14;
@@ -54,11 +56,27 @@ const CONFIGURATION_VALUE: u32 = ENABLE | 6 << 16 | 4 << 20;
 
 const ADMIN_DELETE_SUBMISSION: u8 = 0x00;
 const ADMIN_CREATE_SUBMISSION: u8 = 0x01;
+const ADMIN_GET_LOG_PAGE: u8 = 0x02;
 const ADMIN_DELETE_COMPLETION: u8 = 0x04;
 const ADMIN_CREATE_COMPLETION: u8 = 0x05;
 const ADMIN_IDENTIFY: u8 = 0x06;
 const ADMIN_ABORT: u8 = 0x08;
 const ADMIN_SET_FEATURES: u8 = 0x09;
+const ADMIN_ASYNC_EVENT: u8 = 0x0c;
+/// Asynchronous Event Configuration, and the notices Linux enables from
+/// OAES (`NVME_AEN_SUPPORTED`): namespace attributes, firmware activation,
+/// ANA and discovery log changes.
+const FEATURE_ASYNC_EVENTS: u32 = 0x0b;
+const EVENTS_SUPPORTED: u32 = 1 << 8 | 1 << 9 | 1 << 11 | 1 << 31;
+/// Asynchronous event types and the subtypes Linux acts on.
+const EVENT_ERROR: u32 = 0;
+const EVENT_NOTICE: u32 = 2;
+const ERROR_PERSISTENT_INTERNAL: u32 = 0x03;
+const NOTICE_NAMESPACES_CHANGED: u32 = 0x00;
+const NOTICE_FIRMWARE_ACTIVATION: u32 = 0x01;
+/// Firmware Slot Information and Changed Namespace List log pages.
+const LOG_FIRMWARE_SLOT: u32 = 0x03;
+const LOG_CHANGED_NAMESPACES: u32 = 0x04;
 /// Host Behavior Support, with its ACRE and LBAFEE bytes.
 const FEATURE_HOST_BEHAVIOR: u32 = 0x16;
 /// Autonomous Power State Transition: CDW11 APSTE and a 32-entry table of
@@ -100,7 +118,10 @@ const CONTROLLER_SERIAL: core::ops::Range<usize> = 4..24;
 const CONTROLLER_MODEL: core::ops::Range<usize> = 24..64;
 const CONTROLLER_MAXIMUM_TRANSFER: usize = 77;
 const CONTROLLER_RTD3_ENTRY: core::ops::Range<usize> = 88..92;
+/// OAES; MTFA, in 100 ms units.
+const CONTROLLER_EVENTS: usize = 92;
 const CONTROLLER_ATTRIBUTES: usize = 96;
+const CONTROLLER_ACTIVATION: usize = 258;
 /// CTRATT.ELBAS: extended LBA formats.
 const ATTRIBUTE_EXTENDED_LBA: u32 = 1 << 15;
 /// CRDT1–3, in units of 100 ms.
@@ -238,6 +259,18 @@ struct Queue {
 }
 
 impl Queue {
+    /// Retire the completion queue head entry and ring its doorbell.
+    fn retire_head(&mut self, registers: &RegisterIo, stride: usize) -> Result<(), BlockError> {
+        self.head = (self.head + 1) % ENTRIES;
+        if self.head == 0 {
+            self.phase = !self.phase;
+        }
+        registers.write32(
+            DOORBELLS + (2 * usize::from(self.id) + 1) * stride,
+            u32::from(self.head),
+        )
+    }
+
     fn new(id: u16, dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
         Ok(Self {
             submissions: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
@@ -248,6 +281,57 @@ impl Queue {
             phase: true,
         })
     }
+}
+
+/// Linux's asynchronous events: what Identify Controller enables, the
+/// outstanding Asynchronous Event Request and a completion not yet acted on.
+#[derive(Default)]
+struct Events {
+    supported: u32,
+    /// MTFA, in microseconds.
+    activation_us: u64,
+    request: Option<u16>,
+    completed: Option<(u32, u32)>,
+}
+
+impl Events {
+    fn from_identify(identify: &[u8]) -> Self {
+        Self {
+            supported: le32(identify, CONTROLLER_EVENTS) & EVENTS_SUPPORTED,
+            activation_us: u64::from(u16::from_le_bytes([
+                identify[CONTROLLER_ACTIVATION],
+                identify[CONTROLLER_ACTIVATION + 1],
+            ])) * 100_000,
+            ..Self::default()
+        }
+    }
+}
+
+/// Retire the Asynchronous Event Request's completion when it is at the
+/// admin completion queue head.
+fn take_event(
+    registers: &RegisterIo,
+    stride: usize,
+    queue: &mut Queue,
+    events: &mut Events,
+) -> Result<bool, BlockError> {
+    let Some(id) = events.request else {
+        return Ok(false);
+    };
+    let entry = usize::from(queue.head) * 16;
+    let tail_word = queue.completions.coherent(entry + 12)?;
+    if ((tail_word >> 16 & 1) == 1) != queue.phase || tail_word as u16 != id {
+        return Ok(false);
+    }
+    fence(Ordering::SeqCst);
+    let result = queue.completions.coherent(entry)?;
+    if queue.completions.coherent(entry + 8)? >> 16 != u32::from(queue.id) {
+        return Err(BlockError::Device { status: 0xffff });
+    }
+    events.request = None;
+    events.completed = Some((result, tail_word >> 17 & 0x7fff));
+    queue.retire_head(registers, stride)?;
+    Ok(true)
 }
 
 /// One controller, shared by its namespaces.
@@ -276,14 +360,15 @@ struct Controller {
     ready_timeout_us: u64,
     /// The VS register, read at discovery.
     version: u32,
-    /// Completed controller resets; each one rescans the namespaces.
-    resets: u64,
+    /// Queued namespace scans: one per reset and namespace-change notice.
+    scans: u64,
     /// CRDT1–3 from Identify Controller, in 100 ms units.
     retry_delays: [u16; 3],
     /// The host memory buffer, kept across resets, and whether the
     /// controller uses it (`dev->hmb`).
     host_memory: Option<HostMemory>,
     host_memory_enabled: bool,
+    events: Events,
 }
 
 /// Linux's host memory buffer: its descriptor list and chunks.
@@ -526,6 +611,7 @@ impl Controller {
     /// SQ/PRP/data CPU reuse.
     fn execute(&mut self, io: bool, command: [u32; 16]) -> Result<u32, BlockError> {
         self.ready()?;
+        self.service_events()?;
         let mut retries = 0;
         loop {
             match self.run(io, command) {
@@ -561,7 +647,7 @@ impl Controller {
         if status & FATAL != 0 {
             return Err(Lost::Reset(BlockError::Device { status }));
         }
-        let id = self.submit(io, command).map_err(Lost::Fatal)?;
+        let id = self.submit(io, command, true).map_err(Lost::Fatal)?;
         let timeout = if io {
             self.command_timeout_us
         } else {
@@ -580,7 +666,7 @@ impl Controller {
         let mut abort = [0u32; 16];
         abort[0] = u32::from(ADMIN_ABORT);
         abort[10] = u32::from(id) << 16 | u32::from(self.io.id);
-        let abort_id = self.submit(false, abort).map_err(Lost::Fatal)?;
+        let abort_id = self.submit(false, abort, true).map_err(Lost::Fatal)?;
         let completed = match self
             .reap(true, id, self.command_timeout_us)
             .map_err(Lost::Fatal)?
@@ -604,12 +690,20 @@ impl Controller {
         Ok(completed)
     }
 
-    /// Write `command` at the queue tail and ring its doorbell.
-    fn submit(&mut self, io: bool, command: [u32; 16]) -> Result<u16, BlockError> {
+    /// Write `command` at the queue tail and ring its doorbell, giving the
+    /// controller the data buffers when it has `data`.
+    fn submit(&mut self, io: bool, command: [u32; 16], data: bool) -> Result<u16, BlockError> {
         let stride = self.doorbell_stride;
         self.command_id = self.command_id.wrapping_add(1);
         let id = self.command_id;
+        let event = !io && self.events.request.is_some();
         let queue = if io { &mut self.io } else { &mut self.admin };
+        if event {
+            // SAFETY: the controller only reads submission entries, and the
+            // outstanding Asynchronous Event Request's entry is not rewritten
+            // before its completion; Linux keeps that request queued too.
+            unsafe { queue.submissions.resume_writes() };
+        }
         let base = usize::from(queue.tail) * 64;
         for (index, word) in command.iter().enumerate() {
             queue.submissions.write(
@@ -621,8 +715,10 @@ impl Controller {
                 },
             );
         }
-        self.bounce.give()?;
-        self.prp_list.give()?;
+        if data {
+            self.bounce.give()?;
+            self.prp_list.give()?;
+        }
         queue.submissions.give()?;
         queue.tail = (queue.tail + 1) % ENTRIES;
         fence(Ordering::SeqCst);
@@ -634,12 +730,13 @@ impl Controller {
     }
 
     /// Wait for command `id`'s entry at the completion queue head and retire
-    /// it. Only an entry naming exactly this command and queue is accepted.
+    /// it. Only an entry naming exactly this command and queue is accepted,
+    /// after any Asynchronous Event Request completion ahead of it.
     fn reap(&mut self, io: bool, id: u16, timeout: u64) -> Result<Reaped, BlockError> {
         let stride = self.doorbell_stride;
         let registers = &self.registers;
+        let events = &mut self.events;
         let queue = if io { &mut self.io } else { &mut self.admin };
-        let entry = usize::from(queue.head) * 16;
         let mut failure = None;
         let mut fatal = None;
         let done = self.clock.wait(timeout, || {
@@ -649,6 +746,10 @@ impl Controller {
                     fatal = Some(status);
                     return Ok(true);
                 }
+                if !io && take_event(registers, stride, queue, events)? {
+                    return Ok(false);
+                }
+                let entry = usize::from(queue.head) * 16;
                 Ok((queue.completions.coherent(entry + 12)? >> 16 & 1 == 1) == queue.phase)
             })();
             match observed {
@@ -675,6 +776,7 @@ impl Controller {
         // The domain qualifies the coherent observation; this barrier orders
         // later CQ words after the device's final phase/status publication.
         fence(Ordering::SeqCst);
+        let entry = usize::from(queue.head) * 16;
         let result = queue.completions.coherent(entry)?;
         let submission = queue.completions.coherent(entry + 8)?;
         let tail_word = queue.completions.coherent(entry + 12)?;
@@ -685,22 +787,16 @@ impl Controller {
         {
             return Err(BlockError::Device { status: 0xffff });
         }
-        queue.head = (queue.head + 1) % ENTRIES;
-        if queue.head == 0 {
-            queue.phase = !queue.phase;
-        }
-        registers.write32(
-            DOORBELLS + (2 * usize::from(queue.id) + 1) * stride,
-            u32::from(queue.head),
-        )?;
+        queue.retire_head(registers, stride)?;
         Ok(Reaped::Done(result, tail_word >> 17 & 0x7fff))
     }
 
     /// Return the submission queues, PRP list and bounce buffer to the CPU.
     ///
     /// # Safety
-    /// Every published command completed, or the controller acknowledged a
-    /// reset and its DMA was contained.
+    /// Every published command but an Asynchronous Event Request, which owns
+    /// no memory, completed, or the controller acknowledged a reset and its
+    /// DMA was contained.
     unsafe fn reclaim(&mut self) -> Result<(), BlockError> {
         // SAFETY: forwarded from the caller.
         unsafe {
@@ -730,7 +826,9 @@ impl Controller {
         let dead = status & FATAL != 0 || status & READY == 0;
         // A still-outstanding admin command (an unanswered abort) leaves no
         // admin queue to delete with.
-        if !dead && self.admin.head == self.admin.tail {
+        let outstanding = ((self.admin.tail + ENTRIES - self.admin.head) % ENTRIES)
+            .saturating_sub(u16::from(self.events.request.is_some()));
+        if !dead && outstanding == 0 {
             self.delete_io_queues()?;
         }
         let configuration = self.registers.read32(CONFIGURATION)?;
@@ -758,6 +856,7 @@ impl Controller {
                 queue.phase = true;
             }
         }
+        self.events.request = None;
         self.configure_admin_queue()?;
         // Identify through the bounce buffer's first page, keeping the data a
         // retried write still needs there.
@@ -767,6 +866,8 @@ impl Controller {
         // nvme_init_ctrl_finish runs again after every reset; a refused
         // feature is only logged.
         let apst = apst_table(&self.bounce.bytes()[..PAGE]);
+        // The disable ended the Asynchronous Event Request.
+        self.events = Events::from_identify(&self.bounce.bytes()[..PAGE]);
         let mut commands = Vec::new();
         commands.extend(self.host_options()?);
         if let Some(table) = apst {
@@ -786,8 +887,103 @@ impl Controller {
             self.io.submissions.publish();
             self.admin_command(command)?;
         }
-        // nvme_start_ctrl queues a namespace scan.
-        self.resets += 1;
+        // nvme_start_ctrl enables events and queues a namespace scan.
+        self.enable_events()?;
+        self.scans += 1;
+        Ok(())
+    }
+
+    /// Linux `nvme_enable_aen`: enable the notices Linux handles and leave an
+    /// Asynchronous Event Request outstanding. A refused configuration is
+    /// only logged.
+    fn enable_events(&mut self) -> Result<(), BlockError> {
+        if self.events.supported == 0 {
+            return Ok(());
+        }
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_SET_FEATURES);
+        command[10] = FEATURE_ASYNC_EVENTS;
+        command[11] = self.events.supported;
+        match self.admin_command(command) {
+            Ok(_) | Err(BlockError::Device { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        self.request_event()
+    }
+
+    /// Linux `nvme_pci_submit_async_event`.
+    fn request_event(&mut self) -> Result<(), BlockError> {
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_ASYNC_EVENT);
+        let id = self.submit(false, command, false)?;
+        self.events.request = Some(id);
+        Ok(())
+    }
+
+    /// Linux's interrupt-time `nvme_complete_async_event` and its work,
+    /// polled before each command: act on a completed Asynchronous Event
+    /// Request and request the next event. A failed request is not repeated;
+    /// a persistent internal error resets the controller, which requests
+    /// events again.
+    fn service_events(&mut self) -> Result<(), BlockError> {
+        let stride = self.doorbell_stride;
+        if let Err(error) = take_event(&self.registers, stride, &mut self.admin, &mut self.events) {
+            return Err(self.poison(error));
+        }
+        let Some((result, status)) = self.events.completed.take() else {
+            return Ok(());
+        };
+        if status != 0 {
+            return Ok(());
+        }
+        match (result & 0x7, result >> 8 & 0xff) {
+            (EVENT_NOTICE, NOTICE_NAMESPACES_CHANGED) => {
+                // nvme_scan_work clears the Changed Namespace List first.
+                self.read_log(LOG_CHANGED_NAMESPACES, PAGE)?;
+                self.scans += 1;
+            }
+            (EVENT_NOTICE, NOTICE_FIRMWARE_ACTIVATION) => {
+                // nvme_fw_act_work: commands wait while processing is paused,
+                // up to MTFA or the admin timeout, then the Firmware Slot
+                // Information log clears the event.
+                let timeout = match self.events.activation_us {
+                    0 => self.admin_timeout_us,
+                    activation => activation,
+                };
+                match self.wait_status(timeout, |status| status & PROCESSING_PAUSED == 0) {
+                    Ok(()) => self.read_log(LOG_FIRMWARE_SLOT, 512)?,
+                    Err(BlockError::Timeout) => return self.reset_or_poison(),
+                    Err(error) => return Err(self.poison(error)),
+                }
+            }
+            (EVENT_ERROR, ERROR_PERSISTENT_INTERNAL) => return self.reset_or_poison(),
+            _ => {}
+        }
+        self.request_event()
+    }
+
+    fn reset_or_poison(&mut self) -> Result<(), BlockError> {
+        match self.reset() {
+            Ok(()) => Ok(()),
+            Err(failure) => Err(self.poison(failure)),
+        }
+    }
+
+    /// Linux `nvme_get_log` for every namespace into the first bounce page,
+    /// keeping the data a pending write left there. A failure is only
+    /// logged.
+    fn read_log(&mut self, log: u32, bytes: usize) -> Result<(), BlockError> {
+        let kept = self.bounce.bytes()[..PAGE].to_vec();
+        let page = self.bounce.address()?;
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_GET_LOG_PAGE);
+        command[1] = u32::MAX;
+        command[6] = page as u32;
+        command[7] = (page >> 32) as u32;
+        command[10] = ((bytes / 4 - 1) as u32) << 16 | log;
+        let _ = self.execute(false, command);
+        self.ready()?;
+        self.bounce.bytes_mut()[..PAGE].copy_from_slice(&kept);
         Ok(())
     }
 
@@ -1059,7 +1255,7 @@ pub struct Namespace {
     namespace: u32,
     identity: Identity,
     ids: Ids,
-    /// The controller reset count this namespace was last scanned at.
+    /// The controller scan count this namespace was last scanned at.
     scanned: u64,
     /// Set once a rescan removed the namespace.
     removed: Option<BlockError>,
@@ -1096,10 +1292,11 @@ pub fn attach(
         teardown: owned::Teardown::Unprepared,
         ready_timeout_us: 500_000,
         version: 0,
-        resets: 0,
+        scans: 0,
         retry_delays: [0; 3],
         host_memory: None,
         host_memory_enabled: false,
+        events: Events::default(),
     };
     controller.initialize()?;
     discover(controller, format!("{}", function.address), &mut { dma })
@@ -1121,6 +1318,7 @@ fn discover(
     let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
     let request = HostMemoryRequest::from_identify(identify);
     let apst = apst_table(identify);
+    let events = Events::from_identify(identify);
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
     // The maximum transfer, in minimum pages as a power of two; 0 is none.
@@ -1152,6 +1350,8 @@ fn discover(
         controller.io.submissions.publish();
         controller.execute(false, command)?;
     }
+    controller.events = events;
+    controller.enable_events()?;
 
     // Linux `nvme_scan_work`: the active list from NVMe 1.1, otherwise (or
     // when the controller refuses it) every namespace ID in turn.
@@ -1275,7 +1475,8 @@ impl Namespace {
         controller.max_transfer / block * block
     }
 
-    /// Linux `nvme_scan_ns` and `nvme_validate_ns` after a controller reset:
+    /// Linux `nvme_scan_ns` and `nvme_validate_ns` after a controller reset
+    /// or namespace-change notice:
     /// a namespace no longer allocated, or whose identifiers changed, is
     /// removed; otherwise its size and format are updated. A refused
     /// Identify leaves the namespace as it was.
@@ -1283,19 +1484,20 @@ impl Namespace {
         if let Some(error) = &self.removed {
             return Err(error.clone());
         }
-        if self.scanned == controller.resets {
+        controller.service_events()?;
+        if self.scanned == controller.scans {
             return Ok(());
         }
-        let resets = controller.resets;
+        let scans = controller.scans;
         let Some(mut ids) = controller.descriptors(self.namespace)? else {
-            self.scanned = resets;
+            self.scanned = scans;
             return Ok(());
         };
         let (version, max_transfer) = (controller.version, controller.max_transfer);
         let data = match controller.identify(IDENTIFY_NAMESPACE, self.namespace) {
             Ok(data) => data,
             Err(BlockError::Device { .. }) => {
-                self.scanned = resets;
+                self.scanned = scans;
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -1303,7 +1505,7 @@ impl Namespace {
         ids.fill(version, data);
         let allocated = data[NAMESPACE_CAPACITY] != [0; 8];
         let format = plain_format(data, max_transfer);
-        self.scanned = resets;
+        self.scanned = scans;
         match format {
             Ok(Some(format)) if allocated && ids == self.ids => {
                 self.identity.blocks = format.blocks;
@@ -1434,10 +1636,11 @@ mod tests {
                 teardown: owned::Teardown::Unprepared,
                 ready_timeout_us: 500_000,
                 version: 0,
-                resets: 0,
+                scans: 0,
                 retry_delays: [0; 3],
                 host_memory: None,
                 host_memory_enabled: false,
+                events: Events::default(),
             };
             Self {
                 _registers: registers,
