@@ -50,6 +50,7 @@ const INTEL_CLOCK_GATE_IDS: &[u16] = &[
 const INTEL_LBG_IDS: &[u16] = &[0xa1f0, 0xa270];
 const ATI: u16 = 0x1002;
 const AMD: u16 = 0x1022;
+const NVIDIA: u16 = 0x10de;
 const PCI_ID: u16 = 0;
 const PCI_COMMAND: u16 = 4;
 const PCI_STATUS: u16 = 6;
@@ -81,12 +82,20 @@ const TCSEL_MASK: u8 = 7;
 const ATI_SNOOP_CONTROL: u16 = 0x42;
 const ATI_SNOOP_MASK: u8 = 7;
 const ATI_SNOOP_ENABLE: u8 = 2;
+/// Linux `azx_init_pci` for AZX_SNOOP_TYPE_NVIDIA: transaction coherence,
+/// then input and output stream coherence.
+const NVIDIA_TRANSREG: u16 = 0x4e;
+const NVIDIA_ENABLE_COHBITS: u8 = 0x0f;
+const NVIDIA_ISTRM_COH: u16 = 0x4d;
+const NVIDIA_OSTRM_COH: u16 = 0x4c;
+const NVIDIA_ENABLE_COHBIT: u8 = 0x01;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Setup {
     IntelIch,
     IntelPch,
     AtiAzalia,
+    Nvidia,
 }
 
 /// Exact identity-selected accesses. Native widths preserve adjacent PCI
@@ -170,6 +179,23 @@ impl Setup {
                 mask: ATI_SNOOP_MASK,
                 value: ATI_SNOOP_ENABLE,
             }],
+            Self::Nvidia => &[
+                Control::Byte {
+                    offset: NVIDIA_TRANSREG,
+                    mask: NVIDIA_ENABLE_COHBITS,
+                    value: NVIDIA_ENABLE_COHBITS,
+                },
+                Control::Byte {
+                    offset: NVIDIA_ISTRM_COH,
+                    mask: NVIDIA_ENABLE_COHBIT,
+                    value: NVIDIA_ENABLE_COHBIT,
+                },
+                Control::Byte {
+                    offset: NVIDIA_OSTRM_COH,
+                    mask: NVIDIA_ENABLE_COHBIT,
+                    value: NVIDIA_ENABLE_COHBIT,
+                },
+            ],
         }
     }
 }
@@ -253,6 +279,10 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         // Exact AMD hosts use ATI snoop and 40-bit DMA. The later family
         // selects FIFO correction and mandatory bounded discovery below.
         (AMD, 0x780d | 0x157a | 0x1457 | 0x1487 | 0x15e3) => (Setup::AtiAzalia, 40),
+        // Linux binds every NVIDIA HD Audio function with
+        // AZX_DCAPS_PRESET_NVIDIA and 40-bit DMA. GF108 0bea's DMI product
+        // version denylist has no board field here, so it stays refused.
+        (NVIDIA, id) if id != 0x0bea => (Setup::Nvidia, 40),
         _ => return Err(AttachError::UnsupportedController),
     };
     let (position_policy, probe_policy) =
@@ -271,7 +301,12 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
     Ok(Identity {
         vendor,
         device,
-        corb_reset: CorbReset::Handshake,
+        // AZX_DCAPS_CORBRP_SELF_CLEAR is part of the NVIDIA preset.
+        corb_reset: if setup == Setup::Nvidia {
+            CorbReset::SelfClearing
+        } else {
+            CorbReset::Handshake
+        },
         reset_policy: if modern {
             ResetPolicy::IntelClockGate
         } else {
@@ -932,7 +967,10 @@ pub(super) mod tests {
             self.words[usize::from(offset / 4)] = value;
         }
         fn write8(&mut self, offset: u16, value: u8) {
-            assert!(matches!(offset, TCSEL | ATI_SNOOP_CONTROL));
+            assert!(matches!(
+                offset,
+                TCSEL | ATI_SNOOP_CONTROL | NVIDIA_TRANSREG | NVIDIA_ISTRM_COH | NVIDIA_OSTRM_COH
+            ));
             assert_eq!(
                 self.get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
                 0
@@ -1388,6 +1426,26 @@ pub(super) mod tests {
                         && *time >= 10_000)
             );
         }
+    }
+
+    #[test]
+    fn nvidia_gpu_audio_uses_the_linux_preset_coherence_bits_and_40_bit_dma() {
+        let (mut function, timer, bar) = fixture(3);
+        set_identity(&mut function, NVIDIA, 0x22e9);
+        // 4ch output and 4dh input coherence clear, 4eh low nibble clear, 4fh
+        // a neighbor that must survive.
+        function.config().words[19] = 0x5af0_fefe;
+        let prepared = prepare_model(&mut function, &timer, bar).unwrap();
+        assert_eq!(prepared.identity().dma_address_bits, 40);
+        assert_eq!(prepared.config().corb_reset, CorbReset::SelfClearing);
+        let config = function.config();
+        assert_eq!(config.words[19], 0x5aff_ffff);
+        assert!(
+            !config
+                .writes
+                .iter()
+                .any(|(offset, _, _, _)| matches!(*offset, TCSEL | ATI_SNOOP_CONTROL))
+        );
     }
 
     fn pch_fixture(device: u16, version: u16, kind: u16) -> (Function<Model>, Clock, Bar) {
@@ -2120,7 +2178,7 @@ pub(super) mod tests {
             (AMD, 0xab28),
             (ATI, 0x157a),
             (ATI, 0x0002),
-            (0x10de, 0x0be3),
+            (NVIDIA, 0x0bea),
             (INTEL, 0xa828),
         ] {
             let (mut function, timer, bar) = fixture(0);
