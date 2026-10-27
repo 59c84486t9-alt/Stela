@@ -28,6 +28,8 @@ pub enum Input {
     Buttons(u8),
     /// Pointer wheel detents, positive away from the user.
     Wheel(i8),
+    /// Pointer horizontal wheel (AC Pan) detents, positive right.
+    HWheel(i8),
     /// Mouse motion in counts, positive right and down.
     Motion { dx: i16, dy: i16 },
     /// Mouse buttons 1..5 held, as bits 0..4: left, right, middle, side,
@@ -35,4 +37,6 @@ pub enum Input {
     MouseButtons(u8),
     /// Mouse wheel detents, positive away from the user.
     MouseWheel(i8),
+    /// Mouse horizontal wheel (AC Pan) detents, positive right.
+    MouseHWheel(i8),
 }

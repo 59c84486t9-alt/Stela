@@ -42,8 +42,8 @@ const KEYBOARD_ENDPOINT: u8 = 0x81;
 const POINTER_ENDPOINT: u8 = 0x82;
 const MOUSE_ENDPOINT: u8 = 0x83;
 const KEYBOARD_REPORT: usize = 8;
-const POINTER_REPORT: usize = 6;
-const MOUSE_REPORT: usize = 4;
+const POINTER_REPORT: usize = 7;
+const MOUSE_REPORT: usize = 5;
 /// The boot mouse report: buttons, X and Y (HID 1.11 B.2).
 const BOOT_MOUSE_REPORT: usize = 3;
 const INTERFACES: usize = 3;
@@ -124,7 +124,7 @@ const KEYBOARD_REPORT_DESCRIPTOR: [u8; 64] = [
     0xc0,
 ];
 
-const POINTER_REPORT_DESCRIPTOR: [u8; 74] = [
+const POINTER_REPORT_DESCRIPTOR: [u8; 89] = [
     0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, // Generic Desktop, Mouse, Application
     0x09, 0x01, 0xa1, 0x00, // Pointer, Physical
     0x05, 0x09, 0x19, 0x01, 0x29, 0x03, // buttons 1..3
@@ -136,11 +136,13 @@ const POINTER_REPORT_DESCRIPTOR: [u8; 74] = [
     0x05, 0x01, 0x09, 0x38, // wheel
     0x15, 0x81, 0x25, 0x7f, 0x35, 0x00, 0x45, 0x00, //
     0x75, 0x08, 0x95, 0x01, 0x81, 0x06, // relative
+    0x05, 0x0c, 0x0a, 0x38, 0x02, // AC Pan
+    0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06, // relative
     0xc0, 0xc0,
 ];
 
-/// The boot mouse report (HID 1.11 B.2) with a wheel byte after it.
-const MOUSE_REPORT_DESCRIPTOR: [u8; 52] = [
+/// The boot mouse report (HID 1.11 B.2) with wheel and AC Pan bytes after it.
+const MOUSE_REPORT_DESCRIPTOR: [u8; 61] = [
     0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, // Generic Desktop, Mouse, Application
     0x09, 0x01, 0xa1, 0x00, // Pointer, Physical
     0x05, 0x09, 0x19, 0x01, 0x29, 0x03, // buttons 1..3
@@ -148,6 +150,8 @@ const MOUSE_REPORT_DESCRIPTOR: [u8; 52] = [
     0x95, 0x01, 0x75, 0x05, 0x81, 0x01, // padding
     0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, // X, Y, wheel
     0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06, // relative
+    0x05, 0x0c, 0x0a, 0x38, 0x02, // AC Pan
+    0x95, 0x01, 0x81, 0x06, // relative
     0xc0, 0xc0,
 ];
 
@@ -353,10 +357,10 @@ impl Peripheral {
                 }
                 (self.x, self.y) = (x, y);
                 // Motion coalesces into a queued report of the same buttons.
-                let report = self.pointer_report(0);
+                let report = self.pointer_report(0, 0);
                 let queue = &mut self.interfaces[POINTER].queue;
                 match queue.back_mut() {
-                    Some(last) if last[0] == report[0] && last[5] == 0 => {
+                    Some(last) if last[0] == report[0] && last[5] == 0 && last[6] == 0 => {
                         last.copy_from_slice(&report)
                     }
                     _ => self.queue(POINTER, report.to_vec()),
@@ -367,14 +371,21 @@ impl Peripheral {
                     return Err("the pointer has three buttons");
                 }
                 self.buttons = buttons;
-                let report = self.pointer_report(0).to_vec();
+                let report = self.pointer_report(0, 0).to_vec();
                 self.queue(POINTER, report);
             }
             Input::Wheel(detents) => {
                 if detents == i8::MIN {
                     return Err("wheel motion outside its logical range");
                 }
-                let report = self.pointer_report(detents).to_vec();
+                let report = self.pointer_report(detents, 0).to_vec();
+                self.queue(POINTER, report);
+            }
+            Input::HWheel(detents) => {
+                if detents == i8::MIN {
+                    return Err("wheel motion outside its logical range");
+                }
+                let report = self.pointer_report(0, detents).to_vec();
                 self.queue(POINTER, report);
             }
             Input::Motion { dx, dy } => self.motion(dx, dy),
@@ -383,14 +394,21 @@ impl Peripheral {
                     return Err("the mouse has three buttons");
                 }
                 self.mouse_buttons = buttons;
-                let report = self.mouse_report(0, 0, 0).to_vec();
+                let report = self.mouse_report(0, 0, 0, 0).to_vec();
                 self.queue(MOUSE, report);
             }
             Input::MouseWheel(detents) => {
                 if detents == i8::MIN {
                     return Err("wheel motion outside its logical range");
                 }
-                let report = self.mouse_report(0, 0, detents).to_vec();
+                let report = self.mouse_report(0, 0, detents, 0).to_vec();
+                self.queue(MOUSE, report);
+            }
+            Input::MouseHWheel(detents) => {
+                if detents == i8::MIN {
+                    return Err("wheel motion outside its logical range");
+                }
+                let report = self.mouse_report(0, 0, 0, detents).to_vec();
                 self.queue(MOUSE, report);
             }
         }
@@ -409,6 +427,7 @@ impl Peripheral {
         if let Some(last) = queue.back_mut()
             && last[0] == buttons
             && last[3] == 0
+            && last[4] == 0
         {
             for (byte, delta) in [(1, &mut dx), (2, &mut dy)] {
                 let held = i16::from(last[byte] as i8);
@@ -421,7 +440,7 @@ impl Peripheral {
             let step_x = dx.clamp(-MOTION_MAX, MOTION_MAX);
             let step_y = dy.clamp(-MOTION_MAX, MOTION_MAX);
             (dx, dy) = (dx - step_x, dy - step_y);
-            let report = self.mouse_report(step_x as i8, step_y as i8, 0).to_vec();
+            let report = self.mouse_report(step_x as i8, step_y as i8, 0, 0).to_vec();
             self.interfaces[MOUSE].push(report);
         }
     }
@@ -443,22 +462,28 @@ impl Peripheral {
         report
     }
 
-    fn pointer_report(&self, wheel: i8) -> [u8; POINTER_REPORT] {
+    fn pointer_report(&self, wheel: i8, pan: i8) -> [u8; POINTER_REPORT] {
         let [x0, x1] = self.x.to_le_bytes();
         let [y0, y1] = self.y.to_le_bytes();
-        [self.buttons, x0, x1, y0, y1, wheel as u8]
+        [self.buttons, x0, x1, y0, y1, wheel as u8, pan as u8]
     }
 
-    fn mouse_report(&self, dx: i8, dy: i8, wheel: i8) -> [u8; MOUSE_REPORT] {
-        [self.mouse_buttons, dx as u8, dy as u8, wheel as u8]
+    fn mouse_report(&self, dx: i8, dy: i8, wheel: i8, pan: i8) -> [u8; MOUSE_REPORT] {
+        [
+            self.mouse_buttons,
+            dx as u8,
+            dy as u8,
+            wheel as u8,
+            pan as u8,
+        ]
     }
 
     /// The interface's report now: relative fields report no motion.
     fn current(&self, interface: usize) -> Vec<u8> {
         match interface {
             KEYBOARD => self.keyboard_report().to_vec(),
-            POINTER => self.pointer_report(0).to_vec(),
-            _ => self.mouse_report(0, 0, 0).to_vec(),
+            POINTER => self.pointer_report(0, 0).to_vec(),
+            _ => self.mouse_report(0, 0, 0, 0).to_vec(),
         }
     }
 
@@ -913,13 +938,16 @@ mod tests {
         p.input(Input::Move { x: 0x7fff, y: 3 }).unwrap();
         p.input(Input::Buttons(1)).unwrap();
         p.input(Input::Wheel(-2)).unwrap();
-        let mut pointer = [0; 6];
+        p.input(Input::HWheel(5)).unwrap();
+        let mut pointer = [0; POINTER_REPORT];
         p.packet(0x82, Token::In, &mut pointer).unwrap();
-        assert_eq!(pointer, [0, 0xff, 0x7f, 3, 0, 0]);
+        assert_eq!(pointer, [0, 0xff, 0x7f, 3, 0, 0, 0]);
         p.packet(0x82, Token::In, &mut pointer).unwrap();
-        assert_eq!(pointer, [1, 0xff, 0x7f, 3, 0, 0]);
+        assert_eq!(pointer, [1, 0xff, 0x7f, 3, 0, 0, 0]);
         p.packet(0x82, Token::In, &mut pointer).unwrap();
-        assert_eq!(pointer[5], (-2i8) as u8);
+        assert_eq!(pointer[5..], [(-2i8) as u8, 0]);
+        p.packet(0x82, Token::In, &mut pointer).unwrap();
+        assert_eq!(pointer[5..], [0, 5]);
         assert!(p.input(Input::Move { x: 0x8000, y: 0 }).is_err());
     }
 
@@ -939,16 +967,19 @@ mod tests {
         p.input(Input::Motion { dx: 300, dy: -5 }).unwrap();
         p.input(Input::Motion { dx: 10, dy: -5 }).unwrap();
         assert_eq!(p.ready_at(MOUSE_ENDPOINT), Some(0));
-        assert_eq!(read(&mut p).unwrap(), [0, 127, (-5i8) as u8, 0]);
-        assert_eq!(read(&mut p).unwrap(), [0, 127, 0, 0]);
-        assert_eq!(read(&mut p).unwrap(), [0, 56, (-5i8) as u8, 0]);
+        assert_eq!(read(&mut p).unwrap(), [0, 127, (-5i8) as u8, 0, 0]);
+        assert_eq!(read(&mut p).unwrap(), [0, 127, 0, 0, 0]);
+        assert_eq!(read(&mut p).unwrap(), [0, 56, (-5i8) as u8, 0, 0]);
         assert_eq!(read(&mut p), None);
         // A button change and wheel motion each send a report.
         p.input(Input::MouseButtons(2)).unwrap();
         p.input(Input::Motion { dx: -1, dy: 1 }).unwrap();
         p.input(Input::MouseWheel(3)).unwrap();
-        assert_eq!(read(&mut p).unwrap(), [2, (-1i8) as u8, 1, 0]);
-        assert_eq!(read(&mut p).unwrap(), [2, 0, 0, 3]);
+        p.input(Input::MouseHWheel(-4)).unwrap();
+        assert_eq!(read(&mut p).unwrap(), [2, (-1i8) as u8, 1, 0, 0]);
+        assert_eq!(read(&mut p).unwrap(), [2, 0, 0, 3, 0]);
+        assert_eq!(read(&mut p).unwrap(), [2, 0, 0, 0, (-4i8) as u8]);
+        assert!(p.input(Input::MouseHWheel(i8::MIN)).is_err());
         assert!(p.input(Input::MouseButtons(8)).is_err());
         assert!(p.input(Input::MouseWheel(i8::MIN)).is_err());
         // The pointer's state is its own.
@@ -973,7 +1004,7 @@ mod tests {
         let protocol = control(&mut p, setup(0xa1, GET_PROTOCOL, 0, 0, 1), &[]).unwrap();
         assert_eq!(protocol, [BOOT_PROTOCOL]);
         assert!(control(&mut p, setup(0x21, SET_PROTOCOL, 0, 1, 0), &[]).is_err());
-        let report = control(&mut p, setup(0xa1, GET_REPORT, 0x100, 1, 6), &[]).unwrap();
+        let report = control(&mut p, setup(0xa1, GET_REPORT, 0x100, 1, 7), &[]).unwrap();
         assert_eq!(report.len(), POINTER_REPORT);
         // A 40 ms idle rate repeats the unchanged report.
         p.set_time(1000);

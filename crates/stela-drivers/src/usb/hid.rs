@@ -736,6 +736,16 @@ impl UsbInput {
                 Input::Wheel(detents)
             });
         }
+        if let Some(pan) = value(layout.pan)
+            && pan != 0
+        {
+            let detents = pan.clamp(-127, 127) as i8;
+            inputs.push(if mouse {
+                Input::MouseHWheel(detents)
+            } else {
+                Input::HWheel(detents)
+            });
+        }
     }
 }
 
@@ -1271,6 +1281,13 @@ mod tests {
                 1,
                 0x81,
                 6,
+                5,
+                0x0c,
+                0x0a,
+                0x38,
+                2, // AC Pan
+                0x81,
+                6,
                 0xc0,
                 0xc0,
             ];
@@ -1297,13 +1314,14 @@ mod tests {
             hardware
                 .borrow_mut()
                 .incoming_events
-                .push_back(vec![0x11, 127, 0, 1]);
+                .push_back(vec![0x11, 127, 0, 1, 0xfe]);
             let polled = input.poll_hid();
             let expected = if relative {
                 vec![
                     Input::Motion { dx: 127, dy: 0 },
                     Input::MouseButtons(0x11),
                     Input::MouseWheel(1),
+                    Input::MouseHWheel(-2),
                 ]
             } else {
                 vec![
@@ -1313,6 +1331,7 @@ mod tests {
                     },
                     Input::Buttons(1),
                     Input::Wheel(1),
+                    Input::HWheel(-2),
                 ]
             };
             assert_eq!(polled.inputs, expected);

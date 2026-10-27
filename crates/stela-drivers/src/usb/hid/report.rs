@@ -32,6 +32,8 @@ mod sparse_tests;
 const GENERIC_DESKTOP_X: u32 = 0x0001_0030;
 const GENERIC_DESKTOP_Y: u32 = 0x0001_0031;
 const GENERIC_DESKTOP_WHEEL: u32 = 0x0001_0038;
+/// Consumer AC Pan, which `hidinput_configure_usage` maps to REL_HWHEEL.
+const CONSUMER_AC_PAN: u32 = 0x000c_0238;
 const BUTTON_1: u32 = 0x0009_0001;
 const BUTTON_5: u32 = 0x0009_0005;
 const KEYBOARD_PAGE: u32 = 0x07;
@@ -159,6 +161,7 @@ pub struct Pointer {
     pub x: Option<Field>,
     pub y: Option<Field>,
     pub wheel: Option<Field>,
+    pub pan: Option<Field>,
     pub buttons: [Option<Field>; 5],
 }
 
@@ -179,6 +182,7 @@ impl Pointer {
             x: field(8, 8, -127, true),
             y: field(16, 8, -127, true),
             wheel: None,
+            pan: None,
             buttons: [
                 field(0, 1, 0, false),
                 field(1, 1, 0, false),
@@ -511,6 +515,7 @@ fn pointer(items: &[Item]) -> Option<Pointer> {
             GENERIC_DESKTOP_X => layout.x = layout.x.or(field),
             GENERIC_DESKTOP_Y => layout.y = layout.y.or(field),
             GENERIC_DESKTOP_WHEEL => layout.wheel = layout.wheel.or(field),
+            CONSUMER_AC_PAN => layout.pan = layout.pan.or(field),
             BUTTON_1..=BUTTON_5 => {
                 let button = &mut layout.buttons[(*usage - BUTTON_1) as usize];
                 *button = button.or(field);
