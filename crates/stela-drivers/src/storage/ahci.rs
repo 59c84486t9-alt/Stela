@@ -38,6 +38,12 @@ const HANDOFF: usize = 0x28;
 
 const CAP_64BIT: u32 = 1 << 31;
 const CAP_STAGGERED_SPIN_UP: u32 = 1 << 27;
+/// CAP.SALP, SSC, PSC and SXS; CAP2.SDS.
+const CAP_AGGRESSIVE_LPM: u32 = 1 << 26;
+const CAP_SLUMBER: u32 = 1 << 14;
+const CAP_PARTIAL: u32 = 1 << 13;
+const CAP_EXTERNAL: u32 = 1 << 5;
+const CAP2_DEVICE_SLEEP: u32 = 1 << 3;
 /// CAP.NP: the number of ports, minus one.
 const CAP_PORTS: u32 = 0x1f;
 const CAP2_HANDOFF: u32 = 1 << 0;
@@ -83,6 +89,12 @@ const COMMAND_SPIN_UP: u32 = 1 << 1;
 const COMMAND_FIS_RECEIVE: u32 = 1 << 4;
 const COMMAND_FIS_RUNNING: u32 = 1 << 14;
 const COMMAND_LIST_RUNNING: u32 = 1 << 15;
+/// PxCMD.HPCP and ESP, ALPE and ASP, and ICC's Active request.
+const COMMAND_HOTPLUG: u32 = 1 << 18;
+const COMMAND_EXTERNAL: u32 = 1 << 21;
+const COMMAND_AGGRESSIVE_LPM: u32 = 1 << 26;
+const COMMAND_AGGRESSIVE_SLUMBER: u32 = 1 << 27;
+const COMMAND_INTERFACE_ACTIVE: u32 = 1 << 28;
 const TASK_FILE_BUSY: u32 = 0x88;
 /// Port interrupt status bits that end a command (Linux `PORT_IRQ_ERROR`).
 const INTERRUPT_TASK_FILE_ERROR: u32 = 1 << 30;
@@ -149,6 +161,11 @@ const SATA_CONTROL_RESET: u32 = 1;
 /// `sata_link_hardreset`: keep SPD, disable partial and slumber, then
 /// COMRESET (DET 1) and release it (DET 0).
 const SATA_CONTROL_SPEED: u32 = 0x0f0;
+/// SControl.IPM: transitions to Partial, Slumber and DevSleep disallowed.
+const SATA_CONTROL_NO_PARTIAL: u32 = 0x100;
+const SATA_CONTROL_NO_SLUMBER: u32 = 0x200;
+const SATA_CONTROL_NO_DEVICE_SLEEP: u32 = 0x400;
+const SATA_CONTROL_POWER: u32 = 0x700;
 const SATA_CONTROL_COMRESET: u32 = 0x301;
 const SATA_CONTROL_RESUMED: u32 = 0x300;
 const SATA_CONTROL_RESUME_MASK: u32 = 0xf0f;
@@ -190,6 +207,12 @@ const IDENTIFY_PIO_MODES: usize = 64;
 const IDENTIFY_UDMA_MODES: usize = 88;
 /// Word 128 bits 2:0: security supported, enabled and locked.
 const IDENTIFY_SECURITY: usize = 128;
+/// SATA capabilities (word 76, HIPM in bit 9) and features supported (word
+/// 78, DIPM in bit 3).
+const IDENTIFY_SATA_CAPABILITY: usize = 76;
+const IDENTIFY_SATA_FEATURES: usize = 78;
+const SATA_CAPABILITY_HIPM: u16 = 1 << 9;
+const SATA_FEATURE_DIPM: u16 = 1 << 3;
 const SECURITY_LOCKED: u16 = 0x7;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
@@ -255,6 +278,17 @@ const UDMA_MASK_40_WIRE: u32 = 0x07;
 const ATA_REQUEST_SENSE_DATA_EXT: u8 = 0x0b;
 /// `SETFEATURE_SENSE_DATA`, enabled with a count of one.
 const FEATURE_SENSE_DATA: u8 = 0xc3;
+/// SET FEATURES enabling or disabling a SATA feature: DIPM.
+const FEATURE_SATA_ENABLE: u8 = 0x10;
+const FEATURE_SATA_DISABLE: u8 = 0x90;
+const SATA_DIPM: u16 = 0x03;
+/// Linux's `ATA_LPM_*` policies this driver uses: unknown before the first
+/// configuration, maximum power, and CONFIG_SATA_MOBILE_LPM_POLICY's default.
+const LPM_UNKNOWN: u8 = 0;
+const LPM_MAX_POWER: u8 = 1;
+const LPM_MED_POWER_WITH_DIPM: u8 = 3;
+/// `ahci_set_lpm`'s wait for the interface to leave a low-power state.
+const LPM_WAKE_US: u64 = 10_000;
 /// SCSI sense keys (SPC-5 4.4.2) that `scsi_check_sense` and sd's
 /// completion treat apart.
 const SENSE_RECOVERED_ERROR: u8 = 0x01;
@@ -361,6 +395,57 @@ pub struct AhciDisk {
     step_downs: u8,
     /// `ata_id_is_locked` for the last IDENTIFY data read.
     locked: bool,
+    lpm: Lpm,
+}
+
+/// Linux link power management for one port.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Lpm {
+    capabilities: u32,
+    capabilities_2: u32,
+    /// Not `ATA_LFLAG_NO_LPM`: an internal, LPM-capable port whose
+    /// configuration has not failed with one try left.
+    allowed: bool,
+    /// `link->lpm_policy`.
+    policy: u8,
+    /// `ata_id_has_hipm` and `ata_id_has_dipm` for the last IDENTIFY data.
+    hipm: bool,
+    dipm: bool,
+}
+
+impl Lpm {
+    /// Linux `ahci_mark_external_port` and `ahci_update_initial_lpm_policy`:
+    /// none on a hotplug-capable or eSATA port, where LPM hides removal, or
+    /// on a host without Partial, Slumber and DevSleep.
+    fn new(capabilities: u32, capabilities_2: u32, command: u32) -> Self {
+        let external = command & COMMAND_EXTERNAL != 0 && capabilities & CAP_EXTERNAL != 0
+            || command & COMMAND_HOTPLUG != 0;
+        let states = capabilities & (CAP_PARTIAL | CAP_SLUMBER) != 0
+            || capabilities_2 & CAP2_DEVICE_SLEEP != 0;
+        Self {
+            capabilities,
+            capabilities_2,
+            allowed: !external && states,
+            policy: LPM_UNKNOWN,
+            ..Self::default()
+        }
+    }
+
+    /// `ap->target_lpm_policy`. The s2idle upgrade to the minimum-power
+    /// policies needs the FADT low-power S0 flag, which the handoff does not
+    /// carry; the S3 default stands.
+    fn target(&self) -> u8 {
+        if self.allowed {
+            LPM_MED_POWER_WITH_DIPM
+        } else {
+            LPM_MAX_POWER
+        }
+    }
+
+    /// Not `ATA_FLAG_NO_DIPM`: the host has both Partial and Slumber.
+    fn host_dipm(&self) -> bool {
+        self.capabilities & (CAP_PARTIAL | CAP_SLUMBER) == CAP_PARTIAL | CAP_SLUMBER
+    }
 }
 
 /// One `ata_ering_entry`: its flags, `AC_ERR_*` mask and raw clock origin.
@@ -476,6 +561,9 @@ struct Identified {
     transfer: Transfer,
     /// `ata_id_is_locked`.
     locked: bool,
+    /// `ata_id_has_hipm` and `ata_id_has_dipm`.
+    hipm: bool,
+    dipm: bool,
 }
 
 /// What `ata_id_xfermask`, `ata_id_has_iordy` and `ata_id_is_cfa` read.
@@ -570,6 +658,7 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
     {
         return Err(BlockError::Unsupported("SATA logical sector size"));
     }
+    let sata_valid = !matches!(word(IDENTIFY_SATA_CAPABILITY), 0 | 0xffff);
     Ok(Identified {
         model: string(IDENTIFY_MODEL),
         serial: string(IDENTIFY_SERIAL),
@@ -579,6 +668,8 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
         sense_reporting: sense_reporting(word),
         transfer: Transfer::from_identify(word),
         locked: word(IDENTIFY_SECURITY) & SECURITY_LOCKED == SECURITY_LOCKED,
+        hipm: sata_valid && word(IDENTIFY_SATA_CAPABILITY) & SATA_CAPABILITY_HIPM != 0,
+        dipm: sata_valid && word(IDENTIFY_SATA_FEATURES) & SATA_FEATURE_DIPM != 0,
     })
 }
 
@@ -928,7 +1019,7 @@ pub fn attach(
     for index in (0..MAX_PORTS).filter(|index| implemented >> index & 1 == 1) {
         let offset = PORT_BASE + PORT_REGISTERS * u64::from(index);
         let started = registers(handoff, bars[5], offset, PORT_REGISTERS)
-            .and_then(|port| AhciDisk::start(port, capabilities, clock, dma));
+            .and_then(|port| AhciDisk::start(port, capabilities, capabilities_2, clock, dma));
         match started {
             Ok(Some(mut disk)) => {
                 disk.identity.location = format!("{} port {index}", function.address);
@@ -985,9 +1076,11 @@ impl AhciDisk {
     fn start(
         port: Mmio,
         capabilities: u32,
+        capabilities_2: u32,
         clock: Clock,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Option<Self>, BlockError> {
+        let lpm = Lpm::new(capabilities, capabilities_2, port.read32(PORT_COMMAND));
         stop_port(&port, clock)?;
         if capabilities & CAP_STAGGERED_SPIN_UP != 0 {
             port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_SPIN_UP);
@@ -1073,6 +1166,7 @@ impl AhciDisk {
             mode: 0,
             step_downs: 0,
             locked: false,
+            lpm,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
@@ -1091,7 +1185,12 @@ impl AhciDisk {
         disk.identity.block_size = found.block_size;
         disk.transfer = found.transfer;
         disk.locked = found.locked;
+        (disk.lpm.hipm, disk.lpm.dipm) = (found.hipm, found.dipm);
         disk.set_mode(&port)?;
+        // ata_eh_recover's config_lpm; a failure takes EH's next try.
+        if let Err(error) = disk.configure_lpm(&port, DEVICE_TRIES) {
+            disk.reset_and_configure(&port, false, error, DEVICE_TRIES - 1)?;
+        }
         Ok(Some(disk))
     }
 
@@ -1292,9 +1391,18 @@ impl AhciDisk {
         if !failure.reset && !slowed {
             return Ok(());
         }
-        let mut hotplug = failure.hotplug;
-        let mut last = failure.error.clone();
-        let mut tries = DEVICE_TRIES;
+        self.reset_and_configure(port, failure.hotplug, failure.error.clone(), DEVICE_TRIES)
+    }
+
+    /// `ata_eh_recover`'s reset, revalidation and configuration, `tries`
+    /// times at most.
+    fn reset_and_configure(
+        &mut self,
+        port: &impl CommandPort,
+        mut hotplug: bool,
+        mut last: BlockError,
+        mut tries: usize,
+    ) -> Result<(), BlockError> {
         loop {
             let mut online = None;
             for timeout in RESET_TIMEOUTS_US {
@@ -1311,8 +1419,18 @@ impl AhciDisk {
                 Some(false) => return Err(DETACHED),
                 Some(true) => {}
             }
-            // ata_eh_revalidate_and_attach, then ATA_EHI_SETMODE.
-            let Err(error) = self.revalidate(port).and_then(|()| self.set_mode(port)) else {
+            // ata_eh_revalidate_and_attach wakes a power-saving link first;
+            // then ATA_EHI_SETMODE and config_lpm.
+            let woken = if self.lpm.policy > LPM_MAX_POWER {
+                self.set_lpm(port, LPM_MAX_POWER, tries)
+            } else {
+                Ok(())
+            };
+            let Err(error) = woken
+                .and_then(|()| self.revalidate(port))
+                .and_then(|()| self.set_mode(port))
+                .and_then(|()| self.configure_lpm(port, tries))
+            else {
                 return Ok(());
             };
             // ata_eh_handle_dev_fail: another device gets one more chance,
@@ -1540,6 +1658,97 @@ impl AhciDisk {
         self.sense_reporting = found.sense_reporting.1;
         self.transfer = found.transfer;
         self.locked = found.locked;
+        (self.lpm.hipm, self.lpm.dipm) = (found.hipm, found.dipm);
+        Ok(())
+    }
+
+    /// `ata_eh_recover`'s config_lpm: move to the target policy. A failure
+    /// with at most two tries left disables LPM on the link, as
+    /// `ata_eh_link_set_lpm` does.
+    fn configure_lpm(&mut self, port: &impl CommandPort, tries: usize) -> Result<(), BlockError> {
+        let target = self.lpm.target();
+        if self.lpm.policy == target {
+            return Ok(());
+        }
+        self.set_lpm(port, target, tries)
+    }
+
+    /// Linux `ata_eh_link_set_lpm` with `ahci_set_lpm`: DIPM off, the
+    /// SControl IPM restrictions and PxCMD aggressive LPM the policy and HIPM
+    /// allow, then DIPM on from MED_POWER_WITH_DIPM. A device's refusal is
+    /// ignored; any other failure keeps the old policy.
+    fn set_lpm(
+        &mut self,
+        port: &impl CommandPort,
+        policy: u8,
+        tries: usize,
+    ) -> Result<(), BlockError> {
+        if !self.lpm.allowed {
+            return Ok(());
+        }
+        let result = self.apply_lpm(port, policy);
+        if result.is_err() && tries <= 2 {
+            self.lpm.allowed = false;
+        }
+        result
+    }
+
+    fn apply_lpm(&mut self, port: &impl CommandPort, policy: u8) -> Result<(), BlockError> {
+        let lpm = self.lpm;
+        let buffer = self.bounce.physical();
+        let dipm = |disk: &mut Self, feature| match disk.internal(
+            port,
+            ATA_SET_FEATURES,
+            feature,
+            SATA_DIPM,
+            0,
+            buffer,
+        ) {
+            Ok(()) | Err(BlockError::Device { .. }) => Ok(()),
+            Err(error) => Err(error),
+        };
+        if lpm.dipm {
+            dipm(self, FEATURE_SATA_DISABLE)?;
+        }
+        // sata_link_scr_lpm; the port's PhyRdy interrupt is already masked.
+        let mut control = port.read32(PORT_SATA_CONTROL);
+        if policy == LPM_MAX_POWER {
+            control |= SATA_CONTROL_POWER;
+        } else {
+            control &= !SATA_CONTROL_POWER;
+            if lpm.capabilities & CAP_PARTIAL == 0 {
+                control |= SATA_CONTROL_NO_PARTIAL;
+            }
+            if lpm.capabilities & CAP_SLUMBER == 0 {
+                control |= SATA_CONTROL_NO_SLUMBER;
+            }
+            if lpm.capabilities_2 & CAP2_DEVICE_SLEEP == 0 {
+                control |= SATA_CONTROL_NO_DEVICE_SLEEP;
+            }
+        }
+        port.write32(PORT_SATA_CONTROL, control);
+        port.write32(PORT_SATA_ERROR, SERROR_PHY_READY_CHANGE);
+        if lpm.capabilities & CAP_AGGRESSIVE_LPM != 0 {
+            let mut command = port.read32(PORT_COMMAND);
+            if policy == LPM_MAX_POWER || !lpm.hipm {
+                command &= !(COMMAND_AGGRESSIVE_SLUMBER | COMMAND_AGGRESSIVE_LPM);
+                port.write32(PORT_COMMAND, command | COMMAND_INTERFACE_ACTIVE);
+                port.read32(PORT_COMMAND);
+                self.clock.delay(LPM_WAKE_US);
+            } else {
+                port.write32(PORT_COMMAND, command | COMMAND_AGGRESSIVE_LPM);
+            }
+        }
+        let old = self.lpm.policy;
+        self.lpm.policy = policy;
+        if policy >= LPM_MED_POWER_WITH_DIPM
+            && lpm.host_dipm()
+            && lpm.dipm
+            && let Err(error) = dipm(self, FEATURE_SATA_ENABLE)
+        {
+            self.lpm.policy = old;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1978,6 +2187,7 @@ mod tests {
                     mode: 0x46,
                     step_downs: 0,
                     locked: false,
+                    lpm: Lpm::default(),
                 },
                 _registers: registers,
                 _memory: memory,
@@ -2369,6 +2579,58 @@ mod tests {
         assert_eq!(fixture.disk.pio_mask, 0x0f);
         fixture.disk.pio_mask = 0x01;
         assert!(!fixture.disk.lower_transfer_limit(StepDown::Pio));
+    }
+
+    #[test]
+    fn link_power_management_follows_ata_eh_link_set_lpm() {
+        let host = CAP_AGGRESSIVE_LPM | CAP_SLUMBER | CAP_PARTIAL;
+        // Hotplug-capable and eSATA ports, and hosts without LPM states,
+        // stay at maximum power.
+        assert!(!Lpm::new(host, 0, COMMAND_HOTPLUG).allowed);
+        assert!(!Lpm::new(host | CAP_EXTERNAL, 0, COMMAND_EXTERNAL).allowed);
+        assert!(Lpm::new(host, 0, COMMAND_EXTERNAL).allowed);
+        assert!(!Lpm::new(CAP_AGGRESSIVE_LPM, 0, 0).allowed);
+        assert!(Lpm::new(CAP_AGGRESSIVE_LPM, CAP2_DEVICE_SLEEP, 0).allowed);
+
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        fixture.disk.lpm = Lpm {
+            hipm: true,
+            dipm: true,
+            ..Lpm::new(host, 0, 0)
+        };
+        let link = Link::new(&[]);
+        fixture.disk.configure_lpm(&link, DEVICE_TRIES).unwrap();
+        // DIPM off and on around Partial and Slumber allowed with ALPE.
+        assert_eq!(link.issued.get(), 2);
+        assert_eq!(link.writes_to(PORT_SATA_CONTROL), [0x400]);
+        assert_ne!(link.read32(PORT_COMMAND) & COMMAND_AGGRESSIVE_LPM, 0);
+        assert_eq!(fixture.disk.lpm.policy, LPM_MED_POWER_WITH_DIPM);
+
+        // A hard reset wakes the link to maximum power before revalidating,
+        // then restores the policy; without HIPM, ALPE stays off.
+        fixture.disk.lpm.hipm = false;
+        let link = Link::new(&[Fault::Timeout]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false),
+            Ok(())
+        );
+        let controls = link.writes_to(PORT_SATA_CONTROL);
+        assert!(controls.ends_with(&[0x700, 0x400]), "{controls:x?}");
+        assert_eq!(link.read32(PORT_COMMAND) & COMMAND_AGGRESSIVE_LPM, 0);
+        assert_eq!(fixture.disk.lpm.policy, LPM_MED_POWER_WITH_DIPM);
+
+        // A failure with two tries left disables LPM; the old policy stays.
+        // (The revalidation's IDENTIFY data reported no DIPM.)
+        fixture.disk.lpm.dipm = true;
+        let link = Link::new(&[Fault::Timeout]);
+        assert_eq!(
+            fixture.disk.set_lpm(&link, LPM_MAX_POWER, 2),
+            Err(BlockError::Timeout)
+        );
+        assert!(!fixture.disk.lpm.allowed);
+        assert_eq!(fixture.disk.lpm.policy, LPM_MED_POWER_WITH_DIPM);
     }
 
     #[test]
