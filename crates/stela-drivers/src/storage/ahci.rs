@@ -106,6 +106,8 @@ const STATUS_FAULT: u8 = 1 << 5;
 const STATUS_REQUEST: u8 = 1 << 3;
 /// `ATA_SENSE`: sense data is available.
 const STATUS_SENSE: u8 = 1 << 1;
+/// `ATA_CORR`: corrected data error.
+const STATUS_CORRECTED: u8 = 1 << 2;
 const STATUS_ERROR: u8 = 1 << 0;
 const ERROR_INTERFACE_CRC: u8 = 1 << 7;
 const ERROR_UNCORRECTABLE: u8 = 1 << 6;
@@ -177,6 +179,9 @@ const FIELD_VALID_PIO: u16 = 1 << 1;
 const FIELD_VALID_UDMA: u16 = 1 << 2;
 const IDENTIFY_PIO_MODES: usize = 64;
 const IDENTIFY_UDMA_MODES: usize = 88;
+/// Word 128 bits 2:0: security supported, enabled and locked.
+const IDENTIFY_SECURITY: usize = 128;
+const SECURITY_LOCKED: u16 = 0x7;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
 const COMMANDS_2_LBA48: u16 = 1 << 10;
@@ -245,6 +250,8 @@ const FEATURE_SENSE_DATA: u8 = 0xc3;
 /// completion treat apart.
 const SENSE_RECOVERED_ERROR: u8 = 0x01;
 const SENSE_MEDIUM_ERROR: u8 = 0x03;
+const SENSE_HARDWARE_ERROR: u8 = 0x04;
+const SENSE_DATA_PROTECT: u8 = 0x07;
 const SENSE_ABORTED_COMMAND: u8 = 0x0b;
 const SENSE_COMPLETED: u8 = 0x0f;
 /// sd's requeue delays: a busy device blocks its queue for
@@ -343,6 +350,8 @@ pub struct AhciDisk {
     udma_mask: u32,
     mode: u8,
     step_downs: u8,
+    /// `ata_id_is_locked` for the last IDENTIFY data read.
+    locked: bool,
 }
 
 /// One `ata_ering_entry`: its flags, `AC_ERR_*` mask and raw clock origin.
@@ -456,6 +465,8 @@ struct Identified {
     /// Sense Data Reporting supported, and enabled.
     sense_reporting: (bool, bool),
     transfer: Transfer,
+    /// `ata_id_is_locked`.
+    locked: bool,
 }
 
 /// What `ata_id_xfermask`, `ata_id_has_iordy` and `ata_id_is_cfa` read.
@@ -558,6 +569,7 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
         flush: flush_command(word),
         sense_reporting: sense_reporting(word),
         transfer: Transfer::from_identify(word),
+        locked: word(IDENTIFY_SECURITY) & SECURITY_LOCKED == SECURITY_LOCKED,
     })
 }
 
@@ -611,6 +623,48 @@ enum Completion {
     /// Requeue after this delay.
     Retry(u64),
     Fail,
+}
+
+/// Linux `ata_to_sense_error`, from the 3ware translation table: the error
+/// register's best match first, then the status register.
+fn translate_error(status: u8, error: u8) -> Sense {
+    const ERRORS: [(u8, u8, u8, u8); 13] = [
+        (0xd1, SENSE_ABORTED_COMMAND, 0x00, 0x00),
+        (0xd0, SENSE_ABORTED_COMMAND, 0x00, 0x00),
+        (0x61, SENSE_HARDWARE_ERROR, 0x00, 0x00),
+        (0x84, SENSE_ABORTED_COMMAND, 0x47, 0x00),
+        (0x37, Sense::NOT_READY, 0x04, 0x00),
+        (0x09, Sense::NOT_READY, 0x04, 0x00),
+        (0x01, SENSE_MEDIUM_ERROR, 0x13, 0x00),
+        (0x02, SENSE_HARDWARE_ERROR, 0x00, 0x00),
+        (0x08, Sense::NOT_READY, 0x04, 0x00),
+        (0x10, Sense::ILLEGAL_REQUEST, 0x21, 0x00),
+        (0x20, Sense::UNIT_ATTENTION, 0x28, 0x00),
+        (0x40, SENSE_MEDIUM_ERROR, 0x11, 0x04),
+        (0x80, SENSE_MEDIUM_ERROR, 0x11, 0x04),
+    ];
+    const STATUSES: [(u8, u8, u8, u8); 3] = [
+        // Busy means no other bit is valid.
+        (STATUS_BUSY, SENSE_ABORTED_COMMAND, 0x00, 0x00),
+        (STATUS_FAULT, SENSE_HARDWARE_ERROR, 0x44, 0x00),
+        (STATUS_CORRECTED, SENSE_RECOVERED_ERROR, 0x00, 0x00),
+    ];
+    let sense = |(_, key, asc, ascq): (u8, u8, u8, u8)| Sense { key, asc, ascq };
+    let error = if status & STATUS_BUSY != 0 { 0 } else { error };
+    // ABRT alone is not descriptive enough: the status decides.
+    ERRORS
+        .iter()
+        .find(|entry| error != 0 && entry.0 & error == entry.0)
+        .or_else(|| STATUSES.iter().find(|entry| entry.0 & status != 0))
+        .copied()
+        .map_or(
+            Sense {
+                key: SENSE_ABORTED_COMMAND,
+                asc: 0,
+                ascq: 0,
+            },
+            sense,
+        )
 }
 
 fn completion(sense: Sense) -> Completion {
@@ -1009,6 +1063,7 @@ impl AhciDisk {
             udma_mask: u32::MAX,
             mode: 0,
             step_downs: 0,
+            locked: false,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
@@ -1026,6 +1081,7 @@ impl AhciDisk {
         disk.identity.blocks = found.blocks;
         disk.identity.block_size = found.block_size;
         disk.transfer = found.transfer;
+        disk.locked = found.locked;
         disk.set_mode(&port)?;
         Ok(Some(disk))
     }
@@ -1045,8 +1101,8 @@ impl AhciDisk {
     }
 
     /// One command through libata's error handling: recover the port after a
-    /// failure, then retry as `ata_eh_finish` decides, and complete a command
-    /// with sense data as sd does.
+    /// failure, then retry as `ata_eh_finish` decides, and complete a failed
+    /// command by its fetched or generated sense data as sd does.
     fn issue_on(
         &mut self,
         port: &impl CommandPort,
@@ -1088,8 +1144,9 @@ impl AhciDisk {
                 retries += 1;
                 continue;
             }
-            let Some(sense) = failure.sense else {
-                return Err(failure.error);
+            let sense = match failure.sense {
+                Some(sense) => sense,
+                None => self.generated_sense(&mut failure),
             };
             match completion(sense) {
                 Completion::Done => return Ok(()),
@@ -1473,7 +1530,31 @@ impl AhciDisk {
         // ata_dev_reread_id keeps the new data.
         self.sense_reporting = found.sense_reporting.1;
         self.transfer = found.transfer;
+        self.locked = found.locked;
         Ok(())
+    }
+
+    /// Linux `ata_gen_ata_sense` for a failed command without sense data,
+    /// from the D2H FIS it completes with. The error stays the transport's
+    /// own when that FIS reports no device error.
+    fn generated_sense(&self, failure: &mut Failure) -> Sense {
+        let d2h = &self.commands.bytes()[RECEIVED_D2H..RECEIVED_D2H + FIS_BYTES];
+        let (status, error) = (d2h[2], d2h[3]);
+        let sense = if self.locked {
+            // Logical unit access not authorized.
+            Sense {
+                key: SENSE_DATA_PROTECT,
+                asc: 0x74,
+                ascq: 0x71,
+            }
+        } else {
+            translate_error(status, error)
+        };
+        if self.locked || status & (STATUS_BUSY | STATUS_FAULT | STATUS_ERROR | STATUS_REQUEST) != 0
+        {
+            failure.error = BlockError::Sense(sense);
+        }
+        sense
     }
 
     /// Linux `ata_eh_set_mode` with `ata_set_mode` and `ata_dev_set_mode`:
@@ -1887,6 +1968,7 @@ mod tests {
                     udma_mask: 0x7f,
                     mode: 0x46,
                     step_downs: 0,
+                    locked: false,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -2252,6 +2334,67 @@ mod tests {
         assert_eq!(fixture.disk.pio_mask, 0x0f);
         fixture.disk.pio_mask = 0x01;
         assert!(!fixture.disk.lower_transfer_limit(StepDown::Pio));
+    }
+
+    #[test]
+    fn generated_sense_follows_ata_to_sense_error() {
+        let sense = |key, asc, ascq| Sense { key, asc, ascq };
+        for (status, error, expected) in [
+            (0x51, 0x40, sense(SENSE_MEDIUM_ERROR, 0x11, 0x04)),
+            (0x51, 0x84, sense(SENSE_ABORTED_COMMAND, 0x47, 0x00)),
+            (0x51, 0x10, sense(Sense::ILLEGAL_REQUEST, 0x21, 0x00)),
+            (0x51, 0x20, sense(Sense::UNIT_ATTENTION, 0x28, 0x00)),
+            (0x51, 0x37, sense(Sense::NOT_READY, 0x04, 0x00)),
+            (0x51, 0x61, sense(SENSE_HARDWARE_ERROR, 0x00, 0x00)),
+            (0x51, 0xd1, sense(SENSE_ABORTED_COMMAND, 0x00, 0x00)),
+            // ABRT alone falls back to the status.
+            (0x55, 0x04, sense(SENSE_RECOVERED_ERROR, 0x00, 0x00)),
+            (0x71, 0x04, sense(SENSE_HARDWARE_ERROR, 0x44, 0x00)),
+            (0x51, 0x04, sense(SENSE_ABORTED_COMMAND, 0x00, 0x00)),
+            // Busy invalidates the error register.
+            (0xd0, 0x40, sense(SENSE_ABORTED_COMMAND, 0x00, 0x00)),
+        ] {
+            assert_eq!(
+                translate_error(status, error),
+                expected,
+                "{status:x} {error:x}"
+            );
+        }
+
+        // The D2H FIS a failed flush completes with decides it.
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        let mut complete_with = |status: u8, error: u8, locked| {
+            fixture.disk.locked = locked;
+            let d2h = &mut fixture.disk.commands.bytes_mut()[RECEIVED_D2H..];
+            (d2h[2], d2h[3]) = (status, error);
+            let link = Link::new(&[Fault::TaskFile(u32::from(error) << 8 | 0x51)]);
+            let result = fixture
+                .disk
+                .issue_on(&link, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false);
+            (result, link.issued.get())
+        };
+        // A media change is requeued, a corrected error completes.
+        assert_eq!(complete_with(0x51, 0x20, false), (Ok(()), 2));
+        assert_eq!(complete_with(0x55, 0x04, false), (Ok(()), 1));
+        assert_eq!(
+            complete_with(0x51, 0x04, false),
+            (
+                Err(BlockError::Sense(sense(SENSE_ABORTED_COMMAND, 0, 0))),
+                1
+            )
+        );
+        assert_eq!(
+            complete_with(0x51, 0x04, true),
+            (
+                Err(BlockError::Sense(sense(SENSE_DATA_PROTECT, 0x74, 0x71))),
+                1
+            )
+        );
+        // A FIS without a device error keeps the transport's error.
+        assert_eq!(
+            complete_with(0x50, 0x00, false),
+            (Err(BlockError::Device { status: 0x51 }), 1)
+        );
     }
 
     #[test]
