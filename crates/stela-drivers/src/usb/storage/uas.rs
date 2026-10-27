@@ -317,6 +317,9 @@ impl Host {
         let clock = self.engine.io.controller.borrow().clock;
         clock.delay(micros);
     }
+    pub(super) fn now_us(&self) -> u64 {
+        self.engine.io.now()
+    }
     /// Linux `uas_sdev_configure`: an ALWAYS_SYNC enclosure skips both mode
     /// pages and is assumed writable with its write cache on.
     pub(super) fn write_protect_page(&self) -> Option<u8> {
@@ -1319,6 +1322,8 @@ mod tests {
                     assert_eq!(&cdb[..6], &[0x12, 0, 0, 0, 36, 0]);
                     reply.requested = 36;
                     reply.data = vec![0; 36];
+                    // RMB: the target's medium can be removed and replaced.
+                    reply.data[1] = 0x80;
                     reply.data[2] = media.map_or(6, |media| media.version);
                     reply.data[4] = 31;
                     reply.data[8..16].copy_from_slice(b"STELAUSB");
@@ -1456,6 +1461,9 @@ mod tests {
                 .io
                 .clock
                 .set(self.engine.io.clock.get() + micros);
+        }
+        fn now_us(&self) -> u64 {
+            self.engine.io.clock.get()
         }
         fn poisoned(&self) -> bool {
             self.engine.poisoned
@@ -2402,6 +2410,7 @@ mod tests {
                     identity: unit.identity.clone(),
                     media: unit.media.clone(),
                     write_cache: unit.write_cache,
+                    removable: unit.removable,
                 }),
             };
             let commands_before_fault = hardware.borrow().scsi.len();

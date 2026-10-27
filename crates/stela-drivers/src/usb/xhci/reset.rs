@@ -924,6 +924,8 @@ pub(crate) mod tests {
                     0x12 => {
                         task.requested = 36;
                         task.data = vec![0; 36];
+                        // RMB: the model's medium comes and goes.
+                        task.data[1] = 0x80;
                         task.data[2] = 6;
                         task.data[4] = 31;
                         task.data[8..16].copy_from_slice(b"STELAUSB");
