@@ -556,23 +556,6 @@ impl AppleDevices {
         lines
     }
 
-    /// Drain the GFX work commands the firmware observed this run under
-    /// `--agx-observe`, as log lines. Empty when observation is off.
-    pub fn agx_observations(&mut self) -> Vec<String> {
-        let ids: Vec<DeviceId> = self.gfx_masters.iter().map(|&(asc, _)| asc).collect();
-        let mut lines = Vec::new();
-        for id in ids {
-            if let Some(gfx) = self
-                .bus
-                .device_mut::<Asc>(id)
-                .and_then(Asc::firmware_mut::<GfxCoprocessor>)
-            {
-                lines.extend(gfx.observations());
-            }
-        }
-        lines
-    }
-
     /// Strict mode for every native coprocessor (docs/design/runtime.md
     /// "Unsupported operations"), the default; otherwise each answers a
     /// request it does not implement with its own error reply, where its
@@ -1209,11 +1192,7 @@ impl AppleDevices {
     /// GFX endpoints, `agx::firmware`) behind its ASC wrapper, and the `sgx`
     /// register block whose MMU configuration roots the UAT the firmware
     /// masters memory through.
-    pub fn add_gfx(
-        &mut self,
-        placement: &super::soc::GfxController,
-        observe: bool,
-    ) -> Result<(), String> {
+    pub fn add_gfx(&mut self, placement: &super::soc::GfxController) -> Result<(), String> {
         let sgx_physical = placement
             .sgx
             .first()
@@ -1226,8 +1205,8 @@ impl AppleDevices {
             .and_then(|power| power.with_asc_wrapper(placement.wrapper.0))
             .map_err(String::from)?;
         let native_control = power.native_asc_control();
-        let coprocessor = GfxCoprocessor::with_power(placement.gpu.family, observe, power)
-            .map_err(String::from)?;
+        let coprocessor =
+            GfxCoprocessor::with_power(placement.gpu.family, power).map_err(String::from)?;
         let wrapper = Asc::booted(
             Box::new(coprocessor),
             AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
@@ -5235,7 +5214,7 @@ mod tests {
             }));
             devices.bus.map(foreign, base, bytes, 0).unwrap();
             assert_eq!(
-                devices.add_gfx(&placement, false),
+                devices.add_gfx(&placement),
                 Err("GFX native ASC control is not wholly owned by its mounted SGX bank".into())
             );
             assert!(devices.gfx_masters.is_empty());
@@ -5272,7 +5251,7 @@ mod tests {
                 shared_l2: 0x100_0000_8000,
             };
             let mut devices = AppleDevices::new();
-            devices.add_gfx(&placement, false).unwrap();
+            devices.add_gfx(&placement).unwrap();
             let (asc, block) = devices.gfx_masters[0];
             assert_eq!(
                 devices.bus.route(WRAPPER + 0x8110, Width::Word),
@@ -5315,7 +5294,7 @@ mod tests {
         devices
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
-        devices.add_gfx(&placement, false).unwrap();
+        devices.add_gfx(&placement).unwrap();
         assert_eq!(devices.power_devices.len(), 3);
         assert_eq!(devices.power_devices[1].physical, WRAPPER);
         assert_eq!(devices.power_devices[2].physical, SGX);

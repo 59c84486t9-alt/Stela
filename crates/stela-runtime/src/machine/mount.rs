@@ -156,8 +156,6 @@ pub struct Inputs<'f> {
     pub sep_state: Option<sep_state::Location>,
     /// Advertise and log the SEP `sks`/`pnon`/`scrd` services.
     pub sep_observe: bool,
-    /// Record the GFX firmware work commands and derive their fields.
-    pub agx_observe: bool,
     pub entropy: Box<dyn SepEntropy>,
     /// A restore host on the first USB-C connector.
     pub restore: bool,
@@ -217,7 +215,6 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         backing,
         sep_state,
         sep_observe,
-        agx_observe,
         entropy,
         restore,
         input,
@@ -718,7 +715,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
     // bridge) and owns only the bytes they leave.
     if let Some(gfx) = board.gfx.as_ref() {
-        devices.add_gfx(gfx, agx_observe)?;
+        devices.add_gfx(gfx)?;
     }
     // Finalize only after every native constructor, including SGX's final
     // overlapping-window placement, has registered its actual banks.

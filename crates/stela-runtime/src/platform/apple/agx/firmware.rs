@@ -50,7 +50,6 @@ use super::channel;
 use super::event;
 use super::generation::{Family, Layout};
 use super::initdata::{self, Root};
-use super::observe::{self, Journal};
 use super::ring::{self, Kind, Shared};
 use super::signal;
 use super::uat;
@@ -58,9 +57,7 @@ use super::work_decode;
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::format;
 use alloc::rc::Rc;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -549,15 +546,11 @@ pub struct State {
     jobs: VecDeque<Job>,
     active_work: Option<ActiveWork>,
     active_control: Option<ActiveControl>,
-    /// When observing (`--agx-observe`), the record of each work command a
-    /// doorbell ran. Each is still refused by name.
-    observe: Option<Journal>,
 }
 
 impl State {
-    /// A fresh protocol state for `family`'s interface, observing work
-    /// commands when `observe`.
-    fn new(family: &'static Family, observe: bool) -> Self {
+    /// A fresh protocol state for `family`'s interface.
+    fn new(family: &'static Family) -> Self {
         State {
             family,
             initdata_va: None,
@@ -573,17 +566,7 @@ impl State {
             jobs: VecDeque::new(),
             active_work: None,
             active_control: None,
-            observe: observe.then(Journal::default),
         }
-    }
-
-    /// The observed work commands recorded this run, as log lines; empty
-    /// unless `--agx-observe` and a work doorbell ran.
-    pub fn observations(&mut self) -> Vec<String> {
-        self.observe
-            .as_mut()
-            .map(Journal::drain)
-            .unwrap_or_default()
     }
 
     fn init(&mut self, payload: u64) -> Result<(), &'static str> {
@@ -785,15 +768,6 @@ impl State {
                         break;
                     };
                     let command = channel::Command::read(memory, va)?;
-                    if let Some(journal) = self.observe.as_mut() {
-                        match observe::Observation::record(memory, pipe as u8, index, active.channel_state, va) {
-                            Ok(observation) => journal.record(&observation),
-                            Err(reason) => journal.note(format!(
-                                "AGX OBSERVE pipe={} index={index} command={va:#x} unrecorded: {reason}",
-                                pipe as u8
-                            )),
-                        }
-                    }
                     if command.kind == channel::Kind::DashboardSignal
                         && !self.family.dashboard_signals
                     {
@@ -1092,19 +1066,13 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
 pub struct Protocol(Rc<RefCell<State>>);
 
 impl Protocol {
-    /// The protocol of `family`'s firmware, recording work commands when
-    /// `observe` (`--agx-observe`).
-    pub fn with_observe(family: &'static Family, observe: bool) -> Self {
-        Protocol(Rc::new(RefCell::new(State::new(family, observe))))
+    /// The protocol of `family`'s firmware.
+    pub fn new(family: &'static Family) -> Self {
+        Protocol(Rc::new(RefCell::new(State::new(family))))
     }
 
     pub fn with<R>(&self, f: impl FnOnce(&State) -> R) -> R {
         f(&self.0.borrow())
-    }
-
-    /// Drain the observed work commands recorded this run, as log lines.
-    pub fn observations(&self) -> Vec<String> {
-        self.0.borrow_mut().observations()
     }
 }
 
@@ -1117,10 +1085,9 @@ pub struct Coprocessor {
 
 impl Coprocessor {
     /// `family`'s GFX coprocessor, whose RTKit manages its power ordinarily
-    /// (`power-managed`), recording each work command (`--agx-observe`)
-    /// when `observe`, still refusing it by name.
-    pub fn with_observe(family: &'static Family, observe: bool) -> Result<Self, &'static str> {
-        let (endpoints, protocol) = endpoints(family, observe);
+    /// (`power-managed`).
+    pub fn new(family: &'static Family) -> Result<Self, &'static str> {
+        let (endpoints, protocol) = endpoints(family);
         let rtkit = RtKit::new(endpoints, super::super::rtkit::Management::Ordinary)?;
         Ok(Self {
             rtkit,
@@ -1133,24 +1100,18 @@ impl Coprocessor {
     /// A qualified physical binding does not make unknown callbacks successful.
     pub fn with_power(
         family: &'static Family,
-        observe: bool,
         power: super::sgx::FirmwarePower,
     ) -> Result<Self, &'static str> {
         if family != power.family() {
             return Err("GFX firmware power owner belongs to a different GPU family");
         }
-        let mut coprocessor = Self::with_observe(family, observe)?;
+        let mut coprocessor = Self::new(family)?;
         coprocessor.power = Some(power);
         Ok(coprocessor)
     }
 
     pub fn protocol(&self) -> &Protocol {
         &self.protocol
-    }
-
-    /// Drain the observed work commands recorded this run, as log lines.
-    pub fn observations(&mut self) -> Vec<String> {
-        self.protocol.observations()
     }
 }
 
@@ -1253,8 +1214,8 @@ impl Endpoint for Doorbell {
 
 /// The GFX coprocessor's application endpoints and a handle to their shared
 /// state. Pass the endpoints to [`super::super::rtkit::RtKit::new`].
-pub fn endpoints(family: &'static Family, observe: bool) -> (Vec<NumberedEndpoint>, Protocol) {
-    let protocol = Protocol::with_observe(family, observe);
+pub fn endpoints(family: &'static Family) -> (Vec<NumberedEndpoint>, Protocol) {
+    let protocol = Protocol::new(family);
     let endpoints: Vec<NumberedEndpoint> = alloc::vec![
         (
             MESSAGE_ENDPOINT,
@@ -1283,7 +1244,7 @@ mod tests {
     }
 
     fn booted_gfx(family: &'static Family) -> Coprocessor {
-        let mut firmware = Coprocessor::with_observe(family, false).unwrap();
+        let mut firmware = Coprocessor::new(family).unwrap();
         firmware.start(&mut Vec::new()).unwrap();
         for payload in [
             2 << 52 | 12 | 12 << 16,
@@ -1324,9 +1285,9 @@ mod tests {
                 .unwrap();
             let mut sgx = Sgx::new(gpu).unwrap();
             let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
-            let mut firmware = Coprocessor::with_power(family, false, power.clone()).unwrap();
+            let mut firmware = Coprocessor::with_power(family, power.clone()).unwrap();
             let other = if family == &G14G { &G13G } else { &G14G };
-            assert!(Coprocessor::with_power(other, false, power.clone()).is_err());
+            assert!(Coprocessor::with_power(other, power.clone()).is_err());
             // A truthful target binding alone is not enough to acknowledge
             // unimplemented config-dependent callback effects.
             firmware.protocol.0.borrow_mut().initdata_va = Some(ROOT);
@@ -1483,7 +1444,7 @@ mod tests {
             memory.put(CONTROL_ENTRIES + n as u64 * 0x40, entry);
         }
         memory.put_u32(CONTROL_STATE + WRITE, entries.len() as u32);
-        let mut state = State::new(family, false);
+        let mut state = State::new(family);
         state
             .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
@@ -1553,7 +1514,7 @@ mod tests {
                     writes: Vec::new(),
                     reads: 0,
                 };
-                let protocol = Protocol(Rc::new(RefCell::new(State::new(family, false))));
+                let protocol = Protocol(Rc::new(RefCell::new(State::new(family))));
                 let mut endpoint = Message(protocol.clone());
                 let mut outbox = Vec::new();
                 endpoint
@@ -1663,17 +1624,17 @@ mod tests {
 
     #[test]
     fn the_message_endpoint_captures_the_initdata_pointer_once() {
-        let mut state = State::new(&G14G, false);
+        let mut state = State::new(&G14G);
         let va = 0x4_1234_5000;
         assert!(state.init((MSG_INIT << TYPE_SHIFT) | va).is_ok());
         assert_eq!(state.initdata_va, Some(va));
         // A second initdata, or any other message type, is refused.
         assert!(state.init((MSG_INIT << TYPE_SHIFT) | va).is_err());
-        let mut fresh = State::new(&G14G, false);
+        let mut fresh = State::new(&G14G);
         assert!(fresh.init(0x42 << TYPE_SHIFT).is_err());
         // Reserved low bits are not another way to spell the same VA.
         for bit in 44..48 {
-            let mut wide = State::new(&G14G, false);
+            let mut wide = State::new(&G14G);
             assert!(
                 wide.init((MSG_INIT << TYPE_SHIFT) | INIT_VA_BITS | (1 << bit))
                     .is_err()
@@ -1685,7 +1646,7 @@ mod tests {
 
     #[test]
     fn doorbells_take_the_kexts_forms_and_queue_firmware_work() {
-        let (endpoints, protocol) = endpoints(&G14G, false);
+        let (endpoints, protocol) = endpoints(&G14G);
         let mut by_number = endpoints
             .into_iter()
             .collect::<alloc::collections::BTreeMap<_, _>>();
@@ -1706,7 +1667,7 @@ mod tests {
 
     #[test]
     fn malformed_or_unmodeled_doorbells_refuse_explicitly() {
-        let mut state = State::new(&G14G, false);
+        let mut state = State::new(&G14G);
         // Missing the 0x80 flag.
         assert!(state.doorbell(DOORBELL_WORK << TYPE_SHIFT).is_err());
         // An unmodeled type.
@@ -1732,7 +1693,7 @@ mod tests {
                 if allowed & (1 << bit) != 0 {
                     continue;
                 }
-                let mut state = State::new(family, false);
+                let mut state = State::new(family);
                 for payload in [work(2, 3), doorbell_payload(DOORBELL_FWCTL, 0x11)] {
                     assert!(state.doorbell(payload | 1 << bit).is_err());
                     assert!(state.work.is_empty());
@@ -2254,7 +2215,7 @@ mod tests {
         // A G14X firmware refuses the G13G/G13X/G14G root.
         let mut memory = Flat::new(BASE, 0x20000);
         kext_root(&mut memory);
-        let mut g14x = State::new(&G14X, false);
+        let mut g14x = State::new(&G14X);
         g14x.init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
         assert_eq!(
@@ -3094,52 +3055,9 @@ mod tests {
     }
 
     #[test]
-    fn observe_records_the_refused_work_command_and_its_fields() {
-        let mut memory = Flat::new(BASE, 0x20000);
-        kext_root(&mut memory);
-        memory.put_descriptor(RINGS + 0x1a0, CONTROL_STATE, CONTROL_ENTRIES);
-        let mut state = State::new(&G14G, true);
-        state
-            .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
-            .unwrap();
-        state.dma(&mut memory, &mut Vec::new()).unwrap();
-        // A 3D command naming a VDM stream at +0x14 (channel.rs 3D +0x14).
-        let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
-        one_3d_entry(&mut memory, channel_state, command);
-        memory.put_u32(command, 1);
-        let stream = command + 0x400;
-        memory.put_u64(command + 0x14, stream);
-        for (i, word) in [
-            3u32 << 29 | 6 << 8 | 1 << 22 | 1 << 23 | 1 << 24,
-            3,
-            1,
-            0,
-            6 << 29,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            memory.put_u32(stream + 4 * i as u64, word);
-        }
-        state.doorbell(work(1, 0)).unwrap();
-        // The exploratory candidate is not a valid original SKU stream.
-        // Observation never grants stock execution/completion authority.
-        assert!(state.dma(&mut memory, &mut Vec::new()).is_err());
-        let lines = state.observations();
-        assert!(lines[0].starts_with("AGX OBSERVE pipe=1 index=0"));
-        assert!(lines.iter().any(|l| l.contains("ThreeD")));
-        assert!(lines.iter().any(|l| l.contains("VDM control stream")));
-        // Draining twice yields nothing the second time.
-        assert!(state.observations().is_empty());
-        // Off by default: no records without observe.
-        let mut quiet = State::new(&G14G, false);
-        assert!(quiet.observations().is_empty());
-    }
-
-    #[test]
     fn the_root_must_be_the_kexts_before_any_doorbell_runs() {
         let mut memory = Flat::new(BASE, 0x20000);
-        let mut state = State::new(&G14G, false);
+        let mut state = State::new(&G14G);
         state
             .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
@@ -3148,7 +3066,7 @@ mod tests {
             Err("GFX initdata root lacks its magic")
         );
         assert!(state.dma_pending());
-        let mut early = State::new(&G14G, false);
+        let mut early = State::new(&G14G);
         early
             .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
             .unwrap();
@@ -3198,7 +3116,7 @@ mod tests {
         let mut table = Uat::new(40);
         table.configure(base).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut state = State::new(&G14G, false);
+        let mut state = State::new(&G14G);
         state
             .init((MSG_INIT << TYPE_SHIFT) | (va & INIT_VA_BITS))
             .unwrap();

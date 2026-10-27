@@ -89,7 +89,6 @@ mod boot_madt;
 mod boot_native_clock_pm;
 
 mod agx_isa;
-mod agx_observe;
 mod amx;
 // The bench runs the hosted engine, which only an Intel Mac has
 // (`stela_runtime::hosted`).
@@ -140,9 +139,6 @@ enum Task {
     DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
     /// Generate the AGX2 shader ISA tables from Mesa's AGX2.xml.
     AgxIsa(agx_isa::AgxIsa),
-    /// Consolidate a boot run's `--agx-observe` log into a per-command-type
-    /// field-confirmation report.
-    AgxObserve(agx_observe::AgxObserve),
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
@@ -159,7 +155,6 @@ fn main() -> ExitCode {
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::AgxObserve(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
     };
     result.unwrap_or_else(|error| {

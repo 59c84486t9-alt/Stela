@@ -323,7 +323,6 @@ fn mount(
             }),
             sep_state: None,
             sep_observe: false,
-            agx_observe: false,
             entropy: Box::new(|bytes: &mut [u8]| {
                 bytes.fill(0);
                 Ok(())

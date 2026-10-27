@@ -218,10 +218,6 @@ struct Options {
     /// are not recovered (`--sep-observe`): each request is recorded and
     /// refused by name, never answered. A diagnostic mode.
     sep_observe: bool,
-    /// Record each GFX firmware work command and derive its fields
-    /// (`--agx-observe`): the command is logged and still refused by name,
-    /// never completed. A diagnostic mode.
-    agx_observe: bool,
     /// Stop every PE at the first unsupported operation (`--strict`)
     /// instead of answering it degraded and reporting it once
     /// (docs/design/runtime.md "Unsupported operations"). Off by default
@@ -431,7 +427,6 @@ impl Options {
             external_disks: false,
             guest_network: false,
             sep_observe: false,
-            agx_observe: false,
             strict: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
@@ -621,10 +616,6 @@ impl Options {
             }
             if name == "--sep-observe" {
                 options.sep_observe = true;
-                continue;
-            }
-            if name == "--agx-observe" {
-                options.agx_observe = true;
                 continue;
             }
             if name == STRICT_OPTION {
@@ -2207,7 +2198,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             backing,
             sep_state,
             sep_observe: options.sep_observe,
-            agx_observe: options.agx_observe,
             entropy: alloc::boxed::Box::new(bundle::entropy),
             restore: options.restore || options.install.is_some(),
             input: options.input,
@@ -3815,9 +3805,6 @@ fn finish<H: Host>(
     }
     general_registers(cpu);
     sep_observation_report(machine);
-    for line in machine.devices.agx_observations() {
-        output::arguments(format_args!("{line}\n"));
-    }
     match stop {
         Stop::Idle => {
             output::arguments(format_args!(
