@@ -1196,11 +1196,50 @@ pub(crate) fn root_irq_active() -> bool {
 
 /// An idle-worker doorbell only. Stop requests live in generation-bound
 /// mailboxes; delivery cannot authorize native-frame recovery or settlement.
+/// Whether an interrupt came for this core since [`clear_interrupted`].
+pub(crate) fn interrupted() -> bool {
+    local::interrupted()
+}
+
+pub(crate) fn clear_interrupted() {
+    local::clear_interrupt();
+}
+
 pub(crate) fn wake_interrupt() {
     state().apic.eoi();
     // Release publication follows actual EOI; startup evidence cannot race
     // ahead of retirement of the directed interrupt at this physical LAPIC.
     local::doorbell();
+}
+
+/// The message a host disk sends as it completes a command: the doorbell
+/// vector, fixed and edge-triggered, to this processor, which runs the
+/// engine's devices and looks for the disk's completions. `None` where its
+/// APIC ID needs more than a compatibility-format MSI address holds.
+pub(crate) fn completion_signal() -> Option<stela_drivers::bus::irq::MsiMessage> {
+    let apic = &state().apic;
+    let raw = apic.read(0x20);
+    let id = if apic.is_x2apic() { raw } else { raw >> 24 };
+    (id < 255).then(|| stela_drivers::bus::irq::MsiMessage {
+        address: 0xfee0_0000 | u64::from(id) << 12,
+        data: u32::from(super::interrupts::NATIVE_WAKE_VECTOR),
+    })
+}
+
+/// Ring the doorbell of the processor whose APIC ID is `destination`,
+/// through this processor's own local APIC.
+pub(crate) fn ring(destination: u32) {
+    let state = state();
+    // SAFETY: interrupts are off in the engine, so nothing else on this
+    // processor writes its ICR meanwhile; every installed host handles the
+    // doorbell vector.
+    let _ = unsafe {
+        state.apic.notify(
+            destination,
+            super::interrupts::NATIVE_WAKE_VECTOR,
+            state.tsc_hz,
+        )
+    };
 }
 
 pub(crate) fn doorbell_counter() -> &'static core::sync::atomic::AtomicU64 {
@@ -1328,6 +1367,18 @@ impl Host for BareHost<'_> {
                 core::ptr::copy_nonoverlapping(data[done..].as_ptr(), host as *mut u8, chunk)
             };
         })
+    }
+
+    fn compare_exchange_ram(
+        &mut self,
+        physical: u64,
+        expected: &mut [u8],
+        new: &[u8],
+    ) -> Option<bool> {
+        let ram = state().registered_ram.as_ref()?;
+        // SAFETY: the adopted canonical reservation and mapping remain live;
+        // every other core's writes reach the same bytes.
+        unsafe { ram.compare_exchange_physical(physical, expected, new) }.ok()
     }
 
     fn check_ram_range(
@@ -1703,6 +1754,16 @@ impl Host for BareHost<'_> {
 
     fn wait_for_interrupt(&mut self) {
         local::clear_interrupt();
+        // The wait sends queued serial output until an interrupt comes,
+        // opening a window for one after each burst.
+        while crate::output::send_queued() {
+            // SAFETY: STI holds interrupts off for one more instruction, so
+            // only the NOP's boundary takes a pending one.
+            unsafe { asm!("sti", "nop", "cli", options(nomem, nostack)) };
+            if local::interrupted() {
+                return;
+            }
+        }
         // SAFETY: STI's interrupt shadow covers HLT, so no wake-up is lost.
         unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
     }

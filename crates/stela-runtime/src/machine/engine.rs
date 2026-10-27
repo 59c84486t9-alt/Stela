@@ -27,9 +27,11 @@ pub mod installed_code;
 pub(crate) mod metrics;
 mod monitor;
 mod native_timing;
+mod parallel;
 pub use crate::platform::dma::{DmaError, TransferFault};
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
+pub use parallel::{Call, Counts, Hub, Kick, SharedDevices};
 mod pointer;
 mod prepare;
 pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
@@ -42,6 +44,7 @@ mod shared_memory;
 pub mod step_timing;
 mod stored;
 mod system;
+mod table;
 mod tags;
 mod unprivileged;
 mod watch;
@@ -76,6 +79,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 use pointer::{PointerInputs, PointerOperation, PointerResult};
 #[cfg(test)]
 pub(crate) use prepare::test_preparation;
@@ -140,6 +144,14 @@ const JUMP_CACHE: usize = 4096;
 /// anyway). Each run that reaches it costs an exit to the engine, which
 /// at 256 was half of a hosted process's exits.
 const CHAIN_LIMIT: u64 = 4096;
+/// Blocks installed between reclaims for low memory: the heap may be low
+/// with another PE's machine's data, which reclaiming code here again at
+/// every install would not free.
+const LOW_MEMORY_INSTALLS: u64 = 4096;
+
+/// The distinct refusals of one device register and direction that graceful
+/// mode reports.
+const DEVICE_REFUSALS_REPORTED: usize = 16;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
 
@@ -393,6 +405,19 @@ pub trait Host {
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
     /// Write guest RAM. False when any byte is not RAM.
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool;
+    /// Store `new` at `physical` if guest RAM there holds `expected`, in one
+    /// single-copy atomic step against every other core; whether it stored.
+    /// When not, `expected` receives what RAM held. Accesses of up to 16
+    /// bytes within one aligned 16-byte block qualify; `None` when the host
+    /// cannot perform this one.
+    fn compare_exchange_ram(
+        &mut self,
+        _physical: u64,
+        _expected: &mut [u8],
+        _new: &[u8],
+    ) -> Option<bool> {
+        None
+    }
     /// Descriptor admission needs a real RAM/permission owner. A legacy host
     /// without that service cannot qualify a native coprocessor mapping.
     fn check_ram_range(
@@ -618,6 +643,12 @@ pub trait Devices {
     ) -> bool {
         false
     }
+    /// Effect-free classification of a write only the canonical path
+    /// ([`Devices::write_canonical`]) serves: a machine without canonical
+    /// memory forwards it to the one with ([`parallel`]).
+    fn requires_canonical_write(&self, _cpu: usize, _physical: u64, _bytes: u8) -> bool {
+        false
+    }
     /// Refuse before consumption, or return the actual consumed scalar and any
     /// later settlement failure while the same live canonical guard is held.
     fn read_canonical(
@@ -736,6 +767,11 @@ pub trait Devices {
         _now: u64,
     ) -> Option<Result<u64, &'static str>> {
         None
+    }
+    /// Whether [`Self::system_register`] may serve `encoding`, fixed for the
+    /// board's life: devices shared behind a lock are asked only for these.
+    fn serves_register(&self, _encoding: Encoding) -> bool {
+        true
     }
     /// A reset or power-off the guest requested from a device, once.
     fn take_reset(&mut self) -> Option<Reset> {
@@ -920,6 +956,8 @@ pub struct Requirement {
     /// The ESR_EL1 value the access would report if it were a guest exception.
     pub syndrome: Option<u64>,
     pub address: Option<u64>,
+    /// The value a refused device write carried, which its report shows.
+    pub written: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1002,11 +1040,16 @@ impl fmt::Display for Requirement {
                 physical,
                 write,
                 detail,
-            } => write!(
-                f,
-                "device {} at PA {physical:#x}: {detail}",
-                if *write { "write" } else { "read" }
-            )?,
+            } => {
+                write!(
+                    f,
+                    "device {} at PA {physical:#x}: {detail}",
+                    if *write { "write" } else { "read" }
+                )?;
+                if let Some(value) = self.written {
+                    write!(f, " (value {value:#x})")?;
+                }
+            }
             RequirementKind::DeviceAdvance(detail) => write!(f, "device advance: {detail}")?,
             RequirementKind::IllegalReturn(reason) => write!(f, "exception return {reason:?}")?,
             RequirementKind::VmState(register) => write!(
@@ -1229,6 +1272,18 @@ pub struct Statistics {
     /// ([`Machine::set_strict`]); each distinct one is also reported once
     /// ([`Machine::take_unmodeled`]).
     pub degraded: u64,
+    /// Counter ticks the host core halted while the PE waited, and spun
+    /// while it waited for an event another core's store to its monitored
+    /// granule sends.
+    pub sleep_ticks: u64,
+    pub spin_ticks: u64,
+    /// With every PE on a core of its own: maintenance this PE broadcast,
+    /// device accesses it forwarded to the home machine, and the counter
+    /// ticks it spent waiting on other PEs for those or parked while the
+    /// home machine served another's.
+    pub broadcasts: u64,
+    pub forwards: u64,
+    pub sync_ticks: u64,
 }
 
 impl core::ops::AddAssign for Statistics {
@@ -1265,6 +1320,11 @@ impl core::ops::AddAssign for Statistics {
             prediction_isolations,
             translated_pages,
             degraded,
+            sleep_ticks,
+            spin_ticks,
+            broadcasts,
+            forwards,
+            sync_ticks,
         } = other;
         self.replaced_retired = self.replaced_retired.saturating_add(replaced_retired);
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
@@ -1304,6 +1364,11 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.prediction_isolations, prediction_isolations),
             (&mut self.translated_pages, translated_pages),
             (&mut self.degraded, degraded),
+            (&mut self.sleep_ticks, sleep_ticks),
+            (&mut self.spin_ticks, spin_ticks),
+            (&mut self.broadcasts, broadcasts),
+            (&mut self.forwards, forwards),
+            (&mut self.sync_ticks, sync_ticks),
         ] {
             *total += count;
         }
@@ -1369,6 +1434,18 @@ fn dynamic_branch(word: u32) -> Option<(ExitKind, Option<u8>)> {
     })
 }
 
+/// The chained transfers native code may still make, which in parallel
+/// another PE's machine spends to bring this one back to the engine
+/// (`parallel::Hub::interrupt`).
+fn chain_budget(chain: &mut ChainControl) -> &AtomicU64 {
+    // SAFETY: a valid, aligned u64 that this borrow reaches only atomically.
+    unsafe { AtomicU64::from_ptr(&raw mut chain.budget) }
+}
+
+/// The compiled blocks one [`Machine::stale_code`] call checks: about a
+/// millisecond of hashing.
+pub const STALE_CHECKS: usize = 1024;
+
 /// FNV-1a over a block's guest bytes.
 fn source_hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
@@ -1376,7 +1453,8 @@ fn source_hash(bytes: &[u8]) -> u64 {
     })
 }
 
-/// Compiled blocks whose guest bytes changed without a code invalidation.
+/// Compiled blocks whose guest bytes changed without a code invalidation,
+/// among those one [`Machine::stale_code`] call checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StaleCode {
     pub blocks: usize,
@@ -1706,7 +1784,7 @@ pub struct Machine<H: Host, D: Devices> {
     #[cfg(all(feature = "std", feature = "native-profile"))]
     preparation_metrics: Option<metrics::PreparationMetrics>,
     target: TargetCpu,
-    blocks: Vec<Block>,
+    blocks: table::Table<Block>,
     /// Slots of `blocks` whose code was reclaimed, for new blocks.
     free_blocks: Vec<usize>,
     /// The fault recovery tables of the blocks that have entries, by block
@@ -1718,10 +1796,18 @@ pub struct Machine<H: Host, D: Devices> {
     index: BTreeMap<(u64, u64, Variant), usize>,
     /// The `index` keys of the blocks compiled from each physical page.
     code_pages: BTreeMap<u64, Vec<(u64, u64, Variant)>>,
+    /// Blocks compiled and shared by the next reclaim for low memory
+    /// ([`LOW_MEMORY_INSTALLS`]).
+    low_memory_reclaim: u64,
+    /// The last block [`Machine::stale_code`] checked, where its sweep goes
+    /// on; `None` to start over.
+    stale_cursor: Option<(u64, u64, Variant)>,
     /// The fetch pages read for the translation store, by physical page,
     /// until their code is invalidated or they are the least recently used
     /// ([`stored`]), and the count of their uses so far.
     pages: BTreeMap<u64, stored::StoredPage>,
+    /// The most `pages` keeps ([`Self::share_kept_pages`]).
+    kept_pages: usize,
     page_uses: u64,
     /// Entry contexts by variant and address class.
     stored_contexts: BTreeMap<(Variant, u64), crate::translations::Digest>,
@@ -1804,6 +1890,17 @@ pub struct Machine<H: Host, D: Devices> {
     /// Every assigned worker, held while the BSP executes all canonical PEs
     /// in turn through chained native blocks (`run_serialized`).
     serial_hold: Option<processors::publication::StoppedWorkers>,
+    /// The other PEs' machines, when each PE runs on its own host core
+    /// (`parallel`), and the count of device line changes last seen.
+    parallel: Option<Arc<parallel::Hub>>,
+    /// `chain`'s budget as the hub reaches it; declared before `chain`.
+    attached: Option<parallel::Attached>,
+    /// CPU power changes for the other PEs' machines, not yet sent.
+    forwarded_power: Vec<ProcessorChange>,
+    /// Instruction-cache maintenance other PEs broadcast while this one
+    /// waited mid-instruction, applied at its next mail read.
+    deferred_code: Vec<Option<u64>>,
+    lines_epoch: u64,
     pending_device_read: Option<device_read::Pending>,
     pending_device_write: Option<device_write::Pending>,
     pending_device_tail: alloc::collections::VecDeque<shared_memory::RecoveredDeviceAccess>,
@@ -1824,7 +1921,7 @@ pub struct Machine<H: Host, D: Devices> {
     strict: bool,
     /// Every degraded operation met so far, each the first time, and those
     /// not yet taken (`take_unmodeled`); device accesses are keyed by
-    /// register and direction in `degraded_devices`.
+    /// register, direction and refusal in `degraded_devices`.
     unmodeled_met: Vec<RequirementKind>,
     unmodeled: Vec<Requirement>,
     /// The block count at which the running PE's time slice ends.
@@ -1862,9 +1959,9 @@ pub struct Machine<H: Host, D: Devices> {
     first_translated: Option<(u64, u64)>,
     /// Device accesses answered without a model ([`Self::begin_survey`]).
     survey: Option<Survey>,
-    /// The device registers and directions whose degraded answer has been
-    /// reported (`take_unmodeled`).
-    degraded_devices: BTreeSet<(u64, bool)>,
+    /// The refusals of each device register and direction whose degraded
+    /// answer has been reported (`take_unmodeled`).
+    degraded_devices: BTreeMap<(u64, bool), BTreeSet<String>>,
     /// The context leaves SVE and SME instructions run as, by PC, word and
     /// scalable profile ([`scalable`]); discarded with the blocks.
     scalable_leaves:
@@ -1944,12 +2041,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             #[cfg(all(feature = "std", feature = "native-profile"))]
             preparation_metrics: None,
             target,
-            blocks: Vec::new(),
+            blocks: table::Table::new(),
             free_blocks: Vec::new(),
             fault_recovery: BTreeMap::new(),
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
+            low_memory_reclaim: 0,
+            stale_cursor: None,
             pages: BTreeMap::new(),
+            kept_pages: stored::KEPT_PAGES,
             page_uses: 0,
             stored_contexts: BTreeMap::new(),
             preparations: BTreeMap::new(),
@@ -1984,6 +2084,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             native_publication: None,
             native_memory_identity: Arc::new(()),
             serial_hold: None,
+            parallel: None,
+            attached: None,
+            forwarded_power: Vec::new(),
+            deferred_code: Vec::new(),
+            lines_epoch: 0,
             pending_device_read: None,
             pending_device_write: None,
             pending_device_tail: alloc::collections::VecDeque::new(),
@@ -2010,7 +2115,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             translated_pages: BTreeSet::new(),
             first_translated: None,
             survey: None,
-            degraded_devices: BTreeSet::new(),
+            degraded_devices: BTreeMap::new(),
             scalable_leaves: BTreeMap::new(),
             tags: crate::machine::tags::Store::default(),
             tag_checks: [false; 2],
@@ -2031,6 +2136,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             kind,
             syndrome: None,
             address: None,
+            written: None,
         }
     }
 
@@ -2387,7 +2493,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// cluster and PE takes it now, and again when it starts. The boot
     /// mount calls this before the first instruction.
     pub fn hand_off_core_locks(&mut self, handoff: ctrr::Handoff) {
-        let handoff = alloc::rc::Rc::new(handoff);
+        let handoff = alloc::sync::Arc::new(handoff);
         let parked = self.peers.iter_mut().filter_map(|peer| match peer {
             processors::Peer::Parked(parked) => Some(parked.cpu_mut()),
             _ => None,
@@ -2409,7 +2515,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The policy point for an operation this machine cannot carry out in
     /// full: strict, its stop; graceful, `Ok` after counting it
     /// (`Statistics::degraded`) and reporting it the first time (device
-    /// accesses once per register and direction), the caller then giving
+    /// accesses once per register, direction and refusal), the caller then giving
     /// the degraded response of its tier.
     fn degrade(&mut self, requirement: Requirement) -> Step {
         if self.strict {
@@ -2418,8 +2524,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.degraded += 1;
         let first = match &requirement.kind {
             RequirementKind::Device {
-                physical, write, ..
-            } => self.degraded_devices.insert((*physical, *write)),
+                physical,
+                write,
+                detail,
+            } => {
+                // One register can carry many operations, each refused for
+                // its own reason; a register whose refusals name changing
+                // values in their detail reports its first few.
+                let refusals = self
+                    .degraded_devices
+                    .entry((*physical, *write))
+                    .or_default();
+                refusals.len() < DEVICE_REFUSALS_REPORTED && refusals.insert(detail.clone())
+            }
             kind if self.unmodeled_met.contains(kind) => false,
             kind => {
                 self.unmodeled_met.push(kind.clone());
@@ -2527,6 +2644,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) -> Result<(), DeviceError> {
         let result = if self.serial_hold.is_some() {
             self.serial_write_canonical(physical, bytes, value, now)
+        } else if self.parallel.is_some()
+            && self
+                .devices
+                .requires_canonical_write(self.current, physical, bytes)
+        {
+            self.forward_write(physical, bytes, value)
         } else {
             let current = self.current;
             let (devices, processors) = self.processor_write_parts();
@@ -2563,13 +2686,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         core::mem::take(&mut self.trace_hits)
     }
 
-    /// Check every reachable compiled block against the guest bytes it was
-    /// compiled from: a diagnostic of code changed without the IC
-    /// maintenance that would discard its blocks.
+    /// Check the next [`STALE_CHECKS`] reachable compiled blocks against
+    /// the guest bytes they were compiled from, a sweep that goes on where
+    /// the last call stopped: a diagnostic of code changed without the IC
+    /// maintenance that would discard its blocks, bounded per call.
     pub fn stale_code(&mut self) -> StaleCode {
+        use core::ops::Bound::{Excluded, Unbounded};
         let mut report = StaleCode::default();
         let mut bytes = Vec::new();
-        for &index in self.index.values() {
+        let from = self.stale_cursor.map_or(Unbounded, Excluded);
+        let mut last = None;
+        for (&key, &index) in self.index.range((from, Unbounded)).take(STALE_CHECKS) {
             let block = &self.blocks[index];
             bytes.resize(block.source_bytes, 0);
             report.blocks += 1;
@@ -2579,7 +2706,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 report.stale += 1;
                 report.first.get_or_insert((block.pc, block.physical));
             }
+            last = Some(key);
         }
+        // A sweep that reached the last block starts over next time.
+        self.stale_cursor = last.filter(|_| report.blocks == STALE_CHECKS);
         report
     }
 
@@ -3517,38 +3647,37 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `budget` of them, and complete the last one's exit or fault.
     fn execute(&mut self, index: usize, budget: u64) -> Step {
         let entry = self.blocks[index].code;
-        *self.chain = ChainControl {
-            budget,
-            retired: 0,
-            block: index as u64,
-            hits: 0,
-            ..*self.chain
-        };
+        let chain = &mut *self.chain;
+        chain.retired = 0;
+        chain.block = index as u64;
+        chain.hits = 0;
+        chain.linked = 0;
+        // In parallel another PE's machine may spend the budget meanwhile.
+        chain_budget(chain).store(budget, Ordering::Relaxed);
         // SAFETY: installed by this machine since the last discard, for the
         // system-mode block ABI; chained blocks and thunks too.
         let entered = self.timing_start();
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
-        let control = *self.chain;
-        // A thunk that found no transfer left wrapped the budget, after
-        // using all of it.
-        let chained = budget.checked_sub(control.budget).unwrap_or(budget);
-        let last = (control.block & u64::from(u32::MAX)) as usize;
-        self.cpu.retired += control.retired;
+        let remaining = chain_budget(&mut self.chain).load(Ordering::Relaxed);
+        let (block, retired, hits) = (self.chain.block, self.chain.retired, self.chain.hits);
+        let chained = self.chain.linked + hits;
+        let last = (block & u64::from(u32::MAX)) as usize;
+        self.cpu.retired += retired;
         self.statistics.blocks += 1 + chained;
         self.statistics.chained += chained;
-        self.statistics.lookup_hits += control.hits;
+        self.statistics.lookup_hits += hits;
         // A transfer entered the last block, with the BTYPE it names: 0
         // from every thunk but those of BR and BLR forms.
         if chained > 0 {
-            self.cpu.pstate.btype = (control.block >> chain::BLOCK_BTYPE_SHIFT) as u8;
+            self.cpu.pstate.btype = (block >> chain::BLOCK_BTYPE_SHIFT) as u8;
         }
         match exit {
             NativeExit::Exit { next_pc, kind } => {
                 if let Some(count) = self.statistics.exit_kinds.get_mut(kind as usize) {
                     *count += 1;
                 }
-                if let Some(miss) = self.lookup_miss(last, next_pc, kind, control.budget > budget) {
+                if let Some(miss) = self.lookup_miss(last, next_pc, kind, remaining > budget) {
                     self.statistics.lookup_misses[miss] += 1;
                 }
                 let exited = self.exit(last, next_pc, kind);
@@ -4325,8 +4454,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Variant { checks, single, .. } = variant;
         let last = compiled.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
-        if !self.blocks.is_empty() && self.host.memory_low() {
+        let installed = self.statistics.compiled + self.statistics.shared;
+        if !self.blocks.is_empty() && installed >= self.low_memory_reclaim && self.host.memory_low()
+        {
             self.reclaim_code();
+            self.low_memory_reclaim = installed + LOW_MEMORY_INSTALLS;
+        }
+        // A heap without room for the block table's next chunk reuses the
+        // oldest code's slots instead, or, when none of this machine's
+        // blocks lay there, every slot.
+        if self.free_blocks.is_empty() && !self.blocks.try_reserve_one() {
+            self.reclaim_code();
+            if self.free_blocks.is_empty() && !self.blocks.try_reserve_one() {
+                self.discard_code();
+            }
         }
         let code = match self.host.install(&compiled.native.x86_64_code) {
             Ok(code) => code,
@@ -4401,10 +4542,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.blocks[slot] = block;
                 slot
             }
-            None => {
-                self.blocks.push(block);
-                self.blocks.len() - 1
-            }
+            None => self.blocks.push(block),
         };
         if !compiled.fault_recovery.is_empty() {
             self.fault_recovery.insert(index, compiled.fault_recovery);
@@ -4519,6 +4657,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             kind: RequirementKind::Instruction { word, detail },
             syndrome: Some(super::exception::syndrome(Class::Unknown, 0)),
             address: None,
+            written: None,
         })
     }
 
@@ -5871,11 +6010,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let write = written.is_some();
         let unmapped = error == DeviceError::NoDevice;
-        let detail = match (error, written) {
-            (DeviceError::NoDevice, None) => "no device model".into(),
-            (DeviceError::NoDevice, Some(value)) => format!("no device model (value {value:#x})"),
-            (DeviceError::Refused(detail), Some(value)) => format!("{detail} (value {value:#x})"),
-            (DeviceError::Refused(detail) | DeviceError::TransferRefused(detail), _) => detail,
+        let detail = match error {
+            DeviceError::NoDevice => "no device model".into(),
+            DeviceError::Refused(detail) | DeviceError::TransferRefused(detail) => detail,
         };
         let mut requirement = self.requirement(RequirementKind::Device {
             physical,
@@ -5883,6 +6020,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             detail,
         });
         requirement.address = Some(address);
+        // Each written value is the same refusal (`degrade`).
+        requirement.written = written;
         if let Err(stop) = self.degrade(requirement) {
             return Some(Err(stop));
         }
@@ -5890,8 +6029,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// A device access in a form the engine cannot carry out (`detail`):
-    /// strict, the stop; graceful, reported once per register and
-    /// direction, it takes the synchronous external abort without reaching
+    /// strict, the stop; graceful, reported once per register, direction
+    /// and refusal, it takes the synchronous external abort without reaching
     /// the device.
     fn device_unexecuted(
         &mut self,
@@ -7275,6 +7414,7 @@ mod tests {
             kind: RequirementKind::Native("absent"),
             syndrome: None,
             address: None,
+            written: None,
         };
         assert!(requirement.to_string().starts_with("pc=0x10 el=2 lr=0x20 "));
         requirement.link = 0;
@@ -7399,6 +7539,31 @@ mod tests {
             &DeviceError::Refused("unknown register".into())
         ));
         assert_eq!(machine.take_survey().len(), 1);
+    }
+
+    #[test]
+    fn a_device_register_reports_each_refusal_once_up_to_its_first_few() {
+        let mut machine = machine(&[0]);
+        machine.set_strict(false);
+        let mut refuse = |detail: &str| {
+            let requirement = machine.requirement(RequirementKind::Device {
+                physical: 0x1000,
+                write: true,
+                detail: detail.into(),
+            });
+            machine.degrade(requirement).unwrap();
+        };
+        for detail in ["one operation", "another", "one operation"] {
+            refuse(detail);
+        }
+        for value in 0..2 * DEVICE_REFUSALS_REPORTED {
+            refuse(&format!("value {value}"));
+        }
+        assert_eq!(
+            machine.take_unmodeled().len(),
+            DEVICE_REFUSALS_REPORTED,
+            "two operations and the first changing values"
+        );
     }
 
     #[test]
@@ -7927,18 +8092,19 @@ mod tests {
             code.windows(bytes.len()).any(|window| window == bytes)
         };
         let mut machine = machine(&[LDADD_W1_W0_X2, SVC_0]);
-        // Without a host that gives the guarantee, PSTATE.DIT changes no code.
-        // The engine runs one PE at a time, so its atomics are plain accesses
-        // either way, which load first and so report WnR as Arm requires.
+        // Without a host that gives the guarantee, PSTATE.DIT changes no code,
+        // whose atomics lock for the PEs that run concurrently.
         machine.cpu.pstate.dit = true;
         let Ok(Fetched::Block(untimed)) = machine.fetch_block(BASE, false) else {
             panic!("block")
         };
         assert!(!machine.blocks[untimed].variant.timing);
-        assert!(has(&machine, untimed, &PLAIN_ADD_STORE) && !has(&machine, untimed, &LOCK_XADD));
+        assert!(has(&machine, untimed, &LOCK_XADD) && !has(&machine, untimed, &PLAIN_ADD_STORE));
         machine.cpu.pstate.dit = false;
         assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == untimed));
-        // With one, PSTATE.DIT selects a block of its own.
+        // With one, PSTATE.DIT selects a block of its own, of plain accesses
+        // (LOCK has no listed timing), which load first and so report WnR as
+        // Arm requires: such a host runs one PE at a time.
         machine.target = TargetCpu::Sse42Complete.with_doit();
         machine.cpu.pstate.dit = true;
         let Ok(Fetched::Block(timed)) = machine.fetch_block(BASE, false) else {
@@ -8041,7 +8207,7 @@ mod tests {
                         machine.cpu.read(SystemRegister::FAR_EL1),
                     )
                 }),
-                machine.blocks.last().map(|block| block.checks),
+                machine.blocks.iter().last().map(|block| block.checks),
             )
         };
         // EC 0x25 with IL and DFSC 0b100001; WnR for a store.
@@ -8641,6 +8807,21 @@ mod tests {
     }
 
     #[test]
+    fn memory_low_reclaims_code_once_per_run_of_installs() {
+        const RET: u32 = 0xd65f_03c0;
+        let mut machine = machine(&vec![RET; 2 * FETCH_PAGE as usize / 4 + 1]);
+        let base = machine.cpu.pc;
+        assert!(machine.fetch_block(base, false).is_ok());
+        machine.host.memory_low = true;
+        assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+        // Still low, as another machine's data may keep it: the next install
+        // keeps the blocks this one had.
+        assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
+        assert_eq!(machine.index.len(), 2);
+        assert_eq!(machine.statistics.code_discards, 1);
+    }
+
+    #[test]
     fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
         const NOP: u32 = 0xd503_201f;
         const RET: u32 = 0xd65f_03c0;
@@ -8724,6 +8905,7 @@ mod tests {
                 budget: CHAIN_LIMIT - 1,
                 retired: 2,
                 block: 1,
+                linked: 1,
                 ..current
             },
         ));
@@ -8744,6 +8926,7 @@ mod tests {
                 budget: u64::MAX,
                 retired: 2 * budget,
                 block: 0,
+                linked: budget,
                 ..current
             },
         ));
@@ -8763,6 +8946,7 @@ mod tests {
                 budget: CHAIN_LIMIT - 1,
                 retired: 2,
                 block: 1,
+                linked: 1,
                 ..current
             },
         ));
@@ -9101,6 +9285,7 @@ mod tests {
                 budget: CHAIN_LIMIT - 1,
                 retired: 1,
                 block: 0b10 << chain::BLOCK_BTYPE_SHIFT | target as u64,
+                linked: 1,
                 ..current
             },
         ));

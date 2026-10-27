@@ -229,6 +229,78 @@ impl RegisteredSystemRam {
         Ok(())
     }
 
+    /// Store `new` at `physical` if RAM there holds `expected`, in one locked
+    /// compare-and-exchange of the smallest aligned quantity holding both;
+    /// whether it stored. When not, `expected` receives what RAM held. The
+    /// access lies within one aligned 16-byte block; bytes of the quantity
+    /// outside it that change meanwhile are compared again, never stored.
+    ///
+    /// # Safety
+    /// The `read_physical` live-registration contract applies; this is a
+    /// writer of the canonical RAM.
+    pub unsafe fn compare_exchange_physical(
+        &self,
+        physical: u64,
+        expected: &mut [u8],
+        new: &[u8],
+    ) -> Result<bool, MemoryStatus> {
+        let bytes = expected.len();
+        let offset = (physical % GRANULE as u64) as usize;
+        if bytes == 0 || bytes != new.len() || offset + bytes > GRANULE {
+            return Err(MemoryStatus::Alignment);
+        }
+        self.preflight(physical, bytes)?;
+        let width = [1, 2, 4, 8, 16]
+            .into_iter()
+            .find(|&width| offset / width == (offset + bytes - 1) / width)
+            .expect("a 16-byte block holds the access");
+        let start = physical - (offset % width) as u64;
+        let (region, at) = self.region(start).ok_or(MemoryStatus::Domain)?;
+        let pointer = region
+            .backing
+            .host_pointer(at, width, AccessKind::Write)
+            .map_err(|_| MemoryStatus::Permission)?
+            .as_ptr();
+        let shift = (offset % width) * 8;
+        let mask = if bytes == 16 {
+            u128::MAX
+        } else {
+            ((1u128 << (bytes * 8)) - 1) << shift
+        };
+        let place = |value: &[u8]| {
+            let mut wide = [0u8; 16];
+            wide[..bytes].copy_from_slice(value);
+            u128::from_le_bytes(wide) << shift
+        };
+        let (expected_bits, new_bits) = (place(expected), place(new));
+        // SAFETY: a pinned aligned quantity inside the checked envelope; the
+        // caller's contract covers concurrent canonical writers.
+        let mut current = unsafe { access::read_part(pointer, width, self.target) }
+            .map_err(|_| MemoryStatus::Domain)?;
+        loop {
+            let compare = current & !mask | expected_bits;
+            // SAFETY: as above, one locked exchange of the same quantity.
+            let old = unsafe {
+                access::compare_exchange_part(
+                    pointer,
+                    width,
+                    compare,
+                    current & !mask | new_bits,
+                    self.target,
+                )
+            }
+            .map_err(|_| MemoryStatus::Domain)?;
+            if old == compare {
+                return Ok(true);
+            }
+            if old & mask != expected_bits {
+                expected.copy_from_slice(&((old & mask) >> shift).to_le_bytes()[..bytes]);
+                return Ok(false);
+            }
+            current = old;
+        }
+    }
+
     /// Validate physical geometry and actual retained backing permissions for a
     /// DMA descriptor. No bytes are copied and no translation is cached.
     pub fn check_dma_range(
@@ -528,6 +600,48 @@ mod tests {
                 .chain(after[72..].iter())
                 .all(|byte| *byte == 0x53)
         );
+    }
+
+    #[test]
+    fn compare_exchange_stores_only_while_ram_holds_the_expected_bytes() {
+        let storage = Storage::new();
+        let ram = unsafe { model(&[range(&storage, 0x4000, 0, 128)], storage) };
+        // Two bytes inside a four-byte quantity whose other bytes stay.
+        let mut expected = [0x53; 2];
+        assert!(unsafe { ram.compare_exchange_physical(0x4001, &mut expected, &[1, 2]) }.unwrap());
+        let mut expected = [0x53; 2];
+        assert!(!unsafe { ram.compare_exchange_physical(0x4001, &mut expected, &[3, 4]) }.unwrap());
+        assert_eq!(expected, [1, 2], "RAM's bytes");
+        let mut bytes = [0; 4];
+        unsafe { ram.read_physical(0x4000, &mut bytes) }.unwrap();
+        assert_eq!(bytes, [0x53, 1, 2, 0x53]);
+        assert!(matches!(
+            unsafe { ram.compare_exchange_physical(0x400e, &mut [0; 4], &[0; 4]) },
+            Err(MemoryStatus::Alignment)
+        ));
+        // Threads that each add one with a compare-and-exchange lose none.
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let ram = &ram;
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        let mut current = [0; 4];
+                        unsafe { ram.read_physical(0x4024, &mut current) }.unwrap();
+                        loop {
+                            let next = (u32::from_le_bytes(current) + 1).to_le_bytes();
+                            if unsafe { ram.compare_exchange_physical(0x4024, &mut current, &next) }
+                                .unwrap()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let mut counter = [0; 4];
+        unsafe { ram.read_physical(0x4024, &mut counter) }.unwrap();
+        assert_eq!(u32::from_le_bytes(counter), 0x5353_5353 + 4000);
     }
 
     #[test]

@@ -25,6 +25,10 @@ pub struct ProcessorWrite<'a> {
     pub(super) clock: &'a mut clock::Clock,
     pub(super) slice_end: &'a mut u64,
     pub(super) native: NativeProcessorState<'a>,
+    /// Where changes that reach PEs on machines of their own go, for the
+    /// machine to send them ([`super::super::parallel`]); `None` while it
+    /// applies one another machine sent.
+    pub(super) forwarded: Option<&'a mut alloc::vec::Vec<ProcessorChange>>,
 }
 
 /// Successful settlement keeps the exclusive actual-owner borrow through the
@@ -93,6 +97,7 @@ impl ProcessorWrite<'_> {
             clock: &mut *self.clock,
             slice_end: &mut *self.slice_end,
             native: self.native.reborrow(),
+            forwarded: self.forwarded.as_deref_mut(),
         }
     }
 }
@@ -214,7 +219,21 @@ impl<'a> ProcessorWrite<'a> {
         changes: &[ProcessorChange],
     ) -> Result<SettledProcessorWrite<'a>, ProcessorPowerError> {
         let plan = self.processors.prepare(changes)?;
-        self.settle(plan)
+        let remote = self.peers.iter().any(|peer| matches!(peer, Peer::Remote));
+        let mut settled = self.settle(plan)?;
+        // Every other machine keeps the board's CPU power too, and the PE a
+        // change pauses or resumes may run on one of them.
+        if remote && let Some(forwarded) = settled.owners.forwarded.as_deref_mut() {
+            forwarded.extend_from_slice(changes);
+        }
+        Ok(settled)
+    }
+
+    /// Apply a change another PE's machine made and sent, without sending
+    /// it on.
+    pub(in crate::machine::engine) fn received(mut self) -> Self {
+        self.forwarded = None;
+        self
     }
 
     pub(super) fn settle(
@@ -282,7 +301,7 @@ impl<'a> ProcessorWrite<'a> {
                 Peer::Parked(parked) => {
                     pause_cpu(&mut parked.cpu, parked.waiting, now, change.paused)
                 }
-                Peer::Off => {}
+                Peer::Off | Peer::Remote => {}
             }
         }
         *self.slice_end = self.native.statistics.blocks;

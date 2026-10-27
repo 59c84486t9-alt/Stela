@@ -152,12 +152,9 @@ impl HostPowerControl {
         true
     }
 
-    /// A press of the host's power button since the last poll goes to the
-    /// guest as a press and a release.
-    pub fn poll(&mut self, devices: &mut AppleDevices) {
-        if !self.pressed() {
-            return;
-        }
+    /// Give the guest a press and a release of its power button, for a
+    /// press of the host's ([`Self::pressed`]).
+    pub fn press(&mut self, devices: &mut AppleDevices) {
         let result = devices
             .power_button(true)
             .and_then(|()| devices.power_button(false));

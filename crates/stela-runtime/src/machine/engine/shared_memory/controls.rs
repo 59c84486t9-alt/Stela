@@ -231,7 +231,8 @@ pub(super) mod tests {
             counter_frequency: 24_000_000,
             fixed: identification::derive(
                 chip,
-                stela_compiler::TargetCpu::Baseline,
+                // Concurrent PEs' LDAPR needs the 16-byte atomic load.
+                stela_compiler::TargetCpu::X86_64_V2.with_atomic_load16(),
                 true,
                 identification::Speculation::NONE,
             ),

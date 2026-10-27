@@ -251,6 +251,9 @@ pub(crate) unsafe fn activate(
     local.this = local;
     // SAFETY: the descriptor owner pins this private record for the CPU lifetime.
     unsafe { set_base(local as *mut Local as u64) };
+    // SAFETY: CPL0, once for this processor; nothing else here reads
+    // IA32_TSC_AUX.
+    unsafe { crate::ALLOCATOR.tag_cpu() };
 }
 
 /// # Safety
@@ -339,6 +342,11 @@ pub(super) fn doorbell_counter() -> &'static AtomicU64 {
 pub(super) fn doorbell() {
     doorbell_counter().fetch_add(1, Ordering::Release);
     interrupt();
+}
+
+pub(super) fn interrupted() -> bool {
+    // SAFETY: as in interrupt.
+    unsafe { &(*current()).interrupted }.load(Ordering::Acquire)
 }
 
 pub(super) fn clear_interrupt() {

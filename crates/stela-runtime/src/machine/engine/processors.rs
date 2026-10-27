@@ -63,7 +63,7 @@ pub(super) const QUANTUM_HZ: u64 = 500;
 /// XNU xnu-12377.121.6 machine_routines.c:108,1251 groups the original
 /// DeviceTree `reg` by Aff1 (proc_reg.h:1059-1061). Aff2 is a core type,
 /// not part of the physical cluster, including the M6's mixed P/M cluster.
-const PHYSICAL_CLUSTER_MASK: u64 = 0xff00;
+pub(super) const PHYSICAL_CLUSTER_MASK: u64 = 0xff00;
 
 pub(super) enum Peer {
     /// The PE on [`Machine::cpu`].
@@ -71,6 +71,8 @@ pub(super) enum Peer {
     /// Held in reset until a device starts it.
     Off,
     Parked(Box<Parked>),
+    /// Run by another machine on its own host core (`parallel`).
+    Remote,
 }
 
 pub(super) struct Parked {
@@ -127,6 +129,8 @@ pub enum PeerState<'a> {
         cpu: &'a Cpu,
         wfi: Option<bool>,
     },
+    /// Running on its own machine ([`super::parallel`]).
+    Remote,
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
@@ -201,6 +205,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 tag_checks: &mut self.tag_checks,
                 prediction_context: &mut self.prediction_context,
             },
+            forwarded: Some(&mut self.forwarded_power),
         };
         (&mut self.devices, processors)
     }
@@ -227,7 +232,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let retired = match peer {
                     Peer::Running => self.cpu.retired,
                     Peer::Parked(parked) => parked.cpu.retired,
-                    Peer::Off => 0,
+                    Peer::Off | Peer::Remote => 0,
                 };
                 total.saturating_add(u128::from(retired))
             })
@@ -245,6 +250,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 },
                 Peer::Running => PeerState::Running,
                 Peer::Off => PeerState::Off,
+                Peer::Remote => PeerState::Remote,
                 Peer::Parked(parked) if down(parked.waiting) => PeerState::Down,
                 Peer::Parked(parked) => PeerState::Parked {
                     cpu: &parked.cpu,
@@ -271,6 +277,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// run's wait limit, follows a device's bytes for the host, or that only
     /// the host's inputs can end, returns to the host.
     pub(super) fn schedule(&mut self) -> Step {
+        if self.parallel.is_some() {
+            self.forward_power()?;
+            self.read_mail()?;
+        }
         self.take_starts()?;
         if !self.processor_paused(self.current)
             && self.waiting.is_none()
@@ -283,6 +293,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.clock.end_slice(host, self.statistics.blocks);
         let mut waited = false;
         loop {
+            let pass = self.host.counter();
+            if self.parallel.is_some() {
+                self.read_mail()?;
+            }
             self.observe_writes();
             let now = self.now();
             self.poll_devices(now)?;
@@ -308,14 +322,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.clock.start_slice(host, self.statistics.blocks, share);
                 return self.wake();
             }
-            if self.devices.take_host_service() {
+            // In parallel, only a PE that waits for an interrupt serves the
+            // host: one in WFE may hold a ticket another PE hands it.
+            if (self.parallel.is_none() || self.waits_for_interrupt())
+                && self.devices.take_host_service()
+            {
                 if waited {
                     self.host.arm_timer(None);
                 }
                 return Err(Stop::Waiting);
             }
             let deadline = self.next_deadline(now);
-            if deadline.is_none() && !self.devices.waits_on_host() {
+            // In parallel, other machines' PEs can still wake this one.
+            if deadline.is_none() && self.parallel.is_none() && !self.devices.waits_on_host() {
                 return Err(Stop::Idle);
             }
             if let (Some(deadline), true) = (deadline, self.idle_skip) {
@@ -338,12 +357,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 return Err(Stop::Waiting);
             };
-            self.statistics.waits += 1;
-            self.host.arm_timer(Some(self.clock.host_deadline(until)));
-            self.host.wait_for_interrupt();
+            if self.polls_monitor() {
+                core::hint::spin_loop();
+                // The whole pass is the poll's.
+                self.statistics.spin_ticks += self.host.counter().wrapping_sub(pass);
+            } else {
+                self.statistics.waits += 1;
+                self.host.arm_timer(Some(self.clock.host_deadline(until)));
+                let slept = self.host.counter();
+                self.sleep();
+                self.statistics.sleep_ticks += self.host.counter().wrapping_sub(slept);
+            }
             self.waited = self.waited.saturating_add(self.now().saturating_sub(now));
             waited = true;
         }
+    }
+
+    /// Whether the running PE waits for an interrupt, or is powered down,
+    /// so holds no lock another PE spins on.
+    pub fn waits_for_interrupt(&self) -> bool {
+        self.waiting
+            .is_some_and(|wait| wait.kind == WaitKind::Interrupt || wait.down)
     }
 
     pub(super) fn take_starts(&mut self) -> Step {
@@ -577,7 +611,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn observe_writes(&mut self) {
         let parked = self.peers.iter_mut().filter_map(|peer| match peer {
             Peer::Parked(parked) => Some(&mut parked.cpu),
-            Peer::Running | Peer::Off => None,
+            Peer::Running | Peer::Off | Peer::Remote => None,
         });
         for cpu in core::iter::once(&mut self.cpu).chain(parked) {
             let Some(reservation) = cpu.monitor else {
@@ -598,6 +632,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.signal_event();
         if local {
             return;
+        }
+        if let Some(hub) = &self.parallel {
+            hub.event(self.current);
         }
         for peer in &mut self.peers {
             if let Peer::Parked(parked) = peer
@@ -622,6 +659,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// started like one held in reset.
     pub(super) fn start(&mut self, start: Start) -> Step {
         let held = match self.peers.get(start.cpu) {
+            Some(Peer::Remote) => {
+                let hub = self
+                    .parallel
+                    .as_ref()
+                    .expect("a remote PE runs in parallel");
+                hub.start(start.cpu, start.address);
+                return Ok(());
+            }
             Some(Peer::Off) => true,
             Some(Peer::Running) => down(self.waiting),
             Some(Peer::Parked(parked)) => down(parked.waiting),
@@ -692,7 +737,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// PE `pe` leaves reset at `address`.
-    fn restart(&mut self, pe: usize, address: u64) -> Step {
+    pub(super) fn restart(&mut self, pe: usize, address: u64) -> Step {
         let mut cpu = Cpu::of(self.profile.chip, address, Pstate::reset(2));
         // Every PE has the registers of PE 0, the profile's missing ones
         // included.
@@ -706,7 +751,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let clear = match &mut self.peers[pe] {
                 Peer::Running if pe == self.current => self.cpu.clear_exclusive(),
                 Peer::Parked(parked) => parked.cpu.clear_exclusive(),
-                Peer::Off => Ok(()),
+                Peer::Off | Peer::Remote => Ok(()),
                 _ => unreachable!("reset preflight checked exact PE owners"),
             };
             clear.map_err(|_| {
@@ -729,20 +774,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .find_map(|other| match &self.peers[other] {
                 Peer::Running if !down(self.waiting) => Some(&self.cpu),
                 Peer::Parked(parked) if !down(parked.waiting) => Some(&parked.cpu),
-                Peer::Running | Peer::Parked(_) | Peer::Off => None,
+                Peer::Running | Peer::Parked(_) | Peer::Off | Peer::Remote => None,
             });
         // Its cluster-scoped implementation-defined registers too
         // (`impdef::Scope::Cluster`). A new cluster's CTRR registers, and
         // every PE's own, start from what iBoot left (`ctrr::Handoff`).
         cpu.core_locks = self.cpu.core_locks.clone();
         cpu.ctrr_core = ctrr::Core::handed_off(&cpu.core_locks);
-        if let Some(peer) = shared {
+        // In parallel, the cluster's state outlives its PEs on the hub.
+        if let Some(hub) = &self.parallel {
+            let key = cluster(pe).unwrap_or(0);
+            let cluster = hub.cluster(key, || super::parallel::Cluster {
+                ctrr: crate::machine::shared::Shared::new(ctrr::Cluster::handed_off(
+                    &cpu.core_locks,
+                )),
+                impdef: cpu.apple.impdef.cluster_registers(),
+            });
+            cpu.ctrr = cluster.ctrr;
+            cpu.apple.impdef.join_cluster(cluster.impdef);
+        } else if let Some(peer) = shared {
             cpu.ctrr = peer.ctrr.clone();
             cpu.apple.impdef.join(&peer.apple.impdef);
         } else {
-            cpu.ctrr = alloc::rc::Rc::new(core::cell::RefCell::new(ctrr::Cluster::handed_off(
-                &cpu.core_locks,
-            )));
+            cpu.ctrr =
+                crate::machine::shared::Shared::new(ctrr::Cluster::handed_off(&cpu.core_locks));
         }
         cpu.memory_lock = self.cpu.memory_lock;
         let now = self.now();
@@ -752,7 +807,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let replaced = match &self.peers[pe] {
             Peer::Running => self.cpu.retired,
             Peer::Parked(parked) => parked.cpu.retired,
-            Peer::Off => 0,
+            Peer::Off | Peer::Remote => 0,
         };
         self.statistics.replaced_retired = self
             .statistics
@@ -1215,11 +1270,8 @@ mod tests {
         assert!(machine.cpu.amx.registers == amx);
         assert!(machine.cpu.event && parked(&machine, 1).event);
         assert!(machine.cpu.monitor.is_none() && parked(&machine, 1).monitor.is_none());
-        assert!(alloc::rc::Rc::ptr_eq(&cluster, &machine.cpu.ctrr));
-        assert!(alloc::rc::Rc::ptr_eq(
-            &other_cluster,
-            &parked(&machine, 1).ctrr
-        ));
+        assert!(cluster.ptr_eq(&machine.cpu.ctrr));
+        assert!(other_cluster.ptr_eq(&parked(&machine, 1).ctrr));
         assert!(matches!(machine.peer_states()[0], PeerState::Parked { .. }));
         power_change(&mut machine, 2, RETAINED_ACTIVE);
         machine.schedule().unwrap();
@@ -1798,7 +1850,7 @@ mod tests {
                     let Peer::Parked(target) = &mut machine.peers[pe] else {
                         panic!("a new PE is parked")
                     };
-                    assert!(alloc::rc::Rc::ptr_eq(&shared, &target.cpu.ctrr));
+                    assert!(shared.ptr_eq(&target.cpu.ctrr));
                     assert_eq!(target.cpu.ctrr.borrow().read(0, Field::Lower), BASE);
                     assert!(
                         target
@@ -1832,7 +1884,7 @@ mod tests {
                 let Peer::Parked(other) = &mut machine.peers[1] else {
                     panic!("the E core is parked")
                 };
-                assert!(!alloc::rc::Rc::ptr_eq(&shared, &other.cpu.ctrr));
+                assert!(!shared.ptr_eq(&other.cpu.ctrr));
                 assert_eq!(other.cpu.ctrr.borrow().read(0, Field::Lock), 0);
                 assert_eq!(other.cpu.apple.impdef.read(counter), Ok(0));
             }
@@ -1877,7 +1929,7 @@ mod tests {
         let Peer::Parked(other) = &mut machine.peers[1] else {
             panic!("the other cluster's PE is parked")
         };
-        assert!(!alloc::rc::Rc::ptr_eq(&machine.cpu.ctrr, &other.cpu.ctrr));
+        assert!(!machine.cpu.ctrr.ptr_eq(&other.cpu.ctrr));
         assert_eq!(
             *other.cpu.ctrr.borrow(),
             ctrr::Cluster::handed_off(&handoff)

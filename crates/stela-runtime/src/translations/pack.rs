@@ -9,7 +9,9 @@
 //! rewritten in place) holds bytes past it that are never read.
 //!
 //! The store hands the engine the pack's records and keeps the blocks the
-//! engine compiled anew. At a quiescent point it proves them (each compiled
+//! engine compiled anew. A store shared by machines that run at once (one
+//! per PE) also keeps those blocks' native code, within a bound, for the
+//! other machines to install instead of compiling them again. At a quiescent point it proves them (each compiled
 //! again at its page's probe addresses) and lays out the next pack within a
 //! bound: the records that gained entries, then the records this boot used,
 //! then the others, as long as they fit.
@@ -17,6 +19,7 @@ use super::{Digest, Record};
 use crate::machine::{Offer, Preparation, Translations};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use sha2::{Digest as _, Sha256};
+use stela_compiler::block::CompiledBlock;
 
 pub const MAGIC: [u8; 8] = *b"STLTPACK";
 pub const SCHEMA: u32 = 1;
@@ -356,6 +359,12 @@ pub struct Store<'a> {
     loaded: BTreeMap<Digest, bool>,
     pending: Vec<Pending>,
     pending_bytes: usize,
+    /// The blocks offered, by page key, PC and context, for the other
+    /// machines sharing the store, and the bytes of their native code
+    /// within `shared_bound` ([`Store::share`]).
+    shared: BTreeMap<(Digest, u64, Digest), CompiledBlock>,
+    shared_bytes: usize,
+    shared_bound: usize,
     pub counters: Counters,
 }
 
@@ -386,12 +395,22 @@ impl<'a> Store<'a> {
             loaded: BTreeMap::new(),
             pending: Vec::new(),
             pending_bytes: 0,
+            shared: BTreeMap::new(),
+            shared_bytes: 0,
+            shared_bound: 0,
             counters: Counters::default(),
         };
         match parsed {
             Ok(pack) => (empty(pack), None),
             Err(error) => (empty(None), Some(error)),
         }
+    }
+
+    /// Keep the native code of offered blocks, up to `bound` bytes, for
+    /// [`Translations::prepared`]: for machines that share the store. Full,
+    /// it forgets them all and starts again.
+    pub fn share(&mut self, bound: usize) {
+        self.shared_bound = bound;
     }
 
     /// The pack read, if valid.
@@ -520,7 +539,23 @@ impl Translations for Store<'_> {
         record.map(Arc::new)
     }
 
+    fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<CompiledBlock> {
+        self.shared.get(&(*key, pc, *context)).cloned()
+    }
+
     fn offer(&mut self, offer: Offer) {
+        let code = offer.block.native.x86_64_code.len();
+        if code <= self.shared_bound {
+            // Full, it forgets every block and keeps what the PEs run next.
+            if self.shared_bytes + code > self.shared_bound {
+                self.shared.clear();
+                self.shared_bytes = 0;
+            }
+            let key = (offer.key, offer.pc, offer.context);
+            if self.shared.insert(key, offer.block.clone()).is_none() {
+                self.shared_bytes += code;
+            }
+        }
         let bytes = core::mem::size_of::<Pending>() + offer.input.len();
         if self.pending_bytes + bytes > MAX_PENDING_BYTES {
             self.counters.dropped += 1;
@@ -565,6 +600,39 @@ mod tests {
             preparation,
             successors: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_shared_store_hands_offered_blocks_to_other_machines_and_starts_again_when_full() {
+        let translator = Digest::of(b"translator");
+        let key = Digest::of(b"page");
+        let (first, second) = (offer(0x1000, key), offer(0x1008, key));
+        let code = first.block.native.x86_64_code.len();
+        let (mut store, _) = Store::new(translator, None);
+        store.offer(first.clone());
+        // A store no machine shares keeps no native code.
+        assert!(store.prepared(&key, 0x1000, &first.context).is_none());
+        store.share(code + code / 2);
+        store.offer(first.clone());
+        store.offer(first.clone());
+        store.offer(second.clone());
+        assert!(
+            store
+                .prepared(&key, 0x1000, &Digest::of(b"other"))
+                .is_none()
+        );
+        assert!(store.prepared(&key, 0x1008, &second.context).is_some());
+        assert!(store.prepared(&key, 0x1000, &first.context).is_none());
+        store.share(4 * code);
+        store.offer(first.clone());
+        assert_eq!(
+            store
+                .prepared(&key, 0x1000, &first.context)
+                .map(|block| block.native.x86_64_code),
+            Some(first.block.native.x86_64_code.clone())
+        );
+        // Every offer still waits for proof.
+        assert_eq!(store.pending(), 5);
     }
 
     #[test]
@@ -690,6 +758,7 @@ mod tests {
         let layout = Layout::new(&translator, records);
         let pack = layout.bytes();
         let mut disk = RamDisk::new("pack", 128, BLOCK);
+        disk.identity.features.write_cache = true;
         disk.bytes.fill(0xee);
         // Two clusters of 8 blocks, out of order, the file cut to its size.
         let cluster = 8 * u64::from(BLOCK);

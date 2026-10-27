@@ -4,10 +4,12 @@
 //!
 //! The engine owns one [`ChainControl`] at a fixed host address. Before it
 //! enters a block it sets `budget` to the chained transfers it allows,
-//! `retired` to 0 and `block` to the entered block's index. Each thunk takes
-//! one transfer from `budget` (or, when none is left, exits exactly as the
-//! redirected exit would), adds the instructions of the block it leaves to
-//! `retired` and names the block it enters in `block`. After the native
+//! `retired`, `linked` and `hits` to 0 and `block` to the entered block's
+//! index. Each thunk takes one transfer from `budget` (or, when none is
+//! left, exits exactly as the redirected exit would), counts it, adds the
+//! instructions of the block it leaves to `retired` and names the block it
+//! enters in `block`. Another agent may spend the budget meanwhile to bring
+//! the engine back sooner; the counts stay exact. After the native
 //! call returns, `block` is the block whose exit or fault ended the run, in
 //! its low 32 bits, and the BTYPE it was entered with in bits 33:32: 0 from
 //! every thunk but a lookup thunk of a BR or BLR form.
@@ -35,7 +37,7 @@ pub const DIRECT_EXIT_BYTES: usize = 16;
 /// Bytes a redirection writes over the start of a direct exit.
 pub const JUMP_BYTES: usize = 5;
 /// Bytes in a [`thunk`].
-pub const THUNK_BYTES: usize = 37 + DIRECT_EXIT_BYTES;
+pub const THUNK_BYTES: usize = 42 + DIRECT_EXIT_BYTES;
 /// Bytes in an exit to a dynamic target in RAX: `mov edx, kind; ret`.
 pub const DYNAMIC_EXIT_BYTES: usize = 6;
 /// Entries in the engine's lookup table, a power of two.
@@ -73,6 +75,8 @@ pub struct ChainControl {
     pub table: u64,
     /// Transfers lookup thunks made.
     pub hits: u64,
+    /// Transfers the other thunks made.
+    pub linked: u64,
 }
 
 /// One block a fetch at `pc` runs in `context`, or nothing in context 0.
@@ -113,6 +117,7 @@ const BLOCK: u8 = core::mem::offset_of!(ChainControl, block) as u8;
 const CONTEXTS: u8 = core::mem::offset_of!(ChainControl, contexts) as u8;
 const TABLE: u8 = core::mem::offset_of!(ChainControl, table) as u8;
 const HITS: u8 = core::mem::offset_of!(ChainControl, hits) as u8;
+const LINKED: u8 = core::mem::offset_of!(ChainControl, linked) as u8;
 const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
 const _: () = assert!(core::mem::offset_of!(LookupEntry, pc) == 0);
 const ENTRY_CONTEXT: u8 = core::mem::offset_of!(LookupEntry, context) as u8;
@@ -155,6 +160,7 @@ pub fn thunk(
     let skip = code.len();
     code.extend([0x48, 0x81, 0x41, RETIRED]); // add qword [rcx+retired],imm32
     code.extend(retired.to_le_bytes());
+    code.extend([0x48, 0x83, 0x41, LINKED, 0x01]); // add qword [rcx+linked],1
     code.extend([0x48, 0xc7, 0x41, BLOCK]); // mov qword [rcx+block],imm32
     code.extend(block.to_le_bytes());
     code.extend(jump(at + code.len() as u64, entry)?);
@@ -281,12 +287,13 @@ mod tests {
         )
         .unwrap();
         let mut expected = vec![0x48, 0xb9, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        expected.extend([0x48, 0x83, 0x29, 0x01, 0x72, 21]);
+        expected.extend([0x48, 0x83, 0x29, 0x01, 0x72, 26]);
         expected.extend([0x48, 0x81, 0x41, 0x08, 7, 0, 0, 0]);
+        expected.extend([0x48, 0x83, 0x41, 0x38, 0x01]);
         expected.extend([0x48, 0xc7, 0x41, 0x10, 3, 0, 0, 0]);
-        // The jump ends 0x25 bytes into the thunk.
+        // The jump ends 0x2a bytes into the thunk.
         expected.extend([0xe9]);
-        expected.extend((0x2000i32 - 0x1025).to_le_bytes());
+        expected.extend((0x2000i32 - 0x102a).to_le_bytes());
         expected.extend(direct_exit(GuestAddress(0xabc), ExitKind::Fallthrough));
         assert_eq!(code, expected);
         assert!(thunk(0, 0, 0, 0, 1 << 40, GuestAddress(0), ExitKind::Direct).is_none());

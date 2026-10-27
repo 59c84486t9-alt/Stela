@@ -164,6 +164,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         shape: DeviceReadShape,
         now: u64,
     ) -> Result<ConsumedPair, DeviceError> {
+        if self.serial_hold.is_none() && self.parallel.is_some() {
+            return self.forward_read(physical, shape);
+        }
+        self.serial_read_canonical_as(self.current, physical, shape, now)
+    }
+
+    /// [`Self::serial_read_canonical`] for PE `cpu`, which may run on a
+    /// machine of its own and forwarded the read here.
+    pub(super) fn serial_read_canonical_as(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        shape: DeviceReadShape,
+        now: u64,
+    ) -> Result<ConsumedPair, DeviceError> {
         let refused = |reason: &str| DeviceError::TransferRefused(reason.into());
         if self.serial_hold.is_none() {
             return Err(refused(
@@ -186,14 +201,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match shape {
             DeviceReadShape::Scalar { bytes } => self
                 .devices
-                .read_canonical(self.current, physical, bytes, now, &mut memory)
+                .read_canonical(cpu, physical, bytes, now, &mut memory)
                 .map(|scalar| ConsumedPair {
                     values: [scalar.value, 0],
                     settlement: scalar.settlement,
                 }),
             DeviceReadShape::Pair { bytes } => {
                 self.devices
-                    .read_pair_canonical(self.current, physical, bytes, now, &mut memory)
+                    .read_pair_canonical(cpu, physical, bytes, now, &mut memory)
             }
         }
     }

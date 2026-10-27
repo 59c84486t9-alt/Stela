@@ -144,12 +144,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
+        self.serial_write_canonical_as(self.current, physical, bytes, value, now)
+    }
+
+    /// [`Self::serial_write_canonical`] for PE `cpu`, which may run on a
+    /// machine of its own and forwarded the write here.
+    pub(super) fn serial_write_canonical_as(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         let Some(held) = self.serial_hold.take() else {
             return Err(DeviceError::TransferRefused(
                 "canonical device write requires the serialized worker hold".into(),
             ));
         };
-        let consumed = self.serial_write_held(&held, physical, bytes, value, now);
+        let consumed = self.serial_write_held(&held, cpu, physical, bytes, value, now);
         self.serial_hold = Some(held);
         match consumed? {
             ConsumedWrite::Complete { settlement } => settlement,
@@ -160,6 +173,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn serial_write_held(
         &mut self,
         held: &publication::StoppedWorkers,
+        cpu: usize,
         physical: u64,
         bytes: u8,
         value: u64,
@@ -175,10 +189,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 })?
                 .ram_owner(),
         );
-        let current = self.current;
         let (devices, processors) = self.processor_write_parts();
         let mut owners = WriteOwners::new(&ram, held, processors);
-        devices.write_canonical(current, physical, bytes, value, now, &mut owners)
+        devices.write_canonical(cpu, physical, bytes, value, now, &mut owners)
     }
 }
 impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {

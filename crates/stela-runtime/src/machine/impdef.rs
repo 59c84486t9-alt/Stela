@@ -73,8 +73,7 @@
 //! reset value is observed. The run reports every entry the guest used, so none of
 //! these is silent.
 use super::Chip;
-use alloc::{collections::BTreeMap, rc::Rc};
-use core::cell::RefCell;
+use alloc::collections::BTreeMap;
 use stela_compiler::aarch64::system::registers::Encoding;
 
 mod census;
@@ -1782,7 +1781,7 @@ pub struct Registers {
     /// The system count of the PE's first energy reading.
     energy_origin: Option<u64>,
     /// The `Scope::Cluster` values, shared with the cluster's other PEs.
-    cluster: Rc<RefCell<BTreeMap<u16, u64>>>,
+    cluster: super::shared::Shared<BTreeMap<u16, u64>>,
     pub reads: BTreeMap<u16, u64>,
     pub writes: BTreeMap<u16, u64>,
 }
@@ -1792,6 +1791,16 @@ impl Registers {
     /// already has a powered PE.
     pub fn join(&mut self, other: &Self) {
         self.cluster = other.cluster.clone();
+    }
+
+    /// The cluster registers this PE shares, for a PE on another machine.
+    pub(crate) fn cluster_registers(&self) -> super::shared::Shared<BTreeMap<u16, u64>> {
+        self.cluster.clone()
+    }
+
+    /// Share `cluster`, the registers of a PE that runs on another machine.
+    pub(crate) fn join_cluster(&mut self, cluster: super::shared::Shared<BTreeMap<u16, u64>>) {
+        self.cluster = cluster;
     }
 
     fn stored(&self, entry: &Entry) -> Option<u64> {

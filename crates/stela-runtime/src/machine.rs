@@ -22,6 +22,7 @@ pub mod mount;
 pub mod pmu;
 pub mod pointer_keys;
 pub mod registers;
+pub mod shared;
 pub mod soc;
 pub mod streaming;
 pub mod system;

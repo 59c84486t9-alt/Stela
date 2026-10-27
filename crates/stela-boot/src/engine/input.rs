@@ -48,7 +48,16 @@ impl HostInput {
         }
     }
 
-    pub fn poll(&mut self, devices: &mut AppleDevices) {
+    /// Deliver what [`Self::read`] read from the host's devices.
+    pub fn deliver_all(&mut self, devices: &mut AppleDevices, inputs: Vec<Input>) {
+        for input in inputs {
+            self.deliver(devices, input);
+        }
+    }
+
+    /// Read the host's input devices, without the guest's devices: their
+    /// USB devices' first, then the others'.
+    pub fn read(&mut self) -> Vec<Input> {
         let mut usb = Vec::new();
         for device in &mut self.inputs.usb {
             {
@@ -60,10 +69,7 @@ impl HostInput {
                 output::arguments(format_args!("INPUT USB device {} stopped\n", device.name));
             }
         }
-        for input in usb {
-            self.deliver(devices, input);
-        }
-        let mut pending = Vec::new();
+        let mut pending = usb;
         for device in &mut self.inputs.devices {
             let events = {
                 // SAFETY: the loader root `storage::open` captured, which
@@ -77,8 +83,6 @@ impl HostInput {
                 .collect();
             pending.extend(inputs);
         }
-        for input in pending {
-            self.deliver(devices, input);
-        }
+        pending
     }
 }

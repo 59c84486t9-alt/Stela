@@ -2350,7 +2350,7 @@ mod tests {
         const LOCKED: u64 = 0x8000_0101_e000_0000;
         for chip in Chip::ALL {
             let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
-            cpu.core_locks = alloc::rc::Rc::new(ctrr::Handoff {
+            cpu.core_locks = alloc::sync::Arc::new(ctrr::Handoff {
                 tag_offset: LOCKED,
                 ..ctrr::Handoff::default()
             });

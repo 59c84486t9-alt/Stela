@@ -71,9 +71,9 @@ impl Offer {
 /// page let go is read, hashed and looked up again for its next block,
 /// which only a block not yet installed needs.
 #[cfg(not(test))]
-const KEPT_PAGES: usize = 4096;
+pub(super) const KEPT_PAGES: usize = 4096;
 #[cfg(test)]
-const KEPT_PAGES: usize = 4;
+pub(super) const KEPT_PAGES: usize = 4;
 
 /// A fetch page's bytes, as read for its first block, and its record.
 pub(super) struct StoredPage {
@@ -126,7 +126,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let key = Digest::of(bytes.as_slice());
             let record = self.host.translations()?.record(&key);
-            if self.pages.len() == KEPT_PAGES || (!self.pages.is_empty() && self.host.memory_low())
+            if self.pages.len() >= self.kept_pages
+                || (!self.pages.is_empty() && self.host.memory_low())
             {
                 self.forget_least_used_pages();
             }
@@ -144,6 +145,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let page = self.pages.get_mut(&frame)?;
         page.used = self.page_uses;
         Some(page)
+    }
+
+    /// Keep `KEPT_PAGES` across `machines` machines, which each keep their
+    /// own: an equal share each, but no fewer than a sixteenth.
+    pub(super) fn share_kept_pages(&mut self, machines: usize) {
+        self.kept_pages = (KEPT_PAGES / machines.max(1)).max(KEPT_PAGES.div_ceil(16));
     }
 
     /// Let the least recently used quarter of the kept pages go, at least

@@ -101,10 +101,13 @@ impl Clock {
     }
 
     /// `counts` of host time passed with no PE running and nothing in the
-    /// guest's world happening: the count does not show it.
+    /// guest's world happening: the count does not show it. A count that
+    /// follows the host's shows it, as other threads or cores ran meanwhile.
     pub(super) fn exclude(&mut self, counts: u64) {
-        self.lag += counts;
-        self.sync();
+        if !self.follows_host {
+            self.lag += counts;
+            self.sync();
+        }
     }
 
     /// While every PE waits at host counter value `host`, the count leaps to

@@ -406,7 +406,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let cpu = match &mut self.peers[pe] {
                 super::processors::Peer::Running => &mut self.cpu,
                 super::processors::Peer::Parked(parked) => parked.cpu_mut(),
-                super::processors::Peer::Off => unreachable!("preflight admitted active PE"),
+                super::processors::Peer::Off | super::processors::Peer::Remote => {
+                    unreachable!("preflight admitted active PE")
+                }
             };
             cpu.event = false;
             cpu.canonical_memory = Some(memory);
