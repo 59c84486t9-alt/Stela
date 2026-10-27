@@ -2128,16 +2128,16 @@ mod tests {
 
         // A disk still becoming ready is requeued until sd's runtime ends.
         reply(&mut fixture, 0x52, [Sense::NOT_READY, 0x04, 0x01]);
-        let link = failing(0x0453, 100);
+        // At 1000 µs per command timeout the runtime is 6 ms: the 9 ms
+        // requeue delay allows exactly one requeue.
+        let link = failing(0x0453, 2);
         assert!(matches!(
             fixture
                 .disk
                 .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
             Err(BlockError::Sense(_))
         ));
-        let attempts = link.issued.get() / 2;
-        // 6 ms runtime at 1000 µs per command timeout, 9 ms per requeue.
-        assert!((1..=2).contains(&attempts), "{attempts}");
+        assert_eq!(link.issued.get(), 4);
 
         // No sense without the SENSE status, with a device fault, with
         // reporting off, or with invalid sense.
