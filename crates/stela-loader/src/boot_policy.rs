@@ -439,8 +439,7 @@ pub fn ramdisk_root_device(boot_args: &str) -> Option<&str> {
 /// ramdisk"); the first root already holds that device, so the image's
 /// mount fails with EBUSY and imageboot panics (`vfs_mountroot() failed`,
 /// `imageboot.c:468`). A Mac never passes `rd=` for recoveryOS; a root that
-/// pivots to an image is named by `/chosen` instead
-/// ([`crate::root_selection::Root::RamImage`]).
+/// pivots to an image is named by `/chosen` instead.
 pub fn refuse_ramdisk_image_root(boot_args: &str) -> Result<()> {
     if let Some(device) = ramdisk_root_device(boot_args).filter(|_| image_boot_named(boot_args)) {
         anyhow::bail!(

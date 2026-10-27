@@ -1,6 +1,7 @@
 //! Updates of an existing setup, each one a transaction in the setup
 //! record: Stela updates replace `stela.efi`, macOS updates add the new
-//! build's recoveryOS bundles and point `stela.cfg` at them. Both keep what
+//! build's install medium and restore bundles and point Install macOS at
+//! them. Both keep what
 //! they replace, so `--rollback` undoes the last one; an update that was
 //! interrupted is finished by running it again or undone by `--rollback`.
 //!
@@ -11,9 +12,9 @@
 //!   mount interface. When it reads another boot-bundle schema than the
 //!   setup's bundles have, or this `stela` prepares another bundle revision
 //!   (`stela_loader::boot_bundle::REVISION`) than theirs, the update
-//!   prepares the active build's bundles for every machine again (the
-//!   recoveryOS ones, and the restore ones while the setup has the build's
-//!   install medium) at the new schema and revision, from `--ipsw` or
+//!   prepares the active build's restore bundles for every machine again
+//!   (while the setup has the build's install medium) at the new schema and
+//!   revision, from `--ipsw` or
 //!   `--fetch`, beside the old ones, which its rollback boots again; this
 //!   makes it an update even with the same `stela.efi`.
 //!   Bundles of a generation that no kept version boots are removed. The
@@ -26,20 +27,17 @@
 //!   new system on the container's Update volume and sets `boot-command
 //!   upgrade`, which `stela.efi` boots from that volume as iBEC would
 //!   (`stela_loader::upgrade`), and every later boot builds from the
-//!   Preboot volume's new objects. `--update-os` brings the setup to a new
-//!   build offline: its System Recovery bundles and, for a setup with
-//!   installs, the build's install medium and each machine's erase and
-//!   update restore bundles. The Update macOS choice then restores
-//!   the build's Update identity over the installed system, keeping its
-//!   data, as Apple Configurator's update restore does. The previous
-//!   build's medium is kept for rollback ([`MEDIA_KEPT`] media in all), so
-//!   the USB needs room for both.
+//!   Preboot volume's new objects. `--update-os` brings the setup's Install
+//!   macOS to a new build offline: the build's install medium and each
+//!   machine's restore bundles. The previous build's medium is kept for
+//!   rollback ([`MEDIA_KEPT`] media in all), so the USB needs room for
+//!   both.
 //!
 //! Neither touches the installed disks' partitions.
 use super::{
     Environment, LOADER_PATH, MEDIA_KEPT, Prepared, Record, apply_install, bundle,
     check_bundle_revision, check_space, copy_bundles, describe_install, first_schema, plan_install,
-    prepare_bundles, prepare_kind, publish, read_efi, restore_bundles, write_record,
+    prepare_kind, publish, read_efi, restore_bundles, write_record,
 };
 use crate::efi;
 use anyhow::{Context, Result, bail, ensure};
@@ -54,7 +52,7 @@ use std::{
 pub(super) const VERSIONS: &str = "EFI/stela/versions";
 const VERSION_FILE: &str = "stela.efi";
 const VERSION_ID_DIGITS: usize = 16;
-/// Stela versions and recoveryOS builds kept for rollback, the active one
+/// Stela versions and macOS builds kept for rollback, the active one
 /// included.
 pub(super) const KEEP: usize = 3;
 
@@ -77,7 +75,7 @@ pub(super) enum Change {
         #[serde(default)]
         to_revision: u32,
     },
-    /// recoveryOS builds.
+    /// macOS builds of the install media and restore bundles.
     Os { from: String, to: String },
 }
 
@@ -153,21 +151,9 @@ fn activate_stela(esp: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Point `stela.cfg` at `build`'s recoveryOS, which must have a bundle for
-/// every machine of the active generation.
+/// Make `build` the active build, which Install macOS restores; its
+/// restore bundles and medium are the startup choices' from now on.
 fn activate_build(record: &mut Record, build: &str) -> Result<()> {
-    let missing = record.missing_bundles(build);
-    ensure!(
-        missing.is_empty(),
-        "recoveryOS {build} has no {} bundle for {}; prepare them with `stela setup \
-         --repair --ipsw` of that build after activating it, or keep the current build",
-        record.generation(),
-        missing
-            .iter()
-            .map(|ecid| ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}")))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
     record.build = build.into();
     record.bundle_directory = bundle::build_directory(&record.volume, build);
     publish(record)
@@ -183,8 +169,8 @@ fn prune(record: &mut Record) -> Result<()> {
             }
         }
     }
-    while record.recovery_builds.len() > KEEP {
-        let build = record.recovery_builds.remove(0);
+    while record.builds.len() > KEEP {
+        let build = record.builds.remove(0);
         if build != record.build {
             let directory = bundle::build_directory(&record.volume, &build);
             if directory.is_dir() {
@@ -195,14 +181,14 @@ fn prune(record: &mut Record) -> Result<()> {
     }
     let kept = |change: &Change| match change {
         Change::Stela { from, .. } => record.stela_versions.contains(from),
-        Change::Os { from, .. } => record.recovery_builds.contains(from),
+        Change::Os { from, .. } => record.builds.contains(from),
     };
     let history: Vec<Change> = record.history.iter().filter(|c| kept(c)).cloned().collect();
     record.history = history;
     remove_unbooted_bundles(record)?;
     // The media of the newest kept builds, the active one's first.
     let newest: Vec<String> = record
-        .recovery_builds
+        .builds
         .iter()
         .rev()
         .filter(|build| **build != record.build)
@@ -327,17 +313,16 @@ pub(super) fn update_stela(
             version_path(&esp, &to).display()
         )?;
     }
-    // Bundles of the new generation for every machine of the active build,
-    // restore ones too while it has an install medium.
+    // Restore bundles of the new generation for every machine of the active
+    // build while it has an install medium.
     let mut next = record.clone();
     next.bundle_schema = to_generation.schema;
     next.bundle_revision = to_generation.revision;
-    let missing = next.missing_bundles(&record.build);
     let missing_restore = match from_generation == to_generation {
         true => Vec::new(),
         false => next.missing_restore_bundles(),
     };
-    let prepared = if missing.is_empty() && missing_restore.is_empty() {
+    let prepared = if missing_restore.is_empty() {
         Vec::new()
     } else {
         let Some(ipsw) = ipsw else {
@@ -349,18 +334,6 @@ pub(super) fn update_stela(
             );
         };
         let mut prepared: Vec<Prepared> = Vec::new();
-        if !missing.is_empty() {
-            prepared.extend(
-                prepare_bundles(
-                    environment,
-                    ipsw,
-                    &record.model,
-                    Some(&record.build),
-                    &missing,
-                )?
-                .2,
-            );
-        }
         for kind in bundle::RESTORE_KINDS {
             let ecids: Vec<_> = missing_restore
                 .iter()
@@ -476,8 +449,8 @@ fn stela_change(
     }
 }
 
-/// Add `ipsw`'s recoveryOS for every machine and boot it for System
-/// Recovery.
+/// Add `ipsw`'s install medium and every machine's restore bundles, and
+/// make its build the one Install macOS restores.
 pub(super) fn update_os(
     environment: &Environment<'_>,
     mut record: Record,
@@ -496,66 +469,34 @@ pub(super) fn update_os(
     };
     ensure!(
         build != from,
-        "recoveryOS {build} is already the System Recovery of this setup"
+        "macOS {build} is already the build this setup installs"
     );
-    let machines = record.machines();
-    let (_, _, prepared) =
-        prepare_bundles(environment, ipsw, &record.model, Some(&build), &machines)?;
-    let recovery_bytes: u64 = prepared.iter().map(|p| p.bytes).sum();
-    // With installs, the build's install medium and restore bundles, so
-    // Install and Update macOS restore the new build offline.
-    let install = match record.installs.is_empty() {
-        true => {
-            check_space(environment.host, &record.volume, &prepared)?;
-            None
-        }
-        false => Some(plan_install(
-            environment,
-            &record,
-            &build,
-            record.pieces_volume(),
-            ipsw,
-            &restore_bundles(&record.install_machines()),
-            recovery_bytes,
-        )?),
-    };
+    // The build's install medium and restore bundles, so Install macOS
+    // restores the new build offline.
+    let install = plan_install(
+        environment,
+        &record,
+        &build,
+        record.pieces_volume(),
+        ipsw,
+        &restore_bundles(&record.install_machines()),
+        0,
+    )?;
     let mut text = String::new();
     writeln!(text, "macOS update to {product_version} ({build}):")?;
-    for bundle in &prepared {
+    describe_install(&record, &install, &mut text)?;
+    if let Some(medium) = record.active_medium() {
         writeln!(
             text,
-            "  recoveryOS     {} ({:.1} GB); {from}'s stays for rollback",
-            bundle::directory(&record.volume, &build, bundle.ecid, record.generation()).display(),
-            bundle.bytes as f64 / 1e9
+            "  keeps          {} and {from}'s restore bundles for rollback",
+            medium.directory().display()
         )?;
-    }
-    if let Some(plan) = &install {
-        describe_install(&record, plan, &mut text)?;
-        if let Some(medium) = record.active_medium() {
-            writeln!(
-                text,
-                "  keeps          {} for rollback",
-                medium.directory().display()
-            )?;
-        }
     }
     writeln!(
         text,
-        "  stela.cfg      boots recoveryOS {build} for System Recovery"
+        "  next           choose Install macOS in the startup choices: it erases the disk and \
+         restores {product_version}"
     )?;
-    match &install {
-        Some(_) => writeln!(
-            text,
-            "  next           choose Update macOS in the startup choices: it restores \
-             {product_version} over the installed system offline and keeps its data (Install \
-             macOS erases the disk instead)"
-        )?,
-        None => writeln!(
-            text,
-            "  next           boot System Recovery and choose Reinstall macOS, which downloads \
-             {product_version} from Apple; an install added with --target restores it offline"
-        )?,
-    }
     writeln!(
         text,
         "  note           macOS's own Software Update stages the update on the Update volume; \
@@ -573,17 +514,13 @@ pub(super) fn update_os(
         });
         write_record(&record.esp.clone(), &record)?;
     }
-    copy_bundles(&mut record, &prepared)?;
-    write_record(&record.esp.clone(), &record)?;
-    if let Some(plan) = install {
-        apply_install(environment, &mut record, ipsw, plan)?;
-    }
+    apply_install(environment, &mut record, ipsw, install)?;
     activate_build(&mut record, &build)?;
-    if !record.recovery_builds.contains(&from) {
-        record.recovery_builds.insert(0, from.clone());
+    if !record.builds.contains(&from) {
+        record.builds.insert(0, from.clone());
     }
-    record.recovery_builds.retain(|b| *b != build);
-    record.recovery_builds.push(build.clone());
+    record.builds.retain(|b| *b != build);
+    record.builds.push(build.clone());
     record.history.push(Change::Os { from, to: build });
     record.pending = None;
     prune(&mut record)?;
@@ -618,7 +555,7 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
         )?,
         Change::Os { from, to } => writeln!(
             text,
-            "Roll back the {what} macOS update: System Recovery {to} -> {from}"
+            "Roll back the {what} macOS update: macOS {to} -> {from}"
         )?,
     }
     if dry_run {
@@ -650,11 +587,11 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
         Change::Os { from, to } => {
             ensure!(
                 bundle::build_directory(&record.volume, from).is_dir(),
-                "recoveryOS {from} is no longer kept at {}",
+                "the macOS {from} bundles are no longer kept at {}",
                 bundle::build_directory(&record.volume, from).display()
             );
             activate_build(&mut record, from)?;
-            record.recovery_builds.retain(|b| b != to);
+            record.builds.retain(|b| b != to);
             let directory = bundle::build_directory(&record.volume, to);
             if *to != *from && directory.is_dir() {
                 fs::remove_dir_all(directory)?;

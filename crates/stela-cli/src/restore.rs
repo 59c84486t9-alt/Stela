@@ -7,7 +7,6 @@ mod history;
 pub mod manifest;
 pub mod payload;
 pub mod remote;
-pub mod udif;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use reqwest::{Url, blocking::Client, header, redirect::Policy};

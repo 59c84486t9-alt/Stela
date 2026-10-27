@@ -92,9 +92,9 @@ pub(super) fn next_boot(variables: &Variables) -> String {
                 boot_selection::Target::PairedRecovery => "the paired recoveryOS (the Recovery \
                      volume's, else System Recovery)"
                     .into(),
-                boot_selection::Target::SystemRecovery => "System Recovery (the \
-                     RecoveryOSContainer's, else Stela's bundle)"
-                    .into(),
+                boot_selection::Target::SystemRecovery => {
+                    "System Recovery (the RecoveryOSContainer's)".into()
+                }
                 boot_selection::Target::Upgrade => {
                     "the macOS update staged on the Update volume".to_string()
                 }

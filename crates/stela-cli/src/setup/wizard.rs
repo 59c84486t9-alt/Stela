@@ -283,8 +283,9 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
         models.sort();
         models.dedup();
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
-        // Full installation always needs fresh TSS personalization, so the
-        // wizard does not offer it as a choice; scripts keep `--no-tss`.
+        // Every setup installs macOS, which needs TSS personalization, so the
+        // wizard does not offer it as a choice; `--no-tss` withdraws the
+        // opt-in from an existing setup.
         cliclack::set_theme(theme::Stela { extras: true });
         let extras = cliclack::multiselect("5 / 6  Choose extras")
             .item(0, "Profiling", "Save translation timing in the boot log")

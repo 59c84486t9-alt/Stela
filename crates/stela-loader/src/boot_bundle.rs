@@ -184,8 +184,7 @@ pub struct Inputs<'a> {
     /// Trust cache modules placed after the static one in `TrustCache`.
     pub extra_trust_caches: Vec<Input<'a>>,
     /// A ramdisk, placed as the `RAMDisk` region: a restore ramdisk the
-    /// kernel roots from as `md0`, or the disk image of a
-    /// [`root_selection::Root::RamImage`] root.
+    /// kernel roots from as `md0`.
     pub ramdisk: Option<Input<'a>>,
     /// The sealed volume the boot roots from, and its root-hash `IM4P` when
     /// one is available; `None` when it roots from no sealed volume.
@@ -1043,23 +1042,6 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         ),
     }
     boot_policy::refuse_ramdisk_image_root(&options.boot_args)?;
-    let ram_image = matches!(options.root, Some(root_selection::Root::RamImage { .. }));
-    if ram_image {
-        let bytes =
-            ramdisk_bytes.context("a RAM disk image root needs the image as the ramdisk")?;
-        // A memory-device root wins over `boot-uuid` in `IOFindBSDRoot`, and
-        // iBoot names the root in /chosen only without `rd=`.
-        ensure!(
-            !options
-                .boot_args
-                .split_whitespace()
-                .any(|argument| argument.starts_with("rd=") || argument.starts_with("rootdev=")),
-            "a RAM disk image root is named by /chosen boot-uuid; boot-args must not name rd= \
-             or rootdev="
-        );
-        // The physical address follows placement; the length is fixed.
-        root_selection::ram_image(&mut tree, 0, bytes as u64)?;
-    }
     carveouts::publish(&mut tree, &carveouts)?;
     if let Some(chip_id) = inputs.target.chip_id {
         aic::publish(&mut tree, chip_id)?;
@@ -1391,17 +1373,6 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             )
         })
         .transpose()?;
-    if ram_image {
-        // The image keeps the `RAMDisk` region, a name SPTM types (its
-        // region table, `sptm.t8112` file offset 0x28a3); XNU also makes
-        // `md0` of it, which nothing roots from without `rd=`.
-        let image = region("RAMDisk")?;
-        security.extend(root_selection::ram_image(
-            &mut tree,
-            image.guest_pa,
-            image.bytes,
-        )?);
-    }
     if let Some(object) = &boot_manifest_object {
         let manifest = region("BootManifest")?;
         let protected = read_only_region
@@ -3369,59 +3340,14 @@ mod tests {
             tag_storage::LOCK | (dram_end - tag_storage::bytes(m4_options.dram_size))
         );
 
-        // A RAM disk image root: DiskImages gets the placed region from
-        // /chosen, and boot-uuid names the volume.
-        const VOLUME: &str = "11111111-2222-3333-4444-555555555555";
-        let image_root = Options {
-            boot_args: "-v rp0=file:///a.dmg".into(),
-            root: Some(root_selection::Root::RamImage {
-                volume: VOLUME.into(),
-            }),
-            ..options.clone()
-        };
-        let imaged = prepare(&inputs, &image_root)?;
-        let file = |name: &str| &imaged.files.iter().find(|(n, _)| n == name).unwrap().1;
-        let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
-        let ramdisk = imaged
-            .manifest
-            .regions
-            .iter()
-            .find(|r| r.name == "RAMDisk")
-            .unwrap();
-        let chosen = |name: &str| tree.property("/chosen", name).map(|p| p.value.clone());
-        assert_eq!(
-            chosen(root_selection::BOOT_RAMDMG_SIZE),
-            Some(100u64.to_le_bytes().to_vec())
-        );
-        let mut extent = ramdisk.guest_pa.to_le_bytes().to_vec();
-        extent.extend(100u64.to_le_bytes());
-        assert_eq!(chosen(root_selection::BOOT_RAMDMG_EXTENTS), Some(extent));
-        assert_eq!(
-            chosen(root_selection::BOOT_UUID),
-            Some(format!("{VOLUME}\0").into_bytes())
-        );
-        // A memory-device root argument contradicts it, and rd=md0 with an
-        // image root is refused on any root.
-        let with_rd = Options {
-            boot_args: "-v rd=md0 rp0=file:///a.dmg".into(),
-            ..image_root.clone()
-        };
-        let refusal = prepare(&inputs, &with_rd).err().unwrap().to_string();
-        assert!(refusal.contains("memory device md0"), "{refusal}");
-        let rootdev = Options {
-            boot_args: "-v rootdev=disk1s1".into(),
-            ..image_root.clone()
-        };
-        assert!(prepare(&inputs, &rootdev).is_err());
+        // A memory-device root cannot pivot to a disk image.
         let ramdisk_pivot = Options {
             boot_args: "-v rd=md0 rp0=file:///a.dmg".into(),
             root: Some(root_selection::Root::Ramdisk),
             ..options.clone()
         };
-        assert!(prepare(&inputs, &ramdisk_pivot).is_err());
-        let ramdisk = inputs.ramdisk.take();
-        assert!(prepare(&inputs, &image_root).is_err());
-        inputs.ramdisk = ramdisk;
+        let refusal = prepare(&inputs, &ramdisk_pivot).err().unwrap().to_string();
+        assert!(refusal.contains("memory device md0"), "{refusal}");
 
         // With SEP firmware, SEPFW is a reserved, zero-filled staging region
         // between RAMDisk and BootArgs that holds the image's IMG4 container;

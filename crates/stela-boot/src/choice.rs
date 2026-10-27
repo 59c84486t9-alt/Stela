@@ -2,9 +2,8 @@
 //! has `choices.cfg`, `stela.efi` lists on the framebuffer, in Stela's look
 //! ([`ui`]), the entries that can start now, then the PC firmware's own
 //! boot entries (`firmware::entries`), with one highlighted. A macOS entry
-//! is left out until a macOS is installed, a macOS or recoveryOS entry
-//! while Install macOS has not prepared its SSD, and Install macOS once it
-//! has (`selection::ready`). Up and Down move the
+//! is left out until a macOS is installed or while Install macOS has not
+//! prepared its SSD, and Install macOS once it has (`selection::ready`). Up and Down move the
 //! highlight, Enter starts the highlighted entry, and an entry's key (`1`-`9`,
 //! then `a`-`z`) starts it at once; a firmware entry restarts the PC into it.
 //! A countdown from the file's timeout starts the first entry, the one
@@ -219,7 +218,7 @@ impl<'a> Menu<'a> {
                 None => Readiness::Unprepared,
             })
             .collect();
-        // The SSDs a macOS or recoveryOS choice is known to start from,
+        // The SSDs a macOS choice is known to start from,
         // which Install macOS has prepared already.
         let prepared: Vec<Option<&str>> = choices
             .entries
@@ -234,9 +233,7 @@ impl<'a> Menu<'a> {
             let kind = entry.kind();
             let left_out = match (kind, readiness[n]) {
                 (ChoiceKind::Mac, Readiness::NotInstalled) => Some("no macOS is installed"),
-                (ChoiceKind::Mac | ChoiceKind::Recovery, Readiness::Unprepared) => {
-                    Some("its SSD is not prepared")
-                }
+                (ChoiceKind::Mac, Readiness::Unprepared) => Some("its SSD is not prepared"),
                 // Install macOS that chooses its disk is always offered.
                 (ChoiceKind::Setup, _)
                     if !unchosen(entry.options.as_bytes())
@@ -274,10 +271,7 @@ impl<'a> Menu<'a> {
             None => 0,
         };
         // The countdown starts the first entry when it starts the Mac.
-        let starts_mac = matches!(
-            items.first(),
-            Some(Item::Choice(_, ChoiceKind::Mac | ChoiceKind::Recovery))
-        );
+        let starts_mac = matches!(items.first(), Some(Item::Choice(_, ChoiceKind::Mac)));
         Self {
             choices,
             disk,

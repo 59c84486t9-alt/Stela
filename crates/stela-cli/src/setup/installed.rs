@@ -12,8 +12,9 @@
 //!
 //! Setup checks them and writes neither, except that `--initialize-nor`
 //! writes a fresh NOR image over a NOR area that is neither blank nor a NOR
-//! image, and blanks a SEP area that is neither blank nor a SEP roots record. recoveryOS's Disk Utility and Reinstall macOS write the
-//! Apple region, as on a Mac; a region that holds anything but a guest disk
+//! image, and blanks a SEP area that is neither blank nor a SEP roots
+//! record. Install macOS's restore writes the Apple region, as on a Mac; a
+//! region that holds anything but a guest disk
 //! or zeros is used only with `--erase-target`, so no host data is lost by
 //! accident. Every later Stela or macOS update keeps both partitions.
 use super::ecid::Ecid;
@@ -117,30 +118,29 @@ impl InstalledDisk {
     }
 
     /// The engine options that boot it: macOS from its Preboot volume, or
-    /// recoveryOS from `recovery` as NVRAM chooses. The bundle `stela.efi`
-    /// builds from Preboot carries the machine's `ecid`.
-    pub(super) fn options(&self, recovery: &str, ecid: Option<Ecid>) -> String {
+    /// the disk's own recoveryOS as NVRAM chooses (`boot_selection::route`).
+    /// The bundle `stela.efi` builds from the disk carries the machine's
+    /// `ecid`.
+    pub(super) fn options(&self, ecid: Option<Ecid>) -> String {
         let region = self.region_target();
         let ecid = ecid
             .map(|ecid| format!(" --ecid {ecid}"))
             .unwrap_or_default();
         format!(
-            "--system --storage {region} --nor {} --preboot {region} --recovery-bundle \
-             {recovery}{ecid}{}",
+            "--system --storage {region} --nor {} --preboot {region}{ecid}{}",
             self.nor_target(),
             self.external()
         )
     }
 
-    /// The options of its System Recovery, as `stela.efi` routes a
-    /// recoveryOS choice of NVRAM (`boot_selection::route`): the disk and
-    /// NVRAM stay, `--bundle` replaces `--preboot`.
-    pub(super) fn recovery_options(&self, recovery: &str, ecid: Option<Ecid>) -> String {
+    /// The options that boot the USB's bundle `bundle`, such as a restore
+    /// bundle, with this disk and its NVRAM.
+    pub(super) fn bundle_options(&self, bundle: &str, ecid: Option<Ecid>) -> String {
         let ecid = ecid
             .map(|ecid| format!(" --ecid {ecid}"))
             .unwrap_or_default();
         format!(
-            "--system --storage {} --nor {} --bundle {recovery}{ecid}{}",
+            "--system --storage {} --nor {} --bundle {bundle}{ecid}{}",
             self.region_target(),
             self.nor_target(),
             self.external()
@@ -668,8 +668,12 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
 
 /// The Apple region of `disk`, when it holds another file system than a
 /// guest disk: the PC's own OS mounts it and clears its free space, Stela's
-/// machine state included.
+/// machine state included. A disk Install macOS chooses in `stela.efi` has
+/// none on this computer.
 pub(super) fn foreign(host: &dyn Host, disk: &InstalledDisk) -> Result<Option<PartitionInfo>> {
+    if disk.is_chosen() {
+        return Ok(None);
+    }
     let identifier = confirm(host, disk, Role::AppleRegion, None)?;
     Ok(match contents(host, &identifier)? {
         Contents::Other => Some(host.partition(&identifier)?),
@@ -698,7 +702,7 @@ pub(super) fn initialize_nor(host: &dyn Host, disk: &InstalledDisk, image: &[u8]
 /// What the next boot is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum NextBoot {
-    /// System Recovery: Stela's recoveryOS bundle.
+    /// System Recovery: the disk's RecoveryOSContainer.
     Recovery,
     /// macOS, clearing a pending recovery request.
     Macos,

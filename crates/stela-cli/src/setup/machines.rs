@@ -2,23 +2,20 @@
 //! tail holds the machine state, or an Apple region and a machine-state
 //! partition) that is its own Stela machine with its own ECID,
 //! NVRAM and SEP state, as two Macs are. One is the default `stela.cfg`
-//! boots; `stela.efi`'s startup choices (`choices.cfg`) list every install,
-//! its System Recovery and its Install macOS, which restores the
-//! USB's install medium onto it with the machine's own restore bundle. They
-//! open on their own with several installs or an install medium, and when a
-//! key is held otherwise.
+//! boots; `stela.efi`'s startup choices (`choices.cfg`) list every install
+//! and its Install macOS, which restores the USB's install medium onto it
+//! with the machine's own restore bundle. They open on their own with
+//! several installs or an install medium, and when a key is held otherwise.
 //!
 //! A machine's ECID is kept for its life: an install whose machine-state
 //! partition already holds SEP state takes the ECID given with `--ecid`, and
 //! a new one only with `--new-ecid`, since its LocalPolicy and SEP state are
-//! bound to the old one. The first install takes over the setup's own
-//! machine (recoveryOS without a disk keeps no state), so its recoveryOS
-//! bundle serves it; every further install needs its own bundle, prepared
-//! from the active build's restore image.
+//! bound to the old one. Every install needs its own restore bundle,
+//! prepared from the active build's restore image.
 use super::{
-    Environment, Prepared, Setup, TSS_REQUIRED, apply_install, bundle, check_bundle_revision,
-    check_installed_efi, check_space, copy_bundles, describe_install, ecid::Ecid, installed,
-    plan_install, prepare_bundles, publish, read_record, tss_note, write_record,
+    Environment, Setup, TSS_REQUIRED, apply_install, bundle, check_bundle_revision,
+    check_installed_efi, describe_install, ecid::Ecid, installed, plan_install, publish,
+    read_record, tss_note, write_record,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -27,9 +24,9 @@ use stela_loader::mount_interface::MAX_CHOICES;
 
 /// The first install's name unless `--install` gives one.
 pub(super) const FIRST_NAME: &str = "macOS";
-/// Each install has four startup choices: itself, its System Recovery,
-/// Install macOS and Update macOS.
-const MAX_INSTALLS: usize = MAX_CHOICES / 4;
+/// Each install has up to three startup choices: itself, Install macOS and
+/// Update macOS.
+const MAX_INSTALLS: usize = MAX_CHOICES / 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct Install {
@@ -41,16 +38,17 @@ pub(super) struct Install {
     pub(super) disk: installed::InstalledDisk,
 }
 
-/// A name the startup choices can show, with room for " Recovery".
+/// A name the startup choices can show, with room for the longest suffix
+/// of its choices, " - Install macOS".
 pub(super) fn check_name(name: &str) -> Result<()> {
-    const RECOVERY_SUFFIX: usize = " Recovery".len();
+    const SUFFIX: usize = " - Install macOS".len();
     ensure!(
         !name.is_empty()
-            && name.len() + RECOVERY_SUFFIX <= stela_loader::mount_interface::MAX_NAME
+            && name.len() + SUFFIX <= stela_loader::mount_interface::MAX_NAME
             && name.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
             && name.trim() == name,
         "an install name is 1 to {} printable ASCII characters",
-        stela_loader::mount_interface::MAX_NAME - RECOVERY_SUFFIX
+        stela_loader::mount_interface::MAX_NAME - SUFFIX
     );
     Ok(())
 }
@@ -169,17 +167,9 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         "this setup already has an install named {name:?}"
     );
     let mut notes = checked.notes.clone();
-    // The first install takes over the setup's own machine, which kept no
-    // state, unless the partition holds an earlier machine's.
-    let takes_over = record
-        .installs
-        .is_empty()
-        .then_some(record.ecid)
-        .flatten()
-        .filter(|_| command.ecid.is_none() && !checked.sep_provisioned);
     let ecid = machine_ecid(
         command.ecid,
-        takes_over,
+        None,
         checked.sep_provisioned,
         command.new_ecid,
         &mut notes,
@@ -195,14 +185,10 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     };
     let mut next = record.clone();
     next.installs.push(install.clone());
-    if next.installs.len() == 1 {
-        next.ecid = Some(ecid);
-    }
     next.tss |= command.tss;
     next.verify_on_read = command.verify_on_read;
     next.install_image = command.install_image.or(next.install_image);
     let stale = next.drop_stale_bundles();
-    let missing = next.missing_bundles(&record.build);
     // Every install restores from the medium with its own restore bundle.
     let Some(ipsw) = command.optional_image()? else {
         bail!(
@@ -210,19 +196,6 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
              bundle of its own: pass the restore image with --ipsw or --fetch",
             record.build
         );
-    };
-    let prepared: Vec<Prepared> = if missing.is_empty() {
-        Vec::new()
-    } else {
-        let (_, _, prepared) = prepare_bundles(
-            environment,
-            &ipsw,
-            &record.model,
-            Some(&record.build),
-            &missing,
-        )?;
-        check_space(host, &record.volume, &prepared)?;
-        prepared
     };
     let restore: Vec<(bundle::Kind, Option<Ecid>)> =
         super::restore_bundles(&next.install_machines())
@@ -236,7 +209,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         command.install_volume.as_deref(),
         &ipsw,
         &restore,
-        prepared.iter().map(|p| p.bytes).sum(),
+        0,
     )?;
     let mut text = String::new();
     writeln!(text, "Add install \"{name}\" to {}:", record.esp.display())?;
@@ -248,25 +221,11 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
     )?;
     writeln!(text, "  {}", super::state_line(disk))?;
-    for bundle in &prepared {
-        writeln!(
-            text,
-            "  recoveryOS     {} ({:.1} GB)",
-            bundle::directory(
-                &record.volume,
-                &bundle.build,
-                bundle.ecid,
-                record.generation()
-            )
-            .display(),
-            bundle.bytes as f64 / 1e9
-        )?;
-    }
     describe_install(&next, &install_plan, &mut text)?;
     writeln!(
         text,
-        "  choices.cfg    lists \"{name}\", its System Recovery, its Install macOS and \
-         its Update macOS; the startup choices open at every boot"
+        "  choices.cfg    lists \"{name}\" and its Install macOS; the startup choices open \
+         at every boot"
     )?;
     if checked.nor_image.is_some() {
         writeln!(
@@ -289,7 +248,6 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
     }
-    copy_bundles(&mut next, &prepared)?;
     write_record(&next.esp.clone(), &next)?;
     apply_install(environment, &mut next, &ipsw, install_plan)?;
     if let Some(region) = &checked.foreign {
@@ -315,12 +273,14 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
     let mut removed_bundles = Vec::new();
     if let Some(name) = &command.remove_install {
         let install = record.install(Some(name))?.clone();
+        ensure!(
+            record.installs.len() > 1,
+            "install \"{name}\" is this setup's only one; `stela setup --uninstall` removes the \
+             setup"
+        );
         record.installs.retain(|i| i.name != *name);
         if record.default_install.as_deref() == Some(name.as_str()) {
             record.default_install = None;
-        }
-        if record.installs.is_empty() {
-            record.ecid = install.ecid.or(record.ecid);
         }
         writeln!(
             text,
@@ -420,7 +380,8 @@ mod tests {
         machine_ecid(None, None, true, true, &mut notes).unwrap();
         assert!(notes[0].contains("orphaned"));
         assert!(check_name("macOS 2").is_ok());
-        for bad in ["", " macOS", "a\tb", &"x".repeat(32)] {
+        assert!(check_name(&"x".repeat(24)).is_ok());
+        for bad in ["", " macOS", "a\tb", &"x".repeat(25)] {
             assert!(check_name(bad).is_err(), "{bad:?}");
         }
     }

@@ -849,7 +849,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
 
     // QEMU's directory volume is FAT16 and holds 516 MB; larger volumes,
-    // such as a recovery bundle with its ramdisk, go into a FAT32 image.
+    // such as a restore bundle with its ramdisk, go into a FAT32 image.
     let fat = match &arguments.usb_image {
         None if !arguments.directory_volume && directory_bytes(&volume)? > VVFAT_BYTES => {
             Some(fat_image(&volume, &output)?)

@@ -1,6 +1,6 @@
 //! The kernel boot bundle of a recoveryOS on the installed disk, built in
 //! `no_std` so `stela.efi` boots it as iBoot does and `stela boot prepare
-//! --disk --recovery` writes the same one.
+//! --disk --disk-recovery` writes the same one.
 //!
 //! A Mac's internal disk holds two recoveryOS copies (Asahi Linux docs
 //! `platform/stock-partition-layout.md`, commit `0d1f891`):

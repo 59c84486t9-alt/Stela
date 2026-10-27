@@ -67,10 +67,11 @@
 //! holds such a machine at its startup choices instead of booting the
 //! half-restored disk.
 //!
-//! A recoveryOS boot prefers the copy on the boot disk, as LLB does: the
+//! A recoveryOS boot reads the copy on the boot disk, as LLB does: the
 //! paired recoveryOS from the boot container's Recovery volume, then System
-//! Recovery from the RecoveryOSContainer, then Stela's own System Recovery
-//! bundle ([`route`], `stela_loader::recovery`).
+//! Recovery from the RecoveryOSContainer ([`route`],
+//! `stela_loader::recovery`). A disk that holds neither is refused: Stela has
+//! no recoveryOS of its own to fall back to.
 //!
 //! Refused explicitly: `field-diags-paired` (a diagnostics image Stela does
 //! not read).
@@ -296,8 +297,7 @@ pub enum Target {
     /// The recoveryOS paired with the installed system (its container's
     /// Recovery volume).
     PairedRecovery,
-    /// System Recovery: the recoveryOS container's, or Stela's recovery
-    /// bundle when the disk has none.
+    /// System Recovery: the recoveryOS container's.
     SystemRecovery,
     /// The update ramdisk macOS staged on its container's Update volume.
     Upgrade,
@@ -329,8 +329,7 @@ pub struct Selection {
     /// otherwise a paired recovery boot falls back to System Recovery.
     pub paired_on_disk: bool,
     /// The boot disk holds System Recovery in its RecoveryOSContainer
-    /// (`--system-recovery`); otherwise System Recovery is Stela's own
-    /// bundle (`--recovery-bundle`).
+    /// (`--system-recovery`); otherwise a recoveryOS boot is refused.
     pub system_on_disk: bool,
 }
 
@@ -552,9 +551,6 @@ pub fn choose(variables: &mut Variables, volume: &BootVolume, once: bool) -> Res
 
 /// `stela.cfg`'s installed-system option: the disk the bundle is built from.
 pub const PREBOOT_OPTION: &str = "--preboot";
-/// `stela.cfg`'s recoveryOS option: the ESP directory of Stela's recovery
-/// bundle (`stela boot prepare --recovery`), booted for System Recovery.
-pub const RECOVERY_BUNDLE_OPTION: &str = "--recovery-bundle";
 pub const BUNDLE_OPTION: &str = "--bundle";
 /// Options `stela.efi` passes its engine: the boot volume to build from and
 /// a safe-mode boot.
@@ -575,6 +571,9 @@ pub const SYSTEM_RECOVERY_OPTION: &str = "--system-recovery";
 /// mount can tell it from other refusals and hold the machine at its
 /// startup choices.
 pub const RECOVERY_MODE_REFUSAL: &str = "NVRAM holds the machine in iBoot's recovery mode";
+/// How [`route`]'s refusal of a recoveryOS boot of a disk without one
+/// starts.
+pub const NO_RECOVERY_REFUSAL: &str = "NVRAM boots recoveryOS";
 /// What the engine is told only by NVRAM.
 const NVRAM_OPTIONS: [&str; 6] = [
     BOOT_VOLUME_OPTION,
@@ -589,34 +588,18 @@ const NVRAM_OPTIONS: [&str; 6] = [
 /// macOS boot keeps `--preboot` and adds the boot volume and safe mode; an
 /// update adds `--upgrade`, a paired recoveryOS the disk holds
 /// `--paired-recovery`, and System Recovery the disk holds (also in place
-/// of a paired recoveryOS it lacks) `--system-recovery`; any other
-/// recoveryOS boot replaces `--preboot` with `--bundle` of the
-/// `--recovery-bundle` directory, and is refused without one. Recovery mode
-/// boots nothing and is refused ([`Target::RecoveryMode`]).
-/// `--recovery-bundle` never reaches the engine. Returns the options and
-/// what the boot log should say.
+/// of a paired recoveryOS it lacks) `--system-recovery`; a recoveryOS boot
+/// of a disk that holds neither is refused. Recovery mode boots nothing and
+/// is refused ([`Target::RecoveryMode`]). Returns the options and what the
+/// boot log should say.
 pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, String)> {
-    let mut words: Vec<&str> = options.split_ascii_whitespace().collect();
-    let take = |words: &mut Vec<&str>, name: &str| -> Result<Option<String>> {
-        let Some(at) = words.iter().position(|w| *w == name) else {
-            return Ok(None);
-        };
-        ensure!(at + 1 < words.len(), "{name} has no value");
-        let value = words[at + 1].into();
-        words.drain(at..at + 2);
-        ensure!(
-            !words.contains(&name),
-            "{name} appears more than once in stela.cfg"
-        );
-        Ok(Some(value))
-    };
+    let words: Vec<&str> = options.split_ascii_whitespace().collect();
     for option in NVRAM_OPTIONS {
         ensure!(
             !words.contains(&option),
             "{option} is chosen from NVRAM, not stela.cfg"
         );
     }
-    let recovery = take(&mut words, RECOVERY_BUNDLE_OPTION)?;
     let Some(selection) = selection else {
         return Ok((words.join(" "), "NVRAM not read".into()));
     };
@@ -695,28 +678,10 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
                 _ => format!("System Recovery from the RecoveryOSContainer ({reasons})"),
             }
         }
-        target @ (Target::PairedRecovery | Target::SystemRecovery) => {
-            let Some(directory) = recovery else {
-                bail!(
-                    "NVRAM boots recoveryOS ({reasons}), but stela.cfg names no \
-                     {RECOVERY_BUNDLE_OPTION}"
-                );
-            };
-            take(&mut words, PREBOOT_OPTION)?;
-            ensure!(
-                !words.contains(&BUNDLE_OPTION),
-                "stela.cfg names both {BUNDLE_OPTION} and {RECOVERY_BUNDLE_OPTION}"
-            );
-            extra.push(BUNDLE_OPTION.into());
-            extra.push(directory);
-            match target {
-                Target::PairedRecovery => format!(
-                    "recoveryOS ({reasons}): the boot disk holds neither a paired recoveryOS \
-                     nor System Recovery, so Stela's System Recovery bundle boots"
-                ),
-                _ => format!("System Recovery ({reasons})"),
-            }
-        }
+        Target::PairedRecovery | Target::SystemRecovery => bail!(
+            "{NO_RECOVERY_REFUSAL} ({reasons}): the boot disk holds neither a paired \
+             recoveryOS nor System Recovery; choose Install macOS to restore it"
+        ),
     };
     let mut text: Vec<String> = words.into_iter().map(String::from).collect();
     text.extend(extra);
@@ -988,11 +953,11 @@ mod tests {
         // recover-system never boots the paired copy.
         let (options, _) = routed(&system, true, true);
         assert!(options.ends_with(SYSTEM_RECOVERY_OPTION), "{options}");
-        // Neither on the disk: Stela's bundle, without the Preboot disk.
-        let (options, _) = routed(&system, true, false);
-        assert!(
-            options.ends_with("--bundle \\EFI\\stela\\recovery") && !options.contains("--preboot")
-        );
+        // Neither on the disk: refused, with no recoveryOS to fall back to.
+        let mut neither = system.clone();
+        neither.paired_on_disk = true;
+        let error = route(CONFIG, Some(&neither)).unwrap_err().to_string();
+        assert!(error.starts_with(NO_RECOVERY_REFUSAL), "{error}");
         // A missing-boot-media boot is System Recovery too.
         let mut blank = select(&variables(&[])).unwrap();
         blank.missing_boot_media();
@@ -1021,8 +986,7 @@ mod tests {
         )));
     }
 
-    const CONFIG: &str = "--system --storage S:G --nor S:N --preboot S:G \
-                          --recovery-bundle \\EFI\\stela\\recovery";
+    const CONFIG: &str = "--system --storage S:G --nor S:N --preboot S:G";
 
     #[test]
     fn macos_boots_keep_the_preboot_disk_and_name_the_volume() {
@@ -1038,9 +1002,9 @@ mod tests {
         );
         assert_eq!(options, expected);
         assert!(log.starts_with("macOS in safe mode"));
-        // Without NVRAM only the recovery bundle option is removed.
+        // Without NVRAM the options pass unchanged.
         let (plain, _) = route(CONFIG, None).unwrap();
-        assert!(!plain.contains(RECOVERY_BUNDLE_OPTION) && plain.contains("--preboot S:G"));
+        assert_eq!(plain, CONFIG);
     }
 
     #[test]
@@ -1087,32 +1051,24 @@ mod tests {
     }
 
     #[test]
-    fn recovery_boots_read_the_recovery_bundle_instead() {
+    fn recovery_boots_of_a_disk_without_recoveryos_are_refused() {
         let vars = variables(&[(Partition::Common, BOOT_COMMAND, b"recover-system")]);
         let selection = select(&vars).unwrap();
-        let (options, log) = route(CONFIG, Some(&selection)).unwrap();
-        assert_eq!(
-            options,
-            "--system --storage S:G --nor S:N \
-             --bundle \\EFI\\stela\\recovery"
-        );
-        assert!(log.starts_with("System Recovery"));
+        let error = route(CONFIG, Some(&selection)).unwrap_err().to_string();
+        assert!(error.starts_with(NO_RECOVERY_REFUSAL), "{error}");
+        assert!(error.contains("recover-system"), "{error}");
         let paired = select(&variables(&[(Partition::System, RECOVERY_BOOT_MODE, b"x")])).unwrap();
-        assert!(
-            route(CONFIG, Some(&paired))
-                .unwrap()
-                .1
-                .contains("paired recoveryOS")
-        );
-        // A disk without an installed system boots System Recovery too.
+        assert!(route(CONFIG, Some(&paired)).is_err());
+        // A disk without an installed system or System Recovery is refused
+        // too.
         let mut empty = select(&variables(&[])).unwrap();
         empty.missing_boot_media();
+        let error = route(CONFIG, Some(&empty)).unwrap_err().to_string();
+        assert!(error.contains("missing-boot-media"), "{error}");
+        empty.system_on_disk = true;
         let (options, log) = route(CONFIG, Some(&empty)).unwrap();
-        assert!(options.ends_with("--bundle \\EFI\\stela\\recovery"));
-        assert!(log.contains("missing-boot-media"));
-        let without = "--system --preboot S:G";
-        assert!(route(without, Some(&selection)).is_err());
+        assert!(options.ends_with(SYSTEM_RECOVERY_OPTION), "{options}");
+        assert!(log.contains("missing-boot-media"), "{log}");
         assert!(route("--system --safe-boot", None).is_err());
-        assert!(route("--system --recovery-bundle", None).is_err());
     }
 }

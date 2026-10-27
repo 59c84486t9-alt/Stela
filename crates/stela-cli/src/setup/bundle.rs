@@ -4,9 +4,6 @@
 //! the loader that prepared it) and [`Kind`], in
 //! `EFI/stela/boot/<build>/<leaf>` of the bundle volume:
 //!
-//! - `recovery`: a recoveryOS bundle from before machines had ECIDs, schema
-//!   1, revision 0;
-//! - `recovery-<ECID>`: a machine's recoveryOS bundle, schema 1, revision 0;
 //! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
 //!   --restore`), which the Install macOS choice boots;
 //! - `update-<ECID>`: a machine's update restore bundle (`stela boot
@@ -34,7 +31,6 @@ use std::{
 };
 
 pub(super) const MANIFEST: &str = "bundle.json";
-const LEGACY_LEAF: &str = "recovery";
 /// The schema bundles without a suffix have.
 const FIRST_SCHEMA: u32 = 1;
 /// The revision bundles without a suffix have, and that of a `bundle.json`
@@ -51,6 +47,7 @@ pub(super) struct Generation {
     pub(super) revision: u32,
 }
 
+#[cfg(test)]
 impl Generation {
     /// Schema 1, revision 0: every bundle from before setups recorded
     /// revisions.
@@ -70,12 +67,11 @@ impl std::fmt::Display for Generation {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Kind {
-    /// recoveryOS (`boot prepare --recovery`).
-    #[default]
-    Recovery,
     /// The restore ramdisk (`boot prepare --restore`).
+    #[default]
     Restore,
-    /// The update restore ramdisk (`boot prepare --restore --update`).
+    /// The update restore ramdisk (`boot prepare --restore --update`),
+    /// which earlier setups prepared.
     Update,
 }
 
@@ -86,13 +82,12 @@ pub(super) enum Kind {
 pub(super) const RESTORE_KINDS: [Kind; 1] = [Kind::Restore];
 
 impl Kind {
-    fn is_recovery(&self) -> bool {
-        *self == Self::Recovery
+    fn is_restore(&self) -> bool {
+        *self == Self::Restore
     }
 
     fn prefix(self) -> &'static str {
         match self {
-            Self::Recovery => LEGACY_LEAF,
             Self::Restore => "restore",
             Self::Update => "update",
         }
@@ -101,7 +96,6 @@ impl Kind {
     /// What it is called in reports.
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Recovery => "recoveryOS",
             Self::Restore => "restore",
             Self::Update => "update restore",
         }
@@ -122,7 +116,7 @@ pub(super) struct Bundle {
     /// wrote without recording it.
     #[serde(default)]
     pub(super) manifest_sha256: String,
-    #[serde(default, skip_serializing_if = "Kind::is_recovery")]
+    #[serde(default, skip_serializing_if = "Kind::is_restore")]
     pub(super) kind: Kind,
     /// A restore bundle that boots under the AP ticket Apple's signing
     /// service personalized for its machine (`boot prepare --tss`), not the
@@ -137,12 +131,6 @@ impl Bundle {
             schema: self.schema,
             revision: self.revision,
         }
-    }
-
-    /// Whether it is the recoveryOS bundle of `build`, `ecid` and
-    /// `generation`.
-    pub(super) fn same(&self, build: &str, ecid: Option<Ecid>, generation: Generation) -> bool {
-        self.same_kind(Kind::Recovery, build, ecid, generation)
     }
 
     pub(super) fn same_kind(
@@ -162,12 +150,6 @@ impl Bundle {
     pub(super) fn directory(&self, volume: &Path) -> PathBuf {
         directory_of(self.kind, volume, &self.build, self.ecid, self.generation())
     }
-}
-
-/// A recoveryOS bundle's leaf.
-#[cfg(test)]
-pub(super) fn leaf(ecid: Option<Ecid>, generation: Generation) -> String {
-    leaf_of(Kind::Recovery, ecid, generation)
 }
 
 pub(super) fn leaf_of(kind: Kind, ecid: Option<Ecid>, generation: Generation) -> String {
@@ -190,16 +172,6 @@ pub(super) fn build_directory(volume: &Path, build: &str) -> PathBuf {
     volume.join(format!("EFI/stela/boot/{build}"))
 }
 
-/// The recoveryOS bundle's directory on `volume`.
-pub(super) fn directory(
-    volume: &Path,
-    build: &str,
-    ecid: Option<Ecid>,
-    generation: Generation,
-) -> PathBuf {
-    directory_of(Kind::Recovery, volume, build, ecid, generation)
-}
-
 pub(super) fn directory_of(
     kind: Kind,
     volume: &Path,
@@ -208,12 +180,6 @@ pub(super) fn directory_of(
     generation: Generation,
 ) -> PathBuf {
     build_directory(volume, build).join(leaf_of(kind, ecid, generation))
-}
-
-/// The recoveryOS bundle's directory as `stela.cfg` names it on the
-/// firmware's volume.
-pub(super) fn firmware_path(build: &str, ecid: Option<Ecid>, generation: Generation) -> String {
-    firmware_path_of(Kind::Recovery, build, ecid, generation)
 }
 
 pub(super) fn firmware_path_of(
@@ -487,21 +453,18 @@ pub(super) mod tests {
 
     #[test]
     fn bundles_are_named_by_machine_schema_and_revision() {
-        assert_eq!(leaf(None, Generation::FIRST), "recovery");
+        let restore = |ecid, generation| leaf_of(Kind::Restore, ecid, generation);
+        assert_eq!(restore(None, Generation::FIRST), "restore");
         assert_eq!(
-            leaf(Some(Ecid(0xab)), Generation::FIRST),
-            "recovery-00000000000000AB"
+            restore(Some(Ecid(0xab)), Generation::FIRST),
+            "restore-00000000000000AB"
         );
+        assert_eq!(restore(None, of(3, 0)), "restore-s3");
         assert_eq!(
-            leaf(Some(Ecid(0xab)), of(2, 0)),
-            "recovery-00000000000000AB-s2"
+            restore(Some(Ecid(0xab)), of(1, 4)),
+            "restore-00000000000000AB-r4"
         );
-        assert_eq!(leaf(None, of(3, 0)), "recovery-s3");
-        assert_eq!(
-            leaf(Some(Ecid(0xab)), of(1, 4)),
-            "recovery-00000000000000AB-r4"
-        );
-        assert_eq!(leaf(None, of(2, 1)), "recovery-s2-r1");
+        assert_eq!(restore(None, of(2, 1)), "restore-s2-r1");
         assert_eq!(
             leaf_of(Kind::Restore, Some(Ecid(0xab)), of(2, 0)),
             "restore-00000000000000AB-s2"
@@ -513,10 +476,6 @@ pub(super) mod tests {
         assert_eq!(
             firmware_path_of(Kind::Update, "26A434", Some(Ecid(1)), of(1, 2)),
             "\\EFI\\stela\\boot\\26A434\\update-0000000000000001-r2"
-        );
-        assert_eq!(
-            firmware_path("26A434", Some(Ecid(1)), Generation::FIRST),
-            "\\EFI\\stela\\boot\\26A434\\recovery-0000000000000001"
         );
     }
 
@@ -541,7 +500,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let prepared = dir.path().join("prepared");
         write(&prepared, Generation::FIRST, &[0x5a; 4096]).unwrap();
-        let destination = dir.path().join("boot/B/recovery");
+        let destination = dir.path().join("boot/B/restore");
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         let digest = install(&prepared, &destination).unwrap();
         assert!(verify(&destination, &digest).is_empty());
@@ -551,7 +510,7 @@ pub(super) mod tests {
         let second = install(&prepared, &destination).unwrap();
         assert_ne!(second, digest);
         assert_eq!(generation(&destination).unwrap(), of(2, 1));
-        assert!(!dir.path().join("boot/B/recovery.partial").exists());
+        assert!(!dir.path().join("boot/B/restore.partial").exists());
         assert!(!verify(&destination, &digest).is_empty());
         fs::write(destination.join("ramdisk.img"), [0x34; 100]).unwrap();
         let problems = verify(&destination, &second);
@@ -568,7 +527,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let prepared = dir.path().join("prepared");
         let build = dir.path().join("boot/B");
-        let destination = build.join("recovery");
+        let destination = build.join("restore");
         fs::create_dir_all(&build).unwrap();
         write(&prepared, Generation::FIRST, &[0x5a; 4096]).unwrap();
         let first = install(&prepared, &destination).unwrap();

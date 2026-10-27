@@ -6,11 +6,11 @@
 //! before it boots) and hands the engine the options for that boot. A macOS
 //! boot whose Preboot disk holds no installed system boots System Recovery
 //! instead (missing boot media), as a Mac with an erased disk does. A
-//! recoveryOS boot takes the disk's own copy when it has one, the paired
-//! recoveryOS of the Recovery volume and then System Recovery of the
-//! RecoveryOSContainer (`stela_loader::recovery::find`), which the engine
-//! builds from the disk; otherwise it reads the `--recovery-bundle`
-//! directory here, because the ESP is readable only through the firmware.
+//! recoveryOS boot takes the disk's own copy, the paired recoveryOS of the
+//! Recovery volume and then System Recovery of the RecoveryOSContainer
+//! (`stela_loader::recovery::find`), which the engine builds from the disk.
+//! A disk that holds neither boots nothing ([`Refusal::NoRecovery`]): Stela
+//! has no recoveryOS of its own, and only Install macOS restores the disk's.
 //! NVRAM that holds the machine in iBoot's recovery mode, as an interrupted
 //! restore leaves it, boots nothing ([`Refusal::RecoveryMode`]).
 //!
@@ -410,15 +410,16 @@ fn replace(text: &str, name: &str, value: &str) -> String {
 /// Whether a startup choice can start now ([`ready`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Readiness {
-    /// It starts what it names: macOS from an installed system, or
-    /// recoveryOS from a prepared SSD.
+    /// It starts what it names: macOS from an installed system, or the
+    /// disk's recoveryOS when NVRAM asks for it.
     Ready,
     /// A Mac choice whose startup disk holds no installed macOS, which
-    /// would start recoveryOS instead.
+    /// would start the disk's System Recovery instead, or nothing without
+    /// one.
     NotInstalled,
-    /// Its SSD has no iBootSystemContainer yet, or NVRAM holds the machine
-    /// in recovery mode, as an unfinished restore leaves it: only Install
-    /// macOS starts.
+    /// Its SSD has no iBootSystemContainer yet, NVRAM holds the machine in
+    /// recovery mode, as an unfinished restore leaves it, or NVRAM asks for
+    /// a recoveryOS the disk does not hold: only Install macOS starts.
     Unprepared,
     /// The check could not be made; starting the choice reports why.
     Unknown,
@@ -430,41 +431,16 @@ pub fn ready(options: &str, kind: ChoiceKind) -> Readiness {
     match kind {
         ChoiceKind::Mac => match route_checked(options.as_bytes().into(), false) {
             Ok((_, true)) => Readiness::Ready,
-            Ok((_, false)) => Readiness::NotInstalled,
-            Err(Refusal::BlankDisk | Refusal::RecoveryMode) => Readiness::Unprepared,
+            Ok((_, false)) | Err(Refusal::NoRecovery { installed: false }) => {
+                Readiness::NotInstalled
+            }
+            Err(
+                Refusal::BlankDisk
+                | Refusal::RecoveryMode
+                | Refusal::NoRecovery { installed: true },
+            ) => Readiness::Unprepared,
             Err(Refusal::Other(_)) => Readiness::Unknown,
         },
-        ChoiceKind::Recovery => {
-            let Some(target) = option(options, "--storage").and_then(|s| s.parse::<Target>().ok())
-            else {
-                return Readiness::Unknown;
-            };
-            // The engine splits a `--storage` partition that `--nor` also
-            // names; recoveryOS then reads its namespace.
-            let in_storage = option(options, "--nor") == option(options, "--storage");
-            // NVRAM that an unfinished restore left holding the machine in
-            // recovery mode waits for Install macOS, as the Mac choice does.
-            if let Some(nor) = option(options, "--nor").and_then(|s| s.parse::<Target>().ok()) {
-                let state = if in_storage { Part::State } else { Part::Whole };
-                match select(&nor, state, false) {
-                    Ok(s) if s.target == boot_selection::Target::RecoveryMode => {
-                        return Readiness::Unprepared;
-                    }
-                    Ok(_) => {}
-                    Err(_) => return Readiness::Unknown,
-                }
-            }
-            let part = if in_storage {
-                Part::Namespace
-            } else {
-                Part::Whole
-            };
-            match blank(&target, part) {
-                Ok(true) => Readiness::Unprepared,
-                Ok(false) => Readiness::Ready,
-                Err(_) => Readiness::Unknown,
-            }
-        }
         _ => Readiness::Unknown,
     }
 }
@@ -478,6 +454,12 @@ pub enum Refusal {
     /// The internal SSD has no iBootSystemContainer yet: only Install macOS
     /// boots.
     BlankDisk,
+    /// NVRAM boots recoveryOS, or the boot disk holds no installed system
+    /// (`installed` false, missing boot media), and the disk holds no
+    /// recoveryOS to boot: only Install macOS restores one.
+    NoRecovery {
+        installed: bool,
+    },
     Other(&'static str),
 }
 
@@ -553,9 +535,7 @@ fn route_checked(options: Vec<u8>, consume: bool) -> Result<(Vec<u8>, bool), Ref
             if retargeted.is_none() && blank(&disk, part).map_err(refuse)? {
                 return Err(Refusal::BlankDisk);
             }
-            let recovery = option(text, boot_selection::RECOVERY_BUNDLE_OPTION).is_some();
-            if recovery
-                && matches!(selection.target, boot_selection::Target::MacOs { .. })
+            if matches!(selection.target, boot_selection::Target::MacOs { .. })
                 && !installed(&disk, part, selection.volume.as_ref()).map_err(refuse)?
             {
                 selection.missing_boot_media();
@@ -575,6 +555,18 @@ fn route_checked(options: Vec<u8>, consume: bool) -> Result<(Vec<u8>, bool), Ref
                         holds_recovery(&disk, part, recovery::Kind::System, volume.as_ref());
                 }
                 _ => {}
+            }
+            let wants_recovery = matches!(
+                selection.target,
+                boot_selection::Target::PairedRecovery | boot_selection::Target::SystemRecovery
+            );
+            if wants_recovery && !selection.paired_on_disk && !selection.system_on_disk {
+                if let Err(error) = boot_selection::route(text, Some(&selection)) {
+                    output::arguments(format_args!("BOOT {error:#}\n"));
+                }
+                return Err(Refusal::NoRecovery {
+                    installed: installed_system,
+                });
             }
             Some(selection)
         }

@@ -445,6 +445,13 @@ fn map_devices(
 fn held(refusal: Refusal) -> &'static str {
     match refusal {
         Refusal::BlankDisk => "The Mac's SSD is not prepared yet: choose Install macOS first.",
+        Refusal::NoRecovery { installed: false } => {
+            "No macOS is installed and the Mac's SSD holds no System Recovery: choose Install \
+             macOS."
+        }
+        Refusal::NoRecovery { installed: true } => {
+            "NVRAM asks for recoveryOS, which the Mac's SSD does not hold: choose Install macOS."
+        }
         _ => "The Mac's last install did not finish: choose Install macOS again.",
     }
 }
@@ -462,6 +469,7 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
     let (held, found) = match crate::selection::peek(options.to_vec()) {
         Err(refusal @ Refusal::BlankDisk) => (Some(held(refusal)), "no macOS installed yet"),
         Err(refusal @ Refusal::RecoveryMode) => (Some(held(refusal)), "an install did not finish"),
+        Err(refusal @ Refusal::NoRecovery { .. }) => (Some(held(refusal)), "no recoveryOS to boot"),
         _ => (None, ""),
     };
     crate::status::done(found);

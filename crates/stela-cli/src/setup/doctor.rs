@@ -3,8 +3,8 @@
 //! Status reads everything a setup consists of and changes nothing: the
 //! record and any pending update, the installed `stela.efi` against its
 //! kept version and this `stela`'s mount interface, the USB's boot loader,
-//! `stela.cfg` and the startup choices against the record, every recoveryOS
-//! and restore bundle file against its `bundle.json` and the active ones'
+//! `stela.cfg` and the startup choices against the record, every restore
+//! bundle file against its `bundle.json` and the active ones'
 //! revision against the one this `stela` prepares, the install medium's
 //! manifest and pieces, and for each install its
 //! partitions (still the recorded ones), the systems on its Apple region,
@@ -15,15 +15,14 @@
 //! Repair puts back what the record says: the active `stela.efi` from its
 //! kept copy, the entry, `stela.cfg` and the startup choices, and, from the
 //! active build's restore image (`--ipsw` or `--fetch`), every damaged or
-//! missing recoveryOS or restore bundle and a damaged install medium; with
-//! an image it prepares every bundle of the active build again, with each
-//! machine's own ECID, and gives a machine of an older setup without one its
-//! ECID (`machines::machine_ecid`).
+//! missing restore bundle and a damaged install medium; with an image it
+//! prepares every restore bundle of the active build again, with each
+//! machine's own ECID, and gives an install without one its ECID
+//! (`machines::machine_ecid`).
 use super::{
     CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Setup, apply_install, bundle,
-    check_bundle_revision, check_space, copy_bundles, describe_install, ecid::Ecid, host::Host,
-    installed, machines, plan_install, prepare_bundles, publish, read_record, revision_mismatch,
-    state, update, write_record,
+    check_bundle_revision, describe_install, ecid::Ecid, host::Host, installed, machines,
+    plan_install, publish, read_record, revision_mismatch, state, update, write_record,
 };
 use crate::efi;
 use anyhow::{Result, bail};
@@ -98,7 +97,7 @@ fn systems(host: &dyn Host, identifier: &str, bytes: u64) -> Vec<String> {
             )),
         }
     }
-    // The recoveryOS copies stela.efi boots before Stela's own bundle.
+    // The recoveryOS copies stela.efi boots when NVRAM asks for one.
     for kind in [recovery::Kind::Paired, recovery::Kind::System] {
         match recovery::find(&mut disk, kind, None) {
             Ok(copies) => {
@@ -263,13 +262,6 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     if let Some(reason) = revision_mismatch(environment, record) {
         report.problem(reason);
     }
-    for ecid in record.missing_bundles(&record.build) {
-        report.problem(format!(
-            "the active build {} has no recoveryOS bundle for {}: `stela setup --repair --ipsw`",
-            record.build,
-            ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}"))
-        ));
-    }
     for (kind, ecid) in record.missing_restore_bundles() {
         report.problem(format!(
             "the active build {} has no {} bundle for {}, so its {} choice is missing: `stela \
@@ -346,6 +338,15 @@ fn install_status(
         )),
     }
     let disk = &install.disk;
+    // A portable installer's disk is chosen in stela.efi, out of this
+    // computer's reach.
+    if disk.is_chosen() {
+        report.line(
+            "Apple region",
+            "chosen in stela.efi on the PC when Install macOS starts",
+        );
+        return;
+    }
     match installed::confirm(host, disk, installed::Role::AppleRegion, None) {
         Ok(region) => {
             let bytes = host.partition(&region).map(|p| p.bytes).unwrap_or(0);
@@ -359,7 +360,7 @@ fn install_status(
                     disk.apple_region_serial,
                     disk.apple_region_guid,
                     if systems.is_empty() {
-                        "no installed macOS yet; stela.efi boots System Recovery"
+                        "no installed macOS yet; choose Install macOS"
                     } else {
                         "macOS installed"
                     }
@@ -472,18 +473,11 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
         ));
     }
     report.line("model", &record.model);
-    report.line("macOS build", format!("{} (System Recovery)", record.build));
-    report.line("kept builds", record.recovery_builds.join(", "));
-    if record.installs.is_empty() {
-        match record.ecid {
-            Some(ecid) => report.line("ECID", ecid),
-            None => report.problem(
-                "the setup's machine has no ECID (an older setup made it): `stela setup --repair \
-                 --ipsw`"
-                    .into(),
-            ),
-        }
-    }
+    report.line(
+        "macOS build",
+        format!("{} (Install macOS restores it)", record.build),
+    );
+    report.line("kept builds", record.builds.join(", "));
     report.line(
         "TSS",
         if record.tss {
@@ -578,12 +572,6 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
             record.installs[index].ecid = Some(ecid);
             assigned.push((install.name.clone(), ecid));
         }
-        if record.ecid.is_none() {
-            record.ecid = match record.installs.first() {
-                Some(install) => install.ecid,
-                None => Some(command.ecid.map_or_else(Ecid::generate, Ok)?),
-            };
-        }
     }
     for (name, ecid) in &assigned {
         writeln!(text, "  ECID           install \"{name}\" is now {ecid}")?;
@@ -602,53 +590,6 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
         }
     }
     let stale = record.drop_stale_bundles();
-    // The active build's bundles: all again with an image, else the damaged.
-    let mut needed: Vec<Option<Ecid>> = Vec::new();
-    for ecid in record.machines() {
-        let directory = bundle::directory(&record.volume, &record.build, ecid, record.generation());
-        let digest = record
-            .bundle(&record.build, ecid)
-            .map(|b| b.manifest_sha256.clone());
-        let intact = digest.is_some_and(|digest| {
-            bundle::verify(&bundle::in_place(&directory), &digest).is_empty()
-        });
-        if ipsw.is_some() || !intact {
-            needed.push(ecid);
-        }
-    }
-    let prepared = match (&ipsw, needed.is_empty()) {
-        (_, true) => Vec::new(),
-        (Some(ipsw), false) => {
-            let (_, _, prepared) = prepare_bundles(
-                environment,
-                ipsw,
-                &record.model,
-                Some(&record.build),
-                &needed,
-            )?;
-            check_space(environment.host, &record.volume, &prepared)?;
-            prepared
-        }
-        (None, false) => bail!(
-            "{text}  recoveryOS     {} bundles of macOS {} are damaged or missing: pass its \
-             restore image with --ipsw or --fetch",
-            needed.len(),
-            record.build
-        ),
-    };
-    for bundle in &prepared {
-        writeln!(
-            text,
-            "  recoveryOS     prepare {} again",
-            bundle::directory(
-                &record.volume,
-                &bundle.build,
-                bundle.ecid,
-                record.generation()
-            )
-            .display()
-        )?;
-    }
     for old in &stale {
         writeln!(
             text,
@@ -689,7 +630,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
                 record.pieces_volume(),
                 ipsw,
                 &restore,
-                prepared.iter().map(|p| p.bytes).sum(),
+                0,
             )?;
             describe_install(&record, &plan, &mut text)?;
             Some(plan)
@@ -753,8 +694,6 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     for region in &foreign {
         installed::erase_foreign(environment.host, region)?;
     }
-    copy_bundles(&mut record, &prepared)?;
-    write_record(&esp, &record)?;
     if let (Some(plan), Some(ipsw)) = (install, &ipsw) {
         apply_install(environment, &mut record, ipsw, plan)?;
     }

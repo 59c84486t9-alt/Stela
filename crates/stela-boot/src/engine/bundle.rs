@@ -539,14 +539,6 @@ pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<
     Ok(manifest(files, built)?.options.dram_base)
 }
 
-/// Whether the bundle enters recoveryOS (`osenvironment` `recoveryos`).
-pub fn enters_recovery_os(
-    files: &[File],
-    built: Option<&[(String, Vec<u8>)]>,
-) -> Result<bool, String> {
-    Ok(manifest(files, built)?.options.osenvironment.as_deref() == Some("recoveryos"))
-}
-
 /// The guest's DRAM: `backed` bytes of host RAM from `base`, within the
 /// `installed` bytes the Mac reports.
 #[derive(Debug, Clone, Copy)]

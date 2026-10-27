@@ -8,7 +8,7 @@
 //!   reads it from an image ([`find`]) and refuses an image whose interface
 //!   differs from its own, or that has none, instead of installing a
 //!   `stela.efi` that would misread what setup wrote.
-//! - **Startup choices.** With several systems, or to reach System Recovery
+//! - **Startup choices.** With several systems, or to reach Install macOS
 //!   without a host computer, setup also writes [`CHOICES_FILE`]: a timeout
 //!   line and one entry per line, each a name, a tab and a complete
 //!   `stela.cfg` option line. The first entry is the default, the one
@@ -33,7 +33,9 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// Revision 6: [`CHOSEN_DISK`] stands for the partition Install macOS chose.
 /// Revision 7: erase installs select `--development-restore` with `--tss`,
 /// retaining the original DEV-board FDR failure policy without an FDR proxy.
-pub const OPTIONS_REVISION: u32 = 7;
+/// Revision 8: `--recovery-bundle` is gone; a recoveryOS boot reads the
+/// disk's own recoveryOS or is refused.
+pub const OPTIONS_REVISION: u32 = 8;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";
@@ -202,8 +204,6 @@ pub enum ChoiceKind {
     /// The Mac, from the startup disk NVRAM names, as a Mac starts
     /// (`--system` with `--preboot`).
     Mac,
-    /// recoveryOS from a bundle (`--system` without `--preboot`).
-    Recovery,
     /// The restore that lays out the Mac's SSD ([`INSTALL_OPTION`]).
     Setup,
     /// The restore that updates the installed system in place
@@ -228,7 +228,7 @@ impl Choice {
             (true, true, _) => ChoiceKind::Update,
             (true, false, _) => ChoiceKind::Setup,
             (false, _, true) => ChoiceKind::Mac,
-            (false, _, false) => ChoiceKind::Recovery,
+            (false, _, false) => ChoiceKind::Other,
         }
     }
 }
@@ -394,10 +394,10 @@ mod tests {
         };
         let disk = "--system --storage A:B --nor A:B";
         assert_eq!(
-            kind(&format!("{disk} --preboot A:B --recovery-bundle r")),
+            kind(&format!("{disk} --preboot A:B --ecid 1")),
             ChoiceKind::Mac
         );
-        assert_eq!(kind(&format!("{disk} --bundle r")), ChoiceKind::Recovery);
+        assert_eq!(kind(&format!("{disk} --bundle r")), ChoiceKind::Other);
         assert_eq!(
             kind(&format!("{disk} --bundle s --install p.json")),
             ChoiceKind::Setup
@@ -421,8 +421,8 @@ mod tests {
                     options: "--system --preboot A:B".into(),
                 },
                 Choice {
-                    name: "macOS - System Recovery".into(),
-                    options: "--system --bundle \\EFI\\x".into(),
+                    name: "macOS - Install macOS".into(),
+                    options: "--system --bundle \\EFI\\x --install p.json".into(),
                 },
             ],
         };
