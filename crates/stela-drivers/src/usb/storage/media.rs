@@ -97,6 +97,9 @@ impl<T: Scsi> Owner<T> {
 }
 impl<T: Scsi> Scsi for Owner<T> {
     type Lun = T::Lun;
+    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        self.transport.take_failed_data()
+    }
     fn command(
         &mut self,
         lun: Self::Lun,

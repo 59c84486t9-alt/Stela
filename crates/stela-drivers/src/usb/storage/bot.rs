@@ -133,6 +133,9 @@ pub(super) struct Bot<I: Io> {
     initial_read: bool,
     attachment: Option<(Device, Interface)>,
     reset_generation: u64,
+    /// The data a failed command's data phase moved in, until the next
+    /// command: sd keeps it when the sense is RECOVERED ERROR.
+    failed_data: Option<Vec<u8>>,
 }
 impl<I: Io> Bot<I> {
     #[cfg(test)]
@@ -209,6 +212,7 @@ impl<I: Io> Bot<I> {
             initial_read: flags.initial_read(),
             attachment: None,
             reset_generation: 0,
+            failed_data: None,
         }
     }
     pub fn max_lun(&self) -> u8 {
@@ -226,6 +230,10 @@ impl<I: Io> Bot<I> {
 
     pub fn generation(&self) -> u64 {
         self.reset_generation
+    }
+    /// What the last command's data phase moved in before it failed.
+    pub fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        self.failed_data.take()
     }
     pub fn write_protect(&self) -> bool {
         self.flags.write_protect()
@@ -314,8 +322,10 @@ impl<I: Io> Bot<I> {
     }
 
     pub fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        self.failed_data = None;
         let result = self.raw(lun, cdb, data);
         if result == Err(BlockError::CheckCondition) {
+            let moved = self.failed_data.take();
             // SCSI auto-sense must use the failing command's LUN, and cannot
             // race a different unit's command while the interface is borrowed.
             let sense = if cdb[0] == scsi::REQUEST_SENSE {
@@ -325,6 +335,7 @@ impl<I: Io> Bot<I> {
                     .ok()
                     .and_then(|bytes| Sense::parse(&bytes))
             };
+            self.failed_data = moved;
             return Err(sense.map_or(BlockError::CheckCondition, BlockError::Sense));
         }
         if result.is_ok()
@@ -441,6 +452,9 @@ impl<I: Io> Bot<I> {
             return self.failed(PROTOCOL_ERROR);
         }
         if status == CSW_FAILED {
+            if is_in {
+                self.failed_data = Some(self.buffer.bytes()[..moved].to_vec());
+            }
             return Err(BlockError::CheckCondition);
         }
         // transport.c detects bogus residue only from completely received,
@@ -1656,6 +1670,7 @@ mod tests {
                 initial_read: false,
                 attachment: None,
                 reset_generation: 0,
+                failed_data: None,
             };
             assert!(
                 bot.command(1, &[0x2a, 0, 0, 0, 0, 0, 0, 0, 1, 0], Data::Out(&[1, 2, 3]))

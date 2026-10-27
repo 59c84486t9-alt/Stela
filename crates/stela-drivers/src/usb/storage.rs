@@ -74,6 +74,8 @@ trait Scsi {
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
     fn poisoned(&self) -> bool;
+    /// What the last command's data phase moved in before it failed.
+    fn take_failed_data(&mut self) -> Option<Vec<u8>>;
     fn media_publication(&mut self, _lun: Self::Lun, _valid: Rc<Cell<bool>>, _removable: bool) {}
     fn max_lun(&self) -> u8 {
         0
@@ -116,6 +118,9 @@ impl<I: Io> Scsi for Bot<I> {
     type Lun = u8;
     fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         Bot::command(self, lun, cdb, data)
+    }
+    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        Bot::take_failed_data(self)
     }
     fn delay(&self, micros: u64) {
         Bot::delay(self, micros);
@@ -169,6 +174,9 @@ impl Scsi for uas::Host {
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError> {
         uas::Host::command(self, lun.bytes(), cdb, data)
+    }
+    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        uas::Host::take_failed_data(self)
     }
     fn delay(&self, micros: u64) {
         uas::Host::delay(self, micros);
@@ -746,9 +754,17 @@ impl<T: Scsi> Disk<T> {
                 continue;
             }
             match sense.completion(self.removable) {
-                // The transports keep no data from a command that failed.
-                SenseCompletion::Done if matches!(data, Data::In(_)) => return failed,
-                SenseCompletion::Done => return Ok(Vec::new()),
+                // sd_done counts the whole buffer good; only data the
+                // transport moved in full is returned.
+                SenseCompletion::Done => {
+                    return match data {
+                        Data::In(length) => match self.bot.borrow_mut().take_failed_data() {
+                            Some(bytes) if bytes.len() == length => Ok(bytes),
+                            _ => failed,
+                        },
+                        _ => Ok(Vec::new()),
+                    };
+                }
                 SenseCompletion::Retry(_) if exceeded => return failed,
                 SenseCompletion::Retry(delay) => {
                     if delay != 0 {
@@ -922,6 +938,7 @@ mod tests {
         commands: usize,
         now: Cell<u64>,
         delays: RefCell<Vec<u64>>,
+        failed: Option<Vec<u8>>,
     }
     impl Scsi for Unit {
         type Lun = u8;
@@ -929,7 +946,13 @@ mod tests {
             self.commands += 1;
             self.now.set(self.now.get() + 1_000_000);
             match self.senses.pop_front().flatten() {
-                Some(sense) => Err(BlockError::Sense(sense)),
+                // A failed read still moves its data.
+                Some(sense) => {
+                    if let Data::In(bytes) = data {
+                        self.failed = Some(vec![0x5a; bytes]);
+                    }
+                    Err(BlockError::Sense(sense))
+                }
                 None => Ok(match data {
                     Data::In(bytes) => vec![0; bytes],
                     _ => Vec::new(),
@@ -946,6 +969,9 @@ mod tests {
         fn poisoned(&self) -> bool {
             false
         }
+        fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+            self.failed.take()
+        }
     }
 
     fn disk(removable: bool, senses: &[Option<Sense>]) -> Disk<Unit> {
@@ -955,6 +981,7 @@ mod tests {
                 commands: 0,
                 now: Cell::new(0),
                 delays: RefCell::new(Vec::new()),
+                failed: None,
             })),
             lun: 0,
             identity: Identity {
@@ -996,10 +1023,12 @@ mod tests {
         let mut unit = disk(false, &[aborted; 8]);
         assert!(unit.write(0, &[0; 512]).is_err());
         assert_eq!(unit.bot.borrow().commands, 6);
-        // A recovered error completes a write, not a read without its data.
+        // A recovered error completes a write, and a read with its data.
         let recovered = sense(Sense::RECOVERED_ERROR, 0x17, 0x01);
         assert_eq!(disk(false, &[recovered]).write(0, &[0; 512]), Ok(()));
-        assert!(disk(false, &[recovered]).read(0, &mut [0; 512]).is_err());
+        let mut block = [0; 512];
+        assert_eq!(disk(false, &[recovered]).read(0, &mut block), Ok(()));
+        assert_eq!(block, [0x5a; 512]);
         // Requeues stop once the command has run for six timeouts.
         let mut unit = disk(false, &[reset; 400]);
         assert!(unit.flush().is_err());

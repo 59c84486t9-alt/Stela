@@ -275,6 +275,7 @@ impl Host {
                     touched: [false; 4],
                     tag: 0,
                     poisoned: false,
+                    failed_data: None,
                 },
                 flags: binding.flags,
                 device: fresh,
@@ -349,6 +350,10 @@ impl Host {
     }
     pub fn requires_rebind(&self) -> bool {
         self.engine.poisoned
+    }
+    /// What the last command's data phase moved in before it failed.
+    pub(super) fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        self.engine.failed_data.take()
     }
 }
 
@@ -522,6 +527,10 @@ struct Engine<I: Io> {
     touched: [bool; 4],
     tag: u16,
     poisoned: bool,
+    /// Input data that completed before the Sense IU failed its command,
+    /// until the next command: sd keeps it when the sense is RECOVERED
+    /// ERROR.
+    failed_data: Option<Vec<u8>>,
 }
 impl<I: Io> Engine<I> {
     fn new(mut io: I, dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
@@ -538,6 +547,7 @@ impl<I: Io> Engine<I> {
             touched: [false; 4],
             tag: 0,
             poisoned: false,
+            failed_data: None,
         })
     }
     fn buffers_present(&self) -> bool {
@@ -697,6 +707,9 @@ impl<I: Io> Engine<I> {
             }
             if let Some(status) = &terminal {
                 if status.code != 0 {
+                    if input && self.pending[Pipe::Input.index()].is_none() {
+                        self.failed_data = moved.map(|moved| self.data.bytes()[..moved].to_vec());
+                    }
                     // Device-terminal error may precede host data completion.
                     // Drain each actual outstanding contributor before any CPU
                     // buffer access or later command is permitted.
@@ -1467,6 +1480,9 @@ mod tests {
         }
         fn poisoned(&self) -> bool {
             self.engine.poisoned
+        }
+        fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+            self.engine.failed_data.take()
         }
         fn write_protect_page(&self) -> Option<u8> {
             (!self.flags.always_sync()).then_some(super::super::scsi::ALL_PAGES)
