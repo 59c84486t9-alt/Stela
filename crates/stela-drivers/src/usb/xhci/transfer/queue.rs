@@ -20,6 +20,9 @@ pub(in crate::usb::xhci) struct Queue {
     recovery: bool,
     failure: Option<BlockError>,
     clear_tt: bool,
+    /// Linux `xhci_virt_ep.err_count`: transaction errors since the last
+    /// success; cancellation does not clear it.
+    errors: u32,
 }
 
 impl Queue {
@@ -101,7 +104,10 @@ impl Queue {
             return Err(error);
         }
         let done = match event.code() {
-            SUCCESS | SHORT_PACKET => Ok(td.length - event.residual()),
+            SUCCESS | SHORT_PACKET => {
+                self.errors = 0;
+                Ok(td.length - event.residual())
+            }
             status => {
                 // Stopped (including length-invalid and short-packet stopped)
                 // and every error retain DMA until Stop/Reset/SetDequeue ACK.
@@ -115,6 +121,32 @@ impl Queue {
         };
         td.done = Some(done);
         Ok(())
+    }
+
+    /// Linux process_bulk_intr_td: a transaction error on an endpoint that
+    /// is not behind a TT is retried in place while it has failed at most
+    /// MAX_SOFT_RETRY times before. Any other event is left to [`Self::event`].
+    pub(in crate::usb::xhci) fn soft_retry(
+        &mut self,
+        event: &Event,
+        no_soft_retry: bool,
+        translated: bool,
+    ) -> bool {
+        let valid = self.active.iter().any(|td| {
+            td.trb == event.parameter
+                && td.done.is_none()
+                && event.control & EVENT_DATA == 0
+                && event.residual() <= td.length
+        });
+        if !valid || self.recovery || event.code() != USB_TRANSACTION_ERROR {
+            return false;
+        }
+        if no_soft_retry {
+            return false;
+        }
+        let errors = self.errors;
+        self.errors += 1;
+        errors <= MAX_SOFT_RETRY && !translated
     }
 
     pub(in crate::usb::xhci) fn cancellation_snapshot(

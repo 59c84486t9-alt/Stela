@@ -337,6 +337,10 @@ pub(crate) struct CancelModel {
     pub(crate) fatal_on_command: Option<u32>,
     pub(crate) silence_transfer: Option<usize>,
     pub(crate) halt_transfer: Option<usize>,
+    /// Transaction errors each endpoint reports before transferring.
+    pub(crate) transaction_errors: [usize; 32],
+    /// Endpoints reset with Transfer State Preserve, in order.
+    pub(crate) soft_resets: Vec<usize>,
     pub(crate) script: Option<crate::usb::bluetooth::intel::tests::Script>,
     pub(crate) control_script: ControlScript,
     pub(crate) descriptors: Vec<(u8, u8, Vec<u8>)>,
@@ -478,6 +482,9 @@ impl CancelModel {
                 }
                 RESET_ENDPOINT => {
                     if self.state(dci) == 2 {
+                        if control & transfer::TSP != 0 {
+                            self.soft_resets.push(dci);
+                        }
                         self.set_state(dci, 3);
                         self.active[dci] = None;
                     } else {
@@ -553,6 +560,15 @@ impl CancelModel {
             )
         };
         self.set_state(dci, 1);
+        if self.transaction_errors[dci] > 0 {
+            // The TD stays at the dequeue pointer of the halted endpoint.
+            self.transaction_errors[dci] -= 1;
+            self.set_state(dci, ENDPOINT_HALTED);
+            self.active[dci] = Some((at, parameter, length));
+            let code = transfer::USB_TRANSACTION_ERROR;
+            self.event(at, code, TRANSFER_EVENT, dci as u8, length);
+            return;
+        }
         if self.halt_transfer == Some(dci) {
             // A STALL leaves the failed TD at the hardware dequeue pointer.
             // Reset stops it, but only Set Dequeue abandons it; another
@@ -878,6 +894,8 @@ fn cancellation_controller_with_context(
         fatal_on_command: None,
         silence_transfer: None,
         halt_transfer: None,
+        transaction_errors: [0; 32],
+        soft_resets: Vec::new(),
         script: None,
         control_script: Default::default(),
         descriptors: Vec::new(),

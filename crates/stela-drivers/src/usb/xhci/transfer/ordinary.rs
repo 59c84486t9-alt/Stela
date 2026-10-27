@@ -252,12 +252,32 @@ impl Controller {
                 "stale or foreign xHCI transfer ticket",
             )));
         }
+        let no_soft_retry = self.quirks.no_soft_retry;
         while let Some(event) = self
             .take(|e| e.kind() == TRANSFER_EVENT && e.slot() == slot && e.endpoint() == ticket.dci)
         {
-            let endpoint = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
-                .as_mut()
-                .unwrap();
+            let state = self.slot(slot).unwrap();
+            let translated = state.context[2] & TT_SLOT != 0;
+            let endpoint = state.endpoints[usize::from(ticket.dci)].as_mut().unwrap();
+            if endpoint
+                .ring
+                .normal
+                .soft_retry(&event, no_soft_retry, translated)
+            {
+                match self.soft_reset(slot, ticket.dci) {
+                    Ok(()) => continue,
+                    Err(error) => {
+                        // The TD stays halted on the ring; fence it as failed.
+                        let _ = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
+                            .as_mut()
+                            .unwrap()
+                            .ring
+                            .normal
+                            .event(event);
+                        return Some(Err(error));
+                    }
+                }
+            }
             if event.code() == INCOMPATIBLE_DEVICE {
                 // Incompatible Device requires slot retirement, not merely an
                 // endpoint dequeue. Do not allow endpoint cancellation to revive it.
@@ -278,6 +298,21 @@ impl Controller {
             endpoint.in_flight -= 1;
         }
         done
+    }
+
+    /// Linux xhci_handle_halted_endpoint(EP_SOFT_RESET): Reset Endpoint with
+    /// TSP keeps the halted TD in place, and its completion rings the
+    /// endpoint again. Like xhci_handle_cmd_reset_ep, the completion code is
+    /// ignored; only a command the controller never completed is an error.
+    fn soft_reset(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        let target = u32::from(slot) << 24 | u32::from(dci) << 16;
+        match self.command(0, 0, RESET_ENDPOINT << 10 | TSP | target) {
+            Ok(_) => {}
+            Err(BlockError::Device { .. }) if !self.command_poisoned => {}
+            Err(error) => return Err(error),
+        }
+        self.doorbell(slot, dci);
+        Ok(())
     }
 
     /// Cancels this endpoint's complete queue and preserves the requested
@@ -388,6 +423,62 @@ mod tests {
     use super::*;
     use crate::bus::dma::RegionAllocator;
     use crate::usb::xhci::model::*;
+    #[test]
+    fn transaction_errors_soft_retry_in_place_like_linux() {
+        let mut memory = vec![0u64; 64 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        // SAFETY: actual fixture RAM remains retained through every owner.
+        let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+        let (mut c, peer) = cancellation_controller(&mut dma);
+        let buffer = dma.allocate(64, 64).unwrap().physical();
+        let run = |c: &mut Controller, errors: usize| {
+            {
+                let mut peer = peer.borrow_mut();
+                peer.transaction_errors[4] = errors;
+                peer.soft_resets.clear();
+                peer.seen.clear();
+            }
+            let ticket = c.submit_ticket(1, 4, buffer, 64).unwrap();
+            // Each soft reset leaves the TD in flight for a later poll.
+            let result = (0..8).find_map(|_| c.completed_ticket(&ticket));
+            (result, peer.borrow().soft_resets.len())
+        };
+        // Four retries with Transfer State Preserve, the TD kept in place.
+        assert_eq!(run(&mut c, 4), (Some(Ok(64)), 4));
+        assert_eq!(peer.borrow().seen, vec![RESET_ENDPOINT; 4]);
+        assert_eq!(peer.borrow().outgoing.len(), 1);
+        assert!(peer.borrow().dequeues.is_empty());
+        // The success cleared err_count; the fifth error then fails the TD,
+        // which is retired by a hard reset.
+        assert_eq!(
+            run(&mut c, 5),
+            (
+                Some(Err(BlockError::Device {
+                    status: USB_TRANSACTION_ERROR
+                })),
+                4
+            )
+        );
+        c.cancel(1, 4).unwrap();
+        assert_eq!(peer.borrow().soft_resets.len(), 4);
+        assert_eq!(peer.borrow().seen[4..], [RESET_ENDPOINT, SET_DEQUEUE]);
+        // err_count stays above the limit until a success.
+        let failed = Some(Err(BlockError::Device {
+            status: USB_TRANSACTION_ERROR,
+        }));
+        assert_eq!(run(&mut c, 1), (failed.clone(), 0));
+        c.cancel(1, 4).unwrap();
+        assert_eq!(run(&mut c, 0), (Some(Ok(64)), 0));
+        assert_eq!(run(&mut c, 1), (Some(Ok(64)), 1));
+        // XHCI_NO_SOFT_RETRY and a slot behind a TT fail at once.
+        c.quirks.no_soft_retry = true;
+        assert_eq!(run(&mut c, 1), (failed.clone(), 0));
+        c.cancel(1, 4).unwrap();
+        c.quirks.no_soft_retry = false;
+        c.slots[1].as_mut().unwrap().context[2] = 2;
+        assert_eq!(run(&mut c, 1), (failed, 0));
+    }
+
     #[test]
     fn invalid_synchronous_budget_refuses_before_mmio_and_preserves_current_actual_dma_receipt() {
         struct NoAccess;

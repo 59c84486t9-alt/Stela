@@ -5,7 +5,13 @@ mod ordinary;
 mod queue;
 pub use ordinary::{TransferCancellation, TransferTicket};
 const BABBLE_DETECTED: u32 = 3;
-const USB_TRANSACTION_ERROR: u32 = 4;
+pub(super) const USB_TRANSACTION_ERROR: u32 = 4;
+/// Reset Endpoint's Transfer State Preserve flag.
+pub(super) const TSP: u32 = 1 << 9;
+/// Slot context tt_info's TT Hub Slot ID.
+const TT_SLOT: u32 = 0xff;
+/// Linux MAX_SOFT_RETRY.
+const MAX_SOFT_RETRY: u32 = 3;
 const SPLIT_TRANSACTION_ERROR: u32 = 36;
 const STOPPED_TRANSFER: u32 = 26;
 const STOPPED_SHORT_PACKET: u32 = 28;

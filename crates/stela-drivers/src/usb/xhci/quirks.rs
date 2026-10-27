@@ -24,6 +24,8 @@ pub(super) struct Profile {
     pub suspend_delay: bool,
     pub reset_on_resume: bool,
     pub renesas_stale_high: bool,
+    /// XHCI_NO_SOFT_RETRY: transaction errors are not retried in place.
+    pub no_soft_retry: bool,
 }
 impl Profile {
     pub fn pci<C: ConfigSpace>(function: &mut Function<C>) -> Result<Self, BlockError> {
@@ -58,6 +60,11 @@ impl Profile {
                     | (0x1d17, 0x9202)
             ) || vendor == 0x1106,
             renesas_stale_high: vendor == 0x1912 && matches!(device, 0x0014 | 0x0015),
+            // AMD Promontory A and Etron EJ168/EJ188.
+            no_soft_retry: matches!(
+                (vendor, device),
+                (0x1022, 0x43b9 | 0x43bb) | (0x1b6f, 0x7023 | 0x7052)
+            ),
         }
     }
     pub fn endpoint(self, context: endpoint::Context) -> Result<endpoint::Context, BlockError> {
@@ -241,5 +248,8 @@ mod tests {
         assert!(!Profile::identity(0x1b73, 0x1000, 5).slow_suspend);
         assert!(Profile::identity(0x1912, 0x0014, 0).renesas_stale_high);
         assert!(!Profile::identity(0x1912, 0x0014, 0).reset_on_resume);
+        assert!(Profile::identity(0x1022, 0x43bb, 0).no_soft_retry);
+        assert!(Profile::identity(0x1b6f, 0x7052, 0).no_soft_retry);
+        assert!(!Profile::identity(0x1022, 0x43f7, 0).no_soft_retry);
     }
 }
