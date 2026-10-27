@@ -48,7 +48,7 @@ impl Link for RootLink {
     }
     fn carrier(&mut self) -> bool {
         // SAFETY: the loader root `storage::open` captured maps this
-        // device; the engine is serialized.
+        // device.
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.device.carrier()
     }
@@ -186,7 +186,8 @@ impl HostNetwork {
 }
 
 /// The host network, shared by the signing transport and a remote install
-/// image; the engine is serialized, so a borrow never overlaps another.
+/// image; only the service reaches it, which one core at a time holds, so a
+/// borrow never overlaps another.
 #[derive(Clone)]
 pub struct Shared(pub Rc<RefCell<HostNetwork>>);
 

@@ -5,9 +5,19 @@
 //! maps the engine window, and restore the current engine root afterwards.
 //! This boundary never maps host identity addresses into a guest root. All
 //! buffers passed here belong to the engine window, not guest virtual RAM.
+//!
+//! The drivers keep each controller's state in `Rc` and `RefCell`, for one
+//! owner at a time, while the service and every PE reach host devices from
+//! cores of their own: a USB disk the guest drives and the USB keyboard the
+//! service reads share one xHCI controller. [`RestoreRoot`] is the only way
+//! into a driver, so it also holds the host drivers' lock, which serializes
+//! them and orders each holder's writes before the next holder's reads.
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
-use core::arch::asm;
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use stela_drivers::{
     Handoff,
     block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
@@ -21,15 +31,58 @@ use stela_runtime::pc::{
     storage::{self, Named, Target},
 };
 
+/// Held while a core is inside the host drivers ([`RestoreRoot`]).
+static HOST_DRIVERS: AtomicBool = AtomicBool::new(false);
+/// Counter ticks cores waited for [`HOST_DRIVERS`] since the last report,
+/// and the longest wait.
+static HOST_DRIVERS_WAITED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Take the host drivers' lock, counting the wait.
+fn lock_host_drivers() {
+    if HOST_DRIVERS
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        return;
+    }
+    let started = super::host::rdtsc();
+    while HOST_DRIVERS
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let waited = super::host::rdtsc().wrapping_sub(started);
+    HOST_DRIVERS_WAITED[0].fetch_add(waited, Ordering::Relaxed);
+    HOST_DRIVERS_WAITED[1].fetch_max(waited, Ordering::Relaxed);
+}
+
+/// The time cores waited for the host drivers since the last report, in
+/// total and at most, in microseconds.
+pub(super) fn host_drivers_waited(tsc_hz: u64) -> (u128, u128) {
+    let micros = |slot: &AtomicU64| {
+        u128::from(slot.swap(0, Ordering::Relaxed)) * 1_000_000 / u128::from(tsc_hz.max(1))
+    };
+    (
+        micros(&HOST_DRIVERS_WAITED[0]),
+        micros(&HOST_DRIVERS_WAITED[1]),
+    )
+}
+
+/// Inside the host drivers: the loader's root, with interrupts masked and
+/// the host drivers' lock held, until dropped.
 pub(super) struct RestoreRoot {
     root: u64,
     flags: u64,
 }
 impl RestoreRoot {
+    /// Wait for the host drivers' lock, which no holder takes again: a
+    /// driver never calls back into the engine's host interfaces.
+    ///
     /// # Safety
-    /// `root` is the live loader root, retaining the engine window, and the
-    /// engine is serialized: no other PE/interrupt may drive this controller.
+    /// `root` is the live loader root, retaining the engine window.
     pub(super) unsafe fn enter(root: u64) -> Self {
+        lock_host_drivers();
         let (previous, flags): (u64, u64);
         // SAFETY: CPL0, live roots with the same engine code/stack/window.
         // Interrupts remain off until the original root has been restored.
@@ -45,9 +98,13 @@ impl RestoreRoot {
 impl Drop for RestoreRoot {
     fn drop(&mut self) {
         // SAFETY: the original live root; no borrowed identity address
-        // survives a BlockDevice call. Only IF was changed by enter().
+        // survives a BlockDevice call.
         unsafe {
             asm!("mov cr3, {}",in(reg)self.root,options(nostack,preserves_flags));
+        }
+        HOST_DRIVERS.store(false, Ordering::Release);
+        // SAFETY: only IF was changed by enter().
+        unsafe {
             if self.flags & (1 << 9) != 0 {
                 asm!("sti", options(nomem, nostack));
             }

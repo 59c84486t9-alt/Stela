@@ -73,7 +73,7 @@ impl HostInput {
         for device in &mut self.inputs.devices {
             let events = {
                 // SAFETY: the loader root `storage::open` captured, which
-                // maps this device; the engine is serialized.
+                // maps this device.
                 let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
                 device.poll()
             };

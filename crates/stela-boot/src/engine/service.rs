@@ -272,8 +272,10 @@ pub(super) fn report(tsc_hz: u64) -> String {
     let services = SERVICES
         .each_ref()
         .map(|count| count.swap(0, Ordering::Relaxed));
+    // Time cores waited for the host drivers: in total, and the longest.
+    let (waited, longest) = super::storage::host_drivers_waited(tsc_hz);
     let mut line = format!(
-        "services waiting={} boot={} longest_us",
+        "services waiting={} boot={} host_drivers_waited_us={waited}/{longest} longest_us",
         services[0], services[1]
     );
     for (name, longest) in NAMES.iter().zip(&LONGEST) {
