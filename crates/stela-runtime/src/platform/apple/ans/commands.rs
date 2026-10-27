@@ -730,13 +730,19 @@ impl Ans {
         if data[4 + count * 12..].iter().any(|&byte| byte != 0) {
             return Err("ANS namespace request extension fields are not modeled");
         }
-        // Re-creating the provisioned layout re-creates every namespace,
-        // and a controller re-creating one drops its FTL mappings: each
-        // reads erased until written. Other layouts need a recovered ABI.
+        // Same-layout formatting drops the growable data extent's mappings.
+        // Fixed auxiliary namespaces retain their contents: their services
+        // stay attached across doFormatMedia, and eanFormat reuses a valid
+        // header instead of formatting it again. Erasing that header here
+        // leaves the service's cached formatted state pointing at zero data.
+        // Explicit namespace deallocation still applies to every namespace.
+        // Other layouts need a recovered ABI.
         // Only doFormatMedia's CDW10 of 0 (0x3dff8a0) gets here; the update
         // client's 1 (0x3dcac64, 0x3dc9cb0) refuses above.
         for id in 1..=count as u32 {
-            self.medium.erase(id).expect("IDs are consecutive from 1");
+            if self.medium.namespaces[id as usize - 1].description.blocks == 0 {
+                self.medium.erase(id).expect("IDs are consecutive from 1");
+            }
         }
         Ok(Outcome::status(SUCCESS))
     }
@@ -1322,10 +1328,13 @@ mod tests {
     }
 
     #[test]
-    fn recreating_the_provisioned_layout_erases_every_namespace() {
-        let records =
-            [(1, 1, 0), (2, 8, 3)].map(|(id, kind, blocks)| Description { id, kind, blocks });
-        let mut ans = Ans::new(Box::new(RamDisk::new("", 10, 4096)), &records, None).unwrap();
+    fn same_layout_format_erases_data_and_preserves_fixed_auxiliary_namespaces() {
+        let records = [(1, 1, 0), (2, 8, 3), (3, 13, 2)].map(|(id, kind, blocks)| Description {
+            id,
+            kind,
+            blocks,
+        });
+        let mut ans = Ans::new(Box::new(RamDisk::new("", 12, 4096)), &records, None).unwrap();
         let mut memory = Ram::new(0x1000, 0x2000);
         let mut sart = Sart::new(Bounds::Exclusive);
         let mut latch = InterruptLatch::new();
@@ -1346,7 +1355,13 @@ mod tests {
             ans.execute(1, &command, port, &mut sart).unwrap().status
         };
         let mut block = [0; 4096];
-        for (nsid, lba, fill) in [(1, 6, 0x11), (2, 0, 0x22), (2, 2, 0x33)] {
+        for (nsid, lba, fill) in [
+            (1, 6, 0x11),
+            (2, 0, 0x22),
+            (2, 2, 0x33),
+            (3, 0, 0x34),
+            (3, 1, 0x35),
+        ] {
             port.write(0x2000, &[fill; 4096]).unwrap();
             assert_eq!(io(&mut ans, &mut port, WRITE, nsid, lba), SUCCESS);
         }
@@ -1355,9 +1370,9 @@ mod tests {
         create.0[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
         // The provisioned layout, the growable namespace sized either as
         // zero (doFormatMedia without a burn-in count) or its extent.
-        let request = |sizes: [u32; 2]| {
+        let request = |sizes: [u32; 3]| {
             let mut data = alloc::vec![0; 4096];
-            data[..4].copy_from_slice(&2u32.to_le_bytes());
+            data[..4].copy_from_slice(&3u32.to_le_bytes());
             for (i, (record, blocks)) in records.iter().zip(sizes).enumerate() {
                 for (j, word) in [record.id, record.kind, blocks].into_iter().enumerate() {
                     let at = 4 + 12 * i + 4 * j;
@@ -1367,24 +1382,30 @@ mod tests {
             data
         };
         // Another layout, or creation options, refuse without an erase.
-        for (sizes, cdw10) in [([0, 4], 0), ([6, 4], 0), ([0, 3], 1)] {
+        for (sizes, cdw10) in [([0, 4, 2], 0), ([6, 4, 2], 0), ([0, 3, 2], 1)] {
             port.write(0x1000, &request(sizes)).unwrap();
             create.0[40] = cdw10;
             assert!(ans.execute(0, &create, &mut port, &mut sart).is_err());
             assert_eq!(ans.medium.erased_blocks(), 0);
         }
         create.0[40] = 0;
-        for sizes in [[0, 3], [7, 3]] {
+        for sizes in [[0, 3, 2], [7, 3, 2]] {
             port.write(0x1000, &request(sizes)).unwrap();
             let outcome = ans.execute(0, &create, &mut port, &mut sart).unwrap();
             assert_eq!(outcome.status, SUCCESS);
-            assert_eq!(ans.medium.erased_blocks(), 10);
+            assert_eq!(ans.medium.erased_blocks(), 7);
         }
-        for (nsid, lba) in [(1, 6), (2, 0), (2, 2)] {
+        for (nsid, lba, fill) in [
+            (1, 6, 0),
+            (2, 0, 0x22),
+            (2, 2, 0x33),
+            (3, 0, 0x34),
+            (3, 1, 0x35),
+        ] {
             port.write(0x2000, &[0xff; 4096]).unwrap();
             assert_eq!(io(&mut ans, &mut port, READ, nsid, lba), SUCCESS);
             port.read(0x2000, &mut block).unwrap();
-            assert_eq!(block, [0; 4096], "namespace {nsid} block {lba}");
+            assert_eq!(block, [fill; 4096], "namespace {nsid} block {lba}");
         }
         port.write(0x2000, &[0x44; 4096]).unwrap();
         assert_eq!(io(&mut ans, &mut port, WRITE, 2, 1), SUCCESS);
@@ -1392,7 +1413,7 @@ mod tests {
         assert_eq!(io(&mut ans, &mut port, READ, 2, 1), SUCCESS);
         port.read(0x2000, &mut block).unwrap();
         assert_eq!(block, [0x44; 4096]);
-        for (nsid, lba, fill) in [(2, 0, 0), (2, 1, 0x44), (2, 2, 0)] {
+        for (nsid, lba, fill) in [(2, 0, 0x22), (2, 1, 0x44), (2, 2, 0x33)] {
             assert_eq!(io(&mut ans, &mut port, READ, nsid, lba), SUCCESS);
             port.read(0x2000, &mut block).unwrap();
             assert_eq!(block, [fill; 4096]);
