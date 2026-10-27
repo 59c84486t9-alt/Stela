@@ -40,6 +40,7 @@ use stela_runtime::payload::{
 
 mod audio_check;
 mod disks;
+mod fat32;
 mod host_firmware;
 mod lan;
 mod network_check;
@@ -222,6 +223,11 @@ pub struct Run {
     /// guest skips ahead to its next timer.
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=10))]
     icount: Option<u8>,
+    /// Run the x86 guest on the host's processor through KVM instead of
+    /// translating it with TCG, with the host's CPU model unless `--cpu`
+    /// names one. Needs a Linux host with `/dev/kvm`.
+    #[arg(long, conflicts_with = "icount")]
+    kvm: bool,
     /// Attach a GPT disk image through virtio-blk, NVMe and AHCI, have the
     /// mount overwrite and read back one partition of each, and verify the
     /// mount's hashes and every byte of the images.
@@ -381,8 +387,9 @@ enum PayloadMode {
 #[derive(Clone, Copy, ValueEnum)]
 enum Display {
     None,
-    /// Show the UART in a host window; adds no guest display device.
-    Cocoa,
+    /// Show the UART in a host window, Cocoa's on macOS and GTK's elsewhere;
+    /// adds no guest display device.
+    Window,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -572,8 +579,10 @@ fn overlay(qemu: &Path, base: &Path, overlay: &Path) -> Result<()> {
     Ok(())
 }
 
-fn qemu_accelerator(icount: Option<u8>) -> &'static str {
-    if icount.is_some() {
+fn qemu_accelerator(icount: Option<u8>, kvm: bool) -> &'static str {
+    if kvm {
+        "kvm"
+    } else if icount.is_some() {
         "tcg,thread=single"
     } else {
         "tcg,thread=multi"
@@ -857,7 +866,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // log. System mode places the guest beside the window with LA57, which
     // the selected CPU exposes unless `--no-la57` hides it.
     let cpu = qemu_cpu(
-        arguments.cpu.as_deref(),
+        arguments.cpu.as_deref().or(arguments.kvm.then_some("host")),
         arguments.no_la57,
         usb || system
             || arguments.native_dma_check
@@ -887,7 +896,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         ))
         .args([
             "-accel",
-            qemu_accelerator(arguments.icount),
+            qemu_accelerator(arguments.icount, arguments.kvm),
             "-cpu",
             &cpu,
             "-smp",
@@ -1093,12 +1102,18 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .args(["-display", "none"])
             .arg("-serial")
             .arg(format!("file:{}", serial.display())),
-        Display::Cocoa => command
+        // Cocoa sizes its text console from the chardev; GTK's VTE console
+        // sizes itself and refuses the options.
+        Display::Window if cfg!(target_os = "macos") => command
             .args(["-display", "cocoa", "-chardev"])
             .arg(format!(
                 "vc,id=uart,cols=132,rows=50,logfile={}",
                 option_path(&serial)
             ))
+            .args(["-serial", "chardev:uart"]),
+        Display::Window => command
+            .args(["-display", "gtk", "-chardev"])
+            .arg(format!("vc,id=uart,logfile={}", option_path(&serial)))
             .args(["-serial", "chardev:uart"]),
     };
     match arguments.monitor {
@@ -1140,6 +1155,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
     let qemu_version = qemu_version(&qemu)?;
+    // Keep launch-time input identities: another build can replace these
+    // paths while a long restore is still running. Completion must not bind
+    // the old run to the replacement's bytes.
+    let qemu_binding = binding(&qemu)?;
+    let image_binding = binding(&image)?;
+    let source_binding = source.exists().then(|| binding(&source)).transpose()?;
 
     let started = Instant::now();
     let mut child = command
@@ -1154,7 +1175,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // The local launcher can be a shell wrapper. Observe its running image
     // after exec, keeping the launcher binding and QEMU version separately.
     std::thread::sleep(Duration::from_millis(10));
-    let qemu_process_image = process_image(child.id());
+    let qemu_process_image = process_image(child.id()).and_then(|path| binding(&path).ok());
     // A paused debugging session has no deadline.
     let limit = match arguments.gdb {
         Some(_) => Duration::MAX,
@@ -1278,7 +1299,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             json!(mount_exit.as_ref().and_then(|result| result.as_ref().ok()));
         Ok::<_, anyhow::Error>(report)
     });
-    let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
     let native_clock = arguments.native_clock_check.then(|| {
         let observation = native_clock_proof(&serial_text);
         json!({ "passed": observation.is_some()
@@ -1347,19 +1367,19 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     });
     let mut report = json!({
         "command": command_line,
-        "qemu": binding(&qemu)?,
+        "qemu": qemu_binding,
         "qemu_version": qemu_version,
         "host_firmware": host_firmware,
         "qemu_process_image": qemu_process_image,
-        "image": binding(&image)?,
-        "source": source.exists().then(|| binding(&source)).transpose()?,
+        "image": image_binding,
+        "source": source_binding,
         "usb_image": arguments.usb_image,
         "usb_serial": arguments.usb_image.as_ref().map(|_| &arguments.usb_serial),
         "usb_writable": arguments.usb_writable,
         "no_la57": arguments.no_la57,
         "qemu_host_cores": arguments.host_cores,
         "qemu_host_threads": arguments.host_threads,
-        "qemu_accelerator": qemu_accelerator(arguments.icount),
+        "qemu_accelerator": qemu_accelerator(arguments.icount, arguments.kvm),
         "native_dma": native_dma,
         "native_work": native_work,
         "native_irq_work": native_irq_work,
@@ -1565,8 +1585,9 @@ impl ReadAt for Range {
         self.bytes
     }
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
-        use std::os::unix::fs::FileExt;
-        self.file.read_exact_at(buffer, self.start + offset)
+        use std::io::{Read, Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(self.start + offset))?;
+        self.file.read_exact(buffer)
     }
 }
 
@@ -1639,31 +1660,11 @@ fn directory_bytes(path: &Path) -> Result<u64> {
 /// A raw FAT32 image of `volume`, without a partition table, which the
 /// firmware mounts whole.
 fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
-    ensure!(
-        cfg!(target_os = "macos"),
-        "volumes over {VVFAT_BYTES} bytes need a FAT32 image, which this host cannot make; \
-         build it with hdiutil on macOS"
-    );
     let bytes = directory_bytes(volume)?;
-    let size = (bytes + bytes / 8 + (64 << 20)).div_ceil(1 << 20);
-    let base = output.join("volume");
-    exec(
-        Process::new("hdiutil")
-            .args([
-                "create",
-                "-quiet",
-                "-fs",
-                "MS-DOS FAT32",
-                "-volname",
-                "STELA",
-            ])
-            .args(["-layout", "NONE", "-format", "UDTO", "-size"])
-            .arg(format!("{size}m"))
-            .arg("-srcfolder")
-            .arg(volume)
-            .arg(&base),
-    )?;
-    Ok(output.join("volume.cdr"))
+    let size = (bytes + bytes / 8 + (64 << 20)).next_multiple_of(1 << 20);
+    let image = output.join("volume.img");
+    fat32::write(volume, &image, size, "STELA")?;
+    Ok(image)
 }
 
 fn native_irq_work_verified(serial: &str) -> bool {
@@ -2071,10 +2072,11 @@ mod tests {
 
     #[test]
     fn actual_parallel_cpu_execution_is_default_and_icount_keeps_its_required_mode() {
-        assert_eq!(qemu_accelerator(None), "tcg,thread=multi");
+        assert_eq!(qemu_accelerator(None, false), "tcg,thread=multi");
         for shift in 0..=10 {
-            assert_eq!(qemu_accelerator(Some(shift)), "tcg,thread=single");
+            assert_eq!(qemu_accelerator(Some(shift), false), "tcg,thread=single");
         }
+        assert_eq!(qemu_accelerator(None, true), "kvm");
     }
 
     #[test]

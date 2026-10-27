@@ -30,6 +30,15 @@ fn collect(path: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn main() {
+    // `host_memory`: guest memory on the host's POSIX mappings, which hosted
+    // execution runs on. A std build elsewhere (Windows, for setup) has none
+    // and refuses such requests, as the UEFI build does without boot RAM.
+    println!("cargo::rustc-check-cfg=cfg(host_memory)");
+    if std::env::var_os("CARGO_FEATURE_STD").is_some()
+        && std::env::var_os("CARGO_CFG_UNIX").is_some()
+    {
+        println!("cargo::rustc-cfg=host_memory");
+    }
     let mut files = Vec::new();
     for input in INPUTS {
         println!("cargo:rerun-if-changed={input}");

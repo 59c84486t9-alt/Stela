@@ -966,6 +966,36 @@ mod tests {
         }
         assert_eq!(got, data);
     }
+    #[test]
+    fn an_optional_missing_global_manifest_sends_only_file_data_done() {
+        let mut answers = Answers::new(fixture(b"payload", false));
+        answers.store.prepare().unwrap();
+        let request = Value::dict([
+            ("DataType", Value::from("SourceBootObjectV4")),
+            (
+                "Arguments",
+                Value::dict([
+                    ("ImageName", Value::from("__GlobalManifest__")),
+                    ("Variant", Value::from("macOS Customer")),
+                    ("GlobalManifestPrefix", Value::from("centauri/centauri")),
+                    ("GlobalManifestOptional", Value::Boolean(true)),
+                ]),
+            ),
+        ]);
+        let mut job = Job::new(
+            1,
+            Some(2345),
+            request.clone(),
+            answers.plan(&request).unwrap(),
+        );
+        let mut stream = Memory::new(Vec::new(), 1 << 20);
+        while job.poll(&mut stream, &mut answers.store).is_pending() {}
+        stream.input = core::mem::take(&mut stream.output);
+        let mut frame = Framed::new(Endian::Big, Limits::default());
+        let done = receive(&mut frame, &mut stream).unwrap();
+        assert!(done.get("FileData").is_none());
+        assert!(done.required("FileDataDone").unwrap().boolean().unwrap());
+    }
     /// A stream that takes every byte lets one poll move a whole file of
     /// several FileData frames, and its end.
     #[test]

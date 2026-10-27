@@ -27,6 +27,10 @@ use stela_runtime::{
     net::{NetError, Stack, Transfer, stack::DOWNLOAD_BUFFER},
 };
 
+/// One restore-time opaque TCP relay window. TLS stays end to end between the
+/// original Apple guest process and its requested server.
+pub const RELAY_BUFFER: usize = 1 << 20;
+
 /// The host's network adapters and the loader root they are reached in.
 pub struct Links {
     pub devices: Vec<Adapter>,
@@ -154,6 +158,30 @@ impl HostNetwork {
 
     pub fn close(&mut self, transfer: Transfer) {
         self.stack.close(transfer);
+    }
+
+    /// Opens one opaque TCP stream for the restore reverse proxy.
+    pub fn connect(&mut self, host: &str, port: u16) -> Result<Transfer, NetError> {
+        self.stack.open_raw(host, port, RELAY_BUFFER)
+    }
+
+    /// Sends caller-retained opaque bytes, returning zero under backpressure.
+    pub fn relay_write(
+        &mut self,
+        transfer: &mut Transfer,
+        bytes: &[u8],
+    ) -> Result<usize, NetError> {
+        self.stack.write(transfer, bytes)
+    }
+
+    /// Receives opaque bytes. `take` owns framing and reports when the remote
+    /// close has completed the relay.
+    pub fn relay_read(
+        &mut self,
+        transfer: &mut Transfer,
+        take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
+    ) -> Result<bool, NetError> {
+        self.stack.read(transfer, take)
     }
 }
 

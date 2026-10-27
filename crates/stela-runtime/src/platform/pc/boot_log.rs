@@ -1021,8 +1021,8 @@ mod tests {
             Writer::open(&mut tiny),
             Err(BlockError::Unsupported(_))
         ));
-        assert_eq!(PARTITION_BYTES, 0x51_0000);
-        assert_eq!(OFFSET, 0x11_0000);
+        assert_eq!(PARTITION_BYTES, 0xc1_0000);
+        assert_eq!(OFFSET, 0x81_0000);
     }
 
     #[test]
@@ -1035,7 +1035,7 @@ mod tests {
                 .map(|&(offset, bytes)| Extent { offset, bytes })
                 .collect(),
         };
-        let size = 6 << 20;
+        let size = 16 << 20;
         assert_eq!(
             file_runs(&file(&[(0x10_0000, size)]), 512, PARTITION_BYTES),
             Ok(vec![(0x800, PARTITION_BYTES / 512)])

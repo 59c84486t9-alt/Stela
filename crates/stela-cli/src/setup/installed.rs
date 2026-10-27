@@ -211,7 +211,8 @@ pub(super) fn confirm(
     ensure!(
         info.guid.eq_ignore_ascii_case(guid),
         "{identifier} is not this install's {what} (partition {guid}); its identifier may have \
-         changed. Find the partition with that GUID (`diskutil info`) and pass it with {}",
+         changed. Find the partition with that GUID ({}) and pass it with {}",
+        super::host::PARTITION_LISTING,
         match role {
             Role::AppleRegion => "--target",
             Role::Nor => "--nor",
@@ -507,8 +508,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
             ))
         }
         Contents::Blank => notes.push(format!(
-            "{} is blank: install macOS onto it from recoveryOS (Disk Utility, then Reinstall \
-             macOS)",
+            "{} is blank: install macOS onto it with the Install macOS startup choice",
             region.identifier
         )),
         Contents::Other if request.erase_target => notes.push(format!(
@@ -561,7 +561,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let state_bytes = CAPACITY + sep_state::BYTES as usize;
     ensure!(
         area.bytes >= state_bytes as u64,
-        "{} is smaller than the {state_bytes:#x} bytes of the 1 MiB NOR image and the SEP's \
+        "{} is smaller than the {state_bytes:#x} bytes of the 8 MiB NOR image and the SEP's \
          state ({:#x} bytes also keep the optional boot log)",
         nor.identifier,
         boot_log::PARTITION_BYTES

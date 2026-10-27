@@ -1,0 +1,501 @@
+//! Linux: sysfs gives each block device's disk, size and serial number;
+//! `lsblk` lists the partitions with their GPT types, GUIDs and mounts;
+//! `udisksctl` mounts and unmounts where it runs, `mount` and `umount`
+//! otherwise. Partitions are read and written through `/dev`, and a USB is
+//! erased by writing setup's own layout to its whole disk.
+use super::{Cpu, Disk, FileSystem, Host, Partition, PartitionInfo, Volume};
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Deserializer};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+/// How setup gets the rights its raw reads and writes need.
+pub(crate) const ADMIN: &str = "sudo";
+/// A whole disk as `--usb` names it.
+pub(crate) const DISK_EXAMPLE: &str = "/dev/sdb";
+/// What lists each partition's GPT GUID.
+pub(crate) const PARTITION_LISTING: &str = "`lsblk -o NAME,PARTUUID`";
+
+/// The EFI system partition's GPT type, as `lsblk` prints it, and its MBR
+/// type.
+const ESP_TYPES: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
+/// `lsblk`'s columns, for [`Device`].
+const COLUMNS: &str = "NAME,TYPE,SIZE,MODEL,TRAN,RM,HOTPLUG,RO,MOUNTPOINT,PARTTYPE,PARTUUID,PKNAME";
+/// The `BLKRRPART` ioctl: reread the partition table.
+const BLKRRPART: u64 = 0x125f;
+
+/// The computer `stela setup` runs on.
+pub(crate) struct System;
+
+#[derive(Deserialize)]
+struct Listing {
+    blockdevices: Vec<Device>,
+}
+
+/// One block device in `lsblk --json --bytes` output.
+#[derive(Deserialize)]
+struct Device {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default, deserialize_with = "number")]
+    size: u64,
+    model: Option<String>,
+    tran: Option<String>,
+    #[serde(default, deserialize_with = "flag")]
+    rm: bool,
+    #[serde(default, deserialize_with = "flag")]
+    hotplug: bool,
+    #[serde(default, deserialize_with = "flag")]
+    ro: bool,
+    mountpoint: Option<String>,
+    parttype: Option<String>,
+    partuuid: Option<String>,
+    pkname: Option<String>,
+    #[serde(default)]
+    children: Vec<Device>,
+}
+
+impl Device {
+    /// Whether it, or a device on it, is mounted at `/`.
+    fn holds_root(&self) -> bool {
+        self.mountpoint.as_deref() == Some("/") || self.children.iter().any(Device::holds_root)
+    }
+
+    fn content(&self) -> String {
+        match self.parttype.as_deref() {
+            Some(kind) if ESP_TYPES.iter().any(|esp| esp.eq_ignore_ascii_case(kind)) => {
+                "EFI".into()
+            }
+            kind => kind.unwrap_or_default().into(),
+        }
+    }
+
+    fn mount(&self) -> Option<PathBuf> {
+        self.mountpoint
+            .as_deref()
+            .filter(|mount| mount.starts_with('/'))
+            .map(PathBuf::from)
+    }
+}
+
+/// lsblk before util-linux 2.33 prints flags as "0" and "1".
+fn flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Flag {
+        Bool(bool),
+        Text(String),
+    }
+    Ok(match Option::<Flag>::deserialize(deserializer)? {
+        Some(Flag::Bool(value)) => value,
+        Some(Flag::Text(text)) => text == "1",
+        None => false,
+    })
+}
+
+/// lsblk before util-linux 2.33 prints sizes as strings.
+fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Number(u64),
+        Text(String),
+    }
+    Ok(match Option::<Number>::deserialize(deserializer)? {
+        Some(Number::Number(value)) => value,
+        Some(Number::Text(text)) => text.parse().map_err(serde::de::Error::custom)?,
+        None => 0,
+    })
+}
+
+/// `lsblk`'s listing of `device`, or of every block device.
+fn lsblk(device: Option<&str>) -> Result<Vec<Device>> {
+    let mut command = Command::new("lsblk");
+    command.args(["--json", "--bytes", "--output", COLUMNS]);
+    if let Some(device) = device {
+        command.arg(format!("/dev/{device}"));
+    }
+    let output = command.output().context("cannot run lsblk")?;
+    ensure!(
+        output.status.success(),
+        "lsblk failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(serde_json::from_slice::<Listing>(&output.stdout)
+        .context("cannot read lsblk's listing")?
+        .blockdevices)
+}
+
+/// The block device `name`, which sysfs lists; `partition` says which kind.
+fn checked(name: &str, partition: bool) -> Result<()> {
+    let sys = Path::new("/sys/class/block").join(name);
+    ensure!(
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && sys.exists()
+            && sys.join("partition").exists() == partition,
+        "{name} is not a {} on this computer",
+        if partition {
+            "partition, such as sdb1 or nvme0n1p2,"
+        } else {
+            "whole disk, such as sdb or nvme0n1,"
+        }
+    );
+    Ok(())
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+/// Run `command`, or say what it printed.
+fn run(command: &mut Command) -> Result<()> {
+    let output = command
+        .output()
+        .with_context(|| format!("cannot run {:?}", command.get_program()))?;
+    ensure!(
+        output.status.success(),
+        "{:?} failed: {}",
+        command.get_program(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
+impl Host for System {
+    fn volume(&self, path: &Path) -> Result<Volume> {
+        use std::os::unix::fs::MetadataExt;
+        let filesystem;
+        let free_bytes;
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+            let mut info: libc::statfs = unsafe { std::mem::zeroed() };
+            // SAFETY: a NUL-terminated path and a zeroed out-structure.
+            if unsafe { libc::statfs(c_path.as_ptr(), &mut info) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("cannot inspect {}", path.display()));
+            }
+            // Linux superblock magic numbers.
+            filesystem = match info.f_type as u64 {
+                0x4d44 => FileSystem::Fat,
+                0x2011_bab0 => FileSystem::ExFat,
+                0x482b | 0x4858 => FileSystem::Hfs,
+                0x5346_544e | 0x7366_746e => FileSystem::Ntfs,
+                other => FileSystem::Other(format!("file system {other:#x}")),
+            };
+            free_bytes = info.f_bavail as u64 * info.f_bsize as u64;
+        }
+        // The block device holding the volume, and the disk holding that.
+        let device = fs::metadata(path)?.dev();
+        let (major, minor) = (libc::major(device), libc::minor(device));
+        let disk = fs::canonicalize(format!("/sys/dev/block/{major}:{minor}"))
+            .ok()
+            .and_then(|sys| {
+                let disk = if sys.join("partition").exists() {
+                    sys.parent()?
+                } else {
+                    &sys
+                };
+                disk.file_name()?.to_str().map(str::to_owned)
+            });
+        Ok(Volume {
+            filesystem,
+            free_bytes,
+            disk,
+        })
+    }
+
+    fn disks(&self) -> Result<Vec<Disk>> {
+        Ok(lsblk(None)?
+            .into_iter()
+            // A loop device stands in for a USB, as a disk image does on a
+            // Mac; read-only ones hold snaps and images, never a USB.
+            .filter(|d| d.kind == "disk" || d.kind == "loop" && !d.ro && d.size > 0)
+            .map(|d| {
+                let removable = d.rm
+                    || d.hotplug
+                    || d.kind == "loop"
+                    || matches!(d.tran.as_deref(), Some("usb" | "mmc"));
+                Disk {
+                    system: d.holds_root(),
+                    name: match d.model.as_deref().map(str::trim) {
+                        Some(model) if !model.is_empty() => model.to_owned(),
+                        _ if d.kind == "loop" => "loop device".into(),
+                        _ => String::new(),
+                    },
+                    internal: !removable,
+                    partitions: d
+                        .children
+                        .iter()
+                        .filter(|p| p.kind == "part")
+                        .map(|p| Partition {
+                            identifier: p.name.clone(),
+                            content: p.content(),
+                            mount: p.mount(),
+                        })
+                        .collect(),
+                    identifier: d.name,
+                }
+            })
+            .collect())
+    }
+
+    fn partition(&self, identifier: &str) -> Result<PartitionInfo> {
+        checked(identifier, true)?;
+        let device = lsblk(Some(identifier))?
+            .into_iter()
+            .next()
+            .with_context(|| format!("lsblk does not list {identifier}"))?;
+        Ok(PartitionInfo {
+            identifier: identifier.into(),
+            disk: device.pkname.clone().unwrap_or_default(),
+            guid: device
+                .partuuid
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_uppercase(),
+            bytes: device.size,
+            content: device.content(),
+            mount: device.mount(),
+            container: None,
+        })
+    }
+
+    fn serial(&self, disk: &str) -> Result<Option<String>> {
+        checked(disk, false)?;
+        // A loop device has no hardware, and no serial number.
+        let Ok(device) = fs::canonicalize(Path::new("/sys/block").join(disk).join("device")) else {
+            return Ok(None);
+        };
+        // A USB disk: its device's serial number string, which sysfs keeps
+        // beside the device's vendor and product IDs.
+        if let Some(usb) = device.ancestors().find(|dir| dir.join("idVendor").exists()) {
+            return Ok(read_trimmed(&usb.join("serial")));
+        }
+        // An NVMe namespace: its controller's serial number.
+        if let Some(serial) = read_trimmed(&device.join("serial")) {
+            return Ok(Some(serial));
+        }
+        // An ATA disk: its IDENTIFY serial, which udev records.
+        let output = Command::new("lsblk")
+            .args(["--nodeps", "--noheadings", "--output", "SERIAL"])
+            .arg(format!("/dev/{disk}"))
+            .output()
+            .context("cannot run lsblk")?;
+        Ok(
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                .filter(|serial| output.status.success() && !serial.is_empty()),
+        )
+    }
+
+    fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+        use std::os::unix::fs::FileExt;
+        checked(identifier, true)?;
+        let path = format!("/dev/{identifier}");
+        let file = fs::File::open(&path).with_context(|| {
+            format!(
+                "cannot read {path}; setup reads the installed disk's partitions as root ({ADMIN})"
+            )
+        })?;
+        let mut bytes = vec![0; length];
+        file.read_exact_at(&mut bytes, offset)?;
+        Ok(bytes)
+    }
+
+    fn write(&self, identifier: &str, offset: u64, bytes: &[u8]) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        checked(identifier, true)?;
+        let path = format!("/dev/{identifier}");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("cannot open {path} for writing ({ADMIN})"))?;
+        file.write_all_at(bytes, offset)?;
+        file.sync_data()?;
+        Ok(())
+    }
+
+    fn unmount(&self, partition: &PartitionInfo) -> Result<()> {
+        checked(&partition.identifier, true)?;
+        let device = format!("/dev/{}", partition.identifier);
+        let udisks = run(Command::new("udisksctl").args([
+            "unmount",
+            "--no-user-interaction",
+            "--block-device",
+            &device,
+        ]));
+        if let Err(udisks) = udisks {
+            run(Command::new("umount").arg(&device)).with_context(|| {
+                format!("udisksctl could not unmount {device} either: {udisks}")
+            })?;
+        }
+        Ok(())
+    }
+
+    fn mount(&self, identifier: &str) -> Result<PathBuf> {
+        checked(identifier, true)?;
+        let device = format!("/dev/{identifier}");
+        let udisks = run(Command::new("udisksctl").args([
+            "mount",
+            "--no-user-interaction",
+            "--block-device",
+            &device,
+        ]));
+        if let Err(udisks) = udisks {
+            // Without udisks, as root: a mount point of setup's own.
+            let mount = Path::new("/run/stela").join(identifier);
+            fs::create_dir_all(&mount)
+                .with_context(|| format!("cannot create {} ({ADMIN})", mount.display()))?;
+            run(Command::new("mount").arg(&device).arg(&mount))
+                .with_context(|| format!("udisksctl could not mount {device} either: {udisks}"))?;
+        }
+        self.partition(identifier)?
+            .mount
+            .with_context(|| format!("{device} was mounted nowhere"))
+    }
+
+    fn erase(&self, disk: &str, name: &str) -> Result<()> {
+        use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+        checked(disk, false)?;
+        for listed in self.disks()?.iter().filter(|d| d.identifier == disk) {
+            for mounted in listed.partitions.iter().filter(|p| p.mount.is_some()) {
+                self.unmount(&self.partition(&mounted.identifier)?)?;
+            }
+        }
+        let sys = Path::new("/sys/block").join(disk);
+        let sectors: u64 = read_trimmed(&sys.join("size"))
+            .and_then(|size| size.parse().ok())
+            .with_context(|| format!("sysfs gives no size for {disk}"))?;
+        let block_size: u32 = read_trimmed(&sys.join("queue/logical_block_size"))
+            .and_then(|size| size.parse().ok())
+            .with_context(|| format!("sysfs gives no block size for {disk}"))?;
+        // sysfs counts 512-byte sectors whatever the disk's block size.
+        let layout = crate::setup::format::layout(sectors * 512, block_size, name, &mut |bytes| {
+            getrandom::getrandom(bytes).context("the system's random generator failed")
+        })?;
+        let path = format!("/dev/{disk}");
+        // Exclusively: the kernel refuses while any partition is in use.
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_EXCL)
+            .open(&path)
+            .with_context(|| format!("cannot open {path} to erase it ({ADMIN})"))?;
+        super::write_layout(&mut file, &layout)?;
+        // The kernel reads the new partition table; udev, probing the disk
+        // after the write, may hold it briefly.
+        let mut reread = Err(std::io::Error::other("not tried"));
+        for _ in 0..10 {
+            // SAFETY: BLKRRPART takes no argument.
+            reread = match unsafe { libc::ioctl(file.as_raw_fd(), BLKRRPART as _) } {
+                0 => Ok(()),
+                _ => Err(std::io::Error::last_os_error()),
+            };
+            if reread.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        reread.with_context(|| {
+            format!(
+                "{disk} was erased, but the kernel did not read its new partition table (a loop \
+                 device needs partition scanning: losetup -P)"
+            )
+        })?;
+        drop(file);
+        let _ = Command::new("udevadm").arg("settle").status();
+        // The data volume: the disk's second partition, once udev names it.
+        let mut data = None;
+        for _ in 0..50 {
+            data = fs::read_dir(&sys)?.flatten().find_map(|entry| {
+                let number = read_trimmed(&entry.path().join("partition"))?;
+                (number == "2").then(|| entry.file_name().to_string_lossy().into_owned())
+            });
+            if data
+                .as_ref()
+                .is_some_and(|data| Path::new("/dev").join(data).exists())
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let data = data.with_context(|| format!("{disk} shows no data partition after erasing"))?;
+        self.mount(&data)?;
+        Ok(())
+    }
+
+    fn whole_disk(&self, usb: &Path) -> Result<Option<String>> {
+        if usb.is_dir() {
+            return Ok(None);
+        }
+        // `/dev/disk/by-id` and other links name the disk they point to.
+        let usb = fs::canonicalize(usb).unwrap_or_else(|_| usb.to_path_buf());
+        let Some(name) = usb.to_str() else {
+            return Ok(None);
+        };
+        let name = name.strip_prefix("/dev/").unwrap_or(name);
+        Ok(self
+            .disks()?
+            .into_iter()
+            .map(|disk| disk.identifier)
+            .find(|identifier| identifier == name))
+    }
+
+    fn cpu(&self) -> Result<Cpu> {
+        super::cpu()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lsblk_listings_old_and_new_name_esps_and_removable_disks() {
+        let new = r#"{"blockdevices": [
+            {"name": "sdb", "type": "disk", "size": 64023257088, "model": "Ultra Fit ",
+             "tran": "usb", "rm": true, "hotplug": true, "ro": false, "mountpoint": null,
+             "parttype": null, "partuuid": null, "pkname": null, "children": [
+                {"name": "sdb1", "type": "part", "size": 209715200, "model": null,
+                 "tran": null, "rm": true, "hotplug": true, "ro": false,
+                 "mountpoint": "/media/me/EFI",
+                 "parttype": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+                 "partuuid": "0a1b2c3d-0000-4000-8000-000000000001", "pkname": "sdb"},
+                {"name": "sdb2", "type": "part", "size": 63000000000, "model": null,
+                 "tran": null, "rm": true, "hotplug": true, "ro": false,
+                 "mountpoint": "[SWAP]", "parttype": "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f",
+                 "partuuid": null, "pkname": "sdb"}]}]}"#;
+        let old = r#"{"blockdevices": [
+            {"name": "sda", "type": "disk", "size": "500107862016", "model": "SSD",
+             "tran": "sata", "rm": "0", "hotplug": "0", "ro": "0", "mountpoint": null,
+             "parttype": null, "partuuid": null, "pkname": null, "children": [
+                {"name": "sda1", "type": "part", "size": "500000000000", "model": null,
+                 "tran": null, "rm": "0", "hotplug": "0", "ro": "0", "mountpoint": "/",
+                 "parttype": "0x83", "partuuid": null, "pkname": "sda"}]}]}"#;
+        let new: Listing = serde_json::from_str(new).unwrap();
+        let usb = &new.blockdevices[0];
+        assert!(usb.rm && !usb.holds_root());
+        assert_eq!(usb.children[0].content(), "EFI");
+        assert_eq!(
+            usb.children[0].mount(),
+            Some(PathBuf::from("/media/me/EFI"))
+        );
+        // Swap is no mounted volume.
+        assert_eq!(usb.children[1].mount(), None);
+        let old: Listing = serde_json::from_str(old).unwrap();
+        let ssd = &old.blockdevices[0];
+        assert_eq!(ssd.size, 500_107_862_016);
+        assert!(!ssd.rm && ssd.holds_root());
+        assert_eq!(ssd.children[0].content(), "0x83");
+    }
+}

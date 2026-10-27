@@ -513,10 +513,7 @@ pub(super) fn update_os(
             environment,
             &record,
             &build,
-            record
-                .active_medium()
-                .or(record.media.last())
-                .map(|medium| medium.volume.as_path()),
+            record.pieces_volume(),
             ipsw,
             &restore_bundles(&record.install_machines()),
             recovery_bytes,

@@ -7,7 +7,6 @@
 //! and uses another only when asked (`--new-ecid`).
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::io::Read;
 
 /// One machine's ECID; the record keeps it as `0x` and 16 digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,10 +35,9 @@ impl Ecid {
 
     /// A fresh random, nonzero ECID from the operating system's generator.
     pub(super) fn generate() -> Result<Self> {
-        let mut random = std::fs::File::open("/dev/urandom").context("cannot open /dev/urandom")?;
         loop {
             let mut bytes = [0u8; 8];
-            random.read_exact(&mut bytes)?;
+            getrandom::getrandom(&mut bytes).context("the system's random generator failed")?;
             let ecid = u64::from_le_bytes(bytes);
             if ecid != 0 {
                 return Ok(Self(ecid));

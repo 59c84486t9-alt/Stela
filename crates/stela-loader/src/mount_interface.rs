@@ -31,7 +31,9 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// 5: `--external-disks` makes every host disk the engine leaves the guest's
 /// external drive, and `--storage` may share the USB with the install medium.
 /// Revision 6: [`CHOSEN_DISK`] stands for the partition Install macOS chose.
-pub const OPTIONS_REVISION: u32 = 6;
+/// Revision 7: erase installs select `--development-restore` with `--tss`,
+/// retaining the original DEV-board FDR failure policy without an FDR proxy.
+pub const OPTIONS_REVISION: u32 = 7;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";

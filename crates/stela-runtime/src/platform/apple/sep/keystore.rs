@@ -55,6 +55,7 @@
 //! 0xff to -1, then maps it to IOReturn 0xe00002bc (0x2d3a324, table
 //! 0x725990). No sepOS-specific authorization error is invented.
 mod keybag;
+mod reference_key;
 mod system_key;
 
 use super::{
@@ -159,7 +160,12 @@ impl KeyStore {
 
     /// Answer one AP request: read its message, write the reply message
     /// and return the reply frame.
-    pub fn request(&mut self, frame: Frame, payload: &mut dyn Payload) -> Result<Frame, Refusal> {
+    pub fn request(
+        &mut self,
+        frame: Frame,
+        payload: &mut dyn Payload,
+        entropy: &mut dyn super::Entropy,
+    ) -> Result<Frame, Refusal> {
         let refuse = |reason| Refusal::answered(reason, Answer::frame(failure(frame)));
         if frame.tag & REPLY != 0 {
             return Err(Refusal::unanswerable(
@@ -184,7 +190,7 @@ impl KeyStore {
         let message = Message::parse(&bytes).map_err(refuse)?;
         let mut fields = message.fields();
         if command == system_key::PERFORM_OPERATION {
-            let operation = match system_key::public_query(message.variant(), &mut fields) {
+            let operation = match system_key::operation(message.variant(), &mut fields) {
                 Ok(operation) => operation,
                 Err(reason) => {
                     self.diagnostics.record(system_key::diagnostic(
@@ -197,10 +203,19 @@ impl KeyStore {
             let keys = self
                 .system_keys
                 .as_mut()
-                .ok_or_else(|| refuse("SEP system identity requires provisioned machine roots"))?;
-            let public = keys.public(operation).map_err(refuse)?;
+                .ok_or_else(|| refuse("SEP keystore requires provisioned machine roots"))?;
+            let public = match keys.perform(operation, entropy) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    self.diagnostics.record(system_key::diagnostic(
+                        message.variant(),
+                        &mut message.fields(),
+                    ));
+                    return Err(refuse(reason));
+                }
+            };
             let mut reply_fields = (public.len() as u32).to_le_bytes().to_vec();
-            reply_fields.extend_from_slice(public);
+            reply_fields.extend_from_slice(&public);
             reply_fields.resize(reply_fields.len().next_multiple_of(4), 0);
             let reply = message.reply(&reply_fields);
             payload.output(&reply).map_err(refuse)?;
@@ -437,7 +452,10 @@ pub(crate) mod tests {
 
     // Authored encoding of the source-recovered public SIK dictionary:
     // SET { SEQUENCE { "skg", 1 }, { "skt", 1 }, { "o", "oskgp" } }.
-    pub(crate) const SIK_QUERY: &[u8] = b"\x31\x20\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01\x30\x0a\x0c\x01o\x0c\x05oskgp";
+    /// As run12's restore ramdisk sent it: ascending keys `o`, `skg`, `skt`.
+    pub(crate) const SIK_QUERY: &[u8] = b"\x31\x20\x30\x0a\x0c\x01o\x0c\x05oskgp\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01";
+    /// The same pairs in DER's encoded-pair order, which the AP never sends.
+    const DER_ORDER_QUERY: &[u8] = b"\x31\x20\x30\x08\x0c\x03skg\x02\x01\x01\x30\x08\x0c\x03skt\x02\x01\x01\x30\x0a\x0c\x01o\x0c\x05oskgp";
 
     pub(crate) fn system_request(version: u32, query: &[u8]) -> Vec<u8> {
         system_request_with_operation(version, 2, query)
@@ -461,6 +479,246 @@ pub(crate) mod tests {
         let hash = digest(&request);
         request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
         request
+    }
+
+    // Authored from libFDR arm64e 8ae18..8aff8, its resolved outlined
+    // helpers and the caller at 1630..1974. Ascending UTF8 key names:
+    // {bc: 13, kt: 5, o: "oc", rko: 1}; no captured secrets or Apple bytes.
+    const REFERENCE_CREATE: &[u8] = b"\x31\x25\x30\x07\x0c\x02bc\x02\x01\x0d\x30\x07\x0c\x02kt\x02\x01\x05\x30\x07\x0c\x01o\x0c\x02oc\x30\x08\x0c\x03rko\x02\x01\x01";
+
+    #[test]
+    fn source_shaped_constructor_returns_reopenable_keys_and_advances_to_attestation() {
+        for version in [1, 2] {
+            for kind in [4, 5] {
+                let root = Zeroizing::new([1; 32]);
+                let mut keystore = KeyStore::with_system_keys(root.clone());
+                let mut query = REFERENCE_CREATE.to_vec();
+                query[19] = kind;
+                let request = system_request_with_operation(version, 0, &query);
+                let sent = frame(system_key::PERFORM_OPERATION, 26, request.len());
+                let (reply, output) =
+                    ask_with_entropy(&mut keystore, sent, request, &mut |bytes: &mut [u8]| {
+                        bytes.fill(2);
+                        Ok(())
+                    });
+                let reply = reply.unwrap();
+                assert_eq!(reply.parameter, 0);
+                assert_eq!(reply.opcode, sent.opcode);
+                assert_eq!(reply.data as usize >> LENGTH_SHIFT, output.len());
+                let parsed = Message::parse(&output).unwrap();
+                assert_eq!(parsed.variant(), 0);
+                let mut fields = parsed.fields();
+                let blob = fields.blob().unwrap();
+                fields.end().unwrap();
+                reference_key::ReferenceKey::open(&root, blob).unwrap();
+                assert_eq!(keystore.diagnostics().count(), 0);
+                // Source helper 5c61c inserts the ENTIRE constructor reply
+                // as rk, not just its nested public metadata dictionary.
+                let params = reference_key::tests::attestation_parameters(blob);
+                let request = system_request_with_operation(version, 0, &params);
+                let sent = frame(system_key::PERFORM_OPERATION, 27, request.len());
+                let (reply, output) = ask(&mut keystore, sent, request);
+                assert_eq!(reply.unwrap().parameter, 0);
+                let parsed = Message::parse(&output).unwrap();
+                let mut fields = parsed.fields();
+                let signature = p256::ecdsa::Signature::from_der(fields.blob().unwrap()).unwrap();
+                fields.end().unwrap();
+                let key = reference_key::ReferenceKey::open(&root, blob).unwrap();
+                let public = keystore
+                    .system_keys
+                    .as_mut()
+                    .unwrap()
+                    .public(system_key::PublicQuery::Identity)
+                    .unwrap();
+                let verifier = p256::ecdsa::VerifyingKey::from_sec1_bytes(public).unwrap();
+                use p256::ecdsa::signature::Verifier;
+                verifier.verify(&key.public(), &signature).unwrap();
+                let mut wrong = key.public();
+                wrong[10] ^= 1;
+                assert!(verifier.verify(&wrong, &signature).is_err());
+                assert_eq!(keystore.diagnostics().count(), 0);
+                // A fresh owner with the same machine roots signs the same
+                // reference. The signature never authorizes another root.
+                let params = reference_key::tests::attestation_parameters(blob);
+                let mut reopened = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+                let request = system_request_with_operation(version, 0, &params);
+                let (reply, repeated) = ask(
+                    &mut reopened,
+                    frame(system_key::PERFORM_OPERATION, 28, request.len()),
+                    request,
+                );
+                assert_eq!(reply.unwrap().parameter, 0);
+                assert_eq!(output, repeated);
+                let mut other = KeyStore::with_system_keys(Zeroizing::new([2; 32]));
+                let request = system_request_with_operation(version, 0, &params);
+                let (reply, output) = ask(
+                    &mut other,
+                    frame(system_key::PERFORM_OPERATION, 29, request.len()),
+                    request,
+                );
+                assert_eq!(
+                    reply.unwrap_err().reason,
+                    "SEP reference-key authentication failed"
+                );
+                assert!(output.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn reference_signing_roundtrips_original_dictionary_in_both_ipc_versions() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use sha2::Digest;
+        for version in [1, 2] {
+            let root = Zeroizing::new([1; 32]);
+            let blob = reference_key::ReferenceKey::create(&root, 5, &mut |bytes: &mut [u8]| {
+                bytes.fill(2);
+                Ok(())
+            })
+            .unwrap();
+            let digest: [u8; 32] = sha2::Sha256::digest(b"CSR data to be hashed by libFDR").into();
+            let params = reference_key::tests::signing_parameters(&blob, &digest);
+            let request = system_request_with_operation(version, 0, &params);
+            let sent = frame(system_key::PERFORM_OPERATION, 30, request.len());
+            let mut keystore = KeyStore::with_system_keys(root.clone());
+            let (reply, output) = ask(&mut keystore, sent, request);
+            assert_eq!(reply.unwrap().parameter, 0);
+            let message = Message::parse(&output).unwrap();
+            let mut fields = message.fields();
+            let result = fields.blob().unwrap();
+            fields.end().unwrap();
+            let mut outer = crate::platform::apple::sep::der::Cursor(result);
+            let signature = p256::ecdsa::Signature::from_der(outer.take(4).unwrap().value).unwrap();
+            outer.end().unwrap();
+            let key = reference_key::ReferenceKey::open(&root, &blob).unwrap();
+            let verifying = p256::ecdsa::VerifyingKey::from_sec1_bytes(&key.public()).unwrap();
+            verifying.verify_prehash(&digest, &signature).unwrap();
+            assert_eq!(keystore.diagnostics().count(), 0);
+            let mut wrong_root = KeyStore::with_system_keys(Zeroizing::new([2; 32]));
+            let params = reference_key::tests::signing_parameters(&blob, &digest);
+            let request = system_request_with_operation(version, 0, &params);
+            let (reply, output) = ask(
+                &mut wrong_root,
+                frame(system_key::PERFORM_OPERATION, 31, request.len()),
+                request,
+            );
+            assert_eq!(
+                reply.unwrap_err().reason,
+                "SEP reference-key authentication failed"
+            );
+            assert!(output.is_empty());
+            for bad_digest in [&digest[..31], &digest[..0]] {
+                let params = reference_key::tests::signing_parameters(&blob, bad_digest);
+                let request = system_request_with_operation(version, 0, &params);
+                let (reply, output) = ask(
+                    &mut keystore,
+                    frame(system_key::PERFORM_OPERATION, 32, request.len()),
+                    request,
+                );
+                assert_eq!(
+                    reply.unwrap_err().reason,
+                    "SEP reference-key digest must be SHA-256 sized"
+                );
+                assert!(output.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn reference_creation_requires_entropy_without_mutating_identity() {
+        let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+        let request = system_request(2, SIK_QUERY);
+        let (_, identity_before) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 19, request.len()),
+            request.clone(),
+        );
+        for version in [1, 2] {
+            let create = system_request_with_operation(version, 0, REFERENCE_CREATE);
+            let sent = frame(system_key::PERFORM_OPERATION, 23, create.len());
+            let (reply, output) = ask(&mut keystore, sent, create);
+            let refusal = reply.unwrap_err();
+            assert_eq!(refusal.reason, "test entropy unavailable");
+            assert_eq!(refusal.answer.unwrap().frame, failure(sent));
+            assert!(output.is_empty());
+            assert!(keystore.environment().is_none());
+            let diagnostics = keystore.diagnostics().collect::<Vec<_>>();
+            assert_eq!(diagnostics.len(), 1);
+            assert!(diagnostics[0].contains("parameter_operation=oc"));
+            assert!(diagnostics[0].contains("reference_key_type=Some(5)"));
+            assert!(diagnostics[0].contains("keys=bc,kt,o,rko parsed=true"));
+            assert!(
+                diagnostics[0]
+                    .contains("reference_key_class=Some(13) reference_key_options=Some(1)")
+            );
+        }
+        let (_, identity_after) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 19, request.len()),
+            request,
+        );
+        assert_eq!(identity_after, identity_before);
+        // Generation cannot proceed without actual provisioned machine roots.
+        let create = system_request_with_operation(2, 0, REFERENCE_CREATE);
+        let (reply, output) = ask(
+            &mut KeyStore::default(),
+            frame(system_key::PERFORM_OPERATION, 24, create.len()),
+            create,
+        );
+        assert_eq!(
+            reply.unwrap_err().reason,
+            "SEP keystore requires provisioned machine roots"
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn creation_rejects_bad_dictionary_and_public_query_transport_before_semantics() {
+        let mut bad = vec![REFERENCE_CREATE[..REFERENCE_CREATE.len() - 1].to_vec()];
+        let mut duplicate = REFERENCE_CREATE.to_vec();
+        duplicate[15..17].copy_from_slice(b"bc");
+        bad.push(duplicate);
+        let mut unsorted = REFERENCE_CREATE.to_vec();
+        unsorted[2..11].copy_from_slice(&REFERENCE_CREATE[11..20]);
+        unsorted[11..20].copy_from_slice(&REFERENCE_CREATE[2..11]);
+        bad.push(unsorted);
+        let mut missing = REFERENCE_CREATE[..29].to_vec();
+        missing[1] = 27;
+        bad.push(missing);
+        for index in [10, 19, 38] {
+            // negative class/type/options are not u32
+            let mut negative = REFERENCE_CREATE.to_vec();
+            negative[index] = 0x80;
+            bad.push(negative);
+        }
+        for (index, value) in [(10, 12), (19, 7), (38, 2)] {
+            let mut unsupported = REFERENCE_CREATE.to_vec();
+            unsupported[index] = value;
+            bad.push(unsupported);
+        }
+        let mut mixed = REFERENCE_CREATE.to_vec();
+        mixed[1] += 10;
+        mixed.extend_from_slice(&SIK_QUERY[24..]); // public-only skt
+        bad.push(mixed);
+        let mut requests: Vec<_> = bad
+            .iter()
+            .map(|q| system_request_with_operation(2, 0, q))
+            .collect();
+        // The read-only kernel SIK transport cannot authorize creation.
+        requests.push(system_request(2, REFERENCE_CREATE));
+        let mut forged = system_request_with_operation(2, 0, REFERENCE_CREATE);
+        forged[DIGEST_START] ^= 1;
+        requests.push(forged);
+        for request in requests {
+            let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
+            let sent = frame(system_key::PERFORM_OPERATION, 25, request.len());
+            let (reply, output) = ask(&mut keystore, sent, request);
+            let refusal = reply.unwrap_err();
+            assert_ne!(refusal.reason, "test entropy unavailable");
+            assert_eq!(refusal.answer.unwrap().frame, failure(sent));
+            assert!(output.is_empty());
+            assert!(keystore.environment().is_none());
+        }
     }
 
     #[test]
@@ -495,8 +753,8 @@ pub(crate) mod tests {
     fn unsupported_system_metadata_is_sanitized_and_keeps_failure_semantics() {
         let mut keystore = KeyStore::with_system_keys(Zeroizing::new([1; 32]));
         let mut query = SIK_QUERY.to_vec();
-        query[11] = 4;
-        query[21] = 3;
+        query[23] = 4;
+        query[33] = 3;
         let request = system_request_with_operation(2, 7, &query);
         let (reply, output) = ask(
             &mut keystore,
@@ -508,9 +766,21 @@ pub(crate) mod tests {
         assert_eq!(
             keystore.diagnostics().collect::<Vec<_>>(),
             [
-                "sks refused command=0x22 variant=0 handle=Some(4294967295) operation=Some(7) parameter_operation=oskgp system_key_type=Some(3) reference_key_type=None generation=Some(4) parsed=true"
+                "sks refused command=0x22 variant=0 handle=Some(4294967295) operation=Some(7) parameter_operation=oskgp system_key_type=Some(3) reference_key_type=None generation=Some(4) keys=o,skg,skt parsed=true reference_key_class=None reference_key_options=None"
             ]
         );
+        // The encoder's pair order is reported, not refused, so a request
+        // the strict parser rejects as unsorted still shows which it was.
+        let request = system_request_with_operation(2, 0, DER_ORDER_QUERY);
+        let (reply, _) = ask(
+            &mut keystore,
+            frame(system_key::PERFORM_OPERATION, 20, request.len()),
+            request,
+        );
+        assert!(reply.is_err());
+        let diagnostics = keystore.diagnostics().collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("keys=skg,skt,o parsed=true"));
         // Guest-controlled unknown strings and opaque parameter data must
         // never be copied into diagnostics, even when DER parsing succeeds.
         let query = b"\x31\x11\x30\x0f\x0c\x01o\x0c\x0aDO-NOT-LOG";
@@ -524,7 +794,7 @@ pub(crate) mod tests {
         let diagnostics = keystore.diagnostics().collect::<Vec<_>>();
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].contains("parameter_operation=unknown"));
-        assert!(diagnostics[0].contains("parsed=true"));
+        assert!(diagnostics[0].contains("keys=o parsed=true"));
         assert!(!diagnostics[0].contains("DO-NOT-LOG"));
         assert!(!diagnostics[0].contains("1311768467463790320")); // session
         assert_eq!(keystore.diagnostics().count(), 0);
@@ -595,19 +865,20 @@ pub(crate) mod tests {
     #[test]
     fn unsupported_or_malformed_system_queries_never_publish_success() {
         let mut dictionaries = vec![vec![], SIK_QUERY[..SIK_QUERY.len() - 1].to_vec()];
-        for index in [11, 21, 33] {
+        for index in [23, 33, 13] {
             // generation, type and operation
             let mut bad = SIK_QUERY.to_vec();
             bad[index] ^= 1;
             dictionaries.push(bad);
         }
         let mut duplicate = SIK_QUERY.to_vec();
-        duplicate[16..19].copy_from_slice(b"skg");
+        duplicate[28..31].copy_from_slice(b"skg");
         dictionaries.push(duplicate);
         let mut unsorted = SIK_QUERY.to_vec();
-        unsorted[2..12].copy_from_slice(&SIK_QUERY[12..22]);
-        unsorted[12..22].copy_from_slice(&SIK_QUERY[2..12]);
+        unsorted[14..24].copy_from_slice(&SIK_QUERY[24..34]);
+        unsorted[24..34].copy_from_slice(&SIK_QUERY[14..24]);
         dictionaries.push(unsorted);
+        dictionaries.push(DER_ORDER_QUERY.to_vec());
         let mut trailing = SIK_QUERY.to_vec();
         trailing.push(0);
         dictionaries.push(trailing);
@@ -644,7 +915,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             result.unwrap_err().reason,
-            "SEP system identity requires provisioned machine roots"
+            "SEP keystore requires provisioned machine roots"
         );
         assert!(output.is_empty());
     }
@@ -654,11 +925,25 @@ pub(crate) mod tests {
         frame: Frame,
         input: Vec<u8>,
     ) -> (Result<Frame, Refusal>, Vec<u8>) {
+        ask_with_entropy(keystore, frame, input, &mut |_: &mut [u8]| {
+            Err("test entropy unavailable")
+        })
+    }
+
+    fn ask_with_entropy(
+        keystore: &mut KeyStore,
+        frame: Frame,
+        input: Vec<u8>,
+        entropy: &mut dyn super::super::Entropy,
+    ) -> (Result<Frame, Refusal>, Vec<u8>) {
         let mut buffers = Buffers {
             input,
             output: Vec::new(),
         };
-        (keystore.request(frame, &mut buffers), buffers.output)
+        (
+            keystore.request(frame, &mut buffers, entropy),
+            buffers.output,
+        )
     }
 
     #[test]

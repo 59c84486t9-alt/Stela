@@ -78,7 +78,7 @@ fn sector_blocks(device: &dyn BlockDevice) -> Result<(u64, u32), String> {
         ));
     }
     if identity.read_only || identity.blocks * u64::from(block_size) < CAPACITY as u64 {
-        return Err("the NOR partition is read-only or smaller than the 1 MiB image".into());
+        return Err("the NOR partition is read-only or smaller than the 8 MiB image".into());
     }
     Ok(((SECTOR_SIZE / block_size as usize) as u64, block_size))
 }
@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn a_blank_partition_is_initialized_and_sectors_persist() {
-        let mut disk = RamDisk::new("nor", 2048, 512);
+        let mut disk = RamDisk::new("nor", CAPACITY as u64 / 512, 512);
         let (image, fresh) = load(&mut disk).unwrap();
         assert!(fresh);
         assert_eq!(&disk.bytes[..CAPACITY], image.bytes());
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn a_saved_bank_goes_to_the_next_bank_and_survives_a_reload() {
         use super::super::nvram::{Partition, Variables};
-        let mut disk = RamDisk::new("nor", 2048, 512);
+        let mut disk = RamDisk::new("nor", CAPACITY as u64 / 512, 512);
         let (mut image, _) = load(&mut disk).unwrap();
         let mut variables = Variables::parse(image.bank(0).unwrap()).unwrap();
         variables
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn foreign_and_small_partitions_are_refused() {
-        let mut foreign = RamDisk::new("x", 2048, 512);
+        let mut foreign = RamDisk::new("x", CAPACITY as u64 / 512, 512);
         foreign.bytes[7] = 1;
         assert!(load(&mut foreign).is_err());
         assert_eq!(foreign.bytes[7], 1);
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn loading_torn_banks_preserves_disk_bytes_until_the_guest_syncs() {
-        let mut disk = RamDisk::new("nor", 2048, 512);
+        let mut disk = RamDisk::new("nor", CAPACITY as u64 / 512, 512);
         let (image, _) = load(&mut disk).unwrap();
         let first = super::super::ANVRAM.0 as usize;
         // Neither bank validates: bank 0 has an incomplete payload; bank

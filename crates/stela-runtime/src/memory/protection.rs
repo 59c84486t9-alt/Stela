@@ -1,6 +1,6 @@
 //! Changing the protection of owned guest data pages.
 use super::OwnedMemory;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use super::{MemoryRegion, domain};
 
 /// Maximum data rights supplied by the address-space loader. Omitted entries
@@ -15,7 +15,7 @@ pub struct DataProtectionLimit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtectionError {
     InvalidRange,
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     PlatformUnavailable,
     UnmappedRange,
     MaximumProtection,
@@ -42,7 +42,7 @@ impl OwnedMemory {
     /// size; allocation padding may be protected but stays outside the
     /// byte-access bounds. Source snapshots would need invalidation and are
     /// refused. The caller excludes concurrent translated execution.
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub fn protect_data(
         &mut self,
         address: u64,
@@ -73,7 +73,7 @@ impl OwnedMemory {
         )
     }
 
-    #[cfg(not(feature = "std"))]
+    #[cfg(not(host_memory))]
     pub fn protect_data(
         &mut self,
         address: u64,
@@ -85,7 +85,7 @@ impl OwnedMemory {
         Err(ProtectionError::PlatformUnavailable)
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) fn protect_data_with(
         &mut self,
         address: u64,
@@ -98,7 +98,7 @@ impl OwnedMemory {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) fn protect_data_with_service(
         &mut self,
         address: u64,
@@ -233,7 +233,7 @@ impl OwnedMemory {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 pub(super) fn host_protection(readable: bool, writable: bool) -> i32 {
     (if readable {
         libc::PROT_READ

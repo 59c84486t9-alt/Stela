@@ -25,8 +25,13 @@ stela-compiler.workspace = true
 stela-drivers = { workspace = true, features = ["ram-disk"] }
 stela-runtime.workspace = true
 stela-loader.workspace = true
+aes = "0.8"
 base64 = "0.22"
-hpke = { version = "0.13", default-features = false, features = ["alloc", "p256"] }
+ctr = "0.9"
+getrandom = "0.2"
+hkdf = "0.12"
+hmac = "0.12"
+hpke ={ version = "0.13", default-features = false, features = ["alloc", "p256"] }
 p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 plist = "1"
 zeroize = "1"
@@ -34,6 +39,16 @@ libc.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha1 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate"] }
+
+# Setup's disk backend on Windows: storage and volume control codes.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_SystemInformation",
+] }
 
 [dev-dependencies]
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }

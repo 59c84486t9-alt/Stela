@@ -75,12 +75,16 @@ pub(super) fn spi_nor(
     if flash.cells32("ranges").as_deref() != Some(&[0, 0, nor::CAPACITY as u32]) {
         return Err("unsupported NOR ranges".into());
     }
-    for (name, (offset, size)) in [
-        ("firmware", nor::FIRMWARE),
-        ("anvram", nor::ANVRAM),
-        ("syscfg", nor::SYSCFG),
+    for (name, regions) in [
+        ("firmware", nor::FIRMWARE.as_slice()),
+        ("anvram", core::slice::from_ref(&nor::ANVRAM)),
+        ("syscfg", nor::SYSCFG.as_slice()),
     ] {
-        if flash.child(name).and_then(|n| n.cells32("reg")).as_deref() != Some(&[offset, size]) {
+        let expected = regions
+            .iter()
+            .flat_map(|&(offset, size)| [offset, size])
+            .collect::<Vec<_>>();
+        if flash.child(name).and_then(|n| n.cells32("reg")) != Some(expected) {
             return Err(format!(
                 "NOR {name} lacks its supported boot-firmware partition"
             ));
@@ -456,14 +460,18 @@ mod tests {
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let partitions: Vec<_> = [
-            ("firmware", nor::FIRMWARE),
-            ("anvram", nor::ANVRAM),
-            ("syscfg", nor::SYSCFG),
+            ("firmware", nor::FIRMWARE.as_slice()),
+            ("anvram", core::slice::from_ref(&nor::ANVRAM)),
+            ("syscfg", nor::SYSCFG.as_slice()),
         ]
         .into_iter()
-        .map(|(name, (offset, size))| {
+        .map(|(name, regions)| {
+            let registers = regions
+                .iter()
+                .flat_map(|&(offset, size)| [offset, size])
+                .collect::<Vec<_>>();
             encode(
-                &[("name", name.as_bytes()), ("reg", &words(&[offset, size]))],
+                &[("name", name.as_bytes()), ("reg", &words(&registers))],
                 &[],
             )
         })

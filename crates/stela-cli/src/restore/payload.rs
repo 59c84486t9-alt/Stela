@@ -59,6 +59,14 @@ fn restored_members<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
 /// ([`components::system_volume`]).
 pub const RECOVERY_COMMENT: &[u8] = b"Stela recovery members";
 
+/// Whether the IPSW at `image` holds the macOS system image an erase
+/// restore installs: every IPSW but a recovery archive [`trim`] wrote.
+pub fn holds_system_image(image: &Path) -> Result<bool> {
+    let archive = ZipArchive::new(File::open(image)?)
+        .with_context(|| format!("{} is not an IPSW", image.display()))?;
+    Ok(archive.comment() != RECOVERY_COMMENT)
+}
+
 fn select<R: Read + Seek>(archive: &mut ZipArchive<R>, model: &str) -> Result<Selection> {
     let recovery = archive.comment() == RECOVERY_COMMENT;
     select_scope(archive, model, recovery)

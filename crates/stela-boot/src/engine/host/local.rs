@@ -234,8 +234,8 @@ pub(crate) const XSTATE_SUPPORTED_MASK_OFFSET: usize = core::mem::offset_of!(Loc
     + core::mem::offset_of!(super::super::xstate::EntryAbi, supported_mask);
 pub(crate) const XSTATE_AVAILABLE_OFFSET: usize = core::mem::offset_of!(Local, xstate)
     + core::mem::offset_of!(super::super::xstate::EntryAbi, xsave_available);
-pub(crate) const XSTATE_MSR_FLAGS_OFFSET: usize = core::mem::offset_of!(Local, xstate)
-    + core::mem::offset_of!(super::super::xstate::EntryAbi, msr_flags);
+pub(crate) const XSTATE_EXTENDED_OFFSET: usize = core::mem::offset_of!(Local, xstate)
+    + core::mem::offset_of!(super::super::xstate::EntryAbi, extended);
 pub(crate) const XSTATE_ACTIVE_OFFSET: usize = core::mem::offset_of!(Local, xstate_active);
 pub(super) const HELPER_RSP_OFFSET: usize = core::mem::offset_of!(Local, helper_rsp);
 
@@ -254,8 +254,9 @@ pub(crate) unsafe fn configure_xstate(
     if !local.this.is_null() || local.xstate.image_bytes != 0 {
         return Err(super::super::xstate::LayoutError::AlreadyInstalled);
     }
-    owner.check()?;
+    let format = owner.check()?;
     local.xstate = *owner.abi();
+    local.xstate.extended = u64::from(format != super::super::xstate::SaveFormat::Fxsave);
     Ok(())
 }
 

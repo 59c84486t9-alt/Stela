@@ -348,6 +348,51 @@ impl<L: Link, C: Clock> Stack<L, C> {
         })
     }
 
+    /// Opens an unframed TCP stream. The caller supplies every application
+    /// byte later through [`Self::write`] and decides when an idle connection
+    /// ends. This is the transport boundary for protocols whose TLS and
+    /// request framing belong to the peer rather than Stela.
+    pub fn open_raw(&mut self, host: &str, port: u16, buffer: usize) -> Result<Transfer, NetError> {
+        if port == 0 {
+            return Err(NetError::Invalid("TCP destination port zero"));
+        }
+        let destination = alloc::format!("{host}:{port}");
+        let mut transfer = self.open(&destination, Vec::new(), buffer)?;
+        self.sockets
+            .get_mut::<tcp::Socket>(transfer.socket)
+            .set_timeout(None);
+        transfer.idle_at = u64::MAX;
+        Ok(transfer)
+    }
+
+    /// Sends as much of one caller-retained raw payload as the stream accepts.
+    /// Zero is backpressure while the connection is opening or its send window
+    /// is full; the caller must retry the unchanged bytes.
+    pub fn write(&mut self, transfer: &mut Transfer, bytes: &[u8]) -> Result<usize, NetError> {
+        self.poll()?;
+        if transfer.sent != transfer.request.len() {
+            return Err(NetError::Invalid("raw write before the fixed request"));
+        }
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let now = self.now();
+        let socket = self.sockets.get_mut::<tcp::Socket>(transfer.socket);
+        if socket.can_send() {
+            let sent = socket.send_slice(bytes).map_err(|_| NetError::Reset)?;
+            if sent != 0 {
+                transfer.idle_at = now.saturating_add(IDLE_US);
+            }
+            return Ok(sent);
+        }
+        match socket.state() {
+            tcp::State::Closed | tcp::State::CloseWait | tcp::State::LastAck => {
+                Err(NetError::Reset)
+            }
+            _ => Ok(0),
+        }
+    }
+
     /// Without waiting: polls the interface, sends what is left of the
     /// request, and hands what has arrived to `take` with whether the peer
     /// has closed. Returns `take`'s verdict that the response is complete.
@@ -375,7 +420,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
             return Ok(true);
         }
         match socket.state() {
-            tcp::State::Closed if transfer.sent == 0 => Err(NetError::Reset),
+            tcp::State::Closed if !transfer.request.is_empty() && transfer.sent == 0 => {
+                Err(NetError::Reset)
+            }
             tcp::State::SynSent | tcp::State::SynReceived => self.waiting(transfer, now),
             _ if !socket.may_recv() => take(&[], true),
             _ => self.waiting(transfer, now),
@@ -518,6 +565,8 @@ pub(crate) mod tests {
         request: Vec<u8>,
         reply: Option<(Vec<u8>, u64, u64)>,
         sent: u64,
+        raw: bool,
+        raw_sent: usize,
         frames: usize,
         drop_every: usize,
         swap_every: usize,
@@ -564,6 +613,8 @@ pub(crate) mod tests {
                 request: Vec::new(),
                 reply: None,
                 sent: 0,
+                raw: false,
+                raw_sent: 0,
                 frames: 0,
                 drop_every: 0,
                 swap_every: 0,
@@ -582,7 +633,12 @@ pub(crate) mod tests {
                     })
                     .unwrap();
             }
-            if self.reply.is_none() && self.request.windows(4).any(|w| w == b"\r\n\r\n") {
+            if self.raw {
+                while self.raw_sent < self.request.len() && socket.can_send() {
+                    let n = socket.send_slice(&self.request[self.raw_sent..]).unwrap();
+                    self.raw_sent += n;
+                }
+            } else if self.reply.is_none() && self.request.windows(4).any(|w| w == b"\r\n\r\n") {
                 let text = core::str::from_utf8(&self.request).unwrap();
                 let range = text.split("Range: bytes=").nth(1).unwrap();
                 let range = range.split("\r\n").next().unwrap();
@@ -709,5 +765,33 @@ pub(crate) mod tests {
         s.resolved[0].2 = now.wrapping_sub(RESOLVED_US);
         assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP));
         assert_eq!(s.resolve("10.0.2.2"), Ok(SERVER_IP));
+    }
+
+    #[test]
+    fn raw_stream_retains_partial_dynamic_writes_and_opaque_replies() {
+        let clock = TestClock::default();
+        let mut lan = Lan::new(0, clock.clone());
+        lan.raw = true;
+        let mut s = stack(lan, clock);
+        let payload: Vec<u8> = (0..200_000).map(|n| (n * 37) as u8).collect();
+        let mut transfer = s.open_raw("10.0.2.2", 80, 1 << 20).unwrap();
+        let (mut sent, mut received) = (0, Vec::new());
+        for _ in 0..1_000_000 {
+            if sent < payload.len() {
+                sent += s.write(&mut transfer, &payload[sent..]).unwrap();
+            }
+            let done = s
+                .read(&mut transfer, |bytes, _| {
+                    received.extend_from_slice(bytes);
+                    Ok(received.len() == payload.len())
+                })
+                .unwrap();
+            if done {
+                break;
+            }
+        }
+        assert_eq!(sent, payload.len());
+        assert_eq!(received, payload);
+        s.close(transfer);
     }
 }

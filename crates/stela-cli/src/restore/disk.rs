@@ -279,10 +279,11 @@ pub fn extract(image: &Path, output: &Path, selection: &Selection) -> Result<ser
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
 
     #[test]
+    #[cfg(unix)]
     fn guest_paths_follow_links_only_inside_the_volume() -> Result<()> {
+        use std::os::unix::fs::symlink;
         let volume = tempfile::tempdir()?;
         let root = volume.path();
         fs::create_dir_all(root.join("usr/lib"))?;

@@ -10,8 +10,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs::File,
-    io::Cursor,
-    os::unix::fs::FileExt,
+    io::{Cursor, Read, Seek, SeekFrom},
     path::PathBuf,
     rc::Rc,
 };
@@ -232,7 +231,9 @@ impl Ctx {
         let start = f.data_start();
         drop(f);
         let mut out = vec![0; len];
-        File::open(&self.ipsw)?.read_exact_at(&mut out, start + offset)?;
+        let mut file = File::open(&self.ipsw)?;
+        file.seek(SeekFrom::Start(start + offset))?;
+        file.read_exact(&mut out)?;
         Ok(out)
     }
     pub fn ticket_for(&self, name: &str) -> Option<&Ticket> {

@@ -1271,6 +1271,10 @@ pub const SPI: &str = "spi-1,spimc";
 pub const NOR: &str = "nor-flash,spi";
 /// Apple CHRP NVRAM service compatible.
 pub const NVRAM: &str = "nvram,chrp";
+/// The boot-firmware partition exposed through the modeled SPI NOR. The
+/// kernel's AppleEmbeddedSimpleSPINORFlasherDriver binds to this child and
+/// performs its reads, sector erases and page writes through the parent NOR.
+pub const BOOT_FIRMWARE: &str = "iboot,boot";
 /// GPIO output provider compatible.
 pub const GPIO: &str = "gpio,t8101";
 const GPIO_T6000: &str = "gpio,t6000";
@@ -1503,6 +1507,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         memory_resources::COMPATIBLE,
         SPI,
         NOR,
+        BOOT_FIRMWARE,
         NVRAM,
         SYSCFG,
         GPIO,

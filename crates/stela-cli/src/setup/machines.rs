@@ -200,6 +200,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     }
     next.tss |= command.tss;
     next.verify_on_read = command.verify_on_read;
+    next.install_image = command.install_image.or(next.install_image);
     let stale = next.drop_stale_bundles();
     let missing = next.missing_bundles(&record.build);
     // Every install restores from the medium with its own restore bundle.
@@ -351,13 +352,12 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
         } else {
             writeln!(
                 text,
-                "  TSS            off: nothing is sent to Apple's signing server"
+                "  TSS/FDR        off: no machine identity or nonces are sent to Apple's services"
             )?;
             if record.active_medium().is_some() {
                 writeln!(
                     text,
-                    "  choices.cfg    drops the Install macOS choice: the restore needs \
-                     --tss"
+                    "  choices.cfg    drops the Install macOS choice: the restore needs --tss"
                 )?;
             }
         }

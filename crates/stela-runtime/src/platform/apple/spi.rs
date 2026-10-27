@@ -717,7 +717,7 @@ mod tests {
         let bytes: alloc::vec::Vec<_> = (0..4)
             .map(|_| spi.read(RXDATA, Width::Word, &mut a).unwrap())
             .collect();
-        assert_eq!(bytes, [0xff, 0xef, 0x65, 0x14]);
+        assert_eq!(bytes, [0xff, 0xef, 0x60, 0x17]);
         write(&mut spi, PIN, CS_HIGH, &mut a);
         write(&mut spi, STATUS, 0x400023, &mut a);
         assert_eq!(spi.read(STATUS, Width::Word, &mut a), Ok(0));

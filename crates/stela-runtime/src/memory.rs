@@ -32,7 +32,7 @@ pub use allocation::{
     DataPermissions, DataPlacement, PendingDataAllocation,
 };
 pub use binding::{SharedBindingError, SharedMemoryConfig, SharedMemoryParticipant};
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 pub use mapping::FileMemoryRegionSpec;
 pub use protection::{DataProtectionLimit, ProtectionError};
 pub use published::PublishedReadOnlyRegion;
@@ -44,9 +44,9 @@ use alloc::{rc::Rc, sync::Arc};
 use anyhow::{Context, Result, bail, ensure};
 use binding::SharedBinding;
 use core::marker::PhantomData;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use mapping::page_rounded;
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use protection::host_protection;
 use serde::Serialize;
 use storage::NativeStorage;
@@ -123,7 +123,7 @@ pub struct OwnedMemory {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 pub fn host_page_size() -> Result<usize> {
     // SAFETY: sysconf has no pointer arguments or mutable Rust state.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -137,6 +137,12 @@ pub fn host_page_size() -> Result<usize> {
 pub fn host_page_size() -> Result<usize> {
     crate::platform::boot::ensure_live()?;
     Ok(4096)
+}
+
+/// Hosts without POSIX mappings back no guest memory.
+#[cfg(all(feature = "std", not(host_memory)))]
+pub fn host_page_size() -> Result<usize> {
+    bail!("UNSUPPORTED guest memory: it needs a host with POSIX memory mappings")
 }
 
 impl OwnedMemory {

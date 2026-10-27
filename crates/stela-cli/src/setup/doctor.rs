@@ -553,6 +553,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     if ipsw.is_some() {
         check_bundle_revision(environment, &record)?;
     }
+    record.install_image = command.install_image.or(record.install_image);
     let mut notes = Vec::new();
     let mut assigned: Vec<(String, Ecid)> = Vec::new();
     if ipsw.is_some() {
@@ -685,10 +686,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
                 environment,
                 &record,
                 &record.build,
-                record
-                    .active_medium()
-                    .or(record.media.last())
-                    .map(|medium| medium.volume.as_path()),
+                record.pieces_volume(),
                 ipsw,
                 &restore,
                 prepared.iter().map(|p| p.bytes).sum(),

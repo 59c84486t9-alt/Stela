@@ -22,7 +22,11 @@ const ENCAPSULATED_BYTES: usize = 65;
 /// A 32-byte AES-256 archive key and its 16-byte AES-GCM tag.
 const WRAPPED_BYTES: usize = 48;
 const ARCHIVE_KEY_BYTES: usize = 32;
-const AEA_TOOL: &str = "/usr/bin/aea";
+
+mod container;
+
+#[cfg(test)]
+mod benchmark;
 
 #[derive(Debug, Serialize)]
 pub struct Entry {
@@ -371,9 +375,6 @@ pub fn verify_key(metadata: &Metadata, pem: &str) -> Result<()> {
 }
 
 /// Decrypt an AEA1 profile-1 archive with its fetched FCS private key.
-///
-/// The archive key is unwrapped here; macOS `aea` authenticates and decrypts
-/// the payload. The key exists on disk only in a private temporary file.
 pub fn decrypt(input: &Path, key: &Path, output: &Path) -> Result<serde_json::Value> {
     let metadata = inspect(input)?;
     let pem = std::fs::read_to_string(key)?;
@@ -392,42 +393,28 @@ pub fn decrypt(input: &Path, key: &Path, output: &Path) -> Result<serde_json::Va
 }
 
 /// Decrypt the AEA1 profile-1 archive read from `input`, whose metadata is
-/// `metadata`, with its recipient key `pem` into the new file `output`: the
-/// archive streams through macOS `aea`, so an archive still inside its IPSW
-/// needs no copy of its own.
+/// `metadata`, with its recipient key `pem` into the new file `output`
+/// (`container`). The archive streams, so one still inside its IPSW needs no
+/// copy of its own; a failed decryption leaves no output.
 pub fn decrypt_reader(
     metadata: &Metadata,
     pem: &str,
     input: &mut impl Read,
     output: &Path,
 ) -> Result<u64> {
-    ensure!(!output.try_exists()?, "{} exists", output.display());
     ensure!(pem.len() <= MAX_KEY, "key exceeds 64 KiB");
     let archive_key = archive_key(metadata, pem)?;
-    let parent = output
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut key_file = tempfile::NamedTempFile::new_in(parent)?;
-    key_file.write_all(&archive_key)?;
-    let mut child = std::process::Command::new(AEA_TOOL)
-        .arg("decrypt")
-        .arg("-key")
-        .arg(key_file.path())
-        .arg("-o")
-        .arg(output)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("cannot run {AEA_TOOL}"))?;
-    let copied = {
-        let mut stdin = child.stdin.take().context("aea has no standard input")?;
-        std::io::copy(input, &mut stdin)
-    };
-    let status = child.wait()?;
-    drop(key_file);
-    ensure!(status.success(), "{AEA_TOOL} decrypt failed with {status}");
-    copied.context("cannot stream the archive into aea")?;
-    Ok(File::open(output)?.metadata()?.len())
+    let file = File::create_new(output).with_context(|| format!("{} exists", output.display()))?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    let decrypted = container::decrypt(&archive_key, &metadata.header_sha256, input, &mut writer)
+        .and_then(|bytes| {
+            writer.into_inner()?.sync_all()?;
+            Ok(bytes)
+        });
+    if decrypted.is_err() {
+        let _ = std::fs::remove_file(output);
+    }
+    decrypted
 }
 
 #[cfg(test)]

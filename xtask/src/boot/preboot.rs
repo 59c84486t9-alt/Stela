@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::FileExt,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -39,7 +39,8 @@ impl ReadAt for Range {
         self.bytes
     }
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
-        self.file.read_exact_at(buffer, self.start + offset)
+        self.file.seek(SeekFrom::Start(self.start + offset))?;
+        self.file.read_exact(buffer)
     }
 }
 
