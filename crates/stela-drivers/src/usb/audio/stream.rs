@@ -117,6 +117,8 @@ pub struct AudioDevice<T: Transport> {
     /// The last rate change's (requested, running) rates when the clock
     /// reported another; 0 running means it could not be read.
     pub clock_mismatch: Option<(u32, u32)>,
+    /// Linux `chip->sample_rate_read_error`: failed UAC1 rate reads.
+    rate_read_errors: u8,
     mixer: MixerState,
 }
 
@@ -175,6 +177,7 @@ impl<T: Transport> AudioDevice<T> {
             power_owners: Vec::new(),
             last_fault: None,
             clock_mismatch: None,
+            rate_read_errors: 0,
             mixer: MixerState::default(),
         })
     }
@@ -463,7 +466,14 @@ impl<T: Transport> AudioDevice<T> {
             )?;
             let format = &self.playback.as_ref().unwrap().format;
             if let Some(rates) = &format.endpoint_rates {
-                rates.apply(&mut self.transport, format.data.address, rate)?;
+                let running = rates.apply(
+                    &mut self.transport,
+                    format.data.address,
+                    rate,
+                    &mut self.rate_read_errors,
+                )?;
+                // Linux warns of a different rate and streams on.
+                self.clock_mismatch = (running != rate).then_some((rate, running));
             }
             format.init_pitch(&mut self.transport)?;
             self.transport.configure(Direction::Playback, &endpoints)?;
@@ -568,7 +578,13 @@ impl<T: Transport> AudioDevice<T> {
         self.transport
             .alternate(format.interface, format.alternate)?;
         if let Some(rates) = &format.endpoint_rates {
-            rates.apply(&mut self.transport, format.data.address, rate)?;
+            let running = rates.apply(
+                &mut self.transport,
+                format.data.address,
+                rate,
+                &mut self.rate_read_errors,
+            )?;
+            self.clock_mismatch = (running != rate).then_some((rate, running));
         }
         format.init_pitch(&mut self.transport)?;
         self.transport

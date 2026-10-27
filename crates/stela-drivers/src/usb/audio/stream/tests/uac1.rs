@@ -42,6 +42,7 @@ struct LegacyModel {
     short_rate: bool,
     wrong_rate: bool,
     fail_rate: bool,
+    fail_read: bool,
 }
 impl LegacyModel {
     fn new() -> Self {
@@ -52,6 +53,7 @@ impl LegacyModel {
             short_rate: false,
             wrong_rate: false,
             fail_rate: false,
+            fail_read: false,
         }
     }
 }
@@ -88,6 +90,9 @@ impl Control for LegacyModel {
                 return Ok(Vec::new());
             }
             assert_eq!(r[1], 0x81);
+            if self.fail_read {
+                return Err(BlockError::Timeout);
+            }
             let rate = if self.wrong_rate {
                 32_000
             } else {
@@ -217,26 +222,39 @@ fn uac1_collection_and_actual_endpoint_rates_drive_duplex_pcm_and_controls() {
     });
 }
 #[test]
-fn uac1_rate_failure_and_readback_mismatch_never_start_or_release_uncertain_dma() {
-    for fault in 0..3 {
+fn uac1_rate_is_set_and_read_back_like_set_sample_rate_v1() {
+    run(|a| {
+        a.transport.fail_rate = true;
+        let err = a.start_playback(0, 48_000, &[0; 192], true).unwrap_err();
+        assert_eq!(err, Error::Transport(BlockError::Timeout));
+        assert!(a.transport.inner.submitted.is_empty());
+        assert!(a.transport.inner.active.is_empty());
+        assert_eq!(a.transport.inner.alternates.last(), Some(&(3, 0)));
+    });
+    // A different rate is noted and streaming goes on; a short reply keeps
+    // the rest of what was sent.
+    for (short, wrong, mismatch) in [(true, false, None), (false, true, Some((48_000, 32_000)))] {
         run(|a| {
-            a.transport.fail_rate = fault == 0;
-            a.transport.short_rate = fault == 1;
-            a.transport.wrong_rate = fault == 2;
-            let err = a.start_playback(0, 48_000, &[0; 192], true).unwrap_err();
-            assert_eq!(
-                err,
-                match fault {
-                    0 => Error::Transport(BlockError::Timeout),
-                    1 => Error::ControlLength,
-                    _ => Error::ControlReadback,
-                }
-            );
-            assert!(a.transport.inner.submitted.is_empty());
-            assert!(a.transport.inner.active.is_empty());
-            assert_eq!(a.transport.inner.alternates.last(), Some(&(3, 0)));
+            a.transport.short_rate = short;
+            a.transport.wrong_rate = wrong;
+            a.start_playback(0, 48_000, &[0; 192], true).unwrap();
+            assert_eq!(a.clock_mismatch, mismatch);
         });
     }
+    // Three failed reads stop the reads.
+    run(|a| {
+        a.transport.fail_read = true;
+        for _ in 0..4 {
+            a.start_playback(0, 48_000, &[0; 192], true).unwrap();
+            a.stop_playback().unwrap();
+        }
+        let reads = a
+            .transport
+            .endpoint_controls
+            .iter()
+            .filter(|r| r[0] == 0xa2);
+        assert_eq!(reads.count(), 3);
+    });
     run(|a| {
         a.start_capture(1, 48_000).unwrap();
         a.transport.inner.cancel_fail = true;
