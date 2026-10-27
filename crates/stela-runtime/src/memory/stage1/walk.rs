@@ -1,3 +1,7 @@
+//! The stage-1 descriptor walk: reads table descriptors from physical memory
+//! level by level, accumulates table permissions, and returns the physical
+//! address, attributes and permissions, or the architectural fault or
+//! `Unsupported` result.
 use super::config::{ADDRESS_MASK, Granule, Mode, RegionConfig, VaRegion};
 use super::{
     Access, AccessKind, AttributeOrigin, Attributes, Config, ExceptionLevel, Fault, FaultKind,

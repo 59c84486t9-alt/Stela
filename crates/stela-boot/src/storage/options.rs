@@ -1,4 +1,6 @@
-// Pure mount options, also compiled into the hosted xtask verification suite.
+//! Pure mount options, also compiled into the hosted xtask verification suite.
+//! `split` separates the `--storage` and `--storage-check` targets from the
+//! rest of `stela.cfg`, and the USB check requests are validated against them.
 extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use stela_runtime::pc::storage::Target;

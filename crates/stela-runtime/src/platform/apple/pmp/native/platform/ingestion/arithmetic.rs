@@ -1,3 +1,6 @@
+//! Counter ingestion arithmetic: deltas between paired samples with their
+//! microsecond conversion, source scale factors, the percent reduction and the
+//! software `Statistics` histogram.
 use super::{CounterReference, Error};
 use alloc::{vec, vec::Vec};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

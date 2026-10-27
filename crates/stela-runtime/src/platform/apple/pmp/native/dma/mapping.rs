@@ -1,3 +1,7 @@
+//! Mapping handles over a `Broker`. `ReportingMapping` and `TraceMapping`
+//! turn reads, writes, synchronization, unmap and release into queued
+//! operations that keep their reached prefix across Busy results, and refuse a
+//! request that has already retired or has changed.
 use super::super::{platform::owner::Completion, reporting, trace};
 use super::{
     broker::{Broker, Descriptor, Key, Life, Op, Output, Reply, convert, reason},

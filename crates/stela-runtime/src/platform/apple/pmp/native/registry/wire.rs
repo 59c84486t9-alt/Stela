@@ -1,3 +1,6 @@
+//! Wire encodings of the PMP registry protocol: class 3 request and reply
+//! words by `Kind` (init, add, remove, set), the class 4 incoming request and
+//! the 88-byte entry descriptor.
 use super::Configuration;
 #[derive(Clone, Copy)]
 pub(super) enum Kind {

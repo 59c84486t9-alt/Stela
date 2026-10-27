@@ -1,3 +1,7 @@
+//! The native interrupt controller owner: initialization, source registration,
+//! signals and event dispatch, each retaining its reached prefix across Busy
+//! and refusal. `Handler` callbacks run with a `Signals` context that shares
+//! the current-source state with foreground signals.
 use super::super::platform::owner::Completion;
 use super::{Device, Error, Outcome, Placement, SPECIAL, SoftwareConfiguration, refused};
 use crate::platform::apple::bus::Access;

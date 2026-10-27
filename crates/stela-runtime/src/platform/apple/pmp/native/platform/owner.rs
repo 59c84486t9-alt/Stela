@@ -1,3 +1,7 @@
+//! The generic platform lifecycle owner. `Owner` runs initialize, start, stop,
+//! selection, evaluation cycles and counter hooks as retained operations over
+//! a `Backend` that supplies the actual effects, using the `Observation`,
+//! `Effect` and `Completion` vocabulary defined here.
 use super::super::{
     Packets,
     counters::Captured,

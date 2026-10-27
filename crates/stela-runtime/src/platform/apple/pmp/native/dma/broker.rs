@@ -1,3 +1,7 @@
+//! The request side of the native PMP DMA pair. `pair` creates a `Broker` and
+//! its `Service` over shared state; the broker checks and queues mapping
+//! requests and transfers, keeps each grant's lifetime, and hands back the
+//! service's replies.
 use super::super::{platform::owner::Completion, reporting, trace};
 use super::{
     mapping::{Client, ReportingMapping, TraceMapping},
