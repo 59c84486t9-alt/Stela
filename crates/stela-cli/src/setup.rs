@@ -18,10 +18,12 @@
 //!
 //! One command checks the USB and the restore image without writing
 //! anything, prepares the restore bundle on this computer, then copies it
-//! to a FAT32 volume of the USB, which the PC's firmware can read, installs
-//! `stela.efi` as the USB's boot loader (`efi`) with a `stela.cfg` that
-//! boots the installed macOS, and records what it wrote in
-//! `EFI/stela/setup.json`. `--dry-run` stops after the checks; `--uninstall`
+//! to the USB's FAT32 data partition, which the PC's firmware can read and
+//! which also holds the install medium and the translation store
+//! (`stela/boot`, `stela/install` and `stela/store`), installs `stela.efi`
+//! as the USB's boot loader (`efi`) with a `stela.cfg` that boots the
+//! installed macOS, and records what it wrote in `EFI/stela/setup.json` on
+//! the EFI partition. `--dry-run` stops after the checks; `--uninstall`
 //! removes everything the record names.
 //!
 //! Each Stela machine has its own ECID (`setup::ecid`), drawn once, kept in
@@ -174,10 +176,6 @@ pub(crate) struct Setup {
     /// Where `--fetch` keeps the image.
     #[arg(long)]
     download_dir: Option<PathBuf>,
-    /// A volume of the USB for the restore bundles, when the EFI partition
-    /// is too small.
-    #[arg(long)]
-    volume: Option<PathBuf>,
     /// The `stela.efi` to install instead of the one built into `stela`.
     #[arg(long)]
     efi: Option<PathBuf>,
@@ -262,9 +260,10 @@ pub(crate) struct Setup {
     /// engine's `--verify-on-read` to the Install macOS choice.
     #[arg(long, requires = "target")]
     verify_on_read: bool,
-    /// The USB's FAT32 data partition for the install medium (the full IPSW
-    /// in pieces), when it has several; the first one by default.
-    #[arg(long, requires = "target")]
+    /// The USB's FAT32 data partition, when it has several, for the boot
+    /// bundles, the install medium (the full IPSW in pieces or its
+    /// inventory) and the translation store; the first one by default.
+    #[arg(long)]
     install_volume: Option<PathBuf>,
     /// Boot this install by default.
     #[arg(long)]
@@ -354,7 +353,7 @@ pub(crate) struct InstallMedium {
     /// The Mac model whose identities the inventory lists.
     #[arg(long, default_value = PINNED_MODEL)]
     model: String,
-    /// The mounted FAT32 volume to write `EFI/stela/install/<build>` to.
+    /// The mounted FAT32 volume to write `stela/install/<build>` to.
     #[arg(long)]
     volume: PathBuf,
 }
@@ -401,8 +400,9 @@ impl InstallMedium {
 }
 
 /// What setup writes, recorded on the ESP so `--uninstall` can remove it.
-/// Records before schema 8 also named a recoveryOS bundle on the USB; this
-/// `stela` reads them only to uninstall them.
+/// Records before schema 8 also named a recoveryOS bundle on the USB, and
+/// records before schema 9 kept the data partition's files under `EFI/`;
+/// this `stela` reads them only to uninstall them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Record {
     schema_version: u32,
@@ -411,12 +411,13 @@ struct Record {
     build: String,
     model: String,
     esp: PathBuf,
+    /// The USB's FAT32 data partition.
     #[serde(alias = "payload_volume")]
     volume: PathBuf,
     /// A schema 1 setup's restore payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     payload_directory: Option<PathBuf>,
-    /// `EFI/stela/boot/<build>` of the active build.
+    /// `stela/boot/<build>` of the active build.
     bundle_directory: PathBuf,
     /// Directories setup created on the payload volume, deepest first.
     created_directories: Vec<PathBuf>,
@@ -492,8 +493,9 @@ fn first_schema() -> u32 {
 }
 
 const RECORD_KIND: &str = "stela_setup";
-/// Schema 8: no recoveryOS bundle; every setup has an install.
-const RECORD_SCHEMA: u32 = 8;
+/// Schema 8: no recoveryOS bundle; every setup has an install. Schema 9:
+/// the data partition's files are under `stela/`, not `EFI/stela/`.
+const RECORD_SCHEMA: u32 = 9;
 
 impl Record {
     /// Whether installs stream `ipsw`'s build from Apple's servers
@@ -597,17 +599,6 @@ impl Record {
     /// The active build's install medium.
     fn active_medium(&self) -> Option<&medium::Medium> {
         self.medium_of(&self.build)
-    }
-
-    /// The FAT32 partition that holds the IPSW's pieces: that of the active
-    /// build's offline medium, else of the last one. An online medium's
-    /// inventory sits with the boot bundles, which is no such partition.
-    fn pieces_volume(&self) -> Option<&Path> {
-        let offline = |medium: &&medium::Medium| !medium.remote;
-        self.active_medium()
-            .filter(offline)
-            .or(self.media.iter().rev().find(offline))
-            .map(|medium| medium.volume.as_path())
     }
 
     /// Whether the installs restore from install media: the setup has
@@ -812,10 +803,13 @@ fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<Record> {
     );
     ensure!(
         schema == u64::from(RECORD_SCHEMA),
-        "{} is a schema {schema} setup, which this stela no longer reads: it booted a \
-         recoveryOS bundle from the USB. Run `stela setup --uninstall --usb {}` and set the \
-         USB up again",
+        "{} is a schema {schema} setup, which this stela no longer reads: {}. Run `stela setup \
+         --uninstall --usb {}` and set the USB up again",
         path.display(),
+        match schema {
+            8 => "it keeps its files under EFI/ on the data partition",
+            _ => "it booted a recoveryOS bundle from the USB",
+        },
         usb.display()
     );
     let record: Record = stela_runtime::read_json(&path)?;
@@ -831,7 +825,9 @@ fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<Record> {
 /// Any schema's record, for `--uninstall`: the bundles of an older
 /// schema's record that name no kind or `recovery` are recoveryOS bundles,
 /// which this `stela` has no kind for; their build directories are removed
-/// with the rest.
+/// with the rest. Before schema 9 the data partition's files were under
+/// `EFI/`, which the record's volumes then gain, so every directory derived
+/// from them is where that setup wrote it.
 fn read_any_record(path: &Path) -> Result<Record> {
     let mut value: serde_json::Value = stela_runtime::read_json(path)?;
     let schema = value["schema_version"].as_u64().unwrap_or(0);
@@ -855,6 +851,15 @@ fn read_any_record(path: &Path) -> Result<Record> {
     let mut record: Record = serde_json::from_value(value)
         .with_context(|| format!("{} cannot be read", path.display()))?;
     record.migrate();
+    if schema < 9 {
+        record.volume.push("EFI");
+        for medium in record.media.iter_mut().chain(record.medium.as_mut()) {
+            medium.volume.push("EFI");
+        }
+        if let Some(store) = &mut record.translations {
+            store.volume.push("EFI");
+        }
+    }
     Ok(record)
 }
 
@@ -1523,78 +1528,6 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
     Ok(esp)
 }
 
-/// Whether `stela.efi` can read files on this file system: the firmware
-/// reads FAT, the file system UEFI requires, and no other.
-fn readable(filesystem: &FileSystem) -> Result<(), String> {
-    match filesystem {
-        FileSystem::Fat => Ok(()),
-        other => Err(format!(
-            "is {other}, which the PC's firmware cannot read; use FAT32"
-        )),
-    }
-}
-
-/// The first volume of the USB that the firmware can read and the bundle fits
-/// on.
-fn choose_volume(
-    host: &dyn Host,
-    esp: &Path,
-    usb: &Path,
-    explicit: Option<&Path>,
-    bundle_bytes: u64,
-) -> Result<PathBuf> {
-    let esp_disk = host.volume(esp)?.disk;
-    let mut volumes: Vec<PathBuf> = match explicit {
-        Some(path) => vec![path.to_path_buf()],
-        None => {
-            let mut volumes = vec![esp.to_path_buf()];
-            if usb != esp {
-                volumes.push(usb.to_path_buf());
-            }
-            if let Some(id) = &esp_disk {
-                for disk in host.disks()?.iter().filter(|d| &d.identifier == id) {
-                    volumes.extend(disk.partitions.iter().filter_map(|p| p.mount.clone()));
-                }
-            }
-            volumes
-        }
-    };
-    let mut seen = std::collections::BTreeSet::new();
-    volumes.retain(|volume| seen.insert(volume.clone()));
-    let need = bundle_bytes + MARGIN;
-    let mut reasons = String::new();
-    for volume in volumes {
-        let info = host.volume(&volume)?;
-        if explicit.is_some() && esp_disk.is_some() && info.disk != esp_disk {
-            bail!(
-                "{} is not on the USB that holds {}",
-                volume.display(),
-                esp.display()
-            );
-        }
-        if let Err(reason) = readable(&info.filesystem) {
-            writeln!(reasons, "  {} {reason}", volume.display())?;
-            continue;
-        }
-        if info.free_bytes < need {
-            writeln!(
-                reasons,
-                "  {} ({}) has {:.1} GB free; the restore bundles need {:.1} GB",
-                volume.display(),
-                info.filesystem,
-                info.free_bytes as f64 / 1e9,
-                need as f64 / 1e9
-            )?;
-            continue;
-        }
-        return Ok(volume);
-    }
-    bail!(
-        "No volume of the USB can hold the restore bundles:\n{reasons}Add a FAT32 data \
-         partition of at least 4 GB beside the EFI partition, then pass it with --volume."
-    )
-}
-
 /// Where `--fetch` keeps downloaded restore images: the host's per-user cache.
 pub(crate) fn download_dir() -> PathBuf {
     std::env::temp_dir().join("Stela/images")
@@ -1785,12 +1718,11 @@ fn restore_bundles(ecids: &[Option<Ecid>]) -> Vec<(Kind, Option<Ecid>)> {
 
 /// Plan the install of `build` from `ipsw` for `record`: the restore
 /// bundles `bundles` names and the build's install medium; and check the
-/// space: `also` is what else setup writes to the bundle volume.
+/// data partition's space: `also` is what else setup writes to it.
 fn plan_install(
     environment: &Environment<'_>,
     record: &Record,
     build: &str,
-    install_volume: Option<&Path>,
     ipsw: &Path,
     bundles: &[(Kind, Option<Ecid>)],
     also: u64,
@@ -1833,7 +1765,7 @@ fn plan_install(
         }),
         false => {
             let receipt = restore::receipt(ipsw)?;
-            let (volume, guid) = medium::locate(host, &record.esp, install_volume)?;
+            let (volume, guid) = medium::locate(host, &record.esp, Some(&record.volume))?;
             let ipsw_bytes = match environment.download {
                 Some(download) => download.bytes,
                 None => fs::metadata(ipsw)?.len(),
@@ -1857,34 +1789,27 @@ fn plan_install(
             })
         }
     };
+    // The medium and the bundles share the data partition.
     let restore_bytes: u64 = restore.iter().map(|p| p.bytes).sum();
-    match &medium {
-        Some(plan) if plan.volume == record.volume => {
-            let need = plan.need + restore_bytes + also;
-            let free = host.volume(&plan.volume)?.free_bytes;
-            ensure!(
-                free >= need,
-                "{} has {:.1} GB free; the install medium and boot bundles need {:.1} GB (the \
-                 macOS {build} IPSW is {:.1} GB)",
-                plan.volume.display(),
-                free as f64 / 1e9,
-                need as f64 / 1e9,
-                plan.ipsw_bytes as f64 / 1e9
-            );
+    let need = medium.as_ref().map_or(MARGIN, |plan| plan.need) + restore_bytes + also;
+    let free = host.volume(&record.volume)?.free_bytes;
+    ensure!(
+        free >= need,
+        "{} has {:.1} GB free; the install medium and boot bundles need {:.1} GB{}. Free space \
+         on it, or use a larger USB.",
+        record.volume.display(),
+        free as f64 / 1e9,
+        need as f64 / 1e9,
+        match &medium {
+            Some(plan) if !plan.remote => {
+                format!(
+                    " (the macOS {build} IPSW is {:.1} GB)",
+                    plan.ipsw_bytes as f64 / 1e9
+                )
+            }
+            _ => String::new(),
         }
-        Some(plan) if plan.remote => check_space(host, &record.volume, &restore)?,
-        Some(plan) => {
-            medium::check_space(
-                host,
-                &plan.volume,
-                build,
-                plan.ipsw_bytes,
-                environment.piece_bytes,
-            )?;
-            check_space(host, &record.volume, &restore)?;
-        }
-        None => check_space(host, &record.volume, &restore)?,
-    }
+    );
     Ok(InstallPlan {
         build: build.into(),
         restore,
@@ -2129,7 +2054,9 @@ fn plan(
         None => prepare_restore_bundles(environment, &ipsw, command.model(), ecid)?,
     };
     let bundles: u64 = prepared.iter().map(|bundle| bundle.bytes).sum();
-    let volume = choose_volume(host, &esp, &command.usb, command.volume.as_deref(), bundles)?;
+    // The bundles, the install medium and the translation store go on the
+    // USB's FAT32 data partition, which the firmware reads.
+    let (volume, _) = medium::locate(host, &esp, command.install_volume.as_deref())?;
     let install = machines::Install {
         name: command
             .install
@@ -2176,35 +2103,16 @@ fn plan(
     };
     // The restore bundles are prepared above: the install plan adds the
     // install medium.
-    let install = plan_install(
-        environment,
-        &record,
-        &record.build,
-        command.install_volume.as_deref(),
-        &ipsw,
-        &[],
-        bundles,
+    let install = plan_install(environment, &record, &record.build, &ipsw, &[], bundles)?;
+    // The translation store takes what the data partition has left after
+    // everything above.
+    let medium_bytes = install.medium.as_ref().map_or(0, |m| m.need);
+    let (store, note) = translations::choose(
+        host,
+        &[record.volume.as_path()],
+        |_| medium_bytes + bundles,
+        command.translation_store_bytes,
     )?;
-    // The translation store takes what the USB's FAT32 volumes have left
-    // after everything above.
-    let medium = install.medium.as_ref();
-    let mut candidates: Vec<&Path> = medium.iter().map(|m| m.volume.as_path()).collect();
-    candidates.extend([record.volume.as_path(), esp.as_path()]);
-    let planned = |volume: &Path| {
-        let mut bytes = 0;
-        if medium.is_some_and(|m| m.volume == volume) {
-            bytes += medium.map_or(0, |m| m.need);
-        }
-        if record.volume == volume {
-            bytes += bundles;
-        }
-        if esp == volume {
-            bytes += efi_image.len() as u64;
-        }
-        bytes
-    };
-    let (store, note) =
-        translations::choose(host, &candidates, planned, command.translation_store_bytes)?;
     notes.extend(note);
     record.translations = store;
     record.options = record.options_text();
@@ -2563,9 +2471,9 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
         for directory in directories {
             ensure!(
                 directory.starts_with(&record.volume)
-                    && directory.parent().is_some_and(
-                        |p| p.ends_with("EFI/stela/boot") || p.ends_with("EFI/stela/images")
-                    ),
+                    && directory.parent().is_some_and(|p| {
+                        p.ends_with(bundle::BOOT_DIRECTORY) || p.ends_with("EFI/stela/images")
+                    }),
                 "the setup record names an unexpected directory {}",
                 directory.display()
             );
@@ -2879,7 +2787,6 @@ mod tests {
             fetch: false,
             install_image: None,
             download_dir: None,
-            volume: None,
             efi: Some(f.efi.clone()),
             model: Some(restore::payload::SYNTHETIC_MODEL.into()),
             build: PINNED_BUILD.into(),
@@ -3162,28 +3069,34 @@ mod tests {
     }
 
     #[test]
-    fn a_small_esp_sends_the_bundle_to_a_readable_data_volume_of_the_same_usb() {
-        // The firmware cannot read HFS+, so nothing fits.
+    fn the_bundles_go_to_the_usb_s_fat32_data_partition() {
+        // The firmware cannot read HFS+, so the USB has no data partition.
         let f = fixture(GIB / 32, false);
         let error = setup(&environment(&f.host), command(&f, &f.data))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("use FAT32"), "{error}");
-        assert!(error.contains("restore bundles need"), "{error}");
-        // A FAT data volume holds the bundle and the online install's
-        // inventory; the EFI partition keeps only the boot loader and its
-        // configuration.
-        let f = fixture(GIB / 32, true);
-        let mut online = command(&f, &f.data);
+        assert!(error.contains("not FAT32"), "{error}");
+        assert!(
+            error.contains("boot bundles and the install medium"),
+            "{error}"
+        );
+        // A FAT data partition holds the bundle and the online install's
+        // inventory under `stela/`; the EFI partition keeps only the boot
+        // loader and its configuration.
+        let mut f = fixture(GIB / 32, false);
+        add_stela(&mut f);
+        let volume = stela_volume(&f);
+        let mut online = command(&f, &volume);
         online.install_image = Some(InstallImage::Online);
         setup(&environment(&f.host), online).unwrap();
         let ecid = record(&f).installs[0].ecid;
         assert!(bundle_of(&f, ecid).join("ramdisk.img").is_file());
-        assert!(bundle_of(&f, ecid).starts_with(&f.data));
-        assert!(!f.esp.join("EFI/stela/boot").exists());
+        assert!(bundle_of(&f, ecid).starts_with(volume.join("stela/boot")));
+        assert!(volume.join("stela/install").is_dir());
+        assert!(!f.esp.join("stela").exists());
         assert!(f.esp.join(efi::LOADER).is_file());
-        uninstall(&environment(&f.host), &f.data, false).unwrap();
-        assert!(!f.data.join("EFI").exists());
+        uninstall(&environment(&f.host), &volume, false).unwrap();
+        assert!(!volume.join("stela").exists());
     }
 
     #[test]
@@ -3318,6 +3231,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("schema 7 setup"), "{error}");
+        assert!(error.contains("recoveryOS bundle"), "{error}");
         assert!(error.contains("--uninstall"), "{error}");
         let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
         assert!(error.contains("no longer reads"), "{error}");
@@ -3325,6 +3239,61 @@ mod tests {
         assert!(dry.contains("keep     install \"macOS\""), "{dry}");
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert_eq!(snapshot(&f.esp), before);
+
+        // Schema 8, which kept the data partition's bundles, install medium
+        // and translation store under `EFI/stela`: refused, and uninstalled
+        // from where it wrote them.
+        let mut f = fixture(64 * GIB, false);
+        add_stela(&mut f);
+        let volume = stela_volume(&f);
+        let before = (snapshot(&f.esp), snapshot(&volume));
+        efi::add_mount(&f.esp, &f.efi, None, Some("--system\n")).unwrap();
+        let old = volume.join("EFI/stela");
+        let build = old.join("boot/STELA1");
+        bundle::tests::write(
+            &build.join("restore-0000000000000001"),
+            bundle::Generation::FIRST,
+            b"old",
+        )
+        .unwrap();
+        for (directory, file) in [("install/STELA1", "payload.json"), ("store", "store.cfg")] {
+            fs::create_dir_all(old.join(directory)).unwrap();
+            fs::write(old.join(directory).join(file), b"x").unwrap();
+        }
+        let mut install = serde_json::to_value(&disk).unwrap();
+        install["name"] = "macOS".into();
+        install["ecid"] = "0x1".into();
+        let record = serde_json::json!({
+            "schema_version": 8,
+            "kind": RECORD_KIND,
+            "build": "STELA1",
+            "model": "Mac14,3",
+            "esp": f.esp,
+            "volume": volume,
+            "bundle_directory": build,
+            "created_directories": [build, old.join("boot")],
+            "options": "--system\n",
+            "complete": true,
+            "builds": ["STELA1"],
+            "installs": [install],
+            "bundles": [
+                {"build": "STELA1", "ecid": "0x1", "schema": 1, "manifest_sha256": "",
+                 "personalized": true},
+            ],
+            "media": [
+                {"build": "STELA1", "volume": volume, "partition_guid": STELA_GUID,
+                 "manifest_sha256": ""},
+            ],
+            "translations": {"volume": volume, "pack_bytes": translations::MIN_PACK_BYTES},
+        });
+        stela_runtime::write_json(&f.esp.join(RECORD), &record).unwrap();
+        let error = read_record(&environment(&f.host), &f.esp)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("under EFI/"), "{error}");
+        uninstall(&environment(&f.host), &f.esp, false).unwrap();
+        assert_eq!((snapshot(&f.esp), snapshot(&volume)), before);
+        assert!(!old.join("boot").exists());
     }
 
     const REGION: &str = "disk1s2";
@@ -3872,8 +3841,8 @@ mod tests {
             choices.entries[1].options,
             format!(
                 "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --bundle \
-                 \\EFI\\stela\\boot\\{build}\\{} --ecid {ecid} \
-                 --install \\EFI\\stela\\install\\{build}\\payload.json --install-source \
+                 \\stela\\boot\\{build}\\{} --ecid {ecid} \
+                 --install \\stela\\install\\{build}\\payload.json --install-source \
                  {STELA_GUID} --development-restore --tss",
                 bundle::leaf_of(Kind::Restore, Some(ecid), current())
             )
@@ -4005,7 +3974,7 @@ mod tests {
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert_eq!(snapshot(&f.esp), before);
         assert_eq!(snapshot(&stela_volume(&f)), stela_before);
-        assert!(!stela_volume(&f).join("EFI").exists());
+        assert!(!stela_volume(&f).join("stela").exists());
         assert_eq!(partition_bytes(&f, REGION), disks.0);
         assert_eq!(partition_bytes(&f, NOR), nor);
     }
@@ -4198,7 +4167,7 @@ mod tests {
             record2.generation(),
         );
         assert!(choices().entries[3].options.contains(&format!(
-            "--bundle \\EFI\\stela\\boot\\{}\\restore-{}",
+            "--bundle \\stela\\boot\\{}\\restore-{}",
             record2.build,
             second.digits()
         )));
@@ -4748,14 +4717,14 @@ mod tests {
         assert!(options().contains("\\boot\\STELA2\\restore-"));
         let leaf = bundle::leaf_of(Kind::Restore, ecid, current());
         assert!(
-            f.esp
-                .join(format!("EFI/stela/boot/STELA2/{leaf}/bundle.json"))
+            stela_volume(&f)
+                .join(format!("stela/boot/STELA2/{leaf}/bundle.json"))
                 .is_file()
         );
         // The old build stays for rollback.
         let old = bundle::directory_of(
             Kind::Restore,
-            &f.esp,
+            &stela_volume(&f),
             restore::payload::SYNTHETIC_BUILD,
             ecid,
             current(),
@@ -4763,7 +4732,7 @@ mod tests {
         assert!(old.join("bundle.json").is_file());
         rerun(&f, |c| c.rollback = true).unwrap();
         assert_eq!(options(), first);
-        assert!(!f.esp.join("EFI/stela/boot/STELA2").exists());
+        assert!(!stela_volume(&f).join("stela/boot/STELA2").exists());
 
         // An update interrupted after it was recorded refuses other updates,
         // finishes when run again, and rolls back otherwise.
@@ -4773,7 +4742,7 @@ mod tests {
             to: "STELA2".into(),
         });
         write_record(&f.esp, &record1).unwrap();
-        let partial = f.esp.join(format!("EFI/stela/boot/STELA2/{leaf}.partial"));
+        let partial = stela_volume(&f).join(format!("stela/boot/STELA2/{leaf}.partial"));
         fs::create_dir_all(&partial).unwrap();
         fs::write(partial.join("partial"), b"x").unwrap();
         let other = rerun(&f, |c| {
@@ -4879,7 +4848,7 @@ mod tests {
         assert!(undo.contains("no longer kept"), "{undo}");
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert!(!f.esp.join("EFI/stela").exists());
-        assert!(!stela_volume(&f).join("EFI/stela/install").exists());
+        assert!(!stela_volume(&f).join("stela/install").exists());
     }
 
     #[test]
@@ -5348,7 +5317,7 @@ mod tests {
         let ecid = record.installs[0].ecid.unwrap();
         let region = format!("{SERIAL}:{REGION_GUID}");
         let restore = format!(
-            "\\EFI\\stela\\boot\\{}\\{}",
+            "\\stela\\boot\\{}\\{}",
             restore::payload::SYNTHETIC_BUILD,
             bundle::leaf_of(Kind::Restore, Some(ecid), current())
         );

@@ -5,9 +5,9 @@
 //! its header.
 //!
 //! ```text
-//! EFI/stela/store/store.cfg      `bytes N`: one pack's bound
-//! EFI/stela/store/XXXXXXXX.pak   one pack per translator id
-//! EFI/stela/store/spare.bin      a blank pack file of the bound
+//! stela/store/store.cfg      `bytes N`: one pack's bound
+//! stela/store/XXXXXXXX.pak   one pack per translator id
+//! stela/store/spare.bin      a blank pack file of the bound
 //! ```
 //!
 //! `stela.efi` never grows a file: the firmware grows one by writing every
@@ -21,10 +21,9 @@
 //! the first four bytes of its translator id in hex, and its header names
 //! the whole id.
 //!
-//! The home is one FAT32 volume of the boot USB, as the firmware writes it:
-//! the install medium's partition when the setup has one, else the bundle
-//! volume when it is FAT32, else the ESP. `stela.efi` writes only its own
-//! translator id's pack, never past the bound. Setup keeps the packs of the
+//! The home is the USB's FAT32 data partition, which also holds the install
+//! medium and the boot bundles, as the firmware writes it. `stela.efi`
+//! writes only its own translator id's pack, never past the bound. Setup keeps the packs of the
 //! [`PACKS_KEPT`] most recently written translator ids, one for each Stela
 //! version it keeps, so a rollback boots warm, and removes the others when
 //! Stela is updated or repaired. A damaged pack is harmless (the engine
@@ -40,7 +39,7 @@ use std::{
 };
 
 /// The store's directory on its volume.
-pub(super) const DIRECTORY: &str = "EFI/stela/store";
+pub(super) const DIRECTORY: &str = "stela/store";
 /// The bound setup gives `stela.efi`.
 pub(super) const CONFIG: &str = "store.cfg";
 const BYTES_KEY: &str = "bytes";
@@ -299,10 +298,10 @@ fn fitting(room: u64) -> u64 {
     bound / MIB * MIB
 }
 
-/// The store's home among `candidates` (the install medium's partition,
-/// the bundle volume, the ESP, in that order): the first FAT32 one.
-/// `planned` is what setup writes to a volume besides the store, and
-/// `requested` the user's bound (`--translation-store-bytes`, 0 for none).
+/// The store's home among `candidates` (the USB's data partition): the
+/// first FAT32 one. `planned` is what setup writes to a volume besides the
+/// store, and `requested` the user's bound (`--translation-store-bytes`, 0
+/// for none).
 /// The default bound shrinks to what fits; below [`MIN_PACK_BYTES`] the
 /// setup keeps no store, which the returned note says. A requested bound
 /// that does not fit is refused with the sizes.

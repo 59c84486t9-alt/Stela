@@ -603,8 +603,7 @@ mod tests {
         };
         let image = initial_image(b"seed").unwrap();
         let mut volume = Volume::new();
-        let efi = volume.directory(2, 0, b"EFI        ");
-        let stela = volume.directory(efi, 0, b"STELA      ");
+        let stela = volume.directory(2, 0, b"STELA      ");
         let install = volume.directory(stela, 0, b"INSTALL    ");
         let build = volume.directory(install, 0, b"26A434     ");
         // Fragmented, as a volume may place it: the second half comes first.
@@ -613,10 +612,7 @@ mod tests {
         let order: Vec<u32> = second.iter().chain(first).copied().collect();
         volume.file_in(build, 0, b"FDRSTATEBIN", &image, &order);
         // The path the loader hands the engine, as `engine::fdr::writer` opens it.
-        let path = format!(
-            "EFI/stela/install/26A434/{}",
-            crate::restore::fdr::STATE_FILE
-        );
+        let path = format!("stela/install/26A434/{}", crate::restore::fdr::STATE_FILE);
         let mut fat = Fat32::open(volume.disk).unwrap();
         let file = fat.file(&path).unwrap();
         assert_eq!(file.bytes, FILE_BYTES as u64);

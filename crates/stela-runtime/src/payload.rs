@@ -332,9 +332,10 @@ fn lower_hex(text: &str, digits: usize) -> bool {
     text.len() == digits && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The install medium's directory for a build, relative to the volume root.
+/// The install medium's directory for a build, relative to the root of the
+/// USB's FAT32 data partition.
 pub fn install_directory(build: &str) -> String {
-    format!("EFI/stela/install/{build}")
+    format!("stela/install/{build}")
 }
 
 /// A piece's file name in the install directory: an 8.3 name, as FAT
@@ -852,7 +853,7 @@ pub(crate) mod tests {
         assert_eq!(piece_sizes(26_637_307_067, PIECE_BYTES).len(), 7);
         const { assert!(PIECE_BYTES < MAX_SLICE_BYTES) };
         assert_eq!(piece_name(7), "ipsw.007");
-        assert_eq!(install_directory("26A434"), "EFI/stela/install/26A434");
+        assert_eq!(install_directory("26A434"), "stela/install/26A434");
         assert_eq!(manifest.piece_hash_blocks(), 5);
         assert_eq!(manifest.restore_identity(Purpose::Erase).unwrap(), 20);
         assert_eq!(manifest.restore_identity(Purpose::Update).unwrap(), 80);

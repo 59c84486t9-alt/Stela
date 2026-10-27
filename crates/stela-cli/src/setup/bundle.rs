@@ -2,7 +2,7 @@
 //! Stela machine (its ECID is in the bundle's `/chosen`), [`Generation`]
 //! (the boot-bundle schema `stela.efi` reads it with, and the revision of
 //! the loader that prepared it) and [`Kind`], in
-//! `EFI/stela/boot/<build>/<leaf>` of the bundle volume:
+//! `stela/boot/<build>/<leaf>` of the USB's FAT32 data partition:
 //!
 //! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
 //!   --restore`), which the Install macOS choice boots;
@@ -167,9 +167,12 @@ pub(super) fn leaf_of(kind: Kind, ecid: Option<Ecid>, generation: Generation) ->
     leaf
 }
 
-/// `EFI/stela/boot/<build>` on `volume`.
+/// The directory of a build's bundles below a data partition's root.
+pub(super) const BOOT_DIRECTORY: &str = "stela/boot";
+
+/// `stela/boot/<build>` on `volume`.
 pub(super) fn build_directory(volume: &Path, build: &str) -> PathBuf {
-    volume.join(format!("EFI/stela/boot/{build}"))
+    volume.join(BOOT_DIRECTORY).join(build)
 }
 
 pub(super) fn directory_of(
@@ -189,7 +192,7 @@ pub(super) fn firmware_path_of(
     generation: Generation,
 ) -> String {
     format!(
-        "\\EFI\\stela\\boot\\{build}\\{}",
+        "\\stela\\boot\\{build}\\{}",
         leaf_of(kind, ecid, generation)
     )
 }
@@ -471,11 +474,11 @@ pub(super) mod tests {
         );
         assert_eq!(
             firmware_path_of(Kind::Restore, "26A434", Some(Ecid(1)), Generation::FIRST),
-            "\\EFI\\stela\\boot\\26A434\\restore-0000000000000001"
+            "\\stela\\boot\\26A434\\restore-0000000000000001"
         );
         assert_eq!(
             firmware_path_of(Kind::Update, "26A434", Some(Ecid(1)), of(1, 2)),
-            "\\EFI\\stela\\boot\\26A434\\update-0000000000000001-r2"
+            "\\stela\\boot\\26A434\\update-0000000000000001-r2"
         );
     }
 

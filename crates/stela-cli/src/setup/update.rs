@@ -477,7 +477,6 @@ pub(super) fn update_os(
         environment,
         &record,
         &build,
-        record.pieces_volume(),
         ipsw,
         &restore_bundles(&record.install_machines()),
         0,

@@ -623,15 +623,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     let install = match (&ipsw, restore.is_empty() && !damaged_medium) {
         (_, true) => None,
         (Some(ipsw), false) => {
-            let plan = plan_install(
-                environment,
-                &record,
-                &record.build,
-                record.pieces_volume(),
-                ipsw,
-                &restore,
-                0,
-            )?;
+            let plan = plan_install(environment, &record, &record.build, ipsw, &restore, 0)?;
             describe_install(&record, &plan, &mut text)?;
             Some(plan)
         }

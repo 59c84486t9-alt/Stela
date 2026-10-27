@@ -1,6 +1,6 @@
 //! `stela.efi`'s translation store (`docs/design/runtime.md`, "Persistent
 //! translation store"): the pack `stela setup` makes room for in
-//! `EFI/stela/store` on a FAT32 volume of the boot USB.
+//! `stela/store` on the boot USB's FAT32 data partition.
 //!
 //! Before boot services end, [`read`] finds the volume with `store.cfg`,
 //! allocates this translator's pack file to the bound there (through the
@@ -37,7 +37,7 @@ use uefi::{
 /// The handoff file holding the store's placement and its pack.
 pub const FILE: &str = "translations";
 /// The store's directory on its volume, and `stela setup`'s bound there.
-const DIRECTORY: &str = "EFI\\stela\\store";
+const DIRECTORY: &str = "stela\\store";
 const CONFIG: &str = "store.cfg";
 const BYTES_KEY: &str = "bytes";
 const CONFIG_LIMIT: usize = 256;

@@ -3,10 +3,10 @@
 //! "Install medium").
 //!
 //! ```text
-//! EFI/stela/install/<build>/ipsw.000 ...   PIECE_BYTES each, the last shorter
-//! EFI/stela/install/<build>/pieces.bin     SHA-256 of every 64 KiB block of every piece
-//! EFI/stela/install/<build>/blocks.bin     SHA-256 of every 64 KiB block of every member
-//! EFI/stela/install/<build>/payload.json   the restore inventory, written last
+//! stela/install/<build>/ipsw.000 ...   PIECE_BYTES each, the last shorter
+//! stela/install/<build>/pieces.bin     SHA-256 of every 64 KiB block of every piece
+//! stela/install/<build>/blocks.bin     SHA-256 of every 64 KiB block of every member
+//! stela/install/<build>/payload.json   the restore inventory, written last
 //! ```
 //!
 //! No partition is created or formatted: the pieces are files below FAT32's
@@ -70,7 +70,7 @@ impl Medium {
             directory.starts_with(&self.volume)
                 && directory
                     .parent()
-                    .is_some_and(|p| p.ends_with("EFI/stela/install")),
+                    .is_some_and(|p| p.ends_with("stela/install")),
             "the setup record names an unexpected install medium {}",
             directory.display()
         );
@@ -151,12 +151,13 @@ impl Medium {
     }
 }
 
-/// `EFI/stela/install/<build>` on `volume`.
+/// `stela/install/<build>` on `volume`.
 pub(super) fn directory(volume: &Path, build: &str) -> PathBuf {
     volume.join(install_directory(build))
 }
 
-/// The USB's FAT32 data partition: `explicit`, or the first mounted FAT
+/// The USB's FAT32 data partition, which holds the boot bundles, the install
+/// medium and the translation store: `explicit`, or the first mounted FAT
 /// partition of the ESP's disk that is not the ESP. Returns its mount and
 /// GPT unique GUID.
 pub(super) fn locate(
@@ -214,8 +215,8 @@ pub(super) fn locate(
         );
     }
     bail!(
-        "The install medium goes on a FAT32 data partition of the USB beside its EFI partition, \
-         and {usb} has none mounted:\n{reasons}Setup does not repartition the USB: add a FAT32 \
+        "The boot bundles and the install medium go on a FAT32 data partition of the USB beside \
+         its EFI partition, and {usb} has none mounted:\n{reasons}Setup does not repartition the USB: add a FAT32 \
          partition of at least 30 GB with a disk utility, mount it, and run setup again."
     )
 }
@@ -782,7 +783,7 @@ pub(super) mod tests {
         };
         assert_eq!(
             medium("26A434").removable_directory().unwrap(),
-            Path::new("/Volumes/STELA/EFI/stela/install/26A434")
+            Path::new("/Volumes/STELA/stela/install/26A434")
         );
         assert!(medium("../../../Users").removable_directory().is_err());
     }

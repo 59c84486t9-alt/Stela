@@ -202,15 +202,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
             .into_iter()
             .filter(|&(kind, ecid)| next.restore_bundle(kind, ecid).is_none())
             .collect();
-    let install_plan = plan_install(
-        environment,
-        &next,
-        &next.build,
-        command.install_volume.as_deref(),
-        &ipsw,
-        &restore,
-        0,
-    )?;
+    let install_plan = plan_install(environment, &next, &next.build, &ipsw, &restore, 0)?;
     let mut text = String::new();
     writeln!(text, "Add install \"{name}\" to {}:", record.esp.display())?;
     writeln!(text, "  ECID           {ecid}")?;

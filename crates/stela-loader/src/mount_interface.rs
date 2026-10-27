@@ -34,8 +34,10 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// Revision 7: erase installs select `--development-restore` with `--tss`,
 /// retaining the original DEV-board FDR failure policy without an FDR proxy.
 /// Revision 8: `--recovery-bundle` is gone; a recoveryOS boot reads the
-/// disk's own recoveryOS or is refused.
-pub const OPTIONS_REVISION: u32 = 8;
+/// disk's own recoveryOS or is refused. Revision 9: the data partition's
+/// bundles, install medium and translation store are under `stela/`, not
+/// `EFI/stela/`.
+pub const OPTIONS_REVISION: u32 = 9;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";

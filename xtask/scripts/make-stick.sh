@@ -2,13 +2,13 @@
 # Build Stela's standalone host-check boot stick: GPT, the 200 MB EFI system
 # partition diskutil creates (s1, FAT32) holding \EFI\BOOT\BOOTX64.EFI =
 # stela.efi and \EFI\stela\stela.cfg, and one FAT32 data partition STELA (s2,
-# the rest of the disk) holding \EFI\stela\STELALOG.BIN, the preallocated
+# the rest of the disk) holding \stela\STELALOG.BIN, the preallocated
 # --nor-file log, and room for later bundles and the macOS install medium.
 #
 #   make-stick.sh --image FILE [CFG-OPTIONS]   a 4 GiB raw image, for QEMU
 #   make-stick.sh --disk DISK [CFG-OPTIONS]    an external USB disk; WIPES IT
 #
-# CFG-OPTIONS go after `--host-check --nor-file GUID:/EFI/stela/STELALOG.BIN`
+# CFG-OPTIONS go after `--host-check --nor-file GUID:/stela/STELALOG.BIN`
 # in stela.cfg (default: --key-seconds 120 --deadline 1800). STELA_EFI names
 # the stela.efi to install; the default is `cargo xtask boot build --release`'s.
 set -euo pipefail
@@ -80,11 +80,11 @@ guid=$(field $info DiskUUID)
 [[ $guid == ????????-????-????-????-???????????? ]] || die "no partition GUID for ${dev}s2"
 
 $esp_root mkdir -p "$esp/EFI/BOOT" "$esp/EFI/stela"
-mkdir -p "$data/EFI/stela"
+mkdir -p "$data/stela"
 $esp_root cp "$EFI" "$esp/EFI/BOOT/BOOTX64.EFI"
-print -n -- "--host-check --nor-file $guid:/EFI/stela/STELALOG.BIN $extra" | $esp_root tee "$esp/EFI/stela/stela.cfg" > /dev/null
+print -n -- "--host-check --nor-file $guid:/stela/STELALOG.BIN $extra" | $esp_root tee "$esp/EFI/stela/stela.cfg" > /dev/null
 # dd, not mkfile -n: every cluster is allocated, contiguous on a fresh volume.
-dd if=/dev/zero of="$data/EFI/stela/STELALOG.BIN" bs=1m count=$LOG_MIB
+dd if=/dev/zero of="$data/stela/STELALOG.BIN" bs=1m count=$LOG_MIB
 sync
 print "stela.cfg: $(cat "$esp/EFI/stela/stela.cfg")"
 print "BOOTX64.EFI sha256: $(shasum -a 256 "$EFI" | cut -d' ' -f1)"
