@@ -102,12 +102,6 @@ impl Protocol {
         model.fail_unmap = matches!(fault, Fault::Unmap);
         model.fail_retire = matches!(fault, Fault::RegistersRetire);
     }
-    pub(crate) fn late_completion(&self) {
-        let mut model = self.model.lock().unwrap();
-        let (queue, command) = model.pending.take().expect("actual delayed command");
-        model.mutation = Mutation::None;
-        model.complete(queue, command);
-    }
     pub(crate) fn sibling(namespace: &Namespace) -> Namespace {
         Namespace {
             controller: namespace.controller.clone(),
