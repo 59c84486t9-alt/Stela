@@ -134,6 +134,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
+    /// No received event waits ahead of a command's reply.
+    pub(super) fn command_ready(s: &Owned<I, Q, C>) -> Result<(), Error> {
+        let controller = s.controller.state();
+        if !s.pending_rx.is_empty() || !controller.mailbox.as_ref().unwrap().receive_idle() {
+            return Err(Error::NeedsDrain);
+        }
+        Ok(())
+    }
+
     fn validate_edca(s: &Owned<I, Q, C>, observed: &Observed<C>) -> Result<(), Error> {
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
@@ -174,9 +183,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// The exact-controller, applied-policy, revocation and retained autonomous
     /// user contracts of `configure_modern` apply. `limit` must belong to that
     /// same current OS country/control-channel rule, not an invented relaxation.
-    /// Active/pending BA sessions, partial aggregation, pending native RX and
-    /// outstanding TX/DMA owners must drain first; this conservative cut does
-    /// not reconfigure an operational BA session. External publication/reset/IRQ
+    /// As Linux `mt7925_mcu_set_tx` does, the command goes beside live
+    /// traffic and block-ack sessions; only received events queued ahead of
+    /// its reply must drain first. External publication/reset/IRQ
     /// paths serialize through this owner and authority; no raw user may publish new work during the checked drain and
     /// actual command. This function preserves keys/context and grants no new
     /// PHY, ACM, U-APSD, PMF or 6 GHz admission.
@@ -192,7 +201,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let s = self.state_mut();
         let observed = s.edca.as_ref().ok_or(Error::WrongPhase)?;
         Self::validate_edca(s, observed)?;
-        Self::management_drained(s)?;
+        Self::command_ready(s)?;
         s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
         let clock = s.controller.state().control.clock;
         let observed = s.edca.as_ref().unwrap();

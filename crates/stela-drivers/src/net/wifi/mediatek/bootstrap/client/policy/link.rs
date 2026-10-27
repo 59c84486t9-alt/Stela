@@ -396,6 +396,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
+        // mac80211 hands a beacon's new WMM parameters straight to the driver.
+        if Self::active(s) && s.client.pending_edca() {
+            match s.client.update_edca() {
+                Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
+                Err(error) => {
+                    soft_rx = false;
+                    failure.get_or_insert(error);
+                }
+            }
+        }
         if let Err(error) = Self::block_ack(s, timer_now) {
             soft_rx = false;
             failure.get_or_insert(error);

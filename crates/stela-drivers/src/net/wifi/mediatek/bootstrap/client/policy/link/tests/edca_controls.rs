@@ -42,11 +42,8 @@ fn owning_link_consumes_current_wmm_and_preserves_native_notice_and_association(
     let frame = beacon(&link, 1);
     incoming(&model, &frame, None, false);
     link.service().unwrap();
-    assert!(link.pending_edca());
-    assert_eq!(link.applied_edca().unwrap().parameter_set_count, 0);
-    assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
+    // The beacon's parameters apply at once, as mt7925_mcu_set_tx sends them.
     let notices = link.queues().notices;
-    link.update_edca().unwrap();
     assert!(!link.pending_edca());
     assert_eq!(link.applied_edca().unwrap().parameter_set_count, 1);
     assert_eq!(link.station().association_epoch(), Some(epoch));
@@ -78,14 +75,11 @@ fn failed_owning_update_reconciles_carrier_and_retained_ethernet_immediately() {
     link.service().unwrap();
     assert_eq!(link.queues().data_frames, 1);
     let frame = beacon(&link, 1);
-    incoming(&model, &frame, None, false);
-    link.service().unwrap();
-    let notices = link.queues().notices;
     model.response.lock().unwrap().edca_status = Some(0xbad);
-    assert!(link.update_edca().is_err());
+    incoming(&model, &frame, None, false);
+    assert!(link.service().is_err());
     assert_eq!(link.phase(), Phase::Quarantined);
     assert_eq!(link.queues().data_frames, 0);
-    assert_eq!(link.queues().notices, notices);
     assert!(!link.carrier());
     assert!(link.pending_edca());
     assert_eq!(link.applied_edca().unwrap().parameter_set_count, 0);

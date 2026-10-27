@@ -326,7 +326,7 @@ fn malformed_or_unsupported_current_wmm_cancels_unpublished_relaxation() {
 }
 
 #[test]
-fn outstanding_actual_packet_owner_blocks_edca_until_txfree_descriptor_retirement() {
+fn queue_parameters_update_beside_an_outstanding_packet_owner() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();
@@ -345,19 +345,13 @@ fn outstanding_actual_packet_owner_blocks_edca_until_txfree_descriptor_retiremen
     .unwrap();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
-    let before = commands(&model);
-    assert!(matches!(
-        update(&mut driver, &mut owner, None),
-        Err(ClientError::NeedsDrain)
-    ));
-    assert_eq!(commands(&model), before);
+    update(&mut driver, &mut owner, None).unwrap();
+    assert_eq!(driver.applied_edca().unwrap().parameter_set_count, 1);
     assert_eq!(driver.phase(), ClientPhase::Associated);
     assert_eq!(finish_tx(&model).len(), 1);
     driver.poll(NOW + 1, &Source, &mut Policy(true)).unwrap();
     let released = driver.poll_released().unwrap();
     assert_eq!(released.len(), 1);
-    update(&mut driver, &mut owner, None).unwrap();
-    assert_eq!(driver.applied_edca().unwrap().parameter_set_count, 1);
     assert_eq!(released[0].context.association_epoch(), epoch);
 }
 
@@ -495,7 +489,7 @@ fn original_association_only_provider_cannot_implicitly_authorize_dynamic_queues
 }
 
 #[test]
-fn current_canonical_block_ack_work_must_drain_before_native_queue_reconfiguration() {
+fn queue_parameters_update_beside_block_ack_work_like_mt7925_mcu_set_tx() {
     let (mut driver, model, mut owner, _) = secure_modern();
     let parameters: u16 = 1 | 2 | (6 << 2) | (8 << 6);
     let mut body = vec![3, 0, 7];
@@ -508,13 +502,10 @@ fn current_canonical_block_ack_work_must_drain_before_native_queue_reconfigurati
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
     let before = commands(&model);
-    assert!(matches!(
-        update(&mut driver, &mut owner, None),
-        Err(ClientError::NeedsDrain)
-    ));
-    assert_eq!(commands(&model), before);
-    assert_eq!(driver.applied_edca().unwrap().parameter_set_count, 0);
-    assert!(driver.pending_edca());
+    update(&mut driver, &mut owner, None).unwrap();
+    assert_eq!(commands(&model), before + 1);
+    assert_eq!(driver.applied_edca().unwrap().parameter_set_count, 1);
+    assert!(!driver.pending_edca());
     assert!(driver.pending_block_ack());
     assert_eq!(driver.phase(), ClientPhase::Associated);
 }
