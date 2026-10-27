@@ -30,8 +30,16 @@ const STATUS: usize = 8;
 const EECD: usize = 0x10;
 const CTRL_EXT: usize = 0x18;
 const MDIC: usize = 0x20;
+const FCAL: usize = 0x28;
+const FCAH: usize = 0x2c;
+const FCT: usize = 0x30;
 const RCTL: usize = 0x100;
+const FCTTV: usize = 0x170;
+const LTRMINV: usize = 0x5bb0;
+const LTRMAXV: usize = 0x5bb4;
 const TCTL: usize = 0x400;
+const FCRTL: usize = 0x2160;
+const FCRTH: usize = 0x2168;
 const PHPM: usize = 0xe14;
 const EEER: usize = 0xe30;
 const IPCNFG: usize = 0xe38;
@@ -74,10 +82,22 @@ const MDIC_WRITE: u32 = 1 << 26;
 const MMD_CONTROL: u16 = 13;
 const MMD_DATA: u16 = 14;
 const PHY_CONTROL: u16 = 0;
+const PHY_STATUS: u16 = 1;
 const PHY_ADVERTISEMENT: u16 = 4;
+const PHY_PARTNER: u16 = 5;
 const PHY_GIGABIT: u16 = 9;
-const MMD_AN: u16 = 7;
-const MMD_MULTIGIG: u16 = 32;
+const PHY_GIGABIT_STATUS: u16 = 10;
+const MII_LINK: u16 = 1 << 2;
+const MII_AUTONEG_COMPLETE: u16 = 1 << 5;
+const PAUSE: u16 = 1 << 10;
+const ASYMMETRIC_PAUSE: u16 = 1 << 11;
+const REMOTE_RECEIVER_OK: u16 = 1 << 12;
+const STATUS_FD: u32 = 1;
+const STATUS_SPEED_100: u32 = 1 << 6;
+const STATUS_SPEED_1000: u32 = 1 << 7;
+const STATUS_SPEED_2500: u32 = 1 << 22;
+const CTRL_RFCE: u32 = 1 << 27;
+const CTRL_TFCE: u32 = 1 << 28;
 const MANC_RCV_TCO_EN: u32 = 1 << 17;
 const RFCTL_IPV6_EX_DIS: u32 = 1 << 16;
 const RFCTL_LEF: u32 = 1 << 18;
@@ -85,6 +105,38 @@ const RCTL_EN: u32 = 1 << 1;
 const RCTL_SBP: u32 = 1 << 2;
 const RCTL_LPE: u32 = 1 << 5;
 const RXDCTL_ENABLE: u32 = 1 << 25;
+/// igc_reset: the 34 KiB receive packet buffer less one standard frame
+/// (1500 MTU, header, FCS and VLAN tag) and one 9728-byte jumbo frame,
+/// at 16-byte granularity; XON resumes 16 bytes below it.
+const HIGH_WATER: u32 = ((34 << 10) - (1522 + 0x2600)) & 0xffff_fff0;
+const LOW_WATER: u32 = HIGH_WATER - 16;
+const FCRTL_XONE: u32 = 1 << 31;
+const PAUSE_TIME: u32 = 0xffff;
+const LTR_SNOOP: u32 = 1 << 15;
+const LTR_SCALE_1024: u32 = 2;
+const LTR_SCALE_32768: u32 = 3;
+
+/// Resolved pause frame use, Linux `enum igc_fc_mode` without its default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlowControl {
+    None,
+    /// Honor received PAUSE frames; never send them.
+    ReceivePause,
+    /// Send PAUSE frames; ignore received ones.
+    TransmitPause,
+    Full,
+}
+
+/// The negotiated copper link igc_check_for_copper_link observed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Negotiated {
+    /// Megabits per second: 10, 100, 1000 or 2500.
+    pub speed: u16,
+    pub full_duplex: bool,
+    pub flow_control: FlowControl,
+}
+const MMD_AN: u16 = 7;
+const MMD_MULTIGIG: u16 = 32;
 
 /// Linux igc_rx_fifo_flush_base, after the receive queues are programmed and
 /// before any receive buffer is offered: the IPv6 extension-header erratum,
@@ -398,8 +450,8 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             let gigabit = hw.mdio(PHY_GIGABIT, None)?;
             let multigig = hw.mmd(MMD_AN, MMD_MULTIGIG, None)?;
             // All source default copper speeds, no 1000/2500 half duplex;
-            // explicit fc_none policy removes inherited PAUSE advertisement.
-            hw.mdio(PHY_ADVERTISEMENT, Some((adv & !0x0de0) | 0x01e0))?;
+            // igc_fc_default resolves to full: symmetric and asymmetric PAUSE.
+            hw.mdio(PHY_ADVERTISEMENT, Some(adv | 0x0de0))?;
             hw.mdio(PHY_GIGABIT, Some((gigabit & !0x0300) | 0x0200))?;
             hw.mmd(MMD_AN, MMD_MULTIGIG, Some(multigig | 0x0080))?;
             let control = hw.mdio(PHY_CONTROL, None)?;
@@ -408,11 +460,143 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         })
     }
 
+    fn phy_read(&mut self, register: u16) -> Result<u16, BlockError> {
+        self.synchronized(PHY_SYNC, |hw| hw.mdio(register, None))
+    }
+
+    /// Linux igc_check_for_copper_link, entered while a link status change
+    /// is pending. The latched-low MII link bit is read twice. On link the
+    /// MAC adopts the autonegotiated pause resolution, and LTR follows the
+    /// observed link either way. A failed PHY exchange reports no link, as
+    /// Linux's watchdog treats it; an absent function is a register error.
+    pub(super) fn check_for_copper_link(&mut self) -> Result<Option<Negotiated>, BlockError> {
+        let link = match self
+            .phy_read(PHY_STATUS)
+            .and_then(|_| self.phy_read(PHY_STATUS))
+        {
+            Ok(status) => status & MII_LINK != 0,
+            Err(BlockError::Device { status: u32::MAX }) => {
+                return Err(BlockError::Device { status: u32::MAX });
+            }
+            Err(_) => false,
+        };
+        let negotiated = if link {
+            let flow_control = self.flow_control_after_link_up()?;
+            let (speed, full_duplex) = self.speed_and_duplex()?;
+            Some(Negotiated {
+                speed,
+                full_duplex,
+                flow_control,
+            })
+        } else {
+            None
+        };
+        self.set_ltr(negotiated.map(|link| link.speed))?;
+        Ok(negotiated)
+    }
+
+    /// igc_get_speed_and_duplex_copper: I225/I226 report 2.5 Gb/s as the
+    /// 1 Gb/s speed plus a separate 2.5 Gb/s bit.
+    fn speed_and_duplex(&self) -> Result<(u16, bool), BlockError> {
+        let status = self.read(STATUS)?;
+        let speed = if status & STATUS_SPEED_1000 != 0 {
+            if status & STATUS_SPEED_2500 != 0 {
+                2500
+            } else {
+                1000
+            }
+        } else if status & STATUS_SPEED_100 != 0 {
+            100
+        } else {
+            10
+        };
+        Ok((speed, status & STATUS_FD != 0))
+    }
+
+    /// igc_config_fc_after_link_up for the requested igc_fc_full mode: the
+    /// IEEE 802.3 Annex 28B pause resolution, with Linux's receive-pause
+    /// fallback when neither side's bits match, and none at half duplex.
+    /// An incomplete autonegotiation leaves the MAC's pause enables as they
+    /// were, as Linux does.
+    fn flow_control_after_link_up(&mut self) -> Result<FlowControl, BlockError> {
+        let status = self
+            .phy_read(PHY_STATUS)
+            .and_then(|_| self.phy_read(PHY_STATUS))?;
+        if status & MII_AUTONEG_COMPLETE == 0 {
+            let ctrl = self.read(CTRL)?;
+            return Ok(match (ctrl & CTRL_RFCE != 0, ctrl & CTRL_TFCE != 0) {
+                (false, false) => FlowControl::None,
+                (true, false) => FlowControl::ReceivePause,
+                (false, true) => FlowControl::TransmitPause,
+                (true, true) => FlowControl::Full,
+            });
+        }
+        let local = self.phy_read(PHY_ADVERTISEMENT)?;
+        let partner = self.phy_read(PHY_PARTNER)?;
+        let both = |bits: u16, value: u16| value & bits == bits;
+        let mut mode = if local & PAUSE != 0 && partner & PAUSE != 0 {
+            FlowControl::Full
+        } else if local & PAUSE == 0
+            && local & ASYMMETRIC_PAUSE != 0
+            && both(PAUSE | ASYMMETRIC_PAUSE, partner)
+        {
+            FlowControl::TransmitPause
+        } else {
+            // Both the asymmetric receive-only match and Linux's fallback
+            // for a requested full mode without strict IEEE resolution.
+            FlowControl::ReceivePause
+        };
+        if !self.speed_and_duplex()?.1 {
+            mode = FlowControl::None;
+        }
+        // igc_force_mac_fc.
+        let (receive, transmit) = match mode {
+            FlowControl::None => (false, false),
+            FlowControl::ReceivePause => (true, false),
+            FlowControl::TransmitPause => (false, true),
+            FlowControl::Full => (true, true),
+        };
+        let set = if receive { CTRL_RFCE } else { 0 } | if transmit { CTRL_TFCE } else { 0 };
+        self.modify(CTRL, CTRL_RFCE | CTRL_TFCE, set)?;
+        Ok(mode)
+    }
+
+    /// igc_set_ltr_i225 with EEE disabled: the time the receive packet
+    /// buffer takes to fill at the link speed, in 1024 or 32768 ns units.
+    /// Without link Linux leaves the thresholds untouched.
+    fn set_ltr(&mut self, speed: Option<u16>) -> Result<(), BlockError> {
+        let Some(speed) = speed else {
+            return Ok(());
+        };
+        let bits = (self.read(RXPBS)? & 0x3f) * 1024 * 8;
+        let latency = 1000 * bits / u32::from(speed);
+        let (scale, unit) = if latency / 1024 < 1024 {
+            (LTR_SCALE_1024, 1024)
+        } else {
+            (LTR_SCALE_32768, 32768)
+        };
+        let value = (latency / unit).saturating_sub(1);
+        for register in [LTRMINV, LTRMAXV] {
+            if self.read(register)? & 0x3ff != value {
+                self.registers
+                    .write(register, LTR_SNOOP | value | scale << 10);
+            }
+        }
+        Ok(())
+    }
+
+    /// The 1000BASE-T status register's remote receiver OK bit, which Linux
+    /// waits on for up to two seconds before reporting a 1 Gb/s carrier.
+    pub(super) fn remote_receiver_ready(&mut self) -> Result<bool, BlockError> {
+        Ok(self.phy_read(PHY_GIGABIT_STATUS)? & REMOTE_RECEIVER_OK != 0)
+    }
+
     pub(super) fn initialize(&mut self) -> Result<u32, BlockError> {
         self.reset()?;
         self.validate_nvm()?;
         let identity = self.phy()?;
-        // igc_setup_copper_link_base / igc_force_mac_fc(fc_none).
+        // igc_setup_copper_link_base. Pause stays off until the link-up
+        // resolution in check_for_copper_link enables what was negotiated.
         self.modify(
             CTRL,
             (7 << 8) | (1 << 0) | (1 << 11) | (1 << 12) | (3 << 27),
@@ -438,31 +622,39 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             self.registers.write(RAL + index * 8, 0);
             self.registers.write(RAL + index * 8 + 4, 0);
         }
+        // igc_setup_link: the PAUSE address, type and timer, and the
+        // igc_set_fc_watermarks thresholds for transmitted PAUSE with XON.
+        self.registers.write(FCT, 0x8808);
+        self.registers.write(FCAH, 0x0100);
+        self.registers.write(FCAL, 0x00c2_8001);
+        self.registers.write(FCTTV, PAUSE_TIME);
+        self.registers.write(FCRTL, LOW_WATER | FCRTL_XONE);
+        self.registers.write(FCRTH, HIGH_WATER);
         Ok(identity)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use alloc::{collections::BTreeMap, vec::Vec};
     use core::cell::{Cell, RefCell};
 
     #[derive(Default)]
-    struct State {
-        registers: BTreeMap<usize, u32>,
-        phy: BTreeMap<u16, u16>,
+    pub(in super::super) struct State {
+        pub(in super::super) registers: BTreeMap<usize, u32>,
+        pub(in super::super) phy: BTreeMap<u16, u16>,
         mmd: BTreeMap<(u16, u16), u16>,
         mmd_control: u16,
         mmd_address: u16,
         writes: Vec<(usize, u32)>,
         nvm: Vec<u16>,
     }
-    struct Model {
-        state: RefCell<State>,
+    pub(in super::super) struct Model {
+        pub(in super::super) state: RefCell<State>,
         reads: Cell<usize>,
         fail_read: Cell<Option<usize>>,
-        mdio_count: Cell<usize>,
+        pub(in super::super) mdio_count: Cell<usize>,
         mdio_fail: Cell<Option<usize>>,
         mdio_silent: Cell<bool>,
         master_stuck: Cell<bool>,
@@ -636,7 +828,14 @@ mod tests {
                 assert_eq!(hw.initialize(), Ok(0x67c9dc01), "device {device:04x}");
                 let state = model.state.borrow();
                 assert_eq!(state.phy[&0] & 0x1a00, 0x1200);
-                assert_eq!(state.phy[&4], 0xa3e1); // No PAUSE, all10/100 modes, other bits retained.
+                // Symmetric and asymmetric PAUSE, all 10/100 modes, other bits retained.
+                assert_eq!(state.phy[&4], 0xafe1);
+                assert_eq!(state.registers[&FCT], 0x8808);
+                assert_eq!(state.registers[&FCAH], 0x0100);
+                assert_eq!(state.registers[&FCAL], 0x00c2_8001);
+                assert_eq!(state.registers[&FCTTV], 0xffff);
+                assert_eq!(state.registers[&FCRTH], 23552);
+                assert_eq!(state.registers[&FCRTL], 23536 | FCRTL_XONE);
                 assert_eq!(state.phy[&9], 0xfaff); // No1G half duplex, 1G full.
                 assert_eq!(state.mmd[&(7, 32)], 0x5581);
                 assert_eq!(state.mmd_control, 0);
@@ -758,6 +957,150 @@ mod tests {
             model.state.borrow_mut().phy.insert(2, upper);
             assert!(Hardware::new(&model, &model).unwrap().initialize().is_err());
         }
+    }
+
+    pub(in super::super) fn linked(status: u32, partner: u16) -> Model {
+        let model = Model::ready(false);
+        {
+            let mut state = model.state.borrow_mut();
+            state
+                .registers
+                .extend([(STATUS, status), (RXPBS, 34 | 2 << 6)]);
+            state.phy.extend([
+                (PHY_STATUS, MII_LINK | MII_AUTONEG_COMPLETE),
+                (PHY_ADVERTISEMENT, 0x0de0),
+                (PHY_PARTNER, partner),
+            ]);
+        }
+        model
+    }
+
+    #[test]
+    fn copper_link_check_resolves_pause_and_programs_ltr_from_the_negotiated_link() {
+        let full = STATUS_FD | STATUS_SPEED_1000 | STATUS_SPEED_2500;
+        for (partner, mode) in [
+            (PAUSE, FlowControl::Full),
+            (PAUSE | ASYMMETRIC_PAUSE, FlowControl::Full),
+            (ASYMMETRIC_PAUSE, FlowControl::ReceivePause),
+            // Linux's receive-pause fallback for a requested full mode.
+            (0, FlowControl::ReceivePause),
+        ] {
+            let model = linked(full, partner);
+            let mut hw = Hardware::new(&model, &model).unwrap();
+            let link = hw.check_for_copper_link().unwrap().unwrap();
+            assert_eq!(
+                link,
+                Negotiated {
+                    speed: 2500,
+                    full_duplex: true,
+                    flow_control: mode,
+                }
+            );
+            let state = model.state.borrow();
+            let ctrl = state.registers[&CTRL] & (CTRL_RFCE | CTRL_TFCE);
+            let expected = match mode {
+                FlowControl::Full => CTRL_RFCE | CTRL_TFCE,
+                _ => CTRL_RFCE,
+            };
+            assert_eq!(ctrl, expected, "partner {partner:#x}");
+            // 34 KiB at 2.5 Gb/s is 111411 ns: 108 units of 1024 ns, less one.
+            assert_eq!(state.registers[&LTRMINV], LTR_SNOOP | 107 | 2 << 10);
+            assert_eq!(state.registers[&LTRMAXV], LTR_SNOOP | 107 | 2 << 10);
+            assert_eq!(state.registers[&SW_FW_SYNC] & PHY_SYNC, 0);
+        }
+
+        // Without receive-pause ability on our side, the partner's symmetric
+        // and asymmetric bits select transmit pause.
+        let model = linked(STATUS_FD | STATUS_SPEED_100, PAUSE | ASYMMETRIC_PAUSE);
+        model
+            .state
+            .borrow_mut()
+            .phy
+            .insert(PHY_ADVERTISEMENT, ASYMMETRIC_PAUSE);
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        let link = hw.check_for_copper_link().unwrap().unwrap();
+        assert_eq!(
+            (link.speed, link.flow_control),
+            (100, FlowControl::TransmitPause)
+        );
+        assert_eq!(
+            model.state.borrow().registers[&CTRL] & (CTRL_RFCE | CTRL_TFCE),
+            CTRL_TFCE
+        );
+
+        // Half duplex never pauses; 10 Mb/s needs the 32768 ns scale.
+        let model = linked(0, PAUSE);
+        model
+            .state
+            .borrow_mut()
+            .registers
+            .insert(CTRL, CTRL_RFCE | CTRL_TFCE);
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        let link = hw.check_for_copper_link().unwrap().unwrap();
+        assert_eq!(
+            (link.speed, link.full_duplex, link.flow_control),
+            (10, false, FlowControl::None)
+        );
+        let state = model.state.borrow();
+        assert_eq!(state.registers[&CTRL] & (CTRL_RFCE | CTRL_TFCE), 0);
+        assert_eq!(state.registers[&LTRMINV], LTR_SNOOP | 849 | 3 << 10);
+        drop(state);
+
+        // Incomplete autonegotiation keeps the MAC's pause enables.
+        let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
+        {
+            let mut state = model.state.borrow_mut();
+            state.phy.insert(PHY_STATUS, MII_LINK);
+            state.registers.insert(CTRL, CTRL_TFCE);
+        }
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        let link = hw.check_for_copper_link().unwrap().unwrap();
+        assert_eq!(
+            (link.speed, link.flow_control),
+            (1000, FlowControl::TransmitPause)
+        );
+        assert_eq!(model.state.borrow().registers[&CTRL], CTRL_TFCE);
+    }
+
+    #[test]
+    fn copper_link_check_reports_no_link_without_touching_pause_or_ltr() {
+        let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
+        model.state.borrow_mut().phy.insert(PHY_STATUS, 0);
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        assert_eq!(hw.check_for_copper_link(), Ok(None));
+        let state = model.state.borrow();
+        assert!(!state.registers.contains_key(&LTRMINV));
+        assert!(!state.writes.iter().any(|&(r, _)| r == CTRL));
+        drop(state);
+
+        // A failed PHY exchange is no link; an absent function is an error.
+        let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
+        model.mdio_fail.set(Some(1));
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        assert_eq!(hw.check_for_copper_link(), Ok(None));
+        assert_eq!(model.state.borrow().registers[&SW_FW_SYNC] & PHY_SYNC, 0);
+        let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
+        model.software_busy.set(true);
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        assert_eq!(hw.check_for_copper_link(), Ok(None));
+        let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        model.fail_read.set(Some(model.reads.get() + 1));
+        assert_eq!(
+            hw.check_for_copper_link(),
+            Err(BlockError::Device { status: u32::MAX })
+        );
+
+        let model = linked(STATUS_FD | STATUS_SPEED_1000, PAUSE);
+        model.state.borrow_mut().phy.insert(PHY_GIGABIT_STATUS, 0);
+        let mut hw = Hardware::new(&model, &model).unwrap();
+        assert_eq!(hw.remote_receiver_ready(), Ok(false));
+        model
+            .state
+            .borrow_mut()
+            .phy
+            .insert(PHY_GIGABIT_STATUS, REMOTE_RECEIVER_OK);
+        assert_eq!(hw.remote_receiver_ready(), Ok(true));
     }
 
     #[test]

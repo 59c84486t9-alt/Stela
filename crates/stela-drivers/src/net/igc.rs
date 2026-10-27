@@ -3,10 +3,14 @@
 //!
 //! Reset, NVM and PHY setup follow the pinned Linux `igc` shared code.
 //! The declared boot-lifetime profile uses one polled receive/transmit queue,
-//! ordinary Ethernet, autonegotiated 10/100/1000/2500 copper and no pause/EEE.
+//! ordinary Ethernet, autonegotiated 10/100/1000/2500 copper with Linux's
+//! default full flow control, and no EEE.
 //! Management-owned PHYs, blank NVM, failed register reads and incomplete
 //! reset/MDIO/semaphore exchanges fail before any new DMA ring is published.
 mod hardware;
+mod link;
+
+pub use hardware::{FlowControl, Negotiated};
 
 use super::{
     Link, LinkError, MAX_FRAME, Mac,
@@ -37,7 +41,6 @@ const DEVICES: [u16; 14] = [
     0x125d, 0x125e,
 ];
 
-const STATUS: usize = 0x0008;
 const RCTL: usize = 0x0100;
 const TCTL: usize = 0x0400;
 const RAL: usize = 0x5400;
@@ -59,7 +62,6 @@ const TXDCTL: usize = 0xe028;
 /// The register file the driver touches.
 const REGISTER_BYTES: u64 = 0x1_2018; // Includes EERD for validated programmed NVM.
 
-const STATUS_LU: u32 = 1 << 1;
 const RAH_AV: u32 = 1 << 31;
 const RCTL_EN: u32 = 1 << 1;
 const RCTL_MPE: u32 = 1 << 4;
@@ -126,6 +128,8 @@ pub struct Igc {
     discarding: bool,
     /// An absent/failed MMIO function requires a fresh attachment.
     faulted: bool,
+    /// Carrier supervision; its negotiated link while the carrier is up.
+    link: link::Supervisor,
     mac: Mac,
     clock: Clock,
     pub location: String,
@@ -171,6 +175,7 @@ impl Igc {
             transmit: Ring::new(dma)?,
             discarding: false,
             faulted: false,
+            link: link::Supervisor::new(),
             mac,
             clock,
             location: format!("{}", function.address),
@@ -248,12 +253,26 @@ impl Igc {
         Ok(())
     }
 
+    /// The negotiated link while the carrier is up: speed, duplex and the
+    /// pause frames both sides agreed on.
+    pub fn negotiated(&self) -> Option<Negotiated> {
+        self.link.carrier()
+    }
+
     /// Report a lost function, and discard the transmit work a lost link
     /// strands (Linux `igc_watchdog_task` resets for it). Returns the carrier.
     fn watchdog(&mut self) -> Result<bool, LinkError> {
-        let status = self.device.read32(STATUS);
-        self.faulted |= status == u32::MAX;
-        if !self.faulted && status & STATUS_LU == 0 && self.transmit.pending() {
+        let change = match self.faulted {
+            true => link::Change::None,
+            false => self
+                .link
+                .poll(&self.device, &self.clock, self.clock.now_us())
+                .unwrap_or_else(|_| {
+                    self.faulted = true;
+                    link::Change::None
+                }),
+        };
+        if change == link::Change::Down && self.transmit.pending() {
             let device = self.device;
             self.faulted = !TRANSMIT_QUEUE.flush(
                 &mut self.transmit,
@@ -267,7 +286,7 @@ impl Igc {
                 "Intel I225/I226 {} lost register access; reinitialization required",
                 self.location
             ))),
-            false => Ok(status & STATUS_LU != 0),
+            false => Ok(self.link.carrier().is_some()),
         }
     }
 }
@@ -330,6 +349,13 @@ mod tests {
 
     /// An I225 over modeled registers and DMA memory, both rings started
     /// and the link up.
+    const LINK: Negotiated = Negotiated {
+        speed: 2500,
+        full_duplex: true,
+        flow_control: FlowControl::Full,
+    };
+    const ICR: usize = 0x1500;
+
     struct Fixture {
         net: Igc,
         registers: Vec<u32>,
@@ -353,6 +379,7 @@ mod tests {
                 transmit: Ring::new(&mut dma).unwrap(),
                 discarding: false,
                 faulted: false,
+                link: link::Supervisor::established(LINK),
                 mac: Mac([2, 0, 0, 0, 0, 1]),
                 clock: Clock {
                     ticks_per_microsecond: 1,
@@ -362,7 +389,6 @@ mod tests {
             };
             net.start_receive().unwrap();
             net.start_transmit().unwrap();
-            registers[STATUS / 4] = STATUS_LU;
             Self {
                 net,
                 registers,
@@ -378,12 +404,16 @@ mod tests {
             fixture.net.transmit(&[1; 60]).unwrap();
         }
         assert_eq!(fixture.registers[TDT / 4], 3);
-        fixture.registers[STATUS / 4] = 0;
+        // A link change whose PHY check finds no link (here: no PHY answers).
+        let _clock = crate::test_clock::virtualize();
+        fixture.registers[ICR / 4] = 1 << 2;
         assert_eq!(fixture.net.transmit(&[1; 60]), Err(LinkError::NoCarrier));
+        assert_eq!(fixture.net.negotiated(), None);
         assert!(!fixture.net.transmit.pending());
         assert_eq!(fixture.registers[TDT / 4], 0);
         assert_ne!(fixture.registers[TXDCTL / 4] & QUEUE_ENABLE, 0);
-        fixture.registers[STATUS / 4] = STATUS_LU;
+        fixture.registers[ICR / 4] = 0;
+        fixture.net.link = link::Supervisor::established(LINK);
         fixture.net.transmit(&[2; 60]).unwrap();
         assert_eq!(fixture.registers[TDT / 4], 1);
     }
@@ -486,9 +516,10 @@ mod tests {
         }
         assert_eq!(net.receive().unwrap(), Some(vec![2; 60]));
         assert_eq!(net.receive.next, 3);
-        registers[STATUS / 4] = u32::MAX;
+        assert_eq!(net.negotiated(), Some(LINK));
+        registers[ICR / 4] = u32::MAX;
         assert!(!net.carrier());
-        registers[STATUS / 4] = STATUS_LU;
+        registers[ICR / 4] = 0;
         assert!(!net.carrier());
         assert!(net.transmit(&[0; 60]).is_err());
         assert!(net.receive().is_err());
