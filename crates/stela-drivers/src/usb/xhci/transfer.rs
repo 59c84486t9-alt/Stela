@@ -11,7 +11,7 @@ pub(super) const TSP: u32 = 1 << 9;
 /// Slot context tt_info's TT Hub Slot ID.
 const TT_SLOT: u32 = 0xff;
 /// Linux MAX_SOFT_RETRY.
-const MAX_SOFT_RETRY: u32 = 3;
+pub(super) const MAX_SOFT_RETRY: u32 = 3;
 const SPLIT_TRANSACTION_ERROR: u32 = 36;
 const STOPPED_TRANSFER: u32 = 26;
 const STOPPED_SHORT_PACKET: u32 = 28;
@@ -43,18 +43,23 @@ impl Controller {
         dci: u8,
         doorbells: &[u32],
     ) -> Result<(), BlockError> {
-        let target = u32::from(slot) << 24 | u32::from(dci) << 16;
-        match self.command(0, 0, RESET_ENDPOINT << 10 | TSP | target) {
-            Ok(_) => {}
-            Err(BlockError::Device { .. }) if !self.command_poisoned => {}
-            Err(error) => return Err(error),
-        }
+        self.reset_halted(slot, dci, TSP)?;
         fence(Ordering::SeqCst);
         for value in doorbells {
             self.registers
                 .write32(self.doorbells + 4 * usize::from(slot), *value);
         }
         Ok(())
+    }
+
+    /// Linux xhci_reset_halted_ep: Reset Endpoint, with TSP for a soft reset.
+    pub(super) fn reset_halted(&mut self, slot: u8, dci: u8, flags: u32) -> Result<(), BlockError> {
+        let target = u32::from(slot) << 24 | u32::from(dci) << 16;
+        match self.command(0, 0, RESET_ENDPOINT << 10 | flags | target) {
+            Ok(_) => Ok(()),
+            Err(BlockError::Device { .. }) if !self.command_poisoned => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Recovers a halted endpoint: Reset Endpoint, then its dequeue pointer
