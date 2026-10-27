@@ -19,7 +19,7 @@ use super::{
         TXDCTL_THRESHOLDS, TransmitQueue, transmitted,
     },
     check_frame,
-    ring::{DESCRIPTOR, DESCRIPTORS, Ring},
+    ring::{DESCRIPTOR, Ring},
 };
 use crate::{
     Clock, Handoff,
@@ -38,6 +38,8 @@ use core::{
 };
 
 const VENDOR: u16 = 0x8086;
+/// igc.h IGC_DEFAULT_RXD and IGC_DEFAULT_TXD.
+const DESCRIPTORS: usize = 256;
 /// The I220, I221, I225 and I226 parts with a programmed NVM (`igc_hw.h`).
 const DEVICES: [u16; 14] = [
     0x15f2, 0x15f3, 0x15f7, 0x15f8, 0x3100, 0x3101, 0x3102, 0x5502, 0x5503, 0x0d9f, 0x125b, 0x125c,
@@ -184,8 +186,8 @@ impl Igc {
         )?;
         let mut net = Self {
             device,
-            receive: ManuallyDrop::new(Ring::new(dma)?),
-            transmit: ManuallyDrop::new(Ring::new(dma)?),
+            receive: ManuallyDrop::new(Ring::with(dma, DESCRIPTORS)?),
+            transmit: ManuallyDrop::new(Ring::with(dma, DESCRIPTORS)?),
             stalled: None,
             discarding: false,
             faulted: false,
@@ -484,8 +486,8 @@ mod tests {
             let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
             let mut net = Igc {
                 device,
-                receive: ManuallyDrop::new(Ring::new(&mut dma).unwrap()),
-                transmit: ManuallyDrop::new(Ring::new(&mut dma).unwrap()),
+                receive: ManuallyDrop::new(Ring::with(&mut dma, DESCRIPTORS).unwrap()),
+                transmit: ManuallyDrop::new(Ring::with(&mut dma, DESCRIPTORS).unwrap()),
                 stalled: None,
                 discarding: false,
                 faulted: false,
@@ -647,6 +649,8 @@ mod tests {
         let mut fixture = Fixture::new();
         let (net, registers) = (&mut fixture.net, &mut fixture.registers);
         assert_ne!(registers[RCTL / 4] & RCTL_MPE, 0);
+        // 256 sixteen-byte descriptors each, as IGC_DEFAULT_RXD/TXD.
+        assert_eq!([registers[RDLEN / 4], registers[TDLEN / 4]], [4096; 2]);
         for sequence in 0..(DESCRIPTORS * 3) {
             let frame = vec![sequence as u8; 60 + sequence % 128];
             net.transmit(&frame).unwrap();
