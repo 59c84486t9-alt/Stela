@@ -168,8 +168,9 @@ impl Graph {
             layout.width(),
         )
     }
-    /// Write CUR with no readback. A numeric value lands on the step at or
-    /// below it in the probed `range`, clamped, as `get_abs_value` does.
+    /// Write CUR with no readback and return the value written. A numeric
+    /// value lands on the step at or below it in the probed `range`, clamped,
+    /// as `get_abs_value` does.
     pub fn set_feature_value<C: Control>(
         &self,
         io: &mut C,
@@ -178,21 +179,23 @@ impl Graph {
         feature: FeatureControl,
         range: Option<MixerRange>,
         value: FeatureValue,
-    ) -> Result<(), Error> {
+    ) -> Result<FeatureValue, Error> {
         let layout = feature.layout(self.protocol)?;
         self.feature(id, channel, feature.selector(), true)?;
         let mut numeric = layout.numeric(value)?;
         if feature.has_range() {
             numeric = range.ok_or(Error::Format)?.snap(numeric);
         }
+        let bytes = layout.width().encode(numeric);
         control::set(
             io,
             self.control_interface,
             id,
             feature.selector(),
             channel,
-            &layout.width().encode(numeric),
-        )
+            &bytes,
+        )?;
+        Ok(layout.decode(&bytes))
     }
 }
 

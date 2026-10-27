@@ -122,7 +122,7 @@ pub(super) fn plan(
     Plan::parse(interface, all, configuration, speed)
 }
 
-pub use stream::{AudioDevice, Progress};
+pub use stream::{AudioDevice, MixerState, Progress};
 
 #[cfg(test)]
 pub(crate) use stream::tests::configuration as test_configuration;

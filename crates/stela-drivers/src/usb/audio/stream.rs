@@ -117,9 +117,26 @@ pub struct AudioDevice<T: Transport> {
     /// The last rate change's (requested, running) rates when the clock
     /// reported another; 0 running means it could not be read.
     pub clock_mismatch: Option<(u32, u32)>,
-    /// Probed volume and mixer cell ranges by entity, selector or input, and
-    /// channel or output, as Linux keeps them once `cval->initialized`.
-    mixer_ranges: BTreeMap<(u8, u8, u8), super::MixerRange>,
+    mixer: MixerState,
+}
+
+/// What Linux keeps in each `usb_mixer_elem_info` across a reset-resume:
+/// probed ranges and the values last read or written, by entity, selector
+/// or input, and channel or output. Resume publishes a fresh owner; hand it
+/// the old owner's state with `restore_mixer`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MixerState {
+    ranges: BTreeMap<(u8, u8, u8), super::MixerRange>,
+    values: BTreeMap<(u8, u8, u8), Cached>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cached {
+    Mute(bool),
+    Volume(i16),
+    Feature(super::FeatureControl, super::FeatureValue),
+    MixerCell(i16),
+    Input(u8),
+    Clock(u8),
 }
 
 impl AudioDevice<super::Native> {
@@ -158,7 +175,7 @@ impl<T: Transport> AudioDevice<T> {
             power_owners: Vec::new(),
             last_fault: None,
             clock_mismatch: None,
-            mixer_ranges: BTreeMap::new(),
+            mixer: MixerState::default(),
         })
     }
     #[cfg(test)]
@@ -607,27 +624,36 @@ impl<T: Transport> AudioDevice<T> {
         self.ready()?;
         self.binding
             .graph
-            .set_mute(&mut self.transport, entity, channel, muted)
+            .set_mute(&mut self.transport, entity, channel, muted)?;
+        self.mixer
+            .values
+            .insert((entity, 1, channel), Cached::Mute(muted));
+        Ok(())
     }
     /// The volume's range, probed before its first use.
     pub fn volume_range(&mut self, entity: u8, channel: u8) -> Result<super::MixerRange, Error> {
         self.ready()?;
-        if let Some(range) = self.mixer_ranges.get(&(entity, 2, channel)) {
+        if let Some(range) = self.mixer.ranges.get(&(entity, 2, channel)) {
             return Ok(*range);
         }
         let range = self
             .binding
             .graph
             .volume_range(&mut self.transport, entity, channel)?;
-        self.mixer_ranges.insert((entity, 2, channel), range);
+        self.mixer.ranges.insert((entity, 2, channel), range);
         Ok(range)
     }
     /// Set the step at or below `volume_db256`, clamped to the range.
     pub fn set_volume(&mut self, entity: u8, channel: u8, volume_db256: i16) -> Result<(), Error> {
         let range = self.volume_range(entity, channel)?;
+        let written = range.snap(i64::from(volume_db256)) as i16;
         self.binding
             .graph
-            .set_volume(&mut self.transport, entity, channel, range, volume_db256)
+            .set_volume(&mut self.transport, entity, channel, range, written)?;
+        self.mixer
+            .values
+            .insert((entity, 2, channel), Cached::Volume(written));
+        Ok(())
     }
     pub fn feature_value(
         &mut self,
@@ -636,9 +662,19 @@ impl<T: Transport> AudioDevice<T> {
         feature: super::FeatureControl,
     ) -> Result<super::FeatureValue, Error> {
         self.ready()?;
-        self.binding
-            .graph
-            .feature_value(&mut self.transport, entity, channel, feature)
+        // Linux probes a control when it creates it, before any read.
+        if feature.has_range() {
+            self.feature_range(entity, channel, feature)?;
+        }
+        let value =
+            self.binding
+                .graph
+                .feature_value(&mut self.transport, entity, channel, feature)?;
+        self.mixer.values.insert(
+            (entity, feature.selector(), channel),
+            Cached::Feature(feature, value),
+        );
+        Ok(value)
     }
     /// A numeric feature control's range, probed before its first use.
     pub fn feature_range(
@@ -649,14 +685,14 @@ impl<T: Transport> AudioDevice<T> {
     ) -> Result<super::MixerRange, Error> {
         self.ready()?;
         let key = (entity, feature.selector(), channel);
-        if let Some(range) = self.mixer_ranges.get(&key) {
+        if let Some(range) = self.mixer.ranges.get(&key) {
             return Ok(*range);
         }
         let range =
             self.binding
                 .graph
                 .feature_range(&mut self.transport, entity, channel, feature)?;
-        self.mixer_ranges.insert(key, range);
+        self.mixer.ranges.insert(key, range);
         Ok(range)
     }
     pub fn set_feature_value(
@@ -672,20 +708,30 @@ impl<T: Transport> AudioDevice<T> {
         } else {
             None
         };
-        self.binding.graph.set_feature_value(
+        let written = self.binding.graph.set_feature_value(
             &mut self.transport,
             entity,
             channel,
             feature,
             range,
             value,
-        )
+        )?;
+        self.mixer.values.insert(
+            (entity, feature.selector(), channel),
+            Cached::Feature(feature, written),
+        );
+        Ok(())
     }
     pub fn mixer_volume(&mut self, entity: u8, input: u8, output: u8) -> Result<i16, Error> {
-        self.ready()?;
-        self.binding
+        self.mixer_volume_range(entity, input, output)?;
+        let value = self
+            .binding
             .graph
-            .mixer_volume(&mut self.transport, entity, input, output)
+            .mixer_volume(&mut self.transport, entity, input, output)?;
+        self.mixer
+            .values
+            .insert((entity, input, output), Cached::MixerCell(value));
+        Ok(value)
     }
     /// The mixer cell's range, probed before its first use.
     pub fn mixer_volume_range(
@@ -695,14 +741,14 @@ impl<T: Transport> AudioDevice<T> {
         output: u8,
     ) -> Result<super::MixerRange, Error> {
         self.ready()?;
-        if let Some(range) = self.mixer_ranges.get(&(entity, input, output)) {
+        if let Some(range) = self.mixer.ranges.get(&(entity, input, output)) {
             return Ok(*range);
         }
         let range =
             self.binding
                 .graph
                 .mixer_volume_range(&mut self.transport, entity, input, output)?;
-        self.mixer_ranges.insert((entity, input, output), range);
+        self.mixer.ranges.insert((entity, input, output), range);
         Ok(range)
     }
     /// Set the step at or below `value`, clamped to the range.
@@ -714,14 +760,53 @@ impl<T: Transport> AudioDevice<T> {
         value: i16,
     ) -> Result<(), Error> {
         let range = self.mixer_volume_range(entity, input, output)?;
+        let written = range.snap(i64::from(value)) as i16;
         self.binding.graph.set_mixer_volume(
             &mut self.transport,
             entity,
             input,
             output,
             range,
-            value,
-        )
+            written,
+        )?;
+        self.mixer
+            .values
+            .insert((entity, input, output), Cached::MixerCell(written));
+        Ok(())
+    }
+    /// The mixer state to hand a fresh owner after resume.
+    pub fn mixer_state(&self) -> MixerState {
+        self.mixer.clone()
+    }
+    /// Linux `snd_usb_mixer_resume` after a reset-resume: adopt the old
+    /// owner's ranges and write every cached value back. Cached values are
+    /// steps of their ranges, so they are written unchanged. As
+    /// `restore_mixer_value`, a failed write is skipped, not reported.
+    pub fn restore_mixer(&mut self, state: MixerState) -> Result<(), Error> {
+        self.ready()?;
+        let graph = &self.binding.graph;
+        let io = &mut self.transport;
+        for (&(entity, selector, channel), &value) in &state.values {
+            let range = state.ranges.get(&(entity, selector, channel)).copied();
+            let _ = match (value, range) {
+                (Cached::Mute(muted), _) => graph.set_mute(io, entity, channel, muted),
+                (Cached::Volume(volume), Some(range)) => {
+                    graph.set_volume(io, entity, channel, range, volume)
+                }
+                (Cached::Feature(feature, value), range) => graph
+                    .set_feature_value(io, entity, channel, feature, range, value)
+                    .map(|_| ()),
+                (Cached::MixerCell(value), Some(range)) => {
+                    graph.set_mixer_volume(io, entity, selector, channel, range, value)
+                }
+                (Cached::Input(pin), _) => graph.signal_selection(io, entity, pin),
+                (Cached::Clock(pin), _) => graph.clock_selection(io, entity, pin),
+                // Numeric controls are probed before they are cached.
+                (Cached::Volume(_) | Cached::MixerCell(_), None) => Ok(()),
+            };
+        }
+        self.mixer = state;
+        Ok(())
     }
     pub fn select_clock(&mut self, entity: u8, pin: u8) -> Result<(), Error> {
         self.ready()?;
@@ -730,7 +815,9 @@ impl<T: Transport> AudioDevice<T> {
         }
         self.binding
             .graph
-            .clock_selection(&mut self.transport, entity, pin)
+            .clock_selection(&mut self.transport, entity, pin)?;
+        self.mixer.values.insert((entity, 1, 0), Cached::Clock(pin));
+        Ok(())
     }
     pub fn select_input(&mut self, entity: u8, pin: u8) -> Result<(), Error> {
         self.ready()?;
@@ -739,7 +826,9 @@ impl<T: Transport> AudioDevice<T> {
         }
         self.binding
             .graph
-            .signal_selection(&mut self.transport, entity, pin)
+            .signal_selection(&mut self.transport, entity, pin)?;
+        self.mixer.values.insert((entity, 1, 0), Cached::Input(pin));
+        Ok(())
     }
     fn queue_inputs(&mut self) -> Result<(), Error> {
         self.transport.validate()?;
@@ -1785,6 +1874,28 @@ pub(crate) mod tests {
                 "audio alternate aliases a foreign interface endpoint"
             ))
         );
+    }
+
+    #[test]
+    fn mixer_values_are_restored_like_snd_usb_mixer_resume() {
+        let mut state = None;
+        run(|a| {
+            a.set_mute(2, 0, true).unwrap();
+            // The step at or below is what is cached and restored.
+            a.set_volume(2, 0, -300).unwrap();
+            assert_eq!(a.transport.volume, -512);
+            state = Some(a.mixer_state());
+        });
+        // The fresh owner resume publishes starts from device defaults.
+        run(|a| {
+            let state = state.unwrap();
+            a.restore_mixer(state.clone()).unwrap();
+            assert!(a.transport.muted);
+            assert_eq!(a.transport.volume, -512);
+            // The old ranges are adopted, not probed again.
+            assert_eq!(a.mixer_state(), state);
+            assert_eq!(a.volume_range(2, 0).unwrap().res, 256);
+        });
     }
 
     #[test]
