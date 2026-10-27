@@ -2273,6 +2273,7 @@ pub(crate) mod tests {
                         layout: 0x7925,
                         words: [0; 4],
                     },
+                    rx_rate: None,
                     tsf: None,
                 },
                 SecurityStatus {

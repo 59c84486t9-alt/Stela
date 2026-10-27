@@ -416,6 +416,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     layout: 0x7925,
                     words: d.rxv.unwrap_or([0; 4]),
                 },
+                rx_rate: d.rate,
                 tsf: d.timestamp_low.map(wifi::Timestamp::Low32),
             },
             security,

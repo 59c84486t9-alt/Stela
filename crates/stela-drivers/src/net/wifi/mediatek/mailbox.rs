@@ -2066,6 +2066,7 @@ pub(crate) mod tests {
                     layout: 1,
                     words: [0; 4],
                 },
+                rx_rate: None,
                 tsf: None,
             },
             SecurityStatus {

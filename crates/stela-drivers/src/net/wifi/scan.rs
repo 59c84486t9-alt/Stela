@@ -580,6 +580,7 @@ mod tests {
                     layout: 1,
                     words: [3, 0, 0, 0],
                 },
+                rx_rate: None,
                 tsf: None,
             },
             SecurityStatus::default(),

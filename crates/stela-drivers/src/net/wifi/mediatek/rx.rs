@@ -3,7 +3,10 @@
 //! Bounded ordinary raw-802.11 receive descriptors. These are observations,
 //! not association/key-generation, authenticated integrity or replay receipts.
 use super::identity::Chip;
-use crate::bytes::get_le32;
+use crate::{
+    bytes::get_le32,
+    net::wifi::{Bandwidth, Encoding, RxRate},
+};
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -19,6 +22,8 @@ pub enum Error {
     MaximumLengthError,
     InvalidHeaderLength,
     UnsupportedFragment,
+    /// A P-RXV rate `mt7925_mac_fill_rx_rate` refuses; Linux drops the frame.
+    InvalidRate,
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -103,6 +108,9 @@ pub struct Decoded<'a> {
     /// Full source group-3/5 bytes remain available through groups/raw; these
     /// first raw P-RXV words fit the canonical compact rate envelope.
     pub rxv: Option<[u32; 4]>,
+    /// The MT7925 P-RXV rate. MT7921/MT7922 vectors are left undecoded: their
+    /// layout is `mt76_connac2_mac_fill_rx_rate`'s, which is not implemented.
+    pub rate: Option<RxRate>,
     pub header_gap: usize,
     /// Actual ordinary MPDU bytes after RXD groups and hardware header offset;
     /// A-MSDU still contains the device's two-byte pad after its MAC header.
@@ -276,6 +284,10 @@ pub fn decode(chip: Chip, bytes: &[u8]) -> Result<Decoded<'_>, Error> {
             number: u16::from(encoded),
         }
     };
+    let rate = match rxv {
+        Some(words) if connac3 => Some(rate(&words, channel.band)?),
+        _ => None,
+    };
     let amsdu = match (r4 & 3) as u8 {
         0 => None,
         raw_format => Some(Amsdu {
@@ -313,9 +325,84 @@ pub fn decode(chip: Chip, bytes: &[u8]) -> Result<Decoded<'_>, Error> {
         amsdu,
         signal,
         rxv,
+        rate,
         header_gap,
         payload: &bytes[header_gap..],
     })
+}
+
+/// `mt76_rates` hardware values, CCK then OFDM, as `mt76_get_rate` searches
+/// them. The 5 and 6 GHz bands hold only the OFDM ones.
+const LEGACY_RATES: [u8; 12] = [0, 1, 2, 3, 11, 15, 10, 14, 9, 13, 8, 12];
+
+/// Linux `mt76_get_rate`: the band's bitrate index, or 0 when none matches.
+fn legacy_index(band: Band, index: u8, cck: bool) -> u8 {
+    let (rates, start, index) = match (band, cck) {
+        // Bit 2 selects the short preamble.
+        (Band::Ghz2, true) => (&LEGACY_RATES[..], 0, index & !4),
+        (Band::Ghz2, false) => (&LEGACY_RATES[..], 4, index),
+        (_, true) => return 0,
+        (_, false) => (&LEGACY_RATES[4..], 0, index),
+    };
+    rates
+        .iter()
+        .skip(start)
+        .position(|&rate| rate == index)
+        .map_or(0, |at| (start + at) as u8)
+}
+
+/// Linux `mt7925_mac_fill_rx_rate` over P-RXV words 0 and 2.
+fn rate(rxv: &[u32; 4], band: Band) -> Result<RxRate, Error> {
+    let (v0, v2) = (rxv[0], rxv[2]);
+    let index = (v0 & 0x7f) as u8;
+    let nss = ((v0 >> 7) & 15) as u8 + 1;
+    let gi = ((v2 >> 3) & 3) as u8;
+    let mode = ((v2 >> 11) & 15) as u8;
+    let mut rate = RxRate {
+        index,
+        stbc: ((v2 >> 9) & 3) as u8,
+        ..RxRate::default()
+    };
+    match mode {
+        // CCK and OFDM.
+        0 | 1 => rate.index = legacy_index(band, index, mode == 0),
+        // HT and HT greenfield.
+        2 | 3 if index <= 31 => rate.encoding = Encoding::Ht,
+        4 if index <= 11 => {
+            rate.encoding = Encoding::Vht;
+            rate.nss = nss;
+        }
+        // HE SU, extended-range SU, trigger-based and MU.
+        8..=11 => {
+            rate.encoding = Encoding::He;
+            rate.nss = nss;
+            rate.index = index & 15;
+            rate.gi = if gi <= 2 { gi } else { 0 };
+            rate.he_dcm = v2 & (1 << 5) != 0;
+        }
+        // EHT SU, trigger-based and MU.
+        13..=15 => {
+            rate.encoding = Encoding::Eht;
+            rate.nss = nss;
+            rate.index = index & 15;
+            rate.gi = if gi <= 2 { gi } else { 0 };
+        }
+        _ => return Err(Error::InvalidRate),
+    }
+    rate.bandwidth = match v2 & 7 {
+        0 => Bandwidth::Mhz20,
+        // Linux tests the mode against HE_EXT_SU bitwise, and the raw rate
+        // field's ER_SU_106T bit.
+        1 if mode & 9 != 0 && index & (1 << 5) != 0 => Bandwidth::HeRu106,
+        1 => Bandwidth::Mhz40,
+        2 => Bandwidth::Mhz80,
+        3 => Bandwidth::Mhz160,
+        // The vector reports 320 MHz in two positions.
+        4 | 5 => Bandwidth::Mhz320,
+        _ => return Err(Error::InvalidRate),
+    };
+    rate.short_gi = mode < 8 && gi != 0;
+    Ok(rate)
 }
 impl Decoded<'_> {
     /// `header_bytes` must come from the shared actual 802.11 header parser
@@ -401,6 +488,11 @@ mod tests {
             for i in 0..size {
                 bytes[at + i] = (bit * 9 + i as u32) as u8;
             }
+            if bit == 4 && c3 {
+                // A 1 Mb/s CCK P-RXV rate.
+                put(&mut bytes, at, 0);
+                put(&mut bytes, at + 8, 0);
+            }
             at += size;
         }
         for i in 0..24 {
@@ -465,6 +557,66 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn p_rxv_rates_decode_like_mt7925_mac_fill_rx_rate() {
+        // (mode, raw rate, NSTS, frame mode, GI, band) and the result.
+        let rate = |mode: u32, index: u32, nsts: u32, bw: u32, gi: u32, band| {
+            let v2 = mode << 11 | 1 << 9 | gi << 3 | bw;
+            super::rate(&[index | nsts << 7, 0, v2, 0], band)
+        };
+        let legacy = |index| RxRate {
+            index,
+            stbc: 1,
+            ..RxRate::default()
+        };
+        // Long- and short-preamble 2 Mb/s CCK; CCK outside 2.4 GHz.
+        assert_eq!(rate(0, 1, 0, 0, 0, Band::Ghz2), Ok(legacy(1)));
+        assert_eq!(rate(0, 5, 0, 0, 0, Band::Ghz2), Ok(legacy(1)));
+        assert_eq!(rate(0, 1, 0, 0, 0, Band::Ghz5), Ok(legacy(0)));
+        // 6 and 54 Mb/s OFDM by band.
+        assert_eq!(rate(1, 11, 0, 0, 0, Band::Ghz2), Ok(legacy(4)));
+        assert_eq!(rate(1, 12, 0, 0, 0, Band::Ghz6), Ok(legacy(7)));
+        let ht = rate(2, 15, 1, 1, 1, Band::Ghz5).unwrap();
+        assert_eq!(
+            (ht.encoding, ht.index, ht.nss, ht.bandwidth, ht.short_gi),
+            (Encoding::Ht, 15, 0, Bandwidth::Mhz40, true)
+        );
+        assert_eq!(rate(3, 32, 0, 0, 0, Band::Ghz5), Err(Error::InvalidRate));
+        let vht = rate(4, 9, 1, 2, 0, Band::Ghz5).unwrap();
+        assert_eq!(
+            (vht.encoding, vht.nss, vht.bandwidth),
+            (Encoding::Vht, 2, Bandwidth::Mhz80)
+        );
+        assert_eq!(rate(4, 12, 0, 0, 0, Band::Ghz5), Err(Error::InvalidRate));
+        // Extended-range SU on a 106-tone RU with a 3.2 us GI.
+        let he = rate(9, 1 << 5 | 3, 0, 1, 2, Band::Ghz5).unwrap();
+        assert_eq!(
+            (he.encoding, he.index, he.bandwidth, he.gi, he.short_gi),
+            (Encoding::He, 3, Bandwidth::HeRu106, 2, false)
+        );
+        assert_eq!(rate(8, 7, 0, 3, 3, Band::Ghz6).unwrap().gi, 0);
+        let eht = rate(15, 13, 3, 5, 1, Band::Ghz6).unwrap();
+        assert_eq!(
+            (eht.encoding, eht.index, eht.nss, eht.bandwidth, eht.gi),
+            (Encoding::Eht, 13, 4, Bandwidth::Mhz320, 1)
+        );
+        assert_eq!(rate(5, 0, 0, 0, 0, Band::Ghz5), Err(Error::InvalidRate));
+        assert_eq!(rate(1, 11, 0, 6, 0, Band::Ghz5), Err(Error::InvalidRate));
+        // A frame whose vector Linux refuses is dropped.
+        let mut bytes = packet(Chip::Mt7925, 4, 4, 0, 0);
+        put(&mut bytes, 32, 7);
+        put(&mut bytes, 32 + 8, 5 << 11);
+        assert_eq!(decode(Chip::Mt7925, &bytes).err(), Some(Error::InvalidRate));
+        put(&mut bytes, 32 + 8, 4 << 11 | 2);
+        let decoded = decode(Chip::Mt7925, &bytes).unwrap();
+        assert_eq!(decoded.rate.unwrap().bandwidth, Bandwidth::Mhz80);
+        assert_eq!(
+            decode(Chip::Mt7921, &packet(Chip::Mt7921, 4, 4, 0, 0))
+                .unwrap()
+                .rate,
+            None
+        );
     }
     #[test]
     fn every_short_group_and_padding_boundary_refuses_before_reading() {

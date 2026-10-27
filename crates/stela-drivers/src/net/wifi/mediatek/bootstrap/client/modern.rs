@@ -630,6 +630,7 @@ pub(super) mod tests {
                     layout: 0x7925,
                     words: [0; 4],
                 },
+                rx_rate: None,
                 tsf: None,
             },
             signal_dbm: Some(-40),

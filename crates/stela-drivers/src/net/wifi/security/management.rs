@@ -311,6 +311,7 @@ mod tests {
                     layout: 0,
                     words: [0; 4],
                 },
+                rx_rate: None,
                 tsf: None,
             },
             SecurityStatus::default(),
