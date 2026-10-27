@@ -242,12 +242,6 @@ pub unsafe fn open(
     }
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
-    // Disks that can signal their completions wake this processor, which
-    // runs the engine's devices.
-    let handoff = &Handoff {
-        completion: super::host::completion_signal(),
-        ..handoff.clone()
-    };
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
     let mut disks = unsafe { probe(handoff, &mut dma) };
     for (address, error) in &disks.failures {

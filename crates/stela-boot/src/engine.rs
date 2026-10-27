@@ -1469,6 +1469,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 .handoff()
                 .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
             storage_handoff.firmware = host_firmware.clone();
+            // Disks that can signal their completions wake the BSP, which
+            // runs the engine's devices.
+            let bsp = native_processors.expect("validated native roster");
+            storage_handoff.completion =
+                host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
             if options.audio_check.is_some() {
                 // The audio check retains the final slice even after shutdown.
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;

@@ -1213,15 +1213,13 @@ pub(crate) fn wake_interrupt() {
 }
 
 /// The message a host disk sends as it completes a command: the doorbell
-/// vector, fixed and edge-triggered, to this processor, which runs the
-/// engine's devices and looks for the disk's completions. `None` where its
-/// APIC ID needs more than a compatibility-format MSI address holds.
-pub(crate) fn completion_signal() -> Option<stela_drivers::bus::irq::MsiMessage> {
-    let apic = &state().apic;
-    let raw = apic.read(0x20);
-    let id = if apic.is_x2apic() { raw } else { raw >> 24 };
+/// vector, fixed and edge-triggered, to the processor with APIC ID `id`,
+/// which runs the engine's devices and looks for the disk's completions.
+/// `None` where the ID needs more than a compatibility-format MSI address
+/// holds.
+pub(crate) fn completion_signal(id: u64) -> Option<stela_drivers::bus::irq::MsiMessage> {
     (id < 255).then(|| stela_drivers::bus::irq::MsiMessage {
-        address: 0xfee0_0000 | u64::from(id) << 12,
+        address: 0xfee0_0000 | id << 12,
         data: u32::from(super::interrupts::NATIVE_WAKE_VECTOR),
     })
 }
