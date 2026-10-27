@@ -15,6 +15,7 @@ mod packet;
 mod pmf;
 mod six_ghz;
 mod txs;
+use crate::net::wifi::station::operations::ChannelDefinition;
 pub use txs::TxStatus;
 pub use wifi::station::NativeBssObservation as PmfBssObservation;
 mod policy;
@@ -213,6 +214,11 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     edca: Option<edca::Observed<C>>,
     /// A slot time the AP's beacon changed, not yet sent.
     slot_time: Option<u16>,
+    /// The channel the firmware operates when a beacon narrowed it.
+    channel: Option<ChannelDefinition>,
+    /// A channel a beacon changed, not yet sent; `None` inside when the
+    /// change leaves the associated channel, which mac80211 disconnects for.
+    channel_change: Option<Option<ChannelDefinition>>,
     authentication_deadline: Option<u64>,
     authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
     /// The bound 6 GHz transport until its peer retires after drain.
@@ -297,6 +303,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 management: None,
                 edca: None,
                 slot_time: None,
+                channel: None,
+                channel_change: None,
                 authentication_deadline: None,
                 authentication_end: None,
                 six_ghz: None,

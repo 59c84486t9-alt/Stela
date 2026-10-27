@@ -87,3 +87,44 @@ fn failed_owning_update_reconciles_carrier_and_retained_ethernet_immediately() {
     assert_eq!(model.drops.load(Ordering::Relaxed), 0);
     assert!(!model.memory.lock().unwrap().mappings.is_empty());
 }
+
+#[test]
+fn a_beacon_narrowing_the_channel_moves_the_firmware_like_ieee80211_config_bw() {
+    use crate::net::wifi::station::phy::Width;
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    secure(&mut link);
+    drain_notices(&mut link);
+    let context = link.state().client.client.modern_context().unwrap().clone();
+    assert_ne!(context.definition().width, Width::Mhz20);
+    // HT operation without a secondary channel, VHT operation at 20/40 MHz
+    // and EHT operation at 20 MHz on channel 36.
+    let mut frame = beacon(&link, 0);
+    let mut at = 36;
+    while at + 2 < frame.len() {
+        let n = usize::from(frame[at + 1]);
+        match frame[at] {
+            61 => frame[at + 3] &= !7,
+            192 => frame[at + 2] = 0,
+            255 if frame[at + 2] == 106 => frame[at + 8..at + 10].copy_from_slice(&[0, 36]),
+            _ => {}
+        }
+        at += 2 + n;
+    }
+    incoming(&model, &frame, None, false);
+    link.service().unwrap();
+    let command = model
+        .response
+        .lock()
+        .unwrap()
+        .client_commands
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(command[48 + 4..48 + 6], [2, 0]);
+    assert_eq!(command[48 + 11], 0);
+    let channel = link.state().client.client.state().channel.unwrap();
+    assert_eq!(channel.width, Width::Mhz20);
+    assert!(link.carrier());
+    stop(&mut link, &model);
+}

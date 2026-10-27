@@ -407,6 +407,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
+        if Self::active(s) && s.client.client.pending_channel().is_some() {
+            match s.client.update_channel() {
+                Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
+                Err(error) => {
+                    soft_rx = false;
+                    failure.get_or_insert(error);
+                }
+            }
+        }
         if Self::active(s) && s.client.client.pending_slot_time() {
             match s.client.update_slot_time() {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}

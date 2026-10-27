@@ -778,6 +778,33 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         }
         .map_err(PolicyError::Client)
     }
+    /// Apply a channel the current AP's beacon changed, or disconnect when
+    /// the change leaves the associated channel, as mac80211 does.
+    pub fn update_channel(&mut self) -> Result<(), PolicyError> {
+        self.live()?;
+        if self.client.pending_channel() == Some(false) {
+            return self.disconnect();
+        }
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .update_channel_modern(&mut self.authority, admission)
+        }
+        .map_err(PolicyError::Client)
+    }
     /// Send a slot time the current AP's beacon changed.
     pub fn update_slot_time(&mut self) -> Result<(), PolicyError> {
         self.live()?;

@@ -84,6 +84,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             let slot = if capabilities & (1 << 10) != 0 { 9 } else { 20 };
             s.slot_time = (slot != p.slot_time).then_some(slot);
         }
+        // mac80211 `ieee80211_config_bw`: the AP's operation narrowed to the
+        // association, applied when it differs from the current channel.
+        let context = modern.context().clone();
+        let current = s.channel.unwrap_or(context.definition());
+        s.channel_change = match context.beacon_definition(elements) {
+            Ok(definition) if definition == current => None,
+            Ok(definition) if definition.within(&context.definition()) => Some(Some(definition)),
+            _ => Some(None),
+        };
         if elements.len() > 2300 {
             return Err(Error::WrongProfile);
         }
@@ -138,6 +147,59 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             parameters,
             _frame: frame,
         });
+        Ok(())
+    }
+
+    /// Whether a beacon changed the channel: `Some(false)` when the change
+    /// leaves the associated channel.
+    pub fn pending_channel(&self) -> Option<bool> {
+        self.state().channel_change.map(|change| change.is_some())
+    }
+
+    /// mac80211 `ieee80211_link_change_chanreq` to `mt7925_change_chanctx`:
+    /// sends the channel a beacon changed through `mt7925_mcu_set_chctx`.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn update_channel_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let Some(Some(definition)) = s.channel_change else {
+            return Err(Error::WrongPhase);
+        };
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let body = profile.channel_request(&definition).map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.channel = Some(definition);
+        s.channel_change = None;
         Ok(())
     }
 

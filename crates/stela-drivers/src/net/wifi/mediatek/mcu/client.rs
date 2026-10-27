@@ -252,6 +252,58 @@ impl Profile {
         t[6] = self.dtim_period;
         Ok(b)
     }
+    /// Linux `mt7925_mcu_set_chctx`: the RLM TLV for `definition`.
+    pub fn channel_request(
+        self,
+        definition: &crate::net::wifi::station::operations::ChannelDefinition,
+    ) -> Result<Vec<u8>, Error> {
+        use crate::net::wifi::station::phy::Width;
+        self.validate()?;
+        // ieee80211_frequency_to_channel
+        let channel = |mhz: u32| -> u8 {
+            (match self.channel.band {
+                Band::Ghz2 if mhz == 2484 => 14,
+                Band::Ghz2 => (mhz - 2407) / 5,
+                Band::Ghz5 if mhz < 5000 => (mhz - 4000) / 5,
+                Band::Ghz5 => (mhz - 5000) / 5,
+                Band::Ghz6 if mhz == 5935 => 2,
+                Band::Ghz6 => (mhz - 5950) / 5,
+            }) as u8
+        };
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let r = tlv(&mut b, 2, 16);
+        r[4] = self.channel.number as u8;
+        r[5] = channel(definition.center1_mhz);
+        r[7] = match definition.width {
+            Width::Mhz20 => 0,
+            Width::Mhz40 => 1,
+            Width::Mhz80 => 2,
+            Width::Mhz160 => 3,
+            Width::Mhz80P80 => 6,
+            Width::Mhz320 => 7,
+        };
+        if matches!(definition.width, Width::Mhz80P80 | Width::Mhz320) {
+            r[6] = definition.center2_mhz.map_or(0, channel);
+        }
+        r[8] = self.antenna_mask.count_ones() as u8;
+        r[9] = r[8];
+        r[10] = if definition.width == Width::Mhz20 {
+            0
+        } else {
+            4
+        };
+        r[11] = match r[4].cmp(&r[5]) {
+            core::cmp::Ordering::Less => 1,
+            core::cmp::Ordering::Greater => 3,
+            core::cmp::Ordering::Equal => 0,
+        };
+        r[12] = match self.channel.band {
+            Band::Ghz2 => 1,
+            Band::Ghz5 => 2,
+            Band::Ghz6 => 3,
+        };
+        Ok(b)
+    }
     /// Linux `mt7925_mcu_set_timing`: the IFS TLV with only the slot time.
     pub fn timing(self) -> Result<Vec<u8>, Error> {
         self.validate()?;
