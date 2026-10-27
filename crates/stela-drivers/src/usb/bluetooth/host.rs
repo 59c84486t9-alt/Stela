@@ -444,7 +444,6 @@ mod tests {
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
         let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
-        hci.io.clock.ticks_per_microsecond = 1000;
         let payload = vec![0xa5; 4096];
         hci.io.write_firmware(&payload, 3_000_000).unwrap();
         assert_eq!(model.borrow().outgoing.last().unwrap(), &payload);
@@ -477,9 +476,6 @@ mod tests {
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
         let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
-        // Use a generous real publication window: this is a timeout/ownership
-        // test, not a wall-time benchmark or a scheduler-latency assertion.
-        hci.io.clock.ticks_per_microsecond = 1000;
         assert_eq!(
             hci.io.write_firmware(&[0xa5; 64], 3_000_000),
             Err(BlockError::Timeout)

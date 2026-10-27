@@ -501,6 +501,8 @@ pub(crate) mod tests {
         forced_idle_events: usize,
         class_peer: Option<class_peers::Kind>,
         uas_abort: abort_peer::State,
+        /// Runs the controller's one-tick-per-microsecond deadlines on virtual time.
+        _clock: crate::test_clock::Guard,
     }
     fn read<T: Copy>(address: u64) -> T {
         unsafe { (address as *const T).read_volatile() }
@@ -1299,6 +1301,7 @@ pub(crate) mod tests {
             forced_idle_events: 0,
             class_peer,
             uas_abort: abort_peer::State::default(),
+            _clock: crate::test_clock::virtualize(),
         }));
         let mut controller = Controller {
             native_memory: None,

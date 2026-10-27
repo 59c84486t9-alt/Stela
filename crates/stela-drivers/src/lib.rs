@@ -47,6 +47,8 @@ pub mod net;
 pub mod platform;
 pub mod probe;
 pub mod storage;
+#[cfg(test)]
+mod test_clock;
 pub mod usb;
 
 use block::BlockError;
@@ -162,6 +164,10 @@ pub struct Clock {
 
 impl Clock {
     fn ticks() -> u64 {
+        #[cfg(test)]
+        if let Some(ticks) = test_clock::read() {
+            return ticks;
+        }
         // SAFETY: RDTSC has no memory effects; x86-64 always has it.
         unsafe { core::arch::x86_64::_rdtsc() }
     }

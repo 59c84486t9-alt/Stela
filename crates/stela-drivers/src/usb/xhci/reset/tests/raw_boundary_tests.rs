@@ -76,6 +76,7 @@ fn unpublished_profile(
         forced_idle_events: 0,
         class_peer: None,
         uas_abort: abort_peer::State::default(),
+        _clock: crate::test_clock::virtualize(),
     }));
     let mut controller = Controller {
         native_memory: None,

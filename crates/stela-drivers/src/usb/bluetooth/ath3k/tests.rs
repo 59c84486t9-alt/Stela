@@ -475,8 +475,7 @@ fn real_bind_configures_only_raw_output_and_retains_the_completed_uploader() {
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: backing exclusively owns these DMA pages and outlives every owner.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-    let (mut controller, hardware) = xhci::model::unconfigured_cancellation_controller(&mut dma);
-    controller.clock.ticks_per_microsecond = 1000;
+    let (controller, hardware) = xhci::model::unconfigured_cancellation_controller(&mut dma);
     let shared = Rc::new(RefCell::new(controller));
     let (_, catalog, _) = model(Kind::Ar3011, 0, false, 0, 4097);
     let mut found = xhci::Found::default();
@@ -521,8 +520,7 @@ fn native_body_timeout_and_failed_stop_preserve_bytes_and_terminal_raw_owner() {
     let start = backing.as_mut_ptr() as u64;
     // SAFETY: retained backing exclusively owns all controller and raw DMA pages.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-    let (mut controller, hardware) = xhci::model::unconfigured_cancellation_controller(&mut dma);
-    controller.clock.ticks_per_microsecond = 1000;
+    let (controller, hardware) = xhci::model::unconfigured_cancellation_controller(&mut dma);
     hardware.borrow_mut().silence_transfer = Some(4);
     const STOP_ENDPOINT: u32 = 15;
     const CONTEXT_STATE_ERROR: u32 = 19;

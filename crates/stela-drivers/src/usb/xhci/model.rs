@@ -352,6 +352,8 @@ pub(crate) struct CancelModel {
     pub(crate) asix: Option<ethernet::AsixModel>,
     pub(crate) asix_legacy: Option<ethernet::LegacyModel>,
     pub(crate) asix_ticks: u64,
+    /// Runs the controller's one-tick-per-microsecond deadlines on virtual time.
+    _clock: crate::test_clock::Guard,
 }
 
 impl CancelModel {
@@ -531,7 +533,7 @@ impl CancelModel {
     }
     pub(crate) fn legacy_request(&mut self, request: [u8; 8], output: &[u8]) -> Vec<u8> {
         // Controller Clock uses one test tick per microsecond.
-        let ticks = unsafe { core::arch::x86_64::_rdtsc() };
+        let ticks = Clock::ticks();
         let legacy = self.asix_legacy.as_mut().unwrap();
         if self.asix_ticks != 0 {
             legacy.delay(ticks - self.asix_ticks);
@@ -891,10 +893,12 @@ fn cancellation_controller_with_context(
         asix: None,
         asix_legacy: None,
         asix_ticks: 0,
+        _clock: crate::test_clock::virtualize(),
     }));
     model.borrow_mut().set_state(1, 1);
     controller.registers = Box::new(CancelRegisters(model.clone()));
-    // A short actual test deadline without pretending any completion happened.
+    // A short test deadline, on the model's virtual counter so preemption of
+    // the test thread cannot expire it, without pretending any completion.
     controller.clock.ticks_per_microsecond = 1;
     if !configurations.is_empty() {
         // These are the fixture's original wire descriptor/current profiles;
