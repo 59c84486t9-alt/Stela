@@ -7,8 +7,9 @@
 //! Author: Wu Fengguang <wfg@linux.intel.com>
 //!
 //! Owned HDMI/DP codec routing, adapted from pinned Linux HDMI/nvhdmi/ELD
-//! sources. The first concrete profile is nvhdmi MODEL_LEGACY, not a vendor
-//! wildcard. Display programming stays with the actual GPU port owner.
+//! sources: the nvhdmi MODEL_LEGACY and MODEL_GENERIC profiles, not a vendor
+//! wildcard. MODEL_GENERIC codecs are DP-MST capable: each pin device entry is
+//! its own port. Display programming stays with the actual GPU port owner.
 use super::{CodecGraph, Controller, ControllerToken, Registers, StreamId, Verb, WidgetKind};
 use crate::{
     audio::{Direction, Error, PcmFormat, Phase},
@@ -28,7 +29,22 @@ const LEGACY_IDS: &[u32] = &[
     0x10de0012, 0x10de0013, 0x10de0014, 0x10de0015, 0x10de0016, 0x10de0018, 0x10de0019, 0x10de001a,
     0x10de001b, 0x10de001c,
 ];
+/// nvhdmi MODEL_GENERIC: probe_generic sets `dp_mst`.
+const GENERIC_IDS: &[u32] = &[
+    0x10de0040, 0x10de0041, 0x10de0042, 0x10de0043, 0x10de0044, 0x10de0045, 0x10de0050, 0x10de0051,
+    0x10de0052, 0x10de0060, 0x10de0061, 0x10de0062, 0x10de0070, 0x10de0071, 0x10de0072, 0x10de0073,
+    0x10de0074, 0x10de0076, 0x10de007b, 0x10de007c, 0x10de007d, 0x10de007e, 0x10de0080, 0x10de0081,
+    0x10de0082, 0x10de0083, 0x10de0084, 0x10de0090, 0x10de0091, 0x10de0092, 0x10de0093, 0x10de0094,
+    0x10de0095, 0x10de0097, 0x10de0098, 0x10de0099, 0x10de009a, 0x10de009b, 0x10de009c, 0x10de009d,
+    0x10de009e, 0x10de009f, 0x10de00a0, 0x10de00a1, 0x10de00a3, 0x10de00a4, 0x10de00a5, 0x10de00a6,
+    0x10de00a7, 0x10de00a8, 0x10de00a9, 0x10de00aa, 0x10de00ab, 0x10de00ad, 0x10de00ae, 0x10de00af,
+    0x10de00b0, 0x10de00b1, 0x10de00c0, 0x10de00c1, 0x10de00c3, 0x10de00c4, 0x10de00c5,
+];
 const PIN_SENSE: u16 = 0xf09;
+const SET_PIN_SENSE: u16 = 0x709;
+const SET_DEVICE_SELECT: u16 = 0x735;
+const PAR_DEVICE_LIST_LENGTH: u8 = 0x15;
+const PIN_TRIGGER_REQUIRED: u32 = 1 << 1;
 const PRESENT: u32 = 1 << 31;
 const ELD_VALID: u32 = 1 << 30;
 const DIGITAL: u32 = 1 << 9;
@@ -41,6 +57,8 @@ pub struct DisplayAudioIdentity {
     pub gpu_function: Address,
     pub codec: u8,
     pub pin: u8,
+    /// The pin's DP-MST device entry; 0 for a pin without one.
+    pub device: u8,
     /// Actual GPU connector identity, not a guessed pin-to-port arithmetic map.
     pub port: u64,
 }
@@ -102,6 +120,9 @@ pub(super) struct Port {
     owner: ManuallyDrop<Arc<dyn DisplayAudioPort>>,
     graph: CodecGraph,
     pin: u8,
+    device: u8,
+    /// The device entry's connection list, as Linux hdmi_read_pin_conn reads it.
+    connections: Vec<u8>,
     sink: Option<HdmiSink>,
     route: Option<Route>,
     first_error: Option<Error>,
@@ -160,7 +181,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
-        if !LEGACY_IDS.contains(&graph.vendor_id) {
+        if !LEGACY_IDS.contains(&graph.vendor_id) && !GENERIC_IDS.contains(&graph.vendor_id) {
             return Err(Error::UnsupportedTopology);
         }
         let group = graph
@@ -214,16 +235,67 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
+    /// Linux snd_hda_get_num_devices + 1: the pin's device entries, one
+    /// unless the codec is DP-MST capable. An unanswered parameter is 0.
+    fn hdmi_devices(&mut self, codec: u8, vendor: u32, pin: u8) -> Result<u8, Error> {
+        if !GENERIC_IDS.contains(&vendor) {
+            return Ok(1);
+        }
+        let length = match self.parameter(codec, pin, PAR_DEVICE_LIST_LENGTH)? {
+            u32::MAX => 0,
+            length => length & 0x3f,
+        };
+        Ok(length as u8 + 1)
+    }
+    /// Linux snd_hda_set_dev_select: address `device` on a multi-device pin.
+    fn hdmi_select(&mut self, codec: u8, vendor: u32, pin: u8, device: u8) -> Result<(), Error> {
+        let devices = self.hdmi_devices(codec, vendor, pin)?;
+        if devices == 1 {
+            return Ok(());
+        }
+        if device >= devices {
+            return Err(Error::InvalidHdmiPort);
+        }
+        self.verb(Verb::short(codec, pin, SET_DEVICE_SELECT, device)?)?;
+        Ok(())
+    }
+    fn hdmi_select_port(&mut self, index: usize) -> Result<(), Error> {
+        let port = self.hdmi_ports[index].as_ref().unwrap();
+        let (codec, vendor, pin, device) = (
+            port.graph.address,
+            port.graph.vendor_id,
+            port.pin,
+            port.device,
+        );
+        self.hdmi_select(codec, vendor, pin, device)
+    }
+    /// Linux read_pin_sense: trigger when the pin requires it, then read the
+    /// port's device entry.
+    fn hdmi_pin_sense(&mut self, index: usize) -> Result<u32, Error> {
+        let port = self.hdmi_ports[index].as_ref().unwrap();
+        let (codec, pin, device) = (port.graph.address, port.pin, port.device);
+        let capabilities = port
+            .graph
+            .widget(pin)
+            .and_then(|w| w.pin_capabilities)
+            .unwrap_or(0);
+        if capabilities & PIN_TRIGGER_REQUIRED != 0 {
+            self.verb(Verb::short(codec, pin, SET_PIN_SENSE, 0)?)?;
+        }
+        self.verb(Verb::short(codec, pin, PIN_SENSE, device)?)
+    }
     /// Bind a genuine original GPU/HDA port owner. No ELD can be supplied by
-    /// the caller. Modern NVIDIA/MST and Intel/AMD vendor profiles are refused.
+    /// the caller. Intel/AMD vendor profiles are refused.
     /// # Safety
     /// `owner` must retain and coordinate THIS actual controller/function,
-    /// graph codec and physical pin. Its unsafe trait contract must hold for the
-    /// complete attachment, including failures, reset and controller Drop.
+    /// graph codec, physical pin and device entry. Its unsafe trait contract
+    /// must hold for the complete attachment, including failures, reset and
+    /// controller Drop.
     pub unsafe fn attach_hdmi_port(
         &mut self,
         graph: &CodecGraph,
         pin: u8,
+        device: u8,
         owner: Arc<dyn DisplayAudioPort>,
     ) -> Result<HdmiPortId, Error> {
         if self.routing_failed {
@@ -233,15 +305,24 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let identity = owner.identity();
         if identity.codec != graph.address
             || identity.pin != pin
+            || identity.device != device
             || self
                 .hdmi_ports
                 .iter()
                 .flatten()
-                .any(|p| p.graph.address == graph.address && p.pin == pin)
+                .any(|p| p.graph.address == graph.address && p.pin == pin && p.device == device)
         {
             return Err(Error::InvalidHdmiPort);
         }
         self.hdmi_topology(graph, pin)?;
+        if device >= self.hdmi_devices(graph.address, graph.vendor_id, pin)? {
+            return Err(Error::InvalidHdmiPort);
+        }
+        self.hdmi_select(graph.address, graph.vendor_id, pin, device)?;
+        let connections = self.connections(graph.address, pin)?;
+        if connections.is_empty() || connections.len() > 32 {
+            return Err(Error::UnsupportedTopology);
+        }
         let start = self.timer.now_us();
         owner.observe(self.hdmi_deadline())?;
         self.hdmi_late(start)?;
@@ -254,6 +335,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             owner: ManuallyDrop::new(owner),
             graph: graph.clone(),
             pin,
+            device,
+            connections,
             sink: None,
             route: None,
             first_error: None,
@@ -290,9 +373,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         error
     }
     fn hdmi_read_eld(&mut self, index: usize, state: DisplayAudioState) -> Result<HdmiSink, Error> {
+        self.hdmi_select_port(index)?;
         let port = self.hdmi_ports[index].as_ref().unwrap();
         let (codec, pin) = (port.graph.address, port.pin);
-        let sense = self.verb(Verb::short(codec, pin, PIN_SENSE, 0)?)?;
+        let sense = self.hdmi_pin_sense(index)?;
         if sense == u32::MAX {
             return Err(Error::InvalidEld);
         }
@@ -321,7 +405,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             raw.push(value as u8);
         }
-        let after = self.verb(Verb::short(codec, pin, PIN_SENSE, 0)?)?;
+        let after = self.hdmi_pin_sense(index)?;
         if after != sense || self.hdmi_observe(index)? != state {
             return Err(Error::SinkChanged);
         }
@@ -476,8 +560,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::InvalidFormat);
         }
-        let mux = graph
-            .widget(pin)
+        let mux = self.hdmi_ports[index]
+            .as_ref()
             .unwrap()
             .connections
             .iter()
@@ -505,6 +589,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::RouteInUse);
         }
+        self.hdmi_select_port(index)?;
         let packet_size = self.verb(Verb::short(graph.address, pin, 0xf2e, 0)?)?;
         if !(9..=32).contains(&packet_size) {
             return Err(Error::RouteRejected);
@@ -631,6 +716,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if let Some(s) = self.streams[usize::from(stream.descriptor_index())].as_mut() {
             s.running = false;
         }
+        self.hdmi_select_port(index)?;
         self.route_control(codec, pin, 0x730, 0xf30, 0)?;
         self.route_control(codec, pin, 0x732, 0xf32, 0)?;
         self.route_control(codec, pin, 0x707, 0xf07, 0)?;
@@ -774,7 +860,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if state.generation != generation || !state.connected {
                 return Err(Error::SinkChanged);
             }
-            let sense = self.verb(Verb::short(codec, pin, PIN_SENSE, 0)?)?;
+            self.hdmi_select_port(index)?;
+            let sense = self.hdmi_pin_sense(index)?;
             if sense == u32::MAX || sense & (PRESENT | ELD_VALID) != (PRESENT | ELD_VALID) {
                 return Err(Error::SinkChanged);
             }

@@ -186,7 +186,7 @@ impl CodecGraph {
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
-    fn parameter(&mut self, codec: u8, node: u8, parameter: u8) -> Result<u32, Error> {
+    pub(super) fn parameter(&mut self, codec: u8, node: u8, parameter: u8) -> Result<u32, Error> {
         self.verb(Verb::short(codec, node, GET_PARAMETER, parameter)?)
     }
 
@@ -327,7 +327,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(graph)
     }
 
-    fn connections(&mut self, codec: u8, node: u8) -> Result<Vec<u8>, Error> {
+    pub(super) fn connections(&mut self, codec: u8, node: u8) -> Result<Vec<u8>, Error> {
         let length = self.parameter(codec, node, PAR_CONNECTIONS)?;
         let count = (length & 0x7f) as u8;
         let long = length & 0x80 != 0;

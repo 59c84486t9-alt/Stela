@@ -841,6 +841,7 @@ unsafe impl super::super::hdmi::DisplayAudioPort for LegacyDisplayPeer {
             },
             codec: 0,
             pin: 4,
+            device: 0,
             port: 7,
         }
     }
@@ -894,7 +895,7 @@ fn native_legacy_attachment_excludes_saved_digital_sessions_until_actual_detach(
     let graph = controller.enumerate_codec(0).unwrap();
     // SAFETY: retained display peer owns this actual modeled codec/pin; the
     // controller validates the token and freshly re-enumerates its real graph.
-    let port = unsafe { controller.attach_hdmi_port(&graph, 4, owner.clone()) }.unwrap();
+    let port = unsafe { controller.attach_hdmi_port(&graph, 4, 0, owner.clone()) }.unwrap();
     assert_eq!(owner.observations.load(Ordering::SeqCst), 1);
     assert_eq!(Arc::strong_count(&owner), 2);
     assert!(controller.hdmi_owns_node(0, 4));
