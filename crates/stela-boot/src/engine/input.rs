@@ -18,6 +18,10 @@ pub struct HostInput {
     refused: bool,
     /// The first USB polling failure, reported once.
     failed: bool,
+    /// The guest's keyboard LEDs as last sent to the host keyboards.
+    leds: Option<u8>,
+    /// The first LED report failure, reported once.
+    led_failed: bool,
 }
 
 impl HostInput {
@@ -37,6 +41,8 @@ impl HostInput {
             inputs,
             refused: false,
             failed: false,
+            leds: None,
+            led_failed: false,
         }
     }
 
@@ -49,6 +55,25 @@ impl HostInput {
     }
 
     pub fn poll(&mut self, devices: &mut AppleDevices) {
+        // The guest's lock-key LEDs reach each host keyboard, as Linux
+        // `hidinput_led_worker` sends an input device's LED changes.
+        if let Some(leds) = devices.keyboard_leds()
+            && self.leds != Some(leds)
+        {
+            self.leds = Some(leds);
+            for device in &mut self.inputs.usb {
+                // SAFETY: as below, for the device's xHCI controller.
+                let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
+                if let Err(error) = device.set_leds(u16::from(leds))
+                    && !core::mem::replace(&mut self.led_failed, true)
+                {
+                    output::arguments(format_args!(
+                        "INPUT USB device {} LEDs: {error:?}\n",
+                        device.name
+                    ));
+                }
+            }
+        }
         let mut usb = Vec::new();
         for device in &mut self.inputs.usb {
             {

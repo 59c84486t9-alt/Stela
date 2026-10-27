@@ -66,6 +66,15 @@ const FIRST_RETRY_MS: u64 = 13;
 const LONGEST_RETRY_MS: u64 = 100;
 const RETRY_WINDOW_US: u64 = 1_000_000;
 const MICROSECONDS_PER_MILLISECOND: u64 = 1_000;
+const LED_PAGE: u32 = 0x08;
+/// Main item bit 1: a Variable field, one value per usage.
+const VARIABLE: u32 = 2;
+/// LED-page usages by input LED code, as `hidinput_configure_usage` maps
+/// them: Num Lock, Caps Lock, Scroll Lock, Compose, Kana, Stand-By, System
+/// Suspend, Mute, Generic Indicator, Message Waiting, External Power.
+const LED_USAGES: [u16; 11] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x27, 0x4c, 0x09, 0x4b, 0x19, 0x4d,
+];
 /// include/linux/usb.h USB_CTRL_SET_TIMEOUT, the `usb_interrupt_msg` bound
 /// `usbhid_output_report` uses.
 const OUTPUT_TIMEOUT_US: u64 = 5_000_000;
@@ -843,6 +852,50 @@ mod tests {
         let mut device = model::device(Vec::new());
         device.id = controller.borrow().test_device_id(1).unwrap();
         device
+    }
+
+    /// A keyboard whose output report holds five LEDs and three pad bits.
+    const LED_KEYBOARD: [u8; 55] = [
+        0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, // keyboard
+        0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81,
+        0x02, // modifiers
+        0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02, // LEDs
+        0x95, 0x01, 0x75, 0x03, 0x91, 0x01, // padding
+        0x95, 0x06, 0x75, 0x08, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81,
+        0x00, // keys
+        0xc0,
+    ];
+
+    #[test]
+    fn leds_set_the_first_led_report_like_hidinput_led_worker() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: this allocation outlives all model/controller DMA references.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, hardware) = model::cancellation_controller(&mut dma);
+        hardware
+            .borrow_mut()
+            .descriptors
+            .push((REPORT_DESCRIPTOR, 0, LED_KEYBOARD.to_vec()));
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        let interface = interface(&LED_KEYBOARD, 0, 0);
+        let mut input = UsbInput::new(
+            shared.clone(),
+            &device(&shared),
+            &interface,
+            interface.endpoints[0],
+            &mut dma,
+        )
+        .unwrap()
+        .unwrap();
+        // Num Lock, Caps Lock and Stand-By, which this keyboard lacks.
+        input.set_leds(1 << 0 | 1 << 1 | 1 << 5).unwrap();
+        assert_eq!(
+            hardware.borrow().setup.last().unwrap(),
+            &([0x21, SET_REPORT, 0, 2, 4, 0, 1, 0], vec![3])
+        );
+        input.set_leds(1 << 2).unwrap();
+        assert_eq!(hardware.borrow().setup.last().unwrap().1, [4]);
     }
 
     #[test]

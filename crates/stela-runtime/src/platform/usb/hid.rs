@@ -310,6 +310,12 @@ impl Peripheral {
         }
     }
 
+    /// The keyboard LEDs the host last set, Num Lock in bit 0 through Kana
+    /// in bit 4, as the boot keyboard's output report carries them.
+    pub fn leds(&self) -> u8 {
+        self.leds
+    }
+
     /// Applies one input change, queuing the report it produces. Reports
     /// queue only while configured; a host that has not configured the
     /// device reads the current state with GET_REPORT.
@@ -962,7 +968,7 @@ mod tests {
         let mut p = Peripheral::new();
         enumerate(&mut p);
         control(&mut p, setup(0x21, SET_REPORT, 0x200, 0, 1), &[0x23]).unwrap();
-        assert_eq!(p.leds, 3);
+        assert_eq!(p.leds(), 3);
         control(&mut p, setup(0x21, SET_PROTOCOL, 0, 0, 0), &[]).unwrap();
         let protocol = control(&mut p, setup(0xa1, GET_PROTOCOL, 0, 0, 1), &[]).unwrap();
         assert_eq!(protocol, [BOOT_PROTOCOL]);
