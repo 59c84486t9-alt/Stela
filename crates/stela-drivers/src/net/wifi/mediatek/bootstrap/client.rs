@@ -9,6 +9,8 @@ mod edca;
 mod external;
 pub use edca::AppliedEdca;
 mod cqm;
+mod csa;
+pub use csa::ChannelSwitchStep;
 mod local;
 pub mod management;
 mod modern;
@@ -217,6 +219,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     slot_time: Option<u16>,
     /// The OS's RSSI monitor and the AP's averaged beacon signal.
     cqm: cqm::Cqm,
+    /// The AP's announced channel switch.
+    csa: csa::State,
     /// The channel the firmware operates when a beacon narrowed it.
     channel: Option<ChannelDefinition>,
     /// A channel a beacon changed, not yet sent; `None` inside when the
@@ -307,6 +311,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 edca: None,
                 slot_time: None,
                 cqm: cqm::Cqm::default(),
+                csa: csa::State::default(),
                 channel: None,
                 channel_change: None,
                 authentication_deadline: None,
@@ -972,12 +977,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if (s.management.is_some() || s.station.requires_protected_management())
                 && wifi::security::management::robust(&frame)
             {
-                events.push(Event::ProtectedManagement(Self::receive_management(
-                    s, frame, &f.bytes,
-                )?));
+                let received = Self::receive_management(s, frame, &f.bytes)?;
+                if !Self::channel_switch_action(s, received.frame(), received.body()) {
+                    events.push(Event::ProtectedManagement(received));
+                }
                 continue;
             }
             let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
+            if modern_data
+                && Self::channel_switch_action(s, &frame, frame.bytes().get(24..).unwrap_or(&[]))
+            {
+                continue;
+            }
             if modern_data
                 && (frame.header().control & 0x00fc == 0x00d0
                     || frame.header().control & 0x00fc == 0x0084)
@@ -1025,6 +1036,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
         }
         events.extend(Self::poll_reorder(s, now)?.into_iter().map(Event::Ingress));
+        events.append(&mut s.csa.ready);
         events.extend(
             core::mem::take(&mut s.asynchronous)
                 .into_iter()
@@ -1194,6 +1206,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.slot_time = None;
         s.channel = None;
         s.channel_change = None;
+        s.csa = csa::State::default();
         s.management = None;
         s.pmf_selected = None;
         s.pmf_authentication = None;
@@ -1259,6 +1272,15 @@ pub enum Event {
         rssi: i32,
         high: bool,
     },
+    /// `cfg80211_ch_switch_started_notify`: the AP announced a switch to
+    /// `definition` in `count` beacons, asking for silence when `block_tx`.
+    ChannelSwitchStarted {
+        definition: ChannelDefinition,
+        count: u8,
+        block_tx: bool,
+    },
+    /// `cfg80211_ch_switch_notify`: the association now operates there.
+    ChannelSwitched(ChannelDefinition),
     Bss(scan::result::Bss),
     Ingress(Ingress),
     Raw(crate::net::wifi::mediatek::ring::rx::Frame),

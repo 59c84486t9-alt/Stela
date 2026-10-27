@@ -47,6 +47,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .map_err(Error::Station)?;
         let h = frame.header();
         let subtype = h.control & 0x00fc;
+        let channel = (
+            frame.radio.band,
+            frame.radio.channel,
+            frame.radio.frequency_mhz,
+        );
+        // A frame received before a channel switch is no longer the AP's.
+        if Self::switched_from(s, channel) {
+            return Ok(());
+        }
         if h.transmitter != Some(p.peer)
             || frame.bytes().get(16..22) != Some(p.peer.0.as_slice())
             || (
@@ -77,6 +86,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongProfile);
         }
         let mut elements = frame.bytes().get(36..).ok_or(Error::WrongProfile)?;
+        // mac80211 processes a beacon's channel switch elements first.
+        if subtype == 0x0080 {
+            Self::process_channel_switch(s, elements, csa::Source::Beacon, None);
+        }
+        let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
         // mac80211 `ieee80211_handle_bss_capability`: on 2.4 GHz the slot
         // follows the AP's Short Slot Time capability; elsewhere it is 9 us.
         if p.channel.band == wifi::Band::Ghz2 {
@@ -84,18 +98,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             let slot = if capabilities & (1 << 10) != 0 { 9 } else { 20 };
             s.slot_time = (slot != p.slot_time).then_some(slot);
         }
-        // mac80211 `ieee80211_config_bw`: the AP's operation narrowed to the
-        // association, applied when it differs from the current channel.
         if let (Some(signal), Some(association)) =
             (frame.radio.signal_dbm, s.station.association_epoch())
         {
             s.cqm.beacon(association, i32::from(signal));
         }
+        // mac80211 `ieee80211_config_bw`: the AP's operation narrowed to the
+        // association, applied when it differs from the current channel.
         let context = modern.context().clone();
-        let current = s.channel.unwrap_or(context.definition());
-        s.channel_change = match context.beacon_definition(elements) {
+        let operating = s.station.operating_definition().ok_or(Error::WrongPhase)?;
+        let current = s.channel.unwrap_or(operating);
+        s.channel_change = match context.beacon_definition(elements, operating.control) {
             Ok(definition) if definition == current => None,
-            Ok(definition) if definition.within(&context.definition()) => Some(Some(definition)),
+            Ok(definition) if definition.within(&operating) => Some(Some(definition)),
             _ => Some(None),
         };
         if elements.len() > 2300 {

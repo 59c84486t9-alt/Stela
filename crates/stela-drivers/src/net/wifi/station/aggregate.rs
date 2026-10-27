@@ -23,6 +23,7 @@ impl Station {
         }
         self.validate_association_context(group.context())?;
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
         for frame in group.members() {
             let h = frame.header();
             if !h.data_present() || h.control & 0x0300 != 0x0200 {
@@ -39,11 +40,8 @@ impl Station {
                 frame.radio.band,
                 frame.radio.channel,
                 frame.radio.frequency_mhz,
-            ) != (
-                join.channel.band,
-                join.channel.number,
-                join.channel.frequency_mhz,
-            ) {
+            ) != (channel.band, channel.number, channel.frequency_mhz)
+            {
                 return Err(Error::WrongChannel.into());
             }
         }

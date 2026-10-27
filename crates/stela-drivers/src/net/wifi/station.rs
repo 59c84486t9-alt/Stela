@@ -392,6 +392,14 @@ impl Station {
         Ok(())
     }
 
+    /// The channel frames of the current join use: the association's
+    /// operating channel once one exists.
+    pub(crate) fn current_channel(&self) -> Option<super::Channel> {
+        self.operating_definition()
+            .map(|definition| definition.control)
+            .or(self.join.as_ref().map(|join| join.channel))
+    }
+
     /// The channel the current association operates: its own, or where a
     /// channel switch moved it.
     pub fn operating_definition(&self) -> Option<operations::ChannelDefinition> {
@@ -502,15 +510,13 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
         if (
             frame.radio.band,
             frame.radio.channel,
             frame.radio.frequency_mhz,
-        ) != (
-            join.channel.band,
-            join.channel.number,
-            join.channel.frequency_mhz,
-        ) {
+        ) != (channel.band, channel.number, channel.frequency_mhz)
+        {
             return Err(Error::WrongChannel);
         }
         if frame.fcs_error || frame.monitor_only {

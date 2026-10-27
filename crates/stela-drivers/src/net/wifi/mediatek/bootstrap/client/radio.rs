@@ -201,14 +201,24 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         req: &crate::net::wifi::mediatek::mcu::init::Request,
         abort: &crate::net::wifi::mediatek::mcu::init::Request,
     ) -> Result<(), Error> {
+        Self::grant(&mut Roc::of(s), p, token, req, abort)
+    }
+    /// `await_grant` over the state a remain-on-channel request uses.
+    pub(super) fn grant(
+        s: &mut Roc<'_, I, Q, C>,
+        p: Profile,
+        token: u8,
+        req: &crate::net::wifi::mediatek::mcu::init::Request,
+        abort: &crate::net::wifi::mediatek::mcu::init::Request,
+    ) -> Result<(), Error> {
         s.transport_facts
             .try_reserve(1)
             .map_err(|_| Error::NoMemory)?;
         s.asynchronous
             .try_reserve(64)
             .map_err(|_| Error::NoMemory)?;
-        s.phase = Phase::Quarantined;
-        s.roc_token = token;
+        *s.phase = Phase::Quarantined;
+        *s.roc_token = token;
         let fact = s
             .controller
             .state_mut()
@@ -266,14 +276,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if let Some(g) = match_grant {
                 let mut actual = p;
                 actual.interface.band_index = g.hardware_band;
-                s.profile = Some(actual);
-                s.roc_deadline = Some(
+                *s.profile = Some(actual);
+                *s.roc_deadline = Some(
                     clock
                         .now_us()
                         .checked_add(u64::from(g.duration_ms) * 1000)
                         .ok_or(Error::NeedsDrain)?,
                 );
-                s.phase = Phase::Joining;
+                *s.phase = Phase::Joining;
                 return Ok(());
             }
             if deadline.passed() {
@@ -295,6 +305,31 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 return Err(Error::GrantTimeout);
             }
             core::hint::spin_loop();
+        }
+    }
+}
+
+/// The owned state a remain-on-channel request uses, borrowed apart from the
+/// station a regulatory publication holds meanwhile.
+pub(super) struct Roc<'a, I: BarIo, Q: QueueIo, C: 'static> {
+    pub(super) controller: &'a mut Controller<I, Q, C>,
+    pub(super) transport_facts: &'a mut Vec<mailbox::init::Fact>,
+    pub(super) asynchronous: &'a mut Vec<crate::net::wifi::mediatek::ring::rx::Frame>,
+    pub(super) phase: &'a mut Phase,
+    pub(super) roc_token: &'a mut u8,
+    pub(super) roc_deadline: &'a mut Option<u64>,
+    pub(super) profile: &'a mut Option<Profile>,
+}
+impl<'a, I: BarIo, Q: QueueIo, C: 'static> Roc<'a, I, Q, C> {
+    pub(super) fn of(s: &'a mut Owned<I, Q, C>) -> Self {
+        Self {
+            controller: &mut s.controller,
+            transport_facts: &mut s.transport_facts,
+            asynchronous: &mut s.asynchronous,
+            phase: &mut s.phase,
+            roc_token: &mut s.roc_token,
+            roc_deadline: &mut s.roc_deadline,
+            profile: &mut s.profile,
         }
     }
 }

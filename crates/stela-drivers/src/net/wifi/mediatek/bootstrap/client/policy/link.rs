@@ -418,6 +418,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
+        if Self::active(s) {
+            match s.client.channel_switch(timer_now) {
+                Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
+                Err(error) => {
+                    soft_rx = false;
+                    failure.get_or_insert(error);
+                }
+            }
+        }
         if Self::active(s) && s.client.client.pending_channel().is_some() {
             match s.client.update_channel() {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
@@ -485,6 +494,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             .is_some_and(|deadline| deadline <= now)
         {
             s.client.poll_block_ack_timers(now)?;
+        }
+        // Transmission waits while the AP asked for silence.
+        if s.client.client.channel_switch_blocks_tx() {
+            return Ok(());
         }
         if s.client.client.pending_block_ack() && !Self::progress(s).backpressured {
             match s.client.progress_block_ack(&s.source, now) {
@@ -684,7 +697,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Managed
                 failure.map_or(LinkError::NoCarrier, |e| LinkError::Adapter(format!("{e}")))
             );
         }
-        if Self::progress(s).backpressured {
+        // ieee80211_vif_block_queues_csa: the AP asked for silence.
+        if Self::progress(s).backpressured || s.client.client.channel_switch_blocks_tx() {
             return Err(LinkError::Adapter(format!(
                 "{}",
                 failure.unwrap_or(LinkControlError::Backpressure)

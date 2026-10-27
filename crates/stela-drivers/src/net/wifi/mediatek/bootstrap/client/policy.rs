@@ -778,6 +778,44 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         }
         .map_err(PolicyError::Client)
     }
+    /// Follow the current AP's announced channel switch: admit the target as
+    /// `mt7925_pre_channel_switch` checks it is usable, switch when due, and
+    /// disconnect as mac80211 does when the target is refused.
+    pub fn channel_switch(&mut self, now: u64) -> Result<(), PolicyError> {
+        self.live()?;
+        // A switch already due runs as soon as its target is admitted.
+        while let Some(step) = self.client.channel_switch_step(now) {
+            let definition = match step {
+                ChannelSwitchStep::Disconnect => return self.disconnect(),
+                ChannelSwitchStep::Prepare(definition) | ChannelSwitchStep::Switch(definition) => {
+                    definition
+                }
+            };
+            let context = self
+                .client
+                .modern_context()
+                .ok_or(PolicyError::Bss)?
+                .clone();
+            let Ok(admission) =
+                self.authority
+                    .admit_channel_switch(self.client.station(), context, definition)
+            else {
+                return self.disconnect();
+            };
+            if matches!(step, ChannelSwitchStep::Prepare(_)) {
+                self.client.channel_switch_prepared();
+                continue;
+            }
+            // SAFETY: as for update_edca, with the target's own admission.
+            unsafe {
+                self.client
+                    .switch_channel_modern(&mut self.authority, admission)
+            }
+            .map_err(PolicyError::Client)?;
+            self.peer = Some(definition.control);
+        }
+        Ok(())
+    }
     /// Apply a channel the current AP's beacon changed, or disconnect when
     /// the change leaves the associated channel, as mac80211 does.
     pub fn update_channel(&mut self) -> Result<(), PolicyError> {

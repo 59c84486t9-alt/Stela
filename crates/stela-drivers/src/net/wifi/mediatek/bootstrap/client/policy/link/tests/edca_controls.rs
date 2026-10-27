@@ -129,6 +129,114 @@ fn a_beacon_narrowing_the_channel_moves_the_firmware_like_ieee80211_config_bw() 
     stop(&mut link, &model);
 }
 
+fn channel_switch_events(link: &mut TestLink) -> Vec<Event> {
+    drain_notices(link)
+        .into_iter()
+        .filter_map(|notice| match notice.event {
+            LinkEvent::Controller(
+                event @ (Event::ChannelSwitchStarted { .. } | Event::ChannelSwitched(_)),
+            ) => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_announced_channel_switch_moves_the_firmware_like_mt7925_csa_work() {
+    use crate::net::wifi::station::phy::Width;
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    secure(&mut link);
+    drop(drain_notices(&mut link));
+    let before = link.station().operating_definition().unwrap();
+    // An unprotected public ECSA action only quiets the station until a
+    // beacon confirms it: class 115, channel 40, mode 1.
+    let mut action = response(0xd0, &[4, 4, 1, 115, 40, 3]);
+    action[4..10].copy_from_slice(&link.mac().0);
+    incoming(&model, &action, None, false);
+    link.service().unwrap();
+    assert!(link.transmit(&eth(0x800)).is_err());
+    assert_eq!(link.station().operating_definition(), Some(before));
+    incoming(&model, &beacon(&link, 0), None, false);
+    link.service().unwrap();
+    assert!(link.transmit(&eth(0x800)).is_ok());
+    // The beacon announces a quiet switch to 44 at 80 MHz around 42, now.
+    let mut frame = beacon(&link, 0);
+    for (id, data) in [
+        (37, &[1, 44, 0][..]),
+        (62, &[1]),
+        (196, &[194, 3, 1, 42, 0]),
+    ] {
+        frame.extend_from_slice(&[id, data.len() as u8]);
+        frame.extend_from_slice(data);
+    }
+    incoming(&model, &frame, None, false);
+    link.service().unwrap();
+    let target = link.station().operating_definition().unwrap();
+    assert_eq!(target.control.number, 44);
+    assert_eq!((target.width, target.center1_mhz), (Width::Mhz80, 5210));
+    let commands = model.response.lock().unwrap().client_commands.clone();
+    let chctx = commands.last().unwrap();
+    assert_eq!(chctx[48 + 4..48 + 6], [2, 0]);
+    assert_eq!((chctx[48 + 8], chctx[48 + 9], chctx[48 + 11]), (44, 42, 2));
+    assert!(model.response.lock().unwrap().roc_channel.is_none());
+    assert!(matches!(
+        channel_switch_events(&mut link)[..],
+        [Event::ChannelSwitchStarted {
+            count: 0,
+            block_tx: true,
+            ..
+        }]
+    ));
+    // Silence holds until the AP's beacon on the new channel, whose HT
+    // operation names 44 below 48.
+    assert!(link.transmit(&eth(0x800)).is_err());
+    let mut frame = beacon(&link, 0);
+    crate::net::wifi::station::tests::edit_elements(&mut frame[36..], |id, data| {
+        if id == 61 {
+            data[0] = 44;
+            data[1] = (data[1] & !3) | 1;
+        }
+    });
+    let mut bytes = incoming_bytes(&frame, None, false);
+    bytes[13] = 44;
+    device_receive(&model.queues[&0xd4520], &bytes, true, 0);
+    link.service().unwrap();
+    assert!(matches!(
+        channel_switch_events(&mut link)[..],
+        [Event::ChannelSwitched(definition)] if definition == target
+    ));
+    assert!(link.carrier());
+    assert!(link.transmit(&eth(0x800)).is_ok());
+    stop(&mut link, &model);
+}
+
+#[test]
+fn a_channel_switch_to_another_band_disconnects_like_mac80211() {
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    secure(&mut link);
+    drop(drain_notices(&mut link));
+    // ECSA to channel 6 in 2.4 GHz operating class 81.
+    let mut frame = beacon(&link, 0);
+    frame.extend_from_slice(&[60, 4, 0, 81, 6, 3]);
+    incoming(&model, &frame, None, false);
+    link.service().unwrap();
+    assert!(!link.carrier());
+    while link.phase() == Phase::Removing {
+        finish_tx_on(&model, 36);
+        link.service().unwrap();
+    }
+    assert_eq!(link.phase(), Phase::NeedsDrain);
+    // SAFETY: actual model peer/key removal and all old users drained.
+    unsafe { link.retire_peer_after_drain() }.unwrap();
+    link.stop().unwrap();
+    model.response.lock().unwrap().clc_processing = false;
+    model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
+    // SAFETY: independent model controller, firmware, DMA and IRQ/work fence.
+    unsafe { link.stop_after_quiesce() }.unwrap();
+}
+
 #[test]
 fn a_new_association_forgets_the_last_aps_channel_and_timing() {
     let (mut link, model, join, bss, _) = setup_link();

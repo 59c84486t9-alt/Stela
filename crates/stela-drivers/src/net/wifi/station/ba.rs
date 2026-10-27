@@ -439,6 +439,7 @@ impl Station {
     ) -> Result<Action, Error> {
         self.validate_association_context(original)?;
         let context = self.ba_context()?;
+        let channel = self.operating_definition().ok_or(Error::Stale)?.control;
         let h = frame.header();
         if h.control & TYPE_SUBTYPE != crate::net::wifi::frame::ACTION
             || !h.protected()
@@ -458,11 +459,8 @@ impl Station {
             frame.radio.band,
             frame.radio.channel,
             frame.radio.frequency_mhz,
-        ) != (
-            context.channel().band,
-            context.channel().number,
-            context.channel().frequency_mhz,
-        ) {
+        ) != (channel.band, channel.number, channel.frequency_mhz)
+        {
             return Err(Error::Station(super::Error::WrongChannel));
         }
         let action = wire::action_body(

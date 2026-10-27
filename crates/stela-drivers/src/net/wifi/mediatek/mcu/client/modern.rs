@@ -36,6 +36,8 @@ pub struct Configuration {
     negotiated: Negotiated,
     operation: Operation,
     local_he_maps: [McsMaps; 3],
+    /// The BSS's operating width: the negotiated one until a channel switch.
+    width: Width,
 }
 impl Configuration {
     pub fn new(
@@ -43,6 +45,46 @@ impl Configuration {
         negotiated: Negotiated,
         operation: Operation,
         local_he_maps: [McsMaps; 3],
+    ) -> Result<Self, Error> {
+        let width = negotiated.width;
+        Self::checked(profile, negotiated, operation, local_he_maps, width)
+    }
+    /// The configuration once a channel switch moved the BSS to `operation`
+    /// at `width`, no wider than negotiated, on `profile`'s channel.
+    pub fn switched(
+        &self,
+        profile: Profile,
+        operation: Operation,
+        width: Width,
+    ) -> Result<Self, Error> {
+        let mhz = |width| match width {
+            Width::Mhz20 => 20,
+            Width::Mhz40 => 40,
+            Width::Mhz80 => 80,
+            Width::Mhz160 | Width::Mhz80P80 => 160,
+            Width::Mhz320 => 320,
+        };
+        if mhz(width) > mhz(self.negotiated.width)
+            || operation.he != self.operation.he
+            || (operation.mbssid_indicator, operation.mbssid_index)
+                != (self.operation.mbssid_indicator, self.operation.mbssid_index)
+        {
+            return Err(Error::InvalidGeometry);
+        }
+        Self::checked(
+            profile,
+            self.negotiated.clone(),
+            operation,
+            self.local_he_maps,
+            width,
+        )
+    }
+    fn checked(
+        profile: Profile,
+        negotiated: Negotiated,
+        operation: Operation,
+        local_he_maps: [McsMaps; 3],
+        width: Width,
     ) -> Result<Self, Error> {
         profile.validate_inner(true)?;
         // The pinned MT7925 local advertisement includes160MHz, not80+80;
@@ -72,7 +114,7 @@ impl Configuration {
         {
             return Err(Error::InvalidNegotiation);
         }
-        validate_geometry(profile, negotiated.width, operation)?;
+        validate_geometry(profile, width, operation)?;
         if negotiated
             .local()
             .local_he_source_maps()
@@ -101,6 +143,7 @@ impl Configuration {
             negotiated,
             operation,
             local_he_maps,
+            width,
         })
     }
     pub fn negotiated(&self) -> &Negotiated {
@@ -120,11 +163,12 @@ impl Configuration {
     fn matches(&self, profile: Profile) -> Result<(), Error> {
         // Recheck actual supplied resources/rates/antenna against this retained
         // metadata on every request, before any caller can publish it.
-        Self::new(
+        Self::checked(
             profile,
             self.negotiated.clone(),
             self.operation,
             self.local_he_maps,
+            self.width,
         )
         .map(|_| ())
     }
@@ -138,10 +182,13 @@ impl Configuration {
         }
     }
     fn command_bandwidth(&self) -> u8 {
-        match self.negotiated.width {
+        match self.width {
+            Width::Mhz20 => 0,
+            Width::Mhz40 => 1,
+            Width::Mhz80 => 2,
+            Width::Mhz160 => 3,
             Width::Mhz80P80 => 6,
             Width::Mhz320 => 7,
-            _ => self.station_bandwidth(),
         }
     }
     pub(super) fn peer_capabilities(&self, p: Profile, out: &mut Vec<u8>) -> Result<(), Error> {
@@ -258,11 +305,7 @@ impl Configuration {
         r[5] = self.operation.center_channel;
         r[6] = self.operation.second_center_channel;
         r[7] = self.command_bandwidth();
-        r[10] = if self.negotiated.width == Width::Mhz20 {
-            0
-        } else {
-            4
-        };
+        r[10] = if self.width == Width::Mhz20 { 0 } else { 4 };
         r[11] = match (p.channel.number as u8).cmp(&r[5]) {
             core::cmp::Ordering::Less => 1,
             core::cmp::Ordering::Greater => 3,

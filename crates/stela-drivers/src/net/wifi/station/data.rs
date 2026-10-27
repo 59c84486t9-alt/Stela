@@ -249,7 +249,8 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        if plan.channel != join.channel {
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
+        if plan.channel != channel {
             return Err(Error::WrongChannel);
         }
         if let Some((tid, context)) = &plan.qos {
@@ -265,7 +266,7 @@ impl Station {
             }
             qos_access(context, *tid)?;
         }
-        if !policy.allow_data_tx(join.channel) {
+        if !policy.allow_data_tx(channel) {
             return Err(Error::Regulatory);
         }
         let key = match plan.protection {
@@ -317,15 +318,13 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
         if (
             frame.radio.band,
             frame.radio.channel,
             frame.radio.frequency_mhz,
-        ) != (
-            join.channel.band,
-            join.channel.number,
-            join.channel.frequency_mhz,
-        ) {
+        ) != (channel.band, channel.number, channel.frequency_mhz)
+        {
             return Err(Error::WrongChannel);
         }
         let header = frame.header();
@@ -563,7 +562,8 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        if !policy.allow_data_tx(join.channel) {
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
+        if !policy.allow_data_tx(channel) {
             return Err(Error::Regulatory);
         }
         let (destination, source, protocol, payload) = msdu(ethernet)?;
@@ -648,7 +648,7 @@ impl Station {
         plaintext.extend_from_slice(&payload);
         Ok(TxPlan {
             epoch,
-            channel: join.channel,
+            channel,
             plaintext,
             protection,
             sequence,

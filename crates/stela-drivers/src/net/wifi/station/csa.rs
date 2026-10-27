@@ -301,9 +301,16 @@ fn compatible(a: &ChannelDefinition, b: &ChannelDefinition) -> bool {
     wide.width == narrow.width && wide.center1_mhz == narrow.center1_mhz
 }
 
+/// An announcement the station cannot follow, which mac80211 disconnects
+/// for; `block_tx` is its Channel Switch Mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub block_tx: bool,
+    pub error: Error,
+}
+
 /// `ieee80211_parse_ch_switch_ie` for the association's `negotiated`
-/// operation on `band`: `Ok(None)` when no switch is announced, an error
-/// when the announcement cannot be followed, which mac80211 disconnects for.
+/// operation on `band`: `Ok(None)` when no switch is announced.
 /// `ecsa` is a public action frame's own Extended Channel Switch fields.
 pub fn parse(
     elements: &[u8],
@@ -311,20 +318,20 @@ pub fn parse(
     ecsa: Option<[u8; 4]>,
     band: Band,
     negotiated: &Negotiated,
-) -> Result<Option<ChannelSwitch>, Error> {
+) -> Result<Option<ChannelSwitch>, Refusal> {
     let mode = negotiated.mode;
     let e = Elements::parse(elements, frame, mode);
     let wide40 = mode >= Mode::Ht && limit(negotiated.width) >= 40;
     let mut secondary = e.secondary.filter(|_| wide40);
     let wide = e.wide.filter(|_| wide40 && mode >= Mode::Vht);
     let ecsa = ecsa.or_else(|| e.ecsa.map(|b| b.try_into().unwrap()));
-    let mut new_band = band;
+    let mut new_band = Ok(band);
     let mut class = None;
     let mut announced = None;
     if let Some([switch_mode, op_class, number, count]) = ecsa
         && let Some(found) = class_band(op_class)
     {
-        new_band = found?;
+        new_band = found;
         class = Some(op_class);
         announced = Some((switch_mode, number, count));
     }
@@ -336,11 +343,17 @@ pub fn parse(
     let Some((switch_mode, number, count)) = announced else {
         return Ok(None);
     };
+    let refuse = |error| Refusal {
+        block_tx: switch_mode != 0,
+        error,
+    };
+    let new_band = new_band.map_err(refuse)?;
     let control = Channel {
         band: new_band,
         number: u16::from(number),
         frequency_mhz: frequency(new_band, number)
-            .map_err(|_| Error::Invalid("channel switch target"))? as u16,
+            .map_err(|_| refuse(Error::Invalid("channel switch target")))?
+            as u16,
     };
     if secondary.is_none() && mode >= Mode::Ht {
         // Without the offset the post-switch width is unknown: 20 MHz.
@@ -387,7 +400,7 @@ pub fn parse(
         ap = d;
         while limit(negotiated.width) < limit(d.width) && d.downgrade() {}
         if !compatible(&d, &oper) {
-            return Err(Error::Incompatible("channel switch definitions"));
+            return Err(refuse(Error::Incompatible("channel switch definitions")));
         }
         oper = d;
     }
@@ -493,7 +506,9 @@ mod tests {
         ie(&mut e, 37, &[0, 40, 1]);
         ie(&mut e, 62, &[1]);
         ie(&mut e, 194, &[1, 42, 0]);
-        assert!(parse(&e, Frame::Action, None, Band::Ghz5, &n).is_err());
+        assert!(
+            parse(&e, Frame::Action, None, Band::Ghz5, &n).is_err_and(|refusal| !refusal.block_tx)
+        );
         // An unknown operating class falls back to the CSA element.
         let mut e = Vec::new();
         ie(&mut e, 37, &[0, 48, 3]);

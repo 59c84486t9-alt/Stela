@@ -254,14 +254,17 @@ impl AssociationContext {
     pub fn channel(&self) -> Channel {
         self.definition.control
     }
-    /// mac80211 `ieee80211_config_bw` for a later beacon's elements: the
-    /// channel the AP now operates, narrowed to the association's width. An
-    /// error is a mode or geometry change mac80211 disconnects for.
-    pub fn beacon_definition(&self, elements: &[u8]) -> Result<ChannelDefinition, Error> {
+    /// mac80211 `ieee80211_config_bw` for a later beacon's elements around
+    /// the `control` channel the association operates: the channel the AP now
+    /// operates, narrowed to the association's width. An error is a mode or
+    /// geometry change mac80211 disconnects for.
+    pub fn beacon_definition(
+        &self,
+        elements: &[u8],
+        control: Channel,
+    ) -> Result<ChannelDefinition, Error> {
         let mut definition = Operations::parse(elements)
-            .and_then(|operations| {
-                operations.channel_for(self.definition.control, &self.negotiated)
-            })
+            .and_then(|operations| operations.channel_for(control, &self.negotiated))
             .map_err(failure)?;
         let limit = ChannelDefinition {
             width: self.negotiated.width,
