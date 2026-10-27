@@ -88,6 +88,30 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     assert_eq!(bars.ip_path(), Some(IpPath::Dynamic));
     // Discovery's first register is beyond this 16 KiB window.
     let empty = HandoffProvider::new(None);
+    // Invalid timing metadata refuses before the original C owner, provider
+    // or even the first out-of-window register can be consulted. Do not make
+    // a required delay silently expire with zero calibration.
+    for (rate, error) in [
+        (0, stela_drivers::ClockError::Uncalibrated),
+        (
+            u64::MAX / 1000 + 1,
+            stela_drivers::ClockError::DurationOverflow,
+        ),
+        (
+            (u64::MAX / 2) / 1000 + 1,
+            stela_drivers::ClockError::DurationTooLong,
+        ),
+    ] {
+        let invalid = Clock {
+            ticks_per_microsecond: rate,
+        };
+        // SAFETY: canonical model resources, no physical hardware; invalid
+        // calibration must fail before any register operation.
+        assert_eq!(
+            unsafe { crate::discovery::discover(&bars, &invalid, &empty) }.err(),
+            Some(crate::discovery::Error::Clock(error))
+        );
+    }
     // SAFETY: the zeroed model mapping stands in for the device.
     let refused = unsafe { crate::discovery::discover(&bars, &CLOCK, &empty) };
     assert_eq!(
@@ -147,7 +171,8 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     }
 
     // The discovery parameter selects the firmware file. The model reports
-    // 16 MiB of VRAM, whose zeroed table Linux then does not use.
+    // 16 MiB of VRAM and completed IFWI; Linux then does not use its zeroed
+    // discovery table. This fixture does not test the independent IFWI wait.
     let mut function = observed(0x7550, 0x030000, 0xc1);
     let file = Policy {
         discovery: 2,
@@ -161,8 +186,12 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     .unwrap();
     {
         let memsize = bars.registers().unwrap().direct_dword(0xde3).unwrap();
+        let ready = bars.registers().unwrap().direct_dword(0x16061).unwrap();
         // SAFETY: the model's own register memory, with no device behind it.
-        unsafe { memsize.write_volatile(16) };
+        unsafe {
+            memsize.write_volatile(16);
+            ready.write_volatile(0x8000_0000);
+        }
     }
     // SAFETY: the zeroed model mapping stands in for the device.
     let missing = unsafe { crate::discovery::discover(&bars, &CLOCK, &empty) };

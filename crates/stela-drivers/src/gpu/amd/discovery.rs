@@ -4,7 +4,7 @@
 //! IP block is registered or initialized, and no TMR is reserved.
 use super::native_mmio::{AttachedBars, Error as WindowError, RegisterWindow};
 use crate::{
-    Clock,
+    Clock, ClockError,
     firmware::{Provider, Requirement, Target},
 };
 use alloc::{
@@ -23,6 +23,7 @@ use core::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Window(WindowError),
+    Clock(ClockError),
     OutOfMemory,
     /// The firmware Linux prefers for the binary could not be loaded.
     Firmware(crate::firmware::Error),
@@ -255,6 +256,11 @@ pub unsafe fn discover<'owner>(
     provider: &dyn Provider,
 ) -> Result<Discovery<'owner>, Error> {
     let (window, admission) = bars.dynamic().map_err(Error::Window)?;
+    // The pinned original IFWI wait issues msleep(1), up to 2000 times.
+    // Check its complete individual interval before C can touch a register or
+    // invoke the firmware provider. A zero or unrepresentable clock cannot
+    // grant timing authority just because a ready device would skip sleeping.
+    clock.check_duration(1000).map_err(Error::Clock)?;
     let (subvendor, subdevice) = admission.subsystem_ids();
     let device = Device {
         register_bytes: window.bytes() as u64,
