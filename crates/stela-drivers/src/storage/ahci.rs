@@ -139,6 +139,9 @@ const SATA_CONTROL_SPEED: u32 = 0x0f0;
 const SATA_CONTROL_COMRESET: u32 = 0x301;
 const SATA_CONTROL_RESUMED: u32 = 0x300;
 const SATA_CONTROL_RESUME_MASK: u32 = 0xf0f;
+/// `sata_link_hardreset` turns the Phy off (DET 4) to change SPD.
+const SATA_CONTROL_OFFLINE: u32 = 0x304;
+const SPEED_SHIFT: u32 = 4;
 /// Device signatures (AHCI 1.3.1 Â§3.3.9, Linux `SATA_SIGNATURE`s).
 const SIGNATURE_ATA: u32 = 0x0000_0101;
 const SIGNATURE_ATAPI: u32 = 0xeb14_0101;
@@ -223,6 +226,26 @@ const RESUME_SETTLE_US: u64 = 200_000;
 /// `sata_deb_timing_normal` and `_hotplug`: interval, stable duration, limit.
 const DEBOUNCE_NORMAL: [u64; 3] = [5_000, 100_000, 2_000_000];
 const DEBOUNCE_HOTPLUG: [u64; 3] = [25_000, 500_000, 2_000_000];
+/// Linux `ATA_EFLAG_*`: what `ata_eh_speed_down` records with an error.
+const EFLAG_IO: u32 = 1 << 0;
+const EFLAG_DUBIOUS: u32 = 1 << 1;
+const EFLAG_OLD: u32 = 1 << 31;
+/// Linux `ATA_ECAT_*`, each offset by `DUBIOUS` before the transfer is
+/// verified.
+const CATEGORY_ATA_BUS: usize = 1;
+const CATEGORY_TIMEOUT_HSM: usize = 2;
+const CATEGORY_UNKNOWN_DEVICE: usize = 3;
+const CATEGORY_DUBIOUS: usize = 4;
+const CATEGORIES: usize = 8;
+/// Linux `ATA_EH_SPDN_*` verdicts.
+const VERDICT_NCQ_OFF: u32 = 1 << 0;
+const VERDICT_SPEED_DOWN: u32 = 1 << 1;
+const VERDICT_FALLBACK_TO_PIO: u32 = 1 << 2;
+const VERDICT_KEEP_ERRORS: u32 = 1 << 3;
+/// `ATA_ERING_SIZE`, and the verdict's five- and ten-minute windows.
+const ERROR_RING: usize = 32;
+const VERDICT_SHORT_US: u64 = 5 * 60 * 1_000_000;
+const VERDICT_LONG_US: u64 = 10 * 60 * 1_000_000;
 /// The disk left the port or another device answered in its place.
 const DETACHED: BlockError = BlockError::Protocol("the SATA disk detached or changed");
 
@@ -255,6 +278,92 @@ pub struct AhciDisk {
     fault: Option<BlockError>,
     /// The cache flush command, or `None` when the write cache is off.
     flush: Option<u8>,
+    /// `dev->ering`, the history `ata_eh_speed_down` judges.
+    errors: ErrorRing,
+    /// `ATA_DFLAG_DUBIOUS_XFER`: no read or write has completed since the
+    /// disk was configured.
+    dubious: bool,
+    /// `link->sata_spd_limit`, a mask of allowed SPD values less one, and
+    /// `link->sata_spd`, the SStatus SPD after the last reset.
+    speed_limit: u32,
+    speed: u32,
+}
+
+/// One `ata_ering_entry`: its flags, `AC_ERR_*` mask and raw clock origin.
+#[derive(Clone, Copy, Default)]
+struct Recorded {
+    eflags: u32,
+    mask: u32,
+    at: u64,
+}
+
+/// Linux `struct ata_ering`: the newest error at the cursor.
+#[derive(Default)]
+struct ErrorRing {
+    entries: [Recorded; ERROR_RING],
+    cursor: usize,
+}
+
+impl ErrorRing {
+    /// `ata_ering_record`.
+    fn record(&mut self, eflags: u32, mask: u32, at: u64) {
+        self.cursor = (self.cursor + 1) % ERROR_RING;
+        self.entries[self.cursor] = Recorded { eflags, mask, at };
+    }
+
+    /// `ata_ering_map`'s order: newest first, up to the first empty entry.
+    fn newest(&mut self) -> impl Iterator<Item = &mut Recorded> {
+        let (head, tail) = self.entries.split_at_mut(self.cursor + 1);
+        head.iter_mut()
+            .rev()
+            .chain(tail.iter_mut().rev())
+            .take_while(|entry| entry.mask != 0)
+    }
+
+    /// `ata_ering_clear`: entries stay but no longer count.
+    fn clear(&mut self) {
+        for entry in self.newest() {
+            entry.eflags |= EFLAG_OLD;
+        }
+    }
+}
+
+/// Linux `ata_eh_categorize_error`. `verified` turns true at the first
+/// error recorded after a verified transfer and stays so for older ones.
+fn categorize(eflags: u32, mask: u32, verified: &mut bool) -> usize {
+    if eflags & EFLAG_DUBIOUS == 0 {
+        *verified = true;
+    }
+    let base = if *verified { 0 } else { CATEGORY_DUBIOUS };
+    if mask & ERR_ATA_BUS != 0 {
+        return base + CATEGORY_ATA_BUS;
+    }
+    if mask & ERR_TIMEOUT != 0 {
+        return base + CATEGORY_TIMEOUT_HSM;
+    }
+    if eflags & EFLAG_IO != 0 {
+        if mask & ERR_HSM != 0 {
+            return base + CATEGORY_TIMEOUT_HSM;
+        }
+        if mask & (ERR_DEVICE | ERR_MEDIA | ERR_INVALID) == ERR_DEVICE {
+            return base + CATEGORY_UNKNOWN_DEVICE;
+        }
+    }
+    0
+}
+
+/// `fls`: the highest set bit, counting from one.
+fn fls(value: u32) -> u32 {
+    u32::BITS - value.leading_zeros()
+}
+
+/// `__sata_set_spd_needed`'s target SPD for a limit.
+fn speed_target(limit: u32) -> u32 {
+    if limit == u32::MAX {
+        0
+    } else {
+        fls(limit) & 0xf
+    }
 }
 
 /// Linux's flush: none unless the write cache is enabled
@@ -634,6 +743,12 @@ impl AhciDisk {
         if capabilities & CAP_STAGGERED_SPIN_UP != 0 {
             port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_SPIN_UP);
         }
+        // sata_link_init_spd: the firmware's SPD caps the limit.
+        let initial = (port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED) >> SPEED_SHIFT;
+        let speed_limit = match initial {
+            0 => u32::MAX,
+            speed => (1 << speed) - 1,
+        };
         let control = port.read32(PORT_SATA_CONTROL) & !SATA_CONTROL_DETECTION;
         port.write32(PORT_SATA_CONTROL, control | SATA_CONTROL_RESET);
         clock.delay(COMRESET_HOLD_US);
@@ -678,6 +793,7 @@ impl AhciDisk {
         }
         port.write32(PORT_INTERRUPTS, u32::MAX);
         port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_START);
+        let speed = (port.read32(PORT_SATA_STATUS) >> SPEED_SHIFT) & 0xf;
         let mut disk = Self {
             port,
             commands,
@@ -696,6 +812,11 @@ impl AhciDisk {
             command_timeout_us: COMMAND_TIMEOUT_US,
             fault: None,
             flush: None,
+            errors: ErrorRing::default(),
+            // ata_eh_set_mode configured the disk: the transfer is unverified.
+            dubious: true,
+            speed_limit,
+            speed,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
@@ -741,9 +862,13 @@ impl AhciDisk {
         let mut retries = 0;
         loop {
             let Err(failure) = self.attempt(port, command, lba, count, bytes, write, buffer) else {
+                // ata_verify_xfer: a completed DMA transfer verifies it.
+                if io {
+                    self.dubious = false;
+                }
                 return Ok(());
             };
-            if let Err(error) = self.recover(port, &failure) {
+            if let Err(error) = self.recover(port, &failure, io) {
                 self.fault = Some(error.clone());
                 return Err(error);
             }
@@ -843,15 +968,21 @@ impl AhciDisk {
     }
 
     /// Linux `ahci_error_handler` and `ata_eh_recover`: restart an unfrozen
-    /// engine; when a reset is due, hard reset the link (one try per
-    /// `ata_eh_reset_timeouts` entry) and revalidate the disk, up to
-    /// `ATA_EH_DEV_TRIES` times. An error disables the disk.
-    fn recover(&mut self, port: &impl CommandPort, failure: &Failure) -> Result<(), BlockError> {
+    /// engine and consider a speed-down; when a reset is due, hard reset the
+    /// link (one try per `ata_eh_reset_timeouts` entry) and revalidate the
+    /// disk, up to `ATA_EH_DEV_TRIES` times. An error disables the disk.
+    fn recover(
+        &mut self,
+        port: &impl CommandPort,
+        failure: &Failure,
+        io: bool,
+    ) -> Result<(), BlockError> {
         if !failure.frozen {
             stop_engine(port, self.clock)?;
             start_engine(port);
         }
-        if !failure.reset {
+        let slowed = self.speed_down(port, failure.mask, io)?;
+        if !failure.reset && !slowed {
             return Ok(());
         }
         let mut hotplug = failure.hotplug;
@@ -882,6 +1013,108 @@ impl AhciDisk {
         Err(last)
     }
 
+    /// Linux `ata_eh_speed_down`: record the error and, when the verdict
+    /// calls for it, lower the SATA link speed limit; whether a reset must
+    /// apply it. NCQ is never enabled, so NCQ_OFF has nothing to turn off;
+    /// transfer modes are never programmed, so there is none to lower; and
+    /// PIO fallback excludes SATA ATA disks.
+    fn speed_down(
+        &mut self,
+        port: &impl CommandPort,
+        mask: u32,
+        io: bool,
+    ) -> Result<bool, BlockError> {
+        let mut eflags = if io { EFLAG_IO } else { 0 };
+        if self.dubious {
+            eflags |= EFLAG_DUBIOUS;
+        }
+        if categorize(eflags, mask, &mut false) == 0 {
+            return Ok(false);
+        }
+        let at = self.clock.try_start().map_err(|_| BlockError::Timeout)?;
+        self.errors.record(eflags, mask, at);
+        let verdict = self.verdict()?;
+        if verdict & VERDICT_SPEED_DOWN == 0 || !self.lower_speed_limit(port) {
+            return Ok(false);
+        }
+        if verdict & VERDICT_KEEP_ERRORS == 0 {
+            self.errors.clear();
+        }
+        Ok(true)
+    }
+
+    /// Linux `ata_eh_speed_down_verdict`.
+    fn verdict(&mut self) -> Result<u32, BlockError> {
+        let short = self.error_counts(VERDICT_SHORT_US)?;
+        let long = self.error_counts(VERDICT_LONG_US)?;
+        let dubious = |category| short[CATEGORY_DUBIOUS + category];
+        let mut verdict = 0;
+        if dubious(CATEGORY_ATA_BUS) + dubious(CATEGORY_TIMEOUT_HSM) > 1 {
+            verdict |= VERDICT_SPEED_DOWN | VERDICT_FALLBACK_TO_PIO | VERDICT_KEEP_ERRORS;
+        }
+        if dubious(CATEGORY_TIMEOUT_HSM) + dubious(CATEGORY_UNKNOWN_DEVICE) > 1 {
+            verdict |= VERDICT_NCQ_OFF | VERDICT_KEEP_ERRORS;
+        }
+        if short[CATEGORY_ATA_BUS] + short[CATEGORY_TIMEOUT_HSM] + short[CATEGORY_UNKNOWN_DEVICE]
+            > 6
+        {
+            verdict |= VERDICT_FALLBACK_TO_PIO;
+        }
+        if long[CATEGORY_TIMEOUT_HSM] + long[CATEGORY_UNKNOWN_DEVICE] > 3 {
+            verdict |= VERDICT_NCQ_OFF;
+        }
+        if long[CATEGORY_ATA_BUS] + long[CATEGORY_TIMEOUT_HSM] > 3
+            || long[CATEGORY_UNKNOWN_DEVICE] > 6
+        {
+            verdict |= VERDICT_SPEED_DOWN;
+        }
+        Ok(verdict)
+    }
+
+    /// `speed_down_verdict_cb` over `ata_ering_map`: categorized errors
+    /// within the window, newest first, up to the first cleared or older one.
+    fn error_counts(&mut self, window_us: u64) -> Result<[u32; CATEGORIES], BlockError> {
+        let clock = self.clock;
+        let mut counts = [0; CATEGORIES];
+        let mut verified = false;
+        for entry in self.errors.newest() {
+            let age = clock
+                .try_elapsed_us(entry.at)
+                .map_err(|_| BlockError::Timeout)?;
+            if entry.eflags & EFLAG_OLD != 0 || age > window_us {
+                break;
+            }
+            counts[categorize(entry.eflags, entry.mask, &mut verified)] += 1;
+        }
+        Ok(counts)
+    }
+
+    /// Linux `sata_down_spd_limit`: drop the highest allowed speed and every
+    /// speed at or above the current one; false when already at the bottom.
+    fn lower_speed_limit(&mut self, port: &impl CommandPort) -> bool {
+        let status = port.read32(PORT_SATA_STATUS);
+        let speed = if status & SATA_STATUS_DETECTION == DEVICE_PRESENT {
+            (status >> SPEED_SHIFT) & 0xf
+        } else {
+            self.speed
+        };
+        let mut mask = self.speed_limit;
+        if mask <= 1 {
+            return false;
+        }
+        mask &= !(1 << (fls(mask) - 1));
+        if speed > 1 {
+            mask &= (1 << (speed - 1)) - 1;
+        } else if self.speed != 0 {
+            return false;
+        }
+        if mask == 0 {
+            return false;
+        }
+        self.speed_limit = mask;
+        true
+    }
+
     /// Linux `ahci_do_hardreset` with `sata_link_hardreset`: whether an ATA
     /// disk is online afterwards.
     fn hardreset(
@@ -903,6 +1136,14 @@ impl AhciDisk {
         self.commands.bytes_mut()[RECEIVED_D2H..RECEIVED_D2H + FIS_BYTES].copy_from_slice(&d2h);
         port.write32(PORT_SATA_ERROR, port.read32(PORT_SATA_ERROR));
         port.write32(PORT_INTERRUPTS, port.read32(PORT_INTERRUPTS));
+        // sata_set_spd_needed: with the Phy off, program the limit's speed.
+        let target = speed_target(self.speed_limit);
+        if (port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED) >> SPEED_SHIFT != target {
+            let control = port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED;
+            port.write32(PORT_SATA_CONTROL, control | SATA_CONTROL_OFFLINE);
+            let control = port.read32(PORT_SATA_CONTROL) & !SATA_CONTROL_SPEED;
+            port.write32(PORT_SATA_CONTROL, control | target << SPEED_SHIFT);
+        }
         let speed = port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED;
         port.write32(PORT_SATA_CONTROL, speed | SATA_CONTROL_COMRESET);
         port.read32(PORT_SATA_CONTROL);
@@ -945,8 +1186,11 @@ impl AhciDisk {
             Ok(true)
         })();
         start_engine(port);
+        let online = result?;
+        // ata_eh_reset records the current link speed.
+        self.speed = (port.read32(PORT_SATA_STATUS) >> SPEED_SHIFT) & 0xf;
         // ahci_dev_classify: only an ATA disk is the same device.
-        Ok(result? && port.read32(PORT_SIGNATURE) == SIGNATURE_ATA)
+        Ok(online && port.read32(PORT_SIGNATURE) == SIGNATURE_ATA)
     }
 
     /// Linux `ata_dev_revalidate`: IDENTIFY again and require the same model,
@@ -1056,6 +1300,8 @@ mod tests {
         writes: RefCell<Vec<(usize, u32)>>,
         issued: Cell<usize>,
         present: Cell<bool>,
+        /// The disk's fastest SPD.
+        fastest: Cell<u32>,
     }
 
     const READY: u32 = 0x50;
@@ -1075,6 +1321,7 @@ mod tests {
                 writes: RefCell::new(Vec::new()),
                 issued: Cell::new(0),
                 present: Cell::new(true),
+                fastest: Cell::new(2),
             }
         }
 
@@ -1112,12 +1359,26 @@ mod tests {
                 }
                 PORT_SATA_CONTROL => {
                     registers[offset / 4] = value;
-                    if value & SATA_CONTROL_DETECTION == SATA_CONTROL_RESET {
-                        registers[PORT_SATA_STATUS / 4] = 0;
-                        registers[PORT_TASK_FILE / 4] = 0x80;
-                    } else if self.present.get() {
-                        registers[PORT_SATA_STATUS / 4] = 0x123;
-                        registers[PORT_TASK_FILE / 4] = READY;
+                    match value & SATA_CONTROL_DETECTION {
+                        SATA_CONTROL_RESET => {
+                            registers[PORT_SATA_STATUS / 4] = 0;
+                            registers[PORT_TASK_FILE / 4] = 0x80;
+                        }
+                        // The link comes up at the fastest speed both allow.
+                        0 if self.present.get() => {
+                            let limit = (value >> SPEED_SHIFT) & 0xf;
+                            let fastest = self.fastest.get();
+                            let speed = if limit == 0 {
+                                fastest
+                            } else {
+                                limit.min(fastest)
+                            };
+                            registers[PORT_SATA_STATUS / 4] = 0x103 | speed << SPEED_SHIFT;
+                            registers[PORT_TASK_FILE / 4] = READY;
+                        }
+                        0 => {}
+                        // Phy offline.
+                        _ => registers[PORT_SATA_STATUS / 4] = 4,
                     }
                 }
                 PORT_ISSUE => {
@@ -1232,6 +1493,10 @@ mod tests {
                     command_timeout_us: 1000,
                     fault: None,
                     flush: Some(ATA_FLUSH_CACHE_EXT),
+                    errors: ErrorRing::default(),
+                    dubious: false,
+                    speed_limit: u32::MAX,
+                    speed: 2,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -1287,6 +1552,8 @@ mod tests {
         assert_eq!(link.issued.get(), 1);
 
         // I/O is retried five times, as sd allows.
+        drop(fixture);
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
         let link = Link::new(&[Fault::TaskFile(0x0451); 7]);
         assert_eq!(
             fixture
@@ -1331,6 +1598,192 @@ mod tests {
             );
             assert!(fixture.disk.fault.is_none());
         }
+    }
+
+    #[test]
+    fn speed_down_verdicts_follow_ata_eh_speed_down_verdict() {
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        let disk = &mut fixture.disk;
+        // Errors `minutes` old, newest last.
+        let mut judge = |errors: &[(u32, u32, u64)]| {
+            disk.errors = ErrorRing::default();
+            let now = disk.clock.try_start().unwrap();
+            for &(eflags, mask, minutes) in errors {
+                disk.errors.record(eflags, mask, now - minutes * 60_000_000);
+            }
+            disk.verdict().unwrap()
+        };
+        let io = EFLAG_IO;
+        let dubious = EFLAG_IO | EFLAG_DUBIOUS;
+        let spdn = VERDICT_SPEED_DOWN;
+        // Two unverified bus errors or timeouts within five minutes.
+        assert_eq!(
+            judge(&[(dubious, ERR_ATA_BUS, 4), (dubious, ERR_TIMEOUT, 0)]),
+            spdn | VERDICT_FALLBACK_TO_PIO | VERDICT_KEEP_ERRORS
+        );
+        assert_eq!(
+            judge(&[(dubious, ERR_ATA_BUS, 6), (dubious, ERR_TIMEOUT, 0)]),
+            0
+        );
+        // A newer verified error makes older errors verified too.
+        assert_eq!(
+            judge(&[
+                (dubious, ERR_ATA_BUS, 2),
+                (dubious, ERR_ATA_BUS, 1),
+                (io, ERR_HSM, 0)
+            ]),
+            0
+        );
+        // Unverified timeouts or device errors turn NCQ off.
+        assert_eq!(
+            judge(&[(dubious, ERR_DEVICE, 1), (dubious, ERR_HSM, 0)]),
+            VERDICT_NCQ_OFF | VERDICT_KEEP_ERRORS
+        );
+        // More than three bus errors or timeouts within ten minutes.
+        let four = [
+            (io, ERR_ATA_BUS, 9),
+            (0, ERR_TIMEOUT, 7),
+            (io, ERR_HSM, 3),
+            (io, ERR_ATA_BUS | ERR_DEVICE, 0),
+        ];
+        assert_eq!(judge(&four), spdn);
+        let mut expired = four;
+        expired[0].2 = 11;
+        assert_eq!(judge(&expired), 0);
+        // More than six unknown device errors; HSM and media errors count only
+        // for I/O and unknown device errors.
+        let mut seven = [(io, ERR_DEVICE, 0); 7];
+        assert_eq!(
+            judge(&seven),
+            spdn | VERDICT_NCQ_OFF | VERDICT_FALLBACK_TO_PIO
+        );
+        seven[0] = (io, ERR_DEVICE | ERR_MEDIA, 0);
+        assert_eq!(judge(&seven), VERDICT_NCQ_OFF);
+        seven[0] = (0, ERR_HSM, 0);
+        assert_eq!(judge(&seven), VERDICT_NCQ_OFF);
+        // A cleared history stops the scan.
+        judge(&four[..3]);
+        disk.errors.clear();
+        let now = disk.clock.try_start().unwrap();
+        disk.errors.record(io, ERR_ATA_BUS, now);
+        assert_eq!(disk.verdict().unwrap(), 0);
+        // The ring keeps the newest 32.
+        for _ in 0..40 {
+            disk.errors.record(io, ERR_DEVICE, now);
+        }
+        assert_eq!(disk.errors.newest().count(), ERROR_RING);
+    }
+
+    #[test]
+    fn repeated_link_errors_lower_the_sata_speed_like_linux() {
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        let link = Link::new(&[]);
+        link.fastest.set(3);
+        link.registers.borrow_mut()[PORT_SATA_STATUS / 4] = 0x133;
+        fixture.disk.speed = 3;
+        let controls = |link: &Link| -> Vec<u32> {
+            link.writes_to(PORT_SATA_CONTROL)
+                .iter()
+                .map(|control| control & 0xfff)
+                .collect()
+        };
+        // Three verified bus errors only reset the link.
+        for _ in 0..3 {
+            link.faults.borrow_mut().push_back(Fault::Interface);
+            assert_eq!(
+                fixture
+                    .disk
+                    .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true),
+                Ok(())
+            );
+        }
+        assert_eq!(controls(&link), [0x301u32, 0x300].repeat(3));
+        // The fourth lowers the limit below 6 Gbps, turning the Phy off to
+        // program it, and clears the history.
+        link.writes.borrow_mut().clear();
+        link.faults.borrow_mut().push_back(Fault::Interface);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true),
+            Ok(())
+        );
+        assert_eq!(fixture.disk.speed_limit, 0b11);
+        assert_eq!(controls(&link), [0x304, 0x324, 0x321, 0x320]);
+        assert_eq!(fixture.disk.speed, 2);
+        assert_eq!(
+            fixture
+                .disk
+                .errors
+                .newest()
+                .filter(|e| e.eflags & EFLAG_OLD == 0)
+                .count(),
+            0
+        );
+        // Four more reach 1.5 Gbps, the bottom.
+        for _ in 0..4 {
+            link.faults.borrow_mut().push_back(Fault::Interface);
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true)
+                .unwrap();
+        }
+        assert_eq!(fixture.disk.speed_limit, 0b1);
+        assert_eq!(fixture.disk.speed, 1);
+        for _ in 0..4 {
+            link.faults.borrow_mut().push_back(Fault::Interface);
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true)
+                .unwrap();
+        }
+        assert_eq!(fixture.disk.speed_limit, 0b1);
+        assert!(fixture.disk.fault.is_none());
+
+        // Before a verified transfer, two bus errors suffice and the
+        // history is kept. A flush transfers no data and verifies nothing.
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        fixture.disk.dubious = true;
+        let link = Link::new(&[]);
+        for _ in 0..2 {
+            link.faults.borrow_mut().push_back(Fault::Interface);
+            assert_eq!(
+                fixture
+                    .disk
+                    .issue_on(&link, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false),
+                Ok(())
+            );
+        }
+        assert_eq!(fixture.disk.speed_limit, 0b1);
+        assert_eq!(fixture.disk.errors.newest().count(), 2);
+        assert!(fixture.disk.dubious);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Ok(())
+        );
+        assert!(!fixture.disk.dubious);
+
+        // Device errors that need no reset get one when they slow the link.
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        let link = Link::new(&[Fault::TaskFile(0x0451); 6]);
+        assert!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false)
+                .is_err()
+        );
+        assert!(controls(&link).is_empty());
+        link.faults.borrow_mut().push_back(Fault::TaskFile(0x0451));
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Ok(())
+        );
+        assert_eq!(fixture.disk.speed_limit, 0b1);
+        assert_eq!(controls(&link), [0x304, 0x314, 0x311, 0x310]);
     }
 
     #[test]
