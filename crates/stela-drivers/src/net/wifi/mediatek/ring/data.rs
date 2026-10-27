@@ -84,6 +84,18 @@ pub struct FreeEvidence {
     pub accounting_word: Option<u32>,
     pub release_word: u32,
 }
+#[cfg(test)]
+impl Receipt {
+    pub(crate) fn for_tests(serial: u64) -> Self {
+        Self {
+            epoch: Epoch(0),
+            serial,
+            token: 0,
+            descriptor: 0,
+            wcid: 0,
+        }
+    }
+}
 /// Mapping removal completed after both hardware receipts. No air ACK or TXS
 /// status is synthesized. The caller still owns any separate PID/TXS context.
 pub struct Released<C> {

@@ -351,6 +351,17 @@ fn legacy_index(band: Band, index: u8, cck: bool) -> u8 {
         .map_or(0, |at| (start + at) as u8)
 }
 
+/// `legacy_index` for a band as the shared radio status names it.
+pub(crate) fn legacy_rate_index(band: crate::net::wifi::Band, index: u8, cck: bool) -> u8 {
+    use crate::net::wifi::Band as Radio;
+    let band = match band {
+        Radio::Ghz2 => Band::Ghz2,
+        Radio::Ghz5 => Band::Ghz5,
+        Radio::Ghz6 => Band::Ghz6,
+    };
+    legacy_index(band, index, cck)
+}
+
 /// Linux `mt7925_mac_fill_rx_rate` over P-RXV words 0 and 2.
 fn rate(rxv: &[u32; 4], band: Band) -> Result<RxRate, Error> {
     let (v0, v2) = (rxv[0], rxv[2]);

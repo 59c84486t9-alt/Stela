@@ -14,6 +14,8 @@ mod modern;
 mod packet;
 mod pmf;
 mod six_ghz;
+mod txs;
+pub use txs::TxStatus;
 pub use wifi::station::NativeBssObservation as PmfBssObservation;
 mod policy;
 pub use policy::{
@@ -119,9 +121,28 @@ pub struct PacketOwner<C: 'static> {
     tid: Option<u8>,
     /// Sent at the minimum rate, as control-port frames are.
     control_port: bool,
+    /// The TXWI packet ID; one of at least 3 asked for TX status.
+    pid: u8,
     tx_ba: Option<Arc<station::ba::tx::Session>>,
     authentication: Option<Arc<station::external::Session>>,
     management: Option<Arc<management::Session>>,
+}
+#[cfg(test)]
+impl PacketOwner<()> {
+    pub(crate) fn for_tests(association: u64, pid: u8) -> Self {
+        Self {
+            resource: Arc::new(()),
+            association,
+            key: None,
+            context: None,
+            tid: None,
+            control_port: false,
+            pid,
+            tx_ba: None,
+            authentication: None,
+            management: None,
+        }
+    }
 }
 impl<C> PacketOwner<C> {
     pub fn association_epoch(&self) -> u64 {
@@ -157,6 +178,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     interface: Interface<Arc<C>>,
     station: Station,
     pmf_observations: Vec<Arc<PmfBssObservation>>,
+    txs: txs::State,
     pmf_selected: Option<Arc<PmfBssObservation>>,
     pmf_authentication: Option<wifi::regulatory::PmfAuthenticationBinding>,
     scanner: scan::Scanner,
@@ -239,6 +261,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 interface,
                 station,
                 pmf_observations: Vec::new(),
+                txs: txs::State::default(),
                 pmf_selected: None,
                 pmf_authentication: None,
                 scanner,
@@ -790,7 +813,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 });
             }
         }
-        let mut events = Vec::new();
+        s.txs.expire(now);
+        let mut events: Vec<_> = s.txs.ready.drain(..).map(Event::TxStatus).collect();
         while let Some(received) = s.pending_rx.pop_front() {
             let receive::ReceivedFrame { queue, frame: f } = received;
             if f.drop {
@@ -806,6 +830,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 let epoch = q.epoch();
                 // SAFETY: this TX-free event came from the current data ring's own RX path.
                 unsafe { q.apply_tx_free(epoch, &f.bytes) }.map_err(Error::Ring)?;
+                continue;
+            }
+            if kind == Some(0) {
+                if let Some(p) = s.profile {
+                    let reports = s.txs.receive(&f.bytes, p.wcid, p.channel.band);
+                    events.extend(reports.into_iter().map(Event::TxStatus));
+                }
                 continue;
             }
             if kind.is_some_and(|k| k != 2 && k != 7) {
@@ -1191,6 +1222,8 @@ pub enum Event {
         failure: Option<station::Failure>,
     },
     ConnectionLost(crate::net::wifi::mediatek::ring::rx::Frame),
+    /// The firmware's TX status for a frame that asked for it.
+    TxStatus(TxStatus),
     Bss(scan::result::Bss),
     Ingress(Ingress),
     Raw(crate::net::wifi::mediatek::ring::rx::Frame),
