@@ -10,7 +10,7 @@
 mod hardware;
 mod link;
 
-pub use hardware::{FlowControl, Negotiated};
+pub use hardware::{FlowControl, Negotiated, Statistics};
 
 use super::{
     Link, LinkError, MAX_FRAME, Mac,
@@ -130,6 +130,7 @@ pub struct Igc {
     faulted: bool,
     /// Carrier supervision; its negotiated link while the carrier is up.
     link: link::Supervisor,
+    statistics: Statistics,
     mac: Mac,
     clock: Clock,
     pub location: String,
@@ -176,6 +177,7 @@ impl Igc {
             discarding: false,
             faulted: false,
             link: link::Supervisor::new(),
+            statistics: Statistics::default(),
             mac,
             clock,
             location: format!("{}", function.address),
@@ -257,6 +259,19 @@ impl Igc {
     /// pause frames both sides agreed on.
     pub fn negotiated(&self) -> Option<Negotiated> {
         self.link.carrier()
+    }
+
+    /// The MAC counters accumulated since attachment, after reading the
+    /// controller's clear-on-read registers (Linux igc_update_stats).
+    pub fn statistics(&mut self) -> Result<Statistics, LinkError> {
+        if self.faulted || self.statistics.accumulate(&self.device).is_err() {
+            self.faulted = true;
+            return Err(LinkError::Adapter(format!(
+                "Intel I225/I226 {} lost register access; reinitialization required",
+                self.location
+            )));
+        }
+        Ok(self.statistics)
     }
 
     /// Report a lost function, and discard the transmit work a lost link
@@ -380,6 +395,7 @@ mod tests {
                 discarding: false,
                 faulted: false,
                 link: link::Supervisor::established(LINK),
+                statistics: Statistics::default(),
                 mac: Mac([2, 0, 0, 0, 0, 1]),
                 clock: Clock {
                     ticks_per_microsecond: 1,
@@ -416,6 +432,20 @@ mod tests {
         fixture.net.link = link::Supervisor::established(LINK);
         fixture.net.transmit(&[2; 60]).unwrap();
         assert_eq!(fixture.registers[TDT / 4], 1);
+    }
+
+    #[test]
+    fn statistics_accumulate_until_the_function_is_lost() {
+        let mut fixture = Fixture::new();
+        fixture.registers[0x4074 / 4] = 3; // GPRC
+        fixture.registers[0x40c0 / 4] = 0x100; // TORL
+        assert_eq!(fixture.net.statistics().unwrap().good_received, 3);
+        let statistics = fixture.net.statistics().unwrap();
+        assert_eq!(statistics.good_received, 6);
+        assert_eq!(statistics.total_octets_received, 0x200);
+        fixture.registers[0x0008 / 4] = u32::MAX; // STATUS
+        assert!(fixture.net.statistics().is_err());
+        assert!(!fixture.net.carrier());
     }
 
     #[test]

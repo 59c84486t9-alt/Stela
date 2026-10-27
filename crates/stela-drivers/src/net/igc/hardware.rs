@@ -64,6 +64,17 @@ const fn rxdctl(index: usize) -> usize {
 const MPC: usize = 0x4010;
 const RNBC: usize = 0x40a0;
 const ROC: usize = 0x40ac;
+/// Every clear-on-read counter igc_clear_hw_cntrs_base reads, CRCERRS
+/// through LENERRS.
+const COUNTERS: [usize; 66] = [
+    0x4000, 0x4010, 0x4014, 0x4018, 0x401c, 0x4020, 0x4028, 0x402c, 0x4030, 0x4040, 0x4048, 0x404c,
+    0x4050, 0x4054, 0x4058, 0x4074, 0x4078, 0x407c, 0x4080, 0x4088, 0x408c, 0x4090, 0x4094, 0x40a0,
+    0x40a4, 0x40a8, 0x40ac, 0x40b0, 0x40c0, 0x40c4, 0x40c8, 0x40cc, 0x40d0, 0x40d4, 0x40f0, 0x40f4,
+    0x405c, 0x4060, 0x4064, 0x4068, 0x406c, 0x4070, 0x40d8, 0x40dc, 0x40e0, 0x40e4, 0x40e8, 0x40ec,
+    0x4004, 0x400c, 0x4034, 0x403c, 0x40f8, 0x40b4, 0x40b8, 0x40bc, 0x4100, 0x4104, 0x4148, 0x414c,
+    0x4118, 0x4120, 0x4128, 0x412c, 0x4130, 0x4134,
+];
+const LENERRS: usize = 0x4138;
 
 const MASTER_DISABLE: u32 = 1 << 2;
 const MASTER_ENABLED: u32 = 1 << 19;
@@ -115,6 +126,104 @@ const PAUSE_TIME: u32 = 0xffff;
 const LTR_SNOOP: u32 = 1 << 15;
 const LTR_SCALE_1024: u32 = 2;
 const LTR_SCALE_32768: u32 = 3;
+
+/// The MAC's clear-on-read counters, accumulated as igc_update_stats does.
+/// Octet counters are 64-bit pairs that clear when the high half is read;
+/// reading low then high keeps the high half Linux's 32-bit sums drop.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Statistics {
+    pub crc_errors: u64,
+    pub alignment_errors: u64,
+    pub receive_errors: u64,
+    pub length_errors: u64,
+    /// Frames dropped for lack of receive packet buffer space.
+    pub missed: u64,
+    /// Frames dropped for lack of a receive descriptor.
+    pub no_buffers: u64,
+    pub undersize: u64,
+    pub fragments: u64,
+    pub oversize: u64,
+    pub jabbers: u64,
+    pub single_collisions: u64,
+    pub multiple_collisions: u64,
+    pub excessive_collisions: u64,
+    pub late_collisions: u64,
+    pub collisions: u64,
+    pub deferred: u64,
+    pub xon_received: u64,
+    pub xon_transmitted: u64,
+    pub xoff_received: u64,
+    pub xoff_transmitted: u64,
+    pub unsupported_flow_control: u64,
+    pub good_received: u64,
+    pub broadcast_received: u64,
+    pub multicast_received: u64,
+    pub good_octets_received: u64,
+    pub total_received: u64,
+    pub total_octets_received: u64,
+    pub good_transmitted: u64,
+    pub broadcast_transmitted: u64,
+    pub multicast_transmitted: u64,
+    pub good_octets_transmitted: u64,
+    pub total_transmitted: u64,
+    pub total_octets_transmitted: u64,
+}
+
+impl Statistics {
+    /// Add every counter's value since the last read. A failed status read
+    /// means the function is gone; the totals then stay as they were.
+    pub(super) fn accumulate<R: Registers>(&mut self, registers: &R) -> Result<(), BlockError> {
+        if registers.read(STATUS) == u32::MAX {
+            return Err(BlockError::Device { status: u32::MAX });
+        }
+        let read = |register| u64::from(registers.read(register));
+        let pair = |low| read(low) | read(low + 4) << 32;
+        let mut next = *self;
+        for (total, register) in [
+            (&mut next.crc_errors, 0x4000),
+            (&mut next.alignment_errors, 0x4004),
+            (&mut next.receive_errors, 0x400c),
+            (&mut next.missed, MPC),
+            (&mut next.single_collisions, 0x4014),
+            (&mut next.excessive_collisions, 0x4018),
+            (&mut next.multiple_collisions, 0x401c),
+            (&mut next.late_collisions, 0x4020),
+            (&mut next.collisions, 0x4028),
+            (&mut next.deferred, 0x4030),
+            (&mut next.length_errors, 0x4040),
+            (&mut next.xon_received, 0x4048),
+            (&mut next.xon_transmitted, 0x404c),
+            (&mut next.xoff_received, 0x4050),
+            (&mut next.xoff_transmitted, 0x4054),
+            (&mut next.unsupported_flow_control, 0x4058),
+            (&mut next.good_received, 0x4074),
+            (&mut next.broadcast_received, 0x4078),
+            (&mut next.multicast_received, 0x407c),
+            (&mut next.good_transmitted, 0x4080),
+            (&mut next.no_buffers, RNBC),
+            (&mut next.undersize, 0x40a4),
+            (&mut next.fragments, 0x40a8),
+            (&mut next.oversize, ROC),
+            (&mut next.jabbers, 0x40b0),
+            (&mut next.total_received, 0x40d0),
+            (&mut next.total_transmitted, 0x40d4),
+            (&mut next.multicast_transmitted, 0x40f0),
+            (&mut next.broadcast_transmitted, 0x40f4),
+        ] {
+            *total = total.wrapping_add(read(register));
+        }
+        for (total, low) in [
+            (&mut next.good_octets_received, 0x4088),
+            (&mut next.good_octets_transmitted, 0x4090),
+            (&mut next.total_octets_received, 0x40c0),
+            (&mut next.total_octets_transmitted, 0x40c8),
+        ] {
+            *total = total.wrapping_add(pair(low));
+        }
+        *self = next;
+        Ok(())
+    }
+}
 
 /// Resolved pause frame use, Linux `enum igc_fc_mode` without its default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -630,6 +739,11 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         self.registers.write(FCTTV, PAUSE_TIME);
         self.registers.write(FCRTL, LOW_WATER | FCRTL_XONE);
         self.registers.write(FCRTH, HIGH_WATER);
+        // igc_clear_hw_cntrs_base, after link setup: the symbol error count
+        // climbs while there is no link.
+        for counter in COUNTERS.into_iter().chain([LENERRS]) {
+            self.read(counter)?;
+        }
         Ok(identity)
     }
 }
@@ -1101,6 +1215,48 @@ pub(super) mod tests {
             .phy
             .insert(PHY_GIGABIT_STATUS, REMOTE_RECEIVER_OK);
         assert_eq!(hw.remote_receiver_ready(), Ok(true));
+    }
+
+    #[test]
+    fn initialization_clears_every_linux_counter_and_statistics_accumulate_whole_octet_pairs() {
+        // Linux's 67 counters, each read once; a failed read refuses
+        // initialization like every other register read.
+        let model = Model::ready(false);
+        Hardware::new(&model, &model).unwrap().initialize().unwrap();
+        let after = model.reads.get();
+        assert_eq!(COUNTERS.len() + 1, 67);
+        let model = Model::ready(false);
+        model.fail_read.set(Some(after));
+        assert!(Hardware::new(&model, &model).unwrap().initialize().is_err());
+
+        let model = Model::ready(false);
+        {
+            let mut state = model.state.borrow_mut();
+            state.registers.extend([
+                (0x4000, 2),     // CRCERRS
+                (MPC, 3),        // MPC
+                (0x4074, 10),    // GPRC
+                (0x4088, 5),     // GORCL
+                (0x408c, 1),     // GORCH
+                (0x4080, 7),     // GPTC
+                (0x4090, 0x400), // GOTCL
+                (0x4054, 4),     // XOFFTXC
+            ]);
+        }
+        let mut statistics = Statistics::default();
+        statistics.accumulate(&model).unwrap();
+        statistics.accumulate(&model).unwrap();
+        assert_eq!(statistics.crc_errors, 4);
+        assert_eq!(statistics.missed, 6);
+        assert_eq!(statistics.good_received, 20);
+        assert_eq!(statistics.good_octets_received, 2 * (1 << 32 | 5));
+        assert_eq!(statistics.good_transmitted, 14);
+        assert_eq!(statistics.good_octets_transmitted, 0x800);
+        assert_eq!(statistics.xoff_transmitted, 8);
+        let before = statistics;
+        model.state.borrow_mut().registers.insert(STATUS, u32::MAX);
+        assert!(statistics.accumulate(&model).is_err());
+        assert_eq!(statistics, before);
     }
 
     #[test]
