@@ -12,6 +12,9 @@ use crate::net::{Link, LinkError, Mac};
 use alloc::{collections::VecDeque, format, vec::IntoIter};
 
 const DATA_FRAMES: usize = 64;
+/// mac80211 STA_MAX_TX_BUFFER: frames a TID holds while its block-ack
+/// session starts.
+const HELD_FRAMES: usize = 64;
 mod external;
 mod management;
 
@@ -79,6 +82,10 @@ struct QueuedData {
     association: u64,
     bytes: Vec<u8>,
 }
+struct HeldData {
+    tid: u8,
+    bytes: Vec<u8>,
+}
 struct PendingEvents {
     association: Option<u64>,
     events: IntoIter<Event>,
@@ -88,6 +95,8 @@ struct State<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> {
     source: S,
     mac: Mac,
     data: VecDeque<QueuedData>,
+    /// Outgoing frames held while their TID's block-ack session starts.
+    held: VecDeque<HeldData>,
     notices: VecDeque<LinkNotice<C>>,
     pending: Option<PendingEvents>,
     released: Option<IntoIter<Released<PacketOwner<C>>>>,
@@ -153,6 +162,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 source,
                 mac,
                 data,
+                held: VecDeque::new(),
                 notices,
                 pending: None,
                 released: None,
@@ -203,6 +213,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         let epoch = s.client.station().association_epoch();
         if epoch != s.epoch || !Self::up(s) {
             s.data.clear();
+            s.held.clear();
         }
         s.epoch = epoch;
     }
@@ -374,13 +385,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             )
         {
             match s.client.poll_released() {
-                Ok(released) if !released.is_empty() => s.released = Some(released.into_iter()),
+                Ok(released) if !released.is_empty() => {
+                    Self::check_aggr(s, &released, timer_now);
+                    s.released = Some(released.into_iter());
+                }
                 Ok(_) => {}
                 Err(error) => {
                     soft_rx = false;
                     failure.get_or_insert(error);
                 }
             }
+        }
+        if let Err(error) = Self::block_ack(s, timer_now) {
+            soft_rx = false;
+            failure.get_or_insert(error);
         }
         Self::reconcile(s);
         Self::drain(s);
@@ -389,6 +407,84 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             soft_rx,
         }
     }
+    /// Linux `mt7925_tx_check_aggr`, run as TX-free retires each packet: a
+    /// QoS data frame to an HT or HE peer starts its TID's TX block-ack
+    /// session unless one exists. A failed start, like a failed
+    /// `ieee80211_start_tx_ba_session`, leaves the TID to retry on a later
+    /// TX-free; the station limits retries as mac80211 does. An OS-bound
+    /// protected management service starts its own sessions.
+    fn check_aggr(s: &mut State<I, Q, C, S>, released: &[Released<PacketOwner<C>>], now: u64) {
+        let epoch = s.client.station().association_epoch();
+        let Some(context) = s.client.client.modern_context() else {
+            return;
+        };
+        let negotiated = context.negotiated();
+        if negotiated.ht.is_none() && negotiated.he.is_none() {
+            return;
+        }
+        for packet in released {
+            let owner = &packet.context;
+            if let Some(tid) = owner.tid()
+                && Some(owner.association_epoch()) == epoch
+                && !owner.control_port()
+            {
+                let _ = s.client.client.begin_tx_block_ack(tid, 0, now);
+            }
+        }
+    }
+
+    /// mac80211's block-ack work: send queued ADDBA/DELBA/BAR operations and
+    /// expired session timers, then release frames held for a TID whose
+    /// session has started or fallen back (`ieee80211_agg_splice_finish`).
+    fn block_ack(s: &mut State<I, Q, C, S>, now: u64) -> Result<(), PolicyError> {
+        if !Self::active(s) {
+            return Ok(());
+        }
+        if s.client
+            .next_transmit_deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            s.client.poll_block_ack_timers(now)?;
+        }
+        if s.client.client.pending_block_ack() && !Self::progress(s).backpressured {
+            match s.client.progress_block_ack(&s.source, now) {
+                Ok(()) | Err(PolicyError::Client(Error::NeedsDrain | Error::Busy)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let Some(epoch) = s.client.station().association_epoch() else {
+            return Ok(());
+        };
+        let mut at = 0;
+        while at < s.held.len() {
+            let tid = s.held[at].tid;
+            if Client::tx_ba_blocks_data(s.client.client.state(), tid) {
+                at += 1;
+                continue;
+            }
+            let frame = s.held.remove(at).unwrap();
+            s.client
+                .transmit(epoch, &frame.bytes, TxClass::Data, Some(tid), &s.source)?;
+        }
+        Ok(())
+    }
+
+    /// `ieee80211_tx_prep_agg`: holds a frame for a TID whose block-ack
+    /// session is starting, dropping that TID's oldest beyond the limit.
+    fn hold(s: &mut State<I, Q, C, S>, tid: u8, frame: &[u8]) -> Result<(), LinkError> {
+        let mut bytes = Vec::new();
+        if bytes.try_reserve_exact(frame.len()).is_err() || s.held.try_reserve(1).is_err() {
+            return Err(LinkError::Adapter("MT7925 managed link: no memory".into()));
+        }
+        bytes.extend_from_slice(frame);
+        if s.held.iter().filter(|held| held.tid == tid).count() == HELD_FRAMES {
+            let oldest = s.held.iter().position(|held| held.tid == tid).unwrap();
+            s.held.remove(oldest);
+        }
+        s.held.push_back(HeldData { tid, bytes });
+        Ok(())
+    }
+
     // An error-only call starts no new poll and performs no packet publication.
     // Thus repeated bad RX can alternate useful packet I/O and the exact error,
     // without overwriting/coalescing errors or an ambiguous post-publication Err.
@@ -560,6 +656,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Managed
             .association_epoch()
             .ok_or(LinkError::NoCarrier)?;
         let tid = s.client.data_tid(frame);
+        // Frames already held for the TID keep their order.
+        if let Some(tid) = tid
+            && (Client::tx_ba_blocks_data(s.client.client.state(), tid)
+                || s.held.iter().any(|held| held.tid == tid))
+        {
+            s.deferred_error = failure;
+            return Self::hold(s, tid, frame);
+        }
         let result = s
             .client
             .transmit(epoch, frame, TxClass::Data, tid, &s.source);
@@ -723,6 +827,12 @@ mod tests {
     }
     fn stop(link: &mut TestLink, model: &Model) {
         link.disconnect().unwrap();
+        // A block-ack frame still on the air retires before removal.
+        while link.phase() == Phase::Removing {
+            let channel = model.response.lock().unwrap().home_channel;
+            finish_tx_on(model, channel.unwrap_or(36));
+            link.service().unwrap();
+        }
         assert!(!link.carrier());
         assert_eq!(link.phase(), Phase::NeedsDrain);
         // SAFETY: actual source-model peer/key removal and no remaining native old users.
@@ -1063,6 +1173,12 @@ mod tests {
         link.transmit(&eth(0x800)).unwrap();
         assert_eq!(finish_tx_on(&model, 1).len(), 1);
         link.service().unwrap();
+        // Its TX-free starts TID 0's block-ack session, as
+        // mt7925_tx_check_aggr does, and the next frame waits for it.
+        drain_notices(&mut link);
+        assert!(link.state().client.client.state().transmit_ba[0].is_some());
+        link.transmit(&eth(0x800)).unwrap();
+        assert_eq!(link.state().held.len(), 1);
         receive(&data(false), Some(1));
         let frame = link.receive().unwrap().unwrap();
         assert_eq!(&frame[12..14], &0x800u16.to_be_bytes());
@@ -1248,13 +1364,18 @@ mod tests {
                 secure(&mut link);
             }
             drop(drain_notices(&mut link));
-            for _ in 0..3 {
+            // Each data frame takes a new TID: its TX-free starts that TID's
+            // block-ack session, whose ADDBA is a separate publication.
+            for (n, dscp) in [0u8, 8, 32].into_iter().enumerate() {
                 assert_eq!(link.carrier(), !control_port);
                 rejected_rx(&model, true);
                 let receipt = if control_port {
                     Some(link.send_control(&control(), None).unwrap())
                 } else {
-                    link.transmit(&eth(0x800)).unwrap();
+                    let mut frame = eth(0x800);
+                    frame.resize(frame.len().max(34), 0);
+                    frame[14..16].copy_from_slice(&[0x45, dscp << 2]);
+                    link.transmit(&frame).unwrap();
                     None
                 };
                 let original = deferred_message(&link);
@@ -1273,14 +1394,16 @@ mod tests {
                 }
                 assert_eq!(model.queues[&0xd4300].lock().unwrap().head, head);
                 let frames = finish_tx(&model);
-                assert_eq!(frames.len(), 1);
-                assert_eq!(frames[0][1] & 0x40 == 0, control_port);
+                assert_eq!(frames.len(), 1 + usize::from(!control_port && n > 0));
+                assert_eq!(frames.last().unwrap()[1] & 0x40 == 0, control_port);
                 link.service().unwrap();
                 let notices = drain_notices(&mut link);
                 let released: Vec<_> = notices
                     .into_iter()
                     .filter_map(|n| match n.event {
-                        LinkEvent::Released(r) => Some(r),
+                        LinkEvent::Released(r) if r.context.tid().is_some() || control_port => {
+                            Some(r)
+                        }
                         _ => None,
                     })
                     .collect();

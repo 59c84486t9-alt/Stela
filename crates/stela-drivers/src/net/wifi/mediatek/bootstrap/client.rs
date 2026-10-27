@@ -117,6 +117,8 @@ pub struct PacketOwner<C: 'static> {
     key: Option<KeyIdentity>,
     context: Option<Arc<station::AssociationContext>>,
     tid: Option<u8>,
+    /// Sent at the minimum rate, as control-port frames are.
+    control_port: bool,
     tx_ba: Option<Arc<station::ba::tx::Session>>,
     authentication: Option<Arc<station::external::Session>>,
     management: Option<Arc<management::Session>>,
@@ -127,6 +129,9 @@ impl<C> PacketOwner<C> {
     }
     pub const fn tid(&self) -> Option<u8> {
         self.tid
+    }
+    pub const fn control_port(&self) -> bool {
+        self.control_port
     }
     pub fn tx_block_ack(&self) -> Option<&station::ba::tx::Session> {
         self.tx_ba.as_deref()

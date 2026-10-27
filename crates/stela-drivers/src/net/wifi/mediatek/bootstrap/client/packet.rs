@@ -104,6 +104,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             key,
             context: s.modern.as_ref().map(|m| m.context().clone()),
             tid: h.tid,
+            control_port: minimum_rate,
             tx_ba: None,
             authentication: s.station.external_authentication().cloned(),
             management: if s.station.requires_protected_management() {
