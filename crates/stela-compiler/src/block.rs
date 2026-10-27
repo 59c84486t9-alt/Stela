@@ -66,9 +66,10 @@ pub const SYSTEM_REGISTER_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-system-registers-v1";
 /// Direct-RAM blocks for the system-mode engine: guest VAs are native
 /// addresses through shadow paging, `GuestState` is exact at every instruction
-/// boundary, and every System-class instruction exits with kind 11.
+/// boundary, and every System-class instruction exits with kind 11. Other
+/// PEs run concurrently: atomics are locked and barriers fence.
 pub const SYSTEM_MODE_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-system-mode-v1";
+    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-system-mode-v2";
 pub const EL1_PLATFORM_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v2";
 
@@ -528,12 +529,7 @@ impl CompilationPlan {
         profile: BlockProfile,
         target: crate::TargetCpu,
     ) -> Result<Self, CompileError> {
-        // System mode emits for a single agent, whose atomics and acquire
-        // loads need neither CMPXCHG16B nor a 16-byte snapshot.
-        let validated = crate::x86_64::MemoryChecks {
-            single_agent: profile == BlockProfile::SystemModeV1,
-            ..crate::x86_64::MemoryChecks::DEFAULT
-        };
+        let validated = crate::x86_64::MemoryChecks::DEFAULT;
         for instruction in &parsed.instructions {
             // The shared checked service has a separately required writable
             // CX16 read footprint. This does not qualify a direct MOVDQA recipe
@@ -612,12 +608,8 @@ impl CompilationPlan {
             )));
         }
         if !checks.stack_alignment {
-            let single_agent = crate::x86_64::MemoryChecks {
-                single_agent: true,
-                ..checks
-            };
             for instruction in &self.parsed.instructions {
-                crate::x86_64::validate_target_with(instruction, self.target, single_agent)
+                crate::x86_64::validate_target_with(instruction, self.target, checks)
                     .map_err(|error| CompileError(format!("{error:?}")))?;
             }
         }
@@ -1703,7 +1695,6 @@ mod tests {
             crate::TargetCpu::Baseline,
             crate::x86_64::MemoryChecks {
                 guest_range: true,
-                single_agent: true,
                 ..aligned
             },
         );
@@ -1723,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn system_mode_compiles_for_a_single_agent_without_cmpxchg16b_or_locks() {
+    fn system_mode_compiles_locked_atomics_and_fences_for_concurrent_pes() {
         const BASE: GuestAddress = GuestAddress(0x1000);
         // casp x2, x3, x2, x3, [x4] (Rs = Rt), ldar x0, [x1], dmb sy, b .
         const CASP_X2_X3_X4: u32 = 0x4822_7c82;
@@ -1736,25 +1727,20 @@ mod tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        // The baseline target has neither CMPXCHG16B nor the aligned 16-byte
-        // load, which only another agent could tell apart.
+        // The pair needs CMPXCHG16B, which the baseline target lacks.
         for profile in [BlockProfile::Ordinary, BlockProfile::SystemModeV1] {
             let plan = CompilationPlan::new(&source, BASE, profile, crate::TargetCpu::Baseline);
-            assert_eq!(plan.is_ok(), profile == BlockProfile::SystemModeV1);
+            assert!(plan.is_err(), "{profile:?}");
         }
-        let code = CompilationPlan::new(
-            &source,
-            BASE,
-            BlockProfile::SystemModeV1,
-            crate::TargetCpu::Baseline,
-        )
-        .unwrap()
-        .compile()
-        .unwrap()
-        .native
-        .x86_64_code;
-        assert!(!code.contains(&LOCK), "{code:02x?}");
-        assert!(!code.windows(MFENCE.len()).any(|window| window == MFENCE));
+        let target = crate::TargetCpu::X86_64_V2.with_atomic_load16();
+        let code = CompilationPlan::new(&source, BASE, BlockProfile::SystemModeV1, target)
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+            .x86_64_code;
+        assert!(code.contains(&LOCK), "{code:02x?}");
+        assert!(code.windows(MFENCE.len()).any(|window| window == MFENCE));
     }
 
     /// A fault applies exactly the entries covering its offset, SP as 31.
@@ -1788,7 +1774,7 @@ mod tests {
     /// ordinary prefix: locked atomics and no guest range checks, which
     /// belong to the system-mode engine alone.
     #[test]
-    fn only_system_mode_compiles_for_a_single_agent_with_range_checks() {
+    fn only_system_mode_compiles_range_checks() {
         const BASE: GuestAddress = GuestAddress(0x1000);
         // ldaddal x1, x0, [x2]; ldr x3, [x4]; add x0, x0, #1; b .
         let source: Vec<u8> = [0xf8e1_0040_u32, 0xf940_0083, 0x9100_0400, 0x1400_0000]

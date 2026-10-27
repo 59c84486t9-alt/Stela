@@ -126,8 +126,8 @@ pub(crate) fn emit_system_mode(
     // an access they may keep guest registers in host registers, which
     // the fault recovery table names, so the engine finds the frame exact
     // at a fault inside one. Their loads carry no SCTLR_ELx.A check. Accesses check the guest range
-    // (`x86_64::guest_range`). One PE runs at a time, so ordering and
-    // atomicity need no locked instructions or fences.
+    // (`x86_64::guest_range`). PEs run concurrently, so atomics stay locked
+    // and barriers fence.
     emit_selected(
         instructions,
         terminal,
@@ -137,7 +137,6 @@ pub(crate) fn emit_system_mode(
         true,
         super::MemoryChecks {
             guest_range: true,
-            single_agent: true,
             ..checks
         },
         native,
@@ -1192,7 +1191,6 @@ mod tests {
             };
             let checks_at = |index: usize| super::super::MemoryChecks {
                 guest_range: ranges[index],
-                single_agent: system,
                 ..super::super::MemoryChecks::DEFAULT
             };
             let mut cursor = 0;
