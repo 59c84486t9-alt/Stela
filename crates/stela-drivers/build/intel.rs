@@ -129,7 +129,11 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     let Some(base) = native::hosted() else {
         return;
     };
-    let hosted = Builds::new(linux, &base, &generated, &dispatch);
+    let have_endian_h = hosted_endian_header(&base);
+    let mut hosted = Builds::new(linux, &base, &generated, &dispatch);
+    if have_endian_h {
+        hosted.encoders.define("HAVE_ENDIAN_H", None);
+    }
     let mut archives = vec![
         native::archive(&hosted.xe, "intel-xe-hosted", &xe),
         native::archive(&hosted.i915, "intel-i915-hosted", &i915),
@@ -157,6 +161,9 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     }
     // Mesa's headers keep their own warning profile, as Linux's do.
     let mut mesa = base;
+    if have_endian_h {
+        mesa.define("HAVE_ENDIAN_H", None);
+    }
     let (include, src) = (
         format!("{}/include", native::MESA),
         format!("{}/src", native::MESA),
@@ -178,6 +185,20 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
             tests.add(&build, &test, &source, &archives);
         }
     }
+}
+
+/// Mesa detects HAVE_ENDIAN_H by compiling the header with its C compiler.
+/// Use this hosted build's actual compiler, target, flags and system headers;
+/// the freestanding encoder keeps its separate compiler-derived header route.
+fn hosted_endian_header(base: &cc::Build) -> bool {
+    let source = native::out_dir().join("intel-hosted-endian.c");
+    fs::write(&source, "#include <endian.h>\n").expect("write the Mesa header check");
+    base.clone()
+        .cargo_metadata(false)
+        .cargo_warnings(false)
+        .file(source)
+        .try_compile_intermediates()
+        .is_ok()
 }
 
 /// Whether `path` names one of `files`.
