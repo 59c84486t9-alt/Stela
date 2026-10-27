@@ -57,6 +57,13 @@ impl Sense {
     pub const INITIALIZING_COMMAND_REQUIRED: u8 = 0x02;
     /// ASC 3Fh/0Eh: the reported LUN inventory changed.
     pub const LUNS_CHANGED: u8 = 0x0e;
+    /// Sense keys (SPC-5 4.4.2) that `scsi_check_sense` and sd's completion
+    /// treat apart.
+    pub const RECOVERED_ERROR: u8 = 0x01;
+    pub const MEDIUM_ERROR: u8 = 0x03;
+    pub const HARDWARE_ERROR: u8 = 0x04;
+    pub const DATA_PROTECT: u8 = 0x07;
+    pub const ABORTED_COMMAND: u8 = 0x0b;
 
     /// Fixed (70h/71h) or descriptor (72h/73h) format sense data.
     pub fn parse(bytes: &[u8]) -> Option<Self> {
@@ -71,6 +78,67 @@ impl Sense {
             ascq,
         })
     }
+
+    /// `scsi_check_sense` for current sense from a unit with no blacklist
+    /// flags and no expected reset: whether it is NEEDS_RETRY.
+    pub fn needs_retry(self) -> bool {
+        match self.key {
+            Self::ABORTED_COMMAND => {
+                // DIF errors and command duration limit aborts complete.
+                self.asc != 0x10 && !(self.asc == 0x2e && (0x01..=0x03).contains(&self.ascq))
+            }
+            Self::NOT_READY | Self::UNIT_ATTENTION => {
+                // Becoming ready, an ALUA transition, or another LUN changed.
+                self.asc == Self::NOT_READY_CAUSE && matches!(self.ascq, 0x01 | 0x0a)
+                    || self.key == Self::UNIT_ATTENTION
+                        && self.asc == Self::CONDITIONS_CHANGED
+                        && self.ascq == Self::LUNS_CHANGED
+            }
+            // Unrecovered read errors, unreadable address marks and missing
+            // records complete.
+            Self::MEDIUM_ERROR => !matches!(self.asc, 0x11 | 0x13 | 0x14),
+            _ => false,
+        }
+    }
+
+    /// sd's completion of a command left with this sense, as
+    /// `scsi_io_completion_nz_result` and `scsi_io_completion_action` treat
+    /// it: a UNIT ATTENTION is a media change on a removable unit and a
+    /// power glitch or bus reset on a fixed one.
+    pub fn completion(self, removable: bool) -> SenseCompletion {
+        match self.key {
+            Self::RECOVERED_ERROR => SenseCompletion::Done,
+            Self::UNIT_ATTENTION if removable => SenseCompletion::MediaChanged,
+            Self::UNIT_ATTENTION => SenseCompletion::Retry(0),
+            Self::NOT_READY if self.asc == Self::NOT_READY_CAUSE => match self.ascq {
+                0x01 | 0x04..=0x09 | 0x11 | 0x14 | 0x1a | 0x1b | 0x1d => {
+                    SenseCompletion::Retry(DEVICE_BUSY_DELAY_US)
+                }
+                0x0a => SenseCompletion::Retry(ALUA_TRANSITION_DELAY_US),
+                _ => SenseCompletion::Fail,
+            },
+            _ => SenseCompletion::Fail,
+        }
+    }
+}
+
+/// sd's requeue delays: a busy device blocks its queue for
+/// `SCSI_DEFAULT_DEVICE_BLOCKED` runs `SCSI_QUEUE_DELAY` (3 ms) apart, and
+/// an ALUA transition waits `ALUA_TRANSITION_REPREP_DELAY`.
+const DEVICE_BUSY_DELAY_US: u64 = 3 * 3_000;
+const ALUA_TRANSITION_DELAY_US: u64 = 1_000_000;
+
+/// What sd does with a command that ended with sense data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SenseCompletion {
+    /// A recovered error is success.
+    Done,
+    /// Requeue after this delay.
+    Retry(u64),
+    /// The removable unit's medium may have changed: fail, and refuse access
+    /// until it is revalidated (`sdev->changed`).
+    MediaChanged,
+    Fail,
 }
 
 impl fmt::Display for BlockError {

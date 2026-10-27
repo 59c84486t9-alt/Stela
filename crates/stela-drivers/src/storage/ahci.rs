@@ -8,7 +8,7 @@
 //! link is hard reset and the disk revalidated, and sd's retries apply.
 use crate::{
     Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity, Sense, Transport, ascii},
+    block::{BlockDevice, BlockError, Identity, Sense, SenseCompletion, Transport, ascii},
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
@@ -289,19 +289,8 @@ const LPM_MAX_POWER: u8 = 1;
 const LPM_MED_POWER_WITH_DIPM: u8 = 3;
 /// `ahci_set_lpm`'s wait for the interface to leave a low-power state.
 const LPM_WAKE_US: u64 = 10_000;
-/// SCSI sense keys (SPC-5 4.4.2) that `scsi_check_sense` and sd's
-/// completion treat apart.
-const SENSE_RECOVERED_ERROR: u8 = 0x01;
-const SENSE_MEDIUM_ERROR: u8 = 0x03;
-const SENSE_HARDWARE_ERROR: u8 = 0x04;
-const SENSE_DATA_PROTECT: u8 = 0x07;
-const SENSE_ABORTED_COMMAND: u8 = 0x0b;
+/// The highest sense key REQUEST SENSE DATA EXT may report.
 const SENSE_COMPLETED: u8 = 0x0f;
-/// sd's requeue delays: a busy device blocks its queue for
-/// `SCSI_DEFAULT_DEVICE_BLOCKED` runs `SCSI_QUEUE_DELAY` (3 ms) apart, and
-/// an ALUA transition waits `ALUA_TRANSITION_REPREP_DELAY`.
-const DEVICE_BUSY_DELAY_US: u64 = 3 * 3_000;
-const ALUA_TRANSITION_DELAY_US: u64 = 1_000_000;
 
 const BOUNCE_BYTES: usize = 128 * 1024;
 const RESET_TIMEOUT_US: u64 = 1_000_000;
@@ -691,63 +680,29 @@ struct Failure {
     sense: Option<Sense>,
 }
 
-/// `scsi_check_sense` for the current sense of a fixed ATA disk with no
-/// blacklist flags and no expected reset: whether it is NEEDS_RETRY.
-fn sense_needs_retry(sense: Sense) -> bool {
-    match sense.key {
-        SENSE_ABORTED_COMMAND => {
-            // DIF errors and command duration limit aborts complete.
-            sense.asc != 0x10 && !(sense.asc == 0x2e && (0x01..=0x03).contains(&sense.ascq))
-        }
-        Sense::NOT_READY | Sense::UNIT_ATTENTION => {
-            // Becoming ready, an ALUA transition, or another LUN changed.
-            sense.asc == Sense::NOT_READY_CAUSE && matches!(sense.ascq, 0x01 | 0x0a)
-                || sense.key == Sense::UNIT_ATTENTION
-                    && sense.asc == Sense::CONDITIONS_CHANGED
-                    && sense.ascq == Sense::LUNS_CHANGED
-        }
-        // Unrecovered read errors, unreadable address marks and missing
-        // records complete.
-        SENSE_MEDIUM_ERROR => !matches!(sense.asc, 0x11 | 0x13 | 0x14),
-        _ => false,
-    }
-}
-
-/// sd's completion of a command EH finished with sense data, as
-/// `scsi_io_completion_nz_result` and `scsi_io_completion_action` treat a
-/// fixed disk.
-#[derive(Debug, PartialEq, Eq)]
-enum Completion {
-    /// A recovered error is success.
-    Done,
-    /// Requeue after this delay.
-    Retry(u64),
-    Fail,
-}
-
 /// Linux `ata_to_sense_error`, from the 3ware translation table: the error
 /// register's best match first, then the status register.
 fn translate_error(status: u8, error: u8) -> Sense {
     const ERRORS: [(u8, u8, u8, u8); 13] = [
-        (0xd1, SENSE_ABORTED_COMMAND, 0x00, 0x00),
-        (0xd0, SENSE_ABORTED_COMMAND, 0x00, 0x00),
-        (0x61, SENSE_HARDWARE_ERROR, 0x00, 0x00),
-        (0x84, SENSE_ABORTED_COMMAND, 0x47, 0x00),
+        (0xd1, Sense::ABORTED_COMMAND, 0x00, 0x00),
+        (0xd0, Sense::ABORTED_COMMAND, 0x00, 0x00),
+        (0x61, Sense::HARDWARE_ERROR, 0x00, 0x00),
+        (0x84, Sense::ABORTED_COMMAND, 0x47, 0x00),
         (0x37, Sense::NOT_READY, 0x04, 0x00),
         (0x09, Sense::NOT_READY, 0x04, 0x00),
-        (0x01, SENSE_MEDIUM_ERROR, 0x13, 0x00),
-        (0x02, SENSE_HARDWARE_ERROR, 0x00, 0x00),
+        (0x01, Sense::MEDIUM_ERROR, 0x13, 0x00),
+        (0x02, Sense::HARDWARE_ERROR, 0x00, 0x00),
         (0x08, Sense::NOT_READY, 0x04, 0x00),
         (0x10, Sense::ILLEGAL_REQUEST, 0x21, 0x00),
         (0x20, Sense::UNIT_ATTENTION, 0x28, 0x00),
-        (0x40, SENSE_MEDIUM_ERROR, 0x11, 0x04),
-        (0x80, SENSE_MEDIUM_ERROR, 0x11, 0x04),
+        (0x40, Sense::MEDIUM_ERROR, 0x11, 0x04),
+        (0x80, Sense::MEDIUM_ERROR, 0x11, 0x04),
     ];
     const STATUSES: [(u8, u8, u8, u8); 3] = [
         // Busy means no other bit is valid.
-        (STATUS_BUSY, SENSE_ABORTED_COMMAND, 0x00, 0x00),
-        (STATUS_FAULT, SENSE_HARDWARE_ERROR, 0x44, 0x00),
-        (STATUS_CORRECTED, SENSE_RECOVERED_ERROR, 0x00, 0x00),
+        (STATUS_BUSY, Sense::ABORTED_COMMAND, 0x00, 0x00),
+        (STATUS_FAULT, Sense::HARDWARE_ERROR, 0x44, 0x00),
+        (STATUS_CORRECTED, Sense::RECOVERED_ERROR, 0x00, 0x00),
     ];
     let sense = |(_, key, asc, ascq): (u8, u8, u8, u8)| Sense { key, asc, ascq };
     let error = if status & STATUS_BUSY != 0 { 0 } else { error };
@@ -759,28 +714,12 @@ fn translate_error(status: u8, error: u8) -> Sense {
         .copied()
         .map_or(
             Sense {
-                key: SENSE_ABORTED_COMMAND,
+                key: Sense::ABORTED_COMMAND,
                 asc: 0,
                 ascq: 0,
             },
             sense,
         )
-}
-
-fn completion(sense: Sense) -> Completion {
-    match sense.key {
-        SENSE_RECOVERED_ERROR => Completion::Done,
-        // A fixed disk saw a power glitch or bus reset, not a media change.
-        Sense::UNIT_ATTENTION => Completion::Retry(0),
-        Sense::NOT_READY if sense.asc == Sense::NOT_READY_CAUSE => match sense.ascq {
-            0x01 | 0x04..=0x09 | 0x11 | 0x14 | 0x1a | 0x1b | 0x1d => {
-                Completion::Retry(DEVICE_BUSY_DELAY_US)
-            }
-            0x0a => Completion::Retry(ALUA_TRANSITION_DELAY_US),
-            _ => Completion::Fail,
-        },
-        _ => Completion::Fail,
-    }
 }
 
 /// Linux `ahci_error_intr`, `ata_eh_analyze_serror` and `ata_eh_analyze_tf`
@@ -1245,7 +1184,7 @@ impl AhciDisk {
             // With valid sense, only a NEEDS_RETRY disposition with an error
             // left besides the device's is retried.
             let retry = match failure.sense {
-                Some(sense) => failure.mask != 0 && sense_needs_retry(sense),
+                Some(sense) => failure.mask != 0 && sense.needs_retry(),
                 None => worth_retry(failure.mask, io),
             };
             if retry && retries < COMMAND_RETRIES {
@@ -1256,10 +1195,11 @@ impl AhciDisk {
                 Some(sense) => sense,
                 None => self.generated_sense(&mut failure),
             };
-            match completion(sense) {
-                Completion::Done => return Ok(()),
-                Completion::Fail => return Err(failure.error),
-                Completion::Retry(delay_us) => {
+            // A fixed disk: no media change.
+            match sense.completion(false) {
+                SenseCompletion::Done => return Ok(()),
+                SenseCompletion::Fail | SenseCompletion::MediaChanged => return Err(failure.error),
+                SenseCompletion::Retry(delay_us) => {
                     let elapsed = self
                         .clock
                         .try_elapsed_us(prepared)
@@ -1761,7 +1701,7 @@ impl AhciDisk {
         let sense = if self.locked {
             // Logical unit access not authorized.
             Sense {
-                key: SENSE_DATA_PROTECT,
+                key: Sense::DATA_PROTECT,
                 asc: 0x74,
                 ascq: 0x71,
             }
@@ -2637,19 +2577,19 @@ mod tests {
     fn generated_sense_follows_ata_to_sense_error() {
         let sense = |key, asc, ascq| Sense { key, asc, ascq };
         for (status, error, expected) in [
-            (0x51, 0x40, sense(SENSE_MEDIUM_ERROR, 0x11, 0x04)),
-            (0x51, 0x84, sense(SENSE_ABORTED_COMMAND, 0x47, 0x00)),
+            (0x51, 0x40, sense(Sense::MEDIUM_ERROR, 0x11, 0x04)),
+            (0x51, 0x84, sense(Sense::ABORTED_COMMAND, 0x47, 0x00)),
             (0x51, 0x10, sense(Sense::ILLEGAL_REQUEST, 0x21, 0x00)),
             (0x51, 0x20, sense(Sense::UNIT_ATTENTION, 0x28, 0x00)),
             (0x51, 0x37, sense(Sense::NOT_READY, 0x04, 0x00)),
-            (0x51, 0x61, sense(SENSE_HARDWARE_ERROR, 0x00, 0x00)),
-            (0x51, 0xd1, sense(SENSE_ABORTED_COMMAND, 0x00, 0x00)),
+            (0x51, 0x61, sense(Sense::HARDWARE_ERROR, 0x00, 0x00)),
+            (0x51, 0xd1, sense(Sense::ABORTED_COMMAND, 0x00, 0x00)),
             // ABRT alone falls back to the status.
-            (0x55, 0x04, sense(SENSE_RECOVERED_ERROR, 0x00, 0x00)),
-            (0x71, 0x04, sense(SENSE_HARDWARE_ERROR, 0x44, 0x00)),
-            (0x51, 0x04, sense(SENSE_ABORTED_COMMAND, 0x00, 0x00)),
+            (0x55, 0x04, sense(Sense::RECOVERED_ERROR, 0x00, 0x00)),
+            (0x71, 0x04, sense(Sense::HARDWARE_ERROR, 0x44, 0x00)),
+            (0x51, 0x04, sense(Sense::ABORTED_COMMAND, 0x00, 0x00)),
             // Busy invalidates the error register.
-            (0xd0, 0x40, sense(SENSE_ABORTED_COMMAND, 0x00, 0x00)),
+            (0xd0, 0x40, sense(Sense::ABORTED_COMMAND, 0x00, 0x00)),
         ] {
             assert_eq!(
                 translate_error(status, error),
@@ -2676,14 +2616,14 @@ mod tests {
         assert_eq!(
             complete_with(0x51, 0x04, false),
             (
-                Err(BlockError::Sense(sense(SENSE_ABORTED_COMMAND, 0, 0))),
+                Err(BlockError::Sense(sense(Sense::ABORTED_COMMAND, 0, 0))),
                 1
             )
         );
         assert_eq!(
             complete_with(0x51, 0x04, true),
             (
-                Err(BlockError::Sense(sense(SENSE_DATA_PROTECT, 0x74, 0x71))),
+                Err(BlockError::Sense(sense(Sense::DATA_PROTECT, 0x74, 0x71))),
                 1
             )
         );
@@ -2727,51 +2667,103 @@ mod tests {
     fn sense_dispositions_follow_scsi_check_sense_and_sd_completion() {
         let sense = |key, asc, ascq| Sense { key, asc, ascq };
         for (key, asc, ascq, retry, done) in [
-            (SENSE_ABORTED_COMMAND, 0x00, 0x00, true, Completion::Fail),
-            (SENSE_ABORTED_COMMAND, 0x10, 0x01, false, Completion::Fail),
-            (SENSE_ABORTED_COMMAND, 0x2e, 0x02, false, Completion::Fail),
-            (SENSE_ABORTED_COMMAND, 0x2e, 0x04, true, Completion::Fail),
-            (Sense::NOT_READY, 0x04, 0x01, true, Completion::Retry(9_000)),
+            (
+                Sense::ABORTED_COMMAND,
+                0x00,
+                0x00,
+                true,
+                SenseCompletion::Fail,
+            ),
+            (
+                Sense::ABORTED_COMMAND,
+                0x10,
+                0x01,
+                false,
+                SenseCompletion::Fail,
+            ),
+            (
+                Sense::ABORTED_COMMAND,
+                0x2e,
+                0x02,
+                false,
+                SenseCompletion::Fail,
+            ),
+            (
+                Sense::ABORTED_COMMAND,
+                0x2e,
+                0x04,
+                true,
+                SenseCompletion::Fail,
+            ),
+            (
+                Sense::NOT_READY,
+                0x04,
+                0x01,
+                true,
+                SenseCompletion::Retry(9_000),
+            ),
             (
                 Sense::NOT_READY,
                 0x04,
                 0x0a,
                 true,
-                Completion::Retry(1_000_000),
+                SenseCompletion::Retry(1_000_000),
             ),
             (
                 Sense::NOT_READY,
                 0x04,
                 0x1b,
                 false,
-                Completion::Retry(9_000),
+                SenseCompletion::Retry(9_000),
             ),
-            (Sense::NOT_READY, 0x04, 0x02, false, Completion::Fail),
-            (Sense::NOT_READY, 0x04, 0x24, false, Completion::Fail),
-            (Sense::NOT_READY, 0x3a, 0x00, false, Completion::Fail),
+            (Sense::NOT_READY, 0x04, 0x02, false, SenseCompletion::Fail),
+            (Sense::NOT_READY, 0x04, 0x24, false, SenseCompletion::Fail),
+            (Sense::NOT_READY, 0x3a, 0x00, false, SenseCompletion::Fail),
             (
                 Sense::UNIT_ATTENTION,
                 0x29,
                 0x00,
                 false,
-                Completion::Retry(0),
+                SenseCompletion::Retry(0),
             ),
             (
                 Sense::UNIT_ATTENTION,
                 0x3f,
                 0x0e,
                 true,
-                Completion::Retry(0),
+                SenseCompletion::Retry(0),
             ),
-            (SENSE_MEDIUM_ERROR, 0x11, 0x04, false, Completion::Fail),
-            (SENSE_MEDIUM_ERROR, 0x0c, 0x00, true, Completion::Fail),
-            (SENSE_RECOVERED_ERROR, 0x17, 0x01, false, Completion::Done),
-            (Sense::ILLEGAL_REQUEST, 0x21, 0x00, false, Completion::Fail),
-            (0x04, 0x44, 0x00, false, Completion::Fail),
+            (
+                Sense::MEDIUM_ERROR,
+                0x11,
+                0x04,
+                false,
+                SenseCompletion::Fail,
+            ),
+            (Sense::MEDIUM_ERROR, 0x0c, 0x00, true, SenseCompletion::Fail),
+            (
+                Sense::RECOVERED_ERROR,
+                0x17,
+                0x01,
+                false,
+                SenseCompletion::Done,
+            ),
+            (
+                Sense::ILLEGAL_REQUEST,
+                0x21,
+                0x00,
+                false,
+                SenseCompletion::Fail,
+            ),
+            (0x04, 0x44, 0x00, false, SenseCompletion::Fail),
         ] {
             let sense = sense(key, asc, ascq);
-            assert_eq!(sense_needs_retry(sense), retry, "{sense:?}");
-            assert_eq!(completion(sense), done, "{sense:?}");
+            assert_eq!(sense.needs_retry(), retry, "{sense:?}");
+            assert_eq!(sense.completion(false), done, "{sense:?}");
+            // On a removable unit, UNIT ATTENTION reports a media change.
+            if sense.key == Sense::UNIT_ATTENTION {
+                assert_eq!(sense.completion(true), SenseCompletion::MediaChanged);
+            }
         }
     }
 
@@ -2798,14 +2790,14 @@ mod tests {
         // ERR | SENSE with ABRT: a medium error the disk could not recover
         // fails without a retry, carrying the sense.
         let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
-        reply(&mut fixture, 0x52, [SENSE_MEDIUM_ERROR, 0x11, 0x04]);
+        reply(&mut fixture, 0x52, [Sense::MEDIUM_ERROR, 0x11, 0x04]);
         let link = Link::new(&[Fault::TaskFile(0x0453)]);
         assert_eq!(
             fixture
                 .disk
                 .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
             Err(BlockError::Sense(Sense {
-                key: SENSE_MEDIUM_ERROR,
+                key: Sense::MEDIUM_ERROR,
                 asc: 0x11,
                 ascq: 0x04
             }))
@@ -2817,7 +2809,7 @@ mod tests {
         assert_eq!(fixture.disk.errors.newest().count(), 0);
 
         // A recovered error is success.
-        reply(&mut fixture, 0x52, [SENSE_RECOVERED_ERROR, 0x17, 0x01]);
+        reply(&mut fixture, 0x52, [Sense::RECOVERED_ERROR, 0x17, 0x01]);
         let link = Link::new(&[Fault::TaskFile(0x0453)]);
         assert_eq!(
             fixture
@@ -2840,7 +2832,7 @@ mod tests {
 
         // An uncorrectable error with sense needing a retry keeps
         // ERR_MEDIA, so EH retries it five times; sd then fails it.
-        reply(&mut fixture, 0x52, [SENSE_MEDIUM_ERROR, 0x0c, 0x00]);
+        reply(&mut fixture, 0x52, [Sense::MEDIUM_ERROR, 0x0c, 0x00]);
         let link = failing(0x4053, 8);
         assert!(matches!(
             fixture
