@@ -140,6 +140,10 @@ const PED: u32 = 1 << 1;
 const PR: u32 = 1 << 4;
 const PP: u32 = 1 << 9;
 const PORT_CHANGES: u32 = 0x7f << 17;
+/// PORTSC over-current active and its change, and hub.c's cool-down.
+const OVER_CURRENT: u32 = 1 << 3;
+const OVER_CURRENT_CHANGE: u32 = 1 << 20;
+const OVER_CURRENT_COOLDOWN_US: u64 = 100_000;
 const CSC: u32 = 1 << 17;
 const WRC: u32 = 1 << 19;
 const PRC: u32 = 1 << 21;
