@@ -8,7 +8,7 @@
 //! link is hard reset and the disk revalidated, and sd's retries apply.
 use crate::{
     Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity, Transport, ascii},
+    block::{BlockDevice, BlockError, Identity, Sense, Transport, ascii},
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
@@ -104,6 +104,8 @@ const STATUS_BUSY: u8 = 1 << 7;
 const STATUS_READY: u8 = 1 << 6;
 const STATUS_FAULT: u8 = 1 << 5;
 const STATUS_REQUEST: u8 = 1 << 3;
+/// `ATA_SENSE`: sense data is available.
+const STATUS_SENSE: u8 = 1 << 1;
 const STATUS_ERROR: u8 = 1 << 0;
 const ERROR_INTERFACE_CRC: u8 = 1 << 7;
 const ERROR_UNCORRECTABLE: u8 = 1 << 6;
@@ -173,6 +175,13 @@ const WORD_VALID: u16 = 0x4000;
 const IDENTIFY_ENABLED_1: usize = 85;
 const ENABLED_1_WRITE_CACHE: u16 = 1 << 5;
 const IDENTIFY_DEFAULTS: usize = 87;
+/// Word 86 bit 15: words 119 and 120 are valid; their bit 6 is Sense Data
+/// Reporting supported and enabled.
+const IDENTIFY_ENABLED_2: usize = 86;
+const ENABLED_2_WORDS_119_120: u16 = 1 << 15;
+const IDENTIFY_COMMANDS_3: usize = 119;
+const IDENTIFY_ENABLED_3: usize = 120;
+const SENSE_DATA_REPORTING: u16 = 1 << 6;
 const IDENTIFY_LBA48_SECTORS: core::ops::Range<usize> = 100..104;
 const IDENTIFY_SECTOR_SIZE: usize = 106;
 const SECTOR_SIZE_VALID_MASK: u16 = 0xc000;
@@ -205,6 +214,21 @@ const ATA_FLUSH_CACHE: u8 = 0xe7;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
 const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
 const ATA_IDENTIFY: u8 = 0xec;
+const ATA_SET_FEATURES: u8 = 0xef;
+const ATA_REQUEST_SENSE_DATA_EXT: u8 = 0x0b;
+/// `SETFEATURE_SENSE_DATA`, enabled with a count of one.
+const FEATURE_SENSE_DATA: u8 = 0xc3;
+/// SCSI sense keys (SPC-5 4.4.2) that `scsi_check_sense` and sd's
+/// completion treat apart.
+const SENSE_RECOVERED_ERROR: u8 = 0x01;
+const SENSE_MEDIUM_ERROR: u8 = 0x03;
+const SENSE_ABORTED_COMMAND: u8 = 0x0b;
+const SENSE_COMPLETED: u8 = 0x0f;
+/// sd's requeue delays: a busy device blocks its queue for
+/// `SCSI_DEFAULT_DEVICE_BLOCKED` runs `SCSI_QUEUE_DELAY` (3 ms) apart, and
+/// an ALUA transition waits `ALUA_TRANSITION_REPREP_DELAY`.
+const DEVICE_BUSY_DELAY_US: u64 = 3 * 3_000;
+const ALUA_TRANSITION_DELAY_US: u64 = 1_000_000;
 
 const BOUNCE_BYTES: usize = 128 * 1024;
 const RESET_TIMEOUT_US: u64 = 1_000_000;
@@ -287,6 +311,8 @@ pub struct AhciDisk {
     /// `link->sata_spd`, the SStatus SPD after the last reset.
     speed_limit: u32,
     speed: u32,
+    /// `ata_id_sense_reporting_enabled` for the last IDENTIFY data read.
+    sense_reporting: bool,
 }
 
 /// One `ata_ering_entry`: its flags, `AC_ERR_*` mask and raw clock origin.
@@ -392,6 +418,20 @@ struct Identified {
     blocks: u64,
     block_size: u32,
     flush: Option<u8>,
+    /// Sense Data Reporting supported, and enabled.
+    sense_reporting: (bool, bool),
+}
+
+/// Linux `ata_id_has_sense_reporting` and `ata_id_sense_reporting_enabled`.
+fn sense_reporting(word: impl Fn(usize) -> u16) -> (bool, bool) {
+    let valid = |index| word(index) & WORD_VALID_MASK == WORD_VALID;
+    let supported = word(IDENTIFY_ENABLED_2) & ENABLED_2_WORDS_119_120 != 0
+        && valid(IDENTIFY_COMMANDS_3)
+        && word(IDENTIFY_COMMANDS_3) & SENSE_DATA_REPORTING != 0;
+    let enabled = supported
+        && valid(IDENTIFY_ENABLED_3)
+        && word(IDENTIFY_ENABLED_3) & SENSE_DATA_REPORTING != 0;
+    (supported, enabled)
 }
 
 fn identify(data: &[u8]) -> Result<Identified, BlockError> {
@@ -431,6 +471,7 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
         blocks,
         block_size,
         flush: flush_command(word),
+        sense_reporting: sense_reporting(word),
     })
 }
 
@@ -446,6 +487,60 @@ struct Failure {
     reset: bool,
     /// `ata_ehi_hotplugged`: debounce with the hotplug timing.
     hotplug: bool,
+    /// The status reported sense data, without a device fault.
+    sense_reported: bool,
+    /// `ATA_QCFLAG_SENSE_VALID`: the sense data fetched for it.
+    sense: Option<Sense>,
+}
+
+/// `scsi_check_sense` for the current sense of a fixed ATA disk with no
+/// blacklist flags and no expected reset: whether it is NEEDS_RETRY.
+fn sense_needs_retry(sense: Sense) -> bool {
+    match sense.key {
+        SENSE_ABORTED_COMMAND => {
+            // DIF errors and command duration limit aborts complete.
+            sense.asc != 0x10 && !(sense.asc == 0x2e && (0x01..=0x03).contains(&sense.ascq))
+        }
+        Sense::NOT_READY | Sense::UNIT_ATTENTION => {
+            // Becoming ready, an ALUA transition, or another LUN changed.
+            sense.asc == Sense::NOT_READY_CAUSE && matches!(sense.ascq, 0x01 | 0x0a)
+                || sense.key == Sense::UNIT_ATTENTION
+                    && sense.asc == Sense::CONDITIONS_CHANGED
+                    && sense.ascq == Sense::LUNS_CHANGED
+        }
+        // Unrecovered read errors, unreadable address marks and missing
+        // records complete.
+        SENSE_MEDIUM_ERROR => !matches!(sense.asc, 0x11 | 0x13 | 0x14),
+        _ => false,
+    }
+}
+
+/// sd's completion of a command EH finished with sense data, as
+/// `scsi_io_completion_nz_result` and `scsi_io_completion_action` treat a
+/// fixed disk.
+#[derive(Debug, PartialEq, Eq)]
+enum Completion {
+    /// A recovered error is success.
+    Done,
+    /// Requeue after this delay.
+    Retry(u64),
+    Fail,
+}
+
+fn completion(sense: Sense) -> Completion {
+    match sense.key {
+        SENSE_RECOVERED_ERROR => Completion::Done,
+        // A fixed disk saw a power glitch or bus reset, not a media change.
+        Sense::UNIT_ATTENTION => Completion::Retry(0),
+        Sense::NOT_READY if sense.asc == Sense::NOT_READY_CAUSE => match sense.ascq {
+            0x01 | 0x04..=0x09 | 0x11 | 0x14 | 0x1a | 0x1b | 0x1d => {
+                Completion::Retry(DEVICE_BUSY_DELAY_US)
+            }
+            0x0a => Completion::Retry(ALUA_TRANSITION_DELAY_US),
+            _ => Completion::Fail,
+        },
+        _ => Completion::Fail,
+    }
 }
 
 /// Linux `ahci_error_intr`, `ata_eh_analyze_serror` and `ata_eh_analyze_tf`
@@ -497,11 +592,14 @@ fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool) -> Fa
     }
     let status = task_file as u8;
     let error = (task_file >> 8) as u8;
+    let mut sense_reported = false;
     if status & (STATUS_BUSY | STATUS_REQUEST | STATUS_READY) != STATUS_READY {
         mask |= ERR_HSM;
         reset = true;
     } else if status & (STATUS_ERROR | STATUS_FAULT) != 0 {
         mask |= ERR_DEVICE;
+        // Sense data reporting does not work if the device fault bit is set.
+        sense_reported = status & (STATUS_SENSE | STATUS_FAULT) == STATUS_SENSE;
         if error & ERROR_INTERFACE_CRC != 0 {
             mask |= ERR_ATA_BUS;
         }
@@ -532,6 +630,8 @@ fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool) -> Fa
         frozen,
         reset,
         hotplug,
+        sense_reported,
+        sense: None,
     }
 }
 
@@ -817,11 +917,18 @@ impl AhciDisk {
             dubious: true,
             speed_limit,
             speed,
+            sense_reporting: false,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
-        disk.internal(&port, ATA_IDENTIFY, ATA_SECTOR_BYTES as usize, buffer)?;
+        disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)?;
         let found = identify(disk.bounce.bytes())?;
+        // ata_dev_config_sense_reporting only logs a refusal. The kept
+        // IDENTIFY data says it is enabled only once revalidation rereads it.
+        disk.sense_reporting = found.sense_reporting.1;
+        if found.sense_reporting == (true, false) {
+            let _ = disk.internal(&port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer);
+        }
         disk.flush = found.flush;
         disk.identity.serial = found.serial;
         disk.identity.model = found.model;
@@ -845,7 +952,8 @@ impl AhciDisk {
     }
 
     /// One command through libata's error handling: recover the port after a
-    /// failure, then retry as sd does when `ata_eh_worth_retry` agrees.
+    /// failure, then retry as `ata_eh_finish` decides, and complete a command
+    /// with sense data as sd does.
     fn issue_on(
         &mut self,
         port: &impl CommandPort,
@@ -859,23 +967,51 @@ impl AhciDisk {
         // Only reads and writes carry ATA_QCFLAG_IO.
         let io = matches!(command, ATA_READ_DMA_EXT | ATA_WRITE_DMA_EXT);
         let buffer = self.bounce.physical();
+        // scsi_cmd_runtime_exceeced: sd requeues end (allowed + 1) timeouts
+        // after the command was first prepared.
+        let prepared = self.clock.try_start().map_err(|_| BlockError::Timeout)?;
+        let runtime_us = (u64::from(COMMAND_RETRIES) + 1) * self.command_timeout_us;
         let mut retries = 0;
         loop {
-            let Err(failure) = self.attempt(port, command, lba, count, bytes, write, buffer) else {
+            let Err(mut failure) = self.attempt(port, command, 0, lba, count, bytes, write, buffer)
+            else {
                 // ata_verify_xfer: a completed DMA transfer verifies it.
                 if io {
                     self.dubious = false;
                 }
                 return Ok(());
             };
-            if let Err(error) = self.recover(port, &failure, io) {
+            if let Err(error) = self.recover(port, &mut failure, io) {
                 self.fault = Some(error.clone());
                 return Err(error);
             }
-            if !worth_retry(failure.mask, io) || retries == COMMAND_RETRIES {
-                return Err(failure.error);
+            // With valid sense, only a NEEDS_RETRY disposition with an error
+            // left besides the device's is retried.
+            let retry = match failure.sense {
+                Some(sense) => failure.mask != 0 && sense_needs_retry(sense),
+                None => worth_retry(failure.mask, io),
+            };
+            if retry && retries < COMMAND_RETRIES {
+                retries += 1;
+                continue;
             }
-            retries += 1;
+            let Some(sense) = failure.sense else {
+                return Err(failure.error);
+            };
+            match completion(sense) {
+                Completion::Done => return Ok(()),
+                Completion::Fail => return Err(failure.error),
+                Completion::Retry(delay_us) => {
+                    let elapsed = self
+                        .clock
+                        .try_elapsed_us(prepared)
+                        .map_err(|_| BlockError::Timeout)?;
+                    if elapsed > runtime_us {
+                        return Err(failure.error);
+                    }
+                    self.clock.delay(delay_us);
+                }
+            }
         }
     }
 
@@ -885,11 +1021,13 @@ impl AhciDisk {
         &mut self,
         port: &impl CommandPort,
         command: u8,
+        feature: u8,
+        count: u16,
         bytes: usize,
         buffer: u64,
     ) -> Result<(), BlockError> {
         self.ready()?;
-        self.attempt(port, command, 0, 0, bytes, false, buffer)
+        self.attempt(port, command, feature, 0, count, bytes, false, buffer)
             .or_else(|failure| {
                 stop_engine(port, self.clock)?;
                 start_engine(port);
@@ -903,6 +1041,7 @@ impl AhciDisk {
         &mut self,
         port: &impl CommandPort,
         command: u8,
+        feature: u8,
         lba: u64,
         count: u16,
         bytes: usize,
@@ -915,7 +1054,7 @@ impl AhciDisk {
             FIS_REGISTER_HOST_TO_DEVICE,
             FIS_COMMAND,
             command,
-            0,
+            feature,
             lba as u8,
             (lba >> 8) as u8,
             (lba >> 16) as u8,
@@ -968,18 +1107,27 @@ impl AhciDisk {
     }
 
     /// Linux `ahci_error_handler` and `ata_eh_recover`: restart an unfrozen
-    /// engine and consider a speed-down; when a reset is due, hard reset the
+    /// engine, fetch sense data and consider a speed-down; when a reset is due, hard reset the
     /// link (one try per `ata_eh_reset_timeouts` entry) and revalidate the
     /// disk, up to `ATA_EH_DEV_TRIES` times. An error disables the disk.
     fn recover(
         &mut self,
         port: &impl CommandPort,
-        failure: &Failure,
+        failure: &mut Failure,
         io: bool,
     ) -> Result<(), BlockError> {
         if !failure.frozen {
             stop_engine(port, self.clock)?;
             start_engine(port);
+        }
+        // ata_eh_analyze_tf fetches reported sense data unless the port is
+        // frozen or reporting is off; valid sense supersedes the device error.
+        if failure.sense_reported && !failure.frozen && self.sense_reporting {
+            failure.sense = self.request_sense(port)?;
+            if let Some(sense) = failure.sense {
+                failure.error = BlockError::Sense(sense);
+                failure.mask &= !ERR_DEVICE;
+            }
         }
         let slowed = self.speed_down(port, failure.mask, io)?;
         if !failure.reset && !slowed {
@@ -1197,7 +1345,7 @@ impl AhciDisk {
     /// serial and capacity (`ata_dev_same_device`).
     fn revalidate(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
         let buffer = self.table.physical() + IDENTIFY_DATA as u64;
-        self.internal(port, ATA_IDENTIFY, ATA_SECTOR_BYTES as usize, buffer)?;
+        self.internal(port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)?;
         let data = &self.table.bytes()[IDENTIFY_DATA..IDENTIFY_DATA + ATA_SECTOR_BYTES as usize];
         let found = identify(data).map_err(|_| DETACHED)?;
         if found.model != self.identity.model
@@ -1206,7 +1354,39 @@ impl AhciDisk {
         {
             return Err(DETACHED);
         }
+        // ata_dev_reread_id keeps the new data.
+        self.sense_reporting = found.sense_reporting.1;
         Ok(())
+    }
+
+    /// Linux `ata_eh_request_sense`: REQUEST SENSE DATA EXT, whose D2H FIS
+    /// carries the sense key, ASC and ASCQ in LBA bits 23:0. Its own error is
+    /// ignored, as ERR might be set; a timeout leaves no result.
+    fn request_sense(&mut self, port: &impl CommandPort) -> Result<Option<Sense>, BlockError> {
+        let buffer = self.bounce.physical();
+        if let Err(failure) =
+            self.attempt(port, ATA_REQUEST_SENSE_DATA_EXT, 0, 0, 0, 0, false, buffer)
+        {
+            stop_engine(port, self.clock)?;
+            start_engine(port);
+            if failure.frozen {
+                return Ok(None);
+            }
+        }
+        let d2h = &self.commands.bytes()[RECEIVED_D2H..RECEIVED_D2H + FIS_BYTES];
+        if d2h[2] & STATUS_SENSE == 0 {
+            return Ok(None);
+        }
+        let sense = Sense {
+            key: d2h[6],
+            asc: d2h[5],
+            ascq: d2h[4],
+        };
+        // ata_scsi_sense_is_valid
+        if sense.key > SENSE_COMPLETED || (sense.key, sense.asc, sense.ascq) == (0, 0, 0) {
+            return Ok(None);
+        }
+        Ok(Some(sense))
     }
 
     fn chunk_bytes(&self) -> usize {
@@ -1266,7 +1446,7 @@ impl BlockDevice for AhciDisk {
         if power_off {
             let port = self.port;
             let buffer = self.bounce.physical();
-            self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, buffer)?;
+            self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, 0, 0, buffer)?;
         }
         Ok(())
     }
@@ -1290,6 +1470,8 @@ mod tests {
         Interface,
         /// The disk leaves: PhyRdy changes and the link stays down.
         Gone,
+        /// The command completes.
+        Complete,
     }
 
     /// A port and link that answer engine, COMRESET and command register
@@ -1385,7 +1567,7 @@ mod tests {
                     assert_ne!(registers[PORT_COMMAND / 4] & COMMAND_LIST_RUNNING, 0);
                     self.issued.set(self.issued.get() + 1);
                     match self.faults.borrow_mut().pop_front() {
-                        None => registers[PORT_TASK_FILE / 4] = READY,
+                        None | Some(Fault::Complete) => registers[PORT_TASK_FILE / 4] = READY,
                         Some(fault) => {
                             registers[PORT_ISSUE / 4] = value;
                             match fault {
@@ -1398,6 +1580,7 @@ mod tests {
                                     registers[PORT_INTERRUPTS / 4] |= INTERRUPT_INTERFACE_FATAL;
                                     registers[PORT_SATA_ERROR / 4] |= SERROR_DATA;
                                 }
+                                Fault::Complete => unreachable!(),
                                 Fault::Gone => {
                                     self.present.set(false);
                                     registers[PORT_INTERRUPTS / 4] |= INTERRUPT_PHY_READY_CHANGE;
@@ -1497,6 +1680,7 @@ mod tests {
                     dubious: false,
                     speed_limit: u32::MAX,
                     speed: 2,
+                    sense_reporting: true,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -1784,6 +1968,198 @@ mod tests {
         );
         assert_eq!(fixture.disk.speed_limit, 0b1);
         assert_eq!(controls(&link), [0x304, 0x314, 0x311, 0x310]);
+    }
+
+    #[test]
+    fn sense_reporting_follows_ata_id_sense_reporting_enabled() {
+        fn words(pairs: &[(usize, u16)]) -> impl Fn(usize) -> u16 + '_ {
+            move |index| {
+                pairs
+                    .iter()
+                    .find(|(at, _)| *at == index)
+                    .map_or(0, |(_, value)| *value)
+            }
+        }
+        let supported = [(86, 1 << 15), (119, 0x4040)];
+        assert_eq!(sense_reporting(words(&supported)), (true, false));
+        let enabled = [(86, 1 << 15), (119, 0x4040), (120, 0x4040)];
+        assert_eq!(sense_reporting(words(&enabled)), (true, true));
+        // Words 119 and 120 need word 86 bit 15 and their own 01b signature.
+        assert_eq!(
+            sense_reporting(words(&[(119, 0x4040), (120, 0x4040)])),
+            (false, false)
+        );
+        assert_eq!(
+            sense_reporting(words(&[(86, 1 << 15), (119, 0xc040), (120, 0x4040)])),
+            (false, false)
+        );
+        assert_eq!(
+            sense_reporting(words(&[(86, 1 << 15), (119, 0x4040), (120, 0x0040)])),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn sense_dispositions_follow_scsi_check_sense_and_sd_completion() {
+        let sense = |key, asc, ascq| Sense { key, asc, ascq };
+        for (key, asc, ascq, retry, done) in [
+            (SENSE_ABORTED_COMMAND, 0x00, 0x00, true, Completion::Fail),
+            (SENSE_ABORTED_COMMAND, 0x10, 0x01, false, Completion::Fail),
+            (SENSE_ABORTED_COMMAND, 0x2e, 0x02, false, Completion::Fail),
+            (SENSE_ABORTED_COMMAND, 0x2e, 0x04, true, Completion::Fail),
+            (Sense::NOT_READY, 0x04, 0x01, true, Completion::Retry(9_000)),
+            (
+                Sense::NOT_READY,
+                0x04,
+                0x0a,
+                true,
+                Completion::Retry(1_000_000),
+            ),
+            (
+                Sense::NOT_READY,
+                0x04,
+                0x1b,
+                false,
+                Completion::Retry(9_000),
+            ),
+            (Sense::NOT_READY, 0x04, 0x02, false, Completion::Fail),
+            (Sense::NOT_READY, 0x04, 0x24, false, Completion::Fail),
+            (Sense::NOT_READY, 0x3a, 0x00, false, Completion::Fail),
+            (
+                Sense::UNIT_ATTENTION,
+                0x29,
+                0x00,
+                false,
+                Completion::Retry(0),
+            ),
+            (
+                Sense::UNIT_ATTENTION,
+                0x3f,
+                0x0e,
+                true,
+                Completion::Retry(0),
+            ),
+            (SENSE_MEDIUM_ERROR, 0x11, 0x04, false, Completion::Fail),
+            (SENSE_MEDIUM_ERROR, 0x0c, 0x00, true, Completion::Fail),
+            (SENSE_RECOVERED_ERROR, 0x17, 0x01, false, Completion::Done),
+            (Sense::ILLEGAL_REQUEST, 0x21, 0x00, false, Completion::Fail),
+            (0x04, 0x44, 0x00, false, Completion::Fail),
+        ] {
+            let sense = sense(key, asc, ascq);
+            assert_eq!(sense_needs_retry(sense), retry, "{sense:?}");
+            assert_eq!(completion(sense), done, "{sense:?}");
+        }
+    }
+
+    #[test]
+    fn reported_sense_data_is_fetched_and_decides_completion_like_libata() {
+        // The disk's D2H FIS for REQUEST SENSE DATA EXT.
+        let reply = |fixture: &mut Fixture, status: u8, sense: [u8; 3]| {
+            let d2h = &mut fixture.disk.commands.bytes_mut()[RECEIVED_D2H..];
+            d2h[2] = status;
+            d2h[4] = sense[2];
+            d2h[5] = sense[1];
+            d2h[6] = sense[0];
+        };
+        // Each failing command, then REQUEST SENSE DATA EXT.
+        let failing = |task_file, times| {
+            let link = Link::new(&[]);
+            for _ in 0..times {
+                link.faults
+                    .borrow_mut()
+                    .extend([Fault::TaskFile(task_file), Fault::Complete]);
+            }
+            link
+        };
+        // ERR | SENSE with ABRT: a medium error the disk could not recover
+        // fails without a retry, carrying the sense.
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        reply(&mut fixture, 0x52, [SENSE_MEDIUM_ERROR, 0x11, 0x04]);
+        let link = Link::new(&[Fault::TaskFile(0x0453)]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Err(BlockError::Sense(Sense {
+                key: SENSE_MEDIUM_ERROR,
+                asc: 0x11,
+                ascq: 0x04
+            }))
+        );
+        // The read, then REQUEST SENSE DATA EXT.
+        assert_eq!(link.issued.get(), 2);
+        assert_eq!(fixture.disk.table.bytes()[2], ATA_REQUEST_SENSE_DATA_EXT);
+        // Without ERR_DEV the error is not charged to the device.
+        assert_eq!(fixture.disk.errors.newest().count(), 0);
+
+        // A recovered error is success.
+        reply(&mut fixture, 0x52, [SENSE_RECOVERED_ERROR, 0x17, 0x01]);
+        let link = Link::new(&[Fault::TaskFile(0x0453)]);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Ok(())
+        );
+        assert_eq!(link.issued.get(), 2);
+
+        // A unit attention is requeued at once, outside the retry count.
+        reply(&mut fixture, 0x52, [Sense::UNIT_ATTENTION, 0x29, 0x00]);
+        let link = failing(0x0453, 7);
+        assert_eq!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 0, 1, 512, true),
+            Ok(())
+        );
+        assert_eq!(link.issued.get(), 15);
+
+        // An uncorrectable error with sense needing a retry keeps
+        // ERR_MEDIA, so EH retries it five times; sd then fails it.
+        reply(&mut fixture, 0x52, [SENSE_MEDIUM_ERROR, 0x0c, 0x00]);
+        let link = failing(0x4053, 8);
+        assert!(matches!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 0, 1, 512, true),
+            Err(BlockError::Sense(_))
+        ));
+        assert_eq!(link.issued.get(), 12);
+
+        // A disk still becoming ready is requeued until sd's runtime ends.
+        reply(&mut fixture, 0x52, [Sense::NOT_READY, 0x04, 0x01]);
+        let link = failing(0x0453, 100);
+        assert!(matches!(
+            fixture
+                .disk
+                .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
+            Err(BlockError::Sense(_))
+        ));
+        let attempts = link.issued.get() / 2;
+        // 6 ms runtime at 1000 µs per command timeout, 9 ms per requeue.
+        assert!((1..=2).contains(&attempts), "{attempts}");
+
+        // No sense without the SENSE status, with a device fault, with
+        // reporting off, or with invalid sense.
+        for (task_file, reporting, status, sense) in [
+            (0x0451, true, 0x52, [Sense::UNIT_ATTENTION, 0x29, 0]),
+            (0x0473, true, 0x52, [Sense::UNIT_ATTENTION, 0x29, 0]),
+            (0x0453, false, 0x52, [Sense::UNIT_ATTENTION, 0x29, 0]),
+            (0x0453, true, 0x50, [Sense::UNIT_ATTENTION, 0x29, 0]),
+            (0x0453, true, 0x52, [0, 0, 0]),
+            (0x0453, true, 0x52, [0x10, 0x29, 0]),
+        ] {
+            let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+            fixture.disk.sense_reporting = reporting;
+            reply(&mut fixture, status, sense);
+            let link = Link::new(&[Fault::TaskFile(task_file)]);
+            assert!(matches!(
+                fixture
+                    .disk
+                    .issue_on(&link, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false),
+                Err(BlockError::Device { .. })
+            ));
+        }
     }
 
     #[test]
