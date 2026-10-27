@@ -1,6 +1,7 @@
-//! Stela's palette on the standard Clack prompt layout: a warm orange frame,
-//! teal for what is selected or finished, and dim grey for everything else.
-//! The colors are xterm-256 entries 173 and 79, so 256-color terminals match.
+//! Stela's palette on the standard Clack prompt layout, all orange: a muted
+//! frame, a light orange for what is selected or finished, a vivid one for
+//! warnings, and dim grey for everything else. The colors are xterm-256
+//! entries 173, 215 and 208, so 256-color terminals match.
 //!
 //! Glyphs are written directly rather than through `console::Emoji`, which
 //! falls back to ASCII outside Windows Terminal. Every glyph is present in
@@ -30,11 +31,11 @@ pub(super) fn accent() -> Style {
 }
 
 fn selection() -> Style {
-    Style::new().true_color(95, 215, 175)
+    Style::new().true_color(255, 175, 95)
 }
 
 fn warning() -> Style {
-    Style::new().true_color(255, 175, 95)
+    Style::new().true_color(255, 135, 0).bold()
 }
 
 impl Stela {
