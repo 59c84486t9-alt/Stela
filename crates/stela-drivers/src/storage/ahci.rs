@@ -20,6 +20,15 @@ use alloc::{format, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 
 pub const CLASS: [u8; 3] = [0x01, 0x06, 0x01];
+/// `ahci_pci_tbl`: AMD uses the RAID class only for AHCI controllers.
+const VENDOR_AMD: u16 = 0x1022;
+const CLASS_RAID: [u8; 3] = [0x01, 0x04, 0x00];
+
+/// Whether `ahci_pci_tbl` binds the function: the AHCI class, or an AMD
+/// function of the RAID class.
+pub fn matches<C>(function: &Function<C>) -> bool {
+    function.class == CLASS || function.vendor == VENDOR_AMD && function.class == CLASS_RAID
+}
 
 const CAPABILITIES: usize = 0x00;
 const GLOBAL_CONTROL: usize = 0x04;
@@ -2277,6 +2286,32 @@ mod tests {
         );
         assert_eq!(fixture.disk.speed_limit, 0b1);
         assert_eq!(controls(&link), [0x304, 0x314, 0x311, 0x310]);
+    }
+
+    #[test]
+    fn amd_raid_class_functions_bind_like_ahci_pci_tbl() {
+        struct Config([u32; 4]);
+        impl ConfigSpace for Config {
+            fn read32(&self, offset: u16) -> u32 {
+                self.0[usize::from(offset / 4)]
+            }
+            fn write32(&mut self, _: u16, _: u32) {}
+        }
+        let function = |vendor: u32, class: u32| {
+            let address = crate::bus::pci::Address {
+                segment: 0,
+                bus: 0,
+                device: 0,
+                function: 0,
+            };
+            Function::new(address, Config([0x43f6 << 16 | vendor, 0, class << 8, 0])).unwrap()
+        };
+        assert!(matches(&function(0x1022, 0x01_06_01)));
+        assert!(matches(&function(0x8086, 0x01_06_01)));
+        assert!(matches(&function(0x1022, 0x01_04_00)));
+        assert!(!matches(&function(0x8086, 0x01_04_00)));
+        assert!(!matches(&function(0x1022, 0x01_04_01)));
+        assert!(!matches(&function(0x1022, 0x01_06_00)));
     }
 
     #[test]
