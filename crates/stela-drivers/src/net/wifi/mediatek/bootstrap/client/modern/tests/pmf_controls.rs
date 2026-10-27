@@ -144,9 +144,9 @@ impl reg::OsLease for ProtectedGuard {
                 AssociationUse::Configure
                 | AssociationUse::Receive
                 | AssociationUse::Authentication => true,
-                AssociationUse::Management | AssociationUse::Data => {
-                    self.protection.authenticated.get()
-                }
+                AssociationUse::Management
+                | AssociationUse::Data
+                | AssociationUse::ChannelSwitch => self.protection.authenticated.get(),
             }
     }
     fn allows_protected_port(&mut self, operation: &reg::AssociationOperation<'_>) -> bool {

@@ -168,6 +168,8 @@ pub struct Station {
     external: Option<Arc<external::Session>>,
     selected_beacon: Option<super::scan::result::Bss>,
     context: Option<Arc<AssociationContext>>,
+    /// Where a channel switch moved the association of this context ticket.
+    switched: Option<(Ticket, operations::ChannelDefinition)>,
     pmf_observation: Option<Arc<NativeBssObservation>>,
     epoch: u64,
     serial: u32,
@@ -192,6 +194,7 @@ impl Station {
             external: None,
             selected_beacon: None,
             context: None,
+            switched: None,
             pmf_observation: None,
             epoch: 0,
             serial: 0,
@@ -386,6 +389,35 @@ impl Station {
         {
             return Err(Error::Stale);
         }
+        Ok(())
+    }
+
+    /// The channel the current association operates: its own, or where a
+    /// channel switch moved it.
+    pub fn operating_definition(&self) -> Option<operations::ChannelDefinition> {
+        let context = self.context.as_ref()?;
+        Some(match self.switched {
+            Some((ticket, definition)) if ticket == context.ticket() => definition,
+            _ => context.definition(),
+        })
+    }
+
+    /// mac80211 `ieee80211_chswitch_done`: the associated `context` now
+    /// operates `definition`, on the same band.
+    pub fn switch_channel(
+        &mut self,
+        context: &AssociationContext,
+        definition: operations::ChannelDefinition,
+    ) -> Result<(), Error> {
+        self.validate_association_context(context)?;
+        if self.phase != Phase::Associated {
+            return Err(Error::NotAssociated);
+        }
+        definition.validate().map_err(Error::Phy)?;
+        if definition.control.band != context.channel().band {
+            return Err(Error::Unsupported("channel switch to another band"));
+        }
+        self.switched = Some((context.ticket(), definition));
         Ok(())
     }
 

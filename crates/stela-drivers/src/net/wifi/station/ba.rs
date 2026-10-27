@@ -390,15 +390,13 @@ impl Station {
         if epoch != self.epoch {
             return Err(Error::Stale);
         }
+        let channel = self.operating_definition().ok_or(Error::Stale)?.control;
         if (
             frame.radio.band,
             frame.radio.channel,
             frame.radio.frequency_mhz,
-        ) != (
-            context.channel().band,
-            context.channel().number,
-            context.channel().frequency_mhz,
-        ) {
+        ) != (channel.band, channel.number, channel.frequency_mhz)
+        {
             return Err(Error::Station(super::Error::WrongChannel));
         }
         if frame.fcs_error

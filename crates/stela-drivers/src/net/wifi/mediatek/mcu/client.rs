@@ -359,11 +359,17 @@ impl Profile {
         b[20] = if enable { 1 } else { 2 };
         Ok(super::init::Request::client_filter(b))
     }
-    /// The profile without the timing a later beacon changes: the fields
+    /// The profile without what the AP changes later, the timing from its
+    /// beacons and the channel within the band through a switch: the fields
     /// naming one association.
     pub fn association_identity(self) -> Self {
         Self {
             slot_time: 0,
+            channel: Channel {
+                number: 0,
+                frequency_mhz: 0,
+                ..self.channel
+            },
             ..self
         }
     }

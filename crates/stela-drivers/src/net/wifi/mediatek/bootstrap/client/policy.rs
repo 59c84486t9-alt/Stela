@@ -299,7 +299,7 @@ impl Snapshot {
     }
     fn association(&self, op: &reg::AssociationOperation<'_>, environment: Environment) -> bool {
         let ctx = op.context();
-        let def = ctx.definition();
+        let def = op.definition();
         let n = ctx.negotiated();
         if def.validate().is_err() || matches!(def.width, Width::Mhz80P80 | Width::Mhz320) {
             return false;
@@ -325,7 +325,7 @@ impl Snapshot {
                 || f & (1 << 9) != 0 && environment != Environment::Indoor
                 || f & (1 << 6) != 0
                     && (n.mode != Mode::Legacy
-                        || ctx.channel().band != Band::Ghz2
+                        || def.control.band != Band::Ghz2
                         || n.legacy.supported & !15 != 0)
                 || matches!(n.mode, Mode::He | Mode::Eht) && f & (1 << 13) != 0
                 || n.mode == Mode::Eht && f & (1 << 20) != 0
@@ -414,7 +414,7 @@ impl Os {
     }
     fn association(&self, op: &reg::AssociationOperation<'_>) -> bool {
         let ctx = op.context();
-        let def = ctx.definition();
+        let def = op.definition();
         let n = ctx.negotiated();
         let bw = match def.width {
             Width::Mhz20 => 20,
@@ -436,7 +436,7 @@ impl Os {
                 || self.country.bandwidth(r).is_none_or(|max| max < bw * 1000)
                 || (r.no_ofdm
                     && (n.mode != Mode::Legacy
-                        || ctx.channel().band != Band::Ghz2
+                        || def.control.band != Band::Ghz2
                         || n.legacy.supported & !15 != 0))
             {
                 return false;
@@ -447,7 +447,7 @@ impl Os {
         };
         let Some(rule) = self
             .country
-            .rule(u32::from(ctx.channel().frequency_mhz) * 1000, 20_000)
+            .rule(u32::from(def.control.frequency_mhz) * 1000, 20_000)
         else {
             return false;
         };
@@ -481,7 +481,7 @@ impl reg::OsLease for OsGuard<'_> {
         self.0.association(op)
     }
     fn allows_edca(&mut self, op: &reg::EdcaOperation<'_>) -> bool {
-        let channel = op.association().context().channel();
+        let channel = op.association().channel();
         self.0.association(op.association())
             && self
                 .0
@@ -861,9 +861,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .modern_context()
             .ok_or(PolicyError::Bss)?
             .clone();
+        let channel = self
+            .client
+            .station()
+            .operating_definition()
+            .ok_or(PolicyError::Bss)?
+            .control;
         let rule = self
             .country
-            .rule(u32::from(context.channel().frequency_mhz) * 1000, 20_000)
+            .rule(u32::from(channel.frequency_mhz) * 1000, 20_000)
             .ok_or(PolicyError::RestrictionMismatch)?;
         let admission = self
             .authority

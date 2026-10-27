@@ -5,7 +5,10 @@
 //! independently retain and validate those exact existing capabilities.
 
 use super::{Error, HardwareLease, HardwarePolicy, OsLease, OsPolicy, Owner};
-use crate::net::wifi::station::{AssociationContext, Phase, Station, phy::AccessCategory};
+use crate::net::wifi::Channel;
+use crate::net::wifi::station::{
+    AssociationContext, Phase, Station, operations::ChannelDefinition, phy::AccessCategory,
+};
 use alloc::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +22,9 @@ pub enum AssociationUse {
     Authentication,
     Management,
     Data,
+    /// Move the association to a channel its AP announced: the operation's
+    /// definition is the target, which the whole profile must qualify on.
+    ChannelSwitch,
 }
 
 /// Exact borrowed profile for providers to qualify; this is not a permit.
@@ -27,11 +33,20 @@ pub enum AssociationUse {
 #[derive(Debug)]
 pub struct AssociationOperation<'a> {
     context: &'a AssociationContext,
+    definition: ChannelDefinition,
     purpose: AssociationUse,
 }
 impl AssociationOperation<'_> {
     pub fn context(&self) -> &AssociationContext {
         self.context
+    }
+    /// The channel definition the operation runs on: where the association
+    /// operates, which a channel switch may have moved from its own.
+    pub const fn definition(&self) -> ChannelDefinition {
+        self.definition
+    }
+    pub const fn channel(&self) -> Channel {
+        self.definition.control
     }
     pub const fn purpose(&self) -> AssociationUse {
         self.purpose
@@ -76,12 +91,14 @@ pub struct AssociationAdmission {
     native: super::NativeContext,
     os_revision: u64,
     context: Arc<AssociationContext>,
+    definition: ChannelDefinition,
     purpose: AssociationUse,
 }
 impl AssociationAdmission {
     pub fn operation(&self) -> AssociationOperation<'_> {
         AssociationOperation {
             context: &self.context,
+            definition: self.definition,
             purpose: self.purpose,
         }
     }
@@ -107,10 +124,17 @@ fn current(station: &Station, operation: &AssociationOperation<'_>) -> Result<()
         AssociationUse::Receive
         | AssociationUse::Authentication
         | AssociationUse::Management
-        | AssociationUse::Data => Phase::Associated,
+        | AssociationUse::Data
+        | AssociationUse::ChannelSwitch => Phase::Associated,
     };
     if station.phase() != required {
         return Err(Error::Mismatch);
+    }
+    // Every other use runs where the association operates now.
+    if operation.purpose != AssociationUse::ChannelSwitch
+        && station.operating_definition() != Some(operation.definition)
+    {
+        return Err(Error::Stale);
     }
     Ok(())
 }
@@ -120,7 +144,7 @@ fn check(
     os: &mut impl OsLease,
     operation: &AssociationOperation<'_>,
 ) -> Result<(), Error> {
-    let channel = operation.context.channel();
+    let channel = operation.channel();
     if hardware.lookup_channel(channel.band, channel.number) != Some(channel)
         || !hardware.allows_association(operation)
     {
@@ -143,8 +167,35 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         context: Arc<AssociationContext>,
         purpose: AssociationUse,
     ) -> Result<AssociationAdmission, Error> {
+        if purpose == AssociationUse::ChannelSwitch {
+            return Err(Error::Mismatch);
+        }
+        let definition = station.operating_definition().ok_or(Error::Stale)?;
+        self.admit_operation(station, context, definition, purpose)
+    }
+
+    /// Check the current association's whole profile on the `definition`
+    /// its AP announced a switch to, before any native effect there.
+    pub fn admit_channel_switch(
+        &mut self,
+        station: &Station,
+        context: Arc<AssociationContext>,
+        definition: ChannelDefinition,
+    ) -> Result<AssociationAdmission, Error> {
+        definition.validate().map_err(|_| Error::Mismatch)?;
+        self.admit_operation(station, context, definition, AssociationUse::ChannelSwitch)
+    }
+
+    fn admit_operation(
+        &mut self,
+        station: &Station,
+        context: Arc<AssociationContext>,
+        definition: ChannelDefinition,
+        purpose: AssociationUse,
+    ) -> Result<AssociationAdmission, Error> {
         let operation = AssociationOperation {
             context: &context,
+            definition,
             purpose,
         };
         current(station, &operation)?;
@@ -157,6 +208,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
             native,
             os_revision: os.revision(),
             context,
+            definition,
             purpose,
         })
     }
@@ -308,6 +360,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
             // Data independently while these same current guards remain held.
             let data = AssociationOperation {
                 context: operation.context,
+                definition: operation.definition,
                 purpose: AssociationUse::Data,
             };
             check(&mut hardware, &mut os, &data)?;
@@ -416,6 +469,7 @@ mod tests {
             Use::Configure => 1,
             Use::Management => 2,
             Use::Data => 4,
+            Use::ChannelSwitch => 32,
         }
     }
     impl Drop for HardwareGuard {
@@ -530,6 +584,69 @@ mod tests {
     fn associated(s: &mut Station, c: &AssociationContext) {
         s.complete_configuration(c.ticket(), Completion::Accepted, 3)
             .unwrap();
+    }
+
+    #[test]
+    fn a_channel_switch_is_admitted_on_its_target_and_moves_later_uses_there() {
+        let (mut s, c, mut owner, m) = fixture();
+        associated(&mut s, &c);
+        m.hw_mask.set(7 | 32);
+        m.os_mask.set(7 | 32);
+        let target = operations::ChannelDefinition {
+            control: Channel {
+                band: Band::Ghz5,
+                number: 149,
+                frequency_mhz: 5745,
+            },
+            width: Width::Mhz20,
+            center1_mhz: 5745,
+            center2_mhz: None,
+            punctured: 0,
+        };
+        assert_eq!(
+            owner
+                .admit_association(&s, Arc::clone(&c), Use::ChannelSwitch)
+                .unwrap_err(),
+            reg::Error::Mismatch
+        );
+        // The hardware does not offer the target yet.
+        assert_eq!(
+            owner
+                .admit_channel_switch(&s, Arc::clone(&c), target)
+                .unwrap_err(),
+            reg::Error::HardwareDenied
+        );
+        let old = owner
+            .admit_association(&s, Arc::clone(&c), Use::Management)
+            .unwrap();
+        m.channel.set(target.control);
+        let switch = owner
+            .admit_channel_switch(&s, Arc::clone(&c), target)
+            .unwrap();
+        // SAFETY: the pure model's same-device publication only.
+        unsafe {
+            owner.publish_association(switch, &s, Use::ChannelSwitch, |_, op| {
+                assert_eq!(op.definition(), target);
+                assert_eq!(op.context().channel().number, 36);
+            })
+        }
+        .unwrap();
+        let mut other = target;
+        other.control.band = Band::Ghz2;
+        assert!(s.switch_channel(&c, other).is_err());
+        s.switch_channel(&c, target).unwrap();
+        assert_eq!(s.operating_definition(), Some(target));
+        // Uses admitted on the old channel are stale; new ones run on the new.
+        // SAFETY: no model publication is permitted on a stale admission.
+        assert_eq!(
+            unsafe { owner.publish_association::<()>(old, &s, Use::Management, |_, _| panic!()) }
+                .unwrap_err(),
+            reg::Error::Stale
+        );
+        let new = owner
+            .admit_association(&s, Arc::clone(&c), Use::Management)
+            .unwrap();
+        assert_eq!(new.operation().channel(), target.control);
     }
 
     #[test]

@@ -55,7 +55,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 frame.radio.frequency_mhz,
             ) != (p.channel.band, p.channel.number, p.channel.frequency_mhz)
             || modern.context().bssid() != p.peer
-            || modern.context().channel() != p.channel
+            || s.station.operating_definition().map(|d| d.control) != Some(p.channel)
         {
             return Err(Error::WrongProfile);
         }
