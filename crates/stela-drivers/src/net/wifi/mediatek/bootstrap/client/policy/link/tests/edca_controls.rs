@@ -130,6 +130,26 @@ fn a_beacon_narrowing_the_channel_moves_the_firmware_like_ieee80211_config_bw() 
 }
 
 #[test]
+fn a_new_association_forgets_the_last_aps_channel_and_timing() {
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    secure(&mut link);
+    drop(drain_notices(&mut link));
+    let s = link.state_mut().client.client.state_mut();
+    let mut narrowed = s.modern.as_ref().unwrap().context().definition();
+    assert!(narrowed.downgrade());
+    s.channel = Some(narrowed);
+    link.disconnect().unwrap();
+    // SAFETY: actual model peer/key removal and all old users drained.
+    unsafe { link.retire_peer_after_drain() }.unwrap();
+    let (join, bss) = modern_inputs(&link.state().client.client);
+    associate(&mut link, &model, join, bss);
+    let s = link.state().client.client.state();
+    assert!(s.channel.is_none() && s.channel_change.is_none() && s.slot_time.is_none());
+    stop(&mut link, &model);
+}
+
+#[test]
 fn rssi_monitor_without_firmware_rssi_events_watches_beacons_like_mac80211() {
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);

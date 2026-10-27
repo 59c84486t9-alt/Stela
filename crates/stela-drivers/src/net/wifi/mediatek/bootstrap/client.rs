@@ -1191,6 +1191,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.profile = None;
         s.modern = None;
         s.edca = None;
+        s.slot_time = None;
+        s.channel = None;
+        s.channel_change = None;
         s.management = None;
         s.pmf_selected = None;
         s.pmf_authentication = None;
