@@ -43,6 +43,8 @@ const SHUTDOWN_COMPLETE: u32 = 2 << 2;
 const SHUTDOWN_MINIMUM_US: u64 = 5_000_000;
 const SHUTDOWN_MAXIMUM_US: u64 = 60_000_000;
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
+/// Completion polls between controller-fatal checks while a command runs.
+const STATUS_POLL_INTERVAL: u32 = 1024;
 /// The first version with the active namespace list (Linux `NVME_VS(1, 1, 0)`).
 const VERSION_1_1: u32 = 0x0001_0100;
 /// 64-byte submission and 16-byte completion entries, 4 KiB pages, NVM set.
@@ -261,11 +263,17 @@ impl Controller {
         )?;
         let entry = usize::from(queue.head) * 16;
         let mut failure = None;
+        let mut polls = 0u32;
         let done = self.clock.wait(self.command_timeout_us, || {
+            // The CQE lives in RAM; CSTS is an MMIO read, which a hypervisor
+            // traps. Check for a fatal controller only every few polls.
+            polls = polls.wrapping_add(1);
             let observed = (|| {
-                let status = registers.read32(STATUS)?;
-                if status & FATAL != 0 {
-                    return Err(BlockError::Device { status });
+                if polls.is_multiple_of(STATUS_POLL_INTERVAL) {
+                    let status = registers.read32(STATUS)?;
+                    if status & FATAL != 0 {
+                        return Err(BlockError::Device { status });
+                    }
                 }
                 Ok((queue.completions.coherent(entry + 12)? >> 16 & 1 == 1) == queue.phase)
             })();
