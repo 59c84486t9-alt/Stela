@@ -162,7 +162,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         let (ptk, gtk) = Self::management_keys(s)?;
         if s.station.association_epoch() != Some(session.association)
-            || s.profile != Some(session.profile)
+            || s.profile.map(|p| p.association_identity())
+                != Some(session.profile.association_identity())
             || s.peer_generation != session.peer_generation
             || ptk != session.ptk
             || gtk != session.gtk

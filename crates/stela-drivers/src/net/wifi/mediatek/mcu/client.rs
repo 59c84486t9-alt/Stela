@@ -359,6 +359,14 @@ impl Profile {
         b[20] = if enable { 1 } else { 2 };
         Ok(super::init::Request::client_filter(b))
     }
+    /// The profile without the timing a later beacon changes: the fields
+    /// naming one association.
+    pub fn association_identity(self) -> Self {
+        Self {
+            slot_time: 0,
+            ..self
+        }
+    }
     pub fn roc(self, token: u8, duration_ms: u32) -> Result<super::init::Request, Error> {
         self.roc_validated(token, duration_ms, false)
     }

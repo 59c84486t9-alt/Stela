@@ -134,6 +134,21 @@ fn owning_management_notices_preserve_the_65th_actual_ddone_and_consume_original
 }
 
 #[test]
+fn a_beacon_slot_time_change_keeps_the_management_session() {
+    let (mut link, model, session, _) = prepared();
+    drop(drain_notices(&mut link));
+    // As update_slot_time_modern leaves the profile after the AP's change.
+    let s = link.state_mut().client.client.state_mut();
+    let mut profile = s.profile.unwrap();
+    profile.slot_time = 20;
+    s.profile = Some(profile);
+    incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, 1)), false);
+    link.service().unwrap();
+    assert!(Arc::ptr_eq(take_management(&mut link).session(), &session));
+    stop(&mut link, &model);
+}
+
+#[test]
 fn owning_management_tx_releases_original_keys_and_rejects_deferred_envelope_after_removal() {
     let (mut link, model, session, drops) = prepared();
     let receipt = link
