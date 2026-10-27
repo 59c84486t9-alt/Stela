@@ -678,6 +678,36 @@ struct Failure {
     sense_reported: bool,
     /// `ATA_QCFLAG_SENSE_VALID`: the sense data fetched for it.
     sense: Option<Sense>,
+    /// PxIS's error bits.
+    interrupts: u32,
+    /// The result taskfile's status and error (`qc->result_tf`), captured
+    /// from the FIS the command completed with.
+    result: [u8; 2],
+}
+
+impl Failure {
+    /// A failure no command analysis applies to.
+    fn new(error: BlockError) -> Self {
+        Self {
+            error,
+            mask: 0,
+            frozen: false,
+            reset: false,
+            hotplug: false,
+            sense_reported: false,
+            sense: None,
+            interrupts: 0,
+            result: [0; 2],
+        }
+    }
+
+    /// `ata_exec_internal`'s minimal analysis gives exactly `AC_ERR_DEV`:
+    /// the device refused the command, which did not time out.
+    fn refused(&self) -> bool {
+        self.mask & ERR_TIMEOUT == 0
+            && (self.interrupts & INTERRUPT_TASK_FILE_ERROR != 0
+                || self.result[0] & (STATUS_ERROR | STATUS_FAULT) != 0)
+    }
 }
 
 /// Linux `ata_to_sense_error`, from the 3ware translation table: the error
@@ -804,13 +834,13 @@ fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool) -> Fa
         BlockError::Device { status: task_file }
     };
     Failure {
-        error,
         mask,
         frozen,
         reset,
         hotplug,
         sense_reported,
-        sense: None,
+        interrupts,
+        ..Failure::new(error)
     }
 }
 
@@ -1109,7 +1139,8 @@ impl AhciDisk {
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
-        disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)?;
+        disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
+            .map_err(|failure| failure.error)?;
         let found = identify(disk.bounce.bytes())?;
         disk.sense_reporting = found.sense_reporting.1;
         disk.configure(&port, &found);
@@ -1124,7 +1155,7 @@ impl AhciDisk {
         disk.set_mode(&port)?;
         // ata_eh_recover's config_lpm; a failure takes EH's next try.
         if let Err(error) = disk.configure_lpm(&port, DEVICE_TRIES) {
-            disk.reset_and_configure(&port, false, error, DEVICE_TRIES - 1)?;
+            disk.reconfigure(&port, true, false, error, DEVICE_TRIES - 1)?;
         }
         Ok(Some(disk))
     }
@@ -1219,14 +1250,15 @@ impl AhciDisk {
         count: u16,
         bytes: usize,
         buffer: u64,
-    ) -> Result<(), BlockError> {
-        self.ready()?;
-        self.attempt(port, command, feature, 0, count, bytes, false, buffer)
-            .or_else(|failure| {
-                stop_engine(port, self.clock)?;
-                start_engine(port);
-                Err(failure.error)
-            })
+    ) -> Result<(), Failure> {
+        self.ready().map_err(Failure::new)?;
+        let Err(failure) = self.attempt(port, command, feature, 0, count, bytes, false, buffer)
+        else {
+            return Ok(());
+        };
+        stop_engine(port, self.clock).map_err(Failure::new)?;
+        start_engine(port);
+        Err(failure)
     }
 
     /// Issue the command once and wait for its completion or error.
@@ -1292,12 +1324,12 @@ impl AhciDisk {
         let serror = port.read32(PORT_SATA_ERROR);
         port.write32(PORT_SATA_ERROR, serror);
         port.write32(PORT_INTERRUPTS, port.read32(PORT_INTERRUPTS));
-        Err(classify(
-            interrupts,
-            serror,
-            port.read32(PORT_TASK_FILE),
-            !done,
-        ))
+        let mut failure = classify(interrupts, serror, port.read32(PORT_TASK_FILE), !done);
+        // ahci_qc_fill_rtf: the last D2H FIS, before error handling issues
+        // anything else.
+        let d2h = &self.commands.bytes()[RECEIVED_D2H..RECEIVED_D2H + FIS_BYTES];
+        failure.result = [d2h[2], d2h[3]];
+        Err(failure)
     }
 
     /// Linux `ahci_error_handler` and `ata_eh_recover`: restart an unfrozen
@@ -1324,37 +1356,54 @@ impl AhciDisk {
             }
         }
         let slowed = self.speed_down(port, failure.mask, io)?;
-        if !failure.reset && !slowed {
+        // ata_eh_link_autopsy's default actions: a frozen port, a timeout or
+        // an HSM violation resets; any other error of an I/O command, and any
+        // but a device error of another, revalidates.
+        let reset = failure.reset
+            || slowed
+            || failure.frozen
+            || failure.mask & (ERR_HSM | ERR_TIMEOUT) != 0;
+        let revalidate = if io {
+            failure.mask != 0
+        } else {
+            failure.mask & !ERR_DEVICE != 0
+        };
+        if !reset && !revalidate {
             return Ok(());
         }
-        self.reset_and_configure(port, failure.hotplug, failure.error.clone(), DEVICE_TRIES)
+        let last = failure.error.clone();
+        self.reconfigure(port, reset, failure.hotplug, last, DEVICE_TRIES)
     }
 
-    /// `ata_eh_recover`'s reset, revalidation and configuration, `tries`
-    /// times at most.
-    fn reset_and_configure(
+    /// `ata_eh_recover`: a reset when one is due, then revalidation and
+    /// configuration, `tries` times at most; each retry resets.
+    fn reconfigure(
         &mut self,
         port: &impl CommandPort,
+        mut reset: bool,
         mut hotplug: bool,
         mut last: BlockError,
         mut tries: usize,
     ) -> Result<(), BlockError> {
         loop {
-            let mut online = None;
-            for timeout in RESET_TIMEOUTS_US {
-                match self.hardreset(port, timeout, hotplug) {
-                    Ok(present) => {
-                        online = Some(present);
-                        break;
+            if reset {
+                let mut online = None;
+                for timeout in RESET_TIMEOUTS_US {
+                    match self.hardreset(port, timeout, hotplug) {
+                        Ok(present) => {
+                            online = Some(present);
+                            break;
+                        }
+                        Err(error) => last = error,
                     }
-                    Err(error) => last = error,
+                }
+                match online {
+                    None => return Err(last),
+                    Some(false) => return Err(DETACHED),
+                    Some(true) => {}
                 }
             }
-            match online {
-                None => return Err(last),
-                Some(false) => return Err(DETACHED),
-                Some(true) => {}
-            }
+            reset = true;
             // ata_eh_revalidate_and_attach wakes a power-saving link first;
             // then ATA_EHI_SETMODE and config_lpm.
             let woken = if self.lpm.policy > LPM_MAX_POWER {
@@ -1581,7 +1630,8 @@ impl AhciDisk {
     /// serial and capacity (`ata_dev_same_device`).
     fn revalidate(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
         let buffer = self.table.physical() + IDENTIFY_DATA as u64;
-        self.internal(port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)?;
+        self.internal(port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
+            .map_err(|failure| failure.error)?;
         let data = &self.table.bytes()[IDENTIFY_DATA..IDENTIFY_DATA + ATA_SECTOR_BYTES as usize];
         let found = identify(data).map_err(|_| DETACHED)?;
         if found.model != self.identity.model
@@ -1652,8 +1702,8 @@ impl AhciDisk {
             0,
             buffer,
         ) {
-            Ok(()) | Err(BlockError::Device { .. }) => Ok(()),
-            Err(error) => Err(error),
+            Err(failure) if !failure.refused() => Err(failure.error),
+            _ => Ok(()),
         };
         if lpm.dipm {
             dipm(self, FEATURE_SATA_DISABLE)?;
@@ -1701,11 +1751,10 @@ impl AhciDisk {
     }
 
     /// Linux `ata_gen_ata_sense` for a failed command without sense data,
-    /// from the D2H FIS it completes with. The error stays the transport's
-    /// own when that FIS reports no device error.
+    /// from its result taskfile. The error stays the transport's own when
+    /// that reports no device error.
     fn generated_sense(&self, failure: &mut Failure) -> Sense {
-        let d2h = &self.commands.bytes()[RECEIVED_D2H..RECEIVED_D2H + FIS_BYTES];
-        let (status, error) = (d2h[2], d2h[3]);
+        let [status, error] = failure.result;
         let sense = if self.locked {
             // Logical unit access not authorized.
             Sense {
@@ -1764,8 +1813,8 @@ impl AhciDisk {
                 buffer,
             ) {
                 Ok(()) => {}
-                Err(BlockError::Device { .. }) => refused = true,
-                Err(error) => return Err(error),
+                Err(failure) if failure.refused() => refused = true,
+                Err(failure) => return Err(failure.error),
             }
         }
         self.revalidate(port)?;
@@ -1888,7 +1937,8 @@ impl BlockDevice for AhciDisk {
         if power_off {
             let port = self.port;
             let buffer = self.bounce.physical();
-            self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, 0, 0, buffer)?;
+            self.internal(&port, ATA_STANDBY_IMMEDIATE, 0, 0, 0, buffer)
+                .map_err(|failure| failure.error)?;
         }
         Ok(())
     }
@@ -2145,7 +2195,9 @@ mod tests {
 
     #[test]
     fn device_errors_restart_the_engine_and_follow_ata_eh_worth_retry() {
-        // An aborted read is retried after the engine restarts.
+        // An aborted read revalidates the disk without a reset (IDENTIFY,
+        // SET FEATURES with UDMA 6 and its IDENTIFY) and is retried after
+        // the engine restarts.
         let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
         let link = Link::new(&[Fault::TaskFile(0x0451)]);
         assert_eq!(
@@ -2154,7 +2206,7 @@ mod tests {
                 .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
             Ok(())
         );
-        assert_eq!(link.issued.get(), 2);
+        assert_eq!(link.issued.get(), 5);
         let starts: Vec<u32> = link
             .writes_to(PORT_COMMAND)
             .iter()
@@ -2172,7 +2224,7 @@ mod tests {
                 .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
             Err(BlockError::Device { status: 0x4051 })
         );
-        assert_eq!(link.issued.get(), 1);
+        assert_eq!(link.issued.get(), 4);
         assert_eq!(
             fixture
                 .disk
@@ -2193,14 +2245,22 @@ mod tests {
         // I/O is retried five times, as sd allows.
         drop(fixture);
         let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
-        let link = Link::new(&[Fault::TaskFile(0x0451); 7]);
+        let link = Link::new(&[]);
+        for _ in 0..7 {
+            link.faults.borrow_mut().extend([
+                Fault::TaskFile(0x0451),
+                Fault::Complete,
+                Fault::Complete,
+                Fault::Complete,
+            ]);
+        }
         assert_eq!(
             fixture
                 .disk
                 .issue_on(&link, ATA_WRITE_DMA_EXT, 0, 1, 512, true),
             Err(BlockError::Device { status: 0x0451 })
         );
-        assert_eq!(link.issued.get(), 6);
+        assert_eq!(link.issued.get(), 6 * 4);
         assert!(fixture.disk.fault.is_none());
     }
 
@@ -2425,9 +2485,18 @@ mod tests {
         );
         assert!(!fixture.disk.dubious);
 
-        // Device errors that need no reset get one when they slow the link.
+        // Device errors that only revalidate get a reset when they slow the
+        // link.
         let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
-        let link = Link::new(&[Fault::TaskFile(0x0451); 6]);
+        let link = Link::new(&[]);
+        for _ in 0..6 {
+            link.faults.borrow_mut().extend([
+                Fault::TaskFile(0x0451),
+                Fault::Complete,
+                Fault::Complete,
+                Fault::Complete,
+            ]);
+        }
         assert!(
             fixture
                 .disk
@@ -2818,7 +2887,13 @@ mod tests {
         };
         // ERR | SENSE with ABRT: a medium error the disk could not recover
         // fails without a retry, carrying the sense.
-        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        // Revalidation rereads Sense Data Reporting as enabled.
+        let mut page = identify_page("S1", 1024);
+        for (word, value) in [(86u16, 1u16 << 15), (119, 0x4040), (120, 0x4040)] {
+            let at = 2 * usize::from(word);
+            page[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let (mut fixture, _clock) = recovering(page);
         reply(&mut fixture, 0x52, [Sense::MEDIUM_ERROR, 0x11, 0x04]);
         let link = Link::new(&[Fault::TaskFile(0x0453)]);
         assert_eq!(
@@ -2860,16 +2935,23 @@ mod tests {
         assert_eq!(link.issued.get(), 15);
 
         // An uncorrectable error with sense needing a retry keeps
-        // ERR_MEDIA, so EH retries it five times; sd then fails it.
+        // ERR_MEDIA, so EH revalidates the disk and retries it five times;
+        // sd then fails it.
         reply(&mut fixture, 0x52, [Sense::MEDIUM_ERROR, 0x0c, 0x00]);
-        let link = failing(0x4053, 8);
+        let link = Link::new(&[]);
+        for _ in 0..6 {
+            link.faults
+                .borrow_mut()
+                .extend([Fault::TaskFile(0x4053), Fault::Complete]);
+            link.faults.borrow_mut().extend([Fault::Complete; 3]);
+        }
         assert!(matches!(
             fixture
                 .disk
                 .issue_on(&link, ATA_WRITE_DMA_EXT, 0, 1, 512, true),
             Err(BlockError::Sense(_))
         ));
-        assert_eq!(link.issued.get(), 12);
+        assert_eq!(link.issued.get(), 6 * 5);
 
         // A disk still becoming ready is requeued until sd's runtime ends.
         reply(&mut fixture, 0x52, [Sense::NOT_READY, 0x04, 0x01]);
