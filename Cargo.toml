@@ -8,6 +8,17 @@ members = [
     "crates/stela-runtime",
     "xtask",
 ]
+# A plain `cargo build` builds the shipped crates. `cargo xtask` builds the
+# development tasks, whose AArch64 fixtures need clang; `--workspace` includes
+# them, as `cargo xtask check` does.
+default-members = [
+    "crates/stela-cli",
+    "crates/stela-loader",
+    "crates/stela-compiler",
+    "crates/stela-drivers",
+    "crates/stela-drivers/src/gpu/metal/input",
+    "crates/stela-runtime",
+]
 # The UEFI application builds for its own target with aborting panics.
 exclude = ["crates/stela-boot"]
 resolver = "2"
