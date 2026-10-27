@@ -1,33 +1,9 @@
-//! Mach-O planning, dependency discovery, inventories and progress ledgers.
+//! Mach-O planning and dependency discovery.
 use crate::{args::*, input::pauth_all_keys_context};
-use anyhow::{Context, Result, ensure};
-use clap::{Args, Subcommand};
+use anyhow::{Context, Result};
+use clap::Args;
 use std::path::PathBuf;
 use stela_loader as macho;
-use stela_loader::inventory::{Progress, Stage};
-use stela_runtime::{read_json, write_json};
-
-#[derive(Subcommand)]
-pub(crate) enum ProgressCommand {
-    Init {
-        inventory: PathBuf,
-        #[arg(long, default_value = ".stela/progress.json")]
-        ledger: PathBuf,
-    },
-    Status {
-        #[arg(long, default_value = ".stela/progress.json")]
-        ledger: PathBuf,
-    },
-    Record {
-        id: String,
-        #[arg(long)]
-        stage: Stage,
-        #[arg(long)]
-        evidence: PathBuf,
-        #[arg(long, default_value = ".stela/progress.json")]
-        ledger: PathBuf,
-    },
-}
 
 #[derive(Args)]
 pub(crate) struct DiscoverImages {
@@ -63,15 +39,6 @@ pub(crate) struct PlanExecutable {
     input: PathBuf,
     #[arg(long, value_parser = ["arm64", "arm64e"])]
     architecture: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct Inventory {
-    root: PathBuf,
-    #[arg(long)]
-    build: String,
-    #[arg(long, default_value = ".stela/inventory.json")]
-    output: PathBuf,
 }
 
 impl DiscoverImages {
@@ -175,69 +142,6 @@ impl PlanExecutable {
                 "slice_offset": offset, "plan": plan
             }))?
         );
-        Ok(())
-    }
-}
-
-impl Inventory {
-    pub(crate) fn run(self) -> Result<()> {
-        let Self {
-            root,
-            build,
-            output,
-        } = self;
-        ensure!(
-            !output.exists(),
-            "inventory already exists; use a new output path for each scan"
-        );
-        let inventory = stela_loader::scan(&root, &build)?;
-        write_json(&output, &inventory)?;
-        eprintln!(
-            "{} slices, {} scan errors, {} excluded containers; {}",
-            inventory.artifacts.len(),
-            inventory.issues.len(),
-            inventory.excluded_containers.len(),
-            output.display()
-        );
-        ensure!(
-            inventory.issues.is_empty(),
-            "inventory saved but scan was incomplete; inspect its issues before using it"
-        );
-        Ok(())
-    }
-}
-
-impl ProgressCommand {
-    pub(crate) fn run(self) -> Result<()> {
-        match self {
-            Self::Init { inventory, ledger } => {
-                ensure!(
-                    !ledger.exists(),
-                    "ledger exists; choose another --ledger to preserve progress"
-                );
-                let bytes = std::fs::read(inventory)?;
-                let inventory = serde_json::from_slice(&bytes)?;
-                write_json(&ledger, &Progress::new(inventory, &bytes)?)?;
-                eprintln!("Created {}", ledger.display());
-            }
-            Self::Status { ledger } => {
-                let progress: Progress = read_json(&ledger)?;
-                println!("{}", serde_json::to_string_pretty(&progress.report()?)?);
-            }
-            Self::Record {
-                id,
-                stage,
-                evidence,
-                ledger,
-            } => {
-                let mut progress: Progress = read_json(&ledger)?;
-                progress
-                    .report()
-                    .context("existing evidence validation failed")?;
-                progress.record(&id, stage, &evidence)?;
-                write_json(&ledger, &progress)?;
-            }
-        }
         Ok(())
     }
 }

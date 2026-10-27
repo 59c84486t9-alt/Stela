@@ -135,12 +135,6 @@ pub(crate) enum Command {
     /// Discover image dependencies inside a guest filesystem.
     #[command(hide = true)]
     DiscoverImages(loader::DiscoverImages),
-    /// Inventory standalone Mach-O files in an extracted filesystem.
-    #[command(hide = true)]
-    Inventory(loader::Inventory),
-    /// Track per-build translation progress.
-    #[command(subcommand, hide = true)]
-    Progress(loader::ProgressCommand),
     /// Discover and fetch restore images directly from Apple's public feed.
     #[command(subcommand, hide = true)]
     Images(images::ImagesCommand),
@@ -209,8 +203,6 @@ impl Command {
             Self::PlanExecutable(command) => command.run(),
             Self::PlanFixups(command) => command.run(),
             Self::DiscoverImages(command) => command.run(),
-            Self::Inventory(command) => command.run(),
-            Self::Progress(command) => command.run(),
             Self::Images(command) => command.run(),
             Self::ImageManifest(command) => command.run(),
             Self::ExtractImage(command) => command.run(),
