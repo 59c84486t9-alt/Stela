@@ -9,7 +9,10 @@ use crate::{
     bus::dma::{DmaAllocator, DmaBuffer},
     usb::xhci::Endpoint,
 };
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 
 const PACKETS: usize = 32;
 const BUFFER_BYTES: usize = 4096;
@@ -114,6 +117,9 @@ pub struct AudioDevice<T: Transport> {
     /// The last rate change's (requested, running) rates when the clock
     /// reported another; 0 running means it could not be read.
     pub clock_mismatch: Option<(u32, u32)>,
+    /// Probed volume and mixer cell ranges by entity, selector or input, and
+    /// channel or output, as Linux keeps them once `cval->initialized`.
+    mixer_ranges: BTreeMap<(u8, u8, u8), super::MixerRange>,
 }
 
 impl AudioDevice<super::Native> {
@@ -152,6 +158,7 @@ impl<T: Transport> AudioDevice<T> {
             power_owners: Vec::new(),
             last_fault: None,
             clock_mismatch: None,
+            mixer_ranges: BTreeMap::new(),
         })
     }
     #[cfg(test)]
@@ -602,11 +609,25 @@ impl<T: Transport> AudioDevice<T> {
             .graph
             .set_mute(&mut self.transport, entity, channel, muted)
     }
-    pub fn set_volume(&mut self, entity: u8, channel: u8, volume_db256: i16) -> Result<(), Error> {
+    /// The volume's range, probed before its first use.
+    pub fn volume_range(&mut self, entity: u8, channel: u8) -> Result<super::MixerRange, Error> {
         self.ready()?;
+        if let Some(range) = self.mixer_ranges.get(&(entity, 2, channel)) {
+            return Ok(*range);
+        }
+        let range = self
+            .binding
+            .graph
+            .volume_range(&mut self.transport, entity, channel)?;
+        self.mixer_ranges.insert((entity, 2, channel), range);
+        Ok(range)
+    }
+    /// Set the step at or below `volume_db256`, clamped to the range.
+    pub fn set_volume(&mut self, entity: u8, channel: u8, volume_db256: i16) -> Result<(), Error> {
+        let range = self.volume_range(entity, channel)?;
         self.binding
             .graph
-            .set_volume(&mut self.transport, entity, channel, volume_db256)
+            .set_volume(&mut self.transport, entity, channel, range, volume_db256)
     }
     pub fn feature_value(
         &mut self,
@@ -648,6 +669,25 @@ impl<T: Transport> AudioDevice<T> {
             .graph
             .mixer_volume(&mut self.transport, entity, input, output)
     }
+    /// The mixer cell's range, probed before its first use.
+    pub fn mixer_volume_range(
+        &mut self,
+        entity: u8,
+        input: u8,
+        output: u8,
+    ) -> Result<super::MixerRange, Error> {
+        self.ready()?;
+        if let Some(range) = self.mixer_ranges.get(&(entity, input, output)) {
+            return Ok(*range);
+        }
+        let range =
+            self.binding
+                .graph
+                .mixer_volume_range(&mut self.transport, entity, input, output)?;
+        self.mixer_ranges.insert((entity, input, output), range);
+        Ok(range)
+    }
+    /// Set the step at or below `value`, clamped to the range.
     pub fn set_mixer_volume(
         &mut self,
         entity: u8,
@@ -655,10 +695,15 @@ impl<T: Transport> AudioDevice<T> {
         output: u8,
         value: i16,
     ) -> Result<(), Error> {
-        self.ready()?;
-        self.binding
-            .graph
-            .set_mixer_volume(&mut self.transport, entity, input, output, value)
+        let range = self.mixer_volume_range(entity, input, output)?;
+        self.binding.graph.set_mixer_volume(
+            &mut self.transport,
+            entity,
+            input,
+            output,
+            range,
+            value,
+        )
     }
     pub fn select_clock(&mut self, entity: u8, pin: u8) -> Result<(), Error> {
         self.ready()?;
@@ -1290,9 +1335,24 @@ pub(crate) mod tests {
         assert_eq!(g.set_rate(&mut m, c, 44_100), Ok(44_100));
         assert_eq!(m.rate, 44_100);
         g.set_mute(&mut m, 2, 0, true).unwrap();
-        g.set_volume(&mut m, 2, 0, -256).unwrap();
+        let range = g.volume_range(&mut m, 2, 0).unwrap();
+        assert_eq!(
+            range,
+            MixerRange {
+                min: -16384,
+                max: 0,
+                res: 256,
+                db: Some((-6400, 0))
+            }
+        );
+        assert_eq!(m.volume, 0);
+        g.set_volume(&mut m, 2, 0, range, -256).unwrap();
         assert_eq!(m.volume, -256);
-        assert_eq!(g.set_volume(&mut m, 2, 0, -257), Err(Error::Format));
+        // get_abs_value: the step at or below, clamped to the range.
+        g.set_volume(&mut m, 2, 0, range, -257).unwrap();
+        assert_eq!(m.volume, -512);
+        g.set_volume(&mut m, 2, 0, range, i16::MIN).unwrap();
+        assert_eq!(m.volume, -16384);
         assert_eq!(setup(0xa1, 1, 0x100, 0xa00, 4), CURRENT_RATE);
 
         // A clock that keeps running elsewhere is reported, not refused.

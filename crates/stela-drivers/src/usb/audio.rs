@@ -38,7 +38,7 @@ pub use status::{
     StatusAttribute, StatusEvent, StatusNotice, StatusNotifications, Uac1StatusNotice,
 };
 mod stream;
-pub use control::{Control, RateRange, Rates, ResolvedClock};
+pub use control::{Control, MixerRange, RateRange, Rates, ResolvedClock};
 pub use descriptors::{Binding, Entity, Format, Graph, Sync};
 
 pub const CLASS: u8 = 1;

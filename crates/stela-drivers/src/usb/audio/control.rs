@@ -106,10 +106,21 @@ pub(super) fn set<C: Control>(
     channel: u8,
     bytes: &[u8],
 ) -> Result<(), Error> {
+    request(io, interface, entity, selector, channel, 1, bytes)
+}
+fn request<C: Control>(
+    io: &mut C,
+    interface: u8,
+    entity: u8,
+    selector: u8,
+    channel: u8,
+    request: u8,
+    bytes: &[u8],
+) -> Result<(), Error> {
     let reply = io.control(
         setup(
             0x21,
-            1,
+            request,
             u16::from(selector) << 8 | u16::from(channel),
             u16::from(entity) << 8 | u16::from(interface),
             bytes.len() as u16,
@@ -393,6 +404,7 @@ impl Graph {
         }
         Ok(())
     }
+    /// A boolean control reads as `!!val`, as `get_relative_value` has it.
     pub fn mute<C: Control>(&self, io: &mut C, id: u8, channel: u8) -> Result<bool, Error> {
         self.feature(id, channel, 1, false)?;
         let request = if self.protocol == super::UAC1 {
@@ -400,11 +412,7 @@ impl Graph {
         } else {
             1
         };
-        match get(io, self.control_interface, id, 1, channel, request, 1)?[0] {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(Error::ControlReadback),
-        }
+        Ok(get(io, self.control_interface, id, 1, channel, request, 1)?[0] != 0)
     }
     pub fn set_mute<C: Control>(
         &self,
@@ -421,36 +429,214 @@ impl Graph {
             1,
             channel,
             &[u8::from(muted)],
-        )?;
-        if self.mute(io, id, channel)? != muted {
-            return Err(Error::ControlReadback);
-        }
-        Ok(())
+        )
     }
     pub fn volume<C: Control>(&self, io: &mut C, id: u8, channel: u8) -> Result<i16, Error> {
         self.feature(id, channel, 2, false)?;
         signed_current(io, self.protocol, self.control_interface, id, 2, channel)
     }
-    pub fn set_volume<C: Control>(
+    /// Probe a volume's range once, before its first set; probing writes.
+    pub fn volume_range<C: Control>(
         &self,
         io: &mut C,
         id: u8,
         channel: u8,
-        value: i16,
-    ) -> Result<(), Error> {
-        self.feature(id, channel, 2, true)?;
-        set_signed_control(
+    ) -> Result<MixerRange, Error> {
+        self.feature(id, channel, 2, false)?;
+        probe_range(
             io,
             self.protocol,
             self.control_interface,
             id,
             2,
             channel,
-            value,
+            Width::S16,
         )
+    }
+    pub fn set_volume<C: Control>(
+        &self,
+        io: &mut C,
+        id: u8,
+        channel: u8,
+        range: MixerRange,
+        value: i16,
+    ) -> Result<(), Error> {
+        self.feature(id, channel, 2, true)?;
+        let value = range.snap(i64::from(value)) as i16;
+        set_signed(io, self.control_interface, id, 2, channel, value)
     }
 }
 
+/// A numeric control's range as Linux `get_min_max_with_quirks` settles it,
+/// in device units (1/256 dB for volumes, gains and mixer cells).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MixerRange {
+    pub min: i64,
+    pub max: i64,
+    pub res: i64,
+    /// dB bounds in 1/100 dB, as ALSA TLV reports them; `None` when the
+    /// range is bogus, its maximum at or below -96 dB.
+    pub db: Option<(i64, i64)>,
+}
+impl MixerRange {
+    /// `get_relative_value` then `get_abs_value`: the step at or below
+    /// `value`, clamped to the range.
+    pub fn snap(self, value: i64) -> i64 {
+        let step = if value < self.min {
+            0
+        } else if value >= self.max {
+            (self.max - self.min + self.res - 1) / self.res
+        } else {
+            (value - self.min) / self.res
+        };
+        if step < 0 {
+            return self.min;
+        }
+        (self.min + step * self.res).min(self.max)
+    }
+}
+
+/// How a numeric control's value is carried: its width in bytes and
+/// whether `convert_signed_value` sign-extends it.
+#[derive(Clone, Copy)]
+pub(super) struct Width {
+    pub bytes: u16,
+    pub signed: bool,
+}
+impl Width {
+    pub(super) const S16: Self = Self {
+        bytes: 2,
+        signed: true,
+    };
+    pub(super) fn decode(self, bytes: &[u8]) -> i64 {
+        let mut raw = [0; 8];
+        raw[..bytes.len()].copy_from_slice(bytes);
+        let value = u64::from_le_bytes(raw);
+        let shift = 64 - 8 * u32::from(self.bytes);
+        if self.signed {
+            ((value << shift) as i64) >> shift
+        } else {
+            value as i64
+        }
+    }
+    pub(super) fn encode(self, value: i64) -> Vec<u8> {
+        value.to_le_bytes()[..usize::from(self.bytes)].to_vec()
+    }
+}
+
+/// Linux `get_min_max_with_quirks`. MIN and MAX must read; a RES that does
+/// not reads as 1, and UAC1 asks SET_RES for halving it while the device
+/// accepts. Then, when the range is not one value, a control whose GET_CUR
+/// never follows SET_CUR at either end is sticky and refused after being
+/// left at its maximum; otherwise RES doubles until a step past the current
+/// value reads back, and the current value is restored. UAC2 and UAC3 use
+/// the first RANGE triplet.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn probe_range<C: Control>(
+    io: &mut C,
+    protocol: u8,
+    interface: u8,
+    id: u8,
+    selector: u8,
+    channel: u8,
+    width: Width,
+) -> Result<MixerRange, Error> {
+    let n = width.bytes;
+    let value = |io: &mut C, request: u8| -> Result<i64, Error> {
+        if protocol == super::UAC1 {
+            let bytes = get(io, interface, id, selector, channel, request, n)?;
+            return Ok(width.decode(&bytes));
+        }
+        let range = get(io, interface, id, selector, channel, 2, 2 + 3 * n)?;
+        let at = 2 + usize::from(n) * usize::from(request - 0x82);
+        Ok(width.decode(&range[at..at + usize::from(n)]))
+    };
+    // UAC_GET_MAX before UAC_GET_MIN, then UAC_GET_RES.
+    let max = value(io, 0x83)?;
+    let min = value(io, 0x82)?;
+    let mut res = match value(io, 0x84) {
+        Ok(res) if protocol == super::UAC1 => {
+            let last_valid = res;
+            let mut res = res;
+            while res > 1 {
+                let half = width.encode(res / 2);
+                if request(io, interface, id, selector, channel, 4, &half).is_err() {
+                    break;
+                }
+                res /= 2;
+            }
+            value(io, 0x84).unwrap_or(last_valid)
+        }
+        Ok(res) => res,
+        Err(_) => 1,
+    };
+    if res == 0 {
+        res = 1;
+    }
+    let current = |io: &mut C| -> Result<i64, Error> {
+        let request = if protocol == super::UAC1 { 0x81 } else { 1 };
+        Ok(width.decode(&get(io, interface, id, selector, channel, request, n)?))
+    };
+    let set = |io: &mut C, value: i64| {
+        self::set(io, interface, id, selector, channel, &width.encode(value))
+    };
+    if min < max
+        && let Ok(saved) = current(io)
+    {
+        // check_sticky_volume_control: assume non-sticky on failure.
+        let sticky = [min, max]
+            .into_iter()
+            .filter(|&test| test != saved)
+            .all(|test| set(io, test).is_ok() && current(io).is_ok_and(|check| check == saved));
+        if sticky {
+            let _ = set(io, max);
+            return Err(Error::Unsupported("sticky mixer values"));
+        }
+        // check_volume_control_res
+        if min + res < max {
+            let last_valid = res;
+            loop {
+                let test = if saved < max {
+                    saved + res
+                } else {
+                    saved - res
+                };
+                let check = if test < min || test > max || set(io, test).is_err() {
+                    None
+                } else {
+                    current(io).ok()
+                };
+                match check {
+                    None => {
+                        res = last_valid;
+                        break;
+                    }
+                    Some(check) if check == test => break,
+                    Some(_) => res *= 2,
+                }
+            }
+        }
+        let _ = set(io, saved);
+    }
+    let (mut db_min, mut db_max) = (min * 100 / 256, max * 100 / 256);
+    let db = if db_min > db_max {
+        // Something is wrong; assume it is either from or to 0 dB.
+        if db_min < 0 {
+            db_max = 0;
+        } else if db_min > 0 {
+            db_min = 0;
+        }
+        if db_min > db_max {
+            return Err(Error::Descriptor("mixer dB range"));
+        }
+        Some((db_min, db_max))
+    } else if db_max <= -9600 {
+        None
+    } else {
+        Some((db_min, db_max))
+    };
+    Ok(MixerRange { min, max, res, db })
+}
 pub(super) fn signed_current<C: Control>(
     io: &mut C,
     protocol: u8,
@@ -467,65 +653,14 @@ pub(super) fn signed_current<C: Control>(
     ))
 }
 
-pub(super) fn set_signed_control<C: Control>(
+/// SET_CUR without a readback, as `snd_usb_set_cur_mix_value` sends it.
+pub(super) fn set_signed<C: Control>(
     io: &mut C,
-    protocol: u8,
     interface: u8,
     id: u8,
     selector: u8,
     channel: u8,
     value: i16,
 ) -> Result<(), Error> {
-    let ranges = if protocol == super::UAC1 {
-        let mut values = Vec::new();
-        for request in [0x82, 0x83, 0x84] {
-            // UAC1 GET_MIN, GET_MAX, GET_RES
-            values.extend_from_slice(&get(io, interface, id, selector, channel, request, 2)?);
-        }
-        values
-    } else {
-        let head = get(io, interface, id, selector, channel, 2, 2)?;
-        let count = usize::from(u16::from_le_bytes(head.try_into().unwrap()));
-        if !(1..=64).contains(&count) {
-            return Err(Error::Descriptor("volume range count"));
-        }
-        let ranges = get(
-            io,
-            interface,
-            id,
-            selector,
-            channel,
-            2,
-            (2 + 6 * count) as u16,
-        )?;
-        if usize::from(u16::from_le_bytes(ranges[..2].try_into().unwrap())) != count {
-            return Err(Error::ControlReadback);
-        }
-        ranges[2..].to_vec()
-    };
-    let mut supported = false;
-    for r in ranges.as_chunks::<6>().0 {
-        let min = i32::from(i16::from_le_bytes(r[..2].try_into().unwrap()));
-        let max = i32::from(i16::from_le_bytes(r[2..4].try_into().unwrap()));
-        let res = i32::from(u16::from_le_bytes(r[4..].try_into().unwrap()));
-        if min > max || (res == 0 && min != max) {
-            return Err(Error::Descriptor("volume range"));
-        }
-        let v = i32::from(value);
-        supported |= v >= min
-            && v <= max
-            && (if res == 0 {
-                v == min
-            } else {
-                (v - min) % res == 0
-            });
-    }
-    if !supported {
-        return Err(Error::Format);
-    }
-    set(io, interface, id, selector, channel, &value.to_le_bytes())?;
-    if signed_current(io, protocol, interface, id, selector, channel)? != value {
-        return Err(Error::ControlReadback);
-    }
-    Ok(())
+    set(io, interface, id, selector, channel, &value.to_le_bytes())
 }

@@ -95,6 +95,10 @@ impl Control for LegacyModel {
             };
             return Ok(rate.to_le_bytes()[..if self.short_rate { 2 } else { 3 }].to_vec());
         }
+        if r[0] == 0x21 && r[1] == 4 {
+            // SET_RES is refused.
+            return Err(BlockError::Timeout);
+        }
         if r[0] == 0xa1 {
             match r[1] {
                 0x81 => r[1] = 1,
@@ -259,7 +263,8 @@ fn uac1_unadvertised_rate_foreign_endpoint_and_invalid_controls_have_no_publicat
         assert!(a.start_playback(0, 48_000, &[0; 192], true).is_err());
         assert!(a.transport.inner.alternates.is_empty());
         assert!(a.transport.endpoint_controls.is_empty());
-        assert_eq!(a.set_volume(2, 0, -257), Err(Error::Format));
+        a.set_volume(2, 0, -257).unwrap();
+        assert_eq!(a.transport.inner.volume, -512);
     });
 }
 #[test]
