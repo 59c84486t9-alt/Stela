@@ -742,6 +742,10 @@ mod tests {
         host_memory: (u32, u32, u32, u16),
         host_memory_sets: Vec<([u32; 5], (u64, u32))>,
         refuse_host_memory: bool,
+        /// APSTA with a non-operational PS1; the first entry of each APST
+        /// table set.
+        apst: bool,
+        apst_sets: Vec<u64>,
         prepared: bool,
         bme: bool,
         enabled: bool,
@@ -807,6 +811,8 @@ mod tests {
                 host_memory: (0, 0, 0, 0),
                 host_memory_sets: Vec::new(),
                 refuse_host_memory: false,
+                apst: false,
+                apst_sets: Vec::new(),
                 prepared: false,
                 bme: false,
                 enabled: false,
@@ -982,6 +988,12 @@ mod tests {
                             data[276..280].copy_from_slice(&minimum.to_le_bytes());
                             data[332..336].copy_from_slice(&smallest.to_le_bytes());
                             data[336..338].copy_from_slice(&entries.to_le_bytes());
+                            if self.apst {
+                                (data[263], data[265], data[2048 + 32 + 3]) = (1, 1, 2);
+                                // 1 ms entry and exit latency.
+                                data[2048 + 32 + 4..][..2].copy_from_slice(&1000u16.to_le_bytes());
+                                data[2048 + 32 + 8..][..2].copy_from_slice(&1000u16.to_le_bytes());
+                            }
                         }
                         2 => data[..4].copy_from_slice(&1u32.to_le_bytes()),
                         0 => {
@@ -1008,6 +1020,13 @@ mod tests {
                         // Invalid Field in Command.
                         status = 2;
                     }
+                }
+                (0, 9) if command[10] == 0x0c => {
+                    assert_eq!(command[11], 1);
+                    let table =
+                        self.read_iova(u64::from(command[6]) | u64::from(command[7]) << 32, 8);
+                    self.apst_sets
+                        .push(u64::from_le_bytes(table[..8].try_into().unwrap()));
                 }
                 (0, 9) => {
                     assert_eq!(command[10], 0x16);
@@ -1581,6 +1600,21 @@ mod tests {
         disk.flush().unwrap();
         assert_eq!(f.model.lock().unwrap().host_behavior.len(), 2);
         disk.retire_owned().unwrap();
+    }
+
+    #[test]
+    fn apst_is_configured_at_attach_and_after_resets() {
+        let f = Fixture::new();
+        f.model.lock().unwrap().apst = true;
+        let mut a = f.attach().unwrap();
+        let mut m = f.model.lock().unwrap();
+        m.delay_io = 1;
+        m.abortable = false;
+        drop(m);
+        a.namespaces[0].flush().unwrap();
+        // PS0 idles into PS1 after 100 ms, at attach and after the reset.
+        assert_eq!(f.model.lock().unwrap().apst_sets, [1 << 3 | 100 << 8; 2]);
+        a.namespaces[0].retire_owned().unwrap();
     }
 
     #[test]

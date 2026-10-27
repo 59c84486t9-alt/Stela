@@ -61,6 +61,17 @@ const ADMIN_ABORT: u8 = 0x08;
 const ADMIN_SET_FEATURES: u8 = 0x09;
 /// Host Behavior Support, with its ACRE and LBAFEE bytes.
 const FEATURE_HOST_BEHAVIOR: u32 = 0x16;
+/// Autonomous Power State Transition: CDW11 APSTE and a 32-entry table of
+/// idle transition targets.
+const FEATURE_AUTONOMOUS_POWER: u32 = 0x0c;
+const APST_ENTRIES: usize = 32;
+/// Linux's `default_ps_max_latency_us` and the APST timeouts and latency
+/// tolerances (`apst_primary_*`, `apst_secondary_*`).
+const APST_MAXIMUM_LATENCY_US: u64 = 100_000;
+const APST_PRIMARY_TIMEOUT_MS: u64 = 100;
+const APST_PRIMARY_TOLERANCE_US: u64 = 15_000;
+const APST_SECONDARY_TIMEOUT_MS: u64 = 2_000;
+const APST_SECONDARY_TOLERANCE_US: u64 = 100_000;
 /// Host Memory Buffer: CDW11 EHM and MR, CDW12 HSIZE in pages, CDW13-14
 /// the descriptor list and CDW15 its entry count.
 const FEATURE_HOST_MEMORY: u32 = 0x0d;
@@ -94,6 +105,13 @@ const CONTROLLER_ATTRIBUTES: usize = 96;
 const ATTRIBUTE_EXTENDED_LBA: u32 = 1 << 15;
 /// CRDT1–3, in units of 100 ms.
 const CONTROLLER_RETRY_DELAYS: usize = 128;
+/// NPSS, APSTA, and the power state descriptors: flags (bit 1 a
+/// non-operational state), entry and exit latency in microseconds.
+const CONTROLLER_POWER_STATES: usize = 263;
+const CONTROLLER_APST: usize = 265;
+const CONTROLLER_POWER_DESCRIPTORS: usize = 2048;
+const POWER_DESCRIPTOR_BYTES: usize = 32;
+const POWER_NON_OPERATIONAL: u8 = 1 << 1;
 /// HMPRE and HMMIN in 4 KiB units, HMMINDS in 4 KiB units, HMMAXD.
 const CONTROLLER_HOST_MEMORY_PREFERRED: usize = 272;
 const CONTROLLER_HOST_MEMORY_MINIMUM: usize = 276;
@@ -276,6 +294,54 @@ struct HostMemory {
     /// The controller accepted it, so a re-enable may ask for its contents
     /// back (`host_mem_descs` retained).
     returnable: bool,
+}
+
+/// Linux `nvme_configure_apst`: the APST table for a controller that
+/// supports it, or `None`. Walking from the lowest-power state up, each
+/// usable non-operational state becomes the idle target of the states
+/// above it, after the primary timeout for a round trip within the primary
+/// tolerance and the secondary one within the secondary tolerance
+/// (`nvme_apst_get_transition_time`).
+fn apst_table(identify: &[u8]) -> Option<[u64; APST_ENTRIES]> {
+    let states = usize::from(identify[CONTROLLER_POWER_STATES]);
+    // NPSS past 31 is invalid; Linux leaves APST alone.
+    if identify[CONTROLLER_APST] & 1 == 0 || states >= APST_ENTRIES {
+        return None;
+    }
+    let mut table = [0u64; APST_ENTRIES];
+    let mut target = 0u64;
+    let mut tolerance_index = u32::MAX;
+    for state in (0..=states).rev() {
+        if target != 0 {
+            table[state] = target;
+        }
+        let descriptor = &identify[CONTROLLER_POWER_DESCRIPTORS + state * POWER_DESCRIPTOR_BYTES..];
+        if descriptor[3] & POWER_NON_OPERATIONAL == 0 {
+            continue;
+        }
+        let exit = u64::from(le32(descriptor, 8));
+        if exit > APST_MAXIMUM_LATENCY_US {
+            continue;
+        }
+        let total = exit + u64::from(le32(descriptor, 4));
+        let transition = if total <= APST_PRIMARY_TOLERANCE_US {
+            if tolerance_index == 1 {
+                continue;
+            }
+            tolerance_index = 1;
+            APST_PRIMARY_TIMEOUT_MS
+        } else if total <= APST_SECONDARY_TOLERANCE_US {
+            if tolerance_index <= 2 {
+                continue;
+            }
+            tolerance_index = 2;
+            APST_SECONDARY_TIMEOUT_MS
+        } else {
+            continue;
+        };
+        target = (state as u64) << 3 | transition << 8;
+    }
+    Some(table)
 }
 
 /// What Identify Controller asks of a host memory buffer, in bytes.
@@ -698,9 +764,15 @@ impl Controller {
         let kept = self.bounce.bytes()[..PAGE].to_vec();
         let identify = self.identify_command(IDENTIFY_CONTROLLER, 0)?;
         self.admin_command(identify)?;
-        // nvme_init_ctrl_finish runs again after every reset.
-        let command = self.host_options()?;
-        if let Some(command) = command {
+        // nvme_init_ctrl_finish runs again after every reset; a refused
+        // feature is only logged.
+        let apst = apst_table(&self.bounce.bytes()[..PAGE]);
+        let mut commands = Vec::new();
+        commands.extend(self.host_options()?);
+        if let Some(table) = apst {
+            commands.push(self.apst_command(&table)?);
+        }
+        for command in commands {
             match self.admin_command(command) {
                 Ok(_) | Err(BlockError::Device { .. }) => {}
                 Err(error) => return Err(error),
@@ -829,6 +901,23 @@ impl Controller {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// The Set Features enabling APST with `table`, written to the first
+    /// bounce page.
+    fn apst_command(&mut self, table: &[u64; APST_ENTRIES]) -> Result<[u32; 16], BlockError> {
+        let page = &mut self.bounce.bytes_mut()[..APST_ENTRIES * 8];
+        for (entry, bytes) in table.iter().zip(page.chunks_mut(8)) {
+            bytes.copy_from_slice(&entry.to_le_bytes());
+        }
+        let data = self.bounce.address()?;
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_SET_FEATURES);
+        command[6] = data as u32;
+        command[7] = (data >> 32) as u32;
+        command[10] = FEATURE_AUTONOMOUS_POWER;
+        command[11] = 1;
+        Ok(command)
     }
 
     /// Linux `nvme_configure_host_options`, from the Identify Controller data
@@ -1031,6 +1120,7 @@ fn discover(
 ) -> Result<Attached, BlockError> {
     let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
     let request = HostMemoryRequest::from_identify(identify);
+    let apst = apst_table(identify);
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
     // The maximum transfer, in minimum pages as a power of two; 0 is none.
@@ -1042,8 +1132,15 @@ fn discover(
         controller.max_transfer = controller.max_transfer.min(limit.saturating_mul(PAGE));
     }
     controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
-    // A refused Host Behavior Support is ignored, as in Linux.
+    // A refused Host Behavior Support or APST is ignored, as in Linux.
     if let Some(command) = controller.host_options()? {
+        match controller.execute(false, command) {
+            Ok(_) | Err(BlockError::Device { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if let Some(table) = apst {
+        let command = controller.apst_command(&table)?;
         match controller.execute(false, command) {
             Ok(_) | Err(BlockError::Device { .. }) => {}
             Err(error) => return Err(error),
@@ -1541,6 +1638,53 @@ mod tests {
             page[NAMESPACE_FORMATS + 4 * index..][..4].copy_from_slice(&descriptor.to_le_bytes());
         }
         page
+    }
+
+    #[test]
+    fn apst_tables_follow_nvme_configure_apst() {
+        // States: entry and exit latency, non-operational.
+        let identify = |apsta: u8, states: &[(u32, u32, bool)]| {
+            let mut data = vec![0u8; 4096];
+            data[CONTROLLER_POWER_STATES] = (states.len() - 1) as u8;
+            data[CONTROLLER_APST] = apsta;
+            for (index, &(entry, exit, idle)) in states.iter().enumerate() {
+                let at = CONTROLLER_POWER_DESCRIPTORS + index * POWER_DESCRIPTOR_BYTES;
+                data[at + 3] = if idle { POWER_NON_OPERATIONAL } else { 0 };
+                data[at + 4..at + 8].copy_from_slice(&entry.to_le_bytes());
+                data[at + 8..at + 12].copy_from_slice(&exit.to_le_bytes());
+            }
+            data
+        };
+        let states = [
+            (0, 0, false),
+            (0, 0, false),
+            (0, 0, false),
+            (2_000, 2_000, true),
+            (5_000, 40_000, true),
+        ];
+        assert_eq!(apst_table(&identify(0, &states)), None);
+        let table = apst_table(&identify(1, &states)).unwrap();
+        // PS3 after 100 ms from the operational states, PS4 after 2 s
+        // from PS3.
+        let ps3 = 3 << 3 | 100 << 8;
+        assert_eq!(table[..5], [ps3, ps3, ps3, 4 << 3 | 2_000 << 8, 0]);
+        // A second state within the primary tolerance is not a target; one
+        // whose exit latency exceeds 100 ms is never one.
+        let table = apst_table(&identify(
+            1,
+            &[
+                (0, 0, false),
+                (1_000, 1_000, true),
+                (1_000, 2_000, true),
+                (0, 200_000, true),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(table[..4], [2 << 3 | 100 << 8, 2 << 3 | 100 << 8, 0, 0]);
+        // An invalid NPSS.
+        let mut invalid = identify(1, &states);
+        invalid[CONTROLLER_POWER_STATES] = 32;
+        assert_eq!(apst_table(&invalid), None);
     }
 
     #[test]
