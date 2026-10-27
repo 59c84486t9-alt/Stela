@@ -1978,7 +1978,7 @@ mod tests {
         for (option, value) in [
             ("--host-cores", "2"),
             ("--host-threads", "2"),
-            ("--display", "cocoa"),
+            ("--display", "window"),
         ] {
             assert!(
                 native_root_preflight(&parse(vec!["--native-clock-check", option, value]).unwrap())
@@ -2063,7 +2063,7 @@ mod tests {
         for (option, value) in [
             ("--host-cores", "2"),
             ("--host-threads", "2"),
-            ("--display", "cocoa"),
+            ("--display", "window"),
         ] {
             let run = parse(vec!["--native-mmio-check", option, value]).unwrap();
             assert!(native_root_preflight(&run).is_err());
