@@ -1,5 +1,5 @@
 //! Reference semantics of the M1 through M4 AMX generations, ported from the corsix/amx
-//! emulator at 483714bb (MIT, `LICENSES/corsix-amx.txt`) with
+//! emulator at 483714bb (MIT, Copyright (c) 2022 Peter Cawley; `LICENSES/MIT.txt`) with
 //! explicit `AMX_VER_M1` through `AMX_VER_M4`. Each operation reads its 64-bit operand and
 //! updates only the register file or memory; it never reads FPCR.
 //!

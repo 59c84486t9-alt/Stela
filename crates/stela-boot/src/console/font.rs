@@ -1,7 +1,7 @@
-//! The console's bitmap font: Spleen 2.1.0 8x16 by Frederic Cambus
-//! (BSD-2-Clause, `LICENSES/spleen.txt`), in the Linux console's PSF1 or
-//! PSF2 format. Each glyph is `height` rows of `width` bits, MSB first,
-//! each row padded to whole bytes. Spleen's first 256 glyphs are in code
+//! The console's bitmap font: Spleen 2.1.0 8x16, Copyright (c) 2018-2024,
+//! Frederic Cambus (BSD-2-Clause, `LICENSES/BSD-2-Clause.txt`), in the Linux
+//! console's PSF1 or PSF2 format. Each glyph is `height` rows of `width` bits,
+//! MSB first, each row padded to whole bytes. Spleen's first 256 glyphs are in code
 //! point order, so ASCII indexes them directly.
 
 /// One font, parsed from its PSF file.

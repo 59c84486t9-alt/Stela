@@ -1,8 +1,9 @@
 """Independently replay the source-defined M1 transfer effects in native traces.
 
 The row/interleave contract is corsix/amx 483714bb ldst.c/ldst.md (MIT,
-LICENSES/corsix-amx.txt). Fault classifications are observations, not inferred
-permission or exception-priority rules for another CPU or OS.
+Copyright (c) 2022 Peter Cawley; LICENSES/MIT.txt). Fault classifications are
+observations, not inferred permission or exception-priority rules for another
+CPU or OS.
 """
 
 from collections import Counter

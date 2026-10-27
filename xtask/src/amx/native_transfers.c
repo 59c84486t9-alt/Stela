@@ -1,5 +1,6 @@
 // M1 AMX transfer observations, isolated to each child's guarded mappings.
-// Uses the pinned MIT corsix/amx helpers; see LICENSES/corsix-amx.txt.
+// Uses the pinned MIT corsix/amx helpers, Copyright (c) 2022 Peter Cawley;
+// see LICENSES/MIT.txt.
 static int corsix_unbounded_main(void) __attribute__((unused));
 #define main corsix_unbounded_main
 #include "test.c"

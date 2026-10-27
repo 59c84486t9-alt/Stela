@@ -1,5 +1,6 @@
 // Bounded native Apple AMX qualification against the pinned corsix/amx model.
-// Includes its MIT-licensed hardware helpers; see LICENSES/corsix-amx.txt.
+// Includes its MIT-licensed hardware helpers, Copyright (c) 2022 Peter Cawley;
+// see LICENSES/MIT.txt.
 // Build with the unmodified 483714bb sources (including test.c) on arm64 macOS.
 // This runner qualifies M1 only. It does not probe privileged AMX controls.
 static int corsix_unbounded_main(void) __attribute__((unused));
