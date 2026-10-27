@@ -220,6 +220,9 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcuwait_wake.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/rcuwait_finish.c")),
+            PathBuf::from(format!("{LINUX}/fs/seq_output.c")),
+            PathBuf::from(format!("{DRM}/drm_mm.c")),
+            PathBuf::from(format!("{DRM}/drm_vma_manager.c")),
         ];
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
@@ -309,6 +312,13 @@ impl Linux {
             &format!("{COMPAT}/stela/kobject_test.c"),
             &archives,
         );
+        for (name, source) in [
+            ("linux_seq_output", "seq_output_test.c"),
+            ("linux_drm_mm", "drm_mm_test.c"),
+            ("linux_drm_vma", "drm_vma_test.c"),
+        ] {
+            tests.add(&build, name, &format!("{COMPAT}/stela/{source}"), &archives);
+        }
         // This fixture observes actual calls with the ELF linker's --wrap.
         if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
             let mut deferred = build.clone();
