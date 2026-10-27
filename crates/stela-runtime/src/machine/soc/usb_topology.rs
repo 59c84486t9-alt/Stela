@@ -28,7 +28,7 @@ const ATC_PHY_BASE_VIEWS: usize = 28;
 const I2C_COMPATIBLES: &[&str] = &["i2c,t8101", "i2c,t6000", "i2c,t6020"];
 
 /// USB DRD families whose nine-view layout is qualified. The original
-/// 26A434 ADTs (source hashes in `isa/apple-soc-facts.json`) give M1/T6000
+/// 26A434 ADTs give M1/T6000
 /// a 0x1800-byte reg[2], versus 0x5800 on M2/T6020 and M3/T8122. In each,
 /// reg[2] begins at reg[0]+0xc000 and reg[8] at reg[0]+0xd000.
 /// Later families move reg[8] or add a tenth view and are not aliases.

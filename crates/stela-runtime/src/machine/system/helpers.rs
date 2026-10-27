@@ -41,8 +41,7 @@ pub const HCR_NV2: u32 = 45;
 
 /// Arm `EffectiveHCR_EL2_NVx` of an HCR_EL2 value: HCR_EL2.{NV2, NV1, NV}
 /// in effect, EL2 being enabled. NV1 is RAZ (the IMPLEMENTATION DEFINED
-/// choice "HCR_EL2.NV1 is implemented as RAZ", `cargo xtask system-matrix`
-/// IMPDEF), so NV = 0 gives '000' and NV1 reads 0; NV2 takes effect only when
+/// choice "HCR_EL2.NV1 is implemented as RAZ"), so NV = 0 gives '000' and NV1 reads 0; NV2 takes effect only when
 /// it is set (the choice that '10' does not behave as '11').
 pub fn effective_nvx(hcr: u64, nv: bool, nv2: bool) -> u64 {
     if !nv || bits(hcr, u64::from(HCR_NV), 1) == 0 {

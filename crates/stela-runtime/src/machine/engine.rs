@@ -2374,8 +2374,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         core::mem::take(&mut self.watch_hits)
     }
 
-    /// Strict mode, the default (tests, `cargo xtask differential`,
-    /// benchmarks): stop at the first operation this machine cannot carry
+    /// Strict mode, the default (tests, benchmarks): stop at the first operation this machine cannot carry
     /// out in full (`Stop::Unsupported`). Graceful mode (`false`, a user's
     /// boot) answers each with its tier's degraded response, reports it
     /// once and continues ([`Self::degrade`]; docs/design/runtime.md
@@ -6759,7 +6758,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// does (the profile has no FEAT_TIDCP1, so SCTLR_ELx.TIDCP is RES0).
     /// Its encodings are then UNDEFINED, Arm's behavior for an unallocated
     /// encoding: no 26A434 SPTM, TXM, kernelcache or system kext of any
-    /// chip executes one (`isa/apple-soc-facts.json` has no `S1_` row), so
+    /// chip executes one (the census has no `S1_` row), so
     /// that the chips allocate none is an inference from the census.
     fn maintenance(&mut self, word: u32, access: RegisterAccess) -> Step {
         if let Some(step) = self.system_access(word, access) {

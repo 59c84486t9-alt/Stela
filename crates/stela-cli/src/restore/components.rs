@@ -3,9 +3,9 @@
 //! `stela setup` share.
 //!
 //! A profile is a Mac the engine presents, by its `Ap,ProductType`. The
-//! profile registry (`isa/apple-soc-facts.json` `boards[]`, derived from the
-//! IPSWs by `cargo xtask soc-facts`) gives its `ApChipID`, `ApBoardID` and
-//! `DeviceClass`, and the BuildManifest identities with exactly those values
+//! profile registry ([`BOARDS`], the 26A434 IPSW's boards) gives its
+//! `ApChipID`, `ApBoardID` and `DeviceClass`, and the BuildManifest
+//! identities with exactly those values
 //! are the profile's. An identity's purpose is its own `Info.RestoreBehavior`:
 //! `Update` restores keep data; `Erase` with a `RestoreRamDisk` erases;
 //! `Erase` without one is the installed system's set. Components are named by
@@ -13,12 +13,73 @@
 //! is refused with the build and the profile.
 use super::manifest::{Component, Identity, RestoreManifest};
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 use std::fmt;
 use stela_runtime::payload::Purpose;
 
-/// The registry, as `cargo xtask soc-facts` writes it.
-const REGISTRY: &str = include_str!("../../../../isa/apple-soc-facts.json");
+/// The profile registry: each board's `Ap,ProductType`, `ApChipID`,
+/// `ApBoardID` and `DeviceClass`.
+pub const BOARDS: [(&str, u32, u32, &str); 59] = [
+    ("Mac14,8", 0x6022, 0x08, "j180dap"),
+    ("Macmini9,1", 0x8103, 0x22, "j274ap"),
+    ("MacBookPro17,1", 0x8103, 0x24, "j293ap"),
+    ("MacBookAir10,1", 0x8103, 0x26, "j313ap"),
+    ("MacBookPro18,4", 0x6001, 0x08, "j314cap"),
+    ("MacBookPro18,3", 0x6000, 0x08, "j314sap"),
+    ("MacBookPro18,2", 0x6001, 0x0a, "j316cap"),
+    ("MacBookPro18,1", 0x6000, 0x0a, "j316sap"),
+    ("Mac13,1", 0x6001, 0x04, "j375cap"),
+    ("Mac13,2", 0x6002, 0x0c, "j375dap"),
+    ("Mac14,2", 0x8112, 0x28, "j413ap"),
+    ("Mac14,5", 0x6021, 0x04, "j414cap"),
+    ("Mac14,9", 0x6020, 0x04, "j414sap"),
+    ("Mac14,15", 0x8112, 0x2e, "j415ap"),
+    ("Mac14,6", 0x6021, 0x06, "j416cap"),
+    ("Mac14,10", 0x6020, 0x06, "j416sap"),
+    ("Mac15,4", 0x8122, 0x28, "j433ap"),
+    ("Mac15,5", 0x8122, 0x2a, "j434ap"),
+    ("iMac21,1", 0x8103, 0x28, "j456ap"),
+    ("iMac21,2", 0x8103, 0x2a, "j457ap"),
+    ("Mac14,3", 0x8112, 0x24, "j473ap"),
+    ("Mac14,12", 0x6020, 0x02, "j474sap"),
+    ("Mac14,13", 0x6021, 0x0a, "j475cap"),
+    ("Mac14,14", 0x6022, 0x0a, "j475dap"),
+    ("Mac14,7", 0x8112, 0x2a, "j493ap"),
+    ("Mac15,3", 0x8122, 0x22, "j504ap"),
+    ("Mac15,8", 0x6031, 0x44, "j514cap"),
+    ("Mac15,10", 0x6034, 0x44, "j514map"),
+    ("Mac15,6", 0x6030, 0x04, "j514sap"),
+    ("Mac15,9", 0x6031, 0x46, "j516cap"),
+    ("Mac15,11", 0x6034, 0x46, "j516map"),
+    ("Mac15,7", 0x6030, 0x06, "j516sap"),
+    ("Mac16,9", 0x6041, 0x02, "j575cap"),
+    ("Mac15,14", 0x6032, 0x44, "j575dap"),
+    ("Mac16,1", 0x8132, 0x22, "j604ap"),
+    ("Mac15,12", 0x8122, 0x30, "j613ap"),
+    ("Mac16,6", 0x6041, 0x04, "j614cap"),
+    ("Mac16,8", 0x6040, 0x04, "j614sap"),
+    ("Mac15,13", 0x8122, 0x32, "j615ap"),
+    ("Mac16,5", 0x6041, 0x06, "j616cap"),
+    ("Mac16,7", 0x6040, 0x06, "j616sap"),
+    ("Mac16,2", 0x8132, 0x24, "j623ap"),
+    ("Mac16,3", 0x8132, 0x26, "j624ap"),
+    ("Mac17,5", 0x8140, 0x64, "j700ap"),
+    ("Mac17,2", 0x8142, 0x22, "j704ap"),
+    ("Mac16,12", 0x8132, 0x2c, "j713ap"),
+    ("Mac17,7", 0x6050, 0x0a, "j714cap"),
+    ("Mac17,9", 0x6050, 0x08, "j714sap"),
+    ("Mac16,13", 0x8132, 0x2e, "j715ap"),
+    ("Mac17,6", 0x6050, 0x0e, "j716cap"),
+    ("Mac17,8", 0x6050, 0x0c, "j716sap"),
+    ("Mac16,10", 0x8132, 0x2a, "j773gap"),
+    ("Mac16,11", 0x6040, 0x02, "j773sap"),
+    ("Mac17,14", 0x6050, 0x10, "j775cap"),
+    ("Mac17,15", 0x6050, 0x12, "j775dap"),
+    ("Mac17,3", 0x8142, 0x24, "j813ap"),
+    ("Mac17,4", 0x8142, 0x26, "j815ap"),
+    ("Mac18,5", 0x8152, 0x24, "j873gap"),
+    ("Mac17,16", 0x6050, 0x02, "j873sap"),
+];
+
 /// The component only an erase or update restore has: the ramdisk restored
 /// runs from.
 pub const RESTORE_RAMDISK: &str = "RestoreRamDisk";
@@ -53,19 +114,6 @@ impl fmt::Display for Profile {
     }
 }
 
-#[derive(Deserialize)]
-struct Registry {
-    boards: Vec<Board>,
-}
-
-#[derive(Deserialize)]
-struct Board {
-    product_type: String,
-    chip_id: String,
-    board_id: String,
-    device_class: String,
-}
-
 fn hex(value: &str) -> Option<u32> {
     let digits = value
         .strip_prefix("0x")
@@ -86,20 +134,15 @@ impl Profile {
                 device_class: device_class.into(),
             });
         }
-        let registry: Registry =
-            serde_json::from_str(REGISTRY).context("the profile registry is malformed")?;
-        let board = registry
-            .boards
-            .into_iter()
-            .find(|board| board.product_type == model)
-            .with_context(|| {
-                format!("{model} is not in the profile registry (isa/apple-soc-facts.json)")
-            })?;
+        let &(model, chip_id, board_id, device_class) = BOARDS
+            .iter()
+            .find(|board| board.0 == model)
+            .with_context(|| format!("{model} is not in the profile registry"))?;
         Ok(Self {
-            model: board.product_type,
-            chip_id: hex(&board.chip_id).context("registry ApChipID")?,
-            board_id: hex(&board.board_id).context("registry ApBoardID")?,
-            device_class: board.device_class,
+            model: model.into(),
+            chip_id,
+            board_id,
+            device_class: device_class.into(),
         })
     }
 
@@ -278,70 +321,16 @@ mod tests {
         assert_eq!(Profile::of(SYNTHETIC.0).unwrap().board_id, SYNTHETIC.2);
     }
 
-    /// Every registry board is a selectable profile: its model resolves, its
-    /// ApChipID has a SoC row and CPU profile, and its `/cpus` bind to that
-    /// row's PEs or refuse for a stated gap: J700AP's P cores carry only
-    /// per-variant L2 sizes (the bundle resolves them,
-    /// `soc::template_variant`), and the T6050 template leaves
-    /// `product-soc-name` to the variant its fuses pick, which every T6050
-    /// board's profile gives (`stela_loader::soc_variant`). The registry's cluster
-    /// aggregate gives each cluster its first PE's type, so J873gAP's M cores
-    /// read as P here (`isa/apple-board-interfaces.json` keeps them).
+    /// Every registry board is a selectable profile: its model resolves once
+    /// and its ApChipID has a SoC row.
     #[test]
     fn every_registry_board_resolves_to_a_soc_row() {
         use stela_runtime::machine::soc;
-        let registry: serde_json::Value = serde_json::from_str(REGISTRY).unwrap();
-        let boards = registry["boards"].as_array().unwrap();
-        assert_eq!(boards.len(), 59);
-        let mut bound = 0;
-        for board in boards {
-            let model = board["product_type"].as_str().unwrap();
-            let profile = Profile::of(model).unwrap();
-            assert_eq!(
-                profile.device_class,
-                board["device_class"].as_str().unwrap()
-            );
-            let chip = soc::chip(profile.chip_id).unwrap_or_else(|| panic!("{model}"));
-            let processors: Vec<soc::Processor> = board["clusters"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|cluster| {
-                    let kind = cluster["cluster_type"].as_str().unwrap().as_bytes()[0];
-                    let l2 = cluster["l2_cache_size"].as_u64().map(|b| b as u32);
-                    cluster["reg"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(move |reg| soc::Processor {
-                            cluster_type: kind,
-                            reg: hex(reg.as_str().unwrap()).unwrap(),
-                            l2_bytes: l2,
-                        })
-                })
-                .collect();
-            let Some(name) = board["product_soc_name"].as_str() else {
-                assert_eq!(profile.chip_id, 0x6050, "{model}");
-                let fuses = stela_loader::soc_variant::fuses(profile.chip_id, profile.board_id);
-                assert!(
-                    stela_loader::soc_variant::decode(fuses.expect(model)).is_ok(),
-                    "{model}"
-                );
-                continue;
-            };
-            match soc::cpus(profile.chip_id, name, &processors) {
-                Ok(cpus) => {
-                    assert_eq!(cpus.chip, chip, "{model}");
-                    bound += 1;
-                }
-                Err(reason) => {
-                    assert_eq!(profile.chip_id, 0x8140, "{model}: {reason}");
-                    assert!(reason.contains("no l2-cache-size"), "{model}: {reason}");
-                    assert!(soc::template_variant(0x8140).is_some());
-                }
-            }
+        for (model, chip_id, ..) in BOARDS {
+            assert_eq!(BOARDS.iter().filter(|board| board.0 == model).count(), 1);
+            assert_eq!(Profile::of(model).unwrap().chip_id, chip_id);
+            assert!(soc::chip(chip_id).is_some(), "{model}");
         }
-        assert_eq!(bound, 59 - 7 - 1);
     }
 
     #[test]

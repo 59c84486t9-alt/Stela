@@ -20,8 +20,8 @@
 //! - each PE of a cluster repeats the `cpm-impl-reg` sequence with the same
 //!   values, and SPTM may read MASK back to record it.
 //!
-//! The other M1 to M3 SPTMs make the same accesses with their own masks
-//! (`isa/apple-soc-facts.json` `socs[].lockdown`): the M3 ones set every
+//! The other M1 to M3 SPTMs make the same accesses with their own masks:
+//! the M3 ones set every
 //! per-PE bit. MASK and CONTROL reset to 0 (inference). Once locked, a
 //! write that keeps both values (as the cluster's other PEs make) completes;
 //! one that changes them stops, because what hardware does is not

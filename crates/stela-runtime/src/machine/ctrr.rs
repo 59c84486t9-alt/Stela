@@ -40,8 +40,8 @@
 //!
 //! Public XNU `xnu-12377.121.6` gives the H16 (M4) and H17 (M5) platforms
 //! `HAS_CTRR3`, "CTRRv3 registers" (`pexpert/arm64/H16.h`, `H17.h`,
-//! `apple_arm64_common.h`: `KERNEL_CTRR_VERSION 3`). The census
-//! (`isa/apple-soc-facts.json`) shows CRn-11 accesses only in the T8132,
+//! `apple_arm64_common.h`: `KERNEL_CTRR_VERSION 3`). The 26A434 census
+//! shows CRn-11 accesses only in the T8132,
 //! T6040/1, T8140, T8142, T6050 and T8152 SPTMs and kernels. m1n1
 //! `src/cpu_regs.h` (7cde7d1a, "M4 CTRR/CTXR registers") names the EL1, EL12
 //! and per-cluster `ACC_*_EL2` copies of six regions ([`Region`]) and the

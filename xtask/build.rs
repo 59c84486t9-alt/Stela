@@ -1,18 +1,11 @@
 //! Assemble the AArch64 fixtures into flat images with the host's clang: the
-//! oracle harness and the system-mode test kernel.
+//! system-mode test kernel.
 use object::{Object, ObjectSection};
 use std::{env, fs, path::PathBuf, process::Command};
 
 const TARGET: &str = "--target=aarch64-none-elf";
 /// (source, image, architecture)
-const FIXTURES: [(&str, &str, &str); 2] = [
-    (
-        "src/oracle/harness.S",
-        "harness.bin",
-        "-march=armv9.4-a+sme2+memtag",
-    ),
-    ("src/boot/kernel.S", "kernel.bin", "-march=armv8.6-a"),
-];
+const FIXTURES: [(&str, &str, &str); 1] = [("src/boot/kernel.S", "kernel.bin", "-march=armv8.6-a")];
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));

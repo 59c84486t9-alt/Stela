@@ -1,6 +1,5 @@
 //! The Apple CPU a machine models. Each chip's architectural features are
-//! Apple clang's export for it (`isa/apple-codegen-profiles.json`), closed
-//! under the AARCHMRS implications by `cargo xtask system-matrix`; the
+//! Apple clang's export for it, closed under the AARCHMRS implications; the
 //! generated accessors decide a feature only some chips have through
 //! [`Chip::implemented`], and [`Chip::admit`] makes an instruction form the
 //! chip lacks UNDEFINED (or a NOP, where Arm decodes it so), as
@@ -190,8 +189,8 @@ impl Chip {
         CHIPS[self as usize]
     }
 
-    /// Apple clang's architectural features for the chip
-    /// (`isa/apple-codegen-profiles.json`), the cap of what it advertises.
+    /// Apple clang's architectural features for the chip, the cap of what it
+    /// advertises.
     pub fn cap(self) -> &'static [&'static str] {
         CAPS[self as usize]
     }
@@ -371,32 +370,14 @@ impl Chip {
 }
 
 /// The chip the runtime's unit tests build their default CPUs and machines
-/// for: `STELA_TEST_CHIP`, or [`Chip::DEFAULT`]. Each call appends the
-/// running test's name to the file `STELA_TEST_CHIP_LOG` names, so that
-/// `cargo xtask progress`, which runs the tests once per chip, credits a test
-/// on a chip only when it ran there. A test that fixes its chip does not
-/// call it.
+/// for: `STELA_TEST_CHIP`, or [`Chip::DEFAULT`]. A test that fixes its chip
+/// does not call it.
 #[cfg(test)]
 pub fn test_chip() -> Chip {
     extern crate std;
-    use std::io::Write;
-    let chip = std::env::var("STELA_TEST_CHIP").map_or(Chip::DEFAULT, |name| {
+    std::env::var("STELA_TEST_CHIP").map_or(Chip::DEFAULT, |name| {
         Chip::from_name(&name).unwrap_or_else(|| panic!("STELA_TEST_CHIP {name} names no chip"))
-    });
-    if let (Ok(log), Some(test)) = (
-        std::env::var("STELA_TEST_CHIP_LOG"),
-        std::thread::current().name(),
-    ) {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
-            .unwrap_or_else(|error| panic!("STELA_TEST_CHIP_LOG {log}: {error}"));
-        // One write per line, so the parallel tests' appends never interleave.
-        file.write_all(alloc::format!("{test}\n").as_bytes())
-            .unwrap_or_else(|error| panic!("STELA_TEST_CHIP_LOG {log}: {error}"));
-    }
-    chip
+    })
 }
 
 /// Whether the engine implements a feature that only some chips have: every
@@ -467,7 +448,6 @@ const fn engine_implements(feature: Feature) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn the_admit_table_answers_as_the_full_search() {
@@ -568,23 +548,10 @@ mod tests {
     }
 
     #[test]
-    fn chips_follow_the_generated_tables_and_the_m2_implements_all_it_has() {
+    fn chips_are_ordered_and_the_m2_implements_all_it_has() {
         for (index, chip) in Chip::ALL.into_iter().enumerate() {
             assert_eq!(chip as usize, index);
             assert_eq!(Chip::from_name(chip.name()), Some(chip));
-        }
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../isa/apple-codegen-profiles.json");
-        let profiles: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        for chip in Chip::ALL {
-            let cap: Vec<&str> = profiles["profiles"][chip.name()]["architectural_features"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|feature| feature.as_str().unwrap())
-                .collect();
-            assert_eq!(chip.cap(), cap, "{chip:?}");
         }
         // The default chip implements every feature it has, as before any
         // other chip was modeled; a later chip's addition stops explicitly.

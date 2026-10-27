@@ -2,8 +2,7 @@
 //!
 //! `generated` holds every accessor of the Apple CPU profiles as its
 //! AARCHMRS permission tree folded against them, a feature only some chips
-//! have decided by [`Context::implemented`] for the PE's [`Chip`]
-//! (`cargo xtask system-matrix`): which EL gets UNDEFINED, which trap goes to
+//! have decided by [`Context::implemented`] for the PE's [`Chip`]: which EL gets UNDEFINED, which trap goes to
 //! which EL, which register a name reaches under VHE or NV2, and which
 //! operation runs. This module supplies the vocabulary those trees use:
 //! `helpers` holds Arm's shared pseudocode functions, and a [`Context`]

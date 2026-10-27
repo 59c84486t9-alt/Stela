@@ -52,8 +52,8 @@ pub struct TargetCpu {
     /// other agent accesses guest
     /// memory while its code runs: the system engine runs one PE at a time,
     /// and a multi-threaded process must not use it. A compilation mode, not
-    /// a host capability; `isa/dit-timing-audit.json` records each listed
-    /// form's verdict on the [`Self::DATA_INDEPENDENT_TIMING_TIERS`].
+    /// a host capability, honored on the
+    /// [`Self::DATA_INDEPENDENT_TIMING_TIERS`].
     data_independent_timing: bool,
 }
 

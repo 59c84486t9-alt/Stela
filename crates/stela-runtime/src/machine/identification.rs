@@ -3,7 +3,7 @@
 //! They advertise exactly what this engine implements, never more than the
 //! chip implements: each field is set from one table row whose architectural
 //! feature must be in the chip's Apple clang feature set ([`Chip::cap`],
-//! `isa/apple-codegen-profiles.json`, from `clang -mcpu=apple-mN
+//! from `clang -mcpu=apple-mN
 //! --print-enabled-extensions`), or implied by it under the AARCHMRS
 //! feature constraints (a generated [`Feature`] the chip has, such as the
 //! M4's Armv8.7 FEAT_PAN3, which has no clang extension name), and whose
@@ -195,7 +195,7 @@ const FAULTING_DATA: &str = "the host's loads forward no data from a faulting ac
      cleared";
 const DATA_INDEPENDENT_TIMING: &str = "PSTATE.DIT blocks compile for the host's audited \
      data-independent-timing tier, whose lowerings of every listed instruction use only \
-     Intel's data operand independent timing instructions (isa/dit-timing-audit.json)";
+     Intel's data operand independent timing instructions";
 const PAUTH_LR: &str = "PACM sets PSTATE.PACM for the next instruction, as IsPACMEnabled \
      allows, and the two-modifier forms and the PACM-modified PAC*SP, AUT*SP, RETA* and \
      *1716 forms compute ComputePAC2QARMA";
@@ -1522,14 +1522,6 @@ pub fn derive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeSet, path::Path};
-
-    fn json(name: &str) -> serde_json::Value {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../isa")
-            .join(name);
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
-    }
 
     #[test]
     fn containing_feature_dependencies_are_acyclic() {
@@ -1737,32 +1729,6 @@ mod tests {
                     || NO_FIELD.iter().any(|(field, _)| *field == name),
                 "{name} is implemented but has no identification row"
             );
-        }
-    }
-
-    #[test]
-    fn every_row_names_an_apple_clang_feature_or_one_it_implies() {
-        let profiles = json("apple-codegen-profiles.json");
-        let known: BTreeSet<String> = profiles["profiles"]
-            .as_object()
-            .unwrap()
-            .values()
-            .flat_map(|profile| {
-                profile["architectural_features"]
-                    .as_array()
-                    .unwrap()
-                    .clone()
-            })
-            .map(|feature| feature.as_str().unwrap().to_owned())
-            .collect();
-        for row in TABLE {
-            if let Some(feature) = row.feature {
-                assert!(
-                    known.contains(feature)
-                        || Feature::ALL.iter().any(|implied| implied.name() == feature),
-                    "{feature} is neither an Apple clang feature nor implied by one"
-                );
-            }
         }
     }
 

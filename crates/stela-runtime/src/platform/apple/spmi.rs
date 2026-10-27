@@ -43,8 +43,8 @@
 //!
 //! Scalar Register Read/Write and Register0 Write use one request word.
 //! Original 26A434 J613/T8122 `kernelcache.release.mac15g` SHA256
-//! 8210f3645ea16c2481bcaf285ead56eaf2e591bb0d124fe2c01f596c6361ded3
-//! (`isa/apple-soc-facts.json`). `registerReadWriteCommand` at VA9d5c768
+//! 8210f3645ea16c2481bcaf285ead56eaf2e591bb0d124fe2c01f596c6361ded3.
+//! `registerReadWriteCommand` at VA9d5c768
 //! validates a five-bit address and one byte, then packs address at 20:16
 //! and the write byte at 31:24 (9d5c9a0..9d5c9f0). Opcodes 0x40/0x60
 //! come from its table at 772ff48. `performPayloadlessTransaction` packs

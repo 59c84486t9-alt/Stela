@@ -91,26 +91,18 @@ mod boot_native_clock_pm;
 mod agx_isa;
 mod agx_observe;
 mod amx;
-// The bench, the hosted matrix and the oracle's system lane run the hosted
-// engine, which only an Intel Mac has (`stela_runtime::hosted`).
+// The bench runs the hosted engine, which only an Intel Mac has
+// (`stela_runtime::hosted`).
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod bench;
 mod boot;
 mod check;
 mod darwin_catalogs;
-mod differential;
-mod dit;
-mod floor_audit;
 mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-mod hosted_matrix;
 mod hosted_platform;
-mod oracle;
 mod pages;
-mod progress;
 mod restore_dry_run;
-mod soc_facts;
-mod system_matrix;
 mod tools;
 mod xml;
 
@@ -135,8 +127,6 @@ enum Task {
     /// Build native GPU components and report their remaining platform imports.
     #[command(subcommand)]
     Gpu(gpu::Command),
-    /// Compare native translations with the QEMU original, form by form.
-    Differential(differential::Differential),
     /// Time unchanged real-program functions in the process engines, against
     /// a baseline build (release builds only); `bench hosted` times
     /// same-source programs natively and as hosted processes.
@@ -146,34 +136,16 @@ enum Task {
     AmxReference(amx::AmxReference),
     /// Disassemble, size and time the native AMX kernels against the model.
     AmxKernels(amx::kernels::AmxKernels),
-    /// Derive the system platform requirement matrix from the pinned AARCHMRS.
-    SystemMatrix(system_matrix::SystemMatrix),
     /// Generate the BSD system-call and Mach-trap catalogs from xnu sources.
     DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
-    /// Derive the per-SoC facts of a universal macOS IPSW's SPTM, TXM,
-    /// kernelcache and DeviceTree builds.
-    SocFacts(soc_facts::SocFacts),
     /// Generate the AGX2 shader ISA tables from Mesa's AGX2.xml.
     AgxIsa(agx_isa::AgxIsa),
     /// Consolidate a boot run's `--agx-observe` log into a per-command-type
     /// field-confirmation report.
     AgxObserve(agx_observe::AgxObserve),
-    /// Audit the native code of Arm's data-independent-time instructions
-    /// against Intel's data operand independent timing list.
-    DitAudit(dit::DitAudit),
-    /// Check that code compiled for the x86-64-v2 host floor uses only v2
-    /// instructions and compiles wherever a larger tier does.
-    FloorAudit(floor_audit::FloorAudit),
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
-    /// Merge the instruction and system registries into their matrices and
-    /// the README.
-    Progress {
-        /// Fail instead of writing when either file is stale.
-        #[arg(long)]
-        check: bool,
-    },
 }
 
 fn main() -> ExitCode {
@@ -181,41 +153,17 @@ fn main() -> ExitCode {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
-        Task::Differential(task) => task.run().map(|()| ExitCode::SUCCESS),
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         Task::Bench(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::SystemMatrix(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::SocFacts(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AgxObserve(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::FloorAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
-        Task::Progress { check } => progress::run(check)
-            .and_then(|()| system_matrix::assess::run(check))
-            .and_then(|()| hosted_matrix(check))
-            .map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");
         ExitCode::FAILURE
     })
-}
-
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn hosted_matrix(check: bool) -> anyhow::Result<()> {
-    hosted_matrix::run(check)
-}
-
-/// Elsewhere the hosted matrix is left as it is, and said so.
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-fn hosted_matrix(_check: bool) -> anyhow::Result<()> {
-    eprintln!(
-        "UNSUPPORTED hosted requirement matrix: rendering it needs the hosted runtime, \
-         which only an Intel Mac has; it was neither updated nor checked"
-    );
-    Ok(())
 }

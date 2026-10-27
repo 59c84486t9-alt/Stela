@@ -11,7 +11,6 @@ const UNSUPPORTED: &str =
 /// What a mapping's pages permit.
 #[derive(Clone, Copy)]
 pub enum Access {
-    Read,
     ReadWrite,
     ReadExecute,
 }
@@ -20,7 +19,6 @@ pub enum Access {
 impl Access {
     fn protection(self) -> libc::c_int {
         match self {
-            Self::Read => libc::PROT_READ,
             Self::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
             Self::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
         }

@@ -139,52 +139,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires pinned original 26A434 board DeviceTrees; no Apple image is committed"]
-    fn all_original_board_records_use_their_own_layout_and_keep_the_original_hashes() {
-        use crate::machine::adt::Node;
-        use sha2::{Digest, Sha256};
-        let directory =
-            std::env::var("STELA_TEST_PMGR_ADTS").expect("original board ADT directory");
-        let inventory = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../isa/apple-soc-facts.json"),
-        )
-        .unwrap();
-        let inventory: serde_json::Value = serde_json::from_slice(&inventory).unwrap();
-        let mut boards = [0; 2];
-        let mut records = [0; 2];
-        for board in inventory["boards"].as_array().unwrap() {
-            let member = board["source"]["member"].as_str().unwrap();
-            let file = std::path::Path::new(member).file_name().unwrap();
-            let bytes = std::fs::read(
-                std::path::Path::new(&directory)
-                    .join(file)
-                    .with_extension("adt"),
-            )
-            .unwrap();
-            assert_eq!(
-                hex::encode(Sha256::digest(&bytes)),
-                board["source"]["decoded_sha256"].as_str().unwrap()
-            );
-            let root = Node::root(&bytes).unwrap();
-            let io = root.child("arm-io").unwrap();
-            let parent = io.child("pmgr").unwrap();
-            let node = super::super::register_node(&io, &parent).unwrap();
-            let devices = node.property("devices").unwrap();
-            let (layout, _) =
-                Layout::select(node.property("ps-regs"), node.property("ps-groups")).unwrap();
-            let slot = usize::from(layout == Layout::V2);
-            boards[slot] += 1;
-            assert!(devices.len().is_multiple_of(BYTES));
-            for raw in devices.as_chunks::<BYTES>().0 {
-                let record = Record::parse(layout, raw).unwrap();
-                assert!(!record.name.is_empty());
-                records[slot] += 1;
-            }
-        }
-        assert_eq!((boards, records), ([41, 18], [15_656, 9_326]));
-    }
-
-    #[test]
     #[ignore = "requires pinned original 26A434 kernelcache; no Apple image is committed"]
     fn original_kernel_proves_id_parent_group_and_index_selection() {
         use sha2::{Digest, Sha256};

@@ -127,7 +127,7 @@ pub use topology::{KernelLimits, assigned};
 /// `t600x-j375.dtsi`, and the M3 and later boards' `/arm-io/mcc dram-base`
 /// ([`board_dram_base`]).
 /// `pmgr` is the `compatible` of the SoC's `/arm-io/pmgr` in its boards'
-/// DeviceTrees (`isa/apple-soc-facts.json` `boards[].pmgr`). Power-state
+/// 26A434 DeviceTrees. Power-state
 /// ownership and optional register-family qualification are independent.
 /// `lockdown` is
 /// the CONTROL offset of the lockdown registers in each PE's `cpu-impl-reg`
@@ -296,8 +296,6 @@ const fn ep_cores(e_part: u16, p_part: u16, points: Option<[&'static [u32]; 2]>)
 }
 
 /// Original J873GAP has six E cores and one mixed P2/M4 physical cluster.
-/// The historical per-cluster census copied the first PE's P type. The
-/// fresh per-PE ledger `isa/apple-board-interfaces.json` retains all types.
 /// XNU's M_CORE identity establishes Aff2=4; its MIDR part, L1 geometry
 /// and clock requirements remain unestablished.
 const M6_CORES: [CoreType; 3] = [
@@ -393,8 +391,7 @@ const T8112_CLUSTERS: [CpuCluster; 2] = [
 
 /// The CONTROL offsets of the lockdown pairs in `cpu-impl-reg` and
 /// `cpm-impl-reg` that every SPTM from the M1 to the M3 families writes
-/// (`isa/apple-soc-facts.json` `socs[].lockdown`; the T8112's at
-/// `__text+0x1b0e4..0x1b14c`). The M4 and later SPTMs write none.
+/// (the T8112's at `__text+0x1b0e4..0x1b14c`). The M4 and later SPTMs write none.
 const LOCKDOWN: [u64; 2] = [0x5000, 0x9000];
 
 /// XNU's per-board CPU limits (`xnu-12377.121.6`
@@ -821,7 +818,7 @@ const SOCS: [Soc; 22] = [
     // The A18 Pro (J700AP) takes the M4's CPU profile. Apple clang's
     // `-mcpu=apple-a18` exports exactly the M4's FEAT set (clang-2100.1.1.101);
     // its 26A434 SPTM's IMPLEMENTATION DEFINED census equals the T8132's and
-    // its kernel's is a subset of the T8132 kernel's (`isa/apple-soc-facts.json`);
+    // its kernel's is a subset of the T8132 kernel's;
     // the SPTM executes the M4's maintenance words and never reads
     // TAG_OFFSET_EL2; XNU builds memory tagging only for the T8142 and T6050
     // (`makedefs/MakeInc.def` `MTE_SUPPORTED_SOCS`); and m1n1 gives its Tahiti
@@ -3247,8 +3244,7 @@ mod tests {
             (m1.cpus.chip, m1.aic.layout),
             (Chip::AppleM1, AicLayout::V1)
         );
-        // The M1's SPTM locks the same blocks at the same offsets
-        // (isa/apple-soc-facts.json).
+        // The M1's SPTM locks the same blocks at the same offsets.
         assert_eq!(m1.lockdown, found.lockdown);
         assert_eq!(
             board(&tree(0x8103, "Apple M1", MODELED)),

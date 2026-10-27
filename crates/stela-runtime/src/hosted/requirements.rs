@@ -8,9 +8,7 @@
 //! kernel-served subsystems in the pinned MIG catalog. Each row's status
 //! is the dispatcher's own ([`crate::hosted_registry::services`]): forwarded to the
 //! host kernel, modeled by a family of the hosted kernel, either with a
-//! named limit, or refused with a reason. `cargo xtask progress` renders
-//! the matrix into `docs/research/hosted-requirements.md` and its counts
-//! into the README.
+//! named limit, or refused with a reason.
 use crate::darwin::catalog as bsd_catalog;
 use crate::hosted_registry::services::{self, Service};
 use crate::mach::{catalog as mach_catalog, mig};

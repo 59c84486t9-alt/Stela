@@ -8,7 +8,7 @@ use std::{fs, path::Path, process::Command};
 pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()> {
     fs::create_dir_all(output)?;
     let objdump = tools::which("llvm-objdump")
-        .or_else(crate::dit::toolchain_objdump)
+        .or_else(tools::toolchain_objdump)
         .context("original ordering inspection requires llvm-objdump")?;
     let fixture = source.join("port/tests/ordering.c");
     let mut profiles = Vec::new();

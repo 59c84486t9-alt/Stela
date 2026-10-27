@@ -7,7 +7,7 @@
 //!
 //! Board/CPU identities, architectural cache capabilities and memory
 //! tagging use the shared `machine` tables. The DeviceTree facts are pinned
-//! to the universal 26A434 IPSW (`isa/apple-soc-facts.json`). CPU family and
+//! to the universal 26A434 IPSW. CPU family and
 //! subfamily are XNU's for the selected MIDR part ([`FAMILIES`]).
 mod availability;
 pub use availability::DarwinAvailability;
@@ -505,7 +505,7 @@ impl Hardware {
     }
 
     /// Logical CPU 0's `/cpus` node: the first cluster's first core, whose
-    /// `reg` is 0 on every board (`isa/apple-soc-facts.json`).
+    /// `reg` is 0 on every 26A434 board.
     pub fn boot_processor(&self) -> soc::Processor {
         let cluster = &self.clusters[0];
         soc::Processor {

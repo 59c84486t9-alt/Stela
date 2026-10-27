@@ -67,7 +67,7 @@ pub struct Layout {
 /// `CorePerfSampler::sample` and `CoreMemStallSampler::sample` read (and,
 /// on the Ultras and the T6050, the second CLPC's two more memory-stall
 /// counters, S3_1_C15_C14_3 and C15_3: kernelcache.release.mac14j
-/// 0xfffffe0009f7c420), recorded per kext in `isa/apple-soc-facts.json`.
+/// 0xfffffe0009f7c420).
 pub fn layout(chip_id: u32) -> Option<Layout> {
     let (aon, stall) = match chip_id {
         0x8103 | 0x8112 => (3, 4),

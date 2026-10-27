@@ -1435,33 +1435,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original T8112 ADTs in STELA_TEST_CPU_DT_DIR"]
-    fn original_t8112_source_byte_digests_survive_parse_serialization() {
-        let directory = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap());
-        let facts: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../isa/apple-soc-facts.json")).unwrap();
-        let mut count = 0;
-        for board in facts["boards"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|b| b["chip_id"] == "0x8112")
-        {
-            let name = board["device_class"].as_str().unwrap();
-            let raw = std::fs::read(directory.join(format!("DeviceTree.{name}.adt"))).unwrap();
-            assert_eq!(
-                stela_runtime::sha256(&raw),
-                board["source"]["decoded_sha256"].as_str().unwrap(),
-                "{name}: original identity"
-            );
-            let parsed = DeviceTree::parse(&raw).unwrap();
-            assert_eq!(parsed.serialize(), raw, "{name}: source roundtrip");
-            count += 1;
-        }
-        assert_eq!(count, 4);
-    }
-
-    #[test]
     #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
     fn original_j473_first_p_projection_keeps_source_fields_and_absent_coordinates() {
         use stela_runtime::machine::soc::assigned::{BspSource, SourceIdentity};

@@ -25,7 +25,6 @@ mod guest_system;
 mod images;
 mod input;
 mod loader;
-pub mod registry;
 pub mod restore;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod run;

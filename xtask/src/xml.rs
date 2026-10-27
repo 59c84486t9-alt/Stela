@@ -47,22 +47,6 @@ impl Element {
         self.children_named(name).next()
     }
 
-    /// Every element named `name` below this one, outermost first; the
-    /// search does not descend into a match.
-    pub fn descendants<'a>(&'a self, name: &str) -> Vec<&'a Element> {
-        let mut out = Vec::new();
-        for node in &self.children {
-            if let Node::Element(element) = node {
-                if element.name == name {
-                    out.push(element);
-                } else {
-                    out.extend(element.descendants(name));
-                }
-            }
-        }
-        out
-    }
-
     /// The concatenated text of this element and its descendants.
     pub fn text(&self) -> String {
         let mut out = String::new();
