@@ -805,6 +805,30 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         }
         .map_err(PolicyError::Client)
     }
+    /// The OS's connection-quality monitor (`cqm_rssi_thold` and
+    /// `cqm_rssi_hyst`), or `None` to stop it.
+    pub fn set_rssi_monitor(&mut self, monitor: Option<(i32, u32)>) -> Result<(), PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .set_rssi_monitor_modern(&mut self.authority, admission, monitor)
+        }
+        .map_err(PolicyError::Client)
+    }
     /// Send a slot time the current AP's beacon changed.
     pub fn update_slot_time(&mut self) -> Result<(), PolicyError> {
         self.live()?;

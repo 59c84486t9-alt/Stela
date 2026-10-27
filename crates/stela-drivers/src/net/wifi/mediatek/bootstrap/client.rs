@@ -214,6 +214,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     edca: Option<edca::Observed<C>>,
     /// A slot time the AP's beacon changed, not yet sent.
     slot_time: Option<u16>,
+    /// The RSSI monitor's threshold, `cqm_rssi_thold`, while one is set.
+    rssi_threshold: Option<i32>,
     /// The channel the firmware operates when a beacon narrowed it.
     channel: Option<ChannelDefinition>,
     /// A channel a beacon changed, not yet sent; `None` inside when the
@@ -303,6 +305,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 management: None,
                 edca: None,
                 slot_time: None,
+                rssi_threshold: None,
                 channel: None,
                 channel_change: None,
                 authentication_deadline: None,
@@ -866,6 +869,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .map_err(Error::Scan)?;
                     s.phase = Phase::ScanCompleted;
                 }
+                // mt7925_mcu_rssi_monitor_event: each INFO TLV reports
+                // the first TLV's RSSI against the threshold.
+                if event.event_id == 0x41
+                    && event.is_unsolicited()
+                    && s.phase == Phase::Associated
+                    && let Some(threshold) = s.rssi_threshold
+                {
+                    events.extend(rssi_events(event.payload, threshold));
+                    continue;
+                }
                 if event.event_id == 12
                     && event.is_unsolicited()
                     && s.phase == Phase::Associated
@@ -1235,6 +1248,12 @@ pub enum Event {
     ConnectionLost(crate::net::wifi::mediatek::ring::rx::Frame),
     /// The firmware's TX status for a frame that asked for it.
     TxStatus(TxStatus),
+    /// `ieee80211_cqm_rssi_notify`: the signal crossed the monitor's
+    /// threshold, upward when `high`.
+    Rssi {
+        rssi: i32,
+        high: bool,
+    },
     Bss(scan::result::Bss),
     Ingress(Ingress),
     Raw(crate::net::wifi::mediatek::ring::rx::Frame),
@@ -1247,6 +1266,33 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Drop for Client<I, Q, C> {
             core::mem::forget(s)
         }
     }
+}
+/// `mt7925_mcu_rssi_monitor_event` over an event payload: each INFO TLV
+/// after the four-byte header reports the first TLV's RSSI.
+fn rssi_events(payload: &[u8], threshold: i32) -> Vec<Event> {
+    let mut out = Vec::new();
+    let tlvs = payload.get(4..).unwrap_or_default();
+    let Some(rssi) = tlvs
+        .get(4..8)
+        .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+    else {
+        return out;
+    };
+    let mut at = 0;
+    while let Some(tlv) = tlvs.get(at..at + 4) {
+        let len = usize::from(u16::from_le_bytes([tlv[2], tlv[3]]));
+        if len == 0 || len > tlvs.len() - at {
+            break;
+        }
+        if tlv[..2] == [0, 0] {
+            out.push(Event::Rssi {
+                rssi,
+                high: rssi > threshold,
+            });
+        }
+        at += len;
+    }
+    out
 }
 fn rates(elements: &[u8], band: wifi::Band) -> Result<(u16, u16), Error> {
     let table: &[u8] = if band == wifi::Band::Ghz2 {
@@ -1602,6 +1648,31 @@ pub(crate) mod tests {
         b.extend_from_slice(&protocol.to_be_bytes());
         b.extend_from_slice(&[1, 2, 3]);
         b
+    }
+    #[test]
+    fn rssi_events_report_crossings_like_mt7925_mcu_rssi_monitor_event() {
+        let mut payload = vec![3, 0, 0, 0];
+        payload.extend_from_slice(&[0, 0, 8, 0]);
+        payload.extend_from_slice(&(-75i32).to_le_bytes());
+        let events = super::rssi_events(&payload, -70);
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Rssi {
+                rssi: -75,
+                high: false
+            }]
+        ));
+        let events = super::rssi_events(&payload, -80);
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Rssi {
+                rssi: -75,
+                high: true
+            }]
+        ));
+        payload[6] = 0;
+        assert!(super::rssi_events(&payload, -70).is_empty());
+        assert!(super::rssi_events(&payload[..6], -70).is_empty());
     }
     #[test]
     fn actual_late_legacy_configuration_ack_cannot_reuse_cached_poll_time() {

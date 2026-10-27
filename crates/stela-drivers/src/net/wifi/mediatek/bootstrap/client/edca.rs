@@ -203,6 +203,69 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
+    /// Linux `mt7925_mcu_set_rssimonitor` for BSS_CHANGED_CQM: firmware RSSI
+    /// events past `threshold` dBm with `hysteresis`, or none for `None`.
+    /// Only firmware reporting RSSI_NOTIFY_EVT_EN supports it, as Linux
+    /// sets IEEE80211_VIF_SUPPORTS_CQM_RSSI only then.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn set_rssi_monitor_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        monitor: Option<(i32, u32)>,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let flags = s
+            .controller
+            .state()
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.capabilities().observed().chip_flags());
+        if flags.unwrap_or(0) & 2 == 0 {
+            return Err(Error::Unsupported);
+        }
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let (threshold, hysteresis) = monitor.unwrap_or_default();
+        let hysteresis = hysteresis as i32;
+        let body = profile
+            .rssi_monitor_request(
+                monitor.is_some(),
+                threshold.wrapping_add(hysteresis) as i8,
+                threshold.wrapping_sub(hysteresis) as i8,
+            )
+            .map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::RssiMonitor, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.rssi_threshold = monitor.map(|(threshold, _)| threshold);
+        Ok(())
+    }
+
     pub fn pending_slot_time(&self) -> bool {
         self.state().slot_time.is_some()
     }

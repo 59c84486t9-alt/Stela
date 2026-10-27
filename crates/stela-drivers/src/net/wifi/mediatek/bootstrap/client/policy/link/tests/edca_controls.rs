@@ -128,3 +128,22 @@ fn a_beacon_narrowing_the_channel_moves_the_firmware_like_ieee80211_config_bw() 
     assert!(link.carrier());
     stop(&mut link, &model);
 }
+
+#[test]
+fn rssi_monitor_needs_firmware_rssi_events_like_ieee80211_vif_supports_cqm_rssi() {
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    secure(&mut link);
+    drain_notices(&mut link);
+    let before = model.response.lock().unwrap().client_commands.len();
+    // This firmware reports chip flags without RSSI_NOTIFY_EVT_EN.
+    assert!(matches!(
+        link.set_rssi_monitor(Some((-70, 2))),
+        Err(LinkControlError::Policy(PolicyError::Client(
+            Error::Unsupported
+        )))
+    ));
+    assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
+    assert!(link.carrier());
+    stop(&mut link, &model);
+}

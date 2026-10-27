@@ -252,6 +252,17 @@ impl Profile {
         t[6] = self.dtim_period;
         Ok(b)
     }
+    /// Linux `mt7925_mcu_set_rssimonitor`: firmware RSSI events above
+    /// `high` or below `low` dBm while `enable`.
+    pub fn rssi_monitor_request(self, enable: bool, high: i8, low: i8) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let t = tlv(&mut b, 0, 8);
+        t[4] = u8::from(enable);
+        t[5] = high as u8;
+        t[6] = low as u8;
+        Ok(b)
+    }
     /// Linux `mt7925_mcu_set_chctx`: the RLM TLV for `definition`.
     pub fn channel_request(
         self,
@@ -1007,6 +1018,58 @@ mod tests {
             }
         }
         assert_eq!(at, trace.len());
+    }
+
+    #[test]
+    fn bss_updates_encode_like_mt7925_mcu() {
+        use crate::net::wifi::station::{operations::ChannelDefinition, phy::Width};
+        let channel = Channel {
+            band: Band::Ghz5,
+            number: 40,
+            frequency_mhz: 5200,
+        };
+        let p = Profile {
+            wcid: 1,
+            interface: Context {
+                bss_index: 3,
+                omac_index: 0,
+                band_index: 0,
+                wmm_index: 0,
+                link_index: 0,
+                broadcast_wcid: 19,
+                address: Mac([2; 6]),
+            },
+            peer: Mac([4; 6]),
+            channel,
+            aid: 1,
+            basic_rates: 1,
+            supported_rates: 1,
+            beacon_interval: 100,
+            dtim_period: 1,
+            slot_time: 20,
+            antenna_mask: 3,
+            cipher: 0,
+        };
+        // mt7925_mcu_set_rssimonitor
+        assert_eq!(
+            p.rssi_monitor_request(true, -68, -72).unwrap(),
+            [3, 0, 0, 0, 0, 0, 8, 0, 1, (-68i8) as u8, (-72i8) as u8, 0]
+        );
+        // mt7925_mcu_set_timing
+        let timing = p.timing().unwrap();
+        assert_eq!(timing[4..14], [23, 0, 20, 0, 1, 0, 0, 0, 20, 0]);
+        // mt7925_mcu_set_chctx: 40 MHz on 36/40, control above center (SCB).
+        let definition = ChannelDefinition {
+            control: channel,
+            width: Width::Mhz40,
+            center1_mhz: 5190,
+            center2_mhz: None,
+            punctured: 0,
+        };
+        assert_eq!(
+            p.channel_request(&definition).unwrap()[4..17],
+            [2, 0, 16, 0, 40, 38, 0, 1, 2, 2, 4, 3, 2]
+        );
     }
 }
 

@@ -301,6 +301,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Ok(result?)
     }
+    /// Set or stop the firmware RSSI monitor; crossings arrive as
+    /// `Event::Rssi` notices.
+    pub fn set_rssi_monitor(
+        &mut self,
+        monitor: Option<(i32, u32)>,
+    ) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        let result = s.client.set_rssi_monitor(monitor);
+        Self::reconcile(s);
+        Ok(result?)
+    }
     pub fn take_notice(&mut self) -> Option<LinkNotice<C>> {
         self.state_mut().notices.pop_front()
     }
