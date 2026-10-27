@@ -11,6 +11,7 @@ use crate::net::{
 use alloc::vec::Vec;
 
 pub mod modern;
+pub(in crate::net::wifi::mediatek) mod six_ghz;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -155,7 +156,13 @@ impl Profile {
         associated: bool,
         modern: Option<&modern::Configuration>,
     ) -> Result<Vec<u8>, Error> {
-        self.validate_inner(modern.is_some())?;
+        self.peer_request_validated(enable, associated, modern, modern.is_some())
+    }
+    fn peer_request_validated(
+        self, enable: bool, associated: bool,
+        modern: Option<&modern::Configuration>, allow_six: bool,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let mut out = vec![0; 8];
         out[0] = self.interface.bss_index;
         out[1] = self.wcid as u8;
@@ -219,7 +226,10 @@ impl Profile {
     /// Broadcast slot uses the source no-link_sta path: only its own header
     /// translation TLV, distinct from a full peer and from WMWA raw updates.
     pub fn broadcast_request(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.broadcast_request_validated(false)
+    }
+    fn broadcast_request_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let mut out = vec![0; 8];
         out[0] = self.interface.bss_index;
         out[1] = self.interface.broadcast_wcid as u8;
@@ -247,13 +257,19 @@ impl Profile {
         Ok(b)
     }
     pub fn disable_beacon_pm(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.disable_beacon_pm_validated(false)
+    }
+    fn disable_beacon_pm_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         tlv(&mut b, 27, 4);
         Ok(b)
     }
     pub fn filter_request(self, enable: bool) -> Result<super::init::Request, Error> {
-        self.validate()?;
+        self.filter_request_validated(enable, false)
+    }
+    fn filter_request_validated(self, enable: bool, allow_six: bool) -> Result<super::init::Request, Error> {
+        self.validate_inner(allow_six)?;
         let mut b = vec![0; 72];
         // Actual primary PHY band_idx is 0 for this single-PHY profile,
         // distinct from the non-MLO interface's band selector ff.
@@ -265,7 +281,10 @@ impl Profile {
         Ok(super::init::Request::client_filter(b))
     }
     pub fn roc(self, token: u8, duration_ms: u32) -> Result<super::init::Request, Error> {
-        self.validate()?;
+        self.roc_validated(token, duration_ms, false)
+    }
+    fn roc_validated(self, token: u8, duration_ms: u32, allow_six: bool) -> Result<super::init::Request, Error> {
+        self.validate_inner(allow_six)?;
         if duration_ms == 0 {
             return Err(Error::InvalidTiming);
         }
@@ -274,11 +293,7 @@ impl Profile {
         b[8] = self.interface.bss_index;
         b[9] = token;
         b[10] = self.channel.number as u8;
-        b[12] = if self.channel.band == Band::Ghz2 {
-            1
-        } else {
-            2
-        };
+        b[12] = match self.channel.band { Band::Ghz2 => 1, Band::Ghz5 => 2, Band::Ghz6 => 3 };
         b[14] = self.channel.number as u8;
         b[17] = self.channel.number as u8;
         put32(&mut b, 20, duration_ms);
@@ -286,7 +301,10 @@ impl Profile {
         Ok(super::init::Request::roc(b))
     }
     pub fn abort_roc(self, token: u8) -> Result<super::init::Request, Error> {
-        self.validate()?;
+        self.abort_roc_validated(token, false)
+    }
+    fn abort_roc_validated(self, token: u8, allow_six: bool) -> Result<super::init::Request, Error> {
+        self.validate_inner(allow_six)?;
         let mut b = vec![0; 16];
         put16(&mut b, 4, 1);
         put16(&mut b, 6, 12);
@@ -304,7 +322,12 @@ impl Profile {
         enable: bool,
         modern: Option<&modern::Configuration>,
     ) -> Result<Vec<u8>, Error> {
-        self.validate_inner(modern.is_some())?;
+        self.bss_request_validated(enable, modern, modern.is_some())
+    }
+    fn bss_request_validated(
+        self, enable: bool, modern: Option<&modern::Configuration>, allow_six: bool,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let c = self.interface;
         let two = self.channel.band == Band::Ghz2;
         let mut out = vec![c.bss_index, 0, 0, 0];

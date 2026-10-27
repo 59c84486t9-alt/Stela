@@ -25,8 +25,26 @@ pub struct Session {
     channel: Channel,
     ssid: Vec<u8>,
     deadline: u64,
+    six_ghz: Option<SixGhzBinding>,
+}
+/// Original native inputs retained transitively by every actual packet Session.
+#[derive(Debug)]
+struct SixGhzBinding {
+    observation: Arc<NativeBssObservation>,
+    selection: wire::six_ghz::Selection,
+    local: phy::Capabilities,
 }
 impl Session {
+    pub fn six_ghz_observation(&self) -> Option<&Arc<NativeBssObservation>> {
+        self.six_ghz.as_ref().map(|s| &s.observation)
+    }
+    pub fn six_ghz_selection(&self) -> Option<&wire::six_ghz::Selection> {
+        self.six_ghz.as_ref().map(|s| &s.selection)
+    }
+    pub fn six_ghz_local_capabilities(&self) -> Option<&phy::Capabilities> {
+        self.six_ghz.as_ref().map(|s| &s.local)
+    }
+
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -116,12 +134,62 @@ impl Station {
             channel,
             ssid,
             deadline,
+            six_ghz: None,
         });
         self.epoch = epoch;
         self.serial = 0;
         self.external = Some(session.clone());
         self.phase = Phase::ExternalAuthenticating;
         Ok(session)
+    }
+
+    /// CPU-only preparation for the sole native owner's dedicated guarded
+    /// transport. This does not publish Station state or confer permission.
+    pub(crate) fn prepare_six_ghz_authentication(
+        &mut self,
+        observation: Arc<NativeBssObservation>,
+        selection: wire::six_ghz::Selection,
+        local: phy::Capabilities,
+        now: u64,
+        budget: u64,
+    ) -> Result<Arc<Session>, Error> {
+        if self.phase != Phase::Idle { return Err(Error::Busy); }
+        self.clock(now)?;
+        let bss = observation.bss();
+        if bss.channel.band != super::super::Band::Ghz6
+            || bss.bssid.is_multicast() || bss.bssid.0 == [0;6]
+            || bss.bssid == self.local || bss.transmitter != bss.bssid
+        { return Err(Error::InvalidAddress); }
+        let ssid = bss.ssid.as_ref().ok_or(Error::Wire(wire::Error::Invalid("6GHz SSID absent")))?;
+        if ssid.len() > 32 || budget == 0 || budget > MAX_EXCHANGE_US {
+            return Err(Error::Wire(wire::Error::Invalid("external authentication bounds")));
+        }
+        selection.validate_peer(&bss.elements).map_err(Error::Wire)?;
+        let channel = bss.channel;
+        let peer = bss.bssid;
+        let ssid = ssid.clone();
+        Ok(Arc::new(Session {
+            epoch: NEXT_ASSOCIATION.next().ok_or(Error::Overflow)?,
+            local: self.local, peer, channel, ssid,
+            deadline: now.checked_add(budget).ok_or(Error::Overflow)?,
+            six_ghz: Some(SixGhzBinding { observation, selection, local }),
+        }))
+    }
+    /// Only a native callback holding both actual transport providers calls
+    /// this after qualifying the original prepared Session and both clocks.
+    pub(crate) fn commit_six_ghz_authentication(
+        &mut self, session: Arc<Session>, now: u64,
+    ) -> Result<(), Error> {
+        if self.phase != Phase::Idle || session.local != self.local || session.six_ghz.is_none() {
+            return Err(Error::Stale);
+        }
+        self.clock(now)?;
+        if now >= session.deadline { return Err(Error::Timeout); }
+        self.epoch = session.epoch;
+        self.serial = 0;
+        self.external = Some(session);
+        self.phase = Phase::ExternalAuthenticating;
+        Ok(())
     }
 
     /// Identity observation only; a retained old handle stays inspectable but
