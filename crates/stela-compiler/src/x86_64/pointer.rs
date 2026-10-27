@@ -372,7 +372,6 @@ fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn forms_name_their_key_kind_operands_and_completion() {
@@ -434,6 +433,7 @@ mod tests {
     #[test]
     fn thunks_complete_hits_and_computed_misses_natively() {
         use crate::GuestState;
+        use alloc::vec;
         use core::ffi::c_void;
         use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
         unsafe extern "C" {

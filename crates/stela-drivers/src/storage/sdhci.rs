@@ -39,7 +39,8 @@ use registers::*;
 mod clock_tests;
 #[cfg(test)]
 mod model;
-#[cfg(test)]
+// QEMU's qtest socket is a Unix-domain socket.
+#[cfg(all(test, unix))]
 mod qtest;
 #[cfg(test)]
 mod tests;

@@ -421,7 +421,12 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     commit(code, destination, 0);
 }
 
-#[cfg(test)]
+// The test runs generated code on the host, which needs mmap.
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
 mod tests {
     use super::*;
     use crate::GuestState;
@@ -430,7 +435,6 @@ mod tests {
     /// UMINV and UMAXV of bytes and halfwords, both widths, run on the host
     /// for each target tier and agree with Arm's definition: the extremum
     /// in the low lane, every other bit clear.
-    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn unsigned_extrema_across_lanes_run_as_arm_defines_them() {
         use core::ffi::c_void;
