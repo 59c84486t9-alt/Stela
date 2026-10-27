@@ -10,7 +10,7 @@ use super::{
     stream::{ByteStream, Endian, Framed},
 };
 use crate::payload::ReadAt;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, format, vec::Vec};
 use core::task::Poll;
 
 /// Handles identify owned streams, including ones still connecting. A Pending
@@ -232,6 +232,28 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
             self.jobs.remove(at);
         }
         Poll::Pending
+    }
+    /// Read ahead, up to `chunks` reads a job, what the jobs send next: a
+    /// caller that must not hold the ports while it reads the source calls
+    /// this between polls, and the polls then send only what it read. A
+    /// failed read fails the session at its next poll.
+    pub fn prefetch(&mut self, chunks: usize) {
+        if self.failure.is_some() || self.complete {
+            return;
+        }
+        for transfer in &mut self.jobs {
+            if let Err(e) = transfer.job.prefetch(&mut self.answers.store, chunks) {
+                self.failure = Some(super::refuse(
+                    format!("transfer failed: {e}"),
+                    &transfer.job.request,
+                ));
+                return;
+            }
+        }
+    }
+    /// The ASR sender of the job that sends the image, while one does.
+    pub fn asr(&self) -> Option<&super::asr::Sender> {
+        self.jobs.iter().find_map(|transfer| transfer.job.asr())
     }
     /// Close all owned streams after a terminal refusal, without emitting any
     /// further protocol bytes. Caller keeps polling while the guest advances.

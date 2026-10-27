@@ -325,15 +325,16 @@ impl<R: ReadAt> Store<R> {
                 .is_some_and(|v| v.whole.is_none() || self.verify == Verify::OnRead)
         })
     }
-    /// One block of a member with recorded or scanned hashes, checked
-    /// against its hash.
-    fn block(&mut self, path: &str, block: u64) -> Result<Vec<u8>> {
+    /// Blocks `blocks` of a member with recorded or scanned hashes, each
+    /// checked against its hash: one read of the source, so the storage
+    /// under it moves the whole run in its largest transfers.
+    fn blocks(&mut self, path: &str, blocks: core::ops::Range<u64>) -> Result<Vec<u8>> {
         let size = self.member_len(path)?;
         let verified = &self.verified[path];
-        let start = block * BLOCK_BYTES as u64;
+        let start = blocks.start * BLOCK_BYTES as u64;
+        let end = (blocks.end * BLOCK_BYTES as u64).min(size);
         let entry = verified.entry.clone();
-        let expected = verified.blocks[block as usize];
-        let mut bytes = vec![0; (size - start).min(BLOCK_BYTES as u64) as usize];
+        let mut bytes = vec![0; (end - start) as usize];
         let mut progress = match self.cursor.take() {
             Some((p, progress)) if p == path => Some(progress),
             _ => None,
@@ -342,11 +343,15 @@ impl<R: ReadAt> Store<R> {
             .read_member_resuming(&mut self.reader, &entry, &mut progress, start, &mut bytes)
             .map_err(payload)?;
         self.cursor = progress.map(|progress| (path.to_string(), progress));
-        let actual: [u8; 32] = Sha256::digest(&bytes).into();
-        if actual != expected {
-            return Err(Error::Payload(format!(
-                "{path}: source changed at block {block}"
-            )));
+        let expected = &self.verified[path].blocks[blocks.start as usize..blocks.end as usize];
+        for (index, (block, expected)) in bytes.chunks(BLOCK_BYTES).zip(expected).enumerate() {
+            let actual: [u8; 32] = Sha256::digest(block).into();
+            if actual != *expected {
+                return Err(Error::Payload(format!(
+                    "{path}: source changed at block {}",
+                    blocks.start + index as u64
+                )));
+            }
         }
         Ok(bytes)
     }
@@ -354,9 +359,10 @@ impl<R: ReadAt> Store<R> {
     /// then its SHA-384.
     fn check_whole(&mut self, path: &str) -> Result<()> {
         let blocks = self.verified[path].blocks.len() as u64;
+        let run = (MAX_READ_BYTES / BLOCK_BYTES) as u64;
         let mut hash = Sha384::new();
-        for block in 0..blocks {
-            hash.update(self.block(path, block)?);
+        for first in (0..blocks).step_by(run as usize) {
+            hash.update(self.blocks(path, first..(first + run).min(blocks))?);
         }
         let verified = self.verified.get_mut(path).expect("recorded");
         if Some(<[u8; 48]>::from(hash.finalize())) != verified.sha384 {
@@ -479,16 +485,14 @@ impl<R: ReadAt> Store<R> {
         if self.verified[path].sha384.is_none() {
             return self.read_unhashed(path, offset, len);
         }
-        let mut result = Vec::with_capacity(len);
-        let mut at = offset;
-        while result.len() < len {
-            let block = at / BLOCK_BYTES as u64;
-            let bytes = self.block(path, block)?;
-            let skip = (at - block * BLOCK_BYTES as u64) as usize;
-            let n = (bytes.len() - skip).min(len - result.len());
-            result.extend_from_slice(&bytes[skip..skip + n]);
-            at += n as u64;
+        if len == 0 {
+            return Ok(Vec::new());
         }
+        let block = BLOCK_BYTES as u64;
+        let first = offset / block;
+        let mut result = self.blocks(path, first..(offset + len as u64).div_ceil(block))?;
+        result.drain(..(offset - first * block) as usize);
+        result.truncate(len);
         let verified = self.verified.get_mut(path).expect("verified above");
         if let Some((reached, hash)) = &mut verified.whole
             && *reached == offset

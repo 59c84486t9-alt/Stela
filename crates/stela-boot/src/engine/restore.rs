@@ -23,7 +23,7 @@ use crate::{
 };
 use alloc::{boxed::Box, collections::VecDeque, format, rc::Rc, string::String, vec::Vec};
 use core::{cell::RefCell, task::Poll};
-use stela_drivers::block::BlockDevice;
+use stela_drivers::block::{Ahead, BlockDevice, ReadAhead};
 use stela_runtime::{
     machine::apple::{AppleDevices, MuxStream, UsbClient, UsbId},
     net::Transfer,
@@ -75,6 +75,8 @@ impl Mode {
 pub struct Source {
     reader: Box<dyn ReadAt<Error = String>>,
     remote: Option<Rc<RefCell<Remote>>>,
+    /// The partition's read-ahead ([`Source::extent`]).
+    ahead: Option<Ahead>,
 }
 
 struct Described<R>(R);
@@ -107,6 +109,7 @@ impl Source {
         Self {
             reader: Box::new(Described(reader)),
             remote: None,
+            ahead: None,
         }
     }
 
@@ -115,21 +118,32 @@ impl Source {
         Self {
             reader: Box::new(Described(Borrowed(Rc::clone(&remote)))),
             remote: Some(remote),
+            ahead: None,
         }
     }
 
-    /// Reads a remote image ahead without waiting; nothing for another.
+    /// Reads the image ahead without waiting.
     pub fn pump(&mut self) {
         if let Some(remote) = &self.remote {
             remote.borrow_mut().pump();
         }
+        if let Some(ahead) = &self.ahead {
+            ahead.pump();
+        }
     }
 
-    /// The study's raw source: the IPSW from the partition's first byte.
+    /// The study's raw source: the IPSW from the partition's first byte,
+    /// read ahead in the host storage's largest commands.
     pub fn extent(partition: Box<dyn BlockDevice>, bytes: u64) -> Result<Self, String> {
-        Ok(Self::new(
-            Extent::new(Bytes::new(partition), bytes).map_err(|e| format!("{e}"))?,
-        ))
+        let ahead = Ahead::new(ReadAhead::new(
+            partition,
+            READ_AHEAD_BYTES,
+            READ_AHEAD_DEPTH,
+        ));
+        let extent = Extent::new(Bytes::new(ahead.clone()), bytes).map_err(|e| format!("{e}"))?;
+        let mut source = Self::new(extent);
+        source.ahead = Some(ahead);
+        Ok(source)
     }
 }
 
@@ -165,9 +179,27 @@ pub struct Experiment {
     driver: Driver<Source, MuxStream>,
     proxy: Option<ReverseProxy>,
     terminal: bool,
+    /// The restore failed: why, and the counter then. The board stops
+    /// [`FAILURE_GRACE_MS`] later.
+    failure: Option<(String, u64)>,
     ledger: usize,
     mode: Mode,
 }
+
+/// How long the guest runs on after its restore fails. A failure is often
+/// the guest panicking, which takes the USB link down first; its report
+/// reaches the console after that.
+const FAILURE_GRACE_MS: u64 = 10_000;
+
+/// The install medium's read-ahead: requests of 1 MiB, the most a USB
+/// disk's command moves, four kept ahead.
+const READ_AHEAD_BYTES: usize = 1 << 20;
+const READ_AHEAD_DEPTH: usize = 4;
+
+/// Chunks of the image each service reads ahead, in one read the size of
+/// the store's largest, which the host's storage moves in its largest
+/// commands.
+const PREFETCH_CHUNKS: usize = 8;
 
 /// Native services retained for the whole restore session.
 pub struct Services {
@@ -689,16 +721,52 @@ impl Experiment {
             driver,
             proxy: network.map(|network| ReverseProxy::new(network, handoff.tsc_hz)),
             terminal: false,
+            failure: None,
             ledger: 0,
             mode,
         })
     }
+    /// Read ahead from the host's storage, without the guest's devices.
+    pub fn pump(&mut self) {
+        if !self.terminal {
+            self.driver.answers.store.reader_mut().pump();
+        }
+    }
+
+    /// Read ahead, verified, what the restore sends next, without the
+    /// guest's devices: [`Self::poll`] then only copies it to the guest.
+    pub fn prefetch(&mut self) {
+        if !self.terminal {
+            self.driver.prefetch(PREFETCH_CHUNKS);
+        }
+    }
+
+    /// The image sent so far and the share of polls the host was behind
+    /// (no chunk read ahead) or the guest was (its window full), while the
+    /// restore sends one.
+    pub fn asr_report(&self) -> Option<String> {
+        let asr = self.driver.asr()?;
+        let (sent, size) = asr.progress();
+        Some(format!(
+            "ASR HOST sent={}MiB/{}MiB polls_host_behind={} polls_guest_full={}",
+            sent >> 20,
+            size >> 20,
+            asr.starved,
+            asr.full
+        ))
+    }
+
+    /// Serve the guest's restore client; [`Self::pump`] read ahead first.
     pub fn poll(&mut self, devices: &mut AppleDevices) {
+        if let Some((message, at)) = &self.failure
+            && output::millis_since(*at) >= FAILURE_GRACE_MS
+        {
+            output::fatal(message);
+        }
         if self.terminal {
             return;
         }
         let label = self.mode.label();
-        self.driver.answers.store.reader_mut().pump();
         let mut client = devices
             .usb_client(self.usb)
             .unwrap_or_else(|e| output::fatal(e));
@@ -731,18 +799,22 @@ impl Experiment {
             }
             Poll::Ready(Err(error)) => {
                 output::arguments(format_args!("{label} REFUSED {error}\n"));
-                // Preserve the guest stop context and refuse further writes.
-                // The restore has no automatic reboot/retry or fallback.
-                output::fatal(&format!(
-                    "{} failed: {}",
-                    match self.mode {
-                        Mode::Install => "the install",
-                        Mode::DevelopmentInstall => "the development install",
-                        Mode::Update => "the update",
-                        Mode::Study => "the restore study",
-                    },
-                    error.summary()
-                ))
+                // The restore has no automatic reboot/retry or fallback: the
+                // board stops once the guest has had time to report why.
+                self.terminal = true;
+                self.failure = Some((
+                    format!(
+                        "{} failed: {}",
+                        match self.mode {
+                            Mode::Install => "the install",
+                            Mode::DevelopmentInstall => "the development install",
+                            Mode::Update => "the update",
+                            Mode::Study => "the restore study",
+                        },
+                        error.summary()
+                    ),
+                    output::now(),
+                ));
             }
         }
     }

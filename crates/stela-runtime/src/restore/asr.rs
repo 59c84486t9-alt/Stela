@@ -8,7 +8,7 @@ use super::{
     stream::{ByteStream, Output, XmlStream},
 };
 use crate::payload::ReadAt;
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::task::Poll;
 use sha1::{Digest, Sha1};
 pub const PORT: u16 = 12345;
@@ -17,6 +17,8 @@ const SHA1_BYTES: usize = 20;
 const PACKET_BYTES: u64 = 1450;
 const FEC_STRIDE: u64 = 40;
 const PACKETS_PER_FEC: u64 = 25;
+/// Payload chunks [`Sender::prefetch`] keeps read ahead.
+const AHEAD_CHUNKS: usize = 16;
 pub trait ImageSource {
     fn size(&self, component: &str) -> Result<u64>;
     /// Returns exactly len bytes, or fails. Must preserve source identity.
@@ -48,6 +50,16 @@ pub struct Sender {
     oob_remaining: u64,
     output: Output,
     xml: XmlStream,
+    /// Payload chunks read ahead, each with its image bytes and its
+    /// checksum, and the image offset the next starts at. Once a caller
+    /// reads ahead, [`Self::poll`] sends only chunks read ahead.
+    ahead: VecDeque<(usize, Vec<u8>)>,
+    ahead_at: u64,
+    reads_ahead: bool,
+    /// Polls that ended with the guest's window open and no chunk read
+    /// ahead (the host was behind), or with its window full.
+    pub starved: u64,
+    pub full: u64,
 }
 impl Sender {
     pub fn new(image: String, source: &impl ImageSource) -> Result<Self> {
@@ -64,10 +76,62 @@ impl Sender {
             oob_remaining: 0,
             output: Output::default(),
             xml: XmlStream::new(Limits::default()),
+            ahead: VecDeque::new(),
+            ahead_at: 0,
+            reads_ahead: false,
+            starved: 0,
+            full: 0,
         })
     }
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+    /// The payload bytes sent and the image's size.
+    pub fn progress(&self) -> (u64, u64) {
+        (self.offset, self.size)
+    }
+    /// Read up to `chunks` payload chunks ahead in one read of the source,
+    /// while fewer than [`AHEAD_CHUNKS`] wait: a caller that must not hold
+    /// the stream's owner while it reads the source does so here, between
+    /// polls.
+    pub fn prefetch(&mut self, source: &mut impl ImageSource, chunks: usize) -> Result<()> {
+        self.reads_ahead = true;
+        let room = AHEAD_CHUNKS.saturating_sub(self.ahead.len()).min(chunks);
+        if self.phase != Phase::Payload || room == 0 || self.ahead_at == self.size {
+            return Ok(());
+        }
+        let n = (self.size - self.ahead_at).min((room * CHUNK_BYTES) as u64) as usize;
+        let bytes = source.read_at(&self.image, self.ahead_at, n)?;
+        if bytes.len() != n {
+            return Err(Error::Invalid("short ASR payload read"));
+        }
+        for chunk in bytes.chunks(CHUNK_BYTES) {
+            let mut queued = Vec::with_capacity(chunk.len() + SHA1_BYTES);
+            queued.extend_from_slice(chunk);
+            if self.checksum {
+                queued.extend_from_slice(&Sha1::digest(chunk));
+            }
+            self.ahead.push_back((chunk.len(), queued));
+        }
+        self.ahead_at += n as u64;
+        Ok(())
+    }
+    /// The `n` payload bytes at `offset`, with their checksum if asked.
+    fn payload_chunk(
+        &self,
+        source: &mut impl ImageSource,
+        offset: u64,
+        n: usize,
+    ) -> Result<Vec<u8>> {
+        let mut bytes = source.read_at(&self.image, offset, n)?;
+        if bytes.len() != n {
+            return Err(Error::Invalid("short ASR payload read"));
+        }
+        if self.checksum {
+            let digest = Sha1::digest(&bytes);
+            bytes.extend_from_slice(&digest);
+        }
+        Ok(bytes)
     }
     pub fn poll(
         &mut self,
@@ -87,6 +151,13 @@ impl Sender {
         };
         if matches!(r, Poll::Ready(Err(_))) {
             self.phase = Phase::Failed;
+        }
+        if self.phase == Phase::Payload {
+            if self.output.is_pending() {
+                self.full += 1;
+            } else if self.ahead.is_empty() && self.offset < self.size {
+                self.starved += 1;
+            }
         }
         r
     }
@@ -130,15 +201,14 @@ impl Sender {
                 self.phase = Phase::Complete;
                 return Poll::Ready(Ok(()));
             }
-            let n = (self.size - self.offset).min(CHUNK_BYTES as u64) as usize;
-            let mut bytes = source.read_at(&self.image, self.offset, n)?;
-            if bytes.len() != n {
-                return Poll::Ready(Err(Error::Invalid("short ASR payload read")));
-            }
-            if self.checksum {
-                let digest = Sha1::digest(&bytes);
-                bytes.extend_from_slice(&digest);
-            }
+            let (n, bytes) = match self.ahead.pop_front() {
+                Some(chunk) => chunk,
+                None if self.reads_ahead => return Poll::Pending,
+                None => {
+                    let n = (self.size - self.offset).min(CHUNK_BYTES as u64) as usize;
+                    (n, self.payload_chunk(source, self.offset, n)?)
+                }
+            };
             self.output.queue(bytes, CHUNK_BYTES + SHA1_BYTES)?;
             self.offset += n as u64;
             return Poll::Pending;
@@ -211,6 +281,8 @@ impl Sender {
             "Payload" if self.phase == Phase::Validation => {
                 self.phase = Phase::Payload;
                 self.offset = 0;
+                self.ahead.clear();
+                self.ahead_at = 0;
             }
             _ => {
                 return Poll::Ready(Err(super::refuse(
@@ -275,6 +347,26 @@ mod tests {
             Sha1::digest(&data[CHUNK_BYTES..]).as_slice()
         );
     }
+    /// A stream whose every read and write completes at once.
+    struct Ready {
+        input: Vec<u8>,
+        output: Vec<u8>,
+    }
+    impl ByteStream for Ready {
+        fn read(&mut self, b: &mut [u8]) -> Poll<Result<usize>> {
+            let n = b.len().min(self.input.len());
+            if n == 0 {
+                return Poll::Pending;
+            }
+            b[..n].copy_from_slice(&self.input[..n]);
+            self.input.drain(..n);
+            Poll::Ready(Ok(n))
+        }
+        fn write(&mut self, b: &[u8]) -> Poll<Result<usize>> {
+            self.output.extend_from_slice(b);
+            Poll::Ready(Ok(b.len()))
+        }
+    }
     /// Over a stream that takes every byte, the payload's chunks leave in
     /// one poll rather than one a poll.
     #[test]
@@ -283,26 +375,6 @@ mod tests {
         let mut source = fixture(&data, false);
         let mut input = xml(Value::dict([("Command", Value::from("Initiate"))]));
         input.extend(xml(Value::dict([("Command", Value::from("Payload"))])));
-        // Every read and write completes at once.
-        struct Ready {
-            input: Vec<u8>,
-            output: Vec<u8>,
-        }
-        impl ByteStream for Ready {
-            fn read(&mut self, b: &mut [u8]) -> Poll<Result<usize>> {
-                let n = b.len().min(self.input.len());
-                if n == 0 {
-                    return Poll::Pending;
-                }
-                b[..n].copy_from_slice(&self.input[..n]);
-                self.input.drain(..n);
-                Poll::Ready(Ok(n))
-            }
-            fn write(&mut self, b: &[u8]) -> Poll<Result<usize>> {
-                self.output.extend_from_slice(b);
-                Poll::Ready(Ok(b.len()))
-            }
-        }
         let mut stream = Ready {
             input,
             output: Vec::new(),
@@ -316,6 +388,34 @@ mod tests {
             assert!(sender.poll(&mut stream, &mut source).is_pending());
         }
         assert_eq!(sender.phase(), Phase::Payload);
+        assert!(sender.poll(&mut stream, &mut source).is_ready());
+        assert_eq!(sender.phase(), Phase::Complete);
+        assert!(stream.output.ends_with(&data));
+    }
+    /// A sender that reads ahead sends only chunks read ahead, so a poll
+    /// never reads the source while it holds the stream.
+    #[test]
+    fn a_sender_that_reads_ahead_sends_only_chunks_read_ahead() {
+        let data: Vec<_> = (0..3 * CHUNK_BYTES).map(|i| (i * 7) as u8).collect();
+        let mut source = fixture(&data, false);
+        let mut input = xml(Value::dict([("Command", Value::from("Initiate"))]));
+        input.extend(xml(Value::dict([("Command", Value::from("Payload"))])));
+        let mut stream = Ready {
+            input,
+            output: Vec::new(),
+        };
+        let mut sender = Sender::new("os.dmg".into(), &source).unwrap();
+        sender.prefetch(&mut source, 1).unwrap();
+        while sender.phase() != Phase::Payload {
+            assert!(sender.poll(&mut stream, &mut source).is_pending());
+        }
+        assert!(sender.poll(&mut stream, &mut source).is_pending());
+        assert_eq!(sender.progress().0, 0);
+        assert!(sender.starved > 0, "nothing was read ahead yet");
+        sender.prefetch(&mut source, 2).unwrap();
+        assert!(sender.poll(&mut stream, &mut source).is_pending());
+        assert_eq!(sender.progress().0, 2 * CHUNK_BYTES as u64);
+        sender.prefetch(&mut source, 2).unwrap();
         assert!(sender.poll(&mut stream, &mut source).is_ready());
         assert_eq!(sender.phase(), Phase::Complete);
         assert!(stream.output.ends_with(&data));
