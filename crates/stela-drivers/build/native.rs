@@ -68,9 +68,6 @@ pub fn configure() -> cc::Build {
             .flag(format!("--target={NATIVE_TARGET}"))
             .flag("-mno-stack-arg-probe")
             .flag("-mno-incremental-linker-compatible");
-        if !selected("CC") {
-            build.compiler("clang");
-        }
         if !selected("AR") {
             build.archiver(rust_archiver());
         }
@@ -96,7 +93,13 @@ pub fn hosted() -> Option<cc::Build> {
     Some(build)
 }
 
+/// Clang for every target, unless the caller chose a compiler: the
+/// upstream sources' warning profile (`-Wno-everything`) is clang's, and
+/// GCC holds their headers to Stela's warnings.
 fn common(build: &mut cc::Build) {
+    if !selected("CC") {
+        build.compiler("clang");
+    }
     build.std("gnu11").warnings_into_errors(true);
     for warning in WARNINGS {
         build.flag(warning);
