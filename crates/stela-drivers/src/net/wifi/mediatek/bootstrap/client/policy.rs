@@ -778,6 +778,29 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         }
         .map_err(PolicyError::Client)
     }
+    /// Send a slot time the current AP's beacon changed.
+    pub fn update_slot_time(&mut self) -> Result<(), PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .update_slot_time_modern(&mut self.authority, admission)
+        }
+        .map_err(PolicyError::Client)
+    }
     /// Consume the latest native current-peer observation using this owner's
     /// actual immutable country rule and same association publication authority.
     pub fn update_edca(&mut self) -> Result<(), PolicyError> {

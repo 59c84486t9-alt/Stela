@@ -396,9 +396,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 }
             }
         }
-        // mac80211 hands a beacon's new WMM parameters straight to the driver.
+        // mac80211 hands a beacon's new WMM parameters and slot time
+        // straight to the driver.
         if Self::active(s) && s.client.pending_edca() {
             match s.client.update_edca() {
+                Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
+                Err(error) => {
+                    soft_rx = false;
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        if Self::active(s) && s.client.client.pending_slot_time() {
+            match s.client.update_slot_time() {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
                 Err(error) => {
                     soft_rx = false;
@@ -1180,6 +1190,31 @@ mod tests {
         link.service().unwrap();
         link.configure().unwrap();
         secure(&mut link);
+        // A beacon turning on Short Slot Time moves the BSS to 9 us, as
+        // mt7925_mcu_set_timing sends it.
+        let mut short = beacon.clone();
+        short[35] |= 0x04;
+        receive(&short, None);
+        link.service().unwrap();
+        let command = model
+            .response
+            .lock()
+            .unwrap()
+            .client_commands
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(command[48 + 4..48 + 14], [23, 0, 20, 0, 1, 0, 0, 0, 9, 0]);
+        assert_eq!(
+            link.state()
+                .client
+                .client
+                .state()
+                .profile
+                .unwrap()
+                .slot_time,
+            9
+        );
         link.transmit(&eth(0x800)).unwrap();
         assert_eq!(finish_tx_on(&model, 1).len(), 1);
         link.service().unwrap();

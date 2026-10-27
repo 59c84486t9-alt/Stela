@@ -252,6 +252,15 @@ impl Profile {
         t[6] = self.dtim_period;
         Ok(b)
     }
+    /// Linux `mt7925_mcu_set_timing`: the IFS TLV with only the slot time.
+    pub fn timing(self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let ifs = tlv(&mut b, 23, 20);
+        ifs[4] = 1;
+        put16(ifs, 8, self.slot_time);
+        Ok(b)
+    }
     /// Source explicit always-awake native profile, without runtime/deep sleep.
     pub fn awake(self) -> Result<Vec<u8>, Error> {
         self.validate()?;

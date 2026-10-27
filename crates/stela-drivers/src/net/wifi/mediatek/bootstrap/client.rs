@@ -211,6 +211,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     modern: Option<modern::Configuration>,
     management: Option<Arc<management::Session>>,
     edca: Option<edca::Observed<C>>,
+    /// A slot time the AP's beacon changed, not yet sent.
+    slot_time: Option<u16>,
     authentication_deadline: Option<u64>,
     authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
     /// The bound 6 GHz transport until its peer retires after drain.
@@ -294,6 +296,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 modern: None,
                 management: None,
                 edca: None,
+                slot_time: None,
                 authentication_deadline: None,
                 authentication_end: None,
                 six_ghz: None,

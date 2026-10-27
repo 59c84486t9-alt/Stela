@@ -77,6 +77,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongProfile);
         }
         let mut elements = frame.bytes().get(36..).ok_or(Error::WrongProfile)?;
+        // mac80211 `ieee80211_handle_bss_capability`: on 2.4 GHz the slot
+        // follows the AP's Short Slot Time capability; elsewhere it is 9 us.
+        if p.channel.band == wifi::Band::Ghz2 {
+            let capabilities = u16::from_le_bytes([frame.bytes()[34], frame.bytes()[35]]);
+            let slot = if capabilities & (1 << 10) != 0 { 9 } else { 20 };
+            s.slot_time = (slot != p.slot_time).then_some(slot);
+        }
         if elements.len() > 2300 {
             return Err(Error::WrongProfile);
         }
@@ -131,6 +138,58 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             parameters,
             _frame: frame,
         });
+        Ok(())
+    }
+
+    pub fn pending_slot_time(&self) -> bool {
+        self.state().slot_time.is_some()
+    }
+
+    /// Linux `mt7925_link_info_changed` on BSS_CHANGED_ERP_SLOT: sends the
+    /// slot time a beacon changed through `mt7925_mcu_set_timing`.
+    ///
+    /// # Safety
+    /// The exact-controller, applied-policy and revocation contracts of
+    /// `update_edca_modern` apply.
+    pub unsafe fn update_slot_time_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let slot = s.slot_time.ok_or(Error::WrongPhase)?;
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let mut profile = s.profile.ok_or(Error::WrongPhase)?;
+        profile.slot_time = slot;
+        let body = profile.timing().map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let current = &mut s.profile;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *current = Some(profile);
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.slot_time = None;
         Ok(())
     }
 
