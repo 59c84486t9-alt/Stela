@@ -58,6 +58,12 @@ const ADMIN_DELETE_COMPLETION: u8 = 0x04;
 const ADMIN_CREATE_COMPLETION: u8 = 0x05;
 const ADMIN_IDENTIFY: u8 = 0x06;
 const ADMIN_ABORT: u8 = 0x08;
+const ADMIN_SET_FEATURES: u8 = 0x09;
+/// Host Behavior Support, with its ACRE and LBAFEE bytes.
+const FEATURE_HOST_BEHAVIOR: u32 = 0x16;
+const HOST_BEHAVIOR_ACRE: usize = 0;
+const HOST_BEHAVIOR_LBAFEE: usize = 2;
+const HOST_BEHAVIOR_BYTES: usize = 512;
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
@@ -72,6 +78,11 @@ const CONTROLLER_SERIAL: core::ops::Range<usize> = 4..24;
 const CONTROLLER_MODEL: core::ops::Range<usize> = 24..64;
 const CONTROLLER_MAXIMUM_TRANSFER: usize = 77;
 const CONTROLLER_RTD3_ENTRY: core::ops::Range<usize> = 88..92;
+const CONTROLLER_ATTRIBUTES: usize = 96;
+/// CTRATT.ELBAS: extended LBA formats.
+const ATTRIBUTE_EXTENDED_LBA: u32 = 1 << 15;
+/// CRDT1–3, in units of 100 ms.
+const CONTROLLER_RETRY_DELAYS: usize = 128;
 const CONTROLLER_NAMESPACES: core::ops::Range<usize> = 516..520;
 /// Identify Namespace fields (NVM Command Set 1.1 Figure 114).
 const NAMESPACE_SIZE: core::ops::Range<usize> = 0..8;
@@ -98,6 +109,9 @@ const ADMIN_TIMEOUT_US: u64 = 60_000_000;
 const COMMAND_RETRIES: u32 = 5;
 /// The completion status field's Do Not Retry bit.
 const STATUS_DO_NOT_RETRY: u32 = 1 << 14;
+/// The completion status field's Command Retry Delay index.
+const STATUS_RETRY_DELAY: u32 = 3 << 11;
+const RETRY_DELAY_UNIT_US: u64 = 100_000;
 
 /// Namespace Identification Descriptor types (NVMe Base 2.1 Figure 315).
 const DESCRIPTOR_EUI64: u8 = 1;
@@ -230,6 +244,8 @@ struct Controller {
     version: u32,
     /// Completed controller resets; each one rescans the namespaces.
     resets: u64,
+    /// CRDT1–3 from Identify Controller, in 100 ms units.
+    retry_delays: [u16; 3],
 }
 
 impl Controller {
@@ -385,6 +401,12 @@ impl Controller {
                 Ok((_, status)) => {
                     if !io || status & STATUS_DO_NOT_RETRY != 0 || retries == COMMAND_RETRIES {
                         return Err(BlockError::Device { status });
+                    }
+                    // nvme_retry_req: the delay the CRD field selects.
+                    let delay = (status & STATUS_RETRY_DELAY) >> 11;
+                    if delay != 0 {
+                        let units = self.retry_delays[delay as usize - 1];
+                        self.clock.delay(u64::from(units) * RETRY_DELAY_UNIT_US);
                     }
                 }
                 Err(Lost::Reset(error)) => {
@@ -610,6 +632,14 @@ impl Controller {
         let kept = self.bounce.bytes()[..PAGE].to_vec();
         let identify = self.identify_command(IDENTIFY_CONTROLLER, 0)?;
         self.admin_command(identify)?;
+        // nvme_init_ctrl_finish runs again after every reset.
+        let command = self.host_options()?;
+        if let Some(command) = command {
+            match self.admin_command(command) {
+                Ok(_) | Err(BlockError::Device { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         self.bounce.bytes_mut()[..PAGE].copy_from_slice(&kept);
         for command in self.create_queue_commands()? {
             self.io.submissions.publish();
@@ -618,6 +648,34 @@ impl Controller {
         // nvme_start_ctrl queues a namespace scan.
         self.resets += 1;
         Ok(())
+    }
+
+    /// Linux `nvme_configure_host_options`, from the Identify Controller data
+    /// in the first bounce page: the retry delays, and a Set Features for
+    /// Host Behavior Support enabling ACRE when a delay is reported and
+    /// LBAFEE for extended LBA formats. Its data replaces that page.
+    fn host_options(&mut self) -> Result<Option<[u32; 16]>, BlockError> {
+        let identify = &self.bounce.bytes()[..PAGE];
+        for (index, delay) in self.retry_delays.iter_mut().enumerate() {
+            let at = CONTROLLER_RETRY_DELAYS + 2 * index;
+            *delay = u16::from_le_bytes([identify[at], identify[at + 1]]);
+        }
+        let acre = self.retry_delays[0] != 0;
+        let lbafee = le32(identify, CONTROLLER_ATTRIBUTES) & ATTRIBUTE_EXTENDED_LBA != 0;
+        if !acre && !lbafee {
+            return Ok(None);
+        }
+        let page = &mut self.bounce.bytes_mut()[..HOST_BEHAVIOR_BYTES];
+        page.fill(0);
+        page[HOST_BEHAVIOR_ACRE] = u8::from(acre);
+        page[HOST_BEHAVIOR_LBAFEE] = u8::from(lbafee);
+        let data = self.bounce.address()?;
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_SET_FEATURES);
+        command[6] = data as u32;
+        command[7] = (data >> 32) as u32;
+        command[10] = FEATURE_HOST_BEHAVIOR;
+        Ok(Some(command))
     }
 
     /// Linux `nvme_identify_ns_descs`: none before NVMe 1.3. `None` when the
@@ -769,6 +827,7 @@ pub fn attach(
         ready_timeout_us: 500_000,
         version: 0,
         resets: 0,
+        retry_delays: [0; 3],
     };
     controller.initialize()?;
     discover(controller, format!("{}", function.address))
@@ -798,6 +857,13 @@ fn discover(
         controller.max_transfer = controller.max_transfer.min(limit.saturating_mul(PAGE));
     }
     controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
+    // A refused Host Behavior Support is ignored, as in Linux.
+    if let Some(command) = controller.host_options()? {
+        match controller.execute(false, command) {
+            Ok(_) | Err(BlockError::Device { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
 
     for command in controller.create_queue_commands()? {
         controller.io.submissions.publish();
@@ -1086,6 +1152,7 @@ mod tests {
                 ready_timeout_us: 500_000,
                 version: 0,
                 resets: 0,
+                retry_delays: [0; 3],
             };
             Self {
                 _registers: registers,

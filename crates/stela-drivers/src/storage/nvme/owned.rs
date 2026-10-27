@@ -444,6 +444,7 @@ unsafe fn attach_with_timeout(
         ready_timeout_us: 500_000,
         version: 0,
         resets: 0,
+        retry_delays: [0; 3],
     };
     validate_clock(clock)?;
     controller.teardown = Teardown::Unprepared;
@@ -701,6 +702,9 @@ mod tests {
         /// Namespace 1's size and capacity, and its EUI64.
         blocks: u64,
         eui64: [u8; 8],
+        /// CRDT1–3, and the Host Behavior Support pages set.
+        retry_delays: [u16; 3],
+        host_behavior: Vec<[u8; 3]>,
         prepared: bool,
         bme: bool,
         enabled: bool,
@@ -761,6 +765,8 @@ mod tests {
                 disk: vec![0; 1024 * 512],
                 blocks: 1024,
                 eui64: [0x11; 8],
+                retry_delays: [0; 3],
+                host_behavior: Vec::new(),
                 prepared: false,
                 bme: false,
                 enabled: false,
@@ -928,6 +934,9 @@ mod tests {
                             data[4..24].fill(b'S');
                             data[24..64].fill(b'M');
                             data[516..520].copy_from_slice(&1u32.to_le_bytes());
+                            for (index, delay) in self.retry_delays.iter().enumerate() {
+                                data[128 + 2 * index..][..2].copy_from_slice(&delay.to_le_bytes());
+                            }
                         }
                         2 => data[..4].copy_from_slice(&1u32.to_le_bytes()),
                         0 => {
@@ -940,6 +949,12 @@ mod tests {
                         _ => panic!("unsupported model CNS"),
                     }
                     self.write_iova(u64::from(command[6]) | u64::from(command[7]) << 32, &data);
+                }
+                (0, 9) => {
+                    assert_eq!(command[10], 0x16);
+                    let page =
+                        self.read_iova(u64::from(command[6]) | u64::from(command[7]) << 32, 512);
+                    self.host_behavior.push([page[0], page[1], page[2]]);
                 }
                 (0, 5) => {
                     assert_eq!(
@@ -1478,6 +1493,35 @@ mod tests {
         disk.retire_owned().unwrap();
         assert!(f.model.lock().unwrap().released);
     }
+    #[test]
+    fn retry_delays_enable_acre_and_delay_retries_like_linux() {
+        let _clock = crate::test_clock::virtualize();
+        let f = Fixture::new();
+        // No delay reported: Host Behavior Support is left alone.
+        drop(f.attach().unwrap());
+        assert!(f.model.lock().unwrap().host_behavior.is_empty());
+        let f = Fixture::new();
+        f.model.lock().unwrap().retry_delays = [2, 0, 7];
+        let mut a = f.attach().unwrap();
+        let disk = &mut a.namespaces[0];
+        assert_eq!(f.model.lock().unwrap().host_behavior, [[1, 0, 0]]);
+        // CRD 1 waits CRDT1 (200 ms) before the retry; CRD 3 waits 700 ms.
+        for (crd, delay) in [(1u32, 200_000u64), (3, 700_000)] {
+            f.model.lock().unwrap().statuses.push_back(2 | crd << 11);
+            let start = Clock::ticks();
+            disk.flush().unwrap();
+            assert!(Clock::ticks() - start >= delay * 1000);
+        }
+        // Each reset sets it again.
+        let mut m = f.model.lock().unwrap();
+        m.delay_io = 1;
+        m.abortable = false;
+        drop(m);
+        disk.flush().unwrap();
+        assert_eq!(f.model.lock().unwrap().host_behavior.len(), 2);
+        disk.retire_owned().unwrap();
+    }
+
     #[test]
     fn a_reset_rescans_namespaces_like_nvme_scan_ns() {
         let f = Fixture::new();
