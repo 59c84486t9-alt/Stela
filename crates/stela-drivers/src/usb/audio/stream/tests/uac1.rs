@@ -348,48 +348,32 @@ fn uac1_fixed_frequency_has_no_endpoint_request_and_standard_explicit_feedback_r
 
 #[test]
 fn uac1_pitch_controls_and_shared_collection_aliases_are_checked() {
-    struct Pitch {
-        state: bool,
-        writes: usize,
-        wrong: bool,
-    }
+    struct Pitch(Vec<[u8; 8]>);
     impl Control for Pitch {
         fn now_us(&self) -> u64 {
             0
         }
         fn relax(&mut self) {}
         fn control(&mut self, r: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
-            assert_eq!(&r[2..], &[0, 2, 1, 0, 1, 0]);
-            match (r[0], r[1]) {
-                (0x22, 1) => {
-                    assert_eq!(out, [1]);
-                    self.state = true;
-                    self.writes += 1;
-                    Ok(Vec::new())
-                }
-                (0xa2, 0x81) => Ok(vec![u8::from(self.state && !self.wrong)]),
-                _ => panic!("unexpected endpoint pitch request"),
-            }
+            assert_eq!(out, [1]);
+            self.0.push(r);
+            Ok(Vec::new())
         }
     }
-    let rates = EndpointRates {
-        ranges: vec![RateRange {
-            min: 48000,
-            max: 48000,
-            resolution: 0,
-        }],
-        frequency_control: false,
-        pitch_control: true,
-    };
-    let mut io = Pitch {
-        state: false,
-        writes: 0,
-        wrong: false,
-    };
-    rates.apply(&mut io, 1, 48000).unwrap();
-    assert_eq!(io.writes, 1);
-    io.wrong = true;
-    assert_eq!(rates.apply(&mut io, 1, 48000), Err(Error::ControlReadback));
+    // init_pitch_v1 addresses the data endpoint and reads nothing back.
+    let mut c = configuration();
+    let at = c.windows(4).position(|w| w == [7, 0x25, 1, 1]).unwrap();
+    c[at + 3] = 3;
+    let binding = parse(&c).unwrap();
+    let format = binding
+        .formats
+        .iter()
+        .find(|f| f.data.address == 1)
+        .unwrap();
+    assert_eq!(format.pitch, Some((0x0200, 1)));
+    let mut io = Pitch(Vec::new());
+    format.init_pitch(&mut io).unwrap();
+    assert_eq!(io.0, [[0x22, 1, 0, 2, 1, 0, 1, 0]]);
     let c = configuration();
     let mut all = interfaces(&c);
     let mut sibling = all[0].clone();

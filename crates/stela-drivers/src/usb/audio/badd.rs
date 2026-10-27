@@ -150,6 +150,7 @@ fn format(i: &Interface, speed: u8) -> Result<Format, Error> {
         service_microframes: interval,
         max_bytes,
         fill_max: false,
+        pitch: None,
     })
 }
 fn channel_mask(channels: u8) -> u32 {

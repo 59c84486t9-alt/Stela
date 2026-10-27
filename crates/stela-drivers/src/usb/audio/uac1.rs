@@ -22,7 +22,6 @@ const SET_CUR: u8 = 1;
 pub struct EndpointRates {
     pub ranges: Vec<RateRange>,
     pub frequency_control: bool,
-    pub pitch_control: bool,
 }
 impl EndpointRates {
     pub(super) fn validate_rate(&self, rate: u32) -> Result<(), Error> {
@@ -47,9 +46,6 @@ impl EndpointRates {
         rate: u32,
     ) -> Result<(), Error> {
         self.validate_rate(rate)?;
-        if self.pitch_control {
-            endpoint_control(io, endpoint, PITCH, &[1])?;
-        }
         if self.frequency_control {
             endpoint_control(io, endpoint, SAMPLE_RATE, &rate.to_le_bytes()[..3])?;
         }
@@ -384,7 +380,6 @@ fn format(
         endpoint_rates: Some(EndpointRates {
             ranges,
             frequency_control: controls[3] & 1 != 0,
-            pitch_control: controls[3] & 2 != 0,
         }),
         interface: interface.number,
         alternate: interface.alternate,
@@ -400,6 +395,7 @@ fn format(
         service_microframes,
         max_bytes,
         fill_max: controls[3] & 0x80 != 0,
+        pitch: (controls[3] & 2 != 0).then_some((PITCH, u16::from(data.address))),
     })
 }
 

@@ -150,6 +150,7 @@ mod tests {
             service_microframes: 1,
             max_bytes: 1024,
             fill_max: false,
+            pitch: None,
         }
     }
     #[test]

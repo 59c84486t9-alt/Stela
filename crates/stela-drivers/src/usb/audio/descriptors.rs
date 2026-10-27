@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! UAC2 descriptor layouts from Linux include/linux/usb/audio-v2.h and
 //! sound/usb/format.c. All IDs and relationships come from runtime descriptors.
-use super::{CLASS, CONTROL_SUBCLASS, Error, STREAMING_SUBCLASS, UAC2};
+use super::{CLASS, CONTROL_SUBCLASS, Control, Error, STREAMING_SUBCLASS, UAC2};
 use crate::bytes::{le16, le32};
 use crate::{
     audio::Direction,
     usb::xhci::{
         ENDPOINT_DESCRIPTOR, Endpoint, FULL_SPEED, HIGH_SPEED, INTERFACE_ASSOCIATION_DESCRIPTOR,
-        INTERFACE_DESCRIPTOR, Interface,
+        INTERFACE_DESCRIPTOR, Interface, setup,
     },
 };
 use alloc::vec::Vec;
@@ -222,8 +222,23 @@ pub struct Format {
     pub service_microframes: u32,
     pub max_bytes: usize,
     pub fill_max: bool,
+    /// wValue and wIndex of the SET_CUR that enables endpoint pitch control.
+    pub pitch: Option<(u16, u16)>,
 }
 impl Format {
+    /// Linux `snd_usb_init_pitch`, after the sample rate: `init_pitch_v1`
+    /// addresses the data endpoint, `init_pitch_v2` sends index 0 and UAC3
+    /// sends nothing. Nothing is read back.
+    pub(super) fn init_pitch<C: Control>(&self, io: &mut C) -> Result<(), Error> {
+        if let Some((value, index)) = self.pitch
+            && !io
+                .control(setup(0x22, 1, value, index, 1), &[1])?
+                .is_empty()
+        {
+            return Err(Error::ControlLength);
+        }
+        Ok(())
+    }
     pub(super) fn endpoints(&self) -> Vec<Endpoint> {
         let mut endpoints = vec![self.data];
         if let Sync::Explicit(feedback) = self.sync {
@@ -624,6 +639,8 @@ fn format(
         return Err(Error::Descriptor("UAC2 class-specific data endpoint"));
     }
     let fill_max = endpoint[0][3] & 0x80 != 0;
+    // UAC2_CONTROL_PITCH in bmControls; UAC2_EP_CS_PITCH.
+    let pitch = (endpoint[0][4] & 3 != 0).then_some((1 << 8, 0));
     Ok(Format {
         cluster_id: None,
         power_domain: None,
@@ -642,6 +659,7 @@ fn format(
         service_microframes: interval,
         max_bytes,
         fill_max,
+        pitch,
     })
 }
 

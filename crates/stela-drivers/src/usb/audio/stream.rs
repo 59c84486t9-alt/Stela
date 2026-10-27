@@ -441,6 +441,7 @@ impl<T: Transport> AudioDevice<T> {
             if let Some(rates) = &format.endpoint_rates {
                 rates.apply(&mut self.transport, format.data.address, rate)?;
             }
+            format.init_pitch(&mut self.transport)?;
             self.transport.configure(Direction::Playback, &endpoints)?;
             self.queue_inputs()?;
             self.queue_output()?;
@@ -545,6 +546,7 @@ impl<T: Transport> AudioDevice<T> {
         if let Some(rates) = &format.endpoint_rates {
             rates.apply(&mut self.transport, format.data.address, rate)?;
         }
+        format.init_pitch(&mut self.transport)?;
         self.transport
             .configure(Direction::Capture, &self.input.endpoints())?;
         self.queue_inputs()
@@ -1101,6 +1103,7 @@ pub(crate) mod tests {
         output: Vec<u8>,
         submitted: Vec<(u8, usize)>,
         alternates: Vec<(u8, u8)>,
+        pitches: Vec<[u8; 8]>,
         cancel_fail: bool,
         packet_fault: Option<PacketStatus>,
         transport_fault: bool,
@@ -1132,6 +1135,11 @@ pub(crate) mod tests {
             let len = u16::from_le_bytes([r[6], r[7]]) as usize;
             if r[0] == 1 && r[1] == 11 {
                 self.alternates.push((r[4], r[2]));
+                return Ok(Vec::new());
+            }
+            if r[0] == 0x22 {
+                assert_eq!(out, [1]);
+                self.pitches.push(r);
                 return Ok(Vec::new());
             }
             assert_eq!(r[4], 0);
@@ -1699,6 +1707,21 @@ pub(crate) mod tests {
                 "audio alternate aliases a foreign interface endpoint"
             ))
         );
+    }
+
+    #[test]
+    fn pitch_control_is_enabled_after_the_rate_like_snd_usb_init_pitch() {
+        let mut c = configuration();
+        let at = c.windows(3).position(|w| w == [8, 0x25, 1]).unwrap();
+        c[at + 4] = 1;
+        let all = interfaces(&c);
+        let binding = Binding::parse(&all[0], &all, &c, 3).unwrap();
+        assert_eq!(binding.formats[0].pitch, Some((0x0100, 0)));
+        run(|a| {
+            a.binding.formats[0].pitch = Some((0x0100, 0));
+            a.start_playback(0, 48000, &[0; 192], true).unwrap();
+            assert_eq!(a.transport.pitches, [[0x22, 1, 0, 1, 0, 0, 1, 0]]);
+        });
     }
 
     #[test]
