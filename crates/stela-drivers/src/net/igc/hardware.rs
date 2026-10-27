@@ -42,12 +42,20 @@ const RXPBS: usize = 0x2404;
 const TXPBS: usize = 0x3404;
 const RLPML: usize = 0x5004;
 const RXCSUM: usize = 0x5000;
+const RFCTL: usize = 0x5008;
 const MTA: usize = 0x5200;
 const RAL: usize = 0x5400;
 const MANC: usize = 0x5820;
 const SWSM: usize = 0x5b50;
 const SW_FW_SYNC: usize = 0x5b5c;
 const EERD: usize = 0x12014;
+/// Queue `index`'s receive descriptor control.
+const fn rxdctl(index: usize) -> usize {
+    0xc028 + index * 0x40
+}
+const MPC: usize = 0x4010;
+const RNBC: usize = 0x40a0;
+const ROC: usize = 0x40ac;
 
 const MASTER_DISABLE: u32 = 1 << 2;
 const MASTER_ENABLED: u32 = 1 << 19;
@@ -70,6 +78,71 @@ const PHY_ADVERTISEMENT: u16 = 4;
 const PHY_GIGABIT: u16 = 9;
 const MMD_AN: u16 = 7;
 const MMD_MULTIGIG: u16 = 32;
+const MANC_RCV_TCO_EN: u32 = 1 << 17;
+const RFCTL_IPV6_EX_DIS: u32 = 1 << 16;
+const RFCTL_LEF: u32 = 1 << 18;
+const RCTL_EN: u32 = 1 << 1;
+const RCTL_SBP: u32 = 1 << 2;
+const RCTL_LPE: u32 = 1 << 5;
+const RXDCTL_ENABLE: u32 = 1 << 25;
+
+/// Linux igc_rx_fifo_flush_base, after the receive queues are programmed and
+/// before any receive buffer is offered: the IPv6 extension-header erratum,
+/// then, when manageability receives TCO traffic, a 2 ms flush of the packets
+/// that arrived while receive was enabling. A queue that does not report
+/// itself disabled within 10 ms is logged-and-continued in Linux; with no
+/// buffer offered yet nothing can be written, so the flush proceeds too.
+pub(super) fn flush_receive_fifo<R: Registers, T: Timer>(
+    registers: &R,
+    timer: &T,
+) -> Result<(), BlockError> {
+    let read = |register| match registers.read(register) {
+        u32::MAX => Err(BlockError::Device { status: u32::MAX }),
+        value => Ok(value),
+    };
+    let rfctl = read(RFCTL)? | RFCTL_IPV6_EX_DIS;
+    registers.write(RFCTL, rfctl);
+    if read(MANC)? & MANC_RCV_TCO_EN == 0 {
+        return Ok(());
+    }
+    let mut queues = [0; 4];
+    for (index, control) in queues.iter_mut().enumerate() {
+        *control = read(rxdctl(index))?;
+        registers.write(rxdctl(index), *control & !RXDCTL_ENABLE);
+    }
+    for _ in 0..10 {
+        timer.delay(1_000);
+        let mut enabled = 0;
+        for index in 0..queues.len() {
+            enabled |= read(rxdctl(index))?;
+        }
+        if enabled & RXDCTL_ENABLE == 0 {
+            break;
+        }
+    }
+    // Reject every incoming packet while receive is briefly enabled.
+    registers.write(RFCTL, rfctl & !RFCTL_LEF);
+    let rlpml = read(RLPML)?;
+    registers.write(RLPML, 0);
+    let rctl = read(RCTL)?;
+    let rejecting = rctl & !(RCTL_EN | RCTL_SBP) | RCTL_LPE;
+    registers.write(RCTL, rejecting);
+    registers.write(RCTL, rejecting | RCTL_EN);
+    read(STATUS)?;
+    timer.delay(2_000);
+    for (index, control) in queues.into_iter().enumerate() {
+        registers.write(rxdctl(index), control);
+    }
+    registers.write(RCTL, rctl);
+    read(STATUS)?;
+    registers.write(RLPML, rlpml);
+    registers.write(RFCTL, rfctl);
+    // The receive errors the flush itself generated.
+    for counter in [ROC, RNBC, MPC] {
+        registers.read(counter);
+    }
+    Ok(())
+}
 
 pub(super) struct Hardware<'a, R: Registers, T: Timer> {
     registers: &'a R,
@@ -684,6 +757,57 @@ mod tests {
             let model = Model::ready(false);
             model.state.borrow_mut().phy.insert(2, upper);
             assert!(Hardware::new(&model, &model).unwrap().initialize().is_err());
+        }
+    }
+
+    #[test]
+    fn receive_fifo_flush_applies_the_ipv6_erratum_and_flushes_only_for_manageability() {
+        let model = Model::ready(false);
+        model.state.borrow_mut().registers.insert(RFCTL, 1 << 3);
+        flush_receive_fifo(&model, &model).unwrap();
+        let state = model.state.borrow();
+        assert_eq!(state.writes, [(RFCTL, 1 << 3 | RFCTL_IPV6_EX_DIS)]);
+        drop(state);
+
+        let model = Model::ready(false);
+        {
+            let mut state = model.state.borrow_mut();
+            state.registers.extend([
+                (MANC, MANC_RCV_TCO_EN),
+                (RFCTL, RFCTL_LEF),
+                (RLPML, 1518),
+                (RCTL, RCTL_SBP | 1 << 15),
+                (rxdctl(0), RXDCTL_ENABLE | 0x0808),
+                (rxdctl(2), RXDCTL_ENABLE),
+            ]);
+        }
+        flush_receive_fifo(&model, &model).unwrap();
+        let state = model.state.borrow();
+        let rejecting = 1 << 15 | RCTL_LPE;
+        let position = |entry| state.writes.iter().position(|&w| w == entry).unwrap();
+        // Queues stop before receive briefly enables with every packet rejected.
+        assert!(position((rxdctl(0), 0x0808)) < position((RCTL, rejecting)));
+        assert!(position((RCTL, rejecting)) < position((RCTL, rejecting | RCTL_EN)));
+        assert!(position((RLPML, 0)) < position((RCTL, rejecting | RCTL_EN)));
+        assert!(position((RFCTL, RFCTL_IPV6_EX_DIS)) < position((RCTL, rejecting | RCTL_EN)));
+        // Then every original setting returns, with the erratum retained.
+        assert_eq!(state.registers[&rxdctl(0)], RXDCTL_ENABLE | 0x0808);
+        assert_eq!(state.registers[&rxdctl(2)], RXDCTL_ENABLE);
+        assert_eq!(state.registers[&RCTL], RCTL_SBP | 1 << 15);
+        assert_eq!(state.registers[&RLPML], 1518);
+        assert_eq!(state.registers[&RFCTL], RFCTL_LEF | RFCTL_IPV6_EX_DIS);
+        assert!(model.elapsed.get() >= 3_000);
+        drop(state);
+
+        for failure in 1..=4 {
+            let model = Model::ready(false);
+            model
+                .state
+                .borrow_mut()
+                .registers
+                .insert(MANC, MANC_RCV_TCO_EN);
+            model.fail_read.set(Some(failure));
+            assert!(flush_receive_fifo(&model, &model).is_err());
         }
     }
 

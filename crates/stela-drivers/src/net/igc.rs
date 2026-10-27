@@ -202,6 +202,7 @@ impl Igc {
                 "Intel I225/I226 receive queue did not enable",
             ));
         }
+        hardware::flush_receive_fifo(&self.device, &self.clock)?;
         for index in 0..DESCRIPTORS {
             advanced::offer_receive(&mut self.receive, index);
         }
