@@ -149,6 +149,38 @@ fn trapped(controller: &Shared, operation: impl FnOnce()) {
 }
 
 #[test]
+fn a_dead_host_controller_disconnects_every_device_like_usb_hc_died() {
+    let mut memory = vec![0u64; 512 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    // SAFETY: all hardware DMA allocations remain live through the host.
+    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let (mut host, shared) = fixture(&mut dma, HIGH_SPEED);
+    let firmware = crate::firmware::HandoffProvider::new(None);
+    assert!(host.poll(&mut dma, &firmware).removed.is_empty());
+    let devices: Vec<_> = host.devices.iter().map(|d| (d.id, d.slot)).collect();
+    assert_eq!(devices.len(), 3);
+    shared.borrow_mut().died();
+    let changes = host.poll(&mut dma, &firmware);
+    let removed: Vec<_> = changes.removed.iter().map(|d| (d.id, d.slot)).collect();
+    assert_eq!(removed, devices);
+    assert!(changes.added.devices.is_empty());
+    assert!(
+        host.hubs
+            .iter()
+            .all(|hub| hub.retired && hub.recovery.is_none())
+    );
+    // Every slot is fenced and quarantined, as no Disable Slot can run.
+    for (_, slot) in &devices {
+        let c = shared.borrow();
+        let state = c.slots[usize::from(*slot)].as_ref().unwrap();
+        assert!(state.suspended && state.retiring);
+    }
+    // Nothing is reported twice.
+    let changes = host.poll(&mut dma, &firmware);
+    assert!(changes.removed.is_empty() && changes.added.devices.is_empty());
+}
+
+#[test]
 fn retained_hub_parent_and_retirement_authority_refuse_same_number_generation_before_effects() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let mut old_memory = vec![0u64; 512 * 1024];

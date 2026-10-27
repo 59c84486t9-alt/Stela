@@ -186,6 +186,10 @@ impl Host {
         firmware: &dyn crate::firmware::Provider,
     ) -> Changes {
         let mut changes = Changes::default();
+        if matches!(self.controller.borrow().hardware, hardware::State::Died) {
+            self.hc_died(&mut changes);
+            return changes;
+        }
         if !self.sleep.awake() {
             return changes;
         }
@@ -581,6 +585,24 @@ impl Host {
             &mut changes.added.failures,
         );
         Ok(())
+    }
+
+    /// Linux usb_hc_died: every device below a dead host controller is
+    /// disconnected, suspended ones included. No command can disable their
+    /// slots, so each stays quarantined with every original allocation.
+    fn hc_died(&mut self, changes: &mut Changes) {
+        let mut c = self.controller.borrow_mut();
+        for slot in 1..c.slots.len() {
+            if let Some(state) = c.slots[slot].as_mut() {
+                state.suspended = true;
+            }
+            c.quarantine_slot_owned(slot as u8);
+        }
+        for hub in &mut self.hubs {
+            hub.retired = true;
+            hub.recovery = None;
+        }
+        changes.removed.append(&mut self.devices);
     }
 
     fn retire(&mut self, ancestor: SlotId, changes: &mut Changes) -> Result<(), BlockError> {
