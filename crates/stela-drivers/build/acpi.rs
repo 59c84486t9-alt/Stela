@@ -10,8 +10,41 @@ use std::{
 const ACPICA: &str = "../../third_party/linux/drivers/acpi/acpica";
 const HEADERS: &str = "../../third_party/linux/include/acpi";
 
+/// Make `source` visible at `link`: a symbolic link on Unix hosts, a copy
+/// elsewhere, since Windows links need privileges a build cannot assume.
+fn expose(source: &Path, link: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = fs::remove_file(link);
+        std::os::unix::fs::symlink(fs::canonicalize(source).unwrap(), link)
+            .expect("link ACPICA's headers");
+    }
+    #[cfg(not(unix))]
+    {
+        fn copy(from: &Path, to: &Path) {
+            fs::create_dir_all(to).expect("create ACPICA's header copy");
+            for entry in fs::read_dir(from).expect("read ACPICA's headers") {
+                let entry = entry.unwrap();
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy(&entry.path(), &target);
+                } else {
+                    fs::copy(entry.path(), target).expect("copy an ACPICA header");
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(link);
+        copy(source, link);
+    }
+}
+
 fn run(command: &mut Command) {
-    let status = command.status().expect("execute ACPICA tool");
+    let status = command.status().unwrap_or_else(|error| {
+        panic!(
+            "cannot run {:?} for ACPICA ({error}); install clang or set CC and AR",
+            command.get_program()
+        )
+    });
     assert!(status.success(), "ACPICA tool failed: {command:?}");
 }
 
@@ -48,10 +81,7 @@ pub fn build() {
     // alone, so no other Linux header can stand in for a C library one.
     let headers = out.join("acpica-include");
     fs::create_dir_all(&headers).unwrap();
-    let link = headers.join("acpi");
-    let _ = fs::remove_file(&link);
-    std::os::unix::fs::symlink(fs::canonicalize(HEADERS).unwrap(), &link)
-        .expect("link ACPICA's headers");
+    expose(Path::new(HEADERS), &headers.join("acpi"));
     let compiler = env::var_os("CC").unwrap_or_else(|| "clang".into());
     let archiver = env::var_os("AR").unwrap_or_else(|| {
         let output = Command::new(env::var_os("RUSTC").unwrap())
