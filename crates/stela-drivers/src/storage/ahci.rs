@@ -1111,12 +1111,8 @@ impl AhciDisk {
         let buffer = disk.bounce.physical();
         disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)?;
         let found = identify(disk.bounce.bytes())?;
-        // ata_dev_config_sense_reporting only logs a refusal. The kept
-        // IDENTIFY data says it is enabled only once revalidation rereads it.
         disk.sense_reporting = found.sense_reporting.1;
-        if found.sense_reporting == (true, false) {
-            let _ = disk.internal(&port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer);
-        }
+        disk.configure(&port, &found);
         disk.flush = found.flush;
         disk.identity.serial = found.serial;
         disk.identity.model = found.model;
@@ -1599,7 +1595,19 @@ impl AhciDisk {
         self.transfer = found.transfer;
         self.locked = found.locked;
         (self.lpm.hipm, self.lpm.dipm) = (found.hipm, found.dipm);
+        self.configure(port, &found);
         Ok(())
+    }
+
+    /// What Linux `ata_dev_configure`, which `ata_dev_revalidate` reruns,
+    /// asks of the disk: Sense Data Reporting, which a hard reset turns off
+    /// again (`ata_dev_config_sense_reporting` only logs a refusal). The kept
+    /// IDENTIFY data says it is enabled only once a revalidation rereads it.
+    fn configure(&mut self, port: &impl CommandPort, found: &Identified) {
+        if found.sense_reporting == (true, false) {
+            let buffer = self.bounce.physical();
+            let _ = self.internal(port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer);
+        }
     }
 
     /// `ata_eh_recover`'s config_lpm: move to the target policy. A failure
@@ -2632,6 +2640,27 @@ mod tests {
             complete_with(0x50, 0x00, false),
             (Err(BlockError::Device { status: 0x51 }), 1)
         );
+    }
+
+    #[test]
+    fn revalidation_reenables_sense_reporting_like_ata_dev_configure() {
+        // A disk whose reset left Sense Data Reporting supported but off.
+        let mut page = identify_page("S1", 1024);
+        for (word, value) in [(86u16, 1u16 << 15), (119, 0x4040), (120, 0x4000)] {
+            let at = 2 * usize::from(word);
+            page[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let issued = |page| {
+            let (mut fixture, _clock) = recovering(page);
+            let link = Link::new(&[Fault::Timeout]);
+            fixture
+                .disk
+                .issue_on(&link, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false)
+                .unwrap();
+            link.issued.get()
+        };
+        // Each of the two revalidations turns it back on.
+        assert_eq!(issued(page), issued(identify_page("S1", 1024)) + 2);
     }
 
     #[test]
