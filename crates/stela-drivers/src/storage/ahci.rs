@@ -37,6 +37,8 @@ const CAPABILITIES_2: usize = 0x24;
 const HANDOFF: usize = 0x28;
 
 const CAP_64BIT: u32 = 1 << 31;
+/// CAP.SNCQ: Linux sets `ATA_FLAG_NCQ` and `ATA_FLAG_FPDMA_AA` from it.
+const CAP_NCQ: u32 = 1 << 30;
 const CAP_STAGGERED_SPIN_UP: u32 = 1 << 27;
 /// CAP.SALP, SSC, PSC and SXS; CAP2.SDS.
 const CAP_AGGRESSIVE_LPM: u32 = 1 << 26;
@@ -62,6 +64,7 @@ const PORT_SIGNATURE: usize = 0x24;
 const PORT_SATA_STATUS: usize = 0x28;
 const PORT_SATA_CONTROL: usize = 0x2c;
 const PORT_SATA_ERROR: usize = 0x30;
+const PORT_SATA_ACTIVE: usize = 0x34;
 const PORT_ISSUE: usize = 0x38;
 
 /// Intel Port Control and Status: one enable bit per port (Linux `PCS_6`).
@@ -212,7 +215,10 @@ const IDENTIFY_SECURITY: usize = 128;
 const IDENTIFY_SATA_CAPABILITY: usize = 76;
 const IDENTIFY_SATA_FEATURES: usize = 78;
 const SATA_CAPABILITY_HIPM: u16 = 1 << 9;
+const SATA_CAPABILITY_NCQ: u16 = 1 << 8;
 const SATA_FEATURE_DIPM: u16 = 1 << 3;
+const SATA_FEATURE_FPDMA_AA: u16 = 1 << 2;
+const SATA_FEATURE_NCQ_AUTOSENSE: u16 = 1 << 7;
 const SECURITY_LOCKED: u16 = 0x7;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
@@ -231,6 +237,8 @@ const ENABLED_2_WORDS_119_120: u16 = 1 << 15;
 const IDENTIFY_COMMANDS_3: usize = 119;
 const IDENTIFY_ENABLED_3: usize = 120;
 const SENSE_DATA_REPORTING: u16 = 1 << 6;
+/// Word 119: READ LOG DMA EXT.
+const COMMANDS_3_READ_LOG_DMA: u16 = 1 << 3;
 const IDENTIFY_LBA48_SECTORS: core::ops::Range<usize> = 100..104;
 const IDENTIFY_SECTOR_SIZE: usize = 106;
 const SECTOR_SIZE_VALID_MASK: u16 = 0xc000;
@@ -245,12 +253,16 @@ const COMMAND_LIST_BYTES: usize = 1024;
 const RECEIVED_FIS_BYTES: usize = 256;
 /// The received D2H Register FIS, set to BSY before a hardreset.
 const RECEIVED_D2H: usize = COMMAND_LIST_BYTES + 0x40;
+/// The Set Device Bits FIS a queued command completes with.
+const RECEIVED_SDB: usize = COMMAND_LIST_BYTES + 0x58;
 const FIS_BYTES: usize = 20;
 const COMMAND_TABLE_BYTES: usize = 4096;
 const COMMAND_TABLE_ALIGN: usize = 128;
 /// Revalidation IDENTIFY data, in the command table past its one PRDT entry,
 /// so a failed write's data stays in the bounce buffer for its retry.
 const IDENTIFY_DATA: usize = 0x200;
+/// Where log pages are read, past the IDENTIFY data.
+const LOG_DATA: usize = 0x400;
 
 /// Command header DW0: FIS length in dwords, direction, PRDT entries.
 const COMMAND_FIS_DWORDS: u32 = 5;
@@ -259,6 +271,15 @@ const COMMAND_PRDT_SHIFT: u32 = 16;
 
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
+const ATA_READ_FPDMA_QUEUED: u8 = 0x60;
+const ATA_WRITE_FPDMA_QUEUED: u8 = 0x61;
+const ATA_READ_LOG_EXT: u8 = 0x2f;
+const ATA_READ_LOG_DMA_EXT: u8 = 0x47;
+/// The NCQ Command Error log (`ATA_LOG_SATA_NCQ`): byte 0 holds NQ, set
+/// when no queued command failed, and the failed command's tag.
+const LOG_SATA_NCQ: u8 = 0x10;
+const LOG_NCQ_NQ: u8 = 0x80;
+const LOG_NCQ_TAG: u8 = 0x1f;
 const ATA_FLUSH_CACHE: u8 = 0xe7;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
 const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
@@ -282,6 +303,8 @@ const FEATURE_SENSE_DATA: u8 = 0xc3;
 const FEATURE_SATA_ENABLE: u8 = 0x10;
 const FEATURE_SATA_DISABLE: u8 = 0x90;
 const SATA_DIPM: u16 = 0x03;
+/// First-party DMA auto-activation.
+const SATA_FPDMA_AA: u16 = 0x02;
 /// Linux's `ATA_LPM_*` policies this driver uses: unknown before the first
 /// configuration, maximum power, and CONFIG_SATA_MOBILE_LPM_POLICY's default.
 const LPM_UNKNOWN: u8 = 0;
@@ -385,6 +408,34 @@ pub struct AhciDisk {
     /// `ata_id_is_locked` for the last IDENTIFY data read.
     locked: bool,
     lpm: Lpm,
+    ncq: Ncq,
+    /// `ata_id_has_read_log_dma_ext` for the last IDENTIFY data, and
+    /// `ATA_QUIRK_NO_DMA_LOG`, set for good when READ LOG DMA EXT fails.
+    log_dma: bool,
+    no_dma_log: bool,
+}
+
+/// NCQ as Linux `ata_dev_config_ncq` configures it. The block interface
+/// submits one command at a time, so tag 0 is the only one in use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Ncq {
+    /// CAP.SNCQ.
+    host: bool,
+    /// `ATA_DFLAG_NCQ`: the host and the last IDENTIFY data support it.
+    device: bool,
+    /// `ATA_DFLAG_NCQ_OFF`: a speed-down turned it off for good.
+    off: bool,
+    /// `ata_id_has_ncq_autosense`.
+    autosense: bool,
+    /// `ATA_QUIRK_BROKEN_FPDMA_AA`: enabling auto-activation failed.
+    aa_broken: bool,
+}
+
+impl Ncq {
+    /// `ata_ncq_enabled`.
+    fn enabled(&self) -> bool {
+        self.device && !self.off
+    }
 }
 
 /// Linux link power management for one port.
@@ -553,6 +604,12 @@ struct Identified {
     /// `ata_id_has_hipm` and `ata_id_has_dipm`.
     hipm: bool,
     dipm: bool,
+    /// `ata_id_has_ncq`, `ata_id_has_fpdma_aa`, `ata_id_has_ncq_autosense`
+    /// and `ata_id_has_read_log_dma_ext`.
+    ncq: bool,
+    fpdma_aa: bool,
+    ncq_autosense: bool,
+    read_log_dma: bool,
 }
 
 /// What `ata_id_xfermask`, `ata_id_has_iordy` and `ata_id_is_cfa` read.
@@ -659,6 +716,11 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
         locked: word(IDENTIFY_SECURITY) & SECURITY_LOCKED == SECURITY_LOCKED,
         hipm: sata_valid && word(IDENTIFY_SATA_CAPABILITY) & SATA_CAPABILITY_HIPM != 0,
         dipm: sata_valid && word(IDENTIFY_SATA_FEATURES) & SATA_FEATURE_DIPM != 0,
+        ncq: word(IDENTIFY_SATA_CAPABILITY) & SATA_CAPABILITY_NCQ != 0,
+        fpdma_aa: sata_valid && word(IDENTIFY_SATA_FEATURES) & SATA_FEATURE_FPDMA_AA != 0,
+        ncq_autosense: word(IDENTIFY_SATA_FEATURES) & SATA_FEATURE_NCQ_AUTOSENSE != 0,
+        read_log_dma: word(IDENTIFY_ENABLED_2) & ENABLED_2_WORDS_119_120 != 0
+            && word(IDENTIFY_COMMANDS_3) & COMMANDS_3_READ_LOG_DMA != 0,
     })
 }
 
@@ -678,8 +740,11 @@ struct Failure {
     sense_reported: bool,
     /// `ATA_QCFLAG_SENSE_VALID`: the sense data fetched for it.
     sense: Option<Sense>,
-    /// PxIS's error bits.
+    /// PxIS's error bits and SError.
     interrupts: u32,
+    serror: u32,
+    /// A queued command failed.
+    queued: bool,
     /// The result taskfile's status and error (`qc->result_tf`), captured
     /// from the FIS the command completed with.
     result: [u8; 2],
@@ -697,6 +762,8 @@ impl Failure {
             sense_reported: false,
             sense: None,
             interrupts: 0,
+            serror: 0,
+            queued: false,
             result: [0; 2],
         }
     }
@@ -840,8 +907,14 @@ fn classify(interrupts: u32, serror: u32, task_file: u32, timed_out: bool) -> Fa
         hotplug,
         sense_reported,
         interrupts,
+        serror,
         ..Failure::new(error)
     }
+}
+
+/// Linux `ata_scsi_sense_is_valid`.
+fn valid_sense(key: u8, asc: u8, ascq: u8) -> Option<Sense> {
+    (key <= SENSE_COMPLETED && (key, asc, ascq) != (0, 0, 0)).then_some(Sense { key, asc, ascq })
 }
 
 /// Linux `ata_eh_worth_retry`.
@@ -1136,6 +1209,12 @@ impl AhciDisk {
             step_downs: 0,
             locked: false,
             lpm,
+            ncq: Ncq {
+                host: capabilities & CAP_NCQ != 0,
+                ..Ncq::default()
+            },
+            log_dma: false,
+            no_dma_log: false,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
@@ -1143,18 +1222,22 @@ impl AhciDisk {
             .map_err(|failure| failure.error)?;
         let found = identify(disk.bounce.bytes())?;
         disk.sense_reporting = found.sense_reporting.1;
-        disk.configure(&port, &found);
         disk.flush = found.flush;
-        disk.identity.serial = found.serial;
-        disk.identity.model = found.model;
+        disk.identity.serial = found.serial.clone();
+        disk.identity.model = found.model.clone();
         disk.identity.blocks = found.blocks;
         disk.identity.block_size = found.block_size;
         disk.transfer = found.transfer;
         disk.locked = found.locked;
         (disk.lpm.hipm, disk.lpm.dipm) = (found.hipm, found.dipm);
-        disk.set_mode(&port)?;
-        // ata_eh_recover's config_lpm; a failure takes EH's next try.
-        if let Err(error) = disk.configure_lpm(&port, DEVICE_TRIES) {
+        // ata_dev_configure, then ATA_EHI_SETMODE and config_lpm; a failure
+        // takes EH's next try.
+        let mut configured = disk.configure(&port, &found);
+        if configured.is_ok() {
+            disk.set_mode(&port)?;
+            configured = disk.configure_lpm(&port, DEVICE_TRIES);
+        }
+        if let Err(error) = configured {
             disk.reconfigure(&port, true, false, error, DEVICE_TRIES - 1)?;
         }
         Ok(Some(disk))
@@ -1188,7 +1271,10 @@ impl AhciDisk {
     ) -> Result<(), BlockError> {
         self.ready()?;
         // Only reads and writes carry ATA_QCFLAG_IO.
-        let io = matches!(command, ATA_READ_DMA_EXT | ATA_WRITE_DMA_EXT);
+        let io = matches!(
+            command,
+            ATA_READ_DMA_EXT | ATA_WRITE_DMA_EXT | ATA_READ_FPDMA_QUEUED | ATA_WRITE_FPDMA_QUEUED
+        );
         let buffer = self.bounce.physical();
         // scsi_cmd_runtime_exceeced: sd requeues end (allowed + 1) timeouts
         // after the command was first prepared.
@@ -1196,6 +1282,7 @@ impl AhciDisk {
         let runtime_us = (u64::from(COMMAND_RETRIES) + 1) * self.command_timeout_us;
         let mut retries = 0;
         loop {
+            let command = self.rw_command(command);
             let Err(mut failure) = self.attempt(port, command, 0, lba, count, bytes, write, buffer)
             else {
                 // ata_verify_xfer: a completed DMA transfer verifies it.
@@ -1240,6 +1327,15 @@ impl AhciDisk {
         }
     }
 
+    /// `ata_build_rw_tf`: reads and writes are queued while NCQ is enabled.
+    fn rw_command(&self, command: u8) -> u8 {
+        match command {
+            ATA_READ_DMA_EXT if self.ncq.enabled() => ATA_READ_FPDMA_QUEUED,
+            ATA_WRITE_DMA_EXT if self.ncq.enabled() => ATA_WRITE_FPDMA_QUEUED,
+            _ => command,
+        }
+    }
+
     /// An internal command (`ata_exec_internal`): a failure kicks the engine
     /// so it forgets the command, and is returned as is.
     fn internal(
@@ -1276,11 +1372,19 @@ impl AhciDisk {
     ) -> Result<(), Failure> {
         let table = self.table.physical();
         self.table.bytes_mut()[..TABLE_HEADER_BYTES].fill(0);
+        // A queued command's sector count moves to the features registers;
+        // the count register carries its tag, 0, in bits 7:3.
+        let queued = matches!(command, ATA_READ_FPDMA_QUEUED | ATA_WRITE_FPDMA_QUEUED);
+        let (feature, count) = if queued {
+            (count, 0)
+        } else {
+            (u16::from(feature), count)
+        };
         let fis = [
             FIS_REGISTER_HOST_TO_DEVICE,
             FIS_COMMAND,
             command,
-            feature,
+            feature as u8,
             lba as u8,
             (lba >> 8) as u8,
             (lba >> 16) as u8,
@@ -1292,7 +1396,7 @@ impl AhciDisk {
             (lba >> 24) as u8,
             (lba >> 32) as u8,
             (lba >> 40) as u8,
-            0,
+            (feature >> 8) as u8,
             count as u8,
             (count >> 8) as u8,
         ];
@@ -1310,11 +1414,19 @@ impl AhciDisk {
         self.commands.write(8, table);
         fence(Ordering::SeqCst);
         port.write32(PORT_INTERRUPTS, u32::MAX);
+        // ahci_qc_issue: a queued command is active in PxSACT until the
+        // disk's Set Device Bits FIS clears it.
+        let active = if queued {
+            port.write32(PORT_SATA_ACTIVE, 1);
+            PORT_SATA_ACTIVE
+        } else {
+            PORT_ISSUE
+        };
         port.write32(PORT_ISSUE, 1);
         let mut interrupts = 0;
         let done = self.clock.wait(self.command_timeout_us, || {
             interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
-            interrupts != 0 || port.read32(PORT_ISSUE) & 1 == 0
+            interrupts != 0 || port.read32(active) & 1 == 0
         });
         fence(Ordering::SeqCst);
         if done && interrupts == 0 {
@@ -1325,15 +1437,18 @@ impl AhciDisk {
         port.write32(PORT_SATA_ERROR, serror);
         port.write32(PORT_INTERRUPTS, port.read32(PORT_INTERRUPTS));
         let mut failure = classify(interrupts, serror, port.read32(PORT_TASK_FILE), !done);
-        // ahci_qc_fill_rtf: the last D2H FIS, before error handling issues
-        // anything else.
-        let d2h = &self.commands.bytes()[RECEIVED_D2H..RECEIVED_D2H + FIS_BYTES];
-        failure.result = [d2h[2], d2h[3]];
+        // ahci_qc_fill_rtf, before error handling issues anything else: the
+        // Set Device Bits FIS for a queued command, else the last D2H FIS.
+        let fis = if queued { RECEIVED_SDB } else { RECEIVED_D2H };
+        let fis = &self.commands.bytes()[fis..fis + FIS_BYTES];
+        failure.result = [fis[2], fis[3]];
+        failure.queued = queued;
         Err(failure)
     }
 
     /// Linux `ahci_error_handler` and `ata_eh_recover`: restart an unfrozen
-    /// engine, fetch sense data and consider a speed-down; when a reset is due, hard reset the
+    /// engine, analyze an NCQ error, fetch sense data and consider a
+    /// speed-down; when a reset is due, hard reset the
     /// link (one try per `ata_eh_reset_timeouts` entry) and revalidate the
     /// disk, up to `ATA_EH_DEV_TRIES` times. An error disables the disk.
     fn recover(
@@ -1346,28 +1461,34 @@ impl AhciDisk {
             stop_engine(port, self.clock)?;
             start_engine(port);
         }
-        // ata_eh_analyze_tf fetches reported sense data unless the port is
-        // frozen or reporting is off; valid sense supersedes the device error.
-        if failure.sense_reported && !failure.frozen && self.sense_reporting {
-            failure.sense = self.request_sense(port)?;
-            if let Some(sense) = failure.sense {
-                failure.error = BlockError::Sense(sense);
-                failure.mask &= !ERR_DEVICE;
-            }
+        // ahci_error_intr charges a queued command's device error to the
+        // link, where valid sense does not clear it, unless the NCQ error log
+        // names the command.
+        let mut link_device = failure.queued && failure.interrupts & INTERRUPT_TASK_FILE_ERROR != 0;
+        if link_device && !failure.frozen && self.analyze_ncq_error(port, failure)? {
+            link_device = false;
         }
-        let slowed = self.speed_down(port, failure.mask, io)?;
+        // ata_eh_analyze_tf fetches reported sense data the log did not hold
+        // unless the port is frozen or reporting is off; valid sense
+        // supersedes the device error.
+        if failure.sense.is_none()
+            && failure.sense_reported
+            && !failure.frozen
+            && self.sense_reporting
+        {
+            failure.sense = self.request_sense(port)?;
+        }
+        if let Some(sense) = failure.sense {
+            failure.error = BlockError::Sense(sense);
+            failure.mask &= !ERR_DEVICE;
+        }
+        let all = failure.mask | if link_device { ERR_DEVICE } else { 0 };
+        let slowed = self.speed_down(port, all, io)?;
         // ata_eh_link_autopsy's default actions: a frozen port, a timeout or
         // an HSM violation resets; any other error of an I/O command, and any
         // but a device error of another, revalidates.
-        let reset = failure.reset
-            || slowed
-            || failure.frozen
-            || failure.mask & (ERR_HSM | ERR_TIMEOUT) != 0;
-        let revalidate = if io {
-            failure.mask != 0
-        } else {
-            failure.mask & !ERR_DEVICE != 0
-        };
+        let reset = failure.reset || slowed || failure.frozen || all & (ERR_HSM | ERR_TIMEOUT) != 0;
+        let revalidate = if io { all != 0 } else { all & !ERR_DEVICE != 0 };
         if !reset && !revalidate {
             return Ok(());
         }
@@ -1438,8 +1559,8 @@ impl AhciDisk {
 
     /// Linux `ata_eh_speed_down`: record the error and, when the verdict
     /// calls for it, lower the SATA link speed limit; whether a reset must
-    /// apply it. NCQ is never enabled, so NCQ_OFF has nothing to turn off,
-    /// and PIO fallback excludes SATA ATA disks.
+    /// apply it. NCQ_OFF turns NCQ off instead, and PIO fallback excludes
+    /// SATA ATA disks.
     fn speed_down(
         &mut self,
         port: &impl CommandPort,
@@ -1456,6 +1577,13 @@ impl AhciDisk {
         let at = self.clock.try_start().map_err(|_| BlockError::Timeout)?;
         self.errors.record(eflags, mask, at);
         let verdict = self.verdict()?;
+        if verdict & VERDICT_NCQ_OFF != 0 && self.ncq.enabled() {
+            self.ncq.off = true;
+            if verdict & VERDICT_KEEP_ERRORS == 0 {
+                self.errors.clear();
+            }
+            return Ok(false);
+        }
         if verdict & VERDICT_SPEED_DOWN == 0 {
             return Ok(false);
         }
@@ -1645,19 +1773,102 @@ impl AhciDisk {
         self.transfer = found.transfer;
         self.locked = found.locked;
         (self.lpm.hipm, self.lpm.dipm) = (found.hipm, found.dipm);
-        self.configure(port, &found);
-        Ok(())
+        self.configure(port, &found)
     }
 
     /// What Linux `ata_dev_configure`, which `ata_dev_revalidate` reruns,
-    /// asks of the disk: Sense Data Reporting, which a hard reset turns off
-    /// again (`ata_dev_config_sense_reporting` only logs a refusal). The kept
-    /// IDENTIFY data says it is enabled only once a revalidation rereads it.
-    fn configure(&mut self, port: &impl CommandPort, found: &Identified) {
+    /// asks of the disk. `ata_dev_config_ncq` enables first-party DMA
+    /// auto-activation; a failure other than the device's refusal marks it
+    /// broken and fails the configuration. Then Sense Data Reporting, which
+    /// a hard reset turns off again (`ata_dev_config_sense_reporting` only
+    /// logs a refusal). The kept IDENTIFY data says it is enabled only once
+    /// a revalidation rereads it.
+    fn configure(&mut self, port: &impl CommandPort, found: &Identified) -> Result<(), BlockError> {
+        let buffer = self.bounce.physical();
+        self.ncq.device = self.ncq.host && found.ncq;
+        self.ncq.autosense = found.ncq_autosense;
+        self.log_dma = found.read_log_dma;
+        if found.ncq && self.ncq.host && found.fpdma_aa && !self.ncq.aa_broken {
+            let enabled = self.internal(
+                port,
+                ATA_SET_FEATURES,
+                FEATURE_SATA_ENABLE,
+                SATA_FPDMA_AA,
+                0,
+                buffer,
+            );
+            if let Err(failure) = enabled
+                && !failure.refused()
+            {
+                self.ncq.aa_broken = true;
+                return Err(failure.error);
+            }
+        }
         if found.sense_reporting == (true, false) {
-            let buffer = self.bounce.physical();
             let _ = self.internal(port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer);
         }
+        Ok(())
+    }
+
+    /// Linux `ata_read_log_page` for one page into the table's log area:
+    /// READ LOG DMA EXT where IDENTIFY offers it, and once that fails READ
+    /// LOG EXT for good (`ATA_QUIRK_NO_DMA_LOG`), at once unless the port
+    /// froze. Whether the page was read.
+    fn read_log(&mut self, port: &impl CommandPort, log: u8, page: u8) -> Result<bool, BlockError> {
+        let buffer = self.table.physical() + LOG_DATA as u64;
+        let lba = u64::from(log) | u64::from(page) << 8;
+        loop {
+            let dma = self.log_dma && !self.no_dma_log;
+            let command = if dma {
+                ATA_READ_LOG_DMA_EXT
+            } else {
+                ATA_READ_LOG_EXT
+            };
+            let bytes = ATA_SECTOR_BYTES as usize;
+            let Err(failure) = self.attempt(port, command, 0, lba, 1, bytes, false, buffer) else {
+                return Ok(true);
+            };
+            stop_engine(port, self.clock)?;
+            start_engine(port);
+            if !dma {
+                return Ok(false);
+            }
+            self.no_dma_log = true;
+            if failure.frozen {
+                return Ok(false);
+            }
+        }
+    }
+
+    /// Linux `ata_eh_analyze_ncq_error`: the NCQ Command Error log names
+    /// the failed command and holds its result taskfile and, with NCQ
+    /// autosense, its sense data. Whether it named the active command.
+    fn analyze_ncq_error(
+        &mut self,
+        port: &impl CommandPort,
+        failure: &mut Failure,
+    ) -> Result<bool, BlockError> {
+        if !self.read_log(port, LOG_SATA_NCQ, 0)? {
+            return Ok(false);
+        }
+        let log = &self.table.bytes()[LOG_DATA..LOG_DATA + ATA_SECTOR_BYTES as usize];
+        if log[0] & LOG_NCQ_NQ != 0 || log[0] & LOG_NCQ_TAG != 0 {
+            return Ok(false);
+        }
+        let [status, error] = [log[2], log[3]];
+        let sense = if self.ncq.autosense && status & STATUS_SENSE != 0 {
+            valid_sense(log[14], log[15], log[16])
+        } else {
+            None
+        };
+        let task_file = u32::from(status) | u32::from(error) << 8;
+        *failure = Failure {
+            queued: true,
+            result: [status, error],
+            sense,
+            ..classify(failure.interrupts, failure.serror, task_file, false)
+        };
+        Ok(true)
     }
 
     /// `ata_eh_recover`'s config_lpm: move to the target policy. A failure
@@ -1868,16 +2079,7 @@ impl AhciDisk {
         if d2h[2] & STATUS_SENSE == 0 {
             return Ok(None);
         }
-        let sense = Sense {
-            key: d2h[6],
-            asc: d2h[5],
-            ascq: d2h[4],
-        };
-        // ata_scsi_sense_is_valid
-        if sense.key > SENSE_COMPLETED || (sense.key, sense.asc, sense.ascq) == (0, 0, 0) {
-            return Ok(None);
-        }
-        Ok(Some(sense))
+        Ok(valid_sense(d2h[6], d2h[5], d2h[4]))
     }
 
     fn chunk_bytes(&self) -> usize {
@@ -2023,8 +2225,9 @@ mod tests {
                     if value & COMMAND_START != 0 {
                         command |= COMMAND_LIST_RUNNING;
                     } else {
-                        // Clearing ST clears PxCI.
+                        // Clearing ST clears PxCI and PxSACT.
                         registers[PORT_ISSUE / 4] = 0;
+                        registers[PORT_SATA_ACTIVE / 4] = 0;
                     }
                     if value & COMMAND_FIS_RECEIVE != 0 {
                         command |= COMMAND_FIS_RUNNING;
@@ -2059,7 +2262,10 @@ mod tests {
                     assert_ne!(registers[PORT_COMMAND / 4] & COMMAND_LIST_RUNNING, 0);
                     self.issued.set(self.issued.get() + 1);
                     match self.faults.borrow_mut().pop_front() {
-                        None | Some(Fault::Complete) => registers[PORT_TASK_FILE / 4] = READY,
+                        None | Some(Fault::Complete) => {
+                            registers[PORT_TASK_FILE / 4] = READY;
+                            registers[PORT_SATA_ACTIVE / 4] = 0;
+                        }
                         Some(fault) => {
                             registers[PORT_ISSUE / 4] = value;
                             match fault {
@@ -2186,6 +2392,9 @@ mod tests {
                     step_downs: 0,
                     locked: false,
                     lpm: Lpm::default(),
+                    ncq: Ncq::default(),
+                    log_dma: false,
+                    no_dma_log: false,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -2709,6 +2918,83 @@ mod tests {
             complete_with(0x50, 0x00, false),
             (Err(BlockError::Device { status: 0x51 }), 1)
         );
+    }
+
+    #[test]
+    fn ncq_follows_ata_dev_config_ncq_and_ata_eh_analyze_ncq_error() {
+        // NCQ with auto-activation, NCQ autosense and READ LOG DMA EXT.
+        let mut page = identify_page("S1", 1024);
+        for (word, value) in [(76u16, 1u16 << 8), (78, 0x84), (86, 1 << 15), (119, 0x4008)] {
+            let at = 2 * usize::from(word);
+            page[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let found = identify(&page).unwrap();
+        let (mut fixture, _clock) = recovering(page);
+        fixture.disk.ncq.host = true;
+
+        // ata_dev_config_ncq enables auto-activation; a refusal is ignored,
+        // any other failure marks it broken.
+        let link = Link::new(&[]);
+        fixture.disk.configure(&link, &found).unwrap();
+        assert_eq!(fixture.disk.table.bytes()[2..4], [ATA_SET_FEATURES, 0x10]);
+        assert_eq!(fixture.disk.table.bytes()[12], 0x02);
+        let link = Link::new(&[Fault::TaskFile(0x0451)]);
+        fixture.disk.configure(&link, &found).unwrap();
+        let link = Link::new(&[Fault::Interface]);
+        assert!(fixture.disk.configure(&link, &found).is_err());
+        assert!(fixture.disk.ncq.aa_broken);
+        let link = Link::new(&[]);
+        fixture.disk.configure(&link, &found).unwrap();
+        assert_eq!(link.issued.get(), 0);
+        assert!(fixture.disk.ncq.enabled());
+
+        // A read is queued: the count in the features registers, tag 0.
+        let link = Link::new(&[]);
+        let read = |fixture: &mut Fixture, link: &Link| {
+            fixture
+                .disk
+                .issue_on(link, ATA_READ_DMA_EXT, 0x1234, 8, 4096, false)
+        };
+        read(&mut fixture, &link).unwrap();
+        let fis = &fixture.disk.table.bytes()[..14];
+        assert_eq!(
+            [fis[2], fis[3], fis[4], fis[7], fis[11], fis[12]],
+            [ATA_READ_FPDMA_QUEUED, 8, 0x34, DEVICE_LBA, 0, 0]
+        );
+        assert_eq!(link.writes_to(PORT_SATA_ACTIVE), [1]);
+
+        // An uncorrectable queued read: READ LOG DMA EXT fails and READ LOG
+        // EXT names tag 0 with its autosense data. A medium error is not
+        // retried; ERR_MEDIA revalidates without a reset.
+        let log = &mut fixture.disk.table.bytes_mut()[LOG_DATA..LOG_DATA + 512];
+        log[..4].copy_from_slice(&[0, 0, 0x43, 0x40]);
+        log[14..17].copy_from_slice(&[Sense::MEDIUM_ERROR, 0x11, 0x04]);
+        let link = Link::new(&[Fault::TaskFile(0x4041), Fault::TaskFile(0x0451)]);
+        assert_eq!(
+            read(&mut fixture, &link),
+            Err(BlockError::Sense(Sense {
+                key: Sense::MEDIUM_ERROR,
+                asc: 0x11,
+                ascq: 0x04,
+            }))
+        );
+        assert!(fixture.disk.no_dma_log);
+        // The read, both log reads, then IDENTIFY, SET FEATURES UDMA 6 and
+        // IDENTIFY; auto-activation stays broken.
+        assert_eq!(link.issued.get(), 6);
+        assert!(link.writes_to(PORT_SATA_CONTROL).is_empty());
+
+        // Four aborted reads in ten minutes turn NCQ off, without a reset.
+        fixture.disk.table.bytes_mut()[LOG_DATA + 2..LOG_DATA + 4].copy_from_slice(&[0x51, 0x04]);
+        for _ in 0..4 {
+            assert!(fixture.disk.ncq.enabled());
+            let link = Link::new(&[Fault::TaskFile(0x0451)]);
+            read(&mut fixture, &link).unwrap();
+            assert!(link.writes_to(PORT_SATA_CONTROL).is_empty());
+        }
+        assert!(fixture.disk.ncq.off);
+        read(&mut fixture, &Link::new(&[])).unwrap();
+        assert_eq!(fixture.disk.table.bytes()[2], ATA_READ_DMA_EXT);
     }
 
     #[test]
