@@ -574,6 +574,33 @@ pub fn statistics() -> Statistics {
     }
 }
 
+/// Serialize before the executable alias runs bytes just written through
+/// the physmap alias. IRETQ to the next instruction serializes as CPUID
+/// does, but never exits to a hypervisor, which intercepts every CPUID: a
+/// block install and each link would otherwise pay a VM exit (Linux
+/// `iret_to_self`).
+fn serialize_code() {
+    // SAFETY: CPL0 in long mode, with no red zone. The frame IRETQ pops
+    // holds the current SS, RSP, RFLAGS and CS and the next instruction, so
+    // it changes nothing but the stack below RSP.
+    unsafe {
+        core::arch::asm!(
+            "mov {frame:e}, ss",
+            "push {frame}",
+            "lea {frame}, [rsp + 8]",
+            "push {frame}",
+            "pushfq",
+            "mov {frame:e}, cs",
+            "push {frame}",
+            "lea {frame}, [rip + 2f]",
+            "push {frame}",
+            "iretq",
+            "2:",
+            frame = out(reg) _,
+        );
+    }
+}
+
 /// TSC ticks spent in compiled guest code so far.
 pub fn native_ticks() -> u64 {
     state().native_ticks
@@ -1371,8 +1398,7 @@ impl Host for BareHost<'_> {
                 code.len(),
             );
         }
-        // Serialize before the executable alias runs the new bytes.
-        core::arch::x86_64::__cpuid(0);
+        serialize_code();
         state.code_used = end;
         state.code_peak = state.code_peak.max(end);
         #[cfg(feature = "native-profile")]
@@ -1409,8 +1435,7 @@ impl Host for BareHost<'_> {
                 bytes.len(),
             );
         }
-        // Serialize before the executable alias runs the new bytes.
-        core::arch::x86_64::__cpuid(0);
+        serialize_code();
     }
 
     fn discard_code(&mut self) {
