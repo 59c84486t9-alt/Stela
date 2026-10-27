@@ -28,7 +28,10 @@ const NOTRIM: u32 = 1 << 20;
 const NO_FUA: u32 = 1 << 21;
 const NO_NCQ_ON_ATI: u32 = 1 << 22;
 const NO_LPM_ON_ATI: u32 = 1 << 23;
-const NO_LOG_DIR: u32 = 1 << 24;
+pub(super) const NO_LOG_DIR: u32 = 1 << 24;
+/// Set by the driver, as by libata, when the IDENTIFY DEVICE data log is
+/// missing.
+pub(super) const NO_ID_DEV_LOG: u32 = 1 << 25;
 
 /// A model number glob, an optional firmware revision glob and the quirks.
 type Entry = (&'static [u8], Option<&'static [u8]>, u32);

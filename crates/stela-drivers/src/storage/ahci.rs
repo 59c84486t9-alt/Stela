@@ -48,6 +48,7 @@ const CAP_SLUMBER: u32 = 1 << 14;
 const CAP_PARTIAL: u32 = 1 << 13;
 const CAP_EXTERNAL: u32 = 1 << 5;
 const CAP2_DEVICE_SLEEP: u32 = 1 << 3;
+const CAP2_AGGRESSIVE_DEVICE_SLEEP: u32 = 1 << 4;
 /// CAP.NP: the number of ports, minus one.
 const CAP_PORTS: u32 = 0x1f;
 const CAP2_HANDOFF: u32 = 1 << 0;
@@ -67,6 +68,10 @@ const PORT_SATA_STATUS: usize = 0x28;
 const PORT_SATA_CONTROL: usize = 0x2c;
 const PORT_SATA_ERROR: usize = 0x30;
 const PORT_SATA_ACTIVE: usize = 0x34;
+const PORT_DEVICE_SLEEP: usize = 0x44;
+/// PxDEVSLP: aggressive DevSleep enabled, and DevSleep present.
+const DEVICE_SLEEP_AGGRESSIVE: u32 = 1 << 0;
+const DEVICE_SLEEP_PRESENT: u32 = 1 << 1;
 const PORT_ISSUE: usize = 0x38;
 
 /// Intel Port Control and Status: one enable bit per port (Linux `PCS_6`).
@@ -225,6 +230,7 @@ const SATA_CAPABILITY_NCQ: u16 = 1 << 8;
 const SATA_FEATURE_DIPM: u16 = 1 << 3;
 const SATA_FEATURE_FPDMA_AA: u16 = 1 << 2;
 const SATA_FEATURE_NCQ_AUTOSENSE: u16 = 1 << 7;
+const SATA_FEATURE_DEVICE_SLEEP: u16 = 1 << 8;
 const SECURITY_LOCKED: u16 = 0x7;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
@@ -286,6 +292,11 @@ const ATA_READ_LOG_DMA_EXT: u8 = 0x47;
 const LOG_SATA_NCQ: u8 = 0x10;
 const LOG_NCQ_NQ: u8 = 0x80;
 const LOG_NCQ_TAG: u8 = 0x1f;
+/// The general purpose log directory, and the IDENTIFY DEVICE data log
+/// with its SATA Settings page.
+const LOG_DIRECTORY: u8 = 0x00;
+const LOG_IDENTIFY_DEVICE: u8 = 0x30;
+const LOG_SATA_SETTINGS: u8 = 0x08;
 const ATA_FLUSH_CACHE: u8 = 0xe7;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
 const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
@@ -311,6 +322,7 @@ const FEATURE_SATA_DISABLE: u8 = 0x90;
 const SATA_DIPM: u16 = 0x03;
 /// First-party DMA auto-activation.
 const SATA_FPDMA_AA: u16 = 0x02;
+const SATA_DEVICE_SLEEP: u16 = 0x09;
 /// Linux's `ATA_LPM_*` policies this driver uses: unknown before the first
 /// configuration, maximum power, and CONFIG_SATA_MOBILE_LPM_POLICY's default.
 const LPM_UNKNOWN: u8 = 0;
@@ -423,6 +435,8 @@ pub struct AhciDisk {
     no_dma_log: bool,
     /// `dev->quirks`: the table's, which configuration accumulates.
     quirks: u32,
+    /// `ATA_DFLAG_DEVSLP`: the disk has DevSleep and its SATA Settings page.
+    devslp: bool,
 }
 
 /// NCQ as Linux `ata_dev_config_ncq` configures it. The block interface
@@ -626,6 +640,8 @@ struct Identified {
     quirks: u32,
     /// Word 76's supported SATA speeds.
     sata_speeds: u16,
+    /// `ata_id_has_devslp`.
+    devslp: bool,
 }
 
 /// What `ata_id_xfermask`, `ata_id_has_iordy` and `ata_id_is_cfa` read.
@@ -753,6 +769,7 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
             && word(IDENTIFY_COMMANDS_3) & COMMANDS_3_READ_LOG_DMA != 0,
         quirks: quirks::quirks(&c_string(IDENTIFY_MODEL), &c_string(IDENTIFY_FIRMWARE)),
         sata_speeds: word(IDENTIFY_SATA_CAPABILITY) & 0xe,
+        devslp: word(IDENTIFY_SATA_FEATURES) & SATA_FEATURE_DEVICE_SLEEP != 0,
     })
 }
 
@@ -1248,6 +1265,7 @@ impl AhciDisk {
             log_dma: false,
             no_dma_log: false,
             quirks: 0,
+            devslp: false,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
@@ -1827,7 +1845,8 @@ impl AhciDisk {
     /// device's refusal marks it broken and fails the configuration.
     /// `ata_dev_config_lpm` forces max_power for broken LPM and turns DIPM
     /// off on a host without it, as Software Settings Preservation may have
-    /// kept it on. Then Sense Data Reporting, which
+    /// kept it on. `ata_dev_config_devslp` reads the SATA Settings page for
+    /// DevSleep. Then Sense Data Reporting, which
     /// a hard reset turns off again (`ata_dev_config_sense_reporting` only
     /// logs a refusal). The kept IDENTIFY data says it is enabled only once
     /// a revalidation rereads it.
@@ -1880,6 +1899,9 @@ impl AhciDisk {
                 buffer,
             );
         }
+        self.devslp = found.devslp
+            && self.identify_page_supported(port, LOG_SATA_SETTINGS)?
+            && self.read_log(port, LOG_IDENTIFY_DEVICE, LOG_SATA_SETTINGS)?;
         if found.sense_reporting == (true, false) {
             let _ = self.internal(port, ATA_SET_FEATURES, FEATURE_SENSE_DATA, 1, 0, buffer);
         }
@@ -1914,6 +1936,33 @@ impl AhciDisk {
                 return Ok(false);
             }
         }
+    }
+
+    /// Linux `ata_identify_page_supported` with `ata_log_supported`: the
+    /// general purpose log directory, reread at each configuration, lists
+    /// the IDENTIFY DEVICE data log, whose page 0 lists `page`. Without that
+    /// log the disk gets `ATA_QUIRK_NO_ID_DEV_LOG`.
+    fn identify_page_supported(
+        &mut self,
+        port: &impl CommandPort,
+        page: u8,
+    ) -> Result<bool, BlockError> {
+        if self.quirks & quirks::NO_ID_DEV_LOG != 0 {
+            return Ok(false);
+        }
+        let entry = LOG_DATA + 2 * usize::from(LOG_IDENTIFY_DEVICE);
+        let listed = self.quirks & quirks::NO_LOG_DIR == 0
+            && self.read_log(port, LOG_DIRECTORY, 0)?
+            && self.table.bytes()[entry..entry + 2] != [0, 0];
+        if !listed {
+            self.quirks |= quirks::NO_ID_DEV_LOG;
+            return Ok(false);
+        }
+        if !self.read_log(port, LOG_IDENTIFY_DEVICE, 0)? {
+            return Ok(false);
+        }
+        let pages = &self.table.bytes()[LOG_DATA..LOG_DATA + ATA_SECTOR_BYTES as usize];
+        Ok(pages[9..9 + usize::from(pages[8])].contains(&page))
     }
 
     /// Linux `ata_eh_analyze_ncq_error`: the NCQ Command Error log names
@@ -1996,23 +2045,30 @@ impl AhciDisk {
             dipm(self, FEATURE_SATA_DISABLE)?;
         }
         // sata_link_scr_lpm; the port's PhyRdy interrupt is already masked.
-        let mut control = port.read32(PORT_SATA_CONTROL);
-        if policy == LPM_MAX_POWER {
-            control |= SATA_CONTROL_POWER;
-        } else {
-            control &= !SATA_CONTROL_POWER;
-            if lpm.capabilities & CAP_PARTIAL == 0 {
-                control |= SATA_CONTROL_NO_PARTIAL;
+        let scr_lpm = || {
+            let mut control = port.read32(PORT_SATA_CONTROL);
+            if policy == LPM_MAX_POWER {
+                control |= SATA_CONTROL_POWER;
+            } else {
+                control &= !SATA_CONTROL_POWER;
+                if lpm.capabilities & CAP_PARTIAL == 0 {
+                    control |= SATA_CONTROL_NO_PARTIAL;
+                }
+                if lpm.capabilities & CAP_SLUMBER == 0 {
+                    control |= SATA_CONTROL_NO_SLUMBER;
+                }
+                if lpm.capabilities_2 & CAP2_DEVICE_SLEEP == 0 {
+                    control |= SATA_CONTROL_NO_DEVICE_SLEEP;
+                }
             }
-            if lpm.capabilities & CAP_SLUMBER == 0 {
-                control |= SATA_CONTROL_NO_SLUMBER;
-            }
-            if lpm.capabilities_2 & CAP2_DEVICE_SLEEP == 0 {
-                control |= SATA_CONTROL_NO_DEVICE_SLEEP;
-            }
+            port.write32(PORT_SATA_CONTROL, control);
+            port.write32(PORT_SATA_ERROR, SERROR_PHY_READY_CHANGE);
+        };
+        // ahci_set_lpm restricts the link first when saving power, and
+        // lifts the restrictions last at max_power.
+        if policy != LPM_MAX_POWER {
+            scr_lpm();
         }
-        port.write32(PORT_SATA_CONTROL, control);
-        port.write32(PORT_SATA_ERROR, SERROR_PHY_READY_CHANGE);
         if lpm.capabilities & CAP_AGGRESSIVE_LPM != 0 {
             let mut command = port.read32(PORT_COMMAND);
             if policy == LPM_MAX_POWER || !lpm.hipm {
@@ -2023,6 +2079,28 @@ impl AhciDisk {
             } else {
                 port.write32(PORT_COMMAND, command | COMMAND_AGGRESSIVE_LPM);
             }
+        }
+        // ahci_set_aggressive_devslp: only the minimum-power policies,
+        // which are never the target here, enable it; firmware's is undone.
+        let sleep = CAP2_DEVICE_SLEEP | CAP2_AGGRESSIVE_DEVICE_SLEEP;
+        let devslp = port.read32(PORT_DEVICE_SLEEP);
+        if lpm.capabilities_2 & sleep == sleep
+            && self.devslp
+            && devslp & DEVICE_SLEEP_PRESENT != 0
+            && devslp & DEVICE_SLEEP_AGGRESSIVE != 0
+        {
+            port.write32(PORT_DEVICE_SLEEP, devslp & !DEVICE_SLEEP_AGGRESSIVE);
+            let _ = self.internal(
+                port,
+                ATA_SET_FEATURES,
+                FEATURE_SATA_DISABLE,
+                SATA_DEVICE_SLEEP,
+                0,
+                buffer,
+            );
+        }
+        if policy == LPM_MAX_POWER {
+            scr_lpm();
         }
         let old = self.lpm.policy;
         self.lpm.policy = policy;
@@ -2477,6 +2555,7 @@ mod tests {
                     log_dma: false,
                     no_dma_log: false,
                     quirks: 0,
+                    devslp: false,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -3121,6 +3200,48 @@ mod tests {
         let (result, fixture) = configure(&page("WD My Book", "1.0"));
         assert_eq!(result, Err(AGAIN));
         assert_eq!(fixture.disk.speed_limit, 0b1);
+    }
+
+    #[test]
+    fn devslp_follows_ata_dev_config_devslp_and_ahci_set_aggressive_devslp() {
+        let mut page = identify_page("S1", 1024);
+        page[2 * 78..2 * 78 + 2].copy_from_slice(&(1u16 << 8).to_le_bytes());
+        let found = identify(&page).unwrap();
+        let (mut fixture, _clock) = recovering(page);
+        // One buffer answers all three log reads: the directory lists the
+        // IDENTIFY DEVICE data log, whose page 0 lists SATA Settings.
+        let log = &mut fixture.disk.table.bytes_mut()[LOG_DATA..LOG_DATA + 512];
+        (log[8], log[9], log[2 * 0x30]) = (1, LOG_SATA_SETTINGS, 1);
+        let link = Link::new(&[]);
+        fixture.disk.configure(&link, &found).unwrap();
+        assert!(fixture.disk.devslp);
+        assert_eq!(link.issued.get(), 3);
+
+        // Firmware's aggressive DevSleep is turned off on the way to
+        // max_power, before SControl lifts the restrictions.
+        fixture.disk.lpm.capabilities_2 = CAP2_DEVICE_SLEEP | CAP2_AGGRESSIVE_DEVICE_SLEEP;
+        link.registers.borrow_mut()[PORT_DEVICE_SLEEP / 4] = 0x3;
+        fixture.disk.apply_lpm(&link, LPM_MAX_POWER).unwrap();
+        assert_eq!(link.writes_to(PORT_DEVICE_SLEEP), [DEVICE_SLEEP_PRESENT]);
+        let table = fixture.disk.table.bytes();
+        assert_eq!(
+            [table[2], table[3], table[12]],
+            [ATA_SET_FEATURES, 0x90, 0x09]
+        );
+        let order: Vec<usize> = link
+            .writes
+            .borrow()
+            .iter()
+            .filter(|(at, _)| matches!(*at, PORT_DEVICE_SLEEP | PORT_SATA_CONTROL))
+            .map(|(at, _)| *at)
+            .collect();
+        assert_eq!(order, [PORT_DEVICE_SLEEP, PORT_SATA_CONTROL]);
+
+        // Without the IDENTIFY DEVICE data log the disk gets NO_ID_DEV_LOG.
+        fixture.disk.table.bytes_mut()[LOG_DATA + 2 * 0x30] = 0;
+        fixture.disk.configure(&link, &found).unwrap();
+        assert!(!fixture.disk.devslp);
+        assert_ne!(fixture.disk.quirks & quirks::NO_ID_DEV_LOG, 0);
     }
 
     #[test]
