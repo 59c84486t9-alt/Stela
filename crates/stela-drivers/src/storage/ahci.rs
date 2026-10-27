@@ -164,7 +164,19 @@ const TABLE_HEADER_BYTES: usize = 0x90;
 const PRDT_ADDRESS: usize = 0x80;
 const PRDT_BYTE_COUNT: usize = 0x8c;
 /// IDENTIFY DEVICE words (ACS-3 Â§7.12.7).
+const IDENTIFY_CONFIG: usize = 0;
 const IDENTIFY_SERIAL: core::ops::Range<usize> = 10..20;
+/// Word 49 bit 11: IORDY supported; word 51 bits 15:8: the old PIO mode;
+/// word 53 bits 1 and 2: words 64 and 88 valid; words 64 and 88: advanced
+/// PIO and UDMA modes (`ata_id_xfermask`).
+const IDENTIFY_CAPABILITY: usize = 49;
+const CAPABILITY_IORDY: u16 = 1 << 11;
+const IDENTIFY_OLD_PIO: usize = 51;
+const IDENTIFY_FIELD_VALID: usize = 53;
+const FIELD_VALID_PIO: u16 = 1 << 1;
+const FIELD_VALID_UDMA: u16 = 1 << 2;
+const IDENTIFY_PIO_MODES: usize = 64;
+const IDENTIFY_UDMA_MODES: usize = 88;
 const IDENTIFY_MODEL: core::ops::Range<usize> = 27..47;
 const IDENTIFY_COMMANDS_2: usize = 83;
 const COMMANDS_2_LBA48: u16 = 1 << 10;
@@ -215,6 +227,17 @@ const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
 const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
 const ATA_IDENTIFY: u8 = 0xec;
 const ATA_SET_FEATURES: u8 = 0xef;
+/// `SETFEATURES_XFER`, with the transfer mode in the count.
+const FEATURE_TRANSFER_MODE: u8 = 0x03;
+/// `XFER_PIO_0`, `XFER_PIO_2` and `XFER_UDMA_0`.
+const MODE_PIO_0: u8 = 0x08;
+const MODE_PIO_2: u8 = 0x0a;
+const MODE_UDMA_0: u8 = 0x40;
+/// `ahci_port_info`: PIO 0-4 and UDMA 0-6, no MWDMA.
+const HOST_PIO_MASK: u32 = 0x1f;
+const HOST_UDMA_MASK: u32 = 0x7f;
+/// `ATA_UDMA_MASK_40C`: UDMA 0-2.
+const UDMA_MASK_40_WIRE: u32 = 0x07;
 const ATA_REQUEST_SENSE_DATA_EXT: u8 = 0x0b;
 /// `SETFEATURE_SENSE_DATA`, enabled with a count of one.
 const FEATURE_SENSE_DATA: u8 = 0xc3;
@@ -313,6 +336,13 @@ pub struct AhciDisk {
     speed: u32,
     /// `ata_id_sense_reporting_enabled` for the last IDENTIFY data read.
     sense_reporting: bool,
+    /// The last IDENTIFY data's transfer modes, the device's own masks that
+    /// speed-downs narrow, the configured mode and `spdn_cnt`.
+    transfer: Transfer,
+    pio_mask: u32,
+    udma_mask: u32,
+    mode: u8,
+    step_downs: u8,
 }
 
 /// One `ata_ering_entry`: its flags, `AC_ERR_*` mask and raw clock origin.
@@ -344,6 +374,11 @@ impl ErrorRing {
             .rev()
             .chain(tail.iter_mut().rev())
             .take_while(|entry| entry.mask != 0)
+    }
+
+    /// `ata_ering_top`: the newest entry, if any.
+    fn top(&mut self) -> Option<&mut Recorded> {
+        Some(&mut self.entries[self.cursor]).filter(|entry| entry.mask != 0)
     }
 
     /// `ata_ering_clear`: entries stay but no longer count.
@@ -420,6 +455,56 @@ struct Identified {
     flush: Option<u8>,
     /// Sense Data Reporting supported, and enabled.
     sense_reporting: (bool, bool),
+    transfer: Transfer,
+}
+
+/// What `ata_id_xfermask`, `ata_id_has_iordy` and `ata_id_is_cfa` read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Transfer {
+    pio: u32,
+    udma: u32,
+    iordy: bool,
+    compact_flash: bool,
+}
+
+impl Transfer {
+    fn from_identify(word: impl Fn(usize) -> u16) -> Self {
+        let pio = if word(IDENTIFY_FIELD_VALID) & FIELD_VALID_PIO != 0 {
+            u32::from(word(IDENTIFY_PIO_MODES) & 0x03) << 3 | 0x07
+        } else {
+            match word(IDENTIFY_OLD_PIO) >> 8 {
+                mode @ 0..5 => (2 << mode) - 1,
+                _ => 1,
+            }
+        };
+        let udma = if word(IDENTIFY_FIELD_VALID) & FIELD_VALID_UDMA != 0 {
+            u32::from(word(IDENTIFY_UDMA_MODES) & 0xff)
+        } else {
+            0
+        };
+        let config = word(IDENTIFY_CONFIG);
+        Self {
+            pio,
+            udma,
+            iordy: word(IDENTIFY_CAPABILITY) & CAPABILITY_IORDY != 0,
+            compact_flash: config == 0x848a
+                || config == 0x844a
+                || word(IDENTIFY_COMMANDS_2) & 0xc004 == 0x4004,
+        }
+    }
+}
+
+/// `ata_xfer_mask2mode` for one mode class: its highest mode.
+fn highest_mode(mask: u32, base: u8) -> Option<u8> {
+    (mask != 0).then(|| base + (fls(mask) - 1) as u8)
+}
+
+/// Linux `ATA_DNXFER_*` steps.
+#[derive(Clone, Copy)]
+enum StepDown {
+    Pio,
+    Dma,
+    FortyWire,
 }
 
 /// Linux `ata_id_has_sense_reporting` and `ata_id_sense_reporting_enabled`.
@@ -472,6 +557,7 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
         block_size,
         flush: flush_command(word),
         sense_reporting: sense_reporting(word),
+        transfer: Transfer::from_identify(word),
     })
 }
 
@@ -918,6 +1004,11 @@ impl AhciDisk {
             speed_limit,
             speed,
             sense_reporting: false,
+            transfer: Transfer::default(),
+            pio_mask: u32::MAX,
+            udma_mask: u32::MAX,
+            mode: 0,
+            step_downs: 0,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
@@ -934,6 +1025,8 @@ impl AhciDisk {
         disk.identity.model = found.model;
         disk.identity.blocks = found.blocks;
         disk.identity.block_size = found.block_size;
+        disk.transfer = found.transfer;
+        disk.set_mode(&port)?;
         Ok(Some(disk))
     }
 
@@ -1135,7 +1228,8 @@ impl AhciDisk {
         }
         let mut hotplug = failure.hotplug;
         let mut last = failure.error.clone();
-        for _ in 0..DEVICE_TRIES {
+        let mut tries = DEVICE_TRIES;
+        loop {
             let mut online = None;
             for timeout in RESET_TIMEOUTS_US {
                 match self.hardreset(port, timeout, hotplug) {
@@ -1151,21 +1245,32 @@ impl AhciDisk {
                 Some(false) => return Err(DETACHED),
                 Some(true) => {}
             }
-            match self.revalidate(port) {
-                Ok(()) => return Ok(()),
-                Err(error) if error == DETACHED => return Err(error),
-                Err(error) => last = error,
+            // ata_eh_revalidate_and_attach, then ATA_EHI_SETMODE.
+            let Err(error) = self.revalidate(port).and_then(|()| self.set_mode(port)) else {
+                return Ok(());
+            };
+            // ata_eh_handle_dev_fail: another device gets one more chance,
+            // and the last chance runs slower.
+            tries -= 1;
+            if error == DETACHED {
+                tries = tries.min(1);
             }
+            if tries == 1 {
+                self.lower_speed_limit(port);
+                self.lower_transfer_limit(StepDown::Pio);
+            }
+            if tries == 0 {
+                return Err(error);
+            }
+            last = error;
             hotplug = false;
         }
-        Err(last)
     }
 
     /// Linux `ata_eh_speed_down`: record the error and, when the verdict
     /// calls for it, lower the SATA link speed limit; whether a reset must
-    /// apply it. NCQ is never enabled, so NCQ_OFF has nothing to turn off;
-    /// transfer modes are never programmed, so there is none to lower; and
-    /// PIO fallback excludes SATA ATA disks.
+    /// apply it. NCQ is never enabled, so NCQ_OFF has nothing to turn off,
+    /// and PIO fallback excludes SATA ATA disks.
     fn speed_down(
         &mut self,
         port: &impl CommandPort,
@@ -1182,8 +1287,19 @@ impl AhciDisk {
         let at = self.clock.try_start().map_err(|_| BlockError::Timeout)?;
         self.errors.record(eflags, mask, at);
         let verdict = self.verdict()?;
-        if verdict & VERDICT_SPEED_DOWN == 0 || !self.lower_speed_limit(port) {
+        if verdict & VERDICT_SPEED_DOWN == 0 {
             return Ok(false);
+        }
+        // The link speed first, then the transfer mode, twice.
+        if !self.lower_speed_limit(port) {
+            if self.step_downs >= 2 {
+                return Ok(false);
+            }
+            let step = [StepDown::Dma, StepDown::FortyWire][usize::from(self.step_downs)];
+            self.step_downs += 1;
+            if !self.lower_transfer_limit(step) {
+                return Ok(false);
+            }
         }
         if verdict & VERDICT_KEEP_ERRORS == 0 {
             self.errors.clear();
@@ -1356,7 +1472,86 @@ impl AhciDisk {
         }
         // ata_dev_reread_id keeps the new data.
         self.sense_reporting = found.sense_reporting.1;
+        self.transfer = found.transfer;
         Ok(())
+    }
+
+    /// Linux `ata_eh_set_mode` with `ata_set_mode` and `ata_dev_set_mode`:
+    /// choose the fastest PIO and UDMA modes the host, the IDENTIFY data and
+    /// earlier speed-downs allow, program the UDMA mode with SET FEATURES and
+    /// revalidate. A changed mode makes the transfer unverified again.
+    fn set_mode(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
+        // A verified transfer clears DUBIOUS on the newest error.
+        if !self.dubious
+            && let Some(top) = self.errors.top()
+        {
+            top.eflags &= !EFLAG_DUBIOUS;
+        }
+        // ata_dev_xfermask: no MWDMA on AHCI, no cable limit on SATA.
+        self.pio_mask &= HOST_PIO_MASK & self.transfer.pio;
+        self.udma_mask &= HOST_UDMA_MASK & self.transfer.udma;
+        let pio = highest_mode(self.pio_mask, MODE_PIO_0)
+            .ok_or(BlockError::Unsupported("SATA disk without PIO support"))?;
+        // libata_dma_mask leaves CompactFlash in PIO, as without UDMA; these
+        // drivers issue only DMA commands.
+        let mode = highest_mode(self.udma_mask, MODE_UDMA_0)
+            .filter(|_| !self.transfer.compact_flash)
+            .ok_or(BlockError::Unsupported(
+                "SATA disk that libata would run in PIO mode",
+            ))?;
+        if mode != self.mode {
+            self.dubious = true;
+        }
+        self.mode = mode;
+        // ata_dev_set_xfermode: with IORDY in use the mode is sent;
+        // otherwise there is nothing to set.
+        let mut refused = false;
+        if pio > MODE_PIO_2 || self.transfer.iordy {
+            let buffer = self.bounce.physical();
+            match self.internal(
+                port,
+                ATA_SET_FEATURES,
+                FEATURE_TRANSFER_MODE,
+                u16::from(mode),
+                0,
+                buffer,
+            ) {
+                Ok(()) => {}
+                Err(BlockError::Device { .. }) => refused = true,
+                Err(error) => return Err(error),
+            }
+        }
+        self.revalidate(port)?;
+        // A device error is ignored when the disk already runs its fastest
+        // mode.
+        if refused && highest_mode(self.transfer.udma, MODE_UDMA_0) != Some(mode) {
+            return Err(BlockError::Protocol(
+                "the SATA disk refused its transfer mode",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Linux `ata_down_xfermask_limit`: false when nothing changed or no PIO
+    /// mode would remain.
+    fn lower_transfer_limit(&mut self, step: StepDown) -> bool {
+        let (mut pio, mut udma) = (self.pio_mask, self.udma_mask);
+        match step {
+            StepDown::Pio => pio &= !(1 << (fls(pio) - 1)),
+            StepDown::Dma if udma != 0 => {
+                udma &= !(1 << (fls(udma) - 1));
+                if udma == 0 {
+                    return false;
+                }
+            }
+            StepDown::Dma => {}
+            StepDown::FortyWire => udma &= UDMA_MASK_40_WIRE,
+        }
+        if pio == 0 || (pio, udma) == (self.pio_mask, self.udma_mask) {
+            return false;
+        }
+        (self.pio_mask, self.udma_mask) = (pio, udma);
+        true
     }
 
     /// Linux `ata_eh_request_sense`: REQUEST SENSE DATA EXT, whose D2H FIS
@@ -1610,6 +1805,10 @@ mod tests {
             }
         }
         put(IDENTIFY_COMMANDS_2, WORD_VALID | COMMANDS_2_LBA48);
+        put(IDENTIFY_CAPABILITY, CAPABILITY_IORDY);
+        put(IDENTIFY_FIELD_VALID, FIELD_VALID_PIO | FIELD_VALID_UDMA);
+        put(IDENTIFY_PIO_MODES, 0x03);
+        put(IDENTIFY_UDMA_MODES, 0x7f);
         for (offset, index) in IDENTIFY_LBA48_SECTORS.enumerate() {
             put(index, (blocks >> (16 * offset)) as u16);
         }
@@ -1625,6 +1824,7 @@ mod tests {
         fixture.disk.identity.model = found.model;
         fixture.disk.identity.serial = found.serial;
         fixture.disk.identity.blocks = found.blocks;
+        fixture.disk.transfer = found.transfer;
         fixture.disk.clock = Clock {
             ticks_per_microsecond: 1,
         };
@@ -1681,6 +1881,12 @@ mod tests {
                     speed_limit: u32::MAX,
                     speed: 2,
                     sense_reporting: true,
+                    transfer: Transfer::default(),
+                    // As configured: PIO 0-4 and UDMA 0-6.
+                    pio_mask: 0x1f,
+                    udma_mask: 0x7f,
+                    mode: 0x46,
+                    step_downs: 0,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -1761,8 +1967,9 @@ mod tests {
                     .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true),
                 Ok(())
             );
-            // The write, the revalidating IDENTIFY, and the write again.
-            assert_eq!(link.issued.get(), 3);
+            // The write, the revalidating IDENTIFY, SET FEATURES with UDMA 6
+            // and its IDENTIFY, and the write again.
+            assert_eq!(link.issued.get(), 5);
             let controls: Vec<u32> = link
                 .writes_to(PORT_SATA_CONTROL)
                 .iter()
@@ -1776,6 +1983,7 @@ mod tests {
                     .all(|byte| *byte == 0x44)
             );
             assert_eq!(fixture.disk.table.bytes()[2], ATA_WRITE_DMA_EXT);
+            assert_eq!(fixture.disk.mode, 0x46);
             assert_eq!(
                 fixture.disk.commands.bytes()[RECEIVED_D2H..RECEIVED_D2H + 8],
                 [0x27, 0, 0x80, 0, 0, 0, 0, 0xa0]
@@ -1923,6 +2131,25 @@ mod tests {
         }
         assert_eq!(fixture.disk.speed_limit, 0b1);
         assert!(fixture.disk.fault.is_none());
+        // Past the slowest link the UDMA mode steps down, to UDMA 5 and
+        // then to the 40-wire UDMA 2, each reprogrammed with SET FEATURES.
+        assert_eq!((fixture.disk.udma_mask, fixture.disk.mode), (0x3f, 0x45));
+        for _ in 0..4 {
+            link.faults.borrow_mut().push_back(Fault::Interface);
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true)
+                .unwrap();
+        }
+        assert_eq!((fixture.disk.udma_mask, fixture.disk.mode), (0x07, 0x42));
+        for _ in 0..4 {
+            link.faults.borrow_mut().push_back(Fault::Interface);
+            fixture
+                .disk
+                .issue_on(&link, ATA_WRITE_DMA_EXT, 9, 1, 512, true)
+                .unwrap();
+        }
+        assert_eq!((fixture.disk.udma_mask, fixture.disk.step_downs), (0x07, 2));
 
         // Before a verified transfer, two bus errors suffice and the
         // history is kept. A flush transfers no data and verifies nothing.
@@ -1968,6 +2195,63 @@ mod tests {
         );
         assert_eq!(fixture.disk.speed_limit, 0b1);
         assert_eq!(controls(&link), [0x304, 0x314, 0x311, 0x310]);
+    }
+
+    #[test]
+    fn transfer_modes_follow_ata_id_xfermask_and_ata_set_mode() {
+        fn words(pairs: &[(usize, u16)]) -> impl Fn(usize) -> u16 + '_ {
+            move |index| {
+                pairs
+                    .iter()
+                    .find(|(at, _)| *at == index)
+                    .map_or(0, |(_, value)| *value)
+            }
+        }
+        let modern = Transfer::from_identify(words(&[(53, 0x06), (64, 0x03), (88, 0x7f)]));
+        assert_eq!((modern.pio, modern.udma), (0x1f, 0x7f));
+        // Without word 64, word 51 names the fastest PIO mode.
+        let old = Transfer::from_identify(words(&[(51, 2 << 8)]));
+        assert_eq!((old.pio, old.udma), (0x07, 0));
+        assert_eq!(Transfer::from_identify(words(&[(51, 7 << 8)])).pio, 1);
+        assert!(Transfer::from_identify(words(&[(0, 0x848a)])).compact_flash);
+        assert!(Transfer::from_identify(words(&[(83, 0x4004)])).compact_flash);
+
+        // SET FEATURES carries the mode, then IDENTIFY revalidates.
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        fixture.disk.mode = 0;
+        let link = Link::new(&[]);
+        fixture.disk.set_mode(&link).unwrap();
+        assert_eq!(fixture.disk.mode, 0x46);
+        assert!(fixture.disk.dubious);
+        assert_eq!(link.issued.get(), 2);
+        // A refusal is ignored only at the disk's fastest mode.
+        let link = Link::new(&[Fault::TaskFile(0x0451)]);
+        assert_eq!(fixture.disk.set_mode(&link), Ok(()));
+        fixture.disk.udma_mask = 0x1f;
+        let link = Link::new(&[Fault::TaskFile(0x0451)]);
+        assert!(fixture.disk.set_mode(&link).is_err());
+        assert_eq!(fixture.disk.mode, 0x44);
+        // No UDMA: libata would use PIO commands these drivers do not issue.
+        fixture.disk.udma_mask = 0;
+        assert!(matches!(
+            fixture.disk.set_mode(&Link::new(&[])),
+            Err(BlockError::Unsupported(_))
+        ));
+
+        // ata_down_xfermask_limit.
+        fixture.disk.pio_mask = 0x1f;
+        fixture.disk.udma_mask = 0x7f;
+        assert!(fixture.disk.lower_transfer_limit(StepDown::Dma));
+        assert_eq!(fixture.disk.udma_mask, 0x3f);
+        assert!(fixture.disk.lower_transfer_limit(StepDown::FortyWire));
+        assert_eq!(fixture.disk.udma_mask, 0x07);
+        assert!(!fixture.disk.lower_transfer_limit(StepDown::FortyWire));
+        fixture.disk.udma_mask = 0x01;
+        assert!(!fixture.disk.lower_transfer_limit(StepDown::Dma));
+        assert!(fixture.disk.lower_transfer_limit(StepDown::Pio));
+        assert_eq!(fixture.disk.pio_mask, 0x0f);
+        fixture.disk.pio_mask = 0x01;
+        assert!(!fixture.disk.lower_transfer_limit(StepDown::Pio));
     }
 
     #[test]
@@ -2190,7 +2474,10 @@ mod tests {
                     .issue_on(&link, ATA_READ_DMA_EXT, 0, 1, 512, false),
                 Err(DETACHED)
             );
-            assert_eq!(link.issued.get(), 2);
+            // One more chance, slower, as ata_eh_handle_dev_fail gives.
+            assert_eq!(link.issued.get(), 3);
+            assert_eq!(fixture.disk.speed_limit, 0b1);
+            assert_eq!(fixture.disk.pio_mask, 0x0f);
             assert_eq!(fixture.disk.fault, Some(DETACHED));
         }
     }
