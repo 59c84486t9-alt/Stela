@@ -2,6 +2,8 @@
 use super::{activation, firmware};
 use crate::firmware::Image;
 
+pub mod storage;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct Layout {

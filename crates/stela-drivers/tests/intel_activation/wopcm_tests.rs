@@ -2,7 +2,7 @@
 use super::*;
 use intel::{firmware, wopcm};
 
-fn catalog_for_device(device: &Device) -> crate::firmware::Catalog {
+pub(super) fn catalog_for_device(device: &Device) -> crate::firmware::Catalog {
     let request = device.guc_firmware().unwrap();
     intel::catalog_for(&request, intel::bytes(request.wanted()))
 }

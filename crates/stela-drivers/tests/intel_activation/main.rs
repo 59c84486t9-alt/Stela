@@ -3,6 +3,7 @@ extern crate alloc;
 mod intel;
 use activation::{Device, Error, PciIdentity, ProbeOwner};
 use bus::mmio::owned::*;
+mod firmware_storage_tests;
 mod wopcm_tests;
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
@@ -477,6 +478,7 @@ fn activation_owned_model_lifetime_and_failed_unmap_retry() {
     guc_reset_owned_contract(&authority, &NEXT);
     gsm_owned_contract(&authority, &platform, &NEXT);
     wopcm_tests::owned_wopcm_contract(&authority, &platform, &NEXT);
+    firmware_storage_tests::owned_firmware_backing(&authority, &NEXT);
     huc_default_absence_never_looks_up_provider(&authority);
     platform.calls.lock().unwrap().clear();
     let (input, counts) = owner(NEXT.fetch_add(BYTES as u64, Ordering::SeqCst), 0x9a49);
