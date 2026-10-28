@@ -1,5 +1,13 @@
 [
   {
+    "package": "stela-compiler",
+    "test": "native_interruption_gate_costs",
+    "source": "crates/stela-compiler/src/x86_64/chain/tests/budget.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "native CPU comparison of emitted legacy, LOCK, flag and epoch chain gates; run on request"
+  },
+  {
     "package": "xtask",
     "test": "original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources",
     "source": "crates/stela-boot/src/engine/topology.rs",

@@ -8,8 +8,9 @@
 //! index. Each thunk takes one transfer from `budget` (or, when none is
 //! left, exits exactly as the redirected exit would), counts it, adds the
 //! instructions of the block it leaves to `retired` and names the block it
-//! enters in `block`. Another agent may spend the budget meanwhile to bring
-//! the engine back sooner; the counts stay exact. After the native
+//! enters in `block`. Notifications publish a monotonic interrupt epoch;
+//! every thunk compares it with the owner's acknowledged pre-drain snapshot
+//! before spending the local budget. A mismatch takes the original exit. After the native
 //! call returns, `block` is the block whose exit or fault ended the run, in
 //! its low 32 bits, and the BTYPE it was entered with in bits 33:32: 0 from
 //! every thunk but a lookup thunk of a BR or BLR form.
@@ -43,13 +44,13 @@ pub const DIRECT_EXIT_BYTES: usize = 16;
 /// Bytes a redirection writes over the start of a direct exit.
 pub const JUMP_BYTES: usize = 5;
 /// Bytes in a [`thunk`].
-pub const THUNK_BYTES: usize = 42 + DIRECT_EXIT_BYTES;
+pub const THUNK_BYTES: usize = 42 + DIRECT_EXIT_BYTES + 10;
 /// Bytes in an exit to a dynamic target in RAX: `mov edx, kind; ret`.
 pub const DYNAMIC_EXIT_BYTES: usize = 6;
 /// Entries in the engine's lookup table, a power of two.
 pub const LOOKUP_ENTRIES: usize = 1 << 16;
 /// Bytes in a [`lookup_thunk`], without and with its static target.
-pub const LOOKUP_THUNK_BYTES: usize = 91;
+pub const LOOKUP_THUNK_BYTES: usize = 91 + 10;
 pub const STATIC_LOOKUP_THUNK_BYTES: usize = LOOKUP_THUNK_BYTES + 10;
 
 /// A direct exit to a static successor in a block's code.
@@ -65,8 +66,8 @@ pub struct DirectExit {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChainControl {
-    /// Chained transfers still allowed; wraps below zero when a thunk
-    /// finds none left.
+    /// Chained transfers still allowed; only the attached engine/native path
+    /// writes it. Wraps below zero when a thunk finds none left.
     pub budget: u64,
     /// Instructions of the blocks chained out of.
     pub retired: u64,
@@ -83,7 +84,19 @@ pub struct ChainControl {
     pub hits: u64,
     /// Transfers the other thunks made.
     pub linked: u64,
+    /// Sources are published before a Release increment by a notifier.
+    /// Saturates at MAX; no owner may acknowledge that exhausted epoch.
+    pub interrupt_epoch: u64,
+    /// The attached owner's Acquire snapshot taken before draining sources.
+    /// A notification after that snapshot remains pending for the next boundary.
+    pub observed_interrupt_epoch: u64,
 }
+
+// Epoch and observed state are naturally aligned atomic-width words. Capture
+// and storage owners keep the mapped control alive for every embedded address.
+const _: () = assert!(core::mem::offset_of!(ChainControl, interrupt_epoch) == 64);
+const _: () = assert!(core::mem::offset_of!(ChainControl, observed_interrupt_epoch) == 72);
+const _: () = assert!(core::mem::size_of::<ChainControl>() == 80);
 
 /// One block a fetch at `pc` runs in `context`, or nothing in context 0.
 #[repr(C)]
@@ -124,6 +137,78 @@ const CONTEXTS: i32 = core::mem::offset_of!(ChainControl, contexts) as i32;
 const TABLE: i32 = core::mem::offset_of!(ChainControl, table) as i32;
 const HITS: i32 = core::mem::offset_of!(ChainControl, hits) as i32;
 const LINKED: i32 = core::mem::offset_of!(ChainControl, linked) as i32;
+const INTERRUPT_EPOCH: i32 = core::mem::offset_of!(ChainControl, interrupt_epoch) as i32;
+const OBSERVED_INTERRUPT_EPOCH: i32 =
+    core::mem::offset_of!(ChainControl, observed_interrupt_epoch) as i32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interruption {
+    Epoch,
+    #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+    LockedBudget,
+    #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+    Flag,
+    #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+    Legacy,
+}
+impl Interruption {
+    fn extra_bytes(self) -> usize {
+        match self {
+            Self::Epoch => 10,
+            #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+            Self::LockedBudget => 1,
+            #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+            Self::Flag => 7,
+            #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+            Self::Legacy => 0,
+        }
+    }
+}
+fn interruption_gate(
+    asm: &mut crate::x86_64::asm::Asm,
+    policy: Interruption,
+) -> Option<crate::x86_64::asm::Patch> {
+    match policy {
+        Interruption::Epoch => {
+            // Aligned MOV is an acquire load on x86. The owner never rewrites
+            // this word; a notifier only advances it after publishing sources.
+            asm.mov_load(Qword, Rdx, Mem::base(Rcx, INTERRUPT_EPOCH));
+            asm.alu_load(
+                Alu::Cmp,
+                Qword,
+                Rdx,
+                Mem::base(Rcx, OBSERVED_INTERRUPT_EPOCH),
+            );
+            Some(asm.jcc8(Cond::Ne))
+        }
+        #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+        Interruption::Flag => {
+            asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rcx, INTERRUPT_EPOCH), 0);
+            Some(asm.jcc8(Cond::Ne))
+        }
+        #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+        Interruption::LockedBudget | Interruption::Legacy => None,
+    }
+}
+fn spend_budget(asm: &mut crate::x86_64::asm::Asm, policy: Interruption) {
+    #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
+    if policy == Interruption::LockedBudget {
+        asm.lock();
+    }
+    let _ = policy;
+    // This local counter has no foreign writer in the epoch protocol.
+    asm.alu_imm8(Alu::Sub, Qword, Mem::base(Rcx, 0), 1);
+}
+struct ThunkPlan {
+    at: u64,
+    control: u64,
+    retired: u32,
+    block: u32,
+    entry: u64,
+    target: GuestAddress,
+    kind: ExitKind,
+}
+
 const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
 const _: () = assert!(core::mem::offset_of!(LookupEntry, pc) == 0);
 const ENTRY_CONTEXT: i32 = core::mem::offset_of!(LookupEntry, context) as i32;
@@ -152,13 +237,36 @@ pub fn thunk(
     target: GuestAddress,
     kind: ExitKind,
 ) -> Option<Vec<u8>> {
+    thunk_with_policy(
+        ThunkPlan {
+            at,
+            control,
+            retired,
+            block,
+            entry,
+            target,
+            kind,
+        },
+        Interruption::Epoch,
+    )
+}
+fn thunk_with_policy(plan: ThunkPlan, policy: Interruption) -> Option<Vec<u8>> {
+    let ThunkPlan {
+        at,
+        control,
+        retired,
+        block,
+        entry,
+        target,
+        kind,
+    } = plan;
     let retired = i32::try_from(retired).ok()?;
     let block = i32::try_from(block).ok()?;
     let mut code = Code::new();
     let mut asm = code.asm();
     asm.mov_imm64(Rcx, control);
-    // Take one transfer from the budget.
-    asm.alu_imm8(Alu::Sub, Qword, Mem::base(Rcx, 0), 1);
+    let interrupted = interruption_gate(&mut asm, policy);
+    spend_budget(&mut asm, policy);
     let exhausted = asm.jcc8(Cond::B);
     asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), retired);
     asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, LINKED), 1);
@@ -166,9 +274,12 @@ pub fn thunk(
     let transfer = asm.jmp();
     let relative = relative(at + transfer.end() as u64, entry)?;
     asm.bind(exhausted);
+    if let Some(interrupted) = interrupted {
+        asm.bind(interrupted);
+    }
     super::block::direct_exit_with(&mut asm, target, kind);
     code[transfer.offset()..transfer.end()].copy_from_slice(&relative.to_le_bytes());
-    debug_assert_eq!(code.len(), THUNK_BYTES);
+    debug_assert_eq!(code.len(), THUNK_BYTES - 10 + policy.extra_bytes());
     Some(code.into_bytes())
 }
 
@@ -183,6 +294,16 @@ pub fn lookup_thunk(
     kind: ExitKind,
     btype: u8,
 ) -> Option<Vec<u8>> {
+    lookup_with_policy(control, retired, target, kind, btype, Interruption::Epoch)
+}
+fn lookup_with_policy(
+    control: u64,
+    retired: u32,
+    target: Option<GuestAddress>,
+    kind: ExitKind,
+    btype: u8,
+    policy: Interruption,
+) -> Option<Vec<u8>> {
     let retired = i32::try_from(retired).ok()?;
     if btype > 3 {
         return None;
@@ -193,13 +314,16 @@ pub fn lookup_thunk(
         asm.mov_imm64(Rax, target.0);
     }
     asm.mov_imm64(Rcx, control);
+    let mut misses = Vec::new();
+    if let Some(interrupted) = interruption_gate(&mut asm, policy) {
+        misses.push(interrupted);
+    }
     // RDX = the target's entry in the table.
     asm.mov(Dword, Rdx, Rax);
     asm.shift_imm(ShiftOp::Shr, Dword, Rdx, 2);
     asm.alu_imm32(Alu::And, Dword, Rdx, LOOKUP_ENTRIES as i32 - 1);
     asm.shift_imm(ShiftOp::Shl, Dword, Rdx, 5);
     asm.alu_load(Alu::Add, Qword, Rdx, Mem::base(Rcx, TABLE));
-    let mut misses = Vec::new();
     asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
     misses.push(asm.jcc8(Cond::Ne));
     // R8 = the context of the target's half.
@@ -213,7 +337,7 @@ pub fn lookup_thunk(
         asm.test_imm(Size::Byte, Mem::base(Rdx, ENTRY_TARGETS), 1 << btype);
         misses.push(asm.jcc8(Cond::E));
     }
-    asm.alu_imm8(Alu::Sub, Qword, Mem::base(Rcx, 0), 1);
+    spend_budget(&mut asm, policy);
     misses.push(asm.jcc8(Cond::B));
     asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), retired);
     asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, HITS), 1);
@@ -234,9 +358,9 @@ pub fn lookup_thunk(
         btype != 0
             || code.len()
                 == if target.is_some() {
-                    STATIC_LOOKUP_THUNK_BYTES
+                    STATIC_LOOKUP_THUNK_BYTES - 10 + policy.extra_bytes()
                 } else {
-                    LOOKUP_THUNK_BYTES
+                    LOOKUP_THUNK_BYTES - 10 + policy.extra_bytes()
                 }
     );
     Some(code)
@@ -290,13 +414,14 @@ mod tests {
         )
         .unwrap();
         let mut expected = vec![0x48, 0xb9, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        expected.extend([0x48, 0x8b, 0x51, 0x40, 0x48, 0x3b, 0x51, 0x48, 0x75, 32]);
         expected.extend([0x48, 0x83, 0x29, 0x01, 0x72, 26]);
         expected.extend([0x48, 0x81, 0x41, 0x08, 7, 0, 0, 0]);
         expected.extend([0x48, 0x83, 0x41, 0x38, 0x01]);
         expected.extend([0x48, 0xc7, 0x41, 0x10, 3, 0, 0, 0]);
-        // The jump ends 0x2a bytes into the thunk.
+        // The jump ends 0x34 bytes into the thunk.
         expected.extend([0xe9]);
-        expected.extend((0x2000i32 - 0x102a).to_le_bytes());
+        expected.extend((0x2000i32 - 0x1034).to_le_bytes());
         expected.extend(direct_exit(GuestAddress(0xabc), ExitKind::Fallthrough));
         assert_eq!(code, expected);
         assert!(thunk(0, 0, 0, 0, 1 << 40, GuestAddress(0), ExitKind::Direct).is_none());
@@ -434,7 +559,35 @@ mod tests {
                 (control.budget, control.retired, control.hits, control.block),
                 (3, 26, 4, 3 << BLOCK_BTYPE_SHIFT | 42)
             );
+            control.budget = 5;
+            control.interrupt_epoch = 1;
+            control.observed_interrupt_epoch = 0;
+            let prior = (
+                control.budget,
+                control.retired,
+                control.hits,
+                control.linked,
+                control.block,
+            );
+            assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(exit(fixed(0, 0)), (TARGET, ExitKind::Call as u64));
+            assert_eq!(exit(branch(0, TARGET)), (TARGET, ExitKind::Indirect as u64));
+            assert_eq!(
+                (
+                    control.budget,
+                    control.retired,
+                    control.hits,
+                    control.linked,
+                    control.block
+                ),
+                prior
+            );
+            control.observed_interrupt_epoch = 1;
+            assert_eq!(exit(dynamic(0, TARGET)), (0x5151, 99));
+            assert_eq!(control.budget, 4);
             assert_eq!(munmap(page, PAGE), 0);
         }
     }
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    mod budget;
 }
