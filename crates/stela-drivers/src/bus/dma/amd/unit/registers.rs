@@ -320,9 +320,6 @@ fn prepare(inputs: &mut Inputs, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> 
             .find(|cap| cap.capability_offset == unit.capability_offset())
             .copied()
             .ok_or(Error::MissingInstance(unit.capability_offset()))?;
-        if configuration.base_low & BASE_ENABLED == 0 {
-            return Err(Error::Disabled(configuration.capability_offset));
-        }
         if configuration.base() != unit.mmio_address() {
             return Err(Error::Firmware);
         }
@@ -375,6 +372,14 @@ fn prepare(inputs: &mut Inputs, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> 
     }
     // All config/firmware associations have passed. No reserved register is
     // read when the actual capability lacks EFRSup, regardless of ACPI claims.
+    // A base without its enable bit (QEMU's amd-iommu leaves it clear) is
+    // used when its registers answer, as Linux uses the IVHD's base.
+    for profile in &profiles {
+        if profile.configuration.base_low & BASE_ENABLED == 0 {
+            read_register(&inputs.mappings[profile.mapping], CONTROL)
+                .map_err(|_| Error::Disabled(profile.configuration.capability_offset))?;
+        }
+    }
     for profile in &mut profiles {
         let mapping = &inputs.mappings[profile.mapping];
         if profile.configuration.header & EFR_SUPPORTED != 0 {
@@ -911,6 +916,7 @@ mod tests {
             let expected = match case {
                 0 => {
                     function.config().write32(CAP + 4, BASE as u32);
+                    model.set(CONTROL, u64::MAX);
                     Error::Disabled(CAP)
                 }
                 1 => {
@@ -950,7 +956,7 @@ mod tests {
                     Error::Firmware
                 }
                 8 => {
-                    function.config().write32(CAP, 0x0003_000f);
+                    function.config().write32(CAP, 0x0013_000f);
                     Error::UnsupportedLayout(CAP)
                 }
                 _ => {
@@ -972,6 +978,22 @@ mod tests {
             assert_eq!(model.image(), original);
             assert_eq!(model.unmaps.load(Ordering::Relaxed), 1);
         }
+    }
+
+    #[test]
+    fn a_base_without_its_enable_bit_is_used_when_its_registers_answer() {
+        let mut function = make_function(&[(CAP, BASE, 0)], false);
+        function.config().write32(CAP + 4, BASE as u32);
+        let (mapping, _model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+        let group = success(inspect(
+            Inputs {
+                function,
+                mappings: vec![mapping],
+            },
+            &firmware(&[Unit::small()], 0),
+        ));
+        assert_eq!(group.profiles().len(), 1);
+        retire(group.into_inputs());
     }
 
     #[test]
@@ -1055,7 +1077,7 @@ mod tests {
 
     #[test]
     fn all_known_profile_refusals_precede_feature_observation() {
-        for invalid in 0..4 {
+        for invalid in 0..3 {
             let second = Unit {
                 cap: 0x60,
                 base: BASE + COUNTER_APERTURE as u64,
@@ -1063,7 +1085,7 @@ mod tests {
                 features: PERFORMANCE_COUNTERS,
                 ..Unit::small()
             };
-            let mut function = make_function(
+            let function = make_function(
                 &[
                     (CAP, BASE, EFR_SUPPORTED),
                     (second.cap, second.base, EFR_SUPPORTED),
@@ -1079,12 +1101,6 @@ mod tests {
             let expected = match invalid {
                 0 => Error::MappingGeometry,
                 1 => {
-                    function
-                        .config()
-                        .write32(second.cap + 4, second.base as u32);
-                    Error::Disabled(second.cap)
-                }
-                2 => {
                     units[1].cap = 0x64;
                     Error::MissingInstance(0x64)
                 }
