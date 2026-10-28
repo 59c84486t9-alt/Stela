@@ -382,6 +382,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if effective_wcid != key.slot()
                 || d.security.key_index != key.index()
                 || !match key.cipher() {
+                    Cipher::Wep40 => d.security.mode == 1,
+                    Cipher::Wep104 => d.security.mode == 5,
                     Cipher::Tkip => matches!(d.security.mode, 2 | 3),
                     Cipher::Ccmp128 => d.security.mode == 4,
                     Cipher::Ccmp256 => d.security.mode == 10,
@@ -402,6 +404,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     PacketNumber::new(value)
                 }
                 None if grouped && d.amsdu.is_some_and(|a| !a.first) => None,
+                // mt7925_mac_fill_rx reports no IV for WEP.
+                None if key.cipher().is_wep() => None,
                 None => return Err(Error::WrongProfile),
             };
             security = SecurityStatus {

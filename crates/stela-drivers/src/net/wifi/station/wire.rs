@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Layouts adapted from Linux include/linux/ieee80211.h and
 // net/mac80211/{util.c,mlme.c}; source notices in THIRD_PARTY.md.
-//! Single-link open-system/RSN wire forms. Legacy constructors refuse PMF;
-//! the explicit modern PMF profile requires separate retained OS authority.
+//! Single-link open-system, shared-key, static WEP and RSN wire forms. Legacy
+//! constructors refuse PMF; the explicit modern PMF profile requires separate
+//! retained OS authority.
 
 use super::{PortPolicy, phy};
 use crate::net::{
     Mac,
-    wifi::{Band, frame::Mpdu, security::Cipher},
+    wifi::{
+        Band,
+        frame::Mpdu,
+        security::{Cipher, wep},
+    },
 };
 use alloc::{sync::Arc, vec, vec::Vec};
 
@@ -29,8 +34,34 @@ pub struct AssociationRequest {
     elements: Vec<u8>,
     rsn: Option<(Cipher, Cipher)>,
     legacy_wpa: bool,
+    wep: Option<Wep>,
     modern: Option<Arc<ModernSelection>>,
     pmf: Option<pmf::Selection>,
+}
+
+/// WLAN_AUTH_OPEN and WLAN_AUTH_SHARED_KEY.
+pub const OPEN_SYSTEM: u16 = 0;
+pub const SHARED_KEY: u16 = 1;
+
+/// A static WEP association: the default transmit key and the
+/// authentication algorithm `ieee80211_mgd_auth` takes with it.
+#[derive(Clone, Debug)]
+pub struct Wep {
+    key: wep::Key,
+    algorithm: u16,
+    initial_iv: u32,
+}
+impl Wep {
+    /// The OS's random starting IV, as `ieee80211_wep_init` draws it.
+    pub const fn initial_iv(&self) -> u32 {
+        self.initial_iv
+    }
+    pub const fn key(&self) -> &wep::Key {
+        &self.key
+    }
+    pub const fn algorithm(&self) -> u16 {
+        self.algorithm
+    }
 }
 
 /// Exact local association advertisement and explicit OS-selected PHY profile.
@@ -296,6 +327,45 @@ impl AssociationRequest {
         self.pmf.as_ref()
     }
 
+    /// Select static WEP with open-system or shared-key authentication. As
+    /// `ieee80211_determine_our_sta_mode` does for a WEP pairwise cipher, the
+    /// association stays in legacy mode.
+    pub fn with_wep(
+        mut self,
+        key: wep::Key,
+        algorithm: u16,
+        initial_iv: u32,
+    ) -> Result<Self, Error> {
+        if !matches!(algorithm, OPEN_SYSTEM | SHARED_KEY) {
+            return Err(Error::Invalid("WEP authentication algorithm"));
+        }
+        if self.capabilities & 0x10 == 0 || self.rsn.is_some() || self.pmf.is_some() {
+            return Err(Error::Invalid("WEP requires privacy without RSN/WPA"));
+        }
+        if self
+            .modern
+            .as_ref()
+            .is_some_and(|modern| modern.mode != phy::Mode::Legacy)
+        {
+            return Err(Error::Unsupported("WEP outside legacy mode"));
+        }
+        self.wep = Some(Wep {
+            key,
+            algorithm,
+            initial_iv,
+        });
+        Ok(self)
+    }
+
+    pub const fn wep(&self) -> Option<&Wep> {
+        self.wep.as_ref()
+    }
+
+    /// The authentication algorithm of the first frame.
+    pub fn algorithm(&self) -> u16 {
+        self.wep.as_ref().map_or(OPEN_SYSTEM, Wep::algorithm)
+    }
+
     pub fn modern(&self) -> Option<&ModernSelection> {
         self.modern.as_deref()
     }
@@ -393,6 +463,7 @@ impl AssociationRequest {
             elements: bytes,
             rsn: selected_rsn,
             legacy_wpa,
+            wep: None,
             modern: None,
             pmf: selected_pmf,
         })
@@ -405,13 +476,22 @@ impl AssociationRequest {
             {
                 Ok(())
             }
-            PortPolicy::Controlled if self.capabilities & 0x10 != 0 && self.rsn.is_some() => Ok(()),
+            PortPolicy::Controlled
+                if self.capabilities & 0x10 != 0 && (self.rsn.is_some() || self.wep.is_some()) =>
+            {
+                Ok(())
+            }
             _ => Err(Error::Invalid("security policy/association mismatch")),
         }
     }
 
-    pub const fn key_ciphers(&self) -> Option<(Cipher, Cipher)> {
-        self.rsn
+    /// The pairwise and group ciphers, a static WEP key taking both.
+    pub fn key_ciphers(&self) -> Option<(Cipher, Cipher)> {
+        self.rsn.or_else(|| {
+            self.wep
+                .as_ref()
+                .map(|wep| (wep.key.cipher(), wep.key.cipher()))
+        })
     }
 
     pub const fn capabilities(&self) -> u16 {
@@ -447,9 +527,70 @@ fn header(control: u16, local: Mac, bssid: Mac, sequence: u16) -> Result<Vec<u8>
 }
 
 pub fn authentication(local: Mac, bssid: Mac, sequence: u16) -> Result<Vec<u8>, Error> {
+    authentication_with(local, bssid, sequence, OPEN_SYSTEM)
+}
+
+/// The first `ieee80211_send_auth` frame of `algorithm`.
+pub fn authentication_with(
+    local: Mac,
+    bssid: Mac,
+    sequence: u16,
+    algorithm: u16,
+) -> Result<Vec<u8>, Error> {
     let mut frame = header(0x00b0, local, bssid, sequence)?;
-    frame.extend_from_slice(&[0, 0, 1, 0, 0, 0]);
+    frame.extend_from_slice(&algorithm.to_le_bytes());
+    frame.extend_from_slice(&[1, 0, 0, 0]);
     Ok(frame)
+}
+
+/// `ieee80211_auth_challenge`: shared-key transaction 3 returns the AP's
+/// challenge element, WEP-encrypted in software under the default key.
+pub fn shared_key_response(
+    local: Mac,
+    bssid: Mac,
+    sequence: u16,
+    challenge: &[u8],
+    key: &wep::Key,
+    iv: [u8; 3],
+) -> Result<Vec<u8>, Error> {
+    let mut frame = header(0x40b0, local, bssid, sequence)?;
+    frame.extend_from_slice(&[1, 0, 3, 0, 0, 0, 16]);
+    frame.push(u8::try_from(challenge.len()).map_err(|_| Error::Invalid("challenge"))?);
+    frame.extend_from_slice(challenge);
+    wep::encrypt(&mut frame, key, iv);
+    Ok(frame)
+}
+
+/// An authentication frame as `ieee80211_rx_mgmt_auth` reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Authentication<'a> {
+    pub algorithm: u16,
+    pub transaction: u16,
+    pub status: u16,
+    pub elements: &'a [u8],
+}
+
+impl Authentication<'_> {
+    /// The WLAN_EID_CHALLENGE element, as `cfg80211_find_elem` finds it.
+    pub fn challenge(&self) -> Option<&[u8]> {
+        elements(self.elements)
+            .ok()?
+            .into_iter()
+            .find_map(|(id, data)| (id == 16).then_some(data))
+    }
+}
+
+pub fn authentication_frame(frame: &Mpdu) -> Result<Authentication<'_>, Error> {
+    if frame.header().control & 0x00fc != 0x00b0 {
+        return Err(Error::Invalid("authentication subtype"));
+    }
+    let mut body = frame.bytes().get(24..).ok_or(Error::Truncated)?;
+    Ok(Authentication {
+        algorithm: word(&mut body)?,
+        transaction: word(&mut body)?,
+        status: word(&mut body)?,
+        elements: body,
+    })
 }
 
 pub fn check_peer(frame: &Mpdu, local: Mac, bssid: Mac) -> Result<(), Error> {
@@ -477,14 +618,11 @@ pub fn check_peer(frame: &Mpdu, local: Mac, bssid: Mac) -> Result<(), Error> {
 }
 
 pub fn authentication_response(frame: &Mpdu) -> Result<u16, Error> {
-    if frame.header().control & 0x00fc != 0x00b0 {
-        return Err(Error::Invalid("authentication subtype"));
-    }
-    let mut body = frame.bytes().get(24..).ok_or(Error::Truncated)?;
-    if word(&mut body)? != 0 || word(&mut body)? != 2 {
+    let reply = authentication_frame(frame)?;
+    if reply.algorithm != OPEN_SYSTEM || reply.transaction != 2 {
         return Err(Error::Invalid("authentication transaction/algorithm"));
     }
-    word(&mut body)
+    Ok(reply.status)
 }
 
 #[derive(Clone, Debug)]

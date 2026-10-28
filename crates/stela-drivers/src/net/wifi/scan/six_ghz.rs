@@ -57,14 +57,7 @@ pub struct Colocated {
 
 /// The short SSID, `~crc32_le(~0, ssid)`.
 pub fn short_ssid(ssid: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in ssid {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb8_8320 } else { 0 };
-        }
-    }
-    !crc
+    crate::net::wifi::security::wep::crc32(ssid)
 }
 
 /// `cfg80211_channel_is_psc`.

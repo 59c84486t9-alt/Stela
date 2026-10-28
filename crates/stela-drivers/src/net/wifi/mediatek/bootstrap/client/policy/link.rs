@@ -1332,6 +1332,118 @@ mod tests {
         assert_eq!(ptk.cipher(), crate::net::wifi::security::Cipher::Tkip);
     }
     #[test]
+    fn static_wep_with_shared_key_auth_carries_data_like_mt7925_set_key() {
+        use crate::net::wifi::security::{Cipher, wep};
+        use station::{
+            phy::{Mode, Width},
+            wire::{self, AssociationRequest},
+        };
+        // WEP keeps both sides in legacy mode, without RSN.
+        let legacy = |elements: &[u8]| {
+            let mut out = Vec::new();
+            let mut rest = elements;
+            while let [id, length, tail @ ..] = rest {
+                let (data, tail) = tail.split_at(usize::from(*length));
+                let wmm = *id == 221 && data.starts_with(&[0, 0x50, 0xf2, 2]);
+                if !matches!(id, 45 | 48 | 61 | 191 | 192 | 255) && !wmm {
+                    out.extend_from_slice(&[*id, *length]);
+                    out.extend_from_slice(data);
+                }
+                rest = tail;
+            }
+            out
+        };
+        let key = wep::Key::new(&[3; 13], 1).unwrap();
+        let (client, model) = setup_modern();
+        let (mut join, mut bss) = modern_inputs(&client);
+        let local = client.local_advertisement(Band::Ghz5).unwrap();
+        join.request = AssociationRequest::new_modern_with_local(
+            0x11,
+            10,
+            legacy(join.request.elements()),
+            local.capabilities().clone(),
+            Mode::Legacy,
+            Width::Mhz20,
+        )
+        .unwrap()
+        .with_wep(key.clone(), wire::SHARED_KEY, 0)
+        .unwrap();
+        bss.elements = legacy(&bss.elements);
+        let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut link = ManagedLink::new(
+            client,
+            Provider(drops, core::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        let bss = scan_join(&mut link, &model, join, bss);
+        assert_eq!(finish_tx(&model)[0][24..], [1, 0, 1, 0, 0, 0]);
+        link.service().unwrap();
+        incoming(
+            &model,
+            &response(0xb0, &[1, 0, 2, 0, 0, 0, 16, 2, 0xaa, 0xbb]),
+            None,
+            false,
+        );
+        link.service().unwrap();
+        // Transaction 3 leaves as mac80211 encrypted it, under the first IV.
+        let third = finish_tx(&model);
+        let expected =
+            wire::shared_key_response(LOCAL, AP, 0, &[0xaa, 0xbb], &key, [0, 0, 1]).unwrap();
+        assert_eq!(third[0][..2], [0xb0, 0x40]);
+        assert_eq!(third[0][24..], expected[24..]);
+        link.service().unwrap();
+        incoming(&model, &response(0xb0, &[1, 0, 4, 0, 0, 0]), None, false);
+        link.service().unwrap();
+        assert_eq!(finish_tx(&model)[0][..2], [0, 0]);
+        link.service().unwrap();
+        let mut assoc = vec![0x11, 0, 0, 0, 1, 0xc0];
+        assoc.extend_from_slice(&bss.elements);
+        incoming(&model, &response(0x10, &assoc), None, false);
+        link.service().unwrap();
+        link.configure().unwrap();
+        assert_eq!(link.phase(), Phase::Associated);
+        // The default key goes to both the AP's and the BSS's records.
+        let ptk = link
+            .install_key(true, 1, key.material(), ReplaySeed::ZERO)
+            .unwrap();
+        link.install_key(false, 1, key.material(), ReplaySeed::ZERO)
+            .unwrap();
+        assert_eq!(ptk.cipher(), Cipher::Wep104);
+        link.authorize_port(link.station().association_epoch().unwrap())
+            .unwrap();
+        assert!(link.carrier());
+        link.transmit(&eth(0x800)).unwrap();
+        let frames = finish_tx(&model);
+        assert_eq!((frames[0][0], frames[0][1] & 0x40), (0x08, 0x40));
+        link.service().unwrap();
+        // MT_CIPHER_WEP104 has no packet number, so a repeat is delivered;
+        // an ICV error is not.
+        let wep = |icv_error: bool| {
+            let mut raw = incoming_bytes(&data(false), Some((1, 1, 0)), false);
+            let mut r1 = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+            let mut r2 = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+            r2 = (r2 & !(31 << 16)) | (5 << 16);
+            if icv_error {
+                r1 |= 1 << 25;
+            }
+            raw[4..8].copy_from_slice(&r1.to_le_bytes());
+            raw[8..12].copy_from_slice(&r2.to_le_bytes());
+            device_receive(&model.queues[&0xd4520], &raw, true, 0);
+        };
+        for _ in 0..2 {
+            wep(false);
+            link.service().unwrap();
+            let ethernet = link.receive().unwrap().unwrap();
+            assert_eq!(&ethernet[12..14], &0x800u16.to_be_bytes());
+        }
+        // The ICV error is mt7925_mac_fill_rx's RX_FLAG_ONLY_MONITOR: never
+        // delivered, and reported once as rejected receive content.
+        wep(true);
+        assert!(link.service().is_err());
+        assert!(link.receive().unwrap().is_none());
+    }
+    #[test]
     fn aborting_a_join_deauthenticates_like_ieee80211_mgd_deauth() {
         let (mut link, model, join, bss, _) = setup_link();
         scan_join(&mut link, &model, join, bss);

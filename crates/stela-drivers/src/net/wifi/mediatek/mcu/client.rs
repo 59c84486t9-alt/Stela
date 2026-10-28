@@ -141,7 +141,7 @@ impl Profile {
         {
             return Err(Error::InvalidTiming);
         }
-        if !matches!(self.cipher, 0 | 2 | 4 | 10 | 11 | 12) {
+        if !matches!(self.cipher, 0 | 1 | 2 | 4 | 5 | 10 | 11 | 12) {
             return Err(Error::UnsupportedCipher);
         }
         Ok(())
@@ -458,6 +458,7 @@ impl Profile {
         // Exact source switch, including its default for CCMP256. These are
         // firmware BSS fields, never evidence of an OS SAE/RSN authentication.
         let (mode, status) = match self.cipher {
+            1 | 5 => (1, 0),
             2 => (7, 4),
             4 => (7, 6),
             11 | 12 => (11, 8),
