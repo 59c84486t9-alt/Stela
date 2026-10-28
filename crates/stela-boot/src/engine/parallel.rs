@@ -136,7 +136,6 @@ impl Pe {
             "PARALLEL PE {pe} machine takes {} KiB of heap\n",
             own().saturating_sub(before).max(0) >> 10
         ));
-        machine.set_strict(false);
         // Waits return to this loop, which publishes the counts.
         machine.set_wait_limit(Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND));
         if let Err(stop) = machine.start_parallel(Arc::clone(&hub), core_locks, address) {

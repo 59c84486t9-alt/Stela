@@ -268,9 +268,8 @@ pub struct Cpu {
     /// and last byte, as the engine last read it from the devices.
     pub memory_lock: super::mmu::MemoryLocks,
     /// System registers answered as storage after their model refused an
-    /// access outside strict mode, by encoding selector: each reads the
-    /// value last written to it until its model accepts a write
-    /// (`engine::Machine::set_strict`).
+    /// access, by encoding selector: each reads the value last written to
+    /// it until its model accepts a write (`engine::Machine::register_refused`).
     pub degraded: alloc::collections::BTreeMap<u16, u64>,
 }
 

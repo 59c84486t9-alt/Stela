@@ -843,7 +843,7 @@ fn run(
                     &requirement.to_string(),
                     Failure::BadInstruction,
                     None,
-                )?;
+                );
                 pe.cpu.pc = requirement.pc;
                 kernel.bad_instruction(pe, || format!("unsupported {requirement}"))?;
                 if let Some(end) = deliver(kernel, pe)? {

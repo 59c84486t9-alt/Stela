@@ -831,9 +831,12 @@ mod tests {
         );
         // A CPU stop cannot abandon a queued DMA/RPC message.
         assert!(asc.write(0x44, Width::Word, 0, &mut access).is_err());
+        // Nor a power request while it waits: the request is answered
+        // degraded and reported once.
         asc.write(0x8800, Width::Double, 6 << 52 | 0x201, &mut access)
             .unwrap();
-        assert!(asc.write(0x8808, Width::Double, 0, &mut access).is_err());
+        asc.write(0x8808, Width::Double, 0, &mut access).unwrap();
+        assert_eq!(asc.take_unmodeled().len(), 1);
         assert_eq!(
             asc.firmware::<Coprocessor>().unwrap().rtkit.iop_power(),
             0x20

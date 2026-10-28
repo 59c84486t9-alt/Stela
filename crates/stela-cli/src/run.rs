@@ -423,7 +423,6 @@ impl Run {
             statistics: self.statistics,
             fp_profile_output: self.fp_profile_output.clone(),
             engine_profile_output: self.engine_profile_output.clone(),
-            strict: false,
         };
 
         let report = hosted::run(launch).map_err(|error| stopped(&target.program, error))?;

@@ -1258,9 +1258,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .as_ref()
         .and_then(|board| board.boot_processor.as_ref())
         .map_or(0, |boot| boot.cpu);
-    let _ = mount::clpc_absence(&hidden_clpc, false, &mut |arguments| {
-        output::arguments(arguments)
-    });
+    mount::clpc_absence(&hidden_clpc, &mut |arguments| output::arguments(arguments));
     if let (Some(board), Some(tree)) = (board.as_mut(), tree)
         && let Some(states) = board.power_states.as_mut()
     {
@@ -2066,8 +2064,6 @@ fn run_machine<H: Host>(
             "PROFILE on: each heartbeat reports the engine's time by phase and exit kind\n"
         ));
     }
-    machine.set_strict(false);
-    machine.devices.with(|devices| devices.set_strict(false));
     if options.tss {
         output::arguments(format_args!(
             "TSS OPT-IN: the restore host sends this machine's ECID, the restore's nonces and \

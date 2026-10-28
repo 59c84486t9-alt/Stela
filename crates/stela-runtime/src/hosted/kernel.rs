@@ -680,7 +680,7 @@ impl Kernel {
                         ),
                         super::unsupported::Failure::BadInstruction,
                         None,
-                    )?;
+                    );
                     return Ok(false);
                 }
                 self.jit_permissions = value;

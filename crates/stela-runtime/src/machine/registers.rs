@@ -205,7 +205,7 @@ pub struct Changes {
     pub stored: bool,
     /// The write took a value whose effect this machine does not model
     /// (`impdef::Entry::unmodeled_effect`): what is missing, which the
-    /// engine reports once, or stops at in strict mode.
+    /// engine reports once.
     pub unmodeled: Option<&'static str>,
     /// SIQ_CFG_EL1 now refuses (`true`) or accepts the AIC's IRQs for this
     /// PE ([`SIQ_CFG_NO_IRQ`]).

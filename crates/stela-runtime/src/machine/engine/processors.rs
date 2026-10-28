@@ -2181,17 +2181,17 @@ mod tests {
         machine.system_instruction(MRS_X1_RMR_EL2).unwrap();
         assert_eq!(machine.cpu.state.x[1], 1);
         // EL1 cannot reach RMR_EL2, and a board without a reset vector
-        // cannot reset the PE.
+        // cannot reset the PE: the request is reported once and the PE runs on.
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.system_instruction(MSR_RMR_EL2_X1).unwrap();
         assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
         machine.devices.reset = None;
         machine.cpu.set_pstate(Pstate::reset(2));
         machine.cpu.state.x[1] = 0b10;
-        assert!(matches!(
-            machine.system_instruction(MSR_RMR_EL2_X1),
-            Err(Stop::Unsupported(_))
-        ));
+        let pc = machine.cpu.pc;
+        machine.system_instruction(MSR_RMR_EL2_X1).unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (pc + 4, 2));
+        assert_eq!(machine.take_unmodeled().len(), 1);
     }
 
     #[test]
