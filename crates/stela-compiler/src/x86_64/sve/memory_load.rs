@@ -291,8 +291,7 @@ fn scalar_replicate(
             operand.predicate.expect("replicate is predicated"),
             chunk,
             operand.element,
-            1,
-            2,
+            crate::x86_64::scalable::MaskRegisters::new(1, 2),
             length,
             target,
         );

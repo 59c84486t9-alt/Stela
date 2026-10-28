@@ -89,8 +89,7 @@ pub(in crate::x86_64) fn emit(
             predicate,
             chunk,
             ElementSize::Word,
-            ACTIVE,
-            MERGE,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, MERGE),
             length,
             target,
         );

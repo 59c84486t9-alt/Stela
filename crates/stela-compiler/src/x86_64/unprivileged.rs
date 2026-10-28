@@ -11,8 +11,10 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
         operand.transfer,
         operand.bytes,
         operand.data,
-        operand.base,
-        operand.displacement,
-        AddressMode::Offset,
+        crate::x86_64::ImmediateAddress {
+            base: operand.base,
+            displacement: operand.displacement,
+            mode: AddressMode::Offset,
+        },
     );
 }

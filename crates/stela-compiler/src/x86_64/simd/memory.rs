@@ -22,10 +22,12 @@ pub(super) fn emit_register_offset(
     super::super::register_offset::address(
         code,
         checks,
-        operand.base,
-        operand.index,
-        operand.extend,
-        operand.shift,
+        crate::x86_64::register_offset::IndexedAddress::new(
+            operand.base,
+            operand.index,
+            operand.extend,
+            operand.shift,
+        ),
         operand.bytes,
         !operand.load,
     );

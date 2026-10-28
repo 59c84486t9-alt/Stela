@@ -2,15 +2,12 @@
 //! beyond the core's branch, move and SETcc forms.
 use super::{Asm, Cond, Patch};
 
-/// The legacy high-byte registers AH, CH, DH and BH, which ModRM r/m
-/// values 4 to 7 name in an instruction without a REX prefix.
+/// The high-byte registers used by flag capture, without a REX prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum HighByte {
     Ah = 4,
-    Ch = 5,
     Dh = 6,
-    Bh = 7,
 }
 
 impl Asm<'_> {

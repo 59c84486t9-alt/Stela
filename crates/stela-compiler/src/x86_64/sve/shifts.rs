@@ -145,8 +145,7 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
                     predicate,
                     chunk,
                     operand.element_size,
-                    2,
-                    3,
+                    crate::x86_64::scalable::MaskRegisters::new(2, 3),
                     length,
                     target,
                 );

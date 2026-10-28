@@ -343,8 +343,7 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
             predicate,
             chunk,
             operand.element_size,
-            PREDICATE_XMM,
-            PREDICATE_SCRATCH_XMM,
+            crate::x86_64::scalable::MaskRegisters::new(PREDICATE_XMM, PREDICATE_SCRATCH_XMM),
             length,
             target,
         );

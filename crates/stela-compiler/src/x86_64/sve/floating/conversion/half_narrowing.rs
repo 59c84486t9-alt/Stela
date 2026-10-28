@@ -76,8 +76,7 @@ pub(in crate::x86_64) fn emit(
             operand.governing,
             chunk,
             element,
-            ACTIVE,
-            SCRATCH,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, SCRATCH),
             length,
             target,
         );

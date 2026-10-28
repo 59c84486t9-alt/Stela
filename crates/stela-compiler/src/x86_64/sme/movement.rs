@@ -91,8 +91,7 @@ pub(crate) fn emit(
                             predicate,
                             chunk,
                             element,
-                            MASK,
-                            MASK_SCRATCH,
+                            crate::x86_64::scalable::MaskRegisters::new(MASK, MASK_SCRATCH),
                             length,
                             target,
                         );

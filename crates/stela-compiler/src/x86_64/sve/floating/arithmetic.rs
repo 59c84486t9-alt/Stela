@@ -133,8 +133,7 @@ fn active_lanes(
             predicate,
             chunk,
             element,
-            ACTIVE,
-            MASK_SCRATCH,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, MASK_SCRATCH),
             length,
             target,
         );

@@ -201,17 +201,18 @@ fn commit_halves(code: &mut Code, destination: u8) {
     asm.mov_store(Size::Qword, guest(vector_offset(destination) + 8), Rdx);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn table(
-    code: &mut Code,
-    destination: u8,
-    first: u8,
-    registers: u8,
-    indices: u8,
-    bytes: u8,
-    preserve: bool,
-    target: TargetCpu,
-) {
+fn table(code: &mut Code, operand: &Operand, target: TargetCpu) {
+    let Operand::Table {
+        destination,
+        first,
+        registers,
+        indices,
+        bytes,
+        preserve,
+    } = *operand
+    else {
+        unreachable!("a decoded table operation");
+    };
     if target >= TargetCpu::Ssse3 {
         read_vector(code, indices, 1);
         packed(code, Host::Xor, 0, 0); // result
@@ -321,22 +322,6 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             right,
             selection,
         } => permutation(code, destination, left, right, selection, target),
-        Operand::Table {
-            destination,
-            first,
-            registers,
-            indices,
-            bytes,
-            preserve,
-        } => table(
-            code,
-            destination,
-            first,
-            registers,
-            indices,
-            bytes,
-            preserve,
-            target,
-        ),
+        Operand::Table { .. } => table(code, operand, target),
     }
 }

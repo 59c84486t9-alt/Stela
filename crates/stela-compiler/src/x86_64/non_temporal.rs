@@ -31,9 +31,11 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
                 transfer,
                 operand.bytes,
                 data,
-                operand.base,
-                operand.displacement,
-                AddressMode::Offset,
+                crate::x86_64::ImmediateAddress {
+                    base: operand.base,
+                    displacement: operand.displacement,
+                    mode: AddressMode::Offset,
+                },
             );
         }
         Data::Vector(vectors) => {

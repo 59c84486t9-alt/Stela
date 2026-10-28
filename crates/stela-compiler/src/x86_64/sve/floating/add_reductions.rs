@@ -107,8 +107,7 @@ impl Tree {
                 self.predicate,
                 chunk,
                 element(self.format),
-                RIGHT,
-                PREDICATE_SCRATCH,
+                crate::x86_64::scalable::MaskRegisters::new(RIGHT, PREDICATE_SCRATCH),
                 self.length,
                 self.target,
             );
@@ -154,19 +153,28 @@ fn status(code: &mut Code, frame: &numerical::Frame, failures: &mut Vec<usize>) 
     numerical::add_fpsr(code, frame);
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ExceptionState<'a> {
+    features: NumericalFeatures,
+    classification: Classification,
+    frame: &'a numerical::Frame,
+    failures: &'a mut Vec<usize>,
+}
+
 fn pairwise(
     code: &mut Code,
     operand: Operand,
     left: u8,
     right: u8,
     length: VectorLength,
-    features: NumericalFeatures,
-    classification: Classification,
-    frame: &numerical::Frame,
-    failures: &mut Vec<usize>,
+    exceptions: ExceptionState<'_>,
     target: TargetCpu,
 ) {
+    let ExceptionState {
+        features,
+        classification,
+        frame,
+        failures,
+    } = exceptions;
     let predicate = operand
         .predicate
         .expect("validated predicated pairwise form");
@@ -179,8 +187,7 @@ fn pairwise(
                 predicate,
                 chunk,
                 element(operand.format),
-                FIRST_SUBTREE,
-                RIGHT,
+                crate::x86_64::scalable::MaskRegisters::new(FIRST_SUBTREE, RIGHT),
                 length,
                 target,
             );
@@ -286,8 +293,7 @@ pub(in crate::x86_64) fn emit(
             operand.predicate.unwrap(),
             0,
             element(operand.format),
-            RIGHT,
-            PREDICATE_SCRATCH,
+            crate::x86_64::scalable::MaskRegisters::new(RIGHT, PREDICATE_SCRATCH),
             length,
             target,
         );
@@ -310,10 +316,12 @@ pub(in crate::x86_64) fn emit(
                 left,
                 right,
                 length,
-                features,
-                classification,
-                &frame,
-                &mut failures,
+                ExceptionState {
+                    features,
+                    classification,
+                    frame: &frame,
+                    failures: &mut failures,
+                },
                 target,
             );
         } else {

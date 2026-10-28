@@ -803,7 +803,6 @@ fn register_plain(code: &mut Code, signed: bool) {
     asm.cmov(Cond::Ns, Size::Qword, Rax, R10);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn register_shift(
     code: &mut Code,
     operand: &Operand,

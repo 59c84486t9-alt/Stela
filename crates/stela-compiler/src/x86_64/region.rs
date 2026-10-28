@@ -326,9 +326,11 @@ impl Emitter<'_> {
                 MemoryTransfer::Store,
                 bytes,
                 [first, second],
-                base,
-                displacement,
-                mode,
+                crate::x86_64::ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
             );
             encoding::ordinary_pair_store_ends(
                 &raw,
@@ -344,9 +346,11 @@ impl Emitter<'_> {
                 MemoryTransfer::Store,
                 bytes,
                 data[0],
-                base,
-                displacement,
-                mode,
+                crate::x86_64::ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
             );
             encoding::ordinary_store_ends(
                 &raw,
@@ -432,9 +436,11 @@ impl Emitter<'_> {
             transfer,
             bytes,
             data,
-            base,
-            displacement,
-            mode,
+            crate::x86_64::ImmediateAddress {
+                base,
+                displacement,
+                mode,
+            },
         );
         let ends = encoding::ordinary_load_ends(
             &raw,
@@ -659,9 +665,11 @@ impl Emitter<'_> {
             transfer,
             bytes,
             data,
-            base,
-            displacement,
-            mode,
+            crate::x86_64::ImmediateAddress {
+                base,
+                displacement,
+                mode,
+            },
         );
         let ends = encoding::ordinary_pair_load_ends(
             &raw,
@@ -1830,9 +1838,11 @@ mod tests {
             },
             1,
             Register::X(16),
-            Register::X(15),
-            -255,
-            AddressMode::Offset,
+            crate::x86_64::ImmediateAddress {
+                base: Register::X(15),
+                displacement: -255,
+                mode: AddressMode::Offset,
+            },
         );
         assert_eq!(
             encoding::ordinary_load_ends(&raw, 1, 15, Some(16), -255),
@@ -1893,9 +1903,11 @@ mod tests {
                     },
                     bytes,
                     data,
-                    Register::X(15),
-                    -255,
-                    AddressMode::Offset,
+                    crate::x86_64::ImmediateAddress {
+                        base: Register::X(15),
+                        displacement: -255,
+                        mode: AddressMode::Offset,
+                    },
                 );
                 let selected = slot(data);
                 let ends = encoding::ordinary_load_ends(&raw, bytes, 15, selected, -255).unwrap();
@@ -2029,9 +2041,11 @@ mod tests {
             },
             WORD_LOAD_BYTES,
             data,
-            Register::X(15),
-            -8,
-            AddressMode::Offset,
+            crate::x86_64::ImmediateAddress {
+                base: Register::X(15),
+                displacement: -8,
+                mode: AddressMode::Offset,
+            },
         );
         let ends = |raw: &[u8], bytes, base, data| {
             encoding::ordinary_pair_load_ends(raw, bytes, base, data, -8)
@@ -2058,9 +2072,11 @@ mod tests {
                     },
                     bytes,
                     data,
-                    base,
-                    -8,
-                    AddressMode::Offset,
+                    crate::x86_64::ImmediateAddress {
+                        base,
+                        displacement: -8,
+                        mode: AddressMode::Offset,
+                    },
                 );
                 let base = slot(base).unwrap();
                 assert!(ends(&raw, bytes, base, [Some(16), Some(17)]).is_some());
@@ -2628,9 +2644,11 @@ mod tests {
                     MemoryTransfer::Store,
                     bytes,
                     data,
-                    base,
-                    -16,
-                    AddressMode::Offset,
+                    crate::x86_64::ImmediateAddress {
+                        base,
+                        displacement: -16,
+                        mode: AddressMode::Offset,
+                    },
                 );
                 // An X base splits every H/W/X store; the checked SP's
                 // aligned offset never does.
@@ -2688,9 +2706,11 @@ mod tests {
                     MemoryTransfer::Store,
                     bytes,
                     data,
-                    Register::Sp,
-                    -16,
-                    AddressMode::Offset,
+                    crate::x86_64::ImmediateAddress {
+                        base: Register::Sp,
+                        displacement: -16,
+                        mode: AddressMode::Offset,
+                    },
                 );
                 let ends = |raw: &[u8], bytes| {
                     encoding::ordinary_pair_store_ends(raw, bytes, 31, data.map(slot), -16)

@@ -75,8 +75,10 @@ pub(crate) fn emit_ordinary_for_target(
         terminal,
         fallthrough,
         target,
-        true,
-        false,
+        RegionPolicy {
+            optimize: true,
+            fault_table: false,
+        },
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
     )
@@ -112,8 +114,10 @@ pub(crate) fn emit_for_target(
         terminal,
         fallthrough,
         target,
-        false,
-        false,
+        RegionPolicy {
+            optimize: false,
+            fault_table: false,
+        },
         checks,
         super::NativeSystem::NONE,
     )
@@ -143,8 +147,10 @@ pub(crate) fn emit_system_mode(
         terminal,
         fallthrough,
         target,
-        !checks.alignment,
-        true,
+        RegionPolicy {
+            optimize: !checks.alignment,
+            fault_table: true,
+        },
         super::MemoryChecks {
             guest_range: true,
             ..checks
@@ -153,19 +159,28 @@ pub(crate) fn emit_system_mode(
     )
 }
 
+/// Selection and recovery policy for register-resident regions.
+#[derive(Clone, Copy)]
+struct RegionPolicy {
+    optimize: bool,
+    fault_table: bool,
+}
+
 /// With `fault_table`, region accesses keep dirty values in registers and
 /// the returned table says where ([`crate::block::FaultRecovery`]).
-#[allow(clippy::too_many_arguments)]
 fn emit_selected(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
-    optimize_regions: bool,
-    fault_table: bool,
+    regions: RegionPolicy,
     checks: super::MemoryChecks,
     native: super::NativeSystem,
 ) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
+    let RegionPolicy {
+        optimize: optimize_regions,
+        fault_table,
+    } = regions;
     let mut fault_recovery = vec![];
     let mut block = super::Emitted::default();
     let code = &mut block.x86_64_code;
@@ -354,7 +369,6 @@ impl Held {
 /// register the previous one just stored from RAX finds it there, and one
 /// that reads a vector XMM0 holds may take it from there. With
 /// `out_of_line`, numerical instructions move their slow paths there.
-#[allow(clippy::too_many_arguments)]
 fn emit_single(
     code: &mut Code,
     out_of_line: Option<&mut OutOfLine>,
@@ -588,7 +602,6 @@ pub(crate) fn successor_exits(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_terminal(
     code: &mut Code,
     source_map: &mut Vec<(GuestAddress, usize)>,
