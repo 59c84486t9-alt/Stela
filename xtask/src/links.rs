@@ -297,22 +297,26 @@ mod tests {
 
     #[test]
     fn missing_files_headings_paths_and_tasks_are_reported() -> Result<()> {
+        // Spelled apart, so the checker passes over this file itself.
+        const XTASK: &str = "cargo xtask";
         let root = tempfile::tempdir()?;
         fs::create_dir_all(root.path().join("docs/design"))?;
         fs::write(root.path().join("docs/design/system.md"), "# Boot route\n")?;
         fs::write(
             root.path().join("docs/guide.md"),
-            "[ok](design/system.md#boot-route) [gone](design/system.md#boot-route-is-unselected)\n\
-             [missing](design/none.md) [web](https://example.com/x.md)\n\
-             `docs/design/system.md` `crates/stela-runtime/examples/leaf.rs`\n\
-             `docs/design/system.md#boot-route` `docs/design/system.md#gone`\n\
-             [upstream](https://example.com/docs) holds `docs/hw/soc.md`\n\
-             Run `cargo xtask check`, not `cargo xtask dit-audit`.\n",
+            format!(
+                "[ok](design/system.md#boot-route) [gone](design/system.md#boot-route-is-unselected)\n\
+                 [missing](design/none.md) [web](https://example.com/x.md)\n\
+                 `docs/design/system.md` `crates/stela-runtime/examples/leaf.rs`\n\
+                 `docs/design/system.md#boot-route` `docs/design/system.md#gone`\n\
+                 [upstream](https://example.com/docs) holds `docs/hw/soc.md`\n\
+                 Run `{XTASK} check`, not `{XTASK} dit-audit`.\n"
+            ),
         )?;
         // A Rust comment's task, wrapped onto its next line.
         fs::write(
             root.path().join("target.rs"),
-            "/// `cargo xtask\n/// sve-audit` checks\n",
+            format!("/// `{XTASK}\n/// sve-audit` checks\n"),
         )?;
         let files = ["docs/guide.md", "docs/design/system.md", "target.rs"].map(PathBuf::from);
         let tasks = ["check".to_owned()].into();
@@ -324,7 +328,7 @@ mod tests {
             "leaf.rs",
             "system.md#gone",
             "dit-audit",
-            "target.rs:1: `cargo xtask sve-audit`",
+            &format!("target.rs:1: `{XTASK} sve-audit`"),
         ] {
             assert!(problems.iter().any(|p| p.contains(expected)), "{expected}");
         }
