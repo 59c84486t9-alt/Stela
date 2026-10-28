@@ -237,10 +237,7 @@ pub(super) fn cpu_model(options: CpuModelOptions<'_>) -> Result<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg_attr(
-        not(feature = "fetched-sources"),
-        ignore = "reads the sources `cargo xtask gpu fetch` checks out"
-    )]
+    #[cfg_attr(not(feature = "fetched-sources"), ignore = "feature: fetched-sources")]
     #[test]
     fn lut_upload_uses_header_prefix_and_common_heap() {
         let output = tempfile::tempdir().unwrap();

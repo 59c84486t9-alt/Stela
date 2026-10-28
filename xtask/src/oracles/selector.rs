@@ -147,4 +147,46 @@ mod tests {
         entry.values.push("STELA_INPUT".into());
         assert!(crate::oracles::validate(&[entry]).is_err());
     }
+    #[test]
+    fn feature_gates_name_their_enabling_feature() {
+        let files = crate::oracles::git(&[
+            "grep",
+            "-l",
+            "cfg_attr",
+            "--",
+            "crates/**/*.rs",
+            "xtask/**/*.rs",
+        ])
+        .unwrap();
+        let mut inspected = 0;
+        for file in files.lines() {
+            let text = std::fs::read_to_string(crate::tools::root().join(file)).unwrap();
+            let marker = concat!("#[", "cfg_attr(");
+            for (offset, _) in text.match_indices(marker) {
+                let tail = &text[offset + marker.len()..];
+                let attribute = &tail[..tail.find(")]").expect("conditional attribute terminator")];
+                let ignored = attribute.rsplit(',').find(|part| {
+                    let part = part.trim();
+                    part == "ignore" || part.starts_with("ignore =")
+                });
+                if let Some(ignored) = ignored {
+                    assert_eq!(
+                        ignored.trim(),
+                        "ignore = \"feature: fetched-sources\"",
+                        "{file}"
+                    );
+                    assert_eq!(
+                        attribute.trim().split_once(',').unwrap().0,
+                        "not(feature = \"fetched-sources\")",
+                        "{file}"
+                    );
+                    inspected += 1;
+                }
+            }
+        }
+        assert!(
+            inspected > 0,
+            "feature-gated source checks must remain represented"
+        );
+    }
 }

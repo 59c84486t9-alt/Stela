@@ -108,10 +108,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
 }
 
 #[cfg(test)]
-#[cfg_attr(
-    not(feature = "fetched-sources"),
-    ignore = "reads the sources `cargo xtask gpu fetch` checks out"
-)]
+#[cfg_attr(not(feature = "fetched-sources"), ignore = "feature: fetched-sources")]
 #[test]
 fn page_accessors_require_supported_native_geometry() {
     let output = tempfile::tempdir().unwrap();

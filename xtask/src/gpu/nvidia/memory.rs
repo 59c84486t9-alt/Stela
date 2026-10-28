@@ -9,10 +9,7 @@ use std::process::Command;
 use std::{fs, path::Path};
 
 #[cfg(test)]
-#[cfg_attr(
-    not(feature = "fetched-sources"),
-    ignore = "reads the sources `cargo xtask gpu fetch` checks out"
-)]
+#[cfg_attr(not(feature = "fetched-sources"), ignore = "feature: fetched-sources")]
 #[test]
 fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
     let output = tempfile::tempdir().unwrap();
@@ -79,10 +76,7 @@ pub(super) fn verify(clang: &Path, source: &Sources, output: &Path) -> Result<()
 }
 
 #[cfg(test)]
-#[cfg_attr(
-    not(feature = "fetched-sources"),
-    ignore = "reads the sources `cargo xtask gpu fetch` checks out"
-)]
+#[cfg_attr(not(feature = "fetched-sources"), ignore = "feature: fetched-sources")]
 #[test]
 fn nvkms_original_realloc_preserves_ownership_on_heap_denial() {
     let output = tempfile::tempdir().unwrap();
