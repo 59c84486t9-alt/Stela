@@ -757,7 +757,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .transpose()
         .unwrap_or_else(|error| output::fatal(&error));
     let fdr_partition = fdr_placement.as_ref().map(|placement| placement.partition);
-    let mut fdr_device = None;
     // `--nor` naming the `--storage` partition keeps the machine state in
     // that partition's tail (`pc::machine_state`): one device, split below.
     let state_in_storage = options.nor.is_some() && options.nor == options.storage;
@@ -779,101 +778,16 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("the audio check failed")
         });
     }
-    // Serialized, the BSP runs every PE and the workers no guest code.
-    let serialized = !(options.parallel
-        || options.native_rounds
-        || options.native_shared_check
-        || options.native_bootstrap_check);
-    let partition = crate::native_smp::resources::partition(
-        handoff.native_resources.cores as usize,
-        0,
-        handoff.code.bytes,
-        handoff.pool.bytes,
-        serialized,
-    )
-    .unwrap_or_else(|error| output::fatal(error));
-    let native_tsc_base = host::rdtsc();
-    let config = Config {
-        ram: ram.clone(),
-        pool_physical: handoff.pool.physical,
-        pool_bytes: partition.pool_bytes,
-        window_root: handoff.root,
-        code_virtual: layout::code(),
-        code_physical: handoff.code.physical,
-        code_bytes: partition.code_bytes,
+    let InstalledHost {
+        owner: mut host_owner,
+        apic_hz,
         tsc_base: native_tsc_base,
-        tsc_hz: handoff.tsc_hz,
-        apic_base: handoff.apic_base,
-        placement: handoff.placement,
-        bounce: Some((layout::bounce(), handoff.bounce)),
-    };
-    // SAFETY: once on the BSP, with interrupts off and owned native resources.
-    // Retain the processor-local state through every native call and handler.
-    crate::status::begin("Installing the host processor state");
-    let mut host_owner =
-        unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
-    if options.native_bootstrap_check {
-        host::fp_diagnostic::check(&mut host_owner.host())
-            .unwrap_or_else(|error| output::fatal(error));
-    }
-    let apic_hz = host::statistics().apic_hz;
-    crate::status::done("");
-    if options.native_clock_check {
-        // SAFETY: original loader capture remains pinned in this actual
-        // HostOwner's physmap. Parsing never supplies hardware ownership.
-        let prepared = unsafe { crate::native_mmio::captured(handoff) }
-            .map_err(|_| stela_drivers::platform::work::WorkError::Unavailable)
-            .and_then(|wire| crate::native_clock::Prepared::from_fadt(wire.fadt()))
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
-                output::fatal("native clock source capture failed")
-            });
-        // SAFETY: explicit bounded UP test mode on its original HostOwner,
-        // with no other diagnostic/device owner active. The trusted fixture
-        // excludes source reset/SMM/VMM gaps over one second; this grants no
-        // arbitrary original driver execution or general PM clock profile.
-        unsafe { crate::native_clock::diagnostic::check(&mut host_owner, prepared) }
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
-                output::fatal("native clock fixture failed")
-            });
-        stop_here("bounded native clock fixture complete", 0x10);
-    }
-    if options.native_mmio_check {
-        // SAFETY: explicit bounded native diagnostic on the original retained
-        // handoff/owner. Success stops before guest entry; permanent mapping
-        // and IRQ registries retain this exact physical root until VM shutdown.
-        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
-            |error| {
-                output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
-                output::fatal("native MMIO root qualification failed")
-            },
-        );
-        stop_here("native MMIO root qualification complete", 0x10);
-    }
-    // The firmware's ACPI namespace, loaded before the host devices start so
-    // their services can consult it; the host's power transitions run it.
-    let host_acpi = aml::HostAcpi::start(
-        handoff.rsdp,
-        handoff.root,
-        handoff
-            .storage
-            .handoff()
-            .map(|storage| storage.ecam)
-            .unwrap_or_default(),
-        handoff.tsc_hz,
-    );
-    // The owned MMIO authority the host devices' services map through. A
-    // host it cannot qualify is reported, and those services refuse.
-    // SAFETY: this boot's capture, on the installed boot processor before
-    // the other host processors start.
-    let native_mmio = unsafe { crate::native_mmio::captured(handoff) }
-        .and_then(|wire| unsafe { crate::native_mmio::Source::activate(wire, &mut host_owner) })
-        .inspect(|_| output::arguments(format_args!("NATIVE MMIO aperture owned\n")))
-        .inspect_err(|error| {
-            output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));
-        })
-        .ok();
+        serialized,
+    } = install_host(handoff, &options, &ram);
+    let Platform {
+        acpi: host_acpi,
+        mmio: native_mmio,
+    } = start_platform(handoff, &mut host_owner);
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
@@ -881,150 +795,30 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let remote_image = options.install.is_some() && options.install_source.is_none();
     let wants_network =
         (options.tss && restoring) || remote_image || options.network_check.is_some();
-    let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
-        if targets.is_empty()
-            && options.install_source.is_none()
-            && options.preboot.is_none()
-            && !options.input
-            && !wants_network
-            && options.usb_storage.is_empty()
-            && !options.external_disks
-            && !options.guest_network
-            && translation_store.is_none()
-            && fdr_partition.is_none()
-        {
-            (
-                Vec::new(),
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-                None,
-                storage::HostDisks::none(),
-            )
-        } else {
-            let mut storage_handoff = handoff
-                .storage
-                .handoff()
-                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-            storage_handoff.firmware = host_firmware.clone();
-            // Disks that can signal their completions wake the BSP, which
-            // runs the engine's devices.
-            let bsp = native_processors.expect("validated native roster");
-            storage_handoff.completion =
-                host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
-            if options.audio_check.is_some() {
-                // The audio check retains the final slice even after shutdown.
-                storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
-            }
-            crate::status::begin("Starting the PC's disks and USB devices");
-            // SAFETY: sole ownership of the DMA pages and controllers; the
-            // probe runs in the loader's root, which reaches them.
-            let storage::Opened {
-                services,
-                medium,
-                preboot,
-                store,
-                log,
-                fdr,
-                inputs,
-                mut links,
-                usb_disks,
-                disks,
-            } = unsafe {
-                let native = native_mmio.as_ref().map(|mmio| {
-                    services::Services::new(
-                        mmio,
-                        host_acpi.as_ref(),
-                        handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes,
-                        handoff.tsc_hz,
-                    )
-                });
-                storage::open(
-                    &storage_handoff,
-                    handoff.root,
-                    native
-                        .as_ref()
-                        .map(|native| native as &dyn stela_drivers::probe::NativeServices),
-                    &storage::Partitions {
-                        targets: &targets,
-                        medium: options.install_source,
-                        preboot: options.preboot.as_ref(),
-                        store: translation_store,
-                        log: handoff.log_partition.map(Guid),
-                        fdr: fdr_partition,
-                    },
-                    &options.usb_storage,
-                    options.external_disks.then(|| {
-                        stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
-                            .saturating_sub(options.usb_storage.len())
-                    }),
-                )
-            }
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("host storage refusal: {error}\n"));
-                output::fatal(&format!("host storage could not be opened: {error}"))
-            });
-            let count = |count: usize, one: &str, many: &str| {
-                format!("{count} {}", if count == 1 { one } else { many })
-            };
-            let partitions = count(
-                services.len() + usize::from(medium.is_some()),
-                "partition",
-                "partitions",
-            );
-            crate::status::done(&match usb_disks.len() {
-                0 => partitions,
-                disks => format!(
-                    "{partitions}, and {} macOS sees as USB drives",
-                    count(disks, "disk", "disks")
-                ),
-            });
-            if let Some(log) = log {
-                crate::log_file::resume(log);
-            }
-            if let Some(store) = store {
-                translations::set_partition(store);
-            }
-            fdr_device = fdr;
-            // The guest's adapter is its own: the mount's client keeps the
-            // first one. Without one the Mac boots with no network, which
-            // is reported once.
-            let guest_network = options
-                .guest_network
-                .then(|| {
-                    network::GuestNetwork::open(&mut links, wants_network)
-                        .inspect_err(|error| {
-                            output::arguments(format_args!("guest network refusal: {error}\n"));
-                            crate::status::warn(error);
-                        })
-                        .ok()
-                })
-                .flatten();
-            // A missing network is reported here and refused only by what
-            // needs it, so the mount still boots and logs how far it gets.
-            let network = wants_network.then(|| {
-                crate::status::begin("Getting a network address");
-                network::HostNetwork::open(links, storage_handoff.clock)
-                    .inspect(|network| crate::status::done(network.describe()))
-                    .map(|network| network::Shared(Rc::new(RefCell::new(network))))
-                    .inspect_err(|error| {
-                        output::arguments(format_args!("host network refusal: {error}\n"));
-                        crate::status::warn(error);
-                    })
-            });
-            (
-                services,
-                medium,
-                preboot,
-                options.input.then(|| input::HostInput::new(inputs)),
-                network,
-                usb_disks,
-                guest_network,
-                disks,
-            )
-        };
+    let HostDevices {
+        services,
+        medium,
+        preboot,
+        host_input,
+        host_network,
+        usb_disks,
+        guest_network,
+        host_disks,
+        fdr: mut fdr_device,
+    } = start_devices(
+        handoff,
+        &options,
+        &Wanted {
+            firmware: host_firmware.clone(),
+            processors: native_processors,
+            targets: &targets,
+            store: translation_store,
+            fdr: fdr_partition,
+            network: wants_network,
+        },
+        &host_acpi,
+        &native_mmio,
+    );
     let built = preboot.map(|partition| from_disk(partition, &options));
     // A bundle runs at the DRAM base it was prepared for, its SoC's.
     if options.bundle && !options.dram_explicit {
@@ -1891,6 +1685,335 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             }
         },
     )
+}
+
+/// The boot processor's installed host, with what the later phases need.
+struct InstalledHost {
+    owner: host::HostOwner,
+    apic_hz: u64,
+    /// The TSC origin every physical executor shares.
+    tsc_base: u64,
+    /// Whether the BSP runs every PE.
+    serialized: bool,
+}
+
+/// Install the boot processor's host state over `ram`, and run the bounded
+/// diagnostics that stop on it.
+fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> InstalledHost {
+    // Serialized, the BSP runs every PE and the workers no guest code.
+    let serialized = !(options.parallel
+        || options.native_rounds
+        || options.native_shared_check
+        || options.native_bootstrap_check);
+    let partition = crate::native_smp::resources::partition(
+        handoff.native_resources.cores as usize,
+        0,
+        handoff.code.bytes,
+        handoff.pool.bytes,
+        serialized,
+    )
+    .unwrap_or_else(|error| output::fatal(error));
+    let native_tsc_base = host::rdtsc();
+    let config = Config {
+        ram: ram.to_vec(),
+        pool_physical: handoff.pool.physical,
+        pool_bytes: partition.pool_bytes,
+        window_root: handoff.root,
+        code_virtual: layout::code(),
+        code_physical: handoff.code.physical,
+        code_bytes: partition.code_bytes,
+        tsc_base: native_tsc_base,
+        tsc_hz: handoff.tsc_hz,
+        apic_base: handoff.apic_base,
+        placement: handoff.placement,
+        bounce: Some((layout::bounce(), handoff.bounce)),
+    };
+    // SAFETY: once on the BSP, with interrupts off and owned native resources.
+    // Retain the processor-local state through every native call and handler.
+    crate::status::begin("Installing the host processor state");
+    let mut host_owner =
+        unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
+    if options.native_bootstrap_check {
+        host::fp_diagnostic::check(&mut host_owner.host())
+            .unwrap_or_else(|error| output::fatal(error));
+    }
+    let apic_hz = host::statistics().apic_hz;
+    crate::status::done("");
+    if options.native_clock_check {
+        // SAFETY: original loader capture remains pinned in this actual
+        // HostOwner's physmap. Parsing never supplies hardware ownership.
+        let prepared = unsafe { crate::native_mmio::captured(handoff) }
+            .map_err(|_| stela_drivers::platform::work::WorkError::Unavailable)
+            .and_then(|wire| crate::native_clock::Prepared::from_fadt(wire.fadt()))
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
+                output::fatal("native clock source capture failed")
+            });
+        // SAFETY: explicit bounded UP test mode on its original HostOwner,
+        // with no other diagnostic/device owner active. The trusted fixture
+        // excludes source reset/SMM/VMM gaps over one second; this grants no
+        // arbitrary original driver execution or general PM clock profile.
+        unsafe { crate::native_clock::diagnostic::check(&mut host_owner, prepared) }
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-clock FAIL {error:?}\n"));
+                output::fatal("native clock fixture failed")
+            });
+        stop_here("bounded native clock fixture complete", 0x10);
+    }
+    if options.native_mmio_check {
+        // SAFETY: explicit bounded native diagnostic on the original retained
+        // handoff/owner. Success stops before guest entry; permanent mapping
+        // and IRQ registries retain this exact physical root until VM shutdown.
+        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
+            |error| {
+                output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
+                output::fatal("native MMIO root qualification failed")
+            },
+        );
+        stop_here("native MMIO root qualification complete", 0x10);
+    }
+    InstalledHost {
+        owner: host_owner,
+        apic_hz,
+        tsc_base: native_tsc_base,
+        serialized,
+    }
+}
+
+/// The firmware's ACPI namespace and the owned MMIO authority, each `None`
+/// when the host does not qualify, which is reported.
+struct Platform {
+    acpi: Option<aml::HostAcpi>,
+    mmio: Option<crate::native_mmio::Source>,
+}
+
+fn start_platform(handoff: &Handoff, host_owner: &mut host::HostOwner) -> Platform {
+    // The firmware's ACPI namespace, loaded before the host devices start so
+    // their services can consult it; the host's power transitions run it.
+    let host_acpi = aml::HostAcpi::start(
+        handoff.rsdp,
+        handoff.root,
+        handoff
+            .storage
+            .handoff()
+            .map(|storage| storage.ecam)
+            .unwrap_or_default(),
+        handoff.tsc_hz,
+    );
+    // The owned MMIO authority the host devices' services map through. A
+    // host it cannot qualify is reported, and those services refuse.
+    // SAFETY: this boot's capture, on the installed boot processor before
+    // the other host processors start.
+    let native_mmio = unsafe { crate::native_mmio::captured(handoff) }
+        .and_then(|wire| unsafe { crate::native_mmio::Source::activate(wire, host_owner) })
+        .inspect(|_| output::arguments(format_args!("NATIVE MMIO aperture owned\n")))
+        .inspect_err(|error| {
+            output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));
+        })
+        .ok();
+    Platform {
+        acpi: host_acpi,
+        mmio: native_mmio,
+    }
+}
+
+/// What the host devices are opened for.
+struct Wanted<'a> {
+    firmware: Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
+    processors: Option<&'static crate::native_smp::firmware::Capture>,
+    targets: &'a [&'a Target],
+    store: Option<Guid>,
+    fdr: Option<Guid>,
+    /// Whether the mount's own network is needed.
+    network: bool,
+}
+
+/// The host devices the engine and the guest use.
+struct HostDevices {
+    services: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
+    medium: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
+    preboot: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
+    host_input: Option<input::HostInput>,
+    host_network: Option<Result<network::Shared, String>>,
+    usb_disks: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
+    guest_network: Option<network::GuestNetwork>,
+    host_disks: storage::HostDisks,
+    fdr: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
+}
+
+/// Probe the host's devices once, with the native services when the
+/// platform has them, and open the partitions, inputs and networks.
+fn start_devices(
+    handoff: &Handoff,
+    options: &Options,
+    wanted: &Wanted<'_>,
+    host_acpi: &Option<aml::HostAcpi>,
+    native_mmio: &Option<crate::native_mmio::Source>,
+) -> HostDevices {
+    let &Wanted {
+        firmware: ref host_firmware,
+        processors: native_processors,
+        targets,
+        store: translation_store,
+        fdr: fdr_partition,
+        network: wants_network,
+    } = wanted;
+    let mut fdr_device = None;
+    let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
+        if targets.is_empty()
+            && options.install_source.is_none()
+            && options.preboot.is_none()
+            && !options.input
+            && !wants_network
+            && options.usb_storage.is_empty()
+            && !options.external_disks
+            && !options.guest_network
+            && translation_store.is_none()
+            && fdr_partition.is_none()
+        {
+            (
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                storage::HostDisks::none(),
+            )
+        } else {
+            let mut storage_handoff = handoff
+                .storage
+                .handoff()
+                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+            storage_handoff.firmware = host_firmware.clone();
+            // Disks that can signal their completions wake the BSP, which
+            // runs the engine's devices.
+            let bsp = native_processors.expect("validated native roster");
+            storage_handoff.completion =
+                host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
+            if options.audio_check.is_some() {
+                // The audio check retains the final slice even after shutdown.
+                storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
+            }
+            crate::status::begin("Starting the PC's disks and USB devices");
+            // SAFETY: sole ownership of the DMA pages and controllers; the
+            // probe runs in the loader's root, which reaches them.
+            let storage::Opened {
+                services,
+                medium,
+                preboot,
+                store,
+                log,
+                fdr,
+                inputs,
+                mut links,
+                usb_disks,
+                disks,
+            } = unsafe {
+                let native = native_mmio.as_ref().map(|mmio| {
+                    services::Services::new(
+                        mmio,
+                        host_acpi.as_ref(),
+                        handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes,
+                        handoff.tsc_hz,
+                    )
+                });
+                storage::open(
+                    &storage_handoff,
+                    handoff.root,
+                    native
+                        .as_ref()
+                        .map(|native| native as &dyn stela_drivers::probe::NativeServices),
+                    &storage::Partitions {
+                        targets,
+                        medium: options.install_source,
+                        preboot: options.preboot.as_ref(),
+                        store: translation_store,
+                        log: handoff.log_partition.map(Guid),
+                        fdr: fdr_partition,
+                    },
+                    &options.usb_storage,
+                    options.external_disks.then(|| {
+                        stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
+                            .saturating_sub(options.usb_storage.len())
+                    }),
+                )
+            }
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("host storage refusal: {error}\n"));
+                output::fatal(&format!("host storage could not be opened: {error}"))
+            });
+            let count = |count: usize, one: &str, many: &str| {
+                format!("{count} {}", if count == 1 { one } else { many })
+            };
+            let partitions = count(
+                services.len() + usize::from(medium.is_some()),
+                "partition",
+                "partitions",
+            );
+            crate::status::done(&match usb_disks.len() {
+                0 => partitions,
+                disks => format!(
+                    "{partitions}, and {} macOS sees as USB drives",
+                    count(disks, "disk", "disks")
+                ),
+            });
+            if let Some(log) = log {
+                crate::log_file::resume(log);
+            }
+            if let Some(store) = store {
+                translations::set_partition(store);
+            }
+            fdr_device = fdr;
+            // The guest's adapter is its own: the mount's client keeps the
+            // first one. Without one the Mac boots with no network, which
+            // is reported once.
+            let guest_network = options
+                .guest_network
+                .then(|| {
+                    network::GuestNetwork::open(&mut links, wants_network)
+                        .inspect_err(|error| {
+                            output::arguments(format_args!("guest network refusal: {error}\n"));
+                            crate::status::warn(error);
+                        })
+                        .ok()
+                })
+                .flatten();
+            // A missing network is reported here and refused only by what
+            // needs it, so the mount still boots and logs how far it gets.
+            let network = wants_network.then(|| {
+                crate::status::begin("Getting a network address");
+                network::HostNetwork::open(links, storage_handoff.clock)
+                    .inspect(|network| crate::status::done(network.describe()))
+                    .map(|network| network::Shared(Rc::new(RefCell::new(network))))
+                    .inspect_err(|error| {
+                        output::arguments(format_args!("host network refusal: {error}\n"));
+                        crate::status::warn(error);
+                    })
+            });
+            (
+                services,
+                medium,
+                preboot,
+                options.input.then(|| input::HostInput::new(inputs)),
+                network,
+                usb_disks,
+                guest_network,
+                disks,
+            )
+        };
+    HostDevices {
+        services,
+        medium,
+        preboot,
+        host_input,
+        host_network,
+        usb_disks,
+        guest_network,
+        host_disks,
+        fdr: fdr_device,
+    }
 }
 
 /// Retained host interfaces used by both ordinary authored inputs and the
