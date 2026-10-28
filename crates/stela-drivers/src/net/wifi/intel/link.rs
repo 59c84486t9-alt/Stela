@@ -28,7 +28,7 @@ use super::{
         PnvmProgress, RomBoot, ScanResultProgress, UnifiedNvm,
     },
     platform::Observations,
-    policy::Regulatory,
+    policy::{Beacons, Regulatory},
     radio::bios::service::BiosIo,
 };
 use crate::{
@@ -45,7 +45,7 @@ use crate::{
     },
     probe::WifiConfig,
 };
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::any::Any;
 
 /// iwlwifi's `IWL_MVM_UCODE_ALIVE_TIMEOUT`.
@@ -152,6 +152,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     network: WifiConfig,
     deadline: Option<Deadline>,
     scanning: bool,
+    beacons: Option<Arc<Beacons>>,
     candidate: Option<Selected>,
     selected: Option<Selected>,
     address: Mac,
@@ -206,6 +207,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             network: inputs.network,
             deadline: Some(deadline),
             scanning: false,
+            beacons: None,
             candidate: None,
             selected: None,
             address: Mac::default(),
@@ -574,6 +576,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Ok(regulatory) => regulatory,
             Err(error) => return Err((Error::Regulatory(error), board)),
         };
+        self.beacons = Some(regulatory.beacons());
         // SAFETY: the selection belongs to this function's own adapter.
         match unsafe { board.begin_country(regulatory) } {
             Ok(country) => Ok(Stage::Country(Box::new(country))),
@@ -674,6 +677,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Keep `bss` when it carries the network's SSID, has a legacy rate this
     /// band transmits and is stronger than the network found so far.
     fn consider(&mut self, bss: &Bss) {
+        // `cfg80211_inform_single_bss_data` hints every ESS beacon's channel.
+        if bss.capabilities & 1 != 0
+            && let Some(beacons) = &self.beacons
+        {
+            beacons.heard(bss.channel);
+        }
         if bss.ssid.as_deref() != Some(self.network.ssid.as_slice()) {
             return;
         }

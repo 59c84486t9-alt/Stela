@@ -7,28 +7,63 @@
 //! database's world rules "00", the code `iwl_mvm_update_mcc` also gives a
 //! firmware answer of 0.
 //!
-//! Receive needs a rule covering the channel's 20 MHz. Transmit additionally
+//! A station follows cfg80211's channel rules. Receive, and so a passive
+//! scan, needs a rule covering the channel's 20 MHz. Transmit additionally
 //! needs that rule to allow OFDM for an OFDM rate and to cover the planned
-//! EIRP; probing also needs it free of NO-IR, DFS and indoor-only, which
-//! cfg80211 treats as forbidding initiated radiation.
+//! EIRP. Only a probe initiates radiation: like mac80211's scan, it needs the
+//! channel free of DFS and of NO-IR, which a beacon heard there lifts while
+//! the world rules apply (`handle_reg_beacon`). Authentication, association
+//! and data answer the AP, so DFS, NO-IR and indoor-only channels carry them,
+//! as `cfg80211_chandef_usable` prohibits only disabled channels for one.
 use super::boot::{CountryIo, CountryIoError, SelectedCountry};
 use crate::net::wifi::{
-    Channel,
+    Band, Channel,
     regulatory::{
         LegacyRate, NativeContext, Operation, OsLease, OsPolicy, Purpose,
         database::{self, Country, Database},
     },
 };
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_REVISION: crate::net::wifi::Identities = crate::net::wifi::Identities::new();
 
 /// The database's world rules, which cfg80211 applies without a country.
 pub const WORLD: [u8; 2] = *b"00";
 
+/// The channels a beacon was heard on, by band and channel number.
+#[derive(Default)]
+pub struct Beacons([AtomicU64; 12]);
+
+impl Beacons {
+    fn bit(channel: Channel) -> Option<(usize, u64)> {
+        let band = match channel.band {
+            Band::Ghz2 => 0,
+            Band::Ghz5 => 1,
+            Band::Ghz6 => 2,
+        };
+        let number = usize::from(channel.number);
+        (number < 256).then(|| (band * 4 + number / 64, 1 << (number % 64)))
+    }
+
+    /// Record a beacon heard on `channel`.
+    pub fn heard(&self, channel: Channel) {
+        if let Some((word, bit)) = Self::bit(channel) {
+            self.0[word].fetch_or(bit, Ordering::Relaxed);
+        }
+    }
+
+    pub fn found(&self, channel: Channel) -> bool {
+        Self::bit(channel)
+            .is_some_and(|(word, bit)| self.0[word].load(Ordering::Relaxed) & bit != 0)
+    }
+}
+
 /// One adapter's selected country.
 pub struct Regulatory {
     country: Country,
     revision: u64,
+    beacons: Arc<Beacons>,
 }
 
 impl Regulatory {
@@ -51,11 +86,20 @@ impl Regulatory {
                 _ => database.select(WORLD)?,
             },
         };
-        Ok(Self { country, revision })
+        Ok(Self {
+            country,
+            revision,
+            beacons: Arc::default(),
+        })
     }
 
     pub fn country(&self) -> &Country {
         &self.country
+    }
+
+    /// Where the adapter's scans record the beacons they hear.
+    pub fn beacons(&self) -> Arc<Beacons> {
+        self.beacons.clone()
     }
 }
 
@@ -66,8 +110,9 @@ fn cck(rate: LegacyRate) -> bool {
     )
 }
 
-/// Whether the country admits `operation`.
-pub fn allows(country: &Country, operation: Operation) -> bool {
+/// Whether the country admits `operation` for a station that heard the
+/// beacons in `beacons`.
+pub fn allows(country: &Country, beacons: &Beacons, operation: Operation) -> bool {
     let channel: Channel = operation.channel();
     let Some(rule) = country.rule(u32::from(channel.frequency_mhz) * 1000, 20_000) else {
         return false;
@@ -77,10 +122,11 @@ pub fn allows(country: &Country, operation: Operation) -> bool {
         Operation::Transmit {
             purpose, profile, ..
         } => {
+            let hinted = country.alpha2() == WORLD && beacons.found(channel);
             let initiates = purpose == Purpose::Probe;
             (cck(profile.rate) || !rule.no_ofdm)
                 && profile.max_eirp_mbm <= i32::from(rule.max_eirp_mbm)
-                && !(initiates && (rule.no_ir || rule.dfs || rule.indoor_only))
+                && !(initiates && (rule.dfs || (rule.no_ir && !hinted)))
         }
     }
 }
@@ -102,6 +148,7 @@ unsafe impl CountryIo for Regulatory {
 
 pub struct Lease<'a> {
     country: &'a Country,
+    beacons: &'a Beacons,
     revision: u64,
 }
 
@@ -110,17 +157,19 @@ impl OsLease for Lease<'_> {
         self.revision
     }
     fn allows(&mut self, operation: Operation) -> bool {
-        allows(self.country, operation)
+        allows(self.country, self.beacons, operation)
     }
 }
 
 // SAFETY: the rules never change while the adapter runs, so every lease
-// holds the same selection the country phase programmed.
+// holds the same selection the country phase programmed; a beacon hint only
+// lifts NO-IR as cfg80211 does.
 unsafe impl OsPolicy for Regulatory {
     type Lease<'a> = Lease<'a>;
     fn acquire(&mut self, _: NativeContext) -> Option<Self::Lease<'_>> {
         Some(Lease {
             country: &self.country,
+            beacons: &self.beacons,
             revision: self.revision,
         })
     }
@@ -172,18 +221,37 @@ pub(crate) mod tests {
     fn database() -> Database {
         regdb(&[
             (*b"00", &[(2_402_000, 2_472_000, 8, 2000)]),
-            (*b"US", &[(2_402_000, 2_472_000, 0, 3000)]),
-            (*b"CN", &[(2_402_000, 2_482_000, 0, 2000)]),
+            (
+                *b"US",
+                &[
+                    (2_402_000, 2_472_000, 0, 3000),
+                    (5_170_000, 5_250_000, 2, 2300),
+                    (5_250_000, 5_330_000, 4, 2300),
+                ],
+            ),
+            (*b"CN", &[(2_402_000, 2_482_000, 8, 2000)]),
         ])
+    }
+
+    fn channel(number: u16) -> Channel {
+        if number < 15 {
+            Channel {
+                band: Band::Ghz2,
+                number,
+                frequency_mhz: 2407 + number * 5,
+            }
+        } else {
+            Channel {
+                band: Band::Ghz5,
+                number,
+                frequency_mhz: 5000 + number * 5,
+            }
+        }
     }
 
     fn transmit(number: u16, purpose: Purpose, rate: LegacyRate, mbm: i32) -> Operation {
         Operation::Transmit {
-            channel: Channel {
-                band: Band::Ghz2,
-                number,
-                frequency_mhz: 2407 + number * 5,
-            },
+            channel: channel(number),
             purpose,
             profile: TxProfile {
                 width: Width::Legacy20,
@@ -192,6 +260,14 @@ pub(crate) mod tests {
                 max_eirp_mbm: mbm,
             },
         }
+    }
+
+    fn probe(number: u16) -> Operation {
+        transmit(number, Purpose::Probe, LegacyRate::Ofdm6, 0)
+    }
+
+    fn associate(number: u16) -> Operation {
+        transmit(number, Purpose::Management, LegacyRate::Ofdm6, 0)
     }
 
     #[test]
@@ -216,16 +292,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn probing_needs_a_rule_free_of_no_ir() {
-        let world = Regulatory::select(database(), None, None).unwrap();
-        assert!(!allows(
-            world.country(),
-            transmit(1, Purpose::Probe, LegacyRate::Cck1, 0)
-        ));
-        assert!(allows(
-            world.country(),
-            transmit(1, Purpose::Management, LegacyRate::Cck1, 0)
-        ));
+    fn a_beacon_lifts_no_ir_for_probes_only_under_world_rules() {
+        for (alpha2, lifted) in [(None, true), (Some(*b"CN"), false)] {
+            let regulatory = Regulatory::select(database(), alpha2, None).unwrap();
+            let (country, beacons) = (regulatory.country(), regulatory.beacons());
+            assert!(!allows(country, &beacons, probe(1)));
+            assert!(allows(country, &beacons, associate(1)));
+            beacons.heard(channel(1));
+            assert_eq!(allows(country, &beacons, probe(1)), lifted);
+            assert!(!allows(country, &beacons, probe(6)));
+            assert!(allows(country, &beacons, Operation::Receive(channel(6))));
+        }
+    }
+
+    #[test]
+    fn dfs_and_indoor_channels_carry_association_but_dfs_never_probes() {
+        let us = Regulatory::select(database(), Some(*b"US"), None).unwrap();
+        let (country, beacons) = (us.country(), us.beacons());
+        beacons.heard(channel(52));
+        assert!(allows(country, &beacons, associate(52)));
+        assert!(!allows(country, &beacons, probe(52)));
+        assert!(allows(country, &beacons, associate(36)));
+        assert!(allows(country, &beacons, probe(36)));
+        assert!(allows(country, &beacons, Operation::Receive(channel(52))));
     }
 
     #[test]
@@ -248,6 +337,6 @@ pub(crate) mod tests {
             LegacyRate::Ofdm6,
             ceiling + 1
         )));
-        assert!(!lease.allows(transmit(200, Purpose::Data, LegacyRate::Cck1, 0)));
+        assert!(!lease.allows(transmit(14, Purpose::Data, LegacyRate::Cck1, 0)));
     }
 }

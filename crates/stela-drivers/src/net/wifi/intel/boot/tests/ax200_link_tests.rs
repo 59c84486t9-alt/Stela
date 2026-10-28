@@ -14,12 +14,14 @@ use zeroize::Zeroizing;
 
 /// The model's view of the function: the next RX entry it completes, the
 /// last command sequence it answered, the SSID each scan's beacon carries
-/// (the last repeating) and the countries MCC requests named.
+/// (the last repeating), the MCC channel word of channels 1 and 2 and the
+/// countries MCC requests named.
 struct Device<'n> {
     native: &'n Native,
     entry: u16,
     answered: Option<u16>,
     beacons: Vec<&'static [u8]>,
+    channel: u32,
     countries: Vec<[u8; 2]>,
 }
 
@@ -74,7 +76,8 @@ impl Device<'_> {
                     _ => country,
                 };
                 let mut payload = mcc_payload(country, request[2], 51);
-                payload[24..28].copy_from_slice(&0x0f09u32.to_le_bytes());
+                payload[20..24].copy_from_slice(&self.channel.to_le_bytes());
+                payload[24..28].copy_from_slice(&self.channel.to_le_bytes());
                 payload
             }
             (1 | 5, 0x08) => vec![0x9b],
@@ -111,8 +114,8 @@ impl Device<'_> {
     }
 }
 
-/// A channel 1 beacon from 02:03:04:05:06:07 carrying `ssid` and the 1 and
-/// 6 Mb/s rates.
+/// A channel 1 ESS beacon from 02:03:04:05:06:07 carrying `ssid` and the 1
+/// and 6 Mb/s rates.
 fn beacon(ssid: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; 36];
     frame[..2].copy_from_slice(&0x80u16.to_le_bytes());
@@ -120,6 +123,7 @@ fn beacon(ssid: &[u8]) -> Vec<u8> {
     frame[10..16].copy_from_slice(&[2, 3, 4, 5, 6, 7]);
     frame[16..22].copy_from_slice(&[2, 3, 4, 5, 6, 7]);
     frame[32..34].copy_from_slice(&100u16.to_le_bytes());
+    frame[34] = 1;
     frame.extend([0, ssid.len() as u8]);
     frame.extend(ssid);
     frame.extend([1, 2, 0x82, 0x0c, 3, 1, 1]);
@@ -140,11 +144,14 @@ fn beacon(ssid: &[u8]) -> Vec<u8> {
 }
 
 /// Bring the modeled function up for the network "test" until it is ready
-/// to authenticate or fails.
+/// to authenticate or fails, with `flags` on the US 2.4 GHz rule and
+/// `channel` as the firmware's channel word.
 fn bring_up(
     native: &Native,
     country: Option<[u8; 2]>,
     beacons: Vec<&'static [u8]>,
+    flags: u8,
+    channel: u32,
 ) -> (Wifi<Model, ClockBios>, Phase, Vec<[u8; 2]>) {
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
@@ -174,6 +181,7 @@ fn bring_up(
         entry: 0,
         answered: None,
         beacons,
+        channel,
         countries: Vec::new(),
     };
     device.inject(&boot, &alive);
@@ -187,7 +195,7 @@ fn bring_up(
         bios: clock_bios(&native.bios_drops, Some(1)),
         database: regdb(&[
             (*b"00", &[(2_402_000, 2_472_000, 0, 2000)]),
-            (*b"US", &[(2_402_000, 2_472_000, 0, 3000)]),
+            (*b"US", &[(2_402_000, 2_472_000, flags, 3000)]),
         ]),
         network: WifiConfig {
             ssid: b"test".to_vec(),
@@ -208,10 +216,13 @@ fn bring_up(
     (wifi, phase, device.countries)
 }
 
+/// A valid channel that allows initiated radiation.
+const OPEN: u32 = 0x0f09;
+
 #[test]
 fn bring_up_scans_for_the_network_and_readies_its_station() {
     let native = Native::default();
-    let (wifi, phase, countries) = bring_up(&native, Some(*b"US"), vec![b"test"]);
+    let (wifi, phase, countries) = bring_up(&native, Some(*b"US"), vec![b"test"], 0, OPEN);
     assert_eq!(wifi.error(), None);
     assert_eq!(countries.last(), Some(b"US"));
     assert_eq!(phase, Phase::AuthenticationRequired);
@@ -225,7 +236,7 @@ fn bring_up_scans_for_the_network_and_readies_its_station() {
 #[test]
 fn without_a_country_world_rules_apply_and_scans_repeat_until_the_ssid_is_heard() {
     let native = Native::default();
-    let (wifi, phase, countries) = bring_up(&native, None, vec![b"other", b"test"]);
+    let (wifi, phase, countries) = bring_up(&native, None, vec![b"other", b"test"], 0, OPEN);
     assert_eq!(wifi.error(), None);
     assert_eq!(phase, Phase::AuthenticationRequired);
     // The BIOS country, CN, is not in the database.
@@ -234,4 +245,15 @@ fn without_a_country_world_rules_apply_and_scans_repeat_until_the_ssid_is_heard(
         wifi.selected().unwrap().bss.ssid.as_deref(),
         Some(b"test".as_slice())
     );
+}
+
+#[test]
+fn a_station_joins_an_ap_on_a_dfs_no_ir_indoor_only_channel() {
+    let native = Native::default();
+    // Valid, without ACTIVE, with RADAR and INDOOR_ONLY.
+    let restricted = 0x0f31;
+    let (wifi, phase, _) = bring_up(&native, Some(*b"US"), vec![b"test"], 2 | 4 | 8, restricted);
+    assert_eq!(wifi.error(), None);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    assert_eq!(wifi.selected().unwrap().bss.channel.number, 1);
 }

@@ -213,8 +213,9 @@ pub(super) unsafe fn with_legacy_policy<T, Q: BootIo, B: BiosIo, O: CountryIo + 
             regulatory::Error::HardwareDenied,
         ))?;
     let no_ofdm = rule.no_ofdm;
-    let country_allowed =
-        !rule.no_ir && !rule.dfs && !rule.indoor_only && ceiling <= i32::from(rule.max_eirp_mbm);
+    // A station answers its AP: like `cfg80211_chandef_usable` for one, NO-IR,
+    // DFS and indoor-only channels carry its frames.
+    let country_allowed = ceiling <= i32::from(rule.max_eirp_mbm);
     let mcc_allowed = parts.channels.iter().any(|entry| {
         entry.channel.number == channel.number
             && entry.channel.frequency_mhz == channel.frequency_mhz
@@ -229,9 +230,6 @@ pub(super) unsafe fn with_legacy_policy<T, Q: BootIo, B: BiosIo, O: CountryIo + 
                 )
             )
             && entry.valid
-            && !entry.restrictions.no_initiate_radiation
-            && !entry.restrictions.dfs
-            && !entry.restrictions.indoor_only
     });
     let mut hardware = Hardware {
         receive: policy::Hardware {
