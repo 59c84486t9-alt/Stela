@@ -962,6 +962,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     return Err(error);
                 }
             };
+            // ieee80211_rx_h_michael_mic_verify: with the MIC stripped, a
+            // Michael failure the hardware reports goes to the OS, as
+            // cfg80211_michael_mic_failure, and the frame is dropped.
+            if modern_data && frame.security.tkip_mic_error && frame.header().data_present() {
+                let header = frame.header();
+                events.push(Event::MichaelMicFailure {
+                    transmitter: header.transmitter.ok_or(Error::WrongProfile)?,
+                    group: header.receiver.is_multicast(),
+                    key_index: frame.security.key.map(|key| key.index()),
+                });
+                continue;
+            }
             if s.phase == Phase::Scanning {
                 let bss = s
                     .scanner
@@ -1426,6 +1438,13 @@ pub enum Event {
         failure: Option<station::Failure>,
     },
     ConnectionLost(crate::net::wifi::mediatek::ring::rx::Frame),
+    /// `cfg80211_michael_mic_failure`: a TKIP frame from `transmitter` failed
+    /// its Michael MIC under the group or pairwise key `key_index`.
+    MichaelMicFailure {
+        transmitter: crate::net::Mac,
+        group: bool,
+        key_index: Option<u8>,
+    },
     /// The firmware's TX status for a frame that asked for it.
     TxStatus(TxStatus),
     /// `ieee80211_cqm_rssi_notify`: the signal crossed the monitor's

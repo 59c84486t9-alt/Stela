@@ -66,6 +66,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let cipher = if pairwise { ciphers.0 } else { ciphers.1 };
         let bss = if profile.cipher == 0 {
             profile.cipher = match cipher {
+                Cipher::Tkip => 2,
                 Cipher::Ccmp128 => 4,
                 Cipher::Ccmp256 => 10,
                 Cipher::Gcmp128 => 11,

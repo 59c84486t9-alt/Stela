@@ -49,13 +49,25 @@ pub enum Cipher {
     Ccmp256,
     Gcmp128,
     Gcmp256,
+    /// TKIP: a 16-byte temporal key with the 8-byte TX and RX Michael keys.
+    Tkip,
 }
 
 impl Cipher {
+    /// The trailer after the payload: TKIP's Michael MIC and ICV, or the
+    /// CCMP/GCMP MIC.
     const fn mic_length(self) -> usize {
         match self {
             Self::Ccmp128 => 8,
+            Self::Tkip => 12,
             _ => 16,
+        }
+    }
+    /// `struct ieee80211_key_conf`'s keylen for the suite.
+    pub const fn key_length(self) -> usize {
+        match self {
+            Self::Ccmp128 | Self::Gcmp128 => 16,
+            Self::Ccmp256 | Self::Gcmp256 | Self::Tkip => 32,
         }
     }
 }
@@ -81,6 +93,16 @@ impl PacketNumber {
         // Like Linux `ccmp_hdr2pn` and `ieee80211_get_keyid`, only the PN
         // bytes and the key ID are read.
         let value = u64::from_le_bytes([h[0], h[1], h[4], h[5], h[6], h[7], 0, 0]);
+        Ok((Self(value), h[3] >> 6))
+    }
+    /// The TSC of a TKIP IV/EIV, as `ieee80211_tkip_decrypt_data` reads
+    /// TSC0 at byte 2 and TSC1 at byte 0 ahead of the 32-bit IV32.
+    pub fn from_tkip_header(header: &[u8]) -> Result<(Self, u8), Error> {
+        let h: &[u8; 8] = header.get(..8).ok_or(Error::Truncated)?.try_into().unwrap();
+        if h[3] & 0x20 == 0 {
+            return Err(Error::Unsupported("TKIP without Extended IV"));
+        }
+        let value = u64::from_le_bytes([h[2], h[0], h[4], h[5], h[6], h[7], 0, 0]);
         Ok((Self(value), h[3] >> 6))
     }
 }
@@ -330,11 +352,7 @@ impl KeySlot {
         if matches!(scope, KeyScope::Group(_)) && transmit.owner() != NonceOwner::ReceiveOnly {
             return Err(Error::WrongNonceOwner);
         }
-        let length = match cipher {
-            Cipher::Ccmp128 | Cipher::Gcmp128 => 16,
-            _ => 32,
-        };
-        if material.len() != length {
+        if material.len() != cipher.key_length() {
             return Err(Error::InvalidKeyLength);
         }
         let digest: [u8; 32] = Sha256::digest(material).into();
@@ -490,8 +508,12 @@ impl KeySlot {
         let pn = if status.iv_stripped {
             status.pn.or(parent_pn).ok_or(Error::MissingPacketNumber)?
         } else {
-            let (pn, index) =
-                PacketNumber::from_header(mpdu.bytes().get(start..).ok_or(Error::Truncated)?)?;
+            let header = mpdu.bytes().get(start..).ok_or(Error::Truncated)?;
+            let (pn, index) = if key.cipher == Cipher::Tkip {
+                PacketNumber::from_tkip_header(header)?
+            } else {
+                PacketNumber::from_header(header)?
+            };
             if index != key.index {
                 return Err(Error::WrongKey);
             }

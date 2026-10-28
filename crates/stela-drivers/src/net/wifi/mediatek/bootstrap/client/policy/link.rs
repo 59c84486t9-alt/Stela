@@ -1242,6 +1242,96 @@ mod tests {
         assert_ne!(frames[0][1] & 0x40, 0);
     }
     #[test]
+    fn wpa1_tkip_carries_data_and_reports_michael_failures_like_mac80211() {
+        use station::{
+            phy::{Mode, Width},
+            wire::AssociationRequest,
+        };
+        const WPA: [u8; 24] = [
+            221, 22, 0, 0x50, 0xf2, 1, 1, 0, 0, 0x50, 0xf2, 2, 1, 0, 0, 0x50, 0xf2, 2, 1, 0, 0,
+            0x50, 0xf2, 2,
+        ];
+        // TKIP keeps both sides in legacy mode; the AP's RSN becomes WPA1.
+        let wpa = |elements: &[u8]| {
+            let mut out = Vec::new();
+            let mut rest = elements;
+            while let [id, length, tail @ ..] = rest {
+                let (data, tail) = tail.split_at(usize::from(*length));
+                let wmm = *id == 221 && data.starts_with(&[0, 0x50, 0xf2, 2]);
+                if !matches!(id, 45 | 48 | 61 | 191 | 192 | 255) && !wmm {
+                    out.extend_from_slice(&[*id, *length]);
+                    out.extend_from_slice(data);
+                }
+                rest = tail;
+            }
+            out.extend_from_slice(&WPA);
+            out
+        };
+        let (client, model) = setup_modern();
+        let (mut join, mut bss) = modern_inputs(&client);
+        let local = client.local_advertisement(Band::Ghz5).unwrap();
+        join.request = AssociationRequest::new_modern_with_local(
+            0x11,
+            10,
+            wpa(join.request.elements()),
+            local.capabilities().clone(),
+            Mode::Legacy,
+            Width::Mhz20,
+        )
+        .unwrap();
+        bss.elements = wpa(&bss.elements);
+        let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut link = ManagedLink::new(
+            client,
+            Provider(drops, core::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        associate(&mut link, &model, join, bss);
+        let ptk = link
+            .install_key(true, 0, &[4; 32], ReplaySeed::ZERO)
+            .unwrap();
+        link.install_key(false, 1, &[5; 32], ReplaySeed::ZERO)
+            .unwrap();
+        link.authorize_port(link.station().association_epoch().unwrap())
+            .unwrap();
+        assert!(link.carrier());
+        link.transmit(&eth(0x800)).unwrap();
+        let frames = finish_tx(&model);
+        assert_eq!((frames[0][0], frames[0][1] & 0x40), (0x08, 0x40));
+        link.service().unwrap();
+        drain_notices(&mut link);
+        // MT_CIPHER_TKIP with its TSC; then the same frame failing Michael.
+        let tkip = |pn: u64, mic_error: bool| {
+            let mut raw = incoming_bytes(&data(false), Some((1, 0, pn)), false);
+            let mut r1 = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+            let mut r2 = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+            r2 = (r2 & !(31 << 16)) | (2 << 16);
+            if mic_error {
+                r1 |= 1 << 26;
+            }
+            raw[4..8].copy_from_slice(&r1.to_le_bytes());
+            raw[8..12].copy_from_slice(&r2.to_le_bytes());
+            device_receive(&model.queues[&0xd4520], &raw, true, 0);
+        };
+        tkip(1, false);
+        link.service().unwrap();
+        let ethernet = link.receive().unwrap().unwrap();
+        assert_eq!(&ethernet[12..14], &0x800u16.to_be_bytes());
+        tkip(2, true);
+        link.service().unwrap();
+        assert!(link.receive().unwrap().is_none());
+        assert!(drain_notices(&mut link).iter().any(|n| matches!(
+            n.event,
+            LinkEvent::Controller(Event::MichaelMicFailure {
+                transmitter: AP,
+                group: false,
+                key_index: Some(0),
+            })
+        )));
+        assert_eq!(ptk.cipher(), crate::net::wifi::security::Cipher::Tkip);
+    }
+    #[test]
     fn aborting_a_join_deauthenticates_like_ieee80211_mgd_deauth() {
         let (mut link, model, join, bss, _) = setup_link();
         scan_join(&mut link, &model, join, bss);

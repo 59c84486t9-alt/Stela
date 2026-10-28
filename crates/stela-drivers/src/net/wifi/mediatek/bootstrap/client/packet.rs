@@ -378,15 +378,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             let effective_wcid = p
                 .receive_slot(d.wcid, d.unicast_to_me)
                 .ok_or(Error::WrongProfile)?;
+            // mt7925_mac_fill_rx takes MT_CIPHER_TKIP and its NO_MIC form alike.
             if effective_wcid != key.slot()
                 || d.security.key_index != key.index()
-                || d.security.mode
-                    != match key.cipher() {
-                        Cipher::Ccmp128 => 4,
-                        Cipher::Ccmp256 => 10,
-                        Cipher::Gcmp128 => 11,
-                        Cipher::Gcmp256 => 12,
-                    }
+                || !match key.cipher() {
+                    Cipher::Tkip => matches!(d.security.mode, 2 | 3),
+                    Cipher::Ccmp128 => d.security.mode == 4,
+                    Cipher::Ccmp256 => d.security.mode == 10,
+                    Cipher::Gcmp128 => d.security.mode == 11,
+                    Cipher::Gcmp256 => d.security.mode == 12,
+                }
                 || d.security.cipher_mismatch
                 || d.security.cipher_length_mismatch
                 || !d.security.decrypted
