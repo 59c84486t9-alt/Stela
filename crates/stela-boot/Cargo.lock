@@ -630,6 +630,7 @@ name = "stela-boot-core"
 version = "0.1.0"
 dependencies = [
  "stela-compiler",
+ "stela-drivers",
  "stela-loader",
  "stela-runtime",
 ]

@@ -10,6 +10,7 @@ pub mod dmar;
 pub mod firmware_state;
 pub mod options;
 pub mod paging_controls;
+pub mod passthrough;
 pub mod pe;
 pub mod ram;
 pub mod record;

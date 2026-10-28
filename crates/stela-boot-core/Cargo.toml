@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license = "MIT AND GPL-2.0-only"
 publish = false
-description = "The UEFI mount's firmware-independent logic: stela.cfg options, ACPI, topology, paging and console decoders"
+description = "The UEFI mount's firmware-independent logic: stela.cfg options, ACPI, topology, paging and console decoders, and the passthrough DMA domain"
+
+[dependencies]
+stela-drivers = { path = "../stela-drivers" }
 
 # The freestanding crates for stela.efi; on the host, as `stela setup` and
 # the tests build them.
