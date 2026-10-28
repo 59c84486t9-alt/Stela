@@ -3,10 +3,57 @@
 //! displacements are derived from them, and [`Asm`] counts every instruction
 //! it emits.
 //!
+//! Emitters take a [`Code`], which carries the instruction count across
+//! every [`Asm`] built over it.
+//!
 //! The scalar integer families emit through it; the rest still emit bytes
 //! directly, so some operand kinds and forms wait for their first user.
 #![allow(dead_code)]
 use alloc::vec::Vec;
+
+/// Emitted bytes and the number of instructions among them.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Code {
+    bytes: Vec<u8>,
+    instructions: usize,
+}
+
+impl Code {
+    pub(crate) const fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            instructions: 0,
+        }
+    }
+    /// An encoder that appends here and adds to this count.
+    pub(crate) fn asm(&mut self) -> Asm<'_> {
+        Asm {
+            code: &mut self.bytes,
+            instructions: 0,
+            shared: Some(&mut self.instructions),
+        }
+    }
+    /// The instructions emitted through [`Self::asm`].
+    pub(crate) const fn instructions(&self) -> usize {
+        self.instructions
+    }
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl core::ops::Deref for Code {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Vec<u8> {
+        &self.bytes
+    }
+}
+
+impl core::ops::DerefMut for Code {
+    fn deref_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.bytes
+    }
+}
 
 /// General-purpose registers by encoding number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,8 +120,18 @@ pub(crate) struct Mem {
     pub base: Option<Gpr>,
     pub index: Option<(Gpr, u8)>,
     pub displacement: i32,
-    /// Encode the displacement in 32 bits even when it fits 8.
-    pub disp32: bool,
+    pub width: Disp,
+}
+
+/// How a base register's displacement is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Disp {
+    /// The shortest form: none for zero (but RBP and R13), else 8 or 32 bits.
+    Auto,
+    /// An 8-bit field, even for zero.
+    Byte,
+    /// A 32-bit field, even when 8 bits would do.
+    Dword,
 }
 
 impl Mem {
@@ -83,15 +140,26 @@ impl Mem {
             base: Some(base),
             index: None,
             displacement,
-            disp32: false,
+            width: Disp::Auto,
         }
     }
     /// `[base + displacement]` with a 32-bit displacement field.
     pub(crate) const fn base_disp32(base: Gpr, displacement: i32) -> Self {
         Self {
-            disp32: true,
+            width: Disp::Dword,
             ..Self::base(base, displacement)
         }
+    }
+    /// `[base + displacement]` with an 8-bit displacement field.
+    pub(crate) const fn base_disp8(base: Gpr, displacement: i8) -> Self {
+        Self {
+            width: Disp::Byte,
+            ..Self::base(base, displacement as i32)
+        }
+    }
+    /// This operand with its displacement field `width`.
+    pub(crate) const fn with_width(self, width: Disp) -> Self {
+        Self { width, ..self }
     }
     /// `[rip + displacement]`.
     pub(crate) const fn rip(displacement: i32) -> Self {
@@ -99,7 +167,7 @@ impl Mem {
             base: None,
             index: None,
             displacement,
-            disp32: true,
+            width: Disp::Dword,
         }
     }
     pub(crate) const fn indexed(base: Gpr, index: Gpr, scale: u8, displacement: i32) -> Self {
@@ -107,7 +175,7 @@ impl Mem {
             base: Some(base),
             index: Some((index, scale)),
             displacement,
-            disp32: false,
+            width: Disp::Auto,
         }
     }
 }
@@ -241,22 +309,50 @@ pub(crate) struct Vex {
     pub(crate) l: bool,
 }
 
-/// The displacement field of a rel32 branch, resolved by [`Asm::bind`].
+/// The displacement field of a rel8 or rel32 branch, resolved by
+/// [`Asm::bind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
-pub(crate) struct Patch(usize);
+pub(crate) struct Patch {
+    at: usize,
+    short: bool,
+}
 
 impl Patch {
-    /// The offset of the 4-byte displacement in the code.
+    /// The offset of the displacement field in the code.
     pub(crate) const fn offset(self) -> usize {
-        self.0
+        self.at
+    }
+    /// The offset just past the branch, which its displacement counts from.
+    pub(crate) const fn end(self) -> usize {
+        self.at + if self.short { 1 } else { 4 }
     }
 }
 
-/// An encoder that appends to `code` and counts the instructions it emits.
+/// The fields of an EVEX prefix besides its registers (SDM Vol. 2A 2.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Evex {
+    pub(crate) map: Map,
+    pub(crate) pp: Pp,
+    pub(crate) w: bool,
+    /// EVEX.L'L: 0, 1 and 2 for 128, 256 and 512 bits.
+    pub(crate) length: u8,
+    /// EVEX.aaa: the opmask register, zero for none.
+    pub(crate) mask: u8,
+    /// EVEX.z: zero masked elements instead of merging.
+    pub(crate) zeroing: bool,
+    /// EVEX.b: embedded broadcast for memory, or rounding control.
+    pub(crate) broadcast: bool,
+    /// N of the compressed disp8*N displacement (SDM 2.7.5).
+    pub(crate) scale: u8,
+}
+
+/// An encoder that appends to `code` and counts the instructions it emits,
+/// into the [`Code`] it was built over as well.
 pub(crate) struct Asm<'a> {
     code: &'a mut Vec<u8>,
     instructions: usize,
+    shared: Option<&'a mut usize>,
 }
 
 impl<'a> Asm<'a> {
@@ -264,6 +360,13 @@ impl<'a> Asm<'a> {
         Self {
             code,
             instructions: 0,
+            shared: None,
+        }
+    }
+    fn count(&mut self) {
+        self.instructions += 1;
+        if let Some(shared) = self.shared.as_deref_mut() {
+            *shared += 1;
         }
     }
     /// The number of instructions emitted through this encoder.
@@ -278,7 +381,18 @@ impl<'a> Asm<'a> {
     /// `instructions` instructions.
     pub(crate) fn raw(&mut self, bytes: &[u8], instructions: usize) {
         self.code.extend(bytes);
-        self.instructions += instructions;
+        for _ in 0..instructions {
+            self.count();
+        }
+    }
+    /// A prefix byte (LOCK, REP, a segment override) of the next
+    /// instruction, which counts it.
+    pub(crate) fn prefix(&mut self, byte: u8) {
+        self.code.push(byte);
+    }
+    /// `lock` for the next instruction.
+    pub(crate) fn lock(&mut self) {
+        self.prefix(0xf0);
     }
     /// Data or immediates that belong to the instruction just emitted.
     pub(crate) fn data(&mut self, bytes: &[u8]) {
@@ -286,6 +400,12 @@ impl<'a> Asm<'a> {
     }
 
     fn modrm(&mut self, reg: u8, rm: Rm) {
+        self.modrm_scaled(reg, rm, 1);
+    }
+
+    /// ModRM, SIB and displacement, with an 8-bit displacement counted in
+    /// units of `scale` bytes (EVEX disp8*N; 1 elsewhere).
+    fn modrm_scaled(&mut self, reg: u8, rm: Rm, scale: u8) {
         let reg = (reg & 7) << 3;
         match rm {
             Rm::Reg(register) => self.code.push(0xc0 | reg | register.low()),
@@ -304,17 +424,20 @@ impl<'a> Asm<'a> {
                 base: Some(base),
                 index,
                 displacement,
-                disp32,
+                width,
             }) => {
                 // RBP and R13 have no mod-00 form; RSP and R12 need a SIB.
-                let mode = if disp32 {
-                    2
-                } else if displacement == 0 && base.low() != 5 {
-                    0
-                } else if i8::try_from(displacement).is_ok() {
-                    1
-                } else {
-                    2
+                let scale = i32::from(scale);
+                let short = displacement % scale == 0 && i8::try_from(displacement / scale).is_ok();
+                let mode = match width {
+                    Disp::Dword => 2,
+                    Disp::Byte => {
+                        debug_assert!(short, "displacement fits its 8-bit field");
+                        1
+                    }
+                    Disp::Auto if displacement == 0 && base.low() != 5 => 0,
+                    Disp::Auto if short => 1,
+                    Disp::Auto => 2,
                 };
                 match index {
                     None if base.low() != 4 => self.code.push(mode << 6 | reg | base.low()),
@@ -335,7 +458,7 @@ impl<'a> Asm<'a> {
                     }
                 }
                 match mode {
-                    1 => self.code.push(displacement as u8),
+                    1 => self.code.push((displacement / scale) as u8),
                     2 => self.code.extend(displacement.to_le_bytes()),
                     _ => {}
                 }
@@ -345,7 +468,7 @@ impl<'a> Asm<'a> {
 
     /// A legacy-encoded instruction: the operand-size prefix for words, the
     /// mandatory `prefix`, REX when any field needs it, `opcode` and ModRM.
-    fn legacy(
+    pub(crate) fn legacy(
         &mut self,
         size: Size,
         prefix: Option<u8>,
@@ -371,7 +494,7 @@ impl<'a> Asm<'a> {
         }
         self.code.extend(opcode);
         self.modrm(reg, rm);
-        self.instructions += 1;
+        self.count();
     }
 
     /// A VEX-encoded instruction: two-byte C5 when the fields allow it,
@@ -392,7 +515,116 @@ impl<'a> Asm<'a> {
         }
         self.code.push(opcode);
         self.modrm(reg, rm);
-        self.instructions += 1;
+        self.count();
+    }
+
+    /// An EVEX-encoded instruction. Registers number 0 to 31; `rm` names
+    /// an XMM register or memory.
+    pub(crate) fn evex(&mut self, prefix: Evex, opcode: u8, reg: u8, vvvv: u8, rm: Rm) {
+        let Evex {
+            map,
+            pp,
+            w,
+            length,
+            mask,
+            zeroing,
+            broadcast,
+            scale,
+        } = prefix;
+        let (x, b) = match rm {
+            // EVEX.X extends a register r/m to 32 registers.
+            Rm::Xmm(register) => (register & 16 != 0, register & 8 != 0),
+            other => other.extensions(),
+        };
+        let r = reg & 8 != 0;
+        let r2 = reg & 16 != 0;
+        let v2 = vvvv & 16 != 0;
+        self.code.extend([
+            0x62,
+            u8::from(!r) << 7
+                | u8::from(!x) << 6
+                | u8::from(!b) << 5
+                | u8::from(!r2) << 4
+                | map as u8,
+            u8::from(w) << 7 | (!vvvv & 15) << 3 | 4 | pp as u8,
+            u8::from(zeroing) << 7
+                | (length & 3) << 5
+                | u8::from(broadcast) << 4
+                | u8::from(!v2) << 3
+                | (mask & 7),
+            opcode,
+        ]);
+        let scale = if matches!(rm, Rm::Mem(_)) {
+            scale.max(1)
+        } else {
+            1
+        };
+        self.modrm_scaled(reg, rm, scale);
+        self.count();
+    }
+
+    /// A legacy SSE instruction on XMM registers: the mandatory `prefix`,
+    /// REX when a register needs it, `opcode` and ModRM.
+    pub(crate) fn sse(&mut self, prefix: Option<u8>, opcode: &[u8], xmm: u8, rm: impl Into<Rm>) {
+        self.legacy(Size::Dword, prefix, opcode, xmm, false, rm.into());
+    }
+    /// [`Self::sse`] with an 8-bit immediate.
+    pub(crate) fn sse_imm(
+        &mut self,
+        prefix: Option<u8>,
+        opcode: &[u8],
+        xmm: u8,
+        rm: impl Into<Rm>,
+        immediate: u8,
+    ) {
+        self.sse(prefix, opcode, xmm, rm);
+        self.code.push(immediate);
+    }
+    /// An opcode that names its register in its low three bits (`+r`).
+    pub(crate) fn opcode_reg(&mut self, size: Size, opcode: u8, register: Gpr) {
+        if size == Size::Word {
+            self.code.push(0x66);
+        }
+        let w = size == Size::Qword;
+        if w || register.high() {
+            self.code
+                .push(0x40 | u8::from(w) << 3 | u8::from(register.high()));
+        }
+        self.code.push(opcode | register.low());
+        self.count();
+    }
+    /// An instruction of fixed bytes and no operands (`ret`, `ud2`, `mfence`).
+    pub(crate) fn fixed(&mut self, bytes: &[u8]) {
+        self.code.extend(bytes);
+        self.count();
+    }
+
+    // Stack and control transfer.
+
+    /// `push r64`.
+    pub(crate) fn push(&mut self, register: Gpr) {
+        self.opcode_reg(Size::Dword, 0x50, register);
+    }
+    /// `pop r64`.
+    pub(crate) fn pop(&mut self, register: Gpr) {
+        self.opcode_reg(Size::Dword, 0x58, register);
+    }
+    /// `ret`.
+    pub(crate) fn ret(&mut self) {
+        self.fixed(&[0xc3]);
+    }
+    /// `call rm64`.
+    pub(crate) fn call_rm(&mut self, rm: impl Into<Rm>) {
+        self.legacy(Size::Dword, None, &[0xff], 2, false, rm.into());
+    }
+    /// `jmp rm64`.
+    pub(crate) fn jmp_rm(&mut self, rm: impl Into<Rm>) {
+        self.legacy(Size::Dword, None, &[0xff], 4, false, rm.into());
+    }
+    /// `call rel32`, resolved later by [`Self::bind`] or [`resolve`].
+    pub(crate) fn call(&mut self) -> Patch {
+        self.code.push(0xe8);
+        self.patch()
     }
 
     // Moves.
@@ -418,14 +650,14 @@ impl<'a> Asm<'a> {
         }
         self.code.push(0xb8 | destination.low());
         self.code.extend(value.to_le_bytes());
-        self.instructions += 1;
+        self.count();
     }
     /// `movabs r64, imm64` (REX.W B8+r).
     pub(crate) fn mov_imm64(&mut self, destination: Gpr, value: u64) {
         self.code.push(0x48 | u8::from(destination.high()));
         self.code.push(0xb8 | destination.low());
         self.code.extend(value.to_le_bytes());
-        self.instructions += 1;
+        self.count();
     }
     /// `mov rm, imm32` (C7 /0), sign-extended for a quadword.
     pub(crate) fn mov_rm_imm32(&mut self, size: Size, rm: impl Into<Rm>, value: i32) {
@@ -505,7 +737,7 @@ impl<'a> Asm<'a> {
             self.code.push(0x40);
             self.code.extend(opcode);
             self.modrm(reg, rm);
-            self.instructions += 1;
+            self.count();
         } else {
             self.legacy(size, prefix, opcode, reg, false, rm);
         }
@@ -543,7 +775,7 @@ impl<'a> Asm<'a> {
         }
         self.code.push((op as u8) << 3 | 5);
         self.code.extend(value.to_le_bytes());
-        self.instructions += 1;
+        self.count();
     }
     /// `op rm, imm`: the sign-extended imm8 form when it fits, else imm32.
     pub(crate) fn alu_imm(&mut self, op: Alu, size: Size, rm: impl Into<Rm>, value: i32) {
@@ -579,7 +811,7 @@ impl<'a> Asm<'a> {
             self.code.push(0x48);
         }
         self.code.push(0x99);
-        self.instructions += 1;
+        self.count();
     }
     /// A group 2 shift or rotate by CL.
     pub(crate) fn shift_cl(&mut self, op: ShiftOp, size: Size, rm: impl Into<Rm>) {
@@ -605,7 +837,7 @@ impl<'a> Asm<'a> {
     /// `nop`.
     pub(crate) fn nop(&mut self) {
         self.code.push(0x90);
-        self.instructions += 1;
+        self.count();
     }
     /// A group 2 shift or rotate by an immediate (C1 /digit ib).
     pub(crate) fn shift_imm(&mut self, op: ShiftOp, size: Size, rm: impl Into<Rm>, amount: u8) {
@@ -684,7 +916,7 @@ impl<'a> Asm<'a> {
                 .push(0x40 | u8::from(size == Size::Qword) << 3 | u8::from(register.high()));
         }
         self.code.extend([0x0f, 0xc8 | register.low()]);
-        self.instructions += 1;
+        self.count();
     }
     /// `cmovcc dst, rm`.
     pub(crate) fn cmov(&mut self, cond: Cond, size: Size, destination: Gpr, rm: impl Into<Rm>) {
@@ -808,11 +1040,27 @@ impl<'a> Asm<'a> {
         self.code.extend([0x0f, 0x80 | cond as u8]);
         self.patch()
     }
+    /// `jmp rel8`, resolved later by [`Self::bind`].
+    pub(crate) fn jmp8(&mut self) -> Patch {
+        self.code.push(0xeb);
+        self.short_patch()
+    }
+    /// `jcc rel8`, resolved later by [`Self::bind`].
+    pub(crate) fn jcc8(&mut self, cond: Cond) -> Patch {
+        self.code.push(0x70 | cond as u8);
+        self.short_patch()
+    }
     fn patch(&mut self) -> Patch {
         let at = self.code.len();
         self.code.extend([0; 4]);
-        self.instructions += 1;
-        Patch(at)
+        self.count();
+        Patch { at, short: false }
+    }
+    fn short_patch(&mut self) -> Patch {
+        let at = self.code.len();
+        self.code.push(0);
+        self.count();
+        Patch { at, short: true }
     }
     /// Point `patch` at the current position.
     pub(crate) fn bind(&mut self, patch: Patch) {
@@ -823,9 +1071,13 @@ impl<'a> Asm<'a> {
 
 /// Point `patch` in `code` at `target`.
 pub(crate) fn resolve(code: &mut [u8], patch: Patch, target: usize) {
-    let next = patch.0 as i64 + 4;
-    let distance = i32::try_from(target as i64 - next).expect("rel32 branch in range");
-    code[patch.0..patch.0 + 4].copy_from_slice(&distance.to_le_bytes());
+    let distance = target as i64 - patch.end() as i64;
+    if patch.short {
+        code[patch.at] = i8::try_from(distance).expect("rel8 branch in range") as u8;
+    } else {
+        let distance = i32::try_from(distance).expect("rel32 branch in range");
+        code[patch.at..patch.at + 4].copy_from_slice(&distance.to_le_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -938,6 +1190,98 @@ mod tests {
             assert_eq!(code, expected);
             assert_eq!(count, 1);
         }
+    }
+
+    #[test]
+    fn core_forms_match_the_sdm_encodings() {
+        use Gpr::*;
+        for (expected, build) in [
+            (
+                &[0x48, 0x8b, 0x47, 0x00][..],
+                (|a: &mut Asm| a.mov_load(Size::Qword, Rax, Mem::base_disp8(Rdi, 0)))
+                    as fn(&mut Asm),
+            ),
+            (&[0x41, 0x57], |a| a.push(R15)),
+            (&[0x5d], |a| a.pop(Rbp)),
+            (&[0xff, 0xd0], |a| a.call_rm(Rax)),
+            (&[0x41, 0xff, 0xe3], |a| a.jmp_rm(R11)),
+            (&[0x66, 0x0f, 0xef, 0xc1], |a| {
+                a.sse(Some(0x66), &[0x0f, 0xef], 0, Rm::Xmm(1))
+            }),
+            (&[0x66, 0x45, 0x0f, 0xef, 0xc1], |a| {
+                a.sse(Some(0x66), &[0x0f, 0xef], 8, Rm::Xmm(9))
+            }),
+            (&[0x66, 0x0f, 0x70, 0xc1, 0x1b], |a| {
+                a.sse_imm(Some(0x66), &[0x0f, 0x70], 0, Rm::Xmm(1), 0x1b)
+            }),
+            (&[0x0f, 0xae, 0xf0], |a| a.fixed(&[0x0f, 0xae, 0xf0])),
+            // vpaddd zmm0{k1}, zmm1, zmm2
+            (&[0x62, 0xf1, 0x75, 0x49, 0xfe, 0xc2], |a| {
+                a.evex(
+                    Evex {
+                        map: Map::M0f,
+                        pp: Pp::P66,
+                        w: false,
+                        length: 2,
+                        mask: 1,
+                        zeroing: false,
+                        broadcast: false,
+                        scale: 64,
+                    },
+                    0xfe,
+                    0,
+                    1,
+                    Rm::Xmm(2),
+                )
+            }),
+            // vpaddd zmm16, zmm17, [rdi+0x40]: disp8*64 = 1.
+            (&[0x62, 0xe1, 0x75, 0x40, 0xfe, 0x47, 0x01], |a| {
+                a.evex(
+                    Evex {
+                        map: Map::M0f,
+                        pp: Pp::P66,
+                        w: false,
+                        length: 2,
+                        mask: 0,
+                        zeroing: false,
+                        broadcast: false,
+                        scale: 64,
+                    },
+                    0xfe,
+                    16,
+                    17,
+                    Rm::Mem(Mem::base(Rdi, 0x40)),
+                )
+            }),
+        ] {
+            let (code, count) = bytes(build);
+            assert_eq!(code, expected);
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn code_counts_across_encoders_and_prefixes_join_their_instruction() {
+        let mut code = Code::new();
+        code.asm().mov(Size::Dword, Gpr::Rax, Gpr::Rcx);
+        let mut asm = code.asm();
+        asm.lock();
+        asm.alu(Alu::Add, Size::Dword, Mem::base(Gpr::Rdi, 0), Gpr::Rax);
+        assert_eq!(code.instructions(), 2);
+        assert_eq!(*code, [0x89, 0xc8, 0xf0, 0x01, 0x07]);
+    }
+
+    #[test]
+    fn short_branches_resolve_relative_to_the_next_instruction() {
+        let (code, count) = bytes(|a| {
+            let forward = a.jcc8(Cond::Ne);
+            a.mov(Size::Dword, Gpr::Rax, Gpr::Rax);
+            a.bind(forward);
+            let back = a.jmp8();
+            resolve(a.code, back, 0);
+        });
+        assert_eq!(code, [0x75, 2, 0x89, 0xc0, 0xeb, 0xfa]);
+        assert_eq!(count, 3);
     }
 
     #[test]
