@@ -1,6 +1,8 @@
 //! Each A64 form's FP, SVE, SME and FPMR access checks, in its Execute
-//! pseudocode's order, per Apple CPU, derived from Arm's
-//! `ISA_A64_xml_A_profile-2026-06`.
+//! pseudocode's order, per Apple CPU. Generated in 753303a1966 by the former
+//! `cargo xtask system-matrix --isa` from Arm's `ISA_A64_xml_A_profile-2026-06`
+//! and the A64 checklist tracker `isa/a64-documented-checklist.json`,
+//! both since removed; maintained by hand.
 use super::{Check, CheckForm, CheckGroup, CheckVariant, WordClass};
 
 /// Grouped by encoding mask, most specific first, each group sorted by

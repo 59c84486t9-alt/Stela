@@ -101,7 +101,9 @@ mod gpu;
 mod hosted_platform;
 mod pages;
 mod restore_dry_run;
+mod sysregs;
 mod tools;
+mod xml;
 
 #[derive(Parser)]
 #[command(about = "Stela development tasks")]
@@ -138,6 +140,8 @@ enum Task {
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
+    /// Generate the System register accessors from Arm's AARCHMRS.
+    Sysregs(sysregs::Sysregs),
 }
 
 fn main() -> ExitCode {
@@ -151,6 +155,7 @@ fn main() -> ExitCode {
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
+        Task::Sysregs(task) => task.run().map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");
