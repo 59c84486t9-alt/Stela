@@ -373,8 +373,7 @@ pub unsafe fn open(
     let mut devices = unsafe { probe_with_provider(handoff, &mut dma, &firmware, services) };
     // The owners native attachments keep, and those of failed ones, stay
     // for the boot: their mappings and DMA domains outlive the devices.
-    Vec::leak(core::mem::take(&mut devices.native_owners));
-    Vec::leak(core::mem::take(&mut devices.quarantined));
+    Vec::leak(core::mem::take(&mut devices.owners));
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
