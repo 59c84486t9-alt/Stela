@@ -25,7 +25,9 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
 pub mod services;
+pub mod wifi;
 pub use services::{NativeServices, ServiceError};
+pub use wifi::{WifiConfig, WifiSecret, WifiSecretError};
 
 /// A controller refusal retains its original typed details for boot diagnostics.
 /// In particular, firmware names and integrity/target errors are never replaced
