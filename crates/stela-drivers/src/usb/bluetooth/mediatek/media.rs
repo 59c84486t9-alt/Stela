@@ -37,10 +37,16 @@ pub enum Error {
         status: u8,
         event: alloc::vec::Vec<u8>,
     },
-    /// The controller crashed and its memory dump ended. Linux resets the
-    /// controller now; without the shared subsystem reset this attachment
-    /// needs a fresh rebind.
+    /// The controller crashed and its memory dump ended.
     ControllerDump(alloc::boxed::Box<super::coredump::Coredump>),
+    /// A synchronous command outlived its timeout without completion.
+    CommandTimeout(u16),
+    /// btusb_mtk_reset after `cause`: the transport is closed and its USB
+    /// topology owner rebinds a fresh one.
+    Reset {
+        cause: alloc::boxed::Box<Error>,
+        reset: alloc::boxed::Box<super::reset::Reset>,
+    },
     Cleanup {
         cause: alloc::boxed::Box<Error>,
         media: Option<BlockError>,
@@ -157,7 +163,11 @@ pub(in crate::usb::bluetooth) mod tests {
         fn validate(&self) -> core::result::Result<(), BlockError> {
             Ok(()) // This in-memory model has no physical device-generation owner.
         }
-        fn control(&mut self, _: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
+        fn control(&mut self, s: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
+            if s[0] == 0x5e {
+                self.actions.push("uhw-write");
+                return Ok(());
+            }
             if p == [3, 0x0c, 0] {
                 self.actions.push("hci-reset");
                 if !self.no_complete {
@@ -215,6 +225,13 @@ pub(in crate::usb::bluetooth) mod tests {
             })
         }
         fn control_read(&mut self, s: [u8; 8]) -> core::result::Result<Vec<u8>, BlockError> {
+            // uhw registers read as MTK_BT_RST_DONE; the device ID is MT7925's.
+            if s[0] == 0xde {
+                return Ok(0x100u32.to_le_bytes().to_vec());
+            }
+            if s[1] == 0x63 {
+                return Ok(0x7925u32.to_le_bytes().to_vec());
+            }
             assert_eq!(s, [0xc0, 1, 0x30, 0, 0, 0, 64, 0]);
             Ok(self.wmt.pop_front().unwrap_or_default())
         }
@@ -226,6 +243,10 @@ pub(in crate::usb::bluetooth) mod tests {
         }
         fn close(&mut self) -> core::result::Result<(), BlockError> {
             self.actions.push("base-close");
+            Ok(())
+        }
+        fn queue_reset(&mut self) -> core::result::Result<(), BlockError> {
+            self.actions.push("usb-reset");
             Ok(())
         }
         fn now_us(&self) -> u64 {
@@ -384,7 +405,16 @@ pub(in crate::usb::bluetooth) mod tests {
                 ..Model::default()
             },
         ] {
-            assert!(Session::start(hci(m), &mut NoDma, 1).is_err());
+            // An unanswered fd98 outlives HCI_CMD_TIMEOUT, so hci_cmd_timeout
+            // resets the controller; a failed status does not.
+            let timeout = m.no_complete;
+            match Session::start(hci(m), &mut NoDma, 1) {
+                Err(Error::Reset { cause, .. }) => {
+                    assert!(timeout && *cause == Error::CommandTimeout(0xfd98));
+                }
+                Err(Error::Cleanup { .. }) => assert!(!timeout),
+                _ => panic!("fd98 must fail"),
+            }
         }
         assert!(Session::start(hci(Model::default()), &mut NoDma, 0).is_err());
         assert!(Session::start(Hci::from_io(binding(), Model::default()), &mut NoDma, 1).is_err());
@@ -432,6 +462,18 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.lifecycle(), Lifecycle::Failed);
     }
     #[test]
+    fn the_hci_core_command_timeout_resets_the_controller_like_hdev_reset() {
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        let reset = s.reset_controller().unwrap();
+        assert_eq!(
+            (reset.media, reset.subsystem, reset.usb),
+            (None, Ok(()), Ok(()))
+        );
+        assert_eq!(s.lifecycle(), Lifecycle::Failed);
+        assert!(s.hci.io.actions.ends_with(&["base-close", "usb-reset"]));
+        assert!(s.poll().is_err());
+    }
+    #[test]
     fn a_firmware_dump_is_delivered_as_diagnostics_then_ends_the_session() {
         use super::super::coredump::End;
         use crate::usb::bluetooth::Packet;
@@ -441,9 +483,13 @@ pub(in crate::usb::bluetooth) mod tests {
             frame.extend_from_slice(payload);
             frame
         };
+        // btmtk_coredump_notify resets the controller once the dump ends.
         let ended = |error| match error {
-            Error::Cleanup { cause, .. } => match *cause {
-                Error::ControllerDump(dump) => *dump,
+            Error::Reset { cause, reset } => match *cause {
+                Error::ControllerDump(dump) => {
+                    assert_eq!((&reset.subsystem, &reset.usb), (&Ok(()), &Ok(())));
+                    *dump
+                }
                 other => panic!("{other:?}"),
             },
             other => panic!("{other:?}"),
@@ -463,7 +509,12 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!((dump.end, dump.frames), (End::Complete, 256));
         assert_eq!(dump.device_id, 0x7925);
         assert_eq!(s.lifecycle(), Lifecycle::Failed);
-        assert!(s.hci.io.actions.ends_with(&["media-close", "base-close"]));
+        // btusb_mtk_reset: ISO release, the six CONNV3 writes, then the
+        // stopped transport's queued USB reset.
+        let mut reset = vec!["media-close"];
+        reset.extend(["uhw-write"; 6]);
+        reset.extend(["base-close", "usb-reset"]);
+        assert!(s.hci.io.actions.ends_with(&reset));
 
         // A dump that stalls ends after five seconds without new frames.
         let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();

@@ -6,14 +6,15 @@
 //! authenticity, physical/radio qualification and guest services remain separate.
 //! Normal USB initialization is separate from the source WLAN restart path;
 //! the pinned source establishes no mandatory cross-function probe order.
-//! Each function retains its genuine resource owner. Neither USB IDs nor an
-//! initializer/media close grants shared CONNV3 reset authority;
-//! automatic shared recovery/retry remains unsupported while siblings may live.
+//! Each function retains its genuine resource owner. A failed firmware setup,
+//! a command timeout and a completed dump run btusb_mtk_reset as Linux does:
+//! the btmtk subsystem reset, then a queued USB reset that rebinds the device.
 pub mod coredump;
 mod firmware;
 mod identity;
 mod initialize;
 pub(super) mod packet;
+pub mod reset;
 mod wmt;
 pub use firmware::{FirmwareMetadata, Fragment, Patch, Section, SectionMetadata};
 pub use identity::{Chip, Identity, UsbIdentity};
@@ -61,9 +62,9 @@ pub struct Attempt {
     pub reset_completion: Option<Vec<u8>>,
     pub local_version: Option<[u8; 9]>,
     pub address: Option<[u8; 6]>,
+    /// The btusb_mtk_reset that followed a failed firmware setup or command.
+    pub reset: Option<reset::Reset>,
 }
-/// No shared combo power/reset service has granted authority to retry a failed
-/// firmware upload. Failure is terminal for this attachment and requires rebind.
 /// What Linux btusb/btmtk tell the host stack about a MediaTek controller
 /// (btusb_probe's BTUSB_MEDIATEK branch and btmtk_usb_setup for MT79xx).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +230,7 @@ mod tests {
         WrongManufacturer,
         ZeroAddress,
         TrailingEvent,
+        VersionSilent,
     }
     #[derive(Default)]
     struct Trace {
@@ -238,6 +240,10 @@ mod tests {
         iso_starts: usize,
         option_writes: usize,
         reads: usize,
+        /// Writes once btusb_mtk_reset's first uhw read arrived.
+        uhw: Vec<(u32, u32)>,
+        resetting: bool,
+        usb_resets: usize,
     }
     struct Model {
         registers: [u32; 4],
@@ -262,6 +268,13 @@ mod tests {
         }
         fn control(&mut self, setup: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
             assert_eq!(self.trace.borrow().closed, 0);
+            if setup[0] == 0x5e && self.trace.borrow().resetting {
+                let address = u32::from(u16::from_le_bytes([setup[2], setup[3]])) << 16
+                    | u32::from(u16::from_le_bytes([setup[4], setup[5]]));
+                let value = u32::from_le_bytes(p.try_into().unwrap());
+                self.trace.borrow_mut().uhw.push((address, value));
+                return Ok(());
+            }
             if setup[0] == 0x5e {
                 assert_eq!(setup, [0x5e, 2, 1, 0x74, 0x90, 0x18, 4, 0]);
                 assert_eq!(p, [1, 0, 1, 0]);
@@ -310,6 +323,9 @@ mod tests {
                         0
                     }],
                 ));
+                return Ok(());
+            }
+            if op == 0x1001 && self.fault == Fault::VersionSilent {
                 return Ok(());
             }
             let mut response = match op {
@@ -365,6 +381,11 @@ mod tests {
             if self.fail_read == Some(self.trace.borrow().reads) {
                 return Err(BlockError::Device { status: 0x55 });
             }
+            if setup[0] == 0xde {
+                // Every uhw register reads as MTK_BT_RST_DONE.
+                self.trace.borrow_mut().resetting = true;
+                return Ok(0x100u32.to_le_bytes().to_vec());
+            }
             if setup[1] == 0x63 {
                 assert_eq!(setup[0], 0xc0);
                 assert_eq!(setup[6..], [4, 0]);
@@ -411,6 +432,10 @@ mod tests {
             let mut trace = self.trace.borrow_mut();
             trace.closed = 0;
             trace.reopened += 1;
+            Ok(())
+        }
+        fn queue_reset(&mut self) -> core::result::Result<(), BlockError> {
+            self.trace.borrow_mut().usb_resets += 1;
             Ok(())
         }
         fn now_us(&self) -> u64 {
@@ -774,6 +799,8 @@ mod tests {
             )]
         );
         assert!(trace.borrow().commands.is_empty());
+        // request_firmware's failure is a failed firmware setup.
+        assert_eq!(trace.borrow().usb_resets, 1);
         assert_eq!(hci.state(), State::Closed);
         assert!(
             hci.initialize_with_provider(&provider, PlatformInputs::default())
@@ -800,6 +827,7 @@ mod tests {
             Fault::WrongManufacturer,
             Fault::ZeroAddress,
             Fault::TrailingEvent,
+            Fault::VersionSilent,
         ] {
             let (mut hci, catalog, trace) = fixture(Chip::Mt7925, fault);
             let e = initialize(&mut hci, &catalog).unwrap_err();
@@ -808,6 +836,25 @@ mod tests {
             assert!(a.firmware.is_some());
             assert_eq!(hci.state(), State::Closed);
             assert_eq!(trace.borrow().closed, 1);
+            // A failed firmware setup and a timed-out command other than HCI
+            // Reset run btusb_mtk_reset; later failures do not.
+            let reset = matches!(
+                fault,
+                Fault::ProgressForever
+                    | Fault::FragmentProgress
+                    | Fault::InterruptOnly
+                    | Fault::AuxiliaryFailure
+                    | Fault::LateVendor
+                    | Fault::WrongVendorOp
+                    | Fault::VendorFragment
+                    | Fault::VendorLength
+                    | Fault::VersionSilent
+            );
+            assert_eq!(trace.borrow().usb_resets, usize::from(reset), "{fault:?}");
+            if let Some(r) = &a.reset {
+                assert_eq!((&r.subsystem, &r.usb), (&Ok(()), &Ok(())));
+                assert_eq!(trace.borrow().uhw[0], (0x7002_8610, 0x120));
+            }
             assert!(hci.submit_acl(&[1, 0, 0, 0]).is_err());
             if fault == Fault::ProgressForever {
                 assert_eq!(a.sections[0].queries.len(), 20);

@@ -139,6 +139,13 @@ pub trait Io {
     fn reopen(&mut self) -> Result<(), BlockError> {
         Err(BlockError::Unsupported("USB Bluetooth transport reopen"))
     }
+    /// `usb_queue_reset_device`: ask the USB topology owner to reset this
+    /// device and bind it again. Every later access through this owner fails.
+    fn queue_reset(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported(
+            "USB Bluetooth device reset request",
+        ))
+    }
     fn now_us(&self) -> u64;
 }
 
@@ -440,6 +447,23 @@ impl<B: Io> Hci<B> {
                 Err(error(ErrorKind::Usb(failure)))
             }
         }
+    }
+}
+
+impl<B: Io> Hci<B> {
+    /// `usb_queue_reset_device`: close this transport, then ask the USB
+    /// topology owner to reset the device and bind a fresh transport, even
+    /// when the close failed.
+    pub fn queue_reset(&mut self) -> Result<(), Error> {
+        let closed = if self.state == State::Open {
+            self.close()
+        } else {
+            Ok(())
+        };
+        self.io
+            .queue_reset()
+            .map_err(|e| error(ErrorKind::Usb(e)))?;
+        closed
     }
 }
 

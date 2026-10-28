@@ -320,6 +320,9 @@ impl Io for Host {
         self.closed = false;
         self.open()
     }
+    fn queue_reset(&mut self) -> Result<(), BlockError> {
+        self.controller.borrow_mut().queue_reset(self.id)
+    }
     fn now_us(&self) -> u64 {
         self.clock
             .try_elapsed_us(self.clock_origin)
