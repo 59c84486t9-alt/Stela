@@ -483,9 +483,9 @@ fn single_store(bytes: u8) -> Option<&'static [u8]> {
 
 /// Inspect the exact shared store: address, the data's frame load (or
 /// zero) into RCX, and one host store, or with `crossing` the page-crossing
-/// store recipe (`memory_store::crossing_store`), as one segment whose
-/// branches stay inside it. Also the index of the data's segment in the
-/// ends.
+/// store recipe (`memory_store::crossing_store`), retaining its emitted
+/// instruction boundaries. Branches stay within that recipe. Also returns the
+/// index of the staged data's segment in the ends.
 pub fn ordinary_store_ends(
     code: &[u8],
     bytes: u8,
@@ -499,17 +499,23 @@ pub fn ordinary_store_ends(
     let data_end = check_store_data(code, *ends.last()?, data, false)?;
     ends.push(data_end);
     let recipe;
+    let crossing_ends;
     let store = if crossing {
-        recipe = super::super::memory_store::crossing_store(bytes)?.0;
+        (recipe, crossing_ends) = super::super::memory_store::crossing_store(bytes)?;
         &recipe[..]
     } else {
+        crossing_ends = Vec::new();
         single_store(bytes)?
     };
     let end = data_end + store.len();
     if code.get(data_end..end)? != store {
         return None;
     }
-    ends.push(end);
+    if crossing {
+        ends.extend(crossing_ends.into_iter().map(|offset| data_end + offset));
+    } else {
+        ends.push(end);
+    }
     (code.len() == end).then_some((ends, data_segment))
 }
 

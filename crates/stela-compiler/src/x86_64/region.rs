@@ -2954,4 +2954,60 @@ mod tests {
             Err(RegionError::ChangedInstructions)
         ));
     }
+
+    #[test]
+    fn copied_store_recipes_preserve_the_shared_bytes_and_instruction_count() {
+        for bytes in [
+            BYTE_LOAD_BYTES,
+            HALFWORD_LOAD_BYTES,
+            WORD_LOAD_BYTES,
+            DOUBLEWORD_LOAD_BYTES,
+        ] {
+            for base in [Register::X(15), Register::Sp] {
+                for data in [Register::X(16), Register::Zero] {
+                    let input = [instruction(0, store(bytes, data, base, -16))];
+                    let mut baseline = Code::new();
+                    super::super::memory(
+                        &mut baseline,
+                        super::super::MemoryChecks::DEFAULT,
+                        MemoryTransfer::Store,
+                        bytes,
+                        data,
+                        base,
+                        -16,
+                        AddressMode::Offset,
+                    );
+                    let region = emit_clean_load_prefix_with(
+                        &input,
+                        super::super::MemoryChecks::DEFAULT,
+                        false,
+                        None,
+                    )
+                    .unwrap();
+                    assert_eq!(region.consumed_instructions, 1);
+                    // Independently counted shared recipes: base+LEA+data plus
+                    // one byte store, or the complete guard/split/fast paths.
+                    // SP adds three alignment-check instructions and needs no split.
+                    let expected_count = if base == Register::Sp {
+                        7
+                    } else {
+                        match bytes {
+                            1 => 4,
+                            2 => 12,
+                            4 => 16,
+                            8 => 24,
+                            _ => unreachable!(),
+                        }
+                    };
+                    assert_eq!(baseline.instructions(), expected_count);
+                    assert_eq!(region.code, baseline, "{bytes} bytes {base:?} {data:?}");
+                    assert_eq!(
+                        region.code.instructions(),
+                        baseline.instructions(),
+                        "cost count must retain every instruction in the crossing recipe"
+                    );
+                }
+            }
+        }
+    }
 }
