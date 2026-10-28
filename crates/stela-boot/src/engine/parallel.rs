@@ -60,6 +60,8 @@ impl Kick for Doorbells {
 pub(crate) struct Settings {
     pub profile: CpuProfile,
     pub target: TargetCpu,
+    pub traces: Vec<u64>,
+    pub watches: Vec<(u64, u64)>,
 }
 
 /// Give each AP the PE its worker binding names, to run on a machine of its
@@ -88,6 +90,8 @@ pub(crate) fn spawn<H: Host>(
             core_locks: home.cpu.core_locks.clone(),
             profile: settings.profile.clone(),
             target: settings.target,
+            traces: settings.traces.clone(),
+            watches: settings.watches.clone(),
         };
         processor.spawn(Box::new(move |owner| pe.run(owner)), sender, tsc_hz)?;
     }
@@ -108,6 +112,8 @@ struct Pe {
     core_locks: Arc<ctrr::CoreLocks>,
     profile: CpuProfile,
     target: TargetCpu,
+    traces: Vec<u64>,
+    watches: Vec<(u64, u64)>,
 }
 
 impl Pe {
@@ -118,6 +124,8 @@ impl Pe {
             core_locks,
             profile,
             target,
+            traces,
+            watches,
         } = self;
         // This core's driver calls keep the engine's TLB entries.
         let _tagged = super::storage::TaggedRoots::enable();
@@ -132,6 +140,14 @@ impl Pe {
         let before = own();
         let mut machine = Machine::new_at(cpu, owner.host(), devices, profile, target, pe)
             .unwrap_or_else(|error| output::fatal(error));
+        let observing = !traces.is_empty() || !watches.is_empty();
+        if !traces.is_empty() {
+            machine.set_traces(&traces);
+        }
+        if !watches.is_empty() {
+            machine.set_watches(&watches);
+        }
+        drop((traces, watches));
         output::arguments(format_args!(
             "PARALLEL PE {pe} machine takes {} KiB of heap\n",
             own().saturating_sub(before).max(0) >> 10
@@ -144,7 +160,14 @@ impl Pe {
         output::arguments(format_args!("PARALLEL PE {pe} starts at {address:#x}\n"));
         loop {
             let limit = machine.statistics.blocks + SLICE;
-            match machine.run(limit) {
+            let stop = machine.run(limit);
+            // Like the home PE, drain outside guest execution and before a
+            // terminal stop. Retention is bounded by TRACE_HITS/WATCH_HITS;
+            // output uses the shared bounded serial queue, never an ISR.
+            if observing {
+                report_diagnostics(&mut machine);
+            }
+            match stop {
                 Stop::Budget => {}
                 // A PE that waits for an interrupt serves the host meanwhile.
                 Stop::Waiting if machine.waits_for_interrupt() => super::service::serve(false),
@@ -153,6 +176,39 @@ impl Pe {
             }
             hub.publish(pe, machine.counts());
         }
+    }
+}
+
+/// The same records as the home PE, including the PE that made each hit.
+/// Each machine retains at most TRACE_HITS and WATCH_HITS between drains;
+/// their last records report any overflow rather than hiding lost hits.
+fn report_diagnostics<H: Host>(machine: &mut Machine<H, Board>) {
+    for hit in machine.take_trace_hits() {
+        output::arguments(format_args!(
+            "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
+            hit.pc,
+            hit.pe,
+            hit.el,
+            hit.arguments[0],
+            hit.arguments[1],
+            hit.arguments[2],
+            hit.arguments[3],
+            hit.lr,
+            hit.dropped
+        ));
+    }
+    for hit in machine.take_watch_hits() {
+        output::arguments(format_args!(
+            "WATCH pc={:#x} pe={} {} pa={:#x} bytes={} value={:#x}{} dropped={}\n",
+            hit.pc,
+            hit.pe,
+            if hit.write { "write" } else { "read" },
+            hit.physical,
+            hit.bytes,
+            hit.value,
+            if hit.completed { "" } else { " refused" },
+            hit.dropped
+        ));
     }
 }
 

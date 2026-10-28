@@ -1564,6 +1564,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let settings = parallel::Settings {
         profile: profile.clone(),
         target: canonical_ram.target(),
+        traces: options.traces.clone(),
+        watches: options.watches.clone(),
     };
     // The loader handle's last RAM copy preceded canonical registration; its
     // borrow has ended. It never executes a guest instruction.
