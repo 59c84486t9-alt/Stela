@@ -1006,6 +1006,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 doorbells,
             ));
         }
+        if let Some(mmio) = &native_mmio {
+            // SAFETY: the check owns the host's devices; bus 0's first
+            // function is only read here.
+            let generation = unsafe { mmio.check_shootdown() }.unwrap_or_else(|error| {
+                output::arguments(format_args!("CHECK native-shootdown FAIL {error:?}\n"));
+                output::fatal("the MMIO aperture's shootdown failed")
+            });
+            output::arguments(format_args!(
+                "CHECK native-shootdown PASS generation={generation} processors={}\n",
+                executors.processors().len()
+            ));
+        }
         if options.native_shared_check {
             // SAFETY: the bounded fixture owns all source RAM and actual frame
             // loans; all AP returns are acquired before any borrowed release.
@@ -1020,18 +1032,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             }
             .unwrap_or_else(|error| output::fatal(error));
             output::terminate(0x10);
-        }
-        if let Some(mmio) = &native_mmio {
-            // SAFETY: the bootstrap check owns the host's devices; bus 0's
-            // first function is only read here.
-            let generation = unsafe { mmio.check_shootdown() }.unwrap_or_else(|error| {
-                output::arguments(format_args!("CHECK native-shootdown FAIL {error:?}\n"));
-                output::fatal("the MMIO aperture's shootdown failed")
-            });
-            output::arguments(format_args!(
-                "CHECK native-shootdown PASS generation={generation} processors={}\n",
-                executors.processors().len()
-            ));
         }
         output::arguments(format_args!(
             "CHECK native-bootstrap PASS physical_cores={} owned_APs={}; guest SMP execution unqualified\n",
