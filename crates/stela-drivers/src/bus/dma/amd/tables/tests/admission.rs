@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn range_overlap_width_and_payload_admission_refuse_before_mutation() {
+fn mapping_admission_preflight() {
     let (mut tree, monitor) = new_tree(1, 12);
     let root = tree.root_for_publication().unwrap().value();
     let retained = Arc::new(AtomicUsize::new(0));
@@ -74,7 +74,7 @@ fn range_overlap_width_and_payload_admission_refuse_before_mutation() {
 }
 
 #[test]
-fn invalid_table_and_backing_budgets_refuse_before_provider_effects() {
+fn resource_budget_preflight() {
     let mut budgets = vec![(0, 4096), (1, 0), (1, 4095)];
     if let Some(overwidth) = (u32::MAX as usize).checked_add(1) {
         budgets.push((overwidth, 4096));

@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn all_modes_walk_last_page_and_mode_six_uses_only_top_128_slots() {
+fn host_modes_and_top_level_slots() {
     for mode in 1..=6 {
         let (mut tree, monitor) = new_tree(mode, 12);
         let root = tree.root_for_publication().unwrap().value();
@@ -61,7 +61,7 @@ fn all_modes_walk_last_page_and_mode_six_uses_only_top_128_slots() {
 }
 
 #[test]
-fn final_mode_six_native_span_keeps_unrepresentable_exclusive_end() {
+fn final_mode_six_native_span() {
     let (mut tree, monitor) = new_tree(6, 13);
     let root = tree.root_for_publication().unwrap().value();
     let rejected = Arc::new(AtomicUsize::new(0));
@@ -107,7 +107,7 @@ fn final_mode_six_native_span_keeps_unrepresentable_exclusive_end() {
 }
 
 #[test]
-fn actual_virtual_aperture_is_distinct_from_host_table_mode_capacity() {
+fn virtual_aperture_and_host_capacity() {
     let monitor = Monitor::new();
     let hardware = Hardware {
         monitor: monitor.clone(),

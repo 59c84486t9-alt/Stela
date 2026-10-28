@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn unpublished_child_failures_rollback_without_poison_or_payload_retention() {
+fn unpublished_child_rollback() {
     for allocate_failure in [true, false] {
         let (mut tree, monitor) = new_tree(2, 12);
         let root = tree.root_for_publication().unwrap().value();
@@ -46,7 +46,7 @@ fn unpublished_child_failures_rollback_without_poison_or_payload_retention() {
 }
 
 #[test]
-fn later_path_failure_rolls_back_every_private_edge_and_releases_payload() {
+fn deeper_staging_rollback() {
     for allocation_failure in [true, false] {
         let (mut tree, monitor) = new_tree(3, 12);
         let root = tree.root_for_publication().unwrap().value();
@@ -104,7 +104,7 @@ fn later_path_failure_rolls_back_every_private_edge_and_releases_payload() {
 }
 
 #[test]
-fn staged_descendant_edges_are_published_before_the_live_root_edge() {
+fn descendant_before_root_publication() {
     let (mut tree, monitor) = new_tree(3, 12);
     let root = tree.root_for_publication().unwrap().value();
     let drops = Arc::new(AtomicUsize::new(0));

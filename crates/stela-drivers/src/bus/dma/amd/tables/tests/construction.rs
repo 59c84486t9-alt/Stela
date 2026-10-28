@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn root_construction_failures_release_unexposed_context_and_pins() {
+fn unpublished_root_failures() {
     for stage in 0..4 {
         let monitor = Monitor::new();
         {
@@ -71,7 +71,7 @@ fn root_construction_failures_release_unexposed_context_and_pins() {
 }
 
 #[test]
-fn legal_node_budget_endpoints_and_exact_root_byte_budget_are_usable() {
+fn node_budget_endpoints() {
     for nodes in [1, u32::MAX as usize] {
         let (mut tree, monitor) = new_tree_with_limits(1, 12, nodes, 4096);
         let root = tree.root_for_publication().unwrap().value();

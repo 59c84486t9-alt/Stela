@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn exact_node_budget_exhaustion_rolls_back_a_multi_path_staging_batch() {
+fn node_budget_staging_rollback() {
     let (mut tree, monitor) = new_tree_with_limits(3, 12, 4, TEST_TABLE_BUDGET * 4096);
     let root = tree.root_for_publication().unwrap().value();
     let before = monitor.words();
@@ -53,7 +53,7 @@ fn exact_node_budget_exhaustion_rolls_back_a_multi_path_staging_batch() {
 }
 
 #[test]
-fn later_staging_failures_preserve_all_existing_words_and_mapping_pins() {
+fn staged_failure_preserves_existing_mapping() {
     for native_shift in [12, 13] {
         for failure in 0..3 {
             // Five tables allow two staged nodes after the three-table
@@ -152,7 +152,7 @@ fn later_staging_failures_preserve_all_existing_words_and_mapping_pins() {
 }
 
 #[test]
-fn empty_tables_count_toward_budget_and_packed_iovas_reuse_actual_pins() {
+fn empty_table_budget_and_pin_reuse() {
     for native_shift in [12, 13] {
         let (mut tree, monitor) = new_tree_with_limits(
             3,

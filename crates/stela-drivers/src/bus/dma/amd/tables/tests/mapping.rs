@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn expanded_unsorted_eight_k_scatter_aliases_publish_children_before_parents() {
+fn scatter_aliases_and_publication_order() {
     let (mut tree, monitor) = new_tree(2, 13);
     let root = tree.root_for_publication().unwrap().value();
     let drops = Arc::new(AtomicUsize::new(0));
@@ -79,7 +79,7 @@ fn expanded_unsorted_eight_k_scatter_aliases_publish_children_before_parents() {
 }
 
 #[test]
-fn leaf_permissions_follow_direction_and_fixed_payload_policy() {
+fn direction_and_coherency_permissions() {
     for (direction, read, write, coherent) in [
         (Direction::ToDevice, true, false, false),
         (Direction::FromDevice, false, true, true),

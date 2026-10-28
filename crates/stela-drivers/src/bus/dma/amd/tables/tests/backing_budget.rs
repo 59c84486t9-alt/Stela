@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn later_full_backing_limit_rolls_back_tails_and_preserves_established_mapping() {
+fn backing_limit_rollback_preserves_mapping() {
     let (mut tree, monitor) = new_tree_with_limits(3, 12, 8, 6 * 4096);
     let root = tree.root_for_publication().unwrap().value();
     let retained = Arc::new(AtomicUsize::new(0));
@@ -72,7 +72,7 @@ fn later_full_backing_limit_rolls_back_tails_and_preserves_established_mapping()
 }
 
 #[test]
-fn full_native_pins_and_larger_provider_tails_charge_the_backing_budget() {
+fn native_pins_and_provider_tail_budget() {
     // The first case has native8K backing; the second returns two native4K
     // pages for one logical table. Neither unused tail is a spare table.
     for (native_shift, child_granules, byte_limit) in [(13, 1, 12_288), (12, 2, 8192)] {

@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn parent_leaf_and_invalidation_failures_poison_and_keep_original_pins() {
+fn uncertain_publication_retains_pins() {
     for stage in [3, 4, 5] {
         let (mut tree, monitor) = new_tree(2, 12);
         let root = tree.root_for_publication().unwrap().value();
@@ -50,7 +50,7 @@ fn parent_leaf_and_invalidation_failures_poison_and_keep_original_pins() {
 }
 
 #[test]
-fn unmap_failure_and_callback_unwinds_keep_pins_and_prevent_reuse() {
+fn unmap_failures_and_callback_unwinds() {
     for scenario in [0, 1, 2, 3] {
         let (mut tree, monitor) = new_tree(2, 12);
         let root = tree.root_for_publication().unwrap().value();
@@ -134,7 +134,7 @@ fn unmap_failure_and_callback_unwinds_keep_pins_and_prevent_reuse() {
 }
 
 #[test]
-fn empty_exposed_drop_quarantines_hardware_and_table_until_explicit_retirement() {
+fn exposed_tree_drop_quarantine() {
     let (tree, monitor) = new_tree(1, 12);
     drop(tree);
     assert_eq!(monitor.table_drops.load(Ordering::Relaxed), 1);
