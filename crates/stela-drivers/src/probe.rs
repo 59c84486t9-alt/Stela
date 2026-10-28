@@ -348,6 +348,15 @@ pub struct Devices {
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
     pub nics: Vec<Adapter>,
+    /// The regulatory database, once probe found a Wi-Fi adapter (a PCI
+    /// network controller of class 02/80): `Err` reports once that it is
+    /// missing, and no Wi-Fi adapter then scans or transmits.
+    pub regulatory: Option<
+        Result<
+            crate::net::wifi::regulatory::database::Database,
+            crate::net::wifi::regulatory::database::LoadError,
+        >,
+    >,
     /// Sensor hubs, their sensors enabled. Nothing reads their reports yet.
     pub sensors: Vec<native::SensorHub>,
     pub failures: Vec<(Address, Error)>,
@@ -471,6 +480,9 @@ pub unsafe fn probe_with_provider(
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
             mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
+            if function.class[..2] == [2, 0x80] && devices.regulatory.is_none() {
+                devices.regulatory = Some(crate::net::wifi::regulatory::database::load(firmware));
+            }
             if let Some(adapter) = gpu::Adapter::discover(&function) {
                 devices.gpus.push(adapter);
                 continue;
