@@ -57,6 +57,12 @@ fn identification() -> Result<Arc<Snapshot>> {
     )?))
 }
 
+/// Execute the reviewed startup windows under the declared software CPU.
+///
+/// # Safety
+/// `runtime` and `state` must describe the bounded startup path, and `memory`
+/// must own every referenced mapping without concurrent execution or mutation.
+/// This call consumes the software PE's entire execution lifetime.
 pub(super) unsafe fn run(
     runtime: &mut BlockRuntime,
     state: &mut ThreadState,
@@ -70,8 +76,9 @@ pub(super) unsafe fn run(
         runtime.address_space(),
         stela_runtime::thread::VmMaximum::new((1u64 << ADDRESS_BITS) - 1)?,
     )?;
-    // These images, the stack and the clock are all of this namespace's
-    // mappings; nothing else holds a writable alias.
+    // SAFETY: the caller exclusively owns the image and stack mappings. The
+    // clock is created here for the same address space and participates in
+    // this binding for the remainder of the run.
     let domain = unsafe {
         memory.bind_shared_memory_participants(
             SharedMemoryConfig {
@@ -103,6 +110,10 @@ pub(super) unsafe fn run(
     memory_thread
         .bind_events(&endpoint.producer())
         .map_err(|e| anyhow::anyhow!("event binding: {e:?}"))?;
+    // SAFETY: this software machine declares Normal write-back, shareable,
+    // untagged mappings over the bound image, stack and clock ranges. Their
+    // published generation stays fixed during this exclusively borrowed run;
+    // the fixed SCTLR/TCR controls below describe the same mapping contract.
     let source = unsafe { SourceNormalWbDomain::from_source_resolved(domain) }
         .map_err(|e| anyhow::anyhow!("source domain: {e:?}"))?;
     let mut controls = FixedProcessMemoryControls::new_with_identification(
@@ -118,6 +129,9 @@ pub(super) unsafe fn run(
     let mut system = SystemState::new(MASKED_EL0T, 0, El1Registers::new(0, 0, 0, 0, 0))
         .map_err(|e| anyhow::anyhow!("System state: {e:?}"))?;
     let mut context = ExecutionContext::default();
+    // SAFETY: the caller supplies trusted startup code and private mappings.
+    // All protected resources and event producers are local to this new PE,
+    // remain borrowed through completion, and are dropped when this call ends.
     let report = unsafe {
         stela_runtime::darwin::run_services(
             runtime,

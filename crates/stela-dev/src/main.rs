@@ -1,7 +1,5 @@
-//! `stela-dev`: the research and development commands beside the shipped
-//! `stela`: compile and run raw ARM code, plan and probe images, read
-//! restore images, prepare and check boot bundles, and write loaders and
-//! install media by hand. See docs/development.md.
+//! Development commands for translating code, inspecting images, probing
+//! execution, and preparing boot and installation media.
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 use stela_cli::{apfs, boot, efi, restore};
@@ -34,7 +32,7 @@ enum Command {
     CompileLeaf(compile::CompileLeaf),
     /// Compile one native block.
     CompileBlock(compile::CompileBlock),
-    /// Prepare a supported leaf function on demand; reuse an exact cached AOT.
+    /// Prepare a leaf function, reusing a matching cached translation.
     PrepareLeaf(compile::PrepareLeaf),
     /// Run raw code through native block dispatch.
     RunBlocks(execute::RunBlocks),
@@ -59,7 +57,7 @@ enum Command {
     ExtractImage(images::ExtractImage),
     /// Decode a plaintext IM4P payload, such as a kernelcache or DeviceTree.
     DecodeIm4p(images::DecodeIm4p),
-    /// Inspect AEA1 envelope metadata (never key material).
+    /// Inspect AEA1 envelope metadata.
     InspectAea(images::InspectAea),
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
     FetchAeaKey(images::FetchAeaKey),

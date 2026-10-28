@@ -261,7 +261,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn research_state_json_retains_vector_bits_and_fp_status() -> Result<()> {
+    fn state_json_preserves_vector_and_fp_bits() -> Result<()> {
         let mut state = stela_compiler::GuestState::default();
         state.v[0] = [u64::MAX, 0x7ff8000000001234];
         state.v[31] = [0x0123456789abcdef, 0xfedcba9876543210];
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(input.v, state.v);
         assert_eq!(input.fpcr, state.fpcr);
         assert_eq!(input.fpsr, state.fpsr);
-        // Older scalar-only inputs are accepted with zeroed SIMD state.
+        // Scalar-only inputs default SIMD state to zero.
         let scalar: RegisterInput = serde_json::from_value(serde_json::json!({"x":([0u64;31])}))?;
         assert_eq!(scalar.v, [[0; 2]; 32]);
         assert_eq!((scalar.fpcr, scalar.fpsr), (0, 0));
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn research_state_rejects_truncated_vectors_and_unknown_fields() {
+    fn state_json_rejects_malformed_fields() {
         for value in [
             serde_json::json!({"x":([0u64;31]),"v":[[0,0]]}),
             serde_json::json!({"x":([0u64;31]),"fpcrr":0}),
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn full_pauth_keys_and_owned_memory_cli_inputs_are_explicit_and_strict() -> Result<()> {
+    fn pauth_and_memory_inputs() -> Result<()> {
         let folder = tempfile::tempdir()?;
         let path = folder.path().join("keys.json");
         let valid = r#"{"ia":{"low":1,"high":2},"ib":{"low":3,"high":4},"da":{"low":5,"high":6},"db":{"low":7,"high":8}}"#;
@@ -318,6 +318,11 @@ mod tests {
         padded.push(' ');
         std::fs::write(&path, padded)?;
         assert!(pauth_all_keys_context(&path, 92).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pauth_clock_arguments() {
         assert!(
             Cli::try_parse_from([
                 "stela",
@@ -352,6 +357,11 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn memory_inputs_are_bounded() -> Result<()> {
+        let folder = tempfile::tempdir()?;
         let memory = folder.path().join("memory.json");
         std::fs::write(&memory, r#"{"regions":[]}"#)?;
         assert!(raw_memory(Some(&memory))?.regions().is_empty());
@@ -364,6 +374,12 @@ mod tests {
         }
         std::fs::write(&memory, vec![b' '; 4 * 1024 * 1024 + 1])?;
         assert!(raw_memory(Some(&memory)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn file_memory_payload_validation() -> Result<()> {
+        let folder = tempfile::tempdir()?;
         let payload = folder.path().join("payload.bin");
         std::fs::write(&payload, [9, 8, 7, 6, 5, 4])?;
         let region = serde_json::json!({"guest_address":0,"virtual_bytes":4096,
@@ -393,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_input_is_strict_bounded_and_validated() -> Result<()> {
+    fn snapshot_input_validation() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("clock.json");
         for input in [

@@ -1,3 +1,4 @@
+//! EFI installation, replacement, and removal.
 use std::{
     fs,
     path::Path,
@@ -64,7 +65,7 @@ fn uninstall(dir: &Path) -> Output {
 }
 
 #[test]
-fn install_makes_stela_the_removable_media_loader_with_its_files() {
+fn install_loader_files() {
     let dir = esp();
     let output = install_with_source(dir.path());
     assert!(output.status.success(), "{output:?}");
@@ -84,7 +85,7 @@ fn install_makes_stela_the_removable_media_loader_with_its_files() {
 }
 
 #[test]
-fn reinstalling_replaces_stelas_loader_and_keeps_omitted_files() {
+fn reinstall_preserves_omitted_files() {
     let dir = esp();
     assert!(install_with_source(dir.path()).status.success());
     fs::write(dir.path().join("stela.efi"), stela_image(b"newer")).unwrap();
@@ -103,7 +104,7 @@ fn reinstalling_replaces_stelas_loader_and_keeps_omitted_files() {
 }
 
 #[test]
-fn another_loader_is_refused_and_left_unchanged() {
+fn install_refuses_foreign_loader() {
     let dir = esp();
     let loader = dir.path().join(LOADER);
     fs::create_dir_all(loader.parent().unwrap()).unwrap();
@@ -120,13 +121,17 @@ fn another_loader_is_refused_and_left_unchanged() {
 }
 
 #[test]
-fn install_refuses_an_image_that_is_not_stela_or_a_missing_source() {
+fn install_rejects_foreign_source_image() {
     let dir = esp();
     fs::write(dir.path().join("stela.efi"), b"MZother").unwrap();
     let output = install_with_source(dir.path());
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not a stela.efi"));
     assert!(!dir.path().join(LOADER).exists());
+}
+
+#[test]
+fn install_requires_source_image() {
     let dir = esp();
     let output = install(dir.path(), &[]);
     assert!(!output.status.success());
@@ -134,7 +139,7 @@ fn install_refuses_an_image_that_is_not_stela_or_a_missing_source() {
 }
 
 #[test]
-fn uninstall_removes_exactly_what_install_added() {
+fn uninstall_loader_files() {
     let dir = esp();
     let other = dir.path().join("esp/EFI/BOOT/other.efi");
     assert!(install_with_source(dir.path()).status.success());

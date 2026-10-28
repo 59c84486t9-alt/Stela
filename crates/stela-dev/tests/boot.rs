@@ -374,7 +374,7 @@ fn json(path: &Path) -> serde_json::Value {
 }
 
 #[test]
-fn hashed_manifest_and_im4p_decoding_keep_member_identities() {
+fn restore_member_identities() {
     let dir = tempfile::tempdir().unwrap();
     write_archive(&dir.path().join("fixture.ipsw"), None);
     success(&cli(
@@ -420,7 +420,7 @@ fn hashed_manifest_and_im4p_decoding_keep_member_identities() {
             .len(),
         7 * PAGE
     );
-    // Existing outputs are never replaced.
+    // Existing outputs reject a second extraction.
     assert!(
         !cli(
             dir.path(),
@@ -432,7 +432,7 @@ fn hashed_manifest_and_im4p_decoding_keep_member_identities() {
 }
 
 #[test]
-fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
+fn boot_bundle_preparation() {
     let dir = tempfile::tempdir().unwrap();
     // The BuildManifest declares every component's digest as 00 01.
     write_archive(&dir.path().join("fixture.ipsw"), Some(&[0, 1]));

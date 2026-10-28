@@ -1,3 +1,4 @@
+//! Executable planning, translation caches, and restore extraction.
 use std::{
     path::Path,
     process::{Command, Output},
@@ -12,7 +13,7 @@ fn cli(root: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
-fn executable_plan_selects_apple_slices_and_preserves_guest_identity() {
+fn executable_slice_selection() {
     fn image(subtype: u32) -> Vec<u8> {
         let mut data = vec![0; 4096];
         let header = [0xfeedfacfu32, 0x0100000c, subtype, 2, 2, 96, 0, 0];
@@ -87,7 +88,7 @@ fn executable_plan_selects_apple_slices_and_preserves_guest_identity() {
 }
 
 #[test]
-fn first_use_cache_is_reused_and_invalid_instructions_do_not_compile() {
+fn leaf_cache_reuse() {
     let dir = tempfile::tempdir().unwrap();
     let code: Vec<_> = [0xd2800540u32, 0xd65f03c0]
         .iter()
@@ -105,6 +106,11 @@ fn first_use_cache_is_reused_and_invalid_instructions_do_not_compile() {
         assert_eq!(report["cache_hit"], expected);
         assert_eq!(report["manifest"]["verified"], false);
     }
+}
+
+#[test]
+fn leaf_compile_rejects_invalid_instruction() {
+    let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("invalid.arm64"), [0, 0, 0, 0]).unwrap();
     assert!(
         !cli(
@@ -122,8 +128,7 @@ fn first_use_cache_is_reused_and_invalid_instructions_do_not_compile() {
     assert!(!dir.path().join("invalid-output").exists());
 }
 
-#[test]
-fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
+fn restore_archive() -> tempfile::TempDir {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let file = std::fs::File::create(dir.path().join("fixture.ipsw")).unwrap();
@@ -138,6 +143,12 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
     zip.start_file("kernelcache.fixture", options).unwrap();
     zip.write_all(b"fixturekernel").unwrap();
     zip.finish().unwrap();
+    dir
+}
+
+#[test]
+fn restore_manifest_selects_identity() {
+    let dir = restore_archive();
     let report = cli(
         dir.path(),
         &[
@@ -157,6 +168,11 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["product_build"], "FIXTURE");
+}
+
+#[test]
+fn extraction_enforces_size_limit() {
+    let dir = restore_archive();
     assert!(
         !cli(
             dir.path(),
@@ -175,6 +191,11 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
         .success()
     );
     assert!(!dir.path().join("small").exists());
+}
+
+#[test]
+fn extraction_writes_member_bytes() {
+    let dir = restore_archive();
     let extracted = cli(
         dir.path(),
         &[
@@ -195,6 +216,12 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
         std::fs::read(dir.path().join("kernel")).unwrap(),
         b"fixturekernel"
     );
+}
+
+#[test]
+fn extraction_preserves_existing_output() {
+    let dir = restore_archive();
+    std::fs::write(dir.path().join("kernel"), b"existing").unwrap();
     assert!(
         !cli(
             dir.path(),
@@ -210,6 +237,15 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
         .status
         .success()
     );
+    assert_eq!(
+        std::fs::read(dir.path().join("kernel")).unwrap(),
+        b"existing"
+    );
+}
+
+#[test]
+fn extraction_rejects_parent_path() {
+    let dir = restore_archive();
     assert!(
         !cli(
             dir.path(),
@@ -225,6 +261,11 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
         .status
         .success()
     );
+}
+
+#[test]
+fn extraction_checks_crc() {
+    let dir = restore_archive();
     let mut corrupt = std::fs::read(dir.path().join("fixture.ipsw")).unwrap();
     let position = corrupt
         .windows(13)

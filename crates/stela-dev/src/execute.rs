@@ -95,13 +95,13 @@ pub(crate) struct RunBlocks {
     /// Darwin services to handle on guest traps, comma separated.
     #[arg(long, value_enum, value_delimiter = ',')]
     services: Vec<Service>,
-    /// Explicit immutable guest ARM CSR active flags; never inferred from host policy.
+    /// Guest ARM CSR active flags for this execution context.
     #[arg(long)]
     csr_active_configuration: Option<u32>,
     /// Guest process ID, shared by the thread and its task.
     #[arg(long)]
     guest_process_id: Option<u32>,
-    /// Explicit guest vm_map_max for ARM TSD sanitization; never inferred from host RAM.
+    /// Guest vm_map_max used to sanitize ARM thread-specific data.
     #[arg(long, value_parser = parse_address)]
     guest_vm_max_address: Option<u64>,
     /// Map the modern ARM page-size commpage; arm64 user pages stay 16 KiB.
@@ -568,8 +568,6 @@ impl RunBlocks {
             cpu_target,
         );
         runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
-        // SAFETY: the user vouches for the guest code and the native RAM
-        // addresses it uses.
         let mut mach_ports = mach_port_services
             .then(|| stela_runtime::mach::HostPorts::new(ADDRESS_SPACE_ID))
             .transpose()?;
@@ -591,6 +589,9 @@ impl RunBlocks {
         let csr_policy = csr_active_configuration
             .map(stela_runtime::darwin::csr::ArmSecurityPolicy::new)
             .transpose()?;
+        // SAFETY: this command runs caller-trusted code against its private
+        // memory, registers and service contexts. Those resources remain
+        // exclusively borrowed until dispatch and trap handling return.
         let service_run = unsafe {
             if !services.is_empty() || csr_policy.is_some() {
                 stela_runtime::darwin::run_services(
@@ -772,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_tracing_requires_an_explicit_clock_context() {
+    fn tracing_requires_clock_context() {
         assert!(Cli::try_parse_from(["stela", "run-blocks", "code", "--disabled-kdebug"]).is_err());
         assert!(
             Cli::try_parse_from([

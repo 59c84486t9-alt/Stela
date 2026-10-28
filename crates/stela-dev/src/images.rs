@@ -301,7 +301,7 @@ impl ImagesCommand {
             } => {
                 let images = restore::catalog()?;
                 let image = restore::select(&images, build.as_deref(), model.as_deref())?;
-                // Use a synthesized filename, never a remote path component.
+                // Build the local filename from the component identity.
                 ensure!(
                     image.build.bytes().all(|c| c.is_ascii_alphanumeric()),
                     "invalid build identifier"

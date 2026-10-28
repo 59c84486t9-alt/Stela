@@ -57,8 +57,8 @@ fn instruction(data: &[u8], plan: &load_plan::LoadPlan, address: u64) -> Result<
     ))
 }
 
-/// Whitelist exact startup semantics before the direct-RAM unsafe boundary.
-/// The final B target is recovered independently of the compiler decoder.
+/// Validate the startup prefix before direct-RAM execution and recover the
+/// final B target independently of the compiler decoder.
 fn startup_target(words: [u32; 5], entry: u64) -> Result<u64> {
     ensure!(
         words[..4] == [0x910003e0, 0x927cec1f, 0xd280001d, 0xd280001e],
@@ -75,8 +75,7 @@ fn startup_target(words: [u32; 5], entry: u64) -> Result<u64> {
     u64::try_from(i128::from(branch_pc) + i128::from(delta)).context("startup target overflow")
 }
 
-// The startup instruction ranges that may run. Code outside them is never
-// executed; alternative hardware paths stay unpatched.
+// Source-checked instruction ranges admitted by the startup probe.
 fn bootstrap_windows(
     data: &[u8],
     plan: &load_plan::LoadPlan,
@@ -449,7 +448,7 @@ pub fn probe(
 mod tests {
     use super::*;
     #[test]
-    fn startup_whitelist_recovers_signed_branch_and_declines_changed_effects() {
+    fn startup_branch_validation() {
         let mut words = [0x910003e0, 0x927cec1f, 0xd280001d, 0xd280001e, 0x1400ae18];
         assert_eq!(startup_target(words, 0x4bf0).unwrap(), 0x30460);
         assert_eq!(startup_target(words, 0x40000004bf0).unwrap(), 0x40000030460);
