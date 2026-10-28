@@ -179,7 +179,7 @@ pub(super) fn finish(arguments: &Run, outcome: Outcome) -> Result<ExitCode> {
     });
     let network_report = network.as_ref().map(|result| match result {
         Ok(report) => report.clone(),
-        Err(error) => json!({ "passed": false, "reason": error }),
+        Err(error) => json!({ "passed": false, "reason": error.to_string() }),
     });
     let mut report = json!({
         "command": command_line,
