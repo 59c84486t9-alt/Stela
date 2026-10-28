@@ -23,7 +23,8 @@ pub(crate) const PARTITION_LISTING: &str = "`lsblk -o NAME,PARTUUID`";
 /// type.
 const ESP_TYPES: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
 /// `lsblk`'s columns, for [`Device`].
-const COLUMNS: &str = "NAME,TYPE,SIZE,MODEL,TRAN,RM,RO,MOUNTPOINT,PARTTYPE,PARTUUID,PKNAME";
+const COLUMNS: &str =
+    "NAME,TYPE,SIZE,MODEL,TRAN,RM,RO,MOUNTPOINT,MOUNTPOINTS,PARTTYPE,PARTUUID,PKNAME";
 /// The `BLKRRPART` ioctl: reread the partition table.
 const BLKRRPART: u64 = 0x125f;
 
@@ -50,6 +51,8 @@ struct Device {
     #[serde(default, deserialize_with = "flag")]
     ro: bool,
     mountpoint: Option<String>,
+    #[serde(default)]
+    mountpoints: Option<Vec<Option<String>>>,
     parttype: Option<String>,
     partuuid: Option<String>,
     pkname: Option<String>,
@@ -60,7 +63,14 @@ struct Device {
 impl Device {
     /// Whether it, or a device on it, is mounted at `/`.
     fn holds_root(&self) -> bool {
-        self.mountpoint.as_deref() == Some("/") || self.children.iter().any(Device::holds_root)
+        self.mountpoint.as_deref() == Some("/")
+            || self
+                .mountpoints
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|mount| mount == "/")
+            || self.children.iter().any(Device::holds_root)
     }
 
     /// What decides whether setup may erase this whole disk.
@@ -126,20 +136,25 @@ fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
 
 /// `lsblk`'s listing of `device`, or of every block device.
 fn lsblk(device: Option<&str>) -> Result<Vec<Device>> {
-    let mut command = Command::new("lsblk");
-    command.args(["--json", "--bytes", "--output", COLUMNS]);
-    if let Some(device) = device {
-        command.arg(format!("/dev/{device}"));
+    let legacy = COLUMNS.replace(",MOUNTPOINTS", "");
+    let mut failure = String::new();
+    // Older util-linux has only the single-mount column. Root detection still
+    // has to succeed before either listing can expose erase candidates.
+    for columns in [COLUMNS, legacy.as_str()] {
+        let mut command = Command::new("lsblk");
+        command.args(["--json", "--bytes", "--output", columns]);
+        if let Some(device) = device {
+            command.arg(format!("/dev/{device}"));
+        }
+        let output = command.output().context("cannot run lsblk")?;
+        if output.status.success() {
+            return Ok(serde_json::from_slice::<Listing>(&output.stdout)
+                .context("cannot read lsblk's listing")?
+                .blockdevices);
+        }
+        failure = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     }
-    let output = command.output().context("cannot run lsblk")?;
-    ensure!(
-        output.status.success(),
-        "lsblk failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(serde_json::from_slice::<Listing>(&output.stdout)
-        .context("cannot read lsblk's listing")?
-        .blockdevices)
+    anyhow::bail!("lsblk failed: {failure}")
 }
 
 /// The block device `name`, which sysfs lists; `partition` says which kind.
@@ -179,6 +194,14 @@ fn run(command: &mut Command) -> Result<()> {
         "{:?} failed: {}",
         command.get_program(),
         String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
+fn require_system_device(devices: &[Device]) -> Result<()> {
+    ensure!(
+        devices.iter().any(Device::holds_root),
+        "cannot identify the block devices holding the running Linux installation"
     );
     Ok(())
 }
@@ -228,7 +251,9 @@ impl Host for System {
     }
 
     fn disks(&self) -> Result<Vec<Disk>> {
-        Ok(lsblk(None)?
+        let devices = lsblk(None)?;
+        require_system_device(&devices)?;
+        Ok(devices
             .into_iter()
             // A loop device stands in for a USB, as a disk image does on a
             // Mac; read-only ones hold snaps and images, never a USB.
@@ -516,6 +541,22 @@ mod tests {
         assert_eq!(ssd.children[0].content(), "0x83");
         assert_eq!(usb.facts().removal(), Removal::Usb);
         assert_eq!(ssd.facts().removal(), Removal::Fixed);
+    }
+
+    #[test]
+    fn root_guard_uses_all_mounts() {
+        let source = r#"{"blockdevices": [
+            {"name":"sda","type":"disk","model":"USB system disk","tran":"usb",
+             "mountpoint":"/bind","mountpoints":["/", "/bind"]},
+            {"name":"sdb","type":"disk","model":"USB target","tran":"usb",
+             "mountpoint":null,"mountpoints":null}]}"#;
+        let mut listing: Listing = serde_json::from_str(source).unwrap();
+        assert!(require_system_device(&listing.blockdevices).is_ok());
+        assert!(listing.blockdevices[0].holds_root());
+        assert!(!listing.blockdevices[1].holds_root());
+        listing.blockdevices[0].mountpoints = None;
+        assert!(require_system_device(&listing.blockdevices).is_err());
+        assert!(require_system_device(&[]).is_err());
     }
 
     #[test]
