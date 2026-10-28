@@ -37,6 +37,8 @@ fn mld_activation_refuses_unapproved_rate_or_power_before_publication() {
             .unwrap_or(0);
         let syncs = native.domain.records.lock().unwrap().syncs;
         assert_eq!(
+            // SAFETY: same-epoch model owners retain exclusive source RAM and
+            // policy state while the explicit denial is tested before publication.
             unsafe { link.advance(&source) },
             Err(Ax200BindingError::Regulatory(regulatory::Error::OsDenied))
         );
@@ -70,16 +72,22 @@ fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
         authorize(&policy);
         // SAFETY: same retained finite source response/revocation model.
         let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
+        // SAFETY: Source supplies exclusive model RAM; Native retains this
+        // requester/domain and policy, with no asynchronous device access.
         unsafe { link.advance(&source) }.unwrap();
         for index in 0..target {
             let command = link.commands()[index].clone();
             complete_link(&link, &native, &command);
+            // SAFETY: the synchronous model completed this exact command;
+            // all pending mappings remain owned by the same link and domain.
             unsafe { link.advance(&source) }.unwrap();
             link.replenish_completed_receive().unwrap();
             if index == 2 {
                 assert_eq!(link.phase(), Ax200BindingPhase::AuthenticationRequired);
                 native.revoked.store(true, Ordering::SeqCst);
                 link.begin_remove().unwrap();
+                // SAFETY: revocation changes only the retained model policy;
+                // ordered removal still owns the same source and DMA mappings.
                 unsafe { link.advance(&source) }.unwrap();
             }
         }
@@ -89,6 +97,8 @@ fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
         }
         .delay(20);
         let error = Ax200BindingError::Deadline(kind);
+        // SAFETY: only the model clock advanced; the timed-out link retains
+        // its original source/domain and unreclaimed DMA buffers.
         assert_eq!(unsafe { link.advance(&source) }, Err(error.clone()));
         assert_eq!(link.phase(), Ax200BindingPhase::Failed);
         assert_eq!(link.first_error(), Some(&error));
@@ -98,6 +108,8 @@ fn missing_ack_retains_phy_parent_and_latches_mld_failure() {
         };
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the latched failure still owns those same live mappings;
+        // no device or worker can access them during this repeated entry.
         assert_eq!(unsafe { link.advance(&source) }, Err(error.clone()));
         assert_eq!(link.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), ops);

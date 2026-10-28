@@ -62,6 +62,8 @@ fn exercise(bytes: &[u8]) {
         );
     }));
     assert_eq!(
+        // SAFETY: Source allocates exclusive model RAM for this retained
+        // requester/domain; its policy guard remains held through publication.
         unsafe { link.advance(&source) }.unwrap(),
         Ax200BindingPhase::Waiting(BindingCommandKind::AttachPhy)
     );
@@ -98,11 +100,15 @@ fn exercise(bytes: &[u8]) {
         records.cpu_sync_fail = Some(records.cpu_syncs + 1);
         drop(records);
         assert!(matches!(
+            // SAFETY: completion was synchronous; injected CPU-sync failure
+            // retains the same mapped command and receive buffers for retry.
             unsafe { link.advance(&source) },
             Err(Ax200BindingError::Boot(Error::CommandReclaim(_)))
         ));
         assert!(link.first_error().is_none());
         native.domain.records.lock().unwrap().cpu_sync_fail = None;
+        // SAFETY: the failed reclaim retained the live mappings, same source
+        // and requester; clearing the injection adds no device or worker.
         unsafe { link.advance(&source) }.unwrap();
         link.replenish_completed_receive().unwrap();
     }
@@ -110,6 +116,8 @@ fn exercise(bytes: &[u8]) {
     native.revoked.store(true, Ordering::SeqCst);
     let acquired = policy.acquired.load(Ordering::SeqCst);
     link.begin_remove().unwrap();
+    // SAFETY: revocation starts ordered removal in the same no-device model;
+    // the link still retains all DMA mappings and the source owner.
     unsafe { link.advance(&source) }.unwrap();
     let commands = link.commands()[3..].to_vec();
     assert_eq!(
@@ -132,6 +140,8 @@ fn exercise(bytes: &[u8]) {
         };
         emitted_binding(&link, &native);
         complete_link(&link, &native, &command);
+        // SAFETY: this synchronous model completed the current removal ACK;
+        // the retained domain/source still own every pending DMA allocation.
         unsafe { link.advance(&source) }.unwrap();
         link.replenish_completed_receive().unwrap();
         if index < 3 {
@@ -148,6 +158,8 @@ fn exercise(bytes: &[u8]) {
         .into_phy_context()
         .unwrap_or_else(|_| panic!("unique channel context"));
     phy.begin_remove().unwrap();
+    // SAFETY: complete link unassignment returned this original PHY owner;
+    // its source/domain remain live with no asynchronous model DMA user.
     unsafe { phy.advance(&source) }.unwrap();
     let command = phy.commands().last().unwrap().clone();
     assert_eq!(command.kind(), PhyCommandKind::Remove);
@@ -171,6 +183,8 @@ fn exercise(bytes: &[u8]) {
         &command_packet(command.id().wire(), phy.ticket().unwrap().sequence(), &[]),
     );
     assert_eq!(
+        // SAFETY: the PHY removal ACK was published synchronously above; the
+        // same owner retains its checked receive buffers through reclamation.
         unsafe { phy.advance(&source) }.unwrap(),
         Ax200PhyPhase::Removed
     );
