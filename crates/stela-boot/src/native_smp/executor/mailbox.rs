@@ -241,6 +241,32 @@ impl Processor {
         }
     }
 }
+impl Processor {
+    /// Hand this AP work that runs for the rest of the boot on its own Host.
+    /// Its mailbox stays busy, and nothing collects the job: the work owns
+    /// everything it reaches.
+    pub(crate) fn spawn(
+        &self,
+        work: Box<dyn FnOnce(&mut host::HostOwner) + Send>,
+        sender: &Apic,
+        tsc_hz: u64,
+    ) -> Result<(), &'static str> {
+        let pending = self
+            .send(Spawned(work), sender, tsc_hz)
+            .map_err(|_| "AP mailbox busy")?;
+        // Its drop would wait for a return that never comes; the leaked job
+        // stays where the AP reads it.
+        core::mem::forget(pending);
+        Ok(())
+    }
+}
+struct Spawned(Box<dyn FnOnce(&mut host::HostOwner) + Send>);
+impl Command for Spawned {
+    type Output = ();
+    fn execute(self, host: &mut host::HostOwner, _: &mut Option<WorkerOwner>) {
+        (self.0)(host);
+    }
+}
 struct Effect {
     command: publication::HostEffectCommand,
 }

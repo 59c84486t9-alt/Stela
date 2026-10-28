@@ -5,12 +5,25 @@
 //! maps the engine window, and restore the current engine root afterwards.
 //! This boundary never maps host identity addresses into a guest root. All
 //! buffers passed here belong to the engine window, not guest virtual RAM.
+//!
+//! The drivers keep each controller's state in `Rc` and `RefCell`, for one
+//! owner at a time, while the service and every PE reach host devices from
+//! cores of their own: a USB disk the guest drives and the USB keyboard the
+//! service reads share one xHCI controller. [`RestoreRoot`] is the only way
+//! into a driver, so it also holds the host drivers' lock, which serializes
+//! them and orders each holder's writes before the next holder's reads.
+//!
+//! While the engine runs ([`TaggedRoots`]), the loader's root has a TLB
+//! context of its own, so a driver call keeps the engine's translations.
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
-use core::arch::asm;
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use stela_drivers::{
     Handoff,
-    block::{BlockDevice, BlockError, Identity, Shared, Window},
+    block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
     input::virtio::VirtioInput,
     probe::probe,
@@ -21,33 +34,146 @@ use stela_runtime::pc::{
     storage::{self, Named, Target},
 };
 
+/// CR4.PCIDE: TLB entries tagged by their root's context.
+const PCIDE: u64 = 1 << 17;
+/// CR3's context, which holds PWT and PCD without PCIDE.
+const CONTEXT: u64 = 0xfff;
+/// The loader root's context while tagged; every engine root keeps 0.
+const LOADER_CONTEXT: u64 = 1;
+/// A CR3 write that keeps the entering context's TLB entries.
+const KEEP_ENTRIES: u64 = 1 << 63;
+
+/// Tags this core's TLB entries by root while the engine runs. Entering the
+/// loader's root ([`RestoreRoot`]) then flushes only its own context and
+/// leaving it flushes nothing, so the engine's translations survive a call
+/// into the host drivers. Every engine root keeps context 0, whose CR3
+/// writes still flush, so INVLPG and root reloads keep their meaning; no
+/// engine mapping changes inside a driver call. Dropped, CR4 is restored
+/// for the native qualifications, which require PCIDE clear.
+pub(super) struct TaggedRoots {
+    cr4: u64,
+}
+impl TaggedRoots {
+    /// None without PCIDs, or with cache controls in the current root's
+    /// context bits.
+    pub(super) fn enable() -> Option<Self> {
+        if core::arch::x86_64::__cpuid(1).ecx & 1 << 17 == 0 {
+            return None;
+        }
+        let (cr3, cr4): (u64, u64);
+        // SAFETY: CPL0 control register reads.
+        unsafe {
+            asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+            asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        }
+        if cr4 & PCIDE != 0 || cr3 & CONTEXT != 0 {
+            return None;
+        }
+        // SAFETY: the processor has PCIDs and the current root context 0.
+        unsafe { asm!("mov cr4, {}", in(reg) cr4 | PCIDE, options(nostack, preserves_flags)) };
+        Some(Self { cr4 })
+    }
+}
+impl Drop for TaggedRoots {
+    fn drop(&mut self) {
+        // SAFETY: outside a driver call the current root has context 0;
+        // clearing PCIDE flushes every context.
+        unsafe { asm!("mov cr4, {}", in(reg) self.cr4, options(nostack, preserves_flags)) };
+    }
+}
+
+/// Held while a core is inside the host drivers ([`RestoreRoot`]).
+static HOST_DRIVERS: AtomicBool = AtomicBool::new(false);
+/// Counter ticks cores waited for [`HOST_DRIVERS`] since the last report,
+/// and the longest wait.
+static HOST_DRIVERS_WAITED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Take the host drivers' lock, counting the wait.
+fn lock_host_drivers() {
+    if HOST_DRIVERS
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        return;
+    }
+    let started = super::host::rdtsc();
+    while HOST_DRIVERS
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let waited = super::host::rdtsc().wrapping_sub(started);
+    HOST_DRIVERS_WAITED[0].fetch_add(waited, Ordering::Relaxed);
+    HOST_DRIVERS_WAITED[1].fetch_max(waited, Ordering::Relaxed);
+}
+
+/// The time cores waited for the host drivers since the last report, in
+/// total and at most, in microseconds.
+pub(super) fn host_drivers_waited(tsc_hz: u64) -> (u128, u128) {
+    let micros = |slot: &AtomicU64| {
+        u128::from(slot.swap(0, Ordering::Relaxed)) * 1_000_000 / u128::from(tsc_hz.max(1))
+    };
+    (
+        micros(&HOST_DRIVERS_WAITED[0]),
+        micros(&HOST_DRIVERS_WAITED[1]),
+    )
+}
+
+/// Inside the host drivers: the loader's root, with interrupts masked and
+/// the host drivers' lock held, until dropped.
 pub(super) struct RestoreRoot {
     root: u64,
     flags: u64,
+    tagged: bool,
 }
 impl RestoreRoot {
+    /// Wait for the host drivers' lock, which no holder takes again: a
+    /// driver never calls back into the engine's host interfaces.
+    ///
     /// # Safety
-    /// `root` is the live loader root, retaining the engine window, and the
-    /// engine is serialized: no other PE/interrupt may drive this controller.
+    /// `root` is the live loader root, retaining the engine window.
     pub(super) unsafe fn enter(root: u64) -> Self {
-        let (previous, flags): (u64, u64);
-        // SAFETY: CPL0, live roots with the same engine code/stack/window.
-        // Interrupts remain off until the original root has been restored.
+        lock_host_drivers();
+        let (previous, flags, cr4): (u64, u64, u64);
+        // SAFETY: CPL0 control register reads; interrupts remain off until
+        // the original root has been restored.
         unsafe {
-            asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov cr3, {root}",flags=out(reg)flags,previous=out(reg)previous,root=in(reg)root);
+            asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov {cr4}, cr4",flags=out(reg)flags,previous=out(reg)previous,cr4=out(reg)cr4);
         }
+        let tagged = cr4 & PCIDE != 0;
+        // Tagged, entering flushes the loader's context alone.
+        let root = if tagged {
+            root & !CONTEXT | LOADER_CONTEXT
+        } else {
+            root
+        };
+        // SAFETY: live roots with the same engine code/stack/window.
+        unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
         Self {
             root: previous,
             flags,
+            tagged,
         }
     }
 }
 impl Drop for RestoreRoot {
     fn drop(&mut self) {
+        // Tagged, the engine root's entries are still its own: nothing in
+        // a driver call changes an engine mapping.
+        let root = if self.tagged {
+            self.root | KEEP_ENTRIES
+        } else {
+            self.root
+        };
         // SAFETY: the original live root; no borrowed identity address
-        // survives a BlockDevice call. Only IF was changed by enter().
+        // survives a BlockDevice call.
         unsafe {
-            asm!("mov cr3, {}",in(reg)self.root,options(nostack,preserves_flags));
+            asm!("mov cr3, {}",in(reg)root,options(nostack,preserves_flags));
+        }
+        HOST_DRIVERS.store(false, Ordering::Release);
+        // SAFETY: only IF was changed by enter().
+        unsafe {
             if self.flags & (1 << 9) != 0 {
                 asm!("sti", options(nomem, nostack));
             }
@@ -73,17 +199,56 @@ impl BlockDevice for Service {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.inner.write(lba, data)
     }
-    fn flush(&mut self) -> Result<(), BlockError> {
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.flush()
+        self.inner.flush_cache()
+    }
+    fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.write_fua(lba, data)
+    }
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.discard(lba, blocks)
+    }
+    fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.write_zeroes(lba, blocks, unmap)
+    }
+    fn depth(&self) -> usize {
+        self.inner.depth()
+    }
+    fn room(&self) -> bool {
+        self.inner.room()
+    }
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.start(command)
+    }
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.finish(tag)
+    }
+    fn posted(&self) -> bool {
+        // SAFETY: as in read().
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.inner.posted()
+    }
+    fn signals(&self) -> bool {
+        self.inner.signals()
     }
 }
 
-/// The host disks [`open`] took, each once, to shut down before the PC
-/// restarts or turns off.
+/// The host disks [`open`] took, each once with its serial, to report
+/// their I/O and to shut down before the PC restarts or turns off.
 pub struct HostDisks {
-    disks: Vec<Shared>,
+    disks: Vec<(String, Shared)>,
     root: u64,
 }
 
@@ -96,8 +261,39 @@ impl HostDisks {
     }
 
     fn add(&mut self, disk: &Shared) {
-        if !self.disks.iter().any(|taken| taken.same(disk)) {
-            self.disks.push(disk.clone());
+        if !self.disks.iter().any(|(_, taken)| taken.same(disk)) {
+            let serial = disk.whole().identity().serial.clone();
+            self.disks.push((serial, disk.clone()));
+        }
+    }
+
+    /// Each disk's I/O since it was opened, as Linux's `/proc/diskstats`:
+    /// per kind its commands, KiB, mean microseconds from submission to
+    /// completion and requests merged; the device's busy milliseconds and
+    /// the most commands it ran at once.
+    pub fn report(&self, tsc_hz: u64) {
+        let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+        for (serial, disk) in &self.disks {
+            let stats = disk.stats();
+            let mut line = format!("HOST DISK IO serial={serial}");
+            for direction in Direction::ALL {
+                let counts = stats.directions[direction as usize];
+                if counts.ios != 0 {
+                    line.push_str(&format!(
+                        " {}={}/{}KiB/{}us/{}",
+                        direction.name(),
+                        counts.ios,
+                        counts.bytes >> 10,
+                        micros(counts.ticks) / u128::from(counts.ios),
+                        counts.merges,
+                    ));
+                }
+            }
+            output::arguments(format_args!(
+                "{line} busy_ms={} deepest={}\n",
+                micros(stats.busy) / 1000,
+                stats.deepest
+            ));
         }
     }
 
@@ -109,7 +305,7 @@ impl HostDisks {
         }
         // SAFETY: open() captured the loader root, as for every service call.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        for disk in &self.disks {
+        for (_, disk) in &self.disks {
             if let Err(error) = disk.shutdown(power_off) {
                 output::arguments(format_args!("HOST DISK shutdown failed: {error}\n"));
             }

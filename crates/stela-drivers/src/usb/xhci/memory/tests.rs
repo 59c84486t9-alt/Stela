@@ -452,6 +452,9 @@ fn native_core_uses_real_dcbaa_erst_scratchpads_and_coherent_owned_event_trbs() 
             .any(|(device, _, range, _)| !*device && range.len() == TRB)
     );
     assert_eq!(controller.event_index, 1);
+    drop(state);
+    // ERDP moves once the batch of events is taken.
+    controller.publish_events();
     let writes = &registers.borrow().writes;
     assert!(writes.contains(&(0x40 + DCBAAP, dcbaa as u32)));
     assert!(writes.contains(&(0x800 + ERDP, (events + TRB as u64) as u32 | EHB as u32)));

@@ -29,6 +29,9 @@ const COMMAND_IO: u16 = 1 << 0;
 const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_BUS_MASTER: u16 = 1 << 2;
 const COMMAND_INTX_DISABLE: u16 = 1 << 10;
+/// MSI-X Message Control: enable, and mask every vector.
+const MSIX_ENABLE: u16 = 1 << 15;
+const MSIX_FUNCTION_MASK: u16 = 1 << 14;
 const STATUS_CAPABILITIES: u16 = 1 << 4;
 /// Memory BAR type field: 64-bit (PCI 3.0 §6.2.5.1).
 const BAR_MEMORY_64: u32 = 2 << 1;
@@ -73,6 +76,24 @@ pub const CAPABILITY_POWER: u8 = 0x01;
 pub const CAPABILITY_MSI: u8 = 0x05;
 pub const CAPABILITY_VENDOR: u8 = 0x09;
 pub const CAPABILITY_MSIX: u8 = 0x11;
+pub const CAPABILITY_EXPRESS: u8 = 0x10;
+
+const HEADER_BRIDGE: u8 = 1;
+const SECONDARY_BUS: u16 = 0x19;
+/// The PCI Express capability's flags, device control 2 and their fields.
+const EXPRESS_FLAGS: u16 = 2;
+const EXPRESS_TYPE_SHIFT: u16 = 4;
+const EXPRESS_ROOT_PORT: u16 = 4;
+const EXPRESS_DOWNSTREAM: u16 = 6;
+const EXPRESS_DEVICE_CONTROL_2: u16 = 0x28;
+const ARI_FORWARDING: u16 = 1 << 5;
+/// The first extended capability, the ARI capability's ID and its walk's bound.
+const EXTENDED_CAPABILITIES: u16 = 0x100;
+const EXTENDED_ARI: u16 = 0x0e;
+const EXTENDED_LIMIT: usize = 96;
+/// The Vendor ID a function still initializing answers with Configuration
+/// RRS Software Visibility on.
+const VENDOR_NOT_READY: u16 = 0x0001;
 
 /// One ECAM window of the ACPI MCFG table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,7 +260,7 @@ pub struct Function<C = EcamConfig> {
 impl<C: ConfigSpace> Function<C> {
     pub fn new(address: Address, config: C) -> Option<Self> {
         let id = config.read32(VENDOR);
-        if id as u16 == 0xffff {
+        if matches!(id as u16, 0xffff | VENDOR_NOT_READY) {
             return None;
         }
         let class = config.read32(CLASS);
@@ -466,43 +487,169 @@ impl<C: ConfigSpace> Function<C> {
             command | COMMAND_MEMORY | COMMAND_BUS_MASTER | COMMAND_INTX_DISABLE,
         );
     }
+
+    /// Turn on MSI-X for a function [`Self::enable_polled`] set up, as
+    /// Linux's `msix_capability_init` does: enabled with every vector masked
+    /// while `program` writes the table, then the function mask cleared.
+    /// The function's other vectors stay masked as `program` leaves them.
+    pub fn enable_msix<T>(
+        &mut self,
+        msix: MsiX,
+        program: impl FnOnce() -> Result<T, BlockError>,
+    ) -> Result<T, BlockError> {
+        let control = u16::from(msix.offset) + 2;
+        let value = self.config.read16(control);
+        self.config
+            .write16(control, value | MSIX_ENABLE | MSIX_FUNCTION_MASK);
+        let programmed = program();
+        let value = self.config.read16(control);
+        let value = match programmed {
+            Ok(_) => value & !MSIX_FUNCTION_MASK,
+            Err(_) => value & !MSIX_ENABLE,
+        };
+        self.config.write16(control, value);
+        programmed
+    }
+}
+
+/// How a bus's functions are found, from the bridge above it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BusScan {
+    /// Every device number: a root bus or below a conventional bridge.
+    All,
+    /// Device 0 alone, below a PCI Express root or downstream port, whose
+    /// link has one device. Some devices answer at every device number
+    /// there, as Linux's `only_one_child` notes.
+    OneChild,
+    /// Device 0's functions by their ARI chain, below a port forwarding ARI.
+    Ari,
+}
+
+impl<C: ConfigSpace> Function<C> {
+    /// The offset of the PCI Express extended capability `id`.
+    fn extended_capability(&self, id: u16) -> Option<u16> {
+        let mut offset = EXTENDED_CAPABILITIES;
+        for _ in 0..EXTENDED_LIMIT {
+            let header = self.config.read32(offset);
+            if header == 0 || header == u32::MAX {
+                return None;
+            }
+            if header as u16 == id {
+                return Some(offset);
+            }
+            offset = (header >> 20) as u16 & !3;
+            if offset < EXTENDED_CAPABILITIES {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The bus below this bridge and how to scan it; None for a function
+    /// that is no bridge.
+    fn secondary(&self) -> Option<(u8, BusScan)> {
+        if self.header_type() != HEADER_BRIDGE {
+            return None;
+        }
+        let bus = self.config.read8(SECONDARY_BUS);
+        let express = self
+            .capabilities()
+            .into_iter()
+            .find(|&(_, id)| id == CAPABILITY_EXPRESS)
+            .map(|(offset, _)| u16::from(offset));
+        let scan = match express {
+            Some(express) => {
+                let kind =
+                    (self.config.read16(express + EXPRESS_FLAGS) >> EXPRESS_TYPE_SHIFT) & 0xf;
+                let control = self.config.read16(express + EXPRESS_DEVICE_CONTROL_2);
+                match kind {
+                    EXPRESS_ROOT_PORT | EXPRESS_DOWNSTREAM if control & ARI_FORWARDING != 0 => {
+                        BusScan::Ari
+                    }
+                    EXPRESS_ROOT_PORT | EXPRESS_DOWNSTREAM => BusScan::OneChild,
+                    _ => BusScan::All,
+                }
+            }
+            None => BusScan::All,
+        };
+        Some((bus, scan))
+    }
 }
 
 impl Function {
-    /// Every present function in `window`.
+    /// Every present function in `window`, bus by bus. Each bus is scanned
+    /// as the bridge above it allows, as Linux's `pci_scan_child_bus` does:
+    /// one device below a PCI Express port, its ARI functions where the
+    /// port forwards ARI. A function still initializing (Vendor ID 0x0001)
+    /// is not returned.
     ///
     /// # Safety
     ///
     /// The window must be mapped uncached, and nothing else may access the
     /// configuration space of the functions this returns.
     pub unsafe fn enumerate(window: &EcamWindow) -> Vec<Self> {
+        let at = |bus: u8, device: u8, function: u8| {
+            let address = Address {
+                segment: window.segment,
+                bus,
+                device,
+                function,
+            };
+            let offset =
+                (u64::from(bus) << 20) | (u64::from(device) << 15) | (u64::from(function) << 12);
+            let config = EcamConfig {
+                // SAFETY: the window is mapped; this is one function's page,
+                // covered by this function's own safety contract.
+                registers: unsafe { Mmio::new(window.base + offset) },
+            };
+            (address, config)
+        };
+        let mut scans = [BusScan::All; 256];
         let mut functions = Vec::new();
         for bus in window.start_bus..=window.end_bus {
-            for device in 0..32u8 {
-                for function in 0..8u8 {
-                    let address = Address {
-                        segment: window.segment,
-                        bus,
-                        device,
-                        function,
-                    };
-                    let offset = (u64::from(bus) << 20)
-                        | (u64::from(device) << 15)
-                        | (u64::from(function) << 12);
-                    // SAFETY: the window is mapped; this is one function's page.
-                    let config = EcamConfig {
-                        // SAFETY: covered by this function's own safety contract.
-                        registers: unsafe { Mmio::new(window.base + offset) },
-                    };
-                    let multifunction = config.read8(HEADER_TYPE) & 0x80 != 0;
-                    match Function::new(address, config) {
-                        Some(present) => functions.push(present),
-                        None if function == 0 => break,
-                        None => {}
+            let first = functions.len();
+            match scans[usize::from(bus)] {
+                BusScan::Ari => {
+                    // Functions 0-255 of device 0, each naming the next.
+                    let mut number = 0u8;
+                    loop {
+                        let (address, config) = at(bus, number >> 3, number & 7);
+                        let Some(present) = Function::new(address, config) else {
+                            break;
+                        };
+                        let next = present
+                            .extended_capability(EXTENDED_ARI)
+                            .map_or(0, |ari| (present.config.read32(ari + 4) >> 8) as u8);
+                        functions.push(present);
+                        if next <= number {
+                            break;
+                        }
+                        number = next;
                     }
-                    if function == 0 && !multifunction {
-                        break;
+                }
+                scan => {
+                    let devices = if scan == BusScan::OneChild { 1 } else { 32 };
+                    for device in 0..devices {
+                        for function in 0..8u8 {
+                            let (address, config) = at(bus, device, function);
+                            let multifunction = config.read8(HEADER_TYPE) & 0x80 != 0;
+                            match Function::new(address, config) {
+                                Some(present) => functions.push(present),
+                                None if function == 0 => break,
+                                None => {}
+                            }
+                            if function == 0 && !multifunction {
+                                break;
+                            }
+                        }
                     }
+                }
+            }
+            for bridge in &functions[first..] {
+                if let Some((secondary, scan)) = bridge.secondary()
+                    && secondary > bus
+                {
+                    scans[usize::from(secondary)] = scan;
                 }
             }
         }
@@ -668,6 +815,22 @@ mod tests {
         assert_eq!(function.config().words[20] >> 16 & 1, 0);
         let command = function.config().read16(COMMAND);
         assert_eq!(command & 0x406, 0x406);
+    }
+
+    /// MSI-X opens once its table is written, and a failure to write it
+    /// leaves MSI-X off.
+    #[test]
+    fn msix_opens_only_after_its_table_is_written() {
+        let mut function = Function::new(Address::default_for_tests(), fake()).unwrap();
+        let msix = function.interrupts().msix.unwrap();
+        function.enable_polled();
+        function.enable_msix(msix, || Ok(())).unwrap();
+        assert_eq!(function.config().words[16] >> 30, 0b10, "enabled, unmasked");
+        assert_eq!(
+            function.enable_msix(msix, || Err::<(), _>(BlockError::Timeout)),
+            Err(BlockError::Timeout)
+        );
+        assert_eq!(function.config().words[16] >> 31, 0, "left off");
     }
 
     #[test]
@@ -857,6 +1020,91 @@ mod tests {
                 ))
             );
         }
+    }
+
+    /// An ECAM window over buses 0 and 1, every function absent.
+    struct Ecam(Vec<u32>);
+
+    impl Ecam {
+        fn new() -> Self {
+            Self(alloc::vec![u32::MAX; 2 << 18])
+        }
+        fn word(&mut self, bus: usize, device: usize, function: usize, offset: usize) -> &mut u32 {
+            &mut self.0[(bus << 18) | (device << 13) | (function << 10) | (offset / 4)]
+        }
+        /// A function of header type `header`, with no capabilities.
+        fn present(&mut self, bus: usize, device: usize, function: usize, header: u32) {
+            *self.word(bus, device, function, 0) = 0x1234_8086;
+            *self.word(bus, device, function, 0x04) = 0;
+            *self.word(bus, device, function, 0x08) = 0;
+            *self.word(bus, device, function, 0x0c) = header << 16;
+            *self.word(bus, device, function, 0x100) = 0;
+        }
+        /// A PCI Express port of `kind` on 0:1.0 with bus 1 below it.
+        fn port(&mut self, kind: u16, control_2: u16) {
+            self.present(0, 1, 0, 1);
+            *self.word(0, 1, 0, 0x04) = u32::from(STATUS_CAPABILITIES) << 16;
+            *self.word(0, 1, 0, 0x18) = 1 << 8;
+            *self.word(0, 1, 0, 0x34) = 0x40;
+            *self.word(0, 1, 0, 0x40) =
+                u32::from(CAPABILITY_EXPRESS) | u32::from(kind << EXPRESS_TYPE_SHIFT) << 16;
+            *self.word(0, 1, 0, 0x40 + usize::from(EXPRESS_DEVICE_CONTROL_2)) =
+                u32::from(control_2);
+        }
+        fn found(&self) -> Vec<(u8, u8, u8)> {
+            let window = EcamWindow {
+                base: self.0.as_ptr() as u64,
+                segment: 0,
+                start_bus: 0,
+                end_bus: 1,
+            };
+            // SAFETY: this test exclusively owns the backing allocation.
+            unsafe { Function::enumerate(&window) }
+                .iter()
+                .map(|function| {
+                    let address = function.address;
+                    (address.bus, address.device, address.function)
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn below_a_root_port_only_device_zero_is_scanned() {
+        let mut ecam = Ecam::new();
+        ecam.port(EXPRESS_ROOT_PORT, 0);
+        // A device that answers at every device number below the port.
+        for device in 0..32 {
+            ecam.present(1, device, 0, 0);
+        }
+        // A function still initializing is not a function.
+        ecam.present(0, 2, 0, 0);
+        *ecam.word(0, 2, 0, 0) = 0xffff_0001;
+        assert_eq!(ecam.found(), [(0, 1, 0), (1, 0, 0)]);
+    }
+
+    #[test]
+    fn below_a_port_forwarding_ari_the_functions_follow_their_chain() {
+        let mut ecam = Ecam::new();
+        ecam.port(EXPRESS_DOWNSTREAM, ARI_FORWARDING);
+        for (number, next) in [(0usize, 9u32), (9, 0)] {
+            ecam.present(1, number >> 3, number & 7, 0);
+            *ecam.word(1, number >> 3, number & 7, 0x100) = u32::from(EXTENDED_ARI);
+            *ecam.word(1, number >> 3, number & 7, 0x104) = next << 8;
+        }
+        // Not in the chain.
+        ecam.present(1, 0, 1, 0);
+        assert_eq!(ecam.found(), [(0, 1, 0), (1, 0, 0), (1, 1, 1)]);
+    }
+
+    #[test]
+    fn below_a_conventional_bridge_every_device_is_scanned() {
+        let mut ecam = Ecam::new();
+        ecam.present(0, 1, 0, 1);
+        *ecam.word(0, 1, 0, 0x18) = 1 << 8;
+        ecam.present(1, 0, 0, 0);
+        ecam.present(1, 5, 0, 0);
+        assert_eq!(ecam.found(), [(0, 1, 0), (1, 0, 0), (1, 5, 0)]);
     }
 
     #[test]

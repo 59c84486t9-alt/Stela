@@ -143,14 +143,20 @@ struct Sizes {
 impl Sizes {
     /// Each part takes a share of the `free` host RAM, between its bounds;
     /// the guest gets everything left. The pool scales with the guest DRAM
-    /// each of the `cores` executors maps, of which `free` is the bound.
-    fn for_host(free: u64, cores: usize) -> Self {
+    /// each of the `cores` executors maps, of which `free` is the bound, and
+    /// the code arena with the executors that run PEs: every one with
+    /// `parallel`, else the BSP alone. Each other executor that runs PEs
+    /// adds an eighth of the heap's share, for its machine's translation
+    /// metadata.
+    fn for_host(free: u64, cores: usize, parallel: bool) -> Self {
+        let running = if parallel { cores as u64 } else { 1 };
+        let heap = free / HEAP_SHARE + (running - 1) * (free / HEAP_SHARE / 8);
         let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
             (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
         };
         Self {
-            heap: clamp(free / HEAP_SHARE, HEAP_BYTES, LARGE),
-            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT),
+            heap: clamp(heap, HEAP_BYTES, LARGE),
+            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT) * running,
             pool: clamp(
                 (free / POOL_SHARE).saturating_mul(cores as u64),
                 POOL_BYTES,
@@ -569,7 +575,17 @@ fn load(
     let native_cores = crate::native_smp::requested(text)?;
     let (native_processors, cores) = crate::native_smp::firmware::capture_assignment(native_cores)
         .map_err(crate::native_smp::firmware::Error::message)?;
-    let sizes = Sizes::for_host(free_ram()?, cores);
+    // As the engine decides: every PE on its own core unless serialized.
+    let parallel = !text.split_ascii_whitespace().any(|word| {
+        matches!(
+            word,
+            "--serialized"
+                | "--native-rounds"
+                | "--native-shared-check"
+                | "--native-bootstrap-check"
+        )
+    });
+    let sizes = Sizes::for_host(free_ram()?, cores, parallel);
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
     // complete firmware reservation is covered before publishing the handoff.
@@ -614,9 +630,12 @@ fn load(
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
     let root = low_page(MemoryType::LOADER_DATA)?;
-    let before = rdtsc();
-    boot::stall(core::time::Duration::from_millis(50));
-    let tsc_hz = (rdtsc() - before) * 20;
+    let tsc_hz = crate::firmware::tsc_hz();
+    if !crate::cpu::INVARIANT_TSC.present() {
+        output::arguments(format_args!(
+            "UNSUPPORTED host TSC is not invariant: guest time and every timeout follow the cores' clock changes\n"
+        ));
+    }
     let wall_tsc = rdtsc();
     let wall_seconds = uefi::runtime::get_time()
         .ok()

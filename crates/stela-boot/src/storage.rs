@@ -34,7 +34,9 @@ use uefi::{
     table::cfg::ConfigTableEntry,
 };
 
-const DMA_PAGES: usize = 2048;
+/// 16 MiB below 4 GiB: NVMe's bounce buffers, the USB and SATA rings, and
+/// each Ethernet controller's 256-descriptor rings.
+const DMA_PAGES: usize = 4096;
 /// `max_host_mem_size_mb`: the most host memory buffer one NVMe controller
 /// gets.
 const HOST_MEMORY_MAXIMUM: u64 = 128 << 20;
@@ -179,6 +181,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
         firmware: None,
         bluetooth_platform: bluetooth_platform::capture(),
         wifi_platform: Default::default(),
+        completion: None,
         ecam,
         mapped,
         dma: dma..dma + (pages * crate::paging::PAGE) as u64,

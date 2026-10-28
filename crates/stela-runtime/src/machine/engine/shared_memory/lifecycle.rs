@@ -531,7 +531,7 @@ mod tests {
             let cpu = match peer {
                 Peer::Running => &machine.cpu,
                 Peer::Parked(parked) => parked.cpu(),
-                Peer::Off => panic!("started PE"),
+                Peer::Off | Peer::Remote => panic!("started PE"),
             };
             let memory = cpu.canonical_memory.as_ref().unwrap();
             assert_eq!(memory.pe, pe);

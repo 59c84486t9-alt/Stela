@@ -1,3 +1,7 @@
+//! The auxiliary control owner. It holds the `SoftwareImage` and the
+//! source-order cursor, and runs the control tail, lifecycle transitions,
+//! auxiliary configuration and slot reset as retained operations that resume
+//! after Busy.
 use super::super::super::super::counters::{CaptureIdentity, Captured, Frames, Retained};
 use super::super::super::owner::Completion;
 use super::super::{Call, Error, Request, Value};

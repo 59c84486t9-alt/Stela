@@ -118,18 +118,17 @@ impl<R: Registers, P: Platform> Unit<R, P> {
     ) -> Result<Arc<Self>, IrqError> {
         platform.check_cpu()?;
         let saved = platform.save_and_disable();
-        let raw_id = registers.read(0);
         let version = registers.read(1);
         unsafe { platform.restore(saved) };
-        if raw_id == u32::MAX || version == u32::MAX {
+        if version == u32::MAX {
             return Err(IrqError::FailedRead);
         }
+        // Every version takes the local APIC's broadcast EOI, the only EOI
+        // used here: Intel's 0x11 and 0x20, AMD's 0x21. The MADT's ID is the
+        // unit's, as Linux keeps it on x86-64; firmware need not program the
+        // ID register to match.
         let pins = ((version >> 16) & 255) as u16 + 1;
-        if raw_id >> 24 != u32::from(id)
-            || !matches!(version & 255, 0x11 | 0x20)
-            || pins as usize > MAX_PINS
-            || gsi_base.checked_add(u32::from(pins)).is_none()
-        {
+        if pins as usize > MAX_PINS || gsi_base.checked_add(u32::from(pins)).is_none() {
             return Err(IrqError::Unsupported);
         }
         Ok(Arc::new(Self {

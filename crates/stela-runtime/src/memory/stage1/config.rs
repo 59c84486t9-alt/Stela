@@ -1,3 +1,7 @@
+//! Stage-1 translation configuration: derives each region's table geometry,
+//! granule, address tagging and ASID from the effective `TTBRn_EL1`,
+//! `TCR_EL1`, `SCTLR_EL1` and `MAIR_EL1` values and the CPU's feature profile,
+//! and reports controls outside the supported profile as `Unsupported`.
 use super::{AccessKind, Shareability, Unsupported};
 
 pub(super) const DESCRIPTOR_BYTES_LOG2: u32 = 3;

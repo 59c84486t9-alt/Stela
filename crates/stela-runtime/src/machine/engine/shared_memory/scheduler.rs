@@ -201,18 +201,30 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         if let Some(pending) = self.pending_native_device_access() {
             return pending;
         }
+        // SAFETY: the caller's contract.
+        if let Err(stop) = unsafe { self.hold_serialized() } {
+            return stop;
+        }
+        self.run_blocks(limit)
+    }
+
+    /// Hold every assigned physical worker for [`Self::run_serialized`], as
+    /// its first call does, after which their cores take no more of the
+    /// native scheduler's work: they can run machines of their own
+    /// ([`Self::enter_parallel`]).
+    ///
+    /// # Safety
+    /// The [`Self::run_serialized`] contract applies from this call on.
+    pub unsafe fn hold_serialized(&mut self) -> Result<(), Stop> {
         if self.serial_hold.is_none() {
-            let held = match self.hold_native_services() {
-                Ok(held) => held,
-                Err(stop) => return stop,
-            };
+            let held = self.hold_native_services()?;
             self.close_native_services();
             self.serial_hold = Some(held);
             // The fetch and jump caches and the host's shadow tables start
             // from the running PE's regime.
             self.translations_changed();
         }
-        self.run_blocks(limit)
+        Ok(())
     }
 
     /// Execute at most `body_budget` bodies, allowing warm epochs only for one

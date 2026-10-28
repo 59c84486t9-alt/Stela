@@ -367,9 +367,11 @@ impl Mux {
                 if payload.len() != 12 {
                     return Err("invalid usbmux version payload length");
                 }
+                // The pinned usbmuxd checks only the major version
+                // (device.c `device_version_input`): the 26A434 device mux
+                // leaves the padding word uninitialized.
                 let major = u32::from_be_bytes(payload[..4].try_into().unwrap());
-                let minor = u32::from_be_bytes(payload[4..8].try_into().unwrap());
-                if !matches!(major, 1 | 2) || minor != 0 || payload[8..] != [0; 4] {
+                if !matches!(major, 1 | 2) {
                     return Err("unsupported usbmux version");
                 }
                 self.version = major;
@@ -559,7 +561,11 @@ pub(crate) mod tests {
             mux.take_packet().unwrap(),
             [0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]
         );
-        for byte in version(2) {
+        // The device's padding word is not its version.
+        let mut reply = version(2);
+        let padding = reply.len() - 4;
+        reply[padding] = 0x1a;
+        for byte in reply {
             mux.receive(&[byte]).unwrap();
         }
         assert_eq!(

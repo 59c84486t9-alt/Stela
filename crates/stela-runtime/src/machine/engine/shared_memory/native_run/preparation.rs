@@ -75,6 +75,7 @@ impl PreparationFailure {
             kind: RequirementKind::NativePreparation(detail),
             syndrome: None,
             address: None,
+            written: None,
         })
     }
 }

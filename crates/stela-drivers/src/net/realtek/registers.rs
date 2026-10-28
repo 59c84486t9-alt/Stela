@@ -101,7 +101,8 @@ pub(super) const MCU_RX_EMPTY: u8 = 1 << 4;
 pub(super) const LINK_LIST_READY: u8 = 1 << 1;
 pub(super) const TX_FIFO_EMPTY: u32 = 1 << 11;
 pub(super) const RXDV_GATED: u32 = 1 << 19;
-pub(super) const DESCRIPTORS: usize = 32;
+/// Linux r8169's `NUM_RX_DESC` and `NUM_TX_DESC`.
+pub(super) const DESCRIPTORS: usize = 256;
 pub(super) const DESCRIPTOR: usize = 16;
 pub(super) const BUFFER: usize = 2048;
 pub(super) const OWN: u32 = 1 << 31;

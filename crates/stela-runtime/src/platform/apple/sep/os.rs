@@ -923,7 +923,7 @@ mod tests {
         assert!(os.dma_pending());
         assert_eq!(
             dma(&mut os, &mut ram),
-            Err("xART commit-hash types are not recovered")
+            Err("xART commit-hash types other than the manifest hash are not recovered")
         );
         assert!(os.dma_pending());
         let third = dma(&mut os, &mut ram).unwrap();
@@ -953,7 +953,7 @@ mod tests {
         assert_eq!(
             dma_step(&mut os, &mut ram),
             (
-                Err("xART commit-hash types are not recovered"),
+                Err("xART commit-hash types other than the manifest hash are not recovered"),
                 alloc::vec![xart::unsupported(commit_hash)]
             )
         );

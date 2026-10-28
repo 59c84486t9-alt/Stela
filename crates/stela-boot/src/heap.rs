@@ -6,13 +6,18 @@
 //! to 4 KiB with at most 16-byte alignment are therefore rounded up to a
 //! power-of-two size class and, once freed, kept on that class's LIFO list
 //! for the next allocation of the class instead of returning to the free list.
+//!
+//! Every PE on a core of its own allocates at once, so each core the engine
+//! runs on keeps a small cache of free blocks per class ([`Heap::tag_cpu`]),
+//! which it takes from and gives back to without the lock, moving them to
+//! and from the class lists [`BATCH`] at a time under it.
 use core::{
     alloc::{GlobalAlloc, Layout},
     cell::UnsafeCell,
     marker::PhantomData,
     ops::Range,
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
 };
 const WORD: usize = core::mem::align_of::<usize>();
 const PAGE_BYTES: usize = 4096;
@@ -33,6 +38,29 @@ struct Small {
 const SMALLEST: usize = 16;
 const CLASSES: usize = 9;
 const SMALL_ALIGNMENT: usize = 16;
+/// Cores with a cache of their own; later ones take the lock every time.
+const CPUS: usize = 64;
+/// Free blocks a core keeps per class, and moves to or from the class list
+/// at once.
+const CACHED: usize = 64;
+const BATCH: usize = 32;
+/// IA32_TSC_AUX, which RDTSCP reads: `TAG` and the core's cache index.
+#[cfg(target_os = "uefi")]
+const TSC_AUX: u32 = 0xc000_0103;
+const TAG: u32 = 0x5a7e_0000;
+
+/// One core's free blocks by class.
+struct Cache {
+    blocks: [[*mut Small; CACHED]; CLASSES],
+    counts: [usize; CLASSES],
+}
+
+impl Cache {
+    const EMPTY: Self = Self {
+        blocks: [[ptr::null_mut(); CACHED]; CLASSES],
+        counts: [0; CLASSES],
+    };
+}
 /// The size class of `layout`, or `None` for the free list.
 fn class(layout: Layout) -> Option<usize> {
     let bytes = layout.size().max(SMALLEST).next_power_of_two();
@@ -65,6 +93,22 @@ pub struct Usage {
 pub struct Heap {
     held: AtomicBool,
     state: UnsafeCell<State>,
+    caches: [UnsafeCell<Cache>; CPUS],
+    /// Each core's bytes allocated from its cache less those freed to it,
+    /// which [`State::live`] does not count; written by that core alone.
+    cached: [AtomicIsize; CPUS],
+    /// Each core's bytes allocated less those it freed, by every route:
+    /// what its own work holds, which other cores' allocations leave
+    /// alone; written by that core alone.
+    own: [AtomicIsize; CPUS],
+    /// Cores tagged so far, and whether any is.
+    tagged: AtomicUsize,
+    any_tagged: AtomicBool,
+    /// `State::live` and `State::total` as the lock last left them, for
+    /// [`Heap::low`] to read without taking it.
+    live: AtomicUsize,
+    total: AtomicUsize,
+    waits: AtomicU64,
 }
 // SAFETY: all list/header mutations use the real acquire/release exclusion.
 // UEFI callers mask local interrupts before acquiring the lock. Critical
@@ -74,6 +118,14 @@ impl Heap {
     pub const fn new() -> Self {
         Self {
             held: AtomicBool::new(false),
+            caches: [const { UnsafeCell::new(Cache::EMPTY) }; CPUS],
+            cached: [const { AtomicIsize::new(0) }; CPUS],
+            own: [const { AtomicIsize::new(0) }; CPUS],
+            tagged: AtomicUsize::new(0),
+            any_tagged: AtomicBool::new(false),
+            live: AtomicUsize::new(0),
+            total: AtomicUsize::new(0),
+            waits: AtomicU64::new(0),
             state: UnsafeCell::new(State {
                 first: ptr::null_mut(),
                 small: [ptr::null_mut(); CLASSES],
@@ -94,12 +146,19 @@ impl Heap {
         unsafe {
             core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
-        while self
+        if self
             .held
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            self.waits.fetch_add(1, Ordering::Relaxed);
+            while self
+                .held
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
         }
         Guard {
             heap: self,
@@ -244,11 +303,158 @@ impl Heap {
         block
     }
 
-    /// Whether more than three quarters of the heap is allocated.
+    /// Whether more than three quarters of the heap is allocated, as the
+    /// lock and each core's cache last left it.
     pub fn low(&self) -> bool {
-        let _guard = self.lock();
-        let state = unsafe { &*self.state.get() };
-        state.live > state.total / 4 * 3
+        self.live() > self.total.load(Ordering::Relaxed) / 4 * 3
+    }
+
+    /// Bytes allocated and not freed: the class lists' and the caches'.
+    fn live(&self) -> usize {
+        self.live
+            .load(Ordering::Relaxed)
+            .saturating_add_signed(self.cached_live())
+    }
+
+    /// Bytes the caches allocated less those freed to them.
+    fn cached_live(&self) -> isize {
+        (0..self.tagged.load(Ordering::Relaxed).min(CPUS))
+            .map(|cpu| self.cached[cpu].load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Give the calling core a cache of its own, which every later
+    /// allocation on it uses. Once per core, where it RDTSCP reads
+    /// IA32_TSC_AUX and no one else uses it.
+    ///
+    /// # Safety
+    /// Ring 0, on a core that runs no other code using IA32_TSC_AUX.
+    #[cfg(target_os = "uefi")]
+    pub unsafe fn tag_cpu(&self) {
+        // RDTSCP: CPUID 8000_0001h EDX bit 27.
+        let highest = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+        if highest < 0x8000_0001 || core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) == 0 {
+            return;
+        }
+        let cpu = self.tagged.fetch_add(1, Ordering::Relaxed);
+        if cpu >= CPUS {
+            return;
+        }
+        // SAFETY: as the caller guarantees.
+        unsafe {
+            core::arch::asm!("wrmsr", in("ecx") TSC_AUX, in("eax") TAG | cpu as u32,
+                in("edx") 0, options(nostack, preserves_flags));
+        }
+        self.any_tagged.store(true, Ordering::Release);
+    }
+
+    /// The calling core's cache, if it has one.
+    fn cpu(&self) -> Option<usize> {
+        if !self.any_tagged.load(Ordering::Relaxed) {
+            return None;
+        }
+        #[cfg(not(target_os = "uefi"))]
+        let aux = 0;
+        #[cfg(target_os = "uefi")]
+        let aux: u32;
+        // SAFETY: RDTSCP exists, as some core was tagged.
+        #[cfg(target_os = "uefi")]
+        unsafe {
+            core::arch::asm!("rdtscp", out("eax") _, out("edx") _, out("ecx") aux,
+                options(nomem, nostack, preserves_flags));
+        }
+        (aux & !0xffff == TAG)
+            .then_some((aux & 0xffff) as usize)
+            .filter(|&cpu| cpu < CPUS)
+    }
+
+    /// A block of `class` from core `cpu`'s cache, refilled under the lock
+    /// when empty; null when the heap has none.
+    ///
+    /// # Safety
+    /// On core `cpu`, with interrupts disabled.
+    unsafe fn take_cached(&self, cpu: usize, class: usize) -> *mut u8 {
+        // SAFETY: only this core reaches its cache, and nothing interrupts.
+        let cache = unsafe { &mut *self.caches[cpu].get() };
+        if cache.counts[class] == 0 {
+            let _guard = self.lock();
+            let state = unsafe { &mut *self.state.get() };
+            while cache.counts[class] < BATCH {
+                let head = state.small[class];
+                let block = if head.is_null() {
+                    unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
+                } else {
+                    state.small[class] = unsafe { (*head).next };
+                    head.cast()
+                };
+                if block.is_null() {
+                    break;
+                }
+                cache.blocks[class][cache.counts[class]] = block.cast();
+                cache.counts[class] += 1;
+            }
+        }
+        if cache.counts[class] == 0 {
+            return ptr::null_mut();
+        }
+        cache.counts[class] -= 1;
+        self.count_cached(cpu, (SMALLEST << class) as isize);
+        cache.blocks[class][cache.counts[class]].cast()
+    }
+
+    /// Give `block` of `class` to core `cpu`'s cache, moving a batch to the
+    /// class list under the lock when full.
+    ///
+    /// # Safety
+    /// On core `cpu`, with interrupts disabled; `block` is a freed block of
+    /// `class`.
+    unsafe fn give_cached(&self, cpu: usize, class: usize, block: *mut u8) {
+        // SAFETY: only this core reaches its cache, and nothing interrupts.
+        let cache = unsafe { &mut *self.caches[cpu].get() };
+        if cache.counts[class] == CACHED {
+            let _guard = self.lock();
+            let state = unsafe { &mut *self.state.get() };
+            for _ in 0..BATCH {
+                cache.counts[class] -= 1;
+                let freed = cache.blocks[class][cache.counts[class]];
+                // SAFETY: a free block of this class that only the cache held.
+                unsafe {
+                    freed.write(Small {
+                        next: state.small[class],
+                    })
+                };
+                state.small[class] = freed;
+            }
+        }
+        cache.blocks[class][cache.counts[class]] = block.cast();
+        cache.counts[class] += 1;
+        self.count_cached(cpu, -((SMALLEST << class) as isize));
+    }
+
+    /// Add `bytes` to core `cpu`'s count, which only it writes.
+    fn count_cached(&self, cpu: usize, bytes: isize) {
+        let count = &self.cached[cpu];
+        count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+    }
+
+    /// Acquisitions of the heap's lock that found it held: with every PE
+    /// on a core of its own, the cores' allocations meet there.
+    pub fn waits(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
+    }
+
+    /// The calling core's bytes allocated less those it freed, once it is
+    /// tagged.
+    pub fn own(&self) -> Option<isize> {
+        self.cpu().map(|cpu| self.own[cpu].load(Ordering::Relaxed))
+    }
+
+    /// Add `bytes` to the calling core's own count, which only it writes.
+    fn count_own(&self, bytes: isize) {
+        if let Some(cpu) = self.cpu() {
+            let count = &self.own[cpu];
+            count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+        }
     }
 
     /// The heap's usage, walking the free list for its largest extent.
@@ -264,9 +470,10 @@ impl Heap {
                 node = (*node).next;
             }
         }
+        let live = state.live.saturating_add_signed(self.cached_live());
         Usage {
             total: state.total,
-            live: state.live,
+            live,
             carved: state.carved,
             peak: state.peak,
             largest,
@@ -283,6 +490,10 @@ struct Guard<'a> {
 }
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
+        // SAFETY: the lock is still held; no other borrow of the state lives.
+        let state = unsafe { &*self.heap.state.get() };
+        self.heap.live.store(state.live, Ordering::Relaxed);
+        self.heap.total.store(state.total, Ordering::Relaxed);
         self.heap.held.store(false, Ordering::Release);
         #[cfg(target_os = "uefi")]
         // SAFETY: this CPU's saved flags; the guard cannot migrate and no
@@ -292,6 +503,31 @@ impl Drop for Guard<'_> {
         }
     }
 }
+/// Disable interrupts, returning RFLAGS before.
+fn interrupts_off() -> usize {
+    #[cfg(not(target_os = "uefi"))]
+    let flags = 0;
+    #[cfg(target_os = "uefi")]
+    let flags: usize;
+    // SAFETY: CPL0; changes only IF.
+    #[cfg(target_os = "uefi")]
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags)
+    };
+    flags
+}
+
+/// Restore RFLAGS' interrupt flag as [`interrupts_off`] found it.
+fn restore_interrupts(flags: usize) {
+    // SAFETY: this core's flags from `interrupts_off`.
+    #[cfg(target_os = "uefi")]
+    unsafe {
+        core::arch::asm!("push {}", "popfq", in(reg) flags)
+    };
+    #[cfg(not(target_os = "uefi"))]
+    let _ = flags;
+}
+
 fn aligned(value: usize, alignment: usize) -> Option<usize> {
     value
         .checked_add(alignment - 1)
@@ -333,12 +569,41 @@ unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
 // the single matching deallocation.
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _guard = self.lock();
-        let state = unsafe { &mut *self.state.get() };
-        // SAFETY: the actual guard owns this state for the entire operation.
-        unsafe { allocate_locked(state, layout) }
+        if let Some(class) = class(layout)
+            && let Some(cpu) = self.cpu()
+        {
+            let flags = interrupts_off();
+            // SAFETY: on this core, with interrupts disabled.
+            let block = unsafe { self.take_cached(cpu, class) };
+            restore_interrupts(flags);
+            if !block.is_null() {
+                self.count_own((SMALLEST << class) as isize);
+            }
+            return block;
+        }
+        let block = {
+            let _guard = self.lock();
+            let state = unsafe { &mut *self.state.get() };
+            // SAFETY: the actual guard owns this state for the entire operation.
+            unsafe { allocate_locked(state, layout) }
+        };
+        if !block.is_null() {
+            self.count_own(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize);
+        }
+        block
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        self.count_own(-(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize));
+        if let Some(class) = class(layout)
+            && let Some(cpu) = self.cpu()
+        {
+            let flags = interrupts_off();
+            // SAFETY: on this core, with interrupts disabled; the caller's
+            // block of this class, which it no longer accesses.
+            unsafe { self.give_cached(cpu, class, pointer) };
+            restore_interrupts(flags);
+            return;
+        }
         let _guard = self.lock();
         let state = unsafe { &mut *self.state.get() };
         if let Some(class) = class(layout) {
@@ -963,6 +1228,41 @@ mod tests {
                 assert_eq!(heap.usage().largest, ram.0.len());
             }
         }
+    }
+
+    #[test]
+    fn core_caches_refill_and_flush_in_batches_and_count_live_bytes() {
+        let heap = Heap::new();
+        let mut ram = backing();
+        let layout = Layout::from_size_align(24, 8).unwrap();
+        let class = class(layout).unwrap();
+        heap.tagged.store(2, Ordering::Relaxed);
+        // SAFETY: exclusive test backing; no interrupts reach these calls,
+        // and every block goes back to a cache of its class.
+        unsafe {
+            heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+            let blocks: Vec<_> = (0..CACHED + BATCH)
+                .map(|_| heap.take_cached(0, class))
+                .collect();
+            assert!(blocks.iter().all(|block| !block.is_null()));
+            let mut distinct = blocks.clone();
+            distinct.sort();
+            distinct.dedup();
+            assert_eq!(distinct.len(), blocks.len());
+            assert_eq!(heap.usage().live, blocks.len() * 32);
+            // Freed on another core than allocated them: its cache fills
+            // and moves a batch to the class list.
+            for &block in &blocks {
+                heap.give_cached(1, class, block);
+            }
+            assert_eq!(heap.usage().live, 0);
+            assert_eq!((*heap.caches[1].get()).counts[class], CACHED);
+            // The other core's allocations reuse the blocks the list holds.
+            let reused = heap.alloc(layout);
+            assert!(blocks.contains(&reused));
+            heap.dealloc(reused, layout);
+        }
+        assert_eq!(heap.usage().live, 0);
     }
 
     #[test]

@@ -8,7 +8,9 @@
 //! link is hard reset and the disk revalidated, and sd's retries apply.
 use crate::{
     Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity, Sense, SenseCompletion, Transport, ascii},
+    block::{
+        BlockDevice, BlockError, Features, Identity, Sense, SenseCompletion, Transport, ascii,
+    },
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
@@ -242,6 +244,9 @@ const WORD_VALID: u16 = 0x4000;
 const IDENTIFY_ENABLED_1: usize = 85;
 const ENABLED_1_WRITE_CACHE: u16 = 1 << 5;
 const IDENTIFY_DEFAULTS: usize = 87;
+/// Word 169 bit 0: DATA SET MANAGEMENT with the TRIM bit.
+const IDENTIFY_DATA_SET_MANAGEMENT: usize = 169;
+const DATA_SET_MANAGEMENT_TRIM: u16 = 1;
 /// Word 86 bit 15: words 119 and 120 are valid; their bit 6 is Sense Data
 /// Reporting supported and enabled.
 const IDENTIFY_ENABLED_2: usize = 86;
@@ -263,10 +268,19 @@ const ATA_SECTOR_BYTES: u32 = 512;
 /// area (256 bytes), and one command table (AHCI 1.3.1 Â§4.2).
 const COMMAND_LIST_BYTES: usize = 1024;
 const RECEIVED_FIS_BYTES: usize = 256;
+/// The received PIO Setup FIS a PIO data command ends with.
+const RECEIVED_PIO: usize = COMMAND_LIST_BYTES + 0x20;
 /// The received D2H Register FIS, set to BSY before a hardreset.
 const RECEIVED_D2H: usize = COMMAND_LIST_BYTES + 0x40;
 /// The Set Device Bits FIS a queued command completes with.
 const RECEIVED_SDB: usize = COMMAND_LIST_BYTES + 0x58;
+/// FIS types (SATA 3.5 §10.5): D2H Register, PIO Setup, Set Device Bits.
+const FIS_REGISTER_DEVICE_TO_HOST: u8 = 0x34;
+const FIS_PIO_SETUP: u8 = 0x5f;
+const FIS_SET_DEVICE_BITS: u8 = 0xa1;
+/// Polls of the received-FIS area between reads of PxIS and PxCI, which a
+/// hypervisor traps, while a command runs: a failure may post no FIS.
+const REGISTER_POLL_INTERVAL: u32 = 64;
 const FIS_BYTES: usize = 20;
 const COMMAND_TABLE_BYTES: usize = 4096;
 const COMMAND_TABLE_ALIGN: usize = 128;
@@ -300,6 +314,12 @@ const LOG_SATA_SETTINGS: u8 = 0x08;
 const ATA_FLUSH_CACHE: u8 = 0xe7;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
 const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
+/// DATA SET MANAGEMENT, its TRIM feature, and the ranges one 512-byte block
+/// of them holds, each at most 65535 sectors (Linux `ATA_MAX_TRIM_RNUM`).
+const ATA_DATA_SET_MANAGEMENT: u8 = 0x06;
+const TRIM: u16 = 1;
+const TRIM_RANGES: u64 = 64;
+const TRIM_RANGE_SECTORS: u64 = 0xffff;
 const ATA_IDENTIFY: u8 = 0xec;
 const ATA_SET_FEATURES: u8 = 0xef;
 /// `SETFEATURES_XFER`, with the transfer mode in the count.
@@ -642,6 +662,8 @@ struct Identified {
     sata_speeds: u16,
     /// `ata_id_has_devslp`.
     devslp: bool,
+    /// `ata_id_has_trim`.
+    trim: bool,
 }
 
 /// What `ata_id_xfermask`, `ata_id_has_iordy` and `ata_id_is_cfa` read.
@@ -770,6 +792,7 @@ fn identify(data: &[u8]) -> Result<Identified, BlockError> {
         quirks: quirks::quirks(&c_string(IDENTIFY_MODEL), &c_string(IDENTIFY_FIRMWARE)),
         sata_speeds: word(IDENTIFY_SATA_CAPABILITY) & 0xe,
         devslp: word(IDENTIFY_SATA_FEATURES) & SATA_FEATURE_DEVICE_SLEEP != 0,
+        trim: word(IDENTIFY_DATA_SET_MANAGEMENT) & DATA_SET_MANAGEMENT_TRIM != 0,
     })
 }
 
@@ -1240,6 +1263,7 @@ impl AhciDisk {
                 blocks: 0,
                 block_size: ATA_SECTOR_BYTES,
                 read_only: false,
+                features: Features::default(),
             },
             clock,
             command_timeout_us: COMMAND_TIMEOUT_US,
@@ -1282,6 +1306,16 @@ impl AhciDisk {
         disk.identity.model = found.model.clone();
         disk.identity.blocks = found.blocks;
         disk.identity.block_size = found.block_size;
+        // libata's `ata_dev_config_fua` uses FUA only with NCQ and its
+        // quirk lists; this driver leaves it off: a durable write is
+        // followed by a flush, which the write cache's state decides.
+        disk.identity.features = Features {
+            write_cache: found.flush.is_some(),
+            fua: false,
+            max_transfer: BOUNCE_BYTES,
+            discard: found.trim.then_some(TRIM_RANGES * TRIM_RANGE_SECTORS),
+            write_zeroes: None,
+        };
         disk.transfer = found.transfer;
         disk.locked = found.locked;
         (disk.lpm.hipm, disk.lpm.dipm) = (found.hipm, found.dipm);
@@ -1329,6 +1363,19 @@ impl AhciDisk {
         bytes: usize,
         write: bool,
     ) -> Result<(), BlockError> {
+        self.issue_with(port, (command, 0), lba, count, bytes, write)
+    }
+
+    /// [`Self::issue_on`] with the command's FEATURE field.
+    fn issue_with(
+        &mut self,
+        port: &impl CommandPort,
+        (command, feature): (u8, u16),
+        lba: u64,
+        count: u16,
+        bytes: usize,
+        write: bool,
+    ) -> Result<(), BlockError> {
         self.ready()?;
         // Only reads and writes carry ATA_QCFLAG_IO.
         let io = matches!(
@@ -1343,7 +1390,8 @@ impl AhciDisk {
         let mut retries = 0;
         loop {
             let command = self.rw_command(command);
-            let Err(mut failure) = self.attempt(port, command, 0, lba, count, bytes, write, buffer)
+            let Err(mut failure) =
+                self.attempt(port, command, feature, lba, count, bytes, write, buffer)
             else {
                 // ata_verify_xfer: a completed DMA transfer verifies it.
                 if io {
@@ -1408,8 +1456,16 @@ impl AhciDisk {
         buffer: u64,
     ) -> Result<(), Failure> {
         self.ready().map_err(Failure::new)?;
-        let Err(failure) = self.attempt(port, command, feature, 0, count, bytes, false, buffer)
-        else {
+        let Err(failure) = self.attempt(
+            port,
+            command,
+            u16::from(feature),
+            0,
+            count,
+            bytes,
+            false,
+            buffer,
+        ) else {
             return Ok(());
         };
         stop_engine(port, self.clock).map_err(Failure::new)?;
@@ -1423,7 +1479,7 @@ impl AhciDisk {
         &mut self,
         port: &impl CommandPort,
         command: u8,
-        feature: u8,
+        feature: u16,
         lba: u64,
         count: u16,
         bytes: usize,
@@ -1435,11 +1491,7 @@ impl AhciDisk {
         // A queued command's sector count moves to the features registers;
         // the count register carries its tag, 0, in bits 7:3.
         let queued = matches!(command, ATA_READ_FPDMA_QUEUED | ATA_WRITE_FPDMA_QUEUED);
-        let (feature, count) = if queued {
-            (count, 0)
-        } else {
-            (u16::from(feature), count)
-        };
+        let (feature, count) = if queued { (count, 0) } else { (feature, count) };
         let fis = [
             FIS_REGISTER_HOST_TO_DEVICE,
             FIS_COMMAND,
@@ -1474,6 +1526,23 @@ impl AhciDisk {
         self.commands.write(8, table);
         fence(Ordering::SeqCst);
         port.write32(PORT_INTERRUPTS, u32::MAX);
+        // The FIS a command ends with lands in the received-FIS area in RAM:
+        // a queued command's Set Device Bits, another's D2H Register, or for
+        // PIO data a PIO Setup, which precedes the data, from when on the
+        // registers are read every poll. Mark their types with the H2D
+        // Register type, as a hardreset does, to see one arrive.
+        let ending: &[(usize, u8)] = if queued {
+            &[(RECEIVED_SDB, FIS_SET_DEVICE_BITS)]
+        } else {
+            &[
+                (RECEIVED_D2H, FIS_REGISTER_DEVICE_TO_HOST),
+                (RECEIVED_PIO, FIS_PIO_SETUP),
+            ]
+        };
+        for &(at, _) in ending {
+            self.commands.write(at, FIS_REGISTER_HOST_TO_DEVICE);
+        }
+        fence(Ordering::SeqCst);
         // ahci_qc_issue: a queued command is active in PxSACT until the
         // disk's Set Device Bits FIS clears it.
         let active = if queued {
@@ -1484,10 +1553,22 @@ impl AhciDisk {
         };
         port.write32(PORT_ISSUE, 1);
         let mut interrupts = 0;
-        let done = self.clock.wait(self.command_timeout_us, || {
+        let mut finished = || {
             interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
             interrupts != 0 || port.read32(active) & 1 == 0
-        });
+        };
+        let commands = &self.commands;
+        let mut polls = 0u32;
+        let done = self.clock.wait(self.command_timeout_us, || {
+            // The first poll reads the registers too: an emulated port may
+            // finish at the PxCI write.
+            let due = polls.is_multiple_of(REGISTER_POLL_INTERVAL);
+            polls = polls.wrapping_add(1);
+            let posted = ending
+                .iter()
+                .any(|&(at, kind)| commands.read::<u8>(at) == kind);
+            (posted || due) && finished()
+        }) || finished();
         fence(Ordering::SeqCst);
         if done && interrupts == 0 {
             return Ok(());
@@ -2284,17 +2365,52 @@ impl BlockDevice for AhciDisk {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), BlockError> {
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
         match self.flush {
             Some(command) => self.issue(command, 0, 0, 0, false),
             None => self.ready(),
         }
     }
 
+    /// TRIM in one block of ranges, as libata's `ata_format_dsm_trim_descr`
+    /// writes them: each the starting logical sector in bits 47:0 and the
+    /// count in bits 63:48.
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        let bytes = usize::try_from(blocks)
+            .ok()
+            .and_then(|blocks| blocks.checked_mul(self.identity.block_size as usize))
+            .ok_or(BlockError::Unsupported("a TRIM past one block of ranges"))?;
+        self.identity.check_write(lba, bytes)?;
+        let (mut sector, mut sectors) = (lba, blocks);
+        if sectors > TRIM_RANGES * TRIM_RANGE_SECTORS {
+            return Err(BlockError::Unsupported("a TRIM past one block of ranges"));
+        }
+        self.ready()?;
+        let ranges = &mut self.bounce.bytes_mut()[..ATA_SECTOR_BYTES as usize];
+        ranges.fill(0);
+        for range in ranges.chunks_mut(8) {
+            if sectors == 0 {
+                break;
+            }
+            let count = sectors.min(TRIM_RANGE_SECTORS);
+            range.copy_from_slice(&(sector | count << 48).to_le_bytes());
+            (sector, sectors) = (sector + count, sectors - count);
+        }
+        let port = self.port;
+        self.issue_with(
+            &port,
+            (ATA_DATA_SET_MANAGEMENT, TRIM),
+            0,
+            1,
+            ATA_SECTOR_BYTES as usize,
+            true,
+        )
+    }
+
     /// Flush, and before power-off spin the disk down, as Linux libata's
     /// `ata_dev_power_set_standby` does on `SYSTEM_POWER_OFF`.
     fn shutdown(&mut self, power_off: bool) -> Result<(), BlockError> {
-        self.flush()?;
+        self.flush_cache()?;
         if power_off {
             let port = self.port;
             let buffer = self.bounce.physical();
@@ -2531,6 +2647,7 @@ mod tests {
                         blocks: 1024,
                         block_size: 512,
                         read_only: false,
+                        features: Features::default(),
                     },
                     clock: Clock {
                         ticks_per_microsecond: 1000,
@@ -3697,9 +3814,9 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.disk.flush = None;
         let issued = fixture.disk.port.read32(PORT_ISSUE);
-        assert_eq!(fixture.disk.flush(), Ok(()));
+        assert_eq!(fixture.disk.flush_cache(), Ok(()));
         assert_eq!(fixture.disk.port.read32(PORT_ISSUE), issued);
         fixture.disk.fault = Some(BlockError::Timeout);
-        assert_eq!(fixture.disk.flush(), Err(BlockError::Timeout));
+        assert_eq!(fixture.disk.flush_cache(), Err(BlockError::Timeout));
     }
 }

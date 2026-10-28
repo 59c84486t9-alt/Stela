@@ -2983,6 +2983,14 @@ impl Devices for AppleDevices {
         self.read_needs_ram(physical, shape)
     }
 
+    /// CPU PMGR registers, which settle the board's processors, and the
+    /// memory controller words that drain or flush to RAM.
+    fn requires_canonical_write(&self, _cpu: usize, physical: u64, bytes: u8) -> bool {
+        self.is_processor_power_register(physical)
+            || self.read_needs_ram(physical, super::engine::DeviceReadShape::Scalar { bytes })
+            || width(bytes).is_ok_and(|width| self.empty_cache_flush_needs_ram(physical, width))
+    }
+
     fn read_canonical(
         &mut self,
         cpu: usize,
@@ -3124,6 +3132,15 @@ impl Devices for AppleDevices {
                     ipi::IpiError::Unsupported(_, reason) => reason,
                 }),
         )
+    }
+
+    fn serves_register(&self, encoding: Encoding) -> bool {
+        self.ipi.is_some() && ipi::Register::decode(encoding).is_some()
+            || self.core_counters.iter().flatten().any(|&device| {
+                self.bus
+                    .device::<CoreCounters>(device)
+                    .is_some_and(|counters| counters.serves(encoding))
+            })
     }
 
     fn lines(&mut self, cpu: usize, now: u64) -> Lines {
@@ -3311,6 +3328,12 @@ impl Devices for AppleDevices {
             })
             .chain(self.native_pmp_dma_deadline())
             .chain(self.native_pmp_services_deadline())
+            // When to look for a storage command's host transfer.
+            .chain(
+                self.storage_masters
+                    .iter()
+                    .filter_map(|&(ans, _)| self.bus.device::<Ans>(ans)?.host_look()),
+            )
             .min()
     }
 
@@ -3353,7 +3376,7 @@ impl Devices for AppleDevices {
                 .bus
                 .pair_mut::<Ans, Sart>(ans, sart)
                 .expect("a storage master names ANS2 and SART");
-            if !ans.pending() {
+            if !ans.pending(now) {
                 continue;
             }
             let mut access = Access::new(cpu, now, &mut self.latch);

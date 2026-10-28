@@ -3,7 +3,7 @@
 // Copyright Matthew Dharm 1999-2002; Adam J. Richter/Yggdrasil 2000;
 // Pete Zaitcev 2005; Hans de Goede 2013. See ../../THIRD_PARTY.md
 // for exact donor identities.
-use super::super::super::xhci::{Device, HIGH_SPEED};
+use super::super::super::xhci::{Device, HIGH_SPEED, SUPER_SPEED};
 const SINGLE_LUN: u32 = 0x00000001;
 const SCM_MULT_TARG: u32 = 0x00000004;
 const FIX_INQUIRY: u32 = 0x00000008;
@@ -29,18 +29,26 @@ const NO_ATA_1X: u32 = 0x02000000;
 const NO_REPORT_LUNS: u32 = 0x10000000;
 const ALWAYS_SYNC: u32 = 0x20000000;
 const SENSE_AFTER_SYNC: u32 = 0x80000000;
+const MAX_SECTORS_240: u32 = 0x08000000;
+/// scsiglue's bounds on one command's data: the SCSI host's default 240
+/// sectors, and 2048 for a device at SuperSpeed or faster.
+const DEFAULT_TRANSFER_BYTES: usize = 240 * 512;
+const SUPER_TRANSFER_BYTES: usize = 2048 * 512;
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Flags(u32);
+/// The unusual_devs.h flags, and whether the device runs at SuperSpeed or
+/// faster.
+pub(super) struct Flags(u32, bool);
 impl Flags {
     pub fn from_device(device: &Device) -> Result<Self, &'static str> {
         let d = &device.descriptor;
-        Self::from_id(
+        let flags = Self::from_id(
             u16::from_le_bytes([d[8], d[9]]),
             u16::from_le_bytes([d[10], d[11]]),
             u16::from_le_bytes([d[12], d[13]]),
             device.speed == HIGH_SPEED,
-        )
+        )?;
+        Ok(Self(flags.0, device.speed >= SUPER_SPEED))
     }
     pub(super) fn from_id(
         vendor: u16,
@@ -70,7 +78,7 @@ impl Flags {
         {
             bits |= CAPACITY_HEURISTICS;
         }
-        Ok(Self(bits))
+        Ok(Self(bits, false))
     }
     pub fn single_lun(self) -> bool {
         self.0 & SINGLE_LUN != 0
@@ -111,8 +119,10 @@ impl Flags {
             4096
         } else if self.0 & MAX_SECTORS_64 != 0 {
             32768
+        } else if self.0 & MAX_SECTORS_240 == 0 && self.1 {
+            SUPER_TRANSFER_BYTES
         } else {
-            super::MAX_TD
+            DEFAULT_TRANSFER_BYTES
         }
     }
     pub fn initial_read(self) -> bool {
@@ -540,6 +550,7 @@ mod tests {
                 | BROKEN_FUA
                 | NO_ATA_1X
                 | NO_READ_CAPACITY_16,
+            true,
         );
         assert_eq!(f.cbw_len(), 32);
         assert!(f.single_lun());
@@ -553,15 +564,22 @@ mod tests {
         assert!(f.permits(&[0x2a, 0]));
         assert!(!f.permits(&[0x85; 16]));
         assert!(!f.permits(&[0x9e, 16]));
-        assert_eq!(Flags(FIX_CAPACITY).capacity(100), Some(99));
-        assert_eq!(Flags(CAPACITY_HEURISTICS).capacity(101), Some(100));
-        assert_eq!(Flags(CAPACITY_HEURISTICS).capacity(100), Some(100));
-        assert_eq!(Flags(FIX_CAPACITY).capacity(1), None);
+        assert_eq!(Flags(FIX_CAPACITY, false).capacity(100), Some(99));
+        assert_eq!(Flags(CAPACITY_HEURISTICS, false).capacity(101), Some(100));
+        assert_eq!(Flags(CAPACITY_HEURISTICS, false).capacity(100), Some(100));
+        assert_eq!(Flags(FIX_CAPACITY, false).capacity(1), None);
         assert!(
             !Flags::from_id(0x05e3, 0x0702, 0x0010, false)
                 .unwrap()
                 .go_slow()
         );
+    }
+    #[test]
+    fn a_commands_data_bound_follows_scsiglue() {
+        assert_eq!(Flags(0, false).max_transfer_bytes(), 240 * 512);
+        assert_eq!(Flags(0, true).max_transfer_bytes(), 2048 * 512);
+        assert_eq!(Flags(MAX_SECTORS_240, true).max_transfer_bytes(), 240 * 512);
+        assert_eq!(Flags(MAX_SECTORS_MIN, true).max_transfer_bytes(), 4096);
     }
     #[test]
     #[ignore = "requires pinned unchanged Linux USB BOT unusual-device table trace"]

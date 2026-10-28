@@ -1093,6 +1093,7 @@ mod tests {
                 error: None,
                 command_poisoned: false,
                 command_ring_stopped: false,
+                unpublished: 0,
                 location: String::from("stream model"),
             },
             model,

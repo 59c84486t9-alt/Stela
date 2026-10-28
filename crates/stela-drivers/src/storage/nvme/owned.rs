@@ -423,20 +423,29 @@ unsafe fn attach_with_timeout(
             submissions: Buffer::Empty,
             completions: Buffer::Empty,
             id: 0,
+            entries: ADMIN_ENTRIES,
             tail: 0,
             head: 0,
             phase: true,
+            consumed: 0,
         },
         io: Queue {
             submissions: Buffer::Empty,
             completions: Buffer::Empty,
             id: 1,
+            entries: IO_ENTRIES,
             tail: 0,
             head: 0,
             phase: true,
+            consumed: 0,
         },
         bounce: Buffer::Empty,
         prp_list: Buffer::Empty,
+        // The DMA domain's buffers change hands whole: one command at a time.
+        slots: alloc::vec::Vec::new(),
+        tags: alloc::vec![Tag::Free],
+        recovery: None,
+        signalled: false,
         max_transfer: BOUNCE_BYTES,
         shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
         shut_down: false,
@@ -455,11 +464,13 @@ unsafe fn attach_with_timeout(
         configuration: CONFIGURATION_VALUE & !ENABLE,
         independent_identify: false,
         version: 0,
+        commands: 0,
         scans: 0,
         retry_delays: [0; 3],
         host_memory: None,
         host_memory_enabled: false,
         events: super::Events::default(),
+        aborts: alloc::vec::Vec::new(),
     };
     validate_clock(clock)?;
     controller.teardown = Teardown::Unprepared;
@@ -1019,6 +1030,7 @@ mod tests {
                             data[4..24].fill(b'S');
                             data[24..64].fill(b'M');
                             data[516..520].copy_from_slice(&1u32.to_le_bytes());
+                            data[525] = 1; // A volatile write cache.
                             for (index, delay) in self.retry_delays.iter().enumerate() {
                                 data[128 + 2 * index..][..2].copy_from_slice(&delay.to_le_bytes());
                             }
@@ -1816,10 +1828,10 @@ mod tests {
         // Its EUI64 changed: nvme_validate_ns removes it.
         f.model.lock().unwrap().eui64 = [0x22; 8];
         reset(&f, disk);
-        assert_eq!(disk.read(0, &mut [0; 512]), Err(REMOVED));
-        assert_eq!(disk.flush(), Err(REMOVED));
+        assert_eq!(disk.read(0, &mut [0; 512]), Err(NAMESPACE_REMOVED));
+        assert_eq!(disk.flush(), Err(NAMESPACE_REMOVED));
         f.model.lock().unwrap().eui64 = [0x11; 8];
-        assert_eq!(disk.flush(), Err(REMOVED));
+        assert_eq!(disk.flush(), Err(NAMESPACE_REMOVED));
         disk.retire_owned().unwrap();
     }
 

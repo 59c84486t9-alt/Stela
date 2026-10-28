@@ -1,3 +1,7 @@
+//! The executing side of the native PMP DMA pair. `Service` runs one queued
+//! operation per `dispatch` through the actual DMA `Port`, uses the `Coherence`
+//! owner for map, synchronize, unmap and release effects, and records the
+//! reply and grant lifetime for the broker.
 use super::super::platform::owner::Completion;
 use super::broker::{
     Descriptor, Grant, Job, Life, Op, Output, Owners, Reply, ServiceRequest, State, reason,

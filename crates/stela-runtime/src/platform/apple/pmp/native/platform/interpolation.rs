@@ -1,3 +1,6 @@
+//! Logical vote nibbles (`Packed`) and the software `Interpolation` state,
+//! which maps a requested value and duration onto a bounded state table and
+//! steps between adjacent table entries as time advances.
 use alloc::vec::Vec;
 
 /// Logical source vote nibbles, not controller raw register codes or settlement.

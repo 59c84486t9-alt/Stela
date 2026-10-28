@@ -249,16 +249,18 @@ impl BlockDevice for Card {
         }
         Ok(())
     }
-    fn flush(&mut self) -> Result<(), BlockError> {
+    /// An eMMC cache flush (EXT_CSD FLUSH_CACHE), the only cache the
+    /// medium reports.
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
         let mut engine = self.inner.borrow_mut();
         engine.live(self.generation)?;
+        if !self.identity.features.write_cache {
+            return Err(BlockError::Unsupported("the card reports no cache"));
+        }
         engine.begin_request();
         let result = (|| {
-            let card = &engine.medium.as_ref().expect("live").card;
-            if card.kind == Kind::Mmc && card.cache {
-                let rca = engine.rca;
-                Session::new(&mut *engine, rca).mmc_switch(32, 1)?;
-            }
+            let rca = engine.rca;
+            Session::new(&mut *engine, rca).mmc_switch(32, 1)?;
             engine.ready()?;
             engine.check_request()
         })();
@@ -1513,7 +1515,7 @@ mod tests {
             card.write(0, &[0x62; 512]),
             Err(BlockError::Unsupported(STALE))
         );
-        assert_eq!(card.flush(), Err(BlockError::Unsupported(STALE)));
+        assert_eq!(card.flush_cache(), Err(BlockError::Unsupported(STALE)));
         assert_eq!(card.shutdown(true), Err(BlockError::Unsupported(STALE)));
         assert_eq!(
             chip.borrow().accesses,
@@ -1656,14 +1658,15 @@ mod tests {
             }
         }
         // The actual command CHECK requires both END and IDLE, unlike a data
-        // read. An END-only response must not pass as command completion.
-        let chip = Chip::new(false, true);
+        // read. An END-only response must not pass as command completion: a
+        // cached MMC's cache flush is such a command.
+        let chip = Chip::new(true, true);
         let mut host = make_host(&chip, false).unwrap();
         let mut card = host.poll().unwrap().unwrap();
         inject(&host, &chip, Fault::MissingIdle);
         chip.borrow_mut().delay_on = Some(DelayPoint::Completion);
         chip.borrow_mut().delay_us = 1_000_001;
-        assert_eq!(card.flush(), Err(BlockError::Timeout));
+        assert_eq!(card.flush_cache(), Err(BlockError::Timeout));
         stale(&mut card, &chip);
         // CMD24 accepted the write and the physical data changed, but no END
         // arrived. No successful write/flush or retained alias may be reported.
@@ -1710,7 +1713,7 @@ mod tests {
             .filter(|effect| matches!(effect, Effect::Command(13, ..)))
             .count();
         chip.borrow_mut().card.nonready = true;
-        assert_eq!(card.flush(), Err(BlockError::Timeout));
+        assert_eq!(card.read(0, &mut [0; 512]), Err(BlockError::Timeout));
         assert!(
             chip.borrow()
                 .effects
@@ -1795,7 +1798,7 @@ mod tests {
         let mut host = make_host(&chip, false).unwrap();
         let mut card = host.poll().unwrap().unwrap();
         chip.borrow_mut().config[..4].fill(0xff);
-        assert!(card.flush().is_err());
+        assert!(card.read(0, &mut [0; 512]).is_err());
         stale(&mut card, &chip);
         let before = chip.borrow().accesses;
         assert!(host.poll().is_err());
@@ -1839,7 +1842,7 @@ mod tests {
         assert_eq!(chip.borrow().regs[0x3d53] & 0x40, 0x40);
         assert_eq!(chip.borrow().regs[0x3f03] & 0x30, 0x30);
         chip.borrow_mut().bipr |= 1 << 17;
-        assert!(card.flush().is_err());
+        assert!(card.read(0, &mut [0; 512]).is_err());
         assert_eq!(chip.borrow().regs[0x3d50] & 3, 3);
         stale(&mut card, &chip);
         let chip = Chip::new(true, true);
@@ -2341,7 +2344,7 @@ mod tests {
         chip.borrow_mut().delay_on = Some(DelayPoint::LastResponse);
         chip.borrow_mut().delay_us = 1_000_001;
         let primary = BlockError::Device { status: 1 << 21 };
-        assert_eq!(card.flush(), Err(primary.clone()));
+        assert_eq!(card.read(0, &mut [0; 512]), Err(primary.clone()));
         assert_eq!(chip.borrow().delayed, [DelayPoint::LastResponse]);
         assert_eq!(host.last_failure().unwrap().primary, primary);
         stale(&mut card, &chip);
@@ -2429,7 +2432,7 @@ mod tests {
             card.read(3, &mut block).unwrap();
             assert_eq!(block, [0x69; 512]);
             chip.borrow_mut().bipr = 1 << 25;
-            assert!(card.flush().is_err());
+            assert!(card.read(0, &mut [0; 512]).is_err());
             stale(&mut card, &chip);
             chip.borrow_mut().bipr = (1 << 16) | (1 << 25);
             let mut fresh = host.poll().unwrap().unwrap();

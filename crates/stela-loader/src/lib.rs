@@ -37,8 +37,6 @@ pub mod host_firmware;
 pub mod im4m;
 pub mod im4p;
 pub mod installed;
-#[cfg(feature = "std")]
-pub mod inventory;
 pub mod kernel_collection;
 pub mod kernel_version;
 #[cfg(feature = "std")]
@@ -62,13 +60,22 @@ pub mod upgrade;
 #[cfg(feature = "std")]
 use anyhow::{Context, Result, ensure};
 #[cfg(feature = "std")]
-use inventory::{Artifact, Inventory, ScanIssue};
-#[cfg(feature = "std")]
 use object::{Object, ObjectSection};
 #[cfg(feature = "std")]
-use std::{fs::File, io::Read, path::Path};
-#[cfg(feature = "std")]
 use stela_runtime::sha256;
+
+/// One Mach-O slice of a file, as [`inspect`] names it.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub struct Artifact {
+    /// Identity includes path, fat-slice offset, and exact source hash.
+    pub id: String,
+    pub path: String,
+    pub sha256: String,
+    pub architecture: String,
+    pub slice_offset: u64,
+    pub text_bytes: u64,
+}
 
 #[cfg(feature = "std")]
 fn slice(data: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
@@ -134,23 +141,6 @@ fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
 }
 
 #[cfg(feature = "std")]
-fn is_macho(data: &[u8]) -> bool {
-    matches!(
-        data.get(..4),
-        Some(
-            [0xfe, 0xed, 0xfa, 0xce]
-                | [0xce, 0xfa, 0xed, 0xfe]
-                | [0xfe, 0xed, 0xfa, 0xcf]
-                | [0xcf, 0xfa, 0xed, 0xfe]
-                | [0xca, 0xfe, 0xba, 0xbe]
-                | [0xbe, 0xba, 0xfe, 0xca]
-                | [0xca, 0xfe, 0xba, 0xbf]
-                | [0xbf, 0xba, 0xfe, 0xca]
-        )
-    )
-}
-
-#[cfg(feature = "std")]
 pub fn split_slices(data: &[u8]) -> Result<Vec<(u64, &[u8])>> {
     let magic = data
         .get(..4)
@@ -201,78 +191,6 @@ pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
         .into_iter()
         .map(|(offset, bytes)| artifact(bytes, path, offset))
         .collect()
-}
-
-#[cfg(feature = "std")]
-pub fn scan(root: &Path, build: &str) -> Result<Inventory> {
-    ensure!(
-        root.is_dir(),
-        "inventory requires an extracted filesystem directory"
-    );
-    ensure!(!build.trim().is_empty(), "build must not be empty");
-    let root = root.canonicalize()?;
-    let mut inventory = Inventory {
-        schema_version: 1,
-        build: build.into(),
-        root: root.display().to_string(),
-        artifacts: vec![],
-        issues: vec![],
-        excluded_containers: vec![],
-    };
-    for entry in walkdir::WalkDir::new(&root)
-        .follow_links(false)
-        .sort_by_file_name()
-    {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                inventory.issues.push(ScanIssue {
-                    path: error
-                        .path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                    reason: error.to_string(),
-                });
-                continue;
-            }
-        };
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry
-            .path()
-            .strip_prefix(&root)?
-            .to_string_lossy()
-            .into_owned();
-        let result = (|| -> Result<()> {
-            let mut file = File::open(entry.path())?;
-            let mut header = [0u8; 16];
-            let n = file.read(&mut header)?;
-            if header[..n].starts_with(b"dyld_v")
-                || matches!(
-                    entry.path().extension().and_then(|s| s.to_str()),
-                    Some("kc" | "im4p" | "img4" | "dmg" | "ipsw")
-                )
-                || entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("kernelcache")
-            {
-                inventory.excluded_containers.push(ScanIssue { path: path.clone(), reason: "container requires a dedicated extractor; excluded from translation denominator".into() });
-            } else if is_macho(&header[..n]) {
-                let data = std::fs::read(entry.path())?;
-                inventory.artifacts.extend(inspect(&data, &path)?);
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            inventory.issues.push(ScanIssue {
-                path,
-                reason: format!("{error:#}"),
-            });
-        }
-    }
-    Ok(inventory)
 }
 
 #[cfg(feature = "std")]
@@ -350,19 +268,6 @@ mod tests {
                 matches!(load_plan::plan(&bytes), Err(load_plan::PlanError::UnsupportedCpu { cpu_subtype, .. }) if cpu_subtype == subtype)
             );
         }
-        Ok(())
-    }
-    #[test]
-    fn containers_and_parse_errors_are_visible() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        std::fs::write(
-            root.path().join("dyld_shared_cache_arm64e"),
-            b"dyld_v1 arm64e",
-        )?;
-        std::fs::write(root.path().join("broken"), [0xcf, 0xfa, 0xed, 0xfe])?;
-        let inv = scan(root.path(), "test")?;
-        assert_eq!(inv.issues.len(), 1);
-        assert_eq!(inv.excluded_containers.len(), 1);
         Ok(())
     }
 }

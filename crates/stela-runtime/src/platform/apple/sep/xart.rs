@@ -33,8 +33,10 @@
 //! - nonce generate (15) and read (16): at least 20 bytes out, the nonce;
 //!   byte 6 set to 1 asks for a Sandcat slot instead; invalidate (17):
 //!   nothing;
-//! - commit hash (18): byte 6 the hash type, byte 7 a flag, the caller's
-//!   hash or `/chosen/boot-manifest-hash` in;
+//! - commit hash (18): byte 6 the hash type, byte 7 bit 0 set when a hash
+//!   follows, and then the caller's hash or the 48-byte
+//!   `/chosen/boot-manifest-hash` in (the block 0x2d71b70..0x2d71c40; with
+//!   the bit clear a caller hash panics and nothing is sent); no result;
 //! - boot nonce (21): exactly 8 bytes out; commit epochs (22): 16 bytes in
 //!   although the length field is 0; get epochs (23): exactly 32 bytes out;
 //!   AP slot info (24): exactly 56 bytes out (8 nonce, 48 hash); set and get
@@ -69,7 +71,7 @@ use super::{
     Entropy,
     endpoint::Service,
     message::Frame,
-    store::{Backend, NONCE_BYTES, Nonces},
+    store::{Backend, HASH_BYTES, NONCE_BYTES, Nonces},
     transaction::{Answer, Payload, Refusal},
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -83,6 +85,11 @@ const UUID_BYTES: usize = 16;
 /// `SEPEpoch::EPOCH_COUNT` four-byte slots answer a full epoch read.
 const EPOCH_COUNT: usize = 8;
 const EPOCH_SLOT_BYTES: usize = 4;
+/// The hash type `seputil --commit-hash` sends for the sepOS manifest commit
+/// of a restore, with the boot manifest's SHA-384.
+const MANIFEST_HASH_TYPE: u8 = 0xff;
+/// Byte 7 bit 0 of a commit-hash request: a hash follows.
+const HASH_FOLLOWS: u8 = 1;
 /// A refused request's reply status: Darwin `ENOTSUP`.
 const UNSUPPORTED: u8 = 45;
 
@@ -405,7 +412,23 @@ impl Xart {
                 );
             }
             Operation::CommitHash => {
-                return Err("xART commit-hash types are not recovered");
+                if message.slot != MANIFEST_HASH_TYPE {
+                    return Err(
+                        "xART commit-hash types other than the manifest hash are not recovered",
+                    );
+                }
+                if message.reserved != HASH_FOLLOWS || message.flags != 0 {
+                    return Err("xART manifest commit without a hash is not recovered");
+                }
+                if length != HASH_BYTES {
+                    return Err("xART manifest commit is not one SHA-384 hash");
+                }
+                let mut hash = [0; HASH_BYTES];
+                payload.input(&mut hash)?;
+                self.live()?;
+                *committed = true;
+                self.store.commit_firmware(hash)?;
+                0
             }
             Operation::CommitEpochs => {
                 return Err("xART epoch commit without a SEP epoch proposal");
@@ -558,6 +581,34 @@ mod tests {
         assert!(ask(&mut xart, request(SLAVE_ID, 1, 12, 0), &mut buffers).is_err());
         ask(&mut xart, request(SLAVE_ID, 1, 13, 0), &mut buffers).unwrap();
         assert!(ask(&mut xart, request(SLAVE_ID, 1, 15, 0), &mut buffers).is_err());
+    }
+
+    #[test]
+    fn a_manifest_hash_commit_is_stored_and_other_types_refuse() {
+        let mut xart = xart();
+        let mut buffers = Buffers {
+            input: vec![0x3c; HASH_BYTES],
+            output: Vec::new(),
+        };
+        let commit = |slot, reserved, length| {
+            XartMessage {
+                slot,
+                reserved,
+                ..XartMessage::from_frame(request(SLAVE_ID, 4, 18, length))
+            }
+            .frame()
+        };
+        let reply = ask(&mut xart, commit(0xff, 1, 48), &mut buffers).unwrap();
+        let reply = XartMessage::from_frame(reply);
+        assert_eq!((reply.tag, reply.op, reply.length), (4, 0, 0));
+        assert_eq!(xart.store.firmware(), Ok(Some([0x3c; HASH_BYTES])));
+        // Other types, a missing hash and other lengths are not recovered.
+        for frame in [commit(0, 1, 48), commit(0xff, 0, 0), commit(0xff, 1, 32)] {
+            assert!(ask(&mut xart, frame, &mut buffers).is_err());
+        }
+        // An unmounted volume takes no commit.
+        ask(&mut xart, request(SLAVE_ID, 1, 13, 0), &mut buffers).unwrap();
+        assert!(ask(&mut xart, commit(0xff, 1, 48), &mut buffers).is_err());
     }
 
     #[test]

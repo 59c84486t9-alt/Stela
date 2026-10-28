@@ -160,9 +160,7 @@ impl Engine {
         Ok(Medium {
             id: generation()?,
             identity: card.identity,
-            kind: card.kind,
             sector_addressed: card.sector_addressed,
-            cache: card.cache,
             info: card.info,
             notify: card.notify,
         })
@@ -224,7 +222,7 @@ mod tests {
         assert!(failure.quarantined);
         assert_eq!(poison, [0xa5; 512]);
         let accesses = (hardware.borrow().reads, hardware.borrow().writes.len());
-        assert_eq!(card.flush(), Err(BlockError::Unsupported(STALE)));
+        assert_eq!(card.flush_cache(), Err(BlockError::Unsupported(STALE)));
         assert_eq!(host.poll().err(), Some(primary));
         assert_eq!(
             (hardware.borrow().reads, hardware.borrow().writes.len()),

@@ -157,10 +157,6 @@ impl BlockDevice for Image {
     fn write(&mut self, _: u64, _: &[u8]) -> Result<(), BlockError> {
         Err(BlockError::ReadOnly)
     }
-
-    fn flush(&mut self) -> Result<(), BlockError> {
-        Ok(())
-    }
 }
 
 /// The GPT of a whole-disk image and its block size.
@@ -178,6 +174,7 @@ fn table(path: &Path) -> Result<(gpt::Table, u64)> {
                 blocks: bytes / u64::from(block),
                 block_size: block,
                 read_only: true,
+                features: Default::default(),
             },
         };
         match gpt::read(&mut image) {
@@ -236,10 +233,6 @@ pub(crate) mod tests {
             self.bytes[at..at + data.len()].copy_from_slice(data);
             Ok(())
         }
-
-        fn flush(&mut self) -> Result<(), BlockError> {
-            Ok(())
-        }
     }
 
     /// A log region with one boot per entry of `boots`, each printing it.
@@ -255,6 +248,7 @@ pub(crate) mod tests {
                 blocks: boot_log::LOG_BYTES / 512,
                 block_size: 512,
                 read_only: false,
+                features: Default::default(),
             },
         };
         for line in boots {

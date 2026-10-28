@@ -15,7 +15,8 @@
 //! drivers reach through restore, boot, sleep, wake and shutdown.
 //!
 //! Stela's die choices: NVMe 1.3, one I/O queue, explicit linear geometry,
-//! 4/16 KiB queue pages, fixed 4 KiB NVMMU data pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
+//! 4/16 KiB queue pages, fixed 4 KiB NVMMU data pages, 4 KiB LBAs, 1 MiB maximum transfer, the
+//! host disk's volatile write cache, reported as the host's driver finds it, no
 //! optional encryption/SHA/firmware-slot updates or asynchronous events.
 //! The restore mode's boot-from-host image download is recorded, not run,
 //! and so are the restore updater's NAND tunable tables. Identity
@@ -29,6 +30,7 @@ mod commands;
 mod debug;
 mod die;
 mod geometry;
+mod host;
 mod namespace;
 mod prp;
 mod tunables;
@@ -38,7 +40,12 @@ use super::{
     interrupt::{AicInput, Wire},
 };
 use crate::platform::{apple::sart::Sart, dma::Port};
-use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, VecDeque},
+    vec,
+    vec::Vec,
+};
 pub use bfh::{BootImage, Identity};
 pub use geometry::QueueGeometry;
 pub use namespace::Description;
@@ -202,13 +209,18 @@ pub struct Submission {
     pub tunnel: Option<[u8; 80]>,
 }
 
+/// A command whose host transfer runs, with what completes it.
+struct Inflight {
+    queue: usize,
+    command: commands::Command,
+    wait: commands::Wait,
+}
+
+/// A command whose completion awaits room in its completion queue.
 struct Completed {
     queue: usize,
-    tag: u16,
-    tail: u16,
-    phase: bool,
-    cq: u64,
-    bytes: [u8; 16],
+    command: commands::Command,
+    outcome: commands::Outcome,
 }
 
 pub struct Ans {
@@ -225,8 +237,16 @@ pub struct Ans {
     tcb_bases: [u64; 2],
     nvmmu_control: u16,
     valid: Vec<bool>,
+    /// Submitted commands not yet executed, in order.
     pending: VecDeque<(usize, u16)>,
-    completed: Option<Completed>,
+    /// Commands whose host transfers run ([`host::HostDisk`]), by host key.
+    inflight: BTreeMap<u32, Inflight>,
+    /// When to look for the host transfers, in counter ticks
+    /// ([`host::HostDisk::next_look`]).
+    look: u64,
+    /// Executed commands, in the order they completed, whose completions
+    /// await room in their queues.
+    completed: VecDeque<Completed>,
     linear: bool,
     /// I/O queue attributes at 0x1210: 0's-based SQ entries in bits 15:0
     /// and CQ entries in bits 31:16, as AQA. Both writers size their rings
@@ -255,6 +275,14 @@ pub struct Ans {
 }
 
 impl Ans {
+    /// Every feature's default: only Volatile Write Cache is nonzero,
+    /// enabled where the host disk has one.
+    fn default_features(medium: &Medium) -> [u32; 12] {
+        let mut features = [0; 12];
+        features[commands::VOLATILE_WRITE_CACHE] = u32::from(medium.device.write_cache());
+        features
+    }
+
     pub fn new(
         backing: Box<dyn BlockDevice>,
         namespaces: &[Description],
@@ -270,6 +298,7 @@ impl Ans {
         geometry: QueueGeometry,
     ) -> Result<Self, &'static str> {
         let medium = Medium::new(backing, namespaces)?;
+        let features = Self::default_features(&medium);
         Ok(Self {
             lifecycle: LifecycleState {
                 powered: true,
@@ -291,13 +320,15 @@ impl Ans {
             nvmmu_control: geometry::NVMMU_CONTROL,
             valid: vec![false; geometry.tag_slots() as usize],
             pending: VecDeque::new(),
-            completed: None,
+            inflight: BTreeMap::new(),
+            look: 0,
+            completed: VecDeque::new(),
             linear: false,
             queue_attributes: None,
             modesel: 0,
             auto_queue: false,
             shutdown: false,
-            features: [0; 12],
+            features,
             debug: debug::DebugService::default(),
             timestamp: 0,
             os_build: [0; 16],
@@ -324,8 +355,28 @@ impl Ans {
         self.last_submission.as_ref()
     }
 
-    pub fn pending(&self) -> bool {
-        self.executing() && (self.shutdown || !self.pending.is_empty())
+    /// Whether a transfer at counter `now` would advance a command: one
+    /// waits to execute or to complete, or host transfers run and one has
+    /// completed or it is time to look for their completions.
+    pub fn pending(&self, now: u64) -> bool {
+        self.executing()
+            && (self.shutdown
+                || !self.pending.is_empty()
+                || !self.completed.is_empty()
+                || (!self.inflight.is_empty() && (now >= self.look || self.medium.device.posted())))
+    }
+
+    /// When to look for the running host transfers, if any run: at once
+    /// when one has completed.
+    pub fn host_look(&self) -> Option<u64> {
+        if self.inflight.is_empty() {
+            return None;
+        }
+        Some(if self.medium.device.posted() {
+            0
+        } else {
+            self.look
+        })
     }
 
     fn executing(&self) -> bool {
@@ -459,20 +510,40 @@ impl Ans {
                 self.shutdown = true;
             }
         } else {
-            if !self.pending.is_empty() {
+            if !self.pending.is_empty() || !self.inflight.is_empty() || !self.completed.is_empty() {
                 return Err("ANS disable with unprocessed submissions");
             }
             self.status = 0;
             self.queues = [Queue::default(); 2];
             self.valid.fill(false);
             self.shutdown = false;
-            // NVMe 1.4 section 5.11: a controller-level reset discards an
-            // uncommitted image download.
+            // NVMe 1.4 sections 5.11 and 7.3.2: a controller-level reset
+            // discards an uncommitted image download and returns every
+            // feature to its default.
             self.download = bfh::Download::default();
+            self.features = Self::default_features(&self.medium);
         }
         self.config = value;
         self.refresh_auto_queue();
         Ok(())
+    }
+
+    /// Every command the controller owns, by queue and tag: submitted, its
+    /// host transfer running, or its completion not yet published.
+    fn outstanding(&self) -> impl Iterator<Item = (usize, u16)> + '_ {
+        self.pending
+            .iter()
+            .copied()
+            .chain(
+                self.inflight
+                    .values()
+                    .map(|run| (run.queue, run.command.cid())),
+            )
+            .chain(
+                self.completed
+                    .iter()
+                    .map(|done| (done.queue, done.command.cid())),
+            )
     }
 
     fn submit(&mut self, queue: usize, tag: u16) -> Result<(), &'static str> {
@@ -493,7 +564,7 @@ impl Ans {
             .flatten()
             .map(|attributes| (attributes & 0xffff) as usize + 1);
         if limit
-            .is_some_and(|limit| self.pending.iter().filter(|&&(q, _)| q == queue).count() >= limit)
+            .is_some_and(|limit| self.outstanding().filter(|&(q, _)| q == queue).count() >= limit)
         {
             return Err("ANS pending commands exceed the programmed queue limit");
         }
@@ -522,133 +593,165 @@ impl Ans {
                 "ANS DMA while PMGR inhibits execution",
             ));
         }
-        while let Some(&(queue, tag)) = self.pending.front() {
-            if self.completed.is_none() {
-                self.last_submission = None;
-            }
-            let error = |reason| {
-                refuse(
-                    NAME,
-                    if queue == 0 { ADMIN_SUBMIT } else { IO_SUBMIT },
-                    Width::Word,
-                    Direction::Write,
-                    reason,
-                )
+        let address = |base: u64, bytes| base.checked_add(bytes).ok_or("ANS DMA address wraps");
+        let refusal = |queue: usize, reason| {
+            refuse(
+                NAME,
+                if queue == 0 { ADMIN_SUBMIT } else { IO_SUBMIT },
+                Width::Word,
+                Direction::Write,
+                reason,
+            )
+        };
+        // Host transfers that completed end their commands.
+        let now = port.access.now;
+        for (key, done) in self.medium.device.poll(now) {
+            let Some(inflight) = self.inflight.remove(&key) else {
+                return Err(refusal(1, "ANS host transfer for no command"));
             };
+            let queue = inflight.queue;
+            let outcome = self
+                .finish(inflight.wait, Some(done), port)
+                .map_err(|reason| refusal(queue, reason))?;
+            self.completed.push_back(Completed {
+                queue,
+                command: inflight.command,
+                outcome,
+            });
+        }
+        // Submitted commands execute in order; a host transfer runs while
+        // the next ones execute.
+        while let Some(&(queue, tag)) = self.pending.front() {
+            let error = |reason| refusal(queue, reason);
+            let q = self.queues[queue];
+            if !q.cq_enabled {
+                return Err(error("ANS completion queue is disabled"));
+            }
+            let mut raw = [0; 64];
+            port.read(
+                address(q.sq, u64::from(tag) * COMMAND_BYTES).map_err(error)?,
+                &mut raw,
+            )
+            .map_err(dma_error)
+            .map_err(error)?;
+            let mut command = commands::Command(raw);
+            if command.cid() != tag {
+                return Err(error("ANS SQ command ID differs from its linear tag"));
+            }
+            let mut tcb = [0; 128];
+            port.read(
+                address(self.tcb_bases[queue], u64::from(tag) * TCB_BYTES).map_err(error)?,
+                &mut tcb,
+            )
+            .map_err(dma_error)
+            .map_err(error)?;
+            self.last_submission = Some(Submission {
+                queue,
+                tag,
+                command: command.0,
+                tcb,
+                tunnel: None,
+            });
+            // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
+            // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier
+            // submissions leave them zero. The key area from 0x40 on must
+            // stay empty.
+            let mirror = &tcb[56..64];
+            if tcb[0] != 0 && tcb[0] != command.opcode()
+                || u16::from(tcb[2]) != tag
+                || tcb[3] != 0
+                || mirror != [0; 8] && mirror != &command.0[56..64]
+                || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
+            {
+                return Err(error(
+                    "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled",
+                ));
+            }
+            // The key area (bytes 0x40..) names the inline AES-XTS key for the
+            // sector (`sep::inline_key`). The SEP installs those keys over the
+            // unrecovered `sks` service, and the key area's slot/wrapped-key
+            // encoding is itself unrecovered (docs/research/ans2.md), so until
+            // both are recovered no key is installed and an inline-keyed
+            // command refuses here rather than passing data in the clear.
+            if tcb[64..].iter().any(|&b| b != 0) {
+                return Err(error(
+                    "ANS NVMMU inline AES-XTS key area is set, but no SEP key is installed for it \
+                     (sep::inline_key); its slot/wrapped-key encoding is not recovered",
+                ));
+            }
+            // SPTM's MAP_PAGES writes the request's IODirection to TCB byte
+            // 1 (`270c8130`): a grant of device writes (bit 0) and reads
+            // (bit 1). A read into an in-out descriptor grants both, so the
+            // command's own direction need only be within the grant.
+            let flags = tcb[1];
+            command.validate().map_err(error)?;
+            let direction = command.direction(queue).map_err(error)?;
+            if flags & !3 != 0 || direction & !flags != 0 {
+                return Err(error(
+                    "ANS NVMMU TCB DMA permissions do not grant the command's direction",
+                ));
+            }
+            if queue != 0 && matches!(command.opcode(), 1 | 2 | 5) && tcb[4..6] != command.0[48..50]
+            {
+                return Err(error("ANS NVMMU length differs from the command"));
+            }
+            command.0[24..40].copy_from_slice(&tcb[24..40]);
+            let executed = self.execute(queue, &command, port, sart).map_err(error)?;
+            self.pending.pop_front();
+            match executed {
+                commands::Executed::Done(outcome) => self.completed.push_back(Completed {
+                    queue,
+                    command,
+                    outcome,
+                }),
+                commands::Executed::Host(wait) => {
+                    let key = (queue as u32) << 16 | u32::from(tag);
+                    self.inflight.insert(
+                        key,
+                        Inflight {
+                            queue,
+                            command,
+                            wait,
+                        },
+                    );
+                }
+            }
+        }
+        if !self.inflight.is_empty() {
+            self.look = self.medium.device.next_look(now);
+        }
+        // Completions publish in the order their commands completed, each
+        // while its queue has room: queue backpressure leaves every
+        // completed tag owned until the guest advances CQ head, and no
+        // completion is overwritten.
+        let mut index = 0;
+        while index < self.completed.len() {
+            let Completed {
+                queue,
+                ref command,
+                ref outcome,
+            } = self.completed[index];
+            let error = |reason| refusal(queue, reason);
             let q = self.queues[queue];
             if !q.cq_enabled {
                 return Err(error("ANS completion queue is disabled"));
             }
             if q.pending == q.cq_entries {
-                // Queue backpressure leaves every accepted tag owned until
-                // the guest advances CQ head; no completion is overwritten.
-                break;
+                index += 1;
+                continue;
             }
-            let address = |base: u64, bytes| base.checked_add(bytes).ok_or("ANS DMA address wraps");
-            if self.completed.is_none() {
-                let mut raw = [0; 64];
-                port.read(
-                    address(q.sq, u64::from(tag) * COMMAND_BYTES).map_err(error)?,
-                    &mut raw,
-                )
-                .map_err(dma_error)
-                .map_err(error)?;
-                let mut command = commands::Command(raw);
-                if command.cid() != tag {
-                    return Err(error("ANS SQ command ID differs from its linear tag"));
-                }
-                let mut tcb = [0; 128];
-                port.read(
-                    address(self.tcb_bases[queue], u64::from(tag) * TCB_BYTES).map_err(error)?,
-                    &mut tcb,
-                )
-                .map_err(dma_error)
-                .map_err(error)?;
-                self.last_submission = Some(Submission {
-                    queue,
-                    tag,
-                    command: command.0,
-                    tcb,
-                    tunnel: None,
-                });
-                // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
-                // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier
-                // submissions leave them zero. The key area from 0x40 on must
-                // stay empty.
-                let mirror = &tcb[56..64];
-                if tcb[0] != 0 && tcb[0] != command.opcode()
-                    || u16::from(tcb[2]) != tag
-                    || tcb[3] != 0
-                    || mirror != [0; 8] && mirror != &command.0[56..64]
-                    || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
-                {
-                    return Err(error(
-                        "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled",
-                    ));
-                }
-                // The key area (bytes 0x40..) names the inline AES-XTS key for the
-                // sector (`sep::inline_key`). The SEP installs those keys over the
-                // unrecovered `sks` service, and the key area's slot/wrapped-key
-                // encoding is itself unrecovered (docs/research/ans2.md), so until
-                // both are recovered no key is installed and an inline-keyed
-                // command refuses here rather than passing data in the clear.
-                if tcb[64..].iter().any(|&b| b != 0) {
-                    return Err(error(
-                        "ANS NVMMU inline AES-XTS key area is set, but no SEP key is installed for it \
-                     (sep::inline_key); its slot/wrapped-key encoding is not recovered",
-                    ));
-                }
-                // SPTM's MAP_PAGES writes the request's IODirection to TCB byte
-                // 1 (`270c8130`): a grant of device writes (bit 0) and reads
-                // (bit 1). A read into an in-out descriptor grants both, so the
-                // command's own direction need only be within the grant.
-                let flags = tcb[1];
-                command.validate().map_err(error)?;
-                let direction = command.direction(queue).map_err(error)?;
-                if flags & !3 != 0 || direction & !flags != 0 {
-                    return Err(error(
-                        "ANS NVMMU TCB DMA permissions do not grant the command's direction",
-                    ));
-                }
-                if queue != 0
-                    && matches!(command.opcode(), 1 | 2 | 5)
-                    && tcb[4..6] != command.0[48..50]
-                {
-                    return Err(error("ANS NVMMU length differs from the command"));
-                }
-                command.0[24..40].copy_from_slice(&tcb[24..40]);
-                let outcome = self.execute(queue, &command, port, sart).map_err(error)?;
-                let mut completion = [0; 16];
-                completion[..4].copy_from_slice(&outcome.result.to_le_bytes());
-                // Linear SQs have no advancing head; the consumed slot is tag.
-                completion[8..10].copy_from_slice(&tag.to_le_bytes());
-                completion[10..12].copy_from_slice(&(queue as u16).to_le_bytes());
-                completion[12..14].copy_from_slice(&command.cid().to_le_bytes());
-                completion[14..]
-                    .copy_from_slice(&((outcome.status << 1) | u16::from(q.phase)).to_le_bytes());
-                self.completed = Some(Completed {
-                    queue,
-                    tag,
-                    tail: q.tail,
-                    phase: q.phase,
-                    cq: q.cq,
-                    bytes: completion,
-                });
-            }
-            let completed = self.completed.as_ref().unwrap();
-            if (
-                completed.queue,
-                completed.tag,
-                completed.tail,
-                completed.phase,
-                completed.cq,
-            ) != (queue, tag, q.tail, q.phase, q.cq)
-            {
-                return Err(error("ANS completion publication owner changed"));
-            }
+            let tag = command.cid();
+            let mut completion = [0; 16];
+            completion[..4].copy_from_slice(&outcome.result.to_le_bytes());
+            // Linear SQs have no advancing head; the consumed slot is tag.
+            completion[8..10].copy_from_slice(&tag.to_le_bytes());
+            completion[10..12].copy_from_slice(&(queue as u16).to_le_bytes());
+            completion[12..14].copy_from_slice(&tag.to_le_bytes());
+            completion[14..]
+                .copy_from_slice(&((outcome.status << 1) | u16::from(q.phase)).to_le_bytes());
             port.write(
                 address(q.cq, u64::from(q.tail) * COMPLETION_BYTES).map_err(error)?,
-                &completed.bytes,
+                &completion,
             )
             .map_err(dma_error)
             .map_err(error)?;
@@ -659,11 +762,14 @@ impl Ans {
                 q.tail = 0;
                 q.phase = !q.phase;
             }
-            self.pending.pop_front();
-            self.completed = None;
+            self.completed.remove(index);
             self.update_irq(port.access);
         }
-        if self.shutdown && self.pending.is_empty() {
+        if self.shutdown
+            && self.pending.is_empty()
+            && self.inflight.is_empty()
+            && self.completed.is_empty()
+        {
             self.medium.device.flush().map_err(|_| {
                 refuse(
                     NAME,
@@ -730,7 +836,7 @@ impl MmioDevice for Ans {
         // of a tag whose command is still pending, has no model.
         if (VDMA_CACHE..VDMA_CACHE + self.geometry.vdma_bytes()).contains(&offset) {
             let tag = (offset - VDMA_CACHE) / VDMA_ENTRY_BYTES;
-            let pending = self.pending.iter().any(|&(_, t)| u64::from(t) == tag);
+            let pending = self.outstanding().any(|(_, t)| u64::from(t) == tag);
             if width != Width::Word || !offset.is_multiple_of(VDMA_ENTRY_BYTES) || pending {
                 return Err(refuse(
                     NAME,
@@ -751,8 +857,7 @@ impl MmioDevice for Ans {
         {
             let first = ((offset - TAG_STATUS) * 2) as u16;
             return Ok(self
-                .pending
-                .iter()
+                .outstanding()
                 .filter(|(_, tag)| (first..first + 8).contains(tag))
                 .fold(0, |bits, (_, tag)| bits | (1 << ((tag - first) * 4))));
         }
@@ -817,7 +922,7 @@ impl MmioDevice for Ans {
             if self.config & ENABLE != 0 && !matches!(base, IO_SQ | IO_CQ) {
                 return Err(error("ANS queue/TCB base changed while enabled"));
             }
-            if !self.pending.is_empty() || self.queues[1].pending != 0 {
+            if self.outstanding().next().is_some() || self.queues[1].pending != 0 {
                 return Err(error("ANS base changed with outstanding commands"));
             }
             // SPTM 0x270c88c4..0x270c88e8 and 0x270c76cc..0x270c7750
@@ -877,7 +982,7 @@ impl MmioDevice for Ans {
                     .acknowledge(head)
                     .map_err(error)?;
             }
-            LINEAR if value <= 1 && self.pending.is_empty() => self.linear = value != 0,
+            LINEAR if value <= 1 && self.outstanding().next().is_none() => self.linear = value != 0,
             MAX_PENDING
                 if value & 0xffff < u32::from(self.geometry.ring_entries())
                     && value >> 16 < u32::from(self.geometry.ring_entries()) =>
@@ -885,7 +990,7 @@ impl MmioDevice for Ans {
                 let q = self.queues[1];
                 if q.sq_enabled && q.sq_entries != (value as u16 + 1)
                     || q.cq_enabled && q.cq_entries != ((value >> 16) as u16 + 1)
-                    || self.pending.iter().any(|(queue, _)| *queue == 1)
+                    || self.outstanding().any(|(queue, _)| queue == 1)
                 {
                     return Err(error(
                         "ANS IOQA changes an active queue or outstanding submission",
@@ -915,7 +1020,7 @@ impl MmioDevice for Ans {
                 )
                 .map_err(error)?,
             TCB_INVALIDATE if value < u32::from(self.geometry.tag_slots()) => {
-                if self.pending.iter().any(|&(_, tag)| u32::from(tag) == value) {
+                if self.outstanding().any(|(_, tag)| u32::from(tag) == value) {
                     return Err(error("ANS invalidation of a pending command"));
                 }
                 self.valid[value as usize] = false;
@@ -939,7 +1044,7 @@ mod tests {
         dma::{Memory, Physical, tests::Ram},
     };
     use alloc::{vec, vec::Vec};
-    use stela_drivers::block::RamDisk;
+    use stela_drivers::block::{BlockError, RamDisk};
     const RAM: u64 = 0x8_0000_0000;
     const SQ: u64 = RAM;
     const CQ: u64 = RAM + 0x1000;
@@ -966,7 +1071,9 @@ mod tests {
             Self::with_geometry(QueueGeometry::DEFAULT)
         }
         fn with_geometry(geometry: QueueGeometry) -> Self {
-            let disk = Box::new(RamDisk::new("partition-id", 32, 4096));
+            Self::with_disk(Box::new(RamDisk::new("partition-id", 32, 4096)), geometry)
+        }
+        fn with_disk(disk: Box<dyn BlockDevice>, geometry: QueueGeometry) -> Self {
             let mut rig = Self {
                 ans: Ans::with_geometry(
                     disk,
@@ -1240,7 +1347,7 @@ mod tests {
             rig.ans.check_lifecycle(gated).unwrap();
             rig.ans
                 .set_lifecycle(gated, &mut Access::new(0, 0, &mut rig.latch));
-            assert!(!rig.ans.pending());
+            assert!(!rig.ans.pending(0));
             assert!(rig.run().is_err());
             assert_eq!(rig.ans.pending.len(), 1);
             assert_eq!(rig.bytes(CQ, 16), completion);
@@ -1255,7 +1362,7 @@ mod tests {
             );
             rig.ans
                 .set_lifecycle(active, &mut Access::new(0, 0, &mut rig.latch));
-            assert!(rig.ans.pending());
+            assert!(rig.ans.pending(0));
         }
         // A malformed not-yet-filled SQE remains owned rather than being
         // silently completed by gate release.
@@ -1422,6 +1529,67 @@ mod tests {
             u16::from_le_bytes(rig.bytes(IOCQ + 2 * 16 + 14, 2).try_into().unwrap()) >> 1,
             0x80
         );
+    }
+
+    /// A RAM disk with a volatile write cache that counts its flushes.
+    struct Cached {
+        disk: RamDisk,
+        flushes: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
+    }
+
+    impl BlockDevice for Cached {
+        fn identity(&self) -> &stela_drivers::block::Identity {
+            self.disk.identity()
+        }
+        fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+            self.disk.read(lba, buffer)
+        }
+        fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+            self.disk.write(lba, data)
+        }
+        fn flush_cache(&mut self) -> Result<(), BlockError> {
+            self.flushes
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_host_write_cache_is_reported_and_flushed_only_when_the_guest_asks() {
+        let flushes = alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let mut disk = RamDisk::new("partition-id", 32, 4096);
+        disk.identity.features.write_cache = true;
+        let disk = Box::new(Cached {
+            disk,
+            flushes: flushes.clone(),
+        });
+        let mut rig = Rig::with_disk(disk, QueueGeometry::DEFAULT);
+        let flushed = || flushes.load(core::sync::atomic::Ordering::Relaxed);
+        rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(rig.bytes(DATA + 525, 1), [1], "VWC");
+        rig.retire(0, 0);
+        rig.submit(0, 1, 0xa, 0, 0, [6, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(rig.bytes(CQ + 16, 4), 1u32.to_le_bytes(), "enabled");
+        rig.retire(0, 1);
+        rig.io_queues();
+        // A write completes cached; Force Unit Access and Flush reach the
+        // host's cache.
+        rig.submit(1, 0, 1, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+        rig.retire(1, 0);
+        assert_eq!(flushed(), 0);
+        rig.submit(1, 1, 1, 1, DATA, [3, 0, 1 << 30, 0, 0, 0])
+            .unwrap();
+        rig.retire(1, 1);
+        assert_eq!(flushed(), 1);
+        rig.submit(1, 2, 0, 1, 0, [0; 6]).unwrap();
+        rig.retire(1, 2);
+        assert_eq!(flushed(), 2);
+        // With this controller's cache off, each write is durable.
+        rig.submit(0, 2, 9, 0, 0, [6, 0, 0, 0, 0, 0]).unwrap();
+        rig.retire(0, 2);
+        rig.submit(1, 3, 1, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+        rig.retire(1, 3);
+        assert_eq!(flushed(), 3);
     }
 
     #[test]
@@ -1742,8 +1910,9 @@ mod tests {
         rig.submit(0, 1, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
         let before = rig.bytes(CQ, 32);
         rig.submit(0, 2, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
-        assert_eq!(rig.ans.pending.front(), Some(&(0, 2)));
-        assert!(rig.ans.completed.is_none());
+        // The third executes; its completion waits for room.
+        assert!(rig.ans.pending.is_empty());
+        assert_eq!(rig.ans.completed.len(), 1);
         assert_eq!(rig.bytes(CQ, 32), before);
         assert!(
             rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | 1 << 12))
@@ -1822,12 +1991,12 @@ mod tests {
             rig.write(ADMIN_SUBMIT, u64::from(tag)).unwrap();
             rig.run().unwrap();
             assert_eq!(rig.bytes(LARGE_CQ, before.len()), before);
-            assert_eq!(rig.ans.pending.front(), Some(&(0, tag)));
+            assert_eq!(rig.ans.completed.len(), 1);
             assert!(rig.write(CC, 0).is_err());
             rig.write(ADMIN_HEAD, 1).unwrap();
             rig.run().unwrap();
             assert!(rig.ans.pending.is_empty());
-            assert!(rig.ans.completed.is_none());
+            assert!(rig.ans.completed.is_empty());
             assert_eq!(rig.bytes(LARGE_CQ + 14, 2), [0, 0]);
             assert!(rig.write(ADMIN_SUBMIT, u64::from(handoff)).is_err());
         }
@@ -1916,8 +2085,9 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(rig.ans.pending.front(), Some(&(0, tag)));
-        assert!(rig.ans.completed.is_some());
+        // Executed once: its completion stays owned until published.
+        assert!(rig.ans.pending.is_empty());
+        assert_eq!(rig.ans.completed.len(), 1);
         assert_eq!(rig.ans.queues[0].pending, 0);
         assert_eq!(rig.ans.queues[0].tail, 0);
         assert!(!rig.latch.is_asserted(Wire::Aic(IRQ)));
@@ -1938,7 +2108,7 @@ mod tests {
         rig.ans
             .set_lifecycle(stopped, &mut Access::new(0, 0, &mut rig.latch));
         assert!(rig.run().is_err());
-        assert!(rig.ans.completed.is_some());
+        assert_eq!(rig.ans.completed.len(), 1);
         assert!(
             rig.ans
                 .check_lifecycle(LifecycleState {
@@ -1953,7 +2123,7 @@ mod tests {
         large_command(&mut rig, tag, 0xff, 0, [0; 6]);
         rig.run().unwrap();
         assert!(rig.ans.pending.is_empty());
-        assert!(rig.ans.completed.is_none());
+        assert!(rig.ans.completed.is_empty());
         assert_eq!(rig.bytes(LARGE_CQ + 12, 4), [252, 0, 1, 0]);
         assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
     }
@@ -1989,10 +2159,10 @@ mod tests {
         assert_eq!(rig.bytes(LARGE_DATA + 4092, 4), [0x6b, 0x10, 0x6b, 0x10]);
         assert_eq!(rig.bytes(LARGE_CQ, 16), [0; 16]);
         assert_eq!(rig.ans.pending.front(), Some(&(0, tag)));
-        assert!(rig.ans.completed.is_none());
+        assert!(rig.ans.completed.is_empty());
         assert!(rig.write(TCB_INVALIDATE, u64::from(tag)).is_err());
         rig.run().unwrap();
-        assert!(rig.ans.completed.is_none());
+        assert!(rig.ans.completed.is_empty());
         assert_eq!(rig.ans.queues[0].pending, 1);
     }
     #[test]

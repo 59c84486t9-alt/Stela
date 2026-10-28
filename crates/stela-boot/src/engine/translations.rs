@@ -11,15 +11,23 @@
 //! clusters ([`write`]), found by Stela's own FAT32 reader on the
 //! partition the storage drivers opened. Every failure leaves the boot
 //! running without a store, or without writing it.
+//!
+//! When every PE runs on its own host core (the default), their machines
+//! share the store, behind one lock ([`Shared`]), and it keeps the blocks
+//! any of them compiled for the others to install ([`share`]).
 use super::bundle::Bytes;
 use crate::{firmware, handoff::Region, output, paging::PAGE};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
-use core::cell::UnsafeCell;
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use stela_drivers::block::BlockDevice;
 use stela_runtime::{
+    machine::{Offer, Translations},
     pc::{fat32::Fat32, gpt::Guid},
     translations::{
-        self, Digest,
+        self, Digest, Record,
         pack::{self, Pack, Store},
     },
 };
@@ -272,20 +280,89 @@ struct Boot {
     partition: Option<Box<dyn BlockDevice>>,
 }
 
-/// One PE runs the engine and its host at a time.
-struct Cell(UnsafeCell<Option<Boot>>);
-// SAFETY: the engine runs on one host CPU; nothing else reaches the store.
+/// The boot's store, which every PE's machine reaches in turn.
+struct Cell {
+    held: AtomicBool,
+    boot: UnsafeCell<Option<Boot>>,
+}
+// SAFETY: `with_boot` holds `held` for every access.
 unsafe impl Sync for Cell {}
-static BOOT: Cell = Cell(UnsafeCell::new(None));
+static BOOT: Cell = Cell {
+    held: AtomicBool::new(false),
+    boot: UnsafeCell::new(None),
+};
 
-fn boot_state() -> &'static mut Option<Boot> {
-    // SAFETY: as for `Cell`: one CPU, and no reference outlives a call.
-    unsafe { &mut *BOOT.0.get() }
+/// Run `f` on the boot's store, alone. No interrupt handler reaches it.
+fn with_boot<R>(f: impl FnOnce(&mut Option<Boot>) -> R) -> R {
+    while BOOT
+        .held
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: `held` excludes every other access until it is released.
+    let result = f(unsafe { &mut *BOOT.boot.get() });
+    BOOT.held.store(false, Ordering::Release);
+    result
 }
 
-/// The store the engine uses, if the loader read one.
-pub fn store() -> Option<&'static mut Store<'static>> {
-    boot_state().as_mut().map(|boot| &mut boot.store)
+/// The engine's view of the boot's store, from any PE's machine.
+pub struct Shared;
+
+impl Translations for Shared {
+    /// The record, decoded while the other PEs reach the store: the pack's
+    /// bytes outlive the lock.
+    fn record(&mut self, key: &Digest) -> Option<alloc::sync::Arc<Record>> {
+        let (bytes, translator) = with_boot(|boot| {
+            let store = &boot.as_ref()?.store;
+            Some((store.stored(key), *store.translator()))
+        })?;
+        let record = bytes.and_then(|bytes| Record::decode(bytes, &translator, key).ok());
+        with_boot(|boot| {
+            if let Some(boot) = boot {
+                boot.store.looked_up(key, bytes.is_some(), record.is_some());
+            }
+        });
+        record.map(alloc::sync::Arc::new)
+    }
+
+    fn prepared(
+        &mut self,
+        key: &Digest,
+        pc: u64,
+        context: &Digest,
+    ) -> Option<alloc::sync::Arc<stela_compiler::block::CompiledBlock>> {
+        with_boot(|boot| boot.as_mut()?.store.prepared(key, pc, context))
+    }
+
+    fn offer(&mut self, offer: Offer) {
+        with_boot(|boot| {
+            if let Some(boot) = boot {
+                boot.store.offer(offer);
+            }
+        });
+    }
+}
+
+/// The store the engine uses, if the loader read one or the PEs share one.
+pub fn store() -> Option<&'static mut Shared> {
+    with_boot(|boot| boot.is_some()).then(|| Box::leak(Box::new(Shared)))
+}
+
+/// Keep the blocks any PE compiles, up to `bound` bytes of native code, for
+/// the others, which run on host cores of their own: in the loader's store,
+/// or in one of this boot alone.
+pub fn share(bound: usize) {
+    with_boot(|boot| {
+        let boot = boot.get_or_insert_with(|| Boot {
+            store: Store::new(translations::translator_id(), None).0,
+            bound: 0,
+            path: String::new(),
+            partition: None,
+        });
+        boot.store.share(bound);
+    });
 }
 
 /// Make the store of the handoff file `contents` the engine's: the GPT
@@ -312,11 +389,13 @@ pub fn install(contents: &'static [u8]) -> Option<Guid> {
         }
         (None, None) => output::arguments(format_args!("TRANSLATIONS no pack yet\n")),
     }
-    *boot_state() = Some(Boot {
-        store,
-        bound,
-        path: pack_path(&translator, "/"),
-        partition: None,
+    with_boot(|boot| {
+        *boot = Some(Boot {
+            store,
+            bound,
+            path: pack_path(&translator, "/"),
+            partition: None,
+        })
     });
     let partition = Guid(contents[16..32].try_into().expect("a GUID"));
     (flags & WRITABLE != 0).then_some(partition)
@@ -324,9 +403,11 @@ pub fn install(contents: &'static [u8]) -> Option<Guid> {
 
 /// Keep `partition`, the store's volume, for [`write`].
 pub fn set_partition(partition: Box<dyn BlockDevice>) {
-    if let Some(boot) = boot_state() {
-        boot.partition = Some(partition);
-    }
+    with_boot(|boot| {
+        if let Some(boot) = boot {
+            boot.partition = Some(partition);
+        }
+    });
 }
 
 /// At a quiescent point (the guest restarts or powers off): prove the
@@ -337,7 +418,7 @@ pub fn write() {
         bound,
         path,
         partition: Some(partition),
-    }) = boot_state().take()
+    }) = with_boot(Option::take)
     else {
         return;
     };

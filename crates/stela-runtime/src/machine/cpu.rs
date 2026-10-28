@@ -14,8 +14,6 @@ use super::{
     },
 };
 use crate::scalable::ScalableState;
-use alloc::rc::Rc;
-use core::cell::RefCell;
 use stela_compiler::{
     GuestState,
     aarch64::scalable::{ScalableMode, VectorLength},
@@ -260,12 +258,12 @@ pub struct Cpu {
     pub retired: u64,
     /// The CTRR registers of this PE's cluster, shared with its other PEs
     /// (`machine::ctrr`).
-    pub ctrr: Rc<RefCell<super::ctrr::Cluster>>,
+    pub ctrr: super::shared::Shared<super::ctrr::Cluster>,
     /// This PE's own CTRR registers on the M4 and later.
     pub ctrr_core: super::ctrr::Core,
     /// What iBoot left in the core lock registers, which every PE and
     /// cluster starts from.
-    pub core_locks: Rc<super::ctrr::Handoff>,
+    pub core_locks: alloc::sync::Arc<super::ctrr::Handoff>,
     /// The region the memory controller has locked against writes, first
     /// and last byte, as the engine last read it from the devices.
     pub memory_lock: super::mmu::MemoryLocks,
@@ -415,9 +413,9 @@ impl Cpu {
             pmu: None,
             amu: None,
             retired: 0,
-            ctrr: Rc::default(),
+            ctrr: Default::default(),
             ctrr_core: super::ctrr::Core::default(),
-            core_locks: Rc::default(),
+            core_locks: Default::default(),
             memory_lock: [None; 4],
             degraded: alloc::collections::BTreeMap::new(),
         }

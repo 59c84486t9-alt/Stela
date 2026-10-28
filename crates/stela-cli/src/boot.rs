@@ -201,9 +201,6 @@ fn mount(
             }
             Ok(())
         }
-        fn flush(&mut self) -> std::result::Result<(), stela_drivers::block::BlockError> {
-            Ok(())
-        }
     }
     impl ConsoleSink for Discard {
         fn transmit(&mut self, _: u8) -> std::result::Result<(), ConsoleBusy> {
@@ -274,6 +271,7 @@ fn mount(
                         blocks: 256 << 18,
                         block_size: 4096,
                         read_only: false,
+                        features: Default::default(),
                     },
                     written: Default::default(),
                 }) as Box<dyn stela_drivers::block::BlockDevice>

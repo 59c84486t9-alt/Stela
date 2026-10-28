@@ -1,7 +1,7 @@
 //! GUID partition tables, and a block device confined to one partition.
 use alloc::{format, string::String, vec::Vec};
 use core::{fmt, str::FromStr};
-use stela_drivers::block::{BlockDevice, BlockError, Identity};
+use stela_drivers::block::{BlockDevice, BlockError, Command, Finished, Identity};
 
 const SIGNATURE: &[u8; 8] = b"EFI PART";
 const HEADER_BYTES: usize = 92;
@@ -357,8 +357,49 @@ impl<D: BlockDevice> BlockDevice for PartitionDevice<D> {
         self.disk.write(self.first_lba + lba, data)
     }
 
-    fn flush(&mut self) -> Result<(), BlockError> {
-        self.disk.flush()
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
+        self.disk.flush_cache()
+    }
+
+    fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.identity.check_write(lba, data.len())?;
+        self.disk.write_fua(self.first_lba + lba, data)
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        let command = Command::Discard { lba, blocks }.within(&self.identity, self.first_lba)?;
+        self.disk.execute(command).map(drop)
+    }
+
+    fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
+        let command =
+            Command::WriteZeroes { lba, blocks, unmap }.within(&self.identity, self.first_lba)?;
+        self.disk.execute(command).map(drop)
+    }
+
+    fn depth(&self) -> usize {
+        self.disk.depth()
+    }
+
+    fn room(&self) -> bool {
+        self.disk.room()
+    }
+
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.disk
+            .start(command.within(&self.identity, self.first_lba)?)
+    }
+
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        self.disk.finish(tag)
+    }
+
+    fn posted(&self) -> bool {
+        self.disk.posted()
+    }
+
+    fn signals(&self) -> bool {
+        self.disk.signals()
     }
 }
 
@@ -452,7 +493,9 @@ pub(crate) mod tests {
     fn a_partition_device_never_reaches_outside_its_partition() {
         let data = DATA.parse().unwrap();
         let target = partition(data, "AAAAAAAA-0000-0000-0000-000000000002", 100, 103);
-        let disk = formatted("s", core::slice::from_ref(&target));
+        let mut disk = formatted("s", core::slice::from_ref(&target));
+        // A cache to flush: the view passes its flush through.
+        disk.identity.features.write_cache = true;
         let before = disk.bytes.clone();
         let mut view = PartitionDevice::new(disk, target);
         assert_eq!(view.identity().blocks, 4);

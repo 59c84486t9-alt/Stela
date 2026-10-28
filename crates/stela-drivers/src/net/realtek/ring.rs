@@ -121,7 +121,8 @@ mod tests {
     }
     #[test]
     fn device_ownership_ring_wrap_padding_fcs_and_corruption_boundaries() {
-        let mut backing = vec![0u64; 40_000];
+        // Both rings, plus room for alignment.
+        let mut backing = vec![0u64; (2 * DESCRIPTORS * (DESCRIPTOR + BUFFER) + 4096) / 8];
         let start = backing.as_mut_ptr() as u64;
         // SAFETY: backing remains alive and no other accesses alias the allocator.
         let mut dma = unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
@@ -129,7 +130,8 @@ mod tests {
         let mut rx = Ring::new(&mut dma, true).unwrap();
         tx.initialize(false);
         rx.initialize(true);
-        for pass in 0..19 {
+        // Each slot sees every length, and the ring wraps.
+        for pass in 0..4 {
             for index in 0..DESCRIPTORS {
                 let length = [14, 59, 60, MAX_FRAME][(pass + index) % 4];
                 let frame: Vec<u8> = (0..length)

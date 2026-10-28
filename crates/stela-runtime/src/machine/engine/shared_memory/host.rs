@@ -232,6 +232,14 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         // SAFETY: every source/host/alias writer uses this same physical domain.
         unsafe { self.ram.publish_physical(physical, data).is_ok() }
     }
+    fn compare_exchange_ram(
+        &mut self,
+        physical: u64,
+        expected: &mut [u8],
+        new: &[u8],
+    ) -> Option<bool> {
+        self.local.compare_exchange_ram(physical, expected, new)
+    }
     fn check_ram_range(
         &mut self,
         physical: u64,

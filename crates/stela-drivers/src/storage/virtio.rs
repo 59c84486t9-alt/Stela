@@ -2,7 +2,7 @@
 //! `virtio-blk-pci` presents them.
 use crate::{
     Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity, Transport, ascii},
+    block::{BlockDevice, BlockError, Features, Identity, Transport, WriteZeroes, ascii},
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
@@ -19,10 +19,17 @@ const TRANSITIONAL_BLOCK: u16 = 0x1001;
 const FEATURE_READ_ONLY: u64 = 1 << 5;
 const FEATURE_BLOCK_SIZE: u64 = 1 << 6;
 const FEATURE_FLUSH: u64 = 1 << 9;
+const FEATURE_DISCARD: u64 = 1 << 13;
+const FEATURE_WRITE_ZEROES: u64 = 1 << 14;
 
 /// Configuration space: capacity in sectors, and the logical block size.
 const CONFIG_CAPACITY: usize = 0x00;
 const CONFIG_BLOCK_SIZE: usize = 0x14;
+/// The most sectors one discard, and one Write Zeroes, may take, and
+/// whether Write Zeroes may deallocate (virtio 1.2 §5.2.4).
+const CONFIG_MAX_DISCARD: usize = 0x24;
+const CONFIG_MAX_WRITE_ZEROES: usize = 0x30;
+const CONFIG_WRITE_ZEROES_UNMAP: usize = 0x38;
 
 /// `virtio_blk_req`: type, reserved, sector, then the device's status byte
 /// after the data (virtio 1.2 §5.2.6).
@@ -40,6 +47,12 @@ const REQUEST_IN: u32 = 0;
 const REQUEST_OUT: u32 = 1;
 const REQUEST_FLUSH: u32 = 4;
 const REQUEST_GET_ID: u32 = 8;
+const REQUEST_DISCARD: u32 = 11;
+const REQUEST_WRITE_ZEROES: u32 = 13;
+/// `virtio_blk_discard_write_zeroes`: sector, sector count, then flags
+/// whose bit 0 lets Write Zeroes deallocate.
+const SEGMENT_BYTES: usize = 16;
+const SEGMENT_UNMAP: u32 = 1;
 
 const QUEUE_ENTRIES: u16 = 8;
 const BOUNCE_BYTES: usize = 64 * 1024;
@@ -58,7 +71,6 @@ pub struct VirtioBlk {
     bounce: DmaBuffer,
     entries: u16,
     next: u16,
-    flush: bool,
     sectors_per_block: u64,
     identity: Identity,
     clock: Clock,
@@ -74,8 +86,13 @@ impl VirtioBlk {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
         let transport = Modern::new(function, handoff)?;
-        let accepted =
-            transport.negotiate(FEATURE_READ_ONLY | FEATURE_BLOCK_SIZE | FEATURE_FLUSH)?;
+        let accepted = transport.negotiate(
+            FEATURE_READ_ONLY
+                | FEATURE_BLOCK_SIZE
+                | FEATURE_FLUSH
+                | FEATURE_DISCARD
+                | FEATURE_WRITE_ZEROES,
+        )?;
         let queue = dma.allocate(4096, 4096)?;
         let (entries, notify) = transport.queue(handoff, 0, QUEUE_ENTRIES, &queue)?;
         transport.ready();
@@ -92,6 +109,25 @@ impl VirtioBlk {
             return Err(BlockError::Unsupported("virtio block size"));
         }
         let sectors_per_block = u64::from(block_size) / SECTOR;
+        // Linux `virtblk_probe`: a limit of zero is none, and one command
+        // counts at most a 32-bit number of sectors.
+        let blocks = |offset| {
+            let sectors = match device.read32(offset) {
+                0 => u32::MAX,
+                sectors => sectors,
+            };
+            (u64::from(sectors) / sectors_per_block).max(1)
+        };
+        let features = Features {
+            write_cache: accepted & FEATURE_FLUSH != 0,
+            fua: false,
+            max_transfer: BOUNCE_BYTES,
+            discard: (accepted & FEATURE_DISCARD != 0).then(|| blocks(CONFIG_MAX_DISCARD)),
+            write_zeroes: (accepted & FEATURE_WRITE_ZEROES != 0).then(|| WriteZeroes {
+                blocks: blocks(CONFIG_MAX_WRITE_ZEROES),
+                unmap: device.read8(CONFIG_WRITE_ZEROES_UNMAP) != 0,
+            }),
+        };
         let mut driver = Self {
             device,
             notify,
@@ -100,7 +136,6 @@ impl VirtioBlk {
             bounce: dma.allocate(BOUNCE_BYTES, 4096)?,
             entries,
             next: 0,
-            flush: accepted & FEATURE_FLUSH != 0,
             sectors_per_block,
             identity: Identity {
                 transport: Transport::VirtioBlk,
@@ -110,6 +145,7 @@ impl VirtioBlk {
                 blocks: 0,
                 block_size,
                 read_only: accepted & FEATURE_READ_ONLY != 0,
+                features,
             },
             clock: handoff.clock,
             fault: None,
@@ -189,6 +225,16 @@ impl VirtioBlk {
         }
     }
 
+    /// Discard or Write Zeroes `blocks` blocks from `lba`: one segment.
+    fn segment(&mut self, kind: u32, lba: u64, blocks: u64, flags: u32) -> Result<(), BlockError> {
+        let sectors = u32::try_from(blocks * self.sectors_per_block)
+            .map_err(|_| BlockError::Unsupported("a virtio segment past 2^32 sectors"))?;
+        self.bounce.write(0, lba * self.sectors_per_block);
+        self.bounce.write(8, sectors);
+        self.bounce.write(12, flags);
+        self.submit(kind, 0, SEGMENT_BYTES, false)
+    }
+
     fn chunk_blocks(&self) -> u64 {
         (BOUNCE_BYTES / self.identity.block_size as usize) as u64
     }
@@ -228,11 +274,16 @@ impl BlockDevice for VirtioBlk {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), BlockError> {
-        // Without FLUSH the device has no volatile write cache to empty.
-        match self.flush {
-            true => self.submit(REQUEST_FLUSH, 0, 0, false),
-            false => Ok(()),
-        }
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
+        self.submit(REQUEST_FLUSH, 0, 0, false)
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        self.segment(REQUEST_DISCARD, lba, blocks, 0)
+    }
+
+    fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
+        let flags = if unmap { SEGMENT_UNMAP } else { 0 };
+        self.segment(REQUEST_WRITE_ZEROES, lba, blocks, flags)
     }
 }

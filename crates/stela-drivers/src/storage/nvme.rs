@@ -1,11 +1,21 @@
-//! NVMe controllers with one admin and one I/O queue pair, polled. Each
-//! active NVM namespace with plain logical blocks becomes one device.
-//! Namespace discovery and shutdown follow Linux `drivers/nvme/host/core.c`
-//! and `pci.c` at a804c5742bff224d4cb4d25dd383554d598be32b.
+//! NVMe controllers with one admin and one I/O queue pair. Each active NVM
+//! namespace with plain logical blocks becomes one device. The I/O queue
+//! runs up to [`DEPTH`] commands at once, each through its own bounce buffer.
+//! Errors are handled as Linux's `nvme_timeout` and `nvme_decide_disposition`
+//! handle them: a command past its deadline is aborted and given another,
+//! then the controller is reset with its DMA contained, and interrupted
+//! commands, and those failing without Do Not Retry, run again up to
+//! `nvme_max_retries`. Namespace discovery and rescans, asynchronous events,
+//! the host memory buffer, shutdown and recovery follow Linux
+//! `drivers/nvme/host/core.c` and `pci.c` at
+//! a804c5742bff224d4cb4d25dd383554d598be32b.
 use crate::bytes::le32;
 use crate::{
     Clock, Handoff,
-    block::{BlockDevice, BlockError, Identity, Transport, ascii},
+    block::{
+        BlockDevice, BlockError, Command, Features, Finished, Identity, Transport, WriteZeroes,
+        ascii,
+    },
     bus::{dma::DmaAllocator, pci::Function},
     registers,
 };
@@ -28,6 +38,8 @@ const STATUS: usize = 0x1c;
 const ADMIN_ATTRIBUTES: usize = 0x24;
 const ADMIN_SUBMISSION: usize = 0x28;
 const ADMIN_COMPLETION: usize = 0x30;
+/// CRTO: CRWMT in its low half, in 500 ms units.
+const READY_TIMEOUTS: usize = 0x68;
 const DOORBELLS: usize = 0x1000;
 
 const ENABLE: u32 = 1;
@@ -35,6 +47,9 @@ const READY: u32 = 1;
 const FATAL: u32 = 1 << 1;
 /// CSTS.PP: processing paused for a firmware activation.
 const PROCESSING_PAUSED: u32 = 1 << 5;
+/// A controller that is gone reads all ones (Linux `nvme_should_reset`
+/// treats `~0` CSTS as removal).
+const REMOVED: u32 = u32::MAX;
 /// CC.SHN normal shutdown and CSTS.SHST (NVMe Base 2.1 §3.1.4.5–6).
 const SHUTDOWN_NOTIFICATION: u32 = 3 << 14;
 const SHUTDOWN_NORMAL: u32 = 1 << 14;
@@ -45,10 +60,12 @@ const SHUTDOWN_COMPLETE: u32 = 2 << 2;
 const SHUTDOWN_MINIMUM_US: u64 = 5_000_000;
 const SHUTDOWN_MAXIMUM_US: u64 = 60_000_000;
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
-/// The first version with the active namespace list (Linux `NVME_VS(1, 1, 0)`).
-const VERSION_1_1: u32 = 0x0001_0100;
+/// Completion polls between controller-fatal checks while a command runs.
+const STATUS_POLL_INTERVAL: u32 = 1024;
+/// The first version with the active namespace list (Linux `NVME_VS(1, 1, 0)`);
 /// Identify Namespace reports an NGUID from 1.2 and the identification
 /// descriptor list exists from 1.3.
+const VERSION_1_1: u32 = 0x0001_0100;
 const VERSION_1_2: u32 = 0x0001_0200;
 const VERSION_1_3: u32 = 0x0001_0300;
 const VERSION_2_0: u32 = 0x0002_0000;
@@ -60,8 +77,6 @@ const COMMAND_SETS_ALL: u32 = 6 << 4;
 const CAPABILITY_COMMAND_SETS: u64 = 1 << 43;
 const CAPABILITY_READY_WITH_MEDIA: u64 = 1 << 59;
 const CAPABILITY_READY_INDEPENDENT: u64 = 1 << 60;
-/// CRTO: CRWMT in its low half, in 500 ms units.
-const READY_TIMEOUTS: usize = 0x68;
 
 const ADMIN_DELETE_SUBMISSION: u8 = 0x00;
 const ADMIN_CREATE_SUBMISSION: u8 = 0x01;
@@ -72,6 +87,10 @@ const ADMIN_IDENTIFY: u8 = 0x06;
 const ADMIN_ABORT: u8 = 0x08;
 const ADMIN_SET_FEATURES: u8 = 0x09;
 const ADMIN_ASYNC_EVENT: u8 = 0x0c;
+/// One MSI-X table entry: message address, data and vector control.
+const MSIX_ENTRY_BYTES: u64 = 16;
+/// Autonomous Power State Transition (NVMe Base 2.1 5.27.1.6).
+const FEATURE_APST: u32 = 0x0c;
 /// Asynchronous Event Configuration, and the notices Linux enables from
 /// OAES (`NVME_AEN_SUPPORTED`): namespace attributes, firmware activation,
 /// ANA and discovery log changes.
@@ -88,17 +107,9 @@ const LOG_FIRMWARE_SLOT: u32 = 0x03;
 const LOG_CHANGED_NAMESPACES: u32 = 0x04;
 /// Host Behavior Support, with its ACRE and LBAFEE bytes.
 const FEATURE_HOST_BEHAVIOR: u32 = 0x16;
-/// Autonomous Power State Transition: CDW11 APSTE and a 32-entry table of
-/// idle transition targets.
-const FEATURE_AUTONOMOUS_POWER: u32 = 0x0c;
-const APST_ENTRIES: usize = 32;
-/// Linux's `default_ps_max_latency_us` and the APST timeouts and latency
-/// tolerances (`apst_primary_*`, `apst_secondary_*`).
-const APST_MAXIMUM_LATENCY_US: u64 = 100_000;
-const APST_PRIMARY_TIMEOUT_MS: u64 = 100;
-const APST_PRIMARY_TOLERANCE_US: u64 = 15_000;
-const APST_SECONDARY_TIMEOUT_MS: u64 = 2_000;
-const APST_SECONDARY_TOLERANCE_US: u64 = 100_000;
+const HOST_BEHAVIOR_ACRE: usize = 0;
+const HOST_BEHAVIOR_LBAFEE: usize = 2;
+const HOST_BEHAVIOR_BYTES: usize = 512;
 /// Host Memory Buffer: CDW11 EHM and MR, CDW12 HSIZE in pages, CDW13-14
 /// the descriptor list and CDW15 its entry count.
 const FEATURE_HOST_MEMORY: u32 = 0x0d;
@@ -110,12 +121,11 @@ const HOST_MEMORY_MAXIMUM: u64 = 128 << 20;
 const HOST_MEMORY_CHUNK: u64 = 4 << 20;
 /// One descriptor: address, size in pages, reserved.
 const HOST_MEMORY_DESCRIPTOR: usize = 16;
-const HOST_BEHAVIOR_ACRE: usize = 0;
-const HOST_BEHAVIOR_LBAFEE: usize = 2;
-const HOST_BEHAVIOR_BYTES: usize = 512;
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
+const IO_WRITE_ZEROES: u8 = 0x08;
+const IO_DATASET_MANAGEMENT: u8 = 0x09;
 
 const IDENTIFY_NAMESPACE: u32 = 0;
 const IDENTIFY_CONTROLLER: u32 = 1;
@@ -131,56 +141,62 @@ const CONTROLLER_SERIAL: core::ops::Range<usize> = 4..24;
 const CONTROLLER_MODEL: core::ops::Range<usize> = 24..64;
 const CONTROLLER_MAXIMUM_TRANSFER: usize = 77;
 const CONTROLLER_RTD3_ENTRY: core::ops::Range<usize> = 88..92;
-/// OAES; MTFA, in 100 ms units.
+/// OAES and CTRATT, whose ELBAS reports extended LBA formats.
 const CONTROLLER_EVENTS: usize = 92;
 const CONTROLLER_ATTRIBUTES: usize = 96;
-const CONTROLLER_ACTIVATION: usize = 258;
-/// CTRATT.ELBAS: extended LBA formats.
 const ATTRIBUTE_EXTENDED_LBA: u32 = 1 << 15;
 /// CRDT1–3, in units of 100 ms.
 const CONTROLLER_RETRY_DELAYS: usize = 128;
-/// NPSS, APSTA, and the power state descriptors: flags (bit 1 a
-/// non-operational state), entry and exit latency in microseconds.
-const CONTROLLER_POWER_STATES: usize = 263;
-const CONTROLLER_APST: usize = 265;
-const CONTROLLER_POWER_DESCRIPTORS: usize = 2048;
-const POWER_DESCRIPTOR_BYTES: usize = 32;
-const POWER_NON_OPERATIONAL: u8 = 1 << 1;
+/// MTFA, in 100 ms units.
+const CONTROLLER_ACTIVATION: usize = 258;
 /// HMPRE and HMMIN in 4 KiB units, HMMINDS in 4 KiB units, HMMAXD.
 const CONTROLLER_HOST_MEMORY_PREFERRED: usize = 272;
 const CONTROLLER_HOST_MEMORY_MINIMUM: usize = 276;
 const CONTROLLER_HOST_MEMORY_DESCRIPTOR_MINIMUM: usize = 332;
 const CONTROLLER_HOST_MEMORY_DESCRIPTORS: usize = 336;
 const CONTROLLER_NAMESPACES: core::ops::Range<usize> = 516..520;
+/// ONCS: Dataset Management (bit 2) and Write Zeroes (bit 3).
+const CONTROLLER_COMMANDS: usize = 520;
+const COMMANDS_DATASET_MANAGEMENT: u16 = 1 << 2;
+const COMMANDS_WRITE_ZEROES: u16 = 1 << 3;
+/// VWC bit 0: a volatile write cache is present.
+const CONTROLLER_VOLATILE_CACHE: usize = 525;
+/// NPSS: the deepest power state's number.
+const CONTROLLER_POWER_STATES: usize = 263;
+/// APSTA bit 0: autonomous power state transitions are supported.
+const CONTROLLER_APST: usize = 265;
+/// The power state descriptors, 32 bytes each: flags at byte 3 (bit 1 a
+/// non-operational state), entry and exit latencies in microseconds at
+/// bytes 4 and 8.
+const CONTROLLER_POWER_DESCRIPTORS: usize = 2048;
+const POWER_NON_OPERATIONAL: u8 = 1 << 1;
+/// Linux `nvme_core`'s defaults: states whose exit latency exceeds
+/// `default_ps_max_latency_us` are never used; a state whose total latency is
+/// within `apst_primary_latency_tol_us` is entered after
+/// `apst_primary_timeout_ms` idle, one within `apst_secondary_latency_tol_us`
+/// after `apst_secondary_timeout_ms`.
+const APST_MAX_LATENCY_US: u64 = 100_000;
+const APST_PRIMARY_TIMEOUT_MS: u64 = 100;
+const APST_PRIMARY_TOLERANCE_US: u64 = 15_000;
+const APST_SECONDARY_TIMEOUT_MS: u64 = 2_000;
+const APST_SECONDARY_TOLERANCE_US: u64 = 100_000;
 /// Identify Namespace fields (NVM Command Set 1.1 Figure 114).
 const NAMESPACE_SIZE: core::ops::Range<usize> = 0..8;
 const NAMESPACE_CAPACITY: core::ops::Range<usize> = 8..16;
-const NAMESPACE_NGUID: core::ops::Range<usize> = 104..120;
-const NAMESPACE_EUI64: core::ops::Range<usize> = 120..128;
 const NAMESPACE_FORMAT: usize = 26;
+/// DLFEAT: bits 2:0 what a deallocated block reads (001b zeros), bit 3
+/// Write Zeroes may deallocate.
+const NAMESPACE_DEALLOCATE: usize = 33;
 const NAMESPACE_ATTRIBUTES: usize = 99;
 const NAMESPACE_WRITE_PROTECTED: u8 = 1 << 0;
+const NAMESPACE_NGUID: core::ops::Range<usize> = 104..120;
+const NAMESPACE_EUI64: core::ops::Range<usize> = 120..128;
 const NAMESPACE_FORMATS: usize = 128;
 /// FLBAS: format index bits 3:0, and bits 6:5 for formats past sixteen.
 const FORMAT_LOW: u8 = 0xf;
 const FORMAT_HIGH: u8 = 3 << 5;
 /// The most namespaces a sequential scan visits, one Identify each.
 const SEQUENTIAL_SCAN_LIMIT: u32 = 1024;
-
-const PAGE: usize = 4096;
-const ENTRIES: u16 = 16;
-const BOUNCE_BYTES: usize = 128 * 1024;
-const COMMAND_TIMEOUT_US: u64 = 30_000_000;
-/// Linux `NVME_ADMIN_TIMEOUT`.
-const ADMIN_TIMEOUT_US: u64 = 60_000_000;
-/// Linux `nvme_max_retries`.
-const COMMAND_RETRIES: u32 = 5;
-/// The completion status field's Do Not Retry bit.
-const STATUS_DO_NOT_RETRY: u32 = 1 << 14;
-/// The completion status field's Command Retry Delay index.
-const STATUS_RETRY_DELAY: u32 = 3 << 11;
-const RETRY_DELAY_UNIT_US: u64 = 100_000;
-
 /// Namespace Identification Descriptor types (NVMe Base 2.1 Figure 315).
 const DESCRIPTOR_EUI64: u8 = 1;
 const DESCRIPTOR_NGUID: u8 = 2;
@@ -189,8 +205,58 @@ const DESCRIPTOR_CSI: u8 = 4;
 /// Command set identifiers: NVM and zoned namespaces.
 const CSI_NVM: u8 = 0;
 const CSI_ZONED: u8 = 2;
+
+const PAGE: usize = 4096;
+const ADMIN_ENTRIES: u16 = 16;
+/// The I/O queue's entries: one page of submissions.
+const IO_ENTRIES: u16 = 64;
+/// The commands the I/O queue runs at once, each holding a bounce buffer,
+/// as Linux's tag set bounds them; one for a controller in an owned DMA
+/// domain, whose buffers change hands whole.
+const DEPTH: usize = 8;
+const BOUNCE_BYTES: usize = 128 * 1024;
+const COMMAND_TIMEOUT_US: u64 = 30_000_000;
+/// Linux `NVME_ADMIN_TIMEOUT`.
+const ADMIN_TIMEOUT_US: u64 = 60_000_000;
+/// Linux `nvme_max_retries`: a command the controller's reset interrupted,
+/// or that failed without Do Not Retry, runs again at most this often.
+const RETRIES: u8 = 5;
+/// The completion status field's Do Not Retry bit and Command Retry Delay
+/// index.
+const STATUS_DO_NOT_RETRY: u32 = 1 << 14;
+const STATUS_RETRY_DELAY: u32 = 3 << 11;
+const RETRY_DELAY_UNIT_US: u64 = 100_000;
+/// Read/Write CDW12 bit 30: complete only once the data is durable.
+const FORCE_UNIT_ACCESS: u32 = 1 << 30;
+/// Write Zeroes CDW12 bit 25: the blocks may be deallocated.
+const DEALLOCATE: u32 = 1 << 25;
+/// Dataset Management CDW11 bit 2: deallocate the ranges.
+const ATTRIBUTE_DEALLOCATE: u32 = 1 << 2;
 /// I/O to a namespace Linux's rescan removed.
-const REMOVED: BlockError = BlockError::Protocol("the NVMe namespace changed or was removed");
+const NAMESPACE_REMOVED: BlockError =
+    BlockError::Protocol("the NVMe namespace changed or was removed");
+
+/// An I/O read or write of `blocks` blocks at `lba` through `pointers`.
+fn transfer_command(
+    opcode: u8,
+    namespace: u32,
+    lba: u64,
+    blocks: u32,
+    (prp1, prp2): (u64, u64),
+    access: u32,
+) -> [u32; 16] {
+    let mut command = [0u32; 16];
+    command[0] = u32::from(opcode);
+    command[1] = namespace;
+    command[6] = prp1 as u32;
+    command[7] = (prp1 >> 32) as u32;
+    command[8] = prp2 as u32;
+    command[9] = (prp2 >> 32) as u32;
+    command[10] = lba as u32;
+    command[11] = (lba >> 32) as u32;
+    command[12] = access | (blocks - 1);
+    command
+}
 
 /// Linux `nvme_ns_ids`: what identifies a namespace across rescans.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -249,54 +315,160 @@ impl Ids {
     }
 }
 
-/// How a command was lost, when it produced no completion to report.
+/// How an admin command was lost, when it produced no completion to report.
 enum Lost {
     /// Linux resets the controller: a timeout, or a fatal controller status.
     Reset(BlockError),
-    /// The controller broke the protocol or its registers failed.
+    /// The controller broke the protocol, is gone, or its registers failed.
     Fatal(BlockError),
-}
-
-/// One wait for a completion queue entry.
-enum Reaped {
-    Done(u32, u32),
-    TimedOut,
-    /// CSTS.CFS: the controller reported a fatal status.
-    Fatal(u32),
 }
 
 struct Queue {
     submissions: Buffer,
     completions: Buffer,
     id: u16,
+    entries: u16,
     tail: u16,
     head: u16,
     phase: bool,
+    /// The submission head the controller last reported.
+    consumed: u16,
 }
 
 impl Queue {
-    /// Retire the completion queue head entry and ring its doorbell.
-    fn retire_head(&mut self, registers: &RegisterIo, stride: usize) -> Result<(), BlockError> {
-        self.head = (self.head + 1) % ENTRIES;
-        if self.head == 0 {
-            self.phase = !self.phase;
-        }
-        registers.write32(
-            DOORBELLS + (2 * usize::from(self.id) + 1) * stride,
-            u32::from(self.head),
-        )
-    }
-
-    fn new(id: u16, dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
+    fn new(id: u16, entries: u16, dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
         Ok(Self {
             submissions: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
             completions: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
             id,
+            entries,
             tail: 0,
             head: 0,
             phase: true,
+            consumed: 0,
         })
     }
+
+    /// Empty, as a controller reset leaves it.
+    fn restart(&mut self) {
+        self.tail = 0;
+        self.head = 0;
+        self.phase = true;
+        self.consumed = 0;
+    }
+
+    /// Whether a reported submission head lies no earlier than the last
+    /// one and no further than the tail, in ring order: commands fetched
+    /// together may complete reporting the same head.
+    fn consumes(&self, head: u16) -> bool {
+        head < self.entries
+            && self.ahead(self.consumed, head) <= self.ahead(self.consumed, self.tail)
+    }
+
+    /// Whether `head` shows the command at submission `slot` fetched: past
+    /// it, and no further than the tail.
+    fn fetched(&self, slot: u16, head: u16) -> bool {
+        let past = self.ahead(slot, head);
+        past != 0 && past <= self.ahead(slot, self.tail)
+    }
+
+    /// How many entries `to` lies after `from`, in ring order.
+    fn ahead(&self, from: u16, to: u16) -> u16 {
+        (to + self.entries - from) % self.entries
+    }
+}
+
+/// A tag's bounce memory: its data and its PRP list.
+struct Slot {
+    bounce: Buffer,
+    prp_list: Buffer,
+}
+
+/// A command of the I/O queue: under its tag until the controller completes
+/// it, then its result until the namespace takes it.
+#[derive(Default)]
+enum Tag {
+    #[default]
+    Free,
+    Running {
+        id: u16,
+        /// Its submission queue entry.
+        slot: u16,
+        namespace: u32,
+        block: usize,
+        command: Command,
+        deadline: crate::Deadline,
+        /// The runs before this one: retries and resets.
+        retries: u8,
+        /// An Abort for it was sent at its first deadline.
+        aborted: bool,
+    },
+    /// Interrupted by a controller reset, to run again once it completes.
+    Waiting {
+        namespace: u32,
+        block: usize,
+        command: Command,
+        retries: u8,
+    },
+    /// Failed without Do Not Retry, to run again after the delay its
+    /// Command Retry Delay selects (`nvme_retry_req`).
+    Delayed {
+        namespace: u32,
+        block: usize,
+        command: Command,
+        retries: u8,
+        until: crate::Deadline,
+    },
+    Done(Finished),
+}
+
+/// The admin commands bringing a controller up, as Linux's
+/// `nvme_reset_work` runs them after every reset and probe runs them once:
+/// `nvme_init_ctrl_finish`'s Identify, host options and APST,
+/// `nvme_setup_host_mem`, the I/O queues and `nvme_start_ctrl`'s events.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Step {
+    Identify,
+    HostOptions,
+    Apst,
+    HostMemory,
+    CreateCompletion,
+    CreateSubmission,
+    Events,
+}
+
+const STEPS: [Step; 7] = [
+    Step::Identify,
+    Step::HostOptions,
+    Step::Apst,
+    Step::HostMemory,
+    Step::CreateCompletion,
+    Step::CreateSubmission,
+    Step::Events,
+];
+
+/// A controller reset in progress ([`Controller::recover`]), each step
+/// looked for without waiting.
+enum Recovery {
+    /// Deleting the I/O submission, then completion, queue of a live
+    /// controller (`nvme_delete_io_queues`), and the command's identifier.
+    Deleting {
+        submission: bool,
+        id: u16,
+        deadline: crate::Deadline,
+    },
+    /// CC.EN cleared; waiting for CSTS.RDY to clear.
+    Disabling(crate::Deadline),
+    /// CC.EN set; waiting for CSTS.RDY.
+    Enabling(crate::Deadline),
+    /// A bring-up command, its identifier, and the Identify Controller data
+    /// once read.
+    Admin {
+        step: Step,
+        id: u16,
+        deadline: crate::Deadline,
+        identify: Vec<u8>,
+    },
 }
 
 /// Linux's asynchronous events: what Identify Controller enables, the
@@ -323,74 +495,6 @@ impl Events {
     }
 }
 
-/// Retire the Asynchronous Event Request's completion when it is at the
-/// admin completion queue head.
-fn take_event(
-    registers: &RegisterIo,
-    stride: usize,
-    queue: &mut Queue,
-    events: &mut Events,
-) -> Result<bool, BlockError> {
-    let Some(id) = events.request else {
-        return Ok(false);
-    };
-    let entry = usize::from(queue.head) * 16;
-    let tail_word = queue.completions.coherent(entry + 12)?;
-    if ((tail_word >> 16 & 1) == 1) != queue.phase || tail_word as u16 != id {
-        return Ok(false);
-    }
-    fence(Ordering::SeqCst);
-    let result = queue.completions.coherent(entry)?;
-    if queue.completions.coherent(entry + 8)? >> 16 != u32::from(queue.id) {
-        return Err(BlockError::Device { status: 0xffff });
-    }
-    events.request = None;
-    events.completed = Some((result, tail_word >> 17 & 0x7fff));
-    queue.retire_head(registers, stride)?;
-    Ok(true)
-}
-
-/// One controller, shared by its namespaces.
-struct Controller {
-    registers: RegisterIo,
-    doorbell_stride: usize,
-    admin: Queue,
-    io: Queue,
-    bounce: Buffer,
-    prp_list: Buffer,
-    max_transfer: usize,
-    /// How long a normal shutdown may take.
-    shutdown_timeout_us: u64,
-    /// The controller acknowledged a shutdown; it takes no more commands.
-    shut_down: bool,
-    command_id: u16,
-    clock: Clock,
-    command_timeout_us: u64,
-    admin_timeout_us: u64,
-    /// An unresolved command may still own the queues, PRPs and bounce RAM.
-    /// Set when a reset cannot recover the controller; no buffer or queue is
-    /// reused afterwards.
-    fault: Option<BlockError>,
-    owned: Option<owned::Owner>,
-    teardown: owned::Teardown,
-    ready_timeout_us: u64,
-    /// CC without EN, and how long enabling may take (CAP.TO or CRTO).
-    configuration: u32,
-    /// CAP.CRMS.CRIMS: namespaces report readiness of their own.
-    independent_identify: bool,
-    /// The VS register, read at discovery.
-    version: u32,
-    /// Queued namespace scans: one per reset and namespace-change notice.
-    scans: u64,
-    /// CRDT1–3 from Identify Controller, in 100 ms units.
-    retry_delays: [u16; 3],
-    /// The host memory buffer, kept across resets, and whether the
-    /// controller uses it (`dev->hmb`).
-    host_memory: Option<HostMemory>,
-    host_memory_enabled: bool,
-    events: Events,
-}
-
 /// Linux's host memory buffer: its descriptor list and chunks.
 struct HostMemory {
     descriptors: Buffer,
@@ -399,54 +503,6 @@ struct HostMemory {
     /// The controller accepted it, so a re-enable may ask for its contents
     /// back (`host_mem_descs` retained).
     returnable: bool,
-}
-
-/// Linux `nvme_configure_apst`: the APST table for a controller that
-/// supports it, or `None`. Walking from the lowest-power state up, each
-/// usable non-operational state becomes the idle target of the states
-/// above it, after the primary timeout for a round trip within the primary
-/// tolerance and the secondary one within the secondary tolerance
-/// (`nvme_apst_get_transition_time`).
-fn apst_table(identify: &[u8]) -> Option<[u64; APST_ENTRIES]> {
-    let states = usize::from(identify[CONTROLLER_POWER_STATES]);
-    // NPSS past 31 is invalid; Linux leaves APST alone.
-    if identify[CONTROLLER_APST] & 1 == 0 || states >= APST_ENTRIES {
-        return None;
-    }
-    let mut table = [0u64; APST_ENTRIES];
-    let mut target = 0u64;
-    let mut tolerance_index = u32::MAX;
-    for state in (0..=states).rev() {
-        if target != 0 {
-            table[state] = target;
-        }
-        let descriptor = &identify[CONTROLLER_POWER_DESCRIPTORS + state * POWER_DESCRIPTOR_BYTES..];
-        if descriptor[3] & POWER_NON_OPERATIONAL == 0 {
-            continue;
-        }
-        let exit = u64::from(le32(descriptor, 8));
-        if exit > APST_MAXIMUM_LATENCY_US {
-            continue;
-        }
-        let total = exit + u64::from(le32(descriptor, 4));
-        let transition = if total <= APST_PRIMARY_TOLERANCE_US {
-            if tolerance_index == 1 {
-                continue;
-            }
-            tolerance_index = 1;
-            APST_PRIMARY_TIMEOUT_MS
-        } else if total <= APST_SECONDARY_TOLERANCE_US {
-            if tolerance_index <= 2 {
-                continue;
-            }
-            tolerance_index = 2;
-            APST_SECONDARY_TIMEOUT_MS
-        } else {
-            continue;
-        };
-        target = (state as u64) << 3 | transition << 8;
-    }
-    Some(table)
 }
 
 /// What Identify Controller asks of a host memory buffer, in bytes.
@@ -485,6 +541,59 @@ impl HostMemorySource for &mut dyn DmaAllocator {
     }
 }
 
+/// One controller, shared by its namespaces.
+struct Controller {
+    registers: RegisterIo,
+    doorbell_stride: usize,
+    admin: Queue,
+    io: Queue,
+    /// Tag 0's bounce memory, which admin commands also use.
+    bounce: Buffer,
+    prp_list: Buffer,
+    /// Tags 1 and up's bounce memory.
+    slots: Vec<Slot>,
+    tags: Vec<Tag>,
+    recovery: Option<Recovery>,
+    /// The I/O completion queue raises MSI-X vector 0, which the host
+    /// gave the message of its completion signal.
+    signalled: bool,
+    max_transfer: usize,
+    /// How long a normal shutdown may take.
+    shutdown_timeout_us: u64,
+    /// The controller acknowledged a shutdown; it takes no more commands.
+    shut_down: bool,
+    command_id: u16,
+    clock: Clock,
+    command_timeout_us: u64,
+    admin_timeout_us: u64,
+    /// An unresolved command may still own the queues, PRPs and bounce RAM,
+    /// or the controller is gone. No buffer or queue may be reused until a
+    /// new, acknowledged reset.
+    fault: Option<BlockError>,
+    owned: Option<owned::Owner>,
+    teardown: owned::Teardown,
+    ready_timeout_us: u64,
+    /// CC without EN.
+    configuration: u32,
+    /// CAP.CRMS.CRIMS: namespaces report readiness of their own.
+    independent_identify: bool,
+    /// The VS register, read at discovery.
+    version: u32,
+    /// ONCS from Identify Controller.
+    commands: u16,
+    /// Queued namespace scans: one per reset and namespace-change notice.
+    scans: u64,
+    /// CRDT1–3 from Identify Controller, in 100 ms units.
+    retry_delays: [u16; 3],
+    /// The host memory buffer, kept across resets, and whether the
+    /// controller uses it (`dev->hmb`).
+    host_memory: Option<HostMemory>,
+    host_memory_enabled: bool,
+    events: Events,
+    /// The Abort commands sent and not yet completed.
+    aborts: Vec<u16>,
+}
+
 impl Controller {
     fn ready(&mut self) -> Result<(), BlockError> {
         if let Some(error) = &self.fault {
@@ -496,13 +605,13 @@ impl Controller {
         Ok(())
     }
 
-    /// CSTS.CFS, as an error.
+    /// CSTS: a removed controller or CSTS.CFS, as an error.
     fn check_fatal(&self) -> Result<(), BlockError> {
-        let status = self.registers.read32(STATUS)?;
-        if status & FATAL != 0 {
-            return Err(BlockError::Device { status });
+        match self.registers.read32(STATUS)? {
+            REMOVED => Err(removed()),
+            status if status & FATAL != 0 => Err(BlockError::Device { status }),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn poison(&mut self, error: BlockError) -> BlockError {
@@ -515,6 +624,10 @@ impl Controller {
         let done = self
             .clock
             .wait(timeout, || match self.registers.read32(STATUS) {
+                Ok(REMOVED) => {
+                    failure = Some(removed());
+                    true
+                }
                 Ok(status) => condition(status),
                 Err(error) => {
                     failure = Some(error);
@@ -529,6 +642,40 @@ impl Controller {
         } else {
             Err(BlockError::Timeout)
         }
+    }
+
+    /// Point the controller at the admin queue, empty, with every interrupt
+    /// masked.
+    fn configure_admin(&mut self) -> Result<(), BlockError> {
+        self.admin.restart();
+        self.admin.completions.give()?;
+        self.io.completions.give()?;
+        // Empty SQs are CPU-owned until their first command publication. The
+        // controller cannot consume any SQE before the corresponding doorbell.
+        let entries = u32::from(self.admin.entries - 1);
+        self.registers
+            .write32(ADMIN_ATTRIBUTES, entries << 16 | entries)?;
+        self.registers
+            .write64(ADMIN_SUBMISSION, self.admin.submissions.address()?)?;
+        self.admin.submissions.publish();
+        self.registers
+            .write64(ADMIN_COMPLETION, self.admin.completions.address()?)?;
+        self.registers.write32(INTERRUPT_MASK_SET, u32::MAX)
+    }
+
+    /// Linux `nvme_enable_ctrl`: set CC.EN, returning how long CSTS.RDY may
+    /// take, CAP.TO or a longer CRTO.CRWMT. CRIME stays clear, as in Linux.
+    fn enable(&mut self) -> Result<u64, BlockError> {
+        let capabilities = self.registers.read64(CAPABILITIES)?;
+        let mut timeout = capabilities >> 24 & 0xff;
+        if capabilities & CAPABILITY_READY_WITH_MEDIA != 0 {
+            let media = self.registers.read32(READY_TIMEOUTS)? & 0xffff;
+            timeout = timeout.max(u64::from(media));
+        }
+        self.independent_identify = capabilities & CAPABILITY_READY_INDEPENDENT != 0;
+        self.registers
+            .write32(CONFIGURATION, self.configuration | ENABLE)?;
+        Ok(ready_wait_us(timeout))
     }
 
     fn initialize(&mut self) -> Result<(), BlockError> {
@@ -552,11 +699,19 @@ impl Controller {
                 "NVMe controller without 4 KiB pages",
             ));
         }
-        if (capabilities & 0xffff) + 1 < u64::from(ENTRIES) {
+        // CAP.MQES is zero-based; both queues must fit.
+        let longest = (capabilities & 0xffff) + 1;
+        if longest < u64::from(ADMIN_ENTRIES) {
             return Err(BlockError::Unsupported(
                 "NVMe queues shorter than 16 entries",
             ));
         }
+        self.io.entries = self
+            .io
+            .entries
+            .min(u16::try_from(longest).unwrap_or(u16::MAX));
+        let depth = self.tags.len().min(usize::from(self.io.entries) - 1);
+        self.tags.truncate(depth);
         if 4 * self.doorbell_stride + DOORBELLS > 0x2000 {
             return Err(BlockError::Unsupported("NVMe doorbell stride"));
         }
@@ -566,64 +721,34 @@ impl Controller {
         }
         self.registers.write32(CONFIGURATION, 0)?;
         self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
-        self.admin.completions.give()?;
-        self.io.completions.give()?;
-        self.configure_admin_queue()
-    }
-
-    /// Linux `nvme_pci_configure_admin_queue` after the controller is
-    /// disabled: program the admin queue and enable the controller.
-    fn configure_admin_queue(&mut self) -> Result<(), BlockError> {
-        // Empty SQs are CPU-owned until their first command publication. The
-        // controller cannot consume any SQE before the corresponding doorbell.
-        let entries = u32::from(ENTRIES - 1);
-        self.registers
-            .write32(ADMIN_ATTRIBUTES, entries << 16 | entries)?;
-        self.registers
-            .write64(ADMIN_SUBMISSION, self.admin.submissions.address()?)?;
-        self.admin.submissions.publish();
-        self.registers
-            .write64(ADMIN_COMPLETION, self.admin.completions.address()?)?;
-        self.registers.write32(INTERRUPT_MASK_SET, u32::MAX)?;
+        self.configure_admin()?;
         if let Some(owner) = self.owned.as_mut() {
             owner.lifecycle.enable_dma()?;
         }
-        // nvme_enable_ctrl: configure, then enable and wait as long as CAP.TO
-        // or a longer CRTO.CRWMT allows. CRIME stays clear, as in Linux.
-        self.registers.write32(CONFIGURATION, self.configuration)?;
-        let capabilities = self.registers.read64(CAPABILITIES)?;
-        let mut timeout = capabilities >> 24 & 0xff;
-        if capabilities & CAPABILITY_READY_WITH_MEDIA != 0 {
-            let media = self.registers.read32(READY_TIMEOUTS)? & 0xffff;
-            timeout = timeout.max(u64::from(media));
-        }
-        self.independent_identify = capabilities & CAPABILITY_READY_INDEPENDENT != 0;
-        self.registers
-            .write32(CONFIGURATION, self.configuration | ENABLE)?;
-        self.wait_status(ready_wait_us(timeout), |status| {
-            status & (READY | FATAL) != 0
-        })?;
+        let timeout = self.enable()?;
+        self.wait_status(timeout, |status| status & (READY | FATAL) != 0)?;
         self.check_fatal()
     }
 
-    /// The Create I/O Completion Queue and Create I/O Submission Queue
-    /// commands for the single polled I/O queue pair.
-    fn create_queue_commands(&self) -> Result<[[u32; 16]; 2], BlockError> {
-        let entries = u32::from(ENTRIES - 1);
-        let completion = self.io.completions.address()?;
-        let submission = self.io.submissions.address()?;
-        let mut create_completion = [0u32; 16];
-        create_completion[0] = u32::from(ADMIN_CREATE_COMPLETION);
-        create_completion[6] = completion as u32;
-        create_completion[7] = (completion >> 32) as u32;
-        create_completion[10] = entries << 16 | 1;
-        create_completion[11] = 1; // physically contiguous, no interrupt
-        let mut create_submission = create_completion;
-        create_submission[0] = u32::from(ADMIN_CREATE_SUBMISSION);
-        create_submission[6] = submission as u32;
-        create_submission[7] = (submission >> 32) as u32;
-        create_submission[11] = 1 << 16 | 1; // completion queue 1, contiguous
-        Ok([create_completion, create_submission])
+    /// The admin command creating the I/O completion queue, or with
+    /// `submission` the submission queue, polled.
+    fn create_queue(&self, submission: bool) -> Result<[u32; 16], BlockError> {
+        let entries = u32::from(self.io.entries - 1);
+        let mut command = [0u32; 16];
+        let address = if submission {
+            command[0] = u32::from(ADMIN_CREATE_SUBMISSION);
+            command[11] = 1 << 16 | 1; // completion queue 1, contiguous
+            self.io.submissions.address()?
+        } else {
+            command[0] = u32::from(ADMIN_CREATE_COMPLETION);
+            // Physically contiguous; with interrupts enabled, vector 0.
+            command[11] = 1 | u32::from(self.signalled) << 1;
+            self.io.completions.address()?
+        };
+        command[6] = address as u32;
+        command[7] = (address >> 32) as u32;
+        command[10] = entries << 16 | 1;
+        Ok(command)
     }
 
     fn identify_command(&self, cns: u32, namespace: u32) -> Result<[u32; 16], BlockError> {
@@ -637,108 +762,175 @@ impl Controller {
         Ok(command)
     }
 
-    /// Linux's command error handling. A timed-out I/O command is aborted and
-    /// given another timeout; then, or at once for an admin command or a
-    /// fatal controller, the controller is reset. I/O is retried after a
-    /// reset or an error status without DNR, up to `nvme_max_retries`; admin
-    /// commands fail fast. A failed reset poisons every sibling. Only a
-    /// positively identified CQE or an acknowledged reset authorizes
-    /// SQ/PRP/data CPU reuse.
-    fn execute(&mut self, io: bool, command: [u32; 16]) -> Result<u32, BlockError> {
+    /// Run admin `command` through tag 0's memory once every queued command
+    /// ended, as Linux runs its own admin commands: never retried. One past
+    /// its deadline, or a fatal controller, resets the controller, as
+    /// `nvme_timeout` does for the admin queue; a failed reset poisons every
+    /// sibling. Only a positively identified CQE or an acknowledged reset
+    /// authorizes SQ/PRP/data CPU reuse.
+    fn admin(&mut self, command: [u32; 16]) -> Result<u32, BlockError> {
         self.ready()?;
-        self.service_events()?;
-        let mut retries = 0;
-        loop {
-            match self.run(io, command) {
-                Ok((result, 0)) => return Ok(result),
-                Ok((_, status)) => {
-                    if !io || status & STATUS_DO_NOT_RETRY != 0 || retries == COMMAND_RETRIES {
-                        return Err(BlockError::Device { status });
-                    }
-                    // nvme_retry_req: the delay the CRD field selects.
-                    let delay = (status & STATUS_RETRY_DELAY) >> 11;
-                    if delay != 0 {
-                        let units = self.retry_delays[delay as usize - 1];
-                        self.clock.delay(u64::from(units) * RETRY_DELAY_UNIT_US);
-                    }
-                }
-                Err(Lost::Reset(error)) => {
-                    if let Err(failure) = self.reset() {
-                        return Err(self.poison(failure));
-                    }
-                    if !io || retries == COMMAND_RETRIES {
-                        return Err(error);
-                    }
-                }
-                Err(Lost::Fatal(error)) => return Err(self.poison(error)),
+        self.settle()?;
+        match self.admin_wait(command, Some(0)) {
+            Ok((result, 0)) => Ok(result),
+            Ok((_, status)) => Err(BlockError::Device { status }),
+            Err(Lost::Reset(error)) => {
+                // The lost command leaves no admin queue to delete with.
+                self.reset_with(false);
+                self.settle()?;
+                Err(error)
             }
-            retries += 1;
+            Err(Lost::Fatal(error)) => Err(self.poison(error)),
         }
     }
 
-    /// One command to its completion, with `nvme_timeout`'s abort.
-    fn run(&mut self, io: bool, command: [u32; 16]) -> Result<(u32, u32), Lost> {
-        let status = self.registers.read32(STATUS).map_err(Lost::Fatal)?;
-        if status & FATAL != 0 {
-            return Err(Lost::Reset(BlockError::Device { status }));
-        }
-        let id = self.submit(io, command, true).map_err(Lost::Fatal)?;
-        let timeout = if io {
-            self.command_timeout_us
-        } else {
-            self.admin_timeout_us
-        };
-        match self.reap(io, id, timeout).map_err(Lost::Fatal)? {
-            Reaped::Done(result, status) => {
-                // SAFETY: the only outstanding command completed.
-                unsafe { self.reclaim() }.map_err(Lost::Fatal)?;
-                return Ok((result, status));
+    /// Publish admin `command` with tag `tag`'s memory and wait for its
+    /// completion, taking the others posted before it.
+    fn admin_wait(&mut self, command: [u32; 16], tag: Option<usize>) -> Result<(u32, u32), Lost> {
+        match self.registers.read32(STATUS).map_err(Lost::Fatal)? {
+            REMOVED => return Err(Lost::Fatal(removed())),
+            status if status & FATAL != 0 => {
+                return Err(Lost::Reset(BlockError::Device { status }));
             }
-            Reaped::Fatal(status) => return Err(Lost::Reset(BlockError::Device { status })),
-            Reaped::TimedOut if !io => return Err(Lost::Reset(BlockError::Timeout)),
-            Reaped::TimedOut => {}
+            _ => {}
         }
-        let mut abort = [0u32; 16];
-        abort[0] = u32::from(ADMIN_ABORT);
-        abort[10] = u32::from(id) << 16 | u32::from(self.io.id);
-        let abort_id = self.submit(false, abort, true).map_err(Lost::Fatal)?;
-        let completed = match self
-            .reap(true, id, self.command_timeout_us)
-            .map_err(Lost::Fatal)?
-        {
-            Reaped::Done(result, status) => (result, status),
-            Reaped::Fatal(status) => return Err(Lost::Reset(BlockError::Device { status })),
-            Reaped::TimedOut => return Err(Lost::Reset(BlockError::Timeout)),
-        };
-        match self
-            .reap(false, abort_id, self.admin_timeout_us)
-            .map_err(Lost::Fatal)?
-        {
-            Reaped::Done(..) => {
-                // SAFETY: the command and its abort both completed.
-                unsafe { self.reclaim() }.map_err(Lost::Fatal)?;
+        let id = self.publish(false, command, tag).map_err(Lost::Fatal)?;
+        let (clock, timeout) = (self.clock, self.admin_timeout_us);
+        let data = tag.is_some();
+        let mut observed = None;
+        let mut polls = 0u32;
+        clock.wait(timeout, || {
+            // The CQE lives in RAM; CSTS is an MMIO read, which a hypervisor
+            // traps. Check for a fatal controller only every few polls.
+            polls = polls.wrapping_add(1);
+            if polls.is_multiple_of(STATUS_POLL_INTERVAL) {
+                let lost = match self.registers.read32(STATUS) {
+                    Ok(REMOVED) => Some(Lost::Fatal(removed())),
+                    Ok(status) if status & FATAL != 0 => {
+                        Some(Lost::Reset(BlockError::Device { status }))
+                    }
+                    Ok(_) => None,
+                    Err(error) => Some(Lost::Fatal(error)),
+                };
+                if let Some(lost) = lost {
+                    observed = Some(Err(lost));
+                    return true;
+                }
             }
-            // The abort itself timed out: Linux resets for it, and the
-            // command's own completion stands.
-            _ => self.reset().map_err(Lost::Fatal)?,
-        }
-        Ok(completed)
+            match self.admin_completion(Some((id, data))) {
+                Ok(None) => false,
+                Ok(Some(completion)) => {
+                    observed = Some(Ok(completion));
+                    true
+                }
+                Err(error) => {
+                    observed = Some(Err(Lost::Fatal(error)));
+                    true
+                }
+            }
+        });
+        observed.unwrap_or(Err(Lost::Reset(BlockError::Timeout)))
     }
 
-    /// Write `command` at the queue tail and ring its doorbell, giving the
-    /// controller the data buffers when it has `data`.
-    fn submit(&mut self, io: bool, command: [u32; 16], data: bool) -> Result<u16, BlockError> {
+    /// Take the admin completions the controller has posted, one doorbell
+    /// each: an Asynchronous Event Request's is kept for
+    /// [`Self::service_events`] and an Abort's ends it. Command `id`'s result
+    /// and status once posted, giving tag 0's memory back to the CPU when
+    /// it holds `data`; any other completion breaks the protocol.
+    fn admin_completion(
+        &mut self,
+        expected: Option<(u16, bool)>,
+    ) -> Result<Option<(u32, u32)>, BlockError> {
+        while let Some((id, result, status, _)) = self.posted(false)? {
+            self.release(false)?;
+            if self.events.request == Some(id) {
+                self.events.request = None;
+                self.events.completed = Some((result, status));
+            } else if let Some(at) = self.aborts.iter().position(|abort| *abort == id) {
+                self.aborts.swap_remove(at);
+            } else if let Some((_, data)) = expected.filter(|(expected, _)| *expected == id) {
+                if data {
+                    self.trust_completion()?;
+                    // SAFETY: the controller completed this exact command;
+                    // no other command reaches tag 0's memory meanwhile.
+                    unsafe {
+                        self.bounce.take()?;
+                        self.prp_list.take()?;
+                    }
+                }
+                return Ok(Some((result, status)));
+            } else {
+                return Err(BlockError::Device { status: 0xffff });
+            }
+        }
+        Ok(None)
+    }
+
+    /// Before the CPU takes back memory a completion released: an owned
+    /// controller's completion counts only while its registers answer
+    /// without a fatal status, which a removed hierarchy or a failed engine
+    /// would not.
+    fn trust_completion(&self) -> Result<(), BlockError> {
+        match self.owned {
+            Some(_) => self.check_fatal(),
+            None => Ok(()),
+        }
+    }
+
+    /// Tag `tag`'s bounce memory: its data and its PRP list.
+    fn slot(&mut self, tag: usize) -> (&mut Buffer, &mut Buffer) {
+        match tag {
+            0 => (&mut self.bounce, &mut self.prp_list),
+            _ => {
+                let slot = &mut self.slots[tag - 1];
+                (&mut slot.bounce, &mut slot.prp_list)
+            }
+        }
+    }
+
+    /// Whether command identifier `id` names a command still outstanding.
+    fn outstanding(&self, id: u16) -> bool {
+        self.events.request == Some(id)
+            || self.aborts.contains(&id)
+            || self
+                .tags
+                .iter()
+                .any(|tag| matches!(tag, Tag::Running { id: running, .. } if *running == id))
+            || matches!(
+                self.recovery,
+                Some(Recovery::Deleting { id: step, .. } | Recovery::Admin { id: step, .. })
+                    if step == id
+            )
+    }
+
+    /// Publish `command` on queue `io`, giving the controller tag `tag`'s
+    /// memory when it moves data, and ring its doorbell; its identifier,
+    /// one no outstanding command holds.
+    fn publish(
+        &mut self,
+        io: bool,
+        command: [u32; 16],
+        tag: Option<usize>,
+    ) -> Result<u16, BlockError> {
         let stride = self.doorbell_stride;
-        self.command_id = self.command_id.wrapping_add(1);
-        let id = self.command_id;
-        let event = !io && self.events.request.is_some();
-        let queue = if io { &mut self.io } else { &mut self.admin };
-        if event {
-            // SAFETY: the controller only reads submission entries, and the
-            // outstanding Asynchronous Event Request's entry is not rewritten
-            // before its completion; Linux keeps that request queued too.
-            unsafe { queue.submissions.resume_writes() };
+        loop {
+            self.command_id = self.command_id.wrapping_add(1);
+            if !self.outstanding(self.command_id) {
+                break;
+            }
         }
+        let id = self.command_id;
+        if let Some(tag) = tag {
+            let (bounce, prp_list) = self.slot(tag);
+            bounce.give()?;
+            prp_list.give()?;
+        }
+        let registers = &self.registers;
+        let queue = if io { &mut self.io } else { &mut self.admin };
+        // SAFETY: the controller only reads submission entries, and the tail
+        // entry is none it has yet to fetch: fewer commands are outstanding
+        // than the queue holds.
+        unsafe { queue.submissions.resume_writes() };
         let base = usize::from(queue.tail) * 64;
         for (index, word) in command.iter().enumerate() {
             queue.submissions.write(
@@ -750,281 +942,790 @@ impl Controller {
                 },
             );
         }
-        if data {
-            self.bounce.give()?;
-            self.prp_list.give()?;
-        }
         queue.submissions.give()?;
-        queue.tail = (queue.tail + 1) % ENTRIES;
+        queue.tail = (queue.tail + 1) % queue.entries;
         fence(Ordering::SeqCst);
-        self.registers.write32(
+        registers.write32(
             DOORBELLS + 2 * usize::from(queue.id) * stride,
             u32::from(queue.tail),
         )?;
         Ok(id)
     }
 
-    /// Wait for command `id`'s entry at the completion queue head and retire
-    /// it. Only an entry naming exactly this command and queue is accepted,
-    /// after any Asynchronous Event Request completion ahead of it.
-    fn reap(&mut self, io: bool, id: u16, timeout: u64) -> Result<Reaped, BlockError> {
-        let stride = self.doorbell_stride;
-        let registers = &self.registers;
-        let events = &mut self.events;
+    /// The completion at queue `io`'s head, once the controller has posted
+    /// it: its identifier, result, status and submission head, which must
+    /// not have moved back nor past the tail.
+    fn posted(&mut self, io: bool) -> Result<Option<(u16, u32, u32, u16)>, BlockError> {
         let queue = if io { &mut self.io } else { &mut self.admin };
-        let mut failure = None;
-        let mut fatal = None;
-        let done = self.clock.wait(timeout, || {
-            let observed = (|| {
-                let status = registers.read32(STATUS)?;
-                if status & FATAL != 0 {
-                    fatal = Some(status);
-                    return Ok(true);
-                }
-                if !io && take_event(registers, stride, queue, events)? {
-                    return Ok(false);
-                }
-                let entry = usize::from(queue.head) * 16;
-                Ok((queue.completions.coherent(entry + 12)? >> 16 & 1 == 1) == queue.phase)
-            })();
-            match observed {
-                Ok(ready) => ready,
-                Err(error) => {
-                    failure = Some(error);
-                    true
-                }
-            }
-        });
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        if let Some(status) = fatal {
-            return Ok(Reaped::Fatal(status));
-        }
-        if !done {
-            return Ok(Reaped::TimedOut);
-        }
-        let status = registers.read32(STATUS)?;
-        if status & FATAL != 0 {
-            return Ok(Reaped::Fatal(status));
+        let entry = usize::from(queue.head) * 16;
+        if (queue.completions.coherent(entry + 12)? >> 16 & 1 == 1) != queue.phase {
+            return Ok(None);
         }
         // The domain qualifies the coherent observation; this barrier orders
         // later CQ words after the device's final phase/status publication.
         fence(Ordering::SeqCst);
-        let entry = usize::from(queue.head) * 16;
         let result = queue.completions.coherent(entry)?;
         let submission = queue.completions.coherent(entry + 8)?;
         let tail_word = queue.completions.coherent(entry + 12)?;
+        let head = submission as u16;
         if ((tail_word >> 16 & 1) == 1) != queue.phase
-            || tail_word as u16 != id
             || submission >> 16 != u32::from(queue.id)
-            || submission as u16 != queue.tail
+            || !queue.consumes(head)
         {
             return Err(BlockError::Device { status: 0xffff });
         }
-        queue.retire_head(registers, stride)?;
-        Ok(Reaped::Done(result, tail_word >> 17 & 0x7fff))
+        queue.consumed = head;
+        queue.head = (queue.head + 1) % queue.entries;
+        if queue.head == 0 {
+            queue.phase = !queue.phase;
+        }
+        Ok(Some((
+            tail_word as u16,
+            result,
+            tail_word >> 17 & 0x7fff,
+            head,
+        )))
     }
 
-    /// Return the submission queues, PRP list and bounce buffer to the CPU.
-    ///
-    /// # Safety
-    /// Every published command but an Asynchronous Event Request, which owns
-    /// no memory, completed, or the controller acknowledged a reset and its
-    /// DMA was contained.
-    unsafe fn reclaim(&mut self) -> Result<(), BlockError> {
-        // SAFETY: forwarded from the caller.
-        unsafe {
-            self.admin.submissions.take()?;
-            self.io.submissions.take()?;
-            self.bounce.take()?;
-            self.prp_list.take()?;
+    /// Whether a running command's completion is posted at the I/O
+    /// queue's head, or one is done and not yet taken: memory alone.
+    fn posted_completion(&self) -> bool {
+        let mut running = false;
+        for tag in &self.tags {
+            match tag {
+                Tag::Done(_) => return true,
+                Tag::Running { .. } => running = true,
+                _ => {}
+            }
         }
+        let entry = usize::from(self.io.head) * 16;
+        running
+            && self
+                .io
+                .completions
+                .coherent(entry + 12)
+                .is_ok_and(|word| (word >> 16 & 1 == 1) == self.io.phase)
+    }
+
+    /// Ring queue `io`'s completion doorbell at its head.
+    fn release(&mut self, io: bool) -> Result<(), BlockError> {
+        let stride = self.doorbell_stride;
+        let queue = if io { &self.io } else { &self.admin };
+        self.registers.write32(
+            DOORBELLS + (2 * usize::from(queue.id) + 1) * stride,
+            u32::from(queue.head),
+        )
+    }
+
+    /// Whether a command runs, waits to run again or the controller resets.
+    fn busy(&self) -> bool {
+        self.recovery.is_some()
+            || self.tags.iter().any(|tag| {
+                matches!(
+                    tag,
+                    Tag::Running { .. } | Tag::Waiting { .. } | Tag::Delayed { .. }
+                )
+            })
+    }
+
+    /// Wait for every queued command, keeping each result for its tag, and
+    /// for a reset to end: a command of a waiting caller's own follows.
+    /// Every running command and reset step has a deadline, and retries are
+    /// bounded, so this ends.
+    fn settle(&mut self) -> Result<(), BlockError> {
+        loop {
+            self.advance();
+            if let Some(error) = &self.fault {
+                return Err(error.clone());
+            }
+            if !self.busy() {
+                return Ok(());
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+
+    /// The I/O command for `command` with tag `tag`'s memory, its data
+    /// copied in.
+    fn io_command(
+        &mut self,
+        tag: usize,
+        namespace: u32,
+        block: usize,
+        command: &Command,
+    ) -> Result<[u32; 16], BlockError> {
+        let mut words = [0u32; 16];
+        words[1] = namespace;
+        match command {
+            Command::Read { lba, bytes } => {
+                let pointers = self.data_pointers(tag, *bytes)?;
+                Ok(transfer_command(
+                    IO_READ,
+                    namespace,
+                    *lba,
+                    (bytes / block) as u32,
+                    pointers,
+                    0,
+                ))
+            }
+            Command::Write { lba, data, fua } => {
+                self.slot(tag).0.bytes_mut()[..data.len()].copy_from_slice(data);
+                let pointers = self.data_pointers(tag, data.len())?;
+                let access = if *fua { FORCE_UNIT_ACCESS } else { 0 };
+                let blocks = (data.len() / block) as u32;
+                Ok(transfer_command(
+                    IO_WRITE, namespace, *lba, blocks, pointers, access,
+                ))
+            }
+            Command::Flush => {
+                words[0] = u32::from(IO_FLUSH);
+                Ok(words)
+            }
+            Command::Discard { lba, blocks } => {
+                // One range: context attributes, length, starting LBA.
+                let count = u32::try_from(*blocks)
+                    .map_err(|_| BlockError::Unsupported("an NVMe range past 2^32 blocks"))?;
+                let (bounce, _) = self.slot(tag);
+                bounce.write(0, 0u32);
+                bounce.write(4, count);
+                bounce.write(8, *lba);
+                let address = bounce.address()?;
+                words[0] = u32::from(IO_DATASET_MANAGEMENT);
+                words[6] = address as u32;
+                words[7] = (address >> 32) as u32;
+                words[11] = ATTRIBUTE_DEALLOCATE;
+                Ok(words)
+            }
+            Command::WriteZeroes { lba, blocks, unmap } => {
+                let count = u16::try_from(blocks.wrapping_sub(1))
+                    .map_err(|_| BlockError::Unsupported("Write Zeroes past 65536 blocks"))?;
+                words[0] = u32::from(IO_WRITE_ZEROES);
+                words[10] = *lba as u32;
+                words[11] = (*lba >> 32) as u32;
+                words[12] = u32::from(count) | if *unmap { DEALLOCATE } else { 0 };
+                Ok(words)
+            }
+        }
+    }
+
+    /// Whether [`Self::start`] answers now: a tag is free and no reset runs,
+    /// or the controller failed or shut down, which it refuses at once
+    /// rather than leaving the command waiting for room it never gets.
+    fn room(&self) -> bool {
+        self.fault.is_some()
+            || self.shut_down
+            || (self.recovery.is_none() && self.tags.iter().any(|tag| matches!(tag, Tag::Free)))
+    }
+
+    /// Run `command` of `namespace` under a free tag; the tag.
+    fn start(&mut self, namespace: u32, block: usize, command: Command) -> Result<u32, BlockError> {
+        self.ready()?;
+        let tag = self
+            .tags
+            .iter()
+            .position(|tag| matches!(tag, Tag::Free))
+            .filter(|_| self.recovery.is_none())
+            .ok_or(BlockError::Protocol("every NVMe tag is in use"))?;
+        self.submit(tag, namespace, block, command, 0);
+        Ok(tag as u32)
+    }
+
+    /// Run `command` of `namespace` once every queued command ended, and
+    /// wait for it. A fatal controller is reset before it is sent, as
+    /// Linux's timeout handling would reset it.
+    fn run(&mut self, namespace: u32, block: usize, command: Command) -> Finished {
+        self.ready()?;
+        self.settle()?;
+        match self.registers.read32(STATUS)? {
+            REMOVED => return Err(self.poison(removed())),
+            status if status & FATAL != 0 => {
+                self.reset();
+                self.settle()?;
+            }
+            _ => {}
+        }
+        let tag = self.start(namespace, block, command)? as usize;
+        loop {
+            if let Some(result) = self.finish(tag) {
+                return result;
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Publish `command` under `tag`, which holds no other.
+    fn submit(&mut self, tag: usize, namespace: u32, block: usize, command: Command, retries: u8) {
+        let slot = self.io.tail;
+        // A command whose deadline cannot be kept is not sent; the deadline
+        // runs from its doorbell.
+        let published = self.deadline(self.command_timeout_us).and_then(|_| {
+            let words = self.io_command(tag, namespace, block, &command)?;
+            let id = self.publish(true, words, Some(tag))?;
+            Ok((id, self.deadline(self.command_timeout_us)?))
+        });
+        self.tags[tag] = match published {
+            Ok((id, deadline)) => Tag::Running {
+                id,
+                slot,
+                namespace,
+                block,
+                command,
+                deadline,
+                retries,
+                aborted: false,
+            },
+            Err(error) => Tag::Done(Err(self.poison(error))),
+        };
+    }
+
+    /// Collect every completion the controller has posted, run delayed
+    /// retries, check the running commands' deadlines and move a reset on;
+    /// never waits.
+    fn advance(&mut self) {
+        if self.fault.is_some() {
+            self.fail_all();
+            return;
+        }
+        if self.recovery.is_some() {
+            if let Err(error) = self.recover() {
+                self.poison(error);
+                self.fail_all();
+            }
+            return;
+        }
+        // Abort and event completions, which the I/O commands do not wait for.
+        if (self.events.request.is_some() || !self.aborts.is_empty())
+            && let Err(error) = self.admin_completion(None)
+        {
+            self.poison(error);
+            self.fail_all();
+            return;
+        }
+        // A controller posts completions only for running commands.
+        let running = self
+            .tags
+            .iter()
+            .any(|tag| matches!(tag, Tag::Running { .. }));
+        let mut reaped = false;
+        loop {
+            if !running {
+                break;
+            }
+            let (head, phase, consumed) = (self.io.head, self.io.phase, self.io.consumed);
+            match self.posted(true) {
+                Ok(None) => break,
+                Ok(Some((id, _, status, sq_head))) => {
+                    if !reaped && let Err(error) = self.trust_completion() {
+                        (self.io.head, self.io.phase, self.io.consumed) = (head, phase, consumed);
+                        self.poison(error);
+                        self.fail_all();
+                        return;
+                    }
+                    if !self.complete(id, status, sq_head) {
+                        // A completion for no running command, or for one the
+                        // controller had not fetched: the queue is corrupt.
+                        // It stays unretired.
+                        (self.io.head, self.io.phase, self.io.consumed) = (head, phase, consumed);
+                        self.poison(BlockError::Device { status: 0xffff });
+                        self.fail_all();
+                        return;
+                    }
+                    reaped = true;
+                }
+                Err(error) => {
+                    self.poison(error);
+                    self.fail_all();
+                    return;
+                }
+            }
+        }
+        if reaped && let Err(error) = self.release(true) {
+            self.poison(error);
+            self.fail_all();
+            return;
+        }
+        for tag in 0..self.tags.len() {
+            if matches!(&self.tags[tag], Tag::Delayed { until, .. } if until.passed()) {
+                let Tag::Delayed {
+                    namespace,
+                    block,
+                    command,
+                    retries,
+                    ..
+                } = core::mem::take(&mut self.tags[tag])
+                else {
+                    unreachable!();
+                };
+                self.submit(tag, namespace, block, command, retries);
+            }
+        }
+        for tag in 0..self.tags.len() {
+            let Tag::Running {
+                id,
+                deadline,
+                aborted,
+                ..
+            } = &self.tags[tag]
+            else {
+                continue;
+            };
+            if !deadline.passed() {
+                continue;
+            }
+            if *aborted {
+                self.reset();
+                return;
+            }
+            let id = *id;
+            match self.abort(tag, id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.reset();
+                    return;
+                }
+                Err(error) => {
+                    self.poison(error);
+                    self.fail_all();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Linux `nvme_timeout` for an I/O command's first deadline: abort it
+    /// and give it another, unless the controller is fatally failed, which
+    /// is reset at once (`false`).
+    fn abort(&mut self, tag: usize, id: u16) -> Result<bool, BlockError> {
+        match self.registers.read32(STATUS)? {
+            REMOVED => return Err(removed()),
+            status if status & FATAL != 0 => return Ok(false),
+            _ => {}
+        }
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_ABORT);
+        command[10] = u32::from(id) << 16 | u32::from(self.io.id);
+        let abort = self.publish(false, command, None)?;
+        self.aborts.push(abort);
+        let renewed = self.deadline(self.command_timeout_us)?;
+        if let Tag::Running {
+            deadline, aborted, ..
+        } = &mut self.tags[tag]
+        {
+            (*deadline, *aborted) = (renewed, true);
+        }
+        Ok(true)
+    }
+
+    /// Command `id` completed with `status`, the controller reporting
+    /// submission head `head`: its tag takes the result, or, for an error
+    /// without Do Not Retry and retries left, runs it again after the delay
+    /// its Command Retry Delay selects (`nvme_decide_disposition`). Whether
+    /// a running command matched.
+    fn complete(&mut self, id: u16, status: u32, head: u16) -> bool {
+        let io = &self.io;
+        let Some(tag) = self.tags.iter().position(|tag| {
+            matches!(tag, Tag::Running { id: running, slot, .. }
+                if *running == id && io.fetched(*slot, head))
+        }) else {
+            return false;
+        };
+        let Tag::Running {
+            namespace,
+            block,
+            command,
+            retries,
+            ..
+        } = core::mem::take(&mut self.tags[tag])
+        else {
+            unreachable!();
+        };
+        // SAFETY: the controller completed this exact command; its memory
+        // is the CPU's again.
+        let taken = unsafe {
+            let (bounce, prp_list) = self.slot(tag);
+            bounce.take().and_then(|()| prp_list.take())
+        };
+        let retry = status != 0 && status & STATUS_DO_NOT_RETRY == 0 && retries < RETRIES;
+        self.tags[tag] = match (taken, status, command) {
+            (Err(error), ..) => Tag::Done(Err(self.poison(error))),
+            (Ok(()), _, command) if retry => {
+                let delay = match (status & STATUS_RETRY_DELAY) >> 11 {
+                    0 => 0,
+                    index => u64::from(self.retry_delays[index as usize - 1]) * RETRY_DELAY_UNIT_US,
+                };
+                match self.deadline(delay) {
+                    Ok(until) => Tag::Delayed {
+                        namespace,
+                        block,
+                        command,
+                        retries: retries + 1,
+                        until,
+                    },
+                    Err(error) => Tag::Done(Err(error)),
+                }
+            }
+            (Ok(()), 0, Command::Read { bytes, .. }) => {
+                Tag::Done(Ok(Some(self.slot(tag).0.bytes()[..bytes].to_vec())))
+            }
+            (Ok(()), 0, _) => Tag::Done(Ok(None)),
+            (Ok(()), status, _) => Tag::Done(Err(BlockError::Device { status })),
+        };
+        true
+    }
+
+    /// End every command with the controller's fault.
+    fn fail_all(&mut self) {
+        let error = self.fault.clone().unwrap_or(BlockError::Timeout);
+        for tag in &mut self.tags {
+            if matches!(
+                tag,
+                Tag::Running { .. } | Tag::Waiting { .. } | Tag::Delayed { .. }
+            ) {
+                *tag = Tag::Done(Err(error.clone()));
+            }
+        }
+        self.recovery = None;
+    }
+
+    /// Reset the controller, as Linux's `nvme_timeout` does once a
+    /// controller is not gone: every running command waits to run again
+    /// once the reset completes, while it has retries left.
+    fn reset(&mut self) {
+        self.reset_with(true);
+    }
+
+    /// [`Self::reset`]: `nvme_dev_disable` deletes the I/O queues of a live
+    /// controller, unless `delete` is clear or an Abort went unanswered,
+    /// either leaving no admin queue to delete with. A removed controller
+    /// stays failed.
+    fn reset_with(&mut self, delete: bool) {
+        let status = match self.registers.read32(STATUS) {
+            Ok(REMOVED) => Err(removed()),
+            other => other,
+        };
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                self.poison(error);
+                self.fail_all();
+                return;
+            }
+        };
+        for tag in &mut self.tags {
+            *tag = match core::mem::take(tag) {
+                Tag::Running {
+                    namespace,
+                    block,
+                    command,
+                    retries,
+                    ..
+                } => Tag::Waiting {
+                    namespace,
+                    block,
+                    command,
+                    retries: retries + 1,
+                },
+                other => other,
+            };
+        }
+        let dead = status & FATAL != 0 || status & READY == 0;
+        let started = if !dead && delete && self.aborts.is_empty() {
+            self.delete_next(true)
+        } else {
+            self.disable()
+        };
+        if let Err(error) = started {
+            self.poison(error);
+            self.fail_all();
+        }
+    }
+
+    fn deadline(&self, us: u64) -> Result<crate::Deadline, BlockError> {
+        self.clock
+            .try_deadline(us)
+            .map_err(|_| BlockError::Unsupported("NVMe requires a representable deadline"))
+    }
+
+    /// Delete the I/O submission queue, or then the completion queue.
+    fn delete_next(&mut self, submission: bool) -> Result<(), BlockError> {
+        let mut command = [0u32; 16];
+        command[0] = u32::from(if submission {
+            ADMIN_DELETE_SUBMISSION
+        } else {
+            ADMIN_DELETE_COMPLETION
+        });
+        command[10] = u32::from(self.io.id);
+        let id = self.publish(false, command, None)?;
+        let deadline = self.deadline(self.admin_timeout_us)?;
+        self.recovery = Some(Recovery::Deleting {
+            submission,
+            id,
+            deadline,
+        });
         Ok(())
     }
 
-    /// One admin command inside error handling, which never recurses.
-    fn admin_command(&mut self, command: [u32; 16]) -> Result<u32, BlockError> {
-        match self.run(false, command) {
-            Ok((result, 0)) => Ok(result),
-            Ok((_, status)) => Err(BlockError::Device { status }),
-            Err(Lost::Reset(error) | Lost::Fatal(error)) => Err(error),
-        }
-    }
-
-    /// Linux `nvme_dev_disable` and `nvme_reset_work`: delete the I/O queues
-    /// of a live controller, disable it and contain its DMA, then configure
-    /// the admin queue again, identify the controller and recreate the I/O
-    /// queues.
-    fn reset(&mut self) -> Result<(), BlockError> {
-        let status = self.registers.read32(STATUS)?;
-        let dead = status & FATAL != 0 || status & READY == 0;
-        // A still-outstanding admin command (an unanswered abort) leaves no
-        // admin queue to delete with.
-        let outstanding = ((self.admin.tail + ENTRIES - self.admin.head) % ENTRIES)
-            .saturating_sub(u16::from(self.events.request.is_some()));
-        if !dead && outstanding == 0 {
-            self.delete_io_queues()?;
-        }
+    /// Clear CC.EN (and any shutdown notification).
+    fn disable(&mut self) -> Result<(), BlockError> {
         let configuration = self.registers.read32(CONFIGURATION)?;
         self.registers.write32(
             CONFIGURATION,
             configuration & !(ENABLE | SHUTDOWN_NOTIFICATION),
         )?;
-        self.wait_status(self.ready_timeout_us, |status| status & READY == 0)?;
+        let deadline = self.deadline(self.ready_timeout_us)?;
+        self.recovery = Some(Recovery::Disabling(deadline));
+        Ok(())
+    }
+
+    /// The disabled controller no longer reaches any queue or buffer:
+    /// contain its DMA (`pci_disable_device`), take every one back, end the
+    /// commands out of retries (`nvme_cancel_tagset`), empty the queues and
+    /// point the controller at the admin queue again.
+    fn restart_queues(&mut self) -> Result<(), BlockError> {
         if let Some(owner) = self.owned.as_mut() {
-            // pci_disable_device: bus mastering off and posted writes drained.
             owner.lifecycle.disable_dma()?;
             // SAFETY: the engine acknowledged its reset and BME is off.
             unsafe { owner.domain.drain_posted_writes() }.map_err(owned::map_dma_error)?;
         }
-        // SAFETY: the controller acknowledged its reset and its DMA is
-        // contained; no command owns any queue or buffer.
+        for tag in 0..self.tags.len() {
+            // SAFETY: CSTS.RDY clear acknowledges the stopped engine.
+            unsafe {
+                let (bounce, prp_list) = self.slot(tag);
+                bounce.take()?;
+                prp_list.take()?;
+            }
+        }
+        // SAFETY: as above.
         unsafe {
-            self.reclaim()?;
+            self.admin.submissions.take()?;
+            self.io.submissions.take()?;
             for queue in [&mut self.admin, &mut self.io] {
                 queue.completions.take()?;
-                queue.completions.bytes_mut()[..usize::from(ENTRIES) * 16].fill(0);
-                queue.completions.give()?;
-                queue.head = 0;
-                queue.tail = 0;
-                queue.phase = true;
+                queue.completions.bytes_mut().fill(0);
             }
         }
+        for tag in &mut self.tags {
+            if matches!(tag, Tag::Waiting { retries, .. } if *retries > RETRIES) {
+                *tag = Tag::Done(Err(BlockError::Timeout));
+            }
+        }
+        self.io.restart();
+        self.aborts.clear();
+        // The disable ended the Asynchronous Event Request; the host memory
+        // buffer is offered back with the bring-up.
         self.events.request = None;
-        self.configure_admin_queue()?;
-        // Identify through the bounce buffer's first page, keeping the data a
-        // retried write still needs there.
-        let kept = self.bounce.bytes()[..PAGE].to_vec();
-        let identify = self.identify_command(IDENTIFY_CONTROLLER, 0)?;
-        self.admin_command(identify)?;
-        // nvme_init_ctrl_finish runs again after every reset; a refused
-        // feature is only logged.
-        let apst = apst_table(&self.bounce.bytes()[..PAGE]);
-        // The disable ended the Asynchronous Event Request.
-        self.events = Events::from_identify(&self.bounce.bytes()[..PAGE]);
-        let mut commands = Vec::new();
-        commands.extend(self.host_options()?);
-        if let Some(table) = apst {
-            commands.push(self.apst_command(&table)?);
-        }
-        for command in commands {
-            match self.admin_command(command) {
-                Ok(_) | Err(BlockError::Device { .. }) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        self.bounce.bytes_mut()[..PAGE].copy_from_slice(&kept);
-        // nvme_setup_host_mem: the kept buffer is offered back.
         self.host_memory_enabled = false;
-        self.enable_host_memory()?;
-        for command in self.create_queue_commands()? {
-            self.io.submissions.publish();
-            self.admin_command(command)?;
+        self.configure_admin()?;
+        if let Some(owner) = self.owned.as_mut() {
+            owner.lifecycle.enable_dma()?;
         }
-        // nvme_start_ctrl enables events and queues a namespace scan.
-        self.enable_events()?;
-        self.scans += 1;
         Ok(())
     }
 
-    /// Linux `nvme_enable_aen`: enable the notices Linux handles and leave an
-    /// Asynchronous Event Request outstanding. A refused configuration is
-    /// only logged.
-    fn enable_events(&mut self) -> Result<(), BlockError> {
-        if self.events.supported == 0 {
-            return Ok(());
+    /// Move the controller reset on, never waiting: the I/O queues deleted,
+    /// disabled, enabled with the admin queue, brought up again, then the
+    /// interrupted commands run again under their tags.
+    fn recover(&mut self) -> Result<(), BlockError> {
+        let status = self.registers.read32(STATUS)?;
+        if status == REMOVED {
+            return Err(removed());
         }
-        let mut command = [0u32; 16];
-        command[0] = u32::from(ADMIN_SET_FEATURES);
-        command[10] = FEATURE_ASYNC_EVENTS;
-        command[11] = self.events.supported;
-        match self.admin_command(command) {
-            Ok(_) | Err(BlockError::Device { .. }) => {}
-            Err(error) => return Err(error),
-        }
-        self.request_event()
-    }
-
-    /// Linux `nvme_pci_submit_async_event`.
-    fn request_event(&mut self) -> Result<(), BlockError> {
-        let mut command = [0u32; 16];
-        command[0] = u32::from(ADMIN_ASYNC_EVENT);
-        let id = self.submit(false, command, false)?;
-        self.events.request = Some(id);
-        Ok(())
-    }
-
-    /// Linux's interrupt-time `nvme_complete_async_event` and its work,
-    /// polled before each command: act on a completed Asynchronous Event
-    /// Request and request the next event. A failed request is not repeated;
-    /// a persistent internal error resets the controller, which requests
-    /// events again.
-    fn service_events(&mut self) -> Result<(), BlockError> {
-        let stride = self.doorbell_stride;
-        if let Err(error) = take_event(&self.registers, stride, &mut self.admin, &mut self.events) {
-            return Err(self.poison(error));
-        }
-        let Some((result, status)) = self.events.completed.take() else {
-            return Ok(());
-        };
-        if status != 0 {
-            return Ok(());
-        }
-        match (result & 0x7, result >> 8 & 0xff) {
-            (EVENT_NOTICE, NOTICE_NAMESPACES_CHANGED) => {
-                // nvme_scan_work clears the Changed Namespace List first.
-                self.read_log(LOG_CHANGED_NAMESPACES, PAGE)?;
-                self.scans += 1;
+        match self.recovery.take() {
+            None => Ok(()),
+            Some(Recovery::Deleting {
+                submission,
+                id,
+                deadline,
+            }) => match self.admin_completion(Some((id, false)))? {
+                None if !deadline.passed() => {
+                    self.recovery = Some(Recovery::Deleting {
+                        submission,
+                        id,
+                        deadline,
+                    });
+                    Ok(())
+                }
+                // A refused deletion is ignored and a timed-out one ends
+                // the deletions, as in Linux.
+                Some(_) if submission => self.delete_next(false),
+                _ => self.disable(),
+            },
+            Some(Recovery::Disabling(deadline)) => {
+                if status & READY != 0 {
+                    if deadline.passed() {
+                        return Err(BlockError::Timeout);
+                    }
+                    self.recovery = Some(Recovery::Disabling(deadline));
+                    return Ok(());
+                }
+                self.restart_queues()?;
+                let timeout = self.enable()?;
+                let deadline = self.deadline(timeout)?;
+                self.recovery = Some(Recovery::Enabling(deadline));
+                Ok(())
             }
-            (EVENT_NOTICE, NOTICE_FIRMWARE_ACTIVATION) => {
-                // nvme_fw_act_work: commands wait while processing is paused,
-                // up to MTFA or the admin timeout, then the Firmware Slot
-                // Information log clears the event.
-                let timeout = match self.events.activation_us {
-                    0 => self.admin_timeout_us,
-                    activation => activation,
+            Some(Recovery::Enabling(deadline)) => {
+                if status & FATAL != 0 {
+                    return Err(BlockError::Device { status });
+                }
+                if status & READY == 0 {
+                    if deadline.passed() {
+                        return Err(BlockError::Timeout);
+                    }
+                    self.recovery = Some(Recovery::Enabling(deadline));
+                    return Ok(());
+                }
+                self.bring_up(Step::Identify, Vec::new())
+            }
+            Some(Recovery::Admin {
+                step,
+                id,
+                deadline,
+                mut identify,
+            }) => {
+                let Some((_, code)) = self.admin_completion(Some((id, true)))? else {
+                    if deadline.passed() {
+                        return Err(BlockError::Timeout);
+                    }
+                    self.recovery = Some(Recovery::Admin {
+                        step,
+                        id,
+                        deadline,
+                        identify,
+                    });
+                    return Ok(());
                 };
-                match self.wait_status(timeout, |status| status & PROCESSING_PAUSED == 0) {
-                    Ok(()) => self.read_log(LOG_FIRMWARE_SLOT, 512)?,
-                    Err(BlockError::Timeout) => return self.reset_or_poison(),
-                    Err(error) => return Err(self.poison(error)),
+                match (step, code) {
+                    (Step::Identify, 0) => {
+                        identify = self.bounce.bytes()[..PAGE].to_vec();
+                        self.identified(&identify);
+                    }
+                    (Step::HostMemory, code) => self.host_memory_answered(code == 0),
+                    // A refused feature is only logged.
+                    (Step::HostOptions | Step::Apst | Step::Events, _) => {}
+                    (Step::CreateCompletion | Step::CreateSubmission, 0) => {}
+                    (_, status) => return Err(BlockError::Device { status }),
+                }
+                let next = STEPS.iter().position(|each| *each == step).unwrap() + 1;
+                match STEPS.get(next) {
+                    Some(&next) => self.bring_up(next, identify),
+                    None => self.restarted(),
                 }
             }
-            (EVENT_ERROR, ERROR_PERSISTENT_INTERNAL) => return self.reset_or_poison(),
-            _ => {}
-        }
-        self.request_event()
-    }
-
-    fn reset_or_poison(&mut self) -> Result<(), BlockError> {
-        match self.reset() {
-            Ok(()) => Ok(()),
-            Err(failure) => Err(self.poison(failure)),
         }
     }
 
-    /// Linux `nvme_get_log` for every namespace into the first bounce page,
-    /// keeping the data a pending write left there. A failure is only
-    /// logged.
-    fn read_log(&mut self, log: u32, bytes: usize) -> Result<(), BlockError> {
-        let kept = self.bounce.bytes()[..PAGE].to_vec();
+    /// Submit the bring-up command of the first step from `from` on that
+    /// has one; with none left, the controller is up.
+    fn bring_up(&mut self, from: Step, identify: Vec<u8>) -> Result<(), BlockError> {
+        let first = STEPS.iter().position(|each| *each == from).unwrap();
+        for &step in &STEPS[first..] {
+            let command = match step {
+                Step::Identify => Some(self.identify_command(IDENTIFY_CONTROLLER, 0)?),
+                Step::HostOptions => self.host_options(&identify)?,
+                Step::Apst => match apst_table(&identify) {
+                    Some(table) => Some(self.apst_command(&table)?),
+                    None => None,
+                },
+                Step::HostMemory => self.host_memory_command()?,
+                Step::CreateCompletion => Some(self.create_queue(false)?),
+                Step::CreateSubmission => {
+                    self.io.submissions.publish();
+                    Some(self.create_queue(true)?)
+                }
+                Step::Events => self.events_command(),
+            };
+            let Some(command) = command else {
+                continue;
+            };
+            let id = self.publish(false, command, Some(0))?;
+            let deadline = self.deadline(self.admin_timeout_us)?;
+            self.recovery = Some(Recovery::Admin {
+                step,
+                id,
+                deadline,
+                identify,
+            });
+            return Ok(());
+        }
+        self.restarted()
+    }
+
+    /// `nvme_start_ctrl`: leave an Asynchronous Event Request outstanding,
+    /// queue a namespace scan and run the interrupted commands again.
+    fn restarted(&mut self) -> Result<(), BlockError> {
+        if self.events.supported != 0 {
+            self.request_event()?;
+        }
+        self.scans += 1;
+        for tag in 0..self.tags.len() {
+            match core::mem::take(&mut self.tags[tag]) {
+                Tag::Waiting {
+                    namespace,
+                    block,
+                    command,
+                    retries,
+                } => self.submit(tag, namespace, block, command, retries),
+                other => self.tags[tag] = other,
+            }
+        }
+        Ok(())
+    }
+
+    /// What `nvme_init_ctrl_finish` keeps from Identify Controller: the
+    /// retry delays and the events to enable.
+    fn identified(&mut self, identify: &[u8]) {
+        for (index, delay) in self.retry_delays.iter_mut().enumerate() {
+            let at = CONTROLLER_RETRY_DELAYS + 2 * index;
+            *delay = u16::from_le_bytes([identify[at], identify[at + 1]]);
+        }
+        self.events = Events::from_identify(identify);
+    }
+
+    /// Linux `nvme_configure_host_options` from `identify`: a Set Features
+    /// for Host Behavior Support enabling ACRE when a retry delay is
+    /// reported and LBAFEE for extended LBA formats, its data in tag 0's
+    /// bounce page.
+    fn host_options(&mut self, identify: &[u8]) -> Result<Option<[u32; 16]>, BlockError> {
+        let acre = self.retry_delays[0] != 0;
+        let lbafee = le32(identify, CONTROLLER_ATTRIBUTES) & ATTRIBUTE_EXTENDED_LBA != 0;
+        if !acre && !lbafee {
+            return Ok(None);
+        }
+        let page = &mut self.bounce.bytes_mut()[..HOST_BEHAVIOR_BYTES];
+        page.fill(0);
+        page[HOST_BEHAVIOR_ACRE] = u8::from(acre);
+        page[HOST_BEHAVIOR_LBAFEE] = u8::from(lbafee);
+        let data = self.bounce.address()?;
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_SET_FEATURES);
+        command[6] = data as u32;
+        command[7] = (data >> 32) as u32;
+        command[10] = FEATURE_HOST_BEHAVIOR;
+        Ok(Some(command))
+    }
+
+    /// The Set Features enabling autonomous power state transitions with
+    /// `table`, written to tag 0's bounce page.
+    fn apst_command(&mut self, table: &[u64; 32]) -> Result<[u32; 16], BlockError> {
+        for (index, entry) in table.iter().enumerate() {
+            self.bounce.write(8 * index, *entry);
+        }
         let page = self.bounce.address()?;
         let mut command = [0u32; 16];
-        command[0] = u32::from(ADMIN_GET_LOG_PAGE);
-        command[1] = u32::MAX;
+        command[0] = u32::from(ADMIN_SET_FEATURES);
         command[6] = page as u32;
         command[7] = (page >> 32) as u32;
-        command[10] = ((bytes / 4 - 1) as u32) << 16 | log;
-        let _ = self.execute(false, command);
-        self.ready()?;
-        self.bounce.bytes_mut()[..PAGE].copy_from_slice(&kept);
-        Ok(())
+        command[10] = FEATURE_APST;
+        command[11] = 1;
+        Ok(command)
     }
 
     /// Linux `nvme_alloc_host_mem_multi`: chunks of `chunk` bytes up to the
     /// preferred size and descriptor limit; `None` when not one chunk fits.
-    fn allocate_host_memory(
+    fn host_memory_chunks(
         request: HostMemoryRequest,
         preferred: u64,
         chunk: u64,
@@ -1065,40 +1766,39 @@ impl Controller {
         })
     }
 
-    /// Linux `nvme_setup_host_mem` at discovery: allocate the preferred size,
-    /// capped at `max_host_mem_size_mb`, from the largest chunks down to the
-    /// minimum descriptor size, and hand it over. A controller works without
-    /// one when it cannot be had.
-    fn setup_host_memory(
+    /// Linux `nvme_setup_host_mem` at discovery: the preferred size, capped
+    /// at `max_host_mem_size_mb`, from the largest chunks down to the
+    /// minimum descriptor size. A controller works without one when it
+    /// cannot be had; the bring-up hands it over.
+    fn allocate_host_memory(
         &mut self,
         request: HostMemoryRequest,
         source: &mut dyn HostMemorySource,
-    ) -> Result<(), BlockError> {
+    ) {
         if request.preferred == 0 || request.minimum > HOST_MEMORY_MAXIMUM {
-            return Ok(());
+            return;
         }
         let preferred = request.preferred.min(HOST_MEMORY_MAXIMUM);
         let smallest = request.descriptor_minimum.max(2 * PAGE as u64);
         let mut chunk = preferred.min(HOST_MEMORY_CHUNK);
         while chunk >= smallest {
-            if let Some(memory) = Self::allocate_host_memory(request, preferred, chunk, source) {
+            if let Some(memory) = Self::host_memory_chunks(request, preferred, chunk, source) {
                 if request.minimum == 0 || memory.bytes >= request.minimum {
                     self.host_memory = Some(memory);
-                    return self.enable_host_memory();
+                    return;
                 }
                 // nvme_free_host_mem: the controller never saw it.
                 drop(memory);
             }
             chunk /= 2;
         }
-        Ok(())
     }
 
-    /// Linux `nvme_set_host_mem` with EHM, and MR for a buffer the controller
-    /// already filled. A refusal leaves the controller without one.
-    fn enable_host_memory(&mut self) -> Result<(), BlockError> {
+    /// Linux `nvme_set_host_mem` with EHM, and MR for a buffer the
+    /// controller already filled.
+    fn host_memory_command(&self) -> Result<Option<[u32; 16]>, BlockError> {
         let Some(memory) = self.host_memory.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         let mut bits = HOST_MEMORY_ENABLE;
         if memory.returnable {
@@ -1113,74 +1813,104 @@ impl Controller {
         command[13] = list as u32;
         command[14] = (list >> 32) as u32;
         command[15] = memory.chunks.len() as u32;
-        match self.admin_command(command) {
-            Ok(_) => {
-                self.host_memory_enabled = true;
-                if let Some(memory) = self.host_memory.as_mut() {
-                    memory.returnable = true;
-                }
-                Ok(())
-            }
-            Err(BlockError::Device { .. }) => {
-                // nvme_free_host_mem: the next setup offers it afresh. The
-                // pages stay reserved, never reused for anything else.
-                self.host_memory_enabled = false;
-                if let Some(memory) = self.host_memory.as_mut() {
-                    memory.returnable = false;
-                }
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// The Set Features enabling APST with `table`, written to the first
-    /// bounce page.
-    fn apst_command(&mut self, table: &[u64; APST_ENTRIES]) -> Result<[u32; 16], BlockError> {
-        let page = &mut self.bounce.bytes_mut()[..APST_ENTRIES * 8];
-        for (entry, bytes) in table.iter().zip(page.chunks_mut(8)) {
-            bytes.copy_from_slice(&entry.to_le_bytes());
-        }
-        let data = self.bounce.address()?;
-        let mut command = [0u32; 16];
-        command[0] = u32::from(ADMIN_SET_FEATURES);
-        command[6] = data as u32;
-        command[7] = (data >> 32) as u32;
-        command[10] = FEATURE_AUTONOMOUS_POWER;
-        command[11] = 1;
-        Ok(command)
-    }
-
-    /// Linux `nvme_configure_host_options`, from the Identify Controller data
-    /// in the first bounce page: the retry delays, and a Set Features for
-    /// Host Behavior Support enabling ACRE when a delay is reported and
-    /// LBAFEE for extended LBA formats. Its data replaces that page.
-    fn host_options(&mut self) -> Result<Option<[u32; 16]>, BlockError> {
-        let identify = &self.bounce.bytes()[..PAGE];
-        for (index, delay) in self.retry_delays.iter_mut().enumerate() {
-            let at = CONTROLLER_RETRY_DELAYS + 2 * index;
-            *delay = u16::from_le_bytes([identify[at], identify[at + 1]]);
-        }
-        let acre = self.retry_delays[0] != 0;
-        let lbafee = le32(identify, CONTROLLER_ATTRIBUTES) & ATTRIBUTE_EXTENDED_LBA != 0;
-        if !acre && !lbafee {
-            return Ok(None);
-        }
-        let page = &mut self.bounce.bytes_mut()[..HOST_BEHAVIOR_BYTES];
-        page.fill(0);
-        page[HOST_BEHAVIOR_ACRE] = u8::from(acre);
-        page[HOST_BEHAVIOR_LBAFEE] = u8::from(lbafee);
-        let data = self.bounce.address()?;
-        let mut command = [0u32; 16];
-        command[0] = u32::from(ADMIN_SET_FEATURES);
-        command[6] = data as u32;
-        command[7] = (data >> 32) as u32;
-        command[10] = FEATURE_HOST_BEHAVIOR;
         Ok(Some(command))
     }
 
-    /// Linux `nvme_identify_ns_descs`: none before NVMe 1.3. `None` when the
-    /// controller refused the list; the scan then skips the namespace.
+    /// The controller took the host memory buffer or refused it, which
+    /// leaves it without one: the next bring-up offers it afresh
+    /// (`nvme_free_host_mem`). Its pages stay reserved, never reused for
+    /// anything else.
+    fn host_memory_answered(&mut self, accepted: bool) {
+        self.host_memory_enabled = accepted;
+        if let Some(memory) = self.host_memory.as_mut() {
+            memory.returnable = accepted;
+        }
+    }
+
+    /// Linux `nvme_enable_aen`: enable the notices Linux handles.
+    fn events_command(&self) -> Option<[u32; 16]> {
+        if self.events.supported == 0 {
+            return None;
+        }
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_SET_FEATURES);
+        command[10] = FEATURE_ASYNC_EVENTS;
+        command[11] = self.events.supported;
+        Some(command)
+    }
+
+    /// Linux `nvme_pci_submit_async_event`.
+    fn request_event(&mut self) -> Result<(), BlockError> {
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_ASYNC_EVENT);
+        let id = self.publish(false, command, None)?;
+        self.events.request = Some(id);
+        Ok(())
+    }
+
+    /// Linux's interrupt-time `nvme_complete_async_event` and its work,
+    /// between commands: act on a completed Asynchronous Event Request and
+    /// request the next event. A failed request is not repeated; a
+    /// persistent internal error resets the controller, which requests
+    /// events again.
+    fn service_events(&mut self) -> Result<(), BlockError> {
+        if self.events.request.is_some()
+            && !self.busy()
+            && let Err(error) = self.admin_completion(None)
+        {
+            return Err(self.poison(error));
+        }
+        let Some((result, status)) = self.events.completed.take() else {
+            return Ok(());
+        };
+        if status != 0 {
+            return Ok(());
+        }
+        match (result & 0x7, result >> 8 & 0xff) {
+            (EVENT_NOTICE, NOTICE_NAMESPACES_CHANGED) => {
+                // nvme_scan_work clears the Changed Namespace List first.
+                self.read_log(LOG_CHANGED_NAMESPACES, PAGE)?;
+                self.scans += 1;
+            }
+            (EVENT_NOTICE, NOTICE_FIRMWARE_ACTIVATION) => {
+                // nvme_fw_act_work: commands wait while processing is paused,
+                // up to MTFA or the admin timeout, then the Firmware Slot
+                // Information log clears the event.
+                let timeout = match self.events.activation_us {
+                    0 => self.admin_timeout_us,
+                    activation => activation,
+                };
+                match self.wait_status(timeout, |status| status & PROCESSING_PAUSED == 0) {
+                    Ok(()) => self.read_log(LOG_FIRMWARE_SLOT, 512)?,
+                    Err(BlockError::Timeout) => return self.reset_and_settle(),
+                    Err(error) => return Err(self.poison(error)),
+                }
+            }
+            (EVENT_ERROR, ERROR_PERSISTENT_INTERNAL) => return self.reset_and_settle(),
+            _ => {}
+        }
+        self.request_event()
+    }
+
+    fn reset_and_settle(&mut self) -> Result<(), BlockError> {
+        self.reset();
+        self.settle()
+    }
+
+    /// Linux `nvme_get_log` for every namespace into tag 0's bounce page. A
+    /// failure is only logged.
+    fn read_log(&mut self, log: u32, bytes: usize) -> Result<(), BlockError> {
+        let page = self.bounce.address()?;
+        let mut command = [0u32; 16];
+        command[0] = u32::from(ADMIN_GET_LOG_PAGE);
+        command[1] = u32::MAX;
+        command[6] = page as u32;
+        command[7] = (page >> 32) as u32;
+        command[10] = ((bytes / 4 - 1) as u32) << 16 | log;
+        let _ = self.admin(command);
+        self.ready()
+    }
+
     /// Linux `nvme_scan_ns` before it adds or validates a namespace: its
     /// identifiers and whether the command-set-independent Identify
     /// Namespace described it, or `None` when Linux passes it over for
@@ -1209,6 +1939,8 @@ impl Controller {
         Ok(Some((ids, false)))
     }
 
+    /// Linux `nvme_identify_ns_descs`: none before NVMe 1.3. `None` when the
+    /// controller refused the list; the scan then skips the namespace.
     fn descriptors(&mut self, namespace: u32) -> Result<Option<Ids>, BlockError> {
         if self.version < VERSION_1_3 {
             return Ok(Some(Ids::default()));
@@ -1217,6 +1949,18 @@ impl Controller {
             Ok(data) => Ok(Some(Ids::from_descriptors(data))),
             Err(BlockError::Device { .. }) => Ok(None),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Tag `tag`'s result once its command completed; never waits.
+    fn finish(&mut self, tag: usize) -> Option<Finished> {
+        self.advance();
+        if !matches!(self.tags.get(tag)?, Tag::Done(_)) {
+            return None;
+        }
+        match core::mem::take(&mut self.tags[tag]) {
+            Tag::Done(result) => Some(result),
+            _ => unreachable!(),
         }
     }
 
@@ -1230,6 +1974,7 @@ impl Controller {
         if let Err(error) = self.check_fatal() {
             return Err(self.poison(error));
         }
+        self.settle()?;
         self.delete_io_queues()?;
         let result = (|| {
             let configuration = self.registers.read32(CONFIGURATION)?;
@@ -1248,15 +1993,16 @@ impl Controller {
         Ok(())
     }
 
-    /// Linux `nvme_delete_io_queues`, submission queue first. A refused
-    /// deletion is ignored and a timed-out one ends the deletions, as in
-    /// Linux; a broken protocol poisons.
+    /// Linux `nvme_dev_disable` deletes the I/O queues, submission queue
+    /// first, before the shutdown notification. A refused deletion is
+    /// ignored and a timed-out one ends the deletions, as in Linux; a
+    /// broken protocol poisons.
     fn delete_io_queues(&mut self) -> Result<(), BlockError> {
         for opcode in [ADMIN_DELETE_SUBMISSION, ADMIN_DELETE_COMPLETION] {
             let mut command = [0u32; 16];
             command[0] = u32::from(opcode);
             command[10] = u32::from(self.io.id);
-            match self.run(false, command) {
+            match self.admin_wait(command, None) {
                 Ok(_) => {}
                 Err(Lost::Reset(_)) => break,
                 Err(Lost::Fatal(error)) => return Err(self.poison(error)),
@@ -1265,51 +2011,32 @@ impl Controller {
         Ok(())
     }
 
-    /// An admin Identify into the first bounce page.
+    /// An admin Identify into tag 0's bounce page.
     fn identify(&mut self, cns: u32, namespace: u32) -> Result<&[u8], BlockError> {
         let command = self.identify_command(cns, namespace)?;
-        self.execute(false, command)?;
+        self.admin(command)?;
         Ok(&self.bounce.bytes()[..PAGE])
     }
 
-    /// The PRP entries for the first `bytes` of the bounce buffer.
-    fn data_pointers(&mut self, bytes: usize) -> Result<(u64, u64), BlockError> {
-        let first = self.bounce.address()?;
+    /// The PRP entries for the first `bytes` of tag `tag`'s bounce buffer.
+    fn data_pointers(&mut self, tag: usize, bytes: usize) -> Result<(u64, u64), BlockError> {
+        let (bounce, prp_list) = self.slot(tag);
+        let first = bounce.address()?;
         match bytes.div_ceil(PAGE) {
             0 | 1 => Ok((first, 0)),
             2 => Ok((first, first + PAGE as u64)),
             pages => {
                 for page in 1..pages {
-                    self.prp_list
-                        .write(8 * (page - 1), first + (page * PAGE) as u64);
+                    prp_list.write(8 * (page - 1), first + (page * PAGE) as u64);
                 }
-                Ok((first, self.prp_list.address()?))
+                Ok((first, prp_list.address()?))
             }
         }
     }
+}
 
-    fn transfer(
-        &mut self,
-        opcode: u8,
-        namespace: u32,
-        lba: u64,
-        blocks: u32,
-        bytes: usize,
-    ) -> Result<(), BlockError> {
-        self.ready()?;
-        let (prp1, prp2) = self.data_pointers(bytes)?;
-        let mut command = [0u32; 16];
-        command[0] = u32::from(opcode);
-        command[1] = namespace;
-        command[6] = prp1 as u32;
-        command[7] = (prp1 >> 32) as u32;
-        command[8] = prp2 as u32;
-        command[9] = (prp2 >> 32) as u32;
-        command[10] = lba as u32;
-        command[11] = (lba >> 32) as u32;
-        command[12] = blocks - 1;
-        self.execute(true, command).map(|_| ())
-    }
+fn removed() -> BlockError {
+    BlockError::Unsupported("the NVMe controller is gone")
 }
 
 /// One namespace of a controller.
@@ -1336,13 +2063,43 @@ pub fn attach(
     let bars = function.bars();
     let registers = RegisterIo::Legacy(registers(handoff, bars[0], 0, 0x2000)?);
     function.enable_polled();
+    let signalled = match (handoff.completion, function.interrupts().msix) {
+        (Some(message), Some(msix)) => {
+            let table = crate::registers(
+                handoff,
+                bars[usize::from(msix.table_bar)],
+                u64::from(msix.table_offset),
+                MSIX_ENTRY_BYTES,
+            )?;
+            function.enable_msix(msix, || {
+                table.write32(0, message.address as u32);
+                table.write32(4, (message.address >> 32) as u32);
+                table.write32(8, message.data);
+                table.write32(12, 0);
+                Ok(())
+            })?;
+            true
+        }
+        _ => false,
+    };
+    let mut slots = Vec::new();
+    for _ in 1..DEPTH {
+        slots.push(Slot {
+            bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE)?),
+            prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
+        });
+    }
     let mut controller = Controller {
         registers,
         doorbell_stride: 0,
-        admin: Queue::new(0, dma)?,
-        io: Queue::new(1, dma)?,
+        admin: Queue::new(0, ADMIN_ENTRIES, dma)?,
+        io: Queue::new(1, IO_ENTRIES, dma)?,
         bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE)?),
         prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
+        slots,
+        tags: (0..DEPTH).map(|_| Tag::Free).collect(),
+        recovery: None,
+        signalled,
         max_transfer: BOUNCE_BYTES,
         shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
         shut_down: false,
@@ -1357,11 +2114,13 @@ pub fn attach(
         configuration: CONFIGURATION_VALUE & !ENABLE,
         independent_identify: false,
         version: 0,
+        commands: 0,
         scans: 0,
         retry_delays: [0; 3],
         host_memory: None,
         host_memory_enabled: false,
         events: Events::default(),
+        aborts: Vec::new(),
     };
     controller.initialize()?;
     discover(controller, format!("{}", function.address), &mut { dma })
@@ -1387,43 +2146,32 @@ fn discover(
     location: alloc::string::String,
     host_memory: &mut dyn HostMemorySource,
 ) -> Result<Attached, BlockError> {
-    let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
-    let request = HostMemoryRequest::from_identify(identify);
-    let apst = apst_table(identify);
-    let events = Events::from_identify(identify);
+    let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?.to_vec();
+    let request = HostMemoryRequest::from_identify(&identify);
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
     // The maximum transfer, in minimum pages as a power of two; 0 is none.
     let maximum = identify[CONTROLLER_MAXIMUM_TRANSFER];
     let rtd3_entry_us = u64::from(le32(&identify[CONTROLLER_RTD3_ENTRY], 0));
     let namespaces = le32(&identify[CONTROLLER_NAMESPACES], 0);
+    controller.commands = u16::from_le_bytes([
+        identify[CONTROLLER_COMMANDS],
+        identify[CONTROLLER_COMMANDS + 1],
+    ]);
+    // Linux `nvme_init_identify` takes a present cache as one to flush and
+    // leaves the controller's Volatile Write Cache feature as it is.
+    let write_cache = identify[CONTROLLER_VOLATILE_CACHE] & 1 != 0;
     if maximum != 0 {
         let limit = 1usize.checked_shl(u32::from(maximum)).unwrap_or(usize::MAX);
         controller.max_transfer = controller.max_transfer.min(limit.saturating_mul(PAGE));
     }
     controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
-    // A refused Host Behavior Support or APST is ignored, as in Linux.
-    if let Some(command) = controller.host_options()? {
-        match controller.execute(false, command) {
-            Ok(_) | Err(BlockError::Device { .. }) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    if let Some(table) = apst {
-        let command = controller.apst_command(&table)?;
-        match controller.execute(false, command) {
-            Ok(_) | Err(BlockError::Device { .. }) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    controller.setup_host_memory(request, host_memory)?;
-
-    for command in controller.create_queue_commands()? {
-        controller.io.submissions.publish();
-        controller.execute(false, command)?;
-    }
-    controller.events = events;
-    controller.enable_events()?;
+    controller.identified(&identify);
+    controller.allocate_host_memory(request, host_memory);
+    // The rest of the bring-up, as a reset repeats it: host options, APST,
+    // the host memory buffer, the I/O queues and events.
+    controller.bring_up(Step::HostOptions, identify)?;
+    controller.settle()?;
 
     // Linux `nvme_scan_work`: the active list from NVMe 1.1, otherwise (or
     // when the controller refuses it) every namespace ID in turn.
@@ -1454,7 +2202,11 @@ fn discover(
         failures: Vec::new(),
     };
     let mut found = Vec::new();
-    let max_transfer = controller.max_transfer;
+    let (max_transfer, commands, scans) = (
+        controller.max_transfer,
+        controller.commands,
+        controller.scans,
+    );
     for namespace in candidates {
         let Some((mut ids, independent)) = controller.namespace_ids(namespace)? else {
             continue;
@@ -1487,7 +2239,7 @@ fn discover(
             controller: controller.clone(),
             namespace,
             ids,
-            scanned: 0,
+            scanned: scans,
             removed: None,
             identity: Identity {
                 transport: Transport::Nvme,
@@ -1497,10 +2249,71 @@ fn discover(
                 blocks: format.blocks,
                 block_size: format.block_size,
                 read_only: format.read_only,
+                features: features(write_cache, commands, &format, max_transfer),
             },
         })
         .collect();
     Ok(attached)
+}
+
+/// The APST table Linux `nvme_configure_apst` gives a controller that
+/// supports it, or `None`: from the deepest power state up, each state goes
+/// to the deepest usable non-operational state below it once idle for its
+/// timeout, at most one state per latency tolerance.
+fn apst_table(identify: &[u8]) -> Option<[u64; 32]> {
+    let deepest = usize::from(identify[CONTROLLER_POWER_STATES]);
+    if identify[CONTROLLER_APST] & 1 == 0 || deepest > 31 {
+        return None;
+    }
+    let mut table = [0; 32];
+    let mut target = 0;
+    let mut tolerance = u32::MAX;
+    for state in (0..=deepest).rev() {
+        table[state] = target;
+        let descriptor = &identify[CONTROLLER_POWER_DESCRIPTORS + 32 * state..][..32];
+        if descriptor[3] & POWER_NON_OPERATIONAL == 0 {
+            continue;
+        }
+        let exit = u64::from(le32(descriptor, 8));
+        if exit > APST_MAX_LATENCY_US {
+            continue;
+        }
+        let total = exit + u64::from(le32(descriptor, 4));
+        let idle = if total <= APST_PRIMARY_TOLERANCE_US && tolerance != 1 {
+            tolerance = 1;
+            APST_PRIMARY_TIMEOUT_MS
+        } else if total > APST_PRIMARY_TOLERANCE_US
+            && total <= APST_SECONDARY_TOLERANCE_US
+            && tolerance > 2
+        {
+            tolerance = 2;
+            APST_SECONDARY_TIMEOUT_MS
+        } else {
+            continue;
+        };
+        target = (state as u64) << 3 | idle << 8;
+    }
+    Some(table)
+}
+
+/// A namespace's features, as Linux `nvme_update_disk_info` and
+/// `nvme_config_discard` set them: FUA with a volatile write cache,
+/// Deallocate as discard with Dataset Management, and Write Zeroes, which
+/// may deallocate where the namespace reads deallocated blocks as zeros
+/// and says Write Zeroes deallocates (`NVME_NS_DEAC`), each up to the
+/// largest transfer.
+fn features(write_cache: bool, commands: u16, format: &Format, max_transfer: usize) -> Features {
+    let blocks = (max_transfer / format.block_size as usize) as u64;
+    Features {
+        write_cache,
+        fua: write_cache,
+        max_transfer,
+        discard: (commands & COMMANDS_DATASET_MANAGEMENT != 0).then_some(u64::from(u32::MAX)),
+        write_zeroes: (commands & COMMANDS_WRITE_ZEROES != 0).then_some(WriteZeroes {
+            blocks: blocks.min(1 << 16),
+            unmap: format.deallocate & 0x7 == 1 && format.deallocate & 1 << 3 != 0,
+        }),
+    }
 }
 
 /// The namespaces of one controller, and those it cannot serve.
@@ -1514,6 +2327,8 @@ struct Format {
     blocks: u64,
     block_size: u32,
     read_only: bool,
+    /// DLFEAT.
+    deallocate: u8,
 }
 
 /// The format of an Identify Namespace page: none for an empty namespace,
@@ -1538,6 +2353,7 @@ fn plain_format(data: &[u8], max_transfer: usize) -> Result<Option<Format>, Bloc
         blocks,
         block_size: 1 << shift,
         read_only: data[NAMESPACE_ATTRIBUTES] & NAMESPACE_WRITE_PROTECTED != 0,
+        deallocate: data[NAMESPACE_DEALLOCATE],
     }))
 }
 
@@ -1557,11 +2373,13 @@ impl Namespace {
     }
 
     /// Linux `nvme_scan_ns` and `nvme_validate_ns` after a controller reset
-    /// or namespace-change notice:
+    /// or namespace-change notice, once asynchronous events are acted on:
     /// a namespace no longer allocated, or whose identifiers changed, is
     /// removed; otherwise its size and format are updated. A refused
-    /// Identify leaves the namespace as it was.
+    /// Identify leaves the namespace as it was. Admin commands of its own:
+    /// only while no command runs.
     fn rescan(&mut self, controller: &mut Controller) -> Result<(), BlockError> {
+        controller.ready()?;
         if let Some(error) = &self.removed {
             return Err(error.clone());
         }
@@ -1575,6 +2393,7 @@ impl Namespace {
             return Ok(());
         };
         let (version, max_transfer) = (controller.version, controller.max_transfer);
+        let commands = controller.commands;
         let data = match controller.identify(IDENTIFY_NAMESPACE, self.namespace) {
             Ok(data) => data,
             Err(BlockError::Device { .. }) => {
@@ -1594,6 +2413,8 @@ impl Namespace {
                 self.identity.blocks = format.blocks;
                 self.identity.block_size = format.block_size;
                 self.identity.read_only = format.read_only;
+                let write_cache = self.identity.features.write_cache;
+                self.identity.features = features(write_cache, commands, &format, max_transfer);
                 Ok(())
             }
             Err(error) if allocated && ids == self.ids => {
@@ -1602,10 +2423,31 @@ impl Namespace {
                 Err(error)
             }
             _ => {
-                self.removed = Some(REMOVED);
-                Err(REMOVED)
+                self.removed = Some(NAMESPACE_REMOVED);
+                Err(NAMESPACE_REMOVED)
             }
         }
+    }
+
+    /// Run `command` alone once rescanned, waiting for it.
+    fn command(&mut self, command: Command) -> Finished {
+        let controller = self.controller.clone();
+        let mut controller = controller.borrow_mut();
+        self.rescan(&mut controller)?;
+        let command = command.within(&self.identity, 0)?;
+        let block = self.identity.block_size as usize;
+        controller.run(self.namespace, block, command)
+    }
+
+    fn write_with(&mut self, lba: u64, data: &[u8], fua: bool) -> Result<(), BlockError> {
+        let block = self.identity.block_size as usize;
+        let chunk = self.chunk_bytes(&self.controller.borrow());
+        for (index, part) in data.chunks(chunk).enumerate() {
+            let lba = lba + (index * chunk / block) as u64;
+            let data = part.to_vec();
+            self.command(Command::Write { lba, data, fua })?;
+        }
+        Ok(())
     }
 }
 
@@ -1615,48 +2457,89 @@ impl BlockDevice for Namespace {
     }
 
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
-        let controller = self.controller.clone();
-        let mut controller = controller.borrow_mut();
-        controller.ready()?;
-        self.rescan(&mut controller)?;
-        self.identity.check(lba, buffer.len())?;
         let block = self.identity.block_size as usize;
-        let chunk = self.chunk_bytes(&controller);
+        let chunk = self.chunk_bytes(&self.controller.borrow());
         for (index, part) in buffer.chunks_mut(chunk).enumerate() {
-            let first = lba + (index * chunk / block) as u64;
-            let blocks = (part.len() / block) as u32;
-            controller.transfer(IO_READ, self.namespace, first, blocks, part.len())?;
-            part.copy_from_slice(&controller.bounce.bytes()[..part.len()]);
+            let lba = lba + (index * chunk / block) as u64;
+            let bytes = part.len();
+            let data = self.command(Command::Read { lba, bytes })?;
+            part.copy_from_slice(&data.unwrap_or_default()[..bytes]);
         }
         Ok(())
     }
 
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
-        let controller = self.controller.clone();
-        let mut controller = controller.borrow_mut();
-        controller.ready()?;
-        self.rescan(&mut controller)?;
-        self.identity.check_write(lba, data.len())?;
-        let block = self.identity.block_size as usize;
-        let chunk = self.chunk_bytes(&controller);
-        for (index, part) in data.chunks(chunk).enumerate() {
-            let first = lba + (index * chunk / block) as u64;
-            let blocks = (part.len() / block) as u32;
-            controller.bounce.bytes_mut()[..part.len()].copy_from_slice(part);
-            controller.transfer(IO_WRITE, self.namespace, first, blocks, part.len())?;
-        }
-        Ok(())
+        self.write_with(lba, data, false)
     }
 
-    fn flush(&mut self) -> Result<(), BlockError> {
-        let mut command = [0u32; 16];
-        command[0] = u32::from(IO_FLUSH);
-        command[1] = self.namespace;
+    fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.write_with(lba, data, true)
+    }
+
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
+        self.command(Command::Flush).map(drop)
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        self.command(Command::Discard { lba, blocks }).map(drop)
+    }
+
+    fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
+        self.command(Command::WriteZeroes { lba, blocks, unmap })
+            .map(drop)
+    }
+
+    /// One transfer runs as it is, a read handing back its bounce copy.
+    fn execute(&mut self, command: Command) -> Finished {
+        let chunk = self.chunk_bytes(&self.controller.borrow());
+        match command {
+            Command::Read { lba, bytes } if bytes > chunk => {
+                let mut data = alloc::vec![0; bytes];
+                self.read(lba, &mut data).map(|()| Some(data))
+            }
+            Command::Write { lba, data, fua } if data.len() > chunk => {
+                self.write_with(lba, &data, fua).map(|()| None)
+            }
+            command => self.command(command),
+        }
+    }
+
+    /// The controller's tags, shared by its namespaces: [`Self::finish`]
+    /// looks for completions in memory, never at a register, until a
+    /// command's timeout.
+    fn depth(&self) -> usize {
+        self.controller.borrow().tags.len()
+    }
+
+    fn room(&self) -> bool {
+        self.removed.is_some() || self.controller.borrow().room()
+    }
+
+    /// Asynchronous events and rescans run admin commands, which wait: only
+    /// while no command runs, as Linux's work items run between requests.
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
         let controller = self.controller.clone();
         let mut controller = controller.borrow_mut();
-        controller.ready()?;
-        self.rescan(&mut controller)?;
-        controller.execute(true, command).map(|_| ())
+        if !controller.busy() {
+            self.rescan(&mut controller)?;
+        } else if let Some(error) = &self.removed {
+            return Err(error.clone());
+        }
+        let command = command.within(&self.identity, 0)?;
+        let block = self.identity.block_size as usize;
+        controller.start(self.namespace, block, command)
+    }
+
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        self.controller.borrow_mut().finish(tag as usize)
+    }
+
+    fn posted(&self) -> bool {
+        self.controller.borrow().posted_completion()
+    }
+
+    fn signals(&self) -> bool {
+        self.controller.borrow().signalled
     }
 
     /// Flush, then shut the controller down once for all its namespaces.
@@ -1696,13 +2579,23 @@ mod tests {
                     RegionAllocator::new(start..start + (memory.len() * 8) as u64),
                 )
             };
+            let slots = (1..DEPTH)
+                .map(|_| Slot {
+                    bounce: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
+                    prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
+                })
+                .collect();
             let controller = Controller {
                 registers: RegisterIo::Legacy(mmio),
                 doorbell_stride: 4,
-                admin: Queue::new(0, &mut dma).unwrap(),
-                io: Queue::new(1, &mut dma).unwrap(),
+                admin: Queue::new(0, ADMIN_ENTRIES, &mut dma).unwrap(),
+                io: Queue::new(1, IO_ENTRIES, &mut dma).unwrap(),
                 bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE).unwrap()),
                 prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
+                slots,
+                tags: (0..DEPTH).map(|_| Tag::Free).collect(),
+                recovery: None,
+                signalled: false,
                 max_transfer: BOUNCE_BYTES,
                 shutdown_timeout_us: 1000,
                 shut_down: false,
@@ -1721,11 +2614,13 @@ mod tests {
                 configuration: CONFIGURATION_VALUE & !ENABLE,
                 independent_identify: false,
                 version: 0,
+                commands: 0,
                 scans: 0,
                 retry_delays: [0; 3],
                 host_memory: None,
                 host_memory_enabled: false,
                 events: Events::default(),
+                aborts: Vec::new(),
             };
             Self {
                 _registers: registers,
@@ -1744,6 +2639,12 @@ mod tests {
                         blocks: 1024,
                         block_size: 512,
                         read_only: false,
+                        features: Features {
+                            write_cache: true,
+                            fua: true,
+                            max_transfer: BOUNCE_BYTES,
+                            ..Features::default()
+                        },
                     },
                 },
             }
@@ -1822,9 +2723,10 @@ mod tests {
 
     #[test]
     fn sq_head_validation_preserves_wrap_and_rejects_stale_or_ahead_heads() {
-        for invalid_head in [None, Some(15u32), Some(1)] {
+        let stale = u32::from(IO_ENTRIES - 1);
+        for invalid_head in [None, Some(stale), Some(1)] {
             let mut fixture = Fixture::new();
-            for next in 1..ENTRIES {
+            for next in 1..IO_ENTRIES {
                 {
                     let mut c = fixture.disk.controller.borrow_mut();
                     let offset = usize::from(next - 1) * 16;
@@ -1837,9 +2739,11 @@ mod tests {
             }
             {
                 let mut c = fixture.disk.controller.borrow_mut();
+                let last = usize::from(IO_ENTRIES - 1) * 16;
                 c.io.completions
-                    .write(15 * 16 + 8, 1u32 << 16 | invalid_head.unwrap_or(0));
-                c.io.completions.write(15 * 16 + 12, 1u32 << 16 | 16);
+                    .write(last + 8, 1u32 << 16 | invalid_head.unwrap_or(0));
+                c.io.completions
+                    .write(last + 12, 1u32 << 16 | u32::from(IO_ENTRIES));
             }
             let result = fixture.disk.flush();
             let mut c = fixture.disk.controller.borrow_mut();
@@ -1847,7 +2751,7 @@ mod tests {
             match invalid_head {
                 Some(_) => {
                     assert_eq!(result, Err(BlockError::Device { status: 0xffff }));
-                    assert_eq!(c.io.head, 15);
+                    assert_eq!(c.io.head, IO_ENTRIES - 1);
                     assert!(c.io.phase);
                 }
                 None => {
@@ -1855,7 +2759,7 @@ mod tests {
                     assert_eq!(c.io.head, 0);
                     assert!(!c.io.phase);
                     c.io.completions.write(8, 1u32 << 16 | 1);
-                    c.io.completions.write(12, 17u32); // New phase is zero.
+                    c.io.completions.write(12, u32::from(IO_ENTRIES) + 1); // New phase is zero.
                     drop(c);
                     fixture.disk.flush().unwrap();
                 }
@@ -1911,9 +2815,15 @@ mod tests {
             .unwrap();
         assert_eq!(fixture.disk.flush(), Err(error));
         let c = fixture.disk.controller.borrow();
-        // Nothing was submitted to the fatal controller.
+        // Nothing was submitted to the fatal controller, whose reset found
+        // it fatal again.
+        assert_eq!(
+            c.registers.read32(CONFIGURATION).unwrap(),
+            CONFIGURATION_VALUE
+        );
         assert_eq!((c.command_id, c.io.tail, c.io.head), (0, 0, 0));
         assert!(c.io.submissions.bytes().iter().all(|byte| *byte == 0));
+        assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
         assert_eq!(c.registers.read32(DOORBELLS + 8).unwrap(), 0);
     }
 
@@ -1929,50 +2839,342 @@ mod tests {
     }
 
     #[test]
-    fn apst_tables_follow_nvme_configure_apst() {
-        // States: entry and exit latency, non-operational.
-        let identify = |apsta: u8, states: &[(u32, u32, bool)]| {
-            let mut data = vec![0u8; 4096];
-            data[CONTROLLER_POWER_STATES] = (states.len() - 1) as u8;
-            data[CONTROLLER_APST] = apsta;
-            for (index, &(entry, exit, idle)) in states.iter().enumerate() {
-                let at = CONTROLLER_POWER_DESCRIPTORS + index * POWER_DESCRIPTOR_BYTES;
-                data[at + 3] = if idle { POWER_NON_OPERATIONAL } else { 0 };
-                data[at + 4..at + 8].copy_from_slice(&entry.to_le_bytes());
-                data[at + 8..at + 12].copy_from_slice(&exit.to_le_bytes());
-            }
-            data
+    fn namespace_formats_use_both_flbas_index_fields_and_write_protection() {
+        // Format 17 (index bits 0001 and 01) holds 4 KiB blocks.
+        let page = namespace(64, 1 | 1 << 5, &[(17, 12 << 16)], NAMESPACE_WRITE_PROTECTED);
+        let format = plain_format(&page, BOUNCE_BYTES).unwrap().unwrap();
+        assert_eq!((format.blocks, format.block_size), (64, 4096));
+        assert!(format.read_only);
+        assert!(
+            plain_format(&namespace(0, 0, &[], 0), BOUNCE_BYTES)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            plain_format(&namespace(8, 0, &[(0, 8 | 9 << 16)], 0), BOUNCE_BYTES).err(),
+            Some(BlockError::Unsupported("NVMe format with metadata"))
+        );
+        // A 64 KiB block cannot fit an 8 KiB maximum transfer.
+        assert_eq!(
+            plain_format(&namespace(8, 0, &[(0, 16 << 16)], 0), 2 * PAGE).err(),
+            Some(BlockError::Unsupported("NVMe logical block size"))
+        );
+    }
+
+    #[test]
+    fn shutdown_waits_follow_the_rtd3_entry_latency_within_linux_bounds() {
+        assert_eq!(shutdown_timeout_us(0), SHUTDOWN_MINIMUM_US);
+        assert_eq!(shutdown_timeout_us(8_000_001), 9 * MICROSECONDS_PER_SECOND);
+        assert_eq!(shutdown_timeout_us(u64::MAX), SHUTDOWN_MAXIMUM_US);
+    }
+
+    /// Post, at the I/O queue's head, the completion of the command `id`,
+    /// with every submission up to the tail consumed.
+    fn post(controller: &mut Controller, id: u16, status: u32) {
+        let entry = usize::from(controller.io.head) * 16;
+        let tail = u32::from(controller.io.tail);
+        let phase = u32::from(controller.io.phase) << 16;
+        controller
+            .io
+            .completions
+            .write(entry + 8, 1u32 << 16 | tail);
+        controller
+            .io
+            .completions
+            .write(entry + 12, status << 17 | phase | u32::from(id));
+    }
+
+    /// Post, at the admin queue's head, the completion of the command `id`.
+    fn post_admin(controller: &mut Controller, id: u16, status: u32) {
+        let entry = usize::from(controller.admin.head) * 16;
+        let tail = u32::from(controller.admin.tail);
+        let phase = u32::from(controller.admin.phase) << 16;
+        controller.admin.completions.write(entry + 8, tail);
+        controller
+            .admin
+            .completions
+            .write(entry + 12, status << 17 | phase | u32::from(id));
+    }
+
+    fn running_id(controller: &Controller, tag: u32) -> u16 {
+        match controller.tags[tag as usize] {
+            Tag::Running { id, .. } => id,
+            _ => panic!("tag {tag} runs nothing"),
+        }
+    }
+
+    #[test]
+    fn queued_commands_run_together_and_complete_in_any_order() {
+        let mut fixture = Fixture::new();
+        let disk = &mut fixture.disk;
+        assert_eq!(disk.depth(), DEPTH);
+        let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+        let write = disk
+            .start(Command::Write {
+                lba: 1,
+                data: vec![7; 512],
+                fua: true,
+            })
+            .unwrap();
+        assert_ne!(read, write);
+        assert_eq!(
+            disk.controller.borrow().io.tail,
+            2,
+            "both submitted at once"
+        );
+        assert_eq!(disk.finish(read), None, "not complete yet");
+        {
+            let mut controller = disk.controller.borrow_mut();
+            // The write carries Force Unit Access.
+            let words = controller.io.submissions.bytes()[64 + 48..64 + 52].to_vec();
+            assert_eq!(
+                u32::from_le_bytes(words.try_into().unwrap()),
+                FORCE_UNIT_ACCESS
+            );
+            // The write completes first.
+            let id = running_id(&controller, write);
+            post(&mut controller, id, 0);
+        }
+        assert_eq!(disk.finish(write), Some(Ok(None)));
+        assert_eq!(disk.finish(read), None);
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let tag = read as usize;
+            controller.slot(tag).0.bytes_mut()[..512].fill(0x42);
+            let id = running_id(&controller, read);
+            post(&mut controller, id, 0);
+        }
+        assert_eq!(disk.finish(read), Some(Ok(Some(vec![0x42; 512]))));
+        assert_eq!(disk.controller.borrow().io.head, 2);
+        // Every tag in use leaves no room.
+        for _ in 0..DEPTH {
+            disk.start(Command::Flush).unwrap();
+        }
+        assert!(!disk.room());
+        assert!(disk.start(Command::Flush).is_err());
+    }
+
+    #[test]
+    fn deallocate_and_write_zeroes_carry_their_ranges() {
+        let mut fixture = Fixture::new();
+        let disk = &mut fixture.disk;
+        let discard = disk.start(Command::Discard { lba: 9, blocks: 3 }).unwrap();
+        let zeroes = disk
+            .start(Command::WriteZeroes {
+                lba: 20,
+                blocks: 4,
+                unmap: true,
+            })
+            .unwrap();
+        let mut controller = disk.controller.borrow_mut();
+        let word = |controller: &Controller, entry: usize, index: usize| {
+            let bytes = &controller.io.submissions.bytes()[entry * 64 + 4 * index..][..4];
+            u32::from_le_bytes(bytes.try_into().unwrap())
         };
-        let states = [
-            (0, 0, false),
-            (0, 0, false),
-            (0, 0, false),
-            (2_000, 2_000, true),
-            (5_000, 40_000, true),
-        ];
-        assert_eq!(apst_table(&identify(0, &states)), None);
-        let table = apst_table(&identify(1, &states)).unwrap();
-        // PS3 after 100 ms from the operational states, PS4 after 2 s
-        // from PS3.
-        let ps3 = 3 << 3 | 100 << 8;
-        assert_eq!(table[..5], [ps3, ps3, ps3, 4 << 3 | 2_000 << 8, 0]);
-        // A second state within the primary tolerance is not a target; one
-        // whose exit latency exceeds 100 ms is never one.
-        let table = apst_table(&identify(
-            1,
-            &[
-                (0, 0, false),
-                (1_000, 1_000, true),
-                (1_000, 2_000, true),
-                (0, 200_000, true),
-            ],
-        ))
-        .unwrap();
-        assert_eq!(table[..4], [2 << 3 | 100 << 8, 2 << 3 | 100 << 8, 0, 0]);
-        // An invalid NPSS.
-        let mut invalid = identify(1, &states);
-        invalid[CONTROLLER_POWER_STATES] = 32;
-        assert_eq!(apst_table(&invalid), None);
+        assert_eq!(
+            word(&controller, 0, 0) & 0xff,
+            u32::from(IO_DATASET_MANAGEMENT)
+        );
+        assert_eq!(word(&controller, 0, 11), ATTRIBUTE_DEALLOCATE);
+        let range = controller.slot(discard as usize).0.bytes()[..16].to_vec();
+        assert_eq!(range[4..8], 3u32.to_le_bytes());
+        assert_eq!(range[8..16], 9u64.to_le_bytes());
+        assert_eq!(word(&controller, 1, 0) & 0xff, u32::from(IO_WRITE_ZEROES));
+        assert_eq!(word(&controller, 1, 10), 20);
+        assert_eq!(word(&controller, 1, 12), 3 | DEALLOCATE);
+        let _ = zeroes;
+    }
+
+    #[test]
+    fn a_command_past_its_deadline_is_aborted_then_resets_the_controller_and_runs_again() {
+        let _clock = crate::test_clock::virtualize();
+        let mut fixture = Fixture::new();
+        let disk = &mut fixture.disk;
+        let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+        let read_id = running_id(&disk.controller.borrow(), read);
+        let wait = |disk: &mut Namespace| {
+            let clock = disk.controller.borrow().clock;
+            let started = clock.try_start().unwrap();
+            while clock.try_elapsed_us(started).unwrap() < 1000 {
+                core::hint::spin_loop();
+            }
+        };
+        // The deadline passes: the read is aborted and given another.
+        wait(disk);
+        assert_eq!(disk.finish(read), None);
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let abort = &controller.admin.submissions.bytes()[..64];
+            assert_eq!(abort[0], ADMIN_ABORT);
+            assert_eq!(abort[40..44], (u32::from(read_id) << 16 | 1).to_le_bytes());
+            // The controller reports it not aborted.
+            let id = controller.aborts[0];
+            post_admin(&mut controller, id, 0);
+        }
+        assert_eq!(disk.finish(read), None);
+        assert!(disk.controller.borrow().aborts.is_empty());
+        // The second deadline passes: the controller, not ready, is disabled.
+        wait(disk);
+        assert_eq!(disk.finish(read), None);
+        {
+            let controller = disk.controller.borrow();
+            assert!(matches!(controller.recovery, Some(Recovery::Disabling(_))));
+            assert_eq!(controller.registers.read32(CONFIGURATION).unwrap(), 0);
+            assert!(!disk.room());
+        }
+        // CSTS.RDY is clear: it is enabled again.
+        assert_eq!(disk.finish(read), None);
+        {
+            let controller = disk.controller.borrow();
+            assert!(matches!(controller.recovery, Some(Recovery::Enabling(_))));
+            controller.registers.write32(STATUS, READY).unwrap();
+        }
+        // Ready: identified, then the I/O queues created again, completion
+        // queue first.
+        for opcode in [
+            ADMIN_IDENTIFY,
+            ADMIN_CREATE_COMPLETION,
+            ADMIN_CREATE_SUBMISSION,
+        ] {
+            assert_eq!(disk.finish(read), None);
+            let mut controller = disk.controller.borrow_mut();
+            let Some(Recovery::Admin { id, .. }) = controller.recovery else {
+                panic!("no bring-up command");
+            };
+            let offset = usize::from(controller.admin.tail - 1) * 64;
+            assert_eq!(controller.admin.submissions.bytes()[offset], opcode);
+            post_admin(&mut controller, id, 0);
+        }
+        // The interrupted read runs again on the empty queue.
+        assert_eq!(disk.finish(read), None);
+        let mut controller = disk.controller.borrow_mut();
+        assert!(controller.recovery.is_none());
+        assert_eq!(controller.scans, 1);
+        assert_eq!((controller.io.tail, controller.io.head), (1, 0));
+        let id = running_id(&controller, read);
+        controller.bounce.bytes_mut()[..512].fill(0x5a);
+        post(&mut controller, id, 0);
+        drop(controller);
+        assert_eq!(disk.finish(read), Some(Ok(Some(vec![0x5a; 512]))));
+    }
+
+    #[test]
+    fn errors_without_do_not_retry_run_again_after_their_retry_delay() {
+        let _clock = crate::test_clock::virtualize();
+        let mut fixture = Fixture::new();
+        let disk = &mut fixture.disk;
+        disk.controller.borrow_mut().clock = Clock {
+            ticks_per_microsecond: 1,
+        };
+        disk.controller.borrow_mut().retry_delays = [1, 0, 0];
+        let flush = disk.start(Command::Flush).unwrap();
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let id = running_id(&controller, flush);
+            // Namespace Not Ready with CRD 1: 100 ms.
+            post(&mut controller, id, 0x82 | 1 << 11);
+        }
+        assert_eq!(disk.finish(flush), None);
+        assert!(matches!(
+            disk.controller.borrow().tags[flush as usize],
+            Tag::Delayed { retries: 1, .. }
+        ));
+        let clock = disk.controller.borrow().clock;
+        let started = clock.try_start().unwrap();
+        while disk.controller.borrow().io.tail == 1 {
+            assert_eq!(disk.finish(flush), None);
+        }
+        assert!(clock.try_elapsed_us(started).unwrap() >= 100_000);
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let id = running_id(&controller, flush);
+            post(&mut controller, id, 0);
+        }
+        assert_eq!(disk.finish(flush), Some(Ok(None)));
+    }
+
+    /// Each state idles into the deepest usable non-operational state below
+    /// it, one per latency tolerance, as Linux `nvme_configure_apst`.
+    #[test]
+    fn apst_follows_linux_tolerances_from_the_deepest_state_up() {
+        let mut identify = vec![0u8; PAGE];
+        assert_eq!(apst_table(&identify), None, "no APST support");
+        identify[CONTROLLER_APST] = 1;
+        identify[CONTROLLER_POWER_STATES] = 5;
+        // (state, entry us, exit us): PS5's exit is past the latency limit.
+        for (state, entry, exit) in [
+            (2, 500, 500),
+            (3, 2_000, 2_000),
+            (4, 4_000, 30_000),
+            (5, 0, 200_000),
+        ] {
+            let descriptor = &mut identify[CONTROLLER_POWER_DESCRIPTORS + 32 * state..][..32];
+            descriptor[3] = POWER_NON_OPERATIONAL;
+            descriptor[4..8].copy_from_slice(&u32::to_le_bytes(entry));
+            descriptor[8..12].copy_from_slice(&u32::to_le_bytes(exit));
+        }
+        let table = apst_table(&identify).unwrap();
+        let primary = 3 << 3 | APST_PRIMARY_TIMEOUT_MS << 8;
+        let secondary = 4 << 3 | APST_SECONDARY_TIMEOUT_MS << 8;
+        assert_eq!(table[..6], [primary, primary, primary, secondary, 0, 0]);
+        assert!(table[6..].iter().all(|&entry| entry == 0));
+    }
+
+    /// A signalled controller's I/O completion queue raises vector 0, and
+    /// a posted completion shows in memory before the namespace takes it.
+    #[test]
+    fn completions_are_signalled_and_posted_in_memory() {
+        let mut fixture = Fixture::new();
+        let disk = &mut fixture.disk;
+        assert_eq!(disk.controller.borrow().create_queue(false).unwrap()[11], 1);
+        disk.controller.borrow_mut().signalled = true;
+        assert!(disk.signals());
+        assert_eq!(
+            disk.controller.borrow().create_queue(false).unwrap()[11],
+            0b11
+        );
+        assert!(!disk.posted(), "nothing runs");
+        let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+        assert!(!disk.posted());
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let id = running_id(&controller, read);
+            post(&mut controller, id, 0);
+        }
+        assert!(disk.posted());
+        assert!(disk.finish(read).is_some());
+        assert!(!disk.posted());
+    }
+
+    #[test]
+    fn a_removed_controller_fails_its_commands_without_a_reset() {
+        let mut fixture = Fixture::new();
+        let disk = &mut fixture.disk;
+        let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+        disk.controller
+            .borrow()
+            .registers
+            .write32(STATUS, REMOVED)
+            .unwrap();
+        disk.controller.borrow_mut().reset();
+        assert_eq!(disk.finish(read), Some(Err(removed())));
+        assert!(disk.controller.borrow().recovery.is_none());
+        assert_eq!(disk.read(0, &mut [0; 512]), Err(removed()));
+    }
+
+    #[test]
+    fn only_a_controller_with_a_volatile_write_cache_is_sent_flushes() {
+        let mut fixture = Fixture::new();
+        fixture.disk.identity.features.write_cache = false;
+        assert_eq!(fixture.disk.flush(), Ok(()));
+        assert_eq!(fixture.disk.controller.borrow().io.tail, 0);
+        // With a cache the flush is submitted; this fixture never completes
+        // it, nor its abort.
+        fixture.disk.identity.features.write_cache = true;
+        assert_eq!(fixture.disk.flush(), Err(BlockError::Timeout));
+        let controller = fixture.disk.controller.borrow();
+        assert_eq!(controller.io.submissions.bytes()[0], IO_FLUSH);
+        assert_eq!(controller.admin.submissions.bytes()[0], ADMIN_ABORT);
     }
 
     #[test]
@@ -2012,36 +3214,6 @@ mod tests {
         assert_eq!((ids.eui64, ids.nguid), ([5; 8], [0; 16]));
         ids.fill(VERSION_1_2, &data);
         assert_eq!(ids.nguid, [6; 16]);
-    }
-
-    #[test]
-    fn namespace_formats_use_both_flbas_index_fields_and_write_protection() {
-        // Format 17 (index bits 0001 and 01) holds 4 KiB blocks.
-        let page = namespace(64, 1 | 1 << 5, &[(17, 12 << 16)], NAMESPACE_WRITE_PROTECTED);
-        let format = plain_format(&page, BOUNCE_BYTES).unwrap().unwrap();
-        assert_eq!((format.blocks, format.block_size), (64, 4096));
-        assert!(format.read_only);
-        assert!(
-            plain_format(&namespace(0, 0, &[], 0), BOUNCE_BYTES)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            plain_format(&namespace(8, 0, &[(0, 8 | 9 << 16)], 0), BOUNCE_BYTES).err(),
-            Some(BlockError::Unsupported("NVMe format with metadata"))
-        );
-        // A 64 KiB block cannot fit an 8 KiB maximum transfer.
-        assert_eq!(
-            plain_format(&namespace(8, 0, &[(0, 16 << 16)], 0), 2 * PAGE).err(),
-            Some(BlockError::Unsupported("NVMe logical block size"))
-        );
-    }
-
-    #[test]
-    fn shutdown_waits_follow_the_rtd3_entry_latency_within_linux_bounds() {
-        assert_eq!(shutdown_timeout_us(0), SHUTDOWN_MINIMUM_US);
-        assert_eq!(shutdown_timeout_us(8_000_001), 9 * MICROSECONDS_PER_SECOND);
-        assert_eq!(shutdown_timeout_us(u64::MAX), SHUTDOWN_MAXIMUM_US);
     }
 
     #[test]

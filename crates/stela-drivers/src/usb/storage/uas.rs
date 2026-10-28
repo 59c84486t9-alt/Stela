@@ -326,6 +326,11 @@ impl Host {
     pub(super) fn write_protect_page(&self) -> Option<u8> {
         (!self.flags.always_sync()).then_some(super::scsi::ALL_PAGES)
     }
+    /// Linux `uas_sdev_configure` sets `broken_fua` for a BROKEN_FUA
+    /// enclosure, which then takes no FUA write.
+    pub(super) fn fua_permitted(&self) -> bool {
+        self.flags.permits(&super::scsi::write_10_fua())
+    }
     pub(super) fn caching(&self) -> super::Caching {
         match self.flags.always_sync() {
             true => super::Caching::WriteBack,
@@ -2012,7 +2017,7 @@ mod tests {
             assert_eq!(changed.len(), 1);
             let before = hardware.borrow().accesses;
             assert!(disks[0].read(0, &mut [0; 512]).is_err());
-            assert!(same[0].flush().is_err());
+            assert!(same[0].flush_cache().is_err());
             assert_eq!(hardware.borrow().accesses, before);
             // CHECK CONDITION can arrive before USB2 READY or before SS data
             // completes. The native contributor cancellation must finish, and
@@ -2061,7 +2066,7 @@ mod tests {
                 .unwrap();
             assert!(empty.is_empty());
             let before = hardware.borrow().accesses;
-            assert!(inserted[0].flush().is_err());
+            assert!(inserted[0].flush_cache().is_err());
             assert_eq!(hardware.borrow().accesses, before);
             assert!(storage.rescan(&mut failures).is_err());
             hardware.borrow_mut().empty_media = false;
@@ -2282,7 +2287,7 @@ mod tests {
             let mut disks = scan_uas(owner, &mut failures).unwrap();
             assert_eq!(disks.len(), 1);
             assert!(failures.is_empty());
-            assert_eq!(disks[0].write_cache, write_back);
+            assert_eq!(disks[0].identity().features.write_cache, write_back);
             disks[0].write(1, &[0x91; 512]).unwrap();
             disks[0].flush().unwrap();
             assert_eq!(
@@ -2425,7 +2430,8 @@ mod tests {
                     lun: unit.lun,
                     identity: unit.identity.clone(),
                     media: unit.media.clone(),
-                    write_cache: unit.write_cache,
+                    running: None,
+                    next_tag: 0,
                     removable: unit.removable,
                 }),
             };

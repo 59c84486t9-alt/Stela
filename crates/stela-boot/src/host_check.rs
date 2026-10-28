@@ -46,7 +46,6 @@ use core::{
     arch::asm,
     fmt,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
 };
 use stela_drivers::{
     Handoff,
@@ -69,7 +68,6 @@ const DEFAULT_KEY_SECONDS: u64 = 60;
 const BEAT_SECONDS: u64 = 10;
 /// The stop code at `--deadline`.
 const DEADLINE_CODE: u32 = 0x10;
-const TSC_STALL_MILLISECONDS: u64 = 50;
 const MILLISECONDS: u64 = 1000;
 const MICROSECONDS: u64 = 1_000_000;
 /// The one-shot interrupt comes after 10 ms.
@@ -289,8 +287,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     for line in cpu::report() {
         output::arguments(format_args!("CPU {line}\n"));
     }
-    boot::stall(Duration::from_millis(TSC_STALL_MILLISECONDS));
-    let tsc_hz = (rdtsc() - started) * MILLISECONDS / TSC_STALL_MILLISECONDS;
+    let tsc_hz = crate::firmware::tsc_hz();
     let mut machine = Machine {
         native_dma: None,
         native_work: None,
@@ -326,8 +323,9 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         "tsc",
         Verdict::Pass,
         format!(
-            "hz={tsc_hz} invariant={} (against a {TSC_STALL_MILLISECONDS} ms firmware stall)",
-            cpu::INVARIANT_TSC.present()
+            "hz={tsc_hz} invariant={} source={:?}",
+            cpu::INVARIANT_TSC.present(),
+            crate::firmware::tsc_source()
         ),
     );
     match storage::discover() {

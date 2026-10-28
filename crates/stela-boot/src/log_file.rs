@@ -10,7 +10,7 @@ use crate::{
     status,
 };
 use alloc::{boxed::Box, format, string::String};
-use stela_drivers::block::{BlockDevice, BlockError, Identity, Shared, Transport};
+use stela_drivers::block::{BlockDevice, BlockError, Features, Identity, Shared, Transport};
 use stela_loader::mount_interface::BOOT_LOG_FILE;
 use stela_runtime::pc::{
     boot_log::{self, LOG_BYTES, Writer},
@@ -131,6 +131,11 @@ fn firmware_file() -> Result<(FileDevice, Option<Guid>), &'static str> {
         blocks: LOG_BYTES / u64::from(BLOCK),
         block_size: BLOCK,
         read_only: false,
+        // The firmware's file system may hold writes until a flush.
+        features: Features {
+            write_cache: true,
+            ..Features::default()
+        },
     };
     Ok((
         FileDevice { identity, file },
@@ -215,7 +220,7 @@ impl BlockDevice for FileDevice {
             .map_err(|error| failed(error.status()))
     }
 
-    fn flush(&mut self) -> Result<(), BlockError> {
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
         self.file.flush().map_err(|error| failed(error.status()))
     }
 }

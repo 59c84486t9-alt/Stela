@@ -24,6 +24,8 @@ const CSW_FAILED: u8 = 1;
 const COMMAND_US: u64 = 30_000_000;
 const RESET_RECOVERY_US: u64 = 6_000_000;
 const MAX_LUN: u8 = 15;
+/// xHCI completion code 22: the slot must be retired, not cancelled.
+const INCOMPATIBLE_DEVICE: u32 = 22;
 const PROTOCOL_ERROR: BlockError = BlockError::Protocol("malformed Bulk-Only wrapper or transfer");
 const SHORT_WRITE: BlockError = BlockError::Protocol("short Bulk-Only write");
 
@@ -41,7 +43,39 @@ pub(super) trait Io {
     fn bulk(&mut self, endpoint: Endpoint, buffer: u64, length: usize)
     -> Result<usize, BlockError>;
     fn delay(&self, micros: u64);
+    /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
+    /// Submit a bulk transfer and return; [`Self::reap`] gives its length
+    /// once complete. By default it runs at once.
+    fn submit(
+        &mut self,
+        endpoint: Endpoint,
+        buffer: u64,
+        length: usize,
+    ) -> Result<Pending, BlockError> {
+        Ok(Pending::Done(self.bulk(endpoint, buffer, length)))
+    }
+    /// A submitted transfer's length once complete; never waits. A failed
+    /// or timed-out one has had its endpoint's queue cancelled, as a
+    /// failed [`Self::bulk`] has.
+    fn reap(&mut self, pending: &Pending) -> Option<Result<usize, BlockError>> {
+        match pending {
+            Pending::Done(result) => Some(result.clone()),
+            Pending::Ticket { .. } => Some(Err(BlockError::Protocol(
+                "a BOT transfer ticket on a transport without tickets",
+            ))),
+        }
+    }
+}
+
+/// A submitted bulk transfer ([`Io::submit`]).
+pub(super) enum Pending {
+    Done(Result<usize, BlockError>),
+    Ticket {
+        ticket: super::super::xhci::TransferTicket,
+        dci: u8,
+        deadline: crate::Deadline,
+    },
 }
 
 pub(super) struct Native {
@@ -90,6 +124,64 @@ impl Io for Native {
     fn now_us(&self) -> u64 {
         self.controller.borrow().clock.now_us()
     }
+    fn submit(
+        &mut self,
+        endpoint: Endpoint,
+        buffer: u64,
+        length: usize,
+    ) -> Result<Pending, BlockError> {
+        let mut controller = self.controller.borrow_mut();
+        let deadline = controller
+            .clock
+            .try_deadline(COMMAND_US)
+            .map_err(|_| BlockError::Unsupported("xHCI transfer timeout clock unavailable"))?;
+        let dci = endpoint.dci();
+        let ticket = controller
+            .device(self.id)?
+            .submit_ticket(dci, buffer, length)?;
+        Ok(Pending::Ticket {
+            ticket,
+            dci,
+            deadline,
+        })
+    }
+    /// As the xHCI's own waited transfer: a failure or a timeout cancels
+    /// the endpoint's queue before the buffer returns to the CPU.
+    fn reap(&mut self, pending: &Pending) -> Option<Result<usize, BlockError>> {
+        let Pending::Ticket {
+            ticket,
+            dci,
+            deadline,
+        } = pending
+        else {
+            let Pending::Done(result) = pending else {
+                unreachable!()
+            };
+            return Some(result.clone());
+        };
+        let mut controller = self.controller.borrow_mut();
+        let mut device = match controller.device(self.id) {
+            Ok(device) => device,
+            Err(error) => return Some(Err(error)),
+        };
+        match device.completed_ticket(ticket) {
+            Some(Ok(length)) => Some(Ok(length)),
+            Some(Err(error)) => {
+                let incompatible = matches!(
+                    error,
+                    BlockError::Device {
+                        status: INCOMPATIBLE_DEVICE
+                    }
+                );
+                if !incompatible && let Err(cancel) = device.cancel(*dci) {
+                    return Some(Err(cancel));
+                }
+                Some(Err(error))
+            }
+            None if deadline.passed() => Some(device.cancel(*dci).and(Err(BlockError::Timeout))),
+            None => None,
+        }
+    }
 }
 
 /// The unique owner can move to a fresh transport only after actual whole-device
@@ -133,10 +225,57 @@ pub(super) struct Bot<I: Io> {
     initial_read: bool,
     attachment: Option<(Device, Interface)>,
     reset_generation: u64,
+    /// The clock time a reset recovery's settling ends ([`Self::recover`]).
+    settling: Option<u64>,
+    /// The command begun and not yet ended ([`Self::begin`]).
+    begun: Option<Begun>,
     /// The data a failed command's data phase moved in, until the next
     /// command: sd keeps it when the sense is RECOVERED ERROR.
     failed_data: Option<Vec<u8>>,
 }
+
+/// A command between its wrapper and its status, one transfer at a time,
+/// none waited for ([`Bot::begin`]).
+struct Begun {
+    lun: u8,
+    cdb: Vec<u8>,
+    is_in: bool,
+    length: usize,
+    out: Option<Vec<u8>>,
+    received: Vec<u8>,
+    moved: usize,
+    /// The status stage met a zero-length packet, or a stall.
+    zero: bool,
+    stalled: bool,
+    stage: Stage,
+    /// The command is the REQUEST SENSE that answers another's result.
+    sensing: Option<Sensing>,
+}
+
+/// What a REQUEST SENSE answers (Linux `usb_stor_invoke_transport`).
+#[derive(Clone, Copy)]
+enum Sensing {
+    /// The command reported CHECK CONDITION: its auto-sense.
+    Failed,
+    /// A SYNCHRONIZE CACHE the device's quirk leaves without status.
+    Synchronized,
+}
+
+enum Stage {
+    /// The CBW, of this many bytes.
+    Wrapper(Pending, usize),
+    /// A data transfer of this many bytes.
+    Data(Pending, usize),
+    Status(Pending),
+}
+
+/// What a step of a begun command left.
+enum Next {
+    Wait,
+    Stage(Stage),
+    Done(Result<Vec<u8>, BlockError>),
+}
+
 impl<I: Io> Bot<I> {
     #[cfg(test)]
     pub fn new(
@@ -212,6 +351,8 @@ impl<I: Io> Bot<I> {
             initial_read: flags.initial_read(),
             attachment: None,
             reset_generation: 0,
+            settling: None,
+            begun: None,
             failed_data: None,
         }
     }
@@ -227,13 +368,13 @@ impl<I: Io> Bot<I> {
     pub fn delay(&self, micros: u64) {
         self.io.delay(micros);
     }
-
-    pub fn generation(&self) -> u64 {
-        self.reset_generation
-    }
     /// What the last command's data phase moved in before it failed.
     pub fn take_failed_data(&mut self) -> Option<Vec<u8>> {
         self.failed_data.take()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.reset_generation
     }
     pub fn write_protect(&self) -> bool {
         self.flags.write_protect()
@@ -289,9 +430,14 @@ impl<I: Io> Bot<I> {
     /// Reset and halt clearing affect *every* LUN. All acknowledgements must
     /// succeed to reuse the shared transport. Unresolved DMA stays in permanent
     /// boot allocations, and the entire interface remains quarantined.
+    ///
+    /// Acknowledged class reset is not device-side recovery completion: as
+    /// usb_stor_reset_common, the device settles for HZ*6 before either
+    /// CLEAR_FEATURE, which controller readiness alone cannot replace. No
+    /// caller waits for it; the transport takes no command until it has
+    /// passed ([`Self::recovering`]).
     fn recover(&mut self) {
-        self.poisoned = true;
-        let result = (|| {
+        let reset = (|| {
             self.io.ready()?;
             self.io.control(setup(
                 TYPE_CLASS | RECIPIENT_INTERFACE,
@@ -299,11 +445,29 @@ impl<I: Io> Bot<I> {
                 0,
                 u16::from(self.interface),
                 0,
-            ))?;
-            // Acknowledged class reset is not device-side recovery completion.
-            // Match usb_stor_reset_common's HZ*6 settling interval before either
-            // CLEAR_FEATURE; controller readiness alone cannot replace it.
-            self.io.delay(RESET_RECOVERY_US);
+            ))
+        })();
+        match reset {
+            // The acknowledged reset ends every published unit's media.
+            Ok(_) => {
+                self.settling = Some(self.io.now_us().saturating_add(RESET_RECOVERY_US));
+                self.reset_generation = self.reset_generation.wrapping_add(1);
+            }
+            Err(_) => self.poisoned = true,
+        }
+    }
+
+    /// Whether a reset recovery still settles. Once it has settled, both
+    /// halts are cleared and the transport takes commands again.
+    fn recovering(&mut self) -> bool {
+        let Some(settled) = self.settling else {
+            return false;
+        };
+        if self.io.now_us() < settled {
+            return true;
+        }
+        self.settling = None;
+        let result = (|| {
             self.io.ready()?;
             let input = self.io.clear(self.endpoints[0]);
             let output = self.io.clear(self.endpoints[1]);
@@ -311,56 +475,63 @@ impl<I: Io> Bot<I> {
             output?;
             self.io.ready()
         })();
-        if result.is_ok() {
-            self.reset_generation = self.reset_generation.wrapping_add(1);
-            self.poisoned = false;
+        if result.is_err() {
+            self.poisoned = true;
         }
+        false
     }
     fn failed<T>(&mut self, error: BlockError) -> Result<T, BlockError> {
         self.recover();
         Err(error)
     }
 
+    /// Run `cdb` on `lun`, the caller waiting, for a reset recovery's
+    /// settling first.
     pub fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
-        self.failed_data = None;
-        let result = self.raw(lun, cdb, data);
-        if result == Err(BlockError::CheckCondition) {
-            let moved = self.failed_data.take();
-            // SCSI auto-sense must use the failing command's LUN, and cannot
-            // race a different unit's command while the interface is borrowed.
-            let sense = if cdb[0] == scsi::REQUEST_SENSE {
-                None
-            } else {
-                self.raw(lun, &scsi::request_sense(), Data::In(scsi::SENSE_BYTES))
-                    .ok()
-                    .and_then(|bytes| Sense::parse(&bytes))
-            };
-            self.failed_data = moved;
-            return Err(sense.map_or(BlockError::CheckCondition, BlockError::Sense));
-        }
-        if result.is_ok()
-            && cdb.first() == Some(&scsi::SYNCHRONIZE_CACHE_10)
-            && self.flags.sense_after_sync()
-        {
-            let bytes = self.raw(lun, &scsi::request_sense(), Data::In(scsi::SENSE_BYTES))?;
-            let sense = Sense::parse(&bytes).ok_or(PROTOCOL_ERROR)?;
-            if sense.key != 0 {
-                return Err(BlockError::Sense(sense));
+        if let Some(settled) = self.settling {
+            let now = self.io.now_us();
+            if now < settled {
+                self.io.delay(settled - now);
             }
         }
-        result
+        self.begin(lun, cdb, data)?;
+        self.wait()
     }
 
-    fn raw(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+    /// The begun command's result, the caller waiting for its transfers.
+    fn wait(&mut self) -> Result<Vec<u8>, BlockError> {
+        loop {
+            if let Some(result) = self.end() {
+                return result;
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Whether a begun command has not ended, or a reset recovery settles.
+    pub fn busy(&mut self) -> bool {
+        self.begun.is_some() || self.recovering()
+    }
+
+    /// Begin `cdb` on `lun` with its data stage and return once its CBW is
+    /// submitted; [`Self::end`] gives the result.
+    pub fn begin(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<(), BlockError> {
+        if self.begun.is_some() || self.recovering() {
+            return Err(BlockError::Protocol(
+                "BOT runs one command at a time, none while its reset settles",
+            ));
+        }
         if lun > self.max_lun || cdb.is_empty() || cdb.len() > 16 || !self.flags.permits(cdb) {
             return Err(BlockError::Unsupported(
                 "invalid USB storage LUN or command",
             ));
         }
-        let (length, is_in) = match &data {
-            Data::None => (0, false),
-            Data::In(n) => (*n, true),
-            Data::Out(b) => (b.len(), false),
+        self.failed_data = None;
+        let (length, is_in, out) = match data {
+            Data::None => (0, false, None),
+            Data::In(n) => (n, true, None),
+            Data::Out(b) => (b.len(), false, Some(b.to_vec())),
         };
         if length > self.max_transfer_bytes() {
             return Err(BlockError::Unsupported(
@@ -375,72 +546,213 @@ impl<I: Io> Bot<I> {
         // leak through the extra donor-defined byte.
         let cbw_length = self.flags.cbw_len();
         self.wrapper.bytes_mut()[31] = 0;
-        match self
+        let pending = match self
             .io
-            .bulk(self.endpoints[1], self.wrapper.physical(), cbw_length)
+            .submit(self.endpoints[1], self.wrapper.physical(), cbw_length)
         {
-            Ok(n) if n == cbw_length => {}
-            Ok(_) => {
-                return self.failed(PROTOCOL_ERROR);
-            }
+            Ok(pending) => pending,
             Err(error) => return self.failed(error),
-        }
-        // No uncertain CBW transfer can be followed by a CPU data write.
-        if let Data::Out(bytes) = data {
-            self.buffer.bytes_mut()[..length].copy_from_slice(bytes);
-        }
-        if self.flags.go_slow() {
-            self.io.delay(125);
-        }
-        let mut moved = 0;
-        if length != 0 {
-            let endpoint = self.endpoints[usize::from(!is_in)];
-            match self.io.bulk(endpoint, self.buffer.physical(), length) {
-                Ok(n) if n <= length => moved = n,
-                Ok(_) => {
-                    return self.failed(PROTOCOL_ERROR);
+        };
+        self.begun = Some(Begun {
+            lun,
+            cdb: cdb.to_vec(),
+            is_in,
+            length,
+            out,
+            received: Vec::new(),
+            moved: 0,
+            zero: false,
+            stalled: false,
+            stage: Stage::Wrapper(pending, cbw_length),
+            sensing: None,
+        });
+        Ok(())
+    }
+
+    /// The begun command's data once its status arrived, with same-LUN
+    /// auto-sense after a failure, which runs as the command did; never
+    /// waits for a transfer.
+    pub fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        let mut begun = self.begun.take()?;
+        let result = loop {
+            match self.advance(&mut begun) {
+                Next::Wait => {
+                    self.begun = Some(begun);
+                    return None;
                 }
-                Err(BlockError::Device {
-                    status: super::STALL,
-                }) => {
-                    if let Err(error) = self.io.clear(endpoint) {
-                        return self.failed(error);
-                    }
-                }
-                Err(error) => return self.failed(error),
+                Next::Stage(stage) => begun.stage = stage,
+                Next::Done(result) => break result,
             }
+        };
+        match begun.sensing {
+            Some(Sensing::Failed) => {
+                let sense = result.ok().and_then(|bytes| Sense::parse(&bytes));
+                return Some(Err(
+                    sense.map_or(BlockError::CheckCondition, BlockError::Sense)
+                ));
+            }
+            Some(Sensing::Synchronized) => {
+                return Some(result.and_then(|bytes| {
+                    let sense = Sense::parse(&bytes).ok_or(PROTOCOL_ERROR)?;
+                    if sense.key != 0 {
+                        return Err(BlockError::Sense(sense));
+                    }
+                    Ok(Vec::new())
+                }));
+            }
+            None => {}
         }
-        // Some bridges skip the data phase and send the CSW directly. Keep
-        // status bytes out of returned media and do not wait for a second CSW.
-        let skipped = is_in
-            && moved == 13
-            && length > 13
-            && u32::from_le_bytes(self.buffer.bytes()[..4].try_into().unwrap()) == CSW_SIGNATURE;
-        if skipped {
-            self.wrapper.bytes_mut()[..13].copy_from_slice(&self.buffer.bytes()[..13]);
-            moved = 0;
+        let (lun, cdb) = (begun.lun, &begun.cdb);
+        // SCSI auto-sense must use the failing command's LUN, and cannot race
+        // a different unit's command while the interface is borrowed.
+        let sensing = if result == Err(BlockError::CheckCondition) {
+            (cdb[0] != scsi::REQUEST_SENSE).then_some(Sensing::Failed)
         } else {
-            let input = self.endpoints[0];
-            let address = self.wrapper.physical();
-            let mut zero = false;
-            let mut stalled = false;
-            loop {
-                match self.io.bulk(input, address, 13) {
-                    Ok(13) => break,
-                    Ok(0) if !zero && !stalled => zero = true,
+            (result.is_ok()
+                && cdb.first() == Some(&scsi::SYNCHRONIZE_CACHE_10)
+                && self.flags.sense_after_sync())
+            .then_some(Sensing::Synchronized)
+        };
+        let Some(sensing) = sensing else {
+            return Some(result);
+        };
+        // The failed command's data outlives the sense command.
+        let moved = self.failed_data.take();
+        let begun = self.begin(lun, &scsi::request_sense(), Data::In(scsi::SENSE_BYTES));
+        self.failed_data = moved;
+        if let Err(error) = begun {
+            return Some(Err(match sensing {
+                Sensing::Failed => BlockError::CheckCondition,
+                Sensing::Synchronized => error,
+            }));
+        }
+        self.begun.as_mut().unwrap().sensing = Some(sensing);
+        self.end()
+    }
+
+    /// Move the begun command on as far as its completed transfers allow.
+    fn advance(&mut self, begun: &mut Begun) -> Next {
+        match &begun.stage {
+            Stage::Wrapper(pending, cbw_length) => {
+                let cbw_length = *cbw_length;
+                let Some(result) = self.io.reap(pending) else {
+                    return Next::Wait;
+                };
+                match result {
+                    Ok(n) if n == cbw_length => {}
+                    Ok(_) => return Next::Done(self.failed(PROTOCOL_ERROR)),
+                    Err(error) => return Next::Done(self.failed(error)),
+                }
+                if self.flags.go_slow() {
+                    self.io.delay(125);
+                }
+                self.data_or_status(begun)
+            }
+            Stage::Data(pending, piece) => {
+                let piece = *piece;
+                let Some(result) = self.io.reap(pending) else {
+                    return Next::Wait;
+                };
+                let endpoint = self.endpoints[usize::from(!begun.is_in)];
+                match result {
+                    Ok(n) if n <= piece => {
+                        if begun.is_in {
+                            begun.received.extend_from_slice(&self.buffer.bytes()[..n]);
+                        }
+                        begun.moved += n;
+                        if n < piece {
+                            return self.status(begun);
+                        }
+                        self.data_or_status(begun)
+                    }
+                    Ok(_) => Next::Done(self.failed(PROTOCOL_ERROR)),
                     Err(BlockError::Device {
                         status: super::STALL,
-                    }) if !stalled => {
-                        stalled = true;
-                        if let Err(error) = self.io.clear(input) {
-                            return self.failed(error);
+                    }) => {
+                        if let Err(error) = self.io.clear(endpoint) {
+                            return Next::Done(self.failed(error));
                         }
+                        self.status(begun)
                     }
-                    Ok(_) => return self.failed(PROTOCOL_ERROR),
-                    Err(error) => return self.failed(error),
+                    Err(error) => Next::Done(self.failed(error)),
+                }
+            }
+            Stage::Status(pending) => {
+                let Some(result) = self.io.reap(pending) else {
+                    return Next::Wait;
+                };
+                match result {
+                    Ok(13) => Next::Done(self.conclude(begun)),
+                    Ok(0) if !begun.zero && !begun.stalled => {
+                        begun.zero = true;
+                        self.submit_status()
+                    }
+                    Err(BlockError::Device {
+                        status: super::STALL,
+                    }) if !begun.stalled => {
+                        begun.stalled = true;
+                        if let Err(error) = self.io.clear(self.endpoints[0]) {
+                            return Next::Done(self.failed(error));
+                        }
+                        self.submit_status()
+                    }
+                    Ok(_) => Next::Done(self.failed(PROTOCOL_ERROR)),
+                    Err(error) => Next::Done(self.failed(error)),
                 }
             }
         }
+    }
+
+    /// A data stage longer than one transfer descriptor moves as
+    /// consecutive ones of `MAX_TD` bytes, each a whole number of packets,
+    /// as Linux's scatter-gather list does, until the device ends it short
+    /// or stalls.
+    fn data_or_status(&mut self, begun: &mut Begun) -> Next {
+        if begun.moved >= begun.length {
+            return self.status(begun);
+        }
+        let piece = (begun.length - begun.moved).min(MAX_TD);
+        // No uncertain CBW transfer can be followed by a CPU data write.
+        if let Some(bytes) = &begun.out {
+            self.buffer.bytes_mut()[..piece]
+                .copy_from_slice(&bytes[begun.moved..begun.moved + piece]);
+        }
+        let endpoint = self.endpoints[usize::from(!begun.is_in)];
+        match self.io.submit(endpoint, self.buffer.physical(), piece) {
+            Ok(pending) => Next::Stage(Stage::Data(pending, piece)),
+            Err(error) => Next::Done(self.failed(error)),
+        }
+    }
+
+    /// Some bridges skip the data phase and send the CSW directly. Keep
+    /// status bytes out of returned media and do not wait for a second CSW.
+    fn status(&mut self, begun: &mut Begun) -> Next {
+        let skipped = begun.is_in
+            && begun.moved == 13
+            && begun.length > 13
+            && u32::from_le_bytes(begun.received[..4].try_into().unwrap()) == CSW_SIGNATURE;
+        if skipped {
+            self.wrapper.bytes_mut()[..13].copy_from_slice(&begun.received[..13]);
+            begun.moved = 0;
+            return Next::Done(self.conclude(begun));
+        }
+        self.submit_status()
+    }
+
+    fn submit_status(&mut self) -> Next {
+        match self
+            .io
+            .submit(self.endpoints[0], self.wrapper.physical(), 13)
+        {
+            Ok(pending) => Next::Stage(Stage::Status(pending)),
+            Err(error) => Next::Done(self.failed(error)),
+        }
+    }
+
+    /// The command's result from its CSW.
+    fn conclude(&mut self, begun: &mut Begun) -> Result<Vec<u8>, BlockError> {
+        let (cdb, is_in, length, moved) = (&begun.cdb, begun.is_in, begun.length, begun.moved);
+        let mut received = core::mem::take(&mut begun.received);
         let bytes = &self.wrapper.bytes()[..13];
         let residue = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let status = bytes[12];
@@ -452,8 +764,8 @@ impl<I: Io> Bot<I> {
             return self.failed(PROTOCOL_ERROR);
         }
         if status == CSW_FAILED {
-            if is_in {
-                self.failed_data = Some(self.buffer.bytes()[..moved].to_vec());
+            if is_in && begun.sensing.is_none() {
+                self.failed_data = Some(received);
             }
             return Err(BlockError::CheckCondition);
         }
@@ -479,11 +791,8 @@ impl<I: Io> Bot<I> {
         if !is_in && (moved != length || residue != 0) {
             return Err(SHORT_WRITE);
         }
-        Ok(if is_in {
-            self.buffer.bytes()[..moved.min(length - residue)].to_vec()
-        } else {
-            Vec::new()
-        })
+        received.truncate(moved.min(length - residue));
+        Ok(received)
     }
 }
 
@@ -726,6 +1035,8 @@ mod tests {
         payload: Vec<u8>,
         status: u8,
         data_done: bool,
+        /// Data bytes moved so far, over one transfer or several.
+        moved: usize,
     }
     #[derive(Debug, PartialEq, Eq)]
     enum Order {
@@ -953,6 +1264,7 @@ mod tests {
                     payload,
                     status,
                     data_done: requested == 0,
+                    moved: 0,
                 });
                 if s.fault == Fault::ShortCbw {
                     return Ok(30);
@@ -966,7 +1278,10 @@ mod tests {
             let mut command = s.command.take().unwrap();
             if !command.data_done {
                 assert_eq!(command.input, endpoint.is_in());
-                assert_eq!(length, command.length);
+                // A data stage moves in transfers of whole packets but its
+                // last, up to the command's length.
+                let remaining = command.length - command.moved;
+                assert!(length == remaining || length < remaining && length.is_multiple_of(512));
                 command.data_done = true;
                 if s.fault == Fault::SkippedData {
                     assert!(command.input && length > 13);
@@ -986,21 +1301,27 @@ mod tests {
                 let count = if s.fault == Fault::ShortData {
                     length - 1
                 } else if command.input {
-                    length.min(command.payload.len())
+                    length.min(command.payload.len().saturating_sub(command.moved))
                 } else {
                     length
                 };
+                let moved = command.moved;
                 if command.input {
-                    bytes[..count].copy_from_slice(&command.payload[..count]);
+                    bytes[..count].copy_from_slice(&command.payload[moved..moved + count]);
                 } else if command.status == 0 && matches!(command.cdb[0], 0x2a | 0x8a) {
-                    let at = if command.cdb[0] == 0x2a {
-                        u32::from_be_bytes(command.cdb[2..6].try_into().unwrap()) as usize * 512
-                    } else {
-                        u64::from_be_bytes(command.cdb[2..10].try_into().unwrap()) as usize * 512
-                    };
+                    let at = moved
+                        + if command.cdb[0] == 0x2a {
+                            u32::from_be_bytes(command.cdb[2..6].try_into().unwrap()) as usize * 512
+                        } else {
+                            u64::from_be_bytes(command.cdb[2..10].try_into().unwrap()) as usize
+                                * 512
+                        };
                     s.units[usize::from(command.lun)].as_mut().unwrap().media[at..at + count]
                         .copy_from_slice(&bytes[..count]);
                 }
+                command.moved += count;
+                // A short transfer ends the stage early.
+                command.data_done = command.moved == command.length || count < length;
                 s.command = Some(command);
                 return Ok(count);
             }
@@ -1159,7 +1480,7 @@ mod tests {
         let super::super::UsbTransport::Bot(disk) = &disks[0].disk else {
             panic!("native BOT fixture published another transport")
         };
-        assert_eq!(disk.write_cache, write_cache);
+        assert_eq!(disk.identity.features.write_cache, write_cache);
         NativeFixture {
             storage,
             disk: disks.remove(0),
@@ -1245,7 +1566,7 @@ mod tests {
                             assert!(old_disk.read(7, &mut poison).is_err());
                             assert_eq!(poison, [0xb7; 512]);
                             assert!(old_disk.write(7, &[0xee; 512]).is_err());
-                            assert!(old_disk.flush().is_err());
+                            assert!(old_disk.flush_cache().is_err());
                             let mut old = old_owner.borrow_mut();
                             assert!(old.transport.io.ready().is_err());
                             assert!(
@@ -1350,7 +1671,7 @@ mod tests {
                     assert!(disk.read(0, &mut poison).is_err());
                     assert_eq!(poison, [0xc3; 512]);
                     assert!(disk.write(0, &[0x11; 512]).is_err());
-                    assert!(disk.flush().is_err());
+                    assert!(disk.flush_cache().is_err());
                     assert!(
                         owner
                             .borrow_mut()
@@ -1533,6 +1854,8 @@ mod tests {
             let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
             state.borrow_mut().fault = fault;
             assert!(bot.command(0, &[0; 6], Data::None).is_err());
+            state.borrow_mut().now += RESET_RECOVERY_US;
+            assert!(!bot.busy());
             let state = state.borrow();
             assert_eq!(state.controls.last().unwrap()[1], RESET);
             assert_eq!(state.clears, vec![0x82, 0x02]);
@@ -1597,6 +1920,9 @@ mod tests {
                 bot.command(0, &[0x12, 0, 0, 0, 36, 0], Data::In(36))
                     .is_err()
             );
+            // A failed halt clear shows once the reset has settled.
+            state.borrow_mut().now += RESET_RECOVERY_US;
+            assert!(!bot.busy());
             assert!(bot.poisoned());
             let wrapper = bot.wrapper.bytes().to_vec();
             let buffer = bot.buffer.bytes().to_vec();
@@ -1626,7 +1952,7 @@ mod tests {
             (1, vec![0; 6], 0),
             (0, vec![], 0),
             (0, vec![0; 17], 0),
-            (0, vec![0; 6], MAX_TD + 1),
+            (0, vec![0; 6], bot.max_transfer_bytes() + 1),
         ] {
             assert!(bot.command(lun, &cdb, Data::In(length)).is_err());
         }
@@ -1670,6 +1996,8 @@ mod tests {
                 initial_read: false,
                 attachment: None,
                 reset_generation: 0,
+                settling: None,
+                begun: None,
                 failed_data: None,
             };
             assert!(
@@ -1737,7 +2065,7 @@ mod tests {
         assert!(same[0].read(0, &mut data).is_err());
         assert!(same[0].read(0, &mut []).is_err());
         assert!(same[0].write(0, &[0; 512]).is_err());
-        assert!(same[0].flush().is_err());
+        assert!(same[0].flush_cache().is_err());
         assert!(same[0].command(&[0; 6], super::super::Data::None).is_err());
         assert_eq!(state.borrow().transfers, before);
         let mut current = scan_bot(owner.clone(), &mut failures).unwrap();
@@ -1762,7 +2090,7 @@ mod tests {
         assert_eq!(data, [0x99; 512]);
         let before = state.borrow().transfers;
         assert!(current[0].read(0, &mut data).is_err());
-        assert!(disks[0].flush().is_err());
+        assert!(disks[0].flush_cache().is_err());
         assert_eq!(state.borrow().transfers, before);
         assert_eq!(
             state
@@ -1802,22 +2130,22 @@ mod tests {
             .resize(4096, 0x33);
         let mut fresh = scan_bot(owner.clone(), &mut failures).unwrap();
         assert_eq!(fresh[0].identity().blocks, 8);
-        assert!(old[0].flush().is_err());
+        assert!(old[0].flush_cache().is_err());
         old[1].read(0, &mut [0; 512]).unwrap();
         state.borrow_mut().units[0].as_mut().unwrap().readonly = true;
         let protected = scan_bot(owner.clone(), &mut failures).unwrap();
         assert!(protected[0].identity().read_only);
-        assert!(fresh[0].flush().is_err());
+        assert!(fresh[0].flush_cache().is_err());
         // Failed revalidation cannot preserve an older apparently usable view.
         state.borrow_mut().override_payload.push((0x25, vec![0; 7]));
         assert!(scan_bot(owner.clone(), &mut failures).unwrap().is_empty());
-        assert!(old[1].flush().is_err());
+        assert!(old[1].flush_cache().is_err());
         state.borrow_mut().override_payload.clear();
         let mut ready = scan_bot(owner.clone(), &mut failures).unwrap();
         state.borrow_mut().fault = Fault::Timeout;
         assert!(ready[0].read(0, &mut [0; 512]).is_err());
         let before = state.borrow().transfers;
-        assert!(ready[1].flush().is_err());
+        assert!(ready[1].flush_cache().is_err());
         assert_eq!(state.borrow().transfers, before);
         assert!(scan_bot(owner, &mut failures).is_err());
     }
@@ -1848,10 +2176,17 @@ mod tests {
             disks.push(super::super::Disk {
                 bot: bot.clone(),
                 lun,
-                identity,
+                identity: crate::block::Identity {
+                    features: crate::block::Features {
+                        write_cache: true,
+                        ..identity.features
+                    },
+                    ..identity
+                },
                 media: Rc::new(core::cell::Cell::new(true)),
-                write_cache: true,
                 removable,
+                running: None,
+                next_tag: 0,
             });
         }
         let mut bytes = vec![0; MAX_TD * 2 + 512];
@@ -1868,9 +2203,9 @@ mod tests {
         let mut untouched = [0xa5; 512];
         assert!(disks[0].read(0, &mut untouched).is_err());
         assert_eq!(untouched, [0xa5; 512]);
-        assert_eq!(disks[0].cdb(false, u32::MAX as u64, 1)[0], 0x28);
-        assert_eq!(disks[0].cdb(false, u32::MAX as u64, 2)[0], 0x88);
-        assert_eq!(disks[0].cdb(true, 1u64 << 32, 1)[0], 0x8a);
+        assert_eq!(disks[0].cdb(false, false, u32::MAX as u64, 1)[0], 0x28);
+        assert_eq!(disks[0].cdb(false, false, u32::MAX as u64, 2)[0], 0x88);
+        assert_eq!(disks[0].cdb(true, false, 1u64 << 32, 1)[0], 0x8a);
     }
 
     #[test]
@@ -2042,6 +2377,40 @@ mod tests {
         assert_eq!(failures[0].0, "reader LUN 1");
         assert!(!state.borrow().history.iter().any(|(lun, _, _)| *lun == 2));
     }
+    /// No caller waits for a reset to settle: the transport refuses
+    /// commands until it has, then clears both halts.
+    #[test]
+    fn a_settling_reset_holds_commands_without_waiting() {
+        let mut memory = vec![0u64; 32 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        let mut dma = dma(&mut memory);
+        let io = model(
+            start,
+            start + memory.len() as u64 * 8,
+            vec![unit(0), unit(1)],
+        );
+        let state = io.0.clone();
+        let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
+        state.borrow_mut().fault = Fault::Phase;
+        bot.begin(0, &[0; 6], Data::None).unwrap();
+        assert!(bot.end().unwrap().is_err());
+        state.borrow_mut().fault = Fault::None;
+        assert!(bot.busy());
+        assert!(bot.begin(1, &[0; 6], Data::None).is_err());
+        assert!(!state.borrow().order.contains(&Order::Clear(0x82)));
+        state.borrow_mut().now += RESET_RECOVERY_US;
+        assert!(!bot.busy());
+        assert_eq!(bot.generation(), 1);
+        bot.command(1, &[0; 6], Data::None).unwrap();
+        assert!(
+            !state
+                .borrow()
+                .order
+                .iter()
+                .any(|order| matches!(order, Order::Delay(_)))
+        );
+    }
+
     #[test]
     fn recovery_waits_for_real_reset_settle_before_clears_and_next_lun() {
         let mut memory = vec![0u64; 32 * 1024];
@@ -2057,6 +2426,7 @@ mod tests {
         state.borrow_mut().fault = Fault::Phase;
         assert!(bot.command(0, &[0; 6], Data::None).is_err());
         assert!(!bot.poisoned());
+        assert!(bot.busy(), "the reset settles");
         state.borrow_mut().fault = Fault::None;
         bot.command(1, &[0; 6], Data::None).unwrap();
         assert_eq!(
@@ -2177,8 +2547,9 @@ mod tests {
             lun: 0,
             identity,
             media: Rc::new(core::cell::Cell::new(true)),
-            write_cache: false,
             removable: false,
+            running: None,
+            next_tag: 0,
         };
         let before = state.borrow().history.len();
         let mut data = vec![0; 128 * 1024];
@@ -2221,10 +2592,10 @@ mod tests {
         assert!(old[0].command(&[0; 6], Data::None).is_err());
         let before = state.borrow().transfers;
         assert!(old[1].read(0, &mut [0; 512]).is_err());
-        assert!(old[0].flush().is_err());
+        assert!(old[0].flush_cache().is_err());
         assert_eq!(state.borrow().transfers, before);
         state.borrow_mut().fault = Fault::None;
         assert_eq!(scan_bot(owner, &mut failures).unwrap().len(), 2);
-        assert!(old[1].flush().is_err());
+        assert!(old[1].flush_cache().is_err());
     }
 }

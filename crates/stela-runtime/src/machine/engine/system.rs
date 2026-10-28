@@ -411,8 +411,9 @@ enum Translation {
     /// Another translation control: all.
     All,
     /// TLB maintenance: every fetch translation, of the shadow what the
-    /// TLBI reaches, and of the lookup table what it reaches everywhere.
-    Maintenance(Reach, tlbi::Everywhere),
+    /// TLBI reaches, and of the lookup table what it reaches everywhere;
+    /// and the scope other PEs apply, for one broadcast beyond this PE.
+    Maintenance(Reach, tlbi::Everywhere, Option<tlbi::Scope>),
 }
 
 /// HCR_EL2.FB: EL1 TLBIs broadcast Inner Shareable.
@@ -421,7 +422,7 @@ const HCR_FB: u32 = 9;
 /// What `tlbi` removes from the shadow of `cpu`'s current context, and
 /// from a cache of every context's translations. EL2 is enabled and
 /// HCR_EL2.E2H is RES1 (`cpu`).
-fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere) {
+fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere, Option<tlbi::Scope>) {
     let controls = cpu.controls(cpu.regime());
     let context = tlbi::Context {
         el: cpu.pstate.el,
@@ -435,7 +436,8 @@ fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere) {
         asid: (controls.regime != mmu::Regime::El2).then(|| mmu::current_asid(&controls)),
     };
     let scope = Scope::new(tlbi, context);
-    (scope.reach(&current), scope.everywhere())
+    let broadcast = super::parallel::broadcasts(&scope).then_some(scope);
+    (scope.reach(&current), scope.everywhere(), broadcast)
 }
 
 /// The compiled code an instruction-cache invalidation makes stale.
@@ -885,8 +887,8 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             // current context alone, loses what the TLBI reaches of it, a
             // superset of its scope and level.
             Operation::Tlbi(tlbi) => {
-                let (reach, everywhere) = reach(&self.machine.cpu, &tlbi);
-                self.translation = Translation::Maintenance(reach, everywhere);
+                let (reach, everywhere, broadcast) = reach(&self.machine.cpu, &tlbi);
+                self.translation = Translation::Maintenance(reach, everywhere, broadcast);
                 Ok(())
             }
             Operation::At {
@@ -1325,7 +1327,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match translation {
             Translation::All => self.controls_changed(),
             Translation::TableBase => self.table_base_changed(),
-            Translation::Maintenance(reach, everywhere) => self.tlb_maintained(reach, everywhere),
+            Translation::Maintenance(reach, everywhere, broadcast) => {
+                self.tlb_maintained(reach, everywhere);
+                if let Some(scope) = broadcast
+                    && let Err(stop) = self.broadcast(super::parallel::Maintenance::Tlb(scope))
+                {
+                    return Some(Err(stop));
+                }
+            }
             Translation::Unchanged if regime => self.sync_regime(),
             Translation::Unchanged => {}
         }
@@ -1334,10 +1343,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Code::Page(physical) => {
                 self.invalidate_code_page(physical);
                 self.host.code_invalidated(Some(physical));
+                if let Err(stop) =
+                    self.broadcast(super::parallel::Maintenance::Code(Some(physical)))
+                {
+                    return Some(Err(stop));
+                }
             }
             Code::All => {
                 self.discard_code();
                 self.host.code_invalidated(None);
+                if let Err(stop) = self.broadcast(super::parallel::Maintenance::Code(None)) {
+                    return Some(Err(stop));
+                }
             }
         }
         // The state the accessor changed before refusing is resynchronized

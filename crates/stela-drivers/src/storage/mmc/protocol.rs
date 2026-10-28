@@ -3,7 +3,7 @@
 use super::{wire::*, *};
 use crate::{
     Clock,
-    block::{Identity, Transport},
+    block::{Features, Identity, Transport},
 };
 use alloc::format;
 mod ddr;
@@ -118,9 +118,7 @@ pub(in crate::storage) trait Host {
 pub(in crate::storage) struct Description {
     pub rca: u16,
     pub identity: Identity,
-    pub kind: Kind,
     pub sector_addressed: bool,
-    pub cache: bool,
     pub info: CardInfo,
     pub notify: bool,
 }
@@ -465,14 +463,16 @@ impl<H: Host> Session<'_, H> {
             blocks,
             block_size: 512,
             read_only,
+            features: Features {
+                write_cache: kind == Kind::Mmc && cache,
+                ..Features::default()
+            },
         };
         self.wait_card_ready()?;
         Ok(Description {
             rca: self.rca,
             identity,
-            kind,
             sector_addressed,
-            cache,
             info,
             notify,
         })

@@ -5,7 +5,9 @@
 //! exclusive load; a store-exclusive to that granule passes once and clears
 //! it, as do CLREX and exception return. The local and global monitors
 //! coincide; another observer's write to the granule clears it
-//! (`processors`). `IsExclusiveVA` is TRUE. With FEAT_MTE2 a load, and a
+//! (`processors`), or, with PEs on their own host cores, the store passes
+//! only while RAM holds what the load read (`parallel`). `IsExclusiveVA` is
+//! TRUE. With FEAT_MTE2 a load, and a
 //! store that passes, is tag checked unless its base is SP.
 use super::{Devices, Host, Machine, RamTables, RequirementKind, Step, Translated, tags::TagCheck};
 use crate::machine::{
@@ -119,6 +121,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         "an exclusive load of a device register",
                     )));
                 }
+                if self.parallel.is_some() {
+                    // Other PEs write concurrently: the loaded value, which a
+                    // store-exclusive later compares, is read single-copy
+                    // atomically.
+                    self.atomic_read_ram(physical, bytes)?;
+                    let offset = (physical - granule) as usize;
+                    reservation.bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
+                }
                 self.cpu.monitor = Some(reservation);
                 for (index, register) in registers.iter().enumerate() {
                     if let Some(register) = register {
@@ -137,10 +147,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .monitor
                     .is_some_and(|reservation| reservation.granule == granule)
                     && last == granule;
-                self.cpu.monitor = None;
+                let reservation = self.cpu.monitor.take();
                 if passed && tag_checked && self.exclusive_tag_fault(&access)? {
                     return Ok(());
                 }
+                let mut stored = passed;
                 if passed {
                     for (index, register) in registers.iter().enumerate() {
                         if let Some(register) = register {
@@ -150,16 +161,50 @@ impl<H: Host, D: Devices> Machine<H, D> {
                                 .copy_from_slice(&value[..usize::from(element_bytes)]);
                         }
                     }
-                    if !self.host.write_ram(physical, bytes) {
+                    if self.parallel.is_some() {
+                        // The monitor passes while RAM still holds what the
+                        // exclusive load read (see `parallel`).
+                        let offset = (physical - granule) as usize;
+                        let mut expected = [0u8; 16];
+                        let expected = &mut expected[..bytes.len()];
+                        expected.copy_from_slice(
+                            &reservation.expect("passed").bytes[offset..offset + bytes.len()],
+                        );
+                        stored = self
+                            .host
+                            .compare_exchange_ram(physical, expected, bytes)
+                            .ok_or_else(|| {
+                                self.unsupported(RequirementKind::Native(
+                                    "an exclusive store the host cannot compare and exchange",
+                                ))
+                            })?;
+                    } else if !self.host.write_ram(physical, bytes) {
                         return Err(self.unsupported(RequirementKind::Native(
                             "an exclusive store to a device register",
                         )));
                     }
                 }
-                self.write_register(status, u64::from(!passed));
+                self.write_register(status, u64::from(!stored));
             }
         }
         self.next()
+    }
+
+    /// Read `buffer.len()` bytes of RAM at `physical` single-copy atomically,
+    /// as a compare-and-exchange of zero with zero that fails, or stores the
+    /// zero RAM already held.
+    fn atomic_read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> Result<(), super::Stop> {
+        buffer.fill(0);
+        let mut zero = [0u8; 16];
+        let zero = &mut zero[..buffer.len()];
+        self.host
+            .compare_exchange_ram(physical, buffer, zero)
+            .map(drop)
+            .ok_or_else(|| {
+                self.unsupported(RequirementKind::Native(
+                    "an exclusive load the host cannot read atomically",
+                ))
+            })
     }
 
     /// Take the Tag Check fault of an exclusive access, if it has one.

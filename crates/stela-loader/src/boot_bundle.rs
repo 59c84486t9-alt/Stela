@@ -102,7 +102,10 @@ pub const SCHEMA_VERSION: u32 = 4;
 /// unsupported PMP DMA, requiring actual native memory resources at mount.
 /// Revision 29: normalize the observed one-MiB NOR template to the qualified
 /// eight-MiB firmware, syscfg and NVRAM regions derived from mBoot.
-pub const REVISION: u32 = 29;
+/// Revision 30: publish a tethered restore's ticket digest as
+/// `/chosen/secure-boot-hashes sfr-manifest-hash`, which restored's iBoot
+/// staging requires once EAN holds an earlier install's `ifw2`.
+pub const REVISION: u32 = 30;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -1118,6 +1121,8 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
 
     // Preserve the actual IM4M selected by boot policy. The payload tag
     // belongs to the source input, not a guessed iBoot identity or name.
+    // A tethered restore loads the IPSW's firmware under the same ticket.
+    let restore = options.boot_command == Some(handoff::BootCommand::TetheredRestore);
     let boot_manifest_object = inputs
         .boot_manifest
         .as_ref()
@@ -1127,6 +1132,10 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
                 &inputs.kernel_collection.source.payload_type,
                 manifest.bytes,
             )
+            .map(|object| match restore {
+                true => object.admits_firmware(),
+                false => object,
+            })
         })
         .transpose()?;
     if let Some(object) = &boot_manifest_object {

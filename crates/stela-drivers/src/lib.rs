@@ -73,6 +73,10 @@ pub struct Handoff {
     pub bluetooth_platform: usb::bluetooth::intel::DsbrCapture,
     /// Copied status metadata; raw bytes belong to the permanent firmware catalog.
     pub wifi_platform: net::wifi::intel::platform::Observations,
+    /// The message a disk sends when it completes a command, where the
+    /// engine takes one: it wakes the core that looks for completions
+    /// ([`block::BlockDevice::signals`]). `None` leaves every disk polled.
+    pub completion: Option<bus::irq::MsiMessage>,
 }
 
 impl Handoff {
@@ -163,7 +167,8 @@ pub struct Clock {
 }
 
 impl Clock {
-    fn ticks() -> u64 {
+    /// The raw time-stamp counter, for intervals another party converts.
+    pub(crate) fn ticks() -> u64 {
         #[cfg(test)]
         if let Some(ticks) = test_clock::read() {
             return ticks;
@@ -180,18 +185,19 @@ impl Clock {
             .ticks_per_microsecond
             .checked_mul(microseconds)
             .ok_or(ClockError::DurationOverflow)?;
-        // Leave at least half a raw counter revolution in which an expired
-        // deadline can be observed; near-full-period intervals can otherwise
-        // miss expiry entirely between adjacent observations at rollover.
-        if ticks > u64::MAX / 2 {
+        // Leave a quarter of a raw counter revolution in which an expired
+        // deadline can be observed and another quarter in which a counter
+        // read before the start, on a core whose counter lags by a few
+        // cycles, is told apart from one long past it ([`Deadline`]).
+        if ticks > u64::MAX / 4 {
             return Err(ClockError::DurationTooLong);
         }
         Ok(ticks)
     }
 
     /// Validate calibration and the complete required interval before any
-    /// device programming. Intervals may span at most half a raw counter
-    /// revolution. Zero duration still requires a calibrated clock.
+    /// device programming. Intervals may span at most a quarter of a raw
+    /// counter revolution. Zero duration still requires a calibrated clock.
     pub fn check_duration(&self, microseconds: u64) -> Result<(), ClockError> {
         self.duration_ticks(microseconds).map(|_| ())
     }
@@ -336,8 +342,13 @@ pub struct Deadline {
 }
 
 impl Deadline {
+    /// Whether `counter` lies at least the deadline's ticks after its
+    /// start. A counter before the start, as another core's may read by a
+    /// few cycles, has not passed it: intervals span at most a quarter of
+    /// the counter's revolution ([`Clock::check_duration`]).
     fn passed_at(&self, counter: u64) -> bool {
-        counter.wrapping_sub(self.start) >= self.ticks
+        let elapsed = counter.wrapping_sub(self.start) as i64;
+        elapsed >= 0 && elapsed as u64 >= self.ticks
     }
     pub fn passed(&self) -> bool {
         self.passed_at(Clock::ticks())
@@ -354,6 +365,7 @@ mod tests {
             firmware: None,
             bluetooth_platform: Default::default(),
             wifi_platform: Default::default(),
+            completion: None,
             ecam: Vec::new(),
             mapped: vec![0x1000..0x3000, 0x8000..0x9000],
             dma: 0..0,
@@ -380,6 +392,7 @@ mod tests {
             firmware: Some(catalog.clone()),
             bluetooth_platform: Default::default(),
             wifi_platform: Default::default(),
+            completion: None,
         };
         let cloned = handoff.clone();
         assert!(Arc::ptr_eq(cloned.firmware.as_ref().unwrap(), &catalog));
@@ -439,16 +452,18 @@ mod tests {
         let largest = Clock {
             ticks_per_microsecond: 1,
         }
-        .deadline_with(u64::MAX / 2, || u64::MAX - 4)
+        .deadline_with(u64::MAX / 4, || u64::MAX - 4)
         .unwrap();
-        assert!(!largest.passed_at((u64::MAX - 4).wrapping_add(u64::MAX / 2 - 1)));
-        assert!(largest.passed_at((u64::MAX - 4).wrapping_add(u64::MAX / 2)));
-        assert!(largest.passed_at((u64::MAX - 4).wrapping_add(u64::MAX / 2 + 1)));
+        assert!(!largest.passed_at((u64::MAX - 4).wrapping_add(u64::MAX / 4 - 1)));
+        assert!(largest.passed_at((u64::MAX - 4).wrapping_add(u64::MAX / 4)));
+        assert!(largest.passed_at((u64::MAX - 4).wrapping_add(u64::MAX / 4 + 1)));
+        // Another core's counter a few cycles behind the start.
+        assert!(!largest.passed_at(u64::MAX - 7));
         assert_eq!(
             Clock {
                 ticks_per_microsecond: 1
             }
-            .check_duration(u64::MAX / 2 + 1),
+            .check_duration(u64::MAX / 4 + 1),
             Err(ClockError::DurationTooLong)
         );
     }
@@ -488,7 +503,7 @@ mod tests {
         let clock = Clock {
             ticks_per_microsecond: 1,
         };
-        for (start, duration) in [(100, 6), (u64::MAX - 4, 6), (u64::MAX - 4, u64::MAX / 2)] {
+        for (start, duration) in [(100, 6), (u64::MAX - 4, 6), (u64::MAX - 4, u64::MAX / 4)] {
             let observations = [
                 start,
                 start.wrapping_add(duration - 1),
@@ -533,7 +548,7 @@ mod tests {
             (0, 10, ClockError::Uncalibrated),
             (u64::MAX, 2, ClockError::DurationOverflow),
             (u64::MAX, 1, ClockError::DurationTooLong),
-            (1, u64::MAX / 2 + 1, ClockError::DurationTooLong),
+            (1, u64::MAX / 4 + 1, ClockError::DurationTooLong),
         ] {
             let clock = Clock {
                 ticks_per_microsecond: rate,

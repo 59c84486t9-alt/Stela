@@ -1,3 +1,7 @@
+//! The PTD bank and its register model. `Ptd` holds entries, metadata, update
+//! aliases and per-route interrupt state with per-bit knownness, accepts
+//! updates, consumes whole entries and drives the route wire levels, refusing
+//! accesses it cannot qualify.
 #[cfg(test)]
 use super::PTD_BYTES;
 use super::{MAX_ENTRIES, Range, UPDATE_OFFSET};

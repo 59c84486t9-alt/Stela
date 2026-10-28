@@ -48,7 +48,7 @@ impl Link for RootLink {
     }
     fn carrier(&mut self) -> bool {
         // SAFETY: the loader root `storage::open` captured maps this
-        // device; the engine is serialized.
+        // device.
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.device.carrier()
     }
@@ -186,7 +186,8 @@ impl HostNetwork {
 }
 
 /// The host network, shared by the signing transport and a remote install
-/// image; the engine is serialized, so a borrow never overlaps another.
+/// image; only the service reaches it, which one core at a time holds, so a
+/// borrow never overlaps another.
 #[derive(Clone)]
 pub struct Shared(pub Rc<RefCell<HostNetwork>>);
 
@@ -286,11 +287,8 @@ impl GuestNetwork {
         // out, and frames come in while its receive queue has room. The rest
         // wait in the host adapter's ring, which drops on overflow as the
         // hardware does.
-        while let Some(frame) = devices.network_take() {
-            if let Err(error) = self.link.transmit(&frame) {
-                self.refuse(error.into());
-            }
-        }
+        let frames: Vec<_> = core::iter::from_fn(|| devices.network_take()).collect();
+        self.transmit(frames);
         while devices.network_room() {
             match self.link.receive() {
                 Ok(Some(frame)) => {
@@ -302,6 +300,20 @@ impl GuestNetwork {
                     self.refuse(error.into());
                     break;
                 }
+            }
+        }
+    }
+
+    /// The frames the guest queued, taken from its devices, for
+    /// [`Self::transmit`] to send without them.
+    pub fn queued(devices: &mut AppleDevices) -> Vec<Vec<u8>> {
+        core::iter::from_fn(|| devices.network_take()).collect()
+    }
+
+    pub fn transmit(&mut self, frames: Vec<Vec<u8>>) {
+        for frame in frames {
+            if let Err(error) = self.link.transmit(&frame) {
+                self.refuse(error.into());
             }
         }
     }

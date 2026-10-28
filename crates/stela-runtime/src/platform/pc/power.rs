@@ -9,32 +9,43 @@
 //!   space registers (segment 0, bus 0, as section 5.2.9 requires) are
 //!   taken; a memory-space register is reported and left to the mount's
 //!   architectural fallbacks.
-//! - Power-off is the S5 soft-off sequence: SLP_TYPx from `\_S5` and SLP_EN
-//!   written to PM1a_CNT and, when present, PM1b_CNT (section 7.4.2). The
-//!   `\_PTS` and `\_GTS` control methods are AML the mount cannot run;
+//! - Power-off is the S5 soft-off sequence as Linux's
+//!   `acpi_hw_legacy_sleep` runs it (section 7.4.2): every GPE disabled
+//!   and every GPE and fixed event status cleared, so no pending wake event
+//!   turns the machine straight back on; SLP_TYPx from `\_S5` written to
+//!   PM1a_CNT and, when present, PM1b_CNT, then SLP_EN. A hardware-reduced
+//!   platform writes them to its sleep control register instead, after
+//!   clearing WAK_STS, as `acpi_hw_extended_sleep` does (section 4.8.3.7).
+//!   The `\_PTS` and `\_GTS` control methods are AML the mount cannot run;
 //!   firmware that needs them keeps the machine on and the mount says so.
 //! - The fixed-feature power button sets PWRBTN_STS in PM1x_STS when
 //!   PWRBTN_EN in PM1x_EN is set (section 4.8.4.1); a status bit is
 //!   cleared by writing one. A FADT with PWR_BUTTON set has a
-//!   control-method button instead, which needs AML and is not read.
+//!   control-method button instead, which needs AML and is not read. The
+//!   mount reads the button only where the firmware already runs in ACPI
+//!   mode: taking the fixed events from SMM firmware in legacy mode would
+//!   leave its thermal, fan and battery events to an OS that services no
+//!   SCI.
 //!
-//! The PM1 blocks are system I/O ports. The extended (X_) FADT blocks are
-//! preferred when present; one outside I/O space is refused. A
-//! hardware-reduced platform has no PM1 blocks, so it has neither the
-//! soft-off sequence nor the fixed button.
+//! The PM1 and GPE blocks and the sleep registers are system I/O ports.
+//! The extended (X_) FADT blocks are preferred when present; one outside
+//! I/O space is refused. A hardware-reduced platform has no PM1 blocks, so
+//! it has no fixed button.
 use super::acpi::{self, AcpiError};
 
 const HEADER: usize = 36;
 
 /// FADT field offsets (ACPI 6.5 table 5.9).
 const DSDT: usize = 40;
-const SMI_COMMAND: usize = 48;
-const ACPI_ENABLE: usize = 52;
 const PM1A_EVENT: usize = 56;
 const PM1B_EVENT: usize = 60;
 const PM1A_CONTROL: usize = 64;
 const PM1B_CONTROL: usize = 68;
+const GPE0_BLOCK: usize = 80;
+const GPE1_BLOCK: usize = 84;
 const PM1_EVENT_LENGTH: usize = 88;
+const GPE0_BLOCK_LENGTH: usize = 92;
+const GPE1_BLOCK_LENGTH: usize = 93;
 const FLAGS: usize = 112;
 const RESET_REGISTER: usize = 116;
 const RESET_VALUE: usize = 128;
@@ -43,6 +54,10 @@ const X_PM1A_EVENT: usize = 148;
 const X_PM1B_EVENT: usize = 160;
 const X_PM1A_CONTROL: usize = 172;
 const X_PM1B_CONTROL: usize = 184;
+const X_GPE0_BLOCK: usize = 220;
+const X_GPE1_BLOCK: usize = 232;
+const SLEEP_CONTROL: usize = 244;
+const SLEEP_STATUS: usize = 256;
 const GAS_BYTES: usize = 12;
 
 /// FADT flags.
@@ -57,6 +72,15 @@ const PCI_CONFIGURATION: u8 = 2;
 
 /// PM1 status and enable bits (ACPI 6.5 tables 4.16, 4.17).
 pub const POWER_BUTTON: u16 = 1 << 8;
+/// Every fixed event's status in PM1x_STS: TMR, BM, GBL, PWRBTN, SLPBTN,
+/// RTC and WAK, Linux's `ACPI_BITMASK_ALL_FIXED_STATUS`.
+pub const ALL_FIXED_STATUS: u16 = 0x8731;
+/// The sleep status register's WAK_STS and the sleep control register's
+/// fields (ACPI 6.5 sections 4.8.3.7, 4.8.3.8).
+pub const SLEEP_WAKE_STATUS: u8 = 1 << 7;
+const SLEEP_REGISTER_TYPE_SHIFT: u8 = 2;
+const SLEEP_REGISTER_TYPE: u8 = 0x7 << SLEEP_REGISTER_TYPE_SHIFT;
+const SLEEP_REGISTER_ENABLE: u8 = 1 << 5;
 /// PM1 control bits (ACPI 6.5 table 4.18).
 pub const SCI_ENABLE: u16 = 1 << 0;
 const SLEEP_TYPE_SHIFT: u16 = 10;
@@ -93,6 +117,29 @@ pub struct Pm1 {
     pub control: u16,
 }
 
+/// A general-purpose event block (ACPI 6.5 section 4.8.4.1): its status
+/// registers, then as many enable registers, one byte each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gpe {
+    pub port: u16,
+    pub bytes: u8,
+}
+
+impl Gpe {
+    /// Each status register's port and its enable register's.
+    pub fn registers(self) -> impl Iterator<Item = (u16, u16)> {
+        let half = u16::from(self.bytes / 2);
+        (0..half).map(move |index| (self.port + index, self.port + half + index))
+    }
+}
+
+/// A hardware-reduced platform's sleep control and status registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SleepRegisters {
+    pub control: u16,
+    pub status: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HostPower {
     /// PM1a and PM1b; PM1a is required for any PM1 use.
@@ -105,9 +152,10 @@ pub struct HostPower {
     pub reset: Option<(ResetRegister, u8)>,
     /// Whether the power button is the fixed-feature one.
     pub fixed_power_button: bool,
-    /// SMI_CMD and the ACPI_ENABLE value written to it to hand the fixed
-    /// events to the OS, when the firmware starts in legacy mode.
-    pub acpi_enable: Option<(u16, u8)>,
+    /// GPE0 and GPE1.
+    pub gpe: [Option<Gpe>; 2],
+    /// A hardware-reduced platform's sleep registers.
+    pub sleep_registers: Option<SleepRegisters>,
     /// What was found and refused, for the mount's report.
     pub refused: Option<&'static str>,
 }
@@ -124,11 +172,21 @@ impl HostPower {
     }
 }
 
-/// PM1x_CNT with S5's sleep type and SLP_EN set, from its current value.
-pub fn sleep_control(current: u16, sleep_type: u8) -> u16 {
+/// PM1x_CNT with S5's sleep type and SLP_EN clear, from its current
+/// value: written first, as Linux writes SLP_TYP before SLP_EN.
+pub fn sleep_type_control(current: u16, sleep_type: u8) -> u16 {
     current & !(SLEEP_TYPE | SLEEP_ENABLE)
         | (u16::from(sleep_type) << SLEEP_TYPE_SHIFT) & SLEEP_TYPE
-        | SLEEP_ENABLE
+}
+
+/// PM1x_CNT with S5's sleep type and SLP_EN set, from its current value.
+pub fn sleep_control(current: u16, sleep_type: u8) -> u16 {
+    sleep_type_control(current, sleep_type) | SLEEP_ENABLE
+}
+
+/// The sleep control register's value entering `sleep_type`.
+pub fn sleep_register_control(sleep_type: u8) -> u8 {
+    (sleep_type << SLEEP_REGISTER_TYPE_SHIFT) & SLEEP_REGISTER_TYPE | SLEEP_REGISTER_ENABLE
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -149,20 +207,23 @@ fn gas(bytes: &[u8], offset: usize) -> Option<(u8, u64)> {
     Some((field[0], u64_at(field, 4)?))
 }
 
-/// An I/O port block: the X_ field when present, else the 32-bit one.
-fn port(fadt: &[u8], legacy: usize, extended: usize) -> Result<Option<u16>, &'static str> {
+/// An I/O port block: the X_ field when present, else the 32-bit one
+/// (none for a register only the extended form gives).
+fn port(fadt: &[u8], legacy: Option<usize>, extended: usize) -> Result<Option<u16>, &'static str> {
     let address = match gas(fadt, extended) {
         Some((SYSTEM_IO, address)) if address != 0 => address,
         Some((_, address)) if address != 0 => {
-            return Err("a PM1 block outside system I/O space");
+            return Err("an ACPI register block outside system I/O space");
         }
-        _ => u64::from(u32_at(fadt, legacy).unwrap_or(0)),
+        _ => legacy
+            .and_then(|legacy| u32_at(fadt, legacy))
+            .map_or(0, u64::from),
     };
     match address {
         0 => Ok(None),
         address => u16::try_from(address)
             .map(Some)
-            .map_err(|_| "a PM1 block above the I/O space"),
+            .map_err(|_| "an ACPI register block above the I/O space"),
     }
 }
 
@@ -218,8 +279,18 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
     }
     let mut pm1 = [None; 2];
     let mut event_bytes = 0;
+    let mut sleep_registers = None;
     if flags & HARDWARE_REDUCED != 0 {
-        refuse("a hardware-reduced platform: no PM1 blocks");
+        match (
+            port(table, None, SLEEP_CONTROL),
+            port(table, None, SLEEP_STATUS),
+        ) {
+            (Ok(Some(control)), Ok(Some(status))) => {
+                sleep_registers = Some(SleepRegisters { control, status });
+            }
+            (Ok(_), Ok(_)) => refuse("a hardware-reduced platform without sleep registers"),
+            (Err(reason), _) | (_, Err(reason)) => refuse(reason),
+        }
     } else {
         event_bytes = table[PM1_EVENT_LENGTH];
         let blocks = [
@@ -227,7 +298,10 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
             (PM1B_EVENT, X_PM1B_EVENT, PM1B_CONTROL, X_PM1B_CONTROL),
         ];
         for (slot, (event, x_event, control, x_control)) in pm1.iter_mut().zip(blocks) {
-            match (port(table, event, x_event), port(table, control, x_control)) {
+            match (
+                port(table, Some(event), x_event),
+                port(table, Some(control), x_control),
+            ) {
                 (Ok(Some(event)), Ok(Some(control))) => *slot = Some(Pm1 { event, control }),
                 (Ok(_), Ok(_)) => {}
                 (Err(reason), _) | (_, Err(reason)) => refuse(reason),
@@ -241,17 +315,27 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
             refuse("a PM1 event block shorter than its status and enable registers");
         }
     }
-    let smi = u32_at(table, SMI_COMMAND).unwrap_or(0);
-    let enable = table[ACPI_ENABLE];
+    let mut gpe = [None; 2];
+    let blocks = [
+        (GPE0_BLOCK, X_GPE0_BLOCK, GPE0_BLOCK_LENGTH),
+        (GPE1_BLOCK, X_GPE1_BLOCK, GPE1_BLOCK_LENGTH),
+    ];
+    for (slot, (legacy, extended, length)) in gpe.iter_mut().zip(blocks) {
+        let bytes = table.get(length).copied().unwrap_or(0);
+        match port(table, Some(legacy), extended) {
+            Ok(Some(port)) if bytes != 0 && bytes % 2 == 0 => *slot = Some(Gpe { port, bytes }),
+            Ok(Some(_)) => refuse("a GPE block of no whole status and enable halves"),
+            Ok(None) => {}
+            Err(reason) => refuse(reason),
+        }
+    }
     let power = HostPower {
         pm1,
         pm1_event_bytes: event_bytes,
         reset,
         fixed_power_button: pm1[0].is_some() && flags & CONTROL_METHOD_POWER_BUTTON == 0,
-        acpi_enable: u16::try_from(smi)
-            .ok()
-            .filter(|&port| port != 0 && enable != 0)
-            .map(|port| (port, enable)),
+        gpe,
+        sleep_registers,
         ..power
     };
     Ok((power, dsdt))
@@ -311,7 +395,7 @@ pub fn soft_off(dsdt: &[u8]) -> Option<(u8, u8)> {
 pub unsafe fn discover(rsdp: u64) -> Result<HostPower, AcpiError> {
     // SAFETY: the caller's contract.
     let (mut power, dsdt) = fadt(unsafe { acpi::find(rsdp, b"FACP")? })?;
-    if power.pm1[0].is_some() {
+    if power.pm1[0].is_some() || power.sleep_registers.is_some() {
         // SAFETY: the FADT's DSDT, under the caller's contract.
         match unsafe { acpi::table(dsdt) }.ok().and_then(soft_off) {
             Some(types) => power.soft_off = Some(types),
@@ -336,8 +420,8 @@ mod tests {
         let mut table = vec![0u8; 276];
         table[..4].copy_from_slice(b"FACP");
         table[DSDT..DSDT + 4].copy_from_slice(&0x7fe0_0000u32.to_le_bytes());
-        table[SMI_COMMAND..SMI_COMMAND + 4].copy_from_slice(&0xb2u32.to_le_bytes());
-        table[ACPI_ENABLE] = 0x02;
+        table[GPE0_BLOCK..GPE0_BLOCK + 4].copy_from_slice(&0x620u32.to_le_bytes());
+        table[GPE0_BLOCK_LENGTH] = 16;
         table[PM1A_EVENT..PM1A_EVENT + 4].copy_from_slice(&0x600u32.to_le_bytes());
         table[PM1A_CONTROL..PM1A_CONTROL + 4].copy_from_slice(&0x604u32.to_le_bytes());
         table[PM1_EVENT_LENGTH] = 4;
@@ -360,7 +444,18 @@ mod tests {
         assert_eq!(power.enable_port(pm1a), 0x602);
         assert_eq!(power.reset, Some((ResetRegister::Io(0xcf9), 6)));
         assert!(power.fixed_power_button);
-        assert_eq!(power.acpi_enable, Some((0xb2, 2)));
+        let gpe0 = Gpe {
+            port: 0x620,
+            bytes: 16,
+        };
+        assert_eq!(power.gpe, [Some(gpe0), None]);
+        let registers: Vec<_> = gpe0.registers().collect();
+        assert_eq!(registers.len(), 8);
+        assert_eq!(
+            (registers[0], registers[7]),
+            ((0x620, 0x628), (0x627, 0x62f))
+        );
+        assert_eq!(power.sleep_registers, None);
         assert_eq!(power.refused, None);
     }
 
@@ -399,6 +494,24 @@ mod tests {
         let (power, _) = fadt(&table).unwrap();
         assert_eq!(power.pm1, [None, None]);
         assert!(power.reset.is_some());
+        assert_eq!(
+            power.refused,
+            Some("a hardware-reduced platform without sleep registers")
+        );
+        // Its sleep registers, in I/O space.
+        for (offset, address) in [(SLEEP_CONTROL, 0x404u64), (SLEEP_STATUS, 0x400)] {
+            table[offset] = SYSTEM_IO;
+            table[offset + 4..offset + 12].copy_from_slice(&address.to_le_bytes());
+        }
+        let (power, _) = fadt(&table).unwrap();
+        assert_eq!(
+            power.sleep_registers,
+            Some(SleepRegisters {
+                control: 0x404,
+                status: 0x400
+            })
+        );
+        assert_eq!(power.refused, None);
         assert!(fadt(&table[..100]).is_err());
     }
 
@@ -438,5 +551,11 @@ mod tests {
             SCI_ENABLE | 5 << 10 | 1 << 13
         );
         assert_eq!(sleep_control(0, 0), 1 << 13);
+        // The type alone first, as Linux writes it.
+        assert_eq!(
+            sleep_type_control(SCI_ENABLE | 1 << 13, 5),
+            SCI_ENABLE | 5 << 10
+        );
+        assert_eq!(sleep_register_control(5), 5 << 2 | 1 << 5);
     }
 }

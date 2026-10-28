@@ -1,7 +1,7 @@
 //! Physical AP lifetime and processor-local native resources. Startup ACKs
 //! prove entry/ownership only; the runtime publication protocol separately
 //! requires an actual recovered native loan before any CPU settlement.
-use super::{bootstrap, firmware, resources, topology};
+use super::{bootstrap, firmware, resources, topology, tsc_sync};
 use crate::{
     apic::{self, Apic},
     engine::{host, interrupts},
@@ -21,6 +21,9 @@ mod mailbox;
 const STARTING: u8 = 0;
 const READY: u8 = 1;
 const REFUSED: u8 = 2;
+/// Initialized, and bringing its time-stamp counter into agreement with
+/// the BSP's, which takes part ([`tsc_sync`]).
+const SYNCING: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupFailure {
@@ -63,6 +66,7 @@ struct Argument {
     doorbells: UnsafeCell<Option<&'static core::sync::atomic::AtomicU64>>,
     refusal: UnsafeCell<Option<&'static str>>,
     status: AtomicU8,
+    tsc: tsc_sync::Sync,
     mailbox: mailbox::Mailbox,
 }
 
@@ -225,7 +229,11 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             *argument.doorbells.get() = Some(host::doorbell_counter());
         }
         Ok(owner)
-    })();
+    })()
+    .and_then(|owner| {
+        argument.status.store(SYNCING, Ordering::Release);
+        argument.tsc.target().map(|()| owner)
+    });
     match initialized {
         Ok(mut owner) => {
             argument.status.store(READY, Ordering::Release);
@@ -445,6 +453,7 @@ pub(crate) unsafe fn start(
             doorbells: UnsafeCell::new(None),
             refusal: UnsafeCell::new(None),
             status: AtomicU8::new(STARTING),
+            tsc: tsc_sync::Sync::new(handoff.tsc_hz),
             mailbox: mailbox::Mailbox::new(),
         }));
         let physical = handoff.native_resources.sipi;
@@ -513,6 +522,13 @@ pub(crate) unsafe fn start(
             }
             match argument.status.load(Ordering::Acquire) {
                 READY => break,
+                SYNCING => {
+                    argument.tsc.source();
+                    let (adjusted, rounds) = argument.tsc.outcome();
+                    crate::output::arguments(format_args!(
+                        "NATIVE TSC slot={slot} adjusted={adjusted} rounds={rounds}\n"
+                    ));
+                }
                 REFUSED => {
                     // SAFETY: the owner published this immutable reason before
                     // the Acquire REFUSED observation; storage remains pinned.

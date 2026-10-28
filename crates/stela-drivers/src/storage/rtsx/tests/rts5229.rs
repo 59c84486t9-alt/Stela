@@ -60,7 +60,7 @@ fn native_rts5229_actual_revision_power_and_drive_profile_runs_changed_sd_and_mm
                 chip.borrow().regs[0x3d62],
                 if revision == 2 { 0xe5 } else { 0xd5 }
             );
-            assert!(alias.flush().is_err());
+            assert!(alias.flush_cache().is_err());
         }
     }
 }

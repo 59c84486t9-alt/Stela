@@ -778,7 +778,10 @@ mod tests {
                 if at == 0x3818 && value != previous && m.flush_after_tx {
                     let address = u64::from(m.mac[&0x3800]) | (u64::from(m.mac[&0x3804]) << 32);
                     assert_ne!(address, 0);
-                    assert_eq!(m.mac[&0x3808], 512);
+                    assert_eq!(
+                        m.mac[&0x3808],
+                        (crate::net::ring::DESCRIPTORS * crate::net::ring::DESCRIPTOR) as u32
+                    );
                     let descriptor = (address as usize + previous as usize * 16) as *const u8;
                     // SAFETY: the queue model's actual published ring belongs
                     // to its live synchronous Memory owner, aligned and512B.

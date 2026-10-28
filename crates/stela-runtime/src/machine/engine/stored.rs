@@ -18,8 +18,14 @@ pub trait Translations {
     fn record(&mut self, key: &Digest) -> Option<Arc<Record>>;
     /// The block at `pc` of the page whose bytes hash to `key`, prepared
     /// in `context` at that very PC since the record was read, if the
-    /// store has one.
-    fn prepared(&mut self, _key: &Digest, _pc: u64, _context: &Digest) -> Option<CompiledBlock> {
+    /// store has one: shared, so a store other machines reach copies none
+    /// of it while they wait.
+    fn prepared(
+        &mut self,
+        _key: &Digest,
+        _pc: u64,
+        _context: &Digest,
+    ) -> Option<Arc<CompiledBlock>> {
         None
     }
     /// A block the engine compiled from a page the store had no entry for.
@@ -71,9 +77,9 @@ impl Offer {
 /// page let go is read, hashed and looked up again for its next block,
 /// which only a block not yet installed needs.
 #[cfg(not(test))]
-const KEPT_PAGES: usize = 4096;
+pub(super) const KEPT_PAGES: usize = 4096;
 #[cfg(test)]
-const KEPT_PAGES: usize = 4;
+pub(super) const KEPT_PAGES: usize = 4;
 
 /// A fetch page's bytes, as read for its first block, and its record.
 pub(super) struct StoredPage {
@@ -126,7 +132,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let key = Digest::of(bytes.as_slice());
             let record = self.host.translations()?.record(&key);
-            if self.pages.len() == KEPT_PAGES || (!self.pages.is_empty() && self.host.memory_low())
+            if self.pages.len() >= self.kept_pages
+                || (!self.pages.is_empty() && self.host.memory_low())
             {
                 self.forget_least_used_pages();
             }
@@ -144,6 +151,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let page = self.pages.get_mut(&frame)?;
         page.used = self.page_uses;
         Some(page)
+    }
+
+    /// Keep `KEPT_PAGES` across `machines` machines, which each keep their
+    /// own: an equal share each, but no fewer than a sixteenth.
+    pub(super) fn share_kept_pages(&mut self, machines: usize) {
+        self.kept_pages = (KEPT_PAGES / machines.max(1)).max(KEPT_PAGES.div_ceil(16));
     }
 
     /// Let the least recently used quarter of the kept pages go, at least
@@ -194,14 +207,19 @@ pub(super) mod tests {
     pub(crate) struct MemoryStore {
         pub(crate) records: BTreeMap<Digest, Arc<Record>>,
         pub(crate) offers: Vec<Offer>,
-        pub(crate) prepared: BTreeMap<(Digest, u64, Digest), CompiledBlock>,
+        pub(crate) prepared: BTreeMap<(Digest, u64, Digest), Arc<CompiledBlock>>,
     }
 
     impl Translations for MemoryStore {
         fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
             self.records.get(key).cloned()
         }
-        fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<CompiledBlock> {
+        fn prepared(
+            &mut self,
+            key: &Digest,
+            pc: u64,
+            context: &Digest,
+        ) -> Option<Arc<CompiledBlock>> {
             self.prepared.get(&(*key, pc, *context)).cloned()
         }
         fn offer(&mut self, offer: Offer) {
@@ -260,9 +278,10 @@ pub(super) mod tests {
                 for same_profile in [false, true] {
                     let mut store = MemoryStore::default();
                     if shared {
-                        store
-                            .prepared
-                            .insert((offer.key, offer.pc, offer.context), offer.block.clone());
+                        store.prepared.insert(
+                            (offer.key, offer.pc, offer.context),
+                            Arc::new(offer.block.clone()),
+                        );
                     } else {
                         store.records.insert(offer.key, Arc::new(record.clone()));
                     }
@@ -293,9 +312,10 @@ pub(super) mod tests {
         assert!(first.fetch_block(BASE + 4, false).is_ok());
         let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
         let mut store = MemoryStore::default();
-        store
-            .prepared
-            .insert((offer.key, offer.pc, offer.context), offer.block.clone());
+        store.prepared.insert(
+            (offer.key, offer.pc, offer.context),
+            Arc::new(offer.block.clone()),
+        );
         let mut second = machine(&words);
         second.host.store = Some(store);
         let Ok(Fetched::Block(index)) = second.fetch_block(BASE + 4, false) else {

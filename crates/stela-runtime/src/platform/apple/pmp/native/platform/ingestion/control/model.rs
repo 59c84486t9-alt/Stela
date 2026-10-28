@@ -1,3 +1,6 @@
+//! Data model of the auxiliary control tail: the `Configuration` of its four
+//! source rows, the `SoftwareImage` and `SlotImage` state they describe, and
+//! little-endian accessors for the raw slot bytes.
 use super::super::{Auxiliary, Descriptor, Error, Ordinal};
 use alloc::{vec, vec::Vec};
 

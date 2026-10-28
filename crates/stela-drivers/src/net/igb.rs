@@ -283,6 +283,10 @@ impl Link for Igb {
             let index = self.receive.next;
             let status: u32 = self.receive.descriptors.read(index * DESCRIPTOR + 8);
             if status & RX_DD == 0 {
+                if let Some(tail) = self.receive.idle() {
+                    fence(Ordering::SeqCst);
+                    self.device.write32(RDT, tail);
+                }
                 return Ok(None);
             }
             fence(Ordering::Acquire);
@@ -300,11 +304,17 @@ impl Link for Igb {
             self.dropping = !eop;
             advanced::offer_receive(&mut self.receive, index);
             self.receive.advance();
-            fence(Ordering::SeqCst);
-            self.device.write32(RDT, index as u32);
+            if let Some(tail) = self.receive.offered(index) {
+                fence(Ordering::SeqCst);
+                self.device.write32(RDT, tail);
+            }
             if frame.is_some() {
                 return Ok(frame);
             }
+        }
+        if let Some(tail) = self.receive.idle() {
+            fence(Ordering::SeqCst);
+            self.device.write32(RDT, tail);
         }
         Ok(None)
     }
@@ -984,10 +994,10 @@ mod tests {
     impl DmaFixture {
         fn new() -> Self {
             let mut registers = vec![0; 0x2_0000 / 4];
-            let mut memory = vec![u64::MAX; 40_000];
+            let mut memory = vec![u64::MAX; 200_000];
             let physical = memory.as_mut_ptr() as u64;
             // SAFETY: the fixture keeps these DMA pages alive beyond the driver.
-            let mut dma = unsafe { RegionAllocator::new(physical..physical + 320_000) };
+            let mut dma = unsafe { RegionAllocator::new(physical..physical + 1_600_000) };
             let mut net = Igb {
                 // SAFETY: this fixture exclusively owns the complete register backing.
                 device: unsafe { Mmio::new(registers.as_mut_ptr() as u64) },
@@ -1039,10 +1049,16 @@ mod tests {
             base(TDBAL, TDBAH),
             fixture.net.transmit.descriptors.physical()
         );
-        assert_eq!(fixture.registers[RDLEN / 4], 512);
-        assert_eq!(fixture.registers[TDLEN / 4], 512);
+        assert_eq!(
+            fixture.registers[RDLEN / 4],
+            (DESCRIPTORS * DESCRIPTOR) as u32
+        );
+        assert_eq!(
+            fixture.registers[TDLEN / 4],
+            (DESCRIPTORS * DESCRIPTOR) as u32
+        );
         assert_eq!(fixture.registers[SRRCTL / 4], 0x0200_0002);
-        assert_eq!(fixture.registers[RDT / 4], 31);
+        assert_eq!(fixture.registers[RDT / 4], (DESCRIPTORS - 1) as u32);
         assert_eq!(fixture.registers[TDT / 4], 0);
         for index in 0..DESCRIPTORS {
             assert_eq!(
@@ -1078,7 +1094,11 @@ mod tests {
             ),
             Err(BlockError::Timeout)
         );
-        assert!(!io.writes.borrow().contains(&(RDT, 31)));
+        assert!(
+            !io.writes
+                .borrow()
+                .contains(&(RDT, (DESCRIPTORS - 1) as u32))
+        );
         assert_eq!(io.get(RXDCTL) & QUEUE_ENABLE, 0);
         assert_eq!(io.get(TXDCTL) & QUEUE_ENABLE, 0);
         assert_eq!(io.get(RCTL), 0);
@@ -1105,7 +1125,7 @@ mod tests {
     #[test]
     fn full_transmit_ring_refuses_overwrite_and_recovers_only_completed_slots() {
         let mut fixture = DmaFixture::new();
-        for _ in 0..31 {
+        for _ in 0..DESCRIPTORS - 1 {
             fixture.net.transmit(&[7; 60]).unwrap();
         }
         let descriptors = fixture.net.transmit.descriptors.bytes().to_vec();
@@ -1184,7 +1204,9 @@ mod tests {
                     .read::<u64>(index * DESCRIPTOR + 8),
                 0
             );
-            assert_eq!(fixture.registers[RDT / 4], index as u32);
+            if (sequence + 1) % 16 == 0 {
+                assert_eq!(fixture.registers[RDT / 4], index as u32);
+            }
         }
         assert_eq!(fixture.net.transmit.next, 0);
         assert_eq!(fixture.net.receive.next, 0);
@@ -1201,8 +1223,9 @@ mod tests {
         fixture.deliver(5, &[6; 60], 3, 60);
         assert_eq!(fixture.net.receive().unwrap(), Some(vec![6; 60]));
         assert_eq!(fixture.net.receive.next, 6);
-        assert_eq!(fixture.registers[RDT / 4], 5);
+        assert_eq!(fixture.registers[RDT / 4], (DESCRIPTORS - 1) as u32);
         assert_eq!(fixture.net.receive().unwrap(), None);
+        assert_eq!(fixture.registers[RDT / 4], 5);
     }
 
     #[test]

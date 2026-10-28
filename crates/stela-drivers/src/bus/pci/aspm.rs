@@ -505,6 +505,7 @@ mod tests {
             firmware: None,
             bluetooth_platform: Default::default(),
             wifi_platform: Default::default(),
+            completion: None,
             ecam: vec![window],
             mapped: vec![window.range()],
             dma: 0..0,

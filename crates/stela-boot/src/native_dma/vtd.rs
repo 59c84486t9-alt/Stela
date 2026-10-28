@@ -50,10 +50,17 @@ const CONTEXT_INVALIDATE: u64 = 1 << 63;
 const CONTEXT_GLOBAL: u64 = 1 << 61;
 const IOTLB_INVALIDATE: u64 = 1 << 63;
 const IOTLB_GLOBAL: u64 = 1 << 60;
+const IOTLB_DOMAIN: u64 = 2 << 60;
+const IOTLB_DOMAIN_SHIFT: u32 = 32;
 const IOTLB_WRITE_DRAIN: u64 = 1 << 48;
 const IOTLB_READ_DRAIN: u64 = 1 << 49;
 const CAP_WRITE_DRAIN: u64 = 1 << 54;
 const CAP_READ_DRAIN: u64 = 1 << 55;
+/// The unit needs its write buffer flushed after table updates (RWBF).
+const CAP_WRITE_BUFFER: u64 = 1 << 4;
+/// The unit may cache not-present entries (CM), so a new entry needs an
+/// IOTLB invalidation too.
+const CAP_CACHING_MODE: u64 = 1 << 7;
 const MSI_START: u64 = 0xfee0_0000;
 const MSI_END: u64 = 0xfef0_0000;
 
@@ -277,7 +284,8 @@ struct DomainState {
 }
 struct State {
     root: Table,
-    context: Table,
+    /// Each allowed requester bus's context table, under its root entry.
+    contexts: BTreeMap<u8, Table>,
     allowed: Vec<u16>,
     domains: BTreeMap<u16, DomainState>,
     next_id: u64,
@@ -406,10 +414,7 @@ impl<R: Registers> Unit<R> {
     ) -> Result<Arc<Self>, VtdError> {
         let mut allowed = requesters.to_vec();
         allowed.sort_unstable();
-        if allowed.is_empty()
-            || allowed.iter().any(|rid| *rid > 255)
-            || allowed.windows(2).any(|pair| pair[0] == pair[1])
-        {
+        if allowed.is_empty() || allowed.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(VtdError::Unsupported);
         }
         if !(32..=52).contains(&physical_bits) || registers.bytes() < 4096 {
@@ -456,17 +461,23 @@ impl<R: Registers> Unit<R> {
             return Err(VtdError::RegisterRange);
         }
         let root = Table::new(source, physical_bits)?;
-        let context = Table::new(source, physical_bits)?;
         // Initial takeover is TE-off and every context is absent. Dynamic
         // context publication separately flushes the child before Present.
-        root.write(0, context.physical() | 1);
+        let mut contexts = BTreeMap::new();
+        for bus in allowed.iter().map(|rid| (rid >> 8) as u8) {
+            if let alloc::collections::btree_map::Entry::Vacant(entry) = contexts.entry(bus) {
+                let context = Table::new(source, physical_bits)?;
+                root.write(usize::from(bus), context.physical() | 1);
+                entry.insert(context);
+            }
+        }
         let unit = Arc::new(Self {
             registers: ManuallyDrop::new(registers),
             source,
             held: AtomicBool::new(false),
             state: ManuallyDrop::new(UnsafeCell::new(State {
                 root,
-                context,
+                contexts,
                 allowed,
                 domains: BTreeMap::new(),
                 next_id: 1,
@@ -545,17 +556,15 @@ impl<R: Registers> Unit<R> {
                 quarantined: false,
             },
         );
-        let index = usize::from(rid) * 2;
-        state
-            .context
-            .write(index + 1, u64::from(did) << 8 | u64::from(self.levels - 2));
+        let (context, index) = state.context(rid);
+        context.write(index + 1, u64::from(did) << 8 | u64::from(self.levels - 2));
         if let Some(line) = self.table_cacheline {
-            state.context.flush(&*self.registers, line);
+            context.flush(&*self.registers, line);
         }
         publish();
-        state.context.write(index, physical | 1);
+        context.write(index, physical | 1);
         if let Some(line) = self.table_cacheline {
-            state.context.flush(&*self.registers, line);
+            context.flush(&*self.registers, line);
         }
         publish();
         if let Err(error) = self.invalidate(TRANSLATION, true) {
@@ -580,10 +589,64 @@ impl<R: Registers> Unit<R> {
         }
         Guard(self)
     }
+    /// Evict the tables holding `leaves`, the entries one mapping changed;
+    /// every new intermediate table was evicted as it was linked ([`leaf`]).
+    ///
+    /// [`leaf`]: DomainState::leaf
+    fn publish_leaves(&self, domain: &DomainState, leaves: &[(usize, usize)]) {
+        if let Some(line) = self.table_cacheline {
+            let mut tables: Vec<usize> = leaves.iter().map(|&(table, _)| table).collect();
+            tables.sort_unstable();
+            tables.dedup();
+            for table in tables {
+                domain.tables[table].flush(&*self.registers, line);
+            }
+        }
+        // Orders actual dirty-line eviction before UC command submission.
+        publish();
+    }
+    /// Make entries that were not present visible to the walker. Without
+    /// Caching Mode the unit caches no not-present entry, so VT-d 6.1 needs
+    /// only the write-buffer flush, as Linux's `__mapping_notify_one` does.
+    fn publish_new_entries(&self, did: u16) -> Result<(), VtdError> {
+        if self.cap & CAP_CACHING_MODE != 0 {
+            return self.invalidate_domain(did);
+        }
+        self.flush_write_buffer()
+    }
+    fn flush_write_buffer(&self) -> Result<(), VtdError> {
+        if self.cap & CAP_WRITE_BUFFER != 0 {
+            self.registers.write32(GCMD, TRANSLATION | WRITE_BUFFER);
+            self.wait32(GSTS, WRITE_BUFFER, false)?;
+        }
+        Ok(())
+    }
+    /// Invalidate one domain's IOTLB entries, draining its queued DMA: the
+    /// unit may grant the global invalidation instead.
+    fn invalidate_domain(&self, did: u16) -> Result<(), VtdError> {
+        publish();
+        self.flush_write_buffer()?;
+        let mut request = IOTLB_INVALIDATE | IOTLB_DOMAIN | u64::from(did) << IOTLB_DOMAIN_SHIFT;
+        if self.cap & CAP_WRITE_DRAIN != 0 {
+            request |= IOTLB_WRITE_DRAIN;
+        }
+        if self.cap & CAP_READ_DRAIN != 0 {
+            request |= IOTLB_READ_DRAIN;
+        }
+        self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
+        self.registers.write64(self.iotlb, request);
+        let value = self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
+        if !matches!((value >> 57) & 3, 1 | 2) {
+            return Err(VtdError::Invalidation);
+        }
+        Ok(())
+    }
     fn publish_tables(&self, state: &State) {
         if let Some(line) = self.table_cacheline {
             state.root.flush(&*self.registers, line);
-            state.context.flush(&*self.registers, line);
+            for context in state.contexts.values() {
+                context.flush(&*self.registers, line);
+            }
             for domain in state.domains.values() {
                 for table in &domain.tables {
                     table.flush(&*self.registers, line);
@@ -646,7 +709,7 @@ impl<R: Registers> Unit<R> {
         if (value >> 57) & 3 != 1 {
             return Err(VtdError::Invalidation);
         }
-        if self.cap & (1 << 4) != 0 {
+        if self.cap & CAP_WRITE_BUFFER != 0 {
             self.registers.write32(GCMD, command | WRITE_BUFFER);
             self.wait32(GSTS, WRITE_BUFFER, false)?;
         }
@@ -694,6 +757,17 @@ impl<R: Registers> Drop for Unit<R> {
                 Some(count.saturating_add(1))
             });
         }
+    }
+}
+
+impl State {
+    /// The context table and entry index of requester `rid`, whose bus
+    /// every allowed requester's has.
+    fn context(&self, rid: u16) -> (&Table, usize) {
+        (
+            &self.contexts[&((rid >> 8) as u8)],
+            usize::from(rid & 0xff) * 2,
+        )
     }
 }
 
@@ -851,19 +925,20 @@ impl<R: Registers> RequesterDomain<R> {
             return Err(VtdError::Busy);
         }
         domain.claim.check_stopped()?;
-        let index = usize::from(self.rid) * 2;
-        state.context.write(index, 0);
+        let (context, index) = state.context(self.rid);
+        context.write(index, 0);
         if let Some(line) = self.unit.table_cacheline {
-            state.context.flush(&*self.unit.registers, line);
+            context.flush(&*self.unit.registers, line);
         }
         publish();
         if let Err(error) = self.unit.invalidate(TRANSLATION, true) {
             state.poisoned = true;
             return Err(error);
         }
-        state.context.write(index + 1, 0);
+        let (context, index) = state.context(self.rid);
+        context.write(index + 1, 0);
         if let Some(line) = self.unit.table_cacheline {
-            state.context.flush(&*self.unit.registers, line);
+            context.flush(&*self.unit.registers, line);
         }
         publish();
         let DomainState { claim, .. } = state
@@ -979,8 +1054,8 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
                 pages.physical_pages()[offset / native_size] + (offset % native_size) as u64;
             domain.tables[table].write(index, physical | rights);
         }
-        self.unit.publish_tables(state);
-        if self.unit.invalidate(TRANSLATION, false).is_err() {
+        self.unit.publish_leaves(domain, &live.leaves);
+        if self.unit.publish_new_entries(self.did).is_err() {
             // An unacknowledged translation is never returned as a live lease;
             // retain its pin/table inventory and poison further submissions.
             state.poisoned = true;
@@ -1004,8 +1079,8 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         for &(table, index) in &live.leaves {
             domain.tables[table].write(index, 0);
         }
-        self.unit.publish_tables(state);
-        if self.unit.invalidate(TRANSLATION, false).is_err() {
+        self.unit.publish_leaves(domain, &live.leaves);
+        if self.unit.invalidate_domain(self.did).is_err() {
             state.poisoned = true;
             return Err(DmaError::InvalidationFailed);
         }
@@ -1809,12 +1884,28 @@ mod tests {
                 unsafe { unit.shut_down() }.unwrap();
             }
         }
-        for invalid in [&[][..], &[8, 8][..], &[0x100][..]] {
+        for invalid in [&[][..], &[8, 8][..]] {
             assert!(matches!(
                 unsafe { Unit::take_over(ModelRegisters::new(), source(), invalid, 48) },
                 Err(VtdError::Unsupported)
             ));
         }
+        // Requesters on two buses: a context table under each root entry.
+        let unit =
+            unsafe { Unit::take_over(ModelRegisters::new(), source(), &[8, 0x308], 48) }.unwrap();
+        {
+            let mut guard = unit.lock();
+            let state = guard.state();
+            assert_eq!(state.contexts.len(), 2);
+            for bus in [0, 3] {
+                assert_eq!(
+                    state.root.read(bus),
+                    state.contexts[&(bus as u8)].physical() | 1
+                );
+            }
+            assert_eq!(state.root.read(1), 0);
+        }
+        unsafe { unit.shut_down() }.unwrap();
         let registers = ModelRegisters::new();
         let inventory: Vec<u16> = (0..16).collect();
         let unit = unsafe { Unit::take_over(registers, source(), &inventory, 48) }.unwrap();
@@ -2021,25 +2112,37 @@ mod tests {
         let pin = pages(PAGE, 12, 0xa000000, Arc::new(AtomicU64::new(0)));
         let mut mapping =
             DmaMapping::map(domain.clone(), pin, Direction::Bidirectional, u64::MAX).unwrap();
-        let check = || {
-            let count = {
-                let mut guard = unit.lock();
-                guard.state().domains[&8].tables.len() + 2
-            };
+        // Every table the mapping touched, and no other, is flushed before
+        // the publication: here the write-buffer flush, then the IOTLB's.
+        let check = |publication: usize, count: usize| {
             let events = &registers.0.lock().unwrap().cache_events;
-            let invalidation = events
+            let published = events
                 .iter()
-                .position(|event| *event == (false, unit.iotlb))
+                .position(|event| *event == (false, publication))
                 .unwrap();
-            let flushed: alloc::collections::BTreeSet<_> = events[..invalidation]
+            let flushed: alloc::collections::BTreeSet<_> = events[..published]
                 .iter()
                 .filter(|event| event.0)
                 .map(|event| event.1)
                 .collect();
             assert_eq!(flushed.len(), count);
-            assert!(!events[invalidation..].iter().any(|event| event.0));
+            assert!(!events[published..].iter().any(|event| event.0));
         };
-        check();
+        // A fresh domain's mapping builds a path through every one of its
+        // tables; the unit's root and context tables stay as they were.
+        let tables = {
+            let mut guard = unit.lock();
+            guard.state().domains[&8].tables.len()
+        };
+        check(GCMD, tables);
+        assert!(
+            !registers
+                .0
+                .lock()
+                .unwrap()
+                .cache_events
+                .contains(&(false, unit.iotlb))
+        );
         registers.0.lock().unwrap().cache_events.clear();
         registers.0.lock().unwrap().block_iotlb = true;
         // SAFETY: stopped synchronous model; unmap flush must precede IOTLB.
@@ -2047,12 +2150,13 @@ mod tests {
             unsafe { mapping.unmap() },
             Err(DmaError::InvalidationFailed)
         );
-        check();
+        // Only the leaf table changes.
+        check(unit.iotlb, 1);
         registers.0.lock().unwrap().cache_events.clear();
         registers.0.lock().unwrap().block_iotlb = false;
         // SAFETY: same stopped requester; retained retry must flush again.
         unsafe { mapping.unmap() }.unwrap();
-        check();
+        check(unit.iotlb, 1);
         // SAFETY: all mappings removed and no model DMA can restart.
         unsafe { domain.detach() }.unwrap();
         drop(domain);
@@ -2087,8 +2191,8 @@ mod tests {
                     (0x8000000 + (index * 4096) as u64) | READ
                 );
             }
-            assert_eq!(state.root.read(0), state.context.physical() | 1);
-            assert_eq!(state.context.read(0x18 * 2 + 1), (1 << 8) | 2);
+            assert_eq!(state.root.read(0), state.contexts[&0].physical() | 1);
+            assert_eq!(state.contexts[&0].read(0x18 * 2 + 1), (1 << 8) | 2);
         }
         mapping.sync_for_device(0..16384).unwrap();
         let token = {
@@ -2196,7 +2300,9 @@ mod tests {
                 .unwrap();
         let released = Arc::new(AtomicU64::new(0));
         let pin = pages(4096, 12, 0x9000000, released.clone());
-        registers.0.lock().unwrap().block_iotlb = true;
+        // Without Caching Mode a new mapping needs only the write-buffer
+        // flush, which fails here.
+        registers.0.lock().unwrap().fail_gsts_after = Some(TRANSLATION | WRITE_BUFFER);
         assert!(matches!(
             DmaMapping::map(domain.clone(), pin, Direction::Bidirectional, u64::MAX),
             Err(DmaError::InvalidationFailed)

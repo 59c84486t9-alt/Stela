@@ -37,10 +37,13 @@
 //! clusters, wherever they lie, that hold the bytes its layout needs.
 use super::fat32;
 use crate::machine::apple::{nor::CAPACITY, sep_state};
-use alloc::{format, vec, vec::Vec};
-use core::fmt::{self, Write as _};
+use alloc::{collections::VecDeque, format, vec, vec::Vec};
+use core::{
+    convert::Infallible,
+    fmt::{self, Write as _},
+};
 use sha2::{Digest, Sha256};
-use stela_drivers::block::{BlockDevice, BlockError};
+use stela_drivers::block::{BlockDevice, BlockError, Finished, Request};
 
 /// Where the region starts in the machine-state partition.
 pub const OFFSET: u64 = CAPACITY as u64 + sep_state::BYTES;
@@ -414,6 +417,9 @@ struct Ring {
     tail: Vec<u8>,
     /// `tail` holds bytes the device does not.
     dirty: bool,
+    /// The ring has wrapped and `tail`'s block still holds oldest stream
+    /// bytes past the head that `tail` lacks: read before it is written.
+    unread: bool,
 }
 
 impl Ring {
@@ -422,15 +428,11 @@ impl Ring {
         HEADER_BYTES / self.block as u64 + (at % self.ring_bytes) / self.block as u64
     }
 
-    /// Copy `bytes` to the ring at the head, writing each block they fill.
-    /// `remaining` counts this flush's bytes still to come: a block they
-    /// will overwrite whole is not read first.
-    fn stage(
-        &mut self,
-        device: &mut dyn BlockDevice,
-        mut bytes: &[u8],
-        remaining: &mut usize,
-    ) -> Result<(), BlockError> {
+    /// Copy `bytes` to the ring at the head; each block they fill joins
+    /// `writes`, consecutive blocks one write. `remaining` counts this
+    /// store's bytes still to come: a block they will overwrite whole is
+    /// not read first.
+    fn stage(&mut self, mut bytes: &[u8], remaining: &mut usize, writes: &mut Vec<(u64, Vec<u8>)>) {
         while !bytes.is_empty() {
             let offset = (self.head % self.block as u64) as usize;
             let count = (self.block - offset).min(bytes.len());
@@ -440,19 +442,42 @@ impl Ring {
             bytes = &bytes[count..];
             *remaining -= count;
             if self.head.is_multiple_of(self.block as u64) {
-                device.write(self.lba(self.head - 1), &self.tail)?;
+                join(writes, self.lba(self.head - 1), &self.tail, self.block);
                 self.dirty = false;
                 // The next block holds the oldest stream bytes once the ring
-                // has wrapped; keep those this flush does not overwrite.
-                if self.head >= self.ring_bytes && *remaining < self.block {
-                    device.read(self.lba(self.head), &mut self.tail)?;
-                } else {
-                    self.tail.fill(0);
-                }
+                // has wrapped; keep those this store does not overwrite.
+                self.unread = self.head >= self.ring_bytes && *remaining < self.block;
+                self.tail.fill(0);
             }
         }
-        Ok(())
     }
+}
+
+/// Add block `lba`'s `bytes` to `writes`, joining the last write when it
+/// ends just before.
+fn join(writes: &mut Vec<(u64, Vec<u8>)>, lba: u64, bytes: &[u8], block: usize) {
+    match writes.last_mut() {
+        Some((first, data)) if *first + (data.len() / block) as u64 == lba => {
+            data.extend_from_slice(bytes);
+        }
+        _ => writes.push((lba, bytes.to_vec())),
+    }
+}
+
+/// A step of a store ([`Writer::begin_store`]), each a request the last
+/// one's completion lets go: the ring's bytes, then the header.
+enum Step {
+    /// Ring blocks from this one; `tail` when the last is the head's.
+    Blocks {
+        lba: u64,
+        data: Vec<u8>,
+        tail: bool,
+    },
+    /// The head's block, for the oldest bytes `tail` lacks.
+    ReadTail,
+    /// The head's block.
+    Tail,
+    Header,
 }
 
 /// The log of one boot: appends wait in memory until a flush stores them.
@@ -463,6 +488,9 @@ pub struct Writer {
     durable: Option<u64>,
     fresh: Option<HeaderError>,
     pending: Pending<Vec<u8>>,
+    /// The store in progress: its steps to come and the one running.
+    steps: VecDeque<Step>,
+    running: Option<Step>,
 }
 
 impl Writer {
@@ -519,6 +547,7 @@ impl Writer {
             head: header.head,
             tail: vec![0; block],
             dirty: false,
+            unread: false,
         };
         let head = header.head;
         let offset = (head % block as u64) as usize;
@@ -541,6 +570,8 @@ impl Writer {
             durable: fresh.is_none().then_some(head),
             fresh,
             pending: Pending::new(vec![0; pending]),
+            steps: VecDeque::new(),
+            running: None,
         };
         if last != b'\n' {
             writer.append(b"\n");
@@ -590,31 +621,144 @@ impl Writer {
         self.pending.push(bytes);
     }
 
-    /// Store the pending bytes: ring blocks first, durably, then the
-    /// header, durably.
+    /// Store the pending bytes, the caller waiting: [`Self::begin_store`]
+    /// with each request run to completion.
     pub fn flush(&mut self, device: &mut dyn BlockDevice) -> Result<(), BlockError> {
-        let mut remaining = self.pending.bytes();
-        if remaining == 0 && self.durable == Some(self.ring.head) {
+        if !self.begin_store() {
             return Ok(());
         }
+        while let Some(request) = self.next_request() {
+            self.completed(request.run(device))?;
+        }
+        Ok(())
+    }
+
+    /// Whether a store has requests left ([`Self::next_request`]).
+    pub fn storing(&self) -> bool {
+        self.running.is_some() || !self.steps.is_empty()
+    }
+
+    /// Begin storing the pending bytes; whether there are any. The store
+    /// is the ring's blocks, each durable once written, then the header,
+    /// durable too: a header never names bytes the device lacks, and no
+    /// cache is flushed whole. Bytes appended meanwhile wait for the next.
+    pub fn begin_store(&mut self) -> bool {
+        if self.storing() {
+            return true;
+        }
+        let mut remaining = self.pending.bytes();
+        if remaining == 0 && self.durable == Some(self.ring.head) {
+            return false;
+        }
+        let mut writes = Vec::new();
         let ring = &mut self.ring;
-        self.pending
-            .drain(|bytes| ring.stage(device, bytes, &mut remaining))?;
-        if ring.dirty {
-            device.write(ring.lba(ring.head), &ring.tail)?;
-            ring.dirty = false;
+        let Ok(()) = self.pending.drain(|bytes| {
+            ring.stage(bytes, &mut remaining, &mut writes);
+            Ok::<_, Infallible>(())
+        });
+        // The head's partial block joins the ring's writes unless its old
+        // bytes must be read first.
+        let mut tail = false;
+        if ring.dirty && !ring.unread {
+            join(&mut writes, ring.lba(ring.head), &ring.tail, ring.block);
+            tail = true;
         }
-        device.flush()?;
-        let mut block = vec![0; ring.block];
-        Header {
-            head: ring.head,
-            boots: self.boots,
-            ring_bytes: ring.ring_bytes,
+        let count = writes.len();
+        for (index, (lba, data)) in writes.into_iter().enumerate() {
+            let tail = tail && index + 1 == count;
+            self.steps.push_back(Step::Blocks { lba, data, tail });
         }
-        .encode(&mut block);
-        device.write(0, &block)?;
-        device.flush()?;
-        self.durable = Some(ring.head);
+        if ring.unread {
+            self.steps.push_back(Step::ReadTail);
+        }
+        if ring.dirty && !tail {
+            self.steps.push_back(Step::Tail);
+        }
+        self.steps.push_back(Step::Header);
+        true
+    }
+
+    /// The store's next request once the last one completed
+    /// ([`Self::completed`]); `None` when it has no more.
+    pub fn next_request(&mut self) -> Option<Request> {
+        if self.running.is_some() {
+            return None;
+        }
+        let ring = &self.ring;
+        let step = self.steps.pop_front()?;
+        let (request, step) = match step {
+            Step::Blocks { lba, data, tail } => (
+                Request::Write {
+                    lba,
+                    data,
+                    durable: true,
+                },
+                Step::Blocks {
+                    lba,
+                    data: Vec::new(),
+                    tail,
+                },
+            ),
+            Step::ReadTail => (
+                Request::Read {
+                    lba: ring.lba(ring.head),
+                    bytes: ring.block,
+                },
+                Step::ReadTail,
+            ),
+            Step::Tail => (
+                Request::Write {
+                    lba: ring.lba(ring.head),
+                    data: ring.tail.clone(),
+                    durable: true,
+                },
+                Step::Tail,
+            ),
+            Step::Header => {
+                let mut block = vec![0; ring.block];
+                Header {
+                    head: ring.head,
+                    boots: self.boots,
+                    ring_bytes: ring.ring_bytes,
+                }
+                .encode(&mut block);
+                let request = Request::Write {
+                    lba: 0,
+                    data: block,
+                    durable: true,
+                };
+                (request, Step::Header)
+            }
+        };
+        self.running = Some(step);
+        Some(request)
+    }
+
+    /// The running request finished with `finished`. A failure ends the
+    /// store: the next starts over from what the device then holds.
+    pub fn completed(&mut self, finished: Finished) -> Result<(), BlockError> {
+        let step = self.running.take();
+        let data = match finished {
+            Ok(data) => data,
+            Err(error) => {
+                self.steps.clear();
+                return Err(error);
+            }
+        };
+        let ring = &mut self.ring;
+        match step {
+            Some(Step::Blocks { tail: true, .. }) | Some(Step::Tail) => ring.dirty = false,
+            Some(Step::ReadTail) => {
+                // The bytes before the head are this store's; keep the old
+                // ones after it.
+                let old = data.ok_or(BlockError::Protocol("a log read returned no data"))?;
+                let offset = (ring.head % ring.block as u64) as usize;
+                ring.tail[offset..].copy_from_slice(&old[offset..]);
+                ring.unread = false;
+            }
+            Some(Step::Header) => self.durable = Some(ring.head),
+            Some(Step::Blocks { .. }) | None => {}
+        }
         Ok(())
     }
 }
@@ -680,9 +824,13 @@ mod tests {
     }
 
     impl Recorder {
+        /// A disk with a write cache, so each durable write is followed
+        /// by a flush.
         fn new(region: u64, block: u32) -> Self {
+            let mut disk = RamDisk::new("log", region / u64::from(block), block);
+            disk.identity.features.write_cache = true;
             Self {
-                disk: RamDisk::new("log", region / u64::from(block), block),
+                disk,
                 events: Vec::new(),
                 reads: 0,
                 writes_left: None,
@@ -719,9 +867,9 @@ mod tests {
             self.disk.write(lba, data)
         }
 
-        fn flush(&mut self) -> Result<(), BlockError> {
+        fn flush_cache(&mut self) -> Result<(), BlockError> {
             self.events.push(None);
-            self.disk.flush()
+            self.disk.flush_cache()
         }
     }
 
@@ -885,9 +1033,10 @@ mod tests {
             assert_eq!(disk.events[header - 1], None);
             assert_eq!(&disk.events[header + 1..], &[None]);
             assert!(disk.events[..header - 1].iter().all(|e| *e != Some(0)));
-            // Data fills three blocks; the device fails before the header.
+            // Data fills three blocks, one write; the device fails before
+            // the header.
             writer.append(&vec![b'x'; 3 * block as usize]);
-            disk.writes_left = Some(3);
+            disk.writes_left = Some(1);
             assert_eq!(writer.flush(&mut disk), Err(BlockError::Timeout));
             assert_eq!(disk.log().unwrap(), before);
         }

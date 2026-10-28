@@ -12,6 +12,7 @@ pub(crate) mod memory_types;
 pub(crate) mod resources;
 pub(crate) mod topology;
 pub(crate) mod transport;
+mod tsc_sync;
 
 pub(crate) const OPTION: &str = "--native-cores";
 

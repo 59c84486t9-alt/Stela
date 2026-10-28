@@ -357,7 +357,7 @@ fn native_gl9750_phase_timeout_preserves_primary_and_failed_reset_without_reusin
     ));
     assert!(failure.quarantined);
     let accesses = bank.borrow().writes.len();
-    assert_eq!(old.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(old.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert_eq!(host.poll().err(), Some(BlockError::Timeout));
     assert_eq!(bank.borrow().writes.len(), accesses);
 }
@@ -498,7 +498,7 @@ fn native_gl9750_uncertain_dma_grant_never_posts_a_command_and_retains_failed_ow
     assert_eq!(bank.borrow().wire.len(), commands);
     assert!(host.last_failure().unwrap().quarantined);
     let accesses = bank.borrow().writes.len();
-    assert_eq!(old.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(old.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert_eq!(host.poll().err(), Some(primary));
     assert_eq!(bank.borrow().writes.len(), accesses);
 }
@@ -537,7 +537,7 @@ fn native_gl9750_ignored_dma_selection_cannot_publish_a_dma_command_or_output() 
                 && value & u32::from(DMA_MASK) == u32::from(ADMA32))
     );
     let writes = card.borrow().writes.len();
-    assert_eq!(old.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(old.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert_eq!(card.borrow().writes.len(), writes);
 }
 
@@ -560,7 +560,7 @@ fn native_gl9750_dma_error_and_failed_retirement_keep_primary_and_stale_output()
     assert!(failure.retirement.is_some());
     assert!(failure.quarantined);
     let accesses = bank.borrow().writes.len();
-    assert_eq!(disk.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(disk.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert_eq!(host.poll().err(), Some(primary));
     assert_eq!(bank.borrow().writes.len(), accesses);
 }

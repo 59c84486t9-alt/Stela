@@ -725,7 +725,7 @@ mod tests {
     fn transmit_without_carrier_is_refused_and_leaves_the_ring_untouched() {
         use crate::bus::dma::RegionAllocator;
         let mut registers = vec![0u32; 64];
-        let mut memory = vec![0u64; 65_536];
+        let mut memory = vec![0u64; 262_144];
         let start = memory.as_mut_ptr() as u64;
         // SAFETY: the fixture owns both allocations for the driver's lifetime.
         let (device, mut dma) = unsafe {
@@ -1522,7 +1522,7 @@ mod tests {
     #[test]
     fn descriptor_publication_is_high_before_low_and_own_before_enable() {
         use crate::bus::dma::RegionAllocator;
-        let mut backing = vec![0u64; 40_000];
+        let mut backing = vec![0u64; 200_000];
         let base = backing.as_mut_ptr() as u64;
         // SAFETY: backing outlives all descriptor use and has no other accesses.
         let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -1652,7 +1652,7 @@ mod tests {
     fn mac34_station_replaces_stale_exgmac_before_dma_and_relocks_on_failure() {
         use crate::bus::dma::RegionAllocator;
         for fault in [false, true] {
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all descriptor use and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -1717,7 +1717,7 @@ mod tests {
             (0, Err(BlockError::Timeout)),
             (ENABLE, Ok(())),
         ] {
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all descriptor use and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -1898,7 +1898,7 @@ mod tests {
     fn d_mac_start_clears_stale_jumbo_state_and_uses_single_fetch_receive_configuration() {
         use crate::bus::dma::RegionAllocator;
         for version in [25, 26] {
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all descriptor use and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -2233,7 +2233,7 @@ mod tests {
     fn e_mac_start_and_receive_modes_clear_inherited_jumbo_and_pulse_fifo_reset() {
         use crate::bus::dma::RegionAllocator;
         for version in [32, 33] {
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all descriptor use and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -2558,7 +2558,7 @@ mod tests {
                     assert_eq!(s.ephy[0x19], 0x7fff);
                 }
             }
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives descriptor use and has no competing access.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -2806,7 +2806,7 @@ mod tests {
                 ) || (*r == COMMAND
                     && *v == u32::from(ENABLE))));
             }
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives descriptors and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -3063,7 +3063,7 @@ mod tests {
                         .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
                 );
             }
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives descriptor access and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -3379,7 +3379,7 @@ mod tests {
                         .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
                 );
             }
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives descriptor access and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -3600,7 +3600,7 @@ mod tests {
                         .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
                 );
             }
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing remains alive and has no other descriptor accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -3980,7 +3980,7 @@ mod tests {
                 assert!(!s.writes.iter().any(|(r, _, _)| *r == 0x7a));
                 assert!(s.writes.contains(&(CSI_ADDRESS, 0x0002_f70c, 4)));
             }
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives both rings and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
@@ -4242,7 +4242,7 @@ mod tests {
                 };
                 assert!(at(0x8002_f890) < at(0x0002_f70c));
             }
-            let mut backing = vec![0u64; 40_000];
+            let mut backing = vec![0u64; 200_000];
             let base = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives both rings and has no other accesses.
             let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };

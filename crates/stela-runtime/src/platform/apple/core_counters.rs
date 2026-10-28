@@ -134,6 +134,11 @@ impl CoreCounters {
     /// The counter a System register is, on this SoC: S3_7_C15_C(2n)_3 for
     /// core performance counter n < 8, S3_7_C15_C14_0 and C14_1 for the
     /// ninth and tenth, S3_1_C15_C(8+k)_3 for memory-stall counter k.
+    /// Whether `encoding` is one of these counters' System registers.
+    pub fn serves(&self, encoding: Encoding) -> bool {
+        self.of_register(encoding).is_some()
+    }
+
     fn of_register(&self, encoding: Encoding) -> Option<Counter> {
         let (op1, crm, op2) = (encoding.op1(), encoding.crm(), encoding.op2());
         if encoding.op0() != 3 || encoding.crn() != 15 {

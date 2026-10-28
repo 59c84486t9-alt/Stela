@@ -615,6 +615,10 @@ impl Link for E1000e {
             let base = index * DESCRIPTOR;
             let status: u8 = self.receive.descriptors.read(base + 12);
             if status & RX_DONE == 0 {
+                if let Some(tail) = self.receive.idle() {
+                    fence(Ordering::SeqCst);
+                    self.device.write32(RDT, tail);
+                }
                 return Ok(None);
             }
             fence(Ordering::Acquire);
@@ -629,11 +633,17 @@ impl Link for E1000e {
             self.dropping_receive = !eop;
             self.offer_receive(index);
             self.receive.advance();
-            fence(Ordering::SeqCst);
-            self.device.write32(RDT, index as u32);
+            if let Some(tail) = self.receive.offered(index) {
+                fence(Ordering::SeqCst);
+                self.device.write32(RDT, tail);
+            }
             if frame.is_some() {
                 return Ok(frame);
             }
+        }
+        if let Some(tail) = self.receive.idle() {
+            fence(Ordering::SeqCst);
+            self.device.write32(RDT, tail);
         }
         Ok(None)
     }
@@ -854,10 +864,10 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let mut registers = vec![0u32; REGISTER_BYTES as usize / 4];
-            let mut memory = vec![u64::MAX; 40_000];
+            let mut memory = vec![u64::MAX; 200_000];
             let start = memory.as_mut_ptr() as u64;
             // SAFETY: the fixture owns the memory for the driver's whole lifetime.
-            let mut allocator = unsafe { RegionAllocator::new(start..start + 320_000) };
+            let mut allocator = unsafe { RegionAllocator::new(start..start + 1_600_000) };
             // SAFETY: this aligned backing covers every register used by the driver.
             let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
             let mut net = E1000e {
@@ -904,9 +914,15 @@ mod tests {
     #[test]
     fn dma_rings_use_legacy_descriptors_and_a_single_empty_slot() {
         let mut fixture = Fixture::new();
-        assert_eq!(fixture.registers[RDLEN / 4], 512);
-        assert_eq!(fixture.registers[TDLEN / 4], 512);
-        assert_eq!(fixture.registers[RDT / 4], 31);
+        assert_eq!(
+            fixture.registers[RDLEN / 4],
+            (DESCRIPTORS * DESCRIPTOR) as u32
+        );
+        assert_eq!(
+            fixture.registers[TDLEN / 4],
+            (DESCRIPTORS * DESCRIPTOR) as u32
+        );
+        assert_eq!(fixture.registers[RDT / 4], (DESCRIPTORS - 1) as u32);
         assert_eq!(fixture.registers[RFCTL / 4] & RFCTL_EXTEN, 0);
         for _ in 0..DESCRIPTORS - 1 {
             fixture.net.transmit(&[7; 60]).unwrap();
@@ -914,7 +930,7 @@ mod tests {
         let before = fixture.net.transmit.descriptors.bytes().to_vec();
         assert!(fixture.net.transmit(&[8; 60]).is_err());
         assert_eq!(fixture.net.transmit.descriptors.bytes(), before);
-        assert_eq!(fixture.net.transmit.next, 31);
+        assert_eq!(fixture.net.transmit.next, DESCRIPTORS - 1);
         // Completion of the oldest descriptor permits only that buffer to be reused.
         fixture.net.transmit.descriptors.write(12, TX_DONE);
         fixture.net.transmit(&[9; 60]).unwrap();
@@ -967,7 +983,8 @@ mod tests {
         fixture.inject(4, 60, RX_DONE | RX_EOP, 0, 5);
         assert_eq!(fixture.net.receive().unwrap(), Some(vec![5; 60]));
         assert_eq!(fixture.net.receive.next, 5);
-        assert_eq!(fixture.registers[RDT / 4], 4);
+        // The tail waits for a batch, or for the ring to run dry.
+        assert_eq!(fixture.registers[RDT / 4], (DESCRIPTORS - 1) as u32);
         assert_eq!(
             fixture
                 .net
@@ -977,6 +994,7 @@ mod tests {
             0
         );
         assert_eq!(fixture.net.receive().unwrap(), None);
+        assert_eq!(fixture.registers[RDT / 4], 4);
     }
 
     #[test]
@@ -1002,7 +1020,10 @@ mod tests {
                     .read::<u64>(index * DESCRIPTOR + 8),
                 0
             );
-            assert_eq!(fixture.registers[RDT / 4], index as u32);
+            // Linux's E1000_RX_BUFFER_WRITE: one tail write per sixteen.
+            if (count + 1) % 16 == 0 {
+                assert_eq!(fixture.registers[RDT / 4], index as u32);
+            }
         }
         assert_eq!(fixture.net.receive.next, 0);
     }

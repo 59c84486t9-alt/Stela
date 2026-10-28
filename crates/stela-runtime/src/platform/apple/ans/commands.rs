@@ -10,13 +10,13 @@
 //! completion.
 use super::{
     Ans, COMMAND_BYTES, COMPLETION_BYTES, MODE_RESTORE, NVMMU_PAGE_BYTES, Queue, bfh, die,
-    namespace::BLOCK_BYTES,
+    namespace::{BLOCK_BYTES, ReadPlan},
     prp::{MAX_TRANSFER, Prps, dma_error},
     tunables,
 };
 use crate::platform::{apple::sart::Sart, dma::Port};
-use alloc::vec;
-use stela_drivers::block::BlockError;
+use alloc::{vec, vec::Vec};
+use stela_drivers::block::{BlockError, Finished, Request};
 
 pub(super) const IDENTIFY_BYTES: usize = 4096;
 /// `AppleANS2NVMeController::AllocateTunnelBuffer` (0x3dbe83c) rounds every
@@ -148,6 +148,10 @@ const APPLE_BFH_PARAMS: u8 = 0xd1;
 const APPLE_IDENTIFY_STORAGE: u8 = 0xc8;
 const APPLE_TUNNEL: u8 = 0xd8;
 const FLUSH: u8 = 0;
+/// CDW12 bit 30 of a read or write.
+const FORCE_UNIT_ACCESS: u32 = 1 << 30;
+/// Feature 06h, Volatile Write Cache: bit 0 enables it.
+pub(super) const VOLATILE_WRITE_CACHE: usize = 6;
 const WRITE: u8 = 1;
 const READ: u8 = 2;
 const COMPARE: u8 = 5;
@@ -168,7 +172,9 @@ const RANGE_BYTES: usize = 16;
 /// (0x3ddc7bc..0x3ddc7c8) keeps bit 2 as `IsDatasetManagementSupported`.
 const ONCS: u16 = 1 | (1 << 2);
 /// DLFEAT (Identify namespace byte 33) 001b: a deallocated block reads as
-/// zeros, which is what [`super::namespace::Medium::deallocate`] provides.
+/// zeros, which [`super::namespace::Medium::deallocate`] provides and the
+/// host keeps past a restart where its Write Zeroes deallocates
+/// ([`super::host::HostDisk::deallocates_zeroed`]); 000b otherwise.
 const DLFEAT_READ_ZEROS: u8 = 1;
 
 pub(super) struct Command(pub [u8; 64]);
@@ -250,6 +256,57 @@ impl Outcome {
         }
     }
 }
+/// What executing a command left: its outcome, or the host transfer it
+/// waits for ([`super::host`]).
+pub(super) enum Executed {
+    Done(Outcome),
+    Host(Wait),
+}
+
+/// A test's command, run without a host executor, completes at once.
+#[cfg(test)]
+impl core::ops::Deref for Executed {
+    type Target = Outcome;
+    fn deref(&self) -> &Outcome {
+        match self {
+            Self::Done(outcome) => outcome,
+            Self::Host(_) => panic!("a command without a host executor completes at once"),
+        }
+    }
+}
+
+/// What an I/O command does once its host transfer completes
+/// ([`Ans::finish`]).
+pub(super) enum Wait {
+    Read {
+        plan: ReadPlan,
+        bytes: usize,
+        prps: Prps,
+    },
+    Compare {
+        plan: ReadPlan,
+        data: Vec<u8>,
+    },
+    Write {
+        nsid: u32,
+        lba: u64,
+        blocks: u64,
+    },
+    Flush,
+    /// The host's blocks deallocated, or zeroed.
+    Deallocate,
+}
+
+/// The host's bytes of a read: none for one whose blocks are all erased.
+fn host_bytes(done: Option<Finished>) -> Result<Option<Vec<u8>>, BlockError> {
+    match done {
+        None => Ok(None),
+        Some(Ok(Some(data))) => Ok(Some(data)),
+        Some(Ok(None)) => Err(BlockError::Protocol("ANS host read returned no data")),
+        Some(Err(error)) => Err(error),
+    }
+}
+
 fn block_result(result: Result<(), BlockError>) -> Outcome {
     Outcome::status(match result {
         Ok(()) => SUCCESS,
@@ -279,10 +336,20 @@ impl Ans {
         cmd: &Command,
         port: &mut Port<'_, '_>,
         sart: &mut Sart,
-    ) -> Result<Outcome, &'static str> {
+    ) -> Result<Executed, &'static str> {
         if queue != 0 {
-            return self.io(cmd, port);
+            let key = (queue as u32) << 16 | u32::from(cmd.cid());
+            return self.io(key, cmd, port);
         }
+        self.admin(cmd, port, sart).map(Executed::Done)
+    }
+
+    fn admin(
+        &mut self,
+        cmd: &Command,
+        port: &mut Port<'_, '_>,
+        sart: &mut Sart,
+    ) -> Result<Outcome, &'static str> {
         match cmd.opcode() {
             IDENTIFY => self.identify(cmd, port),
             APPLE_DEBUG_SERVICE => {
@@ -407,7 +474,9 @@ impl Ans {
                 data[513] = 0x44; // SQES/CQES max and min.
                 put32(&mut data, 516, self.medium.namespaces.len() as u32);
                 put16(&mut data, 520, ONCS); // No write zeroes or crypto.
-                // VWC/OACS are zero: no downloadable firmware/cache.
+                // VWC: the host disk's own cache. OACS is zero: no
+                // downloadable firmware.
+                data[525] = u8::from(self.medium.device.write_cache());
             }
             0 => {
                 let Some(ns) = self.medium.namespace(cmd.nsid()) else {
@@ -416,7 +485,11 @@ impl Ans {
                 for offset in [0, 8, 16] {
                     put64(&mut data, offset, ns.blocks);
                 }
-                data[33] = DLFEAT_READ_ZEROS;
+                data[33] = if self.medium.device.deallocates_zeroed() {
+                    DLFEAT_READ_ZEROS
+                } else {
+                    0
+                };
                 data[130] = 12; // LBAF0.LBADS; zero metadata, one format.
                 data[0x180] = ns.description.kind as u8;
             }
@@ -557,8 +630,20 @@ impl Ans {
                 }))
             }
             7 => Ok(Outcome::result(0)), // Exactly one I/O SQ/CQ, zero based.
+            6 if self.medium.device.write_cache() => {
+                // The host's cache stays on; with this one off, each write
+                // completes once the host has flushed it as well.
+                if setting {
+                    if value & !1 != 0 {
+                        return Err("ANS Volatile Write Cache value is not modeled");
+                    }
+                    self.features[VOLATILE_WRITE_CACHE] = value;
+                }
+                Ok(Outcome::result(self.features[VOLATILE_WRITE_CACHE]))
+            }
             1 | 2 | 4 | 5 | 6 | 8 | 9 | 10 | 11 => {
-                // Round-robin arbitration, power state 0, no volatile cache,
+                // Round-robin arbitration, power state 0, no volatile cache
+                // where the host disk has none,
                 // immediate interrupts and no async event source. The
                 // temperature threshold/error-recovery limit hold state.
                 if setting
@@ -582,9 +667,15 @@ impl Ans {
         }
     }
 
-    fn io(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome, &'static str> {
+    /// I/O command `cmd`, whose host transfer runs under `key`.
+    fn io(
+        &mut self,
+        key: u32,
+        cmd: &Command,
+        port: &mut Port<'_, '_>,
+    ) -> Result<Executed, &'static str> {
         if self.medium.namespace(cmd.nsid()).is_none() {
-            return Ok(Outcome::status(INVALID_NAMESPACE));
+            return Ok(Executed::Done(Outcome::status(INVALID_NAMESPACE)));
         }
         if cmd.opcode() == FLUSH {
             // CDW10 bit 0 asks for a barrier: IONVMeBlockStorageDevice's
@@ -598,10 +689,10 @@ impl Ans {
             {
                 return Err("ANS Flush fields are not modeled");
             }
-            return Ok(block_result(self.medium.device.flush()));
+            return self.host(key, vec![Request::Flush], Wait::Flush, port);
         }
         if cmd.opcode() == DATASET_MANAGEMENT {
-            return self.dataset_management(cmd, port);
+            return self.dataset_management(key, cmd, port);
         }
         let controls = cmd.word(48);
         // CDW13 carries hints the controller may ignore, from
@@ -609,60 +700,128 @@ impl Ans {
         // bits 3:0 NVMe's Dataset Management access frequency, bits 10:8
         // the request's priority tier and bit 12 passive I/O. The writes'
         // bit 11 has no established meaning and refuses.
-        if controls & !0x4000_ffff != 0 || cmd.word(52) & !HINTS != 0 || !cmd.zero_words(56) {
+        if controls & !(FORCE_UNIT_ACCESS | 0xffff) != 0
+            || cmd.word(52) & !HINTS != 0
+            || !cmd.zero_words(56)
+        {
             return Err("ANS protection, encryption, metadata or read/write hints are not modeled");
         }
         let blocks = u64::from((controls & 0xffff) + 1);
         let lba = cmd.long(40);
         if self.medium.address(cmd.nsid(), lba, blocks).is_none() {
-            return Ok(Outcome::status(LBA_RANGE));
+            return Ok(Executed::Done(Outcome::status(LBA_RANGE)));
         }
         let bytes = blocks as usize * BLOCK_BYTES as usize;
         if bytes > MAX_TRANSFER {
-            return Ok(Outcome::status(INVALID_FIELD));
+            return Ok(Executed::Done(Outcome::status(INVALID_FIELD)));
         }
         let prps = cmd.prps(port, bytes, NVMMU_PAGE_BYTES)?;
-        let mut data = vec![0; bytes];
+        let (nsid, range) = (cmd.nsid(), "ANS I/O range was checked");
         match cmd.opcode() {
-            READ => {
-                let result = self.medium.read(cmd.nsid(), lba, &mut data);
-                if result.is_ok() {
-                    prps.write(port, &data)?;
-                }
-                Ok(block_result(result))
+            READ | COMPARE => {
+                let plan = self.medium.plan_read(nsid, lba, blocks).expect(range);
+                let request = plan.address.map(|lba| Request::Read { lba, bytes });
+                let requests = request.into_iter().collect();
+                let wait = if cmd.opcode() == READ {
+                    Wait::Read { plan, bytes, prps }
+                } else {
+                    let mut data = vec![0; bytes];
+                    prps.read(port, &mut data)?;
+                    Wait::Compare { plan, data }
+                };
+                self.host(key, requests, wait, port)
             }
             WRITE => {
+                let mut data = vec![0; bytes];
                 prps.read(port, &mut data)?;
-                let result = self.medium.write(cmd.nsid(), lba, &data);
-                if result.is_err() {
-                    return Ok(block_result(result));
-                }
-                // This model has no volatile write cache: every completed
-                // write is durable, including writes with FUA clear.
-                Ok(block_result(self.medium.device.flush()))
-            }
-            COMPARE => {
-                prps.read(port, &mut data)?;
-                let mut media = vec![0; bytes];
-                let result = self.medium.read(cmd.nsid(), lba, &mut media);
-                if result.is_err() {
-                    return Ok(block_result(result));
-                }
-                Ok(Outcome::status(if data == media { SUCCESS } else { 0x285 }))
+                let address = self.medium.address(nsid, lba, blocks).expect(range);
+                // Force Unit Access: this write completes durably whatever
+                // the cache. A read returns the same bytes either way.
+                let request = Request::Write {
+                    lba: address,
+                    data,
+                    durable: self.write_through() || controls & FORCE_UNIT_ACCESS != 0,
+                };
+                self.host(key, vec![request], Wait::Write { nsid, lba, blocks }, port)
             }
             _ => Err("ANS I/O command is not modeled"),
         }
     }
 
+    /// Submit an I/O command's host transfers under `key`, none for a read
+    /// of erased blocks alone, and finish the command at once unless the
+    /// host disk completes them later ([`super::host`]).
+    fn host(
+        &mut self,
+        key: u32,
+        requests: Vec<Request>,
+        wait: Wait,
+        port: &mut Port<'_, '_>,
+    ) -> Result<Executed, &'static str> {
+        if requests.is_empty() {
+            return self.finish(wait, None, port).map(Executed::Done);
+        }
+        match self.medium.device.submit(key, requests, port.access.now) {
+            Some(done) => self.finish(wait, Some(done), port).map(Executed::Done),
+            None => Ok(Executed::Host(wait)),
+        }
+    }
+
+    /// Whether a write completes only once durable: this controller's
+    /// cache is off while the host disk's is on.
+    fn write_through(&self) -> bool {
+        self.medium.device.write_cache() && self.features[VOLATILE_WRITE_CACHE] == 0
+    }
+
+    /// An I/O command's outcome once its host transfer is `done`.
+    pub(super) fn finish(
+        &mut self,
+        wait: Wait,
+        done: Option<Finished>,
+        port: &mut Port<'_, '_>,
+    ) -> Result<Outcome, &'static str> {
+        Ok(match (wait, done) {
+            (Wait::Read { plan, bytes, prps }, done) => match host_bytes(done) {
+                Ok(host) => {
+                    prps.write(port, &plan.finish(bytes, host))?;
+                    Outcome::status(SUCCESS)
+                }
+                Err(error) => block_result(Err(error)),
+            },
+            (Wait::Compare { plan, data }, done) => match host_bytes(done) {
+                Ok(host) => Outcome::status(if plan.finish(data.len(), host) == data {
+                    SUCCESS
+                } else {
+                    0x285
+                }),
+                Err(error) => block_result(Err(error)),
+            },
+            (Wait::Write { nsid, lba, blocks }, Some(result)) => {
+                if result.is_ok() {
+                    self.medium.written(nsid, lba, blocks);
+                }
+                block_result(result.map(drop))
+            }
+            (Wait::Flush | Wait::Deallocate, Some(result)) => block_result(result.map(drop)),
+            (Wait::Deallocate, None) => Outcome::status(SUCCESS),
+            _ => return Err("ANS host transfer result differs from its command"),
+        })
+    }
+
     /// Deallocate every listed range. Ranges are all checked before any
     /// takes effect, so an out-of-range entry fails the whole command (LBA
     /// Out of Range) with nothing deallocated. Integral-dataset hints (IDR,
-    /// IDW) and context attributes carry no modeled effect and refuse.
+    /// IDW) and context attributes carry no modeled effect and refuse. The
+    /// blocks read as zeros at once; the host's blocks are zeroed with
+    /// deallocation where its Write Zeroes deallocates, so they stay zeros,
+    /// else discarded where it takes discard, which lets an SSD erase them
+    /// ahead of its next write, under `key`.
     fn dataset_management(
         &mut self,
+        key: u32,
         cmd: &Command,
         port: &mut Port<'_, '_>,
-    ) -> Result<Outcome, &'static str> {
+    ) -> Result<Executed, &'static str> {
         let count = cmd.word(40);
         if count & !0xff != 0 || cmd.word(44) != DEALLOCATE || !cmd.zero_words(48) {
             return Err(
@@ -685,16 +844,35 @@ impl Ans {
                 .checked_add(blocks)
                 .is_some_and(|end| end <= self.medium.namespace(cmd.nsid()).unwrap().blocks);
             if !fits {
-                return Ok(Outcome::status(LBA_RANGE));
+                return Ok(Executed::Done(Outcome::status(LBA_RANGE)));
             }
             extents.push((lba, blocks));
         }
+        let zeroed = self.medium.device.deallocates_zeroed();
+        let discard = self.medium.device.identity().features.discard.is_some();
+        let mut requests = vec![];
         for (lba, blocks) in extents {
             self.medium
                 .deallocate(cmd.nsid(), lba, blocks)
                 .expect("a checked range");
+            let (lba, blocks) = self
+                .medium
+                .host_extent(cmd.nsid(), lba, blocks)
+                .expect("a checked range");
+            if blocks == 0 {
+                continue;
+            }
+            if zeroed {
+                requests.push(Request::WriteZeroes {
+                    lba,
+                    blocks,
+                    unmap: true,
+                });
+            } else if discard {
+                requests.push(Request::Discard { lba, blocks });
+            }
         }
-        Ok(Outcome::status(SUCCESS))
+        self.host(key, requests, Wait::Deallocate, port)
     }
 
     fn verify_namespaces(
@@ -968,7 +1146,7 @@ mod tests {
         dma::{Physical, tests::Ram},
     };
     use alloc::boxed::Box;
-    use stela_drivers::block::RamDisk;
+    use stela_drivers::block::{BlockDevice, RamDisk};
 
     #[test]
     fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
@@ -1420,6 +1598,111 @@ mod tests {
         }
     }
 
+    /// With a host executor, an I/O command waits for its transfer, which
+    /// runs without the controller, and completes once it has.
+    /// A queued disk whose requests complete once released.
+    struct Later {
+        disk: RamDisk,
+        started: Option<stela_drivers::block::Command>,
+        released: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    }
+
+    impl BlockDevice for Later {
+        fn identity(&self) -> &stela_drivers::block::Identity {
+            self.disk.identity()
+        }
+        fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+            self.disk.read(lba, buffer)
+        }
+        fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+            self.disk.write(lba, data)
+        }
+        fn depth(&self) -> usize {
+            1
+        }
+        fn room(&self) -> bool {
+            self.started.is_none()
+        }
+        fn start(&mut self, command: stela_drivers::block::Command) -> Result<u32, BlockError> {
+            self.started = Some(command);
+            Ok(0)
+        }
+        fn finish(&mut self, _tag: u32) -> Option<Finished> {
+            if !self.released.load(core::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            Some(self.disk.execute(self.started.take()?))
+        }
+        fn posted(&self) -> bool {
+            self.started.is_some() && self.released.load(core::sync::atomic::Ordering::Relaxed)
+        }
+        fn signals(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_queued_host_disk_completes_io_transfers_after_the_doorbell() {
+        let records = [Description {
+            id: 1,
+            kind: 1,
+            blocks: 0,
+        }];
+        let released = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let disk = Later {
+            disk: RamDisk::new("", 16, 4096),
+            started: None,
+            released: released.clone(),
+        };
+        let mut ans = Ans::new(Box::new(disk), &records, None).unwrap();
+        let mut memory = Ram::new(0x1000, 0x3000);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let command = |opcode| {
+            let mut command = Command([0; 64]);
+            command.0[0] = opcode;
+            command.0[4..8].copy_from_slice(&1u32.to_le_bytes());
+            command.0[24..32].copy_from_slice(&0x3000u64.to_le_bytes());
+            command.0[40..48].copy_from_slice(&3u64.to_le_bytes());
+            command
+        };
+        let mut run = |ans: &mut Ans, port: &mut Port<'_, '_>, opcode| {
+            let Ok(Executed::Host(wait)) = ans.execute(1, &command(opcode), port, &mut sart) else {
+                panic!("the command waits for its host transfer");
+            };
+            assert!(
+                ans.medium.device.poll(0).is_empty(),
+                "the disk has not completed it"
+            );
+            assert!(!ans.medium.device.posted());
+            // The disk signals its completion: a look waits only for a
+            // lost signal.
+            assert_eq!(ans.medium.device.next_look(0), 24_000);
+            released.store(true, core::sync::atomic::Ordering::Relaxed);
+            assert!(ans.medium.device.posted());
+            let mut done = ans.medium.device.poll(0);
+            released.store(false, core::sync::atomic::Ordering::Relaxed);
+            assert_eq!(done.len(), 1);
+            let (key, done) = done.pop().unwrap();
+            assert_eq!(key, 1 << 16, "queue 1, tag 0");
+            ans.finish(wait, Some(done), port).unwrap().status
+        };
+        port.write(0x3000, &[0x5a; 4096]).unwrap();
+        assert_eq!(run(&mut ans, &mut port, WRITE), SUCCESS);
+        port.write(0x3000, &[0; 4096]).unwrap();
+        assert_eq!(run(&mut ans, &mut port, READ), SUCCESS);
+        let mut block = [0; 4096];
+        port.read(0x3000, &mut block).unwrap();
+        assert_eq!(block, [0x5a; 4096]);
+    }
+
     #[test]
     fn dataset_management_deallocates_checked_ranges_and_reads_zero() {
         let records =
@@ -1517,10 +1800,21 @@ mod tests {
         assert_eq!(block, [0; 4096]);
     }
 
+    /// Deallocated blocks read as zeros past a restart (DLFEAT 001b) only
+    /// where the host's Write Zeroes deallocates them.
     #[test]
     fn identify_reports_dataset_management_and_zero_reads() {
+        for unmap in [false, true] {
+            let mut disk = RamDisk::new("", 4, 4096);
+            disk.identity.features.write_zeroes =
+                Some(stela_drivers::block::WriteZeroes { blocks: 4, unmap });
+            identify_dataset_management(disk, if unmap { DLFEAT_READ_ZEROS } else { 0 });
+        }
+    }
+
+    fn identify_dataset_management(disk: RamDisk, dlfeat: u8) {
         let mut ans = Ans::new(
-            Box::new(RamDisk::new("", 4, 4096)),
+            Box::new(disk),
             &[Description {
                 id: 1,
                 kind: 1,
@@ -1552,7 +1846,7 @@ mod tests {
             if cns == 1 {
                 assert_eq!(u16::from_le_bytes([data[520], data[521]]), ONCS);
             } else {
-                assert_eq!(data[33], DLFEAT_READ_ZEROS);
+                assert_eq!(data[33], dlfeat);
             }
         }
     }

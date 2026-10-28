@@ -527,6 +527,21 @@ impl Job {
         }
         r.map(|r| r.map_err(|e| super::refuse(format!("transfer failed: {e}"), &self.request)))
     }
+    /// Read ahead what the job sends next ([`super::asr::Sender::prefetch`]),
+    /// up to `chunks` reads.
+    pub fn prefetch<R: ReadAt>(&mut self, store: &mut Store<R>, chunks: usize) -> Result<()> {
+        match &mut self.plan {
+            Plan::Asr(sender) => sender.prefetch(store, chunks),
+            _ => Ok(()),
+        }
+    }
+    /// The job's ASR sender, if it sends the image.
+    pub fn asr(&self) -> Option<&super::asr::Sender> {
+        match &self.plan {
+            Plan::Asr(sender) => Some(sender),
+            _ => None,
+        }
+    }
     fn written(&self) -> u64 {
         self.frame.written() + self.raw.written()
     }
@@ -1192,6 +1207,7 @@ mod tests {
         let diagnostic = fdr_fixture(&store, Value::dict([]));
         let seed = diagnostic.with_records(Value::dict([])).unwrap();
         let mut disk = RamDisk::new("FDR", (fdr_store::FILE_BYTES / 512) as u64, 512);
+        disk.identity.features.write_cache = true;
         disk.bytes = fdr_store::initial_image(&seed).unwrap();
         let mut journal = Journal::open(&mut disk).unwrap();
         let disk = Rc::new(RefCell::new(disk));

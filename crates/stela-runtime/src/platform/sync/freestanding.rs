@@ -1,18 +1,24 @@
 //! Spin locks for ring 0. The loader must exclude interrupt re-entry and
 //! migration while a guard is held. Panics abort.
+//!
+//! A lock is a ticket lock: each processor that waits takes the next ticket
+//! and only reads until it is served, so waiters take turns in order and do
+//! not bounce the line the holder works on.
 use alloc::rc::Rc;
 use core::{
     cell::UnsafeCell,
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 #[cfg(not(all(target_arch = "x86_64", target_os = "uefi")))]
 compile_error!("freestanding metadata locks require the x86-64 ring-0 platform");
 
 pub(crate) struct Mutex<T: ?Sized> {
-    held: AtomicBool,
+    /// The next ticket, and the ticket that holds the lock.
+    next: AtomicU32,
+    serving: AtomicU32,
     value: UnsafeCell<T>,
 }
 // SAFETY: all accesses use the atomic exclusion, and ownership can cross CPUs
@@ -23,7 +29,8 @@ unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 impl<T> Mutex<T> {
     pub(crate) const fn new(value: T) -> Self {
         Self {
-            held: AtomicBool::new(false),
+            next: AtomicU32::new(0),
+            serving: AtomicU32::new(0),
             value: UnsafeCell::new(value),
         }
     }
@@ -51,11 +58,8 @@ pub(crate) struct WouldBlock;
 
 impl<T: ?Sized> Mutex<T> {
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, T>, PoisonError<MutexGuard<'_, T>>> {
-        while self
-            .held
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
+        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
+        while self.serving.load(Ordering::Acquire) != ticket {
             core::hint::spin_loop();
         }
         Ok(MutexGuard {
@@ -64,9 +68,15 @@ impl<T: ?Sized> Mutex<T> {
         })
     }
     pub(crate) fn try_lock(&self) -> Result<MutexGuard<'_, T>, WouldBlock> {
+        let serving = self.serving.load(Ordering::Relaxed);
         if self
-            .held
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .next
+            .compare_exchange(
+                serving,
+                serving.wrapping_add(1),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
             .is_err()
         {
             return Err(WouldBlock);
@@ -90,7 +100,11 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 }
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        self.owner.held.store(false, Ordering::Release);
+        // Only the holder moves `serving`.
+        let served = self.owner.serving.load(Ordering::Relaxed);
+        self.owner
+            .serving
+            .store(served.wrapping_add(1), Ordering::Release);
     }
 }
 impl<T: ?Sized + core::fmt::Debug> core::fmt::Debug for Mutex<T> {

@@ -17,10 +17,12 @@ pub(crate) mod install;
 pub(crate) mod interrupts;
 mod network;
 pub(crate) mod nor;
+mod parallel;
 pub(crate) mod power;
 mod progress;
 mod remote;
 mod restore;
+mod service;
 mod speculation;
 pub(crate) mod storage;
 mod topology;
@@ -51,7 +53,7 @@ use stela_loader::{
     installed, recovery,
 };
 use stela_runtime::machine::apple::WallClock;
-use stela_runtime::machine::engine::step_timing;
+use stela_runtime::machine::engine::{Call, step_timing};
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Host, Machine, PeerState, Stop, Transition,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
@@ -187,6 +189,11 @@ struct Options {
     /// Execute PEs in checked native rounds on their assigned workers
     /// (`--native-rounds`) instead of serialized chained blocks on the BSP.
     native_rounds: bool,
+    /// Run each PE on its own host core, a machine per PE: the default, as
+    /// the loader gives the guest no more PEs than the host has cores.
+    /// `--serialized` runs every PE on the BSP instead, as native rounds and
+    /// checks do.
+    parallel: bool,
     /// Time the engine's phases between translated blocks and report them
     /// with each heartbeat (`--profile`).
     profile: bool,
@@ -418,6 +425,7 @@ impl Options {
             native_shared_check: false,
             native_artifacts: false,
             native_rounds: false,
+            parallel: true,
             profile: false,
             tss: false,
             ecid: None,
@@ -445,6 +453,14 @@ impl Options {
             }
             if name == "--native-rounds" {
                 options.native_rounds = true;
+                continue;
+            }
+            if name == "--parallel" {
+                options.parallel = true;
+                continue;
+            }
+            if name == "--serialized" {
+                options.parallel = false;
                 continue;
             }
             if name == "--profile" {
@@ -753,6 +769,9 @@ impl Options {
         if options.update_restore && options.install.is_none() {
             return Err("--update-restore applies to --install");
         }
+        if options.native_rounds || options.native_shared_check || options.native_bootstrap_check {
+            options.parallel = false;
+        }
         if options.development_restore
             && (options.install.is_none() || options.update_restore || options.strict)
         {
@@ -821,7 +840,10 @@ impl Options {
 
 /// The host CPU's compiler target, from CPUID, after setting Intel's data
 /// operand independent timing mode where the CPU has it ([`enable_doit`]).
-fn target() -> TargetCpu {
+/// The host CPU's target. With `parallel` it declares no data operand
+/// independent timing: other cores run PEs too, without its control, and
+/// their atomics lock and fence, which Intel's guidance lists no timing for.
+fn target(parallel: bool) -> TargetCpu {
     let (vendor, basic, extended) = (__cpuid(0), __cpuid(1), __cpuid_count(7, 0));
     let (ssse3, sse41, sse42) = (
         basic.ecx & (1 << 9) != 0,
@@ -860,7 +882,7 @@ fn target() -> TargetCpu {
         }
     }
     // SAFETY: once on the one CPU, before any guest code runs.
-    if unsafe { enable_doit(extended.edx) } {
+    if !parallel && unsafe { enable_doit(extended.edx) } {
         target = target.with_doit();
     }
     target
@@ -1203,7 +1225,7 @@ fn stop_here(text: &str, code: u32) -> ! {
 }
 
 /// The guest's console lines since the run loop showed them, the last
-/// `status::STREAM_LINES` at most.
+/// `status::STREAM_LINES` at most, reached under the board's lock.
 static GUEST_LINES: output::Global<Vec<String>> = output::Global(RefCell::new(Vec::new()));
 
 /// The restore step `line` begins, by name, as the running step's detail.
@@ -1447,6 +1469,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 .handoff()
                 .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
             storage_handoff.firmware = host_firmware.clone();
+            // Disks that can signal their completions wake the BSP, which
+            // runs the engine's devices.
+            let bsp = native_processors.expect("validated native roster");
+            storage_handoff.completion =
+                host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
             if options.audio_check.is_some() {
                 // The audio check retains the final slice even after shutdown.
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
@@ -1679,8 +1706,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         None => (None, None, None, None),
     };
     // Serialized, the BSP runs every PE and the workers no guest code.
-    let serialized =
-        !(options.native_rounds || options.native_shared_check || options.native_bootstrap_check);
+    let serialized = !(options.parallel
+        || options.native_rounds
+        || options.native_shared_check
+        || options.native_bootstrap_check);
     let partition = crate::native_smp::resources::partition(
         handoff.native_resources.cores as usize,
         0,
@@ -1829,7 +1858,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     )
     .unwrap_or_else(|error| output::fatal(&error));
     let mut bare = host_owner.host();
-    let target = target();
+    let target = target(options.parallel);
     let speculation = speculation::probe();
     let mut read_only_region = None;
     let mut core_locks = stela_runtime::machine::ctrr::Handoff::default();
@@ -2373,11 +2402,25 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         None => None,
     };
+    let capture = native_processors.expect("validated native roster");
+    let hub = stela_runtime::machine::engine::Hub::new(
+        profile.processors.len().max(1),
+        parallel::Doorbells::new(profile.processors.len().max(1), &worker_bindings, |slot| {
+            let selected = *capture.selected.get(slot)? as usize;
+            u32::try_from(capture.processors.get(selected)?.apic_id).ok()
+        }),
+    );
+    let devices = parallel::Board::new(devices, hub.clone());
+    let settings = parallel::Settings {
+        strict: options.strict,
+        profile: profile.clone(),
+        target: canonical_ram.target(),
+    };
     // The loader handle's last RAM copy preceded canonical registration; its
     // borrow has ended. It never executes a guest instruction.
     // SAFETY: actual started executors, retained source Plan/profile and exact
     // RAM/device owners remain live for the whole non-returning run below.
-    let machine = unsafe {
+    let mut machine = unsafe {
         crate::native_smp::canonical::prepare_with_locks(
             handoff,
             native_processors.expect("validated native roster"),
@@ -2396,6 +2439,33 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         )
     }
     .unwrap_or_else(|error| output::fatal(error));
+    if options.parallel {
+        // The workers are held for good, and their cores run PEs instead.
+        // SAFETY: as for `run_serialized` below.
+        if let Err(stop) = unsafe { machine.hold_serialized() } {
+            output::arguments(format_args!("PARALLEL refused: {stop:?}\n"));
+            output::fatal("the serial workers could not be held");
+        }
+        machine
+            .enter_parallel(hub)
+            .unwrap_or_else(|error| output::fatal(error));
+        translations::share(parallel::SHARED_CODE_BYTES);
+        parallel::spawn(
+            &machine,
+            &worker_bindings,
+            &executors,
+            &sender,
+            handoff.tsc_hz,
+            &settings,
+        )
+        .unwrap_or_else(|error| output::fatal(error));
+    }
+    // The run's driver calls keep the engine's TLB entries; the serialized
+    // workers' qualifications require PCIDE clear.
+    let _tagged = options
+        .parallel
+        .then(storage::TaggedRoots::enable)
+        .flatten();
     let boot_progress =
         loaded_source
             .as_ref()
@@ -2450,11 +2520,11 @@ struct RunIo {
 }
 
 fn run_machine<H: Host>(
-    mut machine: Machine<H, AppleDevices>,
+    mut machine: Machine<H, parallel::Board>,
     options: &Options,
     handoff: &Handoff,
     io: RunIo,
-    execute: impl FnMut(&mut Machine<H, AppleDevices>, u64) -> Stop,
+    execute: impl FnMut(&mut Machine<H, parallel::Board>, u64) -> Stop,
 ) -> ! {
     if options.survey {
         output::arguments(format_args!(
@@ -2471,7 +2541,9 @@ fn run_machine<H: Host>(
         ));
     }
     machine.set_strict(options.strict);
-    machine.devices.set_strict(options.strict);
+    machine
+        .devices
+        .with(|devices| devices.set_strict(options.strict));
     output::arguments(format_args!(
         "UNSUPPORTED OPERATIONS {}\n",
         unsupported_mode(options.strict)
@@ -2502,33 +2574,38 @@ fn run_machine<H: Host>(
         machine.set_watches(&options.watches);
     }
     let RunIo {
-        mut restore,
-        mut host_input,
-        mut guest_network,
-        mut host_nor,
+        restore,
+        host_input,
+        guest_network,
+        host_nor,
         host_disks,
         mut boot_progress,
     } = io;
-    let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz, host_disks);
     crate::status::begin(match restore {
         Some(_) => "Starting the macOS installer",
         None => "Starting macOS",
     });
+    service::install(service::Service::new(
+        machine.devices.worker(),
+        restore,
+        host_input,
+        guest_network,
+        host_nor,
+        power::HostPowerControl::new(handoff.power, handoff.tsc_hz, host_disks),
+        handoff.tsc_hz,
+    ));
     let started = host::rdtsc();
     let stop = run(
         &mut machine,
         options.budget,
         handoff.tsc_hz,
-        restore.as_mut(),
-        host_input.as_mut(),
-        guest_network.as_mut(),
-        host_nor.as_mut(),
-        &mut host_power,
         &mut boot_progress,
         execute,
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
-    finish(&mut machine, stop, seconds, &options.dumps, &host_power)
+    let mut service = service::take().expect("the run's service");
+    service.stop();
+    finish(&mut machine, stop, seconds, &options.dumps, service.power())
 }
 
 /// Exit kinds by `ExitKind` value, then native faults
@@ -2619,16 +2696,11 @@ const BEAT_SECONDS: u64 = 10;
 /// different memory or native-entry path.
 #[allow(clippy::too_many_arguments)]
 fn run<H: Host>(
-    machine: &mut Machine<H, AppleDevices>,
+    machine: &mut Machine<H, parallel::Board>,
     budget: u64,
     tsc_hz: u64,
-    mut restore: Option<&mut restore::Experiment>,
-    mut host_input: Option<&mut input::HostInput>,
-    mut guest_network: Option<&mut network::GuestNetwork>,
-    mut host_nor: Option<&mut nor::HostNor>,
-    host_power: &mut power::HostPowerControl,
     boot_progress: &mut progress::BootProgress,
-    mut execute: impl FnMut(&mut Machine<H, AppleDevices>, u64) -> Stop,
+    mut execute: impl FnMut(&mut Machine<H, parallel::Board>, u64) -> Stop,
 ) -> Stop {
     let mut beat = (
         host::rdtsc(),
@@ -2643,6 +2715,8 @@ fn run<H: Host>(
         ),
     );
     let mut retired_at_beat = machine.retired_instructions();
+    let mut pe_counts_at_beat = parallel::counts(machine);
+    let mut lock_waits_at_beat = ([0; Call::ALL.len()], 0);
     // Counter ticks spent compiling, the guest instructions compiled and
     // the blocks taken from the translation store, at the last beat.
     let mut translation = (
@@ -2657,9 +2731,12 @@ fn run<H: Host>(
     // The running PE's PC at service boundaries, at most once a millisecond.
     let mut hot: BTreeMap<u64, u32> = BTreeMap::new();
     let mut hot_sampled = beat.0;
-    let mut log_flushed = beat.0;
     let mut serviced = beat.0;
     let mut service_gap = 0;
+    // The longest service between two slices: with every PE on a core of
+    // its own, the boot PE's guest time passes meanwhile.
+    let mut service_longest = 0;
+    let mut service_parts = ServiceParts::new(beat.0);
     let mut service_boundaries = 0u64;
     let mut user = 0;
     let mut beats = 0u64;
@@ -2679,17 +2756,19 @@ fn run<H: Host>(
             budget.min(slice)
         };
         let slice_started = host::rdtsc();
+        service_longest = service_longest.max(slice_started.wrapping_sub(serviced));
+        service_parts.lap(ServiceParts::BEAT, slice_started);
         let stop = execute(machine, limit);
         let service_now = host::rdtsc();
+        service_parts.start(service_now);
         sliced_ticks += service_now.wrapping_sub(slice_started);
         service_gap = service_gap.max(service_now.wrapping_sub(serviced));
         serviced = service_now;
         service_boundaries = service_boundaries.saturating_add(1);
-        let lines = GUEST_LINES
-            .0
-            .try_borrow_mut()
-            .map(|mut lines| core::mem::take(&mut *lines))
-            .unwrap_or_default();
+        // One hold of the devices' lock, which every PE's device accesses
+        // take, for everything they left for the reports.
+        let drained = machine.devices.with(Drained::take);
+        let lines = drained.lines;
         if let Some(step) = lines.iter().rev().find_map(|line| installer_step(line)) {
             crate::status::progress(&step);
             boot_progress.installer(step);
@@ -2711,8 +2790,10 @@ fn run<H: Host>(
         }
         crate::status::stream(lines.iter().map(String::as_str));
         crate::status::tick();
-        unmodeled_report(machine);
-        sep_observation_report(machine);
+        unmodeled_report(machine, drained.unmodeled);
+        for line in drained.sep {
+            output::arguments(format_args!("SEP OBSERVE {line}\n"));
+        }
         for hit in machine.take_trace_hits() {
             output::arguments(format_args!(
                 "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
@@ -2740,7 +2821,7 @@ fn run<H: Host>(
                 hit.dropped
             ));
         }
-        while let Some(log) = machine.devices.take_usb_log() {
+        for log in drained.usb {
             use stela_runtime::machine::apple::UsbLog;
             match log {
                 UsbLog::Descriptor(descriptor) => output::arguments(format_args!(
@@ -2760,11 +2841,11 @@ fn run<H: Host>(
                 )),
             }
         }
-        while let Some((port, line)) = machine.devices.take_usb_host_trace() {
+        for (port, line) in drained.usb_host {
             output::arguments(format_args!("XHCI port={port} {line}\n"));
         }
 
-        while let Some(log) = machine.devices.take_smc_log() {
+        for log in drained.smc {
             output::arguments(format_args!(
                 "SMC key-write op={:#x} id={} flags={:#x} key={:#010x} command={:x?} request={:#018x} reply={:x?} dropped={}\n",
                 log.request as u8,
@@ -2778,11 +2859,11 @@ fn run<H: Host>(
             ));
         }
 
-        while let Some(entry) = machine.devices.take_display_log() {
+        for entry in drained.display {
             display::print_log(&entry);
         }
 
-        while let Some(log) = machine.devices.take_power_log() {
+        for log in drained.power {
             use stela_runtime::machine::apple::PowerLog;
             match log {
                 PowerLog::Sleep => output::arguments(format_args!(
@@ -2797,39 +2878,30 @@ fn run<H: Host>(
             }
         }
 
+        service_parts.lap(ServiceParts::REPORTS, host::rdtsc());
         // A wait the limit or the host's inputs ended goes on like a slice.
         let waiting = matches!(stop, Stop::Waiting);
-        if (waiting || matches!(stop, Stop::Budget))
-            && let Some(experiment) = restore.as_deref_mut()
-        {
-            machine.exclude_host_time(|devices| experiment.poll(devices));
+        // The boot PE holds no lock another PE spins on while it waits for
+        // an interrupt or runs at EL0 (`service`).
+        let quiet = waiting && machine.waits_for_interrupt() || machine.cpu.pstate.el == 0;
+        let requested = machine.devices.hub().service_unclaimed();
+        if !machine.runs_parallel() || quiet || service::starved(tsc_hz, requested) {
+            machine.exclude_host_time(|_| service::serve(true));
         }
-        if let Some(input) = host_input.as_deref_mut() {
-            machine.exclude_host_time(|devices| input.poll(devices));
-        }
-        if let Some(network) = guest_network.as_deref_mut() {
-            machine.exclude_host_time(|devices| network.poll(devices));
-        }
-        if let Some(nor) = host_nor.as_deref_mut() {
-            machine.exclude_host_time(|devices| nor.poll(devices));
-        }
-        machine.exclude_host_time(|devices| host_power.poll(devices));
+        service_parts.lap(ServiceParts::SERVICE, host::rdtsc());
 
         // A wall-time service yield may precede even the final block limit.
         // Only the actual executed count can establish budget completion.
         let budget_reached = budget != 0 && machine.statistics.blocks >= budget;
         let sliced = waiting || matches!(stop, Stop::Budget) && !budget_reached;
         let now = host::rdtsc();
-        // Keep diagnostic flash writes independent of the UI/input cadence.
-        // Guest NOR sector commits still happen at every service boundary.
-        if now.wrapping_sub(log_flushed) >= tsc_hz {
-            machine.exclude_host_time(|_| output::flush_due());
-            log_flushed = host::rdtsc();
-        }
         if !sliced {
             output::arguments(format_args!(
-                "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={}\n",
+                "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={} maximum_service_us={} {} {}\n",
                 u128::from(service_gap) * 1_000_000 / u128::from(tsc_hz),
+                u128::from(service_longest) * 1_000_000 / u128::from(tsc_hz),
+                service_parts.report(tsc_hz),
+                service::report(tsc_hz),
             ));
             output::report_log_stores();
             return stop;
@@ -2844,7 +2916,11 @@ fn run<H: Host>(
             user += u32::from(machine.cpu.pstate.el == 0);
             sampled = now;
         }
-        if now - beat.0 >= BEAT_SECONDS * tsc_hz {
+        // The heartbeat's reports wait for a quiet boot PE, as the service
+        // does, for one more interval at most.
+        let due = now - beat.0;
+        if due >= BEAT_SECONDS * tsc_hz && (quiet || due >= 2 * BEAT_SECONDS * tsc_hz) {
+            let mut cost = BeatCost::new(now);
             let (native, blocks) = (host::native_ticks(), machine.statistics.blocks);
             let elapsed = now - beat.0;
             let cpu = &machine.cpu;
@@ -2906,11 +2982,67 @@ fn run<H: Host>(
                 cpu.state.x[30],
             ));
             output::arguments(format_args!(
-                "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={}\n",
+                "HOST SERVICE boundaries={service_boundaries} maximum_gap_us={} maximum_service_us={} {} {}\n",
                 u128::from(service_gap) * 1_000_000 / u128::from(tsc_hz),
+                u128::from(service_longest) * 1_000_000 / u128::from(tsc_hz),
+                service_parts.report(tsc_hz),
+                service::report(tsc_hz),
             ));
-            let retired = machine.retired_instructions();
+            // Each PE on its own host core counts for itself.
+            let per_pe = parallel::counts(machine);
+            let retired = per_pe
+                .iter()
+                .map(|counts| u128::from(counts.retired))
+                .sum::<u128>();
             let instructions = retired.saturating_sub(retired_at_beat);
+            if per_pe.len() > 1 {
+                let interval_ticks =
+                    u128::from(elapsed.max(1)) * u128::from(host::COUNTER_HZ) / u128::from(tsc_hz);
+                let percent = |ticks: u64| u128::from(ticks) * 100 / interval_ticks.max(1);
+                let mut rates = String::from("PES RETIRED millions_per_second");
+                // Per PE: idle, monitor-polling and synchronizing shares of
+                // the interval, its waits, and the blocks it compiled and
+                // installed from another PE.
+                let mut shares = String::from("PES TIME idle%/spin%/sync%/waits/compiled/shared");
+                let mut totals = parallel::Counts::default();
+                for (pe, (now, before)) in per_pe.iter().zip(&mut pe_counts_at_beat).enumerate() {
+                    let rate = u128::from(now.retired.saturating_sub(before.retired))
+                        .saturating_mul(u128::from(tsc_hz))
+                        / u128::from(elapsed.max(1))
+                        / 1_000_000;
+                    rates.push_str(&format!(" {pe}:{rate}"));
+                    shares.push_str(&format!(
+                        " {pe}:{}/{}/{}/{}/{}/{}",
+                        percent(now.sleep_ticks.saturating_sub(before.sleep_ticks)),
+                        percent(now.spin_ticks.saturating_sub(before.spin_ticks)),
+                        percent(now.sync_ticks.saturating_sub(before.sync_ticks)),
+                        now.waits.saturating_sub(before.waits),
+                        now.compiled.saturating_sub(before.compiled),
+                        now.shared.saturating_sub(before.shared),
+                    ));
+                    totals.broadcasts += now.broadcasts.saturating_sub(before.broadcasts);
+                    totals.forwards += now.forwards.saturating_sub(before.forwards);
+                    *before = *now;
+                }
+                // Lock waits since the last beat: the devices', by call, and
+                // the heap's.
+                let waits = (machine.devices.waits(), crate::ALLOCATOR.waits());
+                let mut devices = String::new();
+                for (call, (now, before)) in Call::ALL
+                    .iter()
+                    .zip(waits.0.iter().zip(&lock_waits_at_beat.0))
+                {
+                    devices.push_str(&format!(" {}={}", call.name(), now - before));
+                }
+                output::arguments(format_args!(
+                    "{rates} broadcasts={} forwards={} device_waits{devices} heap_waits={}\n",
+                    totals.broadcasts,
+                    totals.forwards,
+                    waits.1 - lock_waits_at_beat.1
+                ));
+                lock_waits_at_beat = waits;
+                output::arguments(format_args!("{shares}\n"));
+            }
             output::arguments(format_args!(
                 "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={}\n",
                 instructions.saturating_mul(u128::from(tsc_hz)) / u128::from(elapsed.max(1)),
@@ -2934,7 +3066,7 @@ fn run<H: Host>(
             #[cfg(feature = "native-profile")]
             output::arguments(format_args!(
                 "NATIVE BOARD {:?}\n",
-                machine.devices.advance_statistics()
+                machine.devices.with(AppleDevices::advance_statistics)
             ));
             #[cfg(feature = "native-profile")]
             {
@@ -2953,32 +3085,47 @@ fn run<H: Host>(
                 ));
             }
             service_gap = 0;
+            service_longest = 0;
+            service_parts.longest = [0; ServiceParts::PARTS];
             beat = (now, native, blocks, compiled, chained, events);
+            cost.mark("performance");
             translation = translation_report(machine, translation, compiled - beat_compiled);
+            cost.mark("translation");
             exits.report(machine);
             translated.report(machine);
             shadows.report();
+            cost.mark("exits");
             peers_report(machine);
+            cost.mark("peers");
             let stale = machine.stale_code();
             if stale.stale > 0 {
                 output::arguments(format_args!("STALE {stale:?}\n"));
             }
+            cost.mark("stale");
             sample_report(&mut samples, user);
             hot_report(&mut hot);
             timer_report(machine);
-            for state in machine.devices.coprocessor_diagnostics() {
+            cost.mark("samples");
+            for state in machine
+                .devices
+                .with(|devices| devices.coprocessor_diagnostics())
+            {
                 output::arguments(format_args!("ASC {state}\n"));
             }
-            for state in machine.devices.usb_diagnostics() {
+            for state in machine.devices.with(|devices| devices.usb_diagnostics()) {
                 output::arguments(format_args!("USB {state}\n"));
             }
+            cost.mark("devices");
             survey_report(machine);
             occupancy_report(machine, &mut occupancy);
+            cost.mark("occupancy");
             user = 0;
             beats += 1;
             if beats.is_multiple_of(SUSPENSION_BEATS) {
                 suspension_report(machine);
+                cost.mark("suspension");
             }
+            cost.report(tsc_hz);
         }
     }
 }
@@ -2986,7 +3133,7 @@ fn run<H: Host>(
 /// Observe the current instruction's source range after all native owners
 /// have recovered. This walker can read RAM descriptors only: diagnostic
 /// failures neither update guest tables nor raise a guest exception.
-fn observed_instruction<H: Host>(machine: &mut Machine<H, AppleDevices>) -> Option<u64> {
+fn observed_instruction<H: Host>(machine: &mut Machine<H, parallel::Board>) -> Option<u64> {
     use stela_runtime::machine::mmu::{self, Access, Outcome, TableMemory};
     struct ReadOnlyTables<'a, H>(&'a mut H);
     impl<H: Host> TableMemory for ReadOnlyTables<'_, H> {
@@ -3019,7 +3166,7 @@ const CHAIN: usize = 6;
 /// `pc` and the return addresses of the frame records from `frame`,
 /// without their PACs; zero past the chain's end.
 fn call_chain<const N: usize, H: Host>(
-    machine: &mut Machine<H, AppleDevices>,
+    machine: &mut Machine<H, parallel::Board>,
     pc: u64,
     mut frame: u64,
 ) -> [u64; N] {
@@ -3047,7 +3194,7 @@ const SUSPENSION_CHAIN: usize = 12;
 /// chain of the link register and the frame records, with its thread count
 /// and the seconds since the most recent of them stopped. A guest that idles
 /// without progress shows here the wait it never leaves.
-fn suspension_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
+fn suspension_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     const SHOWN: usize = 32;
     let now = machine.host.counter();
     let frequency = stela_runtime::machine::timer::system_frequency(&machine.cpu).max(1);
@@ -3111,6 +3258,84 @@ fn sample_report(samples: &mut Vec<[u64; CHAIN]>, user: u32) {
     samples.clear();
 }
 
+/// The longest each part of the service between two slices took since the
+/// last beat: with every PE on a core of its own, the boot PE's guest time
+/// passes meanwhile.
+struct ServiceParts {
+    at: u64,
+    longest: [u64; Self::PARTS],
+}
+
+impl ServiceParts {
+    const PARTS: usize = 3;
+    const REPORTS: usize = 0;
+    const SERVICE: usize = 1;
+    const BEAT: usize = 2;
+    const NAMES: [&str; Self::PARTS] = ["reports", "service", "beat"];
+
+    fn new(now: u64) -> Self {
+        Self {
+            at: now,
+            longest: [0; Self::PARTS],
+        }
+    }
+
+    fn start(&mut self, now: u64) {
+        self.at = now;
+    }
+
+    /// The part `part` ended at `now`.
+    fn lap(&mut self, part: usize, now: u64) {
+        self.longest[part] = self.longest[part].max(now.wrapping_sub(self.at));
+        self.at = now;
+    }
+
+    fn report(&self, tsc_hz: u64) -> String {
+        let mut line = String::from("longest_us");
+        for (name, ticks) in Self::NAMES.iter().zip(self.longest) {
+            line.push_str(&format!(
+                " {name}={}",
+                u128::from(ticks) * 1_000_000 / u128::from(tsc_hz)
+            ));
+        }
+        line
+    }
+}
+
+/// What each of the heartbeat's reports took, which holds the boot PE's
+/// guest up.
+struct BeatCost {
+    at: u64,
+    parts: Vec<(&'static str, u64)>,
+}
+
+impl BeatCost {
+    fn new(now: u64) -> Self {
+        Self {
+            at: now,
+            parts: Vec::new(),
+        }
+    }
+
+    /// The reports since the last mark were `name`'s.
+    fn mark(&mut self, name: &'static str) {
+        let now = host::rdtsc();
+        self.parts.push((name, now.wrapping_sub(self.at)));
+        self.at = now;
+    }
+
+    fn report(&self, tsc_hz: u64) {
+        let mut line = String::from("BEAT COST us");
+        for (name, ticks) in &self.parts {
+            line.push_str(&format!(
+                " {name}={}",
+                u128::from(*ticks) * 1_000_000 / u128::from(tsc_hz)
+            ));
+        }
+        output::arguments(format_args!("{line}\n"));
+    }
+}
+
 /// The PCs the running PE was at most often at the heartbeat's service
 /// boundaries, sampled at most once a millisecond: where guest time goes.
 fn hot_report(hot: &mut BTreeMap<u64, u32>) {
@@ -3128,7 +3353,7 @@ fn hot_report(hot: &mut BTreeMap<u64, u32>) {
 
 /// The counter, PSTATE.DAIF and each generic timer's CTL and CVAL, which
 /// show why a PE that should sleep in WFI does not.
-fn timer_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
+fn timer_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     use stela_runtime::machine::timer::CHANNELS;
     let (now, timers) = machine.timer_snapshot();
     output::arguments(format_args!(
@@ -3156,7 +3381,7 @@ impl TranslatedSeen {
     /// translated variant, or that fell in the four-level guard, with the
     /// counts so far: such a guest runs correctly, through the translation
     /// helper, but slower, and may call for a different placement.
-    fn report<H: Host>(&mut self, machine: &Machine<H, AppleDevices>) {
+    fn report<H: Host>(&mut self, machine: &Machine<H, parallel::Board>) {
         let host = host::statistics();
         let first = machine.first_translated();
         if self.reported || (first.is_none() && host.guard_faults == 0) {
@@ -3303,7 +3528,7 @@ impl ExitsSeen {
     /// that did not end in a counted exit ran out of their chain budget),
     /// the exits by `ExitKind`, and the instruction words that most often
     /// left compiled code, so the engine's exit causes can be ranked.
-    fn report<H: Host>(&mut self, machine: &Machine<H, AppleDevices>) {
+    fn report<H: Host>(&mut self, machine: &Machine<H, parallel::Board>) {
         const SHOWN: usize = 24;
         let statistics = &machine.statistics;
         let entries = statistics.blocks - statistics.chained;
@@ -3385,7 +3610,7 @@ impl ExitsSeen {
 }
 
 /// The instruction words that most often left compiled code for the engine.
-fn exit_report<H: Host>(machine: &Machine<H, AppleDevices>) {
+fn exit_report<H: Host>(machine: &Machine<H, parallel::Board>) {
     const SHOWN: usize = 16;
     let mut words: Vec<_> = machine
         .exit_words()
@@ -3404,7 +3629,7 @@ fn exit_report<H: Host>(machine: &Machine<H, AppleDevices>) {
 /// wait path can be located.
 /// The frame records from `frame` on, read through the running PE's
 /// translation regime (a parked PE's kernel frames share it).
-fn frames<H: Host>(machine: &mut Machine<H, AppleDevices>, label: &str, mut frame: u64) {
+fn frames<H: Host>(machine: &mut Machine<H, parallel::Board>, label: &str, mut frame: u64) {
     for depth in 0..16 {
         let mut record = [0u8; 16];
         if frame == 0 || !frame.is_multiple_of(8) || !machine.read_virtual(frame, &mut record) {
@@ -3419,7 +3644,7 @@ fn frames<H: Host>(machine: &mut Machine<H, AppleDevices>, label: &str, mut fram
 
 /// The guest virtual ranges `--dump` names, 16 bytes a line, through the
 /// stopped PE's translation regime.
-fn dump_report<H: Host>(machine: &mut Machine<H, AppleDevices>, dumps: &[(Base, u64)]) {
+fn dump_report<H: Host>(machine: &mut Machine<H, parallel::Board>, dumps: &[(Base, u64)]) {
     for &(base, bytes) in dumps {
         let address = base.resolve(&machine.cpu.state.x);
         for line in (address..address + bytes).step_by(16) {
@@ -3437,7 +3662,7 @@ fn dump_report<H: Host>(machine: &mut Machine<H, AppleDevices>, dumps: &[(Base, 
     }
 }
 
-fn stack_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
+fn stack_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     frames(machine, "FRAME", machine.cpu.state.x[29]);
     let sp = machine.cpu.state.sp;
     for line in 0..32u64 {
@@ -3466,7 +3691,7 @@ fn stack_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
 /// The text a general-purpose register points to, when it reads as at least
 /// eight printable characters: a guest's panic message often sits in one at
 /// a stop, while the console that would print it is off.
-fn text_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
+fn text_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     const LIMIT: usize = 512;
     for register in 0..29 {
         let address = machine.cpu.state.x[register];
@@ -3490,11 +3715,38 @@ fn text_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     }
 }
 
-/// The SEP's `--sep-observe` journal, printed as it fills: a graceful run
-/// keeps going past each observed request and may end at the host timeout.
-fn sep_observation_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
-    for line in machine.devices.sep_observations() {
-        output::arguments(format_args!("SEP OBSERVE {line}\n"));
+/// What the devices left for the boot PE's reports since the last slice:
+/// the guest's console lines, the unsupported requests they answered, the
+/// SEP's `--sep-observe` journal (a graceful run keeps going past each
+/// observed request and may end at the host timeout) and their logs.
+struct Drained {
+    lines: Vec<String>,
+    unmodeled: Vec<String>,
+    sep: Vec<String>,
+    usb: Vec<stela_runtime::machine::apple::UsbLog>,
+    usb_host: Vec<(u32, String)>,
+    smc: Vec<stela_runtime::machine::apple::SmcWriteLog>,
+    display: Vec<stela_runtime::machine::apple::DisplayLog>,
+    power: Vec<stela_runtime::machine::apple::PowerLog>,
+}
+
+impl Drained {
+    fn take(devices: &mut AppleDevices) -> Self {
+        Self {
+            // The console that adds them is a device another PE can reach.
+            lines: GUEST_LINES
+                .0
+                .try_borrow_mut()
+                .map(|mut lines| core::mem::take(&mut *lines))
+                .unwrap_or_default(),
+            unmodeled: devices.take_unmodeled(),
+            sep: devices.sep_observations(),
+            usb: core::iter::from_fn(|| devices.take_usb_log()).collect(),
+            usb_host: core::iter::from_fn(|| devices.take_usb_host_trace()).collect(),
+            smc: core::iter::from_fn(|| devices.take_smc_log()).collect(),
+            display: core::iter::from_fn(|| devices.take_display_log()).collect(),
+            power: core::iter::from_fn(|| devices.take_power_log()).collect(),
+        }
     }
 }
 
@@ -3514,10 +3766,9 @@ static UNMODELED_REPORTED: AtomicU64 = AtomicU64::new(0);
 /// time since the last report: machine operations and device accesses, then
 /// coprocessor requests answered with their firmware's error reply or left
 /// unanswered.
-fn unmodeled_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
+fn unmodeled_report<H: Host>(machine: &mut Machine<H, parallel::Board>, requests: Vec<String>) {
     static ORDER_NOTED: AtomicBool = AtomicBool::new(false);
     let requirements = machine.take_unmodeled();
-    let requests = machine.devices.take_unmodeled();
     UNMODELED_REPORTED.fetch_add(
         (requirements.len() + requests.len()) as u64,
         Ordering::Relaxed,
@@ -3541,7 +3792,7 @@ fn unmodeled_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
 /// Each device register a survey answered for the first time since the last
 /// report: guest PA, width, direction, the PC and link register that first
 /// reached it, its count so far, the last value written and the refusal it replaced.
-fn survey_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
+fn survey_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     for record in machine.take_survey() {
         output::arguments(format_args!(
             "SURVEY pa={:#x} bytes={} {} pc={:#x} lr={:#x} count={} value={:#x}: {}\n",
@@ -3562,7 +3813,7 @@ fn survey_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
 /// tables map and the outermost mapped 32 MiB, which decide whether a
 /// four-level host's upper window can lie below the guest's mappings.
 fn occupancy_report<H: Host>(
-    machine: &mut Machine<H, AppleDevices>,
+    machine: &mut Machine<H, parallel::Board>,
     last: &mut Option<stela_runtime::machine::engine::Occupancy>,
 ) {
     let Some(now) = machine.upper_occupancy() else {
@@ -3599,7 +3850,7 @@ fn general_registers(cpu: &Cpu) {
 /// compiled since: nanoseconds per block and per guest
 /// instruction, and the blocks the translation store gave. The new `last`.
 fn translation_report<H: Host>(
-    machine: &Machine<H, AppleDevices>,
+    machine: &Machine<H, parallel::Board>,
     last: (u64, u64, u64),
     compiled: u64,
 ) -> (u64, u64, u64) {
@@ -3625,15 +3876,16 @@ fn translation_report<H: Host>(
     now
 }
 
-/// Where every PE is: `R` running, `-` held in reset, `d` powered down,
-/// or a parked PE's PC and its wait (`i` WFI, `e` WFE, `p` preempted), with
-/// the switch count.
-fn peers_report<H: Host>(machine: &Machine<H, AppleDevices>) {
+/// Where every PE is: `R` running, `-` held in reset, `d` powered down, `P`
+/// on its own machine, or a parked PE's PC and its wait (`i` WFI, `e` WFE,
+/// `p` preempted), with the switch count.
+fn peers_report<H: Host>(machine: &Machine<H, parallel::Board>) {
     output::arguments(format_args!("PES switches={}", machine.statistics.switches));
     for (number, state) in machine.peer_states().into_iter().enumerate() {
         match state {
             PeerState::Running => output::arguments(format_args!(" {number}:R")),
             PeerState::Off => output::arguments(format_args!(" {number}:-")),
+            PeerState::Remote => output::arguments(format_args!(" {number}:P")),
             PeerState::Down => output::arguments(format_args!(" {number}:d")),
             PeerState::Parked { cpu, wfi } => {
                 let wait = match wfi {
@@ -3713,14 +3965,15 @@ impl fmt::Display for Registers<'_> {
 }
 
 fn finish<H: Host>(
-    machine: &mut Machine<H, AppleDevices>,
+    machine: &mut Machine<H, parallel::Board>,
     stop: Stop,
     seconds: f64,
     dumps: &[(Base, u64)],
     host_power: &power::HostPowerControl,
 ) -> ! {
     survey_report(machine);
-    unmodeled_report(machine);
+    let drained = machine.devices.with(Drained::take);
+    unmodeled_report(machine, drained.unmodeled);
     // Machine answers are counted per access; coprocessor requests are
     // counted among the distinct reports only.
     output::arguments(format_args!(
@@ -3781,7 +4034,12 @@ fn finish<H: Host>(
         ));
     }
     general_registers(cpu);
-    sep_observation_report(machine);
+    for line in drained.sep {
+        output::arguments(format_args!(
+            "SEP OBSERVE {line}
+"
+        ));
+    }
     match stop {
         Stop::Idle => {
             output::arguments(format_args!(

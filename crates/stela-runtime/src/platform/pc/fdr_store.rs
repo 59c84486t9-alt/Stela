@@ -271,6 +271,8 @@ mod tests {
         assert!(initial_image(&vec![0; MAX_PAYLOAD + 1]).is_err());
         for block in [512, 4096] {
             let mut device = disk(block);
+            // With a write cache, each commit flushes it twice.
+            device.identity.features.write_cache = true;
             let mut journal = Journal::open(&mut device).unwrap();
             assert_eq!(journal.snapshot(), None);
             assert_eq!(read_image(&device.bytes).unwrap(), None);
@@ -404,6 +406,8 @@ mod tests {
     impl PowerDisk {
         fn seeded(block: u32) -> Self {
             let mut cache = disk(block);
+            // Its writes reach the medium only once flushed.
+            cache.identity.features.write_cache = true;
             let mut journal = Journal::open(&mut cache).unwrap();
             journal.commit(&mut cache, b"first").unwrap();
             journal.commit(&mut cache, b"previous").unwrap();
@@ -477,7 +481,7 @@ mod tests {
             Ok(())
         }
 
-        fn flush(&mut self) -> Result<(), BlockError> {
+        fn flush_cache(&mut self) -> Result<(), BlockError> {
             self.events.push("flush");
             let phase = self.phase;
             self.phase += 1;

@@ -1,3 +1,7 @@
+//! Tests for the data TLB policy: a cached translation outlives PTE changes
+//! until the next epoch while reads still resolve current RAM bytes, and
+//! rights, context changes, page splits, stage-2 entries and a failed
+//! physical owner never reuse an entry they should not.
 use super::super::{
     Controls, Failure, MemoryStatus, Policy, flags,
     tests::{fixture, ordinary_transfer},

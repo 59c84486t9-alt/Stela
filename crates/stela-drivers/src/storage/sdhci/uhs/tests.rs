@@ -217,7 +217,7 @@ fn native_retuning_precedes_live_io_and_failed_retuning_permanently_fences_alias
         Err(BlockError::Unsupported(STALE))
     );
     assert_eq!(old.write(4, &bytes), Err(BlockError::Unsupported(STALE)));
-    assert_eq!(old.flush(), Err(BlockError::Unsupported(STALE)));
+    assert_eq!(old.flush_cache(), Err(BlockError::Unsupported(STALE)));
     assert_eq!(
         (
             chip.borrow().reads,

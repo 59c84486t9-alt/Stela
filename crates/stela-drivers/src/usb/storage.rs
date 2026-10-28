@@ -7,7 +7,10 @@
 // see THIRD_PARTY.md for the pinned sources, notices and implementation scope.
 use super::xhci::{Device, Endpoint, Interface, MAX_TD, Plan, STALL, Shared, setup};
 use crate::{
-    block::{BlockDevice, BlockError, Identity, Sense, SenseCompletion, Transport},
+    block::{
+        BlockDevice, BlockError, Command, Features, Finished, Identity, Sense, SenseCompletion,
+        Transport,
+    },
     bus::dma::DmaAllocator,
 };
 use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
@@ -74,6 +77,28 @@ trait Scsi {
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
     fn poisoned(&self) -> bool;
+    /// Whether [`Self::begin`] runs commands without waiting for them.
+    fn queued(&self) -> bool {
+        false
+    }
+    /// Begin `cdb` without waiting for its transfers; `None` from a
+    /// transport that runs commands only to completion.
+    fn begin(
+        &mut self,
+        _lun: Self::Lun,
+        _cdb: &[u8],
+        _data: Data<'_>,
+    ) -> Option<Result<(), BlockError>> {
+        None
+    }
+    /// The begun command's result once complete; never waits.
+    fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        None
+    }
+    /// Whether a begun command has not ended, or the transport recovers.
+    fn busy(&mut self) -> bool {
+        false
+    }
     /// What the last command's data phase moved in before it failed.
     fn take_failed_data(&mut self) -> Option<Vec<u8>>;
     fn media_publication(&mut self, _lun: Self::Lun, _valid: Rc<Cell<bool>>, _removable: bool) {}
@@ -113,6 +138,10 @@ trait Scsi {
     fn report_luns_permitted(&self) -> bool {
         true
     }
+    /// Whether the transport's quirks let the unit take FUA writes.
+    fn fua_permitted(&self) -> bool {
+        false
+    }
 }
 impl<I: Io> Scsi for Bot<I> {
     type Lun = u8;
@@ -130,6 +159,18 @@ impl<I: Io> Scsi for Bot<I> {
     }
     fn poisoned(&self) -> bool {
         Bot::poisoned(self)
+    }
+    fn queued(&self) -> bool {
+        true
+    }
+    fn begin(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Option<Result<(), BlockError>> {
+        Some(Bot::begin(self, lun, cdb, data))
+    }
+    fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        Bot::end(self)
+    }
+    fn busy(&mut self) -> bool {
+        Bot::busy(self)
     }
     fn max_lun(&self) -> u8 {
         Bot::max_lun(self)
@@ -196,6 +237,9 @@ impl Scsi for uas::Host {
     fn report_luns_permitted(&self) -> bool {
         uas::Host::report_luns_permitted(self)
     }
+    fn fua_permitted(&self) -> bool {
+        uas::Host::fua_permitted(self)
+    }
     fn max_transfer_bytes(&self) -> usize {
         uas::Host::max_transfer_bytes(self)
     }
@@ -222,10 +266,26 @@ struct Disk<T: Scsi> {
     lun: T::Lun,
     identity: Identity,
     media: Rc<Cell<bool>>,
-    /// The unit caches writes, so a flush sends SYNCHRONIZE CACHE.
-    write_cache: bool,
     /// INQUIRY's RMB: a UNIT ATTENTION reports a media change.
     removable: bool,
+    /// The command this unit runs, as SCSI commands one at a time
+    /// ([`Disk::start`]).
+    running: Option<Running>,
+    next_tag: u32,
+}
+
+/// A block command a unit runs as consecutive SCSI commands, none waited
+/// for: a transfer split where the transport needs it.
+struct Running {
+    tag: u32,
+    command: Command,
+    /// The bytes of the transfer its SCSI commands have moved.
+    done: usize,
+    /// The begun SCSI command's transfer bytes.
+    begun: Option<usize>,
+    /// A read's bytes so far.
+    data: Vec<u8>,
+    result: Option<Finished>,
 }
 
 pub(super) fn discover_retained(
@@ -390,7 +450,7 @@ fn quarantined() -> BlockError {
 fn publication<T: Scsi>(
     owner: &Rc<RefCell<T>>,
     lun: T::Lun,
-    (identity, removable): (Identity, bool),
+    (mut identity, removable): (Identity, bool),
 ) -> Result<Disk<T>, BlockError> {
     let media = Rc::new(Cell::new(true));
     // The cache query is still part of revalidation. Register this publication
@@ -398,25 +458,36 @@ fn publication<T: Scsi>(
     owner
         .borrow_mut()
         .media_publication(lun, media.clone(), removable);
-    let write_cache = write_cache(&mut *owner.borrow_mut(), lun)?;
+    let (write_cache, fua) = caching(&mut *owner.borrow_mut(), lun)?;
+    let size = identity.block_size as usize;
+    identity.features = Features {
+        write_cache,
+        fua: write_cache && fua && owner.borrow().fua_permitted(),
+        max_transfer: owner.borrow().max_transfer_bytes() / size * size,
+        discard: None,
+        write_zeroes: None,
+    };
     Ok(Disk {
         bot: owner.clone(),
         lun,
         identity,
         media,
-        write_cache,
         removable,
+        running: None,
+        next_tag: 0,
     })
 }
 
-/// Linux `sd_read_cache_type`: the Caching page's WCE bit, or the
-/// transport's source-selected assumption. Its recognized 05/24/00 invalid
-/// field response permits the default write-through policy. Other failures
-/// cannot establish cache policy for a publication of the earlier metadata.
-fn write_cache<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<bool, BlockError> {
+/// Linux `sd_read_cache_type`: the Caching page's WCE bit and its header's
+/// DPOFUA bit, or the transport's source-selected assumption, which reads
+/// no DPOFUA. Its recognized 05/24/00 invalid field response permits the
+/// default write-through policy. Other failures cannot establish cache
+/// policy for a publication of the earlier metadata. usb-storage skips the
+/// VPD pages (`skip_vpd_pages`), so no unit is offered discard.
+fn caching<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<(bool, bool), BlockError> {
     match bot.caching() {
-        Caching::WriteThrough => Ok(false),
-        Caching::WriteBack => Ok(true),
+        Caching::WriteThrough => Ok((false, false)),
+        Caching::WriteBack => Ok((true, false)),
         Caching::Query => match bot.command(
             lun,
             &scsi::mode_sense(scsi::CACHING_PAGE),
@@ -424,8 +495,9 @@ fn write_cache<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<bool, BlockError> {
         ) {
             // A complete header-only response establishes that no caching
             // page exists (sd_read_cache_type's No Caching mode page path).
-            Ok(mode) if mode.len() >= 4 && mode[0] == 3 && mode[3] == 0 => Ok(false),
+            Ok(mode) if mode.len() >= 4 && mode[0] == 3 && mode[3] == 0 => Ok((false, false)),
             Ok(mode) if scsi::write_protected(&mode).is_some() => scsi::write_cache_enabled(&mode)
+                .map(|enabled| (enabled, scsi::fua_supported(&mode)))
                 .ok_or(BlockError::Protocol(
                     "missing or malformed USB Caching mode page",
                 )),
@@ -434,7 +506,7 @@ fn write_cache<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<bool, BlockError> {
                 key: Sense::ILLEGAL_REQUEST,
                 asc: 0x24,
                 ascq: 0,
-            })) => Ok(false),
+            })) => Ok((false, false)),
             Err(error) => Err(error),
         },
     }
@@ -703,6 +775,8 @@ fn probe_identified<T: Scsi>(
         blocks,
         block_size,
         read_only,
+        // Read with the Caching page once the disk is published.
+        features: Features::default(),
     };
     Ok((identity, inquiry[1] & 0x80 != 0))
 }
@@ -784,21 +858,129 @@ impl<T: Scsi> Disk<T> {
             ))
         }
     }
-    /// READ or WRITE of `blocks` at `lba`, (10) when it fits, else (16).
-    fn cdb(&self, write: bool, lba: u64, blocks: u32) -> Vec<u8> {
+    /// The bytes of the next command of a transfer of `remaining` bytes at
+    /// `lba`: at most the transport's bound, and the last sector alone
+    /// where the device needs it so.
+    fn command_bytes(&self, lba: u64, remaining: usize) -> usize {
+        let size = self.identity.block_size as usize;
+        let maximum = self.bot.borrow().max_transfer_bytes() / size * size;
+        let mut length = remaining.min(maximum);
+        if self.bot.borrow().separate_last_sector()
+            && lba + (length / size) as u64 == self.identity.blocks
+            && length > size
+        {
+            length -= size;
+        }
+        length
+    }
+
+    /// Begin the running command's next SCSI command, or settle its result
+    /// once it needs none or one cannot begin.
+    fn step(&mut self) {
+        let Some(running) = self.running.as_ref() else {
+            return;
+        };
+        if running.begun.is_some() || running.result.is_some() {
+            return;
+        }
+        let size = self.identity.block_size as usize;
+        let total = Self::total(&running.command);
+        let (cdb, length) = match &running.command {
+            Command::Read { lba, .. } | Command::Write { lba, .. } if running.done < total => {
+                let at = lba + (running.done / size) as u64;
+                let length = self.command_bytes(at, total - running.done);
+                let (write, fua) = match &running.command {
+                    Command::Write { fua, .. } => (true, *fua),
+                    _ => (false, false),
+                };
+                (self.cdb(write, fua, at, (length / size) as u32), length)
+            }
+            Command::Read { .. } | Command::Write { .. } => {
+                let running = self.running.as_mut().unwrap();
+                let read = matches!(running.command, Command::Read { .. });
+                let data = core::mem::take(&mut running.data);
+                running.result = Some(Ok(read.then_some(data)));
+                return;
+            }
+            Command::Flush if running.done == 0 => (scsi::synchronize_cache().to_vec(), 0),
+            Command::Flush => {
+                self.running.as_mut().unwrap().result = Some(Ok(None));
+                return;
+            }
+            Command::Discard { .. } | Command::WriteZeroes { .. } => {
+                self.running.as_mut().unwrap().result =
+                    Some(Err(BlockError::Unsupported("USB storage takes no discard")));
+                return;
+            }
+        };
+        let begun = {
+            let running = self.running.as_ref().unwrap();
+            let mut bot = self.bot.borrow_mut();
+            match &running.command {
+                Command::Write { data, .. } => {
+                    let part = &data[running.done..running.done + length];
+                    bot.begin(self.lun, &cdb, Data::Out(part))
+                }
+                Command::Read { .. } => bot.begin(self.lun, &cdb, Data::In(length)),
+                _ => bot.begin(self.lun, &cdb, Data::None),
+            }
+        };
+        let running = self.running.as_mut().unwrap();
+        match begun {
+            Some(Ok(())) => running.begun = Some(length),
+            Some(Err(error)) => running.result = Some(Err(error)),
+            None => {
+                running.result = Some(Err(BlockError::Unsupported(
+                    "the USB storage transport runs no queued commands",
+                )));
+            }
+        }
+    }
+
+    /// A transfer's bytes.
+    fn total(command: &Command) -> usize {
+        match command {
+            Command::Read { bytes, .. } => *bytes,
+            Command::Write { data, .. } => data.len(),
+            _ => 0,
+        }
+    }
+
+    /// Write `data` at `lba` as the transport takes it, with `fua`.
+    fn write_with(&mut self, lba: u64, data: &[u8], fua: bool) -> Result<(), BlockError> {
+        self.check_media()?;
+        self.identity.check_write(lba, data.len())?;
+        let size = self.identity.block_size as usize;
+        let (mut lba, mut remaining) = (lba, data);
+        while !remaining.is_empty() {
+            let length = self.command_bytes(lba, remaining.len());
+            let (chunk, rest) = remaining.split_at(length);
+            remaining = rest;
+            let blocks = (chunk.len() / size) as u32;
+            let cdb = self.cdb(true, fua, lba, blocks);
+            self.io(&cdb, Data::Out(chunk))?;
+            lba += u64::from(blocks);
+        }
+        Ok(())
+    }
+
+    /// READ or WRITE of `blocks` at `lba`, (10) when it fits, else (16),
+    /// with Force Unit Access when `fua`.
+    fn cdb(&self, write: bool, fua: bool, lba: u64, blocks: u32) -> Vec<u8> {
+        let flags = if fua { scsi::FUA } else { 0 };
         if lba
             .checked_add(u64::from(blocks))
             .is_some_and(|end| end <= u64::from(u32::MAX) + 1)
             && blocks <= u32::from(u16::MAX)
         {
-            let mut cdb = vec![if write { scsi::WRITE_10 } else { scsi::READ_10 }, 0];
+            let mut cdb = vec![if write { scsi::WRITE_10 } else { scsi::READ_10 }, flags];
             cdb.extend_from_slice(&(lba as u32).to_be_bytes());
             cdb.push(0);
             cdb.extend_from_slice(&(blocks as u16).to_be_bytes());
             cdb.push(0);
             cdb
         } else {
-            let mut cdb = vec![if write { scsi::WRITE_16 } else { scsi::READ_16 }, 0];
+            let mut cdb = vec![if write { scsi::WRITE_16 } else { scsi::READ_16 }, flags];
             cdb.extend_from_slice(&lba.to_be_bytes());
             cdb.extend_from_slice(&blocks.to_be_bytes());
             cdb.extend_from_slice(&[0, 0]);
@@ -815,22 +997,13 @@ impl<T: Scsi> BlockDevice for Disk<T> {
         self.check_media()?;
         self.identity.check(lba, buffer.len())?;
         let size = self.identity.block_size as usize;
-        let mut lba = lba;
-        let maximum = self.bot.borrow().max_transfer_bytes() / size * size;
-        let separate_last = self.bot.borrow().separate_last_sector();
-        let mut remaining = buffer;
+        let (mut lba, mut remaining) = (lba, buffer);
         while !remaining.is_empty() {
-            let mut length = remaining.len().min(maximum);
-            if separate_last
-                && lba + (length / size) as u64 == self.identity.blocks
-                && length > size
-            {
-                length -= size;
-            }
+            let length = self.command_bytes(lba, remaining.len());
             let (chunk, rest) = remaining.split_at_mut(length);
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
-            let cdb = self.cdb(false, lba, blocks);
+            let cdb = self.cdb(false, false, lba, blocks);
             let data = self.io(&cdb, Data::In(chunk.len()))?;
             if data.len() != chunk.len() {
                 return Err(BlockError::Protocol("short USB storage read"));
@@ -842,37 +1015,85 @@ impl<T: Scsi> BlockDevice for Disk<T> {
     }
 
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
-        self.check_media()?;
-        self.identity.check_write(lba, data.len())?;
-        let size = self.identity.block_size as usize;
-        let mut lba = lba;
-        let maximum = self.bot.borrow().max_transfer_bytes() / size * size;
-        let separate_last = self.bot.borrow().separate_last_sector();
-        let mut remaining = data;
-        while !remaining.is_empty() {
-            let mut length = remaining.len().min(maximum);
-            if separate_last
-                && lba + (length / size) as u64 == self.identity.blocks
-                && length > size
-            {
-                length -= size;
-            }
-            let (chunk, rest) = remaining.split_at(length);
-            remaining = rest;
-            let blocks = (chunk.len() / size) as u32;
-            let cdb = self.cdb(true, lba, blocks);
-            self.io(&cdb, Data::Out(chunk))?;
-            lba += u64::from(blocks);
-        }
-        Ok(())
+        self.write_with(lba, data, false)
     }
 
-    /// Linux sd flushes only a unit whose write cache is on.
-    fn flush(&mut self) -> Result<(), BlockError> {
-        if !self.write_cache {
-            return self.check_media();
-        }
+    fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.write_with(lba, data, true)
+    }
+
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
+        self.check_media()?;
         self.io(&scsi::synchronize_cache(), Data::None).map(|_| ())
+    }
+
+    /// A transport that begins commands without waiting runs one block
+    /// command at a time.
+    fn depth(&self) -> usize {
+        usize::from(self.bot.borrow().queued())
+    }
+
+    fn room(&self) -> bool {
+        self.running.is_none() && !self.bot.borrow_mut().busy()
+    }
+
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.check_media()?;
+        let command = command.within(&self.identity, 0)?;
+        if !self.room() {
+            return Err(BlockError::Protocol(
+                "a USB storage unit runs one command at a time",
+            ));
+        }
+        let tag = self.next_tag;
+        self.next_tag = tag.wrapping_add(1);
+        self.running = Some(Running {
+            tag,
+            command,
+            done: 0,
+            begun: None,
+            data: Vec::new(),
+            result: None,
+        });
+        self.step();
+        Ok(tag)
+    }
+
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        if self.running.as_ref()?.tag != tag {
+            return None;
+        }
+        if let Some(length) = self.running.as_ref()?.begun {
+            let ended = self.bot.borrow_mut().end()?;
+            let running = self.running.as_mut()?;
+            running.begun = None;
+            match ended {
+                Err(error) => {
+                    if matches!(&error, BlockError::Sense(sense)
+                        if media::changed(sense, self.removable))
+                    {
+                        self.media.set(false);
+                    }
+                    running.result = Some(Err(error));
+                }
+                Ok(bytes) => {
+                    if let Command::Read { .. } = running.command {
+                        if bytes.len() != length {
+                            running.result =
+                                Some(Err(BlockError::Protocol("short USB storage read")));
+                        } else {
+                            running.data.extend_from_slice(&bytes);
+                        }
+                    }
+                    // A flush counts as one byte once complete.
+                    running.done += length.max(1);
+                }
+            }
+            self.step();
+        }
+        let result = self.running.as_mut()?.result.take()?;
+        self.running = None;
+        Some(result)
     }
 }
 
@@ -918,10 +1139,40 @@ impl BlockDevice for UsbDisk {
             UsbTransport::Uas(disk) => disk.write(lba, bytes),
         }
     }
-    fn flush(&mut self) -> Result<(), BlockError> {
+    fn write_fua(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
         match &mut self.disk {
-            UsbTransport::Bot(disk) => disk.flush(),
-            UsbTransport::Uas(disk) => disk.flush(),
+            UsbTransport::Bot(disk) => disk.write_fua(lba, bytes),
+            UsbTransport::Uas(disk) => disk.write_fua(lba, bytes),
+        }
+    }
+    fn flush_cache(&mut self) -> Result<(), BlockError> {
+        match &mut self.disk {
+            UsbTransport::Bot(disk) => disk.flush_cache(),
+            UsbTransport::Uas(disk) => disk.flush_cache(),
+        }
+    }
+    fn depth(&self) -> usize {
+        match &self.disk {
+            UsbTransport::Bot(disk) => disk.depth(),
+            UsbTransport::Uas(disk) => disk.depth(),
+        }
+    }
+    fn room(&self) -> bool {
+        match &self.disk {
+            UsbTransport::Bot(disk) => disk.room(),
+            UsbTransport::Uas(disk) => disk.room(),
+        }
+    }
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        match &mut self.disk {
+            UsbTransport::Bot(disk) => disk.start(command),
+            UsbTransport::Uas(disk) => disk.start(command),
+        }
+    }
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        match &mut self.disk {
+            UsbTransport::Bot(disk) => disk.finish(tag),
+            UsbTransport::Uas(disk) => disk.finish(tag),
         }
     }
 }
@@ -992,10 +1243,15 @@ mod tests {
                 blocks: 8,
                 block_size: 512,
                 read_only: false,
+                features: Features {
+                    write_cache: true,
+                    ..Features::default()
+                },
             },
             media: Rc::new(Cell::new(true)),
-            write_cache: true,
             removable,
+            running: None,
+            next_tag: 0,
         }
     }
 
@@ -1005,12 +1261,12 @@ mod tests {
         let reset = sense(Sense::UNIT_ATTENTION, Sense::RESET_OCCURRED, 0);
         // A fixed unit retries a UNIT ATTENTION and keeps its medium.
         let mut fixed = disk(false, &[reset]);
-        assert_eq!(fixed.flush(), Ok(()));
+        assert_eq!(fixed.flush_cache(), Ok(()));
         assert_eq!(fixed.bot.borrow().commands, 2);
         assert!(fixed.media.get());
         // A removable one reports a media change and refuses access.
         let mut removable = disk(true, &[reset]);
-        assert!(matches!(removable.flush(), Err(BlockError::Sense(_))));
+        assert!(matches!(removable.flush_cache(), Err(BlockError::Sense(_))));
         assert!(!removable.media.get());
         // Becoming ready: five NEEDS_RETRY retries, then a delayed requeue.
         let becoming = sense(Sense::NOT_READY, Sense::NOT_READY_CAUSE, 0x01);
@@ -1031,7 +1287,7 @@ mod tests {
         assert_eq!(block, [0x5a; 512]);
         // Requeues stop once the command has run for six timeouts.
         let mut unit = disk(false, &[reset; 400]);
-        assert!(unit.flush().is_err());
+        assert!(unit.flush_cache().is_err());
         assert_eq!(unit.bot.borrow().commands, 181);
     }
 }

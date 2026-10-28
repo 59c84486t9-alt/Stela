@@ -20,6 +20,8 @@ pub struct HostInput {
     failed: bool,
     /// The guest's keyboard LEDs as last sent to the host keyboards.
     leds: Option<u8>,
+    /// The guest's keyboard LEDs as the last delivery found them.
+    wanted_leds: Option<u8>,
     /// The first LED report failure, reported once.
     led_failed: bool,
 }
@@ -42,6 +44,7 @@ impl HostInput {
             refused: false,
             failed: false,
             leds: None,
+            wanted_leds: None,
             led_failed: false,
         }
     }
@@ -54,10 +57,21 @@ impl HostInput {
         }
     }
 
-    pub fn poll(&mut self, devices: &mut AppleDevices) {
-        // The guest's lock-key LEDs reach each host keyboard, as Linux
-        // `hidinput_led_worker` sends an input device's LED changes.
-        if let Some(leds) = devices.keyboard_leds()
+    /// Deliver what [`Self::read`] read from the host's devices, and note
+    /// the guest's lock-key LEDs for the next read to send.
+    pub fn deliver_all(&mut self, devices: &mut AppleDevices, inputs: Vec<Input>) {
+        for input in inputs {
+            self.deliver(devices, input);
+        }
+        self.wanted_leds = devices.keyboard_leds();
+    }
+
+    /// Read the host's input devices, without the guest's devices: their
+    /// USB devices' first, then the others'. The guest's lock-key LEDs
+    /// reach each host keyboard first, as Linux `hidinput_led_worker`
+    /// sends an input device's LED changes.
+    pub fn read(&mut self) -> Vec<Input> {
+        if let Some(leds) = self.wanted_leds
             && self.leds != Some(leds)
         {
             self.leds = Some(leds);
@@ -85,14 +99,11 @@ impl HostInput {
                 output::arguments(format_args!("INPUT USB device {} stopped\n", device.name));
             }
         }
-        for input in usb {
-            self.deliver(devices, input);
-        }
-        let mut pending = Vec::new();
+        let mut pending = usb;
         for device in &mut self.inputs.devices {
             let events = {
                 // SAFETY: the loader root `storage::open` captured, which
-                // maps this device; the engine is serialized.
+                // maps this device.
                 let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
                 device.poll()
             };
@@ -102,8 +113,6 @@ impl HostInput {
                 .collect();
             pending.extend(inputs);
         }
-        for input in pending {
-            self.deliver(devices, input);
-        }
+        pending
     }
 }

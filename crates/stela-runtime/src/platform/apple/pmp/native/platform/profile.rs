@@ -1,3 +1,6 @@
+//! The T8112 platform `Profile`: joins the registry device table with the
+//! DVFS domain rows into per-`Ordinal` `Descriptor`s that carry hooks,
+//! controllers, counter selection and `Interpolation` state.
 use super::super::power::DeviceTable;
 use super::{CounterReference, CounterSelection, Interpolation, McSelection};
 use alloc::{vec, vec::Vec};

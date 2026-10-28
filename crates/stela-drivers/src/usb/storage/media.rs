@@ -505,7 +505,7 @@ mod tests {
                 1
             );
             let accesses = hardware.borrow().accesses;
-            assert!(disks[0].flush().is_err());
+            assert!(disks[0].flush_cache().is_err());
             assert_eq!(hardware.borrow().accesses, accesses);
             let TransportOwner::Uas(old) = &stale_owner.owner else {
                 panic!("wrong transport");

@@ -124,7 +124,7 @@ fn native_root_uas_reuses_three_original_owners_across_96_resets_and_real_io() {
                     assert!(disk.read(7, &mut poison).is_err());
                     assert_eq!(poison, [0xb7; 512]);
                     assert!(disk.write(7, &[0xee; 512]).is_err());
-                    assert!(disk.flush().is_err());
+                    assert!(disk.flush_cache().is_err());
                     let mut old = old.borrow_mut();
                     assert!(old.transport.engine.io.ready().is_err());
                     assert!(old.transport.command([0; 8], &[0; 6], Data::None).is_err());
@@ -217,7 +217,7 @@ fn native_uas_failed_reset_retains_all_three_original_owners_and_bytes() {
                 assert!(disk.read(0, &mut poison).is_err());
                 assert_eq!(poison, [0x91; 512]);
                 assert!(disk.write(0, &[0; 512]).is_err());
-                assert!(disk.flush().is_err());
+                assert!(disk.flush_cache().is_err());
                 assert!(
                     old.borrow_mut()
                         .transport
