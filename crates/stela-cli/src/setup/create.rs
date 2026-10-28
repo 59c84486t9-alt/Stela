@@ -105,12 +105,14 @@ pub(super) fn plan_install(
         if !ecids.is_empty() {
             let (_, _, prepared) = prepare_kind(
                 environment,
-                kind,
-                record.tss,
-                ipsw,
-                &record.model,
-                Some(build),
-                &ecids,
+                super::prepare::BundleOptions {
+                    kind,
+                    tss: record.tss,
+                    ipsw,
+                    model: &record.model,
+                    build: Some(build),
+                    ecids: &ecids,
+                },
             )?;
             restore.extend(prepared);
         }

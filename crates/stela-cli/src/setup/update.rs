@@ -343,12 +343,14 @@ pub(super) fn update_stela(
             if !ecids.is_empty() {
                 let (_, _, restore) = prepare_kind(
                     environment,
-                    kind,
-                    record.tss,
-                    ipsw,
-                    &record.model,
-                    Some(&record.build),
-                    &ecids,
+                    super::prepare::BundleOptions {
+                        kind,
+                        tss: record.tss,
+                        ipsw,
+                        model: &record.model,
+                        build: Some(&record.build),
+                        ecids: &ecids,
+                    },
                 )?;
                 prepared.extend(restore);
             }

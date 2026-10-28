@@ -286,25 +286,15 @@ fn current() -> bundle::Generation {
 
 /// A stand-in for `boot prepare --restore`: the synthetic IPSW has no
 /// kernel to prepare. The bundle's byte names the machine.
-fn fake_prepare_restore(
-    _: &Path,
-    _: &str,
-    ecid: Option<Ecid>,
-    _: bool,
-    output: &Path,
-) -> Result<()> {
+fn fake_prepare_restore(options: prepare::RamdiskOptions<'_>) -> Result<()> {
+    let prepare::RamdiskOptions { ecid, output, .. } = options;
     let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ 0xa5;
     bundle::tests::write(output, current(), &[byte; 2048])
 }
 
 /// A stand-in for `boot prepare --restore --update`.
-fn fake_prepare_update(
-    _: &Path,
-    _: &str,
-    ecid: Option<Ecid>,
-    _: bool,
-    output: &Path,
-) -> Result<()> {
+fn fake_prepare_update(options: prepare::RamdiskOptions<'_>) -> Result<()> {
+    let prepare::RamdiskOptions { ecid, output, .. } = options;
     let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ 0x3c;
     bundle::tests::write(output, current(), &[byte; 1024])
 }
@@ -390,16 +380,15 @@ fn preparation_rejects_unsupported_build() {
 /// machine, kind and revision.
 fn preparers(revision: u32) -> [Box<Prepare>; 2] {
     let of = |kind: u8, bytes: usize| -> Box<Prepare> {
-        Box::new(
-            move |_: &Path, _: &str, ecid: Option<Ecid>, _: bool, output: &Path| {
-                let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ kind ^ revision as u8;
-                let generation = bundle::Generation {
-                    revision,
-                    ..current()
-                };
-                bundle::tests::write(output, generation, &vec![byte; bytes])
-            },
-        )
+        Box::new(move |options: prepare::RamdiskOptions<'_>| {
+            let prepare::RamdiskOptions { ecid, output, .. } = options;
+            let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ kind ^ revision as u8;
+            let generation = bundle::Generation {
+                revision,
+                ..current()
+            };
+            bundle::tests::write(output, generation, &vec![byte; bytes])
+        })
     };
     [of(0xa5, 2048), of(0x3c, 1024)]
 }
@@ -1047,9 +1036,7 @@ fn preparation_preflights_signing_and_capacity() {
     let before = (snapshot(&f.esp), snapshot(&f.data));
     let mut opted = command(&f, Path::new("disk5"));
     opted.tss = true;
-    let fail = |_: &Path, _: &str, _: Option<Ecid>, _: bool, _: &Path| {
-        bail!("signing service unavailable")
-    };
+    let fail = |_: prepare::RamdiskOptions<'_>| bail!("signing service unavailable");
     let env = Environment {
         prepare_restore: &fail,
         ..environment(&f.host)
@@ -1983,7 +1970,8 @@ fn schema_update_rebuilds_bundles_and_rolls_back() {
         schema: next_schema,
         ..current()
     };
-    let prepare = move |_: &Path, _: &str, ecid: Option<Ecid>, _: bool, output: &Path| {
+    let prepare = move |options: prepare::RamdiskOptions<'_>| {
+        let prepare::RamdiskOptions { ecid, output, .. } = options;
         bundle::tests::write(
             output,
             next_generation,

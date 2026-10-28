@@ -51,21 +51,20 @@ pub(super) fn prepare_restore_bundles(
     for kind in bundle::RESTORE_KINDS {
         let (_, _, bundles) = prepare_kind(
             environment,
-            kind,
-            true,
-            ipsw,
-            model,
-            Some(&build),
-            &[Some(ecid)],
+            BundleOptions {
+                kind,
+                tss: true,
+                ipsw,
+                model,
+                build: Some(&build),
+                ecids: &[Some(ecid)],
+            },
         )?;
         prepared.extend(bundles);
     }
     Ok((product_version, build, prepared))
 }
 
-/// Prepare `ipsw`'s bundles of `kind` for each machine of `ecids`, under
-/// Apple's personalized ticket with the TSS opt-in `tss`; the image must be
-/// `build`, when given. Returns the image's version and build too.
 /// Refuse `ipsw`, of macOS `build`, unless setup supports that build.
 pub(super) fn supported(environment: &Environment<'_>, ipsw: &Path, build: &str) -> Result<()> {
     builds::find_in(environment.builds, build)
@@ -73,15 +72,31 @@ pub(super) fn supported(environment: &Environment<'_>, ipsw: &Path, build: &str)
         .map_err(|error| anyhow::anyhow!("{}: {error}", ipsw.display()))
 }
 
+/// Source identity and personalization choices for one kind of boot bundle.
+pub(super) struct BundleOptions<'a> {
+    pub(super) kind: Kind,
+    /// Request personalization through the TSS service.
+    pub(super) tss: bool,
+    pub(super) ipsw: &'a Path,
+    pub(super) model: &'a str,
+    pub(super) build: Option<&'a str>,
+    pub(super) ecids: &'a [Option<Ecid>],
+}
+
+/// Prepare the selected bundle kind for each machine; verify the requested
+/// build and return its product version, build and prepared bundles.
 pub(super) fn prepare_kind(
     environment: &Environment<'_>,
-    kind: Kind,
-    tss: bool,
-    ipsw: &Path,
-    model: &str,
-    build: Option<&str>,
-    ecids: &[Option<Ecid>],
+    options: BundleOptions<'_>,
 ) -> Result<(String, String, Vec<Prepared>)> {
+    let BundleOptions {
+        kind,
+        tss,
+        ipsw,
+        model,
+        build,
+        ecids,
+    } = options;
     let (product_version, found) = restore::payload::identity(ipsw, model)?;
     if let Some(build) = build {
         ensure!(
@@ -102,8 +117,14 @@ pub(super) fn prepare_kind(
         let personalized = tss;
         let progress =
             crate::progress::Phase::spinner(format!("Preparing {} boot files", kind.label()));
-        prepare(ipsw, model, ecid, personalized, &output)
-            .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
+        prepare(RamdiskOptions {
+            ipsw,
+            model,
+            ecid,
+            personalized,
+            output: &output,
+        })
+        .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
         progress.finish();
         let generation = bundle::generation(&output)?;
         ensure!(
@@ -268,28 +289,26 @@ pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<
 /// the boot log as `GUEST|` lines, so a run on a PC can be read afterwards.
 pub(super) const CONSOLE_BOOT_ARGS: &str = "--boot-args=-v serial=3 serial-device-name=uart0";
 
+/// Inputs and destination for one erase or update restore bundle.
+pub(super) struct RamdiskOptions<'a> {
+    pub(super) ipsw: &'a Path,
+    pub(super) model: &'a str,
+    pub(super) ecid: Option<Ecid>,
+    /// Request an AP ticket; ecid must be set.
+    pub(super) personalized: bool,
+    pub(super) output: &'a Path,
+}
+
 /// `stela-dev boot prepare --restore` for the IPSW, model and machine into
 /// `output`: the restore bundle the Install macOS choice boots.
-pub(super) fn prepare_restore(
-    ipsw: &Path,
-    model: &str,
-    ecid: Option<Ecid>,
-    personalized: bool,
-    output: &Path,
-) -> Result<()> {
-    prepare_ramdisk(ipsw, model, ecid, personalized, output, false)
+pub(super) fn prepare_restore(options: RamdiskOptions<'_>) -> Result<()> {
+    prepare_ramdisk(options, false)
 }
 
 /// `stela-dev boot prepare --restore --update`: the update restore bundle the
 /// Update macOS choice boots.
-pub(super) fn prepare_update(
-    ipsw: &Path,
-    model: &str,
-    ecid: Option<Ecid>,
-    personalized: bool,
-    output: &Path,
-) -> Result<()> {
-    prepare_ramdisk(ipsw, model, ecid, personalized, output, true)
+pub(super) fn prepare_update(options: RamdiskOptions<'_>) -> Result<()> {
+    prepare_ramdisk(options, true)
 }
 
 /// A restore bundle of the model's erase or, with `update`, update restore
@@ -298,14 +317,14 @@ pub(super) fn prepare_update(
 /// the engine's own board check of the prepared DeviceTree
 /// (`machine::soc::board`), so a model the engine cannot run is refused
 /// before the USB changes rather than when the PC boots it.
-pub(super) fn prepare_ramdisk(
-    ipsw: &Path,
-    model: &str,
-    ecid: Option<Ecid>,
-    personalized: bool,
-    output: &Path,
-    update: bool,
-) -> Result<()> {
+fn prepare_ramdisk(options: RamdiskOptions<'_>, update: bool) -> Result<()> {
+    let RamdiskOptions {
+        ipsw,
+        model,
+        ecid,
+        personalized,
+        output,
+    } = options;
     let mut line: Vec<String> = [
         "--ipsw",
         ipsw.to_str().context("IPSW path is not UTF-8")?,

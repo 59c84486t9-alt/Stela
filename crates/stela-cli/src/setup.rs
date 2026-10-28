@@ -294,7 +294,7 @@ impl InstallMedium {
 
 /// Writes a restore bundle for an IPSW, model and machine into a
 /// directory, under Apple's personalized ticket when the `bool` says so.
-type Prepare = dyn Fn(&Path, &str, Option<Ecid>, bool, &Path) -> Result<()>;
+type Prepare = dyn for<'a> Fn(prepare::RamdiskOptions<'a>) -> Result<()>;
 
 /// An IPSW's restore inventory for a model.
 type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
