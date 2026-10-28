@@ -70,6 +70,25 @@ const CTRL: usize = 0x0000;
 const STATUS: usize = 0x0008;
 const EECD: usize = 0x0010;
 const CTRL_EXT: usize = 0x0018;
+/// Interrupt registers e1000_configure_msix and e1000_irq_enable program.
+const ICS: usize = 0x00c8;
+const IMS: usize = 0x00d0;
+const EIAC: usize = 0x00dc;
+const IVAR: usize = 0x00e4;
+/// E1000_EITR_82574(0), vector 0's throttle.
+const EITR0: usize = 0x00e8;
+const IMS_LSC: u32 = 1 << 2;
+const IMS_RXQ0: u32 = 1 << 20;
+const IMS_OTHER: u32 = 1 << 24;
+const IVAR_VALID: u32 = 0x8;
+const CTRL_EXT_EIAME: u32 = 1 << 24;
+const CTRL_EXT_IAME: u32 = 1 << 27;
+const CTRL_EXT_PBA_CLR: u32 = 1 << 31;
+const RFCTL_ACK_DIS: u32 = 1 << 12;
+/// Linux's default 20000 interrupts a second, as 256 ns throttle units.
+const THROTTLE: u32 = 1_000_000_000 / (20_000 * 256);
+/// An MSI-X table entry's bytes.
+const MSIX_ENTRY_BYTES: u64 = 16;
 const MDIC: usize = 0x0020;
 const ICR: usize = 0x00c0;
 const IMC: usize = 0x00d8;
@@ -391,6 +410,8 @@ pub struct E1000e {
     /// Register reads return all ones: the function is gone.
     faulted: bool,
     pub location: String,
+    /// Whether MSI-X vector 0 sends the handoff's completion signal.
+    signalled: bool,
 }
 
 impl E1000e {
@@ -415,8 +436,28 @@ impl E1000e {
         // the mapped ECAM handoff. Do this before enabling device decoding.
         unsafe { pci::disable_aspm_link(function, handoff)? };
         function.power_up(&handoff.clock)?;
-        let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
+        let bars = function.bars();
+        let device = registers(handoff, bars[0], 0, REGISTER_BYTES)?;
         function.enable_polled();
+        let signalled = match (handoff.completion, function.interrupts().msix) {
+            (Some(message), Some(msix)) => {
+                let table = registers(
+                    handoff,
+                    bars[usize::from(msix.table_bar)],
+                    u64::from(msix.table_offset),
+                    MSIX_ENTRY_BYTES,
+                )?;
+                function.enable_msix(msix, || {
+                    table.write32(0, message.address as u32);
+                    table.write32(4, (message.address >> 32) as u32);
+                    table.write32(8, message.data);
+                    table.write32(12, 0);
+                    Ok(())
+                })?;
+                true
+            }
+            _ => false,
+        };
         reset(&device, &handoff.clock)?;
         let mac = station(device.read32(RAL), device.read32(RAH)).ok_or(
             BlockError::Unsupported("82574L without a valid NVM MAC address"),
@@ -433,6 +474,7 @@ impl E1000e {
             phy_hangs: 0,
             faulted: false,
             location: format!("{} Intel 82574L", function.address),
+            signalled,
         };
         net.start();
         Ok(net)
@@ -555,7 +597,27 @@ impl E1000e {
             .write32(RCTL, RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
         self.device
             .write32(TCTL, TCTL_EN | TCTL_PSP | TCTL_COLLISIONS | TCTL_RTLC);
+        if self.signalled {
+            self.arm_interrupts();
+        }
         self.device.read32(STATUS);
+    }
+
+    /// e1000_configure_msix and e1000_irq_enable for one vector: queue 0's
+    /// receive and the other causes (link changes) send it, auto-cleared
+    /// until the next empty receive re-arms it.
+    fn arm_interrupts(&self) {
+        let device = &self.device;
+        // Linux's workaround for the 82574's spurious MSI-X interrupts.
+        device.write32(RFCTL, device.read32(RFCTL) | RFCTL_ACK_DIS);
+        device.write32(EITR0, THROTTLE);
+        device.write32(IVAR, IVAR_VALID | (IVAR_VALID << 16));
+        device.write32(
+            CTRL_EXT,
+            (device.read32(CTRL_EXT) & !CTRL_EXT_IAME) | CTRL_EXT_PBA_CLR | CTRL_EXT_EIAME,
+        );
+        device.write32(EIAC, IMS_RXQ0);
+        device.write32(IMS, IMS_RXQ0 | IMS_OTHER | IMS_LSC);
     }
 
     fn offer_receive(&mut self, index: usize) {
@@ -608,6 +670,10 @@ impl Link for E1000e {
         Ok(())
     }
 
+    fn signals(&self) -> bool {
+        self.signalled
+    }
+
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         // Bound processing even if a device continually supplies bad frames.
         for _ in 0..DESCRIPTORS {
@@ -618,6 +684,21 @@ impl Link for E1000e {
                 if let Some(tail) = self.receive.idle() {
                     fence(Ordering::SeqCst);
                     self.device.write32(RDT, tail);
+                }
+                if self.signalled {
+                    // e1000_msix_other reads the link and other causes,
+                    // clearing them so the next one sends the vector. A
+                    // receive cause read with them is a frame to look for.
+                    let causes = self.device.read32(ICR);
+                    if causes & IMS_LSC != 0 {
+                        self.watchdog()?;
+                    }
+                    if causes & IMS_RXQ0 != 0 {
+                        continue;
+                    }
+                    // e1000e_poll: the receive cause auto-cleared when the
+                    // vector fired; enable it again now the ring is empty.
+                    self.device.write32(IMS, IMS_RXQ0);
                 }
                 return Ok(None);
             }
@@ -644,6 +725,12 @@ impl Link for E1000e {
         if let Some(tail) = self.receive.idle() {
             fence(Ordering::SeqCst);
             self.device.write32(RDT, tail);
+        }
+        if self.signalled {
+            // Frames stopped at the bound wait with the cause cleared; a
+            // software cause sends it again, as e1000_watchdog_task does.
+            self.device.write32(ICS, IMS_RXQ0);
+            self.device.write32(IMS, IMS_RXQ0);
         }
         Ok(None)
     }
@@ -855,6 +942,17 @@ mod tests {
         }
     }
 
+    /// An empty receive enables the receive cause again, auto-cleared when
+    /// the vector fired.
+    #[test]
+    fn empty_receive_enables_the_receive_cause_again() {
+        let mut fixture = Fixture::new();
+        fixture.net.signalled = true;
+        assert!(fixture.net.signals());
+        assert_eq!(fixture.net.receive(), Ok(None));
+        assert_eq!(fixture.registers[IMS / 4], IMS_RXQ0);
+    }
+
     struct Fixture {
         net: E1000e,
         registers: Vec<u32>,
@@ -883,6 +981,7 @@ mod tests {
                 phy_hangs: 0,
                 faulted: false,
                 location: String::from("model"),
+                signalled: false,
             };
             net.start();
             registers[STATUS / 4] = STATUS_LU;

@@ -65,8 +65,10 @@ impl OwnedConfig {
     /// routing and assignment ownership until the mapping is retired. No other
     /// configuration writer, raw pointer, MappingView, firmware accessor or reset
     /// path may access/change this function concurrently or invalidate the grant.
-    /// All accesses, final releases and retirement obey the platform's process/
-    /// deferred-context rules. A matching physical number alone proves none of
+    /// Accesses may run in an interrupt handler; final releases and
+    /// retirement require process or deferred context, as
+    /// [`MappingPlatform`](crate::bus::mmio::owned::MappingPlatform) sets out.
+    /// A matching physical number alone proves none of
     /// these ownership facts. This grants neither DMA quiescence nor coherency.
     pub unsafe fn attach(
         address: Address,
@@ -275,8 +277,9 @@ impl ConfigSpace for OwnedConfig {
     }
 }
 
-// SAFETY: the attachment grant establishes actual exclusive, retained config
-// access in process/deferred context. write16 is a native volatile word store.
+// SAFETY: the attachment grant establishes exclusive config access for the
+// grant's life, from any context the mapping permits. write16 is a native
+// volatile word store.
 unsafe impl MsiConfigSpace for OwnedConfig {}
 
 #[cfg(test)]

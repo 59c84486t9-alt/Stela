@@ -1,5 +1,7 @@
 //! virtio-net PCI devices (virtio 1.2 section 5.1), as QEMU's
-//! `virtio-net-pci` presents them, as a polled raw Ethernet [`Link`].
+//! `virtio-net-pci` presents them, as a raw Ethernet [`Link`] that sends
+//! the handoff's completion signal for received frames and link changes
+//! when the function has MSI-X.
 //!
 //! The driver negotiates only VERSION_1, MAC and STATUS: no checksum or
 //! segmentation offload, no mergeable receive buffers and no control
@@ -136,6 +138,8 @@ pub struct VirtioNet {
     status: bool,
     clock: Clock,
     pub location: alloc::string::String,
+    /// Whether the device sends the handoff's completion signal.
+    signalled: bool,
 }
 
 impl VirtioNet {
@@ -144,7 +148,10 @@ impl VirtioNet {
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
-        let transport = Modern::new(function, handoff)?;
+        let mut transport = Modern::new(function, handoff)?;
+        if let Some(message) = handoff.completion {
+            transport.signal(function, handoff, message, &[RECEIVE])?;
+        }
         let accepted = transport.negotiate(FEATURE_MAC | FEATURE_STATUS)?;
         if accepted & FEATURE_MAC == 0 {
             return Err(BlockError::Unsupported(
@@ -153,6 +160,7 @@ impl VirtioNet {
         }
         let receive = Queue::new(&transport, handoff, RECEIVE, dma)?;
         let transmit = Queue::new(&transport, handoff, TRANSMIT, dma)?;
+        let signalled = transport.signals();
         let device = transport.device;
         let mac = Mac(core::array::from_fn(|n| device.read8(CONFIG_MAC + n)));
         let mut net = Self {
@@ -165,6 +173,7 @@ impl VirtioNet {
             status: accepted & FEATURE_STATUS != 0,
             clock: handoff.clock,
             location: format!("{}", function.address),
+            signalled,
         };
         transport.ready();
         for id in 0..net.receive.entries {
@@ -240,6 +249,10 @@ impl Link for VirtioNet {
         Ok(())
     }
 
+    fn signals(&self) -> bool {
+        self.signalled
+    }
+
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         self.usable()?;
         loop {
@@ -309,6 +322,7 @@ mod tests {
                         ticks_per_microsecond: 0,
                     },
                     location: "fixture".into(),
+                    signalled: false,
                 },
                 _registers: registers,
                 _memory: memory,

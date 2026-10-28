@@ -41,6 +41,9 @@ impl<L: Link> Link for Located<L> {
     fn carrier(&mut self) -> bool {
         self.link.carrier()
     }
+    fn signals(&self) -> bool {
+        self.link.signals()
+    }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         self.link.transmit(frame)
     }

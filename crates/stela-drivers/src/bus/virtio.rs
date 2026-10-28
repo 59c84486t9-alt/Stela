@@ -1,11 +1,14 @@
 //! The modern (virtio 1.x) PCI transport the virtio drivers share: the
-//! register regions, reset, feature negotiation and split virtqueue setup.
+//! register regions, reset, feature negotiation, split virtqueue setup and
+//! the MSI-X vector the device signals.
 use super::{
     dma::DmaBuffer,
+    irq::MsiMessage,
     mmio::Mmio,
     pci::{self, CAPABILITY_VENDOR, ConfigSpace, Function},
 };
 use crate::{Handoff, block::BlockError, registers};
+use core::cell::Cell;
 
 pub const VENDOR: u16 = 0x1af4;
 
@@ -29,6 +32,8 @@ const QUEUE_DESCRIPTORS: usize = 0x20;
 const QUEUE_DRIVER: usize = 0x28;
 const QUEUE_DEVICE: usize = 0x30;
 const NO_VECTOR: u16 = 0xffff;
+/// An MSI-X table entry's bytes.
+const MSIX_ENTRY_BYTES: u64 = 16;
 
 const ACKNOWLEDGE: u8 = 1;
 const DRIVER: u8 = 2;
@@ -52,6 +57,14 @@ pub(crate) struct Modern {
     common: Mmio,
     pub(crate) device: Mmio,
     notify: (Option<pci::Bar>, u64, u64, u32),
+    bars: [Option<pci::Bar>; 6],
+    /// The MSI-X entry configuration changes and the signalled queues
+    /// send, [`NO_VECTOR`] when the device is polled.
+    vector: u16,
+    /// The queues that send `vector`, one bit each.
+    signalled: u32,
+    /// Set when the device answered a vector write with [`NO_VECTOR`].
+    refused: Cell<bool>,
 }
 
 impl Modern {
@@ -102,7 +115,61 @@ impl Modern {
             common,
             device,
             notify,
+            bars,
+            vector: NO_VECTOR,
+            signalled: 0,
+            refused: Cell::new(false),
         })
+    }
+
+    /// Send `message` from MSI-X entry 0 for configuration changes and for
+    /// the used buffers of `queues`, as Linux's `vp_find_vqs_msix` shares
+    /// vectors, before [`Self::negotiate`] and [`Self::queue`] program them.
+    /// A function without MSI-X stays polled.
+    pub(crate) fn signal(
+        &mut self,
+        function: &mut Function,
+        handoff: &Handoff,
+        message: MsiMessage,
+        queues: &[u16],
+    ) -> Result<(), BlockError> {
+        let Some(msix) = function.interrupts().msix else {
+            return Ok(());
+        };
+        let bar = self
+            .bars
+            .get(usize::from(msix.table_bar))
+            .copied()
+            .flatten();
+        let table = registers(handoff, bar, u64::from(msix.table_offset), MSIX_ENTRY_BYTES)?;
+        function.enable_msix(msix, || {
+            table.write32(0, message.address as u32);
+            table.write32(4, (message.address >> 32) as u32);
+            table.write32(8, message.data);
+            table.write32(12, 0);
+            Ok(())
+        })?;
+        self.vector = 0;
+        self.signalled = queues.iter().fold(0, |mask, &queue| {
+            mask | 1u32.checked_shl(queue.into()).unwrap_or(0)
+        });
+        Ok(())
+    }
+
+    /// Whether the device sends [`Self::signal`]'s message for every event
+    /// it was given.
+    pub(crate) fn signals(&self) -> bool {
+        self.vector != NO_VECTOR && !self.refused.get()
+    }
+
+    /// Writes `vector` to the vector register at `offset`; a device that
+    /// reads back [`NO_VECTOR`] instead refused it (virtio 1.2 section
+    /// 4.1.5.1.2).
+    fn route(&self, offset: usize, vector: u16) {
+        self.common.write16(offset, vector);
+        if vector != NO_VECTOR && self.common.read16(offset) != vector {
+            self.refused.set(true);
+        }
     }
 
     /// Accepts the offered features among `wanted`; VERSION_1 is required.
@@ -129,7 +196,7 @@ impl Modern {
                 "virtio device refused its features",
             ));
         }
-        common.write16(CONFIG_VECTOR, NO_VECTOR);
+        self.route(CONFIG_VECTOR, self.vector);
         Ok(accepted)
     }
 
@@ -151,7 +218,13 @@ impl Modern {
         }
         let entries = entries.min(1 << (15 - maximum.leading_zeros()));
         common.write16(QUEUE_SIZE, entries);
-        common.write16(QUEUE_VECTOR, NO_VECTOR);
+        let signalled = 1u32
+            .checked_shl(index.into())
+            .is_some_and(|bit| self.signalled & bit != 0);
+        self.route(
+            QUEUE_VECTOR,
+            if signalled { self.vector } else { NO_VECTOR },
+        );
         common.write64(QUEUE_DESCRIPTORS, memory.physical());
         common.write64(QUEUE_DRIVER, memory.physical() + AVAIL as u64);
         common.write64(QUEUE_DEVICE, memory.physical() + USED as u64);
@@ -172,5 +245,41 @@ impl Modern {
             DEVICE_STATUS,
             ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+
+    /// A transport over plain memory: every register reads back what was
+    /// written, and the device offers VERSION_1.
+    fn modelled(common: &mut [u64], vector: u16) -> Modern {
+        // SAFETY: the caller owns the memory for the transport's lifetime.
+        let common = unsafe { Mmio::new(common.as_mut_ptr() as u64) };
+        common.write32(DEVICE_FEATURE, 1);
+        Modern {
+            common,
+            device: common,
+            notify: (None, 0, 0, 0),
+            bars: [None; 6],
+            vector,
+            signalled: 0,
+            refused: Cell::new(false),
+        }
+    }
+
+    /// Negotiation sends configuration changes to the signal vector, or to
+    /// none on a polled device.
+    #[test]
+    fn negotiation_routes_configuration_changes_to_the_signal_vector() {
+        for (vector, signals) in [(0, true), (NO_VECTOR, false)] {
+            let mut memory: Box<[u64]> = vec![0u64; 8].into_boxed_slice();
+            let transport = modelled(&mut memory, vector);
+            transport.negotiate(0).unwrap();
+            assert_eq!(transport.common.read16(CONFIG_VECTOR), vector);
+            assert_eq!(transport.signals(), signals);
+        }
     }
 }

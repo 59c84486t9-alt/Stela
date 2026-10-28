@@ -6,6 +6,7 @@ use super::{Bindings, Error, Kind, Pair, Result, Voice, framing};
 use crate::usb::bluetooth::mediatek::{
     coredump::Collector,
     packet::DUMP_HANDLE,
+    reset::{self, Reset},
     wmt::{self, WmtEvent},
 };
 use crate::{
@@ -26,6 +27,20 @@ fn collector<B: Io>(hci: &Hci<B>) -> Option<Collector> {
         _ => None,
     }
 }
+
+/// The device ID of a validated MediaTek initialization.
+fn device_id<B: Io>(hci: &Hci<B>) -> Option<u32> {
+    match hci.initialization() {
+        Some(Ok(InitializationReport::MediaTek(report))) => Some(report.identity.device_id),
+        _ => None,
+    }
+}
+
+/// HCI_CMD_TIMEOUT: hci_cmd_timeout calls hdev->reset once a command other
+/// than HCI Reset goes this long without its completion.
+const CMD_TIMEOUT_US: u64 = 2_000_000;
+const RESET_US: u64 = 5_000_000;
+const HCI_RESET: u16 = 0x0c03;
 
 /// HCI_INIT_TIMEOUT, btmtk_usb_hci_wmt_sync's wait for the WMT event.
 const WMT_TIMEOUT_US: u64 = 10_000_000;
@@ -180,6 +195,14 @@ impl<B: MediaIo> Session<B> {
                 lifecycle: Lifecycle::Running,
             }),
             Err(error) => {
+                if matches!(error, Error::CommandTimeout(opcode) if opcode != HCI_RESET)
+                    && let Some(device_id) = device_id(&hci)
+                {
+                    return Err(Error::Reset {
+                        cause: alloc::boxed::Box::new(error),
+                        reset: alloc::boxed::Box::new(Self::hardware_reset(&mut hci, device_id)),
+                    });
+                }
                 let media = hci.io.close_media().err();
                 let base = hci.close().err();
                 Err(Error::Cleanup {
@@ -189,6 +212,22 @@ impl<B: MediaIo> Session<B> {
                 })
             }
         }
+    }
+    /// btusb_mtk_reset: release the media interfaces, reset the subsystem,
+    /// then close the transport with a queued USB reset.
+    fn hardware_reset(hci: &mut Hci<B>, device_id: u32) -> Reset {
+        let media = hci.io.close_media().err();
+        reset::run(hci, device_id, media)
+    }
+    /// `hdev->reset` (btmtk_reset_sync), for the caller's HCI core once a
+    /// command it sent outlives HCI_CMD_TIMEOUT. This session fails, and the
+    /// USB topology owner reports the device removed and binds a fresh one.
+    pub fn reset_controller(&mut self) -> Result<Reset> {
+        self.hci.io.validate()?;
+        let device_id =
+            device_id(&self.hci).ok_or(Error::Unsupported("MediaTek controller reset"))?;
+        self.lifecycle = Lifecycle::Failed;
+        Ok(Self::hardware_reset(&mut self.hci, device_id))
     }
     pub(in crate::usb::bluetooth) fn start_realtek(hci: Hci<B>) -> Result<Self> {
         Self::start_standard(hci, true)
@@ -283,7 +322,12 @@ impl<B: MediaIo> Session<B> {
     ) -> Result<SetupReport> {
         let opcode = u16::from_le_bytes([packet[0], packet[1]]);
         hci.submit_command(packet).map_err(Error::Hci)?;
-        let deadline = hci.io.now_us().saturating_add(5_000_000);
+        let timeout = if opcode == HCI_RESET {
+            RESET_US
+        } else {
+            CMD_TIMEOUT_US
+        };
+        let deadline = hci.io.now_us().saturating_add(timeout);
         let mut bytes: usize = pending
             .iter()
             .map(|p| match p {
@@ -350,7 +394,7 @@ impl<B: MediaIo> Session<B> {
                 }
             }
             if hci.io.now_us() >= deadline {
-                return Err(Error::Transport(BlockError::Timeout));
+                return Err(Error::CommandTimeout(opcode));
             }
             if completion.is_none() {
                 crate::waiting();
@@ -585,8 +629,16 @@ impl<B: MediaIo> Session<B> {
                     ended = collector.feed(frame, now);
                 }
             }
+            // btmtk_coredump_notify resets the controller once a dump ends.
             if let Some(dump) = ended {
-                return Err(self.fail(Error::ControllerDump(alloc::boxed::Box::new(dump))));
+                let device_id = device_id(&self.hci).expect("MediaTek dump collector");
+                self.lifecycle = Lifecycle::Failed;
+                return Err(Error::Reset {
+                    cause: alloc::boxed::Box::new(Error::ControllerDump(alloc::boxed::Box::new(
+                        dump,
+                    ))),
+                    reset: alloc::boxed::Box::new(Self::hardware_reset(&mut self.hci, device_id)),
+                });
             }
         }
         for kind in [Kind::Iso, Kind::Sco] {

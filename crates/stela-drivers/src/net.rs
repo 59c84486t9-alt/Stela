@@ -79,4 +79,11 @@ pub trait Link {
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError>;
     /// One frame the adapter received, if any, without blocking.
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError>;
+    /// Whether the adapter sends its host's completion signal
+    /// ([`crate::Handoff::completion`]) when a frame arrives or its link
+    /// changes, waking the core that looks for frames, after
+    /// [`Self::receive`] found none.
+    fn signals(&self) -> bool {
+        false
+    }
 }
