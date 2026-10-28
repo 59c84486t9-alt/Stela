@@ -1222,6 +1222,36 @@ pub(crate) fn in_interrupt() -> bool {
     local::irq_active()
 }
 
+/// Sleep until an interrupt, at most `micros`: a completion signal, the
+/// engine's own timer or this one-shot. The engine's armed one-shot count
+/// is put back less the time slept; a periodic or TSC-deadline timer, or a
+/// timer not yet measured, leaves the caller to poll.
+pub(crate) fn sleep_for(micros: u64) {
+    const MASKED: u32 = 1 << 16;
+    const MODE: u32 = 3 << 17;
+    let state = state();
+    let lvt = state.apic.read(apic::LVT_TIMER);
+    if state.apic_hz == 0 || micros == 0 || lvt & MODE != 0 {
+        return;
+    }
+    let remaining = state.apic.read(apic::CURRENT);
+    let armed = lvt & MASKED == 0 && remaining != 0;
+    let ticks = (u128::from(micros) * u128::from(state.apic_hz) / 1_000_000)
+        .clamp(1, u128::from(u32::MAX)) as u32;
+    let ticks = if armed { ticks.min(remaining) } else { ticks };
+    state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
+    state.apic.write(apic::INITIAL, ticks);
+    // SAFETY: STI's interrupt shadow covers HLT, so no wake-up is lost.
+    unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    let slept = ticks - state.apic.read(apic::CURRENT);
+    state.apic.write(apic::LVT_TIMER, lvt);
+    // A count that ran out during the sleep fires at once.
+    state.apic.write(
+        apic::INITIAL,
+        if armed { (remaining - slept).max(1) } else { 0 },
+    );
+}
+
 pub(crate) fn completion_signal(id: u64) -> Option<stela_drivers::bus::irq::MsiMessage> {
     (id < 255).then(|| stela_drivers::bus::irq::MsiMessage {
         address: 0xfee0_0000 | id << 12,
