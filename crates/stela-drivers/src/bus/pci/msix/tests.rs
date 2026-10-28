@@ -666,12 +666,21 @@ mod allocation {
 }
 
 #[test]
-fn actual_metadata_allocation_refusal_is_immutable_and_legacy_path_allocates_nothing() {
+fn metadata_allocation_failure() {
     const CHILD: &str = "STELA_MSIX_ALLOCATION_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        assert!(std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "bus::pci::msix::tests::actual_metadata_allocation_refusal_is_immutable_and_legacy_path_allocates_nothing"])
-            .env(CHILD, "1").env("RUST_TEST_THREADS", "1").status().unwrap().success());
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "bus::pci::msix::tests::metadata_allocation_failure"
+                ])
+                .env(CHILD, "1")
+                .env("RUST_TEST_THREADS", "1")
+                .status()
+                .unwrap()
+                .success()
+        );
         return;
     }
     let (mut owner, m) = attach(fixture(2048));

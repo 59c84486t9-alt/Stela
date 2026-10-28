@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn legacy_wrappers_match_complete_original_owner_access_traces() {
+fn legacy_trace_parity() {
     for vectors in [1, 2, 65, 2048] {
         let (mut owner, m) = attach(fixture(vectors));
         let f = fixture(vectors);
@@ -63,7 +63,7 @@ fn legacy_wrappers_match_complete_original_owner_access_traces() {
 }
 
 #[test]
-fn indexed_sparse_boundary_payloads_and_simultaneous_pending_delivery() {
+fn sparse_indices_and_pending_delivery() {
     for vectors in [1, 2, 65, 66, 2048] {
         let (mut owner, m) = attach(fixture(vectors));
         let mut indices: Vec<u16> = [0, 1, 63, 64, 65, 2047]
@@ -134,7 +134,7 @@ fn indexed_sparse_boundary_payloads_and_simultaneous_pending_delivery() {
 }
 
 #[test]
-fn indexed_program_preserves_live_peers_and_real_pending_bits() {
+fn live_peer_preservation() {
     let (mut owner, m) = attach(fixture(66));
     for index in [0, 63, 64] {
         unsafe { owner.program_indexed(index, message(index)) }.unwrap();
@@ -190,7 +190,7 @@ fn indexed_program_preserves_live_peers_and_real_pending_bits() {
 }
 
 #[test]
-fn mixed_legacy_calls_invalidate_nonzero_replay_without_reviving_old_routes() {
+fn legacy_calls_invalidate_indexed_replay() {
     for use_program in [false, true] {
         let (mut owner, m) = attach(fixture(65));
         for index in [0, 64] {
@@ -221,7 +221,7 @@ fn mixed_legacy_calls_invalidate_nonzero_replay_without_reviving_old_routes() {
 }
 
 #[test]
-fn invalid_index_selection_message_and_offset_leave_valid_state_unchanged() {
+fn invalid_selection_is_transactional() {
     let (mut owner, m) = attach(fixture(65));
     for index in [0, 64] {
         unsafe { owner.program_indexed(index, message(index)) }.unwrap();
@@ -282,7 +282,7 @@ fn invalid_index_selection_message_and_offset_leave_valid_state_unchanged() {
 }
 
 #[test]
-fn every_indexed_access_failure_before_or_after_effect_poisons_all_entries() {
+fn indexed_access_failure_quarantines() {
     let (mut baseline, m) = attach(fixture(3));
     for index in 0..3 {
         m.lock().unwrap().publish(index);
@@ -336,7 +336,7 @@ fn every_indexed_access_failure_before_or_after_effect_poisons_all_entries() {
 }
 
 #[test]
-fn selected_message_and_peer_corruption_never_reopen_the_global_guard() {
+fn peer_corruption_blocks_global_unmask() {
     for corrupt_peer in [false, true] {
         let (mut owner, m) = attach(fixture(3));
         for index in 0..3 {
@@ -368,7 +368,7 @@ fn selected_message_and_peer_corruption_never_reopen_the_global_guard() {
 }
 
 #[test]
-fn indexed_layout_identity_control_and_peer_mask_changes_quarantine_one_owner() {
+fn changed_layout_quarantines() {
     for case in 0..7 {
         let f = fixture(3);
         let drops = [
@@ -413,7 +413,7 @@ fn indexed_layout_identity_control_and_peer_mask_changes_quarantine_one_owner() 
 }
 
 #[test]
-fn legacy_vector_zero_has_independently_stated_literal_access_order() {
+fn vector_zero_literal_trace() {
     // Exact immutable fixture layout: one 64-bit BAR, table/PBA in BAR0, one
     // capability. This sequence comes from the source contract, not new helpers.
     let discovery = [
@@ -477,7 +477,7 @@ fn legacy_vector_zero_has_independently_stated_literal_access_order() {
 }
 
 #[test]
-fn missing_legacy_zero_preflight_preserves_nonzero_live_replay() {
+fn missing_zero_preflight_preserves_peer() {
     let (mut owner, m) = attach(fixture(65));
     unsafe { owner.program_indexed(64, message(64)) }.unwrap();
     m.lock().unwrap().publish(64);

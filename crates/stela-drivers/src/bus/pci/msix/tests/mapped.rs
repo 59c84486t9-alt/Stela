@@ -3,14 +3,22 @@
 use super::*;
 
 #[test]
-fn native_mapped_bar_uses_owned_uc_windows_and_actual_volatile_words() {
+fn owned_mapping_windows() {
     // The real authority is a boot singleton. Exercise actual owned mappings in
     // an isolated process, independently of other registry activation tests.
     const CHILD: &str = "STELA_MSIX_MAPPED_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        assert!(std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "bus::pci::msix::tests::mapped::native_mapped_bar_uses_owned_uc_windows_and_actual_volatile_words"])
-            .env(CHILD,"1").status().unwrap().success());
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "bus::pci::msix::tests::mapped::owned_mapping_windows"
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap()
+                .success()
+        );
         return;
     }
     use crate::bus::mmio::owned::{
@@ -176,7 +184,7 @@ fn native_mapped_bar_uses_owned_uc_windows_and_actual_volatile_words() {
 }
 
 #[test]
-fn actual_32_and_64_bit_bars_with_separate_pending_arrays() {
+fn separate_pending_bar_layouts() {
     for wide in [false, true] {
         let mut f = fixture(65);
         let base = if wide { BASE } else { 0x4000_0000 };
@@ -206,7 +214,7 @@ fn actual_32_and_64_bit_bars_with_separate_pending_arrays() {
 }
 
 #[test]
-fn actual_bar_relocation_never_accesses_old_table_or_revives_authority() {
+fn relocated_bar_rejects_stale_access() {
     let (mut owner, m) = attach(fixture(2));
     unsafe { owner.program(MESSAGE) }.unwrap();
     m.lock().unwrap().put(0x10, 4, (BASE as u32 + 0x10000) | 4);

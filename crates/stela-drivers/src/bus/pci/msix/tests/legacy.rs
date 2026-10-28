@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_enable_mask_program_order_and_one_real_pending_delivery() {
+fn enable_order_and_pending_delivery() {
     for vectors in [1, 2, 65, 2048] {
         let (mut owner, m) = attach(fixture(vectors));
         unsafe { owner.program(MESSAGE) }.unwrap();
@@ -36,7 +36,7 @@ fn actual_enable_mask_program_order_and_one_real_pending_delivery() {
 }
 
 #[test]
-fn errors_return_real_owners_before_any_writes_and_reject_malformed_extents() {
+fn invalid_extents_return_owners() {
     for case in 0..12 {
         let f = fixture(2);
         {
@@ -82,7 +82,7 @@ fn errors_return_real_owners_before_any_writes_and_reject_malformed_extents() {
 }
 
 #[test]
-fn every_failed_access_retains_actual_owners_and_prevents_replay() {
+fn failed_access_poisoning() {
     let (mut baseline, m) = attach(fixture(2));
     m.lock().unwrap().callback_published = true;
     unsafe { baseline.program(MESSAGE) }.unwrap();
@@ -127,7 +127,7 @@ fn every_failed_access_retains_actual_owners_and_prevents_replay() {
 }
 
 #[test]
-fn changed_hardware_message_and_capability_cannot_be_unmasked() {
+fn changed_message_blocks_unmask() {
     let (mut owner, m) = attach(fixture(2));
     assert_eq!(unsafe { owner.unmask() }, Err(Error::NotProgrammed));
     assert_eq!(
