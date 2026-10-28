@@ -75,6 +75,12 @@ pub unsafe trait NativeServices {
     /// Pages for driver DMA rings and buffers, for the rest of the boot.
     fn pages(&self) -> &'static dyn PageSource;
 
+    /// An owned cryptographic source for authentication nonces. The handle
+    /// outlives probe; a platform without trusted entropy reports unavailable.
+    fn entropy(&self) -> Result<Arc<dyn crate::entropy::Entropy>, ServiceError> {
+        Err(ServiceError::Unavailable)
+    }
+
     /// The interrupt controller that routes MSIs to the probing CPU, for
     /// drivers that need a delivered interrupt, such as Intel's ISH.
     fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError>;
@@ -212,6 +218,8 @@ pub(crate) mod tests {
             Some(ServiceError::Unavailable)
         );
         assert_eq!(*services.requests.borrow(), [address]);
+        assert!(matches!(services.entropy(), Err(ServiceError::Unavailable)));
+
         assert_eq!(
             alloc::format!(
                 "{}",
