@@ -20,7 +20,7 @@ use stela_drivers::{
     block::BlockDevice,
     bus::{
         dma::RegionAllocator,
-        pci::{Bar, Function},
+        pci::{self, Bar, Function},
     },
     probe::probe,
 };
@@ -30,7 +30,10 @@ use stela_runtime::pc::{
 };
 use uefi::{
     boot::{self, AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, Tpl},
-    proto::nvme::{NvmeQueueType, NvmeRequestBuilder, pass_thru::NvmePassThru},
+    proto::{
+        nvme::{NvmeQueueType, NvmeRequestBuilder, pass_thru::NvmePassThru},
+        pci::{configuration::ResourceRangeType, root_bridge::PciRootBridgeIo},
+    },
     table::cfg::ConfigTableEntry,
 };
 
@@ -129,6 +132,41 @@ fn host_memory_pages() -> usize {
     handles.iter().copied().filter_map(required).sum()
 }
 
+/// The host bridges: each root bridge's segment and bus range, as the
+/// firmware decodes them, its `_CRS` bus-number descriptor (Linux reads the
+/// same from the PNP0A08 device's AML; the firmware's root bridge protocol
+/// reports it before boot services end, when the engine cannot run AML).
+fn root_bridges() -> Vec<(u16, core::ops::RangeInclusive<u8>)> {
+    let Ok(handles) = boot::find_handles::<PciRootBridgeIo>() else {
+        return Vec::new();
+    };
+    let bridge = |handle| {
+        // SAFETY: a read of its configuration while boot services run; the
+        // firmware keeps the root bridge.
+        let bridge = unsafe {
+            boot::open_protocol::<PciRootBridgeIo>(
+                OpenProtocolParams {
+                    handle,
+                    agent: boot::image_handle(),
+                    controller: None,
+                },
+                OpenProtocolAttributes::GetProtocol,
+            )
+        }
+        .ok()?;
+        let segment = u16::try_from(bridge.segment_nr()).ok()?;
+        let buses = bridge
+            .configuration()
+            .ok()?
+            .into_iter()
+            .find(|descriptor| descriptor.resource_range_type == ResourceRangeType::Bus)?;
+        let first = u8::try_from(buses.address_min).ok()?;
+        let last = u8::try_from(buses.address_max).unwrap_or(u8::MAX);
+        (first <= last).then_some((segment, first..=last))
+    };
+    handles.iter().copied().filter_map(bridge).collect()
+}
+
 /// What the storage drivers need after ExitBootServices: the ECAM windows,
 /// DMA pages below 4 GiB, the TSC rate and every range to map uncached.
 /// Runs before ExitBootServices.
@@ -136,7 +174,29 @@ pub fn discover() -> Result<Handoff, &'static str> {
     let rsdp = rsdp().ok_or("firmware has no ACPI tables")?;
     // SAFETY: the firmware's RSDP, its tables mapped while boot services last.
     let mcfg = unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| "no valid ACPI MCFG table")?;
-    let ecam = acpi::mcfg(mcfg).map_err(|_| "invalid ACPI MCFG table")?;
+    let mcfg = acpi::mcfg(mcfg).map_err(|_| "invalid ACPI MCFG table")?;
+    let bridges = root_bridges();
+    let ecam = if bridges.is_empty() {
+        output::arguments(format_args!(
+            "UNSUPPORTED PCI root bridges unknown: each MCFG window is scanned from its first bus alone\n"
+        ));
+        mcfg
+    } else {
+        let rooted = pci::rooted(&mcfg, &bridges);
+        for (segment, buses) in &bridges {
+            if !rooted
+                .iter()
+                .any(|window| window.segment == *segment && window.start_bus == *buses.start())
+            {
+                output::arguments(format_args!(
+                    "UNSUPPORTED PCI root bridge {segment:04x}:{:02x}-{:02x} outside every MCFG window: not scanned\n",
+                    buses.start(),
+                    buses.end()
+                ));
+            }
+        }
+        rooted
+    };
     let allocate = |pages| {
         boot::allocate_pages(
             AllocateType::MaxAddress(0xffff_ffff),

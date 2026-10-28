@@ -6,7 +6,10 @@
 use super::mmio::Mmio;
 use crate::{Clock, block::BlockError};
 use alloc::vec::Vec;
-use core::{fmt, ops::Range};
+use core::{
+    fmt,
+    ops::{Range, RangeInclusive},
+};
 
 mod aspm;
 pub mod msi;
@@ -577,11 +580,13 @@ impl<C: ConfigSpace> Function<C> {
 }
 
 impl Function {
-    /// Every present function in `window`, bus by bus. Each bus is scanned
-    /// as the bridge above it allows, as Linux's `pci_scan_child_bus` does:
-    /// one device below a PCI Express port, its ARI functions where the
-    /// port forwards ARI. A function still initializing (Vendor ID 0x0001)
-    /// is not returned.
+    /// Every present function below `window`'s root bus, its first bus: the
+    /// root bus, then each bus a bridge leads to, as Linux's
+    /// `pci_scan_child_bus` descends. A bus no bridge leads to holds no
+    /// function, as the window is one host bridge's ([`rooted`]). Each bus is
+    /// scanned as the bridge above it allows: one device below a PCI Express
+    /// port, its ARI functions where the port forwards ARI. A function still
+    /// initializing (Vendor ID 0x0001) is not returned.
     ///
     /// # Safety
     ///
@@ -604,11 +609,15 @@ impl Function {
             };
             (address, config)
         };
-        let mut scans = [BusScan::All; 256];
+        let mut scans = [None; 256];
+        scans[usize::from(window.start_bus)] = Some(BusScan::All);
         let mut functions = Vec::new();
         for bus in window.start_bus..=window.end_bus {
+            let Some(scan) = scans[usize::from(bus)] else {
+                continue;
+            };
             let first = functions.len();
-            match scans[usize::from(bus)] {
+            match scan {
                 BusScan::Ari => {
                     // Functions 0-255 of device 0, each naming the next.
                     let mut number = 0u8;
@@ -649,12 +658,33 @@ impl Function {
                 if let Some((secondary, scan)) = bridge.secondary()
                     && secondary > bus
                 {
-                    scans[usize::from(secondary)] = scan;
+                    scans[usize::from(secondary)] = Some(scan);
                 }
             }
         }
         functions
     }
+}
+
+/// The MCFG's windows narrowed to host bridges: for each root bridge, given
+/// as its segment and its bus range (the bus-number descriptor of its
+/// `_CRS`), the part of its segment's window that decodes the range, from
+/// its root bus. Bridges no window decodes are left out.
+pub fn rooted(windows: &[EcamWindow], bridges: &[(u16, RangeInclusive<u8>)]) -> Vec<EcamWindow> {
+    bridges
+        .iter()
+        .filter_map(|(segment, buses)| {
+            let window = windows.iter().find(|window| {
+                window.segment == *segment
+                    && (window.start_bus..=window.end_bus).contains(buses.start())
+            })?;
+            Some(EcamWindow {
+                start_bus: *buses.start(),
+                end_bus: window.end_bus.min(*buses.end()),
+                ..*window
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1105,6 +1135,42 @@ mod tests {
         ecam.present(1, 0, 0, 0);
         ecam.present(1, 5, 0, 0);
         assert_eq!(ecam.found(), [(0, 1, 0), (1, 0, 0), (1, 5, 0)]);
+    }
+
+    #[test]
+    fn a_bus_no_bridge_leads_to_is_not_scanned() {
+        let mut ecam = Ecam::new();
+        ecam.present(0, 3, 0, 0);
+        // Bus 1 answers, but nothing on the root bus leads to it.
+        ecam.present(1, 0, 0, 0);
+        assert_eq!(ecam.found(), [(0, 3, 0)]);
+    }
+
+    #[test]
+    fn windows_narrow_to_each_root_bridge_from_its_root_bus() {
+        let window = |segment, start_bus, end_bus| EcamWindow {
+            base: 0xe000_0000,
+            segment,
+            start_bus,
+            end_bus,
+        };
+        let mcfg = [window(0, 0, 0xff), window(1, 0, 0x3f)];
+        assert_eq!(
+            rooted(
+                &mcfg,
+                &[
+                    (0, 0..=0x7f),
+                    (0, 0x80..=0xff),
+                    (1, 0x10..=0xff),
+                    (2, 0..=0xff)
+                ]
+            ),
+            [
+                window(0, 0, 0x7f),
+                window(0, 0x80, 0xff),
+                window(1, 0x10, 0x3f)
+            ]
+        );
     }
 
     #[test]
