@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn hsw_bdw_pch_word_snoop_preserves_device_status_and_tcsel_neighbors_after_d3hot() {
+fn hsw_bdw_snoop_preserves_status() {
     for device in [0x8c20, 0x8ca0, 0x8d20, 0x8d21, 0x9c20, 0x9c21, 0x9ca0] {
         for (version, kind) in [(1, 9), (2, 9), (1, 0), (2, 0)] {
             let (mut function, timer, bar) = pch_fixture(device, version, kind);
@@ -42,7 +42,7 @@ fn hsw_bdw_pch_word_snoop_preserves_device_status_and_tcsel_neighbors_after_d3ho
 }
 
 #[test]
-fn remaining_legacy_pch_profiles_prepare_with_exact_word_snoop_and_global_tags() {
+fn legacy_snoop_uses_global_tags() {
     for device in [
         0x1c20, 0x1d20, 0x1e20, 0x3b56, 0x3b57, 0x811b, 0x080a, 0x0f04, 0x2284,
     ] {
@@ -65,7 +65,7 @@ fn remaining_legacy_pch_profiles_prepare_with_exact_word_snoop_and_global_tags()
 }
 
 #[test]
-fn lewisburg_requires_mapped_ownership_and_separate_tags_without_skl_reset() {
+fn lewisburg_uses_separate_tags() {
     for &device in INTEL_LBG_IDS {
         let (mut function, timer, bar) = modern_pci_model_for(device);
         assert_eq!(
@@ -101,7 +101,7 @@ fn lewisburg_requires_mapped_ownership_and_separate_tags_without_skl_reset() {
 }
 
 #[test]
-fn pch_snoop_capability_ownership_rejects_unrelated_headers_bodies_and_wrong_pcie_layout() {
+fn malformed_snoop_capabilities_rejected() {
     for variant in 0..11 {
         let (mut function, timer, bar) = pch_fixture(0x8c20, 2, 9);
         match variant {
@@ -164,7 +164,7 @@ fn pch_snoop_capability_ownership_rejects_unrelated_headers_bodies_and_wrong_pci
 }
 
 #[test]
-fn pch_snoop_control_failures_refuse_and_attempt_cleanup_after_the_failed_word_access() {
+fn snoop_failure_attempts_cleanup() {
     for variant in 0..3 {
         let (mut function, timer, bar) = pch_fixture(0x9ca0, 2, 9);
         match variant {
@@ -214,7 +214,7 @@ fn pch_snoop_control_failures_refuse_and_attempt_cleanup_after_the_failed_word_a
 }
 
 #[test]
-fn pch_dsp_and_selectable_classes_refuse_before_writes_and_unimplemented_intel_stays_unknown() {
+fn dsp_and_unknown_profiles_rejected() {
     for (class, stale_enumeration) in [
         ([4, 1, 0], false),
         ([4, 3, 0x80], false),

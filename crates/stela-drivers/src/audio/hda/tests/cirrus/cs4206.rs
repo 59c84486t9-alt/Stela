@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn cs4206_and_4207_source_errata_shared_pin_coefficients_adc_index_and_real_duplex_pcm() {
+fn startup_errata_and_duplex() {
     for id in [0x1013_4206, 0x1013_4207] {
         for shared in 0..8 {
             let mut fixture = Fixture::new();
@@ -131,7 +131,7 @@ fn cs4206_and_4207_source_errata_shared_pin_coefficients_adc_index_and_real_dupl
 }
 
 #[test]
-fn cirrus_unknown_layout_missing_processing_digital_power_or_shared_pin_refuses_before_effects() {
+fn unsupported_layout_rejected() {
     for fault in 0..8 {
         let mut fixture = Fixture::new();
         let model = device(0x1013_4206, 7);
@@ -179,7 +179,7 @@ fn cirrus_unknown_layout_missing_processing_digital_power_or_shared_pin_refuses_
 }
 
 #[test]
-fn cirrus_errata_processing_index_final_coefficient_and_lost_ack_failures_retain_owner() {
+fn startup_failure_retains_owner() {
     for fault in 0..7 {
         let mut fixture = Fixture::new();
         let model = device(0x1013_4207, 7);
@@ -238,7 +238,7 @@ fn cirrus_errata_processing_index_final_coefficient_and_lost_ack_failures_retain
 }
 
 #[test]
-fn cirrus_live_default_processing_coefficient_and_identity_loss_quarantine_existing_routes() {
+fn live_state_drift_quarantines_routes() {
     for fault in 0..5 {
         let mut fixture = Fixture::new();
         let model = device(0x1013_4206, 7);
@@ -294,7 +294,7 @@ fn cirrus_live_default_processing_coefficient_and_identity_loss_quarantine_exist
 }
 
 #[test]
-fn cirrus_shutdown_awaits_actual_stream_stop_and_quiet_failure_still_retires_dma() {
+fn shutdown_failure_still_stops_dma() {
     for stream_failure in [false, true] {
         let mut fixture = Fixture::new();
         let model = device(0x1013_4207, 0);
@@ -345,7 +345,7 @@ fn cirrus_shutdown_awaits_actual_stream_stop_and_quiet_failure_still_retires_dma
 }
 
 #[test]
-fn cirrus_and_other_vendor_backends_cannot_replace_a_retained_codec_address() {
+fn vendor_owners_are_exclusive() {
     for (initial, target) in [(0, 1), (0, 2), (0, 3), (1, 0), (2, 0)] {
         let mut fixture = Fixture::new();
         let model = device(0x1013_4206, 0);

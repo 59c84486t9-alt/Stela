@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn conexant_headset_cold_trim_bias_real_routes_and_duplex_pcm() {
+fn cold_trim_and_duplex() {
     for id in [0x14f1_1f86, 0x14f1_1f87] {
         for present in [false, true] {
             let mut fixture = Fixture::new();
@@ -130,7 +130,7 @@ fn conexant_headset_cold_trim_bias_real_routes_and_duplex_pcm() {
 }
 
 #[test]
-fn conexant_headset_poll_preserves_type_precedence_and_source_bias_on_headphone_only() {
+fn headphone_detection_precedence() {
     for (raw, kind) in [
         (0, ConexantHeadsetKind::Headphone),
         (0x400, ConexantHeadsetKind::Omtp),
@@ -174,7 +174,7 @@ fn conexant_headset_poll_preserves_type_precedence_and_source_bias_on_headphone_
 }
 
 #[test]
-fn conexant_headset_incomplete_detection_and_readback_failures_hold_owned_routes() {
+fn detection_failure_retains_routes() {
     for fault in 0..6 {
         let mut fixture = Fixture::new();
         let model = headset_device(0x14f1_1f86, true);
@@ -244,7 +244,7 @@ fn conexant_headset_incomplete_detection_and_readback_failures_hold_owned_routes
 }
 
 #[test]
-fn conexant_headset_cold_failures_and_missing_actual_controls_refuse_without_false_readiness() {
+fn cold_failure_blocks_readiness() {
     for fault in 0..6 {
         let mut fixture = Fixture::new();
         let model = headset_device(0x14f1_1f87, true);

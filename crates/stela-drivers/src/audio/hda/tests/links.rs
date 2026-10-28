@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn extended_link_prefers_supported_clocks_and_preserves_other_link_and_capability_state() {
+fn clock_selection_preserves_other_links() {
     for (frequencies, expected) in [
         (0x3f, 2u8),
         (0x3b, 3),
@@ -64,8 +64,7 @@ fn extended_link_prefers_supported_clocks_and_preserves_other_link_and_capabilit
 }
 
 #[test]
-fn extended_preflight_refuses_active_processing_malformed_bodies_and_unmapped_caps_before_dma_or_writes()
- {
+fn invalid_link_preflight() {
     for variant in 0..17 {
         let mut fixture = Fixture::new();
         let model = extended_model();
@@ -111,7 +110,7 @@ fn extended_preflight_refuses_active_processing_malformed_bodies_and_unmapped_ca
 }
 
 #[test]
-fn extended_link_power_clock_and_failed_reads_refuse_constructor_and_attempt_link_restore() {
+fn link_failure_restores_power() {
     for variant in 0..9 {
         let mut fixture = Fixture::new();
         let model = extended_model();
@@ -191,8 +190,7 @@ fn extended_link_power_clock_and_failed_reads_refuse_constructor_and_attempt_lin
 }
 
 #[test]
-fn processing_ownership_change_refuses_reset_and_shutdown_without_touching_active_dsp_or_retiring_dma()
- {
+fn dsp_ownership_blocks_reset_and_shutdown() {
     let mut fixture = Fixture::new();
     let model = extended_model();
     let (mut function, state) = reset_pci(&model);
@@ -235,8 +233,7 @@ fn processing_ownership_change_refuses_reset_and_shutdown_without_touching_activ
 }
 
 #[test]
-fn configured_nonzero_link_clock_is_preserved_and_failed_reinitialization_never_exposes_stale_clock_metadata()
- {
+fn failed_reinitialize_stales_link_clock() {
     for initially_on in [false, true] {
         let mut fixture = Fixture::new();
         let model = extended_model();

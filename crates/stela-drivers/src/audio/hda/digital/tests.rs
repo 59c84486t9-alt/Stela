@@ -299,7 +299,7 @@ fn pcm(rate: u32, bits: u8, channels: u8) -> PcmFormat {
 }
 
 #[test]
-fn native_single_entry_discovery_eld_and_per_descriptor_pcm_intersection() {
+fn single_entry_pcm_capabilities() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     let mut pins = controller.discover_digital_pins(0).unwrap();
@@ -368,7 +368,7 @@ fn native_single_entry_discovery_eld_and_per_descriptor_pcm_intersection() {
 }
 
 #[test]
-fn native_nvidia_mst_entries_use_fresh_connections_and_restore_nonzero_selector() {
+fn mst_connections_restore_selector() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     {
@@ -417,7 +417,7 @@ fn native_nvidia_mst_entries_use_fresh_connections_and_restore_nonzero_selector(
 }
 
 #[test]
-fn native_rejects_non_display_pins_and_unsupported_audio_paths() {
+fn unsupported_audio_paths() {
     for (parameter, value) in [(9, 0x0040_0100), (0x0c, 0x10), (0x0c, 0x0100_0080)] {
         let mut ram = Ram::new();
         let (mut controller, peer) = controller(&mut ram);
@@ -442,7 +442,7 @@ fn native_rejects_non_display_pins_and_unsupported_audio_paths() {
 }
 
 #[test]
-fn native_size_bounds_and_full_256_byte_acquisition() {
+fn eld_acquisition_bounds() {
     for size in [0, 19, 257, u32::MAX] {
         let mut ram = Ram::new();
         let (mut controller, peer) = controller(&mut ram);
@@ -485,7 +485,7 @@ fn native_size_bounds_and_full_256_byte_acquisition() {
 }
 
 #[test]
-fn native_malformed_eld_never_publishes_capabilities() {
+fn malformed_eld_rejected() {
     for (index, value, expected) in [
         (0, 8, DigitalError::UnsupportedEldVersion(1)),
         (4, 17, DigitalError::InvalidEld),
@@ -505,7 +505,7 @@ fn native_malformed_eld_never_publishes_capabilities() {
 }
 
 #[test]
-fn native_zero_speakers_partial_and_compressed_sads_never_inflate_pcm() {
+fn sad_capabilities_are_not_combined() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     let mut pins = controller.discover_digital_pins(0).unwrap();
@@ -542,7 +542,7 @@ fn native_zero_speakers_partial_and_compressed_sads_never_inflate_pcm() {
 }
 
 #[test]
-fn native_retryable_sink_changes_clear_prior_success() {
+fn sink_change_invalidates_session() {
     for fault in 0..7 {
         let mut ram = Ram::new();
         let (mut controller, peer) = controller(&mut ram);
@@ -578,7 +578,7 @@ fn native_retryable_sink_changes_clear_prior_success() {
 }
 
 #[test]
-fn native_transport_faults_fall_back_to_single_commands_like_azx_rirb_get_response() {
+fn transport_falls_back_to_single_commands() {
     for fault in 0..3 {
         let mut ram = Ram::new();
         let (mut controller, peer) = controller(&mut ram);
@@ -610,7 +610,7 @@ fn native_transport_faults_fall_back_to_single_commands_like_azx_rirb_get_respon
 }
 
 #[test]
-fn native_actual_reset_and_shutdown_invalidate_sessions_before_mmio() {
+fn reset_invalidates_sessions() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     let mut pins = controller.discover_digital_pins(0).unwrap();
@@ -642,7 +642,7 @@ fn native_actual_reset_and_shutdown_invalidate_sessions_before_mmio() {
 }
 
 #[test]
-fn native_mst_dynamic_shrink_and_selector_restore_failures_retain_owner() {
+fn mst_shrink_quarantines_owner() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     peer.borrow_mut().count = 2;
@@ -683,7 +683,7 @@ fn native_mst_dynamic_shrink_and_selector_restore_failures_retain_owner() {
 }
 
 #[test]
-fn native_mst_failed_acquisition_restores_and_live_shrink_never_sets_invalid_entry() {
+fn failed_acquisition_restores_selector() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     {
@@ -713,7 +713,7 @@ fn native_mst_failed_acquisition_restores_and_live_shrink_never_sets_invalid_ent
 }
 
 #[test]
-fn native_connection_change_and_actual_link_budget_refuse_pcm() {
+fn changed_connection_rejects_pcm() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     let mut pins = controller.discover_digital_pins(0).unwrap();
@@ -732,7 +732,7 @@ fn native_connection_change_and_actual_link_budget_refuse_pcm() {
 }
 
 #[test]
-fn native_masked_device_count_uses_both_fresh_entries_and_restores_selector() {
+fn masked_device_count_refreshes_entries() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     {
@@ -773,7 +773,7 @@ fn native_masked_device_count_uses_both_fresh_entries_and_restores_selector() {
 }
 
 #[test]
-fn native_device_count_masks_low_field_boundaries_without_wrapping() {
+fn device_count_boundaries() {
     for (response, count) in [(0, 1), (63, 64), (0xa500_0000, 1), (0xa500_003f, 64)] {
         let mut ram = Ram::new();
         let (mut controller, peer) = controller(&mut ram);
@@ -787,7 +787,7 @@ fn native_device_count_masks_low_field_boundaries_without_wrapping() {
 }
 
 #[test]
-fn native_all_ones_device_count_refuses_before_selector_publication() {
+fn failed_device_count_rejected() {
     let mut ram = Ram::new();
     let (mut controller, peer) = controller(&mut ram);
     {
@@ -856,7 +856,7 @@ unsafe impl super::super::hdmi::DisplayAudioPort for LegacyDisplayPeer {
 }
 
 #[test]
-fn native_legacy_attachment_excludes_saved_digital_sessions_until_actual_detach() {
+fn legacy_port_excludes_sessions() {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 

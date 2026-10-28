@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn conexant_live_eapd_inventory_uses_actual_pin_count_and_whole_global_value() {
+fn eapd_inventory() {
     for count in 0..=4 {
         let mut fixture = Fixture::new();
         let model = device(0x14f1_5098, count);
@@ -48,7 +48,7 @@ fn conexant_live_eapd_inventory_uses_actual_pin_count_and_whole_global_value() {
 }
 
 #[test]
-fn conexant_selected_adc_and_pin_connections_use_correct_amp_indices_and_pcm() {
+fn selected_adc_amp_indices() {
     for codec in [0x14f1_5045, 0x14f1_5047, 0x14f1_5098] {
         let mut fixture = Fixture::new();
         let model = device(codec, 3);
@@ -137,7 +137,7 @@ fn conexant_selected_adc_and_pin_connections_use_correct_amp_indices_and_pcm() {
 }
 
 #[test]
-fn conexant_refuses_stale_live_metadata_and_unsupported_headsets_before_effects() {
+fn stale_metadata_rejected() {
     for case in 0..9 {
         let mut fixture = Fixture::new();
         let model = device(
@@ -186,7 +186,7 @@ fn conexant_refuses_stale_live_metadata_and_unsupported_headsets_before_effects(
 }
 
 #[test]
-fn conexant_bad_route_options_are_pure_preflight_and_initialized_identity_is_live() {
+fn route_options_preflight() {
     let mut fixture = Fixture::new();
     let model = device(0x14f1_5098, 3);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -233,7 +233,7 @@ fn conexant_bad_route_options_are_pure_preflight_and_initialized_identity_is_liv
 }
 
 #[test]
-fn conexant_partial_init_master_and_route_failures_hold_state_until_actual_reset() {
+fn partial_initialization_requires_reset() {
     for case in 0..4 {
         let mut fixture = Fixture::new();
         let model = device(0x14f1_5045, if case == 0 { 2 } else { 3 });
@@ -301,7 +301,7 @@ fn conexant_partial_init_master_and_route_failures_hold_state_until_actual_reset
 }
 
 #[test]
-fn conexant_shutdown_faults_keep_amplifier_ownership_and_require_reset() {
+fn shutdown_failure_retains_amplifiers() {
     for case in 0..3 {
         let mut fixture = Fixture::new();
         let model = device(0x14f1_5098, 3);
@@ -356,7 +356,7 @@ fn conexant_shutdown_faults_keep_amplifier_ownership_and_require_reset() {
 }
 
 #[test]
-fn conexant_direct_reset_turns_amplifiers_off_before_releasing_the_old_generation() {
+fn reset_disables_amplifiers() {
     let mut fixture = Fixture::new();
     let model = device(0x14f1_5047, 2);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -377,7 +377,7 @@ fn conexant_direct_reset_turns_amplifiers_off_before_releasing_the_old_generatio
 }
 
 #[test]
-fn conexant_initial_power_failure_and_lost_master_reply_quarantine_real_effects() {
+fn initial_power_failure_quarantines_routes() {
     for power_fault in [true, false] {
         let mut fixture = Fixture::new();
         let model = device(0x14f1_5098, 3);
@@ -423,7 +423,7 @@ fn conexant_initial_power_failure_and_lost_master_reply_quarantine_real_effects(
 }
 
 #[test]
-fn conexant_failed_command_restart_cannot_reuse_stale_shutdown_acknowledgements() {
+fn failed_restart_rejects_stale_shutdown() {
     let mut fixture = Fixture::new();
     let model = device(0x14f1_5098, 3);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -461,7 +461,7 @@ fn conexant_failed_command_restart_cannot_reuse_stale_shutdown_acknowledgements(
 }
 
 #[test]
-fn conexant_lost_owned_live_authority_blocks_previous_routes_from_starting() {
+fn lost_controls_block_start() {
     for master_call in [true, false] {
         for changed_vendor in [true, false] {
             let mut fixture = Fixture::new();

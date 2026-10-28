@@ -23,7 +23,7 @@ fn event(controller: &mut Controller<ModelRegisters, ModelClock>) -> Unsolicited
     event
 }
 #[test]
-fn actual_jack_subscription_interleaves_rirb_events_and_live_pcm_without_fake_sense() {
+fn jack_events_during_pcm() {
     let mut fixture = Fixture::new();
     let model = jack_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -84,7 +84,7 @@ fn actual_jack_subscription_interleaves_rirb_events_and_live_pcm_without_fake_se
 }
 
 #[test]
-fn actual_unsolicited_dma_wrap_and_bounded_loss_preserve_event_order() {
+fn unsolicited_wrap_preserves_order() {
     let mut fixture = Fixture::new();
     let model = jack_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -130,7 +130,7 @@ fn actual_unsolicited_dma_wrap_and_bounded_loss_preserve_event_order() {
 }
 
 #[test]
-fn jack_tags_are_never_reused_and_reset_stales_handles_before_mmio() {
+fn reset_stales_jack_tags() {
     let mut fixture = Fixture::new();
     let model = jack_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -162,7 +162,7 @@ fn jack_tags_are_never_reused_and_reset_stales_handles_before_mmio() {
 }
 
 #[test]
-fn actual_widget_and_control_authority_refuse_forged_graph_and_owned_tags() {
+fn forged_graph_and_tags_rejected() {
     for rejection in 0..5 {
         let mut fixture = Fixture::new();
         let model = jack_model();
@@ -215,7 +215,7 @@ fn actual_widget_and_control_authority_refuse_forged_graph_and_owned_tags() {
 }
 
 #[test]
-fn uncertain_jack_enable_or_disable_retains_real_effects_until_full_reset() {
+fn uncertain_enable_requires_reset() {
     for disable in [false, true] {
         let mut fixture = Fixture::new();
         let model = jack_model();
@@ -252,7 +252,7 @@ fn uncertain_jack_enable_or_disable_retains_real_effects_until_full_reset() {
 }
 
 #[test]
-fn a_corb_memory_fault_refuses_even_cached_notifications_and_requires_reset() {
+fn corb_fault_blocks_cached_events() {
     let mut fixture = Fixture::new();
     let model = jack_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -273,7 +273,7 @@ fn a_corb_memory_fault_refuses_even_cached_notifications_and_requires_reset() {
 
 #[test]
 #[ignore = "requires unchanged-source HDA unsolicited oracle trace"]
-fn hda_unsolicited_matches_original_linux_admission_and_queue_dispatch() {
+fn hda_unsolicited_matches_linux_admission_and_dispatch() {
     use sha2::{Digest, Sha256};
     let path = std::env::var("STELA_HDA_UNSOLICITED_ORACLE")
         .expect("set STELA_HDA_UNSOLICITED_ORACLE to source trace.txt");

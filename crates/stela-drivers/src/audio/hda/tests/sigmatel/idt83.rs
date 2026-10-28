@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn idt83_all_source_ids_amplifier_mode_seven_port_map_and_native_duplex_jack_power() {
+fn family_jack_power_and_duplex() {
     let mut ids = vec![
         0x111d_7604,
         0x111d_76d4,
@@ -132,7 +132,7 @@ fn idt83_all_source_ids_amplifier_mode_seven_port_map_and_native_duplex_jack_pow
 }
 
 #[test]
-fn idt83_powered_off_route_refusal_full_refresh_and_fixed_no_detect_ports() {
+fn powered_off_route_and_refresh() {
     let mut fixture = Fixture::new();
     let model = idt83_device(0x111d_7604);
     model.borrow_mut().pin_senses.insert(0x0a, 0);
@@ -192,8 +192,7 @@ fn idt83_powered_off_route_refusal_full_refresh_and_fixed_no_detect_ports() {
 }
 
 #[test]
-fn idt83_unknown_family_missing_port_stale_config_and_undeclared_map_refuse_before_vendor_effects()
-{
+fn invalid_port_map_rejected() {
     for fault in 0..7 {
         let mut fixture = Fixture::new();
         let model = idt83_device(0x111d_7604);
@@ -254,7 +253,7 @@ fn idt83_unknown_family_missing_port_stale_config_and_undeclared_map_refuse_befo
 }
 
 #[test]
-fn idt83_mode_and_cold_map_after_effect_failures_retain_owner_until_actual_reset() {
+fn cold_map_failure_requires_reset() {
     for fault in 0..4 {
         let mut fixture = Fixture::new();
         let model = idt83_device(0x111d_76f3);
@@ -301,7 +300,7 @@ fn idt83_mode_and_cold_map_after_effect_failures_retain_owner_until_actual_reset
 }
 
 #[test]
-fn idt83_live_map_config_and_pin_authority_loss_quarantines_existing_routes_and_shutdown() {
+fn live_map_drift_quarantines_routes() {
     for fault in 0..4 {
         let mut fixture = Fixture::new();
         let model = idt83_device(0x111d_76e8);
@@ -357,7 +356,7 @@ fn idt83_live_map_config_and_pin_authority_loss_quarantines_existing_routes_and_
 }
 
 #[test]
-fn idt83_live_jack_power_write_failed_readback_and_lost_ack_preserve_pcm_owner() {
+fn failed_jack_power_retains_owner() {
     for lost_ack in [false, true] {
         let mut fixture = Fixture::new();
         let model = idt83_device(0x111d_7605);

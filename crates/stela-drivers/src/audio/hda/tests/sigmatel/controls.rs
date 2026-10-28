@@ -18,7 +18,7 @@ mod idt95 {
     }
 
     #[test]
-    fn idt95_four_source_ports_native_duplex_and_jack_map_do_not_inherit_idt83_mode() {
+    fn idt95_port_map_and_duplex() {
         let mut fixture = Fixture::new();
         let model = device();
         let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -108,7 +108,7 @@ mod idt95 {
     }
 
     #[test]
-    fn idt95_actual_port_map_or_default_loss_quarantines_and_unknown_neighbor_refuses() {
+    fn idt95_invalid_port_state_quarantines_routes() {
         for defaults in [false, true] {
             let mut fixture = Fixture::new();
             let model = device();
@@ -141,7 +141,7 @@ mod idt95 {
     // New composition regression, UNRUN: canonical dispatch and failed reset
     // must retain the same IDT port/PCM authority, not just a vendor handle.
     #[test]
-    fn idt95_canonical_poll_and_failed_reset_preserve_pcm_and_port_owner() {
+    fn idt95_failed_reset_retains_port() {
         let mut fixture = Fixture::new();
         let model = device();
         let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -294,7 +294,7 @@ mod stac9872 {
     }
 
     #[test]
-    fn stac9872_right_channel_failure_and_live_startup_amp_loss_retain_owner() {
+    fn stac9872_amp_failure_retains_owner() {
         for live_loss in [false, true] {
             let mut fixture = Fixture::new();
             let model = device(0x8384_7662);

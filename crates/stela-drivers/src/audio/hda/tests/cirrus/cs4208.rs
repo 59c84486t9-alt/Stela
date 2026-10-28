@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn cs4208_actual_vendor_startup_and_effective_stereo_gain_preserve_raw_graph_with_duplex_pcm() {
+fn startup_preserves_graph_and_stereo_gain() {
     for inherited in [false, true] {
         for converter in [0x18, 0x1b, 0x1c] {
             let mut fixture = Fixture::new();
@@ -123,7 +123,7 @@ fn cs4208_actual_vendor_startup_and_effective_stereo_gain_preserve_raw_graph_wit
 }
 
 #[test]
-fn cs4208_mono_advertised_input_pin_uses_two_actual_amp_channels_and_checks_right_failure() {
+fn input_amp_uses_both_channels() {
     for right_failure in [false, true] {
         let mut fixture = Fixture::new();
         let model = cs4208_device(false, true);
@@ -173,7 +173,7 @@ fn cs4208_mono_advertised_input_pin_uses_two_actual_amp_channels_and_checks_righ
 }
 
 #[test]
-fn cs4208_missing_fixed_input_authority_and_inexpressible_gain_refuse_before_effects() {
+fn invalid_input_amp_rejected() {
     for fault in 0..6 {
         let mut fixture = Fixture::new();
         let model = cs4208_device(false, false);
@@ -215,7 +215,7 @@ fn cs4208_missing_fixed_input_authority_and_inexpressible_gain_refuse_before_eff
 }
 
 #[test]
-fn cs4208_late_index_coefficient_and_ack_failures_retain_real_startup_effects_until_reset() {
+fn startup_failure_requires_reset() {
     for fault in 0..4 {
         let mut fixture = Fixture::new();
         let model = cs4208_device(false, false);
@@ -264,7 +264,7 @@ fn cs4208_late_index_coefficient_and_ack_failures_retain_real_startup_effects_un
 }
 
 #[test]
-fn cs4208_live_raw_input_amp_stereo_and_coefficient_changes_quarantine_configured_pcm() {
+fn live_input_drift_quarantines_routes() {
     for fault in 0..4 {
         let inherited = fault == 1;
         let mut fixture = Fixture::new();

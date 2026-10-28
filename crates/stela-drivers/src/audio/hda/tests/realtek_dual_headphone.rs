@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn alc285_and_295_single_route_observes_raw_second_pin_and_orders_actual_boot_depop() {
+fn single_route_depop_timing() {
     for (id, coefficient_zero, boot_depop) in [
         (0x10ec0285, 0, true),
         (0x10ec0285, 0x10, false),
@@ -179,7 +179,7 @@ fn alc285_and_295_single_route_observes_raw_second_pin_and_orders_actual_boot_de
 }
 
 #[test]
-fn alc295_optional_real_second_route_does_not_require_a_headphone_enable_bit() {
+fn optional_second_route() {
     let mut fixture = Fixture::new();
     let model = realtek_two_sense_model(0x10ec0295, true, true);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -235,7 +235,7 @@ fn alc295_optional_real_second_route_does_not_require_a_headphone_enable_bit() {
 }
 
 #[test]
-fn alc295_depop_timeout_and_staged_fixed_sequencer_failures_quarantine_until_reset() {
+fn failed_depop_requires_reset() {
     for stage in 0..9 {
         let mut fixture = Fixture::new();
         let model = realtek_two_sense_model(0x10ec0295, true, true);
@@ -345,7 +345,7 @@ fn alc295_depop_timeout_and_staged_fixed_sequencer_failures_quarantine_until_res
 }
 
 #[test]
-fn alc295_live_fixed_pin_and_conditional_output_capabilities_are_not_invented() {
+fn pin_capability_validation() {
     for case in 0..5 {
         let mut fixture = Fixture::new();
         let model = realtek_two_sense_model(0x10ec0295, false, case != 4);
@@ -403,7 +403,7 @@ fn alc295_live_fixed_pin_and_conditional_output_capabilities_are_not_invented() 
 }
 
 #[test]
-fn alc295_optional_route_preflight_and_partial_second_route_failure_keep_ownership_explicit() {
+fn partial_second_route_retains_owner() {
     for conflict in [true, false] {
         let mut fixture = Fixture::new();
         let model = realtek_two_sense_model(0x10ec0295, false, false);

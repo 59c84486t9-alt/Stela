@@ -104,7 +104,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "hda_unsolicited_matches_original_linux_admission_and_queue_dispatch",
+    "test": "hda_unsolicited_matches_linux_admission_and_dispatch",
     "source": "crates/stela-drivers/src/audio/hda/tests/unsolicited_models.rs",
     "kind": "oracle",
     "inputs": [

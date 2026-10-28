@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn conexant_cx20561_actual_minimum_gain_mute_preserves_mono_stereo_and_hardware_mute() {
+fn cx20561_minimum_gain_mute() {
     for converter in [0x10, 0x11] {
         for channels in [1, 2] {
             for hardware_mute in [false, true] {
@@ -85,7 +85,7 @@ fn conexant_cx20561_actual_minimum_gain_mute_preserves_mono_stereo_and_hardware_
 }
 
 #[test]
-fn conexant_minimum_mute_policy_does_not_leak_to_other_codecs_or_nonowned_dacs() {
+fn mute_policy_profile_scope() {
     let mut fixture = Fixture::new();
     let model = minimum_mute_device(0x14f1_5047, 0x10, 2, false);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -138,7 +138,7 @@ fn conexant_minimum_mute_policy_does_not_leak_to_other_codecs_or_nonowned_dacs()
 }
 
 #[test]
-fn conexant_minimum_mute_rejected_physical_gain_or_live_amp_authority_quarantines_routes() {
+fn invalid_gain_quarantines_routes() {
     for changed_caps in [false, true] {
         let mut fixture = Fixture::new();
         let model = minimum_mute_device(0x14f1_5051, 0x10, 2, false);
@@ -186,7 +186,7 @@ fn conexant_minimum_mute_rejected_physical_gain_or_live_amp_authority_quarantine
 }
 
 #[test]
-fn conexant_minimum_mute_inherits_live_group_caps_and_refuses_an_unusable_zero_db_code() {
+fn inherited_amp_zero_db_bounds() {
     for refusal in 0..3 {
         let mut fixture = Fixture::new();
         let model = minimum_mute_device(0x14f1_5051, 0x10, 2, false);

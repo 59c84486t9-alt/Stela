@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn failed_dma_stop_and_gpu_quiet_keep_whole_owner_and_first_cause() {
+fn stop_failure_retains_first_cause() {
     for dma_fault in [false, true] {
         let mut f = Fixture::new(false);
         let mut c = f.controller();
@@ -30,7 +30,7 @@ fn failed_dma_stop_and_gpu_quiet_keep_whole_owner_and_first_cause() {
 }
 
 #[test]
-fn active_or_faulted_controller_drop_does_not_release_actual_gpu_hda_owner() {
+fn drop_retains_active_owner() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -43,7 +43,7 @@ fn active_or_faulted_controller_drop_does_not_release_actual_gpu_hda_owner() {
 }
 
 #[test]
-fn one_stream_cannot_own_distinct_analog_and_hdmi_converters_in_either_order() {
+fn analog_and_hdmi_streams_are_exclusive() {
     for analog_first in [false, true] {
         let mut f = Fixture::new(false);
         let mut c = f.controller();
@@ -85,7 +85,7 @@ fn one_stream_cannot_own_distinct_analog_and_hdmi_converters_in_either_order() {
 }
 
 #[test]
-fn acknowledged_stop_can_park_past_ring_duration_and_restart_a_fresh_epoch() {
+fn stopped_stream_restarts_new_epoch() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -117,7 +117,7 @@ fn acknowledged_stop_can_park_past_ring_duration_and_restart_a_fresh_epoch() {
 }
 
 #[test]
-fn actual_digital_enable_control_preserves_status_and_live_pcm_ownership() {
+fn digital_enable_preserves_status() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -139,7 +139,7 @@ fn actual_digital_enable_control_preserves_status_and_live_pcm_ownership() {
 }
 
 #[test]
-fn rejected_live_digital_control_keeps_effects_owner_and_cause_until_reset() {
+fn digital_control_failure_requires_reset() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -159,7 +159,7 @@ fn rejected_live_digital_control_keeps_effects_owner_and_cause_until_reset() {
 }
 
 #[test]
-fn polled_observation_cause_survives_simultaneous_dma_stop_failure() {
+fn observation_error_precedes_stop_error() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -182,7 +182,7 @@ fn polled_observation_cause_survives_simultaneous_dma_stop_failure() {
 }
 
 #[test]
-fn pci_suspend_retires_only_after_real_dma_codec_gpu_and_command_quiet() {
+fn suspend_waits_for_complete_quiescence() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -209,7 +209,7 @@ fn pci_suspend_retires_only_after_real_dma_codec_gpu_and_command_quiet() {
 }
 
 #[test]
-fn pci_d3_grant_is_refused_after_uncertain_gpu_quiet_even_with_stopped_dma() {
+fn uncertain_gpu_stop_blocks_d3() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -231,7 +231,7 @@ fn pci_d3_grant_is_refused_after_uncertain_gpu_quiet_even_with_stopped_dma() {
 }
 
 #[test]
-fn mmio_codec_graph_does_not_fabricate_an_original_pci_subsystem() {
+fn mmio_graph_has_no_pci_subsystem() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let before = f.hardware.lock().unwrap().commands.len();
@@ -241,7 +241,7 @@ fn mmio_codec_graph_does_not_fabricate_an_original_pci_subsystem() {
 }
 
 #[test]
-fn raw_converter_binding_cannot_share_an_hdmi_stream_in_either_order() {
+fn raw_binding_excludes_hdmi_stream() {
     for raw_first in [false, true] {
         let mut f = Fixture::new(false);
         let mut c = f.controller();

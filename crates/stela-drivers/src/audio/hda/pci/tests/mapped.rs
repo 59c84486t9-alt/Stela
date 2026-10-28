@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn exact_conventional_intel_profile_requires_mapped_preflight_and_pci_reset_adapter() {
+fn modern_profile_requires_mapped_preflight() {
     for &device in INTEL_CLOCK_GATE_IDS {
         let (mut function, timer, bar) = modern_pci_model();
         set_identity(&mut function, INTEL, device);
@@ -44,7 +44,7 @@ fn exact_conventional_intel_profile_requires_mapped_preflight_and_pci_reset_adap
 }
 
 #[test]
-fn mapped_pci_identity_power_capability_and_mapping_failures_precede_mmio_and_mutation() {
+fn pci_preflight_precedes_mmio() {
     for fault in 0..12 {
         let (mut function, timer, bar) = modern_pci_model();
         let registers = MappedModel::new();
@@ -83,7 +83,7 @@ fn mapped_pci_identity_power_capability_and_mapping_failures_precede_mmio_and_mu
 }
 
 #[test]
-fn first_link_failed_reads_uncertain_power_and_unadvertised_clock_refuse_before_pci_writes() {
+fn invalid_link_state_precedes_pci_writes() {
     for (value, frequencies, expected) in [
         (
             u32::MAX,
@@ -159,7 +159,7 @@ fn first_link_failed_reads_uncertain_power_and_unadvertised_clock_refuse_before_
 }
 
 #[test]
-fn each_new_conventional_intel_identity_refuses_dsp_and_selectable_classes_before_mmio() {
+fn dsp_profiles_rejected_before_mmio() {
     for device in [
         0x34c8, 0x3dc8, 0xa0c8, 0x43c8, 0x7ad0, 0x51c8, 0x51c9, 0x51cd, 0x51cc, 0x54c8, 0x7e28,
     ] {
@@ -192,7 +192,7 @@ fn each_new_conventional_intel_identity_refuses_dsp_and_selectable_classes_befor
 }
 
 #[test]
-fn mapped_interrupt_control_read_failures_do_not_publish_failed_words() {
+fn failed_interrupt_reads_rejected() {
     for offset in [0x60, 0xb0] {
         for after_preflight in [false, true] {
             let (mut function, timer, bar) = modern_pci_model();
@@ -233,7 +233,7 @@ fn mapped_interrupt_control_read_failures_do_not_publish_failed_words() {
 }
 
 #[test]
-fn mapped_active_dma_failed_controls_and_extended_ownership_refuse_before_pci_mutation() {
+fn active_dma_blocks_preparation() {
     for (offset, value, expected) in [
         (0x4c, 2, AttachError::ActiveDma { offset: 0x4c }),
         (0x5c, 2, AttachError::ActiveDma { offset: 0x5c }),

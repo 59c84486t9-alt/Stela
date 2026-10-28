@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn alc269_live_silicon_variants_use_exact_pll_eapd_and_revision_controls() {
+fn silicon_variant_controls() {
     for (zero, variant) in [
         (0x0000, Alc269Variant::Va),
         (0x0014, Alc269Variant::Vb),
@@ -106,7 +106,7 @@ fn alc269_live_silicon_variants_use_exact_pll_eapd_and_revision_controls() {
 }
 
 #[test]
-fn alc269_vb18_preserves_the_donor_or_operations_and_does_not_normalize_fields() {
+fn vb18_preserves_coefficient_bits() {
     for (old_d, old_17) in [(0x0420, 0x0110), (0x0c20, 0x0190)] {
         let mut fixture = Fixture::new();
         let model = realtek_desktop_model(0x10ec0269);
@@ -134,7 +134,7 @@ fn alc269_vb18_preserves_the_donor_or_operations_and_does_not_normalize_fields()
 }
 
 #[test]
-fn alc269_companion_dsp_or_unknown_companion_identity_refuses_before_any_codec_mutation() {
+fn companion_dsp_rejected() {
     for identity in [0x10ec5505, 0x12345678, u32::MAX] {
         let mut fixture = Fixture::new();
         let model = realtek_desktop_model(0x10ec0269);
@@ -158,7 +158,7 @@ fn alc269_companion_dsp_or_unknown_companion_identity_refuses_before_any_codec_m
 }
 
 #[test]
-fn alc269_unknown_variant_failed_revision_and_literal_readback_refuse_and_gate_partial_state() {
+fn invalid_revision_requires_reset() {
     for fault in 0..3 {
         let mut fixture = Fixture::new();
         let model = realtek_desktop_model(0x10ec0269);

@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn independent_direction_tags_cover_all_thirty_descriptors_without_aliasing_buffers_or_handles() {
+fn direction_tags_have_disjoint_handles() {
     for policy in [StreamTagPolicy::Global, StreamTagPolicy::PerDirection] {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
@@ -92,7 +92,7 @@ fn independent_direction_tags_cover_all_thirty_descriptors_without_aliasing_buff
 }
 
 #[test]
-fn amd_fifo_capture_correction_keeps_exact_transport_and_wrap_coordinates() {
+fn fifo_capture_position_correction() {
     let mut fixture = Fixture::new();
     let model = Model::new(256);
     let mut controller = create(
@@ -143,7 +143,7 @@ fn amd_fifo_capture_correction_keeps_exact_transport_and_wrap_coordinates() {
 }
 
 #[test]
-fn amd_fifo_playback_reports_delay_without_inventing_position_and_restart_clamps_again() {
+fn fifo_playback_delay_and_restart() {
     let mut fixture = Fixture::new();
     let model = Model::new(256);
     let mut controller = create(
@@ -197,7 +197,7 @@ fn amd_fifo_playback_reports_delay_without_inventing_position_and_restart_clamps
 }
 
 #[test]
-fn amd_fifo_inclusive_first_endpoint_is_primed_and_small_rings_refuse_before_allocating() {
+fn fifo_endpoint_and_small_ring_bounds() {
     let mut fixture = Fixture::new();
     let model = Model::new(256);
     let mut controller = create(

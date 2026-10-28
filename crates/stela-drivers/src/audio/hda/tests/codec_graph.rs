@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn codec_graph_expands_short_and_long_ranges_and_inherits_capabilities() {
+fn connection_ranges_and_inherited_caps() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -20,7 +20,7 @@ fn codec_graph_expands_short_and_long_ranges_and_inherits_capabilities() {
 }
 
 #[test]
-fn malformed_codec_counts_ranges_and_connection_targets_are_rejected() {
+fn malformed_connections_rejected() {
     for (node, parameter, value) in [(0, 4, (127 << 16) | 2), (1, 4, (1 << 16) | 6), (6, 0x0e, 1)] {
         let mut fixture = Fixture::new();
         let model = graph_model();
@@ -37,6 +37,10 @@ fn malformed_codec_counts_ranges_and_connection_targets_are_rejected() {
             Err(Error::InvalidCodecGraph | Error::InvalidConnectionList)
         ));
     }
+}
+
+#[test]
+fn unencodable_connection_node_rejected() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     model.borrow_mut().connection_words.insert((4, 0), 0x100); // long NID cannot be packed into verbs.

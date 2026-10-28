@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn discovery_budget_and_required_pre_stream_gate_fail_before_any_register_access() {
+fn invalid_budget_precedes_register_access() {
     for (attempts, delay_us) in [(0, 1), (61, 1), (1, 0), (1, 1_000_001)] {
         let mut fixture = Fixture::new();
         let model = graph_model();
@@ -71,7 +71,7 @@ fn discovery_budget_and_required_pre_stream_gate_fail_before_any_register_access
 }
 
 #[test]
-fn discovery_retries_reset_generation_and_retains_each_codec_failure_without_empty_success() {
+fn retry_retains_codec_failures() {
     for ready_after in [2, 4] {
         let mut fixture = Fixture::new();
         let model = graph_model();
@@ -118,7 +118,7 @@ fn discovery_retries_reset_generation_and_retains_each_codec_failure_without_emp
 }
 
 #[test]
-fn discovery_retains_partial_codec_failures_and_resets_poison_before_any_new_command() {
+fn partial_failures_reset_poison() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     model.borrow_mut().advertised_codecs = 3;
@@ -164,7 +164,7 @@ fn discovery_retains_partial_codec_failures_and_resets_poison_before_any_new_com
 }
 
 #[test]
-fn discovery_retry_quiescence_failure_is_final_and_preserves_original_error_history() {
+fn retry_quiescence_failure_is_final() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     model.borrow_mut().codec_ready_after_resets = 2;
@@ -193,7 +193,7 @@ fn discovery_retry_quiescence_failure_is_final_and_preserves_original_error_hist
 }
 
 #[test]
-fn reinitialize_invalidates_reused_stream_tags_graphs_and_routes_before_register_access() {
+fn reinitialize_stales_streams_and_routes() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -262,7 +262,7 @@ fn reinitialize_invalidates_reused_stream_tags_graphs_and_routes_before_register
 }
 
 #[test]
-fn failed_reinitialize_quiescence_keeps_reservations_dma_and_blocks_normal_operations() {
+fn failed_quiescence_retains_reservations() {
     for command_stop in [false, true] {
         let mut fixture = Fixture::new();
         let model = analog_model();
@@ -352,7 +352,7 @@ fn failed_reinitialize_quiescence_keeps_reservations_dma_and_blocks_normal_opera
 }
 
 #[test]
-fn reinitialize_reset_failure_blocks_until_explicit_recovery_and_generation_never_wraps() {
+fn failed_reset_requires_explicit_recovery() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();

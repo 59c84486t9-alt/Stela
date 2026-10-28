@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_modern_pci_preparation_composes_reset_links_routes_and_finite_duplex_dma() {
+fn pci_preparation_and_duplex() {
     for device in [
         0xa170, 0x34c8, 0x3dc8, 0xa0c8, 0x43c8, 0x7ad0, 0x51c8, 0x51c9, 0x51cd, 0x51cc, 0x54c8,
         0x7e28,
@@ -102,7 +102,7 @@ fn actual_modern_pci_preparation_composes_reset_links_routes_and_finite_duplex_d
 }
 
 #[test]
-fn command_rings_wrap_at_all_finite_sizes_with_delayed_hardware() {
+fn command_ring_wrap() {
     for size in [2, 16, 256] {
         let mut fixture = Fixture::new();
         let model = Model::new(size);
@@ -121,7 +121,7 @@ fn command_rings_wrap_at_all_finite_sizes_with_delayed_hardware() {
 }
 
 #[test]
-fn spurious_and_duplicate_replies_are_dropped_like_snd_hdac_bus_update_rirb() {
+fn duplicate_replies_dropped() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -136,7 +136,7 @@ fn spurious_and_duplicate_replies_are_dropped_like_snd_hdac_bus_update_rirb() {
 }
 
 #[test]
-fn a_late_answer_completes_the_next_verb_and_a_stuck_rirb_reset_fails() {
+fn late_reply_completes_next_verb() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -149,6 +149,11 @@ fn a_late_answer_completes_the_next_verb_and_a_stuck_rirb_reset_fails() {
     model.borrow_mut().response_delay = 3;
     assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
     assert_eq!(controller.outstanding[0], 0);
+}
+
+#[test]
+fn stuck_rirb_reset_times_out() {
+    let mut fixture = Fixture::new();
     let model = Model::new(16);
     model.borrow_mut().rirb_reset_stuck = true;
     model.borrow_mut().set(RIRBWP, 8, 2);
@@ -159,7 +164,7 @@ fn a_late_answer_completes_the_next_verb_and_a_stuck_rirb_reset_fails() {
 }
 
 #[test]
-fn a_timed_out_verb_falls_back_to_single_commands_like_azx_rirb_get_response() {
+fn timeout_falls_back_to_single_commands() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -176,7 +181,7 @@ fn a_timed_out_verb_falls_back_to_single_commands_like_azx_rirb_get_response() {
 }
 
 #[test]
-fn a_bus_reset_restores_codec_writes_then_retries_like_snd_hda_bus_reset() {
+fn bus_reset_replays_codec_writes() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -197,7 +202,7 @@ fn a_bus_reset_restores_codec_writes_then_retries_like_snd_hda_bus_reset() {
 }
 
 #[test]
-fn command_faults_and_invalid_pointers_are_explicit_and_poison() {
+fn command_faults_poison_transport() {
     for (offset, value, expected) in [
         (CORBSTS, 1, Error::CorbMemory),
         (CORBRP, 0xffff, Error::InvalidRingPointer),
@@ -220,7 +225,7 @@ fn command_faults_and_invalid_pointers_are_explicit_and_poison() {
 }
 
 #[test]
-fn link_reset_and_command_quiesce_fail_bounded_before_dma_start() {
+fn quiescence_timeout_precedes_dma() {
     for (enter, expected) in [(true, Phase::LinkResetEnter), (false, Phase::LinkResetExit)] {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
@@ -247,7 +252,7 @@ fn link_reset_and_command_quiesce_fail_bounded_before_dma_start() {
 }
 
 #[test]
-fn corb_reset_quirk_is_explicit_and_no_timeout_fallback_guesses_it() {
+fn explicit_corb_reset_quirk() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     model.borrow_mut().self_clear = true;

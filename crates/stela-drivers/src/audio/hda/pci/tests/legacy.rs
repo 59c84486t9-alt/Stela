@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn exact_legacy_ids_refuse_modern_dsp_gpu_and_wrong_classes() {
+fn legacy_profile_admission() {
     for device in [
         0x2668, 0x269a, 0x27d8, 0x284b, 0x293e, 0x293f, 0x3a3e, 0x3a6e,
     ] {
@@ -28,7 +28,7 @@ fn exact_legacy_ids_refuse_modern_dsp_gpu_and_wrong_classes() {
 }
 
 #[test]
-fn d3hot_restores_bars_after_delay_and_preserves_wake_status_and_vendor_bytes() {
+fn d3hot_restores_bars_after_delay() {
     let (mut function, timer, bar) = fixture(3);
     let prepared = prepare_model(&mut function, &timer, bar).unwrap();
     assert_eq!(prepared.bar_range(), 0xfebf_0000..0xfebf_4000);
@@ -63,7 +63,7 @@ fn d3hot_restores_bars_after_delay_and_preserves_wake_status_and_vendor_bytes() 
 }
 
 #[test]
-fn d2_delay_and_d3_no_soft_reset_do_not_rewrite_bars() {
+fn d2_and_no_soft_reset_preserve_bars() {
     for (state, delay_us) in [(2, 200), (3 | PM_NO_SOFT_RESET, 10_000), (0, 0)] {
         let (mut function, timer, bar) = fixture(state);
         prepare_model(&mut function, &timer, bar).unwrap();
@@ -79,7 +79,7 @@ fn d2_delay_and_d3_no_soft_reset_do_not_rewrite_bars() {
 }
 
 #[test]
-fn absent_pci_pm_is_configuration_ready_and_wide_bar_is_preserved() {
+fn absent_pm_preserves_wide_bar() {
     let (mut function, timer, _) = fixture(0);
     function.config().words[13] = 0x60; // No PM capability.
     function.config().words[4] = 0x0000_0004;
@@ -106,7 +106,7 @@ fn absent_pci_pm_is_configuration_ready_and_wide_bar_is_preserved() {
 }
 
 #[test]
-fn ownership_unknown_or_dsp_causes_no_configuration_writes() {
+fn unknown_ownership_rejected() {
     for ownership in [Ownership::Unknown, Ownership::Dsp] {
         let (mut function, timer, bar) = fixture(0);
         // SAFETY: isolated model; refusal must occur before any mutation.
@@ -119,7 +119,7 @@ fn ownership_unknown_or_dsp_causes_no_configuration_writes() {
 }
 
 #[test]
-fn malformed_capability_lists_and_invalid_bars_refuse_before_mutation() {
+fn malformed_capabilities_rejected() {
     for change in [0, 1, 2, 3, 4, 5] {
         let (mut function, timer, bar) = fixture(0);
         match change {
@@ -166,7 +166,7 @@ fn malformed_capability_lists_and_invalid_bars_refuse_before_mutation() {
 }
 
 #[test]
-fn overlapping_capability_bodies_and_vendor_tcsel_refuse_before_writes() {
+fn overlapping_controls_rejected() {
     for variant in 0..5 {
         let (mut function, timer, bar) = fixture(0);
         match variant {
@@ -200,7 +200,7 @@ fn overlapping_capability_bodies_and_vendor_tcsel_refuse_before_writes() {
 }
 
 #[test]
-fn all_msi_layouts_are_bounded_and_disjoint_when_well_formed() {
+fn msi_layout_bounds() {
     for flags in [
         0,
         MSI_ADDRESS_64,
@@ -214,7 +214,7 @@ fn all_msi_layouts_are_bounded_and_disjoint_when_well_formed() {
 }
 
 #[test]
-fn config_failure_beginning_after_final_enable_is_rejected_and_cleanup_attempted() {
+fn final_enable_failure_attempts_cleanup() {
     let (mut function, timer, bar) = fixture(0);
     function.config().fail_after_enable = true;
     assert_eq!(
@@ -233,7 +233,7 @@ fn config_failure_beginning_after_final_enable_is_rejected_and_cleanup_attempted
 }
 
 #[test]
-fn actual_identity_is_checked_against_enumerated_identity_before_writes() {
+fn live_identity_preflight() {
     let (mut function, timer, bar) = fixture(0);
     function.config().words[0] = 0x27d8_8086; // Still supported, but a different function.
     assert_eq!(
@@ -244,7 +244,7 @@ fn actual_identity_is_checked_against_enumerated_identity_before_writes() {
 }
 
 #[test]
-fn rejected_decode_disable_stops_before_power_or_vendor_writes() {
+fn rejected_decode_stops_preparation() {
     let (mut function, timer, bar) = fixture(3);
     function.config().reject_command = true;
     assert_eq!(
@@ -262,7 +262,7 @@ fn rejected_decode_disable_stops_before_power_or_vendor_writes() {
 }
 
 #[test]
-fn power_tcsel_or_command_rejections_fail_and_leave_mastering_disabled() {
+fn rejected_controls_disable_mastering() {
     for failure in 0..3 {
         let (mut function, timer, bar) = fixture(3);
         match failure {
@@ -290,7 +290,7 @@ fn power_tcsel_or_command_rejections_fail_and_leave_mastering_disabled() {
 }
 
 #[test]
-fn legacy_ati_amd_snoop_uses_exact_identity_and_preserves_neighbor_and_tcsel() {
+fn ati_amd_snoop_preserves_neighbor_bits() {
     for (vendor, device, bits) in [
         (ATI, 0x437b, 32),
         (ATI, 0x4383, 32),
@@ -325,7 +325,7 @@ fn legacy_ati_amd_snoop_uses_exact_identity_and_preserves_neighbor_and_tcsel() {
 }
 
 #[test]
-fn nvidia_gpu_audio_uses_the_linux_preset_coherence_bits_and_40_bit_dma() {
+fn nvidia_coherence_and_dma_policy() {
     let (mut function, timer, bar) = fixture(3);
     set_identity(&mut function, NVIDIA, 0x22e9);
     // 4ch output and 4dh input coherence clear, 4eh low nibble clear, 4fh

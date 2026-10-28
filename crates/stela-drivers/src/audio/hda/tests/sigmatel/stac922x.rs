@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn stac922x_direct_knob_capture_range_and_real_native_duplex_preserve_observed_caps() {
+fn knob_capture_range_and_duplex() {
     for id in [
         0x8384_7882,
         0x8384_7680,
@@ -128,7 +128,7 @@ fn stac922x_direct_knob_capture_range_and_real_native_duplex_preserve_observed_c
 }
 
 #[test]
-fn stac922x_missing_fixed_authority_and_unexpressible_knob_refuse_before_effects() {
+fn invalid_knob_rejected() {
     for fault in 0..7 {
         let mut fixture = Fixture::new();
         let model = stac922x_device(0x8384_7680, false);
@@ -173,7 +173,7 @@ fn stac922x_missing_fixed_authority_and_unexpressible_knob_refuse_before_effects
 }
 
 #[test]
-fn stac922x_knob_effect_and_capture_right_channel_failures_retain_ownership_until_reset() {
+fn failed_capture_requires_reset() {
     for fault in 0..3 {
         let mut fixture = Fixture::new();
         let model = stac922x_device(0x8384_7882, false);
@@ -236,7 +236,7 @@ fn stac922x_knob_effect_and_capture_right_channel_failures_retain_ownership_unti
 }
 
 #[test]
-fn stac922x_live_knob_and_raw_inherited_or_override_amp_authority_quarantine_existing_pcm() {
+fn live_amp_drift_quarantines_pcm() {
     for fault in 0..3 {
         let mut fixture = Fixture::new();
         let inherited = fault == 2;

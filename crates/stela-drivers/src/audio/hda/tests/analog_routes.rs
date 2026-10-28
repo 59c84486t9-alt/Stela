@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn firmware_pin_candidates_are_real_format_checked_paths_without_electrical_inference() {
+fn firmware_pin_candidates() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     model.borrow_mut().pin_defaults.insert(5, 0x01a1_9020);
@@ -56,7 +56,7 @@ fn firmware_pin_candidates_are_real_format_checked_paths_without_electrical_infe
 }
 
 #[test]
-fn polled_pin_sense_uses_real_verbs_trigger_and_full_width_measurement_without_routing_writes() {
+fn pin_sense_preserves_routing() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     model.borrow_mut().parameters.insert((4, 0x0c), 0x1001f);
@@ -105,7 +105,7 @@ fn polled_pin_sense_uses_real_verbs_trigger_and_full_width_measurement_without_r
 }
 
 #[test]
-fn analog_routes_program_real_command_rings_power_mixers_pins_and_both_directions() {
+fn analog_duplex_routing() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -174,7 +174,7 @@ fn analog_routes_program_real_command_rings_power_mixers_pins_and_both_direction
 }
 
 #[test]
-fn analog_route_preflight_refuses_unsupported_electrical_caps_before_any_verb() {
+fn unsupported_electrical_caps_rejected() {
     for failure in 0..7 {
         let mut fixture = Fixture::new();
         let model = analog_model();
@@ -262,7 +262,7 @@ fn analog_route_preflight_refuses_unsupported_electrical_caps_before_any_verb() 
 }
 
 #[test]
-fn analog_route_cycles_digital_and_cross_group_endpoints_refuse_explicitly() {
+fn invalid_route_topology_rejected() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -313,7 +313,7 @@ fn analog_route_cycles_digital_and_cross_group_endpoints_refuse_explicitly() {
 }
 
 #[test]
-fn analog_route_hardware_failures_poison_future_configuration_and_start() {
+fn route_failure_blocks_start() {
     for failure in 0..6 {
         let mut fixture = Fixture::new();
         let model = analog_model();
@@ -377,7 +377,7 @@ fn analog_route_hardware_failures_poison_future_configuration_and_start() {
 }
 
 #[test]
-fn analog_routes_reserve_widgets_and_require_every_stream_stopped() {
+fn widget_reservation_requires_stopped_streams() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -438,7 +438,7 @@ fn analog_routes_reserve_widgets_and_require_every_stream_stopped() {
 }
 
 #[test]
-fn capture_bias_choices_and_stopped_buffer_fill_observe_capability_and_dma_ownership() {
+fn capture_bias_and_buffer_ownership() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -510,7 +510,7 @@ fn capture_bias_choices_and_stopped_buffer_fill_observe_capability_and_dma_owner
 }
 
 #[test]
-fn zero_widget_power_states_inherit_function_group_but_zero_group_refuses() {
+fn inherited_power_states() {
     for group_states in [1, 0] {
         let mut fixture = Fixture::new();
         let model = analog_model();
@@ -554,7 +554,7 @@ fn zero_widget_power_states_inherit_function_group_but_zero_group_refuses() {
 }
 
 #[test]
-fn uncertain_stream_stop_blocks_other_routes_before_codec_or_mmio_writes() {
+fn uncertain_stop_blocks_routing() {
     for dma_error in [false, true] {
         let mut fixture = Fixture::new();
         let model = analog_model();

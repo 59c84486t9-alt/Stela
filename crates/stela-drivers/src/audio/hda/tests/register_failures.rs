@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn local_rirb_status_acknowledgement_releases_response_counter_backpressure() {
+fn rirb_ack_releases_backpressure() {
     for enable_status in [true, false] {
         let mut fixture = Fixture::new();
         let model = Model::new(256);
@@ -29,7 +29,7 @@ fn local_rirb_status_acknowledgement_releases_response_counter_backpressure() {
 }
 
 #[test]
-fn all_ones_command_control_after_final_enable_refuses_constructor_and_attempts_cleanup() {
+fn final_control_read_failure_attempts_cleanup() {
     for offset in [CORBCTL, RIRBCTL] {
         let mut fixture = Fixture::new();
         let model = Model::new(256);
@@ -65,7 +65,7 @@ fn all_ones_command_control_after_final_enable_refuses_constructor_and_attempts_
 }
 
 #[test]
-fn control_read_failures_cannot_acknowledge_link_corb_or_codec_presence() {
+fn failed_reads_do_not_acknowledge_controls() {
     for case in 0..5 {
         let mut fixture = Fixture::new();
         let model = Model::new(256);
@@ -114,7 +114,7 @@ fn control_read_failures_cannot_acknowledge_link_corb_or_codec_presence() {
 }
 
 #[test]
-fn failed_stream_control_reads_refuse_reset_start_and_stop_without_cpu_buffer_ownership() {
+fn failed_stream_reads_retain_buffer_ownership() {
     for case in 0..4 {
         let mut fixture = Fixture::new();
         let model = Model::new(256);
@@ -188,7 +188,7 @@ fn failed_stream_control_reads_refuse_reset_start_and_stop_without_cpu_buffer_ow
 }
 
 #[test]
-fn converter_binding_ff_is_valid_data_but_full_failed_response_is_rejected() {
+fn converter_ff_value_and_failed_response() {
     for failed_read in [false, true] {
         let mut fixture = Fixture::new();
         let model = graph_model();
@@ -239,7 +239,7 @@ fn converter_binding_ff_is_valid_data_but_full_failed_response_is_rejected() {
 }
 
 #[test]
-fn dma_identity_ceiling_checks_full_32_40_and_64_bit_extents() {
+fn dma_address_ceiling_extents() {
     for bits in [32, 40, 48] {
         let limit = 1u64 << bits;
         assert_eq!(check_dma_range(limit - 4096, 4096, 4096, bits), Ok(()));
@@ -265,7 +265,7 @@ fn dma_identity_ceiling_checks_full_32_40_and_64_bit_extents() {
 }
 
 #[test]
-fn configured_dma_ceiling_is_explicit_and_applies_to_rings_before_hardware_writes() {
+fn dma_ceiling_precedes_ring_programming() {
     for bits in [0, 31, 65, u8::MAX] {
         let mut fixture = Fixture::new();
         let model = Model::new(256);

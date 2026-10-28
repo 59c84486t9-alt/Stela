@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn pcm_formats_buffers_directions_and_verb_widths_validate_before_programming() {
+fn pcm_format_encoding() {
     for rate in [
         8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000,
     ] {
@@ -42,9 +42,17 @@ fn pcm_formats_buffers_directions_and_verb_widths_validate_before_programming() 
         .encode(),
         Err(Error::InvalidFormat)
     );
+}
+
+#[test]
+fn verb_field_bounds() {
     assert_eq!(Verb::short(15, 0, 0xf00, 0), Err(Error::InvalidVerb));
     assert_eq!(Verb::short(0, 128, 0xf00, 0), Err(Error::InvalidVerb));
     assert_eq!(Verb::long(0, 2, 2, 0x4011).unwrap().raw(), 0x0022_4011);
+}
+
+#[test]
+fn stream_buffer_preflight() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -70,7 +78,7 @@ fn pcm_formats_buffers_directions_and_verb_widths_validate_before_programming() 
 }
 
 #[test]
-fn production_streams_walk_real_split_bdls_and_preserve_stopped_cpu_ownership() {
+fn split_bdl_streaming() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -121,7 +129,7 @@ fn production_streams_walk_real_split_bdls_and_preserve_stopped_cpu_ownership() 
 }
 
 #[test]
-fn stream_dma_faults_w1c_status_and_stop_failure_do_not_release_buffer_ownership() {
+fn failed_stop_retains_buffer_ownership() {
     for fault in [SD_FIFO_ERROR, SD_DESC_ERROR] {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
@@ -164,7 +172,7 @@ fn stream_dma_faults_w1c_status_and_stop_failure_do_not_release_buffer_ownership
 }
 
 #[test]
-fn stream_reset_start_and_position_failures_are_explicit() {
+fn reset_start_and_position_failures() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -203,7 +211,7 @@ fn stream_reset_start_and_position_failures_are_explicit() {
 }
 
 #[test]
-fn standard_converter_bind_checks_graph_direction_format_and_readback() {
+fn converter_graph_and_readback() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -237,7 +245,7 @@ fn standard_converter_bind_checks_graph_direction_format_and_readback() {
 }
 
 #[test]
-fn dma_width_ring_capabilities_and_platform_claim_bounds_are_checked() {
+fn dma_ring_and_mmio_bounds() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     model.borrow_mut().bytes[GCAP] &= !1;
@@ -251,13 +259,17 @@ fn dma_width_ring_capabilities_and_platform_claim_bounds_are_checked() {
         create(&model, &mut fixture, config()),
         Err(Error::UnsupportedRingSize)
     ));
+}
+
+#[test]
+fn mmio_claim_bounds() {
     // SAFETY: these invalid ranges are rejected before any MMIO is touched.
     assert!(unsafe { MmioRegisters::claim(0, 0x1000) }.is_err());
     assert!(unsafe { MmioRegisters::claim(0x1000, 0x400) }.is_err());
 }
 
 #[test]
-fn converter_channel_span_is_validated_before_any_verb_or_mmio() {
+fn converter_channel_preflight() {
     for (widget_capabilities, channels, channel, expected) in [
         (1, 2, 1, Err(Error::InvalidFormat)),
         (1, 1, 0, Err(Error::InvalidFormat)),
@@ -293,7 +305,7 @@ fn converter_channel_span_is_validated_before_any_verb_or_mmio() {
 }
 
 #[test]
-fn cyclic_buffers_require_complete_packets_at_high_and_fractional_rates() {
+fn cyclic_packet_alignment() {
     for rate in [176_400, 192_000] {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
@@ -333,7 +345,7 @@ fn cyclic_buffers_require_complete_packets_at_high_and_fractional_rates() {
 }
 
 #[test]
-fn unstriped_peak_and_aggregate_bandwidth_are_reserved_before_allocation() {
+fn bandwidth_reserved_before_allocation() {
     for rate in [176_400, 192_000] {
         let mut fixture = Fixture::new();
         let model = Model::new(16);

@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn alc298_explicit_headphone_startup_observes_source_delays_and_reserves_real_route() {
+fn headphone_startup_timing() {
     for present in [false, true] {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec0298, present);
@@ -104,7 +104,7 @@ fn alc298_explicit_headphone_startup_observes_source_delays_and_reserves_real_ro
 }
 
 #[test]
-fn alc298_startup_rechecks_live_pin_policy_and_stale_stream_before_any_mutation() {
+fn stale_route_rejected() {
     for fault in 0..7 {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec0298, true);
@@ -186,7 +186,7 @@ fn alc298_startup_rechecks_live_pin_policy_and_stale_stream_before_any_mutation(
 }
 
 #[test]
-fn alc298_startup_failures_quarantine_partial_pin_amp_and_common_state() {
+fn startup_failure_quarantines_routes() {
     for fault in 0..4 {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec0298, true);

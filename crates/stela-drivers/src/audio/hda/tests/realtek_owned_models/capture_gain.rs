@@ -48,7 +48,7 @@ fn capture(
 }
 
 #[test]
-fn all_family_capture_gain_uses_adc_zero_during_real_duplex_dma() {
+fn family_capture_gain() {
     for &id in IDS {
         let mut fixture = Fixture::new();
         let model = adc_model(id);
@@ -121,7 +121,7 @@ fn all_family_capture_gain_uses_adc_zero_during_real_duplex_dma() {
 }
 
 #[test]
-fn selected_mixer_input_isolated_and_mono_adc_has_one_amplifier_channel() {
+fn selected_mixer_amp_channels() {
     for mixer in [false, true] {
         let mut fixture = Fixture::new();
         let model = adc_model(0x10ec_0887);
@@ -162,7 +162,7 @@ fn selected_mixer_input_isolated_and_mono_adc_has_one_amplifier_channel() {
 }
 
 #[test]
-fn mono_mixer_with_one_stereo_source_has_two_input_amplifier_channels() {
+fn stereo_mixer_amp_channels() {
     let mut fixture = Fixture::new();
     let model = adc_model(0x10ec_0887);
     {
@@ -194,7 +194,7 @@ fn mono_mixer_with_one_stereo_source_has_two_input_amplifier_channels() {
 }
 
 #[test]
-fn terminal_capture_pin_gain_does_not_claim_its_output_selector() {
+fn terminal_pin_gain_selector() {
     let mut fixture = Fixture::new();
     let model = adc_model(0x10ec_0887);
     {
@@ -224,7 +224,7 @@ fn terminal_capture_pin_gain_does_not_claim_its_output_selector() {
 }
 
 #[test]
-fn gain_and_real_mute_capabilities_are_required_without_hidden_effects() {
+fn missing_gain_or_mute_rejected() {
     let mut fixture = Fixture::new();
     let model = adc_model(0x10ec_0887);
     {
@@ -262,7 +262,7 @@ fn gain_and_real_mute_capabilities_are_required_without_hidden_effects() {
 }
 
 #[test]
-fn wrong_stream_and_unreserved_nodes_refuse_before_live_codec_access() {
+fn unreserved_stream_rejected() {
     let mut fixture = Fixture::new();
     let model = adc_model(0x10ec_0887);
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -298,7 +298,7 @@ fn wrong_stream_and_unreserved_nodes_refuse_before_live_codec_access() {
 }
 
 #[test]
-fn failed_channel_or_lost_selector_retains_dma_and_requires_real_reset() {
+fn failed_gain_requires_reset() {
     for fault in 0..3 {
         let mut fixture = Fixture::new();
         let model = adc_model(0x10ec_0887);
@@ -353,7 +353,7 @@ fn failed_channel_or_lost_selector_retains_dma_and_requires_real_reset() {
 }
 
 #[test]
-fn live_amp_capability_drift_cannot_authorize_a_set() {
+fn live_amp_drift_rejected() {
     let mut fixture = Fixture::new();
     let model = adc_model(0x10ec_0887);
     let mut controller = create(&model, &mut fixture, config()).unwrap();

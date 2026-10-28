@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn cs4210_exact_cold_sequence_effective_dac_range_and_normal_input_one_drive_duplex_pcm() {
+fn cold_startup_and_duplex() {
     for inherited in [false, true] {
         for raw_steps in [15, 63] {
             let mut fixture = Fixture::new();
@@ -128,7 +128,7 @@ fn cs4210_exact_cold_sequence_effective_dac_range_and_normal_input_one_drive_dup
 }
 
 #[test]
-fn cs4210_speaker_boost_is_live_preserves_high_bits_and_skips_unchanged_data_writes() {
+fn speaker_boost_preserves_high_bits() {
     for pin in [5, 6] {
         let mut fixture = Fixture::new();
         let model = cs4210_device(false, 63);
@@ -199,7 +199,7 @@ fn cs4210_speaker_boost_is_live_preserves_high_bits_and_skips_unchanged_data_wri
 }
 
 #[test]
-fn cs4210_bad_fixed_authority_refuses_without_codec_effect_or_retained_owner() {
+fn invalid_fixed_controls_rejected() {
     for fault in 0..7 {
         let mut fixture = Fixture::new();
         let model = cs4210_device(false, 63);
@@ -245,7 +245,7 @@ fn cs4210_bad_fixed_authority_refuses_without_codec_effect_or_retained_owner() {
 }
 
 #[test]
-fn cs4210_late_pinmux_duplicate_processing_and_protected_lost_ack_retain_effects_until_reset() {
+fn startup_failure_requires_reset() {
     for fault in 0..5 {
         let mut fixture = Fixture::new();
         let model = cs4210_device(false, 63);
@@ -312,7 +312,7 @@ fn cs4210_late_pinmux_duplicate_processing_and_protected_lost_ack_retain_effects
 }
 
 #[test]
-fn cs4210_live_raw_amp_pin_processing_and_core_authority_loss_quarantines_existing_routes() {
+fn live_control_drift_quarantines_routes() {
     for inherited in [false, true] {
         for fault in 0..5 {
             let mut fixture = Fixture::new();
@@ -375,7 +375,7 @@ fn cs4210_live_raw_amp_pin_processing_and_core_authority_loss_quarantines_existi
 }
 
 #[test]
-fn cs4210_live_speaker_boost_after_effect_failure_retains_pcm_and_codec_until_actual_reset() {
+fn speaker_boost_failure_retains_owner() {
     for lost_ack in [false, true] {
         let mut fixture = Fixture::new();
         let model = cs4210_device(false, 63);

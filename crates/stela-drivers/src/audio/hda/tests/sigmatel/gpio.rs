@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn sigmatel_actual_fixed_startup_gpio_preservation_and_native_duplex_pcm() {
+fn startup_gpio_and_duplex() {
     for id in [
         0x8384_7690,
         0x8384_7632,
@@ -149,7 +149,7 @@ fn sigmatel_actual_fixed_startup_gpio_preservation_and_native_duplex_pcm() {
 }
 
 #[test]
-fn sigmatel_startup_gpio_mux_eapd_amp_and_quiet_failures_retain_real_ownership() {
+fn startup_failure_retains_owner() {
     for id in [0x8384_7690, 0x8384_7632] {
         for fault in 0..9 {
             let mut fixture = Fixture::new();
@@ -211,7 +211,7 @@ fn sigmatel_startup_gpio_mux_eapd_amp_and_quiet_failures_retain_real_ownership()
 }
 
 #[test]
-fn sigmatel_refuses_unknown_fixed_metadata_and_gpio_authority_before_effects() {
+fn invalid_gpio_controls_rejected() {
     for fault in 0..6 {
         let mut fixture = Fixture::new();
         let model = device(if fault == 0 {
@@ -250,7 +250,7 @@ fn sigmatel_refuses_unknown_fixed_metadata_and_gpio_authority_before_effects() {
 }
 
 #[test]
-fn sigmatel_owned_live_identity_loss_and_stream_quiescence_failures_block_reuse() {
+fn lost_identity_blocks_reuse() {
     for quiet_failure in [false, true] {
         let mut fixture = Fixture::new();
         let model = device(0x8384_7690);
@@ -310,7 +310,7 @@ fn sigmatel_owned_live_identity_loss_and_stream_quiescence_failures_block_reuse(
 }
 
 #[test]
-fn sigmatel_zero_gpio_and_observed_undeclared_gpio_levels_are_not_inferred_away() {
+fn unclaimed_gpio_levels_preserved() {
     for active_undeclared in [false, true] {
         let mut fixture = Fixture::new();
         let model = device(0x8384_7690);
@@ -353,7 +353,7 @@ fn sigmatel_zero_gpio_and_observed_undeclared_gpio_levels_are_not_inferred_away(
 }
 
 #[test]
-fn sigmatel_and_conexant_backends_cannot_replace_each_others_owned_address() {
+fn vendor_owners_are_exclusive() {
     for initial_sigmatel in [false, true] {
         let mut fixture = Fixture::new();
         let model = device(if initial_sigmatel {

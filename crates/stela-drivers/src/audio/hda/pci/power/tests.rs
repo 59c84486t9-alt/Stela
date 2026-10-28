@@ -402,7 +402,7 @@ fn controller<'a>(
 }
 
 #[test]
-fn retained_pci_d3hot_resumes_exact_dma_and_invalidates_duplex_handles_for_all_added_profiles() {
+fn d3hot_resume_invalidates_stream_handles() {
     for device in [
         0x2668, 0x1c20, 0x1d20, 0x1e20, 0x3b56, 0x3b57, 0x811b, 0x080a, 0x0f04, 0x2284, 0xa1f0,
         0xa270, 0x02c8, 0x06c8, 0xa3f0, 0xf0c8, 0xf1c8, 0x38c8, 0x4dc8, 0x4b55, 0x4b58, 0x7a50,
@@ -543,7 +543,7 @@ unsafe impl DisplayAudioPort for HdmiGrant {
 }
 
 #[test]
-fn composed_hdmi_power_grant_covers_pci_suspend_reset_and_is_retained_on_reset_failure() {
+fn hdmi_grant_survives_failed_suspend() {
     for reject_reset in [false, true] {
         let (mut function, mmio, clock, state, mut ram) = fixture(0x2668);
         let mut c = controller(&mut function, mmio, clock.clone(), &mut ram);
@@ -608,7 +608,7 @@ fn composed_hdmi_power_grant_covers_pci_suspend_reset_and_is_retained_on_reset_f
 }
 
 #[test]
-fn native_codec_subsystem_comes_from_retained_pci_and_refuses_lost_or_suspended_authority() {
+fn subsystem_requires_live_pci_binding() {
     let (mut function, mmio, clock, state, mut ram) = fixture(0x2668);
     let mut c = controller(&mut function, mmio, clock, &mut ram);
     assert_eq!(c.registers.codec_pci_subsystem(), Ok(Some(0x1234_abcd)));
@@ -638,7 +638,7 @@ fn native_codec_subsystem_comes_from_retained_pci_and_refuses_lost_or_suspended_
 }
 
 #[test]
-fn failed_stop_or_link_reset_never_enters_d3_and_retains_stream_reservations() {
+fn failed_stop_prevents_d3() {
     for stop_fault in [true, false] {
         let (mut function, mmio, clock, state, mut ram) = fixture(0x2668);
         let mut c = controller(&mut function, mmio, clock, &mut ram);
@@ -672,7 +672,7 @@ fn failed_stop_or_link_reset_never_enters_d3_and_retains_stream_reservations() {
 }
 
 #[test]
-fn failed_pm_or_decode_write_retains_snapshot_and_only_explicit_resume_recovers() {
+fn failed_power_write_retains_snapshot() {
     for fault in 0..3 {
         let (mut function, mmio, clock, state, mut ram) = fixture(0x2668);
         let mut c = controller(&mut function, mmio, clock, &mut ram);
@@ -701,7 +701,7 @@ fn failed_pm_or_decode_write_retains_snapshot_and_only_explicit_resume_recovers(
 }
 
 #[test]
-fn resume_identity_capability_bar_snoop_and_reset_failures_retain_original_owner() {
+fn failed_resume_retains_owner() {
     for fault in 0..6 {
         let (mut function, mmio, clock, state, mut ram) = fixture(0x7728);
         let mut c = controller(&mut function, mmio, clock, &mut ram);

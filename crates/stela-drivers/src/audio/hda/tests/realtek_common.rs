@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn realtek_desktop_common_masks_follow_exact_codec_identity_and_real_indexed_verbs() {
+fn family_coefficient_masks() {
     for (id, expected) in [
         (0x10ec0887, &[(10, 0xfbff)][..]),
         (0x10ec0892, &[(4, 0x7fff), (7, 0xffdf)][..]),
@@ -83,7 +83,7 @@ fn realtek_desktop_common_masks_follow_exact_codec_identity_and_real_indexed_ver
 }
 
 #[test]
-fn realtek_common_preflight_refuses_forged_stale_live_identity_and_unsupported_vendor_layouts() {
+fn stale_graph_rejected() {
     for fault in 0..8 {
         let mut fixture = Fixture::new();
         let model = realtek_desktop_model(0x10ec0887);
@@ -127,7 +127,7 @@ fn realtek_common_preflight_refuses_forged_stale_live_identity_and_unsupported_v
 }
 
 #[test]
-fn realtek_common_running_and_uncertain_dma_refuse_before_verb_or_mmio_access() {
+fn running_dma_blocks_configuration() {
     for uncertain in [false, true] {
         let mut fixture = Fixture::new();
         let model = realtek_desktop_model(0x10ec0887);
@@ -164,7 +164,7 @@ fn realtek_common_running_and_uncertain_dma_refuse_before_verb_or_mmio_access() 
 }
 
 #[test]
-fn realtek_common_failed_power_index_coefficient_and_readback_poison_typed_start_until_reset() {
+fn failed_controls_require_reset() {
     for fault in 0..6 {
         let mut fixture = Fixture::new();
         let model = realtek_desktop_model(0x10ec0887);

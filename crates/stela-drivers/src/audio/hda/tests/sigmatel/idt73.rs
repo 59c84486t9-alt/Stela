@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn idt73_all_eighteen_exact_ids_source_gpio_knob_eight_port_map_and_actual_duplex() {
+fn family_startup_and_duplex() {
     let mut ids: Vec<_> = (0x111d_7674..=0x111d_7676).collect();
     ids.extend(0x111d_76c0..=0x111d_76ce);
     assert_eq!(ids.len(), 18);
@@ -132,7 +132,7 @@ fn idt73_all_eighteen_exact_ids_source_gpio_knob_eight_port_map_and_actual_duple
 }
 
 #[test]
-fn idt73_unclaimed_gpio_inputs_and_controls_can_change_during_pcm_and_quiet_preserves_them() {
+fn unclaimed_gpio_preserved() {
     for transition in 0..3 {
         let mut fixture = Fixture::new();
         let model = idt73_device(0x111d_76c2);
@@ -198,7 +198,7 @@ fn idt73_unclaimed_gpio_inputs_and_controls_can_change_during_pcm_and_quiet_pres
 }
 
 #[test]
-fn idt73_missing_source_gpio_knob_or_eighth_port_refuses_before_effects() {
+fn missing_fixed_controls_rejected() {
     for fault in 0..8 {
         let mut fixture = Fixture::new();
         let model = idt73_device(0x111d_7674);
@@ -248,7 +248,7 @@ fn idt73_missing_source_gpio_knob_or_eighth_port_refuses_before_effects() {
 }
 
 #[test]
-fn idt73_source_gpio_knob_and_map_late_effect_failures_retain_owner_until_reset() {
+fn late_startup_failure_requires_reset() {
     for fault in 0..6 {
         let mut fixture = Fixture::new();
         let model = idt73_device(0x111d_76ce);
@@ -309,7 +309,7 @@ fn idt73_source_gpio_knob_and_map_late_effect_failures_retain_owner_until_reset(
 }
 
 #[test]
-fn idt73_live_gpio_knob_port_map_and_defaults_quarantine_retained_routes_and_stale_shutdown() {
+fn live_control_drift_quarantines_routes() {
     for fault in 0..9 {
         let mut fixture = Fixture::new();
         let model = idt73_device(0x111d_76c1);
@@ -378,7 +378,7 @@ fn idt73_live_gpio_knob_port_map_and_defaults_quarantine_retained_routes_and_sta
 }
 
 #[test]
-fn idt73_quiet_waits_for_actual_stop_and_gpio_after_effect_failure_still_stops_command_dma() {
+fn failed_quiet_stops_command_dma() {
     for stream_stuck in [false, true] {
         let mut fixture = Fixture::new();
         let model = idt73_device(0x111d_7675);
@@ -433,7 +433,7 @@ fn idt73_quiet_waits_for_actual_stop_and_gpio_after_effect_failure_still_stops_c
 }
 
 #[test]
-fn idt73_live_map_post_effect_readback_and_lost_ack_keep_running_pcm_owned_until_reset() {
+fn failed_map_update_retains_owner() {
     for lost_ack in [false, true] {
         let mut fixture = Fixture::new();
         let model = idt73_device(0x111d_76c0);

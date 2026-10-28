@@ -52,7 +52,7 @@ fn playback() -> PinOptions {
 mod capture_gain;
 
 #[test]
-fn all_family_silicon_runs_real_duplex_dma_restarts_and_quiets() {
+fn family_duplex_lifecycle() {
     for &id in IDS {
         let mut fixture = Fixture::new();
         let model = family_model(id);
@@ -127,7 +127,7 @@ fn all_family_silicon_runs_real_duplex_dma_restarts_and_quiets() {
 }
 
 #[test]
-fn source_masks_and_668_literal_restore_are_actual_observed_verbs() {
+fn coefficient_masks_and_literal_restore() {
     for &id in IDS {
         let mut fixture = Fixture::new();
         let model = family_model(id);
@@ -184,7 +184,7 @@ fn default_amp_model(id: u32, zero: u16) -> Rc<RefCell<Model>> {
 }
 
 #[test]
-fn default_amp_follows_actual_eapd_write_and_ack_after_family_pll() {
+fn default_amp_follows_eapd_ack() {
     for (id, zero, default_amp) in [
         (0x10ec_0882, 0, true),
         (0x10ec_0883, 0, true),
@@ -243,7 +243,7 @@ fn default_amp_follows_actual_eapd_write_and_ack_after_family_pll() {
 }
 
 #[test]
-fn unacknowledged_eapd_blocks_default_amp_and_retains_codec_owner() {
+fn missing_eapd_ack_retains_owner() {
     for (id, zero) in [
         (0x10ec_0882, 0),
         (0x10ec_0883, 0),
@@ -283,7 +283,7 @@ fn unacknowledged_eapd_blocks_default_amp_and_retains_codec_owner() {
 }
 
 #[test]
-fn mutated_graph_or_lost_codec_authority_never_authorizes_live_amp() {
+fn stale_graph_blocks_amp() {
     for fault in 0..7 {
         let mut fixture = Fixture::new();
         let model = family_model(0x10ec_0887);
@@ -337,7 +337,7 @@ fn mutated_graph_or_lost_codec_authority_never_authorizes_live_amp() {
 }
 
 #[test]
-fn failed_coefficient_programming_retains_address_until_acknowledged_reset() {
+fn failed_coefficient_retains_owner() {
     for fault in 0..4 {
         let mut fixture = Fixture::new();
         let model = family_model(0x10ec_0892);
@@ -411,7 +411,7 @@ fn oem_model() -> Rc<RefCell<Model>> {
     model
 }
 #[test]
-fn original_pci_oem_fixups_have_real_coefficients_routes_and_board_retirement() {
+fn pci_oem_fixups_and_retirement() {
     for subsystem in [0xa0cd1458, 0xa0ce1458, 0xa0d51458, 0x95011558, 0x12931462] {
         let mut fixture = Fixture::new();
         let model = oem_model();
@@ -486,7 +486,7 @@ fn original_pci_oem_fixups_have_real_coefficients_routes_and_board_retirement() 
     }
 }
 #[test]
-fn absent_pci_authority_and_unobserved_oem_connection_refuse_before_coefficient_programming() {
+fn missing_pci_identity_blocks_fixups() {
     let mut fixture = Fixture::new();
     let model = oem_model();
     let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -521,7 +521,7 @@ fn absent_pci_authority_and_unobserved_oem_connection_refuse_before_coefficient_
     assert_eq!(model.borrow().coefficient_writes, 0);
 }
 #[test]
-fn laptop_managed_startup_duplex_restart_and_exact_timed_shutup() {
+fn laptop_depop_timing() {
     for (id, zero) in [
         (0x10ec_0269, 0),
         (0x10ec_0269, 0x18),
@@ -640,7 +640,7 @@ fn laptop_managed_startup_duplex_restart_and_exact_timed_shutup() {
     }
 }
 #[test]
-fn laptop_lost_hidden_bank_and_failed_depop_shutdown_keep_owner() {
+fn laptop_failed_shutdown_retains_owner() {
     for fault in 0..2 {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec_0256, true);

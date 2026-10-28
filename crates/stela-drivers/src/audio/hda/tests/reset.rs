@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn mandatory_pci_reset_policy_and_exact_prepared_bdf_refuse_bypasses_before_dma_or_mmio() {
+fn reset_binding_preflight() {
     let mut fixture = Fixture::new();
     let model = Model::new(16);
     let remaining = fixture.allocator.remaining();
@@ -41,7 +41,7 @@ fn mandatory_pci_reset_policy_and_exact_prepared_bdf_refuse_bypasses_before_dma_
 }
 
 #[test]
-fn native_pci_clock_bracket_covers_initial_reset_reinitialize_and_discovery_retry() {
+fn clock_gate_brackets_each_reset() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     let (mut function, state) = reset_pci(&model);
@@ -86,8 +86,7 @@ fn native_pci_clock_bracket_covers_initial_reset_reinitialize_and_discovery_retr
 }
 
 #[test]
-fn failed_native_pci_reset_controls_never_report_constructor_success_and_attempt_matching_cleanup()
-{
+fn reset_control_failure_attempts_cleanup() {
     for fault in 0..5 {
         let mut fixture = Fixture::new();
         let model = Model::new(16);
@@ -127,7 +126,7 @@ fn failed_native_pci_reset_controls_never_report_constructor_success_and_attempt
 }
 
 #[test]
-fn failed_native_reset_and_quiescence_retain_dma_block_operations_and_allow_explicit_recovery() {
+fn failed_reset_retains_dma_until_recovery() {
     for fault in 0..3 {
         let mut fixture = Fixture::new();
         let model = Model::new(16);

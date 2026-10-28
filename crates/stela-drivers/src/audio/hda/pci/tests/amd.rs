@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn newer_amd_ids_select_fifo_retry_snoop_and_explicit_dma_ceiling() {
+fn profile_selects_fifo_and_dma_policy() {
     for device in [0x1457, 0x1487, 0x15e3] {
         let (mut function, timer, bar) = fixture(3);
         set_identity(&mut function, AMD, device);
@@ -39,7 +39,7 @@ fn newer_amd_ids_select_fifo_retry_snoop_and_explicit_dma_ceiling() {
 }
 
 #[test]
-fn newer_amd_subsystem_exclusions_and_failed_subsystem_reads_refuse_before_writes() {
+fn excluded_subsystems_rejected() {
     for (device, subvendor, subdevice, error) in [
         (0x1487, 0x1043, 0x874f, AttachError::SubsystemExcluded),
         (0x1487, 0x1462, 0xcb59, AttachError::SubsystemExcluded),
@@ -70,7 +70,7 @@ fn newer_amd_subsystem_exclusions_and_failed_subsystem_reads_refuse_before_write
 }
 
 #[test]
-fn conditional_amd_board_exclusion_retains_exact_dmi_condition_and_unknown_evidence() {
+fn board_exclusion_uses_dmi_identity() {
     for (vendor, name, expected) in [
         (
             "Micro-Star International Co., Ltd.",
@@ -126,7 +126,7 @@ fn conditional_amd_board_exclusion_retains_exact_dmi_condition_and_unknown_evide
 }
 
 #[test]
-fn unsupported_amd_dsp_and_gpu_id_families_do_not_inherit_snoop_policy() {
+fn dsp_and_gpu_profiles_rejected() {
     for (vendor, device) in [
         (AMD, 0x15e2),
         (AMD, 0x1640),
@@ -147,7 +147,7 @@ fn unsupported_amd_dsp_and_gpu_id_families_do_not_inherit_snoop_policy() {
 }
 
 #[test]
-fn amd_vendor_control_overlap_and_snoop_rejection_refuse_without_bus_mastering() {
+fn rejected_snoop_keeps_mastering_disabled() {
     for variant in 0..3 {
         let (mut function, timer, bar) = fixture(0);
         set_identity(&mut function, AMD, 0x780d);
@@ -181,7 +181,7 @@ fn amd_vendor_control_overlap_and_snoop_rejection_refuse_without_bus_mastering()
 }
 
 #[test]
-fn failed_initial_pci_or_vendor_controls_are_not_used_for_read_modify_write() {
+fn failed_controls_rejected_before_updates() {
     for vendor_fault in [false, true] {
         let (mut function, timer, bar) = fixture(0);
         if vendor_fault {

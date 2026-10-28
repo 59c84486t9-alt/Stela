@@ -253,7 +253,7 @@ fn routes<R: Registers, T: Timer>(
 }
 
 #[test]
-fn realtek_pci_suspend_resume_owns_duplex_ram_and_requires_fresh_codec_routes() {
+fn pci_resume_requires_fresh_routes() {
     let mut fixture = Fixture::new();
     let (model, mut function, state) = hardware();
     let mut c = claim(&mut function, &state, &mut fixture);
@@ -310,7 +310,7 @@ fn realtek_pci_suspend_resume_owns_duplex_ram_and_requires_fresh_codec_routes() 
 }
 
 #[test]
-fn realtek_failed_stop_or_quiet_never_writes_pci_power_and_keeps_routes() {
+fn failed_quiescence_blocks_pci_power() {
     for failed_stop in [true, false] {
         let mut fixture = Fixture::new();
         let (model, mut function, state) = hardware();
@@ -347,7 +347,7 @@ fn realtek_failed_stop_or_quiet_never_writes_pci_power_and_keeps_routes() {
 }
 
 #[test]
-fn realtek_failed_pci_power_and_resume_reset_keep_original_effect_reservations() {
+fn failed_resume_retains_reservations() {
     let mut fixture = Fixture::new();
     let (model, mut function, state) = hardware();
     let mut c = claim(&mut function, &state, &mut fixture);
@@ -386,7 +386,7 @@ fn realtek_failed_pci_power_and_resume_reset_keep_original_effect_reservations()
 }
 
 #[test]
-fn cold_vendor_initialization_cannot_override_a_retained_raw_converter() {
+fn raw_converter_blocks_vendor_initialization() {
     for vendor in [0x10ec_0882, 0x14f1_5045, 0x8384_7690, 0x1013_4213] {
         let mut fixture = Fixture::new();
         let model = realtek_desktop_model(vendor);

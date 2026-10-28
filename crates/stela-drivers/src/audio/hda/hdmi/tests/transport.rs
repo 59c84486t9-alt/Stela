@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_command_rings_eld_channels_packets_and_24_fresh_periods_without_restart() {
+fn cyclic_playback_refills_without_restart() {
     for dp in [false, true] {
         for channels in [2, 4, 6, 8] {
             let mut f = Fixture::new(dp);
@@ -49,7 +49,7 @@ fn actual_command_rings_eld_channels_packets_and_24_fresh_periods_without_restar
 }
 
 #[test]
-fn invalid_eld_or_missing_pin_and_exact_profile_cannot_enable_gpu_or_codec() {
+fn invalid_port_rejected() {
     for fault in 0..6 {
         let mut f = Fixture::new(false);
         let mut c = f.controller();
@@ -77,7 +77,7 @@ fn invalid_eld_or_missing_pin_and_exact_profile_cannot_enable_gpu_or_codec() {
 }
 
 #[test]
-fn modern_profile_addresses_each_dp_mst_device_entry_like_linux() {
+fn mst_selects_each_device_entry() {
     let mut f = Fixture::new(true);
     {
         let mut h = f.hardware.lock().unwrap();
@@ -126,7 +126,7 @@ fn modern_profile_addresses_each_dp_mst_device_entry_like_linux() {
 }
 
 #[test]
-fn actual_hotplug_stops_then_reprepare_uses_new_sink_and_retains_original_port() {
+fn hotplug_reprepares_same_port() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -159,7 +159,7 @@ fn actual_hotplug_stops_then_reprepare_uses_new_sink_and_retains_original_port()
 }
 
 #[test]
-fn incomplete_ioc_and_coalesced_events_use_retained_completed_frontier() {
+fn coalesced_ioc_preserves_frontier() {
     let mut f = Fixture::new(false);
     let mut c = f.controller();
     let port = f.attach(&mut c);
@@ -180,7 +180,7 @@ fn incomplete_ioc_and_coalesced_events_use_retained_completed_frontier() {
 }
 
 #[test]
-fn elapsed_lap_unfilled_queue_and_late_copy_refuse_success_and_stop() {
+fn late_refill_stops_stream() {
     for fault in 0..3 {
         let mut f = Fixture::new(false);
         let mut c = f.controller();
@@ -215,7 +215,7 @@ fn elapsed_lap_unfilled_queue_and_late_copy_refuse_success_and_stop() {
 }
 
 #[test]
-fn failed_gpu_enable_or_codec_ack_quarantines_then_explicit_reset_recovers() {
+fn enable_failure_requires_reset() {
     for fault in 0..3 {
         let mut f = Fixture::new(false);
         let mut c = f.controller();

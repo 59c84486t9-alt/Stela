@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn alc255_depop_preserves_eapd_passthrough_until_the_final_literal_and_reserves_real_pcm() {
+fn alc255_eapd_depop_sequence() {
     for present in [false, true] {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec0255, present);
@@ -95,7 +95,7 @@ fn alc255_depop_preserves_eapd_passthrough_until_the_final_literal_and_reserves_
 }
 
 #[test]
-fn alc255_live_identity_and_late_depop_failure_do_not_publish_a_route() {
+fn alc255_failed_startup_blocks_route() {
     for fault in 0..3 {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec0255, true);
@@ -159,7 +159,7 @@ fn alc255_live_identity_and_late_depop_failure_do_not_publish_a_route() {
 }
 
 #[test]
-fn alc256_and_257_depop_use_fixed_nodes_ordered_reset_edges_and_timed_stereo_route() {
+fn alc256_stereo_depop_sequence() {
     for id in [0x10ec0256, 0x10ec0257] {
         for present in [false, true] {
             for reset_already_high in [false, true] {
@@ -318,7 +318,7 @@ fn alc256_and_257_depop_use_fixed_nodes_ordered_reset_edges_and_timed_stereo_rou
 }
 
 #[test]
-fn alc256_fixed_power_reset_index_data_and_each_pulse_readback_failure_quarantine_start() {
+fn alc256_failed_readback_blocks_start() {
     for fault in 0..10 {
         let mut fixture = Fixture::new();
         let model = realtek_headphone_model(0x10ec0256, true);
