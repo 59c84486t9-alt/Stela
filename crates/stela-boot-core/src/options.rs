@@ -25,6 +25,13 @@ pub const STRICT: &str = "--strict";
 pub const UPDATE_RESTORE: &str = mount_interface::UPDATE_RESTORE_OPTION;
 pub const EXTERNAL_DISKS: &str = "--external-disks";
 pub const NATIVE_CORES: &str = "--native-cores";
+pub const WIFI: &str = "--wifi";
+pub const WIFI_KEY: &str = "--wifi-key";
+pub const WIFI_COUNTRY: &str = "--wifi-country";
+/// The ESP file `--wifi` reads its key from without `--wifi-key`.
+pub const DEFAULT_WIFI_KEY: &str = "\\EFI\\stela\\wifi.key";
+/// IEEE 802.11 SSIDs are 1 to 32 octets.
+const SSID_BYTES: core::ops::RangeInclusive<usize> = 1..=32;
 
 /// The physical cores an explicit `--native-cores` may name.
 pub const MAX_NATIVE_CORES: usize = 64;
@@ -261,6 +268,15 @@ pub struct System {
     /// Give the guest a USB Ethernet adapter bridged to a host network
     /// adapter of its own (`--guest-network`).
     pub guest_network: bool,
+    /// Join this Wi-Fi network for the mount's network (`--wifi SSID`). The
+    /// line writes `%`, whitespace and control characters as `%XX`.
+    pub ssid: Option<String>,
+    /// The ESP file holding the network's passphrase or PSK (`--wifi-key
+    /// PATH`); `DEFAULT_WIFI_KEY` when `--wifi` is set without it.
+    pub wifi_key: Option<String>,
+    /// The ISO 3166-1 alpha-2 regulatory country, uppercase
+    /// (`--wifi-country XX`).
+    pub wifi_country: Option<String>,
     /// Advertise and log the SEP services whose contracts are not recovered
     /// (`--sep-observe`), each request refused by name.
     pub sep_observe: bool,
@@ -330,6 +346,9 @@ impl Default for System {
             usb_storage: Vec::new(),
             external_disks: false,
             guest_network: false,
+            ssid: None,
+            wifi_key: None,
+            wifi_country: None,
             sep_observe: false,
             strict: false,
             breakpoints: Vec::new(),
@@ -338,6 +357,48 @@ impl Default for System {
             watches: Vec::new(),
             dumps: Vec::new(),
         }
+    }
+}
+
+/// A `--wifi` word: `%XX` escapes decoded, 1 to 32 bytes of UTF-8.
+fn ssid(word: &str) -> Result<String, &'static str> {
+    const MALFORMED: &str = "--wifi needs a 1 to 32 byte network name, with %XX escapes";
+    let mut bytes = Vec::with_capacity(word.len());
+    let mut rest = word.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        rest = tail;
+        if byte != b'%' {
+            bytes.push(byte);
+            continue;
+        }
+        let digits = rest.get(..2).ok_or(MALFORMED)?;
+        let digits = core::str::from_utf8(digits).map_err(|_| MALFORMED)?;
+        bytes.push(u8::from_str_radix(digits, 16).map_err(|_| MALFORMED)?);
+        rest = &rest[2..];
+    }
+    if !SSID_BYTES.contains(&bytes.len()) {
+        return Err(MALFORMED);
+    }
+    String::from_utf8(bytes).map_err(|_| MALFORMED)
+}
+
+/// An SSID as one `--wifi` word: `%`, whitespace and control characters as
+/// `%XX`.
+struct Ssid<'a>(&'a str);
+
+impl fmt::Display for Ssid<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for character in self.0.chars() {
+            if character == '%' || character.is_whitespace() || character.is_control() {
+                let mut bytes = [0; 4];
+                for byte in character.encode_utf8(&mut bytes).bytes() {
+                    write!(f, "%{byte:02X}")?;
+                }
+            } else {
+                write!(f, "{character}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -470,6 +531,31 @@ impl System {
                     options.usb_storage.push(String::from(serial));
                 }
                 "--guest-network" => options.guest_network = true,
+                WIFI => {
+                    let ssid = ssid(value().ok_or("--wifi needs a network name")?)?;
+                    if options.ssid.replace(ssid).is_some() {
+                        return Err("duplicate --wifi");
+                    }
+                }
+                WIFI_KEY => {
+                    let path = value().ok_or("--wifi-key needs an ESP path")?;
+                    if options.wifi_key.replace(String::from(path)).is_some() {
+                        return Err("duplicate --wifi-key");
+                    }
+                }
+                WIFI_COUNTRY => {
+                    let code = value().ok_or("--wifi-country needs a two-letter country")?;
+                    if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+                        return Err("--wifi-country needs a two-letter country");
+                    }
+                    if options
+                        .wifi_country
+                        .replace(code.to_ascii_uppercase())
+                        .is_some()
+                    {
+                        return Err("duplicate --wifi-country");
+                    }
+                }
                 EXTERNAL_DISKS => options.external_disks = true,
                 "--audio-check" => {
                     if options.audio_check.is_some() {
@@ -575,6 +661,9 @@ impl System {
         if options.native_rounds || options.native_shared_check || options.native_bootstrap_check {
             options.parallel = false;
         }
+        if options.ssid.is_some() && options.wifi_key.is_none() {
+            options.wifi_key = Some(String::from(DEFAULT_WIFI_KEY));
+        }
         options.check()?;
         Ok(options)
     }
@@ -599,6 +688,9 @@ impl System {
         }
         if !self.restore && restore_inputs {
             return Err("restore inputs require explicit --restore-study");
+        }
+        if self.ssid.is_none() && (self.wifi_key.is_some() || self.wifi_country.is_some()) {
+            return Err("--wifi-key and --wifi-country configure a --wifi network");
         }
         if self.install_source.is_some() && self.install.is_none() {
             return Err("--install-source names the partition of an --install medium");
@@ -671,6 +763,7 @@ impl System {
                 || self.nor.is_some()
                 || self.input
                 || self.guest_network
+                || self.ssid.is_some()
                 || self.external_disks
                 || !self.usb_storage.is_empty()
                 || self.tss
@@ -805,6 +898,14 @@ impl fmt::Display for System {
         }
         line.flag(EXTERNAL_DISKS, self.external_disks)?;
         line.flag("--guest-network", self.guest_network)?;
+        line.value(WIFI, self.ssid.as_deref().map(Ssid))?;
+        line.value(
+            WIFI_KEY,
+            self.wifi_key
+                .as_deref()
+                .filter(|&path| path != DEFAULT_WIFI_KEY),
+        )?;
+        line.value(WIFI_COUNTRY, self.wifi_country.as_deref())?;
         line.flag("--tss", self.tss)?;
         line.flag("--input", self.input)?;
         line.flag("--idle-skip", self.idle_skip)?;
@@ -1034,6 +1135,34 @@ mod tests {
              --restore-manifest m.plist --restore-identity 2"
         ));
         assert_eq!(restore.restore_manifest_path.as_deref(), Some("m.plist"));
+    }
+
+    #[test]
+    fn wifi_names_escape_spaces_and_the_key_path_defaults() {
+        let options = round_trip("--system --wifi Home%20Net%25 --wifi-country gb");
+        assert_eq!(options.ssid.as_deref(), Some("Home Net%"));
+        assert_eq!(options.wifi_key.as_deref(), Some(DEFAULT_WIFI_KEY));
+        assert_eq!(options.wifi_country.as_deref(), Some("GB"));
+        assert_eq!(
+            options.to_string(),
+            "--system --wifi Home%20Net%25 --wifi-country GB"
+        );
+        let keyed = round_trip("--system --wifi caf\u{e9} --wifi-key \\EFI\\k");
+        assert_eq!(keyed.ssid.as_deref(), Some("caf\u{e9}"));
+        assert_eq!(keyed.wifi_key.as_deref(), Some("\\EFI\\k"));
+        for text in [
+            "--system --wifi-key \\k",
+            "--system --wifi-country GB",
+            "--system --wifi %",
+            "--system --wifi %4",
+            "--system --wifi %FF",
+            "--system --wifi 0123456789abcdef0123456789abcdef0",
+            "--system --wifi a --wifi b",
+            "--system --wifi a --wifi-country GBR",
+            "--system --wifi a --wifi-country 12",
+        ] {
+            assert!(System::parse(text).is_err(), "{text}");
+        }
     }
 
     #[test]
