@@ -19,7 +19,7 @@ use super::{
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
+use std::{fmt::Write as _, fs};
 use stela_loader::mount_interface::MAX_CHOICES;
 
 /// The first install's name unless `--install` gives one.
@@ -329,14 +329,36 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
         record.chooser_timeout = Some(seconds);
         writeln!(text, "  choices        wait {seconds} s")?;
     }
+    if let Some(ssid) = &command.wifi {
+        let network = super::wifi::Network {
+            ssid: ssid.clone(),
+            country: command.wifi_country.clone(),
+        };
+        writeln!(text, "  {}", super::wifi::describe(&network, &record.esp))?;
+        record.wifi = Some(network);
+    }
+    if command.no_wifi && record.wifi.take().is_some() {
+        writeln!(
+            text,
+            "  Wi-Fi          off; remove {}",
+            record.esp.join(super::wifi::KEY_PATH).display()
+        )?;
+    }
     record.choices_text()?;
     if command.dry_run {
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
     }
+    if let Some(passphrase) = &command.wifi_passphrase {
+        super::wifi::write_key(&record.esp, passphrase)?;
+    }
     publish(&mut record)?;
     write_record(&record.esp.clone(), &record)?;
     super::remove_bundles(&record, &removed_bundles)?;
+    let key = record.esp.join(super::wifi::KEY_PATH);
+    if command.no_wifi && key.is_file() {
+        fs::remove_file(key)?;
+    }
     text.push_str("Done.\n");
     Ok(text)
 }

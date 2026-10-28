@@ -5,7 +5,7 @@ use super::{
     bundle::{self, Kind},
     ecid::Ecid,
     image_is_remote, installed, locate_esp, machines, medium, restore_choice_name, translations,
-    update,
+    update, wifi,
 };
 use crate::efi;
 use anyhow::{Context, Result, ensure};
@@ -104,6 +104,9 @@ pub(super) struct Record {
     /// has room for one (`setup::translations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) translations: Option<translations::Store>,
+    /// The Wi-Fi network every choice joins (`--wifi`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) wifi: Option<wifi::Network>,
 }
 
 pub(super) fn first_schema() -> u32 {
@@ -182,6 +185,12 @@ impl Record {
     pub(super) fn line(&self, mut system: System) -> String {
         system.tss = self.tss;
         system.profile = self.profile;
+        // The key file is `--wifi`'s default one.
+        system.ssid = self.wifi.as_ref().map(|network| network.ssid.clone());
+        system.wifi_country = self
+            .wifi
+            .as_ref()
+            .and_then(|network| network.country.clone());
         format!("{system}\n")
     }
 

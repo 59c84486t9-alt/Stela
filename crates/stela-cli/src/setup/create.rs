@@ -13,7 +13,7 @@ use super::{
     },
     read_efi,
     record::{RECORD_KIND, RECORD_SCHEMA, Record, publish, write_record},
-    translations, update, wizard,
+    translations, update, wifi, wizard,
 };
 use crate::{efi, restore};
 use anyhow::{Context, Result, bail, ensure};
@@ -350,6 +350,8 @@ pub(super) struct Plan {
     /// The install medium.
     pub(super) install: InstallPlan,
     pub(super) notes: Vec<String>,
+    /// The key file's passphrase, for `--wifi`.
+    pub(super) wifi_passphrase: Option<String>,
 }
 
 pub(super) fn plan(
@@ -475,6 +477,10 @@ pub(super) fn plan(
         profile: command.profile,
         install_image: command.install_image,
         translations: None,
+        wifi: command.wifi.clone().map(|ssid| wifi::Network {
+            ssid,
+            country: command.wifi_country.clone(),
+        }),
     };
     // The restore bundles are prepared above: the install plan adds the
     // install medium.
@@ -523,6 +529,7 @@ pub(super) fn plan(
         installed,
         install,
         notes,
+        wifi_passphrase: command.wifi_passphrase.clone(),
     })
 }
 
@@ -592,6 +599,9 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
         install.name
     )?;
     describe_install(record, &plan.install, &mut text)?;
+    if let Some(network) = &record.wifi {
+        writeln!(text, "  {}", wifi::describe(network, &record.esp))?;
+    }
     match disk.is_chosen() {
         true => writeln!(
             text,
@@ -632,6 +642,8 @@ pub(super) fn state_line(disk: &installed::InstalledDisk) -> String {
 pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Result<String> {
     let host = environment.host;
     ensure!(command.tss, TSS_REQUIRED);
+    // Before anything is erased.
+    command.read_wifi_passphrase()?;
     if command.fetch {
         builds::find_in(environment.builds, &command.build)?;
     }
@@ -838,6 +850,9 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     let version = update::store_version(&esp, &plan.efi_image)?;
     debug_assert_eq!(Some(&version), record.stela_version.as_ref());
     let kept = update::version_path(&esp, &version);
+    if let Some(passphrase) = &plan.wifi_passphrase {
+        wifi::write_key(&esp, passphrase)?;
+    }
     efi::add_mount(&esp, &kept, None, Some(&record.options))?;
     publish(&mut record)?;
     record.complete = true;

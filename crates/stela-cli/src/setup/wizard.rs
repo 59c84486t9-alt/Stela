@@ -2,6 +2,7 @@
 use super::{
     InstallImage, Request,
     host::{self, Disk, Host, Removal},
+    wifi,
 };
 use crate::{progress::Phase, restore};
 use anyhow::{Context, Result, ensure};
@@ -284,6 +285,11 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         models.sort();
         models.dedup();
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
+        if command.install_image == Some(InstallImage::Online) {
+            choose_wifi(command)?;
+        } else {
+            (command.wifi, command.wifi_passphrase) = (None, None);
+        }
         // Every setup installs macOS, which needs TSS personalization, so the
         // wizard does not offer it as a choice; `configure --no-tss` withdraws the
         // opt-in from an existing setup.
@@ -314,7 +320,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         cliclack::note(
             "6 / 6  Review",
             format!(
-                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\nProfiling  {}\nSigning    Apple personalizes the boot files during setup",
+                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}Profiling  {}\nSigning    Apple personalizes the boot files during setup",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
@@ -323,6 +329,11 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 names
                     .get(command.model())
                     .map_or(command.model(), String::as_str),
+                match (&command.wifi, command.install_image) {
+                    (Some(ssid), _) => format!("Wi-Fi      {ssid}\n"),
+                    (None, Some(InstallImage::Online)) => "Wi-Fi      None (Ethernet)\n".into(),
+                    (None, _) => String::new(),
+                },
                 if command.profile { "On" } else { "Off" },
             ),
         )?;
@@ -352,6 +363,52 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             }
         }
     }
+}
+
+/// A network installer's Wi-Fi: a network this computer sees or knows, one
+/// typed in, or none.
+fn choose_wifi(command: &mut Request) -> Result<()> {
+    let progress = Phase::spinner("Looking for Wi-Fi networks");
+    let networks = wifi::host_networks();
+    progress.finish();
+    const ETHERNET: usize = usize::MAX;
+    const TYPED: usize = usize::MAX - 1;
+    let mut select = cliclack::select("Wi-Fi during installation").item(
+        ETHERNET,
+        "No Wi-Fi",
+        "Connect the PC to Ethernet during installation",
+    );
+    for (index, ssid) in networks.iter().enumerate() {
+        select = select.item(index, ssid, "");
+    }
+    let initial = command
+        .wifi
+        .as_ref()
+        .and_then(|ssid| networks.iter().position(|known| known == ssid))
+        .unwrap_or(if command.wifi.is_some() {
+            TYPED
+        } else {
+            ETHERNET
+        });
+    let choice = select
+        .item(TYPED, "Another network", "Type its name")
+        .initial_value(initial)
+        .interact()?;
+    let ssid = match choice {
+        ETHERNET => {
+            (command.wifi, command.wifi_passphrase) = (None, None);
+            return Ok(());
+        }
+        TYPED => cliclack::input("Network name")
+            .default_input(command.wifi.as_deref().unwrap_or_default())
+            .validate(|name: &String| wifi::ssid(name).map(|_| ()))
+            .interact()?,
+        index => networks[index].clone(),
+    };
+    cliclack::log::warning("The passphrase is stored in plaintext on the USB.")?;
+    command.wifi_passphrase = Some(wifi::ask_passphrase(&ssid)?);
+    command.wifi = Some(ssid);
+    Ok(())
 }
 
 #[cfg(test)]

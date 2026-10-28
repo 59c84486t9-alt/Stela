@@ -268,6 +268,11 @@ fn command(f: &Fixture, usb: &Path) -> Request {
         translation_store_bytes: Some(translations::MIN_PACK_BYTES),
         host_firmware_cache: None,
         confirm_disk: None,
+        wifi: None,
+        wifi_passphrase_file: None,
+        wifi_country: None,
+        no_wifi: false,
+        wifi_passphrase: None,
     }
 }
 
@@ -3122,6 +3127,52 @@ fn the_tail_is_checked_and_an_existing_guest_disk_is_never_converted() {
         );
     }
 }
+#[test]
+fn a_wifi_network_joins_every_choice_and_its_passphrase_goes_beside_them() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    let mut joined = command(&f, &f.esp);
+    joined.wifi = Some("Home Net".into());
+    joined.wifi_country = Some("DE".into());
+    joined.wifi_passphrase = Some("correct horse".into());
+    let report = setup(&environment(&f.host), joined).unwrap();
+    assert!(
+        report.contains("joins \"Home Net\" under DE's rules"),
+        "{report}"
+    );
+    let key = f.esp.join(wifi::KEY_PATH);
+    let options = || fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
+    assert_eq!(fs::read_to_string(&key).unwrap(), "correct horse");
+    assert!(
+        options().contains("--wifi Home%20Net --wifi-country DE"),
+        "{}",
+        options()
+    );
+    assert!(!options().contains("--wifi-key"), "{}", options());
+    rerun(&f, |c| c.action = Action::Status).unwrap();
+    // Off on the existing setup, and its key file goes too.
+    rerun(&f, |c| {
+        c.action = Action::Configure;
+        c.no_wifi = true;
+    })
+    .unwrap();
+    assert!(
+        !key.exists() && !options().contains("--wifi"),
+        "{}",
+        options()
+    );
+    rerun(&f, |c| {
+        c.action = Action::Configure;
+        c.wifi = Some("Office".into());
+        c.wifi_passphrase = Some("0123456789".into());
+    })
+    .unwrap();
+    assert_eq!(fs::read_to_string(&key).unwrap(), "0123456789");
+    assert!(options().contains("--wifi Office"), "{}", options());
+    uninstall(&environment(&f.host), &f.esp, false).unwrap();
+    assert!(!key.exists());
+}
+
 #[test]
 fn observed_firmware_setup_action_requires_capability_and_preserves_dry_run() {
     let mut f = fixture(64 * GIB, false);

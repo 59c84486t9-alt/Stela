@@ -70,6 +70,7 @@ mod state;
 mod translations;
 mod uninstall;
 mod update;
+mod wifi;
 mod wizard;
 
 pub(crate) use command::Setup;
@@ -217,6 +218,12 @@ struct Request {
     translation_store_bytes: Option<u64>,
     host_firmware_cache: Option<PathBuf>,
     confirm_disk: Option<String>,
+    wifi: Option<String>,
+    wifi_passphrase_file: Option<PathBuf>,
+    wifi_country: Option<String>,
+    no_wifi: bool,
+    /// `--wifi`'s passphrase, once read or typed.
+    wifi_passphrase: Option<String>,
 }
 
 #[derive(Args)]
@@ -478,7 +485,10 @@ impl Request {
             }
             Action::Rollback => update::rollback(record, self.dry_run),
             Action::NextBoot(next) => self.next_boot(environment, &record, next),
-            Action::Configure => machines::configure(environment, &self),
+            Action::Configure => {
+                self.read_wifi_passphrase()?;
+                machines::configure(environment, &self)
+            }
             Action::HostFirmwareInstall(source) => {
                 let mount_image = host_firmware_mount(environment, &record)?;
                 let package =
@@ -524,6 +534,11 @@ impl Request {
         let configured =
             locate_esp(environment.host, &self.usb).is_ok_and(|esp| esp.join(RECORD).is_file());
         if configured && self.target.is_some() {
+            ensure!(
+                self.wifi.is_none(),
+                "--wifi goes with a new setup; `stela setup configure --wifi` changes an \
+                 existing one's"
+            );
             return machines::add(environment, &self);
         }
         ensure!(
@@ -531,6 +546,23 @@ impl Request {
             "{INSTALL_IMAGE_ACTIONS}"
         );
         setup(environment, self)
+    }
+
+    /// Read `--wifi`'s passphrase: the wizard's, `--wifi-passphrase-file`'s,
+    /// or one typed at a prompt, which a dry run skips.
+    fn read_wifi_passphrase(&mut self) -> Result<()> {
+        let Some(ssid) = &self.wifi else {
+            return Ok(());
+        };
+        if self.wifi_passphrase.is_some() {
+            return Ok(());
+        }
+        self.wifi_passphrase = match &self.wifi_passphrase_file {
+            Some(file) => Some(wifi::read_passphrase(file)?),
+            None if self.dry_run => None,
+            None => Some(wifi::ask_passphrase(ssid)?),
+        };
+        Ok(())
     }
 
     /// `nvram next-boot`.

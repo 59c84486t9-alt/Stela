@@ -2,7 +2,7 @@
 use super::{
     CHOICES_PATH, Environment, RECORD, bundle, locate_esp,
     record::{Record, read_any_record},
-    translations, update,
+    translations, update, wifi,
 };
 use crate::efi;
 use anyhow::{Context, Result, ensure};
@@ -73,7 +73,10 @@ pub(super) fn uninstall(
     for directory in &removals {
         writeln!(text, "  remove   {}", directory.display())?;
     }
-    for file in efi::INSTALLED.iter().chain([&CHOICES_PATH]) {
+    for file in efi::INSTALLED
+        .iter()
+        .chain([&CHOICES_PATH, &wifi::KEY_PATH])
+    {
         if esp.join(file).is_file() {
             writeln!(text, "  remove   {}", esp.join(file).display())?;
         }
@@ -99,8 +102,10 @@ pub(super) fn uninstall(
         fs::remove_dir_all(directory)
             .with_context(|| format!("cannot remove {}", directory.display()))?;
     }
-    if esp.join(CHOICES_PATH).is_file() {
-        fs::remove_file(esp.join(CHOICES_PATH))?;
+    for file in [CHOICES_PATH, wifi::KEY_PATH] {
+        if esp.join(file).is_file() {
+            fs::remove_file(esp.join(file))?;
+        }
     }
     if let Some(record) = &record {
         for directory in &record.created_directories {

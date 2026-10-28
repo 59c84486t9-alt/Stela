@@ -2,7 +2,7 @@
 //! flags, and each action on an existing setup is a subcommand with only
 //! the options it takes, so the parser refuses every other combination.
 //! Each form becomes one [`Request`] for the action it names.
-use super::{Action, InstallImage, NextBoot, Request, builds, ecid::Ecid};
+use super::{Action, InstallImage, NextBoot, Request, builds, ecid::Ecid, wifi};
 use clap::{Args, Subcommand, builder::TypedValueParser};
 use std::path::PathBuf;
 
@@ -151,6 +151,32 @@ impl Image {
     }
 }
 
+/// The Wi-Fi network `stela.efi` joins.
+#[derive(Args)]
+struct Wifi {
+    /// Join this Wi-Fi network for the install's network, beside or instead
+    /// of Ethernet. Setup asks for its passphrase and writes it to the USB in
+    /// plaintext (`EFI/stela/wifi.key`).
+    #[arg(long, value_name = "SSID", value_parser = wifi::ssid)]
+    wifi: Option<String>,
+    /// Read the Wi-Fi passphrase (8 to 63 characters, or a 64-digit hex PSK)
+    /// from this file instead of asking.
+    #[arg(long, value_name = "FILE", requires = "wifi")]
+    wifi_passphrase_file: Option<PathBuf>,
+    /// The country whose Wi-Fi rules apply, as an ISO 3166 code such as US
+    /// or DE.
+    #[arg(long, value_name = "CODE", requires = "wifi", value_parser = wifi::country)]
+    wifi_country: Option<String>,
+}
+
+impl Wifi {
+    fn apply(self, request: &mut Request) {
+        request.wifi = self.wifi;
+        request.wifi_passphrase_file = self.wifi_passphrase_file;
+        request.wifi_country = self.wifi_country;
+    }
+}
+
 /// An install's machine state.
 #[derive(Args)]
 struct Machine {
@@ -186,6 +212,8 @@ struct Create {
     usb: PathBuf,
     #[command(flatten)]
     image: Image,
+    #[command(flatten)]
+    wifi: Wifi,
     /// Where an install reads the macOS restore image: `offline` copies the
     /// whole IPSW (about 27 GB) onto the USB; TSS still needs network.
     /// `online` writes only its inventory, and `stela.efi` streams
@@ -305,6 +333,7 @@ impl Create {
             ..Request::default()
         };
         self.image.apply(&mut request);
+        self.wifi.apply(&mut request);
         request
     }
 }
@@ -536,6 +565,11 @@ struct Configure {
     /// Turn the engine profile off.
     #[arg(long)]
     no_profile: bool,
+    #[command(flatten)]
+    wifi: Wifi,
+    /// Join no Wi-Fi network, and remove the key file.
+    #[arg(long, conflicts_with = "wifi")]
+    no_wifi: bool,
     /// Show what would change, and change nothing.
     #[arg(long)]
     dry_run: bool,
@@ -543,7 +577,7 @@ struct Configure {
 
 impl Configure {
     fn request(self) -> Request {
-        Request {
+        let mut request = Request {
             default_install: self.default_install,
             remove_install: self.remove_install,
             chooser_timeout: self.chooser_timeout,
@@ -551,9 +585,12 @@ impl Configure {
             no_tss: self.no_tss,
             profile: self.profile,
             no_profile: self.no_profile,
+            no_wifi: self.no_wifi,
             dry_run: self.dry_run,
             ..self.usb.request(Action::Configure)
-        }
+        };
+        self.wifi.apply(&mut request);
+        request
     }
 }
 
