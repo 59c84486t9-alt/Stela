@@ -2,7 +2,8 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_arithmetic::{Binary, Kind, Operand, Source};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, Size, Unary};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 
@@ -15,40 +16,6 @@ const SAVED_RIGHT: u8 = 6;
 const PREVIOUS: u8 = 7;
 const CHUNK_BYTES: usize = 16;
 const QWORD_BYTES: usize = 8;
-const MOD_REGISTER: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
-const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
-const MOVABS_RDX: [u8; 2] = [0x48, 0xba];
-const MOVQ_RAX_XMM: [u8; 4] = [0x66, 0x48, 0x0f, 0x7e];
-const MOVQ_RCX_XMM: [u8; 4] = [0x66, 0x48, 0x0f, 0x7e];
-const MOVQ_RDX_XMM: [u8; 4] = [0x66, 0x48, 0x0f, 0x7e];
-const MOVD_EAX_XMM: [u8; 3] = [0x66, 0x0f, 0x7e];
-const MOVD_ECX_XMM: [u8; 3] = [0x66, 0x0f, 0x7e];
-const TEST_ECX: [u8; 2] = [0x85, 0xc9];
-const TEST_RCX: [u8; 3] = [0x48, 0x85, 0xc9];
-const XOR_EAX: [u8; 2] = [0x31, 0xc0];
-const XOR_EDX: [u8; 2] = [0x31, 0xd2];
-const CMP_ECX_MINUS_ONE: [u8; 3] = [0x83, 0xf9, 0xff];
-const CMP_RCX_MINUS_ONE: [u8; 4] = [0x48, 0x83, 0xf9, 0xff];
-const CMP_EAX_IMMEDIATE: u8 = 0x3d;
-const CMP_RAX_RDX: [u8; 3] = [0x48, 0x39, 0xd0];
-const CDQ: u8 = 0x99;
-const CQO: [u8; 2] = [0x48, 0x99];
-const DIV_ECX: [u8; 2] = [0xf7, 0xf1];
-const DIV_RCX: [u8; 3] = [0x48, 0xf7, 0xf1];
-const IDIV_ECX: [u8; 2] = [0xf7, 0xf9];
-const IDIV_RCX: [u8; 3] = [0x48, 0xf7, 0xf9];
-const NOT_RCX: [u8; 3] = [0x48, 0xf7, 0xd1];
-const BT_EDX_ZERO: [u8; 4] = [0x0f, 0xba, 0xe2, 0];
-const ADC_RAX_RCX: [u8; 3] = [0x48, 0x11, 0xc8];
-const SETC_DL: [u8; 3] = [0x0f, 0x92, 0xc2];
-const MOVZX_EDX_DL: [u8; 3] = [0x0f, 0xb6, 0xd2];
-const GPR_RCX: u8 = 1;
-const GPR_RDX: u8 = 2;
-const JZ: [u8; 2] = [0x0f, 0x84];
-const JNZ: [u8; 2] = [0x0f, 0x85];
-const JMP: [u8; 1] = [0xe9];
-const REL32_BYTES: usize = 4;
 const SWAP_DWORDS: u8 = 0xb1;
 const SWAP_QWORDS: u8 = 0x4e;
 const BROADCAST_HIGH_DWORDS: u8 = 0xf5;
@@ -69,11 +36,20 @@ fn zero(code: &mut Code, register: u8) {
     packed(code, Host::Xor, register, register);
 }
 
+fn shuffle(code: &mut Code, register: u8, control: u8) {
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        register,
+        Rm::Xmm(register),
+        control,
+        TargetCpu::Baseline,
+    );
+}
+
 fn constant(code: &mut Code, destination: u8, value: u64) {
-    code.extend(MOVABS_RAX);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MOD_REGISTER | destination << REGISTER_SHIFT);
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, value);
+    asm.simd(Host::MoveGprQword, destination, Rax, TargetCpu::Baseline);
     packed(code, Host::UnpackLowQword, destination, destination);
 }
 
@@ -209,8 +185,7 @@ fn unary(code: &mut Code, element: ElementSize, absolute: bool, target: TargetCp
         ElementSize::Halfword | ElementSize::Word | ElementSize::Doubleword => {
             copy(code, RIGHT, RESULT);
             if element == ElementSize::Doubleword {
-                packed(code, Host::ShuffleDword, RIGHT, RIGHT);
-                code.push(BROADCAST_HIGH_DWORDS);
+                shuffle(code, RIGHT, BROADCAST_HIGH_DWORDS);
             }
             if element == ElementSize::Halfword {
                 ShiftOpcode::ArithmeticWord.emit(code, RIGHT, HALFWORD_SIGN_SHIFT);
@@ -235,12 +210,15 @@ fn widen(
 ) {
     let half_bits = (element.bits() / 2) as u8;
     if element == ElementSize::Doubleword && !unsigned {
-        packed(code, Host::ShuffleDword, register, register);
-        code.push(if top {
-            SELECT_ODD_DWORDS
-        } else {
-            SELECT_EVEN_DWORDS
-        });
+        shuffle(
+            code,
+            register,
+            if top {
+                SELECT_ODD_DWORDS
+            } else {
+                SELECT_EVEN_DWORDS
+            },
+        );
         if target.supports(TargetCpu::Sse41) {
             Host::SignExtendDwordToQword.register(code, register, register, target);
         } else {
@@ -267,12 +245,15 @@ fn widen(
 
 fn complex(code: &mut Code, element: ElementSize, rotate_270: bool) {
     if matches!(element, ElementSize::Word | ElementSize::Doubleword) {
-        packed(code, Host::ShuffleDword, RIGHT, RIGHT);
-        code.push(if element == ElementSize::Word {
-            SWAP_DWORDS
-        } else {
-            SWAP_QWORDS
-        });
+        shuffle(
+            code,
+            RIGHT,
+            if element == ElementSize::Word {
+                SWAP_DWORDS
+            } else {
+                SWAP_QWORDS
+            },
+        );
     } else {
         let wider = if element == ElementSize::Byte {
             ElementSize::Halfword
@@ -310,29 +291,25 @@ fn complex(code: &mut Code, element: ElementSize, rotate_270: bool) {
 
 /// One qword pair fits the host ADC result and its carry flag directly.
 fn carry_qword(code: &mut Code, subtract: bool, top: bool) {
-    code.extend(MOVQ_RAX_XMM);
-    code.push(MOD_REGISTER | PREVIOUS << REGISTER_SHIFT);
+    code.asm().movq_from_xmm(Rax, PREVIOUS);
     if top {
         ShiftOpcode::RightBytes.emit(code, RIGHT, QWORD_BYTES as u8);
     }
-    code.extend(MOVQ_RCX_XMM);
-    code.push(MOD_REGISTER | RIGHT << REGISTER_SHIFT | GPR_RCX);
+    code.asm().movq_from_xmm(Rcx, RIGHT);
     ShiftOpcode::RightBytes.emit(code, TEMPORARY, QWORD_BYTES as u8);
-    code.extend(MOVQ_RDX_XMM);
-    code.push(MOD_REGISTER | TEMPORARY << REGISTER_SHIFT | GPR_RDX);
+    code.asm().movq_from_xmm(Rdx, TEMPORARY);
     if subtract {
-        code.extend(NOT_RCX);
+        code.asm().unary(Unary::Not, Size::Qword, Rcx);
     }
     // BT consumes only the architectural carry-in low bit. Keep ADC and SETC
     // adjacent so intervening host flags cannot alter the published carry.
-    code.extend(BT_EDX_ZERO);
-    code.extend(ADC_RAX_RCX);
-    code.extend(SETC_DL);
-    code.extend(MOVZX_EDX_DL);
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MOD_REGISTER | RESULT << REGISTER_SHIFT);
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MOD_REGISTER | RIGHT << REGISTER_SHIFT | GPR_RDX);
+    let mut asm = code.asm();
+    asm.bt_imm(Size::Dword, Rdx, 0);
+    asm.alu(Alu::Adc, Size::Qword, Rax, Rcx);
+    asm.setcc(Cond::B, Rdx);
+    asm.movzx(Size::Dword, Rdx, Size::Byte, Rdx);
+    asm.simd(Host::MoveGprQword, RESULT, Rax, TargetCpu::Baseline);
+    asm.simd(Host::MoveGprQword, RIGHT, Rdx, TargetCpu::Baseline);
     packed(code, Host::UnpackLowQword, RESULT, RIGHT);
 }
 
@@ -381,44 +358,35 @@ fn carry(code: &mut Code, element: ElementSize, subtract: bool, top: bool, targe
     packed(code, Host::Or, RESULT, SAVED_LEFT);
 }
 
-fn branch(code: &mut Code, opcode: &[u8]) -> usize {
-    code.extend_from_slice(opcode);
-    let displacement = code.len();
-    code.extend(0i32.to_le_bytes());
-    displacement
-}
-
-fn resolve(code: &mut [u8], displacement: usize) {
-    let relative =
-        i32::try_from(code.len() - displacement - REL32_BYTES).expect("bounded arithmetic body");
-    code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
-}
-
 fn extract(code: &mut Code, source: u8, lane: usize, element: ElementSize, to_rcx: bool) {
     copy(code, TEMPORARY, source);
     if lane != 0 {
         ShiftOpcode::RightBytes.emit(code, TEMPORARY, (lane * element.bytes()) as u8);
     }
-    let opcode = match (element, to_rcx) {
-        (ElementSize::Word, false) => MOVD_EAX_XMM.as_slice(),
-        (ElementSize::Word, true) => MOVD_ECX_XMM.as_slice(),
-        (ElementSize::Doubleword, false) => MOVQ_RAX_XMM.as_slice(),
-        (ElementSize::Doubleword, true) => MOVQ_RCX_XMM.as_slice(),
+    let destination = if to_rcx { Rcx } else { Rax };
+    let mut asm = code.asm();
+    match element {
+        ElementSize::Word => asm.movd_from_xmm(destination, TEMPORARY),
+        ElementSize::Doubleword => asm.movq_from_xmm(destination, TEMPORARY),
         _ => unreachable!("division width"),
-    };
-    code.extend_from_slice(opcode);
-    code.push(MOD_REGISTER | TEMPORARY << REGISTER_SHIFT | u8::from(to_rcx));
+    }
 }
 
 /// Scalar IDIV has no packed counterpart. Guard zero, signed overflow and
 /// inactive lanes before issuing it; no guest or host arithmetic exception leaks.
 fn divide(code: &mut Code, element: ElementSize, unsigned: bool, reverse: bool, predicated: bool) {
+    let size = match element {
+        ElementSize::Word => Size::Dword,
+        ElementSize::Doubleword => Size::Qword,
+        _ => unreachable!("division width"),
+    };
     zero(code, SAVED_RIGHT);
     for lane in 0..CHUNK_BYTES / element.bytes() {
         let inactive = if predicated {
             extract(code, SAVED_LEFT, lane, element, true);
-            code.extend(TEST_ECX);
-            Some(branch(code, &JZ))
+            let mut asm = code.asm();
+            asm.test(Size::Dword, Rcx, Rcx);
+            Some(asm.jcc(Cond::E))
         } else {
             None
         };
@@ -429,12 +397,9 @@ fn divide(code: &mut Code, element: ElementSize, unsigned: bool, reverse: bool, 
             element,
             true,
         );
-        code.extend_from_slice(if element == ElementSize::Word {
-            &TEST_ECX
-        } else {
-            &TEST_RCX
-        });
-        let zero_divisor = branch(code, &JZ);
+        let mut asm = code.asm();
+        asm.test(size, Rcx, Rcx);
+        let zero_divisor = asm.jcc(Cond::E);
         extract(
             code,
             if reverse { RIGHT } else { RESULT },
@@ -442,51 +407,38 @@ fn divide(code: &mut Code, element: ElementSize, unsigned: bool, reverse: bool, 
             element,
             false,
         );
+        let mut asm = code.asm();
         let mut overflow = None;
         if !unsigned {
-            code.extend_from_slice(if element == ElementSize::Word {
-                &CMP_ECX_MINUS_ONE
-            } else {
-                &CMP_RCX_MINUS_ONE
-            });
-            let ordinary_divisor = branch(code, &JNZ);
+            asm.alu_imm8(Alu::Cmp, size, Rcx, -1);
+            let ordinary_divisor = asm.jcc(Cond::Ne);
             if element == ElementSize::Word {
-                code.push(CMP_EAX_IMMEDIATE);
-                code.extend(i32::MIN.to_le_bytes());
+                asm.alu_accumulator_imm32(Alu::Cmp, Size::Dword, i32::MIN);
             } else {
-                code.extend(MOVABS_RDX);
-                code.extend(i64::MIN.to_le_bytes());
-                code.extend(CMP_RAX_RDX);
+                asm.mov_imm64(Rdx, i64::MIN as u64);
+                asm.alu(Alu::Cmp, Size::Qword, Rax, Rdx);
             }
-            overflow = Some(branch(code, &JZ));
-            resolve(code, ordinary_divisor);
+            overflow = Some(asm.jcc(Cond::E));
+            asm.bind(ordinary_divisor);
         }
         if unsigned {
-            code.extend(XOR_EDX);
-        } else if element == ElementSize::Word {
-            code.push(CDQ);
+            asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+            asm.unary(Unary::Div, size, Rcx);
         } else {
-            code.extend(CQO);
+            asm.sign_extend_accumulator(size);
+            asm.unary(Unary::Idiv, size, Rcx);
         }
-        code.extend_from_slice(match (element, unsigned) {
-            (ElementSize::Word, true) => &DIV_ECX,
-            (ElementSize::Word, false) => &IDIV_ECX,
-            (ElementSize::Doubleword, true) => &DIV_RCX,
-            (ElementSize::Doubleword, false) => &IDIV_RCX,
-            _ => unreachable!("division width"),
-        });
-        let finished = branch(code, &JMP);
-        if let Some(position) = inactive {
-            resolve(code, position);
+        let finished = asm.jmp();
+        if let Some(patch) = inactive {
+            asm.bind(patch);
         }
-        resolve(code, zero_divisor);
-        code.extend(XOR_EAX);
-        resolve(code, finished);
-        if let Some(position) = overflow {
-            resolve(code, position);
+        asm.bind(zero_divisor);
+        asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
+        asm.bind(finished);
+        if let Some(patch) = overflow {
+            asm.bind(patch);
         }
-        Host::MoveGprQword.append(code, TargetCpu::Baseline);
-        code.push(MOD_REGISTER | MASK << REGISTER_SHIFT);
+        asm.simd(Host::MoveGprQword, MASK, Rax, TargetCpu::Baseline);
         if lane != 0 {
             ShiftOpcode::LeftBytes.emit(code, MASK, (lane * element.bytes()) as u8);
         }

@@ -3,7 +3,8 @@ use super::{multiply_low_for_target, packed};
 use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Code, Gpr, Rm, Size};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 const RESULT: u8 = 0;
@@ -24,28 +25,24 @@ const SWAP_QWORDS: u8 = 0x4e;
 const QUARTER_TURN_DEGREES: u16 = 90;
 const HALF_TURN_DEGREES: u16 = 180;
 const THREE_QUARTER_TURN_DEGREES: u16 = 270;
-const RAX: u8 = 0;
-const RCX: u8 = 1;
-const RDX: u8 = 2;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MOVQ_TO_GPR: [u8; 4] = [0x66, 0x48, 0x0f, 0x7e];
-const IMUL_RCX_RAX: [u8; 4] = [0x48, 0x0f, 0xaf, 0xc8];
-const IMUL_RDX_RAX: [u8; 4] = [0x48, 0x0f, 0xaf, 0xd0];
 
 fn shuffle(code: &mut Code, opcode: Host, register: u8, control: u8) {
-    packed(code, opcode, register, register);
-    code.push(control);
+    code.asm().simd_imm(
+        opcode,
+        register,
+        Rm::Xmm(register),
+        control,
+        TargetCpu::Baseline,
+    );
 }
 
-fn extract_qword(code: &mut Code, xmm: u8, gpr: u8) {
-    code.extend(MOVQ_TO_GPR);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
+fn extract_qword(code: &mut Code, xmm: u8, gpr: Gpr) {
+    code.asm().movq_from_xmm(gpr, xmm);
 }
 
-fn insert_qword(code: &mut Code, xmm: u8, gpr: u8) {
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
+fn insert_qword(code: &mut Code, xmm: u8, gpr: Gpr) {
+    code.asm()
+        .simd(Host::MoveGprQword, xmm, gpr, TargetCpu::Baseline);
 }
 
 fn doubleword_products(code: &mut Code, rotation_degrees: u16) {
@@ -58,14 +55,15 @@ fn doubleword_products(code: &mut Code, rotation_degrees: u16) {
     if imaginary {
         Shift::RightBytes.emit(code, RESULT, QWORD_BYTES);
     }
-    extract_qword(code, RESULT, RAX);
-    extract_qword(code, RIGHT, RCX);
+    extract_qword(code, RESULT, Rax);
+    extract_qword(code, RIGHT, Rcx);
     Shift::RightBytes.emit(code, RIGHT, QWORD_BYTES);
-    extract_qword(code, RIGHT, RDX);
-    code.extend(IMUL_RCX_RAX);
-    code.extend(IMUL_RDX_RAX);
-    insert_qword(code, RESULT, if imaginary { RDX } else { RCX });
-    insert_qword(code, RIGHT, if imaginary { RCX } else { RDX });
+    extract_qword(code, RIGHT, Rdx);
+    let mut asm = code.asm();
+    asm.imul(Size::Qword, Rcx, Rax);
+    asm.imul(Size::Qword, Rdx, Rax);
+    insert_qword(code, RESULT, if imaginary { Rdx } else { Rcx });
+    insert_qword(code, RIGHT, if imaginary { Rcx } else { Rdx });
     packed(code, Host::UnpackLowQword, RESULT, RIGHT);
 }
 

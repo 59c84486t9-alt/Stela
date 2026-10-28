@@ -3,7 +3,8 @@ use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::Selection;
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::R10;
+use crate::x86_64::asm::{Code, Cond, Rm, Size, resolve};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 const LEFT: u8 = 0;
@@ -17,10 +18,6 @@ const DWORD_SIGN_SHIFT: u8 = DWORD_BITS - 1;
 const LOW_DWORD_MASK_DUPLICATE: u8 = 0xa0;
 const PCLMUL_LOW_QWORDS: u8 = 0x00;
 const PCLMUL_HIGH_QWORDS: u8 = 0x11;
-const MOV_R10D_IMMEDIATE: [u8; 2] = [0x41, 0xba];
-const DEC_R10D: [u8; 3] = [0x41, 0xff, 0xca];
-const JNZ_REL32: [u8; 2] = [0x0f, 0x85];
-const REL32_BYTES: usize = 4;
 
 fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
@@ -83,22 +80,25 @@ fn widen_dwords(code: &mut Code, top: bool) {
     low_lane_mask(code, Shift::RightQword, DWORD_BITS);
     packed(code, Host::And, LEFT, CONSTANT);
     packed(code, Host::Xor, RESULT, RESULT);
-    code.extend(MOV_R10D_IMMEDIATE);
-    code.extend(u32::from(DWORD_BITS).to_le_bytes());
+    code.asm().mov_imm32(R10, u32::from(DWORD_BITS));
     let loop_start = code.len();
     Shift::LeftQword.emit(code, RESULT, 1);
     packed(code, Host::MoveAligned, MASK, RIGHT);
     Shift::ArithmeticDword.emit(code, MASK, DWORD_SIGN_SHIFT);
-    packed(code, Host::ShuffleDword, MASK, MASK);
-    code.push(LOW_DWORD_MASK_DUPLICATE);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        MASK,
+        Rm::Xmm(MASK),
+        LOW_DWORD_MASK_DUPLICATE,
+        TargetCpu::Baseline,
+    );
     packed(code, Host::And, MASK, LEFT);
     packed(code, Host::Xor, RESULT, MASK);
     Shift::LeftDword.emit(code, RIGHT, 1);
-    code.extend(DEC_R10D);
-    code.extend(JNZ_REL32);
-    let displacement = i32::try_from(loop_start as isize - (code.len() + REL32_BYTES) as isize)
-        .expect("bounded polynomial loop");
-    code.extend(displacement.to_le_bytes());
+    let mut asm = code.asm();
+    asm.dec(Size::Dword, R10);
+    let repeat = asm.jcc(Cond::Ne);
+    resolve(code, repeat, loop_start);
 }
 
 fn widen_dwords_pclmul(code: &mut Code, top: bool, target: TargetCpu) {
@@ -111,10 +111,20 @@ fn widen_dwords_pclmul(code: &mut Code, top: bool, target: TargetCpu) {
         packed(code, Host::And, RIGHT, CONSTANT);
     }
     packed(code, Host::MoveAligned, RESULT, LEFT);
-    Host::CarrylessMultiplyQword.register(code, LEFT, RIGHT, target);
-    code.push(PCLMUL_LOW_QWORDS);
-    Host::CarrylessMultiplyQword.register(code, RESULT, RIGHT, target);
-    code.push(PCLMUL_HIGH_QWORDS);
+    code.asm().simd_imm(
+        Host::CarrylessMultiplyQword,
+        LEFT,
+        Rm::Xmm(RIGHT),
+        PCLMUL_LOW_QWORDS,
+        target,
+    );
+    code.asm().simd_imm(
+        Host::CarrylessMultiplyQword,
+        RESULT,
+        Rm::Xmm(RIGHT),
+        PCLMUL_HIGH_QWORDS,
+        target,
+    );
     packed(code, Host::UnpackLowQword, LEFT, RESULT);
 }
 

@@ -3,7 +3,7 @@ use super::packed;
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::{Accumulate, Selection};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Rm};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 const RESULT: u8 = 0;
@@ -68,8 +68,13 @@ fn unsigned_halfwords(code: &mut Code, top: bool, target: TargetCpu) {
         SELECT_EVEN_DWORDS
     };
     for register in [RESULT, SECOND_PARTIAL] {
-        packed(code, Host::ShuffleDword, register, register);
-        code.push(control);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            register,
+            Rm::Xmm(register),
+            control,
+            TargetCpu::Baseline,
+        );
     }
     packed(code, Host::UnpackLowQword, RESULT, SECOND_PARTIAL);
 }

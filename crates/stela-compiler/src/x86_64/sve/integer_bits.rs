@@ -1,5 +1,6 @@
 //! SVE predicated bit operations with SSE2 or SSSE3.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Rm};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -17,9 +18,6 @@ mod scalar;
 const ALTERNATING_BIT_MASK: u8 = 0x55;
 const TWO_BIT_GROUP_MASK: u8 = 0x33;
 const SCALAR_WORD_VECTOR_BYTES: usize = 256;
-const MOV_RAX_IMM64: [u8; 2] = [0x48, 0xb8];
-const PSADBW: [u8; 3] = [0x66, 0x0f, 0xf6];
-const REGISTER_MODRM: u8 = 0xc0;
 const SOURCE_XMM: u8 = 0;
 const OLD_DESTINATION_XMM: u8 = 7;
 const PREDICATE_XMM: u8 = 6;
@@ -38,8 +36,7 @@ fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
 }
 
 fn constant_qword(code: &mut Code, destination: u8, value: u64) {
-    code.extend(MOV_RAX_IMM64);
-    code.extend(value.to_le_bytes());
+    code.asm().mov_imm64(Rax, value);
     packed(code, Host::MoveGprQword, destination, 0);
 }
 
@@ -65,8 +62,13 @@ fn table_constant(code: &mut Code, destination: u8, scratch: u8, values: [u8; 16
 }
 
 fn shuffle(code: &mut Code, opcode: Host, destination: u8, source: u8, control: u8) {
-    packed(code, opcode, destination, source);
-    code.push(control);
+    code.asm().simd_imm(
+        opcode,
+        destination,
+        Rm::Xmm(source),
+        control,
+        TargetCpu::Baseline,
+    );
 }
 
 fn add(element: ElementSize) -> Host {
@@ -230,8 +232,7 @@ fn population(code: &mut Code, element: ElementSize, target: TargetCpu) {
     population_bytes(code, target);
     if element == ElementSize::Doubleword {
         packed(code, Host::Xor, 1, 1);
-        code.extend(PSADBW);
-        code.push(REGISTER_MODRM | (SOURCE_XMM << 3) | 1);
+        code.asm().psadbw(SOURCE_XMM, Rm::Xmm(1));
         return;
     }
     for (width, shift, mask) in [

@@ -2,7 +2,8 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::integer_logic::{Boolean, CopySource, Kind, Operand, Ternary};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Rm};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 
@@ -14,8 +15,6 @@ const CONSTANT: u8 = 4;
 const PREDICATE: u8 = 5;
 const PREDICATE_SCRATCH: u8 = 6;
 const PREVIOUS: u8 = 7;
-const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
-const MODRM_REGISTER: u8 = 0xc0;
 const QWORD_BYTES: usize = 8;
 const BITS_PER_BYTE: usize = 8;
 const ADJACENT_DWORD_SWAP: u8 = 0xb1;
@@ -26,10 +25,9 @@ fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
 }
 
 fn constant(code: &mut Code, value: u64) {
-    code.extend(MOVABS_RAX);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | (CONSTANT << 3));
+    code.asm().mov_imm64(Rax, value);
+    code.asm()
+        .simd(Host::MoveGprQword, CONSTANT, Rax, TargetCpu::Baseline);
     packed(code, Host::UnpackLowQword, CONSTANT, CONSTANT);
 }
 
@@ -52,8 +50,13 @@ fn broadcast_scalar(code: &mut Code, element: ElementSize) {
     if element == ElementSize::Doubleword {
         packed(code, Host::UnpackLowQword, CONSTANT, CONSTANT);
     } else {
-        packed(code, Host::ShuffleDword, CONSTANT, CONSTANT);
-        code.push(BROADCAST_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            CONSTANT,
+            Rm::Xmm(CONSTANT),
+            BROADCAST_LOW_DWORD,
+            TargetCpu::Baseline,
+        );
     }
 }
 
@@ -122,8 +125,13 @@ fn emit_unary_chunk(code: &mut Code, conditional: bool, element: ElementSize) {
         RIGHT,
     );
     if element == ElementSize::Doubleword {
-        packed(code, Host::ShuffleDword, THIRD, RESULT);
-        code.push(ADJACENT_DWORD_SWAP);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            THIRD,
+            Rm::Xmm(RESULT),
+            ADJACENT_DWORD_SWAP,
+            TargetCpu::Baseline,
+        );
         packed(code, Host::And, RESULT, THIRD);
     }
     packed(code, Host::And, RESULT, CONSTANT);
@@ -150,8 +158,8 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
         }
         Kind::Copy(CopySource::General(register)) => {
             crate::x86_64::load(code, register);
-            Host::MoveGprQword.append(code, TargetCpu::Baseline);
-            code.push(MODRM_REGISTER | (CONSTANT << 3));
+            code.asm()
+                .simd(Host::MoveGprQword, CONSTANT, Rax, TargetCpu::Baseline);
             broadcast_scalar(code, operand.element_size);
         }
         Kind::Copy(CopySource::ScalarVector(register)) => {
