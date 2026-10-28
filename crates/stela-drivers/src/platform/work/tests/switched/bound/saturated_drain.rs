@@ -130,10 +130,10 @@ fn run(origin: Callback, expected: &[u64]) {
     assert_eq!(dropped.load(Ordering::Acquire), 4);
 }
 #[test]
-fn queued_general_behind_all_blocked_general_stacks_returns_pending_until_wake() {
+fn general_lane_waits_for_wake() {
     run(general_origin, &[80, 81, 82, 84, 83]);
 }
 #[test]
-fn queued_notify_behind_blocked_notify_stack_returns_pending_until_wake() {
+fn notify_lane_waits_for_wake() {
     run(notify_origin, &[80, 82, 84]);
 }

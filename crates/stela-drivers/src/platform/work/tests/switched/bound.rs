@@ -321,7 +321,7 @@ unsafe extern "C" fn park_until_cancelled(p: *mut c_void) {
     binding.exit();
 }
 #[test]
-fn blocked_pending_cancel_irq_wake_late_handle_and_quiescent_retirement() {
+fn blocked_task_cancel_and_retirement() {
     let (executor, f, dropped) = bound_setup();
     let r = executor.runtime();
     let p = Arc::as_ptr(&f) as *mut c_void;
@@ -428,7 +428,7 @@ unsafe extern "C" fn peer_waker(p: *mut c_void) {
     f.event(12);
 }
 #[test]
-fn multiple_real_continuations_preserve_stack_identity_preempt_irq_and_lease() {
+fn binding_state_survives_switch() {
     let (executor, f, dropped) = bound_setup();
     let r = executor.runtime();
     unsafe { r.call_foreground(peer_waker, Arc::as_ptr(&f) as *mut c_void, 10000) }.unwrap();
@@ -497,7 +497,7 @@ unsafe extern "C" fn reused_worker(p: *mut c_void) {
     binding.exit();
 }
 #[test]
-fn final_check_commit_spurious_wakes_transactional_errors_and_reused_job_generation() {
+fn wake_races_and_worker_reuse() {
     let (executor, f, dropped) = bound_setup();
     let r = executor.runtime();
     let p = Arc::as_ptr(&f) as *mut c_void;
@@ -532,7 +532,7 @@ fn final_check_commit_spurious_wakes_transactional_errors_and_reused_job_generat
     drop(old);
 }
 #[test]
-fn abandoned_blocked_executor_retains_actual_stacks_and_rejects_late_wake() {
+fn blocked_executor_quarantine() {
     let (executor, f, dropped) = bound_setup();
     let r = executor.runtime();
     assert_eq!(

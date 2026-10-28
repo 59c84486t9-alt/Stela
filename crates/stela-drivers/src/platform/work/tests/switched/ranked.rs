@@ -311,7 +311,7 @@ unsafe extern "C" fn stale(p: *mut c_void) {
     );
 }
 #[test]
-fn actual_priority_inversion_dispatch_deboost_wake_and_stale_generation() {
+fn priority_dispatch_and_wake_order() {
     roundtrip(0);
     roundtrip(1);
     roundtrip(2);

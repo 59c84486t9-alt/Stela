@@ -196,7 +196,7 @@ unsafe extern "C" fn reserved_service(p: *mut c_void) {
     f.event(51);
 }
 #[test]
-fn optional_service_owns_a_fifth_distinct_guarded_stack_and_cannot_use_default_lane() {
+fn reserved_service_stack() {
     let (ordinary, _, _, ordinary_dropped) = setup();
     let runtime = ordinary.runtime();
     // SAFETY: rejected before admission; no callback/context is retained.
@@ -243,7 +243,7 @@ fn optional_service_owns_a_fifth_distinct_guarded_stack_and_cannot_use_default_l
     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
 }
 #[test]
-fn actual_x86_continuations_have_distinct_stacks_ids_fifo_and_control_state() {
+fn continuation_stacks_and_control_state() {
     let (executor, f, cpu, dropped) = setup();
     let r = executor.runtime();
     assert_eq!(r.current_id(), Err(WorkError::Unavailable));
@@ -279,7 +279,7 @@ fn actual_x86_continuations_have_distinct_stacks_ids_fifo_and_control_state() {
     assert_eq!(dropped.load(Ordering::Relaxed), 4);
 }
 #[test]
-fn one_actual_executor_per_view_rejects_simultaneous_and_retired_rebinding() {
+fn executor_binding_is_exclusive() {
     let (executor, _, _, _) = setup();
     let view = executor.runtime().queue.clone();
     let dropped = Arc::new(AtomicU64::new(0));
@@ -318,7 +318,7 @@ unsafe extern "C" fn cyclic_drain(p: *mut c_void) {
     f.event(if result.is_err() { 61 } else { 60 });
 }
 #[test]
-fn serial_and_actual_two_task_drain_cycles_refuse_without_hanging() {
+fn drain_cycles_do_not_deadlock() {
     let (executor, f, _, _) = setup();
     let r = executor.runtime();
     let context = Arc::as_ptr(&f) as *mut c_void;
@@ -340,7 +340,7 @@ unsafe extern "C" fn suspended(p: *mut c_void) {
     }
 }
 #[test]
-fn timeout_retains_the_actual_runtime_all_stacks_and_callback_provider() {
+fn timeout_quarantines_executor() {
     let (executor, f, _, dropped) = setup();
     let raw = executor.runtime().get_ref() as *const Runtime<16>;
     let view = executor.runtime().queue.clone();

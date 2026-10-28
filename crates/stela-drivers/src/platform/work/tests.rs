@@ -54,7 +54,7 @@ impl Drop for Owner {
 }
 unsafe extern "C" fn noop(_: *mut c_void) {}
 #[test]
-fn admission_is_bounded_noninline_closed_and_restores_nested_flags() {
+fn admission_bounds_and_flag_restore() {
     let cpu = CpuModel::new();
     let drops = Arc::new(AtomicU64::new(0));
     let queue = unsafe { Queue::<2>::new(cpu.clone(), Arc::new(Owner(drops.clone()))) }.unwrap();
@@ -88,7 +88,7 @@ fn admission_is_bounded_noninline_closed_and_restores_nested_flags() {
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 }
 #[test]
-fn queue_ids_tickets_and_sequence_exhaustion_do_not_alias_or_wrap() {
+fn ticket_identity_and_sequence_exhaustion() {
     let cpu = CpuModel::new();
     let owner: RetainedOwner = Arc::new(());
     let a = unsafe { Queue::<2>::new(cpu.clone(), owner.clone()) }.unwrap();
