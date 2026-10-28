@@ -11,6 +11,9 @@ fn revoked_initial_key_admission() {
     let log = model.bar.0.lock().unwrap().log.len();
     state.allowed.set(false);
     assert!(
+        // SAFETY: The original context and native backing remain retained, but OS
+        // permission was revoked after preflight. Fresh leases must deny the initial
+        // key batch before any firmware publication.
         unsafe {
             driver.install_management_key_modern(
                 &mut owner,
@@ -36,6 +39,9 @@ fn revoked_initial_key_admission() {
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     state.revision.set(state.revision.get() + 1);
     assert!(
+        // SAFETY: The receipt names the live original requester, but its policy
+        // revision changed. Guard revalidation must reject that stale grant before
+        // replacing keys or publishing a command.
         unsafe {
             driver.install_management_key_modern(
                 &mut owner,
@@ -83,6 +89,9 @@ fn pending_block_ack_prevents_initial_igtk() {
             // and retire both source TX receipts before buffering real QoS RX.
             for now in [NOW + 1, NOW + 2] {
                 let permit = admit(&mut owner, &driver, AssociationUse::Management);
+                // SAFETY: The canonical BA state belongs to this retained model peer.
+                // Both current guards serialize synchronous firmware progress and
+                // retain its response packet/DMA until actual modeled completion.
                 unsafe {
                     driver.progress_block_ack(
                         &mut owner,
@@ -123,6 +132,9 @@ fn pending_block_ack_prevents_initial_igtk() {
         let epoch = driver.station().association_epoch().unwrap();
         let before = model.response.lock().unwrap().client_commands.len();
         assert!(matches!(
+            // SAFETY: The pending canonical/aggregation owners remain live in this
+            // software fixture. No physical requester exists; the initial management-
+            // key batch must refuse before changing keys or releasing those users.
             unsafe {
                 driver.install_management_key_modern(
                     &mut owner,

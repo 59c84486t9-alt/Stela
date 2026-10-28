@@ -7,7 +7,11 @@ fn management_tx_retains_packet_owner() {
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
-    let receipt = unsafe {
+    let receipt =
+    // SAFETY: The current session, native context and key owners remain retained.
+    // Hardware/OS leases cover source allocation and queue publication, and the
+    // submitted packet retains its descriptor and payload ownership.
+    unsafe {
         driver.transmit_management_modern(
             &mut owner,
             permit,
@@ -39,6 +43,9 @@ fn management_tx_retains_packet_owner() {
     let head = model.queues[&0xd4300].lock().unwrap().head;
     state.allowed.set(false);
     assert!(
+        // SAFETY: The current session and backing stay live, but OS permission was
+        // revoked after preflight. Fresh guard acquisition must fail before
+        // allocation or a new queue entry.
         unsafe {
             driver.transmit_management_modern(
                 &mut owner,
@@ -71,6 +78,10 @@ fn key_and_unmap_failures_retain_owners() {
             let epoch = driver.station().association_epoch().unwrap();
             model.response.lock().unwrap().status = 9;
             assert!(
+                // SAFETY: The fixture has no prior management-key users and retains
+                // its original native backing. A failed synchronous key
+                // acknowledgement must quarantine ownership rather than release
+                // uncertain DMA.
                 unsafe {
                     driver.install_management_key_modern(
                         &mut owner,
@@ -89,6 +100,9 @@ fn key_and_unmap_failures_retain_owners() {
             let session = attach(&mut driver, &mut owner);
             let proof = received(&mut driver, &model, 9);
             let permit = admit(&mut owner, &driver, AssociationUse::Management);
+            // SAFETY: This current session and requester own the queued management
+            // packet. Fresh leases cover publication; all descriptor, payload and key
+            // owners remain retained through the later unmap-failure injection.
             unsafe {
                 driver.transmit_management_modern(
                     &mut owner,
@@ -105,6 +119,9 @@ fn key_and_unmap_failures_retain_owners() {
             assert!(driver.poll_released().is_err());
             let permit = admit(&mut owner, &driver, AssociationUse::Management);
             assert!(
+                // SAFETY: The RX envelope remains owned, but the original DMA owner
+                // is now poisoned by failed unmap. Validation must reject consumption
+                // before invoking the callback or releasing retained resources.
                 unsafe {
                     driver.with_management_modern::<_, _, ()>(
                         &mut owner,

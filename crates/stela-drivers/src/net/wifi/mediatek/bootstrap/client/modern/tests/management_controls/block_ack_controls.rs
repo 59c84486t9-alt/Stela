@@ -34,6 +34,9 @@ fn consume(driver: &mut Native, owner: &mut Owner, received: Received, now: u64)
     // SAFETY: this modeled OS explicitly selects protected BA MLME for its
     // original authenticated envelope and subsequent guarded response/teardown.
     let mut retained = Some(received);
+    // SAFETY: The envelope owns this current session and requester. Fresh hardware/OS
+    // guards serialize protected BA consumption, and retained state owns any deferred
+    // response or teardown after the call.
     unsafe { driver.receive_management_block_ack(owner, permit, &mut retained, now) }.unwrap();
     assert!(retained.is_none());
 }
@@ -53,14 +56,22 @@ fn assert_cipher_descriptor(model: &Model, session: &Session, request: bool) {
     assert_ne!(queue.index, queue.head);
     let memory = model.memory.lock().unwrap();
     let pointer = crate::net::wifi::mediatek::bootstrap::client::tests::pointer;
-    let descriptor = unsafe {
+    let descriptor =
+    // SAFETY: The queue guard fixes this live descriptor index and the memory guard
+    // retains its mapping. pointer validates the complete 16-byte readable range; no
+    // model peer writes it concurrently.
+    unsafe {
         core::slice::from_raw_parts(
             pointer(&memory, queue.base + u64::from(queue.index) * 16, 16),
             16,
         )
     };
     let address = u32::from_le_bytes(descriptor[..4].try_into().unwrap()) as u64;
-    let actual = unsafe { core::slice::from_raw_parts(pointer(&memory, address, 64), 64) };
+    let actual =
+    // SAFETY: The memory guard retains the mapped TXWI/payload backing, and pointer
+    // checks the entire 64-byte readable range. All bytes were initialized before
+    // queueing; no physical DMA or concurrent writer exists.
+    unsafe { core::slice::from_raw_parts(pointer(&memory, address, 64), 64) };
     let word1 = u32::from_le_bytes(actual[4..8].try_into().unwrap());
     let word3 = u32::from_le_bytes(actual[12..16].try_into().unwrap());
     assert_eq!(word3 & 2, 2); // actual MT_TXD3_PROTECT_FRAME
@@ -72,6 +83,9 @@ fn rotate_refused(driver: &mut Native, owner: &mut Owner, session: &Session) {
     let permit = admit(owner, driver, AssociationUse::Management);
     // SAFETY: negative actual drain control; no old user may be released here.
     assert!(matches!(
+        // SAFETY: The current session and pending BA/packet owners remain retained in
+        // this software model. Rotation must refuse the undrained user before
+        // changing or releasing its key namespace.
         unsafe {
             driver.rotate_management_key_modern(
                 owner,

@@ -17,7 +17,11 @@ fn older_addba_cannot_reverse_delba() {
     assert!(matches!(
         {
             let mut retained = Some(older);
-            let result = unsafe {
+            let result =
+            // SAFETY: The older authenticated envelope remains owned by this live
+            // session. Its stale management packet number must be rejected before
+            // canonical BA state or DMA ownership changes.
+            unsafe {
                 driver.receive_management_block_ack(&mut owner, permit, &mut retained, NOW + 3)
             };
             assert!(retained.is_some());
@@ -61,7 +65,11 @@ fn foreign_and_group_observation_preflight() {
     assert!(matches!(
         {
             let mut retained = Some(proof);
-            let result = unsafe {
+            let result =
+            // SAFETY: Both independent model peers and their backing stay live. This
+            // foreign session is intentionally mismatched; requester/session
+            // validation must refuse it before consuming the original envelope.
+            unsafe {
                 driver.receive_management_block_ack(&mut owner, permit, &mut retained, NOW)
             };
             assert!(retained.is_some());
@@ -89,7 +97,11 @@ fn foreign_and_group_observation_preflight() {
     assert!(matches!(
         {
             let mut retained = Some(proof);
-            let result = unsafe {
+            let result =
+            // SAFETY: The current authenticated group envelope remains owned, but it
+            // is not a pairwise BA action. Guarded classification must reject it
+            // before canonical state or queue publication changes.
+            unsafe {
                 driver.receive_management_block_ack(&mut owner, permit, &mut retained, NOW)
             };
             assert!(retained.is_some());
@@ -135,6 +147,9 @@ fn malformed_actions_preserve_observations() {
         let commands = model.response.lock().unwrap().client_commands.len();
         let log = model.bar.0.lock().unwrap().log.len();
         assert!(
+            // SAFETY: Each authenticated envelope has live backing under the current
+            // session. Only its BA body/classification is invalid; refusal must
+            // preserve the owned observation and avoid canonical or DMA effects.
             unsafe {
                 driver.receive_management_block_ack(
                     &mut owner,

@@ -34,6 +34,9 @@ fn initial_key_batch_and_replay_floor() {
     let proof = received(&mut driver, &model, 9);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert_eq!(
+        // SAFETY: The envelope and current session retain this requester and its RX
+        // backing. Both current model guards scope the callback, which returns only
+        // the packet-number scalar and no borrowed frame view.
         unsafe {
             driver.with_management_modern(&mut owner, permit, proof, |_, body, pn| {
                 assert!(state.hardware.get() && state.os.get());
@@ -92,6 +95,9 @@ fn key_retries_preserve_ipn_namespace() {
     ] {
         let permit = admit(&mut owner, &driver, AssociationUse::Management);
         assert_eq!(
+            // SAFETY: This is an idempotent retry of the same current key material
+            // and retained peer. Both model leases serialize the operation,
+            // preserving the existing key handle and management replay floor.
             unsafe {
                 driver.install_key_modern(
                     &mut owner,
@@ -107,6 +113,9 @@ fn key_retries_preserve_ipn_namespace() {
         );
         let permit = admit(&mut owner, &driver, AssociationUse::Management);
         assert!(matches!(
+            // SAFETY: The original installed key and all backing remain retained. The
+            // deliberately changed material must be refused before replacing the live
+            // key or resetting its replay namespace.
             unsafe {
                 driver.install_key_modern(
                     &mut owner,
@@ -137,6 +146,9 @@ fn key_retries_preserve_ipn_namespace() {
     );
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: The authenticated group envelope retains the original session after
+    // same-key retries. Current guards scope its borrowed body; the callback only
+    // checks bytes and a scalar packet number.
     unsafe {
         driver.with_management_modern(&mut owner, permit, proof, |_, body, pn| {
             assert_eq!(body, [7, 0]);

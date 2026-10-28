@@ -16,6 +16,9 @@ fn deferred_envelope_guard_revalidation() {
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     state.allowed.set(false);
     assert!(
+        // SAFETY: The deferred envelope is owned by this retained current session.
+        // Revoked OS policy must be rejected before invoking the callback or exposing
+        // its borrowed body.
         unsafe {
             driver.with_management_modern::<_, _, ()>(&mut owner, permit, second, |_, _, _| {
                 panic!("revoked OS effect")
@@ -29,6 +32,9 @@ fn deferred_envelope_guard_revalidation() {
     let before = model.response.lock().unwrap().client_commands.len();
     let log = model.bar.0.lock().unwrap().log.len();
     assert!(
+        // SAFETY: The deferred envelope remains live after disconnect, while its
+        // context is stale. Current guard/context checks must reject it before the
+        // callback or any modeled register effect.
         unsafe {
             driver.with_management_modern::<_, _, ()>(&mut owner, permit, third, |_, _, _| {
                 panic!("removed association effect")
@@ -83,9 +89,15 @@ fn reconnect_rejects_stale_context_and_keys() {
     let (mut owner, state) = authority(&driver, &model);
     assert!(!Arc::ptr_eq(driver.modern_context().unwrap(), &old_context));
     let permit = admit(&mut owner, &driver, AssociationUse::Configure);
+    // SAFETY: The old peer was independently retired before reconnect. This fresh
+    // context and its retained native memory are configured only under the new owner
+    // and both current model guards.
     unsafe { driver.configure_modern(&mut owner, permit, NOW + 15) }.unwrap();
     for (pairwise, index, value) in [(true, 0, 3), (false, 2, 0x66)] {
         let permit = admit(&mut owner, &driver, AssociationUse::Management);
+        // SAFETY: The old peer/key users were drained before reconnect. This fresh
+        // association owns the new pairwise/group material, and both leases serialize
+        // their synchronous model acknowledgements.
         unsafe {
             driver.install_key_modern(
                 &mut owner,
@@ -106,6 +118,9 @@ fn reconnect_rejects_stale_context_and_keys() {
     // SAFETY: actual model old users were drained above. Even this fresh GTK
     // namespace cannot revive the original IGTK with a reset replay floor.
     assert!(matches!(
+        // SAFETY: Old peer users were drained and the new context remains retained.
+        // The deliberately retired IGTK material must still be rejected before it can
+        // enter the fresh group-key namespace.
         unsafe {
             driver.install_management_key_modern(
                 &mut owner,
@@ -146,6 +161,9 @@ fn reconnect_rejects_stale_context_and_keys() {
     let head = model.queues[&0xd4300].lock().unwrap().head;
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert!(
+        // SAFETY: The old envelope remains owned alongside its old context, but the
+        // new admission cannot rebrand it. Validation must reject it before a
+        // callback or use of its borrowed body.
         unsafe {
             driver.with_management_modern::<_, _, ()>(
                 &mut owner,
@@ -158,6 +176,9 @@ fn reconnect_rejects_stale_context_and_keys() {
     );
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert!(
+        // SAFETY: The old session is a live retained Arc but belongs to the previous
+        // association. Current guards must reject it before source allocation, key
+        // use or queue publication.
         unsafe {
             driver.transmit_management_modern(
                 &mut owner,
@@ -176,6 +197,9 @@ fn reconnect_rejects_stale_context_and_keys() {
     let fresh = received(&mut driver, &model, 1);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert_eq!(
+        // SAFETY: This envelope belongs to the current session and live requester.
+        // Both guards scope consumption, and the callback returns only the packet-
+        // number scalar without retaining a borrowed frame.
         unsafe { driver.with_management_modern(&mut owner, permit, fresh, |_, _, pn| pn.value()) }
             .unwrap(),
         1

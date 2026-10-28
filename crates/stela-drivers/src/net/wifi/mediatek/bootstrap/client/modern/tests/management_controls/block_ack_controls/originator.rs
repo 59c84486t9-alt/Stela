@@ -97,6 +97,9 @@ fn timeout_disables_before_guarded_delba() {
     let head = model.queues[&0xd4300].lock().unwrap().head;
     state.allowed.set(false);
     assert!(
+        // SAFETY: The protected DELBA action and its session remain retained after
+        // firmware disable. Revoked current policy must deny its publication before
+        // advancing the TX queue.
         unsafe {
             driver.progress_block_ack(
                 &mut owner,
@@ -118,6 +121,9 @@ fn timeout_disables_before_guarded_delba() {
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     let pending = driver.state().ba_actions.len();
     assert!(
+        // SAFETY: The current session remains owned, but its protected DELBA packet
+        // has not drained. Initiation must refuse that pending owner before changing
+        // canonical state or queueing another exchange.
         unsafe {
             driver.begin_management_block_ack(&mut owner, permit, &session, TID, 0, deadline + 3)
         }
@@ -129,6 +135,9 @@ fn timeout_disables_before_guarded_delba() {
     let allocations = state.allocations.get();
     let head = model.queues[&0xd4300].lock().unwrap().head;
     assert!(matches!(
+        // SAFETY: The data frame is borrowed only for this call, and all current
+        // key/native owners remain live. The pending DELBA must block this TID before
+        // allocation or publication can bypass its drain.
         unsafe {
             driver.transmit_modern(
                 &mut owner,
@@ -169,6 +178,9 @@ fn timeout_disables_before_guarded_delba() {
     assert!(!driver.pending_block_ack());
     assert!(!Native::tx_ba_blocks_data(driver.state(), TID));
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
+    // SAFETY: The prior DELBA command and packet completed and were released before
+    // this call. The current session, key and native owners remain retained under
+    // fresh data guards while the new payload is queued.
     unsafe {
         driver.transmit_modern(
             &mut owner,
