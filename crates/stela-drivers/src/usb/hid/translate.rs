@@ -82,6 +82,11 @@ impl Translator {
             .map_or(self.reports.input_bytes, Descriptor::input_bytes)
     }
 
+    /// Whether the device describes a keyboard or a pointer report.
+    pub fn is_keyboard_or_pointer(&self) -> bool {
+        self.reports.keys.is_some() || self.reports.pointer.is_some()
+    }
+
     /// Keyboard reports holding usages the native keyboard cannot report.
     pub fn dropped(&self) -> u64 {
         self.dropped

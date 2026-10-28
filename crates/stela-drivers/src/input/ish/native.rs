@@ -246,8 +246,9 @@ pub struct Native<
 impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     /// # Safety
     /// Inputs retain the actual exclusive native9d35 endpoint, original config,
-    /// complete UC BAR0, powered D0 root/resource/reset/firmware epoch and actual
-    /// requester-matched isolated domain. No old DMA/postedMSI, IRQ/worker, alias,
+    /// complete UC BAR0, powered D0 root/resource/reset/firmware epoch and the
+    /// requester's DMA domain, isolated or the passthrough domain, meeting the
+    /// `DmaDomain` contract for its kind. No old DMA/postedMSI, IRQ/worker, alias,
     /// firmware or reset/removal user remains; this is independently drained,
     /// never inferred from disabled bits. MSI routing is genuinely qualified.
     /// The same retained root producer has examined the complete actual PCI

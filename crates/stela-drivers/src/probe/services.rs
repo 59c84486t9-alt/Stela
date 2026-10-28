@@ -1,6 +1,7 @@
 //! Native resource services the mount supplies to [`probe`](super::probe_with_provider)
 //! for drivers that attach through owned configuration space, owned register
 //! mappings, per-requester DMA domains and the ACPI namespace.
+use crate::bus::irq::IrqController;
 use crate::bus::{
     dma::{mapping::DmaDomain, memory::PageSource},
     mmio::owned::{self, Mapping},
@@ -73,6 +74,10 @@ pub unsafe trait NativeServices {
 
     /// Pages for driver DMA rings and buffers.
     fn pages(&self) -> &dyn PageSource;
+
+    /// The interrupt controller that routes MSIs to the probing CPU, for
+    /// drivers that need a delivered interrupt, such as Intel's ISH.
+    fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError>;
 
     /// The ACPI namespace, for devices described there rather than on PCI:
     /// i8042 keyboards and mice, embedded controllers, I²C-HID devices and
@@ -165,6 +170,9 @@ pub(crate) mod tests {
         }
         fn domain(&self, _: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError> {
             Err(ServiceError::Refused("requester shares an IOMMU group"))
+        }
+        fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError> {
+            Err(ServiceError::Unavailable)
         }
         fn pages(&self) -> &dyn PageSource {
             &NoPages

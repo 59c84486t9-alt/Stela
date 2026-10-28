@@ -1,5 +1,6 @@
 //! PCI functions whose drivers attach through [`NativeServices`]: each takes
 //! a stopped requester, its DMA domain and owned BAR mappings from the mount.
+//! Among them are the AMD and Intel sensor hubs ([`SensorHub`]).
 use super::{Error, NativeServices, ServiceError};
 use crate::{
     Clock,
@@ -13,6 +14,7 @@ use crate::{
         },
         vmd,
     },
+    input::{ish, sfh},
     net::{
         Link, LinkError, Mac,
         aqtion::{self, Aqtion, MappedRegisters},
@@ -53,6 +55,10 @@ pub(super) enum Kind {
     Tg3,
     Aqtion,
     Vmd,
+    /// AMD Sensor Fusion Hub v2.
+    Sfh,
+    /// Intel Integrated Sensor Hub.
+    Ish,
 }
 
 impl Kind {
@@ -65,6 +71,10 @@ impl Kind {
             && function.class == [2, 0, 0]
         {
             Some(Self::Aqtion)
+        } else if (function.vendor, function.device) == (0x1022, 0x15e4) {
+            Some(Self::Sfh)
+        } else if (function.vendor, function.device) == (0x8086, 0x9d35) {
+            Some(Self::Ish)
         } else {
             None
         }
@@ -330,6 +340,140 @@ pub(super) unsafe fn vmd(
             owner: Box::new(hierarchy),
         }),
         Err((error, hierarchy)) => Err((Error::Device(error), Some(Box::new(hierarchy)))),
+    }
+}
+
+/// A sensor hub: AMD's Sensor Fusion Hub, or Intel's Integrated Sensor Hub
+/// when none of its HID clients is a keyboard or pointer.
+pub enum SensorHub {
+    Sfh(Box<Sfh>),
+    Ish(Box<ish::Native>),
+}
+
+/// AMD SFH over its owned BAR2.
+pub type Sfh = sfh::Controller<sfh::pci::NativeRegisters, Clock>;
+
+/// PCI host bridges of Intel's Mehlow platforms, on which Linux `ish_probe`
+/// refuses the ISH (`ish_invalid_pci_ids`).
+pub(super) const MEHLOW: [u16; 2] = [0xa309, 0xa30a];
+
+/// A claimed requester, rewrapped after its BARs were sized, its DMA domain
+/// and its BARs.
+type Sized = (StoppedRequester, Arc<dyn DmaDomain>, [Option<Bar>; 6]);
+
+/// The function's claimed requester, its DMA domain and its BARs.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed claim hands back the owners that must outlive the device"
+)]
+fn claim_sized(services: &dyn NativeServices, address: Address) -> Result<Sized, Failure> {
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let requester = services.claim_stopped(address).map_err(refused)?;
+    let (requester, binding) = requester
+        .into_dma_binding()
+        .map_err(|(error, _)| refused(ServiceError::Claim(error)))?;
+    let domain = services.domain(binding).map_err(refused)?;
+    let mut function = requester.into_function();
+    let bars = function.bars();
+    // SAFETY: the mount claimed this function stopped, and sizing its BARs
+    // with decode off left it so.
+    let requester = unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
+        .map_err(|(error, function)| {
+            (
+                Error::Native(ServiceError::Claim(error)),
+                Some(Box::new(function) as Box<dyn Any>),
+            )
+        })?;
+    Ok((requester, domain, bars))
+}
+
+/// Attach an AMD Sensor Fusion Hub and enable its sensors.
+///
+/// # Safety
+/// [`NativeServices`]' contract holds for `services`, and `clock` is the
+/// handoff's calibrated clock.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+pub(super) unsafe fn sfh(
+    services: &dyn NativeServices,
+    address: Address,
+    clock: Clock,
+) -> Result<Sfh, Failure> {
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let (requester, domain, bars) = claim_sized(services, address)?;
+    let Some(bar @ Bar::Memory { .. }) = bars[2] else {
+        return Err(refused(ServiceError::Refused("missing memory BAR")));
+    };
+    let mapping = services.map_bar(address, bar).map_err(refused)?;
+    // SAFETY: the mount claimed the stopped function and mapped exactly its
+    // BAR2 uncached.
+    let registers = unsafe { sfh::pci::NativeRegisters::attach(requester, mapping, bar) }.map_err(
+        |failure| {
+            (
+                Error::Sfh(failure.error),
+                Some(Box::new((failure.function, failure.mapping)) as Box<dyn Any>),
+            )
+        },
+    )?;
+    // SAFETY: `domain` is the mount's domain for this requester, which meets
+    // the DmaDomain contract for its kind.
+    let mut controller = unsafe { sfh::Controller::claim(registers, clock, domain) }
+        .map_err(|error| (Error::Sfh(error), None))?;
+    match controller.initialize(services.pages()) {
+        Ok(()) => Ok(controller),
+        Err(error) => Err((
+            Error::Sfh(error),
+            Some(Box::new(controller) as Box<dyn Any>),
+        )),
+    }
+}
+
+/// Attach an Intel Integrated Sensor Hub and start its HID clients.
+///
+/// # Safety
+/// [`NativeServices`]' contract holds for `services`, `clock` is the
+/// handoff's calibrated clock, and probe's scan found no Mehlow host bridge
+/// ([`MEHLOW`]).
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+pub(super) unsafe fn ish(
+    services: &dyn NativeServices,
+    address: Address,
+    clock: Clock,
+) -> Result<ish::Native, Failure> {
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let (requester, domain, bars) = claim_sized(services, address)?;
+    let interrupts = services.interrupts().map_err(refused)?;
+    let authority = services.authority().map_err(refused)?;
+    let Some(bar @ Bar::Memory { .. }) = bars[0] else {
+        return Err(refused(ServiceError::Refused("missing memory BAR")));
+    };
+    let mapping = services.map_bar(address, bar).map_err(refused)?;
+    // SAFETY: the mount mapped exactly BAR0 of the claimed function uncached.
+    let registers = unsafe { ish::MappedRegisters::new(mapping) }
+        .map_err(|(error, mapping)| (Error::Ish(error), Some(Box::new(mapping) as Box<dyn Any>)))?;
+    // SAFETY: the handoff's clock is the calibrated invariant TSC.
+    let clock =
+        unsafe { ish::NativeClock::new(clock) }.map_err(|error| (Error::Ish(error), None))?;
+    let inputs = ish::Inputs {
+        function: requester.into_function(),
+        retained: Arc::new(authority),
+        registers,
+        domain,
+        interrupts,
+        clock,
+    };
+    // SAFETY: the mount claimed the stopped function, mapped its BAR0 and
+    // gave its domain and MSI controller; the caller checked for Mehlow.
+    let mut native = unsafe { ish::Native::new(inputs) }
+        .map_err(|(error, inputs)| (Error::Ish(error), Some(Box::new(inputs) as Box<dyn Any>)))?;
+    match native.start() {
+        Ok(()) => Ok(native),
+        Err(error) => Err((Error::Ish(error), Some(Box::new(native) as Box<dyn Any>))),
     }
 }
 

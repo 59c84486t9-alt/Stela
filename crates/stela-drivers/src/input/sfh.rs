@@ -166,8 +166,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// stopped ownership; this grant binds the DMA provider to that requester.
     ///
     /// # Safety
-    /// `domain` is the actual isolated DMA domain of the retained function,
-    /// with its WB payload coherency independently qualified. Firmware/AML/SMM,
+    /// `domain` is the retained function's DMA domain, isolated or the
+    /// passthrough domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)),
+    /// meeting the [`DmaDomain`] contract for its kind, with its WB payload
+    /// coherency independently qualified. Firmware/AML/SMM,
     /// reset/removal and other workers cannot change this exclusive SFH epoch.
     /// Registers, domain and backing allocations remain valid in process/
     /// deferred context, including failures. No numeric identity-DMA fallback.

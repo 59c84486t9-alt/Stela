@@ -2,7 +2,7 @@
 //! One host keyboard or pointer, whatever its transport: probe returns them
 //! in one list and each is polled the same way for [`Input`] changes and sent
 //! the guest's lock-key LEDs.
-use super::{Input, hid_i2c, ps2, touchpad, virtio::VirtioInput};
+use super::{Input, hid_i2c, ish, ps2, touchpad, virtio::VirtioInput};
 use crate::{Clock, block::BlockError, bus::i2c::Bus, usb::hid::UsbInput};
 use alloc::boxed::Box;
 use alloc::{format, string::String, vec::Vec};
@@ -16,6 +16,8 @@ pub enum InputDevice {
     I2cHid(Box<I2cHid>),
     /// An ELAN or Cypress touchpad, read as a mouse.
     Touchpad(Box<touchpad::TouchpadInput>),
+    /// An Intel ISH with a keyboard or pointer client.
+    Ish(Box<ish::IshInput>),
 }
 
 /// An I²C-HID device on whichever bus and interrupt pin probe found it.
@@ -28,6 +30,7 @@ pub enum InputError {
     Ps2(ps2::Error),
     I2cHid(hid_i2c::Error),
     Touchpad(touchpad::Error),
+    Ish(ish::Error),
 }
 
 impl core::fmt::Display for InputError {
@@ -37,6 +40,7 @@ impl core::fmt::Display for InputError {
             Self::Ps2(error) => write!(f, "{error}"),
             Self::I2cHid(error) => write!(f, "{error}"),
             Self::Touchpad(error) => write!(f, "{error}"),
+            Self::Ish(error) => write!(f, "Intel ISH {error:?}"),
         }
     }
 }
@@ -50,6 +54,7 @@ impl InputDevice {
             Self::Ps2(_) => String::from("i8042 PS/2"),
             Self::I2cHid(device) => device.name.clone(),
             Self::Touchpad(device) => device.name.clone(),
+            Self::Ish(device) => device.name.clone(),
         }
     }
 
@@ -79,6 +84,7 @@ impl InputDevice {
             },
             Self::I2cHid(device) => device.poll(inputs).map_err(InputError::I2cHid),
             Self::Touchpad(device) => device.poll(inputs).map_err(InputError::Touchpad),
+            Self::Ish(device) => device.poll(inputs).map_err(InputError::Ish),
         }
     }
 
@@ -94,6 +100,7 @@ impl InputDevice {
             }
             Self::Ps2(_) => Ok(()),
             Self::I2cHid(device) => device.set_leds(u16::from(leds)).map_err(InputError::I2cHid),
+            Self::Ish(device) => device.set_leds(u16::from(leds)).map_err(InputError::Ish),
         }
     }
 
@@ -103,6 +110,7 @@ impl InputDevice {
         match self {
             Self::Usb(device) => device.last_report(),
             Self::I2cHid(device) => device.last_report(),
+            Self::Ish(device) => device.last_report(),
             Self::Virtio(_) | Self::Ps2(_) | Self::Touchpad(_) => &[],
         }
     }
@@ -115,6 +123,7 @@ impl InputDevice {
             Self::Ps2(controller) => controller.needs_reset(),
             Self::I2cHid(device) => device.device().needs_reset(),
             Self::Touchpad(device) => device.stopped(),
+            Self::Ish(device) => device.stopped(),
         }
     }
 }

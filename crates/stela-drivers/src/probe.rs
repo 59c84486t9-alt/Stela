@@ -46,6 +46,8 @@ pub enum Error {
     Vmd(crate::bus::vmd::Error),
     Tg3(net::tg3::Error),
     Aqtion(net::aqtion::Error),
+    Sfh(input::sfh::Error),
+    Ish(input::ish::Error),
 }
 
 impl fmt::Display for Error {
@@ -57,6 +59,8 @@ impl fmt::Display for Error {
             Self::Vmd(error) => write!(f, "VMD: {error}"),
             Self::Tg3(error) => write!(f, "tg3: {error:?}"),
             Self::Aqtion(error) => write!(f, "atlantic: {error:?}"),
+            Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
+            Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
         }
     }
 }
@@ -308,6 +312,8 @@ pub struct Devices {
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
     pub nics: Vec<Adapter>,
+    /// Sensor hubs, their sensors enabled. Nothing reads their reports yet.
+    pub sensors: Vec<native::SensorHub>,
     pub failures: Vec<(Address, Error)>,
     /// Devices behind an attached controller that failed on their own, such
     /// as AHCI ports and NVMe namespaces, by location.
@@ -400,6 +406,9 @@ pub unsafe fn probe_with_provider(
         native_services: services.is_some(),
         ..Devices::default()
     };
+    // Intel ISHs, attached once the scan has looked for a Mehlow host bridge.
+    let mut sensor_hubs = Vec::new();
+    let mut mehlow = false;
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             devices.unmapped.push(*window);
@@ -408,6 +417,7 @@ pub unsafe fn probe_with_provider(
         // SAFETY: mapped as checked; the caller owns the machine.
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
+            mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
             if let Some(adapter) = gpu::Adapter::discover(&function) {
                 devices.gpus.push(adapter);
                 continue;
@@ -438,6 +448,21 @@ pub unsafe fn probe_with_provider(
                     continue;
                 };
                 let attached = match kind {
+                    native::Kind::Sfh => {
+                        // SAFETY: as for tg3 below.
+                        match unsafe { native::sfh(services, address, handoff.clock) } {
+                            Ok(hub) => devices.sensors.push(native::SensorHub::Sfh(Box::new(hub))),
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::Ish => {
+                        sensor_hubs.push(address);
+                        continue;
+                    }
                     native::Kind::Vmd => {
                         // SAFETY: as for tg3 below; the host's hierarchy is
                         // stopped with it.
@@ -680,6 +705,36 @@ pub unsafe fn probe_with_provider(
             match result {
                 Ok(found) => devices.disks.extend(found),
                 Err(error) => devices.failures.push((address, error.into())),
+            }
+        }
+    }
+    for address in sensor_hubs {
+        let Some(services) = services else {
+            devices
+                .failures
+                .push((address, Error::Native(ServiceError::Unavailable)));
+            continue;
+        };
+        if mehlow {
+            devices.failures.push((
+                address,
+                Error::Ish(input::ish::Error::Requirement(
+                    "no ISH on a Mehlow platform, as Linux ish_probe refuses it",
+                )),
+            ));
+            continue;
+        }
+        // SAFETY: as for tg3, and the scan found no Mehlow host bridge.
+        match unsafe { native::ish(services, address, handoff.clock) } {
+            Ok(hub) => {
+                match input::ish::IshInput::new(hub, alloc::format!("Intel ISH {address}")) {
+                    Ok(input) => devices.inputs.push(InputDevice::Ish(Box::new(input))),
+                    Err(hub) => devices.sensors.push(native::SensorHub::Ish(Box::new(hub))),
+                }
+            }
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
             }
         }
     }
