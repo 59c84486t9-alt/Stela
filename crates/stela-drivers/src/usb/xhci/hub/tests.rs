@@ -1496,10 +1496,23 @@ fn raw_port_power_revalidates_root_and_hub_health_before_authorizing_current() {
 }
 
 #[test]
-fn usb2_hub_reads_complete_variable_bitmaps_and_refuses_malformed_descriptors() {
-    for ports in [1usize, 7, 8, 15, 31] {
+fn usb2_hub_descriptors_need_only_device_removable_like_get_hub_descriptor() {
+    for (ports, qemu) in [1usize, 7, 8, 15, 31]
+        .into_iter()
+        .flat_map(|ports| [(ports, false), (ports, true)])
+    {
         let mut hub = Node::hub(HIGH_SPEED, ports);
         hub.multi_tt = true;
+        if qemu {
+            // QEMU's hub sizes PortPwrCtrlMask without bit zero, one byte
+            // shorter than DeviceRemovable at eight ports.
+            let removable = (ports + 1).div_ceil(8);
+            let mut bytes = vec![0, 0x29, ports as u8, 0x0a, 0, 1, 0];
+            bytes.resize(7 + removable, 0);
+            bytes.resize(7 + removable + ports.div_ceil(8), 0xff);
+            bytes[0] = bytes.len() as u8;
+            hub.descriptor = Some(bytes);
+        }
         // Empty ports exercise descriptor/current/status ownership without a
         // separate fake leaf at each route.
         for port in hub.ports.as_mut().unwrap() {
@@ -1514,16 +1527,18 @@ fn usb2_hub_reads_complete_variable_bitmaps_and_refuses_malformed_descriptors() 
         let (mut c, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         assert_eq!(c.enumerate(&mut dma, &mut failures).len(), 1);
-        assert!(failures.is_empty(), "{ports}: {failures:?}");
-        let length = 7 + 2 * (ports + 1).div_ceil(8);
+        assert!(failures.is_empty(), "{ports} {qemu}: {failures:?}");
+        // sizeof(struct usb_hub_descriptor), whatever the hub reports.
         assert!(model.borrow().requests.iter().any(|(_, _, q)| q[0] == 0xa0
             && q[1] == GET_DESCRIPTOR
             && q[3] == HUB_DESCRIPTOR
-            && usize::from(u16::from_le_bytes([q[6], q[7]])) == length));
+            && u16::from_le_bytes([q[6], q[7]]) == 15));
     }
     for bytes in [
         vec![9, 0x29, 0, 1, 0, 1, 0, 0, 255],
-        vec![9, 0x29, 8, 1, 0, 1, 0, 0, 255],
+        // Sixteen ports need DeviceRemovable's third byte.
+        vec![9, 0x29, 16, 1, 0, 1, 0, 0, 255],
+        vec![8, 0x29, 1, 1, 0, 1, 0, 0],
         vec![9, 0x29, 1, 3, 0, 1, 0, 0, 255],
         vec![9, 0x29, 1, 1, 1, 1, 0, 0, 255],
     ] {
