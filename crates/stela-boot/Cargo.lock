@@ -707,6 +707,7 @@ dependencies = [
  "p256",
  "sha1",
  "sha2",
+ "stela-crypto",
  "subtle",
  "triomphe",
  "zeroize",

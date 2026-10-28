@@ -14,7 +14,7 @@ workspace = true
 # Native x86 ACPICA interpreter; builds freestanding C with clang.
 native-acpi = ["dep:cc"]
 # Common native Linux kernel services; selecting this attaches no GPU.
-linux-kernel = ["dep:cc"]
+linux-kernel = ["dep:cc", "dep:stela-crypto"]
 # `block::RamDisk`, the in-memory disk the runtime's tests run models on.
 ram-disk = []
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
@@ -29,6 +29,7 @@ amd-commands = ["dep:cc"]
 metal = []
 
 [dependencies]
+stela-crypto = { path = "../stela-crypto", optional = true }
 # BIP-CMAC uses the shared checked AES backend; expanded keys clear on retirement.
 aes = { version = "0.8", default-features = false, features = ["zeroize"] }
 # WPA2-Personal: PBKDF2/PRF/MIC over HMAC-SHA1 and HMAC-SHA256.

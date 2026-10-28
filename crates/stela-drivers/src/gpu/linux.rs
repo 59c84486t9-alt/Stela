@@ -7,6 +7,7 @@ use core::{alloc::Layout, ffi::c_void, ptr};
 pub mod heap;
 pub mod image;
 pub mod pages;
+pub mod random;
 #[cfg(target_arch = "x86_64")]
 pub mod task;
 
