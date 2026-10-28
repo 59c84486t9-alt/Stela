@@ -94,6 +94,55 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .map_err(PolicyError::Client)
     }
 
+    /// `ieee80211_mgd_assoc` after the OS's SAE exchange authenticated the
+    /// station: associate with the OS's SAE request and the BSS it chose.
+    pub fn associate_external(
+        &mut self,
+        session: &Session,
+        handle: BssHandle,
+        join: Join,
+        now: u64,
+        source: &dyn PageSource,
+    ) -> Result<(), PolicyError> {
+        self.live()?;
+        let observed = self
+            .observed
+            .iter()
+            .find(|b| b.handle == handle)
+            .ok_or(PolicyError::Bss)?;
+        if now
+            .checked_sub(observed.seen)
+            .is_none_or(|age| age > 30_000_000)
+            || observed.bss.channel != join.channel
+            || observed.bss.bssid != join.bssid
+        {
+            return Err(PolicyError::Bss);
+        }
+        let beacon = self.native_beacon(handle)?;
+        let mut check = Check {
+            snapshot: &self.snapshot,
+            country: &self.country,
+            environment: self.environment,
+            revoked: false,
+            peer: self.peer,
+        };
+        self.protection.set(true, false);
+        // SAFETY: authority and client are private disjoint fields of this
+        // same exclusive owning attachment, and the OS selected this network.
+        unsafe {
+            self.client.associate_external_pmf(
+                &mut self.authority,
+                session,
+                join,
+                &beacon,
+                now,
+                source,
+                &mut check,
+            )
+        }
+        .map_err(PolicyError::Client)
+    }
+
     pub fn cancel_external_authentication(&mut self, session: &Session) -> Result<(), PolicyError> {
         self.client
             .cancel_external_authentication(session)

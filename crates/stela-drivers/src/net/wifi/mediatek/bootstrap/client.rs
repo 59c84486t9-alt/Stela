@@ -544,6 +544,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Self::command(s, Command::StationRecord, &peer)?;
         s.format_generation = Some(generation);
         Self::command(s, Command::StationRecord, &broadcast)?;
+        Self::claim_keys(s, profile)?;
+        s.phase = Phase::Joining;
+        let result = Self::action_guarded(s, action, now, source, policy, guard);
+        if result.is_err() && s.station.requires_protected_management() {
+            s.phase = Phase::Quarantined;
+        }
+        result
+    }
+    /// Claim, or rebind from the last association, the PTK and GTK slots of
+    /// the profile's peer.
+    fn claim_keys(s: &mut Owned<I, Q, C>, profile: Profile) -> Result<(), Error> {
         let key_context = KeyContext {
             bss_index: profile.interface.bss_index,
             omac_index: profile.interface.omac_index,
@@ -570,12 +581,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 );
             }
         }
-        s.phase = Phase::Joining;
-        let result = Self::action_guarded(s, action, now, source, policy, guard);
-        if result.is_err() && s.station.requires_protected_management() {
-            s.phase = Phase::Quarantined;
-        }
-        result
+        Ok(())
     }
     fn action(
         s: &mut Owned<I, Q, C>,

@@ -840,19 +840,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 .join_modern(join, beacon, profile, now, source, &mut check)
                 .map_err(PolicyError::Client);
         }
-        // The client's own record of the beacon the OS chose.
-        let beacon = self
-            .client
-            .pmf_bss_observations()
-            .filter(|o| {
-                let bss = o.bss();
-                bss.bssid == observed.bss.bssid
-                    && bss.channel == observed.bss.channel
-                    && bss.elements == observed.bss.elements
-            })
-            .last()
-            .ok_or(PolicyError::Bss)?
-            .clone();
+        let beacon = self.native_beacon(handle)?;
         self.peer = Some(join.channel);
         self.protection.set(true, false);
         // SAFETY: authority and client are private disjoint fields of this
@@ -869,6 +857,26 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             )
         }
         .map_err(PolicyError::Client)
+    }
+    /// The client's own record of the beacon the OS chose.
+    fn native_beacon(&self, handle: BssHandle) -> Result<Arc<PmfBssObservation>, PolicyError> {
+        let observed = self
+            .observed
+            .iter()
+            .find(|b| b.handle == handle)
+            .ok_or(PolicyError::Bss)?;
+        Ok(self
+            .client
+            .pmf_bss_observations()
+            .filter(|o| {
+                let bss = o.bss();
+                bss.bssid == observed.bss.bssid
+                    && bss.channel == observed.bss.channel
+                    && bss.elements == observed.bss.elements
+            })
+            .last()
+            .ok_or(PolicyError::Bss)?
+            .clone())
     }
     pub fn configure_modern(&mut self, now: u64) -> Result<(), PolicyError> {
         self.live()?;

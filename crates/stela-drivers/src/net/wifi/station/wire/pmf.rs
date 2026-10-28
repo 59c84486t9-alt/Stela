@@ -11,6 +11,8 @@ const BIP_CMAC128: [u8; 4] = [0, 15, 172, 6];
 const MFPR: u16 = 1 << 6;
 const MFPC: u16 = 1 << 7;
 const EXTENDED_KEY_ID: u16 = 1 << 13;
+const SAE: u8 = 8;
+const SAE_EXT_KEY: u8 = 24;
 
 /// Original exact selected RSNE and bounded negotiated policy. Only parsing
 /// the explicit opt-in constructor creates it. Actual OS authentication and
@@ -31,14 +33,19 @@ impl Selection {
     pub const fn required(&self) -> bool {
         self.required
     }
+    /// Whether the AKM authenticates with SAE (`WLAN_AKM_SUITE_SAE` or
+    /// `WLAN_AKM_SUITE_SAE_EXT_KEY`), which the OS runs before association.
+    pub const fn sae(&self) -> bool {
+        matches!(self.akm, SAE | SAE_EXT_KEY)
+    }
     pub(super) fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let profile = Profile::parse(bytes)?;
         if profile.pairwise != [CCMP128] || profile.akms.len() != 1 {
             return Err(Error::Unsupported("PMF requires one selected cipher/AKM"));
         }
         let akm = profile.akms[0];
-        if akm[..3] != [0, 15, 172] || !matches!(akm[3], 1 | 2) {
-            return Err(Error::Unsupported("PMF ordinary RSN AKM1/2 only"));
+        if akm[..3] != [0, 15, 172] || !matches!(akm[3], 1 | 2 | SAE | SAE_EXT_KEY) {
+            return Err(Error::Unsupported("PMF RSN AKM1/2 or SAE only"));
         }
         Ok(Self {
             rsn: bytes.to_vec(),
@@ -77,7 +84,6 @@ fn rsne(bytes: &[u8]) -> Result<Option<&[u8]>, Error> {
                     return Err(Error::Invalid("duplicate PMF RSN"));
                 }
             }
-            244 => return Err(Error::Unsupported("PMF RSNX negotiation")),
             221 if data.starts_with(&[0, 0x50, 0xf2, 1]) => {
                 return Err(Error::Unsupported("PMF WPA downgrade"));
             }

@@ -289,7 +289,6 @@ impl AssociationRequest {
                         selected_rsn = Some(rsn(data)?);
                     }
                 }
-                244 if allow_pmf => return Err(Error::Unsupported("PMF RSNX negotiation")),
                 221 if data.starts_with(&[0, 0x50, 0xf2, 1]) => legacy_wpa = true,
                 // Do not advertise modes the current native state machine and
                 // actual driver association context cannot configure yet.

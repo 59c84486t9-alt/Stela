@@ -41,6 +41,25 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(state);
         Ok(result?)
     }
+    /// Associate once the OS's SAE exchange authenticated the station, as
+    /// NL80211_CMD_ASSOCIATE does after it.
+    pub fn associate_external(
+        &mut self,
+        session: &Session,
+        bss: BssHandle,
+        join: Join,
+    ) -> Result<(), LinkControlError> {
+        if join.policy != station::PortPolicy::Controlled || join.request.key_ciphers().is_none() {
+            return Err(LinkControlError::UnsupportedProfile);
+        }
+        let now = self.now();
+        let state = self.state_mut();
+        let result = state
+            .client
+            .associate_external(session, bss, join, now, &state.source);
+        Self::reconcile(state);
+        Ok(result?)
+    }
     pub fn cancel_external_authentication(
         &mut self,
         session: &Session,

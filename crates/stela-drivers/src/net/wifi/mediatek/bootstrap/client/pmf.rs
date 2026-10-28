@@ -106,6 +106,89 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         .map_err(Error::Regulatory)?
     }
+    /// `ieee80211_mgd_assoc` once the OS's SAE exchange authenticated the
+    /// station: associate with the OS's SAE request through the exchange's
+    /// native peer, claiming the keys a join claims, under freshly acquired
+    /// PMF guards. A refused first request goes back to the exchange.
+    ///
+    /// # Safety
+    /// As `join_modern_pmf`.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn associate_external_pmf<H: HardwarePolicy, O: OsPolicy>(
+        &mut self,
+        authority: &mut Owner<H, O>,
+        session: &station::external::Session,
+        join: Join,
+        observed: &Arc<PmfBssObservation>,
+        now: u64,
+        source: &dyn PageSource,
+        policy: &mut impl station::RegulatoryPolicy,
+    ) -> Result<(), Error> {
+        let s = self.state();
+        s.station
+            .validate_external_authentication(session)
+            .map_err(Error::Station)?;
+        if s.phase != Phase::Joining || s.six_ghz.is_some() {
+            return Err(Error::WrongPhase);
+        }
+        let profile = s.profile.ok_or(Error::WrongProfile)?;
+        if profile.peer != join.bssid
+            || profile.channel != join.channel
+            || !s
+                .pmf_observations
+                .iter()
+                .any(|old| Arc::ptr_eq(old, observed))
+        {
+            return Err(Error::WrongProfile);
+        }
+        self.validate_modern_join(&join, profile)?;
+        let pmf = join.request.pmf().ok_or(Error::WrongProfile)?;
+        if observed.bss().kind != scan::result::Kind::Beacon
+            || observed.bss().capabilities & 0x10 == 0
+        {
+            return Err(Error::WrongProfile);
+        }
+        pmf.validate_peer(&observed.bss().elements, &[])
+            .map_err(|e| Error::Station(station::Error::Wire(e)))?;
+        let observed = observed.clone();
+        // SAFETY: exact same exclusive owner and actual retained provider leases.
+        unsafe {
+            authority.with_pmf_authentication(self, |client, guard| {
+                let s = client.state_mut();
+                let ciphers = join.request.key_ciphers();
+                let action = s
+                    .station
+                    .associate_external_pmf(session, join, observed.clone(), now, policy)
+                    .map_err(Error::Station)?;
+                let Action::Transmit {
+                    ticket, ref bytes, ..
+                } = action
+                else {
+                    return Err(Error::WrongPhase);
+                };
+                s.pmf_selected = Some(observed);
+                if let Err(error) =
+                    Self::qualify_pmf_authentication(s, guard, Some((ticket, bytes)))
+                {
+                    s.station
+                        .withdraw_unsubmitted_pmf(ticket)
+                        .map_err(Error::Station)?;
+                    s.pmf_selected = None;
+                    s.pmf_authentication = None;
+                    return Err(error);
+                }
+                s.ciphers = ciphers;
+                Self::claim_keys(s, profile)?;
+                let result = Self::action_guarded(s, action, now, source, policy, Some(guard));
+                if result.is_err() {
+                    s.phase = Phase::Quarantined;
+                }
+                result
+            })
+        }
+        .map_err(Error::Regulatory)?
+    }
+
     pub(super) fn qualify_pmf_authentication(
         s: &mut Owned<I, Q, C>,
         guard: &mut PmfAuthenticationGuard<'_>,

@@ -312,8 +312,13 @@ impl Station {
         now_us: u64,
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<Action, Error> {
-        if join.request.pmf().is_none() {
-            return Err(Error::Unsupported("selected PMF request required"));
+        match join.request.pmf() {
+            None => return Err(Error::Unsupported("selected PMF request required")),
+            // The OS runs SAE before associate_external_pmf.
+            Some(pmf) if pmf.sae() => {
+                return Err(Error::Unsupported("SAE authenticates through the OS"));
+            }
+            Some(_) => {}
         }
         let action = self.begin_modern_inner(join, observed.bss.clone(), now_us, policy)?;
         self.pmf_observation = Some(observed);
@@ -364,7 +369,9 @@ impl Station {
         &mut self,
         ticket: Ticket,
     ) -> Result<(), Error> {
-        if self.phase != Phase::Authenticating
+        // An SAE association goes back to its authenticated exchange.
+        let external = self.phase == Phase::Associating && self.external.is_some();
+        if (self.phase != Phase::Authenticating && !external)
             || self.pending.is_none_or(|pending| {
                 pending.ticket != ticket || pending.queued || pending.attempts != 1
             })
@@ -377,8 +384,68 @@ impl Station {
         self.selected_beacon = None;
         self.context = None;
         self.pmf_observation = None;
-        self.phase = Phase::Idle;
+        self.phase = if external {
+            Phase::ExternalAuthenticating
+        } else {
+            Phase::Idle
+        };
         Ok(())
+    }
+
+    /// `ieee80211_mgd_assoc` once the OS's SAE exchange authenticated the
+    /// station (it is -EBUSY before): associate with the OS's SAE request
+    /// and the native beacon observation, without another authentication.
+    /// The exchange stays until the association ends either way.
+    pub(in crate::net::wifi) fn associate_external_pmf(
+        &mut self,
+        session: &external::Session,
+        join: Join,
+        observed: Arc<NativeBssObservation>,
+        now_us: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Action, Error> {
+        self.validate_external_authentication(session)?;
+        if !self.external_authenticated() {
+            return Err(Error::Busy);
+        }
+        self.clock(now_us)?;
+        if self.now >= self.sae.deadline() {
+            return Err(Error::Timeout);
+        }
+        if join.request.pmf().is_none_or(|pmf| !pmf.sae()) {
+            return Err(Error::Unsupported("SAE PMF request required"));
+        }
+        if join.bssid != session.peer() || join.channel != session.channel() {
+            return Err(Error::InvalidAddress);
+        }
+        let selection = join
+            .request
+            .modern()
+            .ok_or(Error::Unsupported("modern request required"))?;
+        let beacon = observed.bss.clone();
+        if selection.capabilities().band() != join.channel.band
+            || beacon.channel != join.channel
+            || beacon.bssid != join.bssid
+            || beacon.transmitter != join.bssid
+        {
+            return Err(Error::Unsupported("selected beacon/local PHY mismatch"));
+        }
+        join.request.validate_policy(join.policy)?;
+        self.join = Some(join);
+        self.selected_beacon = Some(beacon);
+        self.context = None;
+        self.pmf_observation = Some(observed);
+        self.phase = Phase::Associating;
+        match self.transmit(Phase::Associating, 1, policy) {
+            Ok(action) => Ok(action),
+            Err(error) => {
+                self.join = None;
+                self.selected_beacon = None;
+                self.pmf_observation = None;
+                self.phase = Phase::ExternalAuthenticating;
+                Err(error)
+            }
+        }
     }
 
     /// Identity preflight, not a publication lease. Native submission must also
@@ -645,6 +712,7 @@ impl Station {
                     None
                 };
                 self.context = context.clone();
+                self.external = None;
                 self.phase = Phase::Configuring;
                 self.pending = Some(Pending {
                     ticket,

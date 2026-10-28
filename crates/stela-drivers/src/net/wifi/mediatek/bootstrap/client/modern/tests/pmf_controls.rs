@@ -253,8 +253,12 @@ fn permit(
         .unwrap()
 }
 fn selected_rsn() -> Vec<u8> {
+    rsn(2)
+}
+fn rsn(akm: u8) -> Vec<u8> {
     vec![
-        1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 2, 0xc0, 0, 0, 0, 0, 15, 172, 6,
+        1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, akm, 0xc0, 0, 0, 0, 0, 15, 172,
+        6,
     ]
 }
 fn replace_rsn(elements: &[u8], rsn: &[u8]) -> Vec<u8> {
@@ -274,18 +278,25 @@ fn replace_rsn(elements: &[u8], rsn: &[u8]) -> Vec<u8> {
 pub(in crate::net::wifi::mediatek::bootstrap::client) fn inputs(
     driver: &Native,
 ) -> (Join, scan::result::Bss) {
+    inputs_akm(driver, 2)
+}
+/// `inputs` for another AKM, such as SAE's 8.
+pub(in crate::net::wifi::mediatek::bootstrap::client) fn inputs_akm(
+    driver: &Native,
+    akm: u8,
+) -> (Join, scan::result::Bss) {
     let (mut join, mut bss) = modern_inputs(driver);
     let local = driver.local_advertisement(Band::Ghz5).unwrap();
     join.request = AssociationRequest::new_modern_with_local_pmf(
         0x11,
         10,
-        replace_rsn(join.request.elements(), &selected_rsn()),
+        replace_rsn(join.request.elements(), &rsn(akm)),
         local.capabilities().clone(),
         Mode::Eht,
         Width::Mhz80,
     )
     .unwrap();
-    bss.elements = replace_rsn(&bss.elements, &selected_rsn());
+    bss.elements = replace_rsn(&bss.elements, &rsn(akm));
     (join, bss)
 }
 fn observe(
@@ -768,18 +779,18 @@ fn pmf_constructor_is_explicit_and_actual_ap_response_cannot_change_selected_rsn
         .unwrap();
         assert_eq!(selected.pmf().unwrap().rsn(), selected_rsn());
         assert_eq!(selected.elements(), bytes);
-        append_ie(&mut bytes, 244, &[0]);
-        assert!(
-            AssociationRequest::new_modern_with_local_pmf(
-                0x11,
-                10,
-                bytes,
-                local.capabilities().clone(),
-                Mode::Ht,
-                Width::Mhz20
-            )
-            .is_err()
-        );
+        // wpa_supplicant's RSNX (H2E, SAE-PK) travels with the request.
+        append_ie(&mut bytes, 244, &[0x20]);
+        let extended = AssociationRequest::new_modern_with_local_pmf(
+            0x11,
+            10,
+            bytes.clone(),
+            local.capabilities().clone(),
+            Mode::Ht,
+            Width::Mhz20,
+        )
+        .unwrap();
+        assert_eq!(extended.elements(), bytes);
     }
     for case in 0..4 {
         assert!(
