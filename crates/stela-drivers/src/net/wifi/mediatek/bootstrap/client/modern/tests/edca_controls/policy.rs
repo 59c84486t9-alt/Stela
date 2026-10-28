@@ -11,7 +11,12 @@ fn revoked_and_foreign_update_admission() {
     let old = *driver.applied_edca().unwrap();
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     state.allowed.set(false);
-    assert!(unsafe { driver.update_edca_modern(&mut owner, permit, None) }.is_err());
+    assert!(
+        // SAFETY: The original context, pending observation and native backing remain
+        // retained, but OS policy was revoked after preflight. Fresh guards must deny
+        // queue publication without changing the applied state.
+        unsafe { driver.update_edca_modern(&mut owner, permit, None) }.is_err()
+    );
     assert_eq!(commands(&model), before);
     assert_eq!(*driver.applied_edca().unwrap(), old);
     assert_eq!(driver.phase(), ClientPhase::Associated);
@@ -19,7 +24,12 @@ fn revoked_and_foreign_update_admission() {
     state.allowed.set(true);
     let (other, _other_model, mut other_owner, _) = secure_modern();
     let permit = admit(&mut other_owner, &other, AssociationUse::Management);
-    assert!(unsafe { driver.update_edca_modern(&mut other_owner, permit, None) }.is_err());
+    assert!(
+        // SAFETY: Both original and foreign model requesters keep their backing live. The
+        // deliberately foreign owner/admission must be rejected before rebranding this
+        // observation or publishing an EDCA command.
+        unsafe { driver.update_edca_modern(&mut other_owner, permit, None) }.is_err()
+    );
     assert_eq!(commands(&model), before);
     assert_eq!(*driver.applied_edca().unwrap(), old);
     update(&mut driver, &mut owner, None).unwrap();
@@ -38,7 +48,12 @@ fn independent_queue_policy_denials() {
         // Original context admission still succeeds. Only the exact new queue
         // operation is denied by the independently held dynamic provider.
         let permit = admit(&mut owner, &driver, AssociationUse::Management);
-        let result = unsafe { driver.update_edca_modern(&mut owner, permit, None) };
+        let result =
+        // SAFETY: The pending observation and native owners remain live under the
+        // original association admission. One dynamic hardware/OS hook is
+        // deliberately denied; fresh operation-specific guards must refuse before
+        // publication.
+        unsafe { driver.update_edca_modern(&mut owner, permit, None) };
         match result {
             Err(ClientError::Regulatory(reg::Error::HardwareDenied)) if hardware => {}
             Err(ClientError::Regulatory(reg::Error::OsDenied)) if !hardware => {}
@@ -94,6 +109,9 @@ fn association_permission_does_not_grant_edca() {
         )
         .unwrap();
     assert!(matches!(
+        // SAFETY: The wrapper retains the original model requester and delegates its
+        // real lease/context unchanged. Its dynamic-queue hook deliberately default-
+        // denies, so association permission cannot publish this EDCA update.
         unsafe { driver.update_edca_modern(&mut owner, permit, None) },
         Err(ClientError::Regulatory(reg::Error::HardwareDenied))
     ));

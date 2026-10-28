@@ -81,10 +81,16 @@ fn key_installation_invalidates_observation() {
     let (mut driver, model, _) = awaiting();
     let (mut owner, _) = authority(&driver, &model);
     let permit = admit(&mut owner, &driver, AssociationUse::Configure);
+    // SAFETY: The awaited association owns this live native backing and original
+    // context. Both model guards serialize initial configuration, with no physical
+    // device or concurrent reset user.
     unsafe { driver.configure_modern(&mut owner, permit, 105) }.unwrap();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: The first pairwise key belongs to this retained requester and its model
+    // OS exchange. No old key/frame user is active; current guards serialize
+    // installation before the pending CPU observation becomes stale.
     unsafe {
         driver.install_key_modern(&mut owner, permit, true, 0, &[0x77; 16], ReplaySeed::ZERO)
     }

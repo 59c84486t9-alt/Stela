@@ -7,6 +7,9 @@ fn update_retains_outstanding_packet() {
     let (mut driver, model, mut owner, state) = secure_modern();
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();
+    // SAFETY: The current association/key epoch and native owners remain retained
+    // under fresh data guards. The frame is borrowed only for submission; its queued
+    // DMA owner survives the later independent EDCA update.
     unsafe {
         driver.transmit_modern(
             &mut owner,
