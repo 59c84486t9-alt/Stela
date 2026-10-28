@@ -284,6 +284,7 @@ impl Linux {
         for (name, source) in [
             ("linux_compiler_abi", "abi_test.c"),
             ("linux_acpi_client", "acpi_client_test.c"),
+            ("linux_acpi_dsm", "acpi_dsm_test.c"),
             ("linux_random", "random_test.c"),
             ("linux_seq_output", "seq_output_test.c"),
             ("linux_drm_mm", "drm_mm_test.c"),
