@@ -60,5 +60,9 @@ fn a_pmf_association_opens_its_port_after_the_handshake_keys() {
         &notice.event,
         LinkEvent::Controller(Event::ProtectedManagement(rx)) if rx.body() == [7, 0]
     )));
-    stop(&mut link, &model);
+    // The departure is encrypted, as IEEE80211_STA_MFP_ENABLED leaves it.
+    let departed = depart(&mut link, &model);
+    assert_eq!(departed.len(), 1);
+    assert_eq!(departed[0][..2], [0xc0, 0x40]);
+    retire(&mut link, &model);
 }

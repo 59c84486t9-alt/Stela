@@ -247,7 +247,7 @@ fn a_new_association_forgets_the_last_aps_channel_and_timing() {
     let mut narrowed = s.modern.as_ref().unwrap().context().definition();
     assert!(narrowed.downgrade());
     s.channel = Some(narrowed);
-    link.disconnect().unwrap();
+    depart(&mut link, &model);
     // SAFETY: actual model peer/key removal and all old users drained.
     unsafe { link.retire_peer_after_drain() }.unwrap();
     let (join, bss) = modern_inputs(&link.state().client.client);

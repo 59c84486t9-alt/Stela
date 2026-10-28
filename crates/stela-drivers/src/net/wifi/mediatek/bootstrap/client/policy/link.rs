@@ -445,7 +445,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             }
         }
         if Self::ready(s) {
-            match s.client.channel_switch(timer_now) {
+            match s.client.channel_switch(timer_now, &s.source) {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
                 Err(error) => {
                     soft_rx = false;
@@ -454,7 +454,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             }
         }
         if Self::ready(s) && s.client.client.pending_channel().is_some() {
-            match s.client.update_channel() {
+            match s.client.update_channel(&s.source) {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain)) => {}
                 Err(error) => {
                     soft_rx = false;
@@ -689,9 +689,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Ok(result?)
     }
+    /// The OS's deauthentication with WLAN_REASON_DEAUTH_LEAVING.
     pub fn disconnect(&mut self) -> Result<(), LinkControlError> {
+        self.deauthenticate(3)
+    }
+    /// The OS's deauthentication with its reason, as `ieee80211_mgd_deauth`
+    /// sends it.
+    pub fn deauthenticate(&mut self, reason: u16) -> Result<(), LinkControlError> {
         let s = self.state_mut();
-        let result = s.client.disconnect();
+        let result = s.client.deauthenticate(reason, &s.source);
         Self::reconcile(s);
         Ok(result?)
     }
@@ -925,14 +931,24 @@ mod tests {
         }
         out
     }
-    fn stop(link: &mut TestLink, model: &Model) {
+    /// The OS's deauthentication, returning the frames that left first.
+    fn depart(link: &mut TestLink, model: &Model) -> Vec<Vec<u8>> {
         link.disconnect().unwrap();
-        // A block-ack frame still on the air retires before removal.
+        // The deauthentication and any block-ack frame still on the air
+        // retire before removal.
+        let mut sent = Vec::new();
         while link.phase() == Phase::Removing {
             let channel = model.response.lock().unwrap().home_channel;
-            finish_tx_on(model, channel.unwrap_or(36));
+            sent.extend(finish_tx_on(model, channel.unwrap_or(36)));
             link.service().unwrap();
         }
+        sent
+    }
+    fn stop(link: &mut TestLink, model: &Model) {
+        depart(link, model);
+        retire(link, model);
+    }
+    fn retire(link: &mut TestLink, model: &Model) {
         assert!(!link.carrier());
         assert_eq!(link.phase(), Phase::NeedsDrain);
         // SAFETY: actual source-model peer/key removal and no remaining native old users.
@@ -1014,13 +1030,32 @@ mod tests {
         let ethernet = link.receive().unwrap().unwrap();
         assert_eq!(&ethernet[..6], &LOCAL.0);
         assert_eq!(&ethernet[12..14], &0x800u16.to_be_bytes());
-        stop(&mut link, &model);
+        // ieee80211_mgd_deauth tells the AP, in the clear without PMF.
+        // An ADDBA request queued before it still leaves first.
+        let departed = depart(&mut link, &model);
+        let deauth = departed.last().unwrap();
+        assert_eq!(deauth[..2], [0xc0, 0]);
+        assert_eq!(&deauth[4..10], &AP.0);
+        assert_eq!(deauth[24..], 3u16.to_le_bytes());
+        retire(&mut link, &model);
         assert_eq!(link.mac(), LOCAL);
         drop(notices);
         drop(link);
         assert_eq!(model.drops.load(Ordering::Relaxed), 1);
         assert_eq!(provider.load(Ordering::Relaxed), 1);
         assert!(model.memory.lock().unwrap().mappings.is_empty());
+    }
+    #[test]
+    fn aborting_a_join_deauthenticates_like_ieee80211_mgd_deauth() {
+        let (mut link, model, join, bss, _) = setup_link();
+        scan_join(&mut link, &model, join, bss);
+        assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
+        link.service().unwrap();
+        let departed = depart(&mut link, &model);
+        assert_eq!(departed.len(), 1);
+        assert_eq!(departed[0][..2], [0xc0, 0]);
+        assert_eq!(departed[0][24..], 3u16.to_le_bytes());
+        retire(&mut link, &model);
     }
     #[test]
     fn full_data_and_control_queues_retain_native_batches_in_order() {
@@ -1634,7 +1669,7 @@ mod tests {
             if revoke {
                 link.revoke().unwrap();
             } else {
-                link.disconnect().unwrap();
+                depart(&mut link, &model);
             }
             assert!(!link.carrier());
             assert_eq!(link.queues().data_frames, 0);

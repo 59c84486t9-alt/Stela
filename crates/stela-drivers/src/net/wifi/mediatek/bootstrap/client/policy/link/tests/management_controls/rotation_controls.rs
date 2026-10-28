@@ -3,7 +3,7 @@
 use super::*;
 
 fn stop(link: &mut TestLink, model: &Model) {
-    link.disconnect().unwrap();
+    depart(link, model);
     // SAFETY: exact model removal ACK and independent RX/IRQ/work drain.
     unsafe { link.retire_peer_after_drain() }.unwrap();
     link.stop().unwrap();

@@ -171,7 +171,7 @@ fn owning_management_tx_releases_original_keys_and_rejects_deferred_envelope_aft
     incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, 9)), false);
     link.service().unwrap();
     let deferred = take_management(&mut link);
-    link.disconnect().unwrap();
+    depart(&mut link, &model);
     let log = model.bar.0.lock().unwrap().log.len();
     assert!(
         link.with_management(deferred, |_, _, _| panic!("removed native peer"))

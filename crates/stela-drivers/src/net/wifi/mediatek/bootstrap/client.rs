@@ -11,6 +11,7 @@ mod external;
 pub use edca::AppliedEdca;
 mod cqm;
 mod csa;
+mod departure;
 pub use csa::ChannelSwitchStep;
 mod local;
 pub mod management;

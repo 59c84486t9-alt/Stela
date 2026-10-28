@@ -911,12 +911,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     /// Follow the current AP's announced channel switch: admit the target as
     /// `mt7925_pre_channel_switch` checks it is usable, switch when due, and
     /// disconnect as mac80211 does when the target is refused.
-    pub fn channel_switch(&mut self, now: u64) -> Result<(), PolicyError> {
+    pub fn channel_switch(&mut self, now: u64, source: &dyn PageSource) -> Result<(), PolicyError> {
         self.live()?;
         // A switch already due runs as soon as its target is admitted.
         while let Some(step) = self.client.channel_switch_step(now) {
             let definition = match step {
-                ChannelSwitchStep::Disconnect => return self.disconnect(),
+                ChannelSwitchStep::Disconnect => return self.drop_connection(source),
                 ChannelSwitchStep::Prepare(definition) | ChannelSwitchStep::Switch(definition) => {
                     definition
                 }
@@ -930,7 +930,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 self.authority
                     .admit_channel_switch(self.client.station(), context, definition)
             else {
-                return self.disconnect();
+                return self.drop_connection(source);
             };
             if matches!(step, ChannelSwitchStep::Prepare(_)) {
                 self.client.channel_switch_prepared();
@@ -948,10 +948,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     }
     /// Apply a channel the current AP's beacon changed, or disconnect when
     /// the change leaves the associated channel, as mac80211 does.
-    pub fn update_channel(&mut self) -> Result<(), PolicyError> {
+    pub fn update_channel(&mut self, source: &dyn PageSource) -> Result<(), PolicyError> {
         self.live()?;
         if self.client.pending_channel() == Some(false) {
-            return self.disconnect();
+            return self.drop_connection(source);
         }
         let context = self
             .client
@@ -1266,11 +1266,91 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
     pub fn cancel_scan(&mut self) -> Result<(), PolicyError> {
         self.client.cancel_scan().map_err(PolicyError::Client)
     }
+    /// Remove the station without telling the AP, as a
+    /// `local_state_change` request does.
     pub fn disconnect(&mut self) -> Result<(), PolicyError> {
         self.protection
             .authenticated
             .store(false, Ordering::Release);
         self.client.disconnect().map_err(PolicyError::Client)
+    }
+    /// `ieee80211_mgd_deauth` and `ieee80211_set_disassoc`: leave power
+    /// save, send the AP a deauthentication with this reason unless it asked
+    /// for silence, then remove the station.
+    pub fn deauthenticate(
+        &mut self,
+        reason: u16,
+        source: &dyn PageSource,
+    ) -> Result<(), PolicyError> {
+        if !self.revoked && self.client.phase() == Phase::Joining {
+            let mut check = Check {
+                snapshot: &self.snapshot,
+                country: &self.country,
+                environment: self.environment,
+                revoked: false,
+                peer: self.peer,
+            };
+            // As below, a frame that cannot be sent does not hold up the
+            // departure.
+            let _ = if self.protected()
+                && self.client.station().phase() != station::Phase::ExternalAuthenticating
+            {
+                // SAFETY: authority and client are private disjoint fields of
+                // this same exclusive owning attachment.
+                unsafe {
+                    self.client.transmit_join_deauthentication_pmf(
+                        &mut self.authority,
+                        reason,
+                        source,
+                        &mut check,
+                    )
+                }
+            } else {
+                self.client
+                    .transmit_join_deauthentication(reason, source, &mut check)
+            };
+        }
+        if !self.revoked
+            && self.client.phase() == Phase::Associated
+            && !self.client.channel_switch_blocks_tx()
+            && self.management_ready()
+        {
+            if self.client.power_save() {
+                // ieee80211_recalc_ps_vif once the station is no longer
+                // associated; the departure goes ahead regardless.
+                let _ = self.update_power_save(false);
+            }
+            let context = self
+                .client
+                .modern_context()
+                .ok_or(PolicyError::Bss)?
+                .clone();
+            if let Ok(admission) = self.authority.admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            ) {
+                // A frame that cannot be built or sent, like a failed
+                // `ieee80211_tx_skb`, does not hold up the departure; an
+                // uncertain submission quarantines the client.
+                // SAFETY: same exclusive privately retained controller and
+                // authority.
+                let _ = unsafe {
+                    self.client.transmit_deauthentication(
+                        &mut self.authority,
+                        admission,
+                        reason,
+                        source,
+                    )
+                };
+            }
+        }
+        self.disconnect()
+    }
+    /// `__ieee80211_disconnect` for a connection the station drops itself.
+    fn drop_connection(&mut self, source: &dyn PageSource) -> Result<(), PolicyError> {
+        // WLAN_REASON_DISASSOC_DUE_TO_INACTIVITY
+        self.deauthenticate(4, source)
     }
     /// Deny new work before initiating actual cancel/remove/disable commands.
     /// This return never claims completed retirement. Continue polling/draining
