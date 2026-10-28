@@ -3,7 +3,7 @@ use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{MemoryChecks, memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Gpr, Mem};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod absolute_selection;
 mod aes;
@@ -85,17 +85,18 @@ fn vector_offset(vector: u8) -> u32 {
     (core::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32
 }
 
+/// Guest vector `vector` in GuestState, `[rdi+disp32]`.
+fn vector_memory(vector: u8) -> Mem {
+    Mem::base_disp32(Gpr::Rdi, vector_offset(vector) as i32)
+}
+
 fn commit(code: &mut Code, vector: u8, xmm: u8) {
     // GuestState has only 8-byte alignment; V0 begins at byte264.
-    Host::StoreUnaligned.append(code, crate::TargetCpu::Baseline);
-    code.push(0x87 | (xmm << 3)); // [rdi+disp32]
-    code.extend(vector_offset(vector).to_le_bytes());
+    Host::StoreUnaligned.emit(code, xmm, vector_memory(vector), crate::TargetCpu::Baseline);
 }
 
 fn read_vector(code: &mut Code, vector: u8, xmm: u8) {
-    Host::LoadUnaligned.append(code, crate::TargetCpu::Baseline);
-    code.push(0x87 | (xmm << 3)); // [rdi+disp32]
-    code.extend(vector_offset(vector).to_le_bytes());
+    Host::LoadUnaligned.emit(code, xmm, vector_memory(vector), crate::TargetCpu::Baseline);
 }
 
 fn packed(code: &mut Code, opcode: SimdOpcode, destination: u8, source: u8) {
@@ -124,8 +125,14 @@ fn subtract_opcode(lane_bytes: u8) -> SimdOpcode {
 }
 
 fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8) {
-    packed(code, Host::ShuffleDword, destination, source);
-    code.push(control);
+    packed_imm(code, Host::ShuffleDword, destination, source, control);
+}
+
+/// `movabs rcx, value`, then `movq xmm, rcx`, which clears the high qword.
+fn move_constant(code: &mut Code, xmm: u8, value: u64) {
+    let mut asm = code.asm();
+    asm.mov_imm64(Gpr::Rcx, value);
+    asm.movq_to_xmm(xmm, Gpr::Rcx);
 }
 
 fn unsigned_bias(code: &mut Code, lane_bytes: u8) {
@@ -135,9 +142,7 @@ fn unsigned_bias(code: &mut Code, lane_bytes: u8) {
         4 | 8 => 0x8000000080000000,
         _ => unreachable!("reviewed comparison lane"),
     };
-    code.extend([0x48, 0xb9]);
-    code.extend(mask.to_le_bytes());
-    code.extend([0x66, 0x48, 0x0f, 0x6e, 0xe1]); // movq xmm4,rcx
+    move_constant(code, 4, mask);
     packed(code, Host::UnpackLowQword, 4, 4);
     packed(code, Host::Xor, 0, 4);
     packed(code, Host::Xor, 1, 4);
@@ -168,9 +173,7 @@ fn equal(code: &mut Code, lane_bytes: u8, target: crate::TargetCpu) {
 pub(super) fn greater(code: &mut Code, lane_bytes: u8, unsigned: bool, target: crate::TargetCpu) {
     if lane_bytes == 8 && target >= crate::TargetCpu::Sse42 {
         if unsigned {
-            code.extend([0x48, 0xb9]);
-            code.extend(0x8000000000000000u64.to_le_bytes());
-            code.extend([0x66, 0x48, 0x0f, 0x6e, 0xe1]);
+            move_constant(code, 4, 0x8000000000000000);
             packed(code, Host::UnpackLowQword, 4, 4);
             packed(code, Host::Xor, 0, 4);
             packed(code, Host::Xor, 1, 4);
@@ -553,15 +556,13 @@ pub(super) fn emit_after(
             two_lanes,
         } => {
             if mask == 0 {
-                code.extend([0x66, 0x0f, 0xef, 0xc0]); // pxor xmm0,xmm0
+                packed(code, Host::Xor, 0, 0);
                 commit(code, vector, 0);
                 return;
             }
-            code.extend([0x48, 0xb9]); // movabs rcx,mask
-            code.extend(mask.to_le_bytes());
-            code.extend([0x66, 0x48, 0x0f, 0x6e, 0xc1]); // movq xmm0,rcx (zeros high64)
+            move_constant(code, 0, mask);
             if two_lanes {
-                code.extend([0x66, 0x0f, 0x6c, 0xc0]); // punpcklqdq xmm0,xmm0
+                packed(code, Host::UnpackLowQword, 0, 0);
             }
             commit(code, vector, 0);
         }

@@ -1,7 +1,7 @@
 //! Integer multiplies, widening arithmetic and absolute differences.
 use super::rearrange::{add_or_subtract, lane_constant};
-use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
-use crate::x86_64::asm::Code;
+use super::{Host, commit, greater, packed, packed_imm, read_vector, rearrange::constant, shuffle};
+use crate::x86_64::asm::{Code, Cond, Gpr, Size, resolve};
 use crate::{
     TargetCpu,
     aarch64::simd::products::{Accumulate, Kind, Operand},
@@ -159,7 +159,7 @@ fn indexed(code: &mut Code, lane: u8, index: u8) {
     if lane == 2 {
         // Halfword shuffles leave the other 64-bit half unchanged. Broadcast
         // one repeated dword from the selected half to complete all eight lanes.
-        packed(
+        packed_imm(
             code,
             if index < 4 {
                 Host::ShuffleLowWord
@@ -168,8 +168,8 @@ fn indexed(code: &mut Code, lane: u8, index: u8) {
             },
             1,
             1,
+            (index % 4) * 0x55,
         );
-        code.push((index % 4) * 0x55);
         shuffle(code, 1, 1, if index < 4 { 0 } else { 0xaa });
     } else {
         // Select and broadcast the dword in one shuffle.
@@ -524,9 +524,14 @@ fn doubling(code: &mut Code, operand: &Operand, target: TargetCpu) {
 fn polynomial(code: &mut Code, lane: u8, widen: bool, upper: bool, target: TargetCpu) {
     if lane == 8 {
         if target.supports(TargetCpu::Pclmulqdq) {
-            Host::CarrylessMultiplyQword.register(code, 0, 1, target);
             // Immediate bit 0 selects the left half; bit 4 selects the right.
-            code.push(if upper { 0x11 } else { 0x00 });
+            Host::CarrylessMultiplyQword.register_imm(
+                code,
+                0,
+                1,
+                if upper { 0x11 } else { 0x00 },
+                target,
+            );
             return;
         }
         if upper {
@@ -539,7 +544,7 @@ fn polynomial(code: &mut Code, lane: u8, widen: bool, upper: bool, target: Targe
         lane_constant(code, 4, 8, 1);
         // A counted loop bounds native code size; this register-only operation
         // has no intermediate guest fault or precise-entry boundary.
-        code.extend([0x41, 0xba, 64, 0, 0, 0]); // mov r10d,64
+        code.asm().mov_imm32(Gpr::R10, 64);
         let loop_start = code.len();
         {
             packed(code, Host::MoveAligned, 2, 4);
@@ -557,11 +562,10 @@ fn polynomial(code: &mut Code, lane: u8, widen: bool, upper: bool, target: Targe
             packed(code, Host::Or, 0, 3);
             Shift::RightQword.emit(code, 1, 1);
         }
-        code.extend([0x41, 0xff, 0xca]); // dec r10d
-        code.extend([0x0f, 0x85]); // jnz loop_start
-        let displacement = i32::try_from(loop_start as isize - (code.len() + 4) as isize)
-            .expect("bounded polynomial loop");
-        code.extend(displacement.to_le_bytes());
+        let mut asm = code.asm();
+        asm.dec(Size::Dword, Gpr::R10);
+        let repeat = asm.jcc(Cond::Ne);
+        resolve(code, repeat, loop_start);
     } else {
         let output_lane = if widen { 2 } else { 1 };
         if widen {

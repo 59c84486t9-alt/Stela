@@ -441,7 +441,6 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        const RET: u8 = 0xc3;
         const SOURCE: u8 = 1;
         const DESTINATION: u8 = 2;
         fn run(code: &[u8], state: &mut GuestState) {
@@ -485,7 +484,7 @@ mod tests {
                     };
                     let mut code = Code::new();
                     emit(&mut code, &operand, target);
-                    code.push(RET);
+                    code.asm().ret();
                     for sample in 0..256 {
                         // Edge vectors: all zeros, all ones and lone extrema.
                         let value = match sample {

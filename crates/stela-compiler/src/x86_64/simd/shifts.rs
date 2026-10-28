@@ -2,12 +2,14 @@
 use super::{
     Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, vector_offset,
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size, Unary};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     TargetCpu,
     aarch64::simd::shifts::{Kind, Operand},
     x86_64::isa::ShiftOpcode as Shift,
 };
+use Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdx};
 use alloc::vec::Vec;
 
 const BITS_PER_BYTE: u8 = 8;
@@ -589,16 +591,15 @@ enum LaneBranch {
     AboveOrEqual,
 }
 fn lane_branch(code: &mut Code, condition: LaneBranch) -> usize {
+    let mut asm = code.asm();
     match condition {
-        LaneBranch::Always => code.push(0xe9),
-        LaneBranch::Nonnegative => code.extend([0x0f, 0x89]),
-        LaneBranch::Equal => code.extend([0x0f, 0x84]),
-        LaneBranch::Above => code.extend([0x0f, 0x87]),
-        LaneBranch::AboveOrEqual => code.extend([0x0f, 0x83]),
+        LaneBranch::Always => asm.jmp(),
+        LaneBranch::Nonnegative => asm.jcc(Cond::Ns),
+        LaneBranch::Equal => asm.jcc(Cond::E),
+        LaneBranch::Above => asm.jcc(Cond::A),
+        LaneBranch::AboveOrEqual => asm.jcc(Cond::Ae),
     }
-    let patch = code.len();
-    code.extend([0; 4]);
-    patch
+    .offset()
 }
 fn resolve_lane_branch(code: &mut [u8], patch: usize) {
     let relative = i32::try_from(code.len() - patch - 4).expect("lane recipe rel32");
@@ -613,45 +614,48 @@ enum LaneShift {
 impl LaneShift {
     /// RAX or R10, count CL, baseline 64-bit shift group.
     fn count(self, code: &mut Code, r10: bool) {
-        let group = match self {
-            Self::Left => 4,
-            Self::LogicalRight => 5,
-            Self::ArithmeticRight => 7,
+        let op = match self {
+            Self::Left => ShiftOp::Shl,
+            Self::LogicalRight => ShiftOp::Shr,
+            Self::ArithmeticRight => ShiftOp::Sar,
         };
-        code.extend([
-            if r10 { 0x49 } else { 0x48 },
-            0xd3,
-            0xc0 | (group << 3) | if r10 { 2 } else { 0 },
-        ]);
+        code.asm()
+            .shift_cl(op, Size::Qword, if r10 { R10 } else { Rax });
     }
 }
 fn normalize_lane(code: &mut Code, bits: u8, signed: bool) {
     if bits < 64 {
-        code.extend([0x48, 0xc1, 0xe0, 64 - bits]); // shl rax,64-width
-        code.extend([0x48, 0xc1, if signed { 0xf8 } else { 0xe8 }, 64 - bits]);
+        let mut asm = code.asm();
+        asm.shift_imm(ShiftOp::Shl, Size::Qword, Rax, 64 - bits);
+        let right = if signed { ShiftOp::Sar } else { ShiftOp::Shr };
+        asm.shift_imm(right, Size::Qword, Rax, 64 - bits);
     }
 }
 fn load_shift_lane(code: &mut Code, operand: &Operand, byte: u8, signed: bool) {
+    let lane = guest(vector_offset(operand.source) + u32::from(byte));
+    let mut asm = code.asm();
     match (operand.lane_bytes, signed) {
-        (1, false) => code.extend([0x0f, 0xb6, 0x87]),
-        (1, true) => code.extend([0x48, 0x0f, 0xbe, 0x87]),
-        (2, false) => code.extend([0x0f, 0xb7, 0x87]),
-        (2, true) => code.extend([0x48, 0x0f, 0xbf, 0x87]),
-        (4, false) => code.extend([0x8b, 0x87]),
-        (4, true) => code.extend([0x48, 0x63, 0x87]),
-        (8, _) => code.extend([0x48, 0x8b, 0x87]),
+        (1, false) => asm.movzx(Size::Dword, Rax, Size::Byte, lane),
+        (1, true) => asm.movsx(Size::Qword, Rax, Size::Byte, lane),
+        (2, false) => asm.movzx(Size::Dword, Rax, Size::Word, lane),
+        (2, true) => asm.movsx(Size::Qword, Rax, Size::Word, lane),
+        (4, false) => asm.mov_load(Size::Dword, Rax, lane),
+        (4, true) => asm.movsxd(Rax, lane),
+        (8, _) => asm.mov_load(Size::Qword, Rax, lane),
         _ => unreachable!("allocated shift lane"),
     }
-    code.extend((vector_offset(operand.source) + u32::from(byte)).to_le_bytes());
 }
 fn load_bound(code: &mut Code, bound: u64) {
-    code.extend([0x48, 0xb8]); // movabs rax,bound
-    code.extend(bound.to_le_bytes());
+    code.asm().mov_imm64(Rax, bound);
+}
+/// `xor eax, eax`.
+fn zero_lane(code: &mut Code) {
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
 }
 /// CL is 1 to 128. Rounding adds CF from the last discarded bit instead of
 /// adding a bias that could overflow the qword.
 fn register_right(code: &mut Code, signed: bool, round: bool) {
-    code.extend([0x83, 0xf9, 64]); // cmp ecx,64
+    code.asm().alu_imm8(Alu::Cmp, Size::Dword, Rcx, 64);
     let large = lane_branch(code, LaneBranch::AboveOrEqual);
     if signed {
         LaneShift::ArithmeticRight
@@ -660,23 +664,24 @@ fn register_right(code: &mut Code, signed: bool, round: bool) {
     }
     .count(code, false);
     if round {
-        code.extend([0x48, 0x83, 0xd0, 0]);
-    } // adc rax,0
+        code.asm().alu_imm8(Alu::Adc, Size::Qword, Rax, 0);
+    }
     let done = lane_branch(code, LaneBranch::Always);
     resolve_lane_branch(code, large);
     if signed && !round {
-        code.extend([0x48, 0xc1, 0xf8, 63]); // sign fill
+        // Sign fill.
+        code.asm().shift_imm(ShiftOp::Sar, Size::Qword, Rax, 63);
     } else if !signed && round {
         // At exactly 64 the rounded result is the source top bit. Above 64
         // every unsigned 64-bit value rounds to zero.
         let beyond = lane_branch(code, LaneBranch::Above);
-        code.extend([0x48, 0xc1, 0xe8, 63]);
+        code.asm().shift_imm(ShiftOp::Shr, Size::Qword, Rax, 63);
         let end = lane_branch(code, LaneBranch::Always);
         resolve_lane_branch(code, beyond);
-        code.extend([0x31, 0xc0]);
+        zero_lane(code);
         resolve_lane_branch(code, end);
     } else {
-        code.extend([0x31, 0xc0]);
+        zero_lane(code);
     }
     resolve_lane_branch(code, done);
 }
@@ -690,31 +695,33 @@ fn register_left(
     let mut finished = Vec::new();
     let mut negative_mixed = None;
     if saturating {
-        code.extend([0x48, 0x89, 0xc2]);
-    } // rdx=original
+        // RDX keeps the original.
+        code.asm().mov(Size::Qword, Rdx, Rax);
+    }
     if signed_source && unsigned_result {
-        code.extend([0x48, 0x85, 0xc0]);
+        code.asm().test(Size::Qword, Rax, Rax);
         let nonnegative = lane_branch(code, LaneBranch::Nonnegative);
         negative_mixed = Some(lane_branch(code, LaneBranch::Always));
         resolve_lane_branch(code, nonnegative);
     }
-    code.extend([0x83, 0xf9, bits]); // cmp ecx,width
+    code.asm().alu_imm8(Alu::Cmp, Size::Dword, Rcx, bits as i8);
     let large = lane_branch(code, LaneBranch::AboveOrEqual);
     LaneShift::Left.count(code, false);
     if saturating {
         normalize_lane(code, bits, !unsigned_result);
-        code.extend([0x49, 0x89, 0xc2]); // mov r10,rax
+        code.asm().mov(Size::Qword, R10, Rax);
         if unsigned_result {
             LaneShift::LogicalRight
         } else {
             LaneShift::ArithmeticRight
         }
         .count(code, true);
-        code.extend([0x49, 0x39, 0xd2]); // cmp r10,rdx
+        code.asm().alu(Alu::Cmp, Size::Qword, R10, Rdx);
         finished.push(lane_branch(code, LaneBranch::Equal));
         let clamp = lane_branch(code, LaneBranch::Always);
         resolve_lane_branch(code, large);
-        code.extend([0x48, 0x85, 0xc0]); // zero never saturates, even huge counts
+        // Zero never saturates, even for huge counts.
+        code.asm().test(Size::Qword, Rax, Rax);
         finished.push(lane_branch(code, LaneBranch::Equal));
         resolve_lane_branch(code, clamp);
         if let Some(patch) = negative_mixed {
@@ -727,7 +734,8 @@ fn register_left(
         };
         load_bound(code, maximum);
         if signed_source {
-            code.extend([0x48, 0x85, 0xd2]); // original sign
+            // The original sign.
+            code.asm().test(Size::Qword, Rdx, Rdx);
             let positive = lane_branch(code, LaneBranch::Nonnegative);
             load_bound(
                 code,
@@ -739,13 +747,17 @@ fn register_left(
             );
             resolve_lane_branch(code, positive);
         }
-        code.extend([0x81, 0x8f]); // or dword [rdi+fpsr],QC: sticky, other bits preserved
-        code.extend((core::mem::offset_of!(crate::GuestState, fpsr) as u32).to_le_bytes());
-        code.extend(crate::aarch64::simd::saturating::FPSR_QC.to_le_bytes());
+        // Sticky QC, other bits preserved.
+        code.asm().alu_imm32(
+            Alu::Or,
+            Size::Dword,
+            guest(core::mem::offset_of!(crate::GuestState, fpsr) as u32),
+            crate::aarch64::simd::saturating::FPSR_QC as i32,
+        );
     } else {
         finished.push(lane_branch(code, LaneBranch::Always));
         resolve_lane_branch(code, large);
-        code.extend([0x31, 0xc0]);
+        zero_lane(code);
     }
     for patch in finished {
         resolve_lane_branch(code, patch);
@@ -758,34 +770,37 @@ fn register_left(
 /// 63, which fills with the sign (SSHL) or, below -63, is replaced by zero
 /// (USHL of a 64-bit lane). Narrower lanes are truncated by the caller.
 fn register_plain(code: &mut Code, signed: bool) {
-    const LEFT_LIMIT: u8 = 64;
-    const RIGHT_LIMIT: u8 = 63;
-    const RIGHT_ZERO: u8 = (-64i8) as u8;
-    code.extend([0x49, 0x89, 0xc2]); // mov r10,rax
-    code.extend([0x49, 0xd3, 0xe2]); // shl r10,cl
-    code.extend([0x31, 0xd2]); // xor edx,edx
-    code.extend([0x83, 0xf9, LEFT_LIMIT]); // cmp ecx,64
-    code.extend([0x4c, 0x0f, 0x4d, 0xd2]); // cmovge r10,rdx
-    code.extend([0x89, 0xca, 0xf7, 0xda]); // mov edx,ecx; neg edx
-    code.extend([0x41, 0xbb]); // mov r11d,63
-    code.extend(u32::from(RIGHT_LIMIT).to_le_bytes());
-    code.extend([0x44, 0x39, 0xda]); // cmp edx,r11d
-    code.extend([0x41, 0x0f, 0x4f, 0xd3]); // cmovg edx,r11d
-    code.extend([0x41, 0x89, 0xcb]); // mov r11d,ecx: the signed count
-    code.extend([0x89, 0xd1]); // mov ecx,edx
+    const LEFT_LIMIT: i8 = 64;
+    const RIGHT_LIMIT: u32 = 63;
+    const RIGHT_ZERO: i8 = -64;
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, R10, Rax);
+    asm.shift_cl(ShiftOp::Shl, Size::Qword, R10);
+    asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, LEFT_LIMIT);
+    asm.cmov(Cond::Ge, Size::Qword, R10, Rdx);
+    asm.mov(Size::Dword, Rdx, Rcx);
+    asm.unary(Unary::Neg, Size::Dword, Rdx);
+    asm.mov_imm32(R11, RIGHT_LIMIT);
+    asm.alu(Alu::Cmp, Size::Dword, Rdx, R11);
+    asm.cmov(Cond::G, Size::Dword, Rdx, R11);
+    // R11D keeps the signed count.
+    asm.mov(Size::Dword, R11, Rcx);
+    asm.mov(Size::Dword, Rcx, Rdx);
     if signed {
         LaneShift::ArithmeticRight
     } else {
         LaneShift::LogicalRight
     }
     .count(code, false);
+    let mut asm = code.asm();
     if !signed {
-        code.extend([0x31, 0xd2]); // xor edx,edx
-        code.extend([0x41, 0x83, 0xfb, RIGHT_ZERO]); // cmp r11d,-64
-        code.extend([0x48, 0x0f, 0x4e, 0xc2]); // cmovle rax,rdx
+        asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+        asm.alu_imm8(Alu::Cmp, Size::Dword, R11, RIGHT_ZERO);
+        asm.cmov(Cond::Le, Size::Qword, Rax, Rdx);
     }
-    code.extend([0x45, 0x85, 0xdb]); // test r11d,r11d
-    code.extend([0x49, 0x0f, 0x49, 0xc2]); // cmovns rax,r10
+    asm.test(Size::Dword, R11, R11);
+    asm.cmov(Cond::Ns, Size::Qword, Rax, R10);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -800,19 +815,27 @@ fn register_shift(
 ) {
     // R8/R9 hold staged result halves. Guest sources remain unchanged until both
     // have been consumed, including d=n=m and scalar inactive-lane poisoning.
-    code.extend([0x45, 0x31, 0xc0, 0x45, 0x31, 0xc9]);
+    let mut asm = code.asm();
+    asm.alu(Alu::Xor, Size::Dword, R8, R8);
+    asm.alu(Alu::Xor, Size::Dword, R9, R9);
     let bits = operand.lane_bytes * 8;
     for byte in (0..operand.bytes).step_by(usize::from(operand.lane_bytes)) {
         load_shift_lane(code, operand, byte, signed_source);
         if let Some(counts) = counts {
-            code.extend([0x0f, 0xbe, 0x8f]); // movsx ecx,byte [rdi+count lane]
-            code.extend((vector_offset(counts) + u32::from(byte)).to_le_bytes());
+            // The count lane.
+            code.asm().movsx(
+                Size::Dword,
+                Rcx,
+                Size::Byte,
+                guest(vector_offset(counts) + u32::from(byte)),
+            );
             if !round && !saturating {
                 register_plain(code, signed_source);
             } else {
-                code.extend([0x85, 0xc9]);
+                code.asm().test(Size::Dword, Rcx, Rcx);
                 let left = lane_branch(code, LaneBranch::Nonnegative);
-                code.extend([0xf7, 0xd9]); // neg ecx (signed byte -128 becomes +128)
+                // A signed byte -128 becomes +128.
+                code.asm().unary(Unary::Neg, Size::Dword, Rcx);
                 register_right(code, signed_source, round);
                 let merged = lane_branch(code, LaneBranch::Always);
                 resolve_lane_branch(code, left);
@@ -820,20 +843,24 @@ fn register_shift(
                 resolve_lane_branch(code, merged);
             }
         } else {
-            code.push(0xb9); // mov ecx,imm32
-            code.extend(u32::from(operand.amount).to_le_bytes());
+            code.asm().mov_imm32(Rcx, u32::from(operand.amount));
             register_left(code, bits, signed_source, unsigned_result, true);
         }
         normalize_lane(code, bits, false);
+        let mut asm = code.asm();
         if byte % 8 != 0 {
-            code.extend([0x48, 0xc1, 0xe0, byte % 8 * 8]);
+            asm.shift_imm(ShiftOp::Shl, Size::Qword, Rax, byte % 8 * 8);
         }
-        code.extend([0x49, 0x09, if byte < 8 { 0xc0 } else { 0xc1 }]); // or r8/r9,rax
+        asm.alu(Alu::Or, Size::Qword, if byte < 8 { R8 } else { R9 }, Rax);
     }
-    code.extend([0x4c, 0x89, 0x87]); // commit both staged halves
-    code.extend(vector_offset(operand.destination).to_le_bytes());
-    code.extend([0x4c, 0x89, 0x8f]);
-    code.extend((vector_offset(operand.destination) + 8).to_le_bytes());
+    // Commit both staged halves.
+    let mut asm = code.asm();
+    asm.mov_store(Size::Qword, guest(vector_offset(operand.destination)), R8);
+    asm.mov_store(
+        Size::Qword,
+        guest(vector_offset(operand.destination) + 8),
+        R9,
+    );
 }
 
 #[cfg(test)]

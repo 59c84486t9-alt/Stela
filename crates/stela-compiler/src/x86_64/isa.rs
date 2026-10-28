@@ -307,6 +307,18 @@ impl SimdOpcode {
         };
         self.emit(code, destination, source, target);
     }
+    /// [`Self::register`] with an 8-bit immediate.
+    pub(crate) fn register_imm(
+        self,
+        code: &mut Code,
+        destination: u8,
+        source: u8,
+        immediate: u8,
+        target: TargetCpu,
+    ) {
+        self.register(code, destination, source, target);
+        code.asm().data(&[immediate]);
+    }
 }
 
 /// AVX2 per-element shifts used by fixed 128-bit scalable chunks. The full

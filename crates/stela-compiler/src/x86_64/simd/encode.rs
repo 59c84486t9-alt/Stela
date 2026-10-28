@@ -1,7 +1,7 @@
 //! Typed SSE, AVX and general-purpose forms the SIMD, SME and AMX lowerings
 //! emit beyond the core encoder's (Intel SDM Vol. 2), built on its generic
 //! legacy, SSE and VEX forms.
-use crate::x86_64::asm::{Asm, Gpr, Rm, Size};
+use crate::x86_64::asm::{Asm, Gpr, Mem, Rm, Size};
 
 /// The general-purpose register numbered `number`.
 pub(in crate::x86_64) const fn gpr(number: u8) -> Gpr {
@@ -10,6 +10,11 @@ pub(in crate::x86_64) const fn gpr(number: u8) -> Gpr {
         Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15,
     ];
     REGISTERS[number as usize]
+}
+
+/// `[rdi + offset]` in GuestState, with a 32-bit displacement.
+pub(in crate::x86_64) const fn guest(offset: u32) -> Mem {
+    Mem::base_disp32(Gpr::Rdi, offset as i32)
 }
 
 /// Legacy SSE forms `name xmm, xmm/m`: an optional mandatory prefix and the

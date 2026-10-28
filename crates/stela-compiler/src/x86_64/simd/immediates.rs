@@ -22,8 +22,8 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if value == 0 {
         packed(code, Host::Xor, 0, 0);
     } else {
-        code.extend([0x48, 0xb9]); // MOVABS RCX, expanded low 64 bits
-        code.extend(value.to_le_bytes());
+        // The expanded low 64 bits.
+        code.asm().mov_imm64(crate::x86_64::asm::Gpr::Rcx, value);
         packed(code, Host::MoveGprQword, 0, 1);
         if bytes == 16 {
             packed(code, Host::UnpackLowQword, 0, 0);

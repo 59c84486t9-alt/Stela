@@ -2,7 +2,8 @@
 //! detected before clamping.
 use super::rearrange::{add_or_subtract, lane_constant};
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestState, TargetCpu,
     aarch64::simd::saturating::{FPSR_QC, Kind, Operand},
@@ -213,21 +214,30 @@ fn narrow(
 }
 pub(super) fn publish_qc(code: &mut Code, active_bytes: u8) {
     Host::ByteSignMask.register(code, 1, 4, TargetCpu::Baseline); // pmovmskb ecx,xmm4
-    code.extend([0x81, 0xe1]); // AND ECX, active byte mask: inactive lanes cannot set QC
-    code.extend(((1u32 << active_bytes) - 1).to_le_bytes());
-    code.extend([
-        0x0f,
-        0x95,
-        0xc1,
-        0x0f,
-        0xb6,
-        0xc9,
-        0xc1,
-        0xe1,
+    use Gpr::Rcx;
+    let mut asm = code.asm();
+    // The active byte mask: inactive lanes cannot set QC.
+    asm.alu_imm32(
+        Alu::And,
+        Size::Dword,
+        Rcx,
+        ((1u32 << active_bytes) - 1) as i32,
+    );
+    asm.setcc(Cond::Ne, Rcx);
+    asm.movzx(Size::Dword, Rcx, Size::Byte, Rcx);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Dword,
+        Rcx,
         FPSR_QC.trailing_zeros() as u8,
-    ]); // setne cl; movzx ecx,cl; shl ecx,QC
-    code.extend([0x09, 0x8f]); // or [rdi+FPSR],ecx: sticky QC, preserve every other bit
-    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+    );
+    // Sticky QC, preserving every other bit.
+    asm.alu(
+        Alu::Or,
+        Size::Dword,
+        guest(core::mem::offset_of!(GuestState, fpsr) as u32),
+        Rcx,
+    );
 }
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
