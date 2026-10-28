@@ -536,9 +536,8 @@ pub(in crate::net::wifi::mediatek) fn scan_with_elements(
         }
     }
     Requests::station(context, true).map_err(Error::Context)?;
-    // Source deduplicates by BSSID, preserving the first channel association.
-    // Firmware can consume only ten unique targets. Refuse excess work explicitly
-    // before scan ownership/publication rather than silently dropping a target.
+    // mt76_connac_mcu_build_rnr_scan_param deduplicates by BSSID, keeping the
+    // first channel, and mt7925_mcu_hw_scan sends the first ten.
     let mut targets = [None; RNR_MAX_BSSIDS];
     let mut target_count = 0;
     for target in request.six_ghz() {
@@ -550,7 +549,7 @@ pub(in crate::net::wifi::mediatek) fn scan_with_elements(
             continue;
         }
         if target_count == targets.len() {
-            return Err(Error::InvalidScanTargets);
+            break;
         }
         let channel = request
             .channels()
@@ -822,6 +821,37 @@ mod tests {
             alloc::format!("{:x}", hash.finalize()),
             "68a1c494a1886a2da6e86f7f013f35f70d3990ae076f4bf0f4c71216d722c831"
         );
+    }
+    #[test]
+    fn rnr_targets_past_ten_are_dropped_like_mt7925_mcu_hw_scan() {
+        use crate::net::wifi::scan::{Request, SixGhz};
+        let six = Channel {
+            band: Band::Ghz6,
+            number: 5,
+            frequency_mhz: 5975,
+        };
+        let targets = (0..12)
+            .map(|i| SixGhz {
+                channel_index: 0,
+                bssid: Mac([2, 0x42, 0, 0, i, 1]),
+                short_ssid: None,
+                unsolicited_probe: false,
+                psc_no_listen: false,
+                psd_20: 0,
+            })
+            .collect();
+        let request = Request::with_six_ghz(vec![six], vec![vec![]], vec![], targets).unwrap();
+        let encoded = scan(scan_context(), 1, &request).unwrap();
+        let mut rest = &encoded.body()[4..];
+        let mut bssids = Vec::new();
+        while let [tag, _, length, high, ..] = rest {
+            let length = usize::from(u16::from_le_bytes([*length, *high]));
+            if *tag == 11 {
+                bssids.push(rest[8]);
+            }
+            rest = &rest[length..];
+        }
+        assert_eq!(bssids, (0..10).collect::<Vec<_>>());
     }
     #[test]
     fn native_per_band_probe_budget_refuses_before_losing_a_band() {

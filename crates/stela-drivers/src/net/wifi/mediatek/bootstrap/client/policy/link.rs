@@ -293,6 +293,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn bss(&self) -> impl Iterator<Item = (BssHandle, &scan::result::Bss)> {
         self.state().client.bss()
     }
+    /// The 6 GHz part of a split scan (WIPHY_FLAG_SPLIT_SCAN_6GHZ), planned
+    /// from the BSSes this link knows as `cfg80211_scan_6ghz` plans from the
+    /// BSS list; `scan::six_ghz::first_part` is the scan before it.
+    pub fn six_ghz_scan(
+        &self,
+        request: &scan::Request,
+        options: scan::six_ghz::Options,
+    ) -> Result<Option<scan::Request>, LinkControlError> {
+        scan::six_ghz::second_part(request, options, self.bss().map(|(_, bss)| bss))
+            .map_err(|e| LinkControlError::Policy(PolicyError::Client(Error::Scan(e))))
+    }
     pub fn pending_edca(&self) -> bool {
         self.state().client.pending_edca()
     }
@@ -933,6 +944,19 @@ mod tests {
         incoming(model, &beacon, None, false);
         link.service().unwrap();
         let handle = link.bss().next().unwrap().0;
+        // The link's BSS list plans a split scan's 6 GHz part.
+        let six = wifi::Channel {
+            band: Band::Ghz6,
+            number: 5,
+            frequency_mhz: 5975,
+        };
+        let options = scan::six_ghz::Options {
+            colocated: true,
+            bssid: None,
+        };
+        let split = scan::Request::new(vec![CHANNEL, six], vec![vec![]], vec![]).unwrap();
+        let planned = link.six_ghz_scan(&split, options).unwrap().unwrap();
+        assert_eq!(planned.channels(), &[six]);
         done(model);
         link.service().unwrap();
         // SAFETY: complete source-model terminal scan and actual old-user drain.

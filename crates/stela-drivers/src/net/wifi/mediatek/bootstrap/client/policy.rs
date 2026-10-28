@@ -1906,21 +1906,6 @@ mod tests {
             )))
         ));
         assert_eq!(driver.phase(), Phase::Idle);
-        let excessive = (0..11)
-            .map(|i| scan::SixGhz {
-                bssid: crate::net::Mac([2, 0x42, 0, 0, i, 1]),
-                ..target
-            })
-            .collect();
-        let request =
-            scan::Request::with_six_ghz(vec![six], vec![vec![]], vec![], excessive).unwrap();
-        assert!(matches!(
-            driver.begin_scan(request, 0, 1000),
-            Err(PolicyError::Client(Error::Codec(
-                wire::Error::InvalidScanTargets
-            )))
-        ));
-        assert_eq!(driver.phase(), Phase::Idle);
         let request = scan::Request::with_six_ghz(
             vec![six, six5],
             vec![vec![]],
@@ -1940,7 +1925,7 @@ mod tests {
             Err(PolicyError::Client(Error::Scan(scan::Error::Regulatory)))
         ));
         assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
-        // Both codec-capacity and real NO_IR refusals leave the original owner
+        // Both probe-element and real NO_IR refusals leave the original owner
         // available. No copied RNR data can override programmed probe policy.
         let request = scan::Request::with_six_ghz(
             vec![
