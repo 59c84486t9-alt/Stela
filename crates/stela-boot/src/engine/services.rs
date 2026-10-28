@@ -245,6 +245,20 @@ unsafe impl NativeServices for Services<'_> {
         &native_memory::SOURCE
     }
 
+    fn interrupts(
+        &self,
+    ) -> Result<&'static dyn stela_drivers::bus::irq::IrqController, ServiceError> {
+        Err(ServiceError::Unavailable)
+    }
+
+    fn acpi_memory(
+        &self,
+        _: &stela_drivers::platform::acpi::resources::DeviceResources<'_>,
+        _: usize,
+    ) -> Result<owned::Resource, ServiceError> {
+        Err(ServiceError::Unavailable)
+    }
+
     fn acpi(&self) -> Option<&stela_drivers::platform::acpi::Session> {
         self.acpi.map(HostAcpi::session)
     }

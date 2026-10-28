@@ -333,8 +333,16 @@ impl Session {
     /// ACPICA's device walk matches `_HID` and `_CID` and filters absent devices
     /// using real `_STA`; a missing method follows ACPICA's specification default.
     pub fn devices(&self, hid: &str) -> Result<Vec<Handle<'_>>, Error> {
-        let guard = self.guard()?;
         let hid = CString::new(hid).map_err(|_| BAD_PARAMETER)?;
+        self.walk(hid.as_ptr())
+    }
+    /// Every present device in the namespace: ACPICA's device walk without
+    /// an ID, which filters by `_STA` alone.
+    pub fn all_devices(&self) -> Result<Vec<Handle<'_>>, Error> {
+        self.walk(ptr::null())
+    }
+    fn walk(&self, hid: *const c_char) -> Result<Vec<Handle<'_>>, Error> {
+        let guard = self.guard()?;
         let mut raw = Vec::<*mut c_void>::new();
         unsafe extern "C" fn collect(
             handle: *mut c_void,
@@ -348,11 +356,7 @@ impl Session {
         }
         // SAFETY: all callback storage lives through this synchronous walk.
         checked(unsafe {
-            stela_acpi_walk(
-                hid.as_ptr(),
-                collect,
-                (&mut raw as *mut Vec<*mut c_void>).cast(),
-            )
+            stela_acpi_walk(hid, collect, (&mut raw as *mut Vec<*mut c_void>).cast())
         })?;
         guard.check()?;
         raw.into_iter()

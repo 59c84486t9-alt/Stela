@@ -12,8 +12,10 @@
 //! no-reset-IRQ devices that explicitly expose their separate delay contract.
 //! Raw HID reports and the exact report descriptor pass to a shared HID consumer;
 //! no keyboard, touchpad or touchscreen descriptor is substituted here.
+use super::Input;
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
-use alloc::vec::Vec;
+use crate::usb::hid::Translator;
+use alloc::{string::String, vec::Vec};
 
 mod descriptor;
 pub use descriptor::Descriptor;
@@ -37,6 +39,14 @@ const QUIRK_RESET_DELAY_US: u64 = 100_000;
 pub trait Interrupt {
     fn mask_and_drain(&mut self) -> Result<(), InterruptError>;
     fn asserted(&mut self) -> Result<bool, InterruptError>;
+}
+impl<I: Interrupt + ?Sized> Interrupt for alloc::boxed::Box<I> {
+    fn mask_and_drain(&mut self) -> Result<(), InterruptError> {
+        (**self).mask_and_drain()
+    }
+    fn asserted(&mut self) -> Result<bool, InterruptError> {
+        (**self).asserted()
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterruptError {
@@ -670,6 +680,83 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             .map_err(|error| self.fail(ErrorKind::Interrupt(error)))?;
         self.state = State::Stopped;
         Ok(())
+    }
+}
+
+/// Input reports one poll reads at most, as USB HID bounds its pass.
+const POLL_REPORTS: usize = 16;
+
+/// An I²C-HID keyboard or pointer: the initialized device and the HID
+/// report translator its input reports pass through.
+pub struct HidInput<B, I, T> {
+    device: Device<B, I, T>,
+    translator: Translator,
+    pub name: String,
+}
+
+impl<B: Bus, I: Interrupt, T: Timer> HidInput<B, I, T> {
+    /// Translate `device`'s reports through its report descriptor. `device`
+    /// is initialized; it comes back with the reason when its descriptor
+    /// does not parse.
+    #[allow(
+        clippy::result_large_err,
+        reason = "a device whose descriptor does not parse goes back to its owner"
+    )]
+    pub fn new(
+        device: Device<B, I, T>,
+        name: String,
+    ) -> Result<Self, (Device<B, I, T>, &'static str)> {
+        match Translator::describe(device.report_descriptor()) {
+            Ok(translator) => Ok(Self {
+                device,
+                translator,
+                name,
+            }),
+            Err(error) => Err((device, error)),
+        }
+    }
+
+    pub fn device(&self) -> &Device<B, I, T> {
+        &self.device
+    }
+
+    /// Append the input changes of the reports the device has ready to
+    /// `inputs`, up to [`POLL_REPORTS`] of them.
+    pub fn poll(&mut self, inputs: &mut Vec<Input>) -> Result<(), Error> {
+        let mut events = Vec::new();
+        for _ in 0..POLL_REPORTS {
+            match self.device.poll()? {
+                None => break,
+                Some(
+                    InputReport::Data(report) | InputReport::CorrectedLength { data: report, .. },
+                ) => {
+                    self.translator.translate(&report, &mut events, inputs);
+                }
+                Some(InputReport::Empty | InputReport::SpuriousInterrupt) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Send `leds` (input LED codes as bits) to the device's LED output
+    /// report, as Linux `hidinput_led_worker` does: through the output
+    /// register, else SET_REPORT when the device has none.
+    pub fn set_leds(&mut self, leds: u16) -> Result<(), Error> {
+        let Some((id, report)) = self.translator.led_report(leds) else {
+            return Ok(());
+        };
+        let data = &report[usize::from(id != 0)..];
+        match self.device.output(id, data) {
+            Err(error) if error.kind == ErrorKind::NoOutputRegister => {
+                self.device.set_report(ReportType::Output, id, data)
+            }
+            result => result,
+        }
+    }
+
+    /// The last report received, as it arrived.
+    pub fn last_report(&self) -> &[u8] {
+        self.translator.last_report()
     }
 }
 

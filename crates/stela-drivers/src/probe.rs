@@ -9,7 +9,7 @@ use crate::{
         pci::{Address, EcamWindow, Function},
     },
     gpu,
-    input::{self, virtio::VirtioInput},
+    input::{self, InputDevice, virtio::VirtioInput},
     net::{
         self, Link, LinkError, Mac,
         e1000e::E1000e,
@@ -19,11 +19,13 @@ use crate::{
         virtio::VirtioNet,
     },
     storage::{ahci, nvme, rtsx, sdhci, virtio},
-    usb::{self, bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, hid::UsbInput, xhci},
+    usb::{self, bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, xhci},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
+#[cfg(feature = "native-acpi")]
+mod i2c;
 pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
@@ -44,6 +46,8 @@ pub enum Error {
     Vmd(crate::bus::vmd::Error),
     Tg3(net::tg3::Error),
     Aqtion(net::aqtion::Error),
+    Sfh(input::sfh::Error),
+    Ish(input::ish::Error),
 }
 
 impl fmt::Display for Error {
@@ -55,6 +59,8 @@ impl fmt::Display for Error {
             Self::Vmd(error) => write!(f, "VMD: {error}"),
             Self::Tg3(error) => write!(f, "tg3: {error:?}"),
             Self::Aqtion(error) => write!(f, "atlantic: {error:?}"),
+            Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
+            Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
         }
     }
 }
@@ -83,6 +89,14 @@ pub enum PlatformError {
     /// The description or the machine state rules attachment out.
     Refused(&'static str),
     Ps2(input::ps2::Error),
+    Native(ServiceError),
+    I2c(crate::bus::i2c::Error),
+    Lpss(crate::bus::lpss::Error),
+    LpssAttach(crate::bus::lpss::AttachError),
+    HidI2c(input::hid_i2c::Error),
+    Touchpad(input::touchpad::Error),
+    #[cfg(feature = "native-acpi")]
+    Gpio(crate::bus::gpio::native::Error),
 }
 
 impl fmt::Display for PlatformError {
@@ -93,6 +107,14 @@ impl fmt::Display for PlatformError {
             Self::Acpi(error) => write!(f, "ACPI: {error:?}"),
             Self::Refused(why) => f.write_str(why),
             Self::Ps2(error) => error.fmt(f),
+            Self::Native(error) => error.fmt(f),
+            Self::I2c(error) => write!(f, "I2C controller: {error:?}"),
+            Self::Lpss(error) => write!(f, "LPSS: {error:?}"),
+            Self::LpssAttach(error) => write!(f, "LPSS I2C attach: {error:?}"),
+            Self::HidI2c(error) => error.fmt(f),
+            Self::Touchpad(error) => error.fmt(f),
+            #[cfg(feature = "native-acpi")]
+            Self::Gpio(error) => write!(f, "GPIO controller: {error:?}"),
         }
     }
 }
@@ -266,12 +288,10 @@ pub struct Devices {
     /// Display controllers, inventoried without changing firmware scanout.
     /// These are not initialized accelerators; each records its missing port.
     pub gpus: Vec<gpu::Adapter>,
-    pub inputs: Vec<VirtioInput>,
-    /// i8042 keyboard and mouse ports the ACPI namespace lists, initialized
-    /// and polled through [`Controller::poll`](input::ps2::Controller::poll).
-    pub ps2: Vec<input::ps2::Controller>,
-    /// USB keyboards and pointers behind xHCI controllers.
-    pub usb_inputs: Vec<UsbInput>,
+    /// Host keyboards and pointers: virtio-input devices, USB HID devices
+    /// behind xHCI controllers, and the i8042 ports the ACPI namespace
+    /// lists, each polled through [`InputDevice::poll`].
+    pub inputs: Vec<InputDevice>,
     /// Complete descriptor inventories, including hubs and unbound devices.
     /// Retention does not grant hardware ownership or guest forwarding.
     pub usb_devices: Vec<xhci::Device>,
@@ -292,6 +312,8 @@ pub struct Devices {
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
     pub nics: Vec<Adapter>,
+    /// Sensor hubs, their sensors enabled. Nothing reads their reports yet.
+    pub sensors: Vec<native::SensorHub>,
     pub failures: Vec<(Address, Error)>,
     /// Devices behind an attached controller that failed on their own, such
     /// as AHCI ports and NVMe namespaces, by location.
@@ -384,6 +406,9 @@ pub unsafe fn probe_with_provider(
         native_services: services.is_some(),
         ..Devices::default()
     };
+    // Intel ISHs, attached once the scan has looked for a Mehlow host bridge.
+    let mut sensor_hubs = Vec::new();
+    let mut mehlow = false;
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             devices.unmapped.push(*window);
@@ -392,6 +417,7 @@ pub unsafe fn probe_with_provider(
         // SAFETY: mapped as checked; the caller owns the machine.
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
+            mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
             if let Some(adapter) = gpu::Adapter::discover(&function) {
                 devices.gpus.push(adapter);
                 continue;
@@ -422,6 +448,21 @@ pub unsafe fn probe_with_provider(
                     continue;
                 };
                 let attached = match kind {
+                    native::Kind::Sfh => {
+                        // SAFETY: as for tg3 below.
+                        match unsafe { native::sfh(services, address, handoff.clock) } {
+                            Ok(hub) => devices.sensors.push(native::SensorHub::Sfh(Box::new(hub))),
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::Ish => {
+                        sensor_hubs.push(address);
+                        continue;
+                    }
                     native::Kind::Vmd => {
                         // SAFETY: as for tg3 below; the host's hierarchy is
                         // stopped with it.
@@ -513,7 +554,9 @@ pub unsafe fn probe_with_provider(
                                 .into_iter()
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
-                        devices.usb_inputs.extend(found.inputs);
+                        devices
+                            .inputs
+                            .extend(found.inputs.into_iter().map(InputDevice::Usb));
                         devices.usb_devices.extend(found.devices);
                         devices.usb_hosts.extend(found.hosts);
                         devices.usb_storage.extend(found.storage);
@@ -602,7 +645,7 @@ pub unsafe fn probe_with_provider(
                 continue;
             } else if input::virtio::matches(&function) {
                 match VirtioInput::new(&mut function, handoff, dma) {
-                    Ok(device) => devices.inputs.push(device),
+                    Ok(device) => devices.inputs.push(InputDevice::Virtio(device)),
                     Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
@@ -665,6 +708,36 @@ pub unsafe fn probe_with_provider(
             }
         }
     }
+    for address in sensor_hubs {
+        let Some(services) = services else {
+            devices
+                .failures
+                .push((address, Error::Native(ServiceError::Unavailable)));
+            continue;
+        };
+        if mehlow {
+            devices.failures.push((
+                address,
+                Error::Ish(input::ish::Error::Requirement(
+                    "no ISH on a Mehlow platform, as Linux ish_probe refuses it",
+                )),
+            ));
+            continue;
+        }
+        // SAFETY: as for tg3, and the scan found no Mehlow host bridge.
+        match unsafe { native::ish(services, address, handoff.clock) } {
+            Ok(hub) => {
+                match input::ish::IshInput::new(hub, alloc::format!("Intel ISH {address}")) {
+                    Ok(input) => devices.inputs.push(InputDevice::Ish(Box::new(input))),
+                    Err(hub) => devices.sensors.push(native::SensorHub::Ish(Box::new(hub))),
+                }
+            }
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
+            }
+        }
+    }
     // After every USB host left firmware, as Linux's i8042 probe runs after
     // its PCI fixups.
     #[cfg(feature = "native-acpi")]
@@ -674,6 +747,9 @@ pub unsafe fn probe_with_provider(
             .iter()
             .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
         platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
+        if let Some(services) = services {
+            i2c::attach(services, session, handoff.clock, &mut devices);
+        }
     }
     devices
 }

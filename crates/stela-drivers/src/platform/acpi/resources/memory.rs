@@ -117,6 +117,15 @@ pub struct MemoryReservation {
     resource: MmioResource,
 }
 impl MemoryReservation {
+    /// The reservation `resource` was cut from, when a [`MemoryBroker`]
+    /// reserved it: what a mount's `NativeServices::acpi_memory` hands back.
+    pub fn of(resource: &MmioResource) -> Option<Self> {
+        let backing = resource.backing().downcast_ref::<Backing>()?;
+        Some(Self {
+            pin: backing.0.clone(),
+            resource: resource.clone(),
+        })
+    }
     pub fn resource(&self) -> &MmioResource {
         &self.resource
     }

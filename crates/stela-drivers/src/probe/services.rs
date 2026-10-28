@@ -1,6 +1,7 @@
 //! Native resource services the mount supplies to [`probe`](super::probe_with_provider)
 //! for drivers that attach through owned configuration space, owned register
 //! mappings, per-requester DMA domains and the ACPI namespace.
+use crate::bus::irq::IrqController;
 use crate::bus::{
     dma::{mapping::DmaDomain, memory::PageSource},
     mmio::owned::{self, Mapping},
@@ -74,6 +75,10 @@ pub unsafe trait NativeServices {
     /// Pages for driver DMA rings and buffers.
     fn pages(&self) -> &dyn PageSource;
 
+    /// The interrupt controller that routes MSIs to the probing CPU, for
+    /// drivers that need a delivered interrupt, such as Intel's ISH.
+    fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError>;
+
     /// The ACPI namespace, for devices described there rather than on PCI:
     /// i8042 keyboards and mice, embedded controllers, I²C-HID devices and
     /// batteries ([`platform::acpi::Session::devices`](crate::platform::acpi::Session::devices)
@@ -81,6 +86,17 @@ pub unsafe trait NativeServices {
     /// [`platform::acpi::resources`](crate::platform::acpi::resources)).
     #[cfg(feature = "native-acpi")]
     fn acpi(&self) -> Option<&crate::platform::acpi::Session>;
+
+    /// Reserve memory resource `ordinal` of `device`'s `_CRS` from the
+    /// mount's native broker, for a controller the namespace describes, as
+    /// [`MemoryBroker::reserve`](crate::platform::acpi::resources::MemoryBroker::reserve)
+    /// reserves it.
+    #[cfg(feature = "native-acpi")]
+    fn acpi_memory(
+        &self,
+        device: &crate::platform::acpi::resources::DeviceResources<'_>,
+        ordinal: usize,
+    ) -> Result<owned::Resource, ServiceError>;
 }
 
 /// ACPI hardware IDs of the classes attached through [`NativeServices`].
@@ -155,8 +171,19 @@ pub(crate) mod tests {
         fn domain(&self, _: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError> {
             Err(ServiceError::Refused("requester shares an IOMMU group"))
         }
+        fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError> {
+            Err(ServiceError::Unavailable)
+        }
         fn pages(&self) -> &dyn PageSource {
             &NoPages
+        }
+        #[cfg(feature = "native-acpi")]
+        fn acpi_memory(
+            &self,
+            _: &crate::platform::acpi::resources::DeviceResources<'_>,
+            _: usize,
+        ) -> Result<owned::Resource, ServiceError> {
+            Err(ServiceError::Unavailable)
         }
         #[cfg(feature = "native-acpi")]
         fn acpi(&self) -> Option<&crate::platform::acpi::Session> {

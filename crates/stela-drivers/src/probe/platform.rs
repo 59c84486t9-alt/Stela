@@ -93,7 +93,9 @@ pub(super) fn attach_i8042(
         Ok(Some(controller))
     };
     match attempt() {
-        Ok(controller) => devices.ps2.extend(controller),
+        Ok(controller) => devices
+            .inputs
+            .extend(controller.map(crate::input::InputDevice::Ps2)),
         Err(error) => devices.platform_failures.push(("i8042".into(), error)),
     }
 }

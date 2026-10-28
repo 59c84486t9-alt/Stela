@@ -25,9 +25,8 @@ use stela_drivers::{
     Handoff,
     block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
-    input::virtio::VirtioInput,
+    input::InputDevice,
     probe::{NativeServices, probe_with_provider},
-    usb::hid::UsbInput,
 };
 use stela_runtime::pc::{
     gpt::{Guid, PartitionDevice},
@@ -413,7 +412,6 @@ pub unsafe fn open(
     }
     let inputs = Inputs {
         devices: core::mem::take(&mut devices.inputs),
-        usb: core::mem::take(&mut devices.usb_inputs),
         root,
     };
     let links = super::network::Links {
@@ -595,7 +593,6 @@ pub struct Opened {
 /// The host's input devices and the loader root their registers and DMA
 /// pages are reached through.
 pub struct Inputs {
-    pub devices: alloc::vec::Vec<VirtioInput>,
-    pub usb: alloc::vec::Vec<UsbInput>,
+    pub devices: alloc::vec::Vec<InputDevice>,
     pub root: u64,
 }
