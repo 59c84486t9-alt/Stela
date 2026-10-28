@@ -3,7 +3,7 @@ use super::rearrange::lane_constant;
 use super::{
     Host, commit, packed, read_vector, rearrange::constant, shifts::logical_shift, shuffle,
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, vector_extensions};
 use crate::{
     TargetCpu,
     aarch64::simd::reductions::{BitCount, Combine, Kind, Operand, Shape},
@@ -278,6 +278,9 @@ fn nibble_lookup(code: &mut Code, reverse: bool, target: TargetCpu) {
     packed(code, Host::MoveAligned, 0, 2);
 }
 fn bit_population(code: &mut Code, target: TargetCpu) {
+    if vector_extensions::population_count(code, 1, 0, target) {
+        return;
+    }
     if target >= TargetCpu::Ssse3 {
         nibble_lookup(code, false, target);
         return;
@@ -300,6 +303,9 @@ fn bit_population(code: &mut Code, target: TargetCpu) {
     packed(code, Host::And, 0, 2);
 }
 fn bit_reverse(code: &mut Code, target: TargetCpu) {
+    if vector_extensions::reverse_bytes(code, 0, 2, target) {
+        return;
+    }
     if target >= TargetCpu::Ssse3 {
         nibble_lookup(code, true, target);
         return;
@@ -314,11 +320,18 @@ fn bit_reverse(code: &mut Code, target: TargetCpu) {
         packed(code, Host::Or, 0, 1);
     }
 }
-fn leading_count(code: &mut Code, lane: u8, sign: bool) {
+fn leading_count(code: &mut Code, lane: u8, sign: bool, target: TargetCpu) {
     if sign {
         packed(code, Host::Xor, 1, 1);
         packed(code, compare_opcode(lane), 1, 0);
         packed(code, Host::Xor, 0, 1);
+    }
+    if vector_extensions::leading_zeros(code, lane, 0, target) {
+        if sign {
+            lane_constant(code, 1, lane, 1);
+            packed(code, Host::SubDword, 0, 1);
+        }
+        return;
     }
     packed(code, Host::Xor, 2, 2); // accumulated per-lane count
     packed(code, Host::Xor, 3, 3); // zero comparison operand
@@ -366,6 +379,15 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         bytes,
         lane_bytes,
     } = *operand;
+    if (matches!(kind, Kind::Bits(BitCount::Population))
+        && vector_extensions::population_supported(1, target))
+        || (matches!(
+            kind,
+            Kind::Bits(BitCount::LeadingZeros | BitCount::LeadingSign)
+        ) && vector_extensions::leading_supported(lane_bytes, target))
+    {
+        code.asm().vzeroupper();
+    }
     if !matches!(
         kind,
         Kind::Combine {
@@ -394,8 +416,8 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         Kind::Bits(operation) => match operation {
             BitCount::Population => bit_population(code, target),
             BitCount::Reverse => bit_reverse(code, target),
-            BitCount::LeadingZeros => leading_count(code, lane_bytes, false),
-            BitCount::LeadingSign => leading_count(code, lane_bytes, true),
+            BitCount::LeadingZeros => leading_count(code, lane_bytes, false, target),
+            BitCount::LeadingSign => leading_count(code, lane_bytes, true, target),
             BitCount::Not => {
                 packed(code, Host::EqualDword, 1, 1);
                 packed(code, Host::Xor, 0, 1);
@@ -510,6 +532,164 @@ mod tests {
                             [expected.unwrap(), 0],
                             "{target:?} {maximum} {lane_bytes} {bytes} {value:x?}"
                         );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn packed_bit_extensions_match_each_byte_and_clear_upper_lanes() {
+        use crate::context::ExecutionContext;
+        use crate::x86_64::asm::vector_extensions::execution::Native;
+        let host = TargetCpu::detect();
+        for target in [
+            TargetCpu::Baseline,
+            TargetCpu::Ssse3,
+            TargetCpu::Gfni,
+            TargetCpu::Avx512f.with_avx512vl().with_avx512bitalg(),
+        ] {
+            if !host.supports(target) {
+                continue;
+            }
+            for operation in [BitCount::Population, BitCount::Reverse] {
+                for bytes in [8u8, 16] {
+                    for destination in [1u8, 2] {
+                        let operand = Operand {
+                            kind: Kind::Bits(operation),
+                            destination,
+                            left: 1,
+                            right: 1,
+                            bytes,
+                            lane_bytes: 1,
+                        };
+                        let mut code = Code::new();
+                        emit(&mut code, &operand, target);
+                        code.asm().ret();
+                        let native = Native::new(&code);
+                        for first in 0..=u8::MAX {
+                            let input: [u8; 16] =
+                                core::array::from_fn(|i| first.wrapping_add((i * 37) as u8));
+                            let expected: [u8; 16] = core::array::from_fn(|i| {
+                                if i >= usize::from(bytes) {
+                                    0
+                                } else if operation == BitCount::Reverse {
+                                    input[i].reverse_bits()
+                                } else {
+                                    input[i].count_ones() as u8
+                                }
+                            });
+                            let words = |x: [u8; 16]| {
+                                [
+                                    u64::from_le_bytes(x[..8].try_into().unwrap()),
+                                    u64::from_le_bytes(x[8..].try_into().unwrap()),
+                                ]
+                            };
+                            let mut state = GuestState {
+                                fpsr: 0x0800_001f,
+                                nzcv: 0xa000_0000,
+                                ..GuestState::default()
+                            };
+                            state.v[1] = words(input);
+                            if destination != 1 {
+                                state.v[2] = [u64::MAX; 2];
+                            }
+                            native.run(&mut state, &mut ExecutionContext::default());
+                            assert_eq!(
+                                state.v[usize::from(destination)],
+                                words(expected),
+                                "{target:?} {operation:?} {bytes} {destination} {first}"
+                            );
+                            assert_eq!(state.fpsr, 0x0800_001f);
+                            assert_eq!(state.nzcv, 0xa000_0000);
+                            if destination != 1 {
+                                assert_eq!(state.v[1], words(input));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn packed_dword_leading_counts_match_sign_and_zero_boundaries() {
+        use crate::context::ExecutionContext;
+        use crate::x86_64::asm::vector_extensions::execution::Native;
+        let target = TargetCpu::Avx512f.with_avx512vl().with_avx512cd();
+        if !TargetCpu::detect().supports(target) {
+            return;
+        }
+        for operation in [BitCount::LeadingZeros, BitCount::LeadingSign] {
+            for bytes in [8u8, 16] {
+                for destination in [1u8, 2] {
+                    let operand = Operand {
+                        kind: Kind::Bits(operation),
+                        destination,
+                        left: 1,
+                        right: 1,
+                        bytes,
+                        lane_bytes: 4,
+                    };
+                    let mut code = Code::new();
+                    emit(&mut code, &operand, target);
+                    let mut baseline = Code::new();
+                    emit(&mut baseline, &operand, TargetCpu::Baseline);
+                    assert!(code.len() < baseline.len());
+                    assert!(code.instructions() < baseline.instructions());
+                    code.asm().ret();
+                    let native = Native::new(&code);
+                    for bit in 0..32 {
+                        for value in [0u32, u32::MAX, 1u32 << bit, !(1u32 << bit)] {
+                            let input = [
+                                value,
+                                value.rotate_left(7),
+                                !value,
+                                value.wrapping_mul(0x9e3779b9),
+                            ];
+                            let mut raw = [0u8; 16];
+                            let mut expected = [0u8; 16];
+                            for i in 0..4 {
+                                raw[i * 4..i * 4 + 4].copy_from_slice(&input[i].to_le_bytes());
+                                if i * 4 < usize::from(bytes) {
+                                    let n = if operation == BitCount::LeadingSign {
+                                        let normalized = if (input[i] as i32) < 0 {
+                                            !input[i]
+                                        } else {
+                                            input[i]
+                                        };
+                                        normalized.leading_zeros() - 1
+                                    } else {
+                                        input[i].leading_zeros()
+                                    };
+                                    expected[i * 4..i * 4 + 4].copy_from_slice(&n.to_le_bytes());
+                                }
+                            }
+                            let words = |x: [u8; 16]| {
+                                [
+                                    u64::from_le_bytes(x[..8].try_into().unwrap()),
+                                    u64::from_le_bytes(x[8..].try_into().unwrap()),
+                                ]
+                            };
+                            let mut state = GuestState {
+                                fpsr: 0x0800_001f,
+                                nzcv: 0xa000_0000,
+                                ..GuestState::default()
+                            };
+                            state.v[1] = words(raw);
+                            if destination != 1 {
+                                state.v[2] = [u64::MAX; 2];
+                            }
+                            native.run(&mut state, &mut ExecutionContext::default());
+                            assert_eq!(
+                                state.v[usize::from(destination)],
+                                words(expected),
+                                "{operation:?} {bytes} {destination} {value:08x}"
+                            );
+                            assert_eq!(state.fpsr, 0x0800_001f);
+                            assert_eq!(state.nzcv, 0xa000_0000);
+                            if destination != 1 {
+                                assert_eq!(state.v[1], words(raw));
+                            }
+                        }
                     }
                 }
             }

@@ -12,6 +12,7 @@ pub(crate) mod control;
 mod integer;
 pub(crate) mod memory;
 mod sse;
+pub(crate) mod vector_extensions;
 pub(crate) use integer::BitTest;
 pub(crate) use sse::{FloatLanes, FloatOp};
 
