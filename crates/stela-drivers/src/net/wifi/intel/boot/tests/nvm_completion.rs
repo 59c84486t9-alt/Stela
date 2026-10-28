@@ -10,7 +10,7 @@ fn unified_real_commands_wait_for_actual_init_notification_and_nvm_with_rfkill()
 }
 
 #[test]
-#[ignore = "requires actual pinned Intel firmware images"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn unified_actual_images_drive_real_command_and_notification_epoch() {
     exercise_unified_nvm(true);
 }

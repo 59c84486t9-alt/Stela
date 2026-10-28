@@ -10,7 +10,7 @@ fn rx_recycling_publishes_initial_tail_and_sustains_actual_command_ring_wraps() 
 }
 
 #[test]
-#[ignore = "requires freshly built unchanged Intel RX restock oracle"]
+#[ignore = "oracle: STELA_IWLWIFI_RX_RECYCLE_ORACLE"]
 fn rx_recycling_unchanged_source_free_producer_and_vid_oracle() {
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_RX_RECYCLE_ORACLE").unwrap()).unwrap();

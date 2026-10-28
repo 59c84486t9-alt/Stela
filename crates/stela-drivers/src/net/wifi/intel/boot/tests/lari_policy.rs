@@ -10,7 +10,7 @@ fn lari_actual_bios_source_commands_and_dma_retirement_both_families() {
 }
 
 #[test]
-#[ignore = "requires actual pinned Intel firmware images"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn lari_actual_images_drive_lari6_without_extension_and_lari8_with_extension() {
     exercise_lari_bios(true);
 }
