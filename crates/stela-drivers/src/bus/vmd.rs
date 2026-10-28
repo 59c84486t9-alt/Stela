@@ -75,6 +75,16 @@ enum Shadow {
     Bios,
 }
 impl Profile {
+    /// The page-aligned MEMBAR2 window holding the shadow registers this
+    /// profile reads, or none when its shadow comes from vendor capability
+    /// space.
+    pub fn shadow_window(self) -> Option<core::ops::Range<u64>> {
+        match self.shadow {
+            Shadow::Bios | Shadow::Native => Some(0x2000..0x3000),
+            Shadow::Vendor => None,
+        }
+    }
+
     pub fn identify(vendor: u16, device: u16) -> Result<Self, Error> {
         if vendor != 0x8086 {
             return Err(Error::UnsupportedDevice);

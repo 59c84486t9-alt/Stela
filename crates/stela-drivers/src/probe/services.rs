@@ -59,6 +59,14 @@ pub unsafe trait NativeServices {
     /// Map memory BAR `bar` of the function at `address` for its driver.
     fn map_bar(&self, address: Address, bar: Bar) -> Result<Mapping, ServiceError>;
 
+    /// The mount's reservation of memory BAR `bar` of the function at
+    /// `address`, for drivers that map parts of it or route child resources
+    /// inside it, as Intel VMD does.
+    fn bar_resource(&self, address: Address, bar: Bar) -> Result<owned::Resource, ServiceError>;
+
+    /// The mapping authority that issues [`Self::map_bar`]'s mappings.
+    fn authority(&self) -> Result<owned::Authority, ServiceError>;
+
     /// The DMA domain for the requester `binding` names. The domain keeps the
     /// binding, and with it the configuration epoch it retains.
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError>;
@@ -135,6 +143,13 @@ pub(crate) mod tests {
         }
         fn map_bar(&self, address: Address, _: Bar) -> Result<Mapping, ServiceError> {
             self.requests.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
+        fn bar_resource(&self, address: Address, _: Bar) -> Result<owned::Resource, ServiceError> {
+            self.requests.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
+        fn authority(&self) -> Result<owned::Authority, ServiceError> {
             Err(ServiceError::Unavailable)
         }
         fn domain(&self, _: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError> {

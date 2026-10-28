@@ -41,6 +41,7 @@ pub enum Error {
     Realtek(realtek::Error),
     /// The mount's [`NativeServices`] refused or lack a resource.
     Native(ServiceError),
+    Vmd(crate::bus::vmd::Error),
     Tg3(net::tg3::Error),
     Aqtion(net::aqtion::Error),
 }
@@ -51,6 +52,7 @@ impl fmt::Display for Error {
             Self::Device(error) => error.fmt(f),
             Self::Realtek(error) => error.fmt(f),
             Self::Native(error) => error.fmt(f),
+            Self::Vmd(error) => write!(f, "VMD: {error:?}"),
             Self::Tg3(error) => write!(f, "tg3: {error:?}"),
             Self::Aqtion(error) => write!(f, "atlantic: {error:?}"),
         }
@@ -306,6 +308,9 @@ pub struct Devices {
     /// brought up or handed over, by location, such as
     /// `0000:00:1d.0 EHCI handoff`.
     pub platform_failures: Vec<(String, PlatformError)>,
+    /// Owners a running native attachment hands back when it retires, such
+    /// as an Intel VMD hierarchy behind its NVMe controller.
+    pub native_owners: Vec<Box<dyn core::any::Any>>,
     /// Native owners of controllers whose attach failed, kept so their
     /// mappings and DMA domains outlive whatever the device may still do.
     pub quarantined: Vec<Box<dyn core::any::Any>>,
@@ -419,6 +424,52 @@ pub unsafe fn probe_with_provider(
                     continue;
                 };
                 let attached = match kind {
+                    native::Kind::Vmd => {
+                        // SAFETY: as for tg3 below; the host's hierarchy is
+                        // stopped with it.
+                        match unsafe { native::vmd(services, address, handoff.clock) } {
+                            Ok(found) => {
+                                for child in &found.others {
+                                    let location = alloc::format!(
+                                        "{address} VMD {:02x}:{:02x}.{}",
+                                        child.address.bus,
+                                        child.address.device,
+                                        child.address.function
+                                    );
+                                    devices.device_failures.push((
+                                        location,
+                                        BlockError::Unsupported(
+                                            "device behind VMD other than its first NVMe controller",
+                                        ),
+                                    ));
+                                }
+                                if let Some(attached) = found.nvme {
+                                    devices.device_failures.extend(
+                                        attached.failures.into_iter().map(|(namespace, error)| {
+                                            (
+                                                alloc::format!(
+                                                    "{address} VMD namespace {namespace}"
+                                                ),
+                                                error,
+                                            )
+                                        }),
+                                    );
+                                    devices.disks.extend(
+                                        attached
+                                            .namespaces
+                                            .into_iter()
+                                            .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
+                                    );
+                                }
+                                devices.native_owners.push(found.owner);
+                            }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.quarantined.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
                     native::Kind::Tg3 => {
                         // SAFETY: the caller grants `services`' contract, and
                         // this loop leaves `function` alone once it is claimed.

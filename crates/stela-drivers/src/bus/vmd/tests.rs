@@ -10,6 +10,8 @@ struct Model {
     bars: [(u64, u64, bool); 3],
     shadow: BTreeMap<usize, u64>,
     child: BTreeMap<usize, u8>,
+    /// Writable bits of child dwords, as a BAR's size leaves them.
+    child_masks: BTreeMap<usize, u32>,
     table: BTreeMap<u64, u32>,
     writes: Vec<(u8, usize, u8, u32)>,
     parent_reads: Arc<std::sync::Mutex<Vec<(u16, u8)>>>,
@@ -27,6 +29,7 @@ impl Model {
             ],
             shadow: BTreeMap::new(),
             child: BTreeMap::new(),
+            child_masks: BTreeMap::new(),
             table: BTreeMap::new(),
             writes: Vec::new(),
             parent_reads: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -98,6 +101,13 @@ unsafe impl Registers for Model {
     }
     fn child_write(&mut self, offset: usize, width: u8, value: u32) -> Result<(), Error> {
         self.writes.push((1, offset, width, value));
+        let value = match self.child_masks.get(&offset).copied() {
+            Some(mask) if width == 4 => {
+                let old = self.child_read(offset, 4)?;
+                value & mask | old & !mask
+            }
+            _ => value,
+        };
         self.child_set(offset, width, value);
         Ok(())
     }
@@ -310,6 +320,33 @@ fn scan_honors_multifunction_and_never_enables_child_dma() {
     assert_eq!(config.acpi_address(), Some(0x8007_ffff));
     assert_eq!(config.write(COMMAND, 2, 4), Err(Error::ActiveChild));
     assert_eq!(config.read(4095, 2), Err(Error::Address));
+}
+
+#[test]
+fn a_child_bar_is_sized_with_decode_off_and_restored() {
+    let mut model = Model::new(0x201d);
+    model.bars[0].1 = 1 << 20;
+    model.child_set(0, 4, 0x5678_144d);
+    model.child_set(4, 2, 0x0402);
+    model.child_set(8, 4, 0x0108_0200);
+    model.child_set(0x0e, 1, 0);
+    model.child_set(0x10, 4, 0x8000_4004);
+    model.child_set(0x14, 4, 0);
+    model.child_masks.insert(0x10, 0xffff_c000);
+    model.child_masks.insert(0x14, u32::MAX);
+    let mut host = start(model);
+    let child = host.scan().unwrap()[0].address;
+    assert_eq!(host.memory_bar_bytes(child), Ok(0x4000));
+    let mut config = host.config(0, 0, 0).unwrap();
+    assert_eq!(config.read(0x10, 4), Ok(0x8000_4004));
+    assert_eq!(config.read(0x14, 4), Ok(0));
+    assert_eq!(config.read(COMMAND, 2), Ok(0x0402));
+    let writes = &host.registers.as_ref().unwrap().writes;
+    let sizing = writes
+        .iter()
+        .position(|write| *write == (1, 0x10, 4, u32::MAX))
+        .unwrap();
+    assert!(writes[..sizing].contains(&(1, 4, 2, 0x0400)));
 }
 
 #[test]

@@ -60,6 +60,43 @@ impl<R: Registers> ChildConfig<'_, R> {
     }
 }
 
+impl<R: Registers> Host<R> {
+    /// The bytes `child`'s memory BAR0 decodes, sized as Linux's
+    /// `__pci_read_base` does: memory and I/O decode off while the BAR holds
+    /// all ones, then the BAR and command register restored.
+    pub fn memory_bar_bytes(&mut self, child: Address) -> Result<u64, Error> {
+        let mut config = self.config(child.bus, child.device, child.function)?;
+        let command = config.read(COMMAND, 2)?;
+        config.write(COMMAND, 2, command & !u32::from(MEMORY | 1))?;
+        let size = |config: &mut ChildConfig<'_, R>, offset: u16| -> Result<(u32, u32), Error> {
+            let value = config.read(offset, 4)?;
+            config.write(offset, 4, u32::MAX)?;
+            let mask = config.read(offset, 4)?;
+            config.write(offset, 4, value)?;
+            Ok((value, mask))
+        };
+        let sized = (|| {
+            let (low, low_mask) = size(&mut config, 0x10)?;
+            if low & 1 != 0 {
+                return Err(Error::InvalidResource);
+            }
+            let high_mask = if low & 6 == 4 {
+                size(&mut config, 0x14)?.1
+            } else {
+                0
+            };
+            let writable = u64::from(high_mask) << 32 | u64::from(low_mask & !15);
+            Ok(writable.isolate_lowest_one())
+        })();
+        config.write(COMMAND, 2, command)?;
+        let bytes = sized?;
+        if bytes == 0 {
+            return Err(Error::InvalidResource);
+        }
+        Ok(bytes)
+    }
+}
+
 // ConfigSpace cannot propagate hardware faults and is deliberately not
 // implemented: a failed read must poison/retain the hierarchy rather than
 // return a fabricated all-ones value that looks like an absent child.
