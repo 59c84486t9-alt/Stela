@@ -348,7 +348,7 @@ fn partition_name(value: &str) -> Result<String, String> {
 }
 
 #[derive(Args)]
-pub(crate) struct InstallMedium {
+pub struct InstallMedium {
     /// The macOS 27 restore image (IPSW); a download receipt beside it is
     /// checked.
     #[arg(long)]
@@ -362,7 +362,7 @@ pub(crate) struct InstallMedium {
 }
 
 impl InstallMedium {
-    pub(crate) fn run(self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         let host = host::System;
         let info = host.volume(&self.volume)?;
         ensure!(
@@ -891,10 +891,10 @@ type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
 struct Environment<'a> {
     host: &'a dyn Host,
     download: Option<&'a medium::download::Download>,
-    /// `stela boot prepare --restore`; tests use synthetic IPSWs, which
+    /// `stela-dev boot prepare --restore`; tests use synthetic IPSWs, which
     /// have no kernel, and write a stand-in.
     prepare_restore: &'a Prepare,
-    /// `stela boot prepare --restore --update`, likewise.
+    /// `stela-dev boot prepare --restore --update`, likewise.
     prepare_update: &'a Prepare,
     /// The install medium's inventory, with the public AEA keys fetched.
     inventory: &'a InventoryOf,
@@ -1529,7 +1529,7 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
         ensure!(
             disk.erasable(),
             "{} is on {} ({}), an internal disk{}. Setup changes only a removable USB; use \
-             `stela efi install` to install Stela on another EFI partition by hand.",
+             `stela-dev efi install` to install Stela on another EFI partition by hand.",
             esp.display(),
             disk.identifier,
             disk.name,
@@ -1630,7 +1630,7 @@ pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<
 /// the boot log as `GUEST|` lines, so a run on a PC can be read afterwards.
 const CONSOLE_BOOT_ARGS: &str = "--boot-args=-v serial=3 serial-device-name=uart0";
 
-/// `stela boot prepare --restore` for the IPSW, model and machine into
+/// `stela-dev boot prepare --restore` for the IPSW, model and machine into
 /// `output`: the restore bundle the Install macOS choice boots.
 fn prepare_restore(
     ipsw: &Path,
@@ -1642,7 +1642,7 @@ fn prepare_restore(
     prepare_ramdisk(ipsw, model, ecid, personalized, output, false)
 }
 
-/// `stela boot prepare --restore --update`: the update restore bundle the
+/// `stela-dev boot prepare --restore --update`: the update restore bundle the
 /// Update macOS choice boots.
 fn prepare_update(
     ipsw: &Path,

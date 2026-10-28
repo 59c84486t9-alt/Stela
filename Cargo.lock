@@ -1764,7 +1764,6 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
- "stela-compiler",
  "stela-drivers",
  "stela-loader",
  "stela-runtime",
@@ -1781,6 +1780,23 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "stela-dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "stela-cli",
+ "stela-compiler",
+ "stela-loader",
+ "stela-runtime",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]

@@ -177,7 +177,7 @@ pub fn select(images: &[Image], build: Option<&str>, model: Option<&str>) -> Res
         .collect();
     ensure!(
         !candidates.is_empty(),
-        "no matching image; run `stela images list`"
+        "no matching image; run `stela-dev images list`"
     );
     if build.is_some() {
         ensure!(

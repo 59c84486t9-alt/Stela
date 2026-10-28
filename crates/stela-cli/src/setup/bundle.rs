@@ -4,9 +4,9 @@
 //! the loader that prepared it) and [`Kind`], in
 //! `stela/boot/<build>/<leaf>` of the USB's FAT32 data partition:
 //!
-//! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
+//! - `restore-<ECID>`: a machine's restore bundle (`stela-dev boot prepare
 //!   --restore`), which the Install macOS choice boots;
-//! - `update-<ECID>`: a machine's update restore bundle (`stela boot
+//! - `update-<ECID>`: a machine's update restore bundle (`stela-dev boot
 //!   prepare --restore --update`), which earlier setups' Update macOS
 //!   (Stela) choice booted; setup prepares none now;
 //! - any of these with `-s<schema>` for another schema and `-r<revision>`

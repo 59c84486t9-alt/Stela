@@ -4,7 +4,7 @@ use std::{
 };
 
 fn cli(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_stela"))
+    Command::new(env!("CARGO_BIN_EXE_stela-dev"))
         .current_dir(root)
         .args(args)
         .output()
@@ -131,8 +131,10 @@ fn restore_manifest_and_extraction_enforce_limits_crc_and_existing_outputs() {
     let options =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file("BuildManifest.plist", options).unwrap();
-    zip.write_all(include_bytes!("fixtures/restore.plist"))
-        .unwrap();
+    zip.write_all(include_bytes!(
+        "../../stela-cli/tests/fixtures/restore.plist"
+    ))
+    .unwrap();
     zip.start_file("kernelcache.fixture", options).unwrap();
     zip.write_all(b"fixturekernel").unwrap();
     zip.finish().unwrap();

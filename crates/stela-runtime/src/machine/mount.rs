@@ -2,7 +2,7 @@
 //! (`soc::board`), placed on one [`AppleDevices`] and connected to its PMGR
 //! lifecycle. The host's inputs (console, disks, cables, scanout, entropy and
 //! board firmware files) come from the caller, so `stela.efi` and
-//! `stela boot check` mount the same machine.
+//! `stela-dev boot check` mount the same machine.
 use super::apple::{
     AicInput, AppleDevices, AscLines, ConsoleSink, Range, RtcEpoch, Scanout, SepEntropy,
     SepProvisioning, UsbCables, UsbId, WallClock,

@@ -17,7 +17,7 @@ use stela_runtime::payload::Purpose;
 /// The receipt's `kind`.
 pub(super) const KIND: &str = "stela_guest_system";
 const SCHEMA: u32 = 1;
-/// The receipt `stela extract-guest-files` writes.
+/// The receipt `stela-dev extract-guest-files` writes.
 const EXTRACTION_KIND: &str = "guest_file_extraction";
 /// A decrypted member needs at most this many halves of its encrypted
 /// size while its files are copied (26A434's system volume: 1.26 times).

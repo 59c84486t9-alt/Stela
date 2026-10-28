@@ -76,7 +76,7 @@ pub struct RestoreDryRun {
         default_value = ".stela/images/UniversalMac_27.0.1_26A434_Restore.ipsw"
     )]
     ipsw: PathBuf,
-    /// The payload inventory (`stela image-manifest --payload-manifest`);
+    /// The payload inventory (`stela-dev image-manifest --payload-manifest`);
     /// the block hashes it names are read from beside it.
     #[arg(long, default_value = ".stela/restore-dryrun/payload.json")]
     payload: PathBuf,

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/stela-cli",
+    "crates/stela-dev",
     "crates/stela-loader",
     "crates/stela-compiler",
     "crates/stela-drivers",
@@ -8,11 +9,13 @@ members = [
     "crates/stela-runtime",
     "xtask",
 ]
-# A plain `cargo build` builds the shipped crates. `cargo xtask` builds the
+# A plain `cargo build` builds the shipped crates and `stela-dev`, the
+# research and development commands. `cargo xtask` builds the
 # development tasks, whose AArch64 fixtures need clang; `--workspace` includes
 # them, as `cargo xtask check` does.
 default-members = [
     "crates/stela-cli",
+    "crates/stela-dev",
     "crates/stela-loader",
     "crates/stela-compiler",
     "crates/stela-drivers",

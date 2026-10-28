@@ -2320,7 +2320,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         // machine whose ECID the bundle names (`/chosen unique-chip-id`).
         let signer = options.tss.then(|| {
             let ecid = boot_ecid.unwrap_or_else(|| {
-                output::fatal("--tss needs the bundle's machine ECID (stela boot prepare --ecid)")
+                output::fatal("--tss needs the bundle's machine ECID (stela-dev boot prepare --ecid)")
             });
             stela_runtime::restore::tss::Signer {
                 ecid,

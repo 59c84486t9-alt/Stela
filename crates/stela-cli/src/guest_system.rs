@@ -280,7 +280,7 @@ pub(crate) struct InstallSystem {
     /// Report what would be installed, and change nothing.
     #[arg(long)]
     dry_run: bool,
-    /// Development: copy guest roots `stela extract-guest-files` made from
+    /// Development: copy guest roots `stela-dev extract-guest-files` made from
     /// the newest supported build's images instead of reading an IPSW.
     #[arg(long, hide = true, value_name = "DIR")]
     import: Vec<PathBuf>,

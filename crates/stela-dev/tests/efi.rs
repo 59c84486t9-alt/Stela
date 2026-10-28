@@ -8,7 +8,7 @@ use stela_loader::mount_interface;
 const LOADER: &str = "esp/EFI/BOOT/BOOTX64.EFI";
 
 fn cli(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_stela"))
+    Command::new(env!("CARGO_BIN_EXE_stela-dev"))
         .args(args)
         .output()
         .unwrap()

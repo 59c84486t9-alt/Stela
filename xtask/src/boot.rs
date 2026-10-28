@@ -164,7 +164,7 @@ pub struct Run {
     /// and 12G with a boot bundle.
     #[arg(long)]
     memory: Option<String>,
-    /// A kernel boot bundle directory (`stela boot prepare` output) to start
+    /// A kernel boot bundle directory (`stela-dev boot prepare` output) to start
     /// on the system-mode engine; it is copied to `\EFI\stela\bundle`.
     #[arg(long, conflicts_with = "module")]
     bundle: Option<PathBuf>,
@@ -174,7 +174,7 @@ pub struct Run {
     /// starts it on the system-mode engine.
     #[arg(long, conflicts_with_all = ["module", "bundle", "append", "payload"])]
     preboot_disk: Option<PathBuf>,
-    /// A restore payload inventory (`stela image-manifest
+    /// A restore payload inventory (`stela-dev image-manifest
     /// --payload-manifest`), placed at `\EFI\stela\payload.json` for the
     /// mount's `--restore-manifest`, with the block hash file it names
     /// (`blocks.bin` beside it).

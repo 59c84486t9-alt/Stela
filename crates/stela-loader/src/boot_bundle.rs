@@ -270,7 +270,7 @@ pub struct Options {
     pub overlay: Vec<OverlayProperty>,
 }
 
-/// The defaults of `stela boot prepare` for an installed system: 8 GiB of
+/// The defaults of `stela-dev boot prepare` for an installed system: 8 GiB of
 /// DRAM at 0x8_0000_0000, verbose boot, the first performance CPU booting
 /// with a 24 MHz generic timer, and Reduced Security with SIP enabled.
 impl Options {
