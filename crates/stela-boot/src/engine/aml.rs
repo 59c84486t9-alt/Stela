@@ -770,6 +770,12 @@ impl HostAcpi {
         })
     }
 
+    /// The loaded namespace. Its calls run in the loader root
+    /// ([`RestoreRoot`]), as the host drivers do.
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
     /// Linux's `acpi_power_off_prepare`: S5's SLP_TYPa and SLP_TYPb as the
     /// firmware's `\_S5` evaluates, after `\_PTS(5)` and `\_SST`; `None`
     /// without S5. A failed `\_PTS` is reported, and S5 follows all the same.

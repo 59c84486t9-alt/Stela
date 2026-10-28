@@ -23,6 +23,7 @@ mod progress;
 mod remote;
 mod restore;
 mod service;
+mod services;
 mod speculation;
 pub(crate) mod storage;
 mod topology;
@@ -866,7 +867,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // host it cannot qualify is reported, and those services refuse.
     // SAFETY: this boot's capture, on the installed boot processor before
     // the other host processors start.
-    let _native_mmio = unsafe { crate::native_mmio::captured(handoff) }
+    let native_mmio = unsafe { crate::native_mmio::captured(handoff) }
         .and_then(|wire| unsafe { crate::native_mmio::Source::activate(wire, &mut host_owner) })
         .inspect(|_| output::arguments(format_args!("NATIVE MMIO aperture owned\n")))
         .inspect_err(|error| {
@@ -932,9 +933,20 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 usb_disks,
                 disks,
             } = unsafe {
+                let native = native_mmio.as_ref().map(|mmio| {
+                    services::Services::new(
+                        mmio,
+                        host_acpi.as_ref(),
+                        handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes,
+                        handoff.tsc_hz,
+                    )
+                });
                 storage::open(
                     &storage_handoff,
                     handoff.root,
+                    native
+                        .as_ref()
+                        .map(|native| native as &dyn stela_drivers::probe::NativeServices),
                     &storage::Partitions {
                         targets: &targets,
                         medium: options.install_source,

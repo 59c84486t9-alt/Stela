@@ -26,7 +26,7 @@ use stela_drivers::{
     block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
     input::virtio::VirtioInput,
-    probe::probe,
+    probe::{NativeServices, probe_with_provider},
     usb::hid::UsbInput,
 };
 use stela_runtime::pc::{
@@ -343,6 +343,7 @@ pub struct Partitions<'a> {
 pub unsafe fn open(
     handoff: &Handoff,
     root: u64,
+    services: Option<&dyn NativeServices>,
     partitions: &Partitions<'_>,
     usb_disks: &[String],
     external: Option<usize>,
@@ -367,8 +368,13 @@ pub unsafe fn open(
     let _root = unsafe { RestoreRoot::enter(root) };
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
+    let firmware = stela_drivers::firmware::HandoffProvider::new(handoff.firmware.as_deref());
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
-    let mut devices = unsafe { probe(handoff, &mut dma) };
+    let mut devices = unsafe { probe_with_provider(handoff, &mut dma, &firmware, services) };
+    // The owners native attachments keep, and those of failed ones, stay
+    // for the boot: their mappings and DMA domains outlive the devices.
+    Vec::leak(core::mem::take(&mut devices.native_owners));
+    Vec::leak(core::mem::take(&mut devices.quarantined));
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }

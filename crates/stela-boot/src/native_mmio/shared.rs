@@ -473,3 +473,81 @@ impl Source {
         )
     }
 }
+
+fn in8(port: u16) -> u8 {
+    let value: u8;
+    // SAFETY: a port read; the caller owns the port.
+    unsafe {
+        asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags))
+    };
+    value
+}
+
+fn out8(port: u16, value: u8) {
+    // SAFETY: a port write; the caller owns the port.
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
+    };
+}
+
+/// The I/O APIC's index and data registers, and its first redirection entry
+/// (Intel 82093AA datasheet 3.1, 3.2.4).
+const IOREGSEL: usize = 0;
+const IOWIN: usize = 0x10;
+const IOAPICVER: u32 = 1;
+const REDIRECTION: u32 = 0x10;
+const MASKED: u32 = 1 << 16;
+
+impl Source {
+    /// Mask ISA interrupts `irqs` at the 8259 PICs and at the I/O APIC pins
+    /// the MADT routes them to.
+    ///
+    /// # Safety
+    /// No other owner programs the PICs or those I/O APICs.
+    pub(crate) unsafe fn mask_isa(&self, irqs: &[u8]) -> Result<(), Error> {
+        for &irq in irqs {
+            // OCW1, the interrupt mask register (Intel 8259A datasheet).
+            let port = if irq < 8 { 0x21 } else { 0xa1 };
+            out8(port, in8(port) | 1 << (irq & 7));
+        }
+        let wire = self.platform.wire();
+        let routing =
+            crate::native_irq::madt::Routing::parse(wire.madt(), self.platform.space.physical_bits)
+                .map_err(failed)?;
+        let lines = irqs
+            .iter()
+            .map(|&irq| routing.isa(irq).map(|line| line.gsi))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failed)?;
+        for unit in &routing.units {
+            let page = unit.base & !(PAGE - 1);
+            let offset = (unit.base - page) as usize;
+            let span = PhysicalSpan::new(page, PAGE)?;
+            if !wire.excludes_memory(span.start(), span.end()) {
+                return Err(Error::OutsideResource);
+            }
+            let resource = self.reserve(span, ResourceKind::Registers)?;
+            let mut mapping = self.authority.map(
+                resource,
+                0,
+                PAGE as usize,
+                CacheAttribute::Uncached,
+                Protection::ReadWrite,
+            )?;
+            let select = |index: u32| mapping.write32(offset + IOREGSEL, index);
+            select(IOAPICVER)?;
+            let pins = (mapping.read32(offset + IOWIN)? >> 16 & 0xff) + 1;
+            for &gsi in &lines {
+                let Some(pin) = gsi.checked_sub(unit.gsi_base).filter(|pin| *pin < pins) else {
+                    continue;
+                };
+                select(REDIRECTION + 2 * pin)?;
+                let low = mapping.read32(offset + IOWIN)?;
+                mapping.write32(offset + IOWIN, low | MASKED)?;
+            }
+            // SAFETY: the mapping's only user is this loop, which is done.
+            unsafe { mapping.retire() }?;
+        }
+        Ok(())
+    }
+}
