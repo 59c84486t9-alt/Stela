@@ -3,10 +3,12 @@
 //! RDI holds GuestState and R15 the ExecutionContext. The low 128 bits of each Z
 //! register live in `GuestState::v`; the upper bytes and packed predicates live
 //! in the scalable view. Helpers clobber only RAX/RCX/RDX and XMM0-7.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R15, Rax, Rcx, Rdi, Rdx};
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size, Unary};
 
 pub(crate) use super::memory_context as memory;
 
+mod encode;
 pub(crate) mod lut;
 pub(crate) mod numerical;
 pub(crate) mod routing;
@@ -29,28 +31,12 @@ use crate::{
 };
 
 const XMM_REGISTER_COUNT: u8 = 8;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_DISP32: u8 = 0x80;
-const REGISTER_SHIFT: u8 = 3;
-const STATE_RDI: u8 = 7;
-const ADDRESS_RDX: u8 = 2;
 const HALFWORD_BYTES: usize = core::mem::size_of::<u16>();
 const DWORD_BYTES: usize = core::mem::size_of::<u32>();
 const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const PREDICATE_CHUNK_BYTES: usize = QWORD_BYTES;
 const PREDICATE_MASK_BYTES: usize = VECTOR_CHUNK_BYTES / BITS_PER_BYTE;
-const MOV_RDX_CONTEXT_DISP8: &[u8] = &[0x49, 0x8b, 0x57];
-const MOV_RDX_RDX_DISP8: &[u8] = &[0x48, 0x8b, 0x52];
-const MOVZX_EAX_WORD_RDX_DISP32: &[u8] = &[0x0f, 0xb7, 0x82];
-const MOV_EAX_RDX_DISP32: &[u8] = &[0x8b, 0x82];
-const MOV_RAX_RDX_DISP32: &[u8] = &[0x48, 0x8b, 0x82];
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const MOVABS_RCX_IMM64: &[u8] = &[0x48, 0xb9];
-const MOVQ_XMM_RCX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e];
-const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
-const NEG_EAX: &[u8] = &[0xf7, 0xd8];
 const DWORD_SIGN_BIT: u8 = (u32::BITS - 1) as u8;
-const RCX_REGISTER: u8 = 1;
 const REPEAT_LOW_DWORD: u8 = 0;
 const REPEAT_LOW_TWO_DWORDS: u8 = 0x50;
 const FIRST_PREDICATE_BIT: u8 = 1;
@@ -66,10 +52,13 @@ fn storage_pointer(code: &mut Code, field: u32) {
     // Both fields fit positive signed disp8 in the versioned shared ABI.
     debug_assert!(EXECUTION_CONTEXT_SCALABLE_OFFSET <= i8::MAX as u32);
     debug_assert!(field <= i8::MAX as u32);
-    code.extend(MOV_RDX_CONTEXT_DISP8);
-    code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
-    code.extend(MOV_RDX_RDX_DISP8);
-    code.push(field as u8);
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Qword,
+        Rdx,
+        Mem::base_disp8(R15, EXECUTION_CONTEXT_SCALABLE_OFFSET as i8),
+    );
+    asm.mov_load(Size::Qword, Rdx, Mem::base_disp8(Rdx, field as i8));
 }
 
 fn vector_offset(register: u8) -> u32 {
@@ -88,14 +77,17 @@ fn vector_memory(
     code: &mut Code,
     opcode: Host,
     register: u8,
-    base: u8,
+    base: Gpr,
     displacement: u32,
     target: TargetCpu,
 ) {
     xmm(register);
-    opcode.append(code, target);
-    code.push(MODRM_DISP32 | (register << REGISTER_SHIFT) | base);
-    code.extend(displacement.to_le_bytes());
+    code.asm().simd(
+        opcode,
+        register,
+        Mem::base_disp32(base, displacement as i32),
+        target,
+    );
 }
 
 /// Read one 16-byte Z segment into XMM0..7. Upper chunks clobber RDX only.
@@ -109,10 +101,10 @@ pub(crate) fn load_z_chunk(
 ) {
     assert!(chunk < length.chunks());
     let (base, displacement) = if chunk == 0 {
-        (STATE_RDI, vector_offset(register))
+        (Rdi, vector_offset(register))
     } else {
         storage_pointer(code, SCALABLE_Z_UPPER_OFFSET);
-        (ADDRESS_RDX, upper_offset(register, chunk, length))
+        (Rdx, upper_offset(register, chunk, length))
     };
     vector_memory(
         code,
@@ -135,10 +127,10 @@ pub(crate) fn store_z_chunk(
 ) {
     assert!(chunk < length.chunks());
     let (base, displacement) = if chunk == 0 {
-        (STATE_RDI, vector_offset(register))
+        (Rdi, vector_offset(register))
     } else {
         storage_pointer(code, SCALABLE_Z_UPPER_OFFSET);
-        (ADDRESS_RDX, upper_offset(register, chunk, length))
+        (Rdx, upper_offset(register, chunk, length))
     };
     vector_memory(
         code,
@@ -157,13 +149,14 @@ fn predicate_offset(predicate: u8, byte_offset: usize, length: VectorLength) -> 
 }
 
 fn read_predicate_at(code: &mut Code, displacement: u32, bytes: usize) {
-    code.extend(match bytes {
-        HALFWORD_BYTES => MOVZX_EAX_WORD_RDX_DISP32,
-        DWORD_BYTES => MOV_EAX_RDX_DISP32,
-        QWORD_BYTES => MOV_RAX_RDX_DISP32,
+    let source = Mem::base_disp32(Rdx, displacement as i32);
+    let mut asm = code.asm();
+    match bytes {
+        HALFWORD_BYTES => asm.movzx(Size::Dword, Rax, Size::Word, source),
+        DWORD_BYTES => asm.mov_load(Size::Dword, Rax, source),
+        QWORD_BYTES => asm.mov_load(Size::Qword, Rax, source),
         _ => unreachable!("validated streaming length has 2/4/8-byte predicate chunks"),
-    });
-    code.extend(displacement.to_le_bytes());
+    }
 }
 
 fn predicate_bit_pattern(element: ElementSize) -> u64 {
@@ -217,17 +210,20 @@ pub(crate) fn expand_predicate_mask(
     xmm(scratch);
     assert_ne!(destination, scratch);
     if element == ElementSize::Quadword {
-        code.extend(AND_EAX_IMM8);
-        code.push(FIRST_PREDICATE_BIT);
-        code.extend(NEG_EAX);
-        code.extend(MOVD_XMM_EAX);
-        code.push(MODRM_REGISTER | (destination << REGISTER_SHIFT));
-        Host::ShuffleDword.register(code, destination, destination, target);
-        code.push(REPEAT_LOW_DWORD);
+        let mut asm = code.asm();
+        asm.alu_imm8(Alu::And, Size::Dword, Rax, FIRST_PREDICATE_BIT as i8);
+        asm.unary(Unary::Neg, Size::Dword, Rax);
+        code.asm().movd_to_xmm(destination, Rax);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            destination,
+            Rm::Xmm(destination),
+            REPEAT_LOW_DWORD,
+            target,
+        );
         return;
     }
-    code.extend(MOVD_XMM_EAX);
-    code.push(MODRM_REGISTER | (destination << REGISTER_SHIFT));
+    code.asm().movd_to_xmm(destination, Rax);
     Host::UnpackLowByte.register(code, destination, destination, target);
     Host::UnpackLowWord.register(code, destination, destination, target);
     if element == ElementSize::Doubleword {
@@ -235,16 +231,24 @@ pub(crate) fn expand_predicate_mask(
         // 8-byte element; arithmetic shifts replicate exactly that bit.
         ShiftOpcode::LeftDword.emit(code, destination, DWORD_SIGN_BIT);
         ShiftOpcode::ArithmeticDword.emit(code, destination, DWORD_SIGN_BIT);
-        Host::ShuffleDword.register(code, destination, destination, target);
-        code.push(REPEAT_LOW_TWO_DWORDS);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            destination,
+            Rm::Xmm(destination),
+            REPEAT_LOW_TWO_DWORDS,
+            target,
+        );
         return;
     }
-    Host::ShuffleDword.register(code, destination, destination, target);
-    code.push(REPEAT_LOW_TWO_DWORDS);
-    code.extend(MOVABS_RCX_IMM64);
-    code.extend(predicate_bit_pattern(element).to_le_bytes());
-    code.extend(MOVQ_XMM_RCX);
-    code.push(MODRM_REGISTER | (scratch << REGISTER_SHIFT) | RCX_REGISTER);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(destination),
+        REPEAT_LOW_TWO_DWORDS,
+        target,
+    );
+    code.asm().mov_imm64(Rcx, predicate_bit_pattern(element));
+    code.asm().movq_to_xmm(scratch, Rcx);
     Host::UnpackLowQword.register(code, scratch, scratch, target);
     Host::And.register(code, destination, scratch, target);
     Host::EqualByte.register(code, destination, scratch, target);

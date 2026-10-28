@@ -1,5 +1,5 @@
 //! SSE2 interleave and deinterleave networks for whole 128-bit chunks.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Mem, Rm};
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
@@ -41,8 +41,13 @@ pub(crate) fn split(
                 (odd, first, ODD_DWORDS),
                 (SECOND_ODD_XMM, second, ODD_DWORDS),
             ] {
-                Host::ShuffleDword.register(code, destination, source, target);
-                code.push(control);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    destination,
+                    Rm::Xmm(source),
+                    control,
+                    target,
+                );
             }
             Host::UnpackLowQword.register(code, even, SECOND_EVEN_XMM, target);
             Host::UnpackLowQword.register(code, odd, SECOND_ODD_XMM, target);
@@ -156,10 +161,7 @@ pub(crate) fn split_destructive(
     Host::UnpackLowQword.register(code, odd, second, target);
 }
 
-const MODRM_RIP: u8 = 0x05;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const SHUFFLE_ZERO: u8 = 0x80;
-const JMP_REL32: u8 = 0xe9;
 const REL32_BYTES: usize = core::mem::size_of::<i32>();
 const JUMP_BYTES: usize = core::mem::size_of::<u8>() + REL32_BYTES;
 const CHUNK_BYTES: usize = crate::aarch64::scalable::VECTOR_CHUNK_BYTES;
@@ -173,24 +175,29 @@ pub(crate) fn prepare_split_masks(code: &mut Code, element: ElementSize, target:
     assert!(matches!(element, ElementSize::Byte | ElementSize::Halfword));
     let load_bytes =
         Host::LoadUnaligned.encoding().len() + core::mem::size_of::<u8>() + REL32_BYTES;
+    let mut asm = code.asm();
     for (register, displacement) in [
         (EVEN_MASK_XMM, load_bytes + JUMP_BYTES),
         (ODD_MASK_XMM, JUMP_BYTES + CHUNK_BYTES),
     ] {
-        Host::LoadUnaligned.append(code, target);
-        code.push(MODRM_RIP | (register << MODRM_REGISTER_SHIFT));
-        code.extend((displacement as i32).to_le_bytes());
+        asm.simd(
+            Host::LoadUnaligned,
+            register,
+            Mem::rip(displacement as i32),
+            target,
+        );
     }
-    code.push(JMP_REL32);
-    code.extend((2 * CHUNK_BYTES as i32).to_le_bytes());
+    let over_masks = asm.jmp();
     for parity in 0..2 {
-        for byte in 0..CHUNK_BYTES {
-            code.push(if byte < HALF_CHUNK_BYTES {
+        let mask: [u8; CHUNK_BYTES] = core::array::from_fn(|byte| {
+            if byte < HALF_CHUNK_BYTES {
                 ((byte / element.bytes() * 2 + parity) * element.bytes() + byte % element.bytes())
                     as u8
             } else {
                 SHUFFLE_ZERO
-            });
-        }
+            }
+        });
+        asm.data(&mask);
     }
+    asm.bind(over_masks);
 }

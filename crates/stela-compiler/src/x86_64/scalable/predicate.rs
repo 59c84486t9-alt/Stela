@@ -1,5 +1,6 @@
 //! Packed predicate writes and chunk access.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rdx};
+use crate::x86_64::asm::{Alu, Code, Mem, Size};
 
 use super::{
     DWORD_BYTES, HALFWORD_BYTES, PREDICATE_CHUNK_BYTES, QWORD_BYTES, predicate_chunk,
@@ -7,19 +8,15 @@ use super::{
 };
 use crate::{aarch64::scalable::VectorLength, context::SCALABLE_PREDICATES_OFFSET};
 
-const MOV_RDX_DISP32_AX: &[u8] = &[0x66, 0x89, 0x82];
-const MOV_RDX_DISP32_EAX: &[u8] = &[0x89, 0x82];
-const MOV_RDX_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x82];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-
 pub(super) fn write_predicate_at(code: &mut Code, displacement: u32, bytes: usize) {
-    code.extend(match bytes {
-        HALFWORD_BYTES => MOV_RDX_DISP32_AX,
-        DWORD_BYTES => MOV_RDX_DISP32_EAX,
-        QWORD_BYTES => MOV_RDX_DISP32_RAX,
+    let size = match bytes {
+        HALFWORD_BYTES => Size::Word,
+        DWORD_BYTES => Size::Dword,
+        QWORD_BYTES => Size::Qword,
         _ => unreachable!("validated streaming length has 2/4/8-byte predicate chunks"),
-    });
-    code.extend(displacement.to_le_bytes());
+    };
+    code.asm()
+        .mov_store(size, Mem::base_disp32(Rdx, displacement as i32), Rax);
 }
 
 /// Write low RAX bytes to one packed-P chunk without touching adjacent P slots.
@@ -38,7 +35,7 @@ pub(crate) fn write_predicate_chunk(
 /// Clear a complete packed P register. Clobbers RAX/RDX; all XMMs survive.
 pub(crate) fn zero_predicate(code: &mut Code, predicate: u8, length: VectorLength) {
     storage_pointer(code, SCALABLE_PREDICATES_OFFSET);
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     for offset in (0..length.predicate_bytes()).step_by(PREDICATE_CHUNK_BYTES) {
         let bytes = (length.predicate_bytes() - offset).min(PREDICATE_CHUNK_BYTES);
         write_predicate_at(code, predicate_offset(predicate, offset, length), bytes);

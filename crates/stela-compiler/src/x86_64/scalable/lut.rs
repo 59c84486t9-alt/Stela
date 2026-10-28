@@ -1,14 +1,11 @@
 //! Constant-time packed-index table lookup shared by the LUTI forms.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Rm};
 use crate::{
     TargetCpu,
     aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES},
     x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host},
 };
-const MOV_EAX: u8 = 0xb8;
-const MOVD: &[u8] = &[0x66, 0x0f, 0x6e];
-const REGISTER: u8 = 0xc0;
-const XMM_SHIFT: u8 = 3;
 const REPEAT_LOW: u8 = 0;
 const LOW_TABLE: u8 = 4;
 const HIGH_TABLE: u8 = 5;
@@ -21,12 +18,10 @@ const SHUFFLE_DISABLE: u32 = 0x8080_8080;
 const TABLE_BANK_TO_DISABLE_SHIFT: u8 = 3;
 
 fn splat(code: &mut Code, xmm: u8, value: u32, target: TargetCpu) {
-    code.push(MOV_EAX);
-    code.extend(value.to_le_bytes());
-    code.extend(MOVD);
-    code.push(REGISTER | (xmm << XMM_SHIFT));
-    Host::ShuffleDword.register(code, xmm, xmm, target);
-    code.push(REPEAT_LOW);
+    code.asm().mov_imm32(Rax, value);
+    code.asm().movd_to_xmm(xmm, Rax);
+    code.asm()
+        .simd_imm(Host::ShuffleDword, xmm, Rm::Xmm(xmm), REPEAT_LOW, target);
 }
 fn expand(code: &mut Code, index_bits: u8, target: TargetCpu) {
     splat(
@@ -82,10 +77,10 @@ fn boolean(code: &mut Code, element: ElementSize, index_bits: u8, target: Target
         if element == ElementSize::Byte {
             Host::UnpackLowByte.register(code, 2, 2, target);
         }
-        Host::ShuffleLowWord.register(code, 2, 2, target);
-        code.push(REPEAT_LOW);
-        Host::ShuffleDword.register(code, 2, 2, target);
-        code.push(REPEAT_LOW);
+        code.asm()
+            .simd_imm(Host::ShuffleLowWord, 2, Rm::Xmm(2), REPEAT_LOW, target);
+        code.asm()
+            .simd_imm(Host::ShuffleDword, 2, Rm::Xmm(2), REPEAT_LOW, target);
         Host::And.register(code, 1, 2, target);
         Host::Or.register(code, OUTPUT, 1, target);
     }

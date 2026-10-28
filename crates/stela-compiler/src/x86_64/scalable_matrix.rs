@@ -1,6 +1,7 @@
 //! ZA storage access for the extended native ABI. R15 holds the
 //! ExecutionContext; callers handle slice selection and bounds.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, R15};
+use crate::x86_64::asm::{Code, Mem, Size};
 
 use super::isa::SimdOpcode as Host;
 use crate::{
@@ -9,11 +10,6 @@ use crate::{
 };
 
 const XMM_REGISTER_COUNT: u8 = 8;
-const REX_R8_BASE: u8 = 0x41;
-const MODRM_DISP32_R8: u8 = 0x80;
-const REGISTER_SHIFT: u8 = 3;
-const MOV_R8_CONTEXT_DISP8: &[u8] = &[0x4d, 0x8b, 0x47];
-const MOV_R8_R8_DISP8: &[u8] = &[0x4d, 0x8b, 0x40];
 
 /// Load the ZA bank base into R8. Every other GPR/XMM and host flag survives.
 /// The runtime must have validated a live scalable view and ZA allocation.
@@ -21,10 +17,17 @@ pub(crate) fn load_za_pointer_r8(code: &mut Code) {
     // Versioned pointer fields fit a positive signed disp8.
     debug_assert!(EXECUTION_CONTEXT_SCALABLE_OFFSET <= i8::MAX as u32);
     debug_assert!(SCALABLE_ZA_OFFSET <= i8::MAX as u32);
-    code.extend(MOV_R8_CONTEXT_DISP8);
-    code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
-    code.extend(MOV_R8_R8_DISP8);
-    code.push(SCALABLE_ZA_OFFSET as u8);
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Qword,
+        R8,
+        Mem::base_disp8(R15, EXECUTION_CONTEXT_SCALABLE_OFFSET as i8),
+    );
+    asm.mov_load(
+        Size::Qword,
+        R8,
+        Mem::base_disp8(R8, SCALABLE_ZA_OFFSET as i8),
+    );
 }
 
 fn chunk_memory(code: &mut Code, opcode: Host, register: u8, displacement: u32, target: TargetCpu) {
@@ -33,14 +36,12 @@ fn chunk_memory(code: &mut Code, opcode: Host, register: u8, displacement: u32, 
         displacement <= i32::MAX as u32,
         "ZA displacement must be positive disp32"
     );
-    assert!(target.supports(opcode.requires()));
-    // MOVDQU's mandatory F3 prefix precedes REX.B for the R8 memory base.
-    let encoding = opcode.encoding();
-    code.push(encoding[0]);
-    code.push(REX_R8_BASE);
-    code.extend(&encoding[1..]);
-    code.push(MODRM_DISP32_R8 | (register << REGISTER_SHIFT));
-    code.extend(displacement.to_le_bytes());
+    code.asm().simd(
+        opcode,
+        register,
+        Mem::base_disp32(R8, displacement as i32),
+        target,
+    );
 }
 
 /// Read exactly 16 unaligned bytes at R8+displacement into the chosen XMM.
