@@ -84,8 +84,15 @@ pub unsafe trait NativeServices {
     /// batteries ([`platform::acpi::Session::devices`](crate::platform::acpi::Session::devices)
     /// matches `_HID`/`_CID` and filters by `_STA`; `_CRS` decodes through
     /// [`platform::acpi::resources`](crate::platform::acpi::resources)).
+    ///
+    /// The session is the mount's one ACPICA instance, alive for the
+    /// program. Its provider serves the ports, decode, power and global lock
+    /// of the first embedded controller the ECDT or namespace names, and no
+    /// other owner reaches that controller, as
+    /// [`Binding::install`](crate::platform::ec::binding::Binding::install)
+    /// requires.
     #[cfg(feature = "native-acpi")]
-    fn acpi(&self) -> Option<&crate::platform::acpi::Session>;
+    fn acpi(&self) -> Option<&'static crate::platform::acpi::Session>;
 
     /// Reserve memory resource `ordinal` of `device`'s `_CRS` from the
     /// mount's native broker, for a controller the namespace describes, as
@@ -186,7 +193,7 @@ pub(crate) mod tests {
             Err(ServiceError::Unavailable)
         }
         #[cfg(feature = "native-acpi")]
-        fn acpi(&self) -> Option<&crate::platform::acpi::Session> {
+        fn acpi(&self) -> Option<&'static crate::platform::acpi::Session> {
             None
         }
     }
