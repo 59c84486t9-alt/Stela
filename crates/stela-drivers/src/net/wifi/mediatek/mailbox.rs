@@ -942,16 +942,14 @@ pub(crate) mod tests {
             self.io.configure(address, count)
         }
         fn device_index(&mut self) -> Result<u16, ring::Error> {
-            // submit probes the index before publication. Delay only an
-            // actual published TX whose hardware index remains pending, so
-            // the execute loop has already established its real deadline.
+            // Delay a submitted TX index after its deadline is established.
             let pause = if self.pending_index.is_some() {
                 core::mem::take(&mut self.response.lock().unwrap().pause_next_index_us)
             } else {
                 0
             };
             if pause != 0 {
-                std::thread::sleep(std::time::Duration::from_micros(pause));
+                crate::test_clock::advance(MODEL_CLOCK, pause);
             }
             self.polls += 1;
             if self.polls >= self.delay
@@ -1439,26 +1437,16 @@ pub(crate) mod tests {
             Arc::new(Mutex::new(Response::default())),
         )
     }
+    const MODEL_CLOCK: crate::Clock = crate::Clock {
+        ticks_per_microsecond: 1,
+    };
+
+    /// Synchronous device models share this test thread's virtual counter.
     pub(crate) fn model_clock() -> crate::Clock {
-        static CLOCK: std::sync::OnceLock<crate::Clock> = std::sync::OnceLock::new();
-        *CLOCK.get_or_init(|| {
-            // The model uses live RDTSC, so its Clock must convert the actual
-            // host ticks to microseconds. A fixture value of1 collapsed the
-            // real PCI3s deadline to about1ms and failed under scheduling load.
-            // Sample once for this local model, never per-command/suite-wide.
-            let ticks = crate::Clock::ticks();
-            let start = std::time::Instant::now();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            let elapsed = start.elapsed().as_nanos();
-            let elapsed_ticks = crate::Clock::ticks().wrapping_sub(ticks);
-            crate::Clock {
-                ticks_per_microsecond: u64::try_from(
-                    (u128::from(elapsed_ticks) * 1_000).div_ceil(elapsed),
-                )
-                .unwrap()
-                .max(1),
-            }
-        })
+        // Fixtures can transfer their controller to another owner, so the
+        // guard lasts until the test thread exits.
+        core::mem::forget(crate::test_clock::virtualize());
+        MODEL_CLOCK
     }
     pub(crate) fn setup_controlled(
         chip: Chip,
@@ -1467,7 +1455,8 @@ pub(crate) mod tests {
         delay: usize,
         response: Arc<Mutex<Response>>,
     ) -> (TestMailbox, ModelState, ModelState, ModelState) {
-        // One real modeled requester/domain has one shared IOVA namespace.
+        let clock = model_clock();
+        // One modeled requester/domain has one shared IOVA namespace.
         // Queue register states remain independent; all device DMA resolves
         // through this same registry and allocator.
         let memory = Arc::new(Mutex::new(Memory::default()));
@@ -1529,13 +1518,6 @@ pub(crate) mod tests {
             assert_ne!(bases[0], bases[2]);
             assert_ne!(bases[1], bases[2]);
         }
-        // The model answers on this thread, so a virtual counter expires the
-        // 3 s PCI deadline only after 30 000 unanswered polls. The guard lives
-        // as long as the test's own thread.
-        core::mem::forget(crate::test_clock::virtualize());
-        let clock = crate::Clock {
-            ticks_per_microsecond: 1,
-        };
         // SAFETY: all queues are exclusively owned parts of this one modeled chip;
         // all firmware events use real IOVAs.
         let m =

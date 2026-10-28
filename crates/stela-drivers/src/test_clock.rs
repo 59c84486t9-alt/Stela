@@ -45,6 +45,22 @@ pub(crate) fn virtualize() -> Guard {
     Guard(PhantomData)
 }
 
+/// Advance an active fixture clock by a calibrated interval.
+pub(crate) fn advance(clock: crate::Clock, microseconds: u64) {
+    let ticks = clock
+        .duration_ticks(microseconds)
+        .expect("fixture interval fits its calibrated clock");
+    STATE.with(|state| {
+        let mut current = state.get();
+        assert!(
+            current.guards != 0,
+            "advance requires a virtual clock guard"
+        );
+        current.now = current.now.wrapping_add(ticks);
+        state.set(current);
+    });
+}
+
 impl Drop for Guard {
     fn drop(&mut self) {
         STATE.with(|state| {

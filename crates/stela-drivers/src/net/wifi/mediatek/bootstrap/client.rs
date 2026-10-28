@@ -1808,10 +1808,7 @@ pub(crate) mod tests {
         b.extend_from_slice(body);
         b
     }
-    // Native firmware commands use real elapsed time; these frontend model steps
-    // are100ms, leaving auth/assoc within500ms and the next operation beyond an
-    // accepted Configure's500ms bound. The old microsecond ordinal fixture hid
-    // real native execution time and was not a coherent frontend clock.
+    // Frontend protocol steps are 100 ms apart.
     pub(crate) fn frontend_tick(step: u64) -> u64 {
         step * 100_000
     }
@@ -2232,9 +2229,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn actual_roc_expiring_during_native_packet_preparation_never_publishes() {
+    fn roc_expiry_before_packet_publication() {
         use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageSource, PinnedPages};
-        struct DelayedSource(AtomicUsize);
+        struct DelayedSource {
+            allocations: AtomicUsize,
+            clock: crate::Clock,
+        }
         impl PageSource for DelayedSource {
             fn allocate(
                 &self,
@@ -2242,23 +2242,25 @@ pub(crate) mod tests {
                 alignment: usize,
                 attribute: CacheAttribute,
             ) -> Result<PinnedPages, MemoryError> {
-                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
-                    // The actual source grant is1000ms. Delay only the first real
-                    // post-grant payload allocation; firmware/ROC processing and
-                    // mailbox allocations use their original source unchanged.
-                    std::thread::sleep(std::time::Duration::from_millis(1100));
+                if self.allocations.fetch_add(1, Ordering::Relaxed) == 0 {
+                    // Expire the 1000 ms grant during payload allocation.
+                    crate::test_clock::advance(self.clock, 1_100_000);
                 }
                 Source.allocate(bytes, alignment, attribute)
             }
         }
         let (mut driver, model) = setup();
+        let _clock = crate::test_clock::virtualize();
         let before = model.memory.lock().unwrap().mappings.len();
-        let source = DelayedSource(AtomicUsize::new(0));
+        let source = DelayedSource {
+            allocations: AtomicUsize::new(0),
+            clock: driver.state().controller.state().control.clock,
+        };
         assert!(matches!(
             driver.join(join(), profile(), 0, &source, &mut Policy(true)),
             Err(ClientError::GrantTimeout)
         ));
-        assert_eq!(source.0.load(Ordering::Relaxed), 2);
+        assert_eq!(source.allocations.load(Ordering::Relaxed), 2);
         assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
         assert_eq!(model.memory.lock().unwrap().mappings.len(), before);
         assert_eq!(driver.phase(), ClientPhase::Quarantined);

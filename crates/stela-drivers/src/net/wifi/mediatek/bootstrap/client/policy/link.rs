@@ -1803,18 +1803,25 @@ mod tests {
         assert!(!model.memory.lock().unwrap().mappings.is_empty());
     }
     #[test]
-    fn malformed_rx_cannot_starve_real_authentication_timeout_and_packet_retirement() {
+    fn malformed_rx_preserves_authentication_timeout() {
         let (mut link, model, join, bss, provider) = setup_link();
+        let _clock = crate::test_clock::virtualize();
         scan_join(&mut link, &model, join, bss);
         assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
-        // Use the retained calibrated clock and real elapsed time; no ordinal
-        // fixture timestamp or copied timer completion advances this exchange.
-        std::thread::sleep(std::time::Duration::from_millis(550));
+        let clock = link
+            .state()
+            .client
+            .client
+            .state()
+            .controller
+            .state()
+            .control
+            .clock;
+        crate::test_clock::advance(clock, 550_000);
         incoming(&model, &response(0xb1, &[0, 0, 2, 0, 0, 0]), None, false);
         assert!(link.service().is_err());
         assert_eq!(link.phase(), Phase::Joining);
-        // The rejected protocol-version frame did not prevent a real timed
-        // retry, fresh source ROC grant, or the first packet's actual release.
+        // The rejected frame still permits the timed retry and packet release.
         assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
         assert!(link.queues().notices > 0);
         link.service().unwrap();
