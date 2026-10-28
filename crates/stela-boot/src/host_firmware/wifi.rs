@@ -1,7 +1,8 @@
 //! Read-only Intel Wi-Fi variable observations before ExitBootServices. Only
 //! copied observations and immutable LOADER_DATA regions leave this module.
 use crate::{handoff::Region, paging::PAGE};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::net::wifi::intel::platform::{Observation, Stage, Variable};
 use uefi::{
     CString16, Status, boot,

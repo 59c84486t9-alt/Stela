@@ -199,7 +199,7 @@ impl Resources {
                     return Err("SMBIOS observation wire exceeds its resource budget");
                 }
                 let raw = view(self.smbios.region)?;
-                if <[u8; 32]>::from(sha2::Sha256::digest(raw)) != self.smbios.sha256 {
+                if <[u8; 32]>::from(stela_crypto::Sha256::digest(raw)) != self.smbios.sha256 {
                     return Err("SMBIOS observation wire digest mismatch");
                 }
                 Some(
@@ -233,9 +233,9 @@ impl Resources {
                     .map_err(|_| "SMBIOS wire source mismatch")?;
                 let entry = stela_drivers::firmware::smbios::entry(&raw[..length], format)
                     .map_err(|_| "SMBIOS wire source mismatch")?;
-                if <[u8; 32]>::from(sha2::Sha256::digest(&raw[..length]))
+                if <[u8; 32]>::from(stela_crypto::Sha256::digest(&raw[..length]))
                     != self.smbios.entry_sha256
-                    || <[u8; 32]>::from(sha2::Sha256::digest(&raw[length..]))
+                    || <[u8; 32]>::from(stela_crypto::Sha256::digest(&raw[length..]))
                         != self.smbios.table_sha256
                 {
                     return Err("SMBIOS observation component digest mismatch");
@@ -613,9 +613,9 @@ mod tests {
             },
             format: Some(host::Format::Smbios3),
             source_address: 0x3000,
-            sha256: sha2::Sha256::digest(&*raw).into(),
-            entry_sha256: sha2::Sha256::digest(&raw[..24]).into(),
-            table_sha256: sha2::Sha256::digest(&raw[24..]).into(),
+            sha256: stela_crypto::Sha256::digest(&*raw).into(),
+            entry_sha256: stela_crypto::Sha256::digest(&raw[..24]).into(),
+            table_sha256: stela_crypto::Sha256::digest(&raw[24..]).into(),
         };
         let copied = resources;
         // SAFETY: the static complete fixture models the permanent new alias.

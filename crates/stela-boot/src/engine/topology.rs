@@ -491,7 +491,8 @@ impl<'a> Source<'a> {
         profile: CpuProfile,
         host: &[native::CoreClass],
     ) -> Result<Prepared<'s>, String> {
-        use sha2::{Digest, Sha256};
+        use sha2::Digest;
+        use stela_crypto::Sha256;
         let resources = self.resources.resources();
         if resources.slots.len() != roster.cores().len() {
             return Err("assigned source and actual started worker cardinality differ".into());
@@ -776,7 +777,8 @@ mod tests {
     use super::*;
     use alloc::vec;
     use core::cell::Cell;
-    use sha2::{Digest, Sha256};
+    use sha2::Digest;
+    use stela_crypto::Sha256;
     use stela_loader::apple_device_tree::Node;
     use {
         stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::Caches,

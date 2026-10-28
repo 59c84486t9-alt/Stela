@@ -24,7 +24,8 @@ use crate::{
     ui::{self, Canvas},
 };
 use alloc::{format, string::String, vec, vec::Vec};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use uefi::{
     Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},

@@ -3,7 +3,8 @@
 use super::bundle::Bytes;
 use crate::{firmware, handoff::Region, output, paging::PAGE};
 use alloc::{boxed::Box, format, string::String};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::block::{BlockDevice, Shared};
 use stela_runtime::{
     pc::{boot_log, fat32::Fat32, fdr_store, gpt::Guid},

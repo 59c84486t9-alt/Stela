@@ -6,7 +6,8 @@ mod clpc;
 #[path = "source/cpus.rs"]
 mod cpus;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle::ORIGINAL_DEVICE_TREE_FILE};
 use {
     stela_contracts::Chip, stela_formats::boot_bundle::Manifest,

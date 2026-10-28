@@ -4,7 +4,8 @@
 //! DSP0134 §5.2 authorize reading their published tables. Never use this after
 //! root replacement/EBS, or for undescribed/reserved/MMIO/protected memory.
 use crate::{handoff::Region, paging::PAGE};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::firmware::smbios::{self, Error, Format, MAX_ENTRY_BYTES};
 use uefi::{
     boot::{self, MemoryType},

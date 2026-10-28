@@ -12,7 +12,8 @@ use core::{
     ops::Range,
     sync::atomic::{AtomicU64, Ordering},
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::{
     Clock,
     bus::{

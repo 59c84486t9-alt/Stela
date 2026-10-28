@@ -1,5 +1,6 @@
 //! HPET source candidate. This parser grants no mapping or hardware ownership.
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use stela_crypto::Sha256;
 use stela_drivers::{bus::mmio::owned::PhysicalSpan, platform::work::WorkError};
 
 const BLOCK_BYTES: u64 = 1024;
