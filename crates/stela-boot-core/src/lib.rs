@@ -12,6 +12,7 @@ pub mod early_fault;
 pub mod entropy;
 pub mod firmware_state;
 pub mod madt;
+pub mod memory_budget;
 pub mod memory_types;
 pub mod options;
 pub mod paging_controls;

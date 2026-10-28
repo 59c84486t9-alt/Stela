@@ -18,6 +18,7 @@ use core::{arch::asm, panic::PanicInfo};
 use uefi::{
     Status,
     boot::{AllocateType, MemoryType},
+    mem::memory_map::MemoryMap,
 };
 mod apic;
 #[cfg(feature = "diagnostics")]
@@ -65,10 +66,25 @@ mod tables;
 mod ui;
 #[global_allocator]
 pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new();
-/// The heap until `engine::entry` re-initializes the allocator over the
-/// engine's own: settings, startup choices, the storage drivers' discovery,
-/// install mode's buffers and the translation pack while it is read.
-const HEAP_BYTES: usize = 384 * 1024 * 1024;
+/// The live firmware keeps its boot-service pages. Budget the first heap from
+/// the conventional pages still available after the pristine image copy.
+fn initial_heap_bytes() -> Result<usize, &'static str> {
+    let map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
+        .map_err(|_| "firmware memory map unavailable for the boot heap")?;
+    let free = map
+        .entries()
+        .filter(|entry| entry.ty == MemoryType::CONVENTIONAL)
+        .try_fold(0u64, |total, entry| {
+            entry
+                .page_count
+                .checked_mul(paging::PAGE as u64)
+                .and_then(|bytes| total.checked_add(bytes))
+        })
+        .ok_or("firmware memory map overflows the boot heap budget")?;
+    stela_boot_core::memory_budget::bootstrap_heap(free)
+        .map(|bytes| bytes as usize)
+        .map_err(|_| "not enough free firmware RAM for the boot heap budget")
+}
 /// What this build reads, for `stela setup` to check before installing it
 /// (`stela_loader::mount_interface`).
 #[used]
@@ -88,18 +104,19 @@ fn main() -> Status {
     core::hint::black_box(&HOST_FIRMWARE_INTERFACE);
     serial::initialize();
     output::arguments(format_args!("STELA UEFI MOUNT\n"));
+    let heap_bytes = initial_heap_bytes().unwrap_or_else(|error| output::fatal(error));
     let heap = uefi::boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
-        HEAP_BYTES / paging::PAGE,
+        heap_bytes / paging::PAGE,
     )
     .unwrap_or_else(|_| output::fatal("firmware has no memory for the heap"));
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
-    unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
+    unsafe { ALLOCATOR.initialize(heap.as_ptr(), heap_bytes) };
     // SAFETY: the registered heap is the exact reserved WB identity extent.
     unsafe {
-        native_memory::initialize(heap.as_ptr() as usize, heap.as_ptr() as u64, HEAP_BYTES, 0)
+        native_memory::initialize(heap.as_ptr() as usize, heap.as_ptr() as u64, heap_bytes, 0)
     };
     status::set_clock(firmware::tsc_hz());
     firmware::start_ticker();
