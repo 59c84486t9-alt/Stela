@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+// Copyright (C) 2007-2014, 2018-2026 Intel Corporation
+// Copyright (C) 2013-2015 Intel Mobile Communications GmbH
+// Copyright (C) 2016-2017 Intel Deutschland GmbH
+use super::*;
+
+#[test]
+fn rx_recycling_publishes_initial_tail_and_sustains_actual_command_ring_wraps() {
+    exercise_rx_recycling(None);
+}
+
+#[test]
+#[ignore = "requires freshly built unchanged Intel RX restock oracle"]
+fn rx_recycling_unchanged_source_free_producer_and_vid_oracle() {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_RX_RECYCLE_ORACLE").unwrap()).unwrap();
+    assert_eq!(
+        std::format!("{:x}", Sha256::digest(&bytes)),
+        "6b4528a5d64209cc87aa2976e58fd0c358f76a15642557e263f10e830af8732d"
+    );
+    exercise_rx_recycling(Some(core::str::from_utf8(&bytes).unwrap()));
+}
+
+#[test]
+fn rx_recycling_waits_for_actual_target_slot_completion_when_payloads_complete_out_of_order() {
+    let bytes = firmware_bytes();
+    let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
+    let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+    let source = Source::default();
+    let domain = Arc::new(Domain::default());
+    let state = Arc::new(Mutex::new(ModelState::default()));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let boot = start(&catalog, &source, &domain, &state, &drops);
+    let mut boot = command_ready(boot, &empty, &source, &domain, &state);
+    boot.replenish_completed_receive().unwrap();
+    for (index, vid, expected_return, expected_wait) in
+        [(1, 3, 1, false), (2, 4, 0, true), (3, 2, 2, false)]
+    {
+        let ticket = unsafe { boot.submit_command(command_id(), &[], &source) }.unwrap();
+        complete_from_free_slot(
+            &boot,
+            &domain,
+            index,
+            vid,
+            vid - 1,
+            &command_packet(command_id(), ticket.sequence(), &[]),
+        );
+        assert!(matches!(
+            boot.poll_command(&ticket).unwrap(),
+            CommandProgress::Completed(_)
+        ));
+        let r = boot.replenish_completed_receive().unwrap();
+        assert_eq!(r.returned, expected_return);
+        assert_eq!(r.waiting_for_completed_slot, expected_wait);
+        assert_eq!(r.published, 0);
+    }
+    boot.stop().unwrap();
+    assert!(domain.records.lock().unwrap().live.is_empty());
+}
+
+#[test]
+fn rx_recycling_visibility_and_producer_faults_keep_real_dma_and_requester() {
+    for failure in 0..4 {
+        let bytes = firmware_bytes();
+        let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
+        let empty = resources::Catalog::from_handoff(vec![]).unwrap();
+        let source = Source::default();
+        let domain = Arc::new(Domain::default());
+        let state = Arc::new(Mutex::new(ModelState::default()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let boot = start(&catalog, &source, &domain, &state, &drops);
+        let mut boot = command_ready(boot, &empty, &source, &domain, &state);
+        if failure == 3 {
+            boot.replenish_completed_receive().unwrap();
+            let ticket = unsafe { boot.submit_command(command_id(), &[], &source) }.unwrap();
+            complete(
+                &boot,
+                &domain,
+                1,
+                2,
+                &command_packet(command_id(), ticket.sequence(), &[]),
+            );
+            assert!(matches!(
+                boot.poll_command(&ticket).unwrap(),
+                CommandProgress::Completed(_)
+            ));
+            let mut r = domain.records.lock().unwrap();
+            r.cpu_sync_fail = Some(r.cpu_syncs);
+        } else if failure < 2 {
+            let mut r = domain.records.lock().unwrap();
+            r.sync_fail = Some(r.syncs + failure);
+        } else {
+            let mut s = state.lock().unwrap();
+            s.fail = Some(s.ops.len());
+        }
+        let live = domain.records.lock().unwrap().live.len();
+        assert!(boot.replenish_completed_receive().is_err());
+        assert_eq!(boot.state, State::Poisoned);
+        assert_eq!(domain.records.lock().unwrap().live.len(), live);
+        {
+            let mut s = state.lock().unwrap();
+            s.fail = None;
+            s.stop_ack = false;
+        }
+        assert!(boot.stop().is_err());
+        drop(boot);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(domain.records.lock().unwrap().live.len(), live);
+    }
+}

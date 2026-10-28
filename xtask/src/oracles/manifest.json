@@ -1390,7 +1390,7 @@
   {
     "package": "stela-drivers",
     "test": "cold_radio_actual_images_run_source_prefix_with_distinct_offload_and_latencies",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/cold_radio.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1400,7 +1400,7 @@
   {
     "package": "stela-drivers",
     "test": "unified_actual_images_drive_real_command_and_notification_epoch",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/nvm_completion.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1410,7 +1410,7 @@
   {
     "package": "stela-drivers",
     "test": "rx_recycling_unchanged_source_free_producer_and_vid_oracle",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/receive_recycling.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_RX_RECYCLE_ORACLE"
@@ -1420,7 +1420,7 @@
   {
     "package": "stela-drivers",
     "test": "actual_ax210_ucode_external_pnvm_source_dma_doorbell_and_notification",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1430,7 +1430,7 @@
   {
     "package": "stela-drivers",
     "test": "actual_ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1440,7 +1440,7 @@
   {
     "package": "stela-drivers",
     "test": "actual_ax200_image_publishes_owned_context_and_consumes_completed_alive",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/firmware_inputs.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1450,7 +1450,7 @@
   {
     "package": "stela-drivers",
     "test": "lari_actual_images_drive_lari6_without_extension_and_lari8_with_extension",
-    "source": "crates/stela-drivers/src/net/wifi/intel/boot.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/lari_policy.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
