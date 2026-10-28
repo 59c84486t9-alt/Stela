@@ -379,6 +379,13 @@ pub unsafe fn open(
     for (location, error) in &devices.platform_failures {
         output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
     }
+    match &devices.regulatory {
+        Some(Ok(_)) => output::arguments(format_args!("HOST Wi-Fi regulatory database loaded\n")),
+        Some(Err(error)) => output::arguments(format_args!(
+            "HOST Wi-Fi regulatory database missing ({error:?}): the Wi-Fi adapters stay off\n"
+        )),
+        None => {}
+    }
     for (address, warning) in &devices.warnings {
         output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
     }
