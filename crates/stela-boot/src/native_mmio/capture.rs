@@ -63,6 +63,9 @@ impl Wire {
             && matches!(self.hpet_bytes, 0 | 56)
             && matches!(self.levels, 4 | 5)
     }
+    pub(crate) fn levels(&self) -> u32 {
+        self.levels
+    }
     pub(crate) fn madt(&self) -> &[u8] {
         &self.madt[..self.madt_bytes]
     }
@@ -81,9 +84,20 @@ impl Wire {
     pub(super) fn memory(&self) -> &[Memory] {
         &self.memory[..self.memory_count]
     }
-    pub(super) fn table_owned(&self, physical: u64) -> bool {
+    pub(crate) fn table_owned(&self, physical: u64) -> bool {
         physical.is_multiple_of(PAGE)
             && physical.checked_add(PAGE).is_some_and(|end| {
+                self.memory()
+                    .iter()
+                    .any(|r| r.kind == 2 && r.start <= physical && end <= r.end)
+            })
+    }
+    /// Classification of this actual sealed final map; not an allocation grant.
+    pub(crate) fn loader_ram(&self, physical: u64, bytes: u64) -> bool {
+        physical.is_multiple_of(PAGE)
+            && bytes != 0
+            && bytes.is_multiple_of(PAGE)
+            && physical.checked_add(bytes).is_some_and(|end| {
                 self.memory()
                     .iter()
                     .any(|r| r.kind == 2 && r.start <= physical && end <= r.end)

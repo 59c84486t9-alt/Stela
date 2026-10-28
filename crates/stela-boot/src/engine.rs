@@ -16,6 +16,7 @@ pub(crate) mod host;
 mod input;
 pub(crate) mod install;
 pub(crate) mod interrupts;
+mod kernel_work;
 mod network;
 pub(crate) mod nor;
 mod parallel;
@@ -807,6 +808,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         acpi: host_acpi,
         mmio: native_mmio,
         remappers,
+        _work: _kernel_work,
     } = start_platform(handoff, &mut host_owner);
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
@@ -1794,9 +1796,12 @@ struct Platform {
     acpi: Option<&'static aml::HostAcpi>,
     mmio: Option<crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
+    /// Affine runtime/source remain retained through paused/quarantined frames.
+    /// Its producer services require their own complete admission graph.
+    _work: Option<&'static kernel_work::KernelWork>,
 }
 
-fn start_platform(handoff: &Handoff, host_owner: &mut host::HostOwner) -> Platform {
+fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -> Platform {
     // The firmware's ACPI namespace, loaded before the host devices start so
     // their services can consult it; the host's power transitions run it.
     let host_acpi = aml::HostAcpi::start(
@@ -1851,10 +1856,25 @@ fn start_platform(handoff: &Handoff, host_owner: &mut host::HostOwner) -> Platfo
         },
         _ => remapping::Remappers::none(),
     };
+    // SAFETY: actual validated BSP handoff, before AP/driver producers.
+    let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner) } {
+        Ok(work) => {
+            #[cfg(feature = "diagnostics")]
+            output::arguments(format_args!(
+                "NATIVE WORK owned stacks=16 foreground=verified services=unpublished\n"
+            ));
+            Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
+        }
+        Err(error) => {
+            output::arguments(format_args!("NATIVE WORK unavailable: {error}\n"));
+            None
+        }
+    };
     Platform {
         acpi: host_acpi,
         mmio: native_mmio,
         remappers: alloc::boxed::Box::leak(alloc::boxed::Box::new(remappers)),
+        _work: work,
     }
 }
 
