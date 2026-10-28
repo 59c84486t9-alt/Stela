@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn failed_reads_and_rejected_writes_preserve_owners_and_refuse_authorization() {
+fn programming_faults_revoke_authorization() {
     for (offset, width) in [(COMMAND, 2), (0x52, 2), (0x54, 4), (0x58, 2)] {
         let (mut helper, model) = attach(fixture(false, false));
         model.lock().unwrap().fail_read = Some((offset, width));
@@ -28,7 +28,7 @@ fn failed_reads_and_rejected_writes_preserve_owners_and_refuse_authorization() {
     }
 }
 #[test]
-fn failed_enable_or_mask_does_not_release_the_actual_config_or_root() {
+fn enable_and_mask_faults_retain_owners() {
     let f = fixture(true, true);
     let cd = f.config_drops.clone();
     let rd = f.root_drops.clone();
@@ -51,7 +51,7 @@ fn failed_enable_or_mask_does_not_release_the_actual_config_or_root() {
     assert!(weak.upgrade().is_some());
 }
 #[test]
-fn enable_write_without_read_ack_quarantines_even_if_hardware_enabled() {
+fn unacknowledged_enable_quarantines() {
     let f = fixture(false, false);
     let config_drops = f.config_drops.clone();
     let root_drops = f.root_drops.clone();
@@ -68,7 +68,7 @@ fn enable_write_without_read_ack_quarantines_even_if_hardware_enabled() {
     assert_eq!(root_drops.load(Ordering::Relaxed), 0);
 }
 #[test]
-fn changed_identity_layout_or_message_cannot_reenable_a_stale_route() {
+fn changed_route_revokes_authorization() {
     for changed in [0, 0x52, 0x54] {
         let (mut helper, model) = attach(fixture(false, false));
         unsafe { helper.program(MESSAGE) }.unwrap();

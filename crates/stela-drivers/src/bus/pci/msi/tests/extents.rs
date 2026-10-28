@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn supported_standard_extents_can_precede_a_disjoint_real_msi() {
+fn standard_capability_extents() {
     for (id, flags, registers) in [
         (1u8, 3, 0),
         (2, 0, 0),
@@ -38,7 +38,7 @@ fn supported_standard_extents_can_precede_a_disjoint_real_msi() {
     }
 }
 #[test]
-fn adjacent_disjoint_capabilities_remain_valid_and_unknown_versions_refuse() {
+fn adjacent_extents_and_unknown_versions() {
     for reverse in [false, true] {
         let f = fixture(false, false);
         {

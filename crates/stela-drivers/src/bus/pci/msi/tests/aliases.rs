@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn pm_body_cannot_alias_msi_in_either_list_order_before_any_write() {
+fn pm_body_alias_preflight() {
     for reverse in [false, true] {
         let f = fixture(false, false);
         {
@@ -29,7 +29,7 @@ fn pm_body_cannot_alias_msi_in_either_list_order_before_any_write() {
     }
 }
 #[test]
-fn known_extents_and_unknown_headers_reject_bidirectional_aliases() {
+fn body_and_header_alias_preflight() {
     // All these known bodies can contain an aligned fake MSI header.
     for (id, flags) in [
         (1u8, 3),
@@ -109,7 +109,7 @@ fn known_extents_and_unknown_headers_reject_bidirectional_aliases() {
     }
 }
 #[test]
-fn overlapping_non_msi_bodies_also_refuse_before_any_mutation() {
+fn non_msi_alias_preflight() {
     for reverse in [false, true] {
         let f = fixture(false, false);
         {

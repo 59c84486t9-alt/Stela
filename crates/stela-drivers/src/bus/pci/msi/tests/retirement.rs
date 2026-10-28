@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn terminal_stop_preserves_original_owners_and_releases_without_powered_config_access() {
+fn terminal_stop_releases_original_owners() {
     for wide in [false, true] {
         for mask in [false, true] {
             let f = fixture(wide, mask);
@@ -56,7 +56,7 @@ fn terminal_stop_preserves_original_owners_and_releases_without_powered_config_a
     }
 }
 #[test]
-fn every_before_after_disable_access_fault_is_terminal_and_retains_actual_epoch() {
+fn retirement_access_faults_retain_owners() {
     for wide in [false, true] {
         for mask in [false, true] {
             let (mut baseline, model) = attach(fixture(wide, mask));
@@ -102,7 +102,7 @@ fn every_before_after_disable_access_fault_is_terminal_and_retains_actual_epoch(
     }
 }
 #[test]
-fn unwinding_after_a_real_stop_effect_cannot_replay_or_release_the_original_owner() {
+fn stop_unwind_prevents_replay_and_release() {
     let f = fixture(true, true);
     let configs = f.config_drops.clone();
     let roots = f.root_drops.clone();
@@ -136,7 +136,7 @@ fn unwinding_after_a_real_stop_effect_cannot_replay_or_release_the_original_owne
 }
 
 #[test]
-fn concrete_owned_config_epoch_survives_terminal_transfer_and_uncertain_abandonment() {
+fn owned_mapping_retirement_and_abandonment() {
     use crate::bus::pci::owned::tests::fixture as owned_fixture;
     for abandon in [false, true] {
         let address = Address {
@@ -199,7 +199,7 @@ fn concrete_owned_config_epoch_survives_terminal_transfer_and_uncertain_abandonm
 }
 
 #[test]
-fn an_uncertain_terminal_device_stop_cannot_retry_or_release_actual_resources_on_drop() {
+fn failed_stop_retains_owners() {
     let f = fixture(true, true);
     let configs = f.config_drops.clone();
     let roots = f.root_drops.clone();

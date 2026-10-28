@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn real_layouts_program_while_disabled_with_narrow_writes_and_preserved_bits() {
+fn programming_order_and_register_widths() {
     for wide in [false, true] {
         for mask in [false, true] {
             let (mut helper, model) = attach(fixture(wide, mask));
@@ -72,7 +72,7 @@ fn real_layouts_program_while_disabled_with_narrow_writes_and_preserved_bits() {
     }
 }
 #[test]
-fn valid_all_masked_bitmap_preserves_every_other_vector_bit() {
+fn mask_bitmap_preserves_other_vectors() {
     let f = fixture(true, true);
     f.model.lock().unwrap().put(0x60, 4, u32::MAX);
     let (mut helper, model) = attach(f);
@@ -85,7 +85,7 @@ fn valid_all_masked_bitmap_preserves_every_other_vector_bit() {
     drop(unsafe { helper.release() }.unwrap());
 }
 #[test]
-fn invalid_messages_and_unprogrammed_unmask_never_enable_delivery() {
+fn message_and_authorization_preflight() {
     let (mut helper, model) = attach(fixture(false, false));
     assert_eq!(unsafe { helper.unmask() }, Err(MsiError::NotProgrammed));
     for message in [

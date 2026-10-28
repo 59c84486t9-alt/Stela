@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn malformed_duplicate_overlapping_or_live_capabilities_are_refused_without_writes() {
+fn capability_admission_preflight() {
     for case in 0..11 {
         let f = fixture(false, false);
         let expected = {
@@ -81,7 +81,7 @@ fn malformed_duplicate_overlapping_or_live_capabilities_are_refused_without_writ
     }
 }
 #[test]
-fn all_ones_admission_reads_do_not_mutate_or_consume_the_returned_owners() {
+fn failed_admission_returns_original_owners() {
     for (offset, width) in [(0, 4), (STATUS, 2), (0x50, 2), (0x52, 2)] {
         let f = fixture(false, false);
         f.model.lock().unwrap().fail_read = Some((offset, width));
@@ -106,7 +106,7 @@ fn all_ones_admission_reads_do_not_mutate_or_consume_the_returned_owners() {
     }
 }
 #[test]
-fn each_real_capability_layout_has_a_checked_full_config_boundary() {
+fn layout_configuration_bounds() {
     for (wide, mask, offset, length) in [
         (false, false, 0xf4u16, 10usize),
         (true, false, 0xf0, 14),
