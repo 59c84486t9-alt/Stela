@@ -207,6 +207,19 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.carrier(),
         }
     }
+    fn signals(&self) -> bool {
+        match self {
+            Self::Virtio(device) => device.signals(),
+            Self::Igc(device) => device.signals(),
+            Self::E1000e(device) => device.signals(),
+            Self::Igb(device) => device.signals(),
+            Self::Realtek(device) => device.signals(),
+            Self::Usb(device) => device.signals(),
+            Self::UsbVendor(device) => device.signals(),
+            Self::Tg3(device) => device.signals(),
+            Self::Aqtion(device) => device.signals(),
+        }
+    }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         match self {
             Self::Virtio(device) => device.transmit(frame),
