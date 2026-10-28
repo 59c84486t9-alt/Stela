@@ -1,0 +1,495 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! Sparse MSI-X vectors, replay guards and live peer preservation.
+use super::*;
+
+#[test]
+fn legacy_wrappers_match_complete_original_owner_access_traces() {
+    for vectors in [1, 2, 65, 2048] {
+        let (mut owner, m) = attach(fixture(vectors));
+        let f = fixture(vectors);
+        let (function, retained, bars) = f.owners;
+        let mut old = match unsafe { original::LegacyReference::new(function, retained, bars) } {
+            Ok(owner) => owner,
+            Err(_) => panic!("original attach"),
+        };
+        f.model.lock().unwrap().events.clear();
+        let other = f.model;
+        macro_rules! compare {
+            ($new:expr, $old:expr) => {{
+                assert_eq!($new, $old);
+                let a = m.lock().unwrap();
+                let b = other.lock().unwrap();
+                assert_eq!(a.events, b.events);
+                assert_eq!(a.config, b.config);
+                assert_eq!(a.memory, b.memory);
+                assert_eq!(a.emitted, b.emitted);
+            }};
+        }
+        compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
+        let invalid = MsiMessage {
+            address: 3,
+            data: 0,
+        };
+        compare!(unsafe { owner.program(invalid) }, unsafe {
+            old.program(invalid)
+        });
+        compare!(unsafe { owner.program(MESSAGE) }, unsafe {
+            old.program(MESSAGE)
+        });
+        for model in [&m, &other] {
+            let mut model = model.lock().unwrap();
+            model.callback_published = true;
+            model.pending = true;
+        }
+        compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
+        compare!(owner.mask(), old.mask());
+        compare!(unsafe { owner.program(message(1)) }, unsafe {
+            old.program(message(1))
+        });
+        compare!(owner.disable(), old.disable());
+        assert_eq!(owner.vectors(), old.vectors());
+        assert_eq!(owner.needs_reset(), old.needs_reset());
+        drop(unsafe { owner.release() }.unwrap());
+        drop(unsafe { old.release() }.unwrap());
+        assert_eq!(owner.address(), old.address());
+        compare!(unsafe { owner.unmask() }, unsafe { old.unmask() });
+        compare!(unsafe { owner.program(MESSAGE) }, unsafe {
+            old.program(MESSAGE)
+        });
+        assert_eq!(owner.needs_reset(), old.needs_reset());
+        compare!(owner.mask(), old.mask());
+        assert_eq!(m.lock().unwrap().events, other.lock().unwrap().events);
+    }
+}
+
+#[test]
+fn indexed_sparse_boundary_payloads_and_simultaneous_pending_delivery() {
+    for vectors in [1, 2, 65, 66, 2048] {
+        let (mut owner, m) = attach(fixture(vectors));
+        let mut indices: Vec<u16> = [0, 1, 63, 64, 65, 2047]
+            .into_iter()
+            .filter(|index| *index < vectors)
+            .collect();
+        indices.push(vectors - 1);
+        indices.sort_unstable();
+        indices.dedup();
+        let before = m.lock().unwrap().memory.clone();
+        for &index in &indices {
+            unsafe { owner.program_indexed(index, message(index)) }.unwrap();
+        }
+        {
+            let mut m = m.lock().unwrap();
+            selected_masks(&m, &[]);
+            for index in 0..vectors {
+                let word = (TABLE / 4) as usize + usize::from(index) * 4;
+                if indices.contains(&index) {
+                    let expected = message(index);
+                    assert_eq!(m.memory[word], expected.address as u32);
+                    assert_eq!(m.memory[word + 1], (expected.address >> 32) as u32);
+                    assert_eq!(m.memory[word + 2], expected.data);
+                    m.publish(index);
+                    m.queue(index);
+                } else {
+                    assert_eq!(m.memory[word..word + 3], before[word..word + 3]);
+                }
+            }
+            assert!(m.emitted.is_empty());
+        }
+        unsafe { owner.unmask_indices(&indices) }.unwrap();
+        {
+            let m = m.lock().unwrap();
+            selected_masks(&m, &indices);
+            assert_eq!(m.delivered_entries, indices);
+            for &index in &indices {
+                assert_eq!(
+                    m.routes[usize::from(index)]
+                        .as_ref()
+                        .unwrap()
+                        .calls
+                        .load(Ordering::Relaxed),
+                    1
+                );
+            }
+            assert_eq!(
+                m.emitted,
+                indices.iter().copied().map(message).collect::<Vec<_>>()
+            );
+            assert!(
+                m.memory
+                    [(PBA / 4) as usize..(PBA / 4) as usize + usize::from(vectors).div_ceil(32)]
+                    .iter()
+                    .all(|word| *word == 0)
+            );
+            assert!(
+                !m.events
+                    .iter()
+                    .any(|event| matches!(event, Event::BarWrite(offset, _) if *offset >= PBA))
+            );
+            assert!(
+                matches!(m.events.iter().rev().find(|event| matches!(event, Event::ConfigWrite(..))), Some(Event::ConfigWrite(0x52, control)) if control & 0xc000 == 0x8000)
+            );
+        }
+        drop(unsafe { owner.release() }.unwrap());
+    }
+}
+
+#[test]
+fn indexed_program_preserves_live_peers_and_real_pending_bits() {
+    let (mut owner, m) = attach(fixture(66));
+    for index in [0, 63, 64] {
+        unsafe { owner.program_indexed(index, message(index)) }.unwrap();
+        m.lock().unwrap().publish(index);
+    }
+    unsafe { owner.unmask_indices(&[0, 63, 64]) }.unwrap();
+    let before = m.lock().unwrap().memory.clone();
+    {
+        let mut m = m.lock().unwrap();
+        m.queue_on_guard.extend([0, 63, 64, 65]);
+        // Target 65 has no published callback yet: it must never deliver while
+        // its new message is being installed or peer delivery is restored.
+    }
+    let start = m.lock().unwrap().events.len();
+    unsafe { owner.program_indexed(65, message(65)) }.unwrap();
+    {
+        let m = m.lock().unwrap();
+        selected_masks(&m, &[0, 63, 64]);
+        assert_eq!(m.delivered_entries, [0, 63, 64]);
+        assert_eq!(m.emitted, [message(0), message(63), message(64)]);
+        for index in [0u16, 63, 64] {
+            assert_eq!(
+                m.routes[usize::from(index)]
+                    .as_ref()
+                    .unwrap()
+                    .calls
+                    .load(Ordering::Relaxed),
+                1
+            );
+            let word = (TABLE / 4) as usize + usize::from(index) * 4;
+            assert_eq!(m.memory[word..word + 3], before[word..word + 3]);
+        }
+        assert_eq!(m.memory[(PBA / 4) as usize + 2], 2); // pending entry65 survives
+        assert!(m.pending_entries[65]);
+        assert!(m.events[start..].iter().all(|event| match event {
+            Event::BarWrite(offset, _) => (TABLE + 65 * 16..TABLE + 66 * 16).contains(offset),
+            _ => true,
+        }));
+    }
+    m.lock().unwrap().publish(65);
+    unsafe { owner.unmask_indices(&[0, 63, 64, 65]) }.unwrap();
+    assert_eq!(m.lock().unwrap().delivered_entries, [0, 63, 64, 65]);
+    owner.mask().unwrap();
+    unsafe { owner.program_indexed(65, message(65)) }.unwrap();
+    assert_eq!(m.lock().unwrap().get(0x52, 2) & 0xc000, 0xc000);
+    selected_masks(&m.lock().unwrap(), &[]);
+    // Retarget a formerly live entry under an explicitly modeled stopped target;
+    // the unrelated live peer remains enabled; no stale target request exists.
+    unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
+    unsafe { owner.program_indexed(64, message(64)) }.unwrap();
+    selected_masks(&m.lock().unwrap(), &[0]);
+    drop(unsafe { owner.release() }.unwrap());
+}
+
+#[test]
+fn mixed_legacy_calls_invalidate_nonzero_replay_without_reviving_old_routes() {
+    for use_program in [false, true] {
+        let (mut owner, m) = attach(fixture(65));
+        for index in [0, 64] {
+            unsafe { owner.program_indexed(index, message(index)) }.unwrap();
+            m.lock().unwrap().publish(index);
+        }
+        unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
+        if use_program {
+            unsafe { owner.program(MESSAGE) }.unwrap();
+            selected_masks(&m.lock().unwrap(), &[]);
+            unsafe { owner.unmask() }.unwrap();
+        } else {
+            unsafe { owner.unmask() }.unwrap();
+        }
+        selected_masks(&m.lock().unwrap(), &[0]);
+        let events = m.lock().unwrap().events.clone();
+        assert_eq!(
+            unsafe { owner.unmask_indices(&[0, 64]) },
+            Err(Error::NotProgrammed)
+        );
+        assert_eq!(m.lock().unwrap().events, events);
+        assert!(!owner.needs_reset());
+        unsafe { owner.program_indexed(64, message(64)) }.unwrap();
+        unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
+        selected_masks(&m.lock().unwrap(), &[0, 64]);
+        drop(unsafe { owner.release() }.unwrap());
+    }
+}
+
+#[test]
+fn invalid_index_selection_message_and_offset_leave_valid_state_unchanged() {
+    let (mut owner, m) = attach(fixture(65));
+    for index in [0, 64] {
+        unsafe { owner.program_indexed(index, message(index)) }.unwrap();
+        m.lock().unwrap().publish(index);
+    }
+    unsafe { owner.unmask_indices(&[0, 64]) }.unwrap();
+    let memory = m.lock().unwrap().memory.clone();
+    let config = m.lock().unwrap().config;
+    let events = m.lock().unwrap().events.clone();
+    for indices in [&[][..], &[0, 0][..], &[65][..], &[0, 1][..]] {
+        assert!(unsafe { owner.unmask_indices(indices) }.is_err());
+    }
+    assert_eq!(
+        unsafe { owner.program_indexed(65, message(1)) },
+        Err(Error::InvalidIndex)
+    );
+    assert_eq!(
+        unsafe { owner.program_indexed(u16::MAX, message(1)) },
+        Err(Error::InvalidIndex)
+    );
+    assert_eq!(
+        unsafe {
+            owner.program(MsiMessage {
+                address: 3,
+                data: 0,
+            })
+        },
+        Err(Error::InvalidMessage)
+    );
+    assert_eq!(
+        unsafe {
+            owner.program_indexed(
+                64,
+                MsiMessage {
+                    address: 1,
+                    data: 0,
+                },
+            )
+        },
+        Err(Error::InvalidMessage)
+    );
+    assert!(!owner.needs_reset());
+    assert_eq!(m.lock().unwrap().memory, memory);
+    assert_eq!(m.lock().unwrap().config, config);
+    assert_eq!(m.lock().unwrap().events, events);
+    selected_masks(&m.lock().unwrap(), &[0, 64]);
+    // The checked arithmetic also refuses an impossible internal corrupt layout
+    // without touching MMIO. This fixture does not admit such a hardware layout.
+    let saved = owner.layout;
+    owner.layout.table_offset = u64::MAX - 7;
+    assert_eq!(
+        unsafe { owner.program_indexed(64, message(1)) },
+        Err(Error::InvalidTable)
+    );
+    owner.layout = saved;
+    assert_eq!(m.lock().unwrap().events, events);
+    drop(unsafe { owner.release() }.unwrap());
+}
+
+#[test]
+fn every_indexed_access_failure_before_or_after_effect_poisons_all_entries() {
+    let (mut baseline, m) = attach(fixture(3));
+    for index in 0..3 {
+        m.lock().unwrap().publish(index);
+    }
+    m.lock().unwrap().queue_on_guard.extend([0, 1]);
+    indexed_sequence(&mut baseline).unwrap();
+    let count = m.lock().unwrap().events.len();
+    drop(unsafe { baseline.release() }.unwrap());
+    for after_effect in [false, true] {
+        for failure in 1..=count {
+            let f = fixture(3);
+            let drops = [
+                f.config_drops.clone(),
+                f.root_drops.clone(),
+                f.bar_drops.clone(),
+            ];
+            let (mut owner, m) = attach(f);
+            {
+                let mut m = m.lock().unwrap();
+                m.fail = Some(failure);
+                m.after_effect = after_effect;
+                for index in 0..3 {
+                    m.publish(index);
+                }
+                m.queue_on_guard.extend([0, 1]);
+            }
+            assert!(
+                indexed_sequence(&mut owner).is_err(),
+                "unreached failure {failure}"
+            );
+            assert!(owner.needs_reset());
+            assert!(owner.message.is_none() && owner.messages.iter().all(Option::is_none));
+            for index in 0..3 {
+                assert!(!owner.live.contains(index));
+            }
+            let events = m.lock().unwrap().events.len();
+            assert_eq!(
+                unsafe { owner.unmask_indices(&[0, 1]) },
+                Err(Error::Quarantined)
+            );
+            assert_eq!(
+                unsafe { owner.program_indexed(2, MESSAGE) },
+                Err(Error::Quarantined)
+            );
+            assert_eq!(unsafe { owner.release() }.err(), Some(Error::Quarantined));
+            assert_eq!(m.lock().unwrap().events.len(), events);
+            drop(owner);
+            assert!(drops.iter().all(|drop| drop.load(Ordering::Relaxed) == 0));
+        }
+    }
+}
+
+#[test]
+fn selected_message_and_peer_corruption_never_reopen_the_global_guard() {
+    for corrupt_peer in [false, true] {
+        let (mut owner, m) = attach(fixture(3));
+        for index in 0..3 {
+            unsafe { owner.program_indexed(index, message(index)) }.unwrap();
+            m.lock().unwrap().publish(index);
+        }
+        unsafe { owner.unmask_indices(&[0, 1]) }.unwrap();
+        let word = (TABLE / 4) as usize + 4 + 2;
+        m.lock().unwrap().memory[word] ^= 1;
+        let start = m.lock().unwrap().events.len();
+        let result = if corrupt_peer {
+            unsafe { owner.program_indexed(2, message(2)) }
+        } else {
+            unsafe { owner.unmask_indices(&[0, 1, 2]) }
+        };
+        assert!(matches!(result, Err(Error::Readback { .. })));
+        assert!(owner.needs_reset());
+        let m = m.lock().unwrap();
+        assert_eq!(m.get(0x52, 2) & 0xc000, 0xc000);
+        assert!(!m.events[start..].iter().any(
+            |event| matches!(event, Event::ConfigWrite(0x52, control) if control & 0xc000 == 0x8000)
+        ));
+        if !corrupt_peer {
+            assert!(!m.events[start..].iter().any(
+                |event| matches!(event, Event::BarWrite(offset, 0) if (*offset - TABLE) % 16 == 12)
+            ));
+        }
+    }
+}
+
+#[test]
+fn indexed_layout_identity_control_and_peer_mask_changes_quarantine_one_owner() {
+    for case in 0..7 {
+        let f = fixture(3);
+        let drops = [
+            f.config_drops.clone(),
+            f.root_drops.clone(),
+            f.bar_drops.clone(),
+        ];
+        let (mut owner, m) = attach(f);
+        for index in 0..3 {
+            unsafe { owner.program_indexed(index, message(index)) }.unwrap();
+            m.lock().unwrap().publish(index);
+        }
+        unsafe { owner.unmask_indices(&[0, 1]) }.unwrap();
+        {
+            let mut m = m.lock().unwrap();
+            match case {
+                0 => m.put(0, 4, 0x9999_8086),
+                1 => m.put(0x58, 4, (PBA + 8) as u32),
+                2 => m.put(0x54, 4, (TABLE + 16) as u32),
+                3 => m.put(0x52, 2, 0x8003),
+                4 => m.put(4, 2, 0x505),
+                5 => m.put(0x52, 2, 0xc002),
+                _ => m.memory[(TABLE / 4) as usize + 4 + 3] = 1,
+            }
+        }
+        let start = m.lock().unwrap().events.len();
+        assert!(unsafe { owner.program_indexed(2, message(2)) }.is_err());
+        assert!(owner.needs_reset());
+        if case < 6 {
+            assert!(
+                !m.lock().unwrap().events[start..]
+                    .iter()
+                    .any(|event| matches!(event, Event::BarRead(..) | Event::BarWrite(..)))
+            );
+        } else {
+            assert_eq!(m.lock().unwrap().get(0x52, 2) & 0xc000, 0xc000);
+        }
+        assert_eq!(unsafe { owner.release() }.err(), Some(Error::Quarantined));
+        drop(owner);
+        assert!(drops.iter().all(|drop| drop.load(Ordering::Relaxed) == 0));
+    }
+}
+
+#[test]
+fn legacy_vector_zero_has_independently_stated_literal_access_order() {
+    // Exact immutable fixture layout: one 64-bit BAR, table/PBA in BAR0, one
+    // capability. This sequence comes from the source contract, not new helpers.
+    let discovery = [
+        Event::ConfigRead(0, 4),
+        Event::ConfigRead(0x0e, 1),
+        Event::ConfigRead(4, 2),
+        Event::ConfigRead(6, 2),
+        Event::ConfigRead(0x34, 1),
+        Event::ConfigRead(0x50, 2),
+        Event::ConfigRead(0x52, 2),
+        Event::ConfigRead(0x54, 4),
+        Event::ConfigRead(0x58, 4),
+        Event::ConfigRead(0x10, 4),
+        Event::ConfigRead(0x14, 4),
+        Event::ConfigRead(0x10, 4),
+        Event::ConfigRead(0x14, 4),
+    ];
+    let prefix = || {
+        let mut expected = discovery.to_vec();
+        expected.extend([
+            Event::ConfigRead(4, 2),
+            Event::ConfigWrite(4, 0x507),
+            Event::ConfigRead(4, 2),
+            Event::ConfigWrite(0x52, 0xc001),
+            Event::ConfigRead(0x52, 2),
+            Event::BarWrite(0x10c, 1),
+            Event::BarRead(0x10c),
+            Event::BarWrite(0x11c, 1),
+            Event::BarRead(0x11c),
+        ]);
+        expected
+    };
+    let (mut owner, m) = attach(fixture(2));
+    unsafe { owner.program(MESSAGE) }.unwrap();
+    let mut expected = prefix();
+    expected.extend([
+        Event::BarWrite(0x100, 0xfee0_1000),
+        Event::BarRead(0x100),
+        Event::BarWrite(0x104, 0x1234_5678),
+        Event::BarRead(0x104),
+        Event::BarWrite(0x108, 0x8765_4321),
+        Event::BarRead(0x108),
+    ]);
+    expected.extend(discovery);
+    assert_eq!(m.lock().unwrap().events, expected);
+    m.lock().unwrap().events.clear();
+    m.lock().unwrap().publish(0);
+    unsafe { owner.unmask() }.unwrap();
+    let mut expected = prefix();
+    expected.extend([
+        Event::BarRead(0x100),
+        Event::BarRead(0x104),
+        Event::BarRead(0x108),
+        Event::BarWrite(0x10c, 0),
+        Event::BarRead(0x10c),
+    ]);
+    expected.extend(discovery);
+    expected.extend([Event::ConfigWrite(0x52, 0x8001), Event::ConfigRead(0x52, 2)]);
+    assert_eq!(m.lock().unwrap().events, expected);
+    drop(unsafe { owner.release() }.unwrap());
+}
+
+#[test]
+fn missing_legacy_zero_preflight_preserves_nonzero_live_replay() {
+    let (mut owner, m) = attach(fixture(65));
+    unsafe { owner.program_indexed(64, message(64)) }.unwrap();
+    m.lock().unwrap().publish(64);
+    unsafe { owner.unmask_indices(&[64]) }.unwrap();
+    let events = m.lock().unwrap().events.clone();
+    let memory = m.lock().unwrap().memory.clone();
+    assert_eq!(unsafe { owner.unmask() }, Err(Error::NotProgrammed));
+    assert!(owner.live.contains(64));
+    assert_eq!(owner.message_at(64), Some(message(64)));
+    assert!(!owner.needs_reset());
+    assert_eq!(m.lock().unwrap().events, events);
+    assert_eq!(m.lock().unwrap().memory, memory);
+    unsafe { owner.unmask_indices(&[64]) }.unwrap();
+    drop(unsafe { owner.release() }.unwrap());
+}
