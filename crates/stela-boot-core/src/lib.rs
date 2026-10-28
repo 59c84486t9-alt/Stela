@@ -18,6 +18,7 @@ pub mod options;
 pub mod paging_controls;
 pub mod passthrough;
 pub mod pe;
+pub mod pm_timer;
 pub mod ram;
 pub mod random;
 pub mod record;
@@ -29,3 +30,4 @@ pub mod topology;
 #[cfg(target_arch = "x86_64")]
 pub mod vtd;
 pub mod worker_bindings;
+pub mod xstate;

@@ -54,13 +54,6 @@ mod boot_ioapic;
 #[cfg(all(test, feature = "fetched-sources"))]
 #[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
 mod boot_irq_crs;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_clock/pm.rs"]
-#[allow(
-    dead_code,
-    reason = "hosted tests exercise FADT and counter arithmetic; timer port reads require CPL0"
-)]
-mod boot_native_clock_pm;
 
 mod amx;
 // The bench runs the hosted engine, which only an Intel Mac has
