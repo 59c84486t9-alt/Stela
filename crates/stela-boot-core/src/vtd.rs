@@ -5,6 +5,10 @@
 // a804c5742bff224d4cb4d25dd383554d598be32b. Source hashes and license terms:
 // crates/stela-drivers/src/platform/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
 //! Exclusive legacy VT-d unit with distinct owned requester contexts/domains.
+//! Every requester the unit covers starts in the window domain (DID 1),
+//! which maps the drivers' shared DMA region one to one, so a driver that
+//! DMAs there by physical address reaches only that region; attaching a
+//! requester moves it to its own domain.
 //! Noncoherent table walks use actual CPUID-qualified CLFLUSH plus MFENCE.
 //! This never attaches by guessing a DMAR scope or changes active firmware
 //! domains. ATS, scalable mode, RMRR preservation, peer groups and AMD-Vi need
@@ -284,8 +288,17 @@ struct DomainState {
     mappings: BTreeMap<u64, LiveMapping>,
     quarantined: bool,
 }
+/// The window domain: one to one second-level tables over the drivers'
+/// shared DMA region, shared by every covered requester without a domain of
+/// its own.
+struct Window {
+    tables: Vec<Table>,
+}
+const WINDOW_DID: u16 = 1;
+
 struct State {
     root: Table,
+    window: Option<Window>,
     /// Each allowed requester bus's context table, under its root entry.
     contexts: BTreeMap<u8, Table>,
     allowed: Vec<u16>,
@@ -397,13 +410,15 @@ impl<R: Registers> Unit<R> {
         Ok(())
     }
     /// Take ownership of an inactive unit, not an active firmware domain.
+    /// With `window` ranges, every requester starts in the window domain,
+    /// which maps them one to one; without, every context is absent.
     ///
     /// # Safety
-    /// Platform discovery has proved this physical unit routes exactly this
-    /// complete unique flat requester inventory, with no unresolved aliases,
-    /// bridge routes/groups/RMRRs. All requesters
-    /// behind the unit are stopped and drained, with ATS/PRI/PASID and device
-    /// NoSnoop disabled. No other CPU/firmware/SMM owner can change it. Native
+    /// Platform discovery has resolved the unit's scope to `requesters`
+    /// ([`crate::remapping::plan`]), and every reserved region a requester
+    /// still uses lies in `window`. Requesters behind the unit DMA only to
+    /// the window until attached, with ATS/PRI/PASID and device NoSnoop
+    /// disabled. No other CPU/firmware/SMM owner can change it. Native
     /// WB RAM DMA is coherent independently of the ECAP table-walk coherency
     /// bit. Bus mastering remains stopped until real mapping publication.
     /// The register mapping and source's backing mappings stay valid across
@@ -413,6 +428,7 @@ impl<R: Registers> Unit<R> {
         source: &'static (dyn PageSource + Sync),
         requesters: &[u16],
         physical_bits: u8,
+        window: &[Range<u64>],
     ) -> Result<Arc<Self>, VtdError> {
         let mut allowed = requesters.to_vec();
         allowed.sort_unstable();
@@ -463,8 +479,12 @@ impl<R: Registers> Unit<R> {
             return Err(VtdError::RegisterRange);
         }
         let root = Table::new(source, physical_bits)?;
-        // Initial takeover is TE-off and every context is absent. Dynamic
-        // context publication separately flushes the child before Present.
+        let window = (!window.is_empty())
+            .then(|| Window::new(source, physical_bits, levels, window))
+            .transpose()?;
+        // Initial takeover is TE-off; each context is absent or the window's.
+        // Dynamic context publication separately flushes the child before
+        // Present.
         let mut contexts = BTreeMap::new();
         for bus in allowed.iter().map(|rid| (rid >> 8) as u8) {
             if let alloc::collections::btree_map::Entry::Vacant(entry) = contexts.entry(bus) {
@@ -473,12 +493,24 @@ impl<R: Registers> Unit<R> {
                 entry.insert(context);
             }
         }
+        if let Some(window) = &window {
+            for &rid in &allowed {
+                let index = usize::from(rid & 0xff) * 2;
+                let context = &contexts[&((rid >> 8) as u8)];
+                context.write(
+                    index + 1,
+                    u64::from(WINDOW_DID) << 8 | u64::from(levels - 2),
+                );
+                context.write(index, window.tables[0].physical() | 1);
+            }
+        }
         let unit = Arc::new(Self {
             registers: ManuallyDrop::new(registers),
             source,
             held: AtomicBool::new(false),
             state: ManuallyDrop::new(UnsafeCell::new(State {
                 root,
+                window,
                 contexts,
                 allowed,
                 domains: BTreeMap::new(),
@@ -531,7 +563,12 @@ impl<R: Registers> Unit<R> {
         {
             return Err(VtdError::Busy);
         }
-        let did = (1..self.max_domains)
+        let first = if state.window.is_some() {
+            u32::from(WINDOW_DID) + 1
+        } else {
+            1
+        };
+        let did = (first..self.max_domains)
             .find(|did| !state.domains.values().any(|d| u32::from(d.did) == *did))
             .ok_or(VtdError::Busy)? as u16;
         let generation = state.next_generation;
@@ -558,6 +595,21 @@ impl<R: Registers> Unit<R> {
                 quarantined: false,
             },
         );
+        let (context, index) = state.context(rid);
+        if context.read(index) & 1 != 0 {
+            // VT-d 6.5.3.3: a present context entry is cleared and its cached
+            // copies and the window's translations invalidated before it is
+            // rewritten.
+            context.write(index, 0);
+            if let Some(line) = self.table_cacheline {
+                context.flush(&*self.registers, line);
+            }
+            publish();
+            if let Err(error) = self.invalidate(TRANSLATION, true) {
+                state.poisoned = true;
+                return Err(error);
+            }
+        }
         let (context, index) = state.context(rid);
         context.write(index + 1, u64::from(did) << 8 | u64::from(self.levels - 2));
         if let Some(line) = self.table_cacheline {
@@ -686,6 +738,9 @@ impl<R: Registers> Unit<R> {
             for context in state.contexts.values() {
                 context.flush(&*self.registers, line);
             }
+            for table in state.window.iter().flat_map(|window| &window.tables) {
+                table.flush(&*self.registers, line);
+            }
             for domain in state.domains.values() {
                 for table in &domain.tables {
                     table.flush(&*self.registers, line);
@@ -807,6 +862,52 @@ impl State {
             &self.contexts[&((rid >> 8) as u8)],
             usize::from(rid & 0xff) * 2,
         )
+    }
+}
+
+impl Window {
+    /// Tables mapping every page of `ranges` to itself, read and write.
+    fn new(
+        source: &dyn PageSource,
+        physical_bits: u8,
+        levels: u8,
+        ranges: &[Range<u64>],
+    ) -> Result<Self, VtdError> {
+        let mut pages = Vec::new();
+        for range in ranges {
+            let start = range.start & !(PAGE as u64 - 1);
+            let end = range.end.next_multiple_of(PAGE as u64);
+            if start >= end
+                || end > 1u64 << physical_bits
+                || end > 1u64 << (12 + 9 * u32::from(levels))
+                || (start < MSI_END && end > MSI_START)
+            {
+                return Err(VtdError::Unsupported);
+            }
+            pages.push(start..end);
+        }
+        let mut tables = vec![Table::new(source, physical_bits)?];
+        let mut index = BTreeMap::new();
+        index.insert(tables[0].physical(), 0);
+        for page in pages.into_iter().flat_map(|range| range.step_by(PAGE)) {
+            let mut table = 0;
+            for level in (1..levels).rev() {
+                let slot = ((page >> (12 + 9 * u32::from(level))) & 511) as usize;
+                let entry = tables[table].read(slot);
+                table = if entry & (READ | WRITE) == 0 {
+                    let child = Table::new(source, physical_bits)?;
+                    let physical = child.physical();
+                    tables[table].write(slot, physical | READ | WRITE);
+                    tables.push(child);
+                    index.insert(physical, tables.len() - 1);
+                    tables.len() - 1
+                } else {
+                    index[&(entry & ADDRESS)]
+                };
+            }
+            tables[table].write(((page >> 12) & 511) as usize, page | READ | WRITE);
+        }
+        Ok(Self { tables })
     }
 }
 
@@ -1534,7 +1635,8 @@ mod tests {
     #[test]
     fn coherent_words_observe_only_the_live_domains_actual_pins() {
         let registers = ModelRegisters::new();
-        let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8, 16], 48) }.unwrap();
+        let unit =
+            unsafe { Unit::take_over(registers.clone(), source(), &[8, 16], 48, &[]) }.unwrap();
         let first = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
         let second = unsafe { unit.attach_requester(stopped_claim(16)) }.unwrap();
         let released = Arc::new(AtomicU64::new(0));
@@ -1608,7 +1710,8 @@ mod tests {
             if !supported {
                 *registers.0.lock().unwrap().values.get_mut(&CAP).unwrap() &= !CAP_WRITE_DRAIN;
             }
-            let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48) }.unwrap();
+            let unit =
+                unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
             let domain = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
             let pin = pages(PAGE, 12, 0xa10000, Arc::new(AtomicU64::new(0)));
             let cpu = pin.cpu_mapping(CacheAttribute::WriteBack).unwrap();
@@ -1659,7 +1762,8 @@ mod tests {
     fn withheld_drain_bad_granularity_and_write_buffer_fault_keep_all_backing() {
         for failure in 0..3 {
             let registers = ModelRegisters::new();
-            let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48) }.unwrap();
+            let unit =
+                unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
             let claim_drops = Arc::new(AtomicU64::new(0));
             let domain =
                 unsafe { unit.attach_requester(RequesterClaim::model(8, claim_drops.clone())) }
@@ -1715,7 +1819,7 @@ mod tests {
             model.source = Some(source);
         }
         // SAFETY: exclusive deterministic register/requester model; no device.
-        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48) }.unwrap();
+        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) }.unwrap();
         // SAFETY: the model supplies the exact stopped requester claim.
         let domain = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
         let released = Arc::new(AtomicU64::new(0));
@@ -1773,6 +1877,49 @@ mod tests {
     }
 
     #[test]
+    fn covered_requesters_reach_only_the_window_until_attached_to_their_own_domain() {
+        let source = source();
+        let registers = ModelRegisters::new();
+        {
+            let mut m = registers.0.lock().unwrap();
+            m.values.insert(ECAP, 0x10 << 8);
+            m.source = Some(source);
+        }
+        let window = [0x80_0000..0x80_2000, 0x7d00_0000..0x7d00_1000];
+        let unit =
+            unsafe { Unit::take_over(registers.clone(), source, &[8, 16], 48, &window) }.unwrap();
+        {
+            let m = registers.0.lock().unwrap();
+            for requester in [8, 16] {
+                assert_eq!(m.translation(requester, 0x80_0010), Some(0x80_0010));
+                assert_eq!(m.translation(requester, 0x80_1ff8), Some(0x80_1ff8));
+                assert_eq!(m.translation(requester, 0x7d00_0000), Some(0x7d00_0000));
+                assert_eq!(m.translation(requester, 0x80_2000), None);
+                assert_eq!(m.translation(requester, 0x10_0000), None);
+            }
+            assert_eq!(m.translation(24, 0x80_0000), None);
+        }
+        let own = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
+        assert_eq!(own.domain_id(), WINDOW_DID + 1);
+        let m = registers.0.lock().unwrap();
+        assert_eq!(m.translation(8, 0x80_0000), None);
+        assert_eq!(m.translation(16, 0x80_0000), Some(0x80_0000));
+        // The swap invalidated the context cache before the new context.
+        assert!(
+            m.writes
+                .iter()
+                .any(|&(at, value)| at == CCMD && value & CONTEXT_GLOBAL != 0)
+        );
+        drop(m);
+        // A window over the MSI range is refused.
+        let msi = [window[0].clone(), 0xfee0_0000..0xfee0_1000];
+        assert!(matches!(
+            unsafe { Unit::take_over(ModelRegisters::new(), source, &[8], 48, &msi) },
+            Err(VtdError::Unsupported)
+        ));
+    }
+
+    #[test]
     fn actual_contexts_separate_same_iova_and_reject_cross_domain_or_stale_tokens() {
         let source = source();
         let registers = ModelRegisters::new();
@@ -1781,7 +1928,8 @@ mod tests {
             m.values.insert(ECAP, 0x10 << 8);
             m.source = Some(source);
         }
-        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8, 16, 24], 48) }.unwrap();
+        let unit =
+            unsafe { Unit::take_over(registers.clone(), source, &[8, 16, 24], 48, &[]) }.unwrap();
         let first = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
         let second = unsafe { unit.attach_requester(stopped_claim(16)) }.unwrap();
         assert_ne!(first.domain_id(), second.domain_id());
@@ -1879,7 +2027,8 @@ mod tests {
     fn failed_context_detach_keeps_hardware_did_claim_and_tables_until_ack() {
         let source = source();
         let registers = ModelRegisters::new();
-        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8, 16], 48) }.unwrap();
+        let unit =
+            unsafe { Unit::take_over(registers.clone(), source, &[8, 16], 48, &[]) }.unwrap();
         let released = Arc::new(AtomicU64::new(0));
         let first =
             unsafe { unit.attach_requester(RequesterClaim::model(8, released.clone())) }.unwrap();
@@ -1921,7 +2070,7 @@ mod tests {
                 .entry(CAP)
                 .and_modify(|v| *v = (*v & !7) | nd);
             let source = source();
-            let result = unsafe { Unit::take_over(registers, source, &[8], 48) };
+            let result = unsafe { Unit::take_over(registers, source, &[8], 48, &[]) };
             if nd == 7 {
                 assert!(matches!(result, Err(VtdError::Unsupported)));
                 assert_eq!(source.next.load(Ordering::Relaxed), 0x100000);
@@ -1933,13 +2082,14 @@ mod tests {
         }
         for invalid in [&[][..], &[8, 8][..]] {
             assert!(matches!(
-                unsafe { Unit::take_over(ModelRegisters::new(), source(), invalid, 48) },
+                unsafe { Unit::take_over(ModelRegisters::new(), source(), invalid, 48, &[]) },
                 Err(VtdError::Unsupported)
             ));
         }
         // Requesters on two buses: a context table under each root entry.
         let unit =
-            unsafe { Unit::take_over(ModelRegisters::new(), source(), &[8, 0x308], 48) }.unwrap();
+            unsafe { Unit::take_over(ModelRegisters::new(), source(), &[8, 0x308], 48, &[]) }
+                .unwrap();
         {
             let mut guard = unit.lock();
             let state = guard.state();
@@ -1955,7 +2105,7 @@ mod tests {
         unsafe { unit.shut_down() }.unwrap();
         let registers = ModelRegisters::new();
         let inventory: Vec<u16> = (0..16).collect();
-        let unit = unsafe { Unit::take_over(registers, source(), &inventory, 48) }.unwrap();
+        let unit = unsafe { Unit::take_over(registers, source(), &inventory, 48, &[]) }.unwrap();
         let mut domains = Vec::new();
         for rid in 0..15 {
             domains.push(unsafe { unit.attach_requester(stopped_claim(rid)) }.unwrap());
@@ -2021,7 +2171,7 @@ mod tests {
             model.source = Some(source);
         }
         // SAFETY: stopped isolated model; enabling TE activates the observer.
-        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48) }.unwrap();
+        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) }.unwrap();
         let domain =
             unsafe { unit.attach_requester(RequesterClaim::model(8, Arc::new(AtomicU64::new(0)))) }
                 .unwrap();
@@ -2085,7 +2235,7 @@ mod tests {
             let source = source();
             // SAFETY: explicit failed-register model; no takeover may occur.
             assert!(matches!(
-                unsafe { Unit::take_over(registers.clone(), source, &[8], 48) },
+                unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) },
                 Err(VtdError::RegisterRead)
             ));
             assert_eq!(source.next.load(Ordering::Relaxed), 0x100000);
@@ -2099,7 +2249,7 @@ mod tests {
             // SAFETY: model injects failed GSTS only after this real stage's
             // command; no acknowledged usable Arc may escape.
             assert!(matches!(
-                unsafe { Unit::take_over(registers.clone(), source, &[8], 48) },
+                unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) },
                 Err(VtdError::RegisterRead)
             ));
             assert!(quarantined_units() > before);
@@ -2137,7 +2287,8 @@ mod tests {
             *registers.0.lock().unwrap().values.get_mut(&CAP).unwrap() |=
                 CAP_PAGE_SELECTIVE | largest << CAP_MAX_ADDRESS_MASK_SHIFT;
             // SAFETY: exclusive stopped model.
-            let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48) }.unwrap();
+            let unit =
+                unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
             let domain = unsafe {
                 unit.attach_requester(RequesterClaim::model(8, Arc::new(AtomicU64::new(0))))
             }
@@ -2184,7 +2335,7 @@ mod tests {
         let registers = ModelRegisters::new();
         registers.0.lock().unwrap().values.insert(ECAP, 0x10 << 8);
         // SAFETY: exclusive stopped model with CPUID-qualified native flushes.
-        let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48) }.unwrap();
+        let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
         let domain =
             unsafe { unit.attach_requester(RequesterClaim::model(8, Arc::new(AtomicU64::new(0)))) }
                 .unwrap();
@@ -2264,7 +2415,7 @@ mod tests {
         let registers = ModelRegisters::new();
         let source = source();
         // SAFETY: exclusively owned stopped requester in the explicit model.
-        let unit = unsafe { Unit::take_over(registers.clone(), source, &[0x18], 48) }.unwrap();
+        let unit = unsafe { Unit::take_over(registers.clone(), source, &[0x18], 48, &[]) }.unwrap();
         let domain = unsafe {
             unit.attach_requester(RequesterClaim::model(0x18, Arc::new(AtomicU64::new(0))))
         }
@@ -2353,7 +2504,7 @@ mod tests {
         let registers = ModelRegisters::new();
         let source = source();
         // SAFETY: exclusively stopped model unit, with real allocated tables.
-        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48) }.unwrap();
+        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) }.unwrap();
         let domain =
             unsafe { unit.attach_requester(RequesterClaim::model(8, Arc::new(AtomicU64::new(0)))) }
                 .unwrap();
@@ -2383,14 +2534,14 @@ mod tests {
         let source = source();
         // SAFETY: model probe; active firmware translation must be refused.
         assert!(matches!(
-            unsafe { Unit::take_over(registers.clone(), source, &[8], 48) },
+            unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) },
             Err(VtdError::Busy)
         ));
         assert_eq!(source.next.load(Ordering::Relaxed), 0x100000);
         assert!(registers.0.lock().unwrap().writes.is_empty());
         registers.0.lock().unwrap().values.insert(GSTS, 0);
         // SAFETY: exclusively owned model unit, all DMA stopped.
-        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48) }.unwrap();
+        let unit = unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[]) }.unwrap();
         let domain =
             unsafe { unit.attach_requester(RequesterClaim::model(8, Arc::new(AtomicU64::new(0)))) }
                 .unwrap();
