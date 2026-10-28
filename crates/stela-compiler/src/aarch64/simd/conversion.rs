@@ -893,7 +893,7 @@ mod tests {
 
     #[test]
     fn modified_immediates_keep_their_existing_decoder_and_compiler_paths() {
-        use crate::{GuestAddress, Lifter, aarch64, block};
+        use crate::{GuestAddress, Lifter, aarch64};
 
         const MODIFIED_IMMEDIATE: u32 = 0x0f000400;
         const CMODE_SHIFT: u32 = 12;
@@ -944,11 +944,11 @@ mod tests {
                                     let mut source = word.to_le_bytes().to_vec();
                                     source.extend(RETURN_X30.to_le_bytes());
                                     assert!(
-                                        crate::compile(&source, BASE).is_ok(),
+                                        crate::testing::leaf(&source, BASE).is_ok(),
                                         "word={word:08x}"
                                     );
                                     assert!(
-                                        block::compile(&source, BASE).is_ok(),
+                                        crate::testing::block(&source, BASE).is_ok(),
                                         "word={word:08x}"
                                     );
                                     compiled += 1;

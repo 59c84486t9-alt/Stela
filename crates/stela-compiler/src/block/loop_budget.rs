@@ -1,8 +1,5 @@
 //! Per-invocation iteration budget for resident blocks.
 
-pub const RESIDENT_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-resident-budget-v1";
-
 /// Native code counts the basic blocks it completes, including internal back
 /// edges. The caller keeps this context alive until native return.
 #[repr(C)]

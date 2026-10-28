@@ -1,13 +1,11 @@
 //! Blocks compiled with an execution context. A service exit returns the PC of
 //! the instruction still to execute.
-use crate::x86_64::asm::Code;
-
 use super::{Decoded, INSTRUCTION_BYTES, ScalableProfile, context_wrapper, decode};
 use crate::{
-    CompileError, GuestAddress, Lifter, NativeBlock, TargetCpu,
+    CompileError, GuestAddress, Lifter, NativeBlock, Options, TargetCpu,
     aarch64::{Decoder, Operation, floating::features::NumericalFeatures},
     block::{
-        self, BlockProfile, CompiledBlock, ExitKind, MAX_BLOCK_INSTRUCTIONS,
+        self, BlockProfile, CompilationPlan, CompiledBlock, ExitKind, MAX_BLOCK_INSTRUCTIONS,
         scalable::{
             AdmittedScalableNumericalInstruction, ScalableNumericalOperation,
             admit_scalable_numerical_instruction, decode_scalable_numerical_instruction,
@@ -16,49 +14,14 @@ use crate::{
     context::memory::MemoryRequirements,
     x86_64,
 };
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const MOV_EDX_IMMEDIATE: u8 = 0xba;
-const RETURN: u8 = 0xc3;
-
-/// Guest services and numerical feature availability remain distinct from host
-/// capabilities and the set of instruction mappings currently implemented.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExtendedBlockProfile {
-    scalable: ScalableProfile,
-    services: BlockProfile,
-    numerical_features: NumericalFeatures,
-}
-
-impl ExtendedBlockProfile {
-    pub const fn new(
-        scalable: ScalableProfile,
-        services: BlockProfile,
-        numerical_features: NumericalFeatures,
-    ) -> Self {
-        Self {
-            scalable,
-            services,
-            numerical_features,
-        }
-    }
-
-    pub const fn scalable(self) -> ScalableProfile {
-        self.scalable
-    }
-    pub const fn services(self) -> BlockProfile {
-        self.services
-    }
-    pub const fn numerical_features(self) -> NumericalFeatures {
-        self.numerical_features
-    }
-}
-
 enum Terminal {
-    Shared(CompiledBlock),
+    /// An ordinary block of the one terminal instruction.
+    Shared(Box<CompilationPlan>),
     Numerical(AdmittedScalableNumericalInstruction),
 }
 
@@ -85,15 +48,14 @@ fn reject_unavailable_service(pc: GuestAddress, word: u32) -> Result<(), Compile
 fn shared_terminal(
     bytes: &[u8; INSTRUCTION_BYTES],
     pc: GuestAddress,
-    profile: BlockProfile,
     target: TargetCpu,
-) -> Result<Option<CompiledBlock>, CompileError> {
+) -> Result<Option<CompilationPlan>, CompileError> {
     if let Ok(instruction) = Decoder.lift(pc, u32::from_le_bytes(*bytes))
         && matches!(instruction.operation, Operation::FloatingPoint(_))
     {
         return Ok(None);
     }
-    let analysis = block::analyze_with_profile(bytes, pc, profile)
+    let analysis = block::analyze_with_profile(bytes, pc, BlockProfile::ORDINARY)
         .map_err(|error| CompileError(error.to_string()))?;
     // The ordinary scalar numerical boundary is deliberately excluded until
     // its low-V/upper-Z effects have been integrated in context mode.
@@ -101,7 +63,7 @@ fn shared_terminal(
         || analysis.dynamic_edge.is_some()
         || (analysis.terminator_pc.is_some() && !analysis.static_successors.is_empty());
     if permitted {
-        block::compile_for_target(bytes, pc, profile, target).map(Some)
+        CompilationPlan::new(bytes, pc, &Options::new(BlockProfile::ORDINARY, target)).map(Some)
     } else {
         Ok(None)
     }
@@ -118,182 +80,194 @@ fn is_transfer(operation: &Operation) -> bool {
     )
 }
 
-/// Compile a block prefix. Direct RAM, AdvSIMD/FP, mode writes and MOVPRFX are
-/// refused as in the context leaf compiler. `NumericalFeatures` must match the
-/// guest identity the runtime uses for completion.
-pub fn compile_for_profile(
-    source: &[u8],
-    base: GuestAddress,
-    profile: ExtendedBlockProfile,
+/// A decoded context block prefix. Direct RAM, AdvSIMD/FP, mode writes and
+/// MOVPRFX are refused as in the context leaf compiler.
+pub struct Prefix {
+    instructions: Vec<(GuestAddress, Decoded)>,
+    terminal: Option<Terminal>,
+    next_pc: GuestAddress,
+    source_bytes: usize,
+    scalable: ScalableProfile,
+    numerical: NumericalFeatures,
     target: TargetCpu,
-) -> Result<CompiledBlock, CompileError> {
-    if profile.services != BlockProfile::Ordinary {
-        return Err(CompileError(
-            "context block services are not integrated".into(),
-        ));
-    }
-    if source.is_empty()
-        || !source.len().is_multiple_of(INSTRUCTION_BYTES)
-        || !base.0.is_multiple_of(INSTRUCTION_BYTES as u64)
-        || source.len() / INSTRUCTION_BYTES > MAX_BLOCK_INSTRUCTIONS
-    {
-        return Err(CompileError(
-            "context block input must be aligned, nonempty and bounded".into(),
-        ));
-    }
-    let mut instructions = Vec::new();
-    let mut terminal = None;
-    let mut next_pc = base;
-    let mut source_bytes = 0;
-    for bytes in source.as_chunks::<INSTRUCTION_BYTES>().0 {
-        let pc = next_pc;
-        next_pc = GuestAddress(
-            pc.0.checked_add(INSTRUCTION_BYTES as u64)
-                .ok_or_else(|| CompileError("context block guest address overflow".into()))?,
-        );
-        source_bytes += INSTRUCTION_BYTES;
-        let word = u32::from_le_bytes(*bytes);
-        reject_unavailable_service(pc, word)?;
-        if let Some(numerical) = decode_scalable_numerical_instruction(pc, word)? {
-            let admitted = admit_scalable_numerical_instruction(
-                numerical,
-                profile.scalable,
-                profile.numerical_features,
-            )?;
-            terminal = Some(Terminal::Numerical(admitted));
-            break;
+}
+
+impl Prefix {
+    /// Decode a block prefix. `numerical` must match the guest identity the
+    /// runtime uses for completion.
+    pub(crate) fn decode(
+        source: &[u8],
+        base: GuestAddress,
+        scalable: ScalableProfile,
+        numerical: NumericalFeatures,
+        target: TargetCpu,
+    ) -> Result<Self, CompileError> {
+        if source.is_empty()
+            || !source.len().is_multiple_of(INSTRUCTION_BYTES)
+            || !base.0.is_multiple_of(INSTRUCTION_BYTES as u64)
+            || source.len() / INSTRUCTION_BYTES > MAX_BLOCK_INSTRUCTIONS
+        {
+            return Err(CompileError(
+                "context block input must be aligned, nonempty and bounded".into(),
+            ));
         }
-        match decode(pc, word, profile.scalable, target) {
-            Ok(instruction)
-                if instruction.memory_requirements() != MemoryRequirements::default() =>
-            {
-                return Err(CompileError(format!(
-                    "context block memory entry is not integrated at {:#x}",
-                    pc.0
-                )));
-            }
-            Ok(Decoded::Ordinary(instruction)) if is_transfer(&instruction.operation) => {
-                terminal =
-                    shared_terminal(bytes, pc, profile.services, target)?.map(Terminal::Shared);
-                debug_assert!(
-                    terminal.is_some(),
-                    "ordinary transfer has a shared boundary"
-                );
+        let mut instructions = Vec::new();
+        let mut terminal = None;
+        let mut next_pc = base;
+        let mut source_bytes = 0;
+        for bytes in source.as_chunks::<INSTRUCTION_BYTES>().0 {
+            let pc = next_pc;
+            next_pc = GuestAddress(
+                pc.0.checked_add(INSTRUCTION_BYTES as u64)
+                    .ok_or_else(|| CompileError("context block guest address overflow".into()))?,
+            );
+            source_bytes += INSTRUCTION_BYTES;
+            let word = u32::from_le_bytes(*bytes);
+            reject_unavailable_service(pc, word)?;
+            if let Some(numerical_instruction) = decode_scalable_numerical_instruction(pc, word)? {
+                let admitted = admit_scalable_numerical_instruction(
+                    numerical_instruction,
+                    scalable,
+                    numerical,
+                )?;
+                terminal = Some(Terminal::Numerical(admitted));
                 break;
             }
-            Ok(instruction) => instructions.push((pc, instruction)),
-            Err(error) => {
-                if let Some(shared) = shared_terminal(bytes, pc, profile.services, target)? {
-                    terminal = Some(Terminal::Shared(shared));
+            match decode(pc, word, scalable, target) {
+                Ok(instruction)
+                    if instruction.memory_requirements() != MemoryRequirements::default() =>
+                {
+                    return Err(CompileError(format!(
+                        "context block memory entry is not integrated at {:#x}",
+                        pc.0
+                    )));
+                }
+                Ok(Decoded::Ordinary(instruction)) if is_transfer(&instruction.operation) => {
+                    terminal = shared_terminal(bytes, pc, target)?
+                        .map(|plan| Terminal::Shared(Box::new(plan)));
+                    debug_assert!(
+                        terminal.is_some(),
+                        "ordinary transfer has a shared boundary"
+                    );
                     break;
                 }
-                return Err(error);
+                Ok(instruction) => instructions.push((pc, instruction)),
+                Err(error) => {
+                    if let Some(shared) = shared_terminal(bytes, pc, target)? {
+                        terminal = Some(Terminal::Shared(Box::new(shared)));
+                        break;
+                    }
+                    return Err(error);
+                }
             }
         }
-    }
-    let mut code = Code::from(context_wrapper());
-    let mut source_map = Vec::with_capacity(instructions.len() + usize::from(terminal.is_some()));
-    let mut fixups = Vec::new();
-    for (pc, instruction) in instructions {
-        source_map.push((pc, code.len()));
-        super::emit_decoded(
-            &mut code,
-            pc,
-            instruction,
-            profile.scalable,
+        Ok(Self {
+            instructions,
+            terminal,
+            next_pc,
+            source_bytes,
+            scalable,
+            numerical,
             target,
-            &mut fixups,
-        )?;
+        })
     }
-    debug_assert!(fixups.is_empty(), "context block prefix cannot transfer");
-    match terminal {
-        Some(Terminal::Shared(shared)) => {
-            let offset = code.len();
-            source_map.extend(
-                shared
-                    .native
-                    .source_map
-                    .into_iter()
-                    .map(|(pc, at)| (pc, at + offset)),
-            );
-            code.extend(shared.native.x86_64_code);
-        }
-        Some(Terminal::Numerical(instruction)) => {
-            let pc = instruction.instruction_pc();
+
+    pub(crate) const fn source_bytes(&self) -> usize {
+        self.source_bytes
+    }
+
+    pub(crate) fn emit(self) -> Result<CompiledBlock, CompileError> {
+        let target = self.target;
+        let vector_length = self.scalable.vector_length();
+        let mut code = context_wrapper();
+        let mut source_map =
+            Vec::with_capacity(self.instructions.len() + usize::from(self.terminal.is_some()));
+        let mut fixups = Vec::new();
+        for (pc, instruction) in self.instructions {
             source_map.push((pc, code.len()));
-            let emitted = match *instruction.operation() {
-                ScalableNumericalOperation::Sve(operation) => x86_64::sve::floating::emit(
-                    &mut code,
-                    instruction.word(),
-                    operation,
-                    profile.scalable.vector_length(),
-                    profile.numerical_features,
-                    pc,
-                    target,
-                )?,
-                ScalableNumericalOperation::SmeExtremaScale(operand) => {
-                    x86_64::sme::extrema_scale::emit(
+            super::emit_decoded(
+                &mut code,
+                pc,
+                instruction,
+                self.scalable,
+                target,
+                &mut fixups,
+            )?;
+        }
+        debug_assert!(fixups.is_empty(), "context block prefix cannot transfer");
+        match self.terminal {
+            Some(Terminal::Shared(plan)) => {
+                let shared = plan.compile()?;
+                let offset = code.len();
+                source_map.extend(
+                    shared
+                        .native
+                        .source_map
+                        .into_iter()
+                        .map(|(pc, at)| (pc, at + offset)),
+                );
+                code.extend(shared.native.x86_64_code);
+            }
+            Some(Terminal::Numerical(instruction)) => {
+                let pc = instruction.instruction_pc();
+                source_map.push((pc, code.len()));
+                let emitted = match *instruction.operation() {
+                    ScalableNumericalOperation::Sve(operation) => x86_64::sve::floating::emit(
                         &mut code,
-                        operand,
-                        profile.scalable.vector_length(),
-                        profile.numerical_features,
+                        instruction.word(),
+                        operation,
+                        vector_length,
+                        self.numerical,
                         pc,
                         target,
-                    )?
-                }
-                ScalableNumericalOperation::SmeVector(_)
-                | ScalableNumericalOperation::SmeMatrix(_)
-                | ScalableNumericalOperation::FixedFp8Conversion(_)
-                | ScalableNumericalOperation::SmeFp8Conversion(_)
-                | ScalableNumericalOperation::SmeFp8Matrix(_) => false,
-            };
-            if emitted {
-                // The guarded family mapping owns the exact-PC cold exit.
-                // Only its committed fast path reaches the continuation.
-                code.extend(
-                    x86_64::block::emit_for_target(
-                        &[],
-                        None,
+                    )?,
+                    ScalableNumericalOperation::SmeExtremaScale(operand) => {
+                        x86_64::sme::extrema_scale::emit(
+                            &mut code,
+                            operand,
+                            vector_length,
+                            self.numerical,
+                            pc,
+                            target,
+                        )?
+                    }
+                    ScalableNumericalOperation::SmeVector(_)
+                    | ScalableNumericalOperation::SmeMatrix(_)
+                    | ScalableNumericalOperation::FixedFp8Conversion(_)
+                    | ScalableNumericalOperation::SmeFp8Conversion(_)
+                    | ScalableNumericalOperation::SmeFp8Matrix(_) => false,
+                };
+                if emitted {
+                    // The guarded family mapping owns the exact-PC cold exit.
+                    // Only its committed fast path reaches the continuation.
+                    x86_64::block::direct_exit(
+                        &mut code,
                         instruction.next_pc(),
-                        target,
-                        x86_64::MemoryChecks::DEFAULT,
-                    )
-                    .x86_64_code,
-                );
-            } else {
-                code.extend(MOV_RAX_IMMEDIATE);
-                code.extend(pc.0.to_le_bytes());
-                code.push(MOV_EDX_IMMEDIATE);
-                code.extend((ExitKind::ScalableNumerical as u32).to_le_bytes());
-                code.push(RETURN);
+                        ExitKind::Fallthrough,
+                    );
+                } else {
+                    x86_64::block::direct_exit(&mut code, pc, ExitKind::ScalableNumerical);
+                }
             }
+            None => x86_64::block::direct_exit(&mut code, self.next_pc, ExitKind::Fallthrough),
         }
-        None => code.extend(
-            x86_64::block::emit_for_target(
-                &[],
-                None,
-                next_pc,
-                target,
-                x86_64::MemoryChecks::DEFAULT,
-            )
-            .x86_64_code,
-        ),
+        Ok(CompiledBlock {
+            native: NativeBlock {
+                x86_64_code: code.into_bytes(),
+                source_map,
+            },
+            source_bytes: self.source_bytes,
+            direct_exits: Vec::new(),
+            fault_recovery: Vec::new(),
+        })
     }
-    Ok(CompiledBlock {
-        native: NativeBlock {
-            x86_64_code: code.into_bytes(),
-            source_map,
-        },
-        source_bytes,
-        direct_exits: Vec::new(),
-        fault_recovery: Vec::new(),
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::aarch64::scalable::{ScalableMode, VectorLength};
+    use crate::block::Features;
     use alloc::format;
     use alloc::string::ToString;
     use alloc::vec;
@@ -328,45 +302,62 @@ mod tests {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
     }
 
-    fn profile(services: BlockProfile) -> ExtendedBlockProfile {
-        ExtendedBlockProfile::new(
-            ScalableProfile::new(
-                VectorLength::from_bytes(16).unwrap(),
-                ScalableMode::new(true, false),
-            ),
-            services,
-            NumericalFeatures::default(),
+    const CONTEXT_BLOCK: BlockProfile = BlockProfile::new(Features::CONTEXT);
+
+    fn scalable() -> ScalableProfile {
+        ScalableProfile::new(
+            VectorLength::from_bytes(16).unwrap(),
+            ScalableMode::new(true, false),
+        )
+    }
+
+    fn context_block(
+        source: &[u8],
+        base: GuestAddress,
+        profile: BlockProfile,
+        target: TargetCpu,
+    ) -> Result<CompiledBlock, CompileError> {
+        crate::compile(
+            source,
+            base,
+            &Options::new(profile, target)
+                .with_scalable(scalable())
+                .with_numerical_features(NumericalFeatures::default()),
         )
     }
 
     #[test]
-    fn context_entry_declines_every_nonordinary_service_profile() {
+    fn context_blocks_refuse_other_services() {
         for services in [
-            BlockProfile::SystemV1,
-            BlockProfile::AppleArm64eSoftwarePauthV1,
-            BlockProfile::AppleArm64eSoftwarePauthClockV1,
-            BlockProfile::DarwinArm64ThreadV1,
-            BlockProfile::AppleArm64eSoftwarePauthThreadV1,
-            BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+            BlockProfile::new(Features::SYSTEM),
+            BlockProfile::new(Features::POINTER_AUTHENTICATION),
+            BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK)),
+            BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
+            BlockProfile::new(
+                Features::POINTER_AUTHENTICATION
+                    .union(Features::THREAD_REGISTERS)
+                    .union(Features::AMX),
+            ),
+            BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
         ] {
-            let error = compile_for_profile(
+            let error = context_block(
                 &source(&[RET]),
                 BASE,
-                profile(services),
+                BlockProfile::new(Features::CONTEXT | services.features()),
                 TargetCpu::Baseline,
             )
             .unwrap_err();
-            assert!(error.to_string().contains("services are not integrated"));
+            assert!(error.to_string().contains("no emitter implements"));
         }
     }
 
     #[test]
     fn ordinary_trap_extent_stays_distinct_from_forbidden_system_completion() {
         for trap in [SVC, BRK] {
-            let compiled = compile_for_profile(
+            let compiled = context_block(
                 &source(&[ADD_X5_ONE, trap, ERET]),
                 BASE,
-                profile(BlockProfile::Ordinary),
+                CONTEXT_BLOCK,
                 TargetCpu::Baseline,
             )
             .unwrap();
@@ -388,13 +379,9 @@ mod tests {
                 } else {
                     0
                 };
-                let error = compile_for_profile(
-                    &source(&words),
-                    BASE,
-                    profile(BlockProfile::Ordinary),
-                    TargetCpu::Baseline,
-                )
-                .unwrap_err();
+                let error =
+                    context_block(&source(&words), BASE, CONTEXT_BLOCK, TargetCpu::Baseline)
+                        .unwrap_err();
                 assert!(error.to_string().contains("service is not integrated"));
                 assert!(
                     error
@@ -408,10 +395,10 @@ mod tests {
     #[test]
     fn unconsumed_service_after_numerical_boundary_does_not_expand_extent() {
         for &service in SERVICE_WORDS {
-            let compiled = compile_for_profile(
+            let compiled = context_block(
                 &source(&[ADD_X5_ONE, FADD_Z0_SINGLE, service]),
                 BASE,
-                profile(BlockProfile::Ordinary),
+                CONTEXT_BLOCK,
                 TargetCpu::Baseline,
             )
             .unwrap();
@@ -432,10 +419,10 @@ mod tests {
         const MOVPRFX_Z0_Z1: u32 = 0x0420_bc20;
         for word in [LDR_X0_X1, CAS_X0_X1_X2, FADD_S0_S1_S2, MOVPRFX_Z0_Z1] {
             assert!(
-                compile_for_profile(
+                context_block(
                     &source(&[ADD_X5_ONE, word, RET]),
                     BASE,
-                    profile(BlockProfile::Ordinary),
+                    CONTEXT_BLOCK,
                     TargetCpu::Baseline,
                 )
                 .is_err()
@@ -448,16 +435,11 @@ mod tests {
         const ZEROING_PREFIX: u32 = 0x0410_2020;
         const MERGING_PREFIX: u32 = 0x0411_2020;
         const AND_DESTRUCTIVE: u32 = 0x041a_0040;
-        let block_profile = profile(BlockProfile::Ordinary);
+        let block_profile = CONTEXT_BLOCK;
         for prefix in [UNPREDICATED_PREFIX, ZEROING_PREFIX, MERGING_PREFIX] {
             let bytes = source(&[prefix, AND_DESTRUCTIVE, RET]);
-            let leaf = crate::scalable_context::compile_for_profile(
-                &bytes,
-                BASE,
-                block_profile.scalable(),
-                TargetCpu::Baseline,
-            )
-            .unwrap();
+            let leaf = crate::testing::context_leaf(&bytes, BASE, scalable(), TargetCpu::Baseline)
+                .unwrap();
             assert_eq!(
                 leaf.source_map.iter().map(|row| row.0).collect::<Vec<_>>(),
                 [
@@ -467,13 +449,13 @@ mod tests {
                 ]
             );
             let error =
-                compile_for_profile(&bytes, BASE, block_profile, TargetCpu::Baseline).unwrap_err();
+                context_block(&bytes, BASE, block_profile, TargetCpu::Baseline).unwrap_err();
             assert!(error.to_string().contains(&format!("{:#x}", BASE.0)));
         }
-        let error = crate::scalable_context::compile_for_profile(
+        let error = crate::testing::context_leaf(
             &source(&[UNPREDICATED_PREFIX, FADD_Z0_SINGLE, RET]),
             BASE,
-            block_profile.scalable(),
+            scalable(),
             TargetCpu::Baseline,
         )
         .unwrap_err();

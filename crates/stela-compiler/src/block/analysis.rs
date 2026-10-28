@@ -1,6 +1,6 @@
 //! Block boundaries, static successors and dynamic edges, found without emitting code.
 use super::{
-    BlockProfile, ClockInstruction, ExitKind, MAX_BLOCK_INSTRUCTIONS, NOP_ENCODING,
+    BlockProfile, ClockInstruction, ExitKind, Features, MAX_BLOCK_INSTRUCTIONS, NOP_ENCODING,
     PointerAuthentication, PointerAuthenticationOperation, SynchronousTrap, SystemInstruction,
     Terminator, ThreadRegisterInstruction, decode_clock_instruction, decode_pointer_authentication,
     decode_system_instruction, decode_terminator, decode_thread_register_instruction, memory,
@@ -77,7 +77,7 @@ pub struct BlockAnalysis {
 /// continuations are candidates, since the callee may not return; dynamic
 /// targets and trap resumption are resolved at run time.
 pub fn analyze(source: &[u8], base: GuestAddress) -> Result<BlockAnalysis, BlockAnalysisError> {
-    analyze_with_profile(source, base, BlockProfile::Ordinary)
+    analyze_with_profile(source, base, BlockProfile::ORDINARY)
 }
 
 pub fn analyze_with_profile(
@@ -243,7 +243,7 @@ pub(super) fn parse(
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
-        if profile.supports_full_system() {
+        if profile.has(Features::FULL_SYSTEM) {
             // PAuth hints share the hint space, so they are matched first.
             if let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
@@ -273,7 +273,7 @@ pub(super) fn parse(
             // maintenance, exception entry and return, ends its block and
             // completes in the engine, which recomputes what derives from
             // it before the next fetch. The shared lane's PEs keep it.
-            if profile == BlockProfile::SystemModeV1
+            if profile == BlockProfile::new(Features::SYSTEM_MODE)
                 && matches!(
                     crate::aarch64::system::synchronization::decode(word),
                     Some(
@@ -297,7 +297,8 @@ pub(super) fn parse(
             {
                 // The shared lane executes these through the existing typed
                 // all-writer memory service, not the single-agent CPU monitor.
-                let checked = matches!(profile, BlockProfile::SystemModeSharedV1(_))
+                let checked = (profile.has(Features::FULL_SYSTEM)
+                    && profile.checked_memory().is_some())
                     && matches!(decoded.operation, system::SystemOperation::Exclusive(Ok(_)));
                 if !checked {
                     terminal = Some((pc, Terminator::System(decoded)));
@@ -305,14 +306,14 @@ pub(super) fn parse(
                 }
             }
         }
-        if profile.supports_system()
-            && !profile.supports_full_system()
+        if profile.has(Features::SYSTEM)
+            && !profile.has(Features::FULL_SYSTEM)
             && let Some(decoded) =
                 decode_system_instruction(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
                     detail: error.0,
                 })?
-            && (profile.supports_system_registers()
+            && (profile.has(Features::SYSTEM_REGISTERS)
                 || !matches!(
                     decoded.operation,
                     system::SystemOperation::Register(_)
@@ -322,7 +323,7 @@ pub(super) fn parse(
             terminal = Some((pc, Terminator::System(decoded)));
             break;
         }
-        if profile.supports_pointer_authentication()
+        if profile.has(Features::POINTER_AUTHENTICATION)
             && let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
@@ -332,7 +333,7 @@ pub(super) fn parse(
             terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
             break;
         }
-        if profile.supports_clock()
+        if profile.has(Features::CLOCK)
             && let Some(decoded) =
                 decode_clock_instruction(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
@@ -342,7 +343,7 @@ pub(super) fn parse(
             terminal = Some((pc, Terminator::Clock(decoded)));
             break;
         }
-        if profile.supports_thread_registers()
+        if profile.has(Features::THREAD_REGISTERS)
             && let Some(decoded) =
                 decode_thread_register_instruction(pc, word).map_err(|error| {
                     BlockAnalysisError {
@@ -354,7 +355,7 @@ pub(super) fn parse(
             terminal = Some((pc, Terminator::ThreadRegister(decoded)));
             break;
         }
-        if profile.supports_amx()
+        if profile.has(Features::AMX)
             && let Some(decoded) =
                 crate::amx::decode(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
@@ -384,8 +385,8 @@ pub(super) fn parse(
                 detail: "unadmitted original NOP provenance in checked memory profile".into(),
             });
         }
-        if profile.supports_system()
-            && !profile.supports_full_system()
+        if profile.has(Features::SYSTEM)
+            && !profile.has(Features::FULL_SYSTEM)
             && !crate::scalable_context::ordinary_permitted(&instruction.operation)
         {
             return Err(BlockAnalysisError {
@@ -394,7 +395,7 @@ pub(super) fn parse(
             });
         }
         if let Operation::FloatingPoint(operand) = &instruction.operation
-            && (matches!(profile, BlockProfile::SystemModeSharedV1(_))
+            && ((profile.has(Features::FULL_SYSTEM) && profile.checked_memory().is_some())
                 || crate::x86_64::numerical_always_exits(operand))
         {
             // The checked full-system prefix has no inline numerical recipe.
@@ -426,7 +427,7 @@ pub(super) fn parse(
 /// Validate and identify the consumed prefix without generating native code.
 /// Uses the same semantic lift and transfer boundaries as [`compile`].
 pub fn source_bytes(source: &[u8], base: GuestAddress) -> Result<usize, CompileError> {
-    source_bytes_with_profile(source, base, BlockProfile::Ordinary)
+    source_bytes_with_profile(source, base, BlockProfile::ORDINARY)
 }
 
 pub fn source_bytes_with_profile(

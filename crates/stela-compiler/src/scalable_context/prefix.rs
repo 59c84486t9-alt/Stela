@@ -241,7 +241,7 @@ mod tests {
         #[test]
         fn direct_follower_targets_retain_the_follower_map_entry() {
             for bytes in [16, 32, 64, 128, 256] {
-                let native = super::super::super::compile_for_profile(
+                let native = crate::testing::context_leaf(
                     &source(&[BRANCH_TO_FOLLOWER, PREFIX, AND_DESTRUCTIVE, RET]),
                     BASE,
                     profile(bytes),

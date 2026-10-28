@@ -1,6 +1,6 @@
 //! DC CVAC, DC CVAU and DC CIVAC in system-mode blocks the engine compiles
 //! where they neither trap nor are UNDEFINED
-//! (`CompilationPlan::with_cache_clean`). The host is cache-coherent, so
+//! (`Options::with_native_system`). The host is cache-coherent, so
 //! all the engine does for them is translate Xt as a read, taking the Data
 //! Abort of a failed translation (`engine::system` `check_maintenance`).
 //! Native code makes the same check by reading the byte at Xt through the

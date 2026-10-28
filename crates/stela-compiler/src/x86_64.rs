@@ -332,14 +332,14 @@ pub struct MemoryChecks {
     /// 16-byte granule faults. Atomics always fault there (FEAT_LSE2).
     pub ordered_granule: bool,
     /// Every access checks its address against the guest's native ranges
-    /// ([`RangeCheck`]). `SystemModeV1` sets it for every block, whatever
+    /// ([`RangeCheck`]). The direct system-mode profile sets it for every block, whatever
     /// the engine asks, and no other profile does.
     pub(crate) guest_range: bool,
     /// No other agent accesses guest memory while the block runs: the
     /// system engine runs one PE at a time, and no device or host agent
     /// writes guest RAM meanwhile. Atomics, ordered accesses and barriers
     /// then need no LOCK, XCHG, MFENCE or 16-byte snapshot
-    /// ([`plain_ordering`]). `SystemModeV1` sets it for every block, and no
+    /// ([`plain_ordering`]). The direct system-mode profile sets it for every block, and no
     /// other profile does.
     pub(crate) single_agent: bool,
     /// FEAT_CSV3: every access checks the guest range, those

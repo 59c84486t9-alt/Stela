@@ -46,8 +46,8 @@ mod tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        let leaf = crate::compile(&source, crate::GuestAddress(0x100ffc)).unwrap();
-        let block = crate::block::compile(&source, crate::GuestAddress(0x100ffc)).unwrap();
+        let leaf = crate::testing::leaf(&source, crate::GuestAddress(0x100ffc)).unwrap();
+        let block = crate::testing::block(&source, crate::GuestAddress(0x100ffc)).unwrap();
         for native in [&leaf, &block.native] {
             assert_eq!(
                 native.source_map,

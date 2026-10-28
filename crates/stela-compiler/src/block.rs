@@ -6,6 +6,7 @@
 //! runtime helper when software PAuth is enabled.
 
 mod analysis;
+mod features;
 pub mod loop_budget;
 pub mod memory;
 pub mod pauth_lr;
@@ -22,6 +23,7 @@ pub use analysis::{
     SuccessorKind, analyze, analyze_with_profile, source_bytes, source_bytes_with_profile,
 };
 use analysis::{ParsedBlock, analyze_parsed, parse};
+pub use features::{BlockProfile, Features};
 pub use memory::{
     CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID, CheckedMemoryProfile,
     ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -42,161 +44,6 @@ use serde::Serialize;
 
 const NOP_ENCODING: u32 = 0xd503_201f;
 
-/// Separate from the leaf ABI: RAX/RDX return the next guest PC and exit kind.
-pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
-/// The block ABI with software PAuth helper exits. Keys and the PAuth version
-/// are chosen at run time, so cached code contains neither.
-pub const PAUTH_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-v1";
-pub const CLOCK_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-v1";
-
-pub const THREAD_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-darwin-arm64-thread-v1";
-pub const PAUTH_THREAD_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-thread-v1";
-pub const CLOCK_THREAD_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-clock-thread-v1";
-
-/// Restricted context-independent prefixes and checked System runtime exits.
-/// This identifies a service boundary, not CPU feature availability.
-pub const SYSTEM_BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-system-v1";
-pub const SYSTEM_REGISTER_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-system-registers-v1";
-/// Direct-RAM blocks for the system-mode engine: guest VAs are native
-/// addresses through shadow paging, `GuestState` is exact at every instruction
-/// boundary, and every System-class instruction exits with kind 11. Other
-/// PEs run concurrently: atomics are locked and barriers fence.
-pub const SYSTEM_MODE_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-system-mode-v2";
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BlockProfile {
-    #[default]
-    Ordinary,
-    /// Direct RAM, with non-faulting self-loops kept resident.
-    OrdinaryResidentV1,
-    CheckedMemory(CheckedMemoryProfile),
-    /// Checked memory plus the existing serialized PAC/clock/thread helpers.
-    /// The immutable ABI keeps every cache entry distinct from direct RAM.
-    CheckedMemoryPauthClockThread(CheckedMemoryProfile),
-    SystemV1,
-    SystemRegistersV1,
-    /// The system-mode engine's profile; see [`SYSTEM_MODE_BLOCK_ABI`].
-    SystemModeV1,
-    /// All memory uses the checked all-writer service. Every full-system
-    /// terminal remains unexecuted until the BSP recovers the entire cohort.
-    SystemModeSharedV1(CheckedMemoryProfile),
-    AppleArm64eSoftwarePauthV1,
-    AppleArm64eSoftwarePauthClockV1,
-    DarwinArm64ThreadV1,
-    AppleArm64eSoftwarePauthThreadV1,
-    AppleArm64eSoftwarePauthClockThreadV1,
-}
-
-impl BlockProfile {
-    pub const fn abi(self) -> &'static str {
-        match self {
-            Self::Ordinary => BLOCK_ABI,
-            Self::OrdinaryResidentV1 => loop_budget::RESIDENT_BLOCK_ABI,
-            Self::CheckedMemory(profile) => profile.abi(),
-            Self::CheckedMemoryPauthClockThread(profile) => profile.process_helpers_abi(),
-            Self::SystemV1 => SYSTEM_BLOCK_ABI,
-            Self::SystemRegistersV1 => SYSTEM_REGISTER_BLOCK_ABI,
-            Self::SystemModeV1 => SYSTEM_MODE_BLOCK_ABI,
-            Self::SystemModeSharedV1(profile) => profile.shared_system_abi(),
-            Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
-            Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
-            Self::DarwinArm64ThreadV1 => THREAD_BLOCK_ABI,
-            Self::AppleArm64eSoftwarePauthThreadV1 => PAUTH_THREAD_BLOCK_ABI,
-            Self::AppleArm64eSoftwarePauthClockThreadV1 => CLOCK_THREAD_BLOCK_ABI,
-        }
-    }
-
-    pub const fn supports_resident_loops(self) -> bool {
-        matches!(self, Self::OrdinaryResidentV1)
-    }
-
-    pub const fn checked_memory(self) -> Option<CheckedMemoryProfile> {
-        match self {
-            Self::CheckedMemory(profile)
-            | Self::CheckedMemoryPauthClockThread(profile)
-            | Self::SystemModeSharedV1(profile) => Some(profile),
-            _ => None,
-        }
-    }
-
-    pub const fn supports_checked_process_helpers(self) -> bool {
-        matches!(self, Self::CheckedMemoryPauthClockThread(_))
-    }
-
-    pub const fn supports_full_system(self) -> bool {
-        matches!(self, Self::SystemModeV1 | Self::SystemModeSharedV1(_))
-    }
-
-    pub const fn supports_system(self) -> bool {
-        matches!(
-            self,
-            Self::SystemV1
-                | Self::SystemRegistersV1
-                | Self::SystemModeV1
-                | Self::SystemModeSharedV1(_)
-        )
-    }
-
-    pub const fn supports_system_registers(self) -> bool {
-        matches!(
-            self,
-            Self::SystemRegistersV1 | Self::SystemModeV1 | Self::SystemModeSharedV1(_)
-        )
-    }
-
-    pub const fn supports_pointer_authentication(self) -> bool {
-        matches!(
-            self,
-            Self::AppleArm64eSoftwarePauthV1
-                | Self::AppleArm64eSoftwarePauthClockV1
-                | Self::AppleArm64eSoftwarePauthThreadV1
-                | Self::AppleArm64eSoftwarePauthClockThreadV1
-                | Self::CheckedMemoryPauthClockThread(_)
-                | Self::SystemModeV1
-                | Self::SystemModeSharedV1(_)
-        )
-    }
-
-    pub const fn supports_clock(self) -> bool {
-        matches!(
-            self,
-            Self::AppleArm64eSoftwarePauthClockV1
-                | Self::AppleArm64eSoftwarePauthClockThreadV1
-                | Self::CheckedMemoryPauthClockThread(_)
-        )
-    }
-
-    /// AMX state is per guest thread in the direct-RAM thread profiles and
-    /// per PE in system mode; those profiles carry AMX exits.
-    pub const fn supports_amx(self) -> bool {
-        matches!(
-            self,
-            Self::SystemModeV1
-                | Self::SystemModeSharedV1(_)
-                | Self::DarwinArm64ThreadV1
-                | Self::AppleArm64eSoftwarePauthThreadV1
-                | Self::AppleArm64eSoftwarePauthClockThreadV1
-        )
-    }
-
-    pub const fn supports_thread_registers(self) -> bool {
-        matches!(
-            self,
-            Self::DarwinArm64ThreadV1
-                | Self::AppleArm64eSoftwarePauthThreadV1
-                | Self::AppleArm64eSoftwarePauthClockThreadV1
-                | Self::CheckedMemoryPauthClockThread(_)
-        )
-    }
-}
 /// Maximum input window; a terminator can consume a shorter prefix.
 pub const MAX_BLOCK_INSTRUCTIONS: usize = 256;
 
@@ -350,10 +197,22 @@ pub struct CompiledBlock {
     /// system-mode engine may chain (`x86_64::chain`).
     pub direct_exits: alloc::vec::Vec<crate::x86_64::chain::DirectExit>,
     /// Where the native code keeps guest GPRs out of their frame slots
-    /// across a faultable access. Only `SystemModeV1` emits entries, and
+    /// across a faultable access. Only the direct system-mode profile emits entries, and
     /// an engine that recovers from a native fault must apply them
     /// ([`FaultRecovery::apply`]) before it reads the frame.
     pub fault_recovery: alloc::vec::Vec<FaultRecovery>,
+}
+
+impl CompiledBlock {
+    /// Code with no chainable exits and no fault recovery.
+    fn unchained(native: NativeBlock, source_bytes: usize) -> Self {
+        Self {
+            native,
+            source_bytes,
+            direct_exits: alloc::vec::Vec::new(),
+            fault_recovery: alloc::vec::Vec::new(),
+        }
+    }
 }
 
 /// While native code at offsets `start..end` of its block runs, each
@@ -439,79 +298,97 @@ fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, 
     }))
 }
 
-/// Compile through the first transfer, trap or unconditional runtime helper,
-/// or exit at the input boundary.
-/// Unknown semantics before that boundary are rejected. Bytes following a
-/// terminator are unconsumed and do not participate in the returned source map.
-pub fn compile(source: &[u8], base: GuestAddress) -> Result<CompiledBlock, CompileError> {
-    compile_with_profile(source, base, BlockProfile::Ordinary)
-}
-
-pub fn compile_with_profile(
-    source: &[u8],
-    base: GuestAddress,
-    profile: BlockProfile,
-) -> Result<CompiledBlock, CompileError> {
-    compile_for_target(source, base, profile, crate::TargetCpu::Baseline)
-}
-pub fn compile_for_target(
-    source: &[u8],
-    base: GuestAddress,
-    profile: BlockProfile,
-    target: crate::TargetCpu,
-) -> Result<CompiledBlock, CompileError> {
-    CompilationPlan::new(source, base, profile, target)?.compile()
-}
-
 /// [`analyze_with_profile`] of `source` and [`CompilationPlan::new`] of the
 /// block it finds (`source[..analysis.source_bytes]`) from one parse.
 pub fn analyze_and_plan(
     source: &[u8],
     base: GuestAddress,
-    profile: BlockProfile,
-    target: crate::TargetCpu,
+    options: &crate::Options,
 ) -> Result<(BlockAnalysis, Result<CompilationPlan, CompileError>), BlockAnalysisError> {
-    let parsed = parse(source, base, profile)?;
+    let parsed = parse(source, base, options.profile())?;
     let analysis = analyze_parsed(&parsed);
     Ok((
         analysis,
-        CompilationPlan::from_parsed(parsed, profile, target),
+        options
+            .validate()
+            .and_then(|()| CompilationPlan::block(parsed, options)),
     ))
 }
 
-/// One immutable parsed consumed vector shared by cache requirements and emission.
-/// A cache hit may avoid emission; it still derives exact requirements from source.
+/// One validated decode of the consumed input, shared by cache requirements
+/// and emission. A cache hit may skip emission; it still derives the
+/// requirements from source.
 pub struct CompilationPlan {
-    parsed: ParsedBlock,
-    checked: Option<memory::CheckedPlan>,
-    target: crate::TargetCpu,
-    profile: BlockProfile,
-    resident: Option<crate::x86_64::block::ResidentLoopPlan>,
-    checks: crate::x86_64::MemoryChecks,
-    native: crate::x86_64::NativeSystem,
+    options: crate::Options,
+    stage: Stage,
 }
+
+enum Stage {
+    Block {
+        parsed: ParsedBlock,
+        checked: Option<memory::CheckedPlan>,
+        resident: Option<crate::x86_64::block::ResidentLoopPlan>,
+    },
+    Leaf {
+        instructions: alloc::vec::Vec<crate::aarch64::Instruction>,
+        source_bytes: usize,
+    },
+    ContextLeaf(crate::scalable_context::Leaf),
+    ContextBlock(crate::scalable_context::block::Prefix),
+}
+
 impl CompilationPlan {
     pub fn new(
         source: &[u8],
         base: GuestAddress,
-        profile: BlockProfile,
-        target: crate::TargetCpu,
+        options: &crate::Options,
     ) -> Result<Self, CompileError> {
-        let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
-        Self::from_parsed(parsed, profile, target)
+        options.validate()?;
+        let profile = options.profile();
+        let target = options.target();
+        let stage = match (
+            profile.has(Features::CONTEXT),
+            profile.has(Features::LEAF),
+            options.scalable(),
+        ) {
+            (true, true, Some(scalable)) => Stage::ContextLeaf(
+                crate::scalable_context::Leaf::decode(source, base, scalable, target)?,
+            ),
+            (true, false, Some(scalable)) => {
+                Stage::ContextBlock(crate::scalable_context::block::Prefix::decode(
+                    source,
+                    base,
+                    scalable,
+                    options.numerical_features(),
+                    target,
+                )?)
+            }
+            (false, true, _) => Stage::Leaf {
+                instructions: decode_leaf(source, base)?,
+                source_bytes: source.len(),
+            },
+            _ => {
+                let parsed =
+                    parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+                return Self::block(parsed, options);
+            }
+        };
+        Ok(Self {
+            options: *options,
+            stage,
+        })
     }
 
-    fn from_parsed(
-        parsed: ParsedBlock,
-        profile: BlockProfile,
-        target: crate::TargetCpu,
-    ) -> Result<Self, CompileError> {
-        let validated = crate::x86_64::MemoryChecks::DEFAULT;
+    fn block(parsed: ParsedBlock, options: &crate::Options) -> Result<Self, CompileError> {
+        let profile = options.profile();
+        let target = options.target();
+        let checks = options.memory_checks();
+        let shared_system =
+            profile.has(Features::FULL_SYSTEM) && profile.checked_memory().is_some();
         for instruction in &parsed.instructions {
             // The shared checked service has a separately required writable
-            // CX16 read footprint. This does not qualify a direct MOVDQA recipe
-            // or alter the legacy checked profile's read-only host contract.
-            if matches!(profile, BlockProfile::SystemModeSharedV1(_))
+            // CX16 read footprint, so its ordered accesses need no AVX.
+            if shared_system
                 && matches!(instruction.operation, Operation::Ordered(_))
                 && target.supports(crate::TargetCpu::Cx16)
             {
@@ -522,7 +399,12 @@ impl CompilationPlan {
                 Operation::Exclusive(_) | Operation::CheckedPointer(_)
             ) || profile.checked_memory().is_none()
             {
-                crate::x86_64::validate_target_with(instruction, target, validated)
+                crate::x86_64::validate_target(instruction, target)
+                    .map_err(|error| CompileError(format!("{error:?}")))?;
+            }
+            // An unchecked SP needs its own host capability.
+            if !checks.stack_alignment {
+                crate::x86_64::validate_target_with(instruction, target, checks)
                     .map_err(|error| CompileError(format!("{error:?}")))?;
             }
         }
@@ -537,7 +419,7 @@ impl CompilationPlan {
                 )
             })
             .transpose()?;
-        let resident = if profile.supports_resident_loops() {
+        let resident = if profile.has(Features::RESIDENT_LOOPS) {
             crate::x86_64::block::ResidentLoopPlan::new(
                 &parsed.instructions,
                 parsed.terminal.as_ref(),
@@ -547,129 +429,105 @@ impl CompilationPlan {
             None
         };
         Ok(Self {
-            parsed,
-            checked,
-            target,
-            profile,
-            resident,
-            checks: crate::x86_64::MemoryChecks::DEFAULT,
-            native: crate::x86_64::NativeSystem::NONE,
+            options: *options,
+            stage: Stage::Block {
+                parsed,
+                checked,
+                resident,
+            },
         })
     }
 
-    /// Emit the memory checks of the regime's SCTLR_ELx: the system-mode
-    /// engine compiles separate blocks for SA (or SA0 at EL0) clear, where an
-    /// access through a misaligned SP proceeds; for A set, where any access
-    /// not aligned to its elements faults; and for nAA set, where an ordered
-    /// access may cross its 16-byte granule. No other profile admits checks
-    /// but [`crate::x86_64::MemoryChecks::DEFAULT`], and a host without the
-    /// capability an unchecked SP then needs refuses.
-    pub fn with_memory_checks(
-        mut self,
-        checks: crate::x86_64::MemoryChecks,
-    ) -> Result<Self, CompileError> {
-        if checks != crate::x86_64::MemoryChecks::DEFAULT
-            && self.profile != BlockProfile::SystemModeV1
-        {
-            return Err(CompileError(format!(
-                "{:?} makes only the default memory checks",
-                self.profile
-            )));
-        }
-        if !checks.stack_alignment {
-            for instruction in &self.parsed.instructions {
-                crate::x86_64::validate_target_with(instruction, self.target, checks)
-                    .map_err(|error| CompileError(format!("{error:?}")))?;
-            }
-        }
-        self.checks = checks;
-        Ok(self)
-    }
-    /// Complete a terminal DC ZVA natively, zeroing the aligned `bytes`
-    /// block holding Xt (DCZID_EL0.BS: a power of two from 4 to 2048) and
-    /// falling through: the system-mode engine compiles separate blocks for
-    /// the contexts where DC ZVA neither traps nor is UNDEFINED. `None`
-    /// keeps its System exit.
-    pub fn with_zero_block(mut self, bytes: Option<u16>) -> Result<Self, CompileError> {
-        use crate::x86_64::zero_block::{MAX_BYTES, MIN_BYTES};
-        if let Some(bytes) = bytes {
-            if self.profile != BlockProfile::SystemModeV1 {
-                return Err(CompileError(format!(
-                    "{:?} keeps DC ZVA's System exit",
-                    self.profile
-                )));
-            }
-            if !bytes.is_power_of_two() || !(MIN_BYTES..=MAX_BYTES).contains(&bytes) {
-                return Err(CompileError(format!(
-                    "a {bytes}-byte DC ZVA block is not a DCZID_EL0.BS size"
-                )));
-            }
-        }
-        self.native.zero_block = bytes;
-        Ok(self)
-    }
-    /// Complete a terminal DC CVAC, DC CVAU or DC CIVAC among `operations`
-    /// natively, checking that Xt translates for a read and falling through
-    /// (`x86_64::cache_clean`): the system-mode engine compiles separate
-    /// blocks for the contexts where those operations neither trap nor are
-    /// UNDEFINED. Other operations keep their System exit.
-    pub fn with_cache_clean(
-        mut self,
-        operations: crate::x86_64::cache_clean::Operations,
-    ) -> Result<Self, CompileError> {
-        if !operations.is_empty() && self.profile != BlockProfile::SystemModeV1 {
-            return Err(CompileError(format!(
-                "{:?} keeps the DC clean operations' System exit",
-                self.profile
-            )));
-        }
-        self.native.cache_clean = operations;
-        Ok(self)
-    }
-    /// Allow the ordinary runtime to retain eligible internal loop edges. Other
-    /// service profiles keep their existing admission and call contracts.
+    /// Let an ordinary block keep eligible internal loop edges resident, with
+    /// [`Features::RESIDENT_LOOPS`] when it has any. Other profiles keep their
+    /// admission and call contracts.
     pub fn with_resident_loops(mut self) -> Self {
-        if self.profile == BlockProfile::Ordinary {
-            self.resident = crate::x86_64::block::ResidentLoopPlan::new(
-                &self.parsed.instructions,
-                self.parsed.terminal.as_ref(),
-                self.parsed.next_pc,
+        if let Stage::Block {
+            parsed, resident, ..
+        } = &mut self.stage
+            && self.options.profile() == BlockProfile::ORDINARY
+        {
+            *resident = crate::x86_64::block::ResidentLoopPlan::new(
+                &parsed.instructions,
+                parsed.terminal.as_ref(),
+                parsed.next_pc,
             );
-            if self.resident.is_some() {
-                self.profile = BlockProfile::OrdinaryResidentV1;
+            if resident.is_some() {
+                self.options = crate::Options::new(
+                    BlockProfile::new(Features::RESIDENT_LOOPS),
+                    self.options.target(),
+                );
             }
         }
         self
     }
 
     pub fn profile(&self) -> BlockProfile {
-        self.profile
+        self.options.profile()
+    }
+
+    #[cfg(test)]
+    fn parsed(&self) -> &ParsedBlock {
+        match &self.stage {
+            Stage::Block { parsed, .. } => parsed,
+            _ => panic!("not a block plan"),
+        }
     }
 
     pub fn source_bytes(&self) -> usize {
-        self.parsed.source_bytes
+        match &self.stage {
+            Stage::Block { parsed, .. } => parsed.source_bytes,
+            Stage::Leaf { source_bytes, .. } => *source_bytes,
+            Stage::ContextLeaf(leaf) => leaf.source_bytes(),
+            Stage::ContextBlock(prefix) => prefix.source_bytes(),
+        }
     }
+
+    /// The memory service a checked block or a context leaf needs; `None` for
+    /// direct RAM.
     pub fn memory_requirements(&self) -> Option<crate::context::memory::MemoryRequirements> {
-        self.checked.as_ref().map(|plan| {
-            let mut requirements = plan.requirements();
-            use crate::context::memory::{host_caps, profile_requirements};
-            if matches!(self.profile, BlockProfile::SystemModeSharedV1(_))
-                && !self.target.supports(crate::TargetCpu::AtomicLoad16)
-                && self.target.supports(crate::TargetCpu::Cx16)
-                && requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
-            {
-                requirements.required_host_caps =
-                    requirements.required_host_caps & !host_caps::ATOMIC_LOAD16 | host_caps::CX16;
-                requirements.required_profile |= profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK;
+        match &self.stage {
+            Stage::Block {
+                checked: Some(plan),
+                ..
+            } => {
+                let mut requirements = plan.requirements();
+                use crate::context::memory::{host_caps, profile_requirements};
+                let profile = self.options.profile();
+                let target = self.options.target();
+                if profile.has(Features::FULL_SYSTEM)
+                    && !target.supports(crate::TargetCpu::AtomicLoad16)
+                    && target.supports(crate::TargetCpu::Cx16)
+                    && requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
+                {
+                    requirements.required_host_caps = requirements.required_host_caps
+                        & !host_caps::ATOMIC_LOAD16
+                        | host_caps::CX16;
+                    requirements.required_profile |=
+                        profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK;
+                }
+                Some(requirements)
             }
-            requirements
-        })
+            Stage::ContextLeaf(leaf) => Some(leaf.memory_requirements()),
+            _ => None,
+        }
     }
+
+    /// A context leaf's per-instruction scalable execution requirements.
+    pub fn execution_requirements(
+        &self,
+    ) -> Option<crate::aarch64::scalable::execution::ScalableExecutionRequirements> {
+        match &self.stage {
+            Stage::ContextLeaf(leaf) => Some(leaf.execution_requirements()),
+            _ => None,
+        }
+    }
+
     pub fn compile(self) -> Result<CompiledBlock, CompileError> {
         self.compile_impl(None)
     }
-    /// Emit identical code while retaining optional selected-recipe observations.
-    /// Unsupported profiling coverage stays absent, rather than implying zero work.
+    /// Emit identical code while recording the selected recipes. Coverage a
+    /// stage does not profile stays absent, rather than implying zero work.
     pub fn compile_profiled(
         self,
     ) -> Result<(CompiledBlock, profile::CompileProfile), CompileError> {
@@ -677,78 +535,127 @@ impl CompilationPlan {
         let block = self.compile_impl(Some(&mut profile))?;
         Ok((block, profile))
     }
+
     fn compile_impl(
         self,
-        profile: Option<&mut profile::CompileProfile>,
+        recipes: Option<&mut profile::CompileProfile>,
     ) -> Result<CompiledBlock, CompileError> {
-        let native = if let Some(checked) = self.checked {
-            checked.emit(
-                self.parsed.terminal.as_ref(),
-                self.parsed.next_pc,
-                self.target,
-                profile,
-            )?
-        } else if let Some(resident) = self.resident {
+        let options = self.options;
+        let profile = options.profile();
+        let target = options.target();
+        let (parsed, checked, resident) = match self.stage {
+            Stage::Block {
+                parsed,
+                checked,
+                resident,
+            } => (parsed, checked, resident),
+            Stage::Leaf {
+                instructions,
+                source_bytes,
+            } => {
+                let native = crate::x86_64::Emitter
+                    .emit_for_target(&instructions, target)
+                    .map_err(|e| CompileError(format!("x86 emission failed: {e:?}")))?;
+                return Ok(CompiledBlock::unchained(native, source_bytes));
+            }
+            Stage::ContextLeaf(leaf) => {
+                let source_bytes = leaf.source_bytes();
+                return Ok(CompiledBlock::unchained(leaf.emit()?, source_bytes));
+            }
+            Stage::ContextBlock(prefix) => return prefix.emit(),
+        };
+        let native = if let Some(checked) = checked {
+            checked.emit(parsed.terminal.as_ref(), parsed.next_pc, target, recipes)?
+        } else if let Some(resident) = resident {
             resident
-                .emit(&self.parsed.instructions)
+                .emit(&parsed.instructions)
                 .map_err(|error| CompileError(format!("resident loop emission: {error:?}")))?
-        } else if self.profile.supports_resident_loops() {
+        } else if profile.has(Features::RESIDENT_LOOPS) {
             crate::x86_64::block::emit_resident_fallback_for_target(
-                &self.parsed.instructions,
-                self.parsed.terminal.as_ref(),
-                self.parsed.next_pc,
-                self.target,
+                &parsed.instructions,
+                parsed.terminal.as_ref(),
+                parsed.next_pc,
+                target,
             )
-        } else if self.profile == BlockProfile::Ordinary {
+        } else if profile == BlockProfile::ORDINARY {
             crate::x86_64::block::emit_ordinary_for_target(
-                &self.parsed.instructions,
-                self.parsed.terminal.as_ref(),
-                self.parsed.next_pc,
-                self.target,
+                &parsed.instructions,
+                parsed.terminal.as_ref(),
+                parsed.next_pc,
+                target,
             )
         } else {
             // Only system mode runs one agent at a time and checks the
             // guest's ranges; every other profile keeps the locked recipes
-            // and the default checks (`with_memory_checks`).
-            let (native, fault_recovery) = if self.profile == BlockProfile::SystemModeV1 {
+            // and the default checks.
+            let (native, fault_recovery) = if profile.has(Features::FULL_SYSTEM) {
                 crate::x86_64::block::emit_system_mode(
-                    &self.parsed.instructions,
-                    self.parsed.terminal.as_ref(),
-                    self.parsed.next_pc,
-                    self.target,
-                    self.checks,
-                    self.native,
+                    &parsed.instructions,
+                    parsed.terminal.as_ref(),
+                    parsed.next_pc,
+                    target,
+                    options.memory_checks(),
+                    options.native_system(),
                 )
             } else {
                 (
                     crate::x86_64::block::emit_ordinary_for_target(
-                        &self.parsed.instructions,
-                        self.parsed.terminal.as_ref(),
-                        self.parsed.next_pc,
-                        self.target,
+                        &parsed.instructions,
+                        parsed.terminal.as_ref(),
+                        parsed.next_pc,
+                        target,
                     ),
                     alloc::vec::Vec::new(),
                 )
             };
             let direct_exits = crate::x86_64::block::successor_exits(
                 &native.x86_64_code,
-                self.parsed.terminal.as_ref(),
-                self.parsed.next_pc,
+                parsed.terminal.as_ref(),
+                parsed.next_pc,
             );
             return Ok(CompiledBlock {
                 native,
-                source_bytes: self.parsed.source_bytes,
+                source_bytes: parsed.source_bytes,
                 direct_exits,
                 fault_recovery,
             });
         };
-        Ok(CompiledBlock {
-            native,
-            source_bytes: self.parsed.source_bytes,
-            direct_exits: alloc::vec::Vec::new(),
-            fault_recovery: alloc::vec::Vec::new(),
-        })
+        Ok(CompiledBlock::unchained(native, parsed.source_bytes))
     }
+}
+
+/// Lift a leaf, which must end in RET X30, instruction by instruction.
+fn decode_leaf(
+    source: &[u8],
+    base: GuestAddress,
+) -> Result<alloc::vec::Vec<crate::aarch64::Instruction>, CompileError> {
+    use crate::Lifter;
+    if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
+        return Err(CompileError(
+            "input and guest base must be nonempty/aligned to 4 bytes".into(),
+        ));
+    }
+    let mut instructions = alloc::vec::Vec::with_capacity(source.len() / 4);
+    for (index, bytes) in source.as_chunks::<4>().0.iter().enumerate() {
+        let pc = GuestAddress(
+            base.0
+                .checked_add((index as u64) * 4)
+                .ok_or_else(|| CompileError("guest address overflow".into()))?,
+        );
+        let instruction = crate::aarch64::Decoder
+            .lift(pc, u32::from_le_bytes(*bytes))
+            .map_err(|e| CompileError(format!("unsupported ARM64 semantics: {e:?}")))?;
+        instructions.push(instruction);
+    }
+    if !matches!(
+        instructions
+            .last()
+            .map(|instruction| &instruction.operation),
+        Some(Operation::Return)
+    ) {
+        return Err(CompileError("leaf region must end in RET X30".into()));
+    }
+    Ok(instructions)
 }
 
 #[cfg(test)]
@@ -772,24 +679,32 @@ mod tests {
             CheckedMemoryProfile::SpAlignmentEnabled,
             CheckedMemoryProfile::SpAlignmentDisabled,
         ] {
-            let shared = BlockProfile::SystemModeSharedV1(specialization);
-            let checked = BlockProfile::CheckedMemory(specialization);
+            let shared =
+                BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(specialization);
+            let checked = BlockProfile::ORDINARY.with_checked_memory(specialization);
             assert_ne!(shared.abi(), checked.abi());
-            assert_ne!(shared.abi(), BlockProfile::SystemModeV1.abi());
+            assert_ne!(shared.abi(), BlockProfile::new(Features::SYSTEM_MODE).abi());
             let target = TargetCpu::X86_64_V2.with_atomic_load16();
-            let plan =
-                || CompilationPlan::new(&source, GuestAddress(0x4000), shared, target).unwrap();
-            assert!(!plan().checks.single_agent);
+            let options = crate::Options::new(shared, target);
+            let plan = || CompilationPlan::new(&source, GuestAddress(0x4000), &options).unwrap();
+            assert!(!plan().options.memory_checks().single_agent);
             assert!(
-                plan()
-                    .with_memory_checks(crate::x86_64::MemoryChecks {
+                CompilationPlan::new(
+                    &source,
+                    GuestAddress(0x4000),
+                    &options.with_memory_checks(crate::x86_64::MemoryChecks {
                         single_agent: true,
                         ..crate::x86_64::MemoryChecks::DEFAULT
                     })
-                    .is_err()
+                )
+                .is_err()
             );
-            let expected =
-                CompilationPlan::new(&source, GuestAddress(0x4000), checked, target).unwrap();
+            let expected = CompilationPlan::new(
+                &source,
+                GuestAddress(0x4000),
+                &crate::Options::new(checked, target),
+            )
+            .unwrap();
             assert_eq!(plan().memory_requirements(), expected.memory_requirements());
             let native = plan().compile().unwrap().native;
             let expected = expected.compile().unwrap().native;
@@ -810,10 +725,15 @@ mod tests {
             .collect();
         let profile = CheckedMemoryProfile::SpAlignmentDisabled;
         let plan = |outer, target| {
-            CompilationPlan::new(&source, GuestAddress(0x4000), outer, target).unwrap()
+            CompilationPlan::new(
+                &source,
+                GuestAddress(0x4000),
+                &crate::Options::new(outer, target),
+            )
+            .unwrap()
         };
         let shared = plan(
-            BlockProfile::SystemModeSharedV1(profile),
+            BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(profile),
             TargetCpu::X86_64_V2,
         );
         let required = shared.memory_requirements().unwrap();
@@ -826,13 +746,15 @@ mod tests {
             CompilationPlan::new(
                 &source,
                 GuestAddress(0x4000),
-                BlockProfile::CheckedMemory(profile),
-                TargetCpu::X86_64_V2,
+                &crate::Options::new(
+                    BlockProfile::ORDINARY.with_checked_memory(profile),
+                    TargetCpu::X86_64_V2
+                )
             )
             .is_err()
         );
         let legacy = plan(
-            BlockProfile::CheckedMemory(profile),
+            BlockProfile::ORDINARY.with_checked_memory(profile),
             TargetCpu::X86_64_V2.with_atomic_load16(),
         );
         let required = legacy.memory_requirements().unwrap();
@@ -842,7 +764,7 @@ mod tests {
             0
         );
         let optional = plan(
-            BlockProfile::SystemModeSharedV1(profile),
+            BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(profile),
             TargetCpu::X86_64_V2.with_atomic_load16(),
         );
         assert_eq!(
@@ -855,21 +777,30 @@ mod tests {
     fn shared_system_control_and_pauth_terminals_keep_the_exact_unexecuted_source_pc() {
         use crate::TargetCpu;
         let base = GuestAddress(0x4000);
-        let shared = BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentDisabled);
-        assert!(shared.supports_system_registers() && shared.supports_full_system());
-        assert!(!shared.supports_checked_process_helpers());
+        let shared = BlockProfile::new(Features::SYSTEM_MODE)
+            .with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled);
+        assert!(shared.has(Features::SYSTEM_REGISTERS) && shared.has(Features::FULL_SYSTEM));
+        assert!(!shared.has(Features::PROCESS_HELPERS));
         for terminal in [0xd53b_e040u32, 0xd503_3fdf, 0xd503_237f, 0xd400_0001] {
             let source: Vec<_> = [0x9100_0400u32, terminal, 0xd65f_03c0]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
-            let plan = CompilationPlan::new(&source, base, shared, TargetCpu::Baseline).unwrap();
+            let plan = CompilationPlan::new(
+                &source,
+                base,
+                &crate::Options::new(shared, TargetCpu::Baseline),
+            )
+            .unwrap();
             assert_eq!(plan.source_bytes(), 8);
             assert_eq!(
-                plan.parsed.terminal.as_ref().unwrap().0,
+                plan.parsed().terminal.as_ref().unwrap().0,
                 GuestAddress(base.0 + 4)
             );
-            assert_eq!(plan.native, crate::x86_64::NativeSystem::NONE);
+            assert_eq!(
+                plan.options.native_system(),
+                crate::x86_64::NativeSystem::NONE
+            );
             let body = plan.compile().unwrap();
             assert_eq!(
                 body.native.source_map.last().unwrap().0,
@@ -887,7 +818,8 @@ mod tests {
             CheckedMemoryProfile::SpAlignmentEnabled,
             CheckedMemoryProfile::SpAlignmentDisabled,
         ] {
-            let shared = BlockProfile::SystemModeSharedV1(specialization);
+            let shared =
+                BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(specialization);
             for word in [
                 0x9e63_0100, // UCVTF D0,X8, reached by the original kernel
                 0x1e22_2820, // FADD S0,S1,S2
@@ -905,11 +837,14 @@ mod tests {
                     }
                     words.extend([word, u32::MAX]);
                     let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
-                    let plan =
-                        CompilationPlan::new(&source, base, shared, crate::TargetCpu::Baseline)
-                            .unwrap();
+                    let plan = CompilationPlan::new(
+                        &source,
+                        base,
+                        &crate::Options::new(shared, crate::TargetCpu::Baseline),
+                    )
+                    .unwrap();
                     let terminal_pc = GuestAddress(base.0 + u64::from(prefix) * 4);
-                    assert!(matches!(plan.parsed.terminal,
+                    assert!(matches!(plan.parsed().terminal,
                         Some((pc, Terminator::FloatingPoint)) if pc == terminal_pc));
                     assert_eq!(plan.source_bytes(), (usize::from(prefix) + 1) * 4);
                     let analysis = analyze_with_profile(&source, base, shared).unwrap();
@@ -942,9 +877,13 @@ mod tests {
             .iter()
             .flat_map(|word| word.to_le_bytes())
             .collect();
-        for profile in [BlockProfile::Ordinary, BlockProfile::SystemModeV1] {
+        for profile in [
+            BlockProfile::ORDINARY,
+            BlockProfile::new(Features::SYSTEM_MODE),
+        ] {
             let target = crate::TargetCpu::Baseline;
-            let (analysis, plan) = analyze_and_plan(&source, BASE, profile, target).unwrap();
+            let (analysis, plan) =
+                analyze_and_plan(&source, BASE, &crate::Options::new(profile, target)).unwrap();
             assert_eq!(
                 analysis,
                 analyze_with_profile(&source, BASE, profile).unwrap()
@@ -956,7 +895,7 @@ mod tests {
                 alloc::format!("{:?}", plan.unwrap().compile().unwrap()),
                 alloc::format!(
                     "{:?}",
-                    compile_for_target(consumed, BASE, profile, target).unwrap()
+                    crate::testing::block_for(consumed, BASE, profile, target).unwrap()
                 )
             );
         }
@@ -964,8 +903,7 @@ mod tests {
             analyze_and_plan(
                 &[],
                 BASE,
-                BlockProfile::Ordinary,
-                crate::TargetCpu::Baseline
+                &crate::Options::new(BlockProfile::ORDINARY, crate::TargetCpu::Baseline)
             )
             .is_err()
         );
@@ -986,41 +924,28 @@ mod tests {
         .into_iter()
         .flat_map(u32::to_le_bytes)
         .collect();
-        let compile = |checked| {
-            CompilationPlan::new(
-                &source,
-                GuestAddress(0x1000),
-                BlockProfile::SystemModeV1,
+        let unaligned = crate::x86_64::MemoryChecks {
+            stack_alignment: false,
+            ..crate::x86_64::MemoryChecks::DEFAULT
+        };
+        let compile = |checks| {
+            let options = crate::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE),
                 crate::TargetCpu::detect(),
             )
-            .and_then(|plan| {
-                plan.with_memory_checks(crate::x86_64::MemoryChecks {
-                    stack_alignment: checked,
-                    ..crate::x86_64::MemoryChecks::DEFAULT
-                })
-            })
-            .and_then(CompilationPlan::compile)
-            .unwrap()
-            .native
-            .x86_64_code
+            .with_memory_checks(checks);
+            crate::compile(&source, GuestAddress(0x1000), &options)
+                .unwrap()
+                .native
+                .x86_64_code
         };
         let has_check = |code: &[u8]| code.windows(SP_CHECK.len()).any(|bytes| bytes == SP_CHECK);
-        assert!(has_check(&compile(true)));
-        assert!(!has_check(&compile(false)));
+        assert!(has_check(&compile(crate::x86_64::MemoryChecks::DEFAULT)));
+        assert!(!has_check(&compile(unaligned)));
         // Only the system-mode profile admits it.
-        assert!(
-            CompilationPlan::new(
-                &source[..4],
-                GuestAddress(0x1000),
-                BlockProfile::Ordinary,
-                crate::TargetCpu::Baseline
-            )
-            .and_then(|plan| plan.with_memory_checks(crate::x86_64::MemoryChecks {
-                stack_alignment: false,
-                ..crate::x86_64::MemoryChecks::DEFAULT
-            }))
-            .is_err()
-        );
+        let ordinary = crate::Options::new(BlockProfile::ORDINARY, crate::TargetCpu::Baseline)
+            .with_memory_checks(unaligned);
+        assert!(crate::compile(&source[..4], GuestAddress(0x1000), &ordinary).is_err());
     }
 
     /// Every access of a system-mode block, in a clean-load region or not,
@@ -1034,19 +959,13 @@ mod tests {
                 .filter(|bytes| *bytes == check)
                 .count()
         };
-        let compile = |words: &[u32], profile, plan: fn(CompilationPlan) -> CompilationPlan| {
+        let compile = |words: &[u32], profile, options: fn(crate::Options) -> crate::Options| {
             let source: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
-            CompilationPlan::new(
-                &source,
-                GuestAddress(0x1000),
-                profile,
-                crate::TargetCpu::detect(),
-            )
-            .map(plan)
-            .and_then(CompilationPlan::compile)
-            .unwrap()
-            .native
-            .x86_64_code
+            let options = options(crate::Options::new(profile, crate::TargetCpu::detect()));
+            crate::compile(&source, GuestAddress(0x1000), &options)
+                .unwrap()
+                .native
+                .x86_64_code
         };
         // ldr w0, [x1]; add w0, w0, #1; ldr x0, [x1, #8]; ldp w2, w3, [x1];
         // ldr h0, [x1, x2]; ld1 {v0.4s}, [x1]; ldr x4, <literal>; ldadd x4,
@@ -1071,7 +990,11 @@ mod tests {
         ];
         // Alone, each access checks, but the prefetch, which never faults.
         for (index, word) in words.into_iter().enumerate() {
-            let alone = compile(&[word], BlockProfile::SystemModeV1, |plan| plan);
+            let alone = compile(
+                &[word],
+                BlockProfile::new(Features::SYSTEM_MODE),
+                |options| options,
+            );
             assert_eq!(
                 count(&alone),
                 usize::from(![1, 14].contains(&index)),
@@ -1082,22 +1005,33 @@ mod tests {
         // needs none (`x86_64::guest_range`): the SIMD register offset,
         // which forgets every base, makes the LD1 check again, and the
         // literal always checks.
-        let system = compile(&words, BlockProfile::SystemModeV1, |plan| plan);
+        let system = compile(
+            &words,
+            BlockProfile::new(Features::SYSTEM_MODE),
+            |options| options,
+        );
         assert_eq!(count(&system), 4);
         // Under FEAT_CSV3 each access checks, so each masks its own address.
-        let masked = compile(&words, BlockProfile::SystemModeV1, |plan| {
-            plan.with_memory_checks(crate::x86_64::MemoryChecks::system(true, false, true, true))
-                .unwrap()
-        });
+        let masked = compile(
+            &words,
+            BlockProfile::new(Features::SYSTEM_MODE),
+            |options| {
+                options.with_memory_checks(crate::x86_64::MemoryChecks::system(
+                    true, false, true, true,
+                ))
+            },
+        );
         assert_eq!(count(&masked), words.len() - 2);
         // A four-level host's blocks, clean-load regions included, check
         // against its placement's ranges.
         const FOUR_LEVEL: crate::x86_64::MemoryChecks =
             crate::x86_64::MemoryChecks::system(true, false, true, false)
                 .with_range(crate::x86_64::RangeCheck::four_level(2));
-        let four_level = compile(&words, BlockProfile::SystemModeV1, |plan| {
-            plan.with_memory_checks(FOUR_LEVEL).unwrap()
-        });
+        let four_level = compile(
+            &words,
+            BlockProfile::new(Features::SYSTEM_MODE),
+            |options| options.with_memory_checks(FOUR_LEVEL),
+        );
         let four_level_check = crate::x86_64::RangeCheck::four_level(2).code();
         assert_eq!(count(&four_level), 0);
         assert_eq!(
@@ -1108,17 +1042,30 @@ mod tests {
             count(&system)
         );
         assert_eq!(
-            count(&compile(&words, BlockProfile::Ordinary, |plan| plan)),
+            count(&compile(&words, BlockProfile::ORDINARY, |options| options)),
             0
         );
         // DC ZVA and DC CVAC completed natively check Xt.
-        let zero = compile(&[0xd50b_7423], BlockProfile::SystemModeV1, |plan| {
-            plan.with_zero_block(Some(64)).unwrap()
-        });
-        let clean = compile(&[0xd50b_7a20], BlockProfile::SystemModeV1, |plan| {
-            plan.with_cache_clean(crate::x86_64::cache_clean::Operations::ALL)
-                .unwrap()
-        });
+        let zero = compile(
+            &[0xd50b_7423],
+            BlockProfile::new(Features::SYSTEM_MODE),
+            |options| {
+                options.with_native_system(crate::x86_64::NativeSystem {
+                    zero_block: Some(64),
+                    ..crate::x86_64::NativeSystem::NONE
+                })
+            },
+        );
+        let clean = compile(
+            &[0xd50b_7a20],
+            BlockProfile::new(Features::SYSTEM_MODE),
+            |options| {
+                options.with_native_system(crate::x86_64::NativeSystem {
+                    cache_clean: crate::x86_64::cache_clean::Operations::ALL,
+                    ..crate::x86_64::NativeSystem::NONE
+                })
+            },
+        );
         assert_eq!((count(&zero), count(&clean)), (1, 1));
         // The translated variant checks each access, and each failed check
         // names the access to the helper: its bytes and whether it writes
@@ -1147,9 +1094,11 @@ mod tests {
             }
             found
         };
-        let all = compile(&words, BlockProfile::SystemModeV1, |plan| {
-            plan.with_memory_checks(TRANSLATED).unwrap()
-        });
+        let all = compile(
+            &words,
+            BlockProfile::new(Features::SYSTEM_MODE),
+            |options| options.with_memory_checks(TRANSLATED),
+        );
         assert_eq!(
             accesses(&all),
             [
@@ -1169,11 +1118,18 @@ mod tests {
             ]
         );
         assert_eq!(count(&all), 0);
-        let zero = compile(&[0xd50b_7423], BlockProfile::SystemModeV1, |plan| {
-            plan.with_memory_checks(TRANSLATED)
-                .and_then(|plan| plan.with_zero_block(Some(64)))
-                .unwrap()
-        });
+        let zero = compile(
+            &[0xd50b_7423],
+            BlockProfile::new(Features::SYSTEM_MODE),
+            |options| {
+                options.with_memory_checks(TRANSLATED).with_native_system(
+                    crate::x86_64::NativeSystem {
+                        zero_block: Some(64),
+                        ..crate::x86_64::NativeSystem::NONE
+                    },
+                )
+            },
+        );
         assert_eq!(accesses(&zero), [(64, 1)]);
     }
 
@@ -1194,17 +1150,15 @@ mod tests {
         ];
         let source: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
         let compile = |checks| {
-            CompilationPlan::new(
-                &source,
-                GuestAddress(0x1000),
-                BlockProfile::SystemModeV1,
+            let options = crate::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE),
                 crate::TargetCpu::detect(),
             )
-            .and_then(|plan| plan.with_memory_checks(checks))
-            .and_then(CompilationPlan::compile)
-            .unwrap()
-            .native
-            .x86_64_code
+            .with_memory_checks(checks);
+            crate::compile(&source, GuestAddress(0x1000), &options)
+                .unwrap()
+                .native
+                .x86_64_code
         };
         // test al,unit-1; jz +2; ud2 for each element size.
         let check = |unit: u8| [0xa8, unit - 1, 0x74, 2, 0x0f, 0x0b];
@@ -1268,10 +1222,10 @@ mod tests {
             (0xd518_1000, vec![]), // msr sctlr_el1, x0
         ] {
             let source: Vec<u8> = [ADD, word].into_iter().flat_map(u32::to_le_bytes).collect();
-            let compiled = compile_for_target(
+            let compiled = crate::testing::block_for(
                 &source,
                 GuestAddress(BASE),
-                BlockProfile::SystemModeV1,
+                BlockProfile::new(Features::SYSTEM_MODE),
                 crate::TargetCpu::Baseline,
             )
             .unwrap();
@@ -1305,20 +1259,21 @@ mod tests {
         const DC_ZVA: u32 = 0xd50b_7423; // dc zva, x3
         const DC_GVA: u32 = 0xd50b_7463; // dc gva, x3
         const MRS: u32 = 0xd538_d080; // mrs x0, tpidr_el1
+        let options = |profile, zero_block| {
+            crate::Options::new(profile, crate::TargetCpu::Baseline).with_native_system(
+                crate::x86_64::NativeSystem {
+                    zero_block,
+                    ..crate::x86_64::NativeSystem::NONE
+                },
+            )
+        };
         let compile = |word: u32, bytes| {
             let source: Vec<u8> = [ADD, word, ADD]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
-            CompilationPlan::new(
-                &source,
-                GuestAddress(BASE),
-                BlockProfile::SystemModeV1,
-                crate::TargetCpu::Baseline,
-            )
-            .and_then(|plan| plan.with_zero_block(bytes))
-            .and_then(CompilationPlan::compile)
-            .unwrap()
+            let options = options(BlockProfile::new(Features::SYSTEM_MODE), bytes);
+            crate::compile(&source, GuestAddress(BASE), &options).unwrap()
         };
         let native = compile(DC_ZVA, Some(64));
         assert_eq!(native.source_bytes, 8, "DC ZVA still ends the block");
@@ -1348,28 +1303,18 @@ mod tests {
             assert_eq!(code[code.len() - DIRECT_EXIT_BYTES..], system, "{word:#x}");
             assert!(compiled.direct_exits.is_empty(), "{word:#x}");
         }
-        let plan = |profile| {
-            CompilationPlan::new(
+        let add = |profile, bytes| {
+            crate::compile(
                 &ADD.to_le_bytes(),
                 GuestAddress(BASE),
-                profile,
-                crate::TargetCpu::Baseline,
+                &options(profile, bytes),
             )
-            .unwrap()
         };
         for bytes in [2, 48, 4096] {
-            assert!(
-                plan(BlockProfile::SystemModeV1)
-                    .with_zero_block(Some(bytes))
-                    .is_err()
-            );
+            assert!(add(BlockProfile::new(Features::SYSTEM_MODE), Some(bytes)).is_err());
         }
-        assert!(
-            plan(BlockProfile::SystemV1)
-                .with_zero_block(Some(64))
-                .is_err()
-        );
-        assert!(plan(BlockProfile::SystemV1).with_zero_block(None).is_ok());
+        assert!(add(BlockProfile::new(Features::SYSTEM), Some(64)).is_err());
+        assert!(add(BlockProfile::new(Features::SYSTEM), None).is_ok());
     }
 
     /// A DC clean operation in the plan's set reads the byte at Xt and falls
@@ -1383,20 +1328,21 @@ mod tests {
         const DC_CIVAC: u32 = 0xd50b_7e20; // dc civac, x0
         const DC_CVAU: u32 = 0xd50b_7b20; // dc cvau, x0
         const DC_IVAC: u32 = 0xd508_7620; // dc ivac, x0
+        let options = |profile, cache_clean| {
+            crate::Options::new(profile, crate::TargetCpu::Baseline).with_native_system(
+                crate::x86_64::NativeSystem {
+                    cache_clean,
+                    ..crate::x86_64::NativeSystem::NONE
+                },
+            )
+        };
         let compile = |word: u32, operations| {
             let source: Vec<u8> = [ADD, word, ADD]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
-            CompilationPlan::new(
-                &source,
-                GuestAddress(BASE),
-                BlockProfile::SystemModeV1,
-                crate::TargetCpu::Baseline,
-            )
-            .and_then(|plan| plan.with_cache_clean(operations))
-            .and_then(CompilationPlan::compile)
-            .unwrap()
+            let options = options(BlockProfile::new(Features::SYSTEM_MODE), operations);
+            crate::compile(&source, GuestAddress(BASE), &options).unwrap()
         };
         let native = compile(DC_CIVAC, Operations::CIVAC);
         assert_eq!(native.source_bytes, 8, "the DC still ends the block");
@@ -1422,14 +1368,8 @@ mod tests {
             let code = &compiled.native.x86_64_code;
             assert_eq!(code[code.len() - DIRECT_EXIT_BYTES..], system, "{word:#x}");
         }
-        let plan = CompilationPlan::new(
-            &ADD.to_le_bytes(),
-            GuestAddress(BASE),
-            BlockProfile::SystemV1,
-            crate::TargetCpu::Baseline,
-        )
-        .unwrap();
-        assert!(plan.with_cache_clean(Operations::CVAC).is_err());
+        let system = options(BlockProfile::new(Features::SYSTEM), Operations::CVAC);
+        assert!(crate::compile(&ADD.to_le_bytes(), GuestAddress(BASE), &system).is_err());
     }
 
     #[test]
@@ -1444,11 +1384,10 @@ mod tests {
         const BTI_C: u32 = 0xd503_245f;
         // ISB retires as NOP: what it synchronizes exits on its own.
         const ISB: u32 = 0xd503_3fdf;
-        let profile = BlockProfile::SystemModeV1;
-        assert_eq!(profile.abi(), SYSTEM_MODE_BLOCK_ABI);
-        assert!(profile.supports_system() && profile.supports_system_registers());
-        assert!(profile.supports_pointer_authentication());
-        assert!(profile.checked_memory().is_none() && !profile.supports_clock());
+        let profile = BlockProfile::new(Features::SYSTEM_MODE);
+        assert!(profile.has(Features::SYSTEM) && profile.has(Features::SYSTEM_REGISTERS));
+        assert!(profile.has(Features::POINTER_AUTHENTICATION));
+        assert!(profile.checked_memory().is_none() && !profile.has(Features::CLOCK));
         let prefix = [ADD, LDR, STP, DMB, YIELD, NOP, BTI_C, ISB];
         for (word, kind) in [
             (0xd518_1000_u32, ExitKind::System), // msr sctlr_el1, x0
@@ -1489,7 +1428,8 @@ mod tests {
             assert_eq!(analysis.terminator_pc, Some(terminal_pc), "{word:#x}");
             assert_eq!(analysis.source_bytes, 4 * (prefix.len() + 1));
             let compiled =
-                compile_for_target(&source, BASE, profile, crate::TargetCpu::Baseline).unwrap();
+                crate::testing::block_for(&source, BASE, profile, crate::TargetCpu::Baseline)
+                    .unwrap();
             let map = &compiled.native.source_map;
             assert_eq!(map.len(), prefix.len() + 1, "{word:#x}");
             assert!(
@@ -1506,7 +1446,8 @@ mod tests {
             assert_eq!(&compiled.native.x86_64_code[at..], expected, "{word:#x}");
         }
         // The shared lane's PEs still end a block at ISB.
-        let shared = BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentEnabled);
+        let shared = BlockProfile::new(Features::SYSTEM_MODE)
+            .with_checked_memory(CheckedMemoryProfile::SpAlignmentEnabled);
         let source: Vec<u8> = [ADD, ISB, ADD]
             .iter()
             .flat_map(|word| word.to_le_bytes())
@@ -1529,7 +1470,8 @@ mod tests {
             crate::TargetCpu::Baseline,
         );
         let compiled =
-            compile_for_target(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();
+            crate::testing::block_for(&ordinary, BASE, profile, crate::TargetCpu::Baseline)
+                .unwrap();
         let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
         let mut unchecked = compiled.native.x86_64_code.clone();
         let at = unchecked
@@ -1552,18 +1494,19 @@ mod tests {
                 ..aligned
             },
         );
-        let compiled = CompilationPlan::new(&ordinary, BASE, profile, crate::TargetCpu::Baseline)
-            .unwrap()
-            .with_memory_checks(aligned)
-            .unwrap()
-            .compile()
-            .unwrap();
+        let options =
+            crate::Options::new(profile, crate::TargetCpu::Baseline).with_memory_checks(aligned);
+        let compiled = crate::compile(&ordinary, BASE, &options).unwrap();
         assert_eq!(compiled.native.x86_64_code, expected.x86_64_code);
         assert_ne!(expected.x86_64_code.len(), 0);
         // The trap and system decoders of other profiles do not see SYS.
         assert!(
-            analyze_with_profile(&0xd508_8723_u32.to_le_bytes(), BASE, BlockProfile::SystemV1)
-                .is_err()
+            analyze_with_profile(
+                &0xd508_8723_u32.to_le_bytes(),
+                BASE,
+                BlockProfile::new(Features::SYSTEM)
+            )
+            .is_err()
         );
     }
 
@@ -1582,17 +1525,28 @@ mod tests {
             .flat_map(u32::to_le_bytes)
             .collect();
         // The pair needs CMPXCHG16B, which the baseline target lacks.
-        for profile in [BlockProfile::Ordinary, BlockProfile::SystemModeV1] {
-            let plan = CompilationPlan::new(&source, BASE, profile, crate::TargetCpu::Baseline);
+        for profile in [
+            BlockProfile::ORDINARY,
+            BlockProfile::new(Features::SYSTEM_MODE),
+        ] {
+            let plan = CompilationPlan::new(
+                &source,
+                BASE,
+                &crate::Options::new(profile, crate::TargetCpu::Baseline),
+            );
             assert!(plan.is_err(), "{profile:?}");
         }
         let target = crate::TargetCpu::X86_64_V2.with_atomic_load16();
-        let code = CompilationPlan::new(&source, BASE, BlockProfile::SystemModeV1, target)
-            .unwrap()
-            .compile()
-            .unwrap()
-            .native
-            .x86_64_code;
+        let code = CompilationPlan::new(
+            &source,
+            BASE,
+            &crate::Options::new(BlockProfile::new(Features::SYSTEM_MODE), target),
+        )
+        .unwrap()
+        .compile()
+        .unwrap()
+        .native
+        .x86_64_code;
         assert!(code.contains(&LOCK), "{code:02x?}");
         assert!(code.windows(MFENCE.len()).any(|window| window == MFENCE));
     }
@@ -1636,25 +1590,29 @@ mod tests {
             .flat_map(u32::to_le_bytes)
             .collect();
         let code = |profile| {
-            compile_for_target(&source, BASE, profile, crate::TargetCpu::Baseline)
+            crate::testing::block_for(&source, BASE, profile, crate::TargetCpu::Baseline)
                 .unwrap()
                 .native
                 .x86_64_code
         };
-        let ordinary = code(BlockProfile::Ordinary);
+        let ordinary = code(BlockProfile::ORDINARY);
         for profile in [
-            BlockProfile::DarwinArm64ThreadV1,
-            BlockProfile::AppleArm64eSoftwarePauthV1,
-            BlockProfile::AppleArm64eSoftwarePauthClockV1,
-            BlockProfile::AppleArm64eSoftwarePauthThreadV1,
-            BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+            BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
+            BlockProfile::new(Features::POINTER_AUTHENTICATION),
+            BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK)),
+            BlockProfile::new(
+                Features::POINTER_AUTHENTICATION
+                    .union(Features::THREAD_REGISTERS)
+                    .union(Features::AMX),
+            ),
+            BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
         ] {
             assert_eq!(code(profile), ordinary, "{profile:?}");
         }
         let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
         let has_check = |code: &[u8]| code.windows(check.len()).any(|bytes| bytes == check);
         assert!(!has_check(&ordinary));
-        let system = code(BlockProfile::SystemModeV1);
+        let system = code(BlockProfile::new(Features::SYSTEM_MODE));
         assert!(has_check(&system));
         assert_ne!(system, ordinary);
     }
@@ -1675,17 +1633,18 @@ mod tests {
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
-            let analysis = analyze_with_profile(&source, BASE, BlockProfile::SystemV1).unwrap();
+            let analysis =
+                analyze_with_profile(&source, BASE, BlockProfile::new(Features::SYSTEM)).unwrap();
             let instruction = analysis.system_instruction.unwrap();
             assert_eq!(analysis.source_bytes, 2 * size_of::<u32>());
             assert_eq!(
                 instruction.instruction_pc,
                 GuestAddress(BASE.0 + size_of::<u32>() as u64)
             );
-            let compiled = compile_for_target(
+            let compiled = crate::testing::block_for(
                 &source,
                 BASE,
-                BlockProfile::SystemV1,
+                BlockProfile::new(Features::SYSTEM),
                 crate::TargetCpu::Baseline,
             )
             .unwrap();
@@ -1700,15 +1659,20 @@ mod tests {
         // Ordinary RAM, exclusives and legacy FP/SIMD cannot bypass shared owners.
         for word in [0xf940_0000_u32, 0xf900_0000, 0xc85f_fc00, 0x1e20_2800] {
             let source: Vec<_> = [word, SVC].into_iter().flat_map(u32::to_le_bytes).collect();
-            assert!(analyze_with_profile(&source, BASE, BlockProfile::SystemV1).is_err());
+            assert!(
+                analyze_with_profile(&source, BASE, BlockProfile::new(Features::SYSTEM)).is_err()
+            );
         }
         assert_eq!(
             ExitKind::try_from(ExitKind::System as u64),
             Ok(ExitKind::System)
         );
-        assert_ne!(BlockProfile::SystemV1.abi(), BlockProfile::Ordinary.abi());
+        assert_ne!(
+            BlockProfile::new(Features::SYSTEM).abi(),
+            BlockProfile::ORDINARY.abi()
+        );
         assert!(
-            analyze_with_profile(&SVC.to_le_bytes(), BASE, BlockProfile::Ordinary)
+            analyze_with_profile(&SVC.to_le_bytes(), BASE, BlockProfile::ORDINARY)
                 .unwrap()
                 .trap
                 .is_some()
@@ -1734,16 +1698,20 @@ mod tests {
         let continuation = GuestAddress(helper_pc.0 + size_of::<u32>() as u64);
         for operation in HALF_OPERATIONS {
             for profile in [
-                BlockProfile::Ordinary,
-                BlockProfile::AppleArm64eSoftwarePauthV1,
-                BlockProfile::AppleArm64eSoftwarePauthClockV1,
-                BlockProfile::DarwinArm64ThreadV1,
-                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
-                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+                BlockProfile::ORDINARY,
+                BlockProfile::new(Features::POINTER_AUTHENTICATION),
+                BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK)),
+                BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
+                BlockProfile::new(
+                    Features::POINTER_AUTHENTICATION
+                        .union(Features::THREAD_REGISTERS)
+                        .union(Features::AMX),
+                ),
+                BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
             ] {
                 let source = bytes(&[NOP, operation, UNSUPPORTED]);
                 let analysis = analyze_with_profile(&source, base, profile).unwrap();
-                let compiled = compile_with_profile(&source, base, profile).unwrap();
+                let compiled = crate::testing::block_with(&source, base, profile).unwrap();
                 assert_eq!(analysis.source_bytes, 2 * size_of::<u32>());
                 assert_eq!(compiled.source_bytes, analysis.source_bytes);
                 assert_eq!(
@@ -1790,17 +1758,21 @@ mod tests {
             0x4e401400, 0x4ec01400, 0x6e401c00, // eight lanes
         ] {
             for profile in [
-                BlockProfile::Ordinary,
-                BlockProfile::AppleArm64eSoftwarePauthV1,
-                BlockProfile::AppleArm64eSoftwarePauthClockV1,
-                BlockProfile::DarwinArm64ThreadV1,
-                BlockProfile::AppleArm64eSoftwarePauthThreadV1,
-                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
-                BlockProfile::SystemModeV1,
+                BlockProfile::ORDINARY,
+                BlockProfile::new(Features::POINTER_AUTHENTICATION),
+                BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK)),
+                BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
+                BlockProfile::new(
+                    Features::POINTER_AUTHENTICATION
+                        .union(Features::THREAD_REGISTERS)
+                        .union(Features::AMX),
+                ),
+                BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
+                BlockProfile::new(Features::SYSTEM_MODE),
             ] {
                 let source = bytes(&[NOP, operation, NOP]);
                 let analysis = analyze_with_profile(&source, base, profile).unwrap();
-                let compiled = compile_with_profile(&source, base, profile).unwrap();
+                let compiled = crate::testing::block_with(&source, base, profile).unwrap();
                 assert_eq!(analysis.source_bytes, source.len());
                 assert_eq!(compiled.source_bytes, analysis.source_bytes);
                 assert_eq!(
@@ -1816,7 +1788,7 @@ mod tests {
                         .pc,
                     suffix_pc
                 );
-                assert!(compile_with_profile(&invalid, base, profile).is_err());
+                assert!(crate::testing::block_with(&invalid, base, profile).is_err());
                 assert!(source_bytes_with_profile(&invalid, base, profile).is_err());
             }
         }
@@ -1890,7 +1862,7 @@ mod tests {
             assert_eq!(analysis.source_bytes, source_bytes(&source, base).unwrap());
             assert_eq!(
                 analysis.source_bytes,
-                compile(&source, base).unwrap().source_bytes
+                crate::testing::block(&source, base).unwrap().source_bytes
             );
             assert_eq!(analysis.source_bytes, 4);
             assert_eq!(
@@ -2009,12 +1981,12 @@ mod tests {
     #[test]
     fn clock_profile_boundaries_share_analysis_and_do_not_widen_old_profiles() {
         let base = GuestAddress(0x4000);
-        let profile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+        let profile = BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK));
         for word in [0xd5033fdf, 0xd53be040, 0xd53be05f] {
             let source = bytes(&[0xd2800020, word, 0]);
             for previous in [
-                BlockProfile::Ordinary,
-                BlockProfile::AppleArm64eSoftwarePauthV1,
+                BlockProfile::ORDINARY,
+                BlockProfile::new(Features::POINTER_AUTHENTICATION),
             ] {
                 assert_eq!(
                     analyze_with_profile(&source, base, previous)
@@ -2022,11 +1994,11 @@ mod tests {
                         .pc,
                     GuestAddress(base.0 + 4)
                 );
-                assert!(compile_with_profile(&source, base, previous).is_err());
+                assert!(crate::testing::block_with(&source, base, previous).is_err());
                 assert!(source_bytes_with_profile(&source, base, previous).is_err());
             }
             let analysis = analyze_with_profile(&source, base, profile).unwrap();
-            let compiled = compile_with_profile(&source, base, profile).unwrap();
+            let compiled = crate::testing::block_with(&source, base, profile).unwrap();
             assert_eq!(analysis.source_bytes, 8);
             assert_eq!(compiled.source_bytes, 8);
             assert_eq!(
@@ -2061,19 +2033,23 @@ mod tests {
             let source = bytes(&[word, 0]);
             assert_eq!(
                 analyze_with_profile(&source, base, profile).unwrap(),
-                analyze_with_profile(&source, base, BlockProfile::AppleArm64eSoftwarePauthV1)
-                    .unwrap()
+                analyze_with_profile(
+                    &source,
+                    base,
+                    BlockProfile::new(Features::POINTER_AUTHENTICATION)
+                )
+                .unwrap()
             );
         }
-        assert!(profile.supports_pointer_authentication() && profile.supports_clock());
-        assert!(!BlockProfile::Ordinary.supports_pointer_authentication());
-        assert!(!BlockProfile::AppleArm64eSoftwarePauthV1.supports_clock());
+        assert!(profile.has(Features::POINTER_AUTHENTICATION) && profile.has(Features::CLOCK));
+        assert!(!BlockProfile::ORDINARY.has(Features::POINTER_AUTHENTICATION));
+        assert!(!BlockProfile::new(Features::POINTER_AUTHENTICATION).has(Features::CLOCK));
     }
 
     #[test]
     fn clock_boundary_respects_window_limit_and_does_not_skip_prior_unknown_words() {
         let base = GuestAddress(0x1000);
-        let profile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+        let profile = BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK));
         let first = analyze_with_profile(&bytes(&[0xd53be05f, 0]), base, profile).unwrap();
         assert_eq!(first.source_bytes, 4);
         assert_eq!(
@@ -2089,7 +2065,7 @@ mod tests {
             GuestAddress(base.0 + (MAX_BLOCK_INSTRUCTIONS as u64 - 1) * 4)
         );
         assert!(
-            compile_with_profile(
+            crate::testing::block_with(
                 &bytes(&[0xd53be040; MAX_BLOCK_INSTRUCTIONS + 1]),
                 base,
                 profile
@@ -2178,7 +2154,7 @@ mod tests {
                             })
                         );
                         assert_eq!(request.operation.required_key(), Some(key));
-                        assert!(compile(&bytes(&[word]), pc).is_err());
+                        assert!(crate::testing::block(&bytes(&[word]), pc).is_err());
                         let zero_word = word | (1 << 13);
                         let zero = decode_pointer_authentication(pc, zero_word).unwrap();
                         assert_eq!(
@@ -2216,7 +2192,7 @@ mod tests {
         const PACGA_X1_X2_X3: u32 = 0x9ac3_3041;
         let pc = GuestAddress(0x1000);
         let source = bytes(&[PACGA_X1_X2_X3]);
-        assert!(compile(&source, pc).is_err());
+        assert!(crate::testing::block(&source, pc).is_err());
         let instruction = decode_pointer_authentication(pc, PACGA_X1_X2_X3)
             .unwrap()
             .unwrap();
@@ -2228,8 +2204,12 @@ mod tests {
                 modifier: 3,
             })
         );
-        let analysis =
-            analyze_with_profile(&source, pc, BlockProfile::AppleArm64eSoftwarePauthV1).unwrap();
+        let analysis = analyze_with_profile(
+            &source,
+            pc,
+            BlockProfile::new(Features::POINTER_AUTHENTICATION),
+        )
+        .unwrap();
         assert_eq!(analysis.pointer_authentication, Some(instruction));
         assert_eq!(analysis.terminator_pc, Some(pc));
         assert_eq!(
@@ -2251,7 +2231,7 @@ mod tests {
             let analysis = analyze_with_profile(
                 &bytes(&[word]),
                 pc,
-                BlockProfile::AppleArm64eSoftwarePauthV1,
+                BlockProfile::new(Features::POINTER_AUTHENTICATION),
             )
             .unwrap();
             assert_eq!(
@@ -2319,7 +2299,7 @@ mod tests {
                             assert!(value.operation.is_transfer());
                             assert!(!value.operation.is_return());
                             assert_eq!(value.operation.required_key(), Some(key));
-                            assert!(compile(&bytes(&[word]), pc).is_err());
+                            assert!(crate::testing::block(&bytes(&[word]), pc).is_err());
                         }
                     }
                 }
@@ -2495,15 +2475,15 @@ mod tests {
                 );
             }
             for profile in [
-                BlockProfile::AppleArm64eSoftwarePauthV1,
-                BlockProfile::AppleArm64eSoftwarePauthClockV1,
+                BlockProfile::new(Features::POINTER_AUTHENTICATION),
+                BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK)),
             ] {
                 let analysis = analyze_with_profile(&bytes(&[word, 0]), pc, profile).unwrap();
                 assert_eq!(analysis.source_bytes, 4);
                 assert_eq!(analysis.dynamic_edge.is_some(), expected.is_return());
                 assert_eq!(analysis.static_successors.is_empty(), expected.is_return());
             }
-            assert!(compile(&bytes(&[word]), pc).is_err());
+            assert!(crate::testing::block(&bytes(&[word]), pc).is_err());
         }
         for data in [false, true] {
             for destination in 0..32u32 {
@@ -2535,15 +2515,15 @@ mod tests {
     #[test]
     fn pointer_authentication_profile_consumes_only_native_prefix_and_boundary() {
         let base = GuestAddress(0x4000);
-        let profile = BlockProfile::AppleArm64eSoftwarePauthV1;
+        let profile = BlockProfile::new(Features::POINTER_AUTHENTICATION);
         for word in [0xd503237f, 0xd50323ff, 0xd65f0fff] {
             let source = bytes(&[0xd2800020, word, 0]); // MOV X0,#1; helper; unknown data
             let ordinary = analyze(&source, base).unwrap_err();
             assert_eq!(ordinary.pc, GuestAddress(base.0 + 4));
-            assert!(compile(&source, base).is_err());
+            assert!(crate::testing::block(&source, base).is_err());
             assert!(source_bytes(&source, base).is_err());
             let analysis = analyze_with_profile(&source, base, profile).unwrap();
-            let compiled = compile_with_profile(&source, base, profile).unwrap();
+            let compiled = crate::testing::block_with(&source, base, profile).unwrap();
             assert_eq!(
                 source_bytes_with_profile(&source, base, profile).unwrap(),
                 8
@@ -2586,8 +2566,7 @@ mod tests {
             let failure = analyze_with_profile(&bytes(&[0, word]), base, profile).unwrap_err();
             assert_eq!(failure.pc, base);
         }
-        assert_eq!(BlockProfile::default().abi(), BLOCK_ABI);
-        assert_ne!(profile.abi(), BLOCK_ABI);
+        assert_ne!(profile.abi(), BlockProfile::ORDINARY.abi());
         // Ordinary transfers and trap behavior are identical in either profile.
         for word in [0xd65f03c0, 0x14000002, 0xd4001001] {
             let source = bytes(&[word, 0]);
@@ -2629,7 +2608,7 @@ mod tests {
             }
         }
         for encoding in [0xd65f0bff, 0xd65f0fff, 0xd71f0800, 0xd73f0800, 0xd69f03e0] {
-            assert!(compile(&bytes(&[encoding]), GuestAddress(0x1000)).is_err());
+            assert!(crate::testing::block(&bytes(&[encoding]), GuestAddress(0x1000)).is_err());
         }
     }
 
@@ -2653,7 +2632,7 @@ mod tests {
             0x14000001, 0x54000020, 0xb4000020, 0x36000020, 0x94000001, 0xd61f0000, 0xd63f03c0,
             0xd65f03c0,
         ] {
-            let compiled = compile(
+            let compiled = crate::testing::block(
                 &bytes(&[0xd503201f, terminator, 0xffffffff]),
                 GuestAddress(0x1000),
             )
@@ -2671,13 +2650,16 @@ mod tests {
             assert_eq!(compiled.native.source_map[0], (GuestAddress(0x1000), 0));
             assert_eq!(compiled.native.source_map[1], (GuestAddress(0x1004), 1));
         }
-        let compiled = compile(&bytes(&[0xd503201f, 0xd503201f]), GuestAddress(0x1000)).unwrap();
+        let compiled =
+            crate::testing::block(&bytes(&[0xd503201f, 0xd503201f]), GuestAddress(0x1000)).unwrap();
         assert_eq!(compiled.source_bytes, 8);
         assert_eq!(
             compiled.native.source_map,
             [(GuestAddress(0x1000), 0), (GuestAddress(0x1004), 1)]
         );
-        assert!(compile(&bytes(&[0xffffffff, 0xd65f03c0]), GuestAddress(0x1000)).is_err());
+        assert!(
+            crate::testing::block(&bytes(&[0xffffffff, 0xd65f03c0]), GuestAddress(0x1000)).is_err()
+        );
     }
 
     #[test]
@@ -2689,10 +2671,10 @@ mod tests {
             (bytes(&[0xd503201f]), u64::MAX - 3),
             (bytes(&vec![0xd503201f; MAX_BLOCK_INSTRUCTIONS + 1]), 0),
         ] {
-            assert!(compile(&input, GuestAddress(base)).is_err());
+            assert!(crate::testing::block(&input, GuestAddress(base)).is_err());
             assert!(source_bytes(&input, GuestAddress(base)).is_err());
         }
-        let compiled = compile(
+        let compiled = crate::testing::block(
             &bytes(&vec![0xd503201f; MAX_BLOCK_INSTRUCTIONS]),
             GuestAddress(0x1000),
         )
@@ -2763,7 +2745,7 @@ mod tests {
             0xd4200001, // reserved BRK neighbor
         ] {
             assert_eq!(decode_trap(GuestAddress(0x2000), word).unwrap(), None);
-            assert!(compile(&bytes(&[word]), GuestAddress(0x2000)).is_err());
+            assert!(crate::testing::block(&bytes(&[word]), GuestAddress(0x2000)).is_err());
         }
     }
 
@@ -2771,7 +2753,7 @@ mod tests {
     fn trap_is_a_consumed_boundary_with_its_own_source_map_and_no_leaf_fallback() {
         for word in [0xd4000001, 0xd4200000, 0xd41fffe1, 0xd43fffe0] {
             let source = bytes(&[0xd503201f, word, 0xffffffff, 0xd65f03c0]);
-            let compiled = compile(&source, GuestAddress(0x2ffc)).unwrap();
+            let compiled = crate::testing::block(&source, GuestAddress(0x2ffc)).unwrap();
             assert_eq!(compiled.source_bytes, 8);
             assert_eq!(source_bytes(&source, GuestAddress(0x2ffc)).unwrap(), 8);
             assert_eq!(
@@ -2780,12 +2762,14 @@ mod tests {
             );
             assert_eq!(compiled.native.x86_64_code.len(), 17);
             assert_eq!(compiled.native.x86_64_code[0], 0x90);
-            assert!(crate::compile(&bytes(&[word, 0xd65f03c0]), GuestAddress(0x3000)).is_err());
+            assert!(
+                crate::testing::leaf(&bytes(&[word, 0xd65f03c0]), GuestAddress(0x3000)).is_err()
+            );
         }
         // Original block input-window policy still forbids wrapping extents,
         // even though BRK's standalone preferred return PC is representable.
         for word in [0xd4000001, 0xd4200000] {
-            assert!(compile(&bytes(&[word]), GuestAddress(u64::MAX - 3)).is_err());
+            assert!(crate::testing::block(&bytes(&[word]), GuestAddress(u64::MAX - 3)).is_err());
         }
     }
 }

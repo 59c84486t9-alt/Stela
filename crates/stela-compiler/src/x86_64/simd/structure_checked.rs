@@ -825,7 +825,7 @@ mod tests {
                 profile: CheckedMemoryProfile,
                 target: TargetCpu,
             ) -> Self {
-                let mut code = Code::from(crate::scalable_context::context_wrapper());
+                let mut code = crate::scalable_context::context_wrapper();
                 checked(operand, profile).emit_context(&mut code, GUEST_PC, target);
                 code.push(0xc3);
                 Self::new(&code)
@@ -1161,20 +1161,21 @@ mod tests {
 
         #[test]
         fn original_ld4_word_uses_checked_block_routing_and_real_source_intervals() {
-            use crate::block::{BlockProfile, CompilationPlan};
+            use crate::block::{BlockProfile, CompilationPlan, Features};
             let source: Vec<_> = [0x4c40_0044, RET]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
             for profile in [
-                BlockProfile::CheckedMemory(CheckedMemoryProfile::SpAlignmentDisabled),
-                BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentDisabled),
+                BlockProfile::ORDINARY
+                    .with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled),
+                BlockProfile::new(Features::SYSTEM_MODE)
+                    .with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled),
             ] {
                 let plan = CompilationPlan::new(
                     &source,
                     GuestAddress(GUEST_PC),
-                    profile,
-                    TargetCpu::X86_64_V2,
+                    &crate::Options::new(profile, TargetCpu::X86_64_V2),
                 )
                 .unwrap();
                 let required = plan.memory_requirements().unwrap();

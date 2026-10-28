@@ -8,7 +8,6 @@ extern crate std;
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 pub mod aarch64;
 pub mod amx;
@@ -17,10 +16,12 @@ pub mod context;
 pub mod scalable_context;
 mod state;
 mod target;
+#[cfg(test)]
+mod testing;
 pub mod wkdm;
 pub mod x86_64;
 
-pub use state::{GuestState, NATIVE_ABI};
+pub use state::GuestState;
 pub use target::TargetCpu;
 
 use serde::{Deserialize, Serialize};
@@ -84,44 +85,138 @@ impl core::fmt::Display for CompileError {
 }
 impl core::error::Error for CompileError {}
 
-/// Compile one raw ARM64 leaf region ending in RET X30.
-/// Input addresses are retained in the output map. No Mach-O loading, external
-/// calls, PAC, privileged operations, or arbitrary RET targets.
-pub fn compile(code: &[u8], base: GuestAddress) -> Result<NativeBlock, CompileError> {
-    compile_for_target(code, base, TargetCpu::Baseline)
-}
-pub fn compile_for_target(
-    code: &[u8],
-    base: GuestAddress,
+/// What [`compile`] translates for: the guest services and memory checks of a
+/// [`block::BlockProfile`], the host's [`TargetCpu`], and the guest's scalable
+/// and numerical specialization for the context ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    profile: block::BlockProfile,
     target: TargetCpu,
-) -> Result<NativeBlock, CompileError> {
-    if code.is_empty() || !code.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
-        return Err(CompileError(
-            "input and guest base must be nonempty/aligned to 4 bytes".into(),
-        ));
+    scalable: Option<scalable_context::ScalableProfile>,
+    numerical: aarch64::floating::features::NumericalFeatures,
+    checks: x86_64::MemoryChecks,
+    native: x86_64::NativeSystem,
+}
+
+impl Options {
+    pub const fn new(profile: block::BlockProfile, target: TargetCpu) -> Self {
+        Self {
+            profile,
+            target,
+            scalable: None,
+            numerical: aarch64::floating::features::NumericalFeatures::new(false, false, false),
+            checks: x86_64::MemoryChecks::DEFAULT,
+            native: x86_64::NativeSystem::NONE,
+        }
     }
-    let mut instructions = vec![];
-    for (index, bytes) in code.as_chunks::<4>().0.iter().enumerate() {
-        let pc = GuestAddress(
-            base.0
-                .checked_add((index as u64) * 4)
-                .ok_or_else(|| CompileError("guest address overflow".into()))?,
-        );
-        let encoding = u32::from_le_bytes(*bytes);
-        let instruction = aarch64::Decoder
-            .lift(pc, encoding)
-            .map_err(|e| CompileError(format!("unsupported ARM64 semantics: {e:?}")))?;
-        instructions.push(instruction);
+    /// The guest's scalable specialization, which [`block::Features::CONTEXT`]
+    /// requires.
+    pub const fn with_scalable(self, scalable: scalable_context::ScalableProfile) -> Self {
+        Self {
+            scalable: Some(scalable),
+            ..self
+        }
     }
-    if !matches!(
-        instructions.last().unwrap().operation,
-        aarch64::Operation::Return
-    ) {
-        return Err(CompileError("leaf region must end in RET X30".into()));
+    /// The numerical features a context block's numerical completions assume;
+    /// they must match the guest identity the runtime completes with.
+    pub const fn with_numerical_features(
+        self,
+        numerical: aarch64::floating::features::NumericalFeatures,
+    ) -> Self {
+        Self { numerical, ..self }
     }
-    x86_64::Emitter
-        .emit_for_target(&instructions, target)
-        .map_err(|e| CompileError(format!("x86 emission failed: {e:?}")))
+    /// Emit the memory checks of the regime's SCTLR_ELx: the system-mode engine
+    /// compiles separate blocks for SA (or SA0 at EL0) clear, where an access
+    /// through a misaligned SP proceeds; for A set, where any access not
+    /// aligned to its elements faults; and for nAA set, where an ordered access
+    /// may cross its 16-byte granule. Only the direct system-mode profile admits
+    /// checks other than [`x86_64::MemoryChecks::DEFAULT`], and a host without
+    /// the capability an unchecked SP then needs refuses.
+    pub const fn with_memory_checks(self, checks: x86_64::MemoryChecks) -> Self {
+        Self { checks, ..self }
+    }
+    /// Complete a terminal DC ZVA or DC clean operation natively
+    /// ([`x86_64::NativeSystem`]): the system-mode engine compiles separate
+    /// blocks for the contexts where those operations neither trap nor are
+    /// UNDEFINED. Only the direct system-mode profile admits them.
+    pub const fn with_native_system(self, native: x86_64::NativeSystem) -> Self {
+        Self { native, ..self }
+    }
+
+    pub const fn profile(&self) -> block::BlockProfile {
+        self.profile
+    }
+    pub const fn target(&self) -> TargetCpu {
+        self.target
+    }
+    pub const fn scalable(&self) -> Option<scalable_context::ScalableProfile> {
+        self.scalable
+    }
+    pub const fn numerical_features(&self) -> aarch64::floating::features::NumericalFeatures {
+        self.numerical
+    }
+    pub const fn memory_checks(&self) -> x86_64::MemoryChecks {
+        self.checks
+    }
+    pub const fn native_system(&self) -> x86_64::NativeSystem {
+        self.native
+    }
+
+    /// Refuse options no emitter implements.
+    pub fn validate(&self) -> Result<(), CompileError> {
+        use block::Features;
+        self.profile.validate()?;
+        let context = self.profile.has(Features::CONTEXT);
+        if context != self.scalable.is_some() {
+            return Err(CompileError(format!(
+                "{:?} {} a scalable specialization",
+                self.profile,
+                if context { "requires" } else { "takes no" }
+            )));
+        }
+        let system_mode = self.profile == block::BlockProfile::new(Features::SYSTEM_MODE);
+        if self.checks != x86_64::MemoryChecks::DEFAULT && !system_mode {
+            return Err(CompileError(format!(
+                "{:?} makes only the default memory checks",
+                self.profile
+            )));
+        }
+        if let Some(bytes) = self.native.zero_block {
+            use x86_64::zero_block::{MAX_BYTES, MIN_BYTES};
+            if !system_mode {
+                return Err(CompileError(format!(
+                    "{:?} keeps DC ZVA's System exit",
+                    self.profile
+                )));
+            }
+            if !bytes.is_power_of_two() || !(MIN_BYTES..=MAX_BYTES).contains(&bytes) {
+                return Err(CompileError(format!(
+                    "a {bytes}-byte DC ZVA block is not a DCZID_EL0.BS size"
+                )));
+            }
+        }
+        if !self.native.cache_clean.is_empty() && !system_mode {
+            return Err(CompileError(format!(
+                "{:?} keeps the DC clean operations' System exit",
+                self.profile
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Translate the guest code at `source`, whose first instruction is at
+/// `base`, for `options`: one validated decode, then the emitters its
+/// profile's features select. A block ends at its first transfer, trap or
+/// runtime exit, or at the input boundary, and bytes after it are unconsumed;
+/// a [`block::Features::LEAF`] function translates the whole input, which ends
+/// in RET X30. Unknown semantics are compile errors.
+pub fn compile(
+    source: &[u8],
+    base: GuestAddress,
+    options: &Options,
+) -> Result<block::CompiledBlock, CompileError> {
+    block::CompilationPlan::new(source, base, options)?.compile()
 }
 
 pub trait Backend<I> {
@@ -150,6 +245,46 @@ mod tests {
     use crate::x86_64::asm::Code;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    #[test]
+    fn options_without_an_emitter_are_refused() {
+        use aarch64::scalable::{ScalableMode, VectorLength};
+        use block::{BlockProfile, Features};
+        let scalable = scalable_context::ScalableProfile::new(
+            VectorLength::from_bytes(16).unwrap(),
+            ScalableMode::new(true, false),
+        );
+        let options = |features| Options::new(BlockProfile::new(features), TargetCpu::Baseline);
+        let unaligned = x86_64::MemoryChecks {
+            stack_alignment: false,
+            ..x86_64::MemoryChecks::DEFAULT
+        };
+        let zero = |bytes| x86_64::NativeSystem {
+            zero_block: Some(bytes),
+            ..x86_64::NativeSystem::NONE
+        };
+        for valid in [
+            options(Features::NONE),
+            options(Features::LEAF),
+            options(Features::CONTEXT).with_scalable(scalable),
+            options(Features::SYSTEM_MODE).with_memory_checks(unaligned),
+            options(Features::SYSTEM_MODE).with_native_system(zero(64)),
+        ] {
+            assert_eq!(valid.validate(), Ok(()), "{valid:?}");
+        }
+        for invalid in [
+            options(Features::CONTEXT),
+            options(Features::NONE).with_scalable(scalable),
+            options(Features::NONE).with_memory_checks(unaligned),
+            options(Features::NONE).with_native_system(zero(64)),
+            options(Features::SYSTEM_MODE).with_native_system(zero(48)),
+            options(Features::CLOCK),
+        ] {
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+            assert!(compile(&0xd65f_03c0_u32.to_le_bytes(), GuestAddress(0), &invalid).is_err());
+        }
+    }
+
     #[test]
     fn polynomial64_lowering_requires_independent_pclmul_and_selects_original_halves() {
         use x86_64::isa::SimdOpcode;
@@ -167,13 +302,14 @@ mod tests {
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
-            let baseline = compile(&source, GuestAddress(0x1000)).unwrap();
+            let baseline = crate::testing::leaf(&source, GuestAddress(0x1000)).unwrap();
             let sse42 =
-                compile_for_target(&source, GuestAddress(0x1000), TargetCpu::Sse42).unwrap();
+                crate::testing::leaf_for(&source, GuestAddress(0x1000), TargetCpu::Sse42).unwrap();
             assert_eq!(baseline.x86_64_code, sse42.x86_64_code);
             let pclmul =
-                compile_for_target(&source, GuestAddress(0x1000), TargetCpu::Pclmulqdq).unwrap();
-            let combined = compile_for_target(
+                crate::testing::leaf_for(&source, GuestAddress(0x1000), TargetCpu::Pclmulqdq)
+                    .unwrap();
+            let combined = crate::testing::leaf_for(
                 &source,
                 GuestAddress(0x1000),
                 TargetCpu::Sse42.with_pclmulqdq(),
@@ -196,8 +332,10 @@ mod tests {
                 .flat_map(u32::to_le_bytes)
                 .collect();
             assert_eq!(
-                compile(&source, GuestAddress(0x1000)).unwrap().x86_64_code,
-                compile_for_target(&source, GuestAddress(0x1000), TargetCpu::Pclmulqdq)
+                crate::testing::leaf(&source, GuestAddress(0x1000))
+                    .unwrap()
+                    .x86_64_code,
+                crate::testing::leaf_for(&source, GuestAddress(0x1000), TargetCpu::Pclmulqdq)
                     .unwrap()
                     .x86_64_code,
             );
@@ -211,16 +349,18 @@ mod tests {
                 .flat_map(|word| word.to_le_bytes())
                 .collect();
             assert!(
-                compile(&source, GuestAddress(0))
+                crate::testing::leaf(&source, GuestAddress(0))
                     .unwrap_err()
                     .0
                     .contains("HostCapabilityRequired")
             );
-            assert!(compile_for_target(&source, GuestAddress(0), TargetCpu::AtomicLoad16).is_ok());
-            let blocked = block::compile(&source, GuestAddress(0)).unwrap_err();
+            assert!(
+                crate::testing::leaf_for(&source, GuestAddress(0), TargetCpu::AtomicLoad16).is_ok()
+            );
+            let blocked = crate::testing::block(&source, GuestAddress(0)).unwrap_err();
             assert!(blocked.0.contains("HostCapabilityRequired"));
             assert!(
-                block::compile_for_target(
+                crate::testing::block_for(
                     &source,
                     GuestAddress(0),
                     block::BlockProfile::default(),
@@ -234,7 +374,7 @@ mod tests {
                 .iter()
                 .flat_map(|word| word.to_le_bytes())
                 .collect();
-            assert!(compile(&source, GuestAddress(0)).is_ok());
+            assert!(crate::testing::leaf(&source, GuestAddress(0)).is_ok());
         }
     }
 
@@ -255,8 +395,8 @@ mod tests {
                     TargetCpu::Cx16,
                 ] {
                     let permitted = !requires_cx16 || target.supports(TargetCpu::Cx16);
-                    let leaf = compile_for_target(&source, GuestAddress(0), target);
-                    let block = block::compile_for_target(
+                    let leaf = crate::testing::leaf_for(&source, GuestAddress(0), target);
+                    let block = crate::testing::block_for(
                         &source,
                         GuestAddress(0),
                         block::BlockProfile::default(),
@@ -291,14 +431,14 @@ mod tests {
             vec![0xd65f0000],
         ] {
             let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            assert!(compile(&bytes, GuestAddress(0)).is_err());
+            assert!(crate::testing::leaf(&bytes, GuestAddress(0)).is_err());
         }
-        assert!(compile(&[0, 0, 0], GuestAddress(0)).is_err());
-        assert!(compile(&0xd65f03c0u32.to_le_bytes(), GuestAddress(1)).is_err());
+        assert!(crate::testing::leaf(&[0, 0, 0], GuestAddress(0)).is_err());
+        assert!(crate::testing::leaf(&0xd65f03c0u32.to_le_bytes(), GuestAddress(1)).is_err());
         let code: Vec<_> = [0xd503201fu32, 0xd65f03c0]
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect();
-        assert!(compile(&code, GuestAddress(u64::MAX - 3)).is_err());
+        assert!(crate::testing::leaf(&code, GuestAddress(u64::MAX - 3)).is_err());
     }
 }

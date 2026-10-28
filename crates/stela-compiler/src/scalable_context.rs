@@ -29,23 +29,21 @@ use alloc::{collections::BTreeMap, format, vec, vec::Vec};
 pub const PROFILE_ID: &str = "apple-sme2-streaming-v1";
 pub const DECLARED_PROFILE_ID: &str = "sme-streaming-v2";
 const INSTRUCTION_BYTES: usize = size_of::<u32>();
-const PUSH_R15: &[u8] = &[0x41, 0x57];
-const MOV_R15_RSI: &[u8] = &[0x49, 0x89, 0xf7];
-const CALL_REL32: u8 = 0xe8;
-const POP_R15: &[u8] = &[0x41, 0x5f];
-const RET: u8 = 0xc3;
-const CALL_BYTES: usize = 1 + size_of::<i32>();
-const CALL_END: usize = PUSH_R15.len() + MOV_R15_RSI.len() + CALL_BYTES;
-pub const CONTEXT_WRAPPER_BYTES: usize = CALL_END + POP_R15.len() + 1;
+/// `push r15; mov r15, rsi; call body; pop r15; ret`: the context ABI's
+/// entry, which keeps the context pointer in R15 across the body.
+pub const CONTEXT_WRAPPER_BYTES: usize = 13;
 
-pub(crate) fn context_wrapper() -> Vec<u8> {
-    let mut code = Vec::with_capacity(CONTEXT_WRAPPER_BYTES);
-    code.extend(PUSH_R15);
-    code.extend(MOV_R15_RSI);
-    code.push(CALL_REL32);
-    code.extend(((CONTEXT_WRAPPER_BYTES - CALL_END) as i32).to_le_bytes());
-    code.extend(POP_R15);
-    code.push(RET);
+pub(crate) fn context_wrapper() -> Code {
+    use x86_64::asm::{Gpr, Size};
+    let mut code = Code::new();
+    let mut asm = code.asm();
+    asm.push(Gpr::R15);
+    asm.mov(Size::Qword, Gpr::R15, Gpr::Rsi);
+    let body = asm.call();
+    asm.pop(Gpr::R15);
+    asm.ret();
+    asm.bind(body);
+    debug_assert_eq!(code.len(), CONTEXT_WRAPPER_BYTES);
     code
 }
 
@@ -304,118 +302,116 @@ fn decode_leaf(
     Ok(instructions)
 }
 
-/// Derive the whole body's service requirements with the same parser used to
-/// compile it. Leaves with no memory access return empty requirements.
-pub fn memory_requirements(
-    source: &[u8],
-    base: GuestAddress,
-    profile: ScalableProfile,
-    target: TargetCpu,
-) -> Result<MemoryRequirements, CompileError> {
-    leaf_memory_requirements(&decode_leaf(source, base, profile, target)?)
-}
-
-fn leaf_memory_requirements(
-    instructions: &[DecodedLeafInstruction],
-) -> Result<MemoryRequirements, CompileError> {
-    instructions
-        .iter()
-        .try_fold(MemoryRequirements::default(), |requirements, decoded| {
-            requirements
-                .merge(decoded.instruction.memory_requirements())
-                .ok_or_else(|| {
-                    CompileError(format!(
-                        "conflicting memory control requirements at {:#x}",
-                        decoded.pc.0
-                    ))
-                })
-        })
-}
-
-/// All outputs derive from one validated source vector. No caller-supplied
-/// execution metadata or service requirements are accepted.
-pub struct PreparedLeafCode {
-    pub native: NativeBlock,
-    pub memory_requirements: MemoryRequirements,
-    pub execution_requirements: ScalableExecutionRequirements,
-}
-
-pub fn prepare_leaf(
-    source: &[u8],
-    base: GuestAddress,
-    profile: ScalableProfile,
-    target: TargetCpu,
-) -> Result<PreparedLeafCode, CompileError> {
-    let instructions = decode_leaf(source, base, profile, target)?;
-    let memory_requirements = leaf_memory_requirements(&instructions)?;
-    let execution_requirements = ScalableExecutionRequirements::new(
-        instructions
-            .iter()
-            .map(|decoded| {
-                InstructionExecutionRequirements::new(
-                    decoded.pc,
-                    decoded.feature_clauses.clone(),
-                    decoded.instruction.execution_access_requirements(),
-                    decoded.instruction.guest_memory_quantity(),
-                )
-            })
-            .collect(),
-    );
-    let native = emit_leaf(instructions, profile, target)?;
-    Ok(PreparedLeafCode {
-        native,
-        memory_requirements,
-        execution_requirements,
-    })
-}
-
-/// Compile a two-argument context leaf ending in RET X30. The runtime validates
-/// this profile against its state before calling it.
-pub fn compile_for_profile(
-    source: &[u8],
-    base: GuestAddress,
-    profile: ScalableProfile,
-    target: TargetCpu,
-) -> Result<NativeBlock, CompileError> {
-    emit_leaf(decode_leaf(source, base, profile, target)?, profile, target)
-}
-
-fn emit_leaf(
+/// A validated context leaf: one decode of the whole body, from which its
+/// service and execution requirements and its code all derive. No
+/// caller-supplied execution metadata or service requirements are accepted.
+pub struct Leaf {
     instructions: Vec<DecodedLeafInstruction>,
+    memory_requirements: MemoryRequirements,
     profile: ScalableProfile,
     target: TargetCpu,
-) -> Result<NativeBlock, CompileError> {
-    let mut code = Code::from(context_wrapper());
-    let mut source_map = Vec::with_capacity(instructions.len());
-    let mut fixups = Vec::new();
-    for DecodedLeafInstruction {
-        pc, instruction, ..
-    } in instructions
-    {
-        source_map.push((pc, code.len()));
-        emit_decoded(&mut code, pc, instruction, profile, target, &mut fixups)?;
+    source_bytes: usize,
+}
+
+impl Leaf {
+    /// Decode a two-argument context leaf ending in RET X30. The runtime
+    /// validates `profile` against its state before calling it.
+    pub(crate) fn decode(
+        source: &[u8],
+        base: GuestAddress,
+        profile: ScalableProfile,
+        target: TargetCpu,
+    ) -> Result<Self, CompileError> {
+        let instructions = decode_leaf(source, base, profile, target)?;
+        let memory_requirements = instructions.iter().try_fold(
+            MemoryRequirements::default(),
+            |requirements, decoded| {
+                requirements
+                    .merge(decoded.instruction.memory_requirements())
+                    .ok_or_else(|| {
+                        CompileError(format!(
+                            "conflicting memory control requirements at {:#x}",
+                            decoded.pc.0
+                        ))
+                    })
+            },
+        )?;
+        Ok(Self {
+            instructions,
+            memory_requirements,
+            profile,
+            target,
+            source_bytes: source.len(),
+        })
     }
-    let offsets: BTreeMap<_, _> = source_map
-        .iter()
-        .map(|(pc, offset)| (pc.0, *offset))
-        .collect();
-    for (pc, target, displacement) in fixups {
-        let destination = offsets.get(&target.0).ok_or_else(|| {
-            CompileError(format!(
-                "unresolved direct target {:#x} from {:#x}",
-                target.0, pc.0
-            ))
-        })?;
-        let relative =
-            i32::try_from(*destination as i128 - (displacement + size_of::<i32>()) as i128)
-                .map_err(|_| CompileError("native branch displacement overflow".into()))?;
-        code[displacement..displacement + size_of::<i32>()]
-            .copy_from_slice(&relative.to_le_bytes());
+
+    pub(crate) const fn source_bytes(&self) -> usize {
+        self.source_bytes
     }
-    Ok(NativeBlock {
-        x86_64_code: code.into_bytes(),
-        source_map,
-    })
+
+    /// The whole body's service requirements; empty for a leaf with no
+    /// memory access.
+    pub(crate) const fn memory_requirements(&self) -> MemoryRequirements {
+        self.memory_requirements
+    }
+
+    /// Each instruction's scalable execution requirements, in source order.
+    pub(crate) fn execution_requirements(&self) -> ScalableExecutionRequirements {
+        ScalableExecutionRequirements::new(
+            self.instructions
+                .iter()
+                .map(|decoded| {
+                    InstructionExecutionRequirements::new(
+                        decoded.pc,
+                        decoded.feature_clauses.clone(),
+                        decoded.instruction.execution_access_requirements(),
+                        decoded.instruction.guest_memory_quantity(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn emit(self) -> Result<NativeBlock, CompileError> {
+        let mut code = context_wrapper();
+        let mut source_map = Vec::with_capacity(self.instructions.len());
+        let mut fixups = Vec::new();
+        for DecodedLeafInstruction {
+            pc, instruction, ..
+        } in self.instructions
+        {
+            source_map.push((pc, code.len()));
+            emit_decoded(
+                &mut code,
+                pc,
+                instruction,
+                self.profile,
+                self.target,
+                &mut fixups,
+            )?;
+        }
+        let offsets: BTreeMap<_, _> = source_map
+            .iter()
+            .map(|(pc, offset)| (pc.0, *offset))
+            .collect();
+        for (pc, target, displacement) in fixups {
+            let destination = offsets.get(&target.0).ok_or_else(|| {
+                CompileError(format!(
+                    "unresolved direct target {:#x} from {:#x}",
+                    target.0, pc.0
+                ))
+            })?;
+            let relative =
+                i32::try_from(*destination as i128 - (displacement + size_of::<i32>()) as i128)
+                    .map_err(|_| CompileError("native branch displacement overflow".into()))?;
+            code[displacement..displacement + size_of::<i32>()]
+                .copy_from_slice(&relative.to_le_bytes());
+        }
+        Ok(NativeBlock {
+            x86_64_code: code.into_bytes(),
+            source_map,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -434,6 +430,9 @@ mod tests {
         context::{ExecutionContext, ScalableStateView},
     };
     use alloc::{vec, vec::Vec};
+
+    /// x86 `ret`, which ends a context leaf's code.
+    const RET: u8 = 0xc3;
 
     mod address {
         use super::*;
@@ -461,7 +460,7 @@ mod tests {
                             ScalableMode::new(true, za),
                         );
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &words(&[word, RET_X30]),
                                 GuestAddress(0),
                                 selected,
@@ -474,7 +473,7 @@ mod tests {
                             ScalableMode::new(false, za),
                         );
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &words(&[word, RET_X30]),
                                 GuestAddress(0),
                                 inactive,
@@ -485,10 +484,12 @@ mod tests {
                             .contains("streaming mode required")
                         );
                     }
-                    assert!(crate::compile(&words(&[word, RET_X30]), GuestAddress(0)).is_err());
+                    assert!(
+                        crate::testing::leaf(&words(&[word, RET_X30]), GuestAddress(0)).is_err()
+                    );
                 }
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[RDSVL_X0_ONE, RET_X30]),
                         GuestAddress(0),
                         profile(bytes, false),
@@ -518,7 +519,7 @@ mod tests {
             for word in RESERVED_BYTE_VECTOR_WORDS {
                 for streaming in [false, true] {
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0),
                             profile(16, streaming),
@@ -545,7 +546,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[ADDVL_X0_ONE, RET_X30]),
                     GuestAddress(0),
                     selected,
@@ -554,7 +555,7 @@ mod tests {
                 .is_ok()
             );
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[CNTP_X0_PN0, RET_X30]),
                     GuestAddress(0),
                     selected,
@@ -572,8 +573,8 @@ mod tests {
         #[test]
         fn ordinary_payload_and_maps_preserve_original_bytes() {
             let source = words(&[NOP, 0xd280_00e0, RET_X30]);
-            let old = crate::compile(&source, GuestAddress(0x1000)).unwrap();
-            let new = compile_for_profile(
+            let old = crate::testing::leaf(&source, GuestAddress(0x1000)).unwrap();
+            let new = crate::testing::context_leaf(
                 &source,
                 GuestAddress(0x1000),
                 profile(32, true),
@@ -601,7 +602,7 @@ mod tests {
             for bytes in [16, 32, 64, 128, 256] {
                 let source = words(&[AND_Z0_Z1_Z2, RDSVL_X0_ONE, RET_X30]);
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &source,
                         GuestAddress(0),
                         profile(bytes, true),
@@ -610,7 +611,7 @@ mod tests {
                     .is_ok()
                 );
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &source,
                         GuestAddress(0),
                         profile(bytes, false),
@@ -621,7 +622,7 @@ mod tests {
                     .contains("streaming mode required")
                 );
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[RDSVL_X0_ONE, RET_X30]),
                         GuestAddress(0),
                         profile(bytes, false),
@@ -631,7 +632,7 @@ mod tests {
                 );
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MOVPRFX_Z0_Z1, AND_Z0_Z1_Z2, RET_X30]),
                     GuestAddress(0),
                     profile(32, true),
@@ -643,7 +644,7 @@ mod tests {
             );
             for word in [0xf940_0020, 0x4e22_8420, 0x1e22_2820] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[word, RET_X30]),
                         GuestAddress(0),
                         profile(32, true),
@@ -656,7 +657,7 @@ mod tests {
         #[test]
         fn branches_resolve_across_scalable_instruction_bodies() {
             const BRANCH_PLUS_EIGHT: u32 = 0x1400_0002;
-            let native = compile_for_profile(
+            let native = crate::testing::context_leaf(
                 &words(&[BRANCH_PLUS_EIGHT, AND_Z0_Z1_Z2, RET_X30]),
                 GuestAddress(0),
                 profile(32, true),
@@ -696,8 +697,8 @@ mod tests {
             };
             for word in [ADD_PAIR, SQCVT_PAIR, SVE_SQCVTN_PAIR, SRSHL_PAIR] {
                 let source = words(&[word, RET_X30]);
-                assert!(crate::compile(&source, GuestAddress(0)).is_err());
-                let compatible = compile_for_profile(
+                assert!(crate::testing::leaf(&source, GuestAddress(0)).is_err());
+                let compatible = crate::testing::context_leaf(
                     &source,
                     GuestAddress(0),
                     profile(16, true),
@@ -710,7 +711,7 @@ mod tests {
                 );
                 for bytes in [16, 32, 64, 128, 256] {
                     for streaming in [false, true] {
-                        let result = compile_for_profile(
+                        let result = crate::testing::context_leaf(
                             &source,
                             GuestAddress(0),
                             declared(bytes, streaming),
@@ -730,7 +731,7 @@ mod tests {
                 }
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[RESERVED_QUARTET_SHIFT, RET_X30]),
                     GuestAddress(0),
                     declared(16, true),
@@ -749,7 +750,7 @@ mod tests {
             .unwrap();
             for word in [ADD_PAIR, SQCVT_PAIR, SVE_SQCVTN_PAIR, SRSHL_PAIR] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[word, RET_X30]),
                         GuestAddress(0),
                         sme_only,
@@ -772,8 +773,12 @@ mod tests {
                         ScalableMode::from_svcr(svcr).unwrap(),
                     );
                     let source = words(&[FCPY_HALF_P15_Z31, FDUP_DOUBLE_Z31, RET_X30]);
-                    let result =
-                        compile_for_profile(&source, GuestAddress(0), profile, TargetCpu::Baseline);
+                    let result = crate::testing::context_leaf(
+                        &source,
+                        GuestAddress(0),
+                        profile,
+                        TargetCpu::Baseline,
+                    );
                     if profile.mode().streaming() {
                         let native = result.unwrap();
                         assert_eq!(
@@ -788,10 +793,11 @@ mod tests {
                 }
             }
             assert!(
-                crate::compile(&words(&[FCPY_HALF_P15_Z31, RET_X30]), GuestAddress(0)).is_err()
+                crate::testing::leaf(&words(&[FCPY_HALF_P15_Z31, RET_X30]), GuestAddress(0))
+                    .is_err()
             );
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[RESERVED_FCPY_SIZE, RET_X30]),
                     GuestAddress(0),
                     profile(16, true),
@@ -807,7 +813,7 @@ mod tests {
         //! Checked store-pair routing.
         use super::*;
         use crate::{
-            block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
+            block::{BlockProfile, CheckedMemoryProfile, CompilationPlan, Features},
             context::memory::{SpAlignmentRequirement, flags, host_caps},
         };
         use alloc::vec::Vec;
@@ -865,12 +871,16 @@ mod tests {
                             .flat_map(u32::to_le_bytes)
                             .collect();
                         for profile in [
-                            BlockProfile::CheckedMemory(recipe),
-                            BlockProfile::CheckedMemoryPauthClockThread(recipe),
+                            BlockProfile::ORDINARY.with_checked_memory(recipe),
+                            BlockProfile::new(Features::PROCESS_HELPERS)
+                                .with_checked_memory(recipe),
                         ] {
-                            let plan =
-                                CompilationPlan::new(&source, BASE, profile, TargetCpu::Cx16)
-                                    .unwrap();
+                            let plan = CompilationPlan::new(
+                                &source,
+                                BASE,
+                                &crate::Options::new(profile, TargetCpu::Cx16),
+                            )
+                            .unwrap();
                             assert_eq!(plan.memory_requirements(), Some(required));
                             let compiled = plan.compile().unwrap();
                             assert_eq!(
@@ -939,14 +949,14 @@ mod tests {
                         let source: Vec<_> =
                             [load, RET].into_iter().flat_map(u32::to_le_bytes).collect();
                         for profile in [
-                            BlockProfile::CheckedMemory(recipe),
-                            BlockProfile::CheckedMemoryPauthClockThread(recipe),
+                            BlockProfile::ORDINARY.with_checked_memory(recipe),
+                            BlockProfile::new(Features::PROCESS_HELPERS)
+                                .with_checked_memory(recipe),
                         ] {
                             let plan = CompilationPlan::new(
                                 &source,
                                 BASE,
-                                profile,
-                                TargetCpu::AtomicLoad16,
+                                &crate::Options::new(profile, TargetCpu::AtomicLoad16),
                             )
                             .unwrap();
                             assert_eq!(plan.memory_requirements(), Some(required));
@@ -975,7 +985,7 @@ mod tests {
             const SDOT_Z0_S_Z1_B_Z2_B: u32 = 0x4482_0020;
             const CDOT_RESERVED_BYTE: u32 = 0x4400_1000;
             let source = words(&[SDOT_Z0_S_Z1_B_Z2_B, RET_X30]);
-            assert!(crate::compile(&source, GuestAddress(0)).is_err());
+            assert!(crate::testing::leaf(&source, GuestAddress(0)).is_err());
             assert!(matches!(
                 crate::aarch64::sve::decode(SDOT_Z0_S_Z1_B_Z2_B),
                 Some(Ok(crate::aarch64::sve::Operand::Dot(_)))
@@ -987,7 +997,7 @@ mod tests {
                             VectorLength::from_bytes(bytes).unwrap(),
                             ScalableMode::new(streaming, za),
                         );
-                        let result = compile_for_profile(
+                        let result = crate::testing::context_leaf(
                             &source,
                             GuestAddress(0),
                             profile,
@@ -1001,7 +1011,7 @@ mod tests {
                     }
                 }
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[CDOT_RESERVED_BYTE, RET_X30]),
                         GuestAddress(0),
                         profile(bytes, true),
@@ -1033,7 +1043,7 @@ mod tests {
                 assert!(dot::decode(word).unwrap().is_ok());
                 assert_eq!(crate::aarch64::sve::decode(word), None);
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[word, RET_X30]),
                         GuestAddress(0),
                         profile(32, true),
@@ -1043,7 +1053,7 @@ mod tests {
                 );
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MOVPRFX_Z0_Z1, SDOT_Z0_S_Z1_B_Z2_B, RET_X30]),
                     GuestAddress(0),
                     profile(32, true),
@@ -1068,7 +1078,7 @@ mod tests {
                                 ScalableMode::new(true, za),
                             );
                             assert!(
-                                compile_for_profile(
+                                crate::testing::context_leaf(
                                     &words(&[word, RET_X30]),
                                     GuestAddress(0),
                                     profile,
@@ -1103,7 +1113,7 @@ mod tests {
                 ),
                 (vec![MOVPRFX_Z0_Z1, CMPEQ_BYTE, RET_X30], true, "MOVPRFX"),
             ] {
-                let error = compile_for_profile(
+                let error = crate::testing::context_leaf(
                     &words(&input),
                     GuestAddress(0),
                     profile(32, streaming),
@@ -1127,16 +1137,20 @@ mod tests {
             )
             .unwrap();
             let source = words(&[CMPEQ_BYTE, RET_X30]);
-            let fixed = compile_for_profile(
+            let fixed = crate::testing::context_leaf(
                 &source,
                 GuestAddress(0),
                 ScalableProfile::new(length, mode),
                 TargetCpu::Baseline,
             )
             .unwrap();
-            let explicit =
-                compile_for_profile(&source, GuestAddress(0), declared, TargetCpu::Baseline)
-                    .unwrap();
+            let explicit = crate::testing::context_leaf(
+                &source,
+                GuestAddress(0),
+                declared,
+                TargetCpu::Baseline,
+            )
+            .unwrap();
             assert_eq!(fixed.x86_64_code, explicit.x86_64_code);
             assert_eq!(fixed.source_map, explicit.source_map);
         }
@@ -1209,7 +1223,7 @@ mod tests {
                     );
                     for bytes in [16, 32, 64, 128, 256] {
                         for target in [TargetCpu::Baseline, TargetCpu::Sse42] {
-                            let native = compile_for_profile(
+                            let native = crate::testing::context_leaf(
                                 &words(&[word, RET_X30]),
                                 GuestAddress(0x1000),
                                 profile(bytes, true),
@@ -1260,7 +1274,7 @@ mod tests {
                 ADD_RESERVED_BYTE_SHIFT8,
             ] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[NOP, word, RET_X30]),
                         GuestAddress(0),
                         profile(32, true),
@@ -1273,7 +1287,7 @@ mod tests {
             }
             for bytes in [16, 32, 64, 128, 256] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[ADD_Z0_Z1_Z2, RET_X30]),
                         GuestAddress(0),
                         profile(bytes, false),
@@ -1285,7 +1299,7 @@ mod tests {
                 );
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MOVPRFX_Z0_Z1, ADD_Z0_Z1_Z2, RET_X30]),
                     GuestAddress(0),
                     profile(32, true),
@@ -1295,7 +1309,9 @@ mod tests {
                 .0
                 .contains("MOVPRFX pair validation")
             );
-            assert!(crate::compile(&words(&[ADD_Z0_Z1_Z2, RET_X30]), GuestAddress(0)).is_err());
+            assert!(
+                crate::testing::leaf(&words(&[ADD_Z0_Z1_Z2, RET_X30]), GuestAddress(0)).is_err()
+            );
         }
 
         #[test]
@@ -1356,7 +1372,7 @@ mod tests {
                     );
                     for bytes in [16, 32, 64, 128, 256] {
                         for target in [TargetCpu::Baseline, TargetCpu::Sse42] {
-                            let native = compile_for_profile(
+                            let native = crate::testing::context_leaf(
                                 &words(&[word, RET_X30]),
                                 GuestAddress(0x1000),
                                 profile(bytes, true),
@@ -1401,7 +1417,7 @@ mod tests {
             const MOVPRFX_PREDICATED_Z0_Z1: u32 = 0x0410_2020;
             for word in [SQADD_RESERVED_BYTE_SHIFT8, SABDLB_RESERVED_BYTE] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[NOP, word, RET_X30]),
                         GuestAddress(0),
                         profile(32, true),
@@ -1414,7 +1430,7 @@ mod tests {
             }
             for bytes in [16, 32, 64, 128, 256] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[SQADD_Z0_Z1_Z2, RET_X30]),
                         GuestAddress(0),
                         profile(bytes, false),
@@ -1427,7 +1443,7 @@ mod tests {
             }
             for prefix in [MOVPRFX_Z0_Z1, MOVPRFX_PREDICATED_Z0_Z1] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[prefix, SQADD_Z0_Z1_Z2, RET_X30]),
                         GuestAddress(0),
                         profile(32, true),
@@ -1438,7 +1454,9 @@ mod tests {
                     .contains("MOVPRFX pair validation")
                 );
             }
-            assert!(crate::compile(&words(&[SQADD_Z0_Z1_Z2, RET_X30]), GuestAddress(0)).is_err());
+            assert!(
+                crate::testing::leaf(&words(&[SQADD_Z0_Z1_Z2, RET_X30]), GuestAddress(0)).is_err()
+            );
         }
 
         #[test]
@@ -1453,8 +1471,12 @@ mod tests {
                         ScalableMode::from_svcr(svcr).unwrap(),
                     );
                     let source = words(&[FABS_HALF, FNEG_DOUBLE, RET_X30]);
-                    let result =
-                        compile_for_profile(&source, GuestAddress(0), profile, TargetCpu::Baseline);
+                    let result = crate::testing::context_leaf(
+                        &source,
+                        GuestAddress(0),
+                        profile,
+                        TargetCpu::Baseline,
+                    );
                     if profile.mode().streaming() {
                         let native = result.unwrap();
                         assert_eq!(
@@ -1468,9 +1490,9 @@ mod tests {
                     }
                 }
             }
-            assert!(crate::compile(&words(&[FABS_HALF, RET_X30]), GuestAddress(0)).is_err());
+            assert!(crate::testing::leaf(&words(&[FABS_HALF, RET_X30]), GuestAddress(0)).is_err());
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[RESERVED_SIGN_SIZE, RET_X30]),
                     GuestAddress(0),
                     profile(16, true),
@@ -1505,7 +1527,7 @@ mod tests {
                 );
                 for bytes in [16, 32, 64, 128, 256] {
                     for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Sse41] {
-                        let native = compile_for_profile(
+                        let native = crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0x1000),
                             profile(bytes, true),
@@ -1549,7 +1571,7 @@ mod tests {
                             ScalableControls::new(length, false),
                         )
                         .unwrap();
-                        let result = compile_for_profile(
+                        let result = crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0),
                             selected,
@@ -1577,7 +1599,7 @@ mod tests {
             ];
             for word in RESERVED_REVERSE_WORDS {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[NOP, word, RET_X30]),
                         GuestAddress(0),
                         profile(16, true),
@@ -1599,7 +1621,7 @@ mod tests {
             ];
             for word in ZEROING_WORDS {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[word, RET_X30]),
                         GuestAddress(0),
                         profile(16, true),
@@ -1610,7 +1632,7 @@ mod tests {
             }
             const CLS_Z0_B_P0_Z1_B: u32 = 0x0418_a020;
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MOVPRFX_Z0_Z1, CLS_Z0_B_P0_Z1_B, RET_X30]),
                     GuestAddress(0),
                     profile(16, true),
@@ -1620,7 +1642,10 @@ mod tests {
                 .0
                 .contains("MOVPRFX pair validation")
             );
-            assert!(crate::compile(&words(&[CLS_Z0_B_P0_Z1_B, RET_X30]), GuestAddress(0)).is_err());
+            assert!(
+                crate::testing::leaf(&words(&[CLS_Z0_B_P0_Z1_B, RET_X30]), GuestAddress(0))
+                    .is_err()
+            );
         }
         #[test]
         fn integer_bits_bsr_recipes_require_declared_dit_zero() {
@@ -1655,7 +1680,7 @@ mod tests {
                         .unwrap();
                         assert_eq!(declared.required_dit(), Some(false));
                         for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Sse41] {
-                            let positive = compile_for_profile(
+                            let positive = crate::testing::context_leaf(
                                 &words(&[word, RET_X30]),
                                 GuestAddress(0),
                                 declared,
@@ -1668,7 +1693,7 @@ mod tests {
                                 &positive.x86_64_code[CONTEXT_WRAPPER_BYTES..][..body.len()],
                                 body
                             );
-                            let legacy = compile_for_profile(
+                            let legacy = crate::testing::context_leaf(
                                 &words(&[word, RET_X30]),
                                 GuestAddress(0),
                                 profile(bytes, true),
@@ -1821,7 +1846,7 @@ mod tests {
                         } else {
                             profile(bytes, true)
                         };
-                        let native = compile_for_profile(
+                        let native = crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0x1000),
                             selected_profile,
@@ -1863,7 +1888,7 @@ mod tests {
             const PMULLB_RESERVED_WORD: u32 = 0x4580_6800;
             for word in [SMULLB_RESERVED_BYTE, PMULLB_RESERVED_WORD] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[NOP, word, RET_X30]),
                         GuestAddress(0),
                         profile(32, true),
@@ -1875,7 +1900,7 @@ mod tests {
                 );
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MUL_Z0_Z1_Z2, RET_X30]),
                     GuestAddress(0),
                     profile(32, false),
@@ -1886,7 +1911,7 @@ mod tests {
                 .contains("streaming mode required")
             );
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MOVPRFX_Z0_Z1, MUL_Z0_Z1_Z2, RET_X30]),
                     GuestAddress(0),
                     profile(32, true),
@@ -2005,7 +2030,7 @@ mod tests {
                 );
                 for bytes in [16, 32, 64, 128, 256] {
                     let profile = profile(bytes, true);
-                    let native = compile_for_profile(
+                    let native = crate::testing::context_leaf(
                         &source(&[word, RET_X30]),
                         GUEST_BASE,
                         profile,
@@ -2040,7 +2065,7 @@ mod tests {
                     );
                     assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
                     assert_eq!(
-                        memory_requirements(
+                        crate::testing::context_leaf_memory(
                             &source(&[word, RET_X30]),
                             GUEST_BASE,
                             profile,
@@ -2057,7 +2082,7 @@ mod tests {
         fn requirements_cover_the_complete_body_and_explicit_pure_case() {
             let profile = profile(16, true);
             assert_eq!(
-                memory_requirements(
+                crate::testing::context_leaf_memory(
                     &source(&[NOP, RET_X30]),
                     GUEST_BASE,
                     profile,
@@ -2067,7 +2092,7 @@ mod tests {
                 MemoryRequirements::default()
             );
             assert_eq!(
-                memory_requirements(
+                crate::testing::context_leaf_memory(
                     &source(&[LD1B_Z1_P0_X5, LD1D_Z1_P0_SP, LD1D_Z1_P0_X5, RET_X30]),
                     GUEST_BASE,
                     profile,
@@ -2115,10 +2140,16 @@ mod tests {
                     profile(16, false),
                 ),
             ] {
-                let scan =
-                    memory_requirements(&source, base, profile, TargetCpu::Baseline).unwrap_err();
+                let scan = crate::testing::context_leaf_memory(
+                    &source,
+                    base,
+                    profile,
+                    TargetCpu::Baseline,
+                )
+                .unwrap_err();
                 let compile =
-                    compile_for_profile(&source, base, profile, TargetCpu::Baseline).unwrap_err();
+                    crate::testing::context_leaf(&source, base, profile, TargetCpu::Baseline)
+                        .unwrap_err();
                 assert_eq!(scan.0, compile.0);
             }
         }
@@ -2233,9 +2264,13 @@ mod tests {
                 for bytes in [16, 256] {
                     let profile = profile(bytes, true);
                     let bytes = source(&[word, RET_X30]);
-                    let native =
-                        compile_for_profile(&bytes, GUEST_BASE, profile, TargetCpu::Baseline)
-                            .unwrap();
+                    let native = crate::testing::context_leaf(
+                        &bytes,
+                        GUEST_BASE,
+                        profile,
+                        TargetCpu::Baseline,
+                    )
+                    .unwrap();
                     let mut expected = Code::new();
                     x86_64::sve::memory_multi::emit(
                         &mut expected,
@@ -2264,8 +2299,13 @@ mod tests {
                     );
                     assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
                     assert_eq!(
-                        memory_requirements(&bytes, GUEST_BASE, profile, TargetCpu::Baseline)
-                            .unwrap(),
+                        crate::testing::context_leaf_memory(
+                            &bytes,
+                            GUEST_BASE,
+                            profile,
+                            TargetCpu::Baseline
+                        )
+                        .unwrap(),
                         x86_64::sve::memory_multi::requirements(&operand)
                     );
                 }
@@ -2276,7 +2316,7 @@ mod tests {
         fn multi_requirements_fold_every_effect_and_preserve_four_argument_descriptor() {
             let profile = profile(16, true);
             assert_eq!(
-                memory_requirements(
+                crate::testing::context_leaf_memory(
                     &source(&[NOP, RET_X30]),
                     GUEST_BASE,
                     profile,
@@ -2286,7 +2326,7 @@ mod tests {
                 MemoryRequirements::default()
             );
             assert_eq!(
-                memory_requirements(
+                crate::testing::context_leaf_memory(
                     &source(&[
                         LD1D_Z0_Z1_PN8_X5_X0,
                         LD1D_Z0_Z1_PN8_SP,
@@ -2311,7 +2351,7 @@ mod tests {
                 }
             );
             assert_eq!(
-                memory_requirements(
+                crate::testing::context_leaf_memory(
                     &source(&[LD1D_Z0_Z1_PN8_SP, RET_X30]),
                     GUEST_BASE,
                     profile,
@@ -2348,10 +2388,16 @@ mod tests {
                 (vec![LD1D_Z0_Z1_PN8_X5_X0], profile(16, true)),
             ] {
                 let bytes = source(&words);
-                let scan = memory_requirements(&bytes, GUEST_BASE, profile, TargetCpu::Baseline)
-                    .unwrap_err();
-                let compile = compile_for_profile(&bytes, GUEST_BASE, profile, TargetCpu::Baseline)
-                    .unwrap_err();
+                let scan = crate::testing::context_leaf_memory(
+                    &bytes,
+                    GUEST_BASE,
+                    profile,
+                    TargetCpu::Baseline,
+                )
+                .unwrap_err();
+                let compile =
+                    crate::testing::context_leaf(&bytes, GUEST_BASE, profile, TargetCpu::Baseline)
+                        .unwrap_err();
                 assert_eq!(scan.0, compile.0);
             }
         }
@@ -2464,7 +2510,7 @@ mod tests {
                 );
                 for bytes in [16, 32, 64, 128, 256] {
                     let profile = profile(bytes, true, true);
-                    let native = compile_for_profile(
+                    let native = crate::testing::context_leaf(
                         &source(&[word, RET_X30]),
                         GUEST_BASE,
                         profile,
@@ -2500,7 +2546,7 @@ mod tests {
                     );
                     assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
                     assert_eq!(
-                        memory_requirements(
+                        crate::testing::context_leaf_memory(
                             &source(&[word, RET_X30]),
                             GUEST_BASE,
                             profile,
@@ -2517,8 +2563,13 @@ mod tests {
         fn stores_preflight_write_caps_tags_and_original_sp_for_the_complete_body() {
             let profile = profile(16, true, true);
             let requirements = |words: &[u32]| {
-                memory_requirements(&source(words), GUEST_BASE, profile, TargetCpu::Baseline)
-                    .unwrap()
+                crate::testing::context_leaf_memory(
+                    &source(words),
+                    GUEST_BASE,
+                    profile,
+                    TargetCpu::Baseline,
+                )
+                .unwrap()
             };
             assert_eq!(
                 requirements(&[NOP, PRFB_P0_SP, RET_X30]),
@@ -2595,10 +2646,15 @@ mod tests {
                 (ST2Q_Z1_P0_X5, profile(16, true, false), "FEAT_SME2p1"),
             ] {
                 let source = source(&[word, RET_X30]);
-                let scan = memory_requirements(&source, GUEST_BASE, profile, TargetCpu::Baseline)
-                    .unwrap_err();
+                let scan = crate::testing::context_leaf_memory(
+                    &source,
+                    GUEST_BASE,
+                    profile,
+                    TargetCpu::Baseline,
+                )
+                .unwrap_err();
                 let compile =
-                    compile_for_profile(&source, GUEST_BASE, profile, TargetCpu::Baseline)
+                    crate::testing::context_leaf(&source, GUEST_BASE, profile, TargetCpu::Baseline)
                         .unwrap_err();
                 assert_eq!(scan.0, compile.0);
                 assert!(scan.0.contains(reason), "{}", scan.0);
@@ -2696,9 +2752,13 @@ mod tests {
                 for bytes in LENGTHS {
                     let profile = profile(bytes, true, true);
                     let input = source(&[word, RET_X30]);
-                    let native =
-                        compile_for_profile(&input, GUEST_BASE, profile, TargetCpu::Baseline)
-                            .unwrap();
+                    let native = crate::testing::context_leaf(
+                        &input,
+                        GUEST_BASE,
+                        profile,
+                        TargetCpu::Baseline,
+                    )
+                    .unwrap();
                     let mut expected = Code::new();
                     x86_64::sve::memory_structure::emit(
                         &mut expected,
@@ -2727,8 +2787,13 @@ mod tests {
                     );
                     assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
                     assert_eq!(
-                        memory_requirements(&input, GUEST_BASE, profile, TargetCpu::Baseline)
-                            .unwrap(),
+                        crate::testing::context_leaf_memory(
+                            &input,
+                            GUEST_BASE,
+                            profile,
+                            TargetCpu::Baseline
+                        )
+                        .unwrap(),
                         x86_64::sve::memory_structure::requirements(operand)
                     );
                 }
@@ -2752,12 +2817,20 @@ mod tests {
                 }
                 for (word, profile) in declines {
                     let input = source(&[NOP, word, RET_X30]);
-                    let scan =
-                        memory_requirements(&input, GUEST_BASE, profile, TargetCpu::Baseline)
-                            .unwrap_err();
-                    let compile =
-                        compile_for_profile(&input, GUEST_BASE, profile, TargetCpu::Baseline)
-                            .unwrap_err();
+                    let scan = crate::testing::context_leaf_memory(
+                        &input,
+                        GUEST_BASE,
+                        profile,
+                        TargetCpu::Baseline,
+                    )
+                    .unwrap_err();
+                    let compile = crate::testing::context_leaf(
+                        &input,
+                        GUEST_BASE,
+                        profile,
+                        TargetCpu::Baseline,
+                    )
+                    .unwrap_err();
                     assert_eq!(scan.0, compile.0);
                 }
             }
@@ -2772,7 +2845,7 @@ mod tests {
                 RET_X30,
             ]);
             assert_eq!(
-                memory_requirements(
+                crate::testing::context_leaf_memory(
                     &input,
                     GUEST_BASE,
                     profile(16, true, true),
@@ -2900,7 +2973,7 @@ mod tests {
         }
 
         fn rejection(word: u32, profile: ScalableProfile) -> String {
-            compile_for_profile(
+            crate::testing::context_leaf(
                 &words(&[NOP, word, RET_X30]),
                 SOURCE_BASE,
                 profile,
@@ -2929,12 +3002,14 @@ mod tests {
                             < usize::from(operand.requirements.minimum_current_svl_bits)
                         {
                             assert!(
-                                compile_for_profile(&source, SOURCE_BASE, profile, target).is_err()
+                                crate::testing::context_leaf(&source, SOURCE_BASE, profile, target)
+                                    .is_err()
                             );
                             continue;
                         }
                         let native =
-                            compile_for_profile(&source, SOURCE_BASE, profile, target).unwrap();
+                            crate::testing::context_leaf(&source, SOURCE_BASE, profile, target)
+                                .unwrap();
                         let mut body = Code::new();
                         x86_64::sme::movement::emit(
                             &mut body,
@@ -2968,7 +3043,7 @@ mod tests {
                         );
                     }
                 }
-                assert!(crate::compile(&words(&[word, RET_X30]), SOURCE_BASE).is_err());
+                assert!(crate::testing::leaf(&words(&[word, RET_X30]), SOURCE_BASE).is_err());
             }
         }
 
@@ -3000,7 +3075,7 @@ mod tests {
                 }
                 for word in [ZERO_ZA_EMPTY, ZERO_ZA_ALL, ZERO_ZT0] {
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             SOURCE_BASE,
                             no_stream,
@@ -3023,7 +3098,7 @@ mod tests {
             for word in [MOVAZ_Z0_ZA0H_BYTE, ZERO_ZA_VECTOR_GROUP] {
                 assert!(rejection(word, no_sme2p1).contains("FEAT_SME2p1"));
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[word, RET_X30]),
                         SOURCE_BASE,
                         no_sme2p1,
@@ -3096,7 +3171,7 @@ mod tests {
             };
             profile.validate_view(&context, &view).unwrap();
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[ZERO_ZA_ALL, RET_X30]),
                     SOURCE_BASE,
                     profile,
@@ -3120,10 +3195,15 @@ mod tests {
             ] {
                 let source = words(&[word, RET_X30]);
                 let first =
-                    compile_for_profile(&source, SOURCE_BASE, legacy, TargetCpu::Baseline).unwrap();
-                let second =
-                    compile_for_profile(&source, SOURCE_BASE, declared, TargetCpu::Baseline)
+                    crate::testing::context_leaf(&source, SOURCE_BASE, legacy, TargetCpu::Baseline)
                         .unwrap();
+                let second = crate::testing::context_leaf(
+                    &source,
+                    SOURCE_BASE,
+                    declared,
+                    TargetCpu::Baseline,
+                )
+                .unwrap();
                 assert_eq!(first.x86_64_code, second.x86_64_code);
                 assert_eq!(first.source_map, second.source_map);
             }
@@ -3213,7 +3293,7 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for svcr in [1, 3] {
                         for target in [TargetCpu::Baseline, TargetCpu::Bmi1] {
-                            let native = compile_for_profile(
+                            let native = crate::testing::context_leaf(
                                 &source(&[word, RET_X30]),
                                 GuestAddress(0x1000),
                                 profile(bytes, svcr, true),
@@ -3257,7 +3337,7 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for svcr in [0, 2] {
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[word, RET_X30]),
                                 GuestAddress(0),
                                 profile(bytes, svcr, true),
@@ -3269,7 +3349,7 @@ mod tests {
                         );
                     }
                     for svcr in [1, 3] {
-                        let result = compile_for_profile(
+                        let result = crate::testing::context_leaf(
                             &source(&[word, RET_X30]),
                             GuestAddress(0),
                             profile(bytes, svcr, false),
@@ -3282,7 +3362,7 @@ mod tests {
                         }
                     }
                 }
-                assert!(crate::compile(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
+                assert!(crate::testing::leaf(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
             }
             assert_eq!(sme2_forms, 17);
         }
@@ -3356,7 +3436,7 @@ mod tests {
                 );
                 for bytes in [16, 32, 64, 128, 256] {
                     for target in [TargetCpu::Baseline, TargetCpu::Sse42] {
-                        let native = compile_for_profile(
+                        let native = crate::testing::context_leaf(
                             &source(&[word, RET_X30]),
                             GuestAddress(0x1000),
                             profile(bytes, 3, features),
@@ -3406,7 +3486,7 @@ mod tests {
                 move_forms += usize::from(vector_move);
                 for svcr in [0, 2] {
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &source(&[word, RET_X30]),
                             GuestAddress(0),
                             profile(16, svcr, all),
@@ -3430,7 +3510,7 @@ mod tests {
                     (sme2, !vector_move, "FEAT_SME2p1"),
                     (all, true, ""),
                 ] {
-                    let result = compile_for_profile(
+                    let result = crate::testing::context_leaf(
                         &source(&[word, RET_X30]),
                         GuestAddress(0),
                         profile(16, 3, features),
@@ -3446,7 +3526,7 @@ mod tests {
                     VectorLength::from_bytes(16).unwrap(),
                     ScalableMode::from_svcr(3).unwrap(),
                 );
-                let result = compile_for_profile(
+                let result = crate::testing::context_leaf(
                     &source(&[word, RET_X30]),
                     GuestAddress(0),
                     v1,
@@ -3457,12 +3537,12 @@ mod tests {
                 } else {
                     assert!(result.is_ok());
                 }
-                assert!(crate::compile(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
+                assert!(crate::testing::leaf(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
             }
             assert_eq!(counter_forms, 2);
             assert_eq!(move_forms, 4);
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &source(&[RESERVED_PSEL_SIZE, RET_X30]),
                     GuestAddress(0),
                     profile(16, 3, all),
@@ -3526,7 +3606,7 @@ mod tests {
                     for bytes in [16, 32, 64, 128, 256] {
                         for za in [false, true] {
                             for target in [TargetCpu::Baseline, TargetCpu::Sse42] {
-                                let native = compile_for_profile(
+                                let native = crate::testing::context_leaf(
                                     &source(word),
                                     GuestAddress(0x1000),
                                     profile(bytes, true, za, true),
@@ -3570,7 +3650,7 @@ mod tests {
         #[test]
         fn predicate_move_requires_sme2p1_streaming_without_requiring_za() {
             for word in BASES {
-                let error = compile_for_profile(
+                let error = crate::testing::context_leaf(
                     &source(word),
                     GuestAddress(0),
                     profile(16, true, false, false),
@@ -3579,7 +3659,7 @@ mod tests {
                 .unwrap_err();
                 assert!(error.0.contains("FEAT_SME2p1"));
                 for za in [false, true] {
-                    let error = compile_for_profile(
+                    let error = crate::testing::context_leaf(
                         &source(word),
                         GuestAddress(0),
                         profile(16, false, za, true),
@@ -3588,7 +3668,7 @@ mod tests {
                     .unwrap_err();
                     assert!(error.0.contains("streaming mode required"));
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &source(word),
                             GuestAddress(0),
                             profile(16, true, za, true),
@@ -3598,7 +3678,7 @@ mod tests {
                     );
                 }
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &source(word),
                         GuestAddress(0),
                         ScalableProfile::new(
@@ -3638,7 +3718,8 @@ mod tests {
                         .flat_map(|word| word.to_le_bytes())
                         .collect();
                     let native =
-                        compile_for_profile(&source, BASE, profile, TargetCpu::Baseline).unwrap();
+                        crate::testing::context_leaf(&source, BASE, profile, TargetCpu::Baseline)
+                            .unwrap();
                     assert_eq!(
                         native
                             .source_map
@@ -3674,9 +3755,11 @@ mod tests {
                 .iter()
                 .flat_map(|word| word.to_le_bytes())
                 .collect();
-            let prepared = prepare_leaf(&source, BASE, profile, TargetCpu::Baseline).unwrap();
+            let prepared =
+                crate::testing::prepared_context_leaf(&source, BASE, profile, TargetCpu::Baseline)
+                    .unwrap();
             let ordinary =
-                compile_for_profile(&source, BASE, profile, TargetCpu::Baseline).unwrap();
+                crate::testing::context_leaf(&source, BASE, profile, TargetCpu::Baseline).unwrap();
             assert_eq!(prepared.native.x86_64_code, ordinary.x86_64_code);
             assert_eq!(prepared.native.source_map, ordinary.source_map);
             let instructions = prepared.execution_requirements.instructions();
@@ -3706,7 +3789,12 @@ mod tests {
                 .iter()
                 .flat_map(|word| word.to_le_bytes())
                 .collect();
-            let error = match prepare_leaf(&refused, BASE, profile, TargetCpu::Baseline) {
+            let error = match crate::testing::prepared_context_leaf(
+                &refused,
+                BASE,
+                profile,
+                TargetCpu::Baseline,
+            ) {
                 Err(error) => error,
                 Ok(_) => panic!("unreviewed MOVPRFX pair accepted"),
             };
@@ -3928,7 +4016,7 @@ mod tests {
                 .unwrap();
                 for word in BASE_SME_WORDS {
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0x1234),
                             profile,
@@ -3957,7 +4045,7 @@ mod tests {
                 .unwrap()
             };
             let compile = |word, profile| {
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[word, RET_X30]),
                     GuestAddress(0x1234),
                     profile,
@@ -4053,7 +4141,7 @@ mod tests {
                             } else {
                                 profile(bytes, svcr)
                             };
-                            let native = compile_for_profile(
+                            let native = crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0x1000),
                                 execution,
@@ -4100,7 +4188,7 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for svcr in [0, 2] {
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0),
                                 profile(bytes, svcr),
@@ -4112,9 +4200,9 @@ mod tests {
                         );
                     }
                 }
-                assert!(crate::compile(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
+                assert!(crate::testing::leaf(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &source(&[MOVPRFX_Z0_Z1, word, RET_X30]),
                         GuestAddress(0),
                         profile(32, 3),
@@ -4126,7 +4214,7 @@ mod tests {
                 );
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &source(&[NOP, RESERVED_LOGICAL_MASK, RET_X30]),
                     GuestAddress(0),
                     profile(32, 3),
@@ -4141,7 +4229,7 @@ mod tests {
         #[test]
         fn rearrangement_declines_nonzero_revd_size_and_both_prefix_forms() {
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &source(&[NONZERO_REVD_SIZE, RET_X30]),
                     GuestAddress(0),
                     profile(32, 3),
@@ -4151,7 +4239,7 @@ mod tests {
             );
             for prefix in [MOVPRFX_Z0_Z1, MOVPRFX_PREDICATED_Z0_Z1] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &source(&[prefix, REARRANGEMENT_WORDS[0], RET_X30]),
                         GuestAddress(0),
                         profile(32, 3),
@@ -4178,7 +4266,7 @@ mod tests {
                                 VectorLength::from_bytes(bytes).unwrap(),
                                 target,
                             );
-                            let legacy = compile_for_profile(
+                            let legacy = crate::testing::context_leaf(
                                 &source(&[word, RET_X30]),
                                 GuestAddress(0x1000),
                                 profile(bytes, svcr),
@@ -4195,7 +4283,7 @@ mod tests {
                             let declared = dit_zero_profile(bytes, svcr);
                             assert_eq!(declared.required_dit(), Some(false));
                             assert!(
-                                compile_for_profile(
+                                crate::testing::context_leaf(
                                     &source(&[word, RET_X30]),
                                     GuestAddress(0x1000),
                                     declared,
@@ -4286,7 +4374,7 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for svcr in [1, 3] {
                         for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
-                            let native = compile_for_profile(
+                            let native = crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0x1000),
                                 profile(bytes, svcr),
@@ -4333,7 +4421,7 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for svcr in [0, 2] {
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0),
                                 profile(bytes, svcr),
@@ -4345,9 +4433,9 @@ mod tests {
                         );
                     }
                 }
-                assert!(crate::compile(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
+                assert!(crate::testing::leaf(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &source(&[MOVPRFX_Z0_Z1, word, RET_X30]),
                         GuestAddress(0),
                         profile(32, 3),
@@ -4360,7 +4448,7 @@ mod tests {
             }
             for word in [RESERVED_BYTE_SHIFT, RESERVED_ZERO_INDEX_SIZE] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &source(&[NOP, word, RET_X30]),
                         GuestAddress(0),
                         profile(32, 3),
@@ -4391,10 +4479,15 @@ mod tests {
                         for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
                             let input = source(&[word, RET_X30]);
                             let base = GuestAddress(0x1000);
-                            let v1 =
-                                compile_for_profile(&input, base, profile(bytes, svcr), target)
-                                    .unwrap();
-                            let v2 = compile_for_profile(&input, base, declared, target).unwrap();
+                            let v1 = crate::testing::context_leaf(
+                                &input,
+                                base,
+                                profile(bytes, svcr),
+                                target,
+                            )
+                            .unwrap();
+                            let v2 = crate::testing::context_leaf(&input, base, declared, target)
+                                .unwrap();
                             assert_eq!(v1.x86_64_code, v2.x86_64_code);
                             assert_eq!(v1.source_map, v2.source_map);
                         }
@@ -4466,7 +4559,7 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for svcr in [1, 3] {
                         for target in [TargetCpu::Baseline, TargetCpu::Sse41, TargetCpu::Sse42] {
-                            let native = compile_for_profile(
+                            let native = crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0x1000),
                                 profile(bytes, svcr),
@@ -4513,7 +4606,7 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for svcr in [0, 2] {
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0),
                                 profile(bytes, svcr),
@@ -4525,10 +4618,10 @@ mod tests {
                         );
                     }
                 }
-                assert!(crate::compile(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
+                assert!(crate::testing::leaf(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
                 for prefix in [MOVPRFX_Z0_Z1, MOVPRFX_PREDICATED_Z0_Z1] {
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &source(&[prefix, word, RET_X30]),
                             GuestAddress(0),
                             profile(32, 3),
@@ -4545,7 +4638,7 @@ mod tests {
                 Some(Err(crate::aarch64::Unsupported))
             );
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &source(&[NOP, RESERVED_SIGNED_DOUBLEWORD, RET_X30]),
                     GuestAddress(0),
                     profile(32, 3),
@@ -4628,7 +4721,7 @@ mod tests {
                 );
                 for bytes in [16, 32, 64, 128, 256] {
                     for target in [TargetCpu::Baseline, TargetCpu::Sse41] {
-                        let native = compile_for_profile(
+                        let native = crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0x1000),
                             declared_dit_zero_profile(bytes),
@@ -4670,7 +4763,7 @@ mod tests {
                 )
                 .unwrap();
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[word, RET_X30]),
                         GuestAddress(0),
                         base_sme,
@@ -4684,7 +4777,7 @@ mod tests {
                             VectorLength::from_bytes(16).unwrap(),
                             ScalableMode::new(streaming, za),
                         );
-                        let result = compile_for_profile(
+                        let result = crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0),
                             selected,
@@ -4887,7 +4980,7 @@ mod tests {
                         "{word:#x} at {bytes} bytes",
                     );
                     let source = words(&[NOP, word, RET_X30]);
-                    let legacy = compile_for_profile(
+                    let legacy = crate::testing::context_leaf(
                         &source,
                         GuestAddress(0),
                         profile(bytes, true),
@@ -4899,7 +4992,7 @@ mod tests {
                         assert!(legacy.is_ok());
                     }
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &source,
                             GuestAddress(0),
                             declared_dit_zero_profile(bytes),
@@ -4918,7 +5011,7 @@ mod tests {
             const LSL_Z0_B_P0_Z0_B_ZERO: u32 = 0x0403_8100;
             for word in [LSL_RESERVED_SIZE, ASR_RESERVED_DOUBLEWORDS] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[NOP, word, RET_X30]),
                         GuestAddress(0),
                         profile(16, true),
@@ -4930,7 +5023,7 @@ mod tests {
                 );
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MOVPRFX_Z0_Z1, LSL_Z0_B_P0_Z0_B_ZERO, RET_X30]),
                     GuestAddress(0),
                     profile(16, true),
@@ -4941,7 +5034,8 @@ mod tests {
                 .contains("MOVPRFX pair validation")
             );
             assert!(
-                crate::compile(&words(&[LSL_Z0_B_P0_Z0_B_ZERO, RET_X30]), GuestAddress(0)).is_err()
+                crate::testing::leaf(&words(&[LSL_Z0_B_P0_Z0_B_ZERO, RET_X30]), GuestAddress(0))
+                    .is_err()
             );
         }
 
@@ -4983,7 +5077,7 @@ mod tests {
                 );
                 for bytes in [16, 32, 64, 128, 256] {
                     for target in [TargetCpu::Baseline, TargetCpu::Sse41] {
-                        let native = compile_for_profile(
+                        let native = crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0x1000),
                             profile(bytes, true),
@@ -5022,7 +5116,7 @@ mod tests {
                             VectorLength::from_bytes(16).unwrap(),
                             ScalableMode::new(streaming, za),
                         );
-                        let result = compile_for_profile(
+                        let result = crate::testing::context_leaf(
                             &words(&[word, RET_X30]),
                             GuestAddress(0),
                             selected,
@@ -5045,7 +5139,7 @@ mod tests {
             const SSHLLB_Z0_H_Z1_B: u32 = 0x4508_a020;
             for word in [SSHLLB_RESERVED_SIZE, SQXTNB_RESERVED_SIZE] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[NOP, word, RET_X30]),
                         GuestAddress(0),
                         profile(16, true),
@@ -5057,7 +5151,7 @@ mod tests {
                 );
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[MOVPRFX_Z0_Z1, SSHLLB_Z0_H_Z1_B, RET_X30]),
                     GuestAddress(0),
                     profile(16, true),
@@ -5067,7 +5161,10 @@ mod tests {
                 .0
                 .contains("MOVPRFX pair validation")
             );
-            assert!(crate::compile(&words(&[SSHLLB_Z0_H_Z1_B, RET_X30]), GuestAddress(0)).is_err());
+            assert!(
+                crate::testing::leaf(&words(&[SSHLLB_Z0_H_Z1_B, RET_X30]), GuestAddress(0))
+                    .is_err()
+            );
         }
     }
     mod sme2p1 {
@@ -5235,7 +5332,7 @@ mod tests {
                             TargetCpu::Sse42,
                         ] {
                             let length = VectorLength::from_bytes(bytes).unwrap();
-                            let native = compile_for_profile(
+                            let native = crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0x1000),
                                 declared(bytes, svcr, true),
@@ -5303,7 +5400,7 @@ mod tests {
                             ScalableProfile::new(length, ScalableMode::from_svcr(svcr).unwrap()),
                             declared(bytes, svcr, false),
                         ] {
-                            let error = compile_for_profile(
+                            let error = crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0x1000),
                                 profile,
@@ -5317,7 +5414,7 @@ mod tests {
                     }
                     for svcr in [0, 2] {
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[NOP, word, RET_X30]),
                                 GuestAddress(0x1000),
                                 declared(bytes, svcr, true),
@@ -5329,10 +5426,10 @@ mod tests {
                         );
                     }
                 }
-                assert!(crate::compile(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
+                assert!(crate::testing::leaf(&source(&[word, RET_X30]), GuestAddress(0)).is_err());
                 for prefix in [0x0420_bc20, 0x0410_2020] {
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &source(&[prefix, word, RET_X30]),
                             GuestAddress(0),
                             declared(32, 3, true),
@@ -5373,7 +5470,7 @@ mod tests {
                         }
                         for svcr in [1, 3] {
                             assert!(
-                                compile_for_profile(
+                                crate::testing::context_leaf(
                                     &source(&[word, RET_X30]),
                                     GuestAddress(0),
                                     declared(bytes, svcr, true),
@@ -5493,9 +5590,13 @@ mod tests {
                 for bytes in [16, 32, 64, 128, 256] {
                     for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
                         let profile = profile(bytes, ScalableMode::new(true, true), features());
-                        let native =
-                            compile_for_profile(&dot_body(word), GUEST_BASE, profile, target)
-                                .unwrap();
+                        let native = crate::testing::context_leaf(
+                            &dot_body(word),
+                            GUEST_BASE,
+                            profile,
+                            target,
+                        )
+                        .unwrap();
                         let mut expected = Code::new();
                         x86_64::sme::integer_dots::emit(
                             &mut expected,
@@ -5524,7 +5625,7 @@ mod tests {
                         assert_eq!(native.x86_64_code[native.source_map[1].1..], [RET]);
                     }
                 }
-                assert!(crate::compile(&dot_body(word), GUEST_BASE).is_err());
+                assert!(crate::testing::leaf(&dot_body(word), GUEST_BASE).is_err());
             }
         }
 
@@ -5537,7 +5638,7 @@ mod tests {
                     (DOT_WORD, sme_only, "FEAT_SME2"),
                     (DOT_DOUBLEWORD, sme2, "FEAT_SME_I16I64"),
                 ] {
-                    let error = compile_for_profile(
+                    let error = crate::testing::context_leaf(
                         &dot_body(word),
                         GUEST_BASE,
                         profile(bytes, ScalableMode::new(true, true), available),
@@ -5554,7 +5655,7 @@ mod tests {
                     (false, true, "streaming mode required"),
                     (true, false, "ZA enable required"),
                 ] {
-                    let error = compile_for_profile(
+                    let error = crate::testing::context_leaf(
                         &dot_body(DOT_WORD),
                         GUEST_BASE,
                         profile(bytes, ScalableMode::new(streaming, za), features()),
@@ -5571,7 +5672,7 @@ mod tests {
                     ScalableMode::new(true, true),
                 );
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &dot_body(DOT_WORD),
                         GUEST_BASE,
                         fixed,
@@ -5580,7 +5681,7 @@ mod tests {
                     .is_ok()
                 );
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &dot_body(DOT_DOUBLEWORD),
                         GUEST_BASE,
                         fixed,
@@ -5606,13 +5707,17 @@ mod tests {
             for word in MATRIX_WORDS {
                 let operand = integer_matrix::decode(word).unwrap();
                 let source = words(&[word, RET_X30]);
-                assert!(crate::compile(&source, GuestAddress(0)).is_err());
+                assert!(crate::testing::leaf(&source, GuestAddress(0)).is_err());
                 let legacy = ScalableProfile::new(
                     VectorLength::from_bytes(16).unwrap(),
                     ScalableMode::new(true, true),
                 );
-                let legacy_result =
-                    compile_for_profile(&source, GuestAddress(0), legacy, TargetCpu::Baseline);
+                let legacy_result = crate::testing::context_leaf(
+                    &source,
+                    GuestAddress(0),
+                    legacy,
+                    TargetCpu::Baseline,
+                );
                 assert_eq!(legacy_result.is_ok(), !operand.requires_i16i64());
                 if operand.requires_i16i64() {
                     assert!(legacy_result.unwrap_err().0.contains("FEAT_SME_I16I64"));
@@ -5637,7 +5742,7 @@ mod tests {
                                         ScalableControls::new(length, false),
                                     )
                                     .unwrap();
-                                    let result = compile_for_profile(
+                                    let result = crate::testing::context_leaf(
                                         &source,
                                         GuestAddress(0),
                                         profile,
@@ -5800,8 +5905,10 @@ mod tests {
 
         fn assert_declined(word: u32, profile: ScalableProfile, target: TargetCpu) {
             let bytes = source(&[word, RET_X30]);
-            let scan = memory_requirements(&bytes, GUEST_BASE, profile, target).unwrap_err();
-            let compile = compile_for_profile(&bytes, GUEST_BASE, profile, target).unwrap_err();
+            let scan = crate::testing::context_leaf_memory(&bytes, GUEST_BASE, profile, target)
+                .unwrap_err();
+            let compile =
+                crate::testing::context_leaf(&bytes, GUEST_BASE, profile, target).unwrap_err();
             assert_eq!(scan.0, compile.0);
         }
 
@@ -5815,7 +5922,8 @@ mod tests {
                 );
                 let profile = declared_profile(true, true, true, true);
                 let bytes = source(&[word, RET_X30]);
-                let native = compile_for_profile(&bytes, GUEST_BASE, profile, target()).unwrap();
+                let native =
+                    crate::testing::context_leaf(&bytes, GUEST_BASE, profile, target()).unwrap();
                 let mut expected = Code::new();
                 x86_64::sme::memory::emit(
                     &mut expected,
@@ -5845,7 +5953,8 @@ mod tests {
                 );
                 assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
                 assert_eq!(
-                    memory_requirements(&bytes, GUEST_BASE, profile, target()).unwrap(),
+                    crate::testing::context_leaf_memory(&bytes, GUEST_BASE, profile, target())
+                        .unwrap(),
                     x86_64::sme::memory::requirements(&operand)
                 );
             }
@@ -5863,7 +5972,7 @@ mod tests {
                         );
                         assert_declined(word, declared_profile(true, true, false, false), target());
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[word, RET_X30]),
                                 GUEST_BASE,
                                 declared_profile(true, false, true, false),
@@ -5876,7 +5985,7 @@ mod tests {
                         assert_declined(word, declared_profile(false, true, true, false), target());
                         assert_declined(word, declared_profile(true, false, true, false), target());
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[word, RET_X30]),
                                 GUEST_BASE,
                                 declared_profile(true, true, false, false),
@@ -5888,7 +5997,7 @@ mod tests {
                     SmeMemoryOperand::ZaVector(_) => {
                         assert_declined(word, declared_profile(true, false, true, false), target());
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[word, RET_X30]),
                                 GUEST_BASE,
                                 declared_profile(false, true, false, false),
@@ -5902,7 +6011,7 @@ mod tests {
                         assert_declined(word, declared_profile(true, true, false, false), target());
                         assert_declined(word, declared_profile(true, true, true, false), target());
                         assert!(
-                            compile_for_profile(
+                            crate::testing::context_leaf(
                                 &source(&[word, RET_X30]),
                                 GUEST_BASE,
                                 declared_profile(false, true, true, true),
@@ -5947,7 +6056,7 @@ mod tests {
                     assert_declined(word, profile, target());
                 } else {
                     assert!(
-                        compile_for_profile(
+                        crate::testing::context_leaf(
                             &source(&[word, RET_X30]),
                             GUEST_BASE,
                             profile,
@@ -5958,7 +6067,7 @@ mod tests {
                 }
             }
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &source(&[NOP, RET_X30]),
                     GUEST_BASE,
                     profile,
@@ -5983,10 +6092,14 @@ mod tests {
             }
             words.push(RET_X30);
             assert_eq!(
-                memory_requirements(&source(&words), GUEST_BASE, profile, target()).unwrap(),
+                crate::testing::context_leaf_memory(&source(&words), GUEST_BASE, profile, target())
+                    .unwrap(),
                 expected
             );
-            assert!(compile_for_profile(&source(&words), GUEST_BASE, profile, target()).is_ok());
+            assert!(
+                crate::testing::context_leaf(&source(&words), GUEST_BASE, profile, target())
+                    .is_ok()
+            );
         }
 
         // Append to scalable_context/sme_memory_tests.rs; reuse its source/profile/target helpers.
@@ -6009,7 +6122,7 @@ mod tests {
                 ZT_LOAD,
                 RET_X30,
             ];
-            let prepared = prepare_leaf(
+            let prepared = crate::testing::prepared_context_leaf(
                 &source(&words),
                 GUEST_BASE,
                 declared_profile(true, true, true, true),
@@ -6089,7 +6202,7 @@ mod tests {
                     ],
                 ),
             ] {
-                let prepared = prepare_leaf(
+                let prepared = crate::testing::prepared_context_leaf(
                     &source(&words),
                     GUEST_BASE,
                     declared_profile(false, true, sme2, sme2),
@@ -6144,7 +6257,7 @@ mod tests {
             );
             for word in [TABLE_SELECT, TABLE_ZIP_PAIR_Q, TABLE_ZIP_QUAD_Q, 0xc165e000] {
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &words(&[word, RET_X30]),
                         GuestAddress(0x1000),
                         legacy,
@@ -6201,7 +6314,7 @@ mod tests {
             ));
             let legacy = ScalableProfile::new(short, ScalableMode::new(true, true));
             let scalar_word = TABLE_LOOKUP | (2 << 12);
-            let error = compile_for_profile(
+            let error = crate::testing::context_leaf(
                 &words(&[scalar_word, RET_X30]),
                 GuestAddress(0x1000),
                 legacy,
@@ -6220,7 +6333,7 @@ mod tests {
                     table_features(),
                     zt0_enabled,
                 );
-                let error = compile_for_profile(
+                let error = crate::testing::context_leaf(
                     &words(&[TABLE_LOOKUP, RET_X30]),
                     GuestAddress(0x1000),
                     profile,
@@ -6231,7 +6344,7 @@ mod tests {
             }
             let profile = table_profile(16, ScalableMode::new(true, true), table_features(), true);
             assert!(
-                compile_for_profile(
+                crate::testing::context_leaf(
                     &words(&[TABLE_LOOKUP, RET_X30]),
                     GuestAddress(0x1000),
                     profile,
@@ -6249,12 +6362,16 @@ mod tests {
             let complete = table_profile(16, ScalableMode::new(true, true), table_features(), true);
             for word in [0xc09c4000, 0xc09c8000, 0xc09a4000, 0xc09a9000] {
                 let input = words(&[word, RET_X30]);
-                let error =
-                    compile_for_profile(&input, GuestAddress(0x1000), base, TargetCpu::Baseline)
-                        .unwrap_err();
+                let error = crate::testing::context_leaf(
+                    &input,
+                    GuestAddress(0x1000),
+                    base,
+                    TargetCpu::Baseline,
+                )
+                .unwrap_err();
                 assert!(error.0.contains("FEAT_SME2p1"));
                 assert!(
-                    compile_for_profile(
+                    crate::testing::context_leaf(
                         &input,
                         GuestAddress(0x1000),
                         complete,
@@ -6277,9 +6394,13 @@ mod tests {
                     table_features(),
                     false,
                 );
-                let error =
-                    compile_for_profile(&input, GuestAddress(0x1000), short, TargetCpu::Baseline)
-                        .unwrap_err();
+                let error = crate::testing::context_leaf(
+                    &input,
+                    GuestAddress(0x1000),
+                    short,
+                    TargetCpu::Baseline,
+                )
+                .unwrap_err();
                 assert!(error.0.contains("require SVL"));
                 let valid = table_profile(
                     minimum,
@@ -6288,8 +6409,13 @@ mod tests {
                     false,
                 );
                 assert!(
-                    compile_for_profile(&input, GuestAddress(0x1000), valid, TargetCpu::Baseline)
-                        .is_ok()
+                    crate::testing::context_leaf(
+                        &input,
+                        GuestAddress(0x1000),
+                        valid,
+                        TargetCpu::Baseline
+                    )
+                    .is_ok()
                 );
             }
         }
@@ -6303,7 +6429,7 @@ mod tests {
                 0xc165e001, 0xc175e001, 0xc136e002, 0xc137e002, 0xc120d001, 0xc120d401, 0xc136e000,
                 0xc137e000, 0xc120d000, 0xc120d400,
             ] {
-                let result = compile_for_profile(
+                let result = crate::testing::context_leaf(
                     &words(&[word, RET_X30]),
                     GuestAddress(0x1000),
                     profile,
@@ -6328,7 +6454,7 @@ mod tests {
                 ScalableFeatures::of(ScalableFeature::Sme),
                 false,
             );
-            let error = compile_for_profile(
+            let error = crate::testing::context_leaf(
                 &words(&[TABLE_SELECT, RET_X30]),
                 GuestAddress(0x1000),
                 sme_only,
@@ -6338,7 +6464,7 @@ mod tests {
             assert!(error.0.contains("FEAT_SME2"));
             let non_streaming =
                 table_profile(16, ScalableMode::new(false, false), table_features(), false);
-            let error = compile_for_profile(
+            let error = crate::testing::context_leaf(
                 &words(&[TABLE_SELECT, RET_X30]),
                 GuestAddress(0x1000),
                 non_streaming,

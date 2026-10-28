@@ -22,7 +22,7 @@ pub(super) fn exit_kind_with(asm: &mut Asm, kind: ExitKind) {
     asm.ret();
 }
 
-pub(super) fn direct_exit(code: &mut Code, target: GuestAddress, kind: ExitKind) {
+pub(crate) fn direct_exit(code: &mut Code, target: GuestAddress, kind: ExitKind) {
     direct_exit_with(&mut code.asm(), target, kind);
 }
 
@@ -99,6 +99,7 @@ pub(crate) fn emit_resident_fallback_for_target(
     super::region::prefix_with_budget(native, base)
 }
 
+#[cfg(test)]
 pub(crate) fn emit_for_target(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
@@ -119,8 +120,8 @@ pub(crate) fn emit_for_target(
     .0
 }
 
-/// [`emit_for_target`] for the system-mode engine, which may also complete
-/// a terminal System instruction natively and fall through: DC ZVA by
+/// A block for the system-mode engine, which may also complete a terminal
+/// System instruction natively and fall through: DC ZVA by
 /// zeroing its block (`x86_64::zero_block`) and DC CVAC, DC CVAU and DC
 /// CIVAC by reading the byte at Xt (`x86_64::cache_clean`).
 pub(crate) fn emit_system_mode(

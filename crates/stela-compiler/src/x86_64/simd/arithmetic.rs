@@ -563,12 +563,12 @@ mod tests {
                 .flat_map(|value| value.to_le_bytes())
                 .collect();
             assert!(
-                crate::compile(&bytes, GuestAddress(0x1000))
+                crate::testing::leaf(&bytes, GuestAddress(0x1000))
                     .unwrap_err()
                     .0
                     .contains("NumericalRuntimeRequired")
             );
-            let block = crate::block::compile(&bytes, GuestAddress(0x1000)).unwrap();
+            let block = crate::testing::block(&bytes, GuestAddress(0x1000)).unwrap();
             assert_eq!(block.source_bytes, bytes.len());
             assert_eq!(block.native.source_map.len(), 2);
             assert_eq!(block.native.source_map[1].0, GuestAddress(0x1004));
@@ -578,7 +578,7 @@ mod tests {
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
                 .collect();
-            let block = crate::block::compile(&bytes, GuestAddress(0x1000)).unwrap();
+            let block = crate::testing::block(&bytes, GuestAddress(0x1000)).unwrap();
             assert_eq!(block.source_bytes, size_of::<u32>());
             assert_eq!(block.native.source_map, [(GuestAddress(0x1000), 0)]);
         }

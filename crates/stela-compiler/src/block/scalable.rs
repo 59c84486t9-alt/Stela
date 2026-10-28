@@ -251,8 +251,6 @@ mod tests {
         use crate::{
             TargetCpu,
             aarch64::scalable::{ScalableMode, VectorLength, profile::ScalableControls},
-            block::BlockProfile,
-            scalable_context::block::{ExtendedBlockProfile, compile_for_profile},
         };
 
         const PC: GuestAddress = GuestAddress(0x1000);
@@ -343,10 +341,11 @@ mod tests {
                         admit_scalable_numerical_instruction(decoded, profile, numerical).unwrap();
                     assert_eq!(admitted.word(), word);
                     assert_eq!(admitted.next_pc(), GuestAddress(0x1004));
-                    let compiled = compile_for_profile(
+                    let compiled = crate::testing::context_block(
                         &word.to_le_bytes(),
                         PC,
-                        ExtendedBlockProfile::new(profile, BlockProfile::Ordinary, numerical),
+                        profile,
+                        numerical,
                         TargetCpu::Baseline,
                     )
                     .unwrap();
@@ -379,14 +378,11 @@ mod tests {
                         .unwrap();
                         assert_eq!(admitted.word(), word, "{id}");
                         assert_eq!(admitted.next_pc(), GuestAddress(0x1004), "{id}");
-                        let compiled = compile_for_profile(
+                        let compiled = crate::testing::context_block(
                             &word.to_le_bytes(),
                             PC,
-                            ExtendedBlockProfile::new(
-                                profile,
-                                BlockProfile::Ordinary,
-                                NumericalFeatures::default(),
-                            ),
+                            profile,
+                            NumericalFeatures::default(),
                             TargetCpu::Baseline,
                         )
                         .unwrap();

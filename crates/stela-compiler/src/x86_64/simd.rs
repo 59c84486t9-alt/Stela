@@ -645,7 +645,7 @@ mod tests {
     use alloc::vec;
 
     mod numerical_boundary {
-        use crate::{GuestAddress, block};
+        use crate::GuestAddress;
         use alloc::vec::Vec;
 
         const FCVT_H_S: u32 = 0x1e23c020;
@@ -664,7 +664,7 @@ mod tests {
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
                     .collect();
-                let compiled = block::compile(&bytes, GuestAddress(0x1000)).unwrap();
+                let compiled = crate::testing::block(&bytes, GuestAddress(0x1000)).unwrap();
                 assert_eq!(compiled.source_bytes, size_of::<u32>());
                 assert_eq!(compiled.native.source_map, [(GuestAddress(0x1000), 0)]);
             }
@@ -673,7 +673,7 @@ mod tests {
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
                     .collect();
-                assert!(block::compile(&bytes, GuestAddress(0x1000)).is_err());
+                assert!(crate::testing::block(&bytes, GuestAddress(0x1000)).is_err());
             }
         }
     }

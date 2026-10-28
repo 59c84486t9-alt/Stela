@@ -855,10 +855,7 @@ mod tests {
 
     #[test]
     fn unqualified_plain_load_does_not_remove_v2_casp_or_cx16() {
-        use crate::{
-            GuestAddress,
-            block::{BlockProfile, compile_for_target},
-        };
+        use crate::{GuestAddress, block::BlockProfile};
         let source: alloc::vec::Vec<_> = [0x4822_7c04u32, 0xd65f_03c0]
             .into_iter()
             .flat_map(u32::to_le_bytes)
@@ -867,17 +864,17 @@ mod tests {
         assert!(!TargetCpu::atomic_load16_guaranteed([0; 3], u32::MAX));
         assert!(!baseline.supports(TargetCpu::AtomicLoad16));
         assert!(baseline.supports(TargetCpu::Cx16));
-        let original = compile_for_target(
+        let original = crate::testing::block_for(
             &source,
             GuestAddress(0x1000),
-            BlockProfile::Ordinary,
+            BlockProfile::ORDINARY,
             baseline,
         )
         .unwrap();
-        let optional = compile_for_target(
+        let optional = crate::testing::block_for(
             &source,
             GuestAddress(0x1000),
-            BlockProfile::Ordinary,
+            BlockProfile::ORDINARY,
             baseline.with_atomic_load16(),
         )
         .unwrap();

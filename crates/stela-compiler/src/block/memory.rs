@@ -68,46 +68,7 @@ impl CheckedMemoryProfile {
         }
     }
 
-    pub const fn abi(self) -> &'static str {
-        match self {
-            Self::AddressChecks(_) => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-v5"
-            }
-            Self::SpAlignmentEnabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-on-normal-wb-v4"
-            }
-            Self::SpAlignmentDisabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v4"
-            }
-        }
-    }
-    /// Immutable identity for the distinct all-writer full-system lane.
-    /// Preparation rejects other specializations before native emission.
-    pub const fn shared_system_abi(self) -> &'static str {
-        match self {
-            Self::SpAlignmentEnabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-system-shared-normal-wb-sa-on-v1"
-            }
-            Self::SpAlignmentDisabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-system-shared-normal-wb-sa-off-v1"
-            }
-            _ => "unadmitted-system-shared-memory-specialization-v1",
-        }
-    }
-
-    pub const fn process_helpers_abi(self) -> &'static str {
-        match self {
-            Self::AddressChecks(_) => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-pauth-clock-thread-v3"
-            }
-            Self::SpAlignmentEnabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-on-normal-wb-pauth-clock-thread-v2"
-            }
-            Self::SpAlignmentDisabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v2"
-            }
-        }
-    }
+    /// The profile's name in a checked block's ABI identity.
     pub const fn id(self) -> &'static str {
         match self {
             Self::AddressChecks(_) => "checked-memory-address-v5",
@@ -167,8 +128,8 @@ impl CheckedPlan {
         profile: CheckedMemoryProfile,
         outer: super::BlockProfile,
     ) -> Result<Self, CompileError> {
-        let process_helpers = outer.supports_checked_process_helpers();
-        let system_helpers = matches!(outer, super::BlockProfile::SystemModeSharedV1(_));
+        let process_helpers = outer.has(super::Features::PROCESS_HELPERS);
+        let system_helpers = outer.has(super::Features::FULL_SYSTEM);
         if system_helpers
             && !matches!(
                 profile,
@@ -250,6 +211,7 @@ impl CheckedPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::Features;
     use alloc::vec::Vec;
     #[test]
     fn checked_process_helpers_use_distinct_immutable_abi_and_exact_terminals() {
@@ -259,25 +221,31 @@ mod tests {
             CheckedMemoryProfile::SpAlignmentEnabled,
             CheckedMemoryProfile::SpAlignmentDisabled,
         ] {
-            let selected = BlockProfile::CheckedMemoryPauthClockThread(recipe);
-            assert_ne!(selected.abi(), BlockProfile::CheckedMemory(recipe).abi());
+            let selected = BlockProfile::new(Features::PROCESS_HELPERS).with_checked_memory(recipe);
             assert_ne!(
                 selected.abi(),
-                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1.abi()
+                BlockProfile::ORDINARY.with_checked_memory(recipe).abi()
             );
-            assert!(selected.supports_pointer_authentication());
-            assert!(selected.supports_clock());
-            assert!(selected.supports_thread_registers());
-            assert!(!selected.supports_system());
+            assert_ne!(
+                selected.abi(),
+                BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)).abi()
+            );
+            assert!(selected.has(Features::POINTER_AUTHENTICATION));
+            assert!(selected.has(Features::CLOCK));
+            assert!(selected.has(Features::THREAD_REGISTERS));
+            assert!(!selected.has(Features::SYSTEM));
             for terminal in [0xd503237fu32, 0xd53be040, 0xd5033fdf, 0xd53bd061] {
                 // Original MOV X3,#0x44 prefix must survive before the helper.
                 let source: Vec<_> = [0xd2800883u32, terminal, 0xd65f03c0]
                     .into_iter()
                     .flat_map(u32::to_le_bytes)
                     .collect();
-                let plan =
-                    CompilationPlan::new(&source, base, selected, crate::TargetCpu::Baseline)
-                        .unwrap();
+                let plan = CompilationPlan::new(
+                    &source,
+                    base,
+                    &crate::Options::new(selected, crate::TargetCpu::Baseline),
+                )
+                .unwrap();
                 assert_eq!(plan.source_bytes(), 8);
                 assert!(plan.memory_requirements().is_some());
                 let compiled = plan.compile().unwrap();
@@ -287,8 +255,10 @@ mod tests {
                     CompilationPlan::new(
                         &source,
                         base,
-                        BlockProfile::CheckedMemory(recipe),
-                        crate::TargetCpu::Baseline
+                        &crate::Options::new(
+                            BlockProfile::ORDINARY.with_checked_memory(recipe),
+                            crate::TargetCpu::Baseline
+                        )
                     )
                     .is_err()
                 );
@@ -296,7 +266,12 @@ mod tests {
             // Authenticated data loads still need the helper reader.
             let load = 0xf8200400u32.to_le_bytes();
             assert!(
-                CompilationPlan::new(&load, base, selected, crate::TargetCpu::Baseline).is_err()
+                CompilationPlan::new(
+                    &load,
+                    base,
+                    &crate::Options::new(selected, crate::TargetCpu::Baseline)
+                )
+                .is_err()
             );
         }
     }
@@ -315,8 +290,11 @@ mod tests {
                 let plan = crate::block::CompilationPlan::new(
                     &source,
                     GuestAddress(0x1000),
-                    crate::block::BlockProfile::CheckedMemoryPauthClockThread(profile),
-                    TargetCpu::Baseline,
+                    &crate::Options::new(
+                        crate::block::BlockProfile::new(Features::PROCESS_HELPERS)
+                            .with_checked_memory(profile),
+                        TargetCpu::Baseline,
+                    ),
                 )
                 .unwrap();
                 let required = plan.memory_requirements().unwrap();
@@ -352,8 +330,11 @@ mod tests {
                         let plan = crate::block::CompilationPlan::new(
                             &source,
                             GuestAddress(0x1000),
-                            crate::block::BlockProfile::SystemModeSharedV1(specialization),
-                            target,
+                            &crate::Options::new(
+                                crate::block::BlockProfile::new(Features::SYSTEM_MODE)
+                                    .with_checked_memory(specialization),
+                                target,
+                            ),
                         )
                         .unwrap();
                         let required = plan.memory_requirements().unwrap();
@@ -417,8 +398,11 @@ mod tests {
                             let plan = crate::block::CompilationPlan::new(
                                 &source,
                                 GuestAddress(pc),
-                                crate::block::BlockProfile::SystemModeSharedV1(profile),
-                                target,
+                                &crate::Options::new(
+                                    crate::block::BlockProfile::new(Features::SYSTEM_MODE)
+                                        .with_checked_memory(profile),
+                                    target,
+                                ),
                             )
                             .unwrap();
                             let requirements = plan.memory_requirements().unwrap();
@@ -506,8 +490,10 @@ mod tests {
                 let plan = crate::block::CompilationPlan::new(
                     &source,
                     GuestAddress(0x1000),
-                    crate::block::BlockProfile::CheckedMemory(recipe),
-                    TargetCpu::Baseline,
+                    &crate::Options::new(
+                        crate::block::BlockProfile::ORDINARY.with_checked_memory(recipe),
+                        TargetCpu::Baseline,
+                    ),
                 )
                 .unwrap();
                 let requirements = plan

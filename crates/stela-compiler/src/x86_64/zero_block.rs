@@ -1,5 +1,5 @@
 //! DC ZVA in system-mode blocks the engine compiles where it neither traps
-//! nor is UNDEFINED (`CompilationPlan::with_zero_block`): Arm
+//! nor is UNDEFINED (`Options::with_native_system`): Arm
 //! `AArch64_MemZero` writes zeroes to the DCZID_EL0.BS block holding Xt,
 //! aligned down, through the same direct guest-VA stores as STR, after the
 //! guest range check. The block is at most 2 KiB and naturally aligned, so

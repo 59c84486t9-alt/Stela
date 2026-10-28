@@ -529,7 +529,7 @@ mod checked_register_tests {
     use crate::{
         Lifter,
         aarch64::Decoder,
-        block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
+        block::{BlockProfile, CheckedMemoryProfile, CompilationPlan, Features},
     };
     use alloc::vec;
 
@@ -594,8 +594,11 @@ mod checked_register_tests {
         let compiled = CompilationPlan::new(
             &source,
             pc,
-            BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentDisabled),
-            TargetCpu::Baseline,
+            &crate::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE)
+                    .with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap()
         .compile()
@@ -679,8 +682,10 @@ mod checked_register_tests {
             let plan = CompilationPlan::new(
                 &source,
                 base,
-                BlockProfile::SystemModeSharedV1(specialization),
-                TargetCpu::Baseline,
+                &crate::Options::new(
+                    BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(specialization),
+                    TargetCpu::Baseline,
+                ),
             )
             .unwrap();
             assert_eq!(plan.source_bytes(), 24);
