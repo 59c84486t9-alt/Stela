@@ -169,8 +169,31 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// The receive handlers from `ieee80211_rx_h_action` through
     /// `ieee80211_rx_h_action_return` for an unprotected action frame.
     pub(super) fn receive_action(s: &mut Owned<I, Q, C>, frame: &Mpdu) -> Result<Receive, Error> {
+        Self::receive_plain_action(s, frame, frame.bytes())
+    }
+
+    /// `receive_action` for an action frame a PMF association authenticated,
+    /// `body` being its decrypted body.
+    pub(super) fn receive_protected_action(
+        s: &mut Owned<I, Q, C>,
+        frame: &Mpdu,
+        body: &[u8],
+    ) -> Result<Receive, Error> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(24 + body.len())
+            .map_err(|_| Error::NoMemory)?;
+        bytes.extend_from_slice(&frame.bytes()[..24]);
+        bytes.extend_from_slice(body);
+        Self::receive_plain_action(s, frame, &bytes)
+    }
+
+    fn receive_plain_action(
+        s: &mut Owned<I, Q, C>,
+        frame: &Mpdu,
+        bytes: &[u8],
+    ) -> Result<Receive, Error> {
         let p = s.profile.ok_or(Error::WrongProfile)?;
-        let bytes = frame.bytes();
         let h = frame.header();
         // ieee80211_rx_h_mgmt_check drops a runt action.
         let Some(&category) = bytes.get(24) else {
@@ -194,9 +217,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             negotiated.ht.as_ref().map(|ht| ht.capability),
             negotiated.he.is_some(),
         );
-        // Under PMF every reply is robust, and the OS owns protected
-        // management beyond block ack and its own SA Queries.
-        let protect = s.management.is_some();
+        // An OS management session without PMF owns protected management
+        // beyond block ack and its own SA Queries. A PMF association's
+        // replies are the station's own, protected when robust.
+        let protect = s.management.is_some() && !s.station.requires_protected_management();
         match verdict {
             Kernel::BlockAck => return Ok(Receive::BlockAck),
             Kernel::Handled => return Ok(Receive::Done),
@@ -274,8 +298,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
     }
 
-    /// `ieee80211_tx_skb` for the oldest reply, unprotected as no PMF was
-    /// negotiated, under the association's management admission.
+    /// `ieee80211_tx_skb` for the oldest reply under the association's
+    /// management admission: a robust reply on a PMF association is
+    /// encrypted with its PTK, and one without keys yet is dropped, as
+    /// `ieee80211_tx_h_select_key` drops it.
     ///
     /// # Safety
     /// As `progress_block_ack`.
@@ -293,9 +319,39 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongPhase);
         }
         let reply = s.action.replies.front().ok_or(Error::WrongPhase)?;
-        let submission = Self::prepare_ba_submission(s, reply)?;
-        let bytes = submission.bytes;
-        let prepared = (submission.config, submission.owner, submission.grant);
+        let (bytes, prepared) = if s.station.requires_protected_management() {
+            let robust = !matches!(reply[24], 4 | 7 | 11 | 15 | 20 | 21 | 22 | 127);
+            let session = match (robust, s.management.clone()) {
+                (true, None) => {
+                    s.action.replies.pop_front();
+                    return Ok(());
+                }
+                (_, session) => session.filter(|_| robust),
+            };
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(reply.len())
+                .map_err(|_| Error::NoMemory)?;
+            bytes.extend_from_slice(reply);
+            if session.is_some() {
+                bytes[1] |= 0x40;
+            }
+            let (config, mut owner, grant) = Self::prepare_submission(
+                s,
+                &bytes,
+                session.as_ref().map(|session| session.pairwise_key()),
+                true,
+                true,
+            )?;
+            owner.management = session;
+            (bytes, (config, owner, grant))
+        } else {
+            let submission = Self::prepare_ba_submission(s, reply)?;
+            (
+                submission.bytes,
+                (submission.config, submission.owner, submission.grant),
+            )
+        };
         let mut started = false;
         // SAFETY: covered by this function's own safety contract.
         let result = unsafe {

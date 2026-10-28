@@ -53,7 +53,8 @@ fn a_pmf_association_opens_its_port_after_the_handshake_keys() {
         &link.receive().unwrap().unwrap()[12..14],
         &0x800u16.to_be_bytes()
     );
-    // An authenticated SA Query response reaches the OS.
+    // An authenticated SA Query response reaches the OS that registered it.
+    link.register_action(&[8, 1]).unwrap();
     incoming(
         &model,
         &response(0x40d0, &[8, 1, 3, 4]),
@@ -65,9 +66,43 @@ fn a_pmf_association_opens_its_port_after_the_handshake_keys() {
         &notice.event,
         LinkEvent::Controller(Event::ProtectedManagement(rx)) if rx.body() == [8, 1, 3, 4]
     )));
-    // The departure is encrypted, as IEEE80211_STA_MFP_ENABLED leaves it.
+    // mac80211 answers the AP's SA Query request and returns an unknown
+    // robust action, both protected.
+    incoming(
+        &model,
+        &response(0x40d0, &[8, 0, 5, 6]),
+        Some((1, 0, 3)),
+        false,
+    );
+    incoming(
+        &model,
+        &response(0x40d0, &[126, 1, 2]),
+        Some((1, 0, 4)),
+        false,
+    );
+    let mut replies = Vec::new();
+    for _ in 0..4 {
+        link.service().unwrap();
+        replies.extend(finish_tx(&model));
+    }
+    drop(drain_notices(&mut link));
+    for body in [&[8, 1, 5, 6][..], &[0xfe, 1, 2]] {
+        assert!(
+            replies
+                .iter()
+                .any(|frame| frame[..2] == [0xd0, 0x40] && &frame[24..] == body)
+        );
+    }
+    // The QoS data frame started its TID's block-ack session with a
+    // protected ADDBA request, and the departure is encrypted too, as
+    // IEEE80211_STA_MFP_ENABLED leaves it.
     let departed = depart(&mut link, &model);
-    assert_eq!(departed.len(), 1);
-    assert_eq!(departed[0][..2], [0xc0, 0x40]);
+    assert!(
+        replies
+            .iter()
+            .chain(&departed)
+            .any(|frame| frame[..2] == [0xd0, 0x40] && frame[24..26] == [3, 0])
+    );
+    assert_eq!(departed.last().unwrap()[..2], [0xc0, 0x40]);
     retire(&mut link, &model);
 }

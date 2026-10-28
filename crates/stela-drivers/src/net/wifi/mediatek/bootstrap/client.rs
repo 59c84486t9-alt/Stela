@@ -1039,9 +1039,21 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
                     continue;
                 }
-                if !Self::channel_switch_action(s, received.frame(), received.body()) {
-                    events.push(Event::ProtectedManagement(received));
+                if Self::channel_switch_action(s, received.frame(), received.body()) {
+                    continue;
                 }
+                // ieee80211_rx_h_action on the decrypted frame: block ack and
+                // what the OS takes reach it; the rest the station answers.
+                if pmf
+                    && received.frame().header().control & 0x00fc == 0x00d0
+                    && matches!(
+                        Self::receive_protected_action(s, received.frame(), received.body())?,
+                        action::Receive::Done
+                    )
+                {
+                    continue;
+                }
+                events.push(Event::ProtectedManagement(received));
                 continue;
             }
             let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;

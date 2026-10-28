@@ -311,9 +311,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn set_power_save(&mut self, enabled: bool) {
         self.state_mut().client.set_power_save(enabled);
     }
-    /// Offer the OS unprotected action frames whose body starts with
-    /// `prefix`, as `NL80211_CMD_REGISTER_FRAME` does; they arrive as raw
-    /// controller notices instead of going back to their sender.
+    /// Offer the OS action frames whose body starts with `prefix`, as
+    /// `NL80211_CMD_REGISTER_FRAME` does; they arrive as controller notices,
+    /// raw or authenticated, instead of going back to their sender.
     pub fn register_action(&mut self, prefix: &[u8]) -> Result<(), LinkControlError> {
         let result = self.state_mut().client.client.register_action(prefix);
         Ok(result.map_err(PolicyError::Client)?)
@@ -371,7 +371,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             )
         {
             let epoch = s.client.station().association_epoch();
-            match s.client.poll(now, &s.source) {
+            match s
+                .client
+                .poll(now, &s.source)
+                .and_then(|events| Self::protected_block_ack(s, events, now))
+            {
                 Ok(events) if !events.is_empty() => {
                     s.pending = Some(PendingEvents {
                         association: epoch,
@@ -496,12 +500,47 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
             soft_rx,
         }
     }
+    /// mac80211 runs a PMF association's decrypted block-ack actions itself
+    /// (`ieee80211_process_addba_request` and the rest), dropping one it
+    /// cannot take as it drops a malformed or excess frame.
+    fn protected_block_ack(
+        s: &mut State<I, Q, C, S>,
+        events: Vec<Event>,
+        now: u64,
+    ) -> Result<Vec<Event>, PolicyError> {
+        if !s.client.protected() {
+            return Ok(events);
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(events.len())
+            .map_err(|_| PolicyError::NoMemory)?;
+        for event in events {
+            match event {
+                Event::ProtectedManagement(rx) if !rx.group() && rx.body().first() == Some(&3) => {
+                    let mut received = Some(rx);
+                    // SAFETY: the link is the association's management
+                    // policy, as mac80211 is for its station.
+                    match unsafe { s.client.receive_management_block_ack(&mut received, now) } {
+                        Ok(())
+                        | Err(PolicyError::Client(
+                            Error::Busy | Error::BlockAck(_) | Error::Key(_),
+                        )) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                event => out.push(event),
+            }
+        }
+        Ok(out)
+    }
+
     /// Linux `mt7925_tx_check_aggr`, run as TX-free retires each packet: a
     /// QoS data frame to an HT or HE peer starts its TID's TX block-ack
     /// session unless one exists. A failed start, like a failed
     /// `ieee80211_start_tx_ba_session`, leaves the TID to retry on a later
-    /// TX-free; the station limits retries as mac80211 does. An OS-bound
-    /// protected management service starts its own sessions.
+    /// TX-free; the station limits retries as mac80211 does. A PMF
+    /// association's sessions start with protected actions; an OS management
+    /// session without PMF starts its own.
     fn check_aggr(s: &mut State<I, Q, C, S>, released: &[Released<PacketOwner<C>>], now: u64) {
         let epoch = s.client.station().association_epoch();
         let Some(context) = s.client.client.modern_context() else {
@@ -517,7 +556,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 && Some(owner.association_epoch()) == epoch
                 && !owner.control_port()
             {
-                let _ = s.client.client.begin_tx_block_ack(tid, 0, now);
+                if !s.client.protected() {
+                    let _ = s.client.client.begin_tx_block_ack(tid, 0, now);
+                } else if s.client.management_ready()
+                    && let Some(session) = s.client.client.state().management.clone()
+                {
+                    // SAFETY: as for protected_block_ack.
+                    let _ = unsafe { s.client.begin_management_block_ack(&session, tid, 0, now) };
+                }
             }
         }
     }

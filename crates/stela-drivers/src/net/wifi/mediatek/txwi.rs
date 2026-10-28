@@ -118,7 +118,7 @@ pub fn encode(c: Config) -> Result<[u8; 32], Error> {
 }
 
 /// Body-qualified MT7925 Block Ack, protected unicast SA Query and other
-/// unprotected action path.
+/// action path; only a robust category may be protected.
 /// Metadata-only Action encoding remains refused: the real category/action bytes select the donor
 /// ADDBA-request TID independently of ordinary response/DELBA management.
 /// This constructs no agreement, radio permission, protection or air receipt.
@@ -159,7 +159,12 @@ pub(in crate::net::wifi::mediatek) fn encode_mpdu(
     }
     match body.first() {
         Some(3) => {}
-        Some(_) if !c.protect => return encode_inner(c, Some(QualifiedAction::Other)),
+        // Only a robust category may be protected (`_ieee80211_is_robust_mgmt_frame`).
+        Some(category)
+            if !c.protect || !matches!(category, 4 | 7 | 11 | 15 | 20 | 21 | 22 | 127) =>
+        {
+            return encode_inner(c, Some(QualifiedAction::Other));
+        }
         _ => return Err(Error::UnsupportedFrame),
     }
     let action = *body.get(1).ok_or(Error::InvalidHeader)?;

@@ -453,6 +453,8 @@ fn poll(
 }
 fn configured() -> (Native, Model, ProtectedOwner, Rc<PmfState>, Rc<Protection>) {
     let (mut driver, model, before, mut owner, state, protection) = awaiting_pmf();
+    // wpa_supplicant registers for its SA Query responses.
+    driver.register_action(&[8, 1]).unwrap();
     let admission = permit(&mut owner, &driver, AssociationUse::Configure);
     // SAFETY: original actual modeled requester and explicitly selected OS policy.
     unsafe { driver.configure_modern(&mut owner, admission, 105) }.unwrap();
