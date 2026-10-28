@@ -81,15 +81,17 @@
 //! key functions, HDCP keys, the DSB, SKG, WRITE_REG and H16 scrambled-key
 //! commands, DKey distribution, DATA bit 24 and the reserved bits of the
 //! address words are refused until their values or behavior are known.
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
-use super::interrupt::{AicInput, Wire};
-use crate::platform::dma::{DmaError, Port};
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
+use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire};
 
 const NAME: &str = "aes-s8000";
 
@@ -910,8 +912,11 @@ impl MmioDevice for Aes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
-    use crate::platform::dma::{Iommu, Memory, tests::Ram};
+    use stela_contracts::interrupt::InterruptLatch;
+    use {
+        stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram,
+    };
 
     const RAM: u64 = 0x8_0000_0000;
     const FIFO: u64 = 0x200;

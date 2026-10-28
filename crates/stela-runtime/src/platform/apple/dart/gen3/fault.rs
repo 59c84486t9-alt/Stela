@@ -10,8 +10,12 @@
 //! decoder. Other header fields, auxiliary AXI data and secondary-capture
 //! behavior remain unqualified. Observations retain every raw summary bit;
 //! failed DMA never fabricates a complete header from the known fields.
-use crate::platform::apple::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{vec, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const PENDING: u64 = 0x4000;
 const RECORDS: u64 = 0x8000;
@@ -272,7 +276,7 @@ impl MmioDevice for Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn original_fault_taxonomy_keeps_observed_direction_and_unmodeled_bits() {

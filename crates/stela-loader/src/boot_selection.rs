@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(parse_uuid(b"A304C51B+D22F-4CDD-829D-3E30CB5BD87B"), None);
         // The APFS partition type, 7C3457EF-0000-11AA-AA11-00306543ECAC,
         // as a GPT entry stores it.
-        let apfs = stela_runtime::payload::gpt::Guid::parse("7C3457EF-0000-11AA-AA11-00306543ECAC")
+        let apfs = stela_formats::payload::gpt::Guid::parse("7C3457EF-0000-11AA-AA11-00306543ECAC")
             .unwrap();
         assert_eq!(VolumeType::Apfs.guid_bytes(), apfs.0);
     }

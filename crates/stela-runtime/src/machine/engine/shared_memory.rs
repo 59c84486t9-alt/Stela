@@ -441,7 +441,7 @@ mod tests {
         EventDomain,
     ) {
         let (cpu, profile, missing, ram) = policy::tests::fixture();
-        let mut machine = board_on(crate::machine::Chip::AppleM1, &[], NoDevices, Vec::new());
+        let mut machine = board_on(stela_contracts::Chip::AppleM1, &[], NoDevices, Vec::new());
         machine.cpu = cpu;
         machine.profile = profile;
         machine.profile_missing = missing;
@@ -638,9 +638,9 @@ mod tests {
     }
     fn clock_domain(
         machine: &mut Machine<FakeHost, NoDevices>,
-    ) -> crate::platform::apple::bus::LifecycleState {
+    ) -> stela_contracts::bus::LifecycleState {
         use super::super::{ProcessorBinding, ProcessorTarget};
-        let active = crate::platform::apple::bus::LifecycleState {
+        let active = stela_contracts::bus::LifecycleState {
             powered: true,
             clocked: true,
             quiesced: false,
@@ -668,7 +668,7 @@ mod tests {
         let state = machine.cpu.state.clone();
         let request = [ProcessorChange {
             domain: 1,
-            state: crate::platform::apple::bus::LifecycleState {
+            state: stela_contracts::bus::LifecycleState {
                 clocked: false,
                 ..active
             },
@@ -711,7 +711,7 @@ mod tests {
         );
         let request = [ProcessorChange {
             domain: 1,
-            state: crate::platform::apple::bus::LifecycleState {
+            state: stela_contracts::bus::LifecycleState {
                 clocked: false,
                 ..active
             },

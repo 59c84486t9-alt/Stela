@@ -21,16 +21,16 @@
 use super::amcc::{BROADCAST, LOCK_REGISTERS, LockResource, MMIO_BYTES, Placement, STRIDE};
 use crate::platform::apple::pmp::native::cache::publisher;
 mod native;
-use crate::{
-    machine::{engine::CanonicalDeviceMemory, soc::MemoryController},
-    memory::{CanonicalRamService, RegisteredSystemRam},
-    platform::apple::{
-        amcc::Locked,
-        bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    },
-};
 use alloc::{collections::BTreeMap, sync::Arc};
 pub use native::QuotaView;
+use {
+    crate::machine::engine::CanonicalDeviceMemory, crate::machine::soc::MemoryController,
+    crate::memory::CanonicalRamService, crate::memory::RegisteredSystemRam,
+    crate::platform::apple::amcc::Locked, stela_contracts::bus::Access,
+    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 const PLANES: usize = 4;
 const STATUS: u64 = 0x424;
@@ -379,8 +379,8 @@ impl MmioDevice for EmptyResource {
 mod tests {
     use super::super::amcc::tests::{frontend, ram, source};
     use super::*;
-    use crate::platform::apple::{bus::Bus, interrupt::InterruptLatch};
     use alloc::boxed::Box;
+    use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,
@@ -795,7 +795,7 @@ mod tests {
     fn original_native_quota_seed_and_publisher_share_the_broadcast_full_word() {
         let code = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&code),
+            stela_formats::sha256(&code),
             "b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c"
         );
         for (start, end, hash) in [
@@ -815,7 +815,7 @@ mod tests {
                 "949295e2f93ed5c1f89e3e2712b07ba2a039d29dcb382a94ba003f35fb258601",
             ),
         ] {
-            assert_eq!(crate::sha256(&code[start..end]), hash);
+            assert_eq!(stela_formats::sha256(&code[start..end]), hash);
         }
         assert_eq!(
             u64::from_le_bytes(code[0x46360..0x46368].try_into().unwrap()),
@@ -838,7 +838,7 @@ mod tests {
         let code =
             std::fs::read(std::env::var("STELA_TEST_MCC_J473_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&code),
+            stela_formats::sha256(&code),
             "06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d"
         );
         for (start, end, hash) in [
@@ -878,7 +878,11 @@ mod tests {
                 "e6aa987254d58eda768ef148602596c4e4583aa7cb77c2b9f2aacc679c7529cd",
             ),
         ] {
-            assert_eq!(crate::sha256(&code[start..end]), hash, "{start:x}..{end:x}");
+            assert_eq!(
+                stela_formats::sha256(&code[start..end]),
+                hash,
+                "{start:x}..{end:x}"
+            );
         }
         assert_eq!(&code[0x17dba3..0x17dbaf], b"disable-mcc\0");
         assert_eq!(&code[0x17dbaf..0x17dbbc], b"-disable_mcc\0");

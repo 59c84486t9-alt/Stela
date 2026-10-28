@@ -9,8 +9,9 @@ use crate::machine::{
     exception::Class,
     mmu::{self, Access, Outcome as Translated},
 };
-#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 use alloc::{format, vec::Vec};
 use stela_compiler::{
     GuestAddress,
@@ -151,7 +152,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     "AMX exit at a word outside the AMX space",
                 )));
             }
-            Err(error) => return self.refuse_amx(word, &error.0),
+            Err(error) => return self.refuse_amx(word, &error.to_string()),
         };
         if let Some(step) = self.hacr_guest(word, crate::machine::hacr::Operation::Amx) {
             return step;
@@ -244,12 +245,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
 mod tests {
     use super::super::tests::{BASE, machine_on};
     use super::*;
-    use crate::machine::Chip;
     use crate::machine::system::Register as SystemRegister;
     use crate::machine::{
         amx::{AMX_CTL_EL1, AMX_STATE_T, AmxView},
         exception::syndrome,
     };
+    use stela_contracts::Chip;
 
     fn machine(words: &[u32]) -> Machine<super::super::tests::FakeHost, super::super::NoDevices> {
         machine_on(Chip::AppleM2, words)

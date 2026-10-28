@@ -7,7 +7,7 @@
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};
 use anyhow::{Result, ensure};
-pub use stela_runtime::boot_bundle::schema::BootCommand;
+pub use stela_formats::boot_bundle::schema::BootCommand;
 use stela_runtime::machine::soc;
 
 const ROOT: &str = "/";

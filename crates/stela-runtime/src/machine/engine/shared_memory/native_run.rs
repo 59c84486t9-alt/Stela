@@ -18,6 +18,7 @@ pub(in crate::machine::engine) use access::{
     RecoveredAccess, RecoveredDeviceAccess, RecoveredRead, RecoveredWrite,
 };
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use stela_compiler::{
     GuestState,
     block::ExitKind,
@@ -60,8 +61,8 @@ pub struct ArtifactCacheStats {
 /// the profile chip independently selects access checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AdmissionPolicy {
-    profile_chip: crate::machine::Chip,
-    table_chip: crate::machine::Chip,
+    profile_chip: stela_contracts::Chip,
+    table_chip: stela_contracts::Chip,
     withheld: u64,
     asimd: bool,
 }
@@ -780,7 +781,7 @@ fn prepare<'a>(
     pe: usize,
     cpu_profile: &crate::machine::CpuProfile,
     missing: &[crate::machine::system::Register],
-    admit: &crate::machine::chip::AdmitTable,
+    admit: &stela_contracts::chip::AdmitTable,
     boundary: PreparationBoundary,
 ) -> Result<NativeRun<'a>, PreparationFailure> {
     let PreparationBoundary {
@@ -869,7 +870,7 @@ fn prepare<'a>(
                 && cpu_profile.chip.checks(word).iter().all(|check| {
                     matches!(
                         check,
-                        crate::machine::chip::Check::Fp | crate::machine::chip::Check::FpAdvSimd
+                        stela_contracts::chip::Check::Fp | stela_contracts::chip::Check::FpAdvSimd
                     )
                 })
         };
@@ -936,7 +937,7 @@ fn prepare<'a>(
                     &stela_compiler::Options::new(profile, target),
                 )
                 .map_err(|error| {
-                    at("compilation planning", MemoryStatus::Unsupported).detail(error.0)
+                    at("compilation planning", MemoryStatus::Unsupported).detail(error.to_string())
                 })?;
                 let bytes = plan.source_bytes();
                 input.truncate(bytes);
@@ -962,7 +963,7 @@ fn prepare<'a>(
                     }
                 }
                 .map_err(|error| {
-                    at("native emission", MemoryStatus::Unsupported).detail(error.0)
+                    at("native emission", MemoryStatus::Unsupported).detail(error.to_string())
                 })?;
                 if !compiled.fault_recovery.is_empty() {
                     return Err(at(
@@ -973,8 +974,8 @@ fn prepare<'a>(
                 let identity = Identity {
                     pe,
                     pc,
-                    source_sha256: crate::sha256(&input),
-                    native_sha256: crate::sha256(&compiled.native.x86_64_code),
+                    source_sha256: stela_formats::sha256(&input),
+                    native_sha256: stela_formats::sha256(&compiled.native.x86_64_code),
                     controls_sha256: key.controls_sha256.as_ref().into(),
                     compiler_source_sha256: stela_compiler::SOURCE_SHA256,
                     abi: profile.abi(),
@@ -1657,7 +1658,7 @@ mod artifact_tests {
         let first = prepare_artifact(&mut machine, BINDING).unwrap();
         let chip = machine.profile.chip;
         let table = Arc::clone(&machine.admit_table);
-        machine.profile.chip = crate::machine::Chip::AppleM2;
+        machine.profile.chip = stela_contracts::Chip::AppleM2;
         let profile = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&first, &profile));
         assert_ne!(
@@ -1671,7 +1672,7 @@ mod artifact_tests {
         assert_eq!(first.source, profile.source);
         machine.profile.chip = chip;
         machine.admit_table = Arc::new(
-            crate::machine::Chip::AppleM2
+            stela_contracts::Chip::AppleM2
                 .admit_table(table.withheld())
                 .unwrap(),
         );
@@ -1682,7 +1683,7 @@ mod artifact_tests {
             table_chip.key.admission.table_chip
         );
         assert_eq!(first.source, table_chip.source);
-        let withheld = table.withheld() ^ (1 << crate::machine::system::Feature::FEAT_WFxT as u64);
+        let withheld = table.withheld() ^ (1 << stela_contracts::Feature::FEAT_WFxT as u64);
         machine.admit_table = Arc::new(table.chip().admit_table(withheld).unwrap());
         let features = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&first, &features));
@@ -2040,7 +2041,7 @@ mod artifact_tests {
             .unwrap()
             .native_artifact_stats();
         machine.cpu.pc = PC;
-        machine.profile.chip = crate::machine::Chip::AppleM2;
+        machine.profile.chip = stela_contracts::Chip::AppleM2;
         let changed = prepare_artifact(&mut machine, BINDING).unwrap();
         assert!(!Arc::ptr_eq(&changed, &artifacts[0]));
         let cache = &machine.cpu.canonical_memory.as_ref().unwrap().artifacts;

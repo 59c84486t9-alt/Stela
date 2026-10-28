@@ -18,12 +18,15 @@ mod legacy_umms;
 pub mod smmu;
 mod t8110;
 
-use super::bus::{Access, MmioDevice, MmioError, Width};
-use super::interrupt::AicInput;
-use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::vec::Vec;
 pub use irq::SharedIrq;
 pub use smmu::SmmuBlock;
+use stela_contracts::interrupt::AicInput;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory};
 /// Internal bus offsets of the independently placed APF and UMMS views,
 /// above the largest translation window any profile admits.
 pub const DAPF_OFFSET: u64 = TRANSLATION_WINDOW_LIMIT;
@@ -443,11 +446,11 @@ impl MmioDevice for Dart {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::interrupt::{InterruptLatch, Wire},
-        dma::{Port, tests::Ram},
-    };
     use alloc::vec;
+    use {
+        stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch, stela_contracts::interrupt::Wire,
+    };
 
     #[test]
     fn explicit_profiles_keep_the_shared_bus_master_type_and_actual_table_effects() {
@@ -709,12 +712,12 @@ mod tests {
             }
             legacy.write(0x40, Width::Word, 1, &mut access).unwrap();
         }
-        assert!(sink.is_asserted(crate::platform::apple::interrupt::Wire::Aic(input)));
+        assert!(sink.is_asserted(stela_contracts::interrupt::Wire::Aic(input)));
         {
             let mut access = Access::new(0, 0, &mut sink);
             modern.set_reset(true, &mut access);
         }
-        assert!(!sink.is_asserted(crate::platform::apple::interrupt::Wire::Aic(input)));
+        assert!(!sink.is_asserted(stela_contracts::interrupt::Wire::Aic(input)));
         assert!(
             legacy
                 .bind_shared_irq(&SharedIrq::new(AicInput::new(0, 1)))

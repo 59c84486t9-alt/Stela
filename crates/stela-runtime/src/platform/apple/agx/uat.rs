@@ -55,10 +55,10 @@
 //! The model walks the tables on every access and caches nothing, so a TLB or
 //! TTBA-cache invalidation has nothing to discard.
 
-use super::super::bus::Access as BusAccess;
-use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::rc::Rc;
 use core::cell::Cell;
+use stela_contracts::bus::Access as BusAccess;
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory};
 
 /// Page shift and size (`UAT_PGBIT`/`UAT_PGSZ`).
 pub const PAGE_SHIFT: u32 = 14;
@@ -558,7 +558,7 @@ impl Uat {
         self.last_fault
     }
 
-    /// The translator as `agent` sees it, for a [`crate::platform::dma::Port`].
+    /// The translator as `agent` sees it, for a [`stela_contracts::dma::Port`].
     pub fn agent(&mut self, agent: Agent) -> AgentView<'_> {
         AgentView { uat: self, agent }
     }
@@ -711,7 +711,7 @@ impl Iommu for AgentView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::dma::tests::Ram;
+    use stela_contracts::dma::test_support::Ram;
 
     #[test]
     fn leaf_flags_round_trip_and_match_the_kext_constants() {
@@ -856,8 +856,8 @@ mod tests {
         context: usize,
         va: u64,
     ) -> Result<u64, DmaError> {
-        use crate::platform::apple::interrupt::InterruptLatch;
-        use crate::platform::dma::Port;
+        use stela_contracts::dma::Port;
+        use stela_contracts::interrupt::InterruptLatch;
         let mut latch = InterruptLatch::new();
         let mut access = BusAccess::new(0, 0, &mut latch);
         let mut view = uat.agent(agent);
@@ -1107,7 +1107,7 @@ mod tests {
         assert_eq!(permits(&hidden, Agent::Firmware), None);
         // A firmware write to a read-only page faults on permission.
         let (mut ram, mut uat, va, _) = firmware_space(fw_ro);
-        use crate::platform::apple::interrupt::InterruptLatch;
+        use stela_contracts::interrupt::InterruptLatch;
         let mut latch = InterruptLatch::new();
         let mut access = BusAccess::new(0, 0, &mut latch);
         let mut view = uat.agent(Agent::Firmware);
@@ -1343,8 +1343,8 @@ mod tests {
 
     #[test]
     fn protection_table_enforces_each_agent_and_direction_without_writing_denied_memory() {
-        use crate::platform::apple::interrupt::InterruptLatch;
-        use crate::platform::dma::Port;
+        use stela_contracts::dma::Port;
+        use stela_contracts::interrupt::InterruptLatch;
         // Independent permission tables in m1n1 PTE.access_fw/access_gpu,
         // OS=1, AP rows and (UXN << 1 | PXN) columns. 1=read, 2=write;
         // None is its uncertain firmware "-?" entry.

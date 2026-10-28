@@ -571,12 +571,14 @@ mod tests {
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
                 .collect();
-            assert!(
+            assert!(matches!(
                 crate::testing::leaf(&bytes, GuestAddress(0x1000))
                     .unwrap_err()
-                    .0
-                    .contains("NumericalRuntimeRequired")
-            );
+                    .kind,
+                crate::CompileErrorKind::Unsupported(
+                    crate::UnsupportedReason::NumericalRuntimeRequired { .. }
+                )
+            ));
             let block = crate::testing::block(&bytes, GuestAddress(0x1000)).unwrap();
             assert_eq!(block.source_bytes, bytes.len());
             assert_eq!(block.native.source_map.len(), 2);

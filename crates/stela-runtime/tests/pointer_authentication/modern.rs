@@ -6,9 +6,10 @@ use stela_compiler::{
     GuestAddress, GuestState,
     block::{BlockProfile, Features},
 };
-use stela_runtime::{
-    blocks::{BlockRuntime, StopReason, ThreadState},
-    pauth::{Context, Key, Keys, Version},
+use {
+    stela_contracts::pauth::Key, stela_runtime::blocks::BlockRuntime,
+    stela_runtime::blocks::StopReason, stela_runtime::blocks::ThreadState,
+    stela_runtime::pauth::Context, stela_runtime::pauth::Keys, stela_runtime::pauth::Version,
 };
 
 const ADDRESS_SPACE: u64 = 73;

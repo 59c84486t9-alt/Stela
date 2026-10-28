@@ -22,10 +22,13 @@
 //!
 //! These registers are EL1-accessible; the engine decides EL0 traps before
 //! calling [`FastIpi::access`].
-use super::interrupt::{CpuIndex, FiqSource, InterruptSink, Wire};
 use crate::system::access::{AccessKind, Encoding};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use {
+    stela_contracts::interrupt::CpuIndex, stela_contracts::interrupt::FiqSource,
+    stela_contracts::interrupt::InterruptSink, stela_contracts::interrupt::Wire,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Register {
@@ -201,7 +204,7 @@ impl FastIpi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     /// T8112: four E-cores in cluster 0, four P-cores in cluster 1.
     fn t8112() -> FastIpi {

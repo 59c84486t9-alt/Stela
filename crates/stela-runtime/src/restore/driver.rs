@@ -10,9 +10,9 @@ use super::{
     session::{Action, Job, PORT, Phase, Session},
     stream::{ByteStream, Endian, Framed},
 };
-use crate::payload::ReadAt;
 use alloc::{boxed::Box, format, vec::Vec};
 use core::task::Poll;
+use stela_formats::payload::ReadAt;
 
 /// Handles identify owned streams, including ones still connecting. A Pending
 /// open must not allocate a stream. A successful close releases the handle.
@@ -374,7 +374,10 @@ mod tests {
         s.input.extend((body.len() as u32).to_be_bytes());
         s.input.extend(body);
     }
-    fn setup() -> (Driver<crate::payload::tests::Memory, u16>, Harness) {
+    fn setup() -> (
+        Driver<stela_formats::payload::test_support::Memory, u16>,
+        Harness,
+    ) {
         let d = Driver::new(
             Answers::new(fixture(b"payload", false)),
             Route::StelaFirmwareStudy,
@@ -411,7 +414,10 @@ mod tests {
         );
         (d, h)
     }
-    fn restoring(d: &mut Driver<crate::payload::tests::Memory, u16>, h: &mut Harness) {
+    fn restoring(
+        d: &mut Driver<stela_formats::payload::test_support::Memory, u16>,
+        h: &mut Harness,
+    ) {
         for _ in 0..100 {
             assert!(d.poll(h).is_pending());
         }

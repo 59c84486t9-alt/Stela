@@ -15,7 +15,7 @@ use std::{
     rc::Rc,
 };
 use stela_cli::restore::archive;
-use stela_runtime::{payload::PayloadManifest, restore::tss::Nonces};
+use {stela_formats::payload::PayloadManifest, stela_runtime::restore::tss::Nonces};
 
 /// Members read whole for comparison; larger ones are only streamed.
 pub const SMALL: u64 = 96 << 20;

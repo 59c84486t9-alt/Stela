@@ -308,7 +308,7 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
             FORMAT.bits,
             FORMAT.channels,
             RING_BYTES,
-            stela_runtime::sha256(&pcm)
+            stela_formats::sha256(&pcm)
         ));
         if let Some(capture) = capture {
             controller
@@ -387,7 +387,7 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
                 "AUDIO CHECK capture bytes={} changed={} sha256={}\n",
                 capture_pcm.len(),
                 changed,
-                stela_runtime::sha256(&capture_pcm)
+                stela_formats::sha256(&capture_pcm)
             ));
             if changed != RING_BYTES {
                 return Err("capture DMA did not replace the complete prefilled ring".into());

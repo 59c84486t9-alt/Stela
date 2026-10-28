@@ -33,11 +33,15 @@
 //!
 //! Stela's existing T8112 model hands off zero idle/disabled configuration, without conditional iBoot
 //! tuning. Header flag variants, other layouts and unknown registers refuse.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::regfile::Held;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
+};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
 };
 pub mod tunables;
 const NAME: &str = "fabric-bridge";
@@ -344,7 +348,7 @@ impl MmioDevice for Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     #[test]
     fn tuning_and_dt_selected_configuration_hold_without_claiming_command_readback() {
         let mut sink = InterruptLatch::new();

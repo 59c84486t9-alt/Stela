@@ -303,7 +303,7 @@ pub fn remote_inventory(
         "{http} serves another object than {}",
         image.url
     );
-    let layout = stela_runtime::payload::Layout::Remote {
+    let layout = stela_formats::payload::Layout::Remote {
         url: http,
         etag: source.etag().into(),
     };

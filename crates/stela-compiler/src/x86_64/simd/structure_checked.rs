@@ -708,12 +708,15 @@ mod tests {
             // SAFETY: run retains disjoint State, view, harness and private stack
             // staging until native return. No reference spans this callback.
             let (view, request) = unsafe { (&mut *view, &*request) };
+            // SAFETY: NativeCode::run stores its unique Harness borrow in opaque until return.
             let harness = unsafe { &mut *view.opaque.cast::<Harness>() };
             harness
                 .requests
                 .push((request.address, request.bytes, request.flags, request.pc));
+            // SAFETY: run stores the live state pointer; callbacks occur synchronously between native writes.
             harness.observed.push(unsafe { (&*harness.state).clone() });
             let start = request.address.wrapping_sub(harness.base) as usize;
+            // SAFETY: the emitted request names its private staging for exactly request.bytes bytes.
             let data =
                 unsafe { core::slice::from_raw_parts_mut(request.data, request.bytes as usize) };
             if request.flags & flags::WRITE == 0 {
@@ -810,6 +813,7 @@ mod tests {
                     )
                 };
                 assert_ne!(pointer as usize, usize::MAX);
+                // SAFETY: the live mapping covers code.len() bytes and is disjoint from the source Vec.
                 unsafe {
                     core::ptr::copy_nonoverlapping(code.as_ptr(), pointer.cast(), code.len());
                 }
@@ -859,6 +863,7 @@ mod tests {
                     *mut ExecutionContext,
                 ) -> u32 = unsafe { core::mem::transmute(self.0) };
                 let before = mxcsr();
+                // SAFETY: state, context, view and Harness outlive this call through the generated ABI.
                 let status = unsafe { entry(state, &mut context) };
                 assert_eq!(
                     mxcsr(),

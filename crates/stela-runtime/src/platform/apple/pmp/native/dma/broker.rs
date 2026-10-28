@@ -7,13 +7,13 @@ use super::{
     mapping::{Client, ReportingMapping, TraceMapping},
     service::Service,
 };
-use crate::platform::dma::{DmaError, TransferFault};
 use alloc::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
     vec::Vec,
 };
 use core::cell::RefCell;
+use {stela_contracts::dma::DmaError, stela_contracts::dma::TransferFault};
 
 /// Placement selected by the actual device dispatcher. Numeric topology does
 /// not authorize a substitute Port: Owners must name the same actual objects.

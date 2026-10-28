@@ -5,11 +5,13 @@
 //! configuration images. Downstream USB-A/Ethernet require real endpoint
 //! models and firmware protocols; adding a config header never creates one.
 //! See `docs/research/apple-pcie.md` for evidence and unsupported boundaries.
-use super::super::dma::{DmaError, Port as DmaPort};
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
 use alloc::{boxed::Box, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port as DmaPort};
 pub mod config;
 mod endpoint;
 pub mod port;
@@ -666,9 +668,12 @@ mod tests {
     use super::config::{MemoryBar, Register};
     use super::port::{APP_CLOCK, LTSSM, Layout, REF_CLOCK};
     use super::*;
-    use crate::platform::dma::{Iommu, Memory, tests::Ram};
     use alloc::rc::Rc;
     use core::cell::RefCell;
+    use {
+        stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram,
+    };
 
     struct NativeState {
         state: LifecycleState,

@@ -43,17 +43,20 @@
 //!   must admit retained stop/resume explicitly; unsupported reset and
 //!   power-loss flows still refuse. Mailbox controls, staged payload and
 //!   queued responses survive a retained halt.
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Transition, Width, refuse,
-};
-use super::interrupt::{AicInput, Wire};
-use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::any::Any;
+use stela_contracts::dma::Port;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Transition, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
+use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire};
 
 pub mod entry;
 pub use entry::{Auxiliary, EntryFetch, EntryHandoff};
@@ -605,7 +608,7 @@ impl MmioDevice for Asc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn physical_retention_freezes_work_and_preserves_mailbox_irq_ownership() {
@@ -1227,7 +1230,7 @@ mod tests {
                 )
             })
             .collect();
-        let rtkit = RtKit::new(endpoints, crate::builds::DEFAULT.rtkit_version).unwrap();
+        let rtkit = RtKit::new(endpoints, stela_formats::builds::DEFAULT.rtkit_version).unwrap();
         let mut asc = Asc::booted(Box::new(rtkit), Lines::from_interrupts(LINES)).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
@@ -1297,7 +1300,7 @@ mod tests {
 
     #[test]
     fn an_earlier_dma_notification_survives_a_later_transfer_fault() {
-        use crate::platform::dma::{Physical, tests::Ram};
+        use {stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram};
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut memory = Ram::new(0, 8);

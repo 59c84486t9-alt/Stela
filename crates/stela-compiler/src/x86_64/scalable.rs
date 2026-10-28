@@ -168,31 +168,49 @@ fn predicate_bit_pattern(element: ElementSize) -> u64 {
     pattern
 }
 
+/// The distinct destination and scratch XMMs used to expand a predicate.
+#[derive(Clone, Copy)]
+pub(crate) struct MaskRegisters {
+    destination: u8,
+    scratch: u8,
+}
+
+impl MaskRegisters {
+    pub(crate) fn new(destination: u8, scratch: u8) -> Self {
+        xmm(destination);
+        xmm(scratch);
+        assert_ne!(destination, scratch);
+        Self {
+            destination,
+            scratch,
+        }
+    }
+
+    pub(crate) fn expand(self, code: &mut Code, element: ElementSize, target: TargetCpu) {
+        expand_predicate_mask(code, element, self.destination, self.scratch, target);
+    }
+}
+
 /// Expand packed P bits into a 16-byte FF/00 element mask. Only each element's
-/// first predicate bit selects the lane. Destination/scratch must be distinct.
-/// Clobbers RAX/RCX/RDX and those two XMMs; preserves other XMMs, RDI and R15.
-#[allow(clippy::too_many_arguments)]
+/// first predicate bit selects the lane.
+/// Clobbers RAX/RCX/RDX and the mask XMMs; preserves other XMMs, RDI and R15.
 pub(crate) fn read_predicate_mask(
     code: &mut Code,
     predicate: u8,
     chunk: usize,
     element: ElementSize,
-    destination: u8,
-    scratch: u8,
+    registers: MaskRegisters,
     length: VectorLength,
     target: TargetCpu,
 ) {
     assert!(chunk < length.chunks());
-    xmm(destination);
-    xmm(scratch);
-    assert_ne!(destination, scratch);
     storage_pointer(code, SCALABLE_PREDICATES_OFFSET);
     read_predicate_at(
         code,
         predicate_offset(predicate, chunk * PREDICATE_MASK_BYTES, length),
         PREDICATE_MASK_BYTES,
     );
-    expand_predicate_mask(code, element, destination, scratch, target);
+    registers.expand(code, element, target);
 }
 
 /// Expand low16 RAX predicate bits without accessing state storage. Upper RAX

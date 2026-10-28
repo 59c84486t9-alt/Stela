@@ -19,11 +19,11 @@
 //! its own Team ID.
 use super::codesign::{CS_PLATFORM_BINARY, CS_REQUIRE_LV, CS_RUNTIME};
 use super::{Call, Kernel, Outcome};
-use crate::code_signature::{self, CodeSignature};
 use crate::hosted::darwin::{E2BIG, EBADEXEC, EBADF, EFAULT, EINVAL, ENOENT, ENOTSUP, EPERM};
 use crate::hosted::{memory, threads::lock};
 pub(crate) use crate::hosted_registry::bsd::signatures::CALLS;
 use anyhow::Result;
+use {stela_formats::code_signature, stela_formats::code_signature::CodeSignature};
 
 const F_ADDSIGS: u64 = 59;
 const F_ADDFILESIGS: u64 = 61;

@@ -344,7 +344,7 @@ fn record(
     let bytes: usize = manifest.images.iter().map(|image| image.length).sum();
     let record = serde_json::json!({
         "kind": "manifest", "phase": phase, "images": images, "bytes": bytes,
-        "sha256": stela_runtime::sha256(manifest_bytes),
+        "sha256": stela_formats::sha256(manifest_bytes),
     });
     output::arguments(format_args!("HOST FIRMWARE RECORD {record}\n"));
     for (index, expected) in manifest.images.iter().enumerate() {
@@ -553,7 +553,7 @@ mod tests {
         .flat_map(|requirement| [true, false].map(|collide| (requirement, collide)))
         {
             let target = requirement.target;
-            let digest = stela_runtime::sha256(&RAW);
+            let digest = stela_formats::sha256(&RAW);
             let manifest = serde_json::json!({"schema":1,"images":[{
                 "name":if collide_name {requirement.name} else {"synthetic/raw.bin"},
                 "path":"raw.bin","length":RAW.len(),"sha256":digest,

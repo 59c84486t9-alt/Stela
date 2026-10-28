@@ -12,7 +12,7 @@ use super::{
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 /// Actual selected native policy inputs, before packing the wire flag word.
 /// These internal flags are not Mach-O protections. Their other allocation,

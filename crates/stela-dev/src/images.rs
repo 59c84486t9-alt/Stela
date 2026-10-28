@@ -191,7 +191,7 @@ impl ImageManifest {
             write_json(&output, &value)?;
             if let Some(path) = payload_manifest {
                 // The block hashes go beside the manifest, which names them.
-                let blocks = path.with_file_name(stela_runtime::payload::BLOCK_HASHES_FILE);
+                let blocks = path.with_file_name(stela_formats::payload::BLOCK_HASHES_FILE);
                 std::fs::File::create_new(&blocks)
                     .with_context(|| format!("{} exists", blocks.display()))?
                     .write_all(&inventory.blocks)?;
@@ -370,8 +370,8 @@ impl ImagesCommand {
                 let inventory = restore::remote_inventory(&image, &model, aea_keys_in.as_deref())?;
                 std::fs::create_dir(&output_dir)
                     .with_context(|| format!("{} exists", output_dir.display()))?;
-                let manifest = output_dir.join(stela_runtime::payload::MANIFEST_FILE);
-                let blocks = output_dir.join(stela_runtime::payload::BLOCK_HASHES_FILE);
+                let manifest = output_dir.join(stela_formats::payload::MANIFEST_FILE);
+                let blocks = output_dir.join(stela_formats::payload::BLOCK_HASHES_FILE);
                 std::fs::write(&blocks, &inventory.blocks)?;
                 std::fs::write(&manifest, inventory.manifest.to_json() + "\n")?;
                 eprintln!(

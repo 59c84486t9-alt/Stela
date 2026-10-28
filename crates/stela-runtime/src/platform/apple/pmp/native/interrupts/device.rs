@@ -11,12 +11,15 @@
 //! All words and relocation are explicit. Real peripheral owners must retain
 //! their electrical input handles. No request, enable or ACK creates an input.
 use super::{Device, Error, Placement, Route};
-use crate::platform::apple::bus::{Access, Direction, MmioDevice, MmioError, Width};
 use alloc::{
     rc::{Rc, Weak},
     vec::Vec,
 };
 use core::{any::Any, cell::RefCell};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arbitration {
@@ -572,9 +575,9 @@ mod tests {
         Completion, Event, Handler, Outcome, Owner, Signals, SoftwareConfiguration,
     };
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::{boxed::Box, vec};
     use core::cell::Cell;
+    use stela_contracts::interrupt::InterruptLatch;
 
     // Authored NEW profile, deliberately not a production/reset default.
     fn configuration(count: u32) -> Configuration {

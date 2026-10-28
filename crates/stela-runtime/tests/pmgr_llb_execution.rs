@@ -5,16 +5,17 @@
 use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::VecDeque, io::Write as _, rc::Rc};
 use stela_compiler::{GuestState, TargetCpu, aarch64::system::registers::Encoding};
-use stela_runtime::{
-    hosted::host::NativeRunner,
-    machine::{
-        Chip, Cpu, CpuProfile, DeviceError, Devices, FaultCause, Host, InstallError, Lines,
-        Machine, NativeCode, NativeExit, Regime, Stop,
-        exception::Pstate,
-        identification::{self, Speculation},
-        mmu,
-        registers::encodings::MPIDR_EL1,
-    },
+use {
+    stela_contracts::Chip, stela_runtime::hosted::host::NativeRunner, stela_runtime::machine::Cpu,
+    stela_runtime::machine::CpuProfile, stela_runtime::machine::DeviceError,
+    stela_runtime::machine::Devices, stela_runtime::machine::FaultCause,
+    stela_runtime::machine::Host, stela_runtime::machine::InstallError,
+    stela_runtime::machine::Lines, stela_runtime::machine::Machine,
+    stela_runtime::machine::NativeCode, stela_runtime::machine::NativeExit,
+    stela_runtime::machine::Regime, stela_runtime::machine::Stop,
+    stela_runtime::machine::exception::Pstate, stela_runtime::machine::identification,
+    stela_runtime::machine::identification::Speculation, stela_runtime::machine::mmu,
+    stela_runtime::machine::registers::encodings::MPIDR_EL1,
 };
 
 const BASE: u64 = 0x1fc050000;

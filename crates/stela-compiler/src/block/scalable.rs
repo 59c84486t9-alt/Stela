@@ -12,7 +12,6 @@ use crate::{
     },
     scalable_context::ScalableProfile,
 };
-use alloc::format;
 
 const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 
@@ -142,8 +141,8 @@ pub fn admit_scalable_numerical_instruction(
     if decode_scalable_numerical_instruction(instruction.instruction_pc, instruction.word)?
         != Some(instruction)
     {
-        return Err(CompileError(
-            "scalable numerical source/descriptor mismatch".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::NumericalDescriptorMismatch,
         ));
     }
     if matches!(
@@ -154,8 +153,8 @@ pub fn admit_scalable_numerical_instruction(
             | ScalableNumericalOperation::SmeFp8Matrix(_)
     ) && !profile.controls().fpmr_enabled()
     {
-        return Err(CompileError(
-            "indirect FPMR access is not enabled in the declared guest profile".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::FpmrAccessDisabled,
         ));
     }
     let mode = profile.mode();
@@ -172,14 +171,14 @@ pub fn admit_scalable_numerical_instruction(
         ScalableNumericalOperation::SmeMatrix(_) | ScalableNumericalOperation::SmeFp8Matrix(_)
     ) && !mode.za_enabled())
     {
-        return Err(CompileError(format!(
-            "scalable numerical mode unavailable at {:#x}",
-            instruction.instruction_pc.0
-        )));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::NumericalModeUnavailable)
+                .at(instruction.instruction_pc),
+        );
     }
     if numerical_features.full_a64() && !profile.features().contains(ScalableFeature::SmeFa64) {
-        return Err(CompileError(
-            "effective FullA64 requires declared FEAT_SME_FA64".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::FullA64RequiresSmeFa64,
         ));
     }
     profile.require_features(
@@ -203,9 +202,10 @@ pub fn decode_scalable_numerical_instruction(
     word: u32,
 ) -> Result<Option<ScalableNumericalInstruction>, CompileError> {
     if !pc.0.is_multiple_of(INSTRUCTION_BYTES) {
-        return Err(CompileError(
-            "scalable numerical PC must be aligned to 4 bytes".into(),
-        ));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
+                .at_instruction(pc, word),
+        );
     }
     let operation = if let Some(operand) = fixed_fp8_conversion::decode(word) {
         ScalableNumericalOperation::FixedFp8Conversion(operand)
@@ -216,8 +216,9 @@ pub fn decode_scalable_numerical_instruction(
     } else if let Some(operand) = extrema_scale::decode(word) {
         ScalableNumericalOperation::SmeExtremaScale(operand)
     } else if let Some(result) = floating::Operation::decode(word) {
-        let operand = result
-            .map_err(|Unsupported| CompileError("reserved scalable numerical encoding".into()))?;
+        let operand = result.map_err(|Unsupported| {
+            CompileError::new(crate::CompileErrorKind::ReservedScalableNumerical)
+        })?;
         if !operand.requires_numerical_completion() {
             return Ok(None);
         }
@@ -231,7 +232,7 @@ pub fn decode_scalable_numerical_instruction(
     };
     let next_pc = GuestAddress(
         pc.0.checked_add(INSTRUCTION_BYTES)
-            .ok_or_else(|| CompileError("scalable numerical continuation overflow".into()))?,
+            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
     );
     Ok(Some(ScalableNumericalInstruction {
         operation,
@@ -244,6 +245,7 @@ pub fn decode_scalable_numerical_instruction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     mod fp8_matrix_scope {
         //! SME FP8 matrix and conversion admission.
@@ -416,7 +418,7 @@ mod tests {
                         NumericalFeatures::default(),
                     )
                     .unwrap_err();
-                    assert!(error.0.contains(message), "{error}");
+                    assert!(error.to_string().contains(message), "{error}");
                 }
             }
         }
@@ -434,7 +436,7 @@ mod tests {
                 NumericalFeatures::default(),
             )
             .unwrap_err();
-            assert!(error.0.contains("source/descriptor mismatch"));
+            assert!(error.to_string().contains("source/descriptor mismatch"));
         }
 
         #[test]
@@ -449,14 +451,14 @@ mod tests {
                 NumericalFeatures::default(),
             )
             .unwrap_err();
-            assert!(error.0.contains("FPMR access"));
+            assert!(error.to_string().contains("FPMR access"));
             let error = admit_scalable_numerical_instruction(
                 decoded,
                 declared_profile(16, true, false),
                 NumericalFeatures::default(),
             )
             .unwrap_err();
-            assert!(error.0.contains("mode unavailable"));
+            assert!(error.to_string().contains("mode unavailable"));
         }
 
         #[test]

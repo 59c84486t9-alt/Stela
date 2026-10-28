@@ -7,8 +7,12 @@
 //! This image owns no fuse programming, bit31 lock, PMGR supply, firmware RAM
 //! cache, native trigger or retirement. Those operations cannot mutate or
 //! replace it through this read interface.
-use crate::platform::apple::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{rc::Rc, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "t6000-identity-inputs";
 
@@ -207,8 +211,8 @@ impl MmioDevice for Image {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{bus::Bus, interrupt::InterruptLatch};
     use alloc::{boxed::Box, vec};
+    use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
 
     fn word(register: Register, value: u32) -> Observation {
         Observation {

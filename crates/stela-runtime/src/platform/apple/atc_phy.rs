@@ -32,9 +32,10 @@
 //! LOAD_CNT restarts the count. The model has no UTMI cycle clock, so the
 //! count reports one event once the clock has been active with EVT_EN set,
 //! not elapsed cycles. The block's other words refuse.
-use super::{
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
-    regfile::Held,
+use {
+    super::regfile::Held, stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
 };
 
 const NAME: &str = "Apple ATC PHY";
@@ -342,8 +343,8 @@ impl MmioDevice for AtcPhy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{bus::Bus, interrupt::InterruptLatch};
     use alloc::boxed::Box;
+    use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
     fn wr(p: &mut AtcPhy, a: &mut Access<'_>, o: u64, v: u32) {
         p.write(o, Width::Word, v.into(), a).unwrap();
     }

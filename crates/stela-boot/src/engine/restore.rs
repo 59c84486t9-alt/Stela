@@ -24,19 +24,18 @@ use crate::{
 use alloc::{boxed::Box, collections::VecDeque, format, rc::Rc, string::String, vec::Vec};
 use core::{cell::RefCell, task::Poll};
 use stela_drivers::block::{Ahead, BlockDevice, ReadAhead};
-use stela_runtime::{
-    machine::apple::{AppleDevices, MuxStream, UsbClient, UsbId},
-    net::Transfer,
-    payload::{PayloadManifest, Purpose, ReadAt},
-    restore::{
-        answers::Answers,
-        driver::{Driver, Ports},
-        proxy::{Control, Destination, Event as ProxyEvent, Peer, Version},
-        route::Route,
-        source::Extent,
-        store::{Store, Verify},
-        stream::ByteStream,
-    },
+use {
+    stela_formats::payload::PayloadManifest, stela_formats::payload::Purpose,
+    stela_formats::payload::ReadAt, stela_runtime::machine::apple::AppleDevices,
+    stela_runtime::machine::apple::MuxStream, stela_runtime::machine::apple::UsbClient,
+    stela_runtime::machine::apple::UsbId, stela_runtime::net::Transfer,
+    stela_runtime::restore::answers::Answers, stela_runtime::restore::driver::Driver,
+    stela_runtime::restore::driver::Ports, stela_runtime::restore::proxy::Control,
+    stela_runtime::restore::proxy::Destination, stela_runtime::restore::proxy::Event as ProxyEvent,
+    stela_runtime::restore::proxy::Peer, stela_runtime::restore::proxy::Version,
+    stela_runtime::restore::route::Route, stela_runtime::restore::source::Extent,
+    stela_runtime::restore::store::Store, stela_runtime::restore::store::Verify,
+    stela_runtime::restore::stream::ByteStream,
 };
 
 /// The bundle's boot manifest (`stela_loader::boot_bundle`).
@@ -688,7 +687,7 @@ impl Experiment {
             output::arguments(format_args!(
                 "FDR DIAGNOSTIC bytes={} sha256={} original Memory-store import; durable host commit enabled; factory trust unqualified\n",
                 placement.diagnostic.len(),
-                stela_runtime::sha256(placement.diagnostic),
+                stela_formats::sha256(placement.diagnostic),
             ));
         }
         if signer.is_some() {

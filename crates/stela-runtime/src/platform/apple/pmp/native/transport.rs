@@ -1,10 +1,11 @@
 //! Actual PTD effects, never service replies inferred from a resource request.
 use super::{Error, Operation, Packets, Value};
-use crate::platform::apple::{
-    bus::{Access, MmioDevice, Width},
-    ptd::{Range, UPDATE_OFFSET, transport::notifications::LocalNotifications},
-};
 use alloc::vec::Vec;
+use {
+    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+};
 
 pub(super) fn publish(
     local: &LocalNotifications,

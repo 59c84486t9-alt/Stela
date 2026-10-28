@@ -702,6 +702,7 @@ mod tests {
                 )
             };
             assert_ne!(pointer as usize, usize::MAX);
+            // SAFETY: the fresh mapping covers length bytes and does not overlap the library Vec.
             unsafe {
                 core::ptr::copy_nonoverlapping(library.code.as_ptr(), pointer.cast(), length);
                 assert_eq!(mprotect(pointer, length, PROT_READ_EXECUTE), 0);
@@ -779,6 +780,7 @@ mod tests {
                     }
                 }
             }
+            // SAFETY: all kernel calls have returned; this is the mapping and length created above.
             assert_eq!(unsafe { munmap(pointer, length) }, 0);
         }
     }

@@ -45,8 +45,8 @@ use super::{
     transaction::{Payload, Refusal},
     xart::{self, Xart},
 };
-use crate::platform::dma::{DmaError, Port};
 use alloc::{boxed::Box, collections::VecDeque, format, string::String, vec::Vec};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 /// The SEP's power state as the control endpoint drives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -621,7 +621,7 @@ mod tests {
     fn map_shared(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>, &'static str> {
         let region = Region::from_message(frame.mailbox())?;
         assert!(reply(os, frame)?.is_empty());
-        let mut ram = crate::platform::dma::tests::Ram::new(region.address, 0x4000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(region.address, 0x4000);
         ram.bytes[..4].copy_from_slice(&u32::from_be_bytes(*b"null").to_le_bytes());
         dma(os, &mut ram)
     }
@@ -722,18 +722,18 @@ mod tests {
     }
 
     struct Identity;
-    impl crate::platform::dma::Iommu for Identity {
+    impl stela_contracts::dma::Iommu for Identity {
         fn page(&self) -> u64 {
             0x4000
         }
         fn translate(
             &mut self,
-            _: &mut dyn crate::platform::dma::Memory,
+            _: &mut dyn stela_contracts::dma::Memory,
             _: usize,
             iova: u64,
             _: u64,
             _: bool,
-            _: &mut crate::platform::apple::bus::Access<'_>,
+            _: &mut stela_contracts::bus::Access<'_>,
         ) -> Result<u64, DmaError> {
             Ok(iova)
         }
@@ -743,10 +743,10 @@ mod tests {
     /// step may also have.
     fn dma_step(
         os: &mut SepOs,
-        ram: &mut crate::platform::dma::tests::Ram,
+        ram: &mut stela_contracts::dma::test_support::Ram,
     ) -> (Result<(), &'static str>, Vec<Frame>) {
-        let mut latch = crate::platform::apple::interrupt::InterruptLatch::new();
-        let mut access = crate::platform::apple::bus::Access::new(0, 0, &mut latch);
+        let mut latch = stela_contracts::interrupt::InterruptLatch::new();
+        let mut access = stela_contracts::bus::Access::new(0, 0, &mut latch);
         let mut port = Port {
             iommu: &mut Identity,
             stream: 0,
@@ -771,7 +771,7 @@ mod tests {
 
     fn dma(
         os: &mut SepOs,
-        ram: &mut crate::platform::dma::tests::Ram,
+        ram: &mut stela_contracts::dma::test_support::Ram,
     ) -> Result<Vec<Frame>, &'static str> {
         let (result, frames) = dma_step(os, ram);
         result.map(|()| frames)
@@ -812,7 +812,7 @@ mod tests {
         // Without registered buffers the request is queued, then refuses.
         assert!(reply(&mut os, request).unwrap().is_empty());
         assert!(os.dma_pending());
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x10000);
         assert!(dma(&mut os, &mut ram).is_err());
         // The AP registers one 0x8000-byte buffer each way, then sends.
         for (tag, opcode, data) in [
@@ -904,7 +904,7 @@ mod tests {
         assert!(reply(&mut os, control(3, control::SLEEP, 0, 0)).is_err());
         assert_eq!(os.power(), Power::Awake);
         assert!(reply(&mut os, shm(0x8000, 4)).is_err());
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x8000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x8000);
         ram.bytes[..16].fill(0x5a);
         let first = dma(&mut os, &mut ram).unwrap();
         assert_eq!(first.len(), 1);
@@ -937,7 +937,7 @@ mod tests {
         }
         .frame();
         reply(&mut os, commit_hash).unwrap();
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x1000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x1000);
         assert_eq!(
             dma_step(&mut os, &mut ram),
             (
@@ -954,7 +954,7 @@ mod tests {
         assert!(reply(&mut os, shm(0x8000, 4)).unwrap().is_empty());
         assert_eq!(os.region(), Some(previous.region));
         assert!(reply(&mut os, control(1, control::NOP, 0, 0)).is_err());
-        let mut ram = crate::platform::dma::tests::Ram::new(0x8000, 0x4000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x8000, 0x4000);
         // A zero-filled directory has no null terminator and must not
         // replace the known layout, even after OS-active was published.
         assert!(dma(&mut os, &mut ram).is_err());
@@ -985,7 +985,7 @@ mod tests {
             parameter: 0,
             data: (request.len() as u32) << 16,
         };
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x10000);
         ram.bytes[..request.len()].copy_from_slice(&request);
         assert!(reply(&mut os, frame).unwrap().is_empty());
         let answer = dma(&mut os, &mut ram).unwrap();
@@ -1015,7 +1015,7 @@ mod tests {
             parameter: 0,
             data: (request.len() as u32) << 16,
         };
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x10000);
         ram.bytes[..request.len()].copy_from_slice(&request);
         assert!(reply(&mut os, frame).unwrap().is_empty());
         assert_eq!(
@@ -1046,7 +1046,7 @@ mod tests {
             parameter: 0,
             data: (request.len() as u32) << 16,
         };
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x10000);
         ram.bytes[..request.len()].copy_from_slice(&request);
         assert!(reply(&mut os, frame).unwrap().is_empty());
         let (result, outbox) = dma_step(&mut os, &mut ram);
@@ -1066,7 +1066,7 @@ mod tests {
         let mut os = SepOs::new(None).with_services(store(), false).unwrap();
         map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         register(&mut os, boot_policy::ID, 0x1c000, 0x14000);
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x30000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x30000);
         let mut proposed = Vec::new();
         for (command, length, expected) in [
             (8u32, 0x124, 32),
@@ -1193,7 +1193,7 @@ mod tests {
             parameter: 0,
             data: 32,
         };
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x30000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x30000);
         ram.bytes[..4].copy_from_slice(b"hcPB");
         ram.bytes[4] = 0x3e;
         // Recorded, then answered with the not-supported reply header.
@@ -1229,7 +1229,7 @@ mod tests {
         ] {
             assert!(reply(&mut os, frame).unwrap().is_empty());
         }
-        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x1000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x1000);
         // Each DMA step consumes one request. The keystore refusal is
         // answered with its failure status; scrd is not answered at all.
         let (result, answer) = dma_step(&mut os, &mut ram);

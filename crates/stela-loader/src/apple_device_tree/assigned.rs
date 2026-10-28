@@ -577,14 +577,26 @@ mod tests {
     use super::*;
     use alloc::vec;
     use core::cell::Cell;
-    use stela_runtime::machine::{
-        Chip,
-        caches::Cache,
-        soc::assigned::{
-            AssignedCore, Assignment, Capacity, CapacityKind, ClusterId, ClusterSlot, CoreKind,
-            InterruptTarget, KindId, PeSlot, PowerResource, RegisterRange, ResourceProfile,
-            Resources, RetainedResources, RetainedRoster, SharedCache, StartResource,
-        },
+    use {
+        stela_contracts::Chip, stela_contracts::caches::Cache,
+        stela_runtime::machine::soc::assigned::AssignedCore,
+        stela_runtime::machine::soc::assigned::Assignment,
+        stela_runtime::machine::soc::assigned::Capacity,
+        stela_runtime::machine::soc::assigned::CapacityKind,
+        stela_runtime::machine::soc::assigned::ClusterId,
+        stela_runtime::machine::soc::assigned::ClusterSlot,
+        stela_runtime::machine::soc::assigned::CoreKind,
+        stela_runtime::machine::soc::assigned::InterruptTarget,
+        stela_runtime::machine::soc::assigned::KindId,
+        stela_runtime::machine::soc::assigned::PeSlot,
+        stela_runtime::machine::soc::assigned::PowerResource,
+        stela_runtime::machine::soc::assigned::RegisterRange,
+        stela_runtime::machine::soc::assigned::ResourceProfile,
+        stela_runtime::machine::soc::assigned::Resources,
+        stela_runtime::machine::soc::assigned::RetainedResources,
+        stela_runtime::machine::soc::assigned::RetainedRoster,
+        stela_runtime::machine::soc::assigned::SharedCache,
+        stela_runtime::machine::soc::assigned::StartResource,
     };
     struct Roster {
         cores: Vec<AssignedCore>,
@@ -1442,7 +1454,7 @@ mod tests {
             .join("DeviceTree.j473ap.adt");
         let original = std::fs::read(file).unwrap();
         assert_eq!(
-            stela_runtime::sha256(&original),
+            stela_formats::sha256(&original),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let mut tree = DeviceTree::parse(&original).unwrap();
@@ -1562,7 +1574,7 @@ mod tests {
         let original_table =
             bytes(immutable.node("/arm-io/wdt").unwrap(), "trigger-config").unwrap();
         assert_eq!(
-            stela_runtime::sha256(original_table),
+            stela_formats::sha256(original_table),
             "e9e9875ee26054ce3129dcb658d3d39b819819ef5bc568ad885d15bca048980c"
         );
         assert_eq!(

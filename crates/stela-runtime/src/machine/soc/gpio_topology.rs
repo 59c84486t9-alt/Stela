@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn s5l_ap_geometry_preserves_validated_restoration_exclusions() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let make = |excluded: &[u8], override_key: Option<&str>| {
             let reg = [0x19b028000u64, 0x4000]
                 .into_iter()
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn other_gpio_banks_carry_the_pins_their_clients_name() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         // J473AP's aop-gpio, its dp2hdmi-gpio client and a hidden smc-gpio.
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn gpio_aperture_requires_complete_source_ranges_before_any_bank_is_returned() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let raw = [0u64, 0x1000]
             .into_iter()
             .flat_map(u64::to_le_bytes)

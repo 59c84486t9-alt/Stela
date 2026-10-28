@@ -6,15 +6,13 @@
 //! Emitters take a [`Code`], which carries the instruction count across
 //! every [`Asm`] built over it.
 //!
-//! The scalar integer families emit through it; the rest still emit bytes
-//! directly, so some operand kinds and forms wait for their first user.
-#![allow(dead_code)]
 use alloc::vec::Vec;
 
 pub(crate) mod control;
 mod integer;
 pub(crate) mod memory;
 mod sse;
+pub(crate) mod vector_extensions;
 pub(crate) use integer::BitTest;
 pub(crate) use sse::{FloatLanes, FloatOp};
 
@@ -98,6 +96,7 @@ impl Code {
             .expect("counted instruction");
     }
     /// Remove every byte and instruction.
+    #[cfg(test)]
     pub(crate) fn clear(&mut self) {
         self.bytes.clear();
         self.instructions = 0;
@@ -385,14 +384,11 @@ pub(crate) enum Alu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum ShiftOp {
-    Rol,
-    Ror,
-    Rcl,
-    Rcr,
-    Shl,
-    Shr,
-    Sal,
-    Sar,
+    Rol = 0,
+    Ror = 1,
+    Shl = 4,
+    Shr = 5,
+    Sar = 7,
 }
 
 /// Condition codes, numbered as in Jcc, SETcc and CMOVcc.
@@ -543,20 +539,13 @@ impl<'a> Asm<'a> {
         }
     }
     /// The number of instructions emitted through this encoder.
+    #[cfg(test)]
     pub(crate) const fn instructions(&self) -> usize {
         self.instructions
     }
     /// The code length, the offset of the next instruction.
     pub(crate) fn len(&self) -> usize {
         self.code.len()
-    }
-    /// Instruction bytes this encoder does not model, counted as
-    /// `instructions` instructions.
-    pub(crate) fn raw(&mut self, bytes: &[u8], instructions: usize) {
-        self.code.extend(bytes);
-        for _ in 0..instructions {
-            self.count();
-        }
     }
     /// A prefix byte (LOCK, REP, a segment override) of the next
     /// instruction, which counts it.
@@ -1166,7 +1155,7 @@ impl<'a> Asm<'a> {
         count: Gpr,
     ) {
         let pp = match op {
-            ShiftOp::Shl | ShiftOp::Sal => Pp::P66,
+            ShiftOp::Shl => Pp::P66,
             ShiftOp::Shr => Pp::Pf2,
             ShiftOp::Sar => Pp::Pf3,
             _ => unreachable!("SHLX, SHRX and SARX only"),
@@ -1185,6 +1174,7 @@ impl<'a> Asm<'a> {
         );
     }
     /// `rorx dst, rm, imm8`: rotate right without flags (BMI2).
+    #[cfg(test)]
     pub(crate) fn rorx(&mut self, size: Size, destination: Gpr, rm: impl Into<Rm>, amount: u8) {
         self.vex(
             Vex {

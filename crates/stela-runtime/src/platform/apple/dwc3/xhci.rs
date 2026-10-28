@@ -60,9 +60,9 @@
 mod slot;
 
 use super::super::typec::Usb2Speed;
-use crate::platform::{dma::Port, usb::Function};
 use alloc::{boxed::Box, collections::VecDeque, format, string::String};
 use slot::Slot;
+use {crate::platform::usb::Function, stela_contracts::dma::Port};
 
 /// Bytes of the core's address space the host registers occupy.
 pub const BYTES: u64 = 0x1000;
@@ -1269,12 +1269,12 @@ impl Xhci {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Access, MmioDevice, Width},
-        dart::Dart,
-        interrupt::InterruptLatch,
+    use {
+        crate::platform::apple::dart::Dart, stela_contracts::bus::Access,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+        stela_contracts::interrupt::InterruptLatch,
     };
-    use crate::platform::dma::{Memory, tests::Ram};
+    use {stela_contracts::dma::Memory, stela_contracts::dma::test_support::Ram};
 
     const STOPPED_CODE: u32 = 26;
 
@@ -2096,23 +2096,19 @@ pub(crate) mod tests {
     /// buffers are host memory, which the model reaches through a `Memory`
     /// over the same addresses.
     pub(crate) mod host {
-        use crate::platform::{
-            apple::{
-                bus::{Access, MmioDevice, Width},
-                dart::Dart,
-                dwc3::xhci::Xhci,
-                interrupt::InterruptLatch,
-                typec::Usb2Speed,
-            },
-            dma::{Memory, Port},
-            usb::Function,
-        };
         use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
         use core::cell::RefCell;
         use stela_drivers::{
             Clock,
             bus::dma::RegionAllocator,
             usb::xhci::{Found, Registers, start},
+        };
+        use {
+            crate::platform::apple::dart::Dart, crate::platform::apple::dwc3::xhci::Xhci,
+            crate::platform::apple::typec::Usb2Speed, crate::platform::usb::Function,
+            stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+            stela_contracts::bus::Width, stela_contracts::dma::Memory, stela_contracts::dma::Port,
+            stela_contracts::interrupt::InterruptLatch,
         };
 
         /// Host memory the test owns, by address.

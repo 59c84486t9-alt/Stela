@@ -242,7 +242,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             let manifest =
                 local_image(&path).with_context(|| format!("reading {}", path.display()))?;
             progress.finish();
-            stela_runtime::builds::find(&manifest.product_build)
+            stela_formats::builds::find(&manifest.product_build)
                 .with_context(|| path.display().to_string())?;
             command.ipsw = Some(path);
             command.fetch = false;

@@ -54,12 +54,15 @@ fn validate(apertures: usize, weights: &[u8; GROUPS as usize]) -> Result<u8, &'s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Access, Bus, Lifecycle, LifecycleState, MmioDevice, Width},
-        interrupt::InterruptLatch,
-        mcc::{APERTURE_BYTES, Controller, DCS_BASE, DCS_STRIDE, Origin, RequestKind},
-    };
     use alloc::boxed::Box;
+    use {
+        crate::platform::apple::mcc::APERTURE_BYTES, crate::platform::apple::mcc::Controller,
+        crate::platform::apple::mcc::DCS_BASE, crate::platform::apple::mcc::DCS_STRIDE,
+        crate::platform::apple::mcc::Origin, crate::platform::apple::mcc::RequestKind,
+        stela_contracts::bus::Access, stela_contracts::bus::Bus, stela_contracts::bus::Lifecycle,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::Width, stela_contracts::interrupt::InterruptLatch,
+    };
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,

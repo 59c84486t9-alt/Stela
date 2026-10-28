@@ -26,11 +26,14 @@ use stela_loader::{
     boot_selection::{BOOT_COMMAND, Command, ONE_TIME_BOOT_COMMAND, RECOVERY_BOOT_MODE, lookup},
     mount_interface::CHOSEN_DISK,
 };
-use stela_runtime::{
-    machine::apple::nor::{CAPACITY, Image, SECTOR_SIZE, nvram::Partition, nvram::Variables},
-    machine::apple::sep_state,
-    payload::gpt::DEFAULT_MIN_APPLE_BYTES,
-    pc::{boot_log, machine_state, storage::Target},
+use {
+    stela_formats::payload::gpt::DEFAULT_MIN_APPLE_BYTES,
+    stela_runtime::machine::apple::nor::CAPACITY, stela_runtime::machine::apple::nor::Image,
+    stela_runtime::machine::apple::nor::SECTOR_SIZE,
+    stela_runtime::machine::apple::nor::nvram::Partition,
+    stela_runtime::machine::apple::nor::nvram::Variables, stela_runtime::machine::apple::sep_state,
+    stela_runtime::pc::boot_log, stela_runtime::pc::machine_state,
+    stela_runtime::pc::storage::Target,
 };
 
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";

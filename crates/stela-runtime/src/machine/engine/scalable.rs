@@ -18,16 +18,8 @@ use super::{
     DeviceError, Devices, FETCH_PAGE, Fetched, Host, InstallError, Machine, NativeCode, RamTables,
     RequirementKind, Step, Stop, Translated, Variant, tags::TagCheck,
 };
-use crate::machine::{
-    cpu::{Exception, STREAMING_VECTOR_BYTES},
-    debug,
-    exception::Class,
-    mmu::{self, Access, MemoryType, alignment},
-    streaming::{self, VectorDestinations},
-    system::Feature,
-    system::File,
-};
 use crate::scalable::ScalableState;
+use alloc::string::ToString;
 use alloc::{format, string::String, vec::Vec};
 use stela_compiler::{
     GuestAddress, GuestState, Options, TargetCpu,
@@ -55,6 +47,13 @@ use stela_compiler::{
         },
     },
     scalable_context::ScalableProfile,
+};
+use {
+    crate::machine::cpu::Exception, crate::machine::cpu::STREAMING_VECTOR_BYTES,
+    crate::machine::debug, crate::machine::exception::Class, crate::machine::mmu,
+    crate::machine::mmu::Access, crate::machine::mmu::MemoryType, crate::machine::mmu::alignment,
+    crate::machine::streaming, crate::machine::streaming::VectorDestinations,
+    crate::machine::system::File, stela_contracts::Feature,
 };
 
 /// The numerical features of every Apple chip's identification: no
@@ -99,6 +98,42 @@ fn features_where(keep: impl Fn(Feature) -> bool) -> ScalableFeatures {
         .fold(ScalableFeatures::empty(), |features, (_, scalable)| {
             features.with(*scalable)
         })
+}
+
+/// A scalable leaf cannot be prepared or installed for this PE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreparationError {
+    MissingState,
+    InvalidVectorLength,
+    Compile(stela_compiler::CompileError),
+    MissingMemoryRequirements,
+    CodeArenaFull,
+}
+impl From<stela_compiler::CompileError> for PreparationError {
+    fn from(error: stela_compiler::CompileError) -> Self {
+        Self::Compile(error)
+    }
+}
+impl core::fmt::Display for PreparationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingState => f.write_str("a PE without SME state"),
+            Self::InvalidVectorLength => f.write_str("the streaming vector length"),
+            Self::Compile(error) => error.fmt(f),
+            Self::MissingMemoryRequirements => {
+                f.write_str("a context leaf without memory requirements")
+            }
+            Self::CodeArenaFull => f.write_str("the leaf exceeds the code arena"),
+        }
+    }
+}
+impl core::error::Error for PreparationError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Compile(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 /// What the engine runs an SVE or SME word as.
@@ -268,7 +303,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let profile = match self.scalable_profile() {
             Ok(profile) => profile,
-            Err(detail) => return refuse(self, &detail),
+            Err(error) => return refuse(self, &error.to_string()),
         };
         let leaf = match self.prepare_scalable(pc, word, profile) {
             Ok(Prepared::Movprfx(prefix)) => return self.movprfx(pc, word, prefix),
@@ -278,7 +313,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return self.undefined();
             }
             Ok(Prepared::Leaf(leaf)) => leaf,
-            Err(detail) => return refuse(self, &detail),
+            Err(error) => return refuse(self, &error.to_string()),
         };
         if let Err(detail) = self.admit_memory(leaf.memory) {
             return refuse(self, detail);
@@ -461,7 +496,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Err(error) = called {
             return Err(self.unsupported(RequirementKind::Instruction {
                 word,
-                detail: error.0,
+                detail: error.to_string(),
             }));
         }
         match (MemoryStatus::from_code(memory.fault_kind), service.failure) {
@@ -688,17 +723,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pc: u64,
         word: u32,
         profile: ScalableProfile,
-    ) -> Result<Prepared, String> {
+    ) -> Result<Prepared, PreparationError> {
         if let Some(prefix) = Movprfx::decode(word) {
             return Ok(Prepared::Movprfx(prefix));
         }
         let result = match decode_scalable_numerical_instruction(GuestAddress(pc), word)
-            .map_err(|error| error.0)?
+            .map_err(PreparationError::from)?
         {
             Some(instruction) => {
                 admit_scalable_numerical_instruction(instruction, profile, NUMERICAL_FEATURES)
                     .map(Prepared::Numerical)
-                    .map_err(|error| error.0)
+                    .map_err(PreparationError::from)
             }
             None => self.scalable_leaf(pc, word, profile).map(Prepared::Leaf),
         };
@@ -754,21 +789,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The profile of the PE's current scalable state.
-    fn scalable_profile(&self) -> Result<ScalableProfile, String> {
+    fn scalable_profile(&self) -> Result<ScalableProfile, PreparationError> {
         let scalable = self
             .cpu
             .scalable
             .as_ref()
-            .ok_or_else(|| String::from("a PE without SME state"))?;
+            .ok_or(PreparationError::MissingState)?;
         let features = features(&self.cpu.registers);
         let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)
-            .ok_or_else(|| String::from("the streaming vector length"))?;
+            .ok_or(PreparationError::InvalidVectorLength)?;
         // The FP8 forms read FPMR, which the PE reaches once their
         // CheckFPMREnabled passes.
         let controls = ScalableControls::new(length, features.contains(ScalableFeature::Sme2))
             .with_fpmr_enabled(streaming::fpmr_enabled(&self.cpu));
         ScalableProfile::new_with_features(length, scalable.mode(), features, controls)
-            .map_err(|error| error.0)
+            .map_err(PreparationError::from)
     }
 
     /// The installed leaf of `word` at `pc` for `profile`, compiling it on
@@ -778,7 +813,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pc: u64,
         word: u32,
         profile: ScalableProfile,
-    ) -> Result<Leaf, String> {
+    ) -> Result<Leaf, PreparationError> {
         if let Some(leaf) = self.scalable_leaves.get(&(pc, word, profile)) {
             return Ok(*leaf);
         }
@@ -791,11 +826,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             GuestAddress(pc),
             &leaf_options(profile, self.target),
         )
-        .map_err(|error| error.0)?;
+        .map_err(PreparationError::from)?;
         let memory = plan
             .memory_requirements()
-            .ok_or_else(|| String::from("a context leaf without memory requirements"))?;
-        let compiled = plan.compile().map_err(|error| error.0)?;
+            .ok_or(PreparationError::MissingMemoryRequirements)?;
+        let compiled = plan.compile().map_err(PreparationError::from)?;
         let native = &compiled.native.x86_64_code;
         let code = match self.host.install(native) {
             Ok(code) => code,
@@ -803,7 +838,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.reclaim_code();
                 self.host
                     .install(native)
-                    .map_err(|_| String::from("the leaf exceeds the code arena"))?
+                    .map_err(|_| PreparationError::CodeArenaFull)?
             }
         };
         self.statistics.compiled += 1;
@@ -1078,7 +1113,7 @@ mod tests {
     /// the reserved encodings they hit.
     #[test]
     fn every_sve_and_sme_form_of_the_sme_chips_runs_or_is_undefined() {
-        use crate::machine::{Chip, chip::Check};
+        use {stela_contracts::Chip, stela_contracts::chip::Check};
         // BFSCALE, of FEAT_SVE_BFSCALE, which no Apple chip has, lies inside
         // FSCALE's encodings, and the compiler declines it as unknown: the
         // SVE form, and the multi-vector forms, FSCALE's with size 0.
@@ -1135,10 +1170,13 @@ mod tests {
                             }
                             Err(error) => {
                                 assert!(
-                                    known || !error.contains("unavailable guest features"),
+                                    known || !matches!(&error, PreparationError::Compile(stela_compiler::CompileError {
+                                        kind: stela_compiler::CompileErrorKind::GuestFeaturesUnavailable { .. },
+                                        ..
+                                    })),
                                     "{chip:?} {word:#010x}: {error}"
                                 );
-                                declined = error;
+                                declined = error.to_string();
                             }
                         }
                     }
@@ -1154,7 +1192,7 @@ mod tests {
 
     #[test]
     fn features_the_chip_lacks_and_debug_state_movt_are_undefined_before_their_checks() {
-        use crate::machine::Chip;
+        use stela_contracts::Chip;
         const BFADD_Z0_Z1: u32 = 0x6500_8020; // bfadd z0.h, p0/m, z0.h, z1.h
         const MOVT_X0_ZT0: u32 = 0xc04c_03e0; // movt x0, zt0[0]
         const UNDEFINED: u64 = 1 << 25;
@@ -1276,7 +1314,7 @@ mod tests {
             FSCALE,
             F1CVT,
         ];
-        let mut machine = super::super::tests::machine_on(crate::machine::Chip::AppleM6, &words);
+        let mut machine = super::super::tests::machine_on(stela_contracts::Chip::AppleM6, &words);
         enable_streaming(&mut machine);
         for _ in 0..5 {
             machine.step().unwrap();
@@ -1326,7 +1364,10 @@ mod tests {
         const HCR_ATA: u64 = 1 << 56;
         const SCTLR_ATA_TCF_SYNC: u64 = 1 << 43 | 1 << 40;
         const TCR_TBI0: u64 = 1 << 37;
-        for chip in [crate::machine::Chip::AppleM5, crate::machine::Chip::AppleM6] {
+        for chip in [
+            stela_contracts::Chip::AppleM5,
+            stela_contracts::Chip::AppleM6,
+        ] {
             let mut machine = super::super::tests::machine_on(chip, &[PTRUE_P0_B, LD1B_Z2_X5]);
             enable_streaming(&mut machine);
             normal_memory(&mut machine, false);

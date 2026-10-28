@@ -11,8 +11,11 @@
 use super::super::Ordinal;
 use super::super::counter_cache::{ManagerClaim, ReadMasks};
 use super::{Completion, ManagerContext, ManagerEffect, Request};
-use crate::platform::apple::bus::{Access, MmioDevice, MmioError, Width};
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+};
 
 type Error = &'static str;
 const CONTROL_MASK: u32 = 0xf << 16;
@@ -430,12 +433,12 @@ mod tests {
     use super::super::super::super::Packets;
     use super::super::super::Evaluation;
     use super::*;
-    use crate::platform::apple::{
-        bus::{Direction, refuse},
-        interrupt::InterruptLatch,
-    };
     use alloc::{rc::Rc, vec};
     use core::cell::RefCell;
+    use {
+        stela_contracts::bus::Direction, stela_contracts::bus::refuse,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     #[derive(Default)]
     struct DeviceState {
@@ -912,15 +915,14 @@ mod tests {
         Manager<Device, Queries>,
     );
     fn cache_fixture() -> CacheHarness {
-        use crate::platform::apple::{
-            bus::LifecycleState,
-            pmp::native,
-            ptd::{
-                Geometry, PTD_BYTES, Ptd, Range, UPDATE_OFFSET,
-                transport::notifications::NativeProfile,
-            },
-        };
         use native::{counters::Frames, platform::counter_cache::Cache, power::DeviceTable};
+        use {
+            crate::platform::apple::pmp::native, crate::platform::apple::ptd::Geometry,
+            crate::platform::apple::ptd::PTD_BYTES, crate::platform::apple::ptd::Ptd,
+            crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+            crate::platform::apple::ptd::transport::notifications::NativeProfile,
+            stela_contracts::bus::LifecycleState,
+        };
         let ranges: Vec<Range> = [
             (1, 0, 1),
             (2, 1, 1),
@@ -995,7 +997,7 @@ mod tests {
     }
     #[test]
     fn provider_cache_uses_actual_before_capture_masks_and_preserves_newer_ptd_until_next_reset() {
-        use crate::platform::apple::{bus::MmioDevice, ptd::UPDATE_OFFSET};
+        use {crate::platform::apple::ptd::UPDATE_OFFSET, stela_contracts::bus::MmioDevice};
         let (native, mut frames, mut cache, mut manager) = cache_fixture();
         let masks = manager.read_masks();
         let mut irq = InterruptLatch::default();

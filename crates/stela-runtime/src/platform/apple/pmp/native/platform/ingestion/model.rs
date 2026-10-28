@@ -462,7 +462,7 @@ mod tests {
             hex::encode(Sha256::digest(&dt)),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
-        let root = crate::machine::adt::Node::root(&dt).unwrap();
+        let root = stela_contracts::adt::Node::root(&dt).unwrap();
         let nub = root
             .child("arm-io")
             .unwrap()

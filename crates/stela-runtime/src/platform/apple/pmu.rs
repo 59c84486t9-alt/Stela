@@ -1193,9 +1193,10 @@ mod tests {
 
     #[test]
     fn a_pmu_without_rtc_routes_an_actual_permanently_deasserted_output() {
-        use crate::platform::apple::{
-            interrupt::AicInput,
-            spmi::{Configuration as Controller, Profile, Spmi},
+        use {
+            crate::platform::apple::spmi::Configuration as Controller,
+            crate::platform::apple::spmi::Profile, crate::platform::apple::spmi::Spmi,
+            stela_contracts::interrupt::AicInput,
         };
         // A Vale-shaped secondary: scratch, legacy scratch, no RTC.
         let windows = alloc::vec![
@@ -1527,7 +1528,7 @@ mod tests {
     fn original_primary_service_rtc_registers_alarm_and_edge_contract_are_source_pinned() {
         let data = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
         );
         for (offset, bytes, digest) in [
@@ -1663,7 +1664,7 @@ mod tests {
             ), // identity-descriptor-retain
         ] {
             assert_eq!(
-                crate::sha256(&data[offset..offset + bytes]),
+                stela_formats::sha256(&data[offset..offset + bytes]),
                 digest,
                 "source span {offset:#x}"
             );
@@ -1699,10 +1700,10 @@ mod tests {
     #[test]
     #[ignore = "requires original J314s26A434 DT via STELA_TEST_SPMI_DT"]
     fn original_j314s_two_rtc_resources_have_one_primary_service_and_local_output() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();

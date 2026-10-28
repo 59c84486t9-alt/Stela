@@ -1,5 +1,4 @@
 //! Scalable profiles: the guest vector length, mode, features and controls a leaf is specialized for.
-use alloc::{format, vec::Vec};
 
 use super::{DECLARED_PROFILE_ID, PROFILE_ID};
 use crate::{
@@ -50,20 +49,26 @@ impl ScalableProfile {
         controls: ScalableControls,
     ) -> Result<Self, CompileError> {
         if !features.contains(ScalableFeature::Sme) {
-            return Err(CompileError("scalable profile requires FEAT_SME".into()));
+            return Err(CompileError::new(
+                crate::CompileErrorKind::ScalableRequiresSme,
+            ));
         }
         if features.contains(ScalableFeature::Sme2p1) && !features.contains(ScalableFeature::Sme2) {
-            return Err(CompileError("FEAT_SME2p1 requires FEAT_SME2".into()));
+            return Err(CompileError::new(
+                crate::CompileErrorKind::Sme2p1RequiresSme2,
+            ));
         }
         if controls.fpmr_enabled() && !features.contains(ScalableFeature::Fpmr) {
-            return Err(CompileError("FPMR access enable requires FEAT_FPMR".into()));
+            return Err(CompileError::new(
+                crate::CompileErrorKind::FpmrRequiresFeature,
+            ));
         }
         if controls.zt0_enabled() && !features.contains(ScalableFeature::Sme2) {
-            return Err(CompileError("ZT0 enable requires FEAT_SME2".into()));
+            return Err(CompileError::new(crate::CompileErrorKind::Zt0RequiresSme2));
         }
         if length > controls.max_vector_length() {
-            return Err(CompileError(
-                "current streaming vector length exceeds declared maximum".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::VectorLengthExceedsMaximum,
             ));
         }
         Ok(Self {
@@ -107,28 +112,13 @@ impl ScalableProfile {
         if requirement.is_satisfied_by(available) {
             return Ok(());
         }
-        let available_names = available.names();
-        let missing: Vec<_> = requirement
-            .all_features()
-            .names()
-            .into_iter()
-            .filter(|name| !available_names.contains(name))
-            .collect();
-        let alternatives = requirement.any_features().names();
-        let mut reasons = Vec::new();
-        if !missing.is_empty() {
-            reasons.push(format!("requires {}", missing.join(", ")));
-        }
-        if !alternatives.is_empty()
-            && !FeatureRequirement::any(requirement.any_features()).is_satisfied_by(available)
-        {
-            reasons.push(format!("requires one of {}", alternatives.join(", ")));
-        }
-        Err(CompileError(format!(
-            "unavailable guest features at {:#x}: {}",
-            pc.0,
-            reasons.join("; ")
-        )))
+        Err(
+            CompileError::new(crate::CompileErrorKind::GuestFeaturesUnavailable {
+                available,
+                required: requirement,
+            })
+            .at(pc),
+        )
     }
 
     /// Only version 2 manifests list declared features; version 1 artifacts
@@ -184,8 +174,8 @@ impl ScalableProfile {
         if valid {
             Ok(())
         } else {
-            Err(CompileError(
-                "extended execution context/profile mismatch".into(),
+            Err(CompileError::new(
+                crate::CompileErrorKind::ExecutionContextMismatch,
             ))
         }
     }

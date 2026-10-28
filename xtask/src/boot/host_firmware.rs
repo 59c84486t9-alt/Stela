@@ -18,7 +18,7 @@ fn expected(data: &[u8]) -> Result<Vec<Value>> {
     for phase in ["before-ebs", "after-ebs"] {
         records.push(json!({"kind":"manifest", "phase":phase,
             "images":manifest.images.len(), "bytes":manifest.total_bytes(),
-            "sha256":stela_runtime::sha256(data)}));
+            "sha256":stela_formats::sha256(data)}));
         for (index, image) in manifest.images.iter().enumerate() {
             let target = &image.target;
             let source = &image.provenance;

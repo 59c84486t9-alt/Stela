@@ -11,7 +11,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 const RING_BYTES: usize = 16_384;
 const MIN_WRAPS: u64 = 5;

@@ -12,9 +12,9 @@
 //! assigned context must agree. A fault cannot identify its physical bank
 //! or incoming SID here and therefore refuses without latching metadata.
 use super::{Dart, Model};
-use crate::platform::{
-    apple::bus::Access,
-    dma::{DmaError, Iommu, Memory},
+use {
+    stela_contracts::bus::Access, stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,
+    stela_contracts::dma::Memory,
 };
 
 const USB_TRADS: usize = 2;
@@ -145,15 +145,13 @@ impl Iommu for T6000ContextDma<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{
-            bus::{MmioDevice, Width},
-            dart::Profile,
-            interrupt::{AicInput, InterruptLatch, Wire},
-        },
-        dma::{Port, tests::Ram},
-    };
     use alloc::{vec, vec::Vec};
+    use {
+        crate::platform::apple::dart::Profile, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::Width, stela_contracts::dma::Port,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::AicInput,
+        stela_contracts::interrupt::InterruptLatch, stela_contracts::interrupt::Wire,
+    };
 
     const ROOT: u64 = 0x8_0000_0000;
     const FRAME: u64 = ROOT + 4 * PAGE;

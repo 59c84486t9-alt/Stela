@@ -627,7 +627,7 @@ mod tests {
     use alloc::string::String;
 
     const WINDOW: u64 = 0x8_0000_0000;
-    const VERSION: u32 = crate::builds::DEFAULT.dcp_link_version;
+    const VERSION: u32 = stela_formats::builds::DEFAULT.dcp_link_version;
     const REGION_DVA: u64 = 0x4000;
     const REGION: u64 = WINDOW + REGION_DVA;
 

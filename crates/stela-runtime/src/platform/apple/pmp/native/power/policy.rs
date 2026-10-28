@@ -400,8 +400,8 @@ mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
     fn original_native_constructor_descriptors_and_request_policy_match_the_profile() {
-        use crate::machine::adt::Node;
         use sha2::{Digest, Sha256};
+        use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&data)),

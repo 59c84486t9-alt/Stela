@@ -598,12 +598,9 @@ mod tests {
 
     #[test]
     fn the_engine_finds_the_state_file_by_its_short_name_and_reads_its_runs() {
-        use crate::{
-            payload::ReadAt,
-            platform::pc::{
-                boot_log,
-                fat32::{Fat32, tests::Volume},
-            },
+        use {
+            crate::platform::pc::boot_log, crate::platform::pc::fat32::Fat32,
+            crate::platform::pc::fat32::tests::Volume, stela_formats::payload::ReadAt,
         };
         let image = initial_image(b"seed").unwrap();
         let mut volume = Volume::new();

@@ -1,6 +1,6 @@
 //! Decoding one instruction and admitting it under a scalable profile.
 use crate::aarch64::Unsupported;
-use alloc::{format, vec::Vec};
+use alloc::vec::Vec;
 
 use super::{Decoded, ScalableProfile, ordinary_permitted};
 use crate::{
@@ -53,29 +53,31 @@ pub(super) fn decode(
 /// requirement is recorded in `clauses`.
 struct Admission<'a> {
     pc: GuestAddress,
+    word: u32,
     profile: ScalableProfile,
     clauses: &'a mut Vec<FeatureRequirement>,
 }
 
 impl Admission<'_> {
-    fn error(&self, reason: &str) -> CompileError {
-        CompileError(format!("{reason} at {:#x}", self.pc.0))
+    fn error(&self, kind: crate::CompileErrorKind) -> CompileError {
+        CompileError::new(kind).at_instruction(self.pc, self.word)
     }
 
-    fn ensure(&self, condition: bool, reason: &str) -> Result<(), CompileError> {
+    fn ensure(&self, condition: bool, kind: crate::CompileErrorKind) -> Result<(), CompileError> {
         if condition {
             Ok(())
         } else {
-            Err(self.error(reason))
+            Err(self.error(kind))
         }
     }
 
     fn operand<T>(
         &self,
         decoded: Result<T, Unsupported>,
-        encoding: &str,
+        family: crate::EncodingFamily,
     ) -> Result<T, CompileError> {
-        decoded.map_err(|Unsupported| self.error(&format!("reserved {encoding} encoding")))
+        decoded
+            .map_err(|Unsupported| self.error(crate::CompileErrorKind::ReservedEncoding { family }))
     }
 
     fn require(&mut self, features: ScalableFeatures) -> Result<(), CompileError> {
@@ -85,28 +87,36 @@ impl Admission<'_> {
             FeatureRequirement::all(features),
             self.pc,
         )
+        .map_err(|error| error.at_instruction(self.pc, self.word))
     }
 
     fn streaming(&self) -> Result<(), CompileError> {
-        self.ensure(self.profile.mode().streaming(), "streaming mode required")
+        self.ensure(
+            self.profile.mode().streaming(),
+            crate::CompileErrorKind::StreamingModeRequired,
+        )
     }
 
     /// The common streaming SVE admission: a valid operand, streaming mode and SME.
     fn streaming_sme<T>(
         &mut self,
         decoded: Result<T, Unsupported>,
-        encoding: &str,
+        family: crate::EncodingFamily,
     ) -> Result<T, CompileError> {
-        let operand = self.operand(decoded, encoding)?;
+        let operand = self.operand(decoded, family)?;
         self.streaming()?;
         self.require(ScalableFeatures::of(ScalableFeature::Sme))?;
         Ok(operand)
     }
 
-    fn declared_dit_zero(&self, required: bool, reason: &str) -> Result<(), CompileError> {
+    fn declared_dit_zero(
+        &self,
+        required: bool,
+        kind: crate::CompileErrorKind,
+    ) -> Result<(), CompileError> {
         self.ensure(
             !required || self.profile.required_dit() == Some(false),
-            reason,
+            kind,
         )
     }
 }
@@ -122,6 +132,7 @@ pub(super) fn decode_recording_features(
     let sme = ScalableFeatures::of(F::Sme);
     let mut check = Admission {
         pc,
+        word,
         profile,
         clauses,
     };
@@ -134,23 +145,23 @@ pub(super) fn decode_recording_features(
         };
         check.ensure(
             !streaming || profile.mode().streaming(),
-            "streaming mode required",
+            crate::CompileErrorKind::StreamingModeRequired,
         )?;
         check.ensure(
             !za || profile.mode().za_enabled(),
-            "ZA enabled state required",
+            crate::CompileErrorKind::ZaEnabledStateRequired,
         )?;
         check.ensure(
             !zt0 || profile.controls().zt0_enabled(),
-            "ZT0 enable required",
+            crate::CompileErrorKind::Zt0EnableRequired,
         )?;
         check.require(if sme2 { sme.with(F::Sme2) } else { sme })?;
         x86_64::sme::memory::validate_target(&operand, target)
-            .map_err(|reason| CompileError(format!("{reason} at {:#x}", pc.0)))?;
+            .map_err(|reason| CompileError::from(reason).at_instruction(pc, word))?;
         return Ok(Decoded::SmeMemory(operand));
     }
     if let Some(decoded) = integer_vector::decode(word) {
-        let operand = check.operand(decoded, "multi-vector integer")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::MultiVectorInteger)?;
         check.require(ScalableFeatures::of(F::Sme2))?;
         // This profile supplies streaming SME lengths, not ordinary SVE state.
         // The six SVE-category narrows enter through their SME2 alternative.
@@ -159,17 +170,17 @@ pub(super) fn decode_recording_features(
     }
     if let Some(decoded) = memory_load::decode(word) {
         return Ok(Decoded::MemoryLoad(
-            check.streaming_sme(decoded, "streaming load")?,
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingLoad)?,
         ));
     }
     if let Some(decoded) = memory_multi::decode(word) {
-        let operand = check.operand(decoded, "streaming multi-vector memory")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingMultiVectorMemory)?;
         check.streaming()?;
         check.require(sme.with(F::Sme2))?;
         return Ok(Decoded::MemoryMulti(operand));
     }
     if let Some(decoded) = memory_store::decode(word) {
-        let operand = check.operand(decoded, "streaming store")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingStore)?;
         check.streaming()?;
         let quadword = matches!(operand, memory_store::Operand::Store(store)
             if store.memory_element == ElementSize::Quadword);
@@ -177,7 +188,7 @@ pub(super) fn decode_recording_features(
         return Ok(Decoded::MemoryStore(operand));
     }
     if let Some(decoded) = memory_structure::decode(word) {
-        let operand = check.operand(decoded, "streaming structured load")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingStructuredLoad)?;
         check.streaming()?;
         // Q allocation accepts SVE2p1 or SME2p1 architecturally. This compiler
         // entry owns SME streaming profiles, so it uses the SME2p1 alternative.
@@ -186,7 +197,7 @@ pub(super) fn decode_recording_features(
         return Ok(Decoded::MemoryStructure(operand));
     }
     if let Some(decoded) = address::decode(word) {
-        let operand = check.operand(decoded, "streaming length/count")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingLengthCount)?;
         check.streaming()?;
         let counter = matches!(
             operand.kind,
@@ -196,10 +207,10 @@ pub(super) fn decode_recording_features(
         return Ok(Decoded::Address(operand));
     }
     if let Some(decoded) = dot::decode_integer(word) {
-        let operand = check.operand(decoded, "streaming integer dot")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingIntegerDot)?;
         check.ensure(
             !operand.requires_i8mm() || profile.declared_features().is_some(),
-            "guest I8MM is outside the streaming profile",
+            crate::CompileErrorKind::StreamingI8mmUnsupported,
         )?;
         check.streaming()?;
         let mut required = sme;
@@ -219,66 +230,73 @@ pub(super) fn decode_recording_features(
         return Ok(Decoded::IntegerDot(operand));
     }
     if let Some(decoded) = integer_predicate_move::decode(word) {
-        let operand = check.operand(decoded, "streaming predicate-to-vector")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingPredicateToVector)?;
         check.require(ScalableFeatures::of(F::Sme2p1))?;
         check.streaming()?;
         return Ok(Decoded::IntegerPredicateMove(operand));
     }
     if let Some(decoded) = integer_bits::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming integer-bit")?;
+        let operand = check.streaming_sme(decoded, crate::EncodingFamily::StreamingIntegerBit)?;
         check.declared_dit_zero(
             x86_64::sve::integer_bits::requires_declared_dit_zero(operand, profile.vector_length()),
-            "BSR leading counts require a declared DIT=0 profile",
+            crate::CompileErrorKind::LeadingCountsRequireDitClear,
         )?;
         return Ok(Decoded::IntegerBits(operand));
     }
     if let Some(decoded) = integer_logic::decode(word) {
-        let operand = check.operand(decoded, "streaming integer")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingInteger)?;
         check.streaming()?;
         check.ensure(
             !matches!(operand.kind, Kind::Copy(CopySource::Vector(_))),
-            "MOVPRFX pair validation required",
+            crate::CompileErrorKind::MovprfxPairRequired,
         )?;
         check.require(sme)?;
         return Ok(Decoded::IntegerLogic(operand));
     }
     if let Some(decoded) = integer_comparison::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming integer comparison")?;
+        let operand =
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingIntegerComparison)?;
         return Ok(Decoded::IntegerComparison(operand));
     }
     if let Some(decoded) = integer_arithmetic::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming integer arithmetic")?;
+        let operand =
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingIntegerArithmetic)?;
         return Ok(Decoded::IntegerArithmetic(operand));
     }
     if let Some(decoded) = integer_saturation::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming integer saturation")?;
+        let operand =
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingIntegerSaturation)?;
         return Ok(Decoded::IntegerSaturation(operand));
     }
     if let Some(decoded) = rearrange_widen::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming rearrangement")?;
+        let operand =
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingRearrangement)?;
         return Ok(Decoded::RearrangeWiden(operand));
     }
     if let Some(decoded) = shifts::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming integer shift")?;
+        let operand = check.streaming_sme(decoded, crate::EncodingFamily::StreamingIntegerShift)?;
         check.declared_dit_zero(
             x86_64::sve::shifts::requires_declared_dit_zero(operand, profile.vector_length()),
-            "selected streaming integer shift mapping requires declared DIT=0",
+            crate::CompileErrorKind::IntegerShiftRequiresDitClear,
         )?;
         return Ok(Decoded::Shifts(operand));
     }
     if let Some(decoded) = shifts_narrow::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming width-conversion")?;
+        let operand =
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingWidthConversion)?;
         return Ok(Decoded::ShiftsNarrow(operand));
     }
     if let Some(decoded) = sign::decode(word) {
         return Ok(Decoded::Sign(
-            check.streaming_sme(decoded, "streaming sign")?,
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingSign)?,
         ));
     }
     if let Some(decoded) = integer_products::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming integer product")?;
-        x86_64::sve::integer_products::validate(operand)
-            .map_err(|Unsupported| check.error("invalid streaming integer product operand"))?;
+        let operand =
+            check.streaming_sme(decoded, crate::EncodingFamily::StreamingIntegerProduct)?;
+        x86_64::sve::integer_products::validate(operand).map_err(|Unsupported| {
+            check.error(crate::CompileErrorKind::InvalidStreamingIntegerProduct)
+        })?;
         return Ok(Decoded::IntegerProducts(operand));
     }
     if let Some(operand) = integer_dots::decode(word) {
@@ -290,11 +308,14 @@ pub(super) fn decode_recording_features(
             features
         })?;
         check.streaming()?;
-        check.ensure(profile.mode().za_enabled(), "ZA enable required")?;
+        check.ensure(
+            profile.mode().za_enabled(),
+            crate::CompileErrorKind::ZaEnableRequired,
+        )?;
         return Ok(Decoded::SmeIntegerDots(operand));
     }
     if let Some(decoded) = sve_tables::decode(word) {
-        let operand = check.operand(decoded, "streaming LUT")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingLut)?;
         profile.require_features(
             FeatureRequirement::all(ScalableFeatures::of(F::Sme2).with(F::Lut)),
             pc,
@@ -304,20 +325,21 @@ pub(super) fn decode_recording_features(
         check.ensure(
             profile.vector_length().bits() >= minimum
                 && profile.controls().max_vector_length().bits() >= minimum,
-            "LUT requires a larger current/maximum vector length",
+            crate::CompileErrorKind::LutVectorLengthRequired,
         )?;
         return Ok(Decoded::SveTables(operand));
     }
     if let Some(decoded) = rearrange_extract::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming extraction")?;
+        let operand = check.streaming_sme(decoded, crate::EncodingFamily::StreamingExtraction)?;
         return Ok(Decoded::RearrangeExtract(operand));
     }
     if let Some(decoded) = floating_copy::decode(word) {
-        let operand = check.streaming_sme(decoded, "streaming floating copy")?;
+        let operand = check.streaming_sme(decoded, crate::EncodingFamily::StreamingFloatingCopy)?;
         return Ok(Decoded::FloatingCopy(operand));
     }
     if let Some(decoded) = predicate_generation::decode(word) {
-        let operand = check.operand(decoded, "streaming predicate generation")?;
+        let operand =
+            check.operand(decoded, crate::EncodingFamily::StreamingPredicateGeneration)?;
         check.streaming()?;
         check.require(if operand.requires_sme2() {
             sme.with(F::Sme2)
@@ -327,7 +349,7 @@ pub(super) fn decode_recording_features(
         return Ok(Decoded::PredicateGeneration(operand));
     }
     if let Some(decoded) = predicate_logic::decode(word) {
-        let operand = check.operand(decoded, "streaming predicate logic")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingPredicateLogic)?;
         check.streaming()?;
         check.require(match operand.kind {
             predicate_logic::Kind::MoveVector { .. } => sme.with(F::Sme2p1),
@@ -337,7 +359,7 @@ pub(super) fn decode_recording_features(
         return Ok(Decoded::PredicateLogic(operand));
     }
     if let Some(decoded) = reductions::decode(word) {
-        let operand = check.operand(decoded, "streaming integer reduction")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingIntegerReduction)?;
         if operand.output == reductions::Output::Quadword {
             check.require(ScalableFeatures::of(F::Sme2p1))?;
         }
@@ -346,7 +368,7 @@ pub(super) fn decode_recording_features(
         return Ok(Decoded::Reductions(operand));
     }
     if let Some(decoded) = rearrange::decode(word) {
-        let operand = check.operand(decoded, "streaming rearrangement")?;
+        let operand = check.operand(decoded, crate::EncodingFamily::StreamingRearrangement)?;
         if matches!(
             operand,
             rearrange::Operand::Interleave { segment: true, .. }
@@ -364,13 +386,16 @@ pub(super) fn decode_recording_features(
                 profile.vector_length(),
                 target,
             ),
-            "scalar table lookup requires explicitly declared DIT=0",
+            crate::CompileErrorKind::TableLookupRequiresDitClear,
         )?;
         return Ok(Decoded::Rearrange(operand));
     }
     if let Some(operand) = movement::decode(word) {
         let requirements = operand.requirements;
-        check.ensure(!requirements.halted, "halted debug execution required")?;
+        check.ensure(
+            !requirements.halted,
+            crate::CompileErrorKind::HaltedDebugRequired,
+        )?;
         check.require(ScalableFeatures::of(match requirements.feature {
             movement::Feature::Sme => F::Sme,
             movement::Feature::Sme2 => F::Sme2,
@@ -378,24 +403,24 @@ pub(super) fn decode_recording_features(
         }))?;
         check.ensure(
             !requirements.za || profile.mode().za_enabled(),
-            "ZA state required",
+            crate::CompileErrorKind::ZaStateRequired,
         )?;
         check.ensure(
             !requirements.streaming || profile.mode().streaming(),
-            "streaming mode required",
+            crate::CompileErrorKind::StreamingModeRequired,
         )?;
         check.ensure(
             !requirements.zt0 || profile.controls().zt0_enabled(),
-            "ZT0 enabled state required",
+            crate::CompileErrorKind::Zt0EnabledStateRequired,
         )?;
         check.ensure(
             profile.controls().max_vector_length().bits()
                 >= usize::from(requirements.minimum_implemented_svl_bits),
-            "maximum streaming vector length is too small",
+            crate::CompileErrorKind::MaximumVectorLengthTooSmall,
         )?;
         check.ensure(
             profile.vector_length().bits() >= usize::from(requirements.minimum_current_svl_bits),
-            "current streaming vector length is too small",
+            crate::CompileErrorKind::CurrentVectorLengthTooSmall,
         )?;
         return Ok(Decoded::SmeMovement(operand));
     }
@@ -409,14 +434,14 @@ pub(super) fn decode_recording_features(
         check.streaming()?;
         check.ensure(
             profile.mode().za_enabled() && profile.controls().zt0_enabled(),
-            "SME LUTv2 requires ZA and enabled ZT0",
+            crate::CompileErrorKind::LutV2StateRequired,
         )?;
         return Ok(Decoded::SmeLutV2(operand));
     }
     if let Some(operand) = tables::decode(word) {
         check.declared_dit_zero(
             x86_64::sme::tables::requires_dit_zero(&operand, profile.vector_length(), target),
-            "scalar SME lookup requires a declared DIT=0 profile",
+            crate::CompileErrorKind::SmeLookupRequiresDitClear,
         )?;
         let features = sme.with(F::Sme2);
         check.require(if operand.feature == tables::Feature::Sme2p1 {
@@ -429,12 +454,14 @@ pub(super) fn decode_recording_features(
         check.ensure(
             profile.vector_length().bits() >= minimum
                 && profile.controls().max_vector_length().bits() >= minimum,
-            &format!("SME table operands require SVL >= {minimum} bits"),
+            crate::CompileErrorKind::SmeTableVectorLength {
+                minimum_bits: minimum,
+            },
         )?;
         check.ensure(
             !operand.requires_zt0()
                 || (profile.mode().za_enabled() && profile.controls().zt0_enabled()),
-            "SME lookup requires ZA and enabled ZT0",
+            crate::CompileErrorKind::LutStateRequired,
         )?;
         return Ok(Decoded::SmeTables(operand));
     }
@@ -449,7 +476,7 @@ pub(super) fn decode_recording_features(
         check.require(required)?;
         check.ensure(
             profile.mode().streaming() && profile.mode().za_enabled(),
-            "streaming mode and ZA required for integer matrix operation",
+            crate::CompileErrorKind::IntegerMatrixStateRequired,
         )?;
         return Ok(Decoded::SmeIntegerMatrix(operand));
     }
@@ -457,16 +484,13 @@ pub(super) fn decode_recording_features(
         check.require(sme)?;
         return Ok(Decoded::Length(operand));
     }
-    let instruction = Decoder
-        .lift(pc, word)
-        .map_err(|reason| CompileError(format!("unsupported ARM64 semantics: {reason:?}")))?;
+    let instruction = Decoder.lift(pc, word).map_err(CompileError::from)?;
     if !ordinary_permitted(&instruction.operation) {
-        return Err(CompileError(format!(
-            "operation outside extended integer profile at {:#x}: {:#010x}",
-            pc.0, word
-        )));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::OutsideContextIntegerProfile)
+                .at_instruction(pc, word),
+        );
     }
-    x86_64::validate_target(&instruction, target)
-        .map_err(|reason| CompileError(format!("x86 emission failed: {reason:?}")))?;
+    x86_64::validate_target(&instruction, target).map_err(CompileError::from)?;
     Ok(Decoded::Ordinary(instruction))
 }

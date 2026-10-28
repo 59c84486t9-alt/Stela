@@ -2,11 +2,12 @@
 //! Register facts: Linux v6.17 `drivers/pci/controller/pcie-apple.c`.
 //! Link readiness is derived from actual modeled supplies and a backed peer.
 //! Analog training, ASPM, tunnel-reset handshakes and AER recovery refuse.
-use super::super::{
-    bus::{Access, Direction, MmioError, Width, refuse},
-    interrupt::{AicInput, Wire},
-};
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::MmioError,
+    stela_contracts::bus::Width, stela_contracts::bus::refuse,
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
+};
 
 pub const LTSSM: u64 = 0x80;
 pub const INT_STATUS: u64 = 0x100;

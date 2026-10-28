@@ -43,12 +43,14 @@
 //! driver's separate enableWakeOnly/claimWakeEvents contract is not modeled,
 //! so a stopped clock cannot silently discard edge/wake ownership. Physical
 //! supply loss, pad retention and reset remain explicit refusals.
-use super::{
-    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    interrupt::{AicInput, Wire},
-};
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::Cell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
+};
 const NAME: &str = "Apple GPIO";
 const DATA: u32 = 1;
 const MODE: u32 = 7 << 1;
@@ -458,7 +460,7 @@ impl MmioDevice for Gpio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     fn lines() -> Vec<AicInput> {
         (199..206).map(|irq| AicInput::new(0, irq)).collect()
     }
@@ -708,9 +710,10 @@ mod tests {
 
     #[test]
     fn mounted_gpio_refusal_keeps_real_aic_delivery_owned() {
-        use crate::platform::apple::{
-            aic::{AIC2_IRQ_CFG, AIC2_TIMESTAMPS, Aic2, Aic2Config},
-            bus::Bus,
+        use {
+            crate::platform::apple::aic::AIC2_IRQ_CFG,
+            crate::platform::apple::aic::AIC2_TIMESTAMPS, crate::platform::apple::aic::Aic2,
+            crate::platform::apple::aic::Aic2Config, stela_contracts::bus::Bus,
         };
         let net = Net::new();
         let input = net.open_drain().unwrap();

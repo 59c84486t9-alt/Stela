@@ -72,7 +72,7 @@ use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use core::ops::Range;
-pub use stela_runtime::boot_bundle::schema::Programmed;
+pub use stela_formats::boot_bundle::schema::Programmed;
 use stela_runtime::machine::ctrr::{CoreLocks, LockRegion, Locked};
 
 pub const AMCC: &str = "/chosen/lock-regs/amcc";

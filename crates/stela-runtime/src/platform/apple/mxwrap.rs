@@ -19,11 +19,15 @@
 //! repeats cold start or resets the mailboxes. CPU idle remains unsupported,
 //! never inferred from FIFO emptiness.
 use super::asc::{Firmware, Lines, Message};
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use super::interrupt::Wire;
-use crate::platform::dma::Port;
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::any::Any;
+use stela_contracts::dma::Port;
+use stela_contracts::interrupt::Wire;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "mxwrap";
 /// Logical offset for ADT `reg[0]`, the AP mailbox view.
@@ -316,7 +320,7 @@ impl MmioDevice for MxWrap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::{AicInput, InterruptLatch};
+    use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch};
 
     #[derive(Default)]
     struct Peer {
@@ -548,7 +552,8 @@ mod tests {
     #[test]
     fn shared_rtkit_management_runs_through_the_original_mailbox_framing() {
         use crate::platform::apple::rtkit::RtKit;
-        let firmware = RtKit::new(Vec::new(), crate::builds::DEFAULT.rtkit_version).unwrap();
+        let firmware =
+            RtKit::new(Vec::new(), stela_formats::builds::DEFAULT.rtkit_version).unwrap();
         let mut wrapper = MxWrap::booted(Box::new(firmware), Lines::default()).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
@@ -730,7 +735,7 @@ mod tests {
 
     #[test]
     fn native_dma_completes_through_ram_before_its_mailbox_reply_is_visible() {
-        use crate::platform::dma::{Physical, tests::Ram};
+        use {stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram};
         struct DmaPeer(bool);
         impl Firmware for DmaPeer {
             fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
@@ -801,7 +806,7 @@ mod tests {
 
     #[test]
     fn committed_dma_messages_survive_faults_masking_halt_and_wrapping_backlog() {
-        use crate::platform::dma::{Physical, tests::Ram};
+        use {stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram};
         #[derive(Default)]
         struct PartialDma {
             committed: bool,

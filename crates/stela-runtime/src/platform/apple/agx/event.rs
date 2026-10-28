@@ -181,8 +181,12 @@ pub(crate) mod tests {
     #[test]
     fn a_real_port_prefix_fault_never_publishes_or_replays_a_published_body() {
         use super::super::uat::PAGE_BYTES;
-        use crate::platform::apple::{bus::Access, interrupt::InterruptLatch};
-        use crate::platform::dma::{DmaError, Iommu, Memory, Port, tests::Ram};
+        use {stela_contracts::bus::Access, stela_contracts::interrupt::InterruptLatch};
+        use {
+            stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,
+            stela_contracts::dma::Memory, stela_contracts::dma::Port,
+            stela_contracts::dma::test_support::Ram,
+        };
 
         struct FaultOnce(Option<u64>);
         impl Iommu for FaultOnce {

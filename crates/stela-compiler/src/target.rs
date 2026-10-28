@@ -1,7 +1,6 @@
 //! Host CPU feature requirements, detection and generated-code target identities.
 
 use alloc::borrow::ToOwned;
-use alloc::format;
 use alloc::string::String;
 
 const CPUID_AVX_HARDWARE: u32 = 1 << 28;
@@ -54,6 +53,8 @@ pub struct HostCpuid {
     pub leaf7_1_eax: u32,
     /// Leaf 7 subleaf 1 EDX.
     pub leaf7_1_edx: u32,
+    /// Leaf 29H subleaf 0 EBX: APX conditional, NDD and NF capabilities.
+    pub leaf29_ebx: u32,
     /// Leaf 8000_0001H ECX.
     pub extended1_ecx: u32,
     /// XCR0, or zero when the OS has not enabled XSAVE ([`CPUID_OSXSAVE`]).
@@ -114,6 +115,7 @@ impl HostCpuid {
             leaf7_edx: leaf7.edx,
             leaf7_1_eax: leaf7_1.eax,
             leaf7_1_edx: leaf7_1.edx,
+            leaf29_ebx: leaf(0x29).ebx,
             extended1_ecx,
             xcr0,
             avx512_on_demand: false,
@@ -143,6 +145,13 @@ impl HostCpuid {
     const fn bmi2(&self) -> bool {
         Self::bit(self.leaf7_ebx, 8)
             && (!matches!(Vendor::from_cpuid(self.vendor), Vendor::Intel) || self.avx())
+    }
+    /// APX EGPRs are available only with XSAVE support and OS-enabled state.
+    const fn apx(&self) -> bool {
+        Self::bit(self.leaf1_ecx, 26)
+            && Self::bit(self.leaf1_ecx, 27)
+            && Self::bit(self.leaf7_1_edx, 21)
+            && self.xcr0 & XCR0_APX_STATE != 0
     }
     /// [`Self::avx512_state`] with AVX-512F.
     const fn avx512f(&self) -> bool {
@@ -202,7 +211,6 @@ macro_rules! features {
     ($($(#[$doc:meta])* $constant:ident, $with:ident, $name:literal, $probe:expr;)*) => {
         /// One optional feature of a [`TargetCpu`], numbered by its bit.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[allow(clippy::upper_case_acronyms)]
         enum Feature {
             $($constant,)*
         }
@@ -212,7 +220,7 @@ macro_rules! features {
             &[$((Feature::$constant, $name, $probe),)*];
 
         // Keep the published feature names and their cache identities.
-        #[allow(non_upper_case_globals)]
+        #[allow(non_upper_case_globals, reason = "Target selectors use the same names as the instruction-set variants they replace.")]
         impl TargetCpu {
             $(
                 $(#[$doc])*
@@ -323,7 +331,12 @@ features! {
     /// REX2 and extended EVEX encodings, with OS-enabled APX state (XCR0
     /// bit 19).
     Apx, with_apx, "+apx", |cpu| {
-        HostCpuid::bit(cpu.leaf7_1_edx, 21) && cpu.xcr0 & XCR0_APX_STATE != 0
+        cpu.apx()
+    };
+    /// APX new conditional instructions, new destinations and flag suppression
+    /// (Intel APX rev. 7, CPUID.29H:EBX[0]), with usable EGPR state.
+    ApxNdd, with_apx_ndd, "+apx-ndd", |cpu| {
+        cpu.apx() && HostCpuid::bit(cpu.leaf29_ebx, 0)
     };
     /// An unaligned load that lies within one cache line is single-copy
     /// atomic: an Intel processor since the P6 family ([`Vendor`]). A 16-byte
@@ -359,7 +372,10 @@ features! {
 const MODES: u64 = 1 << Feature::DataIndependentTiming as u32;
 
 // Keep the published tier names and their cache identities.
-#[allow(non_upper_case_globals)]
+#[allow(
+    non_upper_case_globals,
+    reason = "Tier selectors use the same names as the instruction-set variants they replace."
+)]
 impl TargetCpu {
     pub const Baseline: Self = Self {
         tier: SseTier::Baseline,
@@ -597,8 +613,20 @@ impl PartialOrd for TargetCpu {
     }
 }
 
+/// An invalid target identity, including unknown or incorrectly ordered suffixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetParseError {
+    pub identity: String,
+}
+impl core::fmt::Display for TargetParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "unknown x86-64 CPU target {}", self.identity)
+    }
+}
+impl core::error::Error for TargetParseError {}
+
 impl core::str::FromStr for TargetCpu {
-    type Err = String;
+    type Err = TargetParseError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut target = Self::Baseline;
         let mut tier_name = value;
@@ -615,7 +643,11 @@ impl core::str::FromStr for TargetCpu {
             "ssse3" | "x86_64-baseline+ssse3" => SseTier::Ssse3,
             "sse4.1" | "x86_64-baseline+ssse3+sse4.1" => SseTier::Sse41,
             "sse4.2" | "x86_64-baseline+ssse3+sse4.1+sse4.2" => SseTier::Sse42,
-            _ => return Err(format!("unknown x86-64 CPU target {value}")),
+            _ => {
+                return Err(TargetParseError {
+                    identity: value.to_owned(),
+                });
+            }
         };
         Ok(target)
     }
@@ -715,7 +747,7 @@ mod tests {
              +atomic-load16+cx8+cx16+avx2+avx512f+lzcnt+bmi2+fast-pdep+movbe+gfni\
              +avx512vl+avx512bw+avx512cd+avx512dq+avx512vpopcntdq+avx512bitalg+avx512vnni\
              +avxvnni+avx512bf16+avxneconvert+avx512fp16+vaes+vpclmulqdq+sha512+sm3+sm4\
-             +apx+line-atomic+doit+dit"
+             +apx+apx-ndd+line-atomic+doit+dit"
         );
     }
 
@@ -782,7 +814,12 @@ mod tests {
             "baseline+line-atomic+avx512f",
             "avx512f",
         ] {
-            assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
+            assert_eq!(
+                invalid.parse::<TargetCpu>().unwrap_err(),
+                TargetParseError {
+                    identity: invalid.to_owned()
+                }
+            );
         }
         for (_, name, _) in FEATURES {
             for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
@@ -971,6 +1008,7 @@ mod tests {
         leaf7_edx: u32::MAX,
         leaf7_1_eax: u32::MAX,
         leaf7_1_edx: u32::MAX,
+        leaf29_ebx: u32::MAX,
         extended1_ecx: u32::MAX,
         xcr0: XCR0_AVX_STATE | XCR0_AVX512_STATE | XCR0_APX_STATE,
         avx512_on_demand: false,
@@ -986,6 +1024,42 @@ mod tests {
         }
         assert!(TargetCpu::X86_64_V4 > TargetCpu::X86_64_V3);
         assert!(TargetCpu::X86_64_V3 > TargetCpu::X86_64_V2);
+    }
+
+    #[test]
+    fn apx_destinations_require_the_separate_cpuid_bit() {
+        let foundation = TargetCpu::from_cpuid(&HostCpuid {
+            leaf29_ebx: 0,
+            ..RICH
+        });
+        assert!(foundation.supports(TargetCpu::Apx));
+        assert!(!foundation.supports(TargetCpu::ApxNdd));
+        let full = TargetCpu::from_cpuid(&RICH);
+        assert!(full.supports(TargetCpu::Apx.with_apx_ndd()));
+        assert!(full.id().contains("+apx+apx-ndd"));
+        assert_eq!(full.id().parse::<TargetCpu>().unwrap(), full);
+        for missing in [26, 27] {
+            let disabled = TargetCpu::from_cpuid(&HostCpuid {
+                leaf1_ecx: RICH.leaf1_ecx & !(1 << missing),
+                ..RICH
+            });
+            assert!(!disabled.supports(TargetCpu::Apx));
+            assert!(!disabled.supports(TargetCpu::ApxNdd));
+        }
+        for disabled in [
+            HostCpuid {
+                leaf7_1_edx: 0,
+                ..RICH
+            },
+            HostCpuid {
+                xcr0: RICH.xcr0 & !XCR0_APX_STATE,
+                ..RICH
+            },
+        ] {
+            let disabled = TargetCpu::from_cpuid(&disabled);
+            assert!(!disabled.supports(TargetCpu::Apx));
+            assert!(!disabled.supports(TargetCpu::ApxNdd));
+        }
     }
 
     #[test]

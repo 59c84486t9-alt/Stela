@@ -22,7 +22,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use stela_runtime::builds;
+use stela_formats::builds;
 
 /// The setup USB's one unmounted partition besides its EFI partition: a
 /// raw partition, which becomes the Mac's internal SSD. `None` when the USB

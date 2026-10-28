@@ -137,8 +137,8 @@ impl CheckedPlan {
                     | CheckedMemoryProfile::SpAlignmentDisabled
             )
         {
-            return Err(CompileError(
-                "shared system memory specialization is unqualified".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::UnqualifiedSharedMemoryProfile,
             ));
         }
         if let Some((_, terminal)) = terminal {
@@ -166,8 +166,8 @@ impl CheckedPlan {
                 | super::Terminator::ThreadRegister(_)
                 | super::Terminator::System(_)
                 | super::Terminator::Amx(_) => {
-                    return Err(CompileError(
-                        "terminal service is not admitted by checked GPR memory profile".into(),
+                    return Err(CompileError::new(
+                        crate::CompileErrorKind::UnadmittedMemoryTerminal,
                     ));
                 }
             }
@@ -178,7 +178,9 @@ impl CheckedPlan {
             let operation = CheckedOperation::new(instruction.clone(), profile)?;
             requirements = requirements
                 .merge(operation.requirements())
-                .ok_or_else(|| CompileError("incompatible checked memory requirements".into()))?;
+                .ok_or_else(|| {
+                    CompileError::new(crate::CompileErrorKind::IncompatibleMemoryRequirements)
+                })?;
             decoded.push((instruction.pc, operation));
         }
         Ok(Self {

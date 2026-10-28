@@ -350,11 +350,11 @@ impl HostedBench {
                 "stela": stelas.iter().map(|(build, path)| json!({
                     "build": build,
                     "path": path,
-                    "sha256": std::fs::read(path).map(|bytes| stela_runtime::sha256(&bytes)).ok(),
+                    "sha256": std::fs::read(path).map(|bytes| stela_formats::sha256(&bytes)).ok(),
                 })).collect::<Vec<_>>(),
                 "programs": programs.iter().map(|program| json!({
                     "name": program.name,
-                    "source_sha256": stela_runtime::sha256(program.source.as_bytes()),
+                    "source_sha256": stela_formats::sha256(program.source.as_bytes()),
                 })).collect::<Vec<_>>(),
                 "checksums": checksums,
                 "summary": summary,
@@ -403,8 +403,8 @@ impl HostedBench {
             &work.join("command.json"),
             &json!({
                 "command": format!("{command:?}"), "binary": binary,
-                "binary_sha256": stela_runtime::sha256(&std::fs::read(binary)?),
-                "stela_sha256": variant.stela.as_ref().map(std::fs::read).transpose()?.map(|bytes| stela_runtime::sha256(&bytes)),
+                "binary_sha256": stela_formats::sha256(&std::fs::read(binary)?),
+                "stela_sha256": variant.stela.as_ref().map(std::fs::read).transpose()?.map(|bytes| stela_formats::sha256(&bytes)),
             }),
         )?;
         let start = Instant::now();
@@ -420,8 +420,8 @@ impl HostedBench {
                 "status": status.as_ref().map(ToString::to_string),
                 "success": status.as_ref().is_some_and(std::process::ExitStatus::success),
                 "timeout": status.is_none(), "wall_seconds": wall,
-                "stdout_sha256": stela_runtime::sha256(output.as_bytes()),
-                "stderr_sha256": stela_runtime::sha256(&std::fs::read(&stderr)?),
+                "stdout_sha256": stela_formats::sha256(output.as_bytes()),
+                "stderr_sha256": stela_formats::sha256(&std::fs::read(&stderr)?),
             }),
         )?;
         let Some(status) = status else {
@@ -548,9 +548,9 @@ fn build_program(
                 &directory.join(format!("build-{}.json", variant.arch)),
                 &json!({
                     "command": format!("{command:?}"), "status": status.to_string(),
-                    "source_sha256": stela_runtime::sha256(program.source.as_bytes()),
-                    "header_sha256": stela_runtime::sha256(HEADER.1.as_bytes()),
-                    "binary_sha256": if status.success() { Some(stela_runtime::sha256(&std::fs::read(&binary)?)) } else { None },
+                    "source_sha256": stela_formats::sha256(program.source.as_bytes()),
+                    "header_sha256": stela_formats::sha256(HEADER.1.as_bytes()),
+                    "binary_sha256": if status.success() { Some(stela_formats::sha256(&std::fs::read(&binary)?)) } else { None },
                 }),
             )?;
             ensure!(

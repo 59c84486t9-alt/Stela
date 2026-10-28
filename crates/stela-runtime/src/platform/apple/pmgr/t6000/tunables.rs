@@ -2330,14 +2330,11 @@ mod tests {
 #[cfg(all(test, feature = "std"))]
 mod original {
     use super::*;
-    use crate::{
-        machine::adt::Node,
-        platform::apple::{
-            bridge::Bridge,
-            bus::{MmioDevice, Width},
-        },
-    };
     use sha2::{Digest, Sha256};
+    use {
+        crate::platform::apple::bridge::Bridge, stela_contracts::adt::Node,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+    };
 
     fn word(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
@@ -2688,8 +2685,8 @@ mod original {
             }
             // No metadata-driven default word can satisfy a native RMW.
             let mut model = model;
-            let mut irq = crate::platform::apple::interrupt::InterruptLatch::new();
-            let mut access = crate::platform::apple::bus::Access::new(0, 0, &mut irq);
+            let mut irq = stela_contracts::interrupt::InterruptLatch::new();
+            let mut access = stela_contracts::bus::Access::new(0, 0, &mut irq);
             for row in profile.program(id).unwrap() {
                 assert!(
                     model

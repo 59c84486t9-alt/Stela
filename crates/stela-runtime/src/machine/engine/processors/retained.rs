@@ -1,8 +1,8 @@
 //! Retained CPU participants, independent of a board's PMGR record resolver.
 //! A caller must supply the positively qualified physical domain and exact PE
 //! membership. Neither record names, byte 2 nor MPIDR core-type bits select it.
-use crate::platform::apple::bus::LifecycleState;
 use alloc::{collections::BTreeMap, vec, vec::Vec};
+use stela_contracts::bus::LifecycleState;
 
 /// An explicitly qualified CPU owner. A physical cluster can mix core types.
 #[derive(Debug, Clone, PartialEq, Eq)]

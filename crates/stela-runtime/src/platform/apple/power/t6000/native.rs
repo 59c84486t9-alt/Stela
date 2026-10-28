@@ -8,11 +8,17 @@
 //! captured Apple microstate. Every view shares the parent controller's lifecycle,
 //! request prefix and actual byte storage; there is no parallel SRAM image.
 use super::{Controller, RequestKind};
-use crate::platform::apple::{
-    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    pmgr::t6000::{CODE_BASE, PRE_ACTIVATION_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE},
-};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
+use {
+    crate::platform::apple::pmgr::t6000::CODE_BASE,
+    crate::platform::apple::pmgr::t6000::PRE_ACTIVATION_BASE,
+    crate::platform::apple::pmgr::t6000::SRAM_BASE,
+    crate::platform::apple::pmgr::t6000::SRAM_LIMIT,
+    crate::platform::apple::pmgr::t6000::TABLE_BASE, stela_contracts::bus::Access,
+    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 pub mod effects;
 pub mod engine;
@@ -555,7 +561,7 @@ impl Sram {
         native.write_bytes(offset, input)
     }
 }
-impl crate::platform::dma::Memory for Sram {
+impl stela_contracts::dma::Memory for Sram {
     fn read(&mut self, address: u64, output: &mut [u8]) -> bool {
         self.read_checked(address, output).is_ok()
     }
@@ -670,15 +676,15 @@ mod tests {
     use super::super::{Bank, Instance, Observation as RequestObservation};
     use super::*;
     use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
-    use crate::platform::{
-        apple::{
-            bus::{Bus, DeviceId},
-            interrupt::InterruptLatch,
-            pmgr::install::{Action, NativeImage, Outcome, t6000},
-        },
-        dma::Memory,
-    };
     use alloc::boxed::Box;
+    use {
+        crate::platform::apple::pmgr::install::Action,
+        crate::platform::apple::pmgr::install::NativeImage,
+        crate::platform::apple::pmgr::install::Outcome,
+        crate::platform::apple::pmgr::install::t6000, stela_contracts::bus::Bus,
+        stela_contracts::bus::DeviceId, stela_contracts::dma::Memory,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,

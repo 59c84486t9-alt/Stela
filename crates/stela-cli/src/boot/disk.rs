@@ -7,8 +7,8 @@ use super::{DiskRecovery, Prepare};
 use crate::apfs::open_image;
 use anyhow::{Result, ensure};
 use std::path::Path;
+use stela_formats::apfs;
 use stela_loader::{boot_selection::BootVolume, installed, recovery, upgrade};
-use stela_runtime::apfs;
 
 impl Prepare {
     pub(super) fn run_disk(&self, path: &Path) -> Result<()> {

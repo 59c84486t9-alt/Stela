@@ -85,15 +85,16 @@ mod tests {
         amcc::tests::{ram, source},
         tests::{configuration, descriptor},
     };
-    use crate::platform::apple::{
-        interrupt::InterruptLatch,
-        pmp::native::cache::{
-            policy::Inputs,
-            publisher::{Bank, Configuration, Publisher},
-        },
-        ptd::{Range, transport::notifications::LocalNotifications},
-    };
     use alloc::{vec, vec::Vec};
+    use {
+        crate::platform::apple::pmp::native::cache::policy::Inputs,
+        crate::platform::apple::pmp::native::cache::publisher::Bank,
+        crate::platform::apple::pmp::native::cache::publisher::Configuration,
+        crate::platform::apple::pmp::native::cache::publisher::Publisher,
+        crate::platform::apple::ptd::Range,
+        crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,
@@ -529,15 +530,15 @@ mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
     fn original_table_and_configuration_publish_through_actual_component_owners() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let pmp = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         let dt = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&pmp),
+            stela_formats::sha256(&pmp),
             "b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c"
         );
         assert_eq!(
-            crate::sha256(&dt),
+            stela_formats::sha256(&dt),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         for (start, end, hash) in [
@@ -557,7 +558,7 @@ mod tests {
                 "1c2780da3e5a1fdc46fb9bbbae82b5cd3721e8461bb5988a30a536dffcaac18f",
             ),
         ] {
-            assert_eq!(crate::sha256(&pmp[start..end]), hash);
+            assert_eq!(stela_formats::sha256(&pmp[start..end]), hash);
         }
         // Defaults tail-calls the actual publisher before allocation.
         // Its full source window is also pinned by the pure policy test.
@@ -576,7 +577,7 @@ mod tests {
             .property("mcache-stream")
             .unwrap();
         assert_eq!(
-            crate::sha256(raw),
+            stela_formats::sha256(raw),
             "1daa6222994ef3c8b22c87d2f4a3c3b2f224ec486093c42f8953a1544f1b8cab"
         );
         let word = |offset| u32::from_le_bytes(pmp[offset..offset + 4].try_into().unwrap());

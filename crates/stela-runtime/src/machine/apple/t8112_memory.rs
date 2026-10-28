@@ -2,8 +2,8 @@
 pub mod cold;
 
 use super::{AppleDevices, memory_resources::t8112};
-use crate::platform::apple::bus::Width;
 use alloc::{boxed::Box, format, string::String, sync::Arc};
+use stela_contracts::bus::Width;
 
 impl AppleDevices {
     /// Install the actual component owners together, retaining separate device
@@ -74,16 +74,14 @@ impl AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        machine::Devices,
-        platform::apple::{
-            bus::{Access, LifecycleState, MmioDevice},
-            interrupt::InterruptLatch,
-        },
-    };
     use t8112::{
         amcc::tests::{frontend, ram, source},
         cache::{EmptyResource, SoftwareImage, ZeroWayConfiguration},
+    };
+    use {
+        crate::machine::Devices, stela_contracts::bus::Access,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+        stela_contracts::interrupt::InterruptLatch,
     };
 
     fn components() -> (t8112::Prepared, EmptyResource) {

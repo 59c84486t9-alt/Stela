@@ -248,9 +248,9 @@ mod tests {
         let prepared = prepare(&image(0x4001))?;
         let mut complete = config_policy(prepared.plan());
         let staged = prepared.stage(0x800000, 0x3000)?;
-        let hash = stela_runtime::sha256(staged.bytes());
+        let hash = stela_formats::sha256(staged.bytes());
         let fields = staged.heap_fields(&policy(BankState::Allocate), mapping(0x8000))?;
-        assert_eq!(stela_runtime::sha256(staged.bytes()), hash);
+        assert_eq!(stela_formats::sha256(staged.bytes()), hash);
         for field in [fields.base, fields.size] {
             let tag = field.tag;
             *complete.fields.iter_mut().find(|f| f.tag == tag).unwrap() = field;
@@ -307,7 +307,7 @@ mod tests {
     fn original_t6000_heap_policy_coordinates() -> Result<()> {
         let b = std::fs::read(std::env::var("STELA_TEST_J314S_IBOOT")?)?;
         assert_eq!(
-            stela_runtime::sha256(&b),
+            stela_formats::sha256(&b),
             "20dfa3a5e6d4e4b2844c7558e6d4f8ab74397d11eae63312f00a559cf9612b03"
         );
         let q = |at| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());

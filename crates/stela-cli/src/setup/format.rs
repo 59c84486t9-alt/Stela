@@ -246,7 +246,7 @@ fn volume_label(label: &str) -> Result<[u8; 11]> {
 mod tests {
     use super::*;
     use stela_drivers::block::RamDisk;
-    use stela_runtime::{payload::ReadAt, pc::fat32::Fat32};
+    use {stela_formats::payload::ReadAt, stela_runtime::pc::fat32::Fat32};
 
     /// A disk holding the layout's writes over bytes that are not zero.
     fn image(bytes: u64, block_size: u32, layout: &Layout) -> RamDisk {

@@ -29,12 +29,21 @@ use crate::root_selection;
 use crate::soc_variant;
 use crate::trust_cache;
 use anyhow::{Context, Result, bail, ensure};
-use stela_runtime::machine::{ctrr, identification, soc, tag_storage};
-use stela_runtime::sha256;
+use stela_contracts::tag_storage;
+use stela_formats::sha256;
+use stela_runtime::machine::{ctrr, identification, soc};
 
-pub use stela_runtime::boot_bundle::schema::{
-    BootCpu, BootCpuSelection, Encoding, Entry, File, Image, Manifest, Options, OverlayProperty,
-    Patch, PatchSource, PlaceholderDecision, Region, SCHEMA_VERSION, Source, Target,
+pub use {
+    stela_formats::boot_bundle::schema::BootCpu,
+    stela_formats::boot_bundle::schema::BootCpuSelection,
+    stela_formats::boot_bundle::schema::Encoding, stela_formats::boot_bundle::schema::Entry,
+    stela_formats::boot_bundle::schema::File, stela_formats::boot_bundle::schema::Image,
+    stela_formats::boot_bundle::schema::Manifest, stela_formats::boot_bundle::schema::Options,
+    stela_formats::boot_bundle::schema::OverlayProperty, stela_formats::boot_bundle::schema::Patch,
+    stela_formats::boot_bundle::schema::PatchSource,
+    stela_formats::boot_bundle::schema::PlaceholderDecision,
+    stela_formats::boot_bundle::schema::Region, stela_formats::boot_bundle::schema::SCHEMA_VERSION,
+    stela_formats::boot_bundle::schema::Source, stela_formats::boot_bundle::schema::Target,
 };
 
 /// The revision of the content [`prepare`] writes within its schema; a
@@ -413,7 +422,7 @@ fn page_round(bytes: u64) -> u64 {
 /// the restore host delivers to `seputil` and the largest form `seputil`
 /// can pass to `AppleSEPManager::setFirmwareBytes`.
 fn sep_firmware_region_bytes(image: &[u8]) -> u64 {
-    stela_runtime::img4::container_bytes(image.len()) as u64
+    stela_formats::img4::container_bytes(image.len()) as u64
 }
 
 fn range_value(base: u64, length: u64) -> Vec<u8> {
@@ -567,7 +576,7 @@ pub fn prepare_owned(inputs: &Inputs, ramdisk: OwnedRamdisk, options: &Options) 
 }
 
 fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> Result<Bundle> {
-    stela_runtime::builds::find(&inputs.target.product_build)?;
+    stela_formats::builds::find(&inputs.target.product_build)?;
     let ramdisk_bytes = owned
         .as_ref()
         .map(|ramdisk| ramdisk.bytes.len())
@@ -1436,7 +1445,7 @@ fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<Source> {
 /// (`stela_runtime::machine::tag_storage`), which must lie above every
 /// placed region.
 fn tag_offset(
-    chip: Option<stela_runtime::machine::Chip>,
+    chip: Option<stela_contracts::Chip>,
     options: &Options,
     dram_end: u64,
     top_of_kernel_data: u64,
@@ -2787,13 +2796,13 @@ mod tests {
         .unwrap();
         for error in [borrowed, owned] {
             let error = error
-                .downcast_ref::<stela_runtime::builds::Unsupported>()
+                .downcast_ref::<stela_formats::builds::Unsupported>()
                 .unwrap();
             assert_eq!(error.build, "unsupported-build");
             assert!(
                 error
                     .supported
-                    .contains(&stela_runtime::builds::DEFAULT.build)
+                    .contains(&stela_formats::builds::DEFAULT.build)
             );
         }
     }
@@ -3186,7 +3195,7 @@ mod tests {
         // reproduces the layout.
         assert_eq!(manifest.revision, REVISION);
         let json = serde_json::to_vec(manifest)?;
-        let consumed = stela_runtime::boot_bundle::Manifest::parse(&json)?;
+        let consumed = stela_formats::boot_bundle::Manifest::parse(&json)?;
         let mut changed_source = file(ORIGINAL_DEVICE_TREE_FILE).clone();
         changed_source[0] ^= 1;
         assert!(
@@ -3203,7 +3212,7 @@ mod tests {
         let verified = consumed.verify(&|name| Some(file(name).as_slice()))?;
         let span = (manifest.top_of_kernel_data - options.dram_base) as usize;
         let mut ram = vec![0u8; span];
-        let machine = stela_runtime::boot_bundle::Machine {
+        let machine = stela_formats::boot_bundle::Machine {
             dram_base: options.dram_base,
             ram_bytes: span as u64,
             dram_bytes: span as u64,
@@ -3277,7 +3286,7 @@ mod tests {
         // The policy enables kernel CTRR, so CTRR-D is locked too.
         assert_eq!(core_locks.locked.len(), 6);
         let consumed =
-            stela_runtime::boot_bundle::Manifest::parse(&serde_json::to_vec(m4_manifest)?)?;
+            stela_formats::boot_bundle::Manifest::parse(&serde_json::to_vec(m4_manifest)?)?;
         assert_eq!(consumed.core_locks.as_ref(), Some(core_locks));
         assert_eq!(core_locks.tag_offset, 0);
         // An M5 bundle also locks TAG_OFFSET_EL2 at the top of the managed
@@ -3319,7 +3328,7 @@ mod tests {
             .unwrap();
         assert_eq!(sepfw.bytes, 0);
         assert_eq!(sepfw.memory_bytes, 4 * PAGE);
-        assert!(sepfw.memory_bytes >= stela_runtime::img4::container(&sep).len() as u64);
+        assert!(sepfw.memory_bytes >= stela_formats::img4::container(&sep).len() as u64);
         let file = |name: &str| &staged.files.iter().find(|(n, _)| n == name).unwrap().1;
         assert_eq!(file(SEP_FILE), &sep);
         let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;

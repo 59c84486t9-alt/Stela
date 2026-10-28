@@ -162,8 +162,7 @@ pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, tar
             operand.predicate,
             chunk,
             element,
-            ACTIVE,
-            PREDICATE_SCRATCH,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, PREDICATE_SCRATCH),
             length,
             target,
         );

@@ -2,12 +2,12 @@
 //! Original t6000pmp file91b4..9f04, c750..ce68 and9f04..a50c order the
 //! effects below. Device-specific effects require actual owned resources;
 //! neither this coordinator nor the ping endpoint supplies their settlement.
-use super::super::{
-    bus::{Access, MmioError},
-    ptd::{Range, transport::notifications::LocalNotifications},
-};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use {
+    super::super::ptd::Range, super::super::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access, stela_contracts::bus::MmioError,
+};
 
 pub mod cache;
 pub mod counters;
@@ -654,12 +654,12 @@ impl<B> Drop for Owner<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Lifecycle, LifecycleState, MmioDevice, Width},
-        interrupt::InterruptLatch,
-        ptd::Ptd,
-    };
     use alloc::format;
+    use {
+        crate::platform::apple::ptd::Ptd, stela_contracts::bus::Lifecycle,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::Width, stela_contracts::interrupt::InterruptLatch,
+    };
 
     const IDS: [u32; 15] = [1, 2, 3, 4, 5, 6, 7, 0, 0, 9, 10, 11, 12, 13, 0];
     const PACKETS: Packets = Packets([

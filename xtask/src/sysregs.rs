@@ -616,6 +616,14 @@ impl Sysregs {
             .status()?;
         ensure!(status.success(), "rustfmt failed on {}", access::GENERATED);
         println!("wrote {}", access::GENERATED);
+        let features = root().join(access::FEATURES);
+        fs::write(&features, access::generate_features(&profiles)?)?;
+        let status = Command::new("rustfmt")
+            .args(["--edition", "2024"])
+            .arg(&features)
+            .status()?;
+        ensure!(status.success(), "rustfmt failed on {}", access::FEATURES);
+        println!("wrote {}", access::FEATURES);
         Ok(())
     }
 }
@@ -630,7 +638,7 @@ fn extract(
 ) -> Result<()> {
     let data = fs::read(archive).with_context(|| format!("cannot read {}", archive.display()))?;
     ensure!(
-        data.len() == bytes && stela_runtime::sha256(&data) == sha256,
+        data.len() == bytes && stela_formats::sha256(&data) == sha256,
         "{} is not the pinned {RELEASE} download ({uri})",
         archive.display()
     );

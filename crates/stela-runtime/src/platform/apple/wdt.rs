@@ -43,8 +43,12 @@
 //! which the driver sets to its value under the record's mask on CPU start
 //! events (`writeCoreTriggerConfigurationStateChange`, 0x1ca5cf8). Bits
 //! outside the mask refuse; like the configuration, it acts only on expiry.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use super::interrupt::{AicInput, Wire};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
+use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire};
 
 const NAME: &str = "apple-wdt";
 
@@ -366,7 +370,7 @@ impl MmioDevice for CoreTrigger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     const WD1: u64 = STRIDE;
     const IRQ: AicInput = AicInput::new(0, 379);

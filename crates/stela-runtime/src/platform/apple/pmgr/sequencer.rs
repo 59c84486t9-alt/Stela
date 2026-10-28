@@ -11,8 +11,8 @@
 //! checked RAM/MMIO boundary, then finish with its typed effect outcome. Only a
 //! positively proven no-effect refusal permits retry. Uncertain or partial
 //! effects quarantine the cursor; earlier committed writes remain recorded.
-use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
+use stela_contracts::bus::Width;
 
 pub mod control;
 pub mod copy;
@@ -557,13 +557,16 @@ fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::bus::{Access, Bus, Direction, MmioDevice, MmioError};
-    use crate::platform::apple::interrupt::InterruptLatch;
     use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use crate::platform::apple::pmgr::{ACTIVE, Pmgr, PowerState};
-    use crate::platform::dma::{Memory, tests::Ram};
     use alloc::boxed::Box;
     use core::cell::Cell;
+    use stela_contracts::interrupt::InterruptLatch;
+    use {
+        stela_contracts::bus::Access, stela_contracts::bus::Bus, stela_contracts::bus::Direction,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
+    };
+    use {stela_contracts::dma::Memory, stela_contracts::dma::test_support::Ram};
 
     const SRAM: u64 = 0x23df05200;
 
@@ -786,11 +789,11 @@ mod tests {
                 if result {
                     RouteOutcome::Committed
                 } else {
-                    RouteOutcome::NoEffect(crate::platform::dma::DmaError::Memory)
+                    RouteOutcome::NoEffect(stela_contracts::dma::DmaError::Memory)
                 }
             ),
             Err(FinishError::NoEffect(
-                crate::platform::dma::DmaError::Memory
+                stela_contracts::dma::DmaError::Memory
             ))
         );
         assert_eq!(cursor.committed_writes(), 0);

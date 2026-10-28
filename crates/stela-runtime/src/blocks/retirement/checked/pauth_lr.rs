@@ -83,8 +83,14 @@ pub(super) fn service<'a>(
     .map_err(|error| anyhow::anyhow!("LR service: {error:?}"))?;
     if let Some(key) = instruction.operation.required_key() {
         let (selected, actual) = match key {
-            Key::Ia => (pauth::lr_context::InstructionKey::A, pauth::Key::Ia),
-            Key::Ib => (pauth::lr_context::InstructionKey::B, pauth::Key::Ib),
+            Key::Ia => (
+                pauth::lr_context::InstructionKey::A,
+                stela_contracts::pauth::Key::Ia,
+            ),
+            Key::Ib => (
+                pauth::lr_context::InstructionKey::B,
+                stela_contracts::pauth::Key::Ib,
+            ),
             _ => anyhow::bail!("LR service requires an instruction key"),
         };
         if service.key_selection(selected) == KeySelection::UseKey {

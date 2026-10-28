@@ -21,8 +21,8 @@ use super::{
     rom::Rom,
     state, xart,
 };
-use crate::platform::dma::{DmaError, Port};
 use alloc::{boxed::Box, vec::Vec};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 /// `_bootAction` 0x2d72d68 accepts opcode 106 ("SEP accepted IMG4") and moves
 /// the AP BootStatus to 101. SEPROM replies with it once Stela's policy
@@ -111,9 +111,9 @@ impl SepFirmware {
     /// Measure the container, bind its payload type to the request, and record
     /// any manifest signature as evidence. Structural or type errors refuse.
     fn measure(&self, snapshot: &image::Snapshot, parameter: u8) -> Result<Evidence, &'static str> {
-        let parts = crate::img4::parse(snapshot.bytes())
+        let parts = stela_formats::img4::parse(snapshot.bytes())
             .map_err(|_| "SEP firmware Image4 structure is malformed")?;
-        let kind = crate::img4::payload_type(parts.payload)
+        let kind = stela_formats::img4::payload_type(parts.payload)
             .map_err(|_| "SEP firmware payload type is malformed")?;
         let expected = if parameter == FIRMWARE_SEPI {
             *b"sepi"
@@ -126,7 +126,8 @@ impl SepFirmware {
         let manifest = parts
             .manifest
             .map(|m| signature::inspect(parts.payload, m))
-            .transpose()?;
+            .transpose()
+            .map_err(|error| error.reason())?;
         Ok(Evidence {
             measurement: snapshot.measurement.clone(),
             manifest,
@@ -242,9 +243,9 @@ impl Firmware for SepFirmware {
 mod tests {
     use super::super::observe;
     use super::*;
-    use crate::platform::{
-        apple::{bus::Access, interrupt::InterruptLatch},
-        dma::{Iommu, Memory, tests::Ram},
+    use {
+        stela_contracts::bus::Access, stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
     };
 
     struct Identity {
@@ -377,7 +378,7 @@ mod tests {
             state::Location::Volatile,
         );
         booted(&mut fw);
-        let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+        let image = stela_formats::img4::test_support::im4p(b"sepi", b"stela-sepos");
         let acks = deliver(&mut fw, &image, false).unwrap();
         assert_eq!(acks.len(), 1);
         assert_eq!(Frame::from_mailbox(acks[0]).unwrap().opcode, IMAGE_ACCEPTED);
@@ -407,7 +408,12 @@ mod tests {
                 state::Location::Volatile,
             );
             booted(&mut fw);
-            deliver(&mut fw, &crate::img4::tests::im4p(b"sepi", b"x"), false).unwrap();
+            deliver(
+                &mut fw,
+                &stela_formats::img4::test_support::im4p(b"sepi", b"x"),
+                false,
+            )
+            .unwrap();
             map_shared(&mut fw);
             // Unknown commands refuse before DMA; recognized keybag codecs must
             // validate their actual buffers before refusing unresolved semantics.
@@ -446,7 +452,7 @@ mod tests {
         );
         booted(&mut fw);
         let (payload, manifest) = signature::tests::inputs();
-        let image = crate::img4::compose(&payload, &manifest);
+        let image = stela_formats::img4::compose(&payload, &manifest);
         let acks = deliver(&mut fw, &image, false).unwrap();
         assert_eq!(acks.len(), 1);
         assert!(fw.evidence().unwrap().manifest.is_some());
@@ -454,8 +460,8 @@ mod tests {
 
     #[test]
     fn malformed_payloads_and_dma_faults_refuse_without_a_boot_ack() {
-        let rsep = crate::img4::tests::im4p(b"rsep", b"x");
-        let sepi = crate::img4::tests::im4p(b"sepi", b"x");
+        let rsep = stela_formats::img4::test_support::im4p(b"rsep", b"x");
+        let sepi = stela_formats::img4::test_support::im4p(b"sepi", b"x");
         for (image, fault, refusal) in [
             (
                 b"\x30\x06\x16\x04IM4P".as_slice(),
@@ -503,7 +509,7 @@ mod tests {
             state::Location::Volatile,
         );
         booted(&mut fw);
-        let image = crate::img4::tests::im4p(b"sepi", b"native SEP fixture");
+        let image = stela_formats::img4::test_support::im4p(b"sepi", b"native SEP fixture");
         assert_eq!(deliver(&mut fw, &image, false), Err("entropy unavailable"));
         assert!(fw.dma_pending());
         assert!(fw.evidence().is_none());
@@ -535,7 +541,7 @@ mod tests {
         booted(&mut fw);
         deliver(
             &mut fw,
-            &crate::img4::tests::im4p(b"sepi", b"native SEP fixture"),
+            &stela_formats::img4::test_support::im4p(b"sepi", b"native SEP fixture"),
             false,
         )
         .unwrap();
@@ -597,7 +603,7 @@ mod tests {
         assert_eq!((rom.tag, rom.opcode, rom.data), (2, ROM_FAILURE, 0x30));
         assert_eq!(reply(&mut fw, request(boot_policy::ID, 2, 0)), None);
 
-        let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+        let image = stela_formats::img4::test_support::im4p(b"sepi", b"stela-sepos");
         deliver(&mut fw, &image, false).unwrap();
         map_shared(&mut fw);
         assert!(fw.booted());

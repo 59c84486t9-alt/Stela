@@ -78,7 +78,7 @@ impl PowerStates {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
+    use stela_contracts::adt::encode;
 
     fn fixture() -> Vec<u8> {
         let mut records = [[0u8; PMGR_DEVICE]; 4];
@@ -316,10 +316,10 @@ mod tests {
                     .join(alloc::format!("kernelcache.release.{family}")),
             )
             .unwrap();
-            assert_eq!(crate::sha256(&bytes), expected);
+            assert_eq!(stela_formats::sha256(&bytes), expected);
             let helper = &bytes[offset..offset + 156];
             assert_eq!(
-                crate::sha256(helper),
+                stela_formats::sha256(helper),
                 if family == "mac18g" {
                     "a25fd16e0a9ce011af7761f805a2f7e165dc1090eb2cf81197601749be1ab24b"
                 } else {

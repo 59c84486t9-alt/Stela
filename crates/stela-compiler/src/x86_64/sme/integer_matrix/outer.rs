@@ -121,7 +121,13 @@ fn stage_vector(
         load_z_chunk(code, vector, chunk, RESULT, length, target);
         if let Some(predicate) = predicate {
             read_predicate_mask(
-                code, predicate, chunk, source, TEMP, SCRATCH, length, target,
+                code,
+                predicate,
+                chunk,
+                source,
+                crate::x86_64::scalable::MaskRegisters::new(TEMP, SCRATCH),
+                length,
+                target,
             );
             Host::And.register(code, RESULT, TEMP, target);
         }
@@ -398,8 +404,7 @@ pub(crate) fn emit_outer(
                 operand.predicate_m,
                 chunk,
                 operand.accumulator_size,
-                TEMP,
-                SCRATCH,
+                crate::x86_64::scalable::MaskRegisters::new(TEMP, SCRATCH),
                 length,
                 target,
             );

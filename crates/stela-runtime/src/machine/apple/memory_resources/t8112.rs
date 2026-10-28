@@ -9,25 +9,29 @@
 //! native PMP services, DVFS completion or an AP AIC wire. The PMP's PTD duties
 //! the drivers wait for are modeled behaviorally (`pmp::duties`).
 use super::dcs::NativeDcs;
+use crate::machine::soc::MemoryCache;
+use crate::memory::CanonicalRamService;
+use crate::memory::RegisteredSystemRam;
+use crate::platform::apple::dcs::native::ChannelProgress;
 pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
-use crate::{
-    machine::soc::MemoryCache,
-    memory::{CanonicalRamService, RegisteredSystemRam},
-    platform::apple::{
-        bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-        dcs::native::ChannelProgress,
-        pmp::duties::Duties,
-        ptd::{
-            self, Geometry, Ptd,
-            transport::{
-                IRQ_STATUS,
-                notifications::{LocalNotifications, NativeProfile},
-                status,
-            },
-        },
-    },
-};
+use crate::platform::apple::pmp::duties::Duties;
+use crate::platform::apple::ptd;
+use crate::platform::apple::ptd::Geometry;
+use crate::platform::apple::ptd::Ptd;
+#[cfg(test)]
+use crate::platform::apple::ptd::transport::IRQ_STATUS;
+use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
+use crate::platform::apple::ptd::transport::notifications::NativeProfile;
+use crate::platform::apple::ptd::transport::status;
 use alloc::{sync::Arc, vec::Vec};
+use stela_contracts::bus::Access;
+use stela_contracts::bus::Direction;
+use stela_contracts::bus::Lifecycle;
+use stela_contracts::bus::LifecycleState;
+use stela_contracts::bus::MmioDevice;
+use stela_contracts::bus::MmioError;
+use stela_contracts::bus::Width;
+use stela_contracts::bus::refuse;
 
 const DCS_BYTES: u64 = CHANNEL_STRIDE * CHANNELS as u64;
 const PTD_OFFSET: u64 = DCS_BYTES;
@@ -144,26 +148,14 @@ impl Prepared {
         ]
     }
     pub(super) fn publication_binding(&self) -> (u64, u64, u64) {
-        (self.descriptor.ptd.physical, ptd::PTD_BYTES, PTD_OFFSET)
+        self.publication_layout().binding()
     }
     pub(super) fn display_publication_view(
         &self,
         physical: u64,
         bytes: u64,
     ) -> Result<(u64, u64, u64), &'static str> {
-        let end = physical
-            .checked_add(bytes)
-            .ok_or("display PTD extent overflows")?;
-        let bank_end = self.descriptor.ptd.physical + ptd::PTD_BYTES;
-        if physical != self.descriptor.ptd_updates.0
-            || bytes < self.descriptor.ptd_updates.1
-            || end > bank_end
-        {
-            return Err(
-                "display PTD view must retain the actual complete update alias within its bank",
-            );
-        }
-        Ok((physical, bytes, PTD_OFFSET + ptd::UPDATE_OFFSET))
+        self.publication_layout().display_view(physical, bytes)
     }
     pub fn requires_ram_read(&self, offset: u64, width: Width) -> bool {
         offset < DCS_BYTES && self.dcs.requires_ram_access(offset, width)
@@ -201,27 +193,21 @@ impl Prepared {
         unsafe { self.dcs.write_ram_drain(offset, width, value, now, memory) }
     }
     fn paired_entry(&self, offset: u64, bytes: u8) -> Option<u32> {
-        let within = offset.checked_sub(PTD_OFFSET)?;
-        (bytes == 8 && within.is_multiple_of(16))
-            .then_some(within / 16)
-            .filter(|&entry| entry < u64::from(PROFILE.entries()))
-            .map(|entry| entry as u32)
+        self.publication_layout().entry(offset, bytes)
     }
     fn status_pair(&self, offset: u64, bytes: u8) -> Option<(u64, status::Width)> {
-        let offset = offset.checked_sub(PTD_OFFSET)?;
-        let width = match bytes {
-            4 => status::Width::Double,
-            8 => status::Width::Quad,
-            _ => return None,
-        };
-        let end = IRQ_STATUS + u64::from(PROFILE.entries().div_ceil(32)) * 4;
-        (offset >= IRQ_STATUS
-            && offset.checked_add(width.bytes())? <= end
-            && offset.is_multiple_of(width.bytes()))
-        .then_some((offset, width))
+        self.publication_layout().status_pair(offset, bytes)
     }
     pub(super) fn supports_pair(&self, offset: u64, bytes: u8) -> bool {
-        self.paired_entry(offset, bytes).is_some() || self.status_pair(offset, bytes).is_some()
+        self.publication_layout().supports_pair(offset, bytes)
+    }
+    fn publication_layout(&self) -> super::publication::Layout {
+        super::publication::Layout {
+            physical: self.descriptor.ptd.physical,
+            updates: self.descriptor.ptd_updates,
+            device_offset: PTD_OFFSET,
+            entries: PROFILE.entries() as usize,
+        }
     }
     pub(super) fn read_pair_values(
         &self,
@@ -350,13 +336,15 @@ impl crate::machine::apple::AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        machine::{Devices, apple::AppleDevices, soc::PtdBank},
-        memory::{ReservedSystemRamRange, system_ram::fixture},
-        platform::apple::{amcc, interrupt::InterruptLatch},
-    };
+    use crate::machine::Devices;
+    use crate::machine::apple::AppleDevices;
+    use crate::machine::soc::PtdBank;
+    use crate::memory::ReservedSystemRamRange;
+    use crate::memory::system_ram::fixture;
+    use crate::platform::apple::amcc;
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use stela_contracts::interrupt::InterruptLatch;
     const DCS: u64 = 0x201000000;
     const PTD: u64 = 0x23b3c0000;
     const DRAIN: u64 = 0xa40;
@@ -740,10 +728,10 @@ mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires unchanged original J473 DeviceTree via STELA_TEST_MCC_J473_DT"]
     fn original_j473_dcs_and_ptd_placement_builds_one_source_profiled_resource() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let bytes = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();

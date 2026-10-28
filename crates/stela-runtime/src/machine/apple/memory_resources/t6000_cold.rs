@@ -10,22 +10,17 @@
 //! reset, capacity, timing or completed DRAM programming. Source cacheless
 //! disable_mcc command/waiter evidence is retained in t6000-mcc-backend-20261021-1.
 use super::{Prepared, amcc, mcc, ptd};
-use crate::{
-    machine::{
-        Chip,
-        apple::AppleDevices,
-        soc::{Board, DirectMemoryCache, MemoryController, PowerOwner, PowerStates},
-    },
-    memory::RegisteredSystemRam,
-    platform::apple::{
-        bus::{LifecycleState, Width},
-        pmgr::{
-            self, Pmgr,
-            coverage::{self, Consumer, LifecycleSinks},
-        },
-    },
-};
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use {
+    crate::machine::apple::AppleDevices, crate::machine::soc::Board,
+    crate::machine::soc::DirectMemoryCache, crate::machine::soc::MemoryController,
+    crate::machine::soc::PowerOwner, crate::machine::soc::PowerStates,
+    crate::memory::RegisteredSystemRam, crate::platform::apple::pmgr,
+    crate::platform::apple::pmgr::Pmgr, crate::platform::apple::pmgr::coverage,
+    crate::platform::apple::pmgr::coverage::Consumer,
+    crate::platform::apple::pmgr::coverage::LifecycleSinks, stela_contracts::Chip,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::Width,
+};
 
 /// Entire new-software control image, independent of RAM capacity and opaque
 /// DT config-data/alternate dramcfg-data. Every weight is an explicit policy.
@@ -451,20 +446,17 @@ fn geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        machine::soc::{ClockRole, PowerResource},
-        memory::{ReservedSystemRamRange, system_ram::fixture},
-        platform::apple::{
-            bus::Access,
-            interrupt::InterruptLatch,
-            pmgr::{
-                PowerState,
-                coverage::{Admission, Domain, DomainId},
-            },
-        },
-    };
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use {
+        crate::machine::soc::ClockRole, crate::machine::soc::PowerResource,
+        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
+        crate::platform::apple::pmgr::PowerState,
+        crate::platform::apple::pmgr::coverage::Admission,
+        crate::platform::apple::pmgr::coverage::Domain,
+        crate::platform::apple::pmgr::coverage::DomainId, stela_contracts::bus::Access,
+        stela_contracts::interrupt::InterruptLatch,
+    };
     const SUPPLY: u64 = 0x1000;
     const RAM: u64 = 0x800000000;
     #[repr(C, align(16))]
@@ -924,10 +916,10 @@ mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires original J314s ADT and mac13j KC via STELA_T6000_MCC_DEVICE_TREE/STELA_TEST_MCC_KERNELCACHE"]
     fn original_j314s_input_free_frontend_and_opaque_control_consumers_are_pinned() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let tree = std::fs::read(std::env::var("STELA_T6000_MCC_DEVICE_TREE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&tree),
+            stela_formats::sha256(&tree),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let io = Node::root(&tree).unwrap().child("arm-io").unwrap();
@@ -964,7 +956,7 @@ mod tests {
         );
         let kernel = std::fs::read(std::env::var("STELA_TEST_MCC_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&kernel),
+            stela_formats::sha256(&kernel),
             "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
         );
         for (start, bytes, expected) in [
@@ -994,7 +986,10 @@ mod tests {
                 "358ae139074b063c2aef41e97d73a22fb1aff321074f3f0a92acd2caa672d1a2",
             ),
         ] {
-            assert_eq!(crate::sha256(&kernel[start..start + bytes]), expected);
+            assert_eq!(
+                stela_formats::sha256(&kernel[start..start + bytes]),
+                expected
+            );
         }
     }
 }

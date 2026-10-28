@@ -469,9 +469,9 @@ pub(crate) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
             if faulting {
                 if !matches!(result, NativeExit::Fault(fault) if fault.offset == bytes - 2
                     && fault.cause == FaultCause::InvalidOpcode && !fault.write && fault.address == 0
-                    && fault.registers[0] == RETURN_RAX && fault.registers[2] == RETURN_RDX
-                    && fault.registers[7] == ptr::from_mut(&mut guest) as u64
-                    && (context_abi == 0 || fault.registers[6] == ptr::from_mut(&mut context) as u64))
+                    && fault.registers.get(0) == Some(RETURN_RAX) && fault.registers.get(2) == Some(RETURN_RDX)
+                    && fault.registers.get(7) == Some(ptr::from_mut(&mut guest) as u64)
+                    && (context_abi == 0 || fault.registers.get(6) == Some(ptr::from_mut(&mut context) as u64)))
                 {
                     return Err("native FP fixture did not enter actual #UD recovery");
                 }

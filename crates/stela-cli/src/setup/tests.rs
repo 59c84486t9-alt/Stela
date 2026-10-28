@@ -307,7 +307,7 @@ fn fake_inventory(ipsw: &Path, model: &str) -> Result<restore::payload::Inventor
 
 /// The synthetic IPSW's inventory as if it were on Apple's servers.
 fn fake_remote_inventory(ipsw: &Path, model: &str) -> Result<restore::payload::Inventory> {
-    let layout = stela_runtime::payload::Layout::Remote {
+    let layout = stela_formats::payload::Layout::Remote {
         url: "http://updates-http.example.test/Synthetic.ipsw".into(),
         etag: "\"synthetic\"".into(),
     };
@@ -1107,7 +1107,7 @@ fn targetless_setup_defers_disk_selection_to_efi() {
     for index in 0.. {
         let piece = medium
             .directory()
-            .join(stela_runtime::payload::piece_name(index));
+            .join(stela_formats::payload::piece_name(index));
         let Ok(bytes) = fs::read(piece) else { break };
         joined.extend(bytes);
     }
@@ -1227,7 +1227,7 @@ fn install_reads_offline_or_streamed_image() {
     );
     let first_piece = offline
         .directory()
-        .join(stela_runtime::payload::piece_name(0));
+        .join(stela_formats::payload::piece_name(0));
     assert!(first_piece.is_file());
     // Back online, the pieces go.
     let online = switch(InstallImage::Online);
@@ -1371,7 +1371,7 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
     for index in 0.. {
         let piece = medium
             .directory()
-            .join(stela_runtime::payload::piece_name(index));
+            .join(stela_formats::payload::piece_name(index));
         let Ok(bytes) = fs::read(piece) else { break };
         joined.extend(bytes);
     }
@@ -1379,7 +1379,7 @@ fn installed_disk_preserves_boot_choices_and_partitions() {
     // Status finds a damaged piece by name.
     let first = medium
         .directory()
-        .join(stela_runtime::payload::piece_name(0));
+        .join(stela_formats::payload::piece_name(0));
     let piece = fs::read(&first).unwrap();
     fs::write(&first, &piece[1..]).unwrap();
     let status = format!(

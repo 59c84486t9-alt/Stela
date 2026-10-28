@@ -112,7 +112,9 @@ mod tests {
         metrics.record(
             &Err(Refused {
                 pc: 0,
-                detail: "test refusal".into(),
+                error: stela_compiler::CompileError::new(
+                    stela_compiler::CompileErrorKind::IncompleteSourceInstruction,
+                ),
             }),
             7,
             true,

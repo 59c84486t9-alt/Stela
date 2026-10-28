@@ -55,7 +55,11 @@
 //!   with read-modify-write (sptm.t6020 file 0xbb0b8..0xbb0c4). The
 //!   emulated core has no power throttling, so the word holds what software
 //!   writes, 0 from reset (inference).
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 /// CONTROL and MASK.
 pub const BYTES: u64 = 16;
@@ -229,7 +233,7 @@ impl MmioDevice for Lockdown {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn sptms_lockdown_sequence_completes_and_locks_the_pair() {

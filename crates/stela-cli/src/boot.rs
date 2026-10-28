@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
+use stela_formats::payload::Purpose;
 use stela_loader::boot_bundle::{
     self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
 };
@@ -13,7 +14,6 @@ use stela_loader::boot_policy::{OsEnvironment, SealedVolume, SecurityMode, Secur
 use stela_loader::handoff::{self, BootCommand as FirmwareBootCommand};
 use stela_loader::im4m;
 use stela_loader::root_selection::Root;
-use stela_runtime::payload::Purpose;
 
 mod board_firmware;
 mod disk;
@@ -221,7 +221,7 @@ fn mount(
     }
     let manifest = std::fs::read(bundle.join("bundle.json"))
         .map_err(|error| format!("{} has no manifest: {error}", bundle.display()))?;
-    let manifest = stela_runtime::boot_bundle::Manifest::parse(&manifest)
+    let manifest = stela_formats::boot_bundle::Manifest::parse(&manifest)
         .map_err(|error| format!("bundle manifest: {error:?}"))?;
     // A bundle prepared for no particular machine has no ECID; the SEP
     // takes a stand-in one, as the SSD takes a stand-in disk.
@@ -290,7 +290,7 @@ fn mount(
             build: manifest
                 .target
                 .as_ref()
-                .map(|target| stela_runtime::builds::find(&target.product_build))
+                .map(|target| stela_formats::builds::find(&target.product_build))
                 .transpose()
                 .map_err(|error| error.to_string())?,
         },
@@ -684,13 +684,13 @@ impl Prepare {
             let source = Source {
                 component: label,
                 member: entry.path.clone(),
-                container_sha256: stela_runtime::sha256(&container),
+                container_sha256: stela_formats::sha256(&container),
                 payload_type: receipt
                     .as_ref()
                     .map_or_else(|| "opaque".into(), |r| r.payload_type.clone()),
                 description: receipt.map(|r| r.description).unwrap_or_default(),
                 decoded_bytes: bytes.len() as u64,
-                decoded_sha256: stela_runtime::sha256(&bytes),
+                decoded_sha256: stela_formats::sha256(&bytes),
             };
             Ok(Decoded {
                 bytes,
@@ -740,11 +740,11 @@ impl Prepare {
                 }
                 .into(),
                 member,
-                container_sha256: stela_runtime::sha256(&bytes),
+                container_sha256: stela_formats::sha256(&bytes),
                 payload_type: "im4m".into(),
                 description: String::new(),
                 decoded_bytes: bytes.len() as u64,
-                decoded_sha256: stela_runtime::sha256(&bytes),
+                decoded_sha256: stela_formats::sha256(&bytes),
             };
             Ok(Some(Decoded {
                 bytes,
@@ -764,7 +764,7 @@ impl Prepare {
                     BUILD_MANIFEST_LIMIT,
                 )?;
                 let bytes = ticket::personalized(&manifest, identity.index, ecid)?;
-                let digest = stela_runtime::sha256(&bytes);
+                let digest = stela_formats::sha256(&bytes);
                 Some(Decoded {
                     source: Source {
                         component: "Boot manifest".into(),
@@ -795,7 +795,7 @@ impl Prepare {
                                     payload_type: receipt.payload_type,
                                     description: receipt.description,
                                     decoded_bytes: bytes.len() as u64,
-                                    decoded_sha256: stela_runtime::sha256(&bytes),
+                                    decoded_sha256: stela_formats::sha256(&bytes),
                                     ..raw.source
                                 },
                                 bytes,
@@ -835,7 +835,7 @@ impl Prepare {
                     .and_then(|name| name.to_str())
                     .with_context(|| format!("{} has no UTF-8 file name", path.display()))?
                     .to_owned();
-                let digest = stela_runtime::sha256(&bytes);
+                let digest = stela_formats::sha256(&bytes);
                 let source = Source {
                     component: "BoardFirmware".into(),
                     member: path.canonicalize()?.display().to_string(),

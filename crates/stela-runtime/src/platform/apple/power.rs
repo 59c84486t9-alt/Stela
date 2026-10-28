@@ -40,9 +40,13 @@
 //! observations only, not native execution, functional ownership or PS values.
 pub mod t6000;
 
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "soc-power";
 const STATUS: u64 = 0x24;
@@ -474,8 +478,8 @@ fn nub_fields(offset: u64) -> (u32, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{bus::Bus, interrupt::InterruptLatch};
     use alloc::boxed::Box;
+    use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
 
     fn snapshot(kind: Kind, value: u32) -> Power {
         Power::from_snapshot(

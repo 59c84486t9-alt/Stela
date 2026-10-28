@@ -60,7 +60,9 @@ pub(crate) fn validate_native_snapshot(
     manifest: &Manifest,
     native: &[u8],
 ) -> Result<(), ArtifactError> {
-    if native.len() != manifest.native_bytes || crate::sha256(native) != manifest.native_sha256 {
+    if native.len() != manifest.native_bytes
+        || stela_formats::sha256(native) != manifest.native_sha256
+    {
         return Err(ArtifactError("native snapshot checksum mismatch"));
     }
     Ok(())

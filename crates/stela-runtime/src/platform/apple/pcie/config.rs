@@ -3,8 +3,8 @@
 //! Field encodings: Linux v6.17 `include/uapi/linux/pci_regs.h`. Device
 //! identities and capabilities must be supplied from the selected device's
 //! evidence; this module supplies no Apple or downstream-device identity.
-use super::super::bus::Width;
 use alloc::vec::Vec;
+use stela_contracts::bus::Width;
 
 pub const COMMAND: u16 = 0x04;
 pub const MEMORY_ENABLE: u16 = 1 << 1;

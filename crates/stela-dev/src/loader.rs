@@ -117,7 +117,7 @@ impl PlanFixups {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "kind":"chained_fixup_plan","container_sha256":stela_runtime::sha256(&data),
+                "kind":"chained_fixup_plan","container_sha256":stela_formats::sha256(&data),
                 "slice_offset":slice_offset,"plan":plan,"fixups":fixups,"decoded_fixups":decoded_fixups,
                 "fixups_applied":false,"native_executed":false,"complete_binary_verified":false
             }))?
@@ -138,7 +138,7 @@ impl PlanExecutable {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "kind": "macho_executable_load_plan", "container_sha256": stela_runtime::sha256(&data),
+                "kind": "macho_executable_load_plan", "container_sha256": stela_formats::sha256(&data),
                 "slice_offset": offset, "plan": plan
             }))?
         );

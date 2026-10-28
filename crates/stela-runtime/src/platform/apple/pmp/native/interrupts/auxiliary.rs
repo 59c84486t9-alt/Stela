@@ -6,9 +6,9 @@ use super::super::platform::{
     owner::Completion,
 };
 use super::{Error, Event, Handler, Signals};
-use crate::platform::apple::bus::Access;
 use alloc::rc::Rc;
 use core::cell::Cell;
+use stela_contracts::bus::Access;
 
 /// Opaque live callback receipt, minted only from the actual Signals context
 /// after the same source disable and actual registration retired. Event data

@@ -121,9 +121,9 @@ impl AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::Wire;
     use alloc::rc::Rc;
     use core::cell::Cell;
+    use stela_contracts::interrupt::Wire;
 
     struct Writer {
         count: Rc<Cell<usize>>,
@@ -139,11 +139,11 @@ mod tests {
             width: Width,
             _: &mut Access<'_>,
         ) -> Result<u64, MmioError> {
-            Err(crate::platform::apple::bus::refuse(
+            Err(stela_contracts::bus::refuse(
                 self.name(),
                 offset,
                 width,
-                crate::platform::apple::bus::Direction::Read,
+                stela_contracts::bus::Direction::Read,
                 "write-only test register",
             ))
         }
@@ -160,11 +160,11 @@ mod tests {
                 access
                     .interrupts
                     .set_level(Wire::Aic(AicInput::new(0, 1)), true);
-                return Err(crate::platform::apple::bus::refuse(
+                return Err(stela_contracts::bus::refuse(
                     self.name(),
                     offset,
                     width,
-                    crate::platform::apple::bus::Direction::Write,
+                    stela_contracts::bus::Direction::Write,
                     "retained peripheral prefix",
                 ));
             }

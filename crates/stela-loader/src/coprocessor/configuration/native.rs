@@ -7,7 +7,7 @@ use crate::coprocessor::{HardwareIdentity, Staged};
 use alloc::string::String;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 const CHAIN_STARTS: u32 = u32::from_be_bytes(*b"CSSS");
 const SLIDE: u32 = u32::from_be_bytes(*b"SLID");

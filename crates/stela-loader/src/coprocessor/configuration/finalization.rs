@@ -7,7 +7,7 @@ use crate::coprocessor::publication;
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 const DSEG: u32 = u32::from_le_bytes(*b"dseg");
 const RECORD_BYTES: usize = 16;

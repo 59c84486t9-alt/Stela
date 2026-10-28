@@ -214,14 +214,14 @@ pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
         "declared output exceeds configured limit"
     );
     let mut decoded = vec![];
-    let compression = if stela_runtime::lzfse::is_lzfse(im4p.payload) {
+    let compression = if stela_formats::lzfse::is_lzfse(im4p.payload) {
         ensure!(
             im4p.compression_algorithm
                 .is_none_or(|n| n == COMPRESSION_LZFSE),
             "compression record disagrees with LZFSE marker"
         );
         let limit = usize::try_from(maximum).unwrap_or(usize::MAX);
-        decoded = stela_runtime::lzfse::decode(im4p.payload, limit)
+        decoded = stela_formats::lzfse::decode(im4p.payload, limit)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         "lzfse"
     } else {
@@ -245,15 +245,15 @@ pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
     let receipt = DecodeReceipt {
         schema_version: 1,
         container_bytes: bytes.len(),
-        container_sha256: stela_runtime::sha256(bytes),
+        container_sha256: stela_formats::sha256(bytes),
         payload_type: im4p.payload_type,
         description: im4p.description,
         compression: compression.into(),
         payload_bytes: im4p.payload.len(),
-        payload_sha256: stela_runtime::sha256(im4p.payload),
+        payload_sha256: stela_formats::sha256(im4p.payload),
         declared_uncompressed_bytes: im4p.declared_uncompressed_bytes,
         decoded_bytes: decoded.len(),
-        decoded_sha256: stela_runtime::sha256(&decoded),
+        decoded_sha256: stela_formats::sha256(&decoded),
         opaque_extensions: im4p.opaque_extensions,
         signature_validated: false,
     };
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(decoded, raw);
         assert_eq!(receipt.payload_type, "dtre");
         assert_eq!(receipt.compression, "lzfse");
-        assert_eq!(receipt.decoded_sha256, stela_runtime::sha256(raw));
+        assert_eq!(receipt.decoded_sha256, stela_formats::sha256(raw));
         assert!(!receipt.signature_validated);
         assert!(decode(&container, 2).is_err());
 

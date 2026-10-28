@@ -30,7 +30,9 @@ diagnostics = []
 native-profile = ["stela-runtime/native-profile"]
 
 [dependencies]
+stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
+stela-formats = { path = "../stela-formats", default-features = false }
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
 stela-boot-core = { path = "../stela-boot-core" }
 stela-drivers = { path = "../stela-drivers", features = ["linux-kernel", "native-acpi"] }

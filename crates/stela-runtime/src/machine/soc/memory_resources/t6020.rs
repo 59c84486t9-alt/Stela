@@ -6,11 +6,8 @@
 //! at two. MCC reg0 is the PTD bank, reg1 a separate auxiliary bank. These
 //! are not T6000 direct-aperture ordinals or its PMGR selector8 placement.
 use super::{MemoryController, PtdBank, publication_ranges, range_at, reg_pairs, scalar};
-use crate::{
-    machine::adt::Node,
-    platform::apple::{mcc::t6020, ptd},
-};
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use {crate::platform::apple::mcc::t6020, crate::platform::apple::ptd, stela_contracts::adt::Node};
 
 pub const COMPATIBLE: &str = "mcc,t6020";
 const PREFIX_REGISTERS: usize = 2;
@@ -243,7 +240,7 @@ pub fn from_io(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
+    use stela_contracts::adt::encode;
     fn z(s: &str) -> Vec<u8> {
         s.as_bytes().iter().copied().chain([0]).collect()
     }

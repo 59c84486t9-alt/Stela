@@ -16,10 +16,10 @@
 //! Consequently this boundary is not yet registered as complete PMGR coverage.
 pub mod setup;
 
-use super::bus::LifecycleState;
-use crate::platform::dma::{DmaError, Port};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use stela_contracts::bus::LifecycleState;
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const SLOT_BYTES: u64 = 12;
 /// The original 26A434 controller allocates 0x7ff8 bytes and sends 0xaaa slots.
@@ -494,9 +494,9 @@ impl Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::interrupt::InterruptLatch,
-        dma::{Physical, tests::Ram},
+    use {
+        stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch,
     };
 
     const RAM: u64 = 0x8000;
@@ -830,9 +830,9 @@ mod tests {
 
     #[test]
     fn actual_dart_clock_and_stream_faults_cannot_be_substituted_for_dma_success() {
-        use crate::platform::apple::{
-            bus::{Access, MmioDevice, Width},
-            dart::Dart,
+        use {
+            crate::platform::apple::dart::Dart, stela_contracts::bus::Access,
+            stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
         };
         let mut ram = Ram::new(RAM, 0x8000);
         ram.bytes[0x2000..0x2004].copy_from_slice(b"real");

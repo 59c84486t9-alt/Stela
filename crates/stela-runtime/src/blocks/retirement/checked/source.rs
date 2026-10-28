@@ -197,7 +197,7 @@ impl<'code> BoundSource<'code> {
             identity.guest_base == pc.0
                 && identity.abi == runtime.profile.abi()
                 && identity.target_cpu == runtime.target_cpu().id()
-                && identity.source_sha256 == crate::sha256(source)
+                && identity.source_sha256 == stela_formats::sha256(source)
                 && identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "source/compiler/profile/target differs"
         );
@@ -243,8 +243,7 @@ impl<'code> BoundSource<'code> {
         exit: &BlockExit,
         registers: &GuestState,
     ) -> anyhow::Result<ReturnedTerminal> {
-        let kind = ExitKind::try_from(exit.kind)
-            .map_err(|()| anyhow::anyhow!("unknown native exit carrier"))?;
+        let kind = ExitKind::try_from(exit.kind)?;
         let next = GuestAddress(exit.next_pc);
         let region = &self
             .runtime

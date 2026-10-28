@@ -8,12 +8,13 @@
 //! No firmware executes, hardware events, samples, eligibility or ACKs arise.
 use super::super::counters::{CaptureIdentity, Captured, Frame, Frames};
 use super::{ingestion, owner::Completion};
-use crate::platform::apple::{
-    bus::Access,
-    ptd::{Range, transport::notifications::LocalNotifications},
-};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::{Cell, RefCell};
+use {
+    crate::platform::apple::ptd::Range,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access,
+};
 
 type Error = &'static str;
 /// Unique native PMP allocation claim. Dropping it never permits another cache

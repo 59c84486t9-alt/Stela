@@ -435,9 +435,9 @@ pub(super) fn legacy_requirements<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
     use crate::machine::soc::tests::flat_fixture_extent;
     use alloc::vec;
+    use stela_contracts::adt::encode;
 
     fn bytes64(values: &[u64]) -> Vec<u8> {
         values

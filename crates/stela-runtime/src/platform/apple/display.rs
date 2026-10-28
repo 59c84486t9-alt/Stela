@@ -12,8 +12,12 @@
 //! doc, never a fabricated value. This is the spec-first boundary; the
 //! registers the restored_external boot actually touches are closed from its
 //! trace, not guessed here.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 /// A present-but-unmodeled register aperture: every access refuses, named.
 pub struct Region {
@@ -99,7 +103,7 @@ impl MmioDevice for Region {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn every_display_register_access_refuses_by_name() {

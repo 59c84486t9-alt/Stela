@@ -16,7 +16,11 @@
 //! no status words are claimed. AOP/NUB/SMC/ATC physical wake generators are
 //! not emulated; this model supplies mask state for a supported generator to
 //! query, and does not invent a wake event when a mask is written.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "aop-wake-masks";
 pub const WORDS: usize = 8;
@@ -88,7 +92,7 @@ impl MmioDevice for WakeMasks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn active_low_masks_hold_writes_and_exclude_reserved_sources() {

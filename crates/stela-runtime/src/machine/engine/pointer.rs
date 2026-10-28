@@ -57,21 +57,21 @@ fn memo_result(operation: PointerOperation, result: PointerResult) -> (u64, u64)
 }
 
 /// The memo index of a key.
-pub(super) fn memo_key(key: pauth::Key) -> u8 {
+pub(super) fn memo_key(key: stela_contracts::pauth::Key) -> u8 {
     pointer::key_index(match key {
-        pauth::Key::Ia => PointerAuthenticationKey::Ia,
-        pauth::Key::Ib => PointerAuthenticationKey::Ib,
-        pauth::Key::Da => PointerAuthenticationKey::Da,
-        pauth::Key::Db => PointerAuthenticationKey::Db,
+        stela_contracts::pauth::Key::Ia => PointerAuthenticationKey::Ia,
+        stela_contracts::pauth::Key::Ib => PointerAuthenticationKey::Ib,
+        stela_contracts::pauth::Key::Da => PointerAuthenticationKey::Da,
+        stela_contracts::pauth::Key::Db => PointerAuthenticationKey::Db,
     })
 }
 
-fn key_of(key: PointerAuthenticationKey) -> pauth::Key {
+fn key_of(key: PointerAuthenticationKey) -> stela_contracts::pauth::Key {
     match key {
-        PointerAuthenticationKey::Ia => pauth::Key::Ia,
-        PointerAuthenticationKey::Ib => pauth::Key::Ib,
-        PointerAuthenticationKey::Da => pauth::Key::Da,
-        PointerAuthenticationKey::Db => pauth::Key::Db,
+        PointerAuthenticationKey::Ia => stela_contracts::pauth::Key::Ia,
+        PointerAuthenticationKey::Ib => stela_contracts::pauth::Key::Ib,
+        PointerAuthenticationKey::Da => stela_contracts::pauth::Key::Da,
+        PointerAuthenticationKey::Db => stela_contracts::pauth::Key::Db,
     }
 }
 
@@ -143,7 +143,12 @@ impl PointerService {
     /// After [`Self::revalidate`], open `key`'s tag word as a PAC exit
     /// would: [`pointer::DISABLED`] while its SCTLR enable is clear, else,
     /// untrapped and present in the context, the memo's current tag.
-    pub(super) fn reopen(&mut self, key: pauth::Key, enabled: bool, trapped: bool) {
+    pub(super) fn reopen(
+        &mut self,
+        key: stela_contracts::pauth::Key,
+        enabled: bool,
+        trapped: bool,
+    ) {
         let index = memo_key(key);
         self.tags[usize::from(index)] = if !enabled {
             pointer::DISABLED
@@ -235,7 +240,7 @@ impl PointerService {
     pub(super) fn result(
         &mut self,
         operation: PointerOperation,
-        key: pauth::Key,
+        key: stela_contracts::pauth::Key,
         pointer: u64,
         modifier: u64,
     ) -> Option<PointerResult> {
@@ -293,7 +298,7 @@ impl PointerService {
     pub(super) fn remembered(
         &self,
         operation: PointerOperation,
-        key: pauth::Key,
+        key: stela_contracts::pauth::Key,
         pointer: u64,
         modifier: u64,
     ) -> Option<PointerResult> {
@@ -318,7 +323,7 @@ impl PointerService {
     fn remember(
         &mut self,
         operation: PointerOperation,
-        key: pauth::Key,
+        key: stela_contracts::pauth::Key,
         pointer: u64,
         modifier: u64,
         result: PointerResult,
@@ -378,7 +383,12 @@ mod tests {
         service.open(input);
         assert!(
             service
-                .result(PointerOperation::Sign, pauth::Key::Ia, 0x4000, 0x8000)
+                .result(
+                    PointerOperation::Sign,
+                    stela_contracts::pauth::Key::Ia,
+                    0x4000,
+                    0x8000
+                )
                 .is_none()
         );
         assert_eq!(service.tags, [0; 4]);
@@ -388,7 +398,12 @@ mod tests {
         service.open(input);
         assert!(
             service
-                .result(PointerOperation::Sign, pauth::Key::Ia, 0x4000, 0x8000)
+                .result(
+                    PointerOperation::Sign,
+                    stela_contracts::pauth::Key::Ia,
+                    0x4000,
+                    0x8000
+                )
                 .is_some()
         );
         assert_ne!(service.generation, unknown_generation);
@@ -399,7 +414,12 @@ mod tests {
         assert_eq!(service.generation, unknown_generation);
         assert!(
             service
-                .result(PointerOperation::Sign, pauth::Key::Ia, 0x4000, 0x8000)
+                .result(
+                    PointerOperation::Sign,
+                    stela_contracts::pauth::Key::Ia,
+                    0x4000,
+                    0x8000
+                )
                 .is_none()
         );
         assert_eq!(service.tags, [0; 4]);
@@ -432,7 +452,11 @@ mod tests {
                         for pointer in [0, u64::MAX, 1 << 55, 1 << 63, 0xdead_1234_5678_abcd] {
                             let upper = pointer & (1 << 55) != 0;
                             let keep = cell.keep[usize::from(upper)];
-                            let key = if data { pauth::Key::Da } else { pauth::Key::Ia };
+                            let key = if data {
+                                stela_contracts::pauth::Key::Da
+                            } else {
+                                stela_contracts::pauth::Key::Ia
+                            };
                             assert_eq!(
                                 (pointer & keep) | if upper { cell.upper_extension } else { 0 },
                                 context.strip(key, pointer).unwrap()
@@ -558,7 +582,12 @@ mod tests {
         assert!(!service.is_open());
         assert_eq!(service.tags, [0; 4]);
         assert_eq!(
-            service.result(PointerOperation::Sign, pauth::Key::Ia, 1, 2),
+            service.result(
+                PointerOperation::Sign,
+                stela_contracts::pauth::Key::Ia,
+                1,
+                2
+            ),
             None
         );
     }

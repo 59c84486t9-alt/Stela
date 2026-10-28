@@ -13,14 +13,11 @@
 use crate::output;
 use alloc::{boxed::Box, collections::BTreeMap, format, vec::Vec};
 use stela_drivers::block::{BlockDevice, BlockError, Shared, Submission};
-use stela_runtime::{
-    boot_bundle::Nvram,
-    machine::apple::{
-        AppleDevices,
-        nor::{CAPACITY, Image, persist},
-        sep_state,
-    },
-    pc::{boot_log, machine_state},
+use {
+    stela_formats::boot_bundle::Nvram, stela_runtime::machine::apple::AppleDevices,
+    stela_runtime::machine::apple::nor::CAPACITY, stela_runtime::machine::apple::nor::Image,
+    stela_runtime::machine::apple::nor::persist, stela_runtime::machine::apple::sep_state,
+    stela_runtime::pc::boot_log, stela_runtime::pc::machine_state,
 };
 
 /// Split the Apple region `partition` into the guest's ANS2 namespace and

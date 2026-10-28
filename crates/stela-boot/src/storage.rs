@@ -351,7 +351,7 @@ impl Prepared {
                 let mut first = alloc::vec![0; disk.block_size as usize];
                 partition
                     .read(0, &mut first)
-                    .map(|()| stela_runtime::sha256(&first))
+                    .map(|()| stela_formats::sha256(&first))
                     .map_err(storage::StorageError::Device)
             };
             match result {

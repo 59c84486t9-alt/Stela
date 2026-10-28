@@ -2,11 +2,11 @@
 use super::{RegisteredSystemRam, source};
 use crate::engine::bundle::live_tree::{LiveTree, Ram, registered::ColdRam};
 use alloc::vec;
+use stela_formats::boot_bundle::LoadedRegion;
 use stela_loader::{
     apple_device_tree::{DeviceTree, Node},
     boot_args::{self, BootArgs, Video},
 };
-use stela_runtime::boot_bundle::LoadedRegion;
 
 /// # Safety
 /// Cold fixture owns this exact registered RAM; no frames or producers exist.

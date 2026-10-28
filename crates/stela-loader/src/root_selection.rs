@@ -33,7 +33,7 @@
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, ensure};
-pub use stela_runtime::boot_bundle::schema::Root;
+pub use stela_formats::boot_bundle::schema::Root;
 
 const CHOSEN: &str = "/chosen";
 pub const APFS_PREBOOT_UUID: &str = "apfs-preboot-uuid";

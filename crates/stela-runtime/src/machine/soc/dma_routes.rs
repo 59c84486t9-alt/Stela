@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn native_dma_owner_properties_keep_complete_lists_and_refuse_truncation() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         for bytes in [&[][..], &[1, 0, 0][..], &[0, 0, 0, 0][..], &[1; 8][..]] {
             let tree = encode(&[("AAPL,phandle", bytes)], &[]);
             assert!(native_dma_phandle(&Node::root(&tree).unwrap(), "AAPL,phandle").is_err());

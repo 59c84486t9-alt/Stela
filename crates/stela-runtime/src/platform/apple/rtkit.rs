@@ -573,13 +573,13 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    const VERSION: u64 = crate::builds::DEFAULT.rtkit_version;
+    const VERSION: u64 = stela_formats::builds::DEFAULT.rtkit_version;
 
     #[test]
     fn a_physical_reset_clears_enumeration_without_reusing_boot_quiescence() {
         let mut kit = RtKit::new(
             vec![(0x20, Box::new(super::super::pmp::Pmp::default()))],
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap()
         .quiesced();
@@ -631,7 +631,7 @@ mod tests {
                 (0x20, Box::new(Complement) as Box<dyn Endpoint>),
                 (0x41, Box::new(Complement)),
             ],
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         let mut outbox = Vec::new();
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn cold_system_binding_keeps_the_started_session_and_precedes_roll_call() {
-        let mut kit = RtKit::new(Vec::new(), crate::builds::DEFAULT.rtkit_version).unwrap();
+        let mut kit = RtKit::new(Vec::new(), stela_formats::builds::DEFAULT.rtkit_version).unwrap();
         let mut initial = Vec::new();
         kit.start(&mut initial).unwrap();
         kit.attach_cold_system_endpoints(SystemEndpoints {
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn late_or_duplicate_native_binding_refuses_before_changing_the_endpoint_map() {
-        let mut kit = RtKit::new(Vec::new(), crate::builds::DEFAULT.rtkit_version).unwrap();
+        let mut kit = RtKit::new(Vec::new(), stela_formats::builds::DEFAULT.rtkit_version).unwrap();
         let mut initial = Vec::new();
         kit.start(&mut initial).unwrap();
         mgmt(&mut kit, HELLO_REPLY, VERSION | VERSION << 16).unwrap();
@@ -686,7 +686,7 @@ mod tests {
                 trace: Some(Box::new(Complement)),
                 reporting: None,
             },
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         assert!(
@@ -707,7 +707,7 @@ mod tests {
                 trace: Some(Box::new(Complement)),
                 reporting: Some(Box::new(Complement)),
             },
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         let mut output = Vec::new();
@@ -752,7 +752,7 @@ mod tests {
         assert!(
             RtKit::new(
                 vec![(IOREPORTING, Box::new(Complement))],
-                crate::builds::DEFAULT.rtkit_version
+                stela_formats::builds::DEFAULT.rtkit_version
             )
             .is_err()
         );
@@ -909,7 +909,7 @@ mod tests {
         // word: the AP waited 20 s for running after its last answer.
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         let raw = |rtkit: &mut RtKit, payload| step(rtkit, 0, payload).unwrap();
@@ -951,7 +951,7 @@ mod tests {
     fn a_quiesced_coprocessor_waits_for_its_wake_and_acks_it_after_enumeration() {
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap()
         .quiesced();
@@ -1007,7 +1007,7 @@ mod tests {
     fn enabled_endpoints_send_board_events_and_carry_transitions() {
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Board::default()) as Box<dyn Endpoint>)],
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         rtkit.start(&mut Vec::new()).unwrap();
@@ -1042,11 +1042,17 @@ mod tests {
     #[test]
     fn endpoints_are_application_endpoints_once_each() {
         let one = || Box::new(Complement) as Box<dyn Endpoint>;
-        assert!(RtKit::new(vec![(0x2, one())], crate::builds::DEFAULT.rtkit_version).is_err());
+        assert!(
+            RtKit::new(
+                vec![(0x2, one())],
+                stela_formats::builds::DEFAULT.rtkit_version
+            )
+            .is_err()
+        );
         assert!(
             RtKit::new(
                 vec![(0x20, one()), (0x20, one())],
-                crate::builds::DEFAULT.rtkit_version
+                stela_formats::builds::DEFAULT.rtkit_version
             )
             .is_err()
         );

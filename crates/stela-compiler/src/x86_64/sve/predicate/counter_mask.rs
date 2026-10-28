@@ -8,14 +8,12 @@ const VECTOR_MASK_BYTES: usize = 16;
 
 /// Expand one16-byte counter segment from prepare_counter state. Preserves
 /// R8/R9/R10/RDX/RDI/R15 and other XMMs; clobbers RAX/RCX/R11 and both mask XMMs.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_prepared_counter_mask(
     code: &mut Code,
     group: usize,
     chunk: usize,
     element: crate::aarch64::scalable::ElementSize,
-    destination: u8,
-    scratch: u8,
+    registers: crate::x86_64::scalable::MaskRegisters,
     length: VectorLength,
     target: crate::TargetCpu,
 ) {
@@ -27,5 +25,5 @@ pub(crate) fn emit_prepared_counter_mask(
         code.asm()
             .shift_imm(ShiftOp::Shr, Size::Qword, Rax, shift as u8);
     }
-    crate::x86_64::scalable::expand_predicate_mask(code, element, destination, scratch, target);
+    registers.expand(code, element, target);
 }

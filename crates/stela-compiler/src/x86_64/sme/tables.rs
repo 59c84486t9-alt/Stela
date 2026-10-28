@@ -317,8 +317,7 @@ fn select(
                     usize::from(register_index),
                     chunk,
                     operand.element,
-                    2,
-                    3,
+                    crate::x86_64::scalable::MaskRegisters::new(2, 3),
                     length,
                     target,
                 );

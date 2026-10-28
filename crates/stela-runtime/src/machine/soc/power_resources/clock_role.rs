@@ -142,11 +142,11 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
 mod tests {
     use super::super::{PowerStates, domain_id, inventory, validate_power_graph};
     use super::*;
-    use crate::{
-        machine::adt::encode,
-        platform::apple::pmgr::coverage::{Admission, Domain},
-    };
     use alloc::{string::ToString, vec};
+    use {
+        crate::platform::apple::pmgr::coverage::Admission,
+        crate::platform::apple::pmgr::coverage::Domain, stela_contracts::adt::encode,
+    };
 
     fn words(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
@@ -417,7 +417,7 @@ mod tests {
             std::env::var("STELA_T6000_MCC_DEVICE_TREE").expect("explicit original ADT input");
         let bytes = std::fs::read(&input).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&bytes).unwrap();
@@ -521,9 +521,12 @@ mod tests {
             ),
         ] {
             let bytes = std::fs::read(std::env::var(variable).unwrap()).unwrap();
-            assert_eq!(crate::sha256(&bytes), hash);
+            assert_eq!(stela_formats::sha256(&bytes), hash);
             for &(offset, length, expected) in windows {
-                assert_eq!(crate::sha256(&bytes[offset..offset + length]), expected);
+                assert_eq!(
+                    stela_formats::sha256(&bytes[offset..offset + length]),
+                    expected
+                );
             }
             for &(offset, expected) in pointers {
                 assert_eq!(
@@ -540,7 +543,7 @@ mod tests {
             std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").expect("explicit original KC input");
         let bytes = std::fs::read(input).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
         );
         // Full original functions: cached metadata, no-op processDevice,
@@ -652,7 +655,10 @@ mod tests {
                 "006d1c913997b6f4d6ece3c3256e2b95a0dec9021769d0d9e8248bc8abe6d588",
             ), // effective_device_id
         ] {
-            assert_eq!(crate::sha256(&bytes[offset..offset + length]), expected);
+            assert_eq!(
+                stela_formats::sha256(&bytes[offset..offset + length]),
+                expected
+            );
         }
         // Actual selected vtable and GOT bindings, including PMGR super-start
         // to IOService::start. Authenticated source pointers are kept intact.

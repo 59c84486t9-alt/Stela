@@ -659,8 +659,8 @@ pub(super) mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
     fn original_t8112_join_and_selection_match_every_native_counter_reference() {
-        use crate::machine::adt::Node;
         use sha2::{Digest, Sha256};
+        use stela_contracts::adt::Node;
         let pmp = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&pmp)),

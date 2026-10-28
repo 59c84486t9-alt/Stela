@@ -23,7 +23,7 @@ pub(crate) fn generate(
     );
     let manifest = Manifest {
         identity,
-        native_sha256: crate::sha256(&x86_64_code),
+        native_sha256: stela_formats::sha256(&x86_64_code),
         native_bytes: x86_64_code.len(),
         source_map,
         verified: false,
@@ -40,7 +40,7 @@ pub(crate) fn validate_manifest_bytes(
     if manifest_bytes.len() > MAX_CACHE_MANIFEST_BYTES {
         return Err(ArtifactError("cache file exceeds size limit"));
     }
-    if crate::sha256(manifest_bytes) != expected_sha256 {
+    if stela_formats::sha256(manifest_bytes) != expected_sha256 {
         return Err(ArtifactError("cached manifest checksum mismatch"));
     }
     Ok(())
@@ -163,7 +163,7 @@ mod tests {
         let native = b"immutable original native snapshot";
         let manifest = Manifest {
             identity: identity.clone(),
-            native_sha256: crate::sha256(native),
+            native_sha256: stela_formats::sha256(native),
             native_bytes: native.len(),
             source_map: vec![(GuestAddress(0x1000), 0)],
             verified: false,
@@ -176,7 +176,7 @@ mod tests {
     fn shared_validation_accepts_original_descriptive_inputs() {
         let (identity, manifest, native) = fixture();
         let serialized = b"original serialized manifest bytes";
-        validate_manifest_bytes(serialized, &crate::sha256(serialized)).unwrap();
+        validate_manifest_bytes(serialized, &stela_formats::sha256(serialized)).unwrap();
         validate_preparation_metadata(&manifest, &identity, manifest.memory_requirements).unwrap();
         validate_preparation_native(&manifest, native).unwrap();
         validate_preparation_claim(&manifest).unwrap();

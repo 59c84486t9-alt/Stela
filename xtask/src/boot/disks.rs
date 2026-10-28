@@ -9,12 +9,9 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use stela_runtime::{
-    pc::{
-        gpt::{self, Guid, Partition},
-        storage::pattern,
-    },
-    sha256,
+use {
+    stela_formats::sha256, stela_runtime::pc::gpt, stela_runtime::pc::gpt::Guid,
+    stela_runtime::pc::gpt::Partition, stela_runtime::pc::storage::pattern,
 };
 
 const BLOCK: u64 = 512;

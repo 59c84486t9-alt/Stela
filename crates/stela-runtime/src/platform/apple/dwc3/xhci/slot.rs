@@ -37,11 +37,11 @@ use super::{
     CONTEXT_STATE_ERROR, CYCLE, Event, LINK, MAX_SLOTS, MICROFRAME, PARAMETER_ERROR,
     SLOT_NOT_ENABLED, SUCCESS, TOGGLE, TRANSACTION_ERROR, TRB_BYTES, TRB_ERROR, Xhci,
 };
-use crate::platform::{
-    dma::Port,
-    usb::{self, Function, Reply, Token},
-};
 use alloc::{boxed::Box, format, vec::Vec};
+use {
+    crate::platform::usb, crate::platform::usb::Function, crate::platform::usb::Reply,
+    crate::platform::usb::Token, stela_contracts::dma::Port,
+};
 
 pub(super) const ENDPOINTS: usize = 31;
 const CONTEXT: u64 = 32;

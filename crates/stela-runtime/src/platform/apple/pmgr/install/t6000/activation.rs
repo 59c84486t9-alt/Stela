@@ -6,8 +6,8 @@
 //! are ordered controller inputs only. No native PC, request response, PS value
 //! or retirement follows merely because this transaction was published.
 use super::super::{Error, History, Installation, Step, write};
-use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
+use stela_contracts::bus::Width;
 
 pub use super::super::super::t6000::PRE_ACTIVATION_BASE;
 
@@ -57,16 +57,20 @@ pub fn sequence(stage: u32, kind: u32) -> Result<Option<Installation>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Access, Bus, LifecycleState, MmioError},
-        interrupt::InterruptLatch,
-        pmgr::{
-            install::{Action, FinishError, Outcome},
-            sequencer::PhysicalWrite,
-        },
-        power::t6000::{Bank, Controller, Instance, Observation, native},
-    };
     use alloc::{boxed::Box, vec};
+    use {
+        crate::platform::apple::pmgr::install::Action,
+        crate::platform::apple::pmgr::install::FinishError,
+        crate::platform::apple::pmgr::install::Outcome,
+        crate::platform::apple::pmgr::sequencer::PhysicalWrite,
+        crate::platform::apple::power::t6000::Bank,
+        crate::platform::apple::power::t6000::Controller,
+        crate::platform::apple::power::t6000::Instance,
+        crate::platform::apple::power::t6000::Observation,
+        crate::platform::apple::power::t6000::native, stela_contracts::bus::Access,
+        stela_contracts::bus::Bus, stela_contracts::bus::LifecycleState,
+        stela_contracts::bus::MmioError, stela_contracts::interrupt::InterruptLatch,
+    };
 
     fn owner(unknown_rmw: bool) -> Controller {
         // Explicit supplied test handoff, not native Apple reset observations.

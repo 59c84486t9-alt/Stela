@@ -348,8 +348,7 @@ impl ChunkAccess {
             self.operand.governing,
             chunk,
             self.element,
-            destination,
-            scratch,
+            crate::x86_64::scalable::MaskRegisters::new(destination, scratch),
             self.length,
             self.target,
         );

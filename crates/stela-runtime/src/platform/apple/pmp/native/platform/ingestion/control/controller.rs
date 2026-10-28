@@ -7,8 +7,11 @@
 //! a register read may consume, and this adapter must not replay it.
 use super::super::super::owner::Completion;
 use super::{FlagsMethod, Operation, ResourceRequest, ResourceValue};
-use crate::platform::apple::bus::{Access, MmioDevice, MmioError, Width};
 use alloc::boxed::Box;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mapping {
@@ -243,9 +246,9 @@ impl Controller {
 mod tests {
     use super::super::Identity;
     use super::*;
-    use crate::platform::apple::{bus::Direction, interrupt::InterruptLatch};
     use alloc::{rc::Rc, vec, vec::Vec};
     use core::cell::RefCell;
+    use {stela_contracts::bus::Direction, stela_contracts::interrupt::InterruptLatch};
     type AccessLog = Rc<RefCell<Vec<(u64, Option<u64>)>>>;
     #[derive(Clone)]
     struct Device(AccessLog, bool);

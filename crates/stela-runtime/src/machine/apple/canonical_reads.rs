@@ -82,9 +82,9 @@ impl AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::Wire;
     use alloc::rc::Rc;
     use core::cell::Cell;
+    use stela_contracts::interrupt::Wire;
 
     struct Reader(Rc<Cell<u32>>, bool);
     impl MmioDevice for Reader {
@@ -105,11 +105,11 @@ mod tests {
                 .set_level(Wire::Aic(AicInput::new(0, 1)), true);
             if self.1 {
                 access.request_reset(self.name(), "reached read before refusal");
-                return Err(crate::platform::apple::bus::refuse(
+                return Err(stela_contracts::bus::refuse(
                     self.name(),
                     offset,
                     width,
-                    crate::platform::apple::bus::Direction::Read,
+                    stela_contracts::bus::Direction::Read,
                     "retained read prefix",
                 ));
             }
@@ -122,11 +122,11 @@ mod tests {
             _value: u64,
             _access: &mut Access<'_>,
         ) -> Result<(), MmioError> {
-            Err(crate::platform::apple::bus::refuse(
+            Err(stela_contracts::bus::refuse(
                 self.name(),
                 offset,
                 width,
-                crate::platform::apple::bus::Direction::Write,
+                stela_contracts::bus::Direction::Write,
                 "read-only consuming test register",
             ))
         }

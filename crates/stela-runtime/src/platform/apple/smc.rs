@@ -151,7 +151,6 @@ use rtc::RtcBinding;
 pub use rtc::RtcKeyProfile;
 
 use super::asc::TransitionRequest;
-use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::rtkit::Endpoint;
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -160,6 +159,11 @@ use alloc::{
     vec::Vec,
 };
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
+    stela_contracts::bus::Transition, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 pub const ENDPOINT: u8 = 0x20;
 /// The shared page: one 16 KiB kernel page at the start of the region.

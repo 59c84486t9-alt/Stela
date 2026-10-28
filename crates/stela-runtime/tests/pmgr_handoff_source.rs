@@ -38,7 +38,7 @@ fn original_physical_ps() -> std::collections::BTreeSet<u64> {
     // The restore DT's /chosen chip-id is unprovisioned (zero), so do not
     // patch it or mount a fabricated board to inspect its original records.
     // Replay the pinned v1 placement fields only, using the public ADT reader.
-    let root = stela_runtime::machine::adt::Node::root(&adt).unwrap();
+    let root = stela_contracts::adt::Node::root(&adt).unwrap();
     let io = root.child("arm-io").unwrap();
     let pmgr = io.child("pmgr").unwrap();
     assert!(pmgr.property("ps-groups").is_none());

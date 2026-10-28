@@ -1338,7 +1338,7 @@ fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit 
             address: recorded.address,
             write: recorded.write,
             cause: recorded.cause,
-            registers: recorded.registers,
+            registers: stela_compiler::block::HostGprSnapshot::legacy(recorded.registers),
         });
     }
     NativeExit::Exit {

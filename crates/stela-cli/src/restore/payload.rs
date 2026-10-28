@@ -17,12 +17,17 @@ use std::{
     io::{Read, Seek, Write},
     path::{Path, PathBuf},
 };
-use stela_runtime::payload::{
-    AeaKey, BLOCK_HASHES_FILE, BlockHashes, HASH_BLOCK_BYTES, IdentitySet, KIND, Layout,
-    MANIFEST_FILE, Member, PayloadManifest, Purpose, SourceImage, images_directory, slice_count,
-    slice_path,
-};
 use zip::ZipArchive;
+use {
+    stela_formats::payload::AeaKey, stela_formats::payload::BLOCK_HASHES_FILE,
+    stela_formats::payload::BlockHashes, stela_formats::payload::HASH_BLOCK_BYTES,
+    stela_formats::payload::IdentitySet, stela_formats::payload::KIND,
+    stela_formats::payload::Layout, stela_formats::payload::MANIFEST_FILE,
+    stela_formats::payload::Member, stela_formats::payload::PayloadManifest,
+    stela_formats::payload::Purpose, stela_formats::payload::SourceImage,
+    stela_formats::payload::images_directory, stela_formats::payload::slice_count,
+    stela_formats::payload::slice_path,
+};
 
 const BUILD_MANIFEST: &str = "BuildManifest.plist";
 const RESTORE_PLIST: &str = "Restore.plist";
@@ -146,7 +151,7 @@ fn select_scope<R: Read + Seek>(
         .collect();
     for name in &names {
         ensure!(
-            stela_runtime::payload::safe_path(name),
+            stela_formats::payload::safe_path(name),
             "unsafe member {name}"
         );
         archive
@@ -233,7 +238,7 @@ fn block_hashes(hashed: &[Hashed]) -> (Vec<u8>, BlockHashes) {
     let entry = BlockHashes {
         file: BLOCK_HASHES_FILE.into(),
         block_bytes: HASH_BLOCK_BYTES,
-        sha256: stela_runtime::sha256(&file),
+        sha256: stela_formats::sha256(&file),
     };
     (file, entry)
 }
@@ -307,7 +312,7 @@ fn make_key(
         member: member.into(),
         header_sha256: metadata.header_sha256.clone(),
         url,
-        key_sha256: stela_runtime::sha256(key_pem.as_bytes()),
+        key_sha256: stela_formats::sha256(key_pem.as_bytes()),
         url_asset_sha256: Some(url_asset_sha256),
         key_pem,
     })
@@ -774,7 +779,7 @@ pub fn write(options: &WriteOptions<'_>) -> Result<serde_json::Value> {
     let (layout, members, whole) = match options.layout {
         PayloadLayout::Split => {
             ensure!(
-                (1..=stela_runtime::payload::MAX_SLICE_BYTES).contains(&options.slice_bytes),
+                (1..=stela_formats::payload::MAX_SLICE_BYTES).contains(&options.slice_bytes),
                 "slice size must be 1..=4 GiB-1"
             );
             let whole = std::thread::scope(|scope| {
@@ -1020,7 +1025,7 @@ pub fn synthetic_ipsw_of(path: &Path, build: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stela_runtime::payload::Purpose;
+    use stela_formats::payload::Purpose;
 
     fn options<'a>(image: &'a Path, root: &'a Path, layout: PayloadLayout) -> WriteOptions<'a> {
         WriteOptions {
@@ -1073,7 +1078,7 @@ mod tests {
             let mut original = Vec::new();
             archive.by_name(&member.name)?.read_to_end(&mut original)?;
             assert_eq!(joined, original);
-            assert_eq!(Some(stela_runtime::sha256(&joined)), member.sha256);
+            assert_eq!(Some(stela_formats::sha256(&joined)), member.sha256);
         }
         assert!(directory.join("Firmware/stelatest-os.dmg.003").exists());
         assert!(!directory.join("Firmware/unrelated.bin.000").exists());
@@ -1195,7 +1200,7 @@ mod tests {
         assert_eq!(in_place.source, manifest.source);
         // Its block hashes cover every member's blocks, in order.
         let entry = in_place.block_hashes.as_ref().unwrap();
-        assert_eq!(entry.sha256, stela_runtime::sha256(&blocks));
+        assert_eq!(entry.sha256, stela_formats::sha256(&blocks));
         assert_eq!(blocks.len() as u64, in_place.hash_blocks() * 32);
         let mut archive = ZipArchive::new(File::open(&image)?)?;
         let mut at = 0;

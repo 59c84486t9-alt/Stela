@@ -3,7 +3,7 @@ use alloc::string::String;
 use anyhow::{Result, ensure};
 use object::macho;
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 const WORD_BYTES: usize = core::mem::size_of::<u32>();
 const REGISTER_BYTES: usize = core::mem::size_of::<u64>();

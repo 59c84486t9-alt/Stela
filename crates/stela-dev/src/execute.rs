@@ -264,7 +264,7 @@ impl RunLinkedImages {
                     macho::select_slice(&container, &path, architecture.as_deref())?;
                 inputs.push(ImageInput {
                     data: slice.to_vec(),
-                    container_sha256: stela_runtime::sha256(&container),
+                    container_sha256: stela_formats::sha256(&container),
                     slice_offset,
                     load_base: base,
                 });
@@ -425,7 +425,7 @@ impl RunMappedImage {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({"kind":"mapped_macho_entry_probe",
-            "container_sha256":stela_runtime::sha256(&data),"slice_offset":slice_offset,"plan":image.plan(),
+            "container_sha256":stela_formats::sha256(&data),"slice_offset":slice_offset,"plan":image.plan(),
             "memory_regions":image.regions(),"guard_segments_not_reserved":image.unreserved_guards(),
             "fixups":image.fixups(),"image_base":image.fixups().load_base,"mapped_entry":image.mapped_entry(),
             "applied_rebases":image.fixups().rebases.len(),
@@ -511,7 +511,7 @@ impl RunBlocks {
             },
         };
         let source = std::fs::read(input)?;
-        let source_hash = stela_runtime::sha256(&source);
+        let source_hash = stela_formats::sha256(&source);
         let context = if let Some(path) = software_pauth_keys.as_deref() {
             Some(pauth_all_keys_context(path, ADDRESS_SPACE_ID)?)
         } else {
@@ -653,7 +653,7 @@ impl RunBlocks {
                 "source_id":clock.source_id(),"frequency":clock.frequency(),"region":clock.region(),
                 "legacy_configuration":clock.legacy_configuration(),
                 "legacy_commpage_profile":clock.legacy_configuration().profile_id(),
-                "page_sha256":clock.snapshot_bytes(0, stela_runtime::clock::GUEST_BYTES).map(|bytes| stela_runtime::sha256(&bytes))?
+                "page_sha256":clock.snapshot_bytes(0, stela_runtime::clock::GUEST_BYTES).map(|bytes| stela_formats::sha256(&bytes))?
             })) }).transpose()?;
         println!(
             "{}",
@@ -684,7 +684,7 @@ impl RunBlocks {
             "page_size_commpage":commpage.as_ref().map(|page| -> Result<_> { Ok(serde_json::json!({
                 "profile_id":page.profile_id(),"address_space":page.address_space(),
                 "region":page.region(),"supported_fields":page.supported_fields(),
-                "page_sha256":stela_runtime::sha256(&page.snapshot_bytes()?)
+                "page_sha256":stela_formats::sha256(&page.snapshot_bytes()?)
             })) }).transpose()?,
             "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":service_run.services,
             "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),

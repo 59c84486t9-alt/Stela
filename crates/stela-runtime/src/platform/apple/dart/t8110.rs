@@ -159,16 +159,20 @@
 //! Full family evidence, capability gates and qualification gaps are in
 //! `docs/research/dart-iommu.md`. The paired SMMU view exposes the capture
 //! count of this cacheless implementation, not a physical chip's dump.
-use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use super::super::interrupt::{AicInput, Wire};
 use super::descriptor::Format;
 use super::gen3::fault::{Capture, Code, Level, Record};
 use super::{DAPF_BYTES, DAPF_OFFSET, Fault, Profile, SMMU_BYTES, SMMU_OFFSET, SmmuBlock};
-use crate::platform::dma::{DmaError, Iommu, Memory};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory};
+use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire};
 
 const NAME: &str = "dart-t8110";
 
@@ -1151,7 +1155,7 @@ impl MmioDevice for Dart {
 mod tests {
     use super::super::super::interrupt::InterruptLatch;
     use super::*;
-    use crate::platform::dma::tests::Ram;
+    use stela_contracts::dma::test_support::Ram;
 
     const ROOT: u64 = 0x1_0000_0000;
     const LEAVES: u64 = ROOT + PAGE;
@@ -1607,7 +1611,7 @@ mod tests {
         );
         let mut a = Access::new(0, 0, &mut sink);
         let first = 0x200_8000 - 4;
-        let mut port = crate::platform::dma::Port {
+        let mut port = stela_contracts::dma::Port {
             iommu: &mut dart,
             stream: 1,
             memory: &mut ram,
@@ -1796,10 +1800,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
-        let root = crate::machine::adt::Node::root(&bytes).unwrap();
+        let root = stela_contracts::adt::Node::root(&bytes).unwrap();
         let node = root.child("arm-io").unwrap().child("dart-pmp").unwrap();
         assert_eq!(node.first_u32("n-apfs-instance-0"), Some(16));
         assert_eq!(node.first_u32("sid"), Some(0));

@@ -70,7 +70,7 @@ pub(super) fn processor_registers(root: &Node<'_>) -> Result<Vec<ProcessorRegist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
+    use stela_contracts::adt::encode;
 
     fn tree(blocks: &[Vec<u8>]) -> Vec<u8> {
         let children: Vec<_> = blocks

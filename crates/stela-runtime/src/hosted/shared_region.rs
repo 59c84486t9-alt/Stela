@@ -428,9 +428,9 @@ fn slide_page(
                 diversity
             };
             let key = if raw & KEY_IS_DATA != 0 {
-                pauth::Key::Da
+                stela_contracts::pauth::Key::Da
             } else {
-                pauth::Key::Ia
+                stela_contracts::pauth::Key::Ia
             };
             // A region without pointer authentication (`si_ptrauth`
             // false: a process whose user JOP is disabled) keeps the
@@ -585,7 +585,7 @@ mod tests {
         let location = base + 24;
         let expected = signer
             .sign(
-                pauth::Key::Da,
+                stela_contracts::pauth::Key::Da,
                 0x1_8000_0200 + slide,
                 (location & BLEND_ADDRESS_MASK) | 0x1234 << 48,
             )

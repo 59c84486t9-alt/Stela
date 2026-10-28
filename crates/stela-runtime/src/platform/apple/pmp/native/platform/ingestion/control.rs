@@ -13,11 +13,11 @@ mod packed;
 
 use super::super::owner::Completion;
 use super::{Pair, Request};
-use crate::platform::apple::bus::Access;
 use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
 use alloc::rc::Rc;
 pub use model::{Configuration, SlotImage, SoftwareImage};
 pub use owner::{AuxiliaryBinding, Owner};
+use stela_contracts::bus::Access;
 
 /// Identity of the actual retained resource composition; no completion rights.
 #[derive(Clone)]

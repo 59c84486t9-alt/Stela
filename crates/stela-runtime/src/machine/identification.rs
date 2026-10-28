@@ -14,13 +14,13 @@
 //! level is EL2 as a VHE host, or is a speculation guarantee the host gives
 //! ([`Speculation`]). A field with no satisfied row reads its "not
 //! implemented" (or "not disclosed") value.
-use super::{Chip, registers::encodings::*, system::Feature};
 use alloc::vec::Vec;
 use stela_compiler::{
     GuestAddress, TargetCpu,
     aarch64::system::registers::Encoding,
     block::{BlockProfile, CompilationPlan, Features},
 };
+use {super::registers::encodings::*, stela_contracts::Chip, stela_contracts::Feature};
 
 /// Why a row's level holds on this engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1718,7 +1718,7 @@ mod tests {
         for feature in Feature::ALL {
             if !Chip::ALL
                 .iter()
-                .any(|chip| chip.implemented(feature) == Ok(true))
+                .any(|chip| crate::machine::capabilities::implemented(*chip, feature) == Ok(true))
             {
                 continue;
             }
@@ -2090,7 +2090,7 @@ mod tests {
         // The chip the tests run on advertises the prediction restrictions
         // of its FEAT_SPECRES2 and FEAT_LSE2's alignment.
         let chip = crate::machine::test_chip();
-        let specres = 1 + u64::from(crate::machine::system::Feature::FEAT_SPECRES2.on(chip));
+        let specres = 1 + u64::from(stela_contracts::Feature::FEAT_SPECRES2.on(chip));
         assert_eq!(field(chip, ID_AA64ISAR1_EL1, 40), specres);
         assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), 1);
     }

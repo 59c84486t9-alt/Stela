@@ -87,9 +87,9 @@ impl PowerStates {
     /// no initial LifecycleState and never registers a participant or ACKs PMGR.
     pub fn processor_associations(
         &self,
-        chip: crate::machine::Chip,
+        chip: stela_contracts::Chip,
         root: &Node<'_>,
-        processors: &[crate::machine::registers::Identity],
+        processors: &[stela_contracts::identity::Identity],
         acc_harvesting: u32,
     ) -> Result<Vec<ProcessorAssociation>, String> {
         let io = root.child("arm-io").ok_or("CPU PMGR requires arm-io")?;
@@ -857,12 +857,12 @@ mod tests {
             .into_iter()
             .flat_map(u64::to_le_bytes)
             .collect::<alloc::vec::Vec<_>>();
-        crate::machine::adt::encode(&[("name", b"arm-io"), ("ranges", &ranges)], children)
+        stela_contracts::adt::encode(&[("name", b"arm-io"), ("ranges", &ranges)], children)
     }
 
     use super::*;
     use crate::machine::soc::tests::flat_fixture_extent;
-    use crate::machine::{adt::encode, soc::DART};
+    use {crate::machine::soc::DART, stela_contracts::adt::encode};
 
     #[test]
     fn usb_and_phy_resource_owners_require_qualified_complete_lists() {
@@ -1404,7 +1404,7 @@ mod tests {
             hex::encode(Sha256::digest(&bytes)),
             "d60dbd13b11a6188f6bfa19a6fe173d49950d5b619197a5a7f4e9d76734d1680"
         );
-        let manifest = crate::boot_bundle::Manifest::parse(
+        let manifest = stela_formats::boot_bundle::Manifest::parse(
             &std::fs::read(directory.join("bundle.json")).unwrap(),
         )
         .unwrap();

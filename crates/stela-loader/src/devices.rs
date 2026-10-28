@@ -1310,7 +1310,7 @@ mod tests {
             ),
         ] {
             let input = std::fs::read(format!("{directory}/DeviceTree.{board}")).unwrap();
-            assert_eq!(stela_runtime::sha256(&input), digest);
+            assert_eq!(stela_formats::sha256(&input), digest);
             let mut tree = DeviceTree::parse(&input).unwrap();
             let original = tree.clone();
             let hidden = hide_unmodeled(&mut tree);
@@ -1793,7 +1793,7 @@ mod tests {
     fn original_j314s_preparation_keeps_the_complete_external_display_graph() {
         let bytes = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
-            stela_runtime::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let mut tree = DeviceTree::parse(&bytes).unwrap();
@@ -2040,7 +2040,7 @@ mod tests {
     fn original_direct_memory_preserves_source_while_pmp_dma_stays_hidden() {
         let bytes = std::fs::read(std::env::var("STELA_T6000_MCC_DEVICE_TREE").unwrap()).unwrap();
         assert_eq!(
-            stela_runtime::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let original = DeviceTree::parse(&bytes).unwrap();

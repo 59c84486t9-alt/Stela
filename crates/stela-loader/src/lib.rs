@@ -20,7 +20,7 @@ pub mod carveouts;
 pub mod chained_fixups;
 pub mod coprocessor;
 #[cfg(feature = "std")]
-pub use stela_runtime::code_signature;
+pub use stela_formats::code_signature;
 pub mod darts;
 #[cfg(feature = "std")]
 pub mod dependency_graph;
@@ -62,7 +62,7 @@ use anyhow::{Context, Result, ensure};
 #[cfg(feature = "std")]
 use object::{Object, ObjectSection};
 #[cfg(feature = "std")]
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 /// One Mach-O slice of a file, as [`inspect`] names it.
 #[cfg(feature = "std")]

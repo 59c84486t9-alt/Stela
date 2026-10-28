@@ -131,7 +131,7 @@ impl Controls {
         let address_checks = ProcessMemoryFeatures::from_snapshot(&identification)
             .map_err(|_| MemoryStatus::Unsupported)?
             .unchecked_address_checks();
-        let identity = crate::sha256(
+        let identity = stela_formats::sha256(
             alloc::format!(
                 "{:?} {:?} {:?} {} {:?} {}",
                 translation,
@@ -221,7 +221,10 @@ impl Controls {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::machine::{Chip, CpuProfile, exception::Pstate, identification};
+    use {
+        crate::machine::CpuProfile, crate::machine::exception::Pstate,
+        crate::machine::identification, stela_contracts::Chip,
+    };
     pub(in crate::machine::engine::shared_memory) fn captured()
     -> (Cpu, CpuProfile, Vec<SystemRegister>) {
         let chip = Chip::AppleM1;
@@ -307,7 +310,7 @@ pub(super) mod tests {
         let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
         // Preserve the prior serialization as a negative compatibility input;
         // the new source-qualified address policy must not reuse that key.
-        let legacy = crate::sha256(
+        let legacy = stela_formats::sha256(
             alloc::format!(
                 "{:?} {:?} {:?} {} {}",
                 controls.translation,

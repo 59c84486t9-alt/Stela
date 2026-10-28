@@ -25,14 +25,16 @@ use crate::{
 };
 use alloc::{format, string::String, vec, vec::Vec};
 use sha2::{Digest, Sha256};
-use stela_runtime::{
-    payload::gpt::{self, Found, Guid, Role, Table},
-    pc::{machine_state, storage::Target},
-};
 use uefi::{
     Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
     proto::{loaded_image::LoadedImage, media::block::BlockIO},
+};
+use {
+    stela_formats::payload::gpt, stela_formats::payload::gpt::Found,
+    stela_formats::payload::gpt::Guid, stela_formats::payload::gpt::Role,
+    stela_formats::payload::gpt::Table, stela_runtime::pc::machine_state,
+    stela_runtime::pc::storage::Target,
 };
 
 const MIB: u64 = 1 << 20;
@@ -574,7 +576,7 @@ fn disks() -> Vec<Disk> {
         };
         let found = gpt::read(geometry, |lba, blocks| {
             disk.read(lba, blocks)
-                .map_err(stela_runtime::payload::PayloadError::Disk)
+                .map_err(stela_formats::payload::PayloadError::Disk)
         });
         match found {
             Ok(Found::Table { table, .. }) => disk.table = Some(table),

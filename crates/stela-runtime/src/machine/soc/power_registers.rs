@@ -757,7 +757,7 @@ mod tests {
     use super::*;
 
     fn optional_fixture(performance: &[u8], extra: &[(&str, &[u8])]) -> Vec<u8> {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let reg = [0x1000u64, 0x1000]
             .into_iter()
             .flat_map(u64::to_le_bytes)
@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn performance_bank_capacity_is_independent_of_byte_sized_source_selectors() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let mut group = direct_performance_group();
         group[8..10].copy_from_slice(&306u16.to_le_bytes());
         let mut source = [0; PMGR_DEVICE];
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn special_acc_events_use_the_dt_selector_and_cluster_type() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let mut e = [0u8; 24];
         e[2] = 2;
         e[6] = 12;
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn bridge_headers_configs_axi_and_dependencies_place_the_translated_window() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let cells = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
         let mut config = [0u8; 36];
         config[1] = 7;
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn soc_dpe_samples_are_absolute_and_checked_against_the_selected_dt_bank() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let mut sample = [0u8; 40];
         sample[..8].copy_from_slice(&0x5_0000_2708u64.to_le_bytes());
         sample[16..24].copy_from_slice(&[0x1d, 0, 1, 0, 1, 1, 1, 64]);
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     fn wake_masks_derive_the_bank_and_validate_dt_sources_without_assuming_reset_masks() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let layout = SOCS
             .iter()
             .find(|soc| soc.chip_id == 0x8112)
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn perf_groups_derive_sparse_selectors_from_each_dt_record_kind() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let group = |index: u32, offset: u32, count: u16, class: u8| {
             let mut entry = [0u8; 16];
             entry[..4].copy_from_slice(&index.to_le_bytes());
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn cpu_start_registers_follow_the_pmgr_node_with_registers() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let reg = |base: u64, bytes: u64| [base.to_le_bytes(), bytes.to_le_bytes()].concat();
         let io = |pmgr: &str, pmgr_reg: Option<(u64, u64)>, child: Option<(u64, u64)>| {

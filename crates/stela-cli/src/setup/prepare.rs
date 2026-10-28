@@ -13,7 +13,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use stela_runtime::builds;
+use stela_formats::builds;
 
 /// A boot bundle prepared on this computer, not yet copied.
 pub(super) struct Prepared {

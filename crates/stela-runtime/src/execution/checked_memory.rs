@@ -174,8 +174,8 @@ impl CheckedMemoryBlock {
         let identity = Identity {
             address_space,
             entry,
-            source_sha256: crate::sha256(&source),
-            native_sha256: crate::sha256(&compiled.native.x86_64_code),
+            source_sha256: stela_formats::sha256(&source),
+            native_sha256: stela_formats::sha256(&compiled.native.x86_64_code),
             native_bytes: compiled.native.x86_64_code.len(),
             compiler_source_sha256: stela_compiler::SOURCE_SHA256,
             target,
@@ -994,7 +994,7 @@ mod tests {
             .compile()
             .unwrap();
             assert_eq!(
-                crate::sha256(&emitted.native.x86_64_code),
+                stela_formats::sha256(&emitted.native.x86_64_code),
                 body.identity.native_sha256
             );
             for (name, bytes) in [
@@ -1985,7 +1985,7 @@ mod tests {
             .compile()
             .unwrap();
             assert_eq!(
-                crate::sha256(&emitted.native.x86_64_code),
+                stela_formats::sha256(&emitted.native.x86_64_code),
                 body.identity.native_sha256
             );
             for (name, bytes) in [

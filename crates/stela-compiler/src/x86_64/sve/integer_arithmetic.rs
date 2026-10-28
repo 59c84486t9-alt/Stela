@@ -512,8 +512,10 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
                                 predicate,
                                 chunk,
                                 operand.element_size,
-                                SAVED_LEFT,
-                                SAVED_RIGHT,
+                                crate::x86_64::scalable::MaskRegisters::new(
+                                    SAVED_LEFT,
+                                    SAVED_RIGHT,
+                                ),
                                 length,
                                 target,
                             );
@@ -611,8 +613,7 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
                 predicate,
                 chunk,
                 operand.element_size,
-                SAVED_LEFT,
-                SAVED_RIGHT,
+                crate::x86_64::scalable::MaskRegisters::new(SAVED_LEFT, SAVED_RIGHT),
                 length,
                 target,
             );

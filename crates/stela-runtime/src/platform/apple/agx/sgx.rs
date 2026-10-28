@@ -64,15 +64,17 @@
 //! - The model has one performance state (0), no GPC power transitions and
 //!   so no GPC host interrupts; none of the `sgx` interrupt lines is raised.
 //!   Enables and dynamic gating are held as written.
-use super::super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
 use super::generation::{Family, Gpu, Identification, MMU_ENABLE, Mmu, Model};
 use super::uat::{self, Uat};
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "agx-sgx";
 
@@ -354,7 +356,7 @@ impl FirmwarePower {
     #[cfg(test)]
     fn target(
         &self,
-        port: &mut crate::platform::dma::Port<'_, '_>,
+        port: &mut stela_contracts::dma::Port<'_, '_>,
         region: &super::pio::Region,
         offset: u32,
         write: bool,
@@ -373,9 +375,9 @@ impl FirmwarePower {
             .iommu
             .translate(port.memory, port.stream, va, va + 3, write, port.access)
             .map_err(|error| match error {
-                crate::platform::dma::DmaError::Fault(_) => "GFX firmware PIO faults in the UAT",
-                crate::platform::dma::DmaError::Memory => "GFX firmware PIO page table is not RAM",
-                crate::platform::dma::DmaError::Unsupported(reason) => reason,
+                stela_contracts::dma::DmaError::Fault(_) => "GFX firmware PIO faults in the UAT",
+                stela_contracts::dma::DmaError::Memory => "GFX firmware PIO page table is not RAM",
+                stela_contracts::dma::DmaError::Unsupported(reason) => reason,
             })?;
         if physical != expected {
             return Err("GFX firmware PIO translation disagrees with its AP physical descriptor");
@@ -399,7 +401,7 @@ impl FirmwarePower {
     #[cfg(test)]
     pub fn read(
         &self,
-        port: &mut crate::platform::dma::Port<'_, '_>,
+        port: &mut stela_contracts::dma::Port<'_, '_>,
         region: &super::pio::Region,
         offset: u32,
     ) -> Result<u32, &'static str> {
@@ -409,7 +411,7 @@ impl FirmwarePower {
     #[cfg(test)]
     pub fn write(
         &self,
-        port: &mut crate::platform::dma::Port<'_, '_>,
+        port: &mut stela_contracts::dma::Port<'_, '_>,
         region: &super::pio::Region,
         offset: u32,
         value: u32,
@@ -717,7 +719,7 @@ impl MmioDevice for Sgx {
 mod tests {
     use super::super::generation::{self, GPUS};
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     const MMU_TTBAT: u64 = 0xd0_802c;
     const MMU_TTBA_INVALIDATE: u64 = 0xd0_8030;
@@ -760,7 +762,7 @@ mod tests {
     #[test]
     fn native_firmware_pio_walks_the_uat_and_shares_the_actual_ap_register() {
         use super::super::generation::{G13G, G13X, G14G, G14X, G15G};
-        use crate::platform::dma::{Port, tests::Ram};
+        use {stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram};
         let physical = 0x204000000;
         let base = 0x800000000;
         for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
@@ -875,7 +877,7 @@ mod tests {
                     power.write(&mut port, &region, offset, value)
                 };
             let translate = |sgx: &mut Sgx, ram: &mut Ram, access: &mut Access<'_>, agent| {
-                use crate::platform::dma::Iommu;
+                use stela_contracts::dma::Iommu;
                 sgx.uat()
                     .agent(agent)
                     .translate(ram, 0, 0x12030, 0x12033, false, access)
@@ -897,7 +899,7 @@ mod tests {
             );
             assert!(
                 matches!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu),
-                Err(crate::platform::dma::DmaError::Unsupported(reason)) if reason.contains("Fender sleep"))
+                Err(stela_contracts::dma::DmaError::Unsupported(reason)) if reason.contains("Fender sleep"))
             );
             assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Firmware).is_ok());
             assert!(
@@ -994,7 +996,7 @@ mod tests {
 
     #[test]
     fn physical_gates_inhibit_the_mmu_and_preserve_boot_roots_until_released() {
-        use crate::platform::dma::{Iommu, tests::Ram};
+        use {stela_contracts::dma::Iommu, stela_contracts::dma::test_support::Ram};
         let mut sgx = Sgx::handed_off(t8112(), 0x8_0000_0000, 0x8_0000_4000).unwrap();
         let active = sgx.lifecycle;
         let mut ram = Ram::new(0, 0x1000);
@@ -1026,7 +1028,7 @@ mod tests {
                     false,
                     &mut access
                 ),
-                Err(crate::platform::dma::DmaError::Unsupported(
+                Err(stela_contracts::dma::DmaError::Unsupported(
                     "SGX DMA while PMGR inhibits execution"
                 ))
             ));

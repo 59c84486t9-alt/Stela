@@ -17,11 +17,13 @@
 //! matches the driver's bounded PIO command (0x2cc0f08). Unknown registers,
 //! fields and target operations refuse, including diagnostic XFSTA, whose
 //! encoding the available evidence does not establish.
-use super::{
-    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    interrupt::{AicInput, Wire},
-};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
+};
 
 pub const BYTES: u64 = 0x4000;
 const NAME: &str = "Apple I2C";
@@ -445,7 +447,7 @@ impl MmioDevice for I2c {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     struct Echo {
         cursor: u8,
     }

@@ -2,11 +2,13 @@
 //! programs this bank directly; it does not use the T8112 PMP quota protocol.
 //! Explicit Stela initialization and retained physical observations are distinct.
 //! Committed inputs never become cache-power or quota completion by themselves.
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 mod configuration;
 mod drain;
@@ -563,7 +565,7 @@ impl MmioDevice for View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     fn lifecycle() -> LifecycleState {
         LifecycleState {
             powered: true,

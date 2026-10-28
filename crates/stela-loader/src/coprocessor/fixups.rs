@@ -8,7 +8,7 @@ use super::macho::{Layout, end, file_bytes};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::{pauth, sha256};
+use {stela_formats::sha256, stela_runtime::pauth};
 
 const FORMAT_ARM64E_KERNEL: u32 = 7;
 const STARTS_USE_VM_OFFSET: u32 = 2;
@@ -17,7 +17,7 @@ const STRIDE: u64 = 4;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Authentication {
-    pub key: pauth::Key,
+    pub key: stela_contracts::pauth::Key,
     pub diversity: u16,
     pub address_diversity: bool,
 }
@@ -139,10 +139,10 @@ pub(super) fn parse(data: &[u8], layout: &Layout, maximum: usize) -> Result<Fixu
             );
             let authentication = (value & (1 << 63) != 0).then_some(Authentication {
                 key: match (value >> 49) & 3 {
-                    0 => pauth::Key::Ia,
-                    1 => pauth::Key::Ib,
-                    2 => pauth::Key::Da,
-                    _ => pauth::Key::Db,
+                    0 => stela_contracts::pauth::Key::Ia,
+                    1 => stela_contracts::pauth::Key::Ib,
+                    2 => stela_contracts::pauth::Key::Da,
+                    _ => stela_contracts::pauth::Key::Db,
                 },
                 diversity: (value >> 32) as u16,
                 address_diversity: value & (1 << 48) != 0,
@@ -231,7 +231,7 @@ mod tests {
         let s = prepare(&fixture())?.stage(0x800000, 0x3000)?;
         assert_eq!(s.plan().chains.pointers.len(), 2);
         let ctx = context();
-        let expected = ctx.sign(pauth::Key::Da, 8, 0x1234_0000_0000_2000)?;
+        let expected = ctx.sign(stela_contracts::pauth::Key::Da, 8, 0x1234_0000_0000_2000)?;
         let r = s.relocate(0, ctx, 16)?;
         let signed = u64::from_le_bytes(r.bytes()[0x2000..0x2008].try_into()?);
         assert_eq!(signed, expected);

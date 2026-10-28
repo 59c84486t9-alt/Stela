@@ -495,7 +495,9 @@ mod tests {
         let mut tags = [0u64; 4];
         let (memo, tags) = (memo.as_mut_ptr(), tags.as_mut_ptr());
         let address = (memo as u64, tags as u64);
+        // SAFETY: key_index produces 0..4 and tags outlives these synchronous thunk calls.
         let set_tag = |key: u8, value: u64| unsafe { tags.add(usize::from(key)).write(value) };
+        // SAFETY: slot masks into MEMO_ENTRIES; each returned borrow ends before native execution.
         let entry = |index: usize| unsafe { &mut *memo.add(index) };
         let routine: ServiceRoutine = service;
         let service = Service {

@@ -76,7 +76,7 @@ pub(super) mod tests {
     use super::super::NoDevices;
     use super::super::tests::{BASE, FakeHost, machine_on};
     use super::*;
-    use crate::machine::{Chip, system::Register as SystemRegister};
+    use {crate::machine::system::Register as SystemRegister, stela_contracts::Chip};
 
     const GENTER: u32 = 0x0020_1420;
     const GEXIT: u32 = 0x0020_1400;

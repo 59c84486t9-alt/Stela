@@ -1192,7 +1192,10 @@ mod tests {
         -> Result<()> {
             let context = full_context();
             let cache = tempfile::tempdir()?;
-            for key in [pauth::Key::Ia, pauth::Key::Ib] {
+            for key in [
+                stela_contracts::pauth::Key::Ia,
+                stela_contracts::pauth::Key::Ib,
+            ] {
                 for link in [false, true] {
                     for (target, rm, zero) in [
                         (0, 1, false),
@@ -1204,7 +1207,7 @@ mod tests {
                         let word = 0xd61f0800
                             | (u32::from(!zero) << 24)
                             | (u32::from(link) << 21)
-                            | (u32::from(key == pauth::Key::Ib) << 10)
+                            | (u32::from(key == stela_contracts::pauth::Key::Ib) << 10)
                             | (target << 5)
                             | rm;
                         let mut vm = runtime(cache.path(), &[0x910004e7, word])?;
@@ -1299,7 +1302,8 @@ mod tests {
             ] {
                 let mut vm = runtime(cache.path(), &[0x910004e7, word, 0])?; // ADD X7,X7,#1
                 let mut state = initial(11);
-                state.registers.x[30] = full.sign(pauth::Key::Ia, STOP.0, state.registers.sp)?;
+                state.registers.x[30] =
+                    full.sign(stela_contracts::pauth::Key::Ia, STOP.0, state.registers.sp)?;
                 let mut expected = state.registers.clone();
                 expected.x[7] = expected.x[7].wrapping_add(1);
                 // SAFETY: register prefix/helper only; missing key cannot touch guest RAM.
@@ -1342,11 +1346,15 @@ mod tests {
             let cache = tempfile::tempdir()?;
             let mut vm = runtime(cache.path(), &[0xd65f0bff])?;
             let mut state = initial(8);
-            let signed = context.sign(pauth::Key::Ia, STOP.0, state.registers.sp)?;
+            let signed =
+                context.sign(stela_contracts::pauth::Key::Ia, STOP.0, state.registers.sp)?;
             state.registers.x[30] = signed ^ (1 << 47);
             let expected = state.registers.clone();
-            let target =
-                context.authenticate(pauth::Key::Ia, state.registers.x[30], state.registers.sp)?;
+            let target = context.authenticate(
+                stela_contracts::pauth::Key::Ia,
+                state.registers.x[30],
+                state.registers.sp,
+            )?;
             assert!(!target.authenticated);
             // SAFETY: helper-only RETAA, no target is fetched by failed completion.
             let outcome = unsafe { vm.run_with_pauth(&mut state, None, 1, &context)? };

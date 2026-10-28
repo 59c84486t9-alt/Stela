@@ -168,14 +168,16 @@ mod tests {
             .into_iter()
             .flat_map(u64::to_le_bytes)
             .collect::<alloc::vec::Vec<_>>();
-        crate::machine::adt::encode(&[("name", b"arm-io"), ("ranges", &ranges)], children)
+        stela_contracts::adt::encode(&[("name", b"arm-io"), ("ranges", &ranges)], children)
     }
 
     use super::*;
     use crate::machine::soc::tests::flat_fixture_extent;
-    use crate::machine::{adt::encode, soc::power_resources::inventory_with_nodes};
     use crate::platform::apple::pmgr::coverage::{self, Admission, Consumer, LifecycleSinks};
     use alloc::vec;
+    use {
+        crate::machine::soc::power_resources::inventory_with_nodes, stela_contracts::adt::encode,
+    };
 
     fn bank(binding: Binding) -> Vec<u8> {
         let reg = [binding.physical, binding.bytes]

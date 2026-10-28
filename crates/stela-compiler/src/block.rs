@@ -7,6 +7,7 @@
 
 mod analysis;
 mod features;
+mod host_gprs;
 pub mod loop_budget;
 pub mod memory;
 pub mod pauth_lr;
@@ -24,6 +25,7 @@ pub use analysis::{
 };
 use analysis::{ParsedBlock, analyze_parsed, parse};
 pub use features::{BlockProfile, Features};
+pub use host_gprs::{FaultRecoveryError, HostGprSnapshot};
 pub use memory::{
     CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID, CheckedMemoryProfile,
     ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -39,7 +41,6 @@ use crate::{
     CompileError, GuestAddress, NativeBlock,
     aarch64::{Operation, Register},
 };
-use alloc::format;
 use serde::Serialize;
 
 const NOP_ENCODING: u32 = 0xd503_201f;
@@ -67,8 +68,20 @@ pub enum ExitKind {
     Amx = 12,
 }
 
+/// A native exit tag outside the compiler/runtime ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidExitKind {
+    pub value: u64,
+}
+impl core::fmt::Display for InvalidExitKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "unknown native exit kind {}", self.value)
+    }
+}
+impl core::error::Error for InvalidExitKind {}
+
 impl TryFrom<u64> for ExitKind {
-    type Error = ();
+    type Error = InvalidExitKind;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
@@ -85,7 +98,7 @@ impl TryFrom<u64> for ExitKind {
             10 => Ok(Self::ScalableNumerical),
             11 => Ok(Self::System),
             12 => Ok(Self::Amx),
-            _ => Err(()),
+            _ => Err(InvalidExitKind { value }),
         }
     }
 }
@@ -111,9 +124,10 @@ pub fn decode_clock_instruction(
     word: u32,
 ) -> Result<Option<ClockInstruction>, CompileError> {
     if !pc.0.is_multiple_of(4) {
-        return Err(CompileError(
-            "clock instruction PC must be aligned to 4 bytes".into(),
-        ));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
+                .at_instruction(pc, word),
+        );
     }
     let operation = if word == 0xd5033fdf {
         ClockOperation::InstructionSynchronization
@@ -127,9 +141,10 @@ pub fn decode_clock_instruction(
     Ok(Some(ClockInstruction {
         operation,
         instruction_pc: pc,
-        next_pc: GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
-            CompileError("clock continuation PC overflows guest address range".into())
-        })?),
+        next_pc: GuestAddress(
+            pc.0.checked_add(4)
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+        ),
     }))
 }
 
@@ -155,9 +170,10 @@ pub struct SynchronousTrap {
 /// HVC/SMC/HLT/DCPS and neighboring reserved encodings remain unsupported.
 pub fn decode_trap(pc: GuestAddress, word: u32) -> Result<Option<SynchronousTrap>, CompileError> {
     if !pc.0.is_multiple_of(4) {
-        return Err(CompileError(
-            "trap instruction PC must be aligned to 4 bytes".into(),
-        ));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
+                .at_instruction(pc, word),
+        );
     }
     // June 2026 official SVC_EX_exception / BRK_EX_exception encodings:
     // only imm16 at bits 20:5 varies.
@@ -167,9 +183,10 @@ pub fn decode_trap(pc: GuestAddress, word: u32) -> Result<Option<SynchronousTrap
         _ => return Ok(None),
     };
     let exception_return_pc = match kind {
-        TrapKind::SupervisorCall => GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
-            CompileError("SVC exception return PC overflows guest address range".into())
-        })?),
+        TrapKind::SupervisorCall => GuestAddress(
+            pc.0.checked_add(4)
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+        ),
         TrapKind::SoftwareBreakpoint => pc,
     };
     Ok(Some(SynchronousTrap {
@@ -228,16 +245,38 @@ pub struct FaultRecovery {
 }
 
 impl FaultRecovery {
-    /// Write the values `table` names for a fault at native `offset` from
-    /// the host GPRs at the fault, RAX through R15, into `state`.
-    pub fn apply(table: &[Self], offset: usize, host: &[u64; 16], state: &mut crate::GuestState) {
+    /// Settle the active recovery mappings from a normalized host snapshot.
+    /// All indices and required banks are checked before the first guest write.
+    pub fn apply(
+        table: &[Self],
+        offset: usize,
+        host: &HostGprSnapshot,
+        state: &mut crate::GuestState,
+    ) -> Result<(), FaultRecoveryError> {
         const SP: u8 = 31;
-        for entry in table
-            .iter()
-            .filter(|entry| (entry.start..entry.end).contains(&offset))
-        {
+        let active = || {
+            table
+                .iter()
+                .filter(move |entry| (entry.start..entry.end).contains(&offset))
+        };
+        for entry in active() {
             for &(guest, register) in &entry.registers {
-                let value = host[usize::from(register)];
+                if guest > SP {
+                    return Err(FaultRecoveryError::InvalidGuestRegister { register: guest });
+                }
+                if register >= 32 {
+                    return Err(FaultRecoveryError::InvalidHostRegister { register });
+                }
+                if host.get(register).is_none() {
+                    return Err(FaultRecoveryError::ExtendedStateUnavailable { register });
+                }
+            }
+        }
+        for entry in active() {
+            for &(guest, register) in &entry.registers {
+                let value = host
+                    .get(register)
+                    .expect("active recovery mappings validated");
                 if guest == SP {
                     state.sp = value;
                 } else {
@@ -245,6 +284,7 @@ impl FaultRecovery {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -275,7 +315,7 @@ fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, 
         let target =
             pc.0.checked_add_signed(displacement)
                 .map(GuestAddress)
-                .ok_or_else(|| CompileError("direct call guest address overflow".into()))?;
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?;
         return Ok(Some(Terminator::DirectCall(target)));
     }
     let kind = match word & 0xfffffc1f {
@@ -368,8 +408,7 @@ impl CompilationPlan {
                 source_bytes: source.len(),
             },
             _ => {
-                let parsed =
-                    parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+                let parsed = parse(source, base, profile).map_err(CompileError::from)?;
                 return Self::block(parsed, options);
             }
         };
@@ -399,13 +438,12 @@ impl CompilationPlan {
                 Operation::Exclusive(_) | Operation::CheckedPointer(_)
             ) || profile.checked_memory().is_none()
             {
-                crate::x86_64::validate_target(instruction, target)
-                    .map_err(|error| CompileError(format!("{error:?}")))?;
+                crate::x86_64::validate_target(instruction, target).map_err(CompileError::from)?;
             }
             // An unchecked SP needs its own host capability.
             if !checks.stack_alignment {
                 crate::x86_64::validate_target_with(instruction, target, checks)
-                    .map_err(|error| CompileError(format!("{error:?}")))?;
+                    .map_err(CompileError::from)?;
             }
         }
         let checked = profile
@@ -555,7 +593,7 @@ impl CompilationPlan {
             } => {
                 let native = crate::x86_64::Emitter
                     .emit_for_target(&instructions, target)
-                    .map_err(|e| CompileError(format!("x86 emission failed: {e:?}")))?;
+                    .map_err(CompileError::from)?;
                 return Ok(CompiledBlock::unchained(native, source_bytes));
             }
             Stage::ContextLeaf(leaf) => {
@@ -569,7 +607,7 @@ impl CompilationPlan {
         } else if let Some(resident) = resident {
             resident
                 .emit(&parsed.instructions)
-                .map_err(|error| CompileError(format!("resident loop emission: {error:?}")))?
+                .map_err(CompileError::from)?
         } else if profile.has(Features::RESIDENT_LOOPS) {
             crate::x86_64::block::emit_resident_fallback_for_target(
                 &parsed.instructions,
@@ -631,8 +669,8 @@ fn decode_leaf(
 ) -> Result<alloc::vec::Vec<crate::aarch64::Instruction>, CompileError> {
     use crate::Lifter;
     if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
-        return Err(CompileError(
-            "input and guest base must be nonempty/aligned to 4 bytes".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::InvalidSourceLayout,
         ));
     }
     let mut instructions = alloc::vec::Vec::with_capacity(source.len() / 4);
@@ -640,11 +678,11 @@ fn decode_leaf(
         let pc = GuestAddress(
             base.0
                 .checked_add((index as u64) * 4)
-                .ok_or_else(|| CompileError("guest address overflow".into()))?,
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
         );
         let instruction = crate::aarch64::Decoder
             .lift(pc, u32::from_le_bytes(*bytes))
-            .map_err(|e| CompileError(format!("unsupported ARM64 semantics: {e:?}")))?;
+            .map_err(CompileError::from)?;
         instructions.push(instruction);
     }
     if !matches!(
@@ -653,7 +691,9 @@ fn decode_leaf(
             .map(|instruction| &instruction.operation),
         Some(Operation::Return)
     ) {
-        return Err(CompileError("leaf region must end in RET X30".into()));
+        return Err(CompileError::new(
+            crate::CompileErrorKind::MissingLeafReturn,
+        ));
     }
     Ok(instructions)
 }
@@ -1568,13 +1608,13 @@ mod tests {
         ];
         let host: [u64; 16] = core::array::from_fn(|register| 0x100 + register as u64);
         let mut state = crate::GuestState::default();
-        FaultRecovery::apply(&table, 9, &host, &mut state);
+        FaultRecovery::apply(&table, 9, &HostGprSnapshot::legacy(host), &mut state).unwrap();
         assert_eq!((state.x[3], state.sp, state.x[4]), (0x109, 0x106, 0));
         let mut state = crate::GuestState::default();
-        FaultRecovery::apply(&table, 10, &host, &mut state);
+        FaultRecovery::apply(&table, 10, &HostGprSnapshot::legacy(host), &mut state).unwrap();
         assert_eq!((state.x[3], state.sp, state.x[4]), (0, 0, 0x10a));
         let mut state = crate::GuestState::default();
-        FaultRecovery::apply(&table, 3, &host, &mut state);
+        FaultRecovery::apply(&table, 3, &HostGprSnapshot::legacy(host), &mut state).unwrap();
         assert_eq!(state, crate::GuestState::default());
     }
 
@@ -1901,7 +1941,11 @@ mod tests {
         let source = bytes(&[0xd503201f, 0, 0xd65f03c0]);
         let failure = analyze(&source, base).unwrap_err();
         assert_eq!(failure.pc, GuestAddress(0x1004));
-        assert!(failure.detail.contains("unsupported"));
+        assert!(matches!(
+            failure.kind,
+            crate::CompileErrorKind::Unsupported(_)
+        ));
+        assert_eq!(failure.encoding, Some(0));
         for word in [0xd4001001, 0xd43fffe0] {
             let analysis = analyze(&bytes(&[0xd503201f, word, 0]), base).unwrap();
             assert_eq!(analysis.source_bytes, 8);
@@ -1927,8 +1971,16 @@ mod tests {
         for kind in 0..=ExitKind::Amx as u64 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
-        assert_eq!(ExitKind::try_from(ExitKind::Amx as u64 + 1), Err(()));
-        assert_eq!(ExitKind::try_from(u64::MAX), Err(()));
+        assert_eq!(
+            ExitKind::try_from(ExitKind::Amx as u64 + 1),
+            Err(InvalidExitKind {
+                value: ExitKind::Amx as u64 + 1
+            })
+        );
+        assert_eq!(
+            ExitKind::try_from(u64::MAX),
+            Err(InvalidExitKind { value: u64::MAX })
+        );
     }
 
     #[test]

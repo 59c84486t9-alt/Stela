@@ -19,12 +19,14 @@ pub(super) fn aliases() -> impl Iterator<Item = u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Access, Lifecycle, LifecycleState, MmioDevice, Width},
-        interrupt::InterruptLatch,
-        mcc::{Configuration, Controller, Origin},
-    };
     use alloc::vec;
+    use {
+        crate::platform::apple::mcc::Configuration, crate::platform::apple::mcc::Controller,
+        crate::platform::apple::mcc::Origin, stela_contracts::bus::Access,
+        stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     fn running() -> LifecycleState {
         LifecycleState {

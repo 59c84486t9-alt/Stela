@@ -8,18 +8,18 @@ use super::validate::validate_source_map;
 use crate::Prepared;
 #[cfg(feature = "std")]
 use crate::prepare_runtime_block_for_target;
-use crate::sha256;
 use alloc::collections::{BTreeSet, VecDeque};
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
-    GuestAddress,
+    CompileErrorKind, GuestAddress,
     block::{
         BlockAnalysis, BlockProfile, DynamicEdge, MAX_BLOCK_INSTRUCTIONS, analyze_with_profile,
     },
 };
+use stela_formats::sha256;
 
 /// Persistent preparation artifact shared by ahead-of-time discovery and JIT.
 /// Preparing it performs no native mapping, invocation or guest memory access.
@@ -44,7 +44,8 @@ pub enum DiscoveryProblem {
     TruncatedInstruction,
     Unsupported {
         failure_pc: GuestAddress,
-        detail: String,
+        encoding: Option<u32>,
+        cause: CompileErrorKind,
     },
 }
 #[derive(Debug, Serialize)]
@@ -226,7 +227,8 @@ impl BlockRuntime {
                         Ok(_) => None,
                         Err(error) => Some(DiscoveryProblem::Unsupported {
                             failure_pc: error.pc,
-                            detail: error.detail,
+                            encoding: error.encoding,
+                            cause: error.kind,
                         }),
                     }
                 }

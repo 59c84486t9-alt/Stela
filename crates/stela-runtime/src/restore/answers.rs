@@ -9,7 +9,6 @@ use super::{
     ticket::Ticket,
     tss,
 };
-use crate::payload::{ReadAt, safe_path};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -18,6 +17,7 @@ use alloc::{
     vec::Vec,
 };
 use sha2::{Digest, Sha384};
+use {stela_formats::payload::ReadAt, stela_formats::payload::safe_path};
 const MAX_STAGED_ANSWERS: usize = 128;
 const MAX_STAGED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
@@ -78,7 +78,7 @@ impl Staged {
         {
             return Err(Error::Limit("staged answers"));
         }
-        if crate::sha256(response_bytes) != sha256 {
+        if stela_formats::sha256(response_bytes) != sha256 {
             return Err(Error::Invalid("staged response digest"));
         }
         validate_http_args(kind, args)?;
@@ -111,7 +111,7 @@ impl Staged {
 /// SHA-256 of the staged `URLAsset` reply for a recipient key PEM, for the
 /// inventory to record so the restore host serves the identical answer.
 pub fn staged_system_image_key_digest(pem: &str) -> Result<String> {
-    Ok(crate::sha256(&plist::encode_binary(
+    Ok(stela_formats::sha256(&plist::encode_binary(
         &url_asset_reply(pem),
         Limits::default(),
     )?))
@@ -127,7 +127,10 @@ fn url_asset_reply(pem: &str) -> Value {
     ])
 }
 fn fingerprint(v: &Value) -> Result<String> {
-    Ok(crate::sha256(&plist::encode_binary(v, Limits::default())?))
+    Ok(stela_formats::sha256(&plist::encode_binary(
+        v,
+        Limits::default(),
+    )?))
 }
 fn validate_http_args(kind: &str, args: &Value) -> Result<()> {
     let method = args.required("RequestMethod")?.string()?;
@@ -274,7 +277,7 @@ impl<R: ReadAt> Answers<R> {
                 ("RequestURL", Value::from(key.url.as_str())),
             ]);
             let bytes = plist::encode_binary(&url_asset_reply(&key.key_pem), Limits::default())?;
-            let digest = crate::sha256(&bytes);
+            let digest = stela_formats::sha256(&bytes);
             if key.url_asset_sha256.as_deref().is_some_and(|s| s != digest) {
                 return Err(Error::Invalid("staged key does not match its member"));
             }
@@ -834,13 +837,13 @@ impl<R: ReadAt> Answers<R> {
             let path = identity.path(component)?.to_string();
             let mut bytes = self.member_bytes(&path)?;
             let digest = identity.component(component)?.required("Digest")?.data()?;
-            let parts = crate::img4::parse(&bytes)
+            let parts = stela_formats::img4::parse(&bytes)
                 .map_err(|_| Error::Invalid("SEP firmware is not an IM4P"))?;
             if parts.manifest.is_some() {
                 return Err(Error::Invalid("SEP firmware is not a bare IM4P"));
             }
             if let Some(kind) = kind {
-                crate::img4::set_payload_type(&mut bytes, kind)
+                stela_formats::img4::set_payload_type(&mut bytes, kind)
                     .map_err(|_| Error::Invalid("SEP firmware type cannot be set"))?;
             }
             if Sha384::digest(&bytes).as_slice() != digest {
@@ -848,7 +851,7 @@ impl<R: ReadAt> Answers<R> {
                     "SEP firmware differs from its BuildManifest digest",
                 ));
             }
-            let image = crate::img4::container(&bytes);
+            let image = stela_formats::img4::container(&bytes);
             total += image.len();
             if total > MAX_REPLY_BYTES {
                 return Err(Error::Limit("NOR response bytes"));
@@ -1181,7 +1184,7 @@ fn bare_type(prefix: &[u8], bytes: u64) -> Result<([u8; 4], usize)> {
     if length + header as u64 != bytes || prefix.get(header..header + 6) != Some(b"\x16\x04IM4P") {
         return Err(Error::Invalid("source must be exactly one bare IM4P"));
     }
-    let tag = crate::img4::peek_payload_type(prefix)
+    let tag = stela_formats::img4::peek_payload_type(prefix)
         .map_err(|_| Error::Invalid("IM4P streaming type"))?;
     // `IA5String "IM4P"` is followed by the four-character type's IA5String.
     let at = header + 8;
@@ -1315,7 +1318,7 @@ mod tests {
                 .unwrap()
                 .data()
                 .unwrap(),
-            crate::img4::container(&sep)
+            stela_formats::img4::container(&sep)
         );
         let mut bare = Answers::new(super::super::store::tests::fixture(b"x", false));
         assert!(bare.sep_firmware(&request).is_err());
@@ -1351,7 +1354,7 @@ mod tests {
                 .unwrap()
                 .data()
                 .unwrap(),
-            crate::img4::container(&rsep)
+            stela_formats::img4::container(&rsep)
         );
         // A digest of the file as stored does not cover the retyped image.
         let store = super::super::store::tests::with_components(b"x", false, &components);
@@ -1545,7 +1548,7 @@ mod tests {
     /// refuses by member.
     #[test]
     fn the_system_image_key_answers_the_fcs_key_url_get_offline() {
-        use crate::payload::AeaKey;
+        use stela_formats::payload::AeaKey;
         let pem = "-----BEGIN PRIVATE KEY-----\nMIGHA==\n-----END PRIVATE KEY-----\n";
         let url = "https://wkms-public.apple.com/fcs-keys/mIR-wHh7FG0=";
         let key = AeaKey {
@@ -1553,8 +1556,8 @@ mod tests {
             header_sha256: "a".repeat(64),
             url: url.into(),
             key_pem: pem.into(),
-            key_sha256: crate::sha256(pem.as_bytes()),
-            url_asset_sha256: Some(crate::sha256(
+            key_sha256: stela_formats::sha256(pem.as_bytes()),
+            url_asset_sha256: Some(stela_formats::sha256(
                 &plist::encode_binary(&url_asset_reply(pem), Limits::default()).unwrap(),
             )),
         };
@@ -1590,7 +1593,7 @@ mod tests {
                 header_sha256: "a".repeat(64),
                 url: url.into(),
                 key_pem: other.into(),
-                key_sha256: crate::sha256(other.as_bytes()),
+                key_sha256: stela_formats::sha256(other.as_bytes()),
                 url_asset_sha256: Some("0".repeat(64)),
             }],
         );
@@ -1617,7 +1620,7 @@ mod tests {
                 .is_err()
         );
         staged
-            .insert("URLAsset", &args, &bytes, &crate::sha256(&bytes))
+            .insert("URLAsset", &args, &bytes, &stela_formats::sha256(&bytes))
             .unwrap();
         assert_eq!(staged.get("URLAsset", &args).unwrap(), response);
         let mut changed = args.clone();

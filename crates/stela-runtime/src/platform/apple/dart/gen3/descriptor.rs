@@ -5,7 +5,7 @@
 //! revision3.0. Its native TTBR write at158df8..158e00 still uses PA>>12.
 //! Choosing a software encoding does not qualify the native mode/revision,
 //! security, filter or context contracts needed for profile admission.
-use crate::platform::{apple::dart::descriptor::Format, dma::DmaError};
+use {crate::platform::apple::dart::descriptor::Format, stela_contracts::dma::DmaError};
 
 const COMPACT_ADDRESS: u64 = 0x0000_0003_ffff_ffc0;
 const ATTRIBUTES: u64 = 0xfff << 52 | 0xfff << 40 | 0xf;

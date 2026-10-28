@@ -39,12 +39,14 @@ pub mod store;
 pub mod transaction;
 pub mod xart;
 
-use super::{
-    asc::{Asc, Lines},
-    bus::{Access, Direction, Lifecycle, MmioDevice, MmioError, Width, refuse},
-};
-use crate::platform::dma::Port;
 use alloc::boxed::Box;
+use stela_contracts::dma::Port;
+use {
+    super::asc::Asc, super::asc::Lines, stela_contracts::bus::Access,
+    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "sep";
 const SEND_COMMIT: u64 = 0x8808;
@@ -242,7 +244,10 @@ impl MmioDevice for Sep {
 mod tests {
     use super::message::{Frame, ROM};
     use super::*;
-    use crate::platform::apple::interrupt::{AicInput, InterruptLatch, Wire};
+    use {
+        stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
+        stela_contracts::interrupt::Wire,
+    };
 
     const PHYSICAL: u64 = 0x396400000;
     const ACTIVE: super::super::bus::LifecycleState = super::super::bus::LifecycleState {

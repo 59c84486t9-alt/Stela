@@ -4,7 +4,6 @@ use alloc::rc::Rc;
 use alloc::{boxed::Box, string::String};
 use core::marker::PhantomData;
 
-use crate::sha256;
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{
     GuestAddress, GuestState, Options, TargetCpu,
@@ -21,6 +20,7 @@ use stela_compiler::{
     },
     scalable_context::ScalableProfile,
 };
+use stela_formats::sha256;
 
 use super::{ScalableState, context::ContextLoan};
 use crate::{

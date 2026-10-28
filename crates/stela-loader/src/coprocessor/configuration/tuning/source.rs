@@ -4,7 +4,7 @@ use crate::coprocessor::configuration::Provenance;
 use alloc::{string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 const GROUP_BYTES: usize = 0x38;
 const REVISION_BYTES: usize = 0x58;

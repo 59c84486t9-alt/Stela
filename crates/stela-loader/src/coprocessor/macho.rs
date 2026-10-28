@@ -11,7 +11,7 @@ use object::{
     read::macho::{LoadCommandVariant, MachHeader, Segment},
 };
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Section {

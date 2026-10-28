@@ -1,8 +1,8 @@
 //! Native callable representation retained out of band; never host pointers.
 use super::super::platform::owner::Completion;
 use super::{record::Layout, resources::Request};
-use crate::platform::apple::bus::Access;
 use alloc::boxed::Box;
+use stela_contracts::bus::Access;
 
 pub trait Scalar {
     fn get(&mut self, request: &Request, access: &mut Access<'_>) -> Completion<u64>;

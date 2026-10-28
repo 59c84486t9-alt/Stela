@@ -217,8 +217,8 @@ mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires original J473 DT and KC via STELA_TEST_MCC_J473_DT and STELA_TEST_MCC_J473_KERNELCACHE"]
     fn original_j473_power_vector_uses_source_ordinals_and_distinct_domain_ids() {
-        use crate::machine::adt::Node;
         use sha2::{Digest, Sha256};
+        use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&data)),

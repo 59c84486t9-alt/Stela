@@ -71,12 +71,16 @@
 //! This uses the bus's reset/stop request boundary, never a host reset.
 //! Readback, nonzero encodings and other widths refuse without effects.
 //! Every other register of the aperture refuses.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::regfile::{self, Held, Span};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::sync::atomic::{Ordering, fence};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
+    stela_contracts::bus::Transition, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "amcc";
 const DRAM_ACCESS: u64 = 0x410;
@@ -756,7 +760,7 @@ impl MmioDevice for Amcc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     const fn bit_register(offset: u64) -> Register {
         Register {

@@ -1919,7 +1919,9 @@ dependencies = [
  "sha1",
  "sha2",
  "stela-boot-core",
+ "stela-contracts",
  "stela-drivers",
+ "stela-formats",
  "stela-loader",
  "stela-runtime",
  "tempfile",
@@ -1935,6 +1937,13 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "stela-fingerprint",
+]
+
+[[package]]
+name = "stela-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1962,6 +1971,8 @@ dependencies = [
  "serde_json",
  "stela-cli",
  "stela-compiler",
+ "stela-contracts",
+ "stela-formats",
  "stela-loader",
  "stela-runtime",
  "tempfile",
@@ -1993,6 +2004,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-formats"
+version = "0.1.0"
+dependencies = [
+ "crypto-bigint",
+ "hex",
+ "lzfse_rust",
+ "miniz_oxide",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "stela-contracts",
+]
+
+[[package]]
 name = "stela-loader"
 version = "0.1.0"
 dependencies = [
@@ -2004,7 +2030,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "stela-compiler",
+ "stela-contracts",
  "stela-drivers",
+ "stela-formats",
  "stela-runtime",
  "tempfile",
 ]
@@ -2036,9 +2064,11 @@ dependencies = [
  "sha2",
  "smoltcp",
  "stela-compiler",
+ "stela-contracts",
  "stela-crypto",
  "stela-drivers",
  "stela-fingerprint",
+ "stela-formats",
  "tempfile",
  "zeroize",
 ]
@@ -2592,8 +2622,10 @@ dependencies = [
  "stela-boot-core",
  "stela-cli",
  "stela-compiler",
+ "stela-contracts",
  "stela-crypto",
  "stela-drivers",
+ "stela-formats",
  "stela-loader",
  "stela-runtime",
  "tempfile",

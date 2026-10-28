@@ -72,9 +72,9 @@
 //! has had the space enumerated, so neither an encoding's existence nor its
 //! reset value is observed. The run reports every entry the guest used, so none of
 //! these is silent.
-use super::Chip;
 use alloc::collections::BTreeMap;
 use stela_compiler::aarch64::system::registers::Encoding;
+use stela_contracts::Chip;
 
 mod census;
 mod objc;

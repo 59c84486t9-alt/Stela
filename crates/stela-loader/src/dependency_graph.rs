@@ -146,7 +146,7 @@ fn read_input(
     Ok((
         ImageInput {
             data: slice.to_vec(),
-            container_sha256: stela_runtime::sha256(&bytes),
+            container_sha256: stela_formats::sha256(&bytes),
             slice_offset,
             load_base: Some(load_base),
         },

@@ -37,7 +37,7 @@ pub(in crate::guest_system) fn read(
         record.kind == KIND
             && record.schema_version == SCHEMA
             && record.product_build == original.product_build
-            && record.receipt_sha256 == stela_runtime::sha256(receipt)
+            && record.receipt_sha256 == stela_formats::sha256(receipt)
             && !record.kernels.is_empty()
             && [record.source_sha256, record.manifest_sha256]
                 .iter()
@@ -183,9 +183,9 @@ pub(in crate::guest_system) fn refresh(
         kind: KIND.into(),
         schema_version: SCHEMA,
         product_build: layout.build.build.into(),
-        receipt_sha256: stela_runtime::sha256(&original),
+        receipt_sha256: stela_formats::sha256(&original),
         source_sha256,
-        manifest_sha256: stela_runtime::sha256(&manifest_bytes),
+        manifest_sha256: stela_formats::sha256(&manifest_bytes),
         kernels,
     };
     if dry_run {
@@ -234,7 +234,7 @@ mod tests {
             let work = tempfile::tempdir()?;
             let layout = Layout::new(
                 work.path().join("installed"),
-                stela_runtime::builds::DEFAULT,
+                stela_formats::builds::DEFAULT,
             );
             fs::create_dir_all(layout.root().join("usr/lib"))?;
             fs::write(layout.root().join("usr/lib/dyld"), b"original dyld")?;
@@ -301,14 +301,14 @@ mod tests {
                         component: component.into(),
                         member: member.into(),
                         member_bytes: aea.len() as u64,
-                        aea_header_sha256: stela_runtime::sha256(&header),
+                        aea_header_sha256: stela_formats::sha256(&header),
                         volume: None,
                     })
                     .into(),
                 files: vec![disk::Copied {
                     path: "/usr/lib/dyld".into(),
                     bytes: 13,
-                    sha256: stela_runtime::sha256(b"original dyld"),
+                    sha256: stela_formats::sha256(b"original dyld"),
                 }],
                 kernels: vec![],
             };

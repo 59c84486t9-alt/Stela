@@ -1,6 +1,6 @@
 //! The kernel boot bundle: `bundle.json` and the files it lists, as prepared
 //! on the host by `stela-dev boot prepare` (the iBoot side of the hand-off).
-//! `stela_runtime::boot_bundle` checks every region's SHA-256, writes the
+//! `stela_formats::boot_bundle` checks every region's SHA-256, writes the
 //! regions and their zero tails into guest DRAM, and fills the patch slots
 //! only the running machine knows; this supplies the machine's side: guest
 //! RAM through the engine's host, seeded host entropy and the timebase.
@@ -29,17 +29,19 @@ use stela_loader::{
     apple_device_tree::DeviceTree, boot_bundle::Options, boot_selection::BootVolume, boot_trace,
     installed, recovery, upgrade,
 };
-use stela_runtime::{
-    boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
-    machine::Host,
-    payload::{self, PayloadManifest, ReadAt},
-};
 use uefi::{
     CString16, boot,
     proto::media::{
         file::{Directory, File as _, FileAttribute, FileInfo, FileMode, RegularFile},
         fs::SimpleFileSystem,
     },
+};
+use {
+    stela_formats::boot_bundle::Framebuffer, stela_formats::boot_bundle::MANIFEST_FILE,
+    stela_formats::boot_bundle::Machine, stela_formats::boot_bundle::Manifest,
+    stela_formats::boot_bundle::Nvram, stela_formats::payload,
+    stela_formats::payload::PayloadManifest, stela_formats::payload::ReadAt,
+    stela_runtime::machine::Host,
 };
 
 /// The counter frequency the machine presents in CNTFRQ_EL0.

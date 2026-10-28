@@ -1,5 +1,5 @@
 //! The kernel boot bundle of an installed system, built from its APFS
-//! container's Preboot volume (`stela_runtime::preboot`), in `no_std` so
+//! container's Preboot volume (`stela_formats::preboot`), in `no_std` so
 //! `stela.efi` builds the same bundle `stela-dev boot prepare --disk` writes.
 //!
 //! The volume group is the one NVRAM's boot volume names
@@ -44,12 +44,11 @@ use crate::{
 };
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use stela_runtime::{
-    apfs::{self, Container, Volume, btree::Hash},
-    img4,
-    payload::ReadAt,
-    preboot::{self, BootSet, SYSTEM_VERSION},
-    sha256,
+use {
+    stela_formats::apfs, stela_formats::apfs::Container, stela_formats::apfs::Volume,
+    stela_formats::apfs::btree::Hash, stela_formats::img4, stela_formats::payload::ReadAt,
+    stela_formats::preboot, stela_formats::preboot::BootSet,
+    stela_formats::preboot::SYSTEM_VERSION, stela_formats::sha256,
 };
 
 /// The variant recorded for a bundle read from an installed system.

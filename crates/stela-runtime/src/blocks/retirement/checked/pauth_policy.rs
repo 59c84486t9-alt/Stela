@@ -78,10 +78,10 @@ pub(super) fn qualify(
     }
     if let Some(key) = operation.required_key() {
         let (key, enable) = match key {
-            Key::Ia => (pauth::Key::Ia, SCTLR_ENIA),
-            Key::Ib => (pauth::Key::Ib, SCTLR_ENIB),
-            Key::Da => (pauth::Key::Da, SCTLR_ENDA),
-            Key::Db => (pauth::Key::Db, SCTLR_ENDB),
+            Key::Ia => (stela_contracts::pauth::Key::Ia, SCTLR_ENIA),
+            Key::Ib => (stela_contracts::pauth::Key::Ib, SCTLR_ENIB),
+            Key::Da => (stela_contracts::pauth::Key::Da, SCTLR_ENDA),
+            Key::Db => (stela_contracts::pauth::Key::Db, SCTLR_ENDB),
         };
         anyhow::ensure!(
             sctlr_el1 & enable != 0 && context.has_key(key),

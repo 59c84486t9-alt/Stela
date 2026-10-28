@@ -15,12 +15,6 @@
 //! without that evidence refuses: the T6050's M cores, whose caches no
 //! source gives, the M6's M cores, and a T6050 template whose fused variant
 //! is not merged yet (the boot bundle merges it, `stela_loader::soc_variant`).
-use super::{
-    Chip,
-    adt::Node,
-    caches::{Cache, Caches},
-    registers::Identity,
-};
 use crate::platform::apple::{
     aes, agx,
     aic::{AIC2_DIE_STRIDE, AIC2_MAX_DIES, AIC3_IRQ_CFG, AIC3_TIMESTAMPS, AicLayout},
@@ -31,6 +25,10 @@ use crate::platform::apple::{
     pmu, power, ptd, sart, smc, spi, spmi, wake,
 };
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
+use {
+    stela_contracts::Chip, stela_contracts::adt::Node, stela_contracts::caches::Cache,
+    stela_contracts::caches::Caches, stela_contracts::identity::Identity,
+};
 
 pub mod t6000_pmgr;
 
@@ -2289,7 +2287,7 @@ mod tests {
 
     #[test]
     fn dart_supply_ids_and_retention_come_from_dt_properties() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let reg = [0x35004000u64, 0x4000]
             .into_iter()
             .flat_map(u64::to_le_bytes)
@@ -2345,7 +2343,7 @@ mod tests {
 
     #[test]
     fn watchdog_side_words_use_independent_translated_dt_ranges() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let reg = [
             0x1000u64, 0x4000, 0xc218, 4, 0x8008, 4, 0x800c, 4, 0x8020, 4,
         ]
@@ -2412,7 +2410,7 @@ mod tests {
         };
         let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();
@@ -2461,7 +2459,7 @@ mod tests {
     fn original_j314s_ap_gpio_qualifies_without_auxiliary_or_lifecycle_claims() {
         let data = std::fs::read(std::env::var("STELA_TEST_GPIO_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();
@@ -2498,7 +2496,7 @@ mod tests {
 
     #[test]
     fn rtbuddy_endpoint_selection_uses_protocol_and_rejects_ambiguity() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let endpoint = |name: &str, compatible: &str| {
             let name = [name.as_bytes(), &[0]].concat();
             let compatible = [compatible.as_bytes(), &[0]].concat();
@@ -2539,7 +2537,7 @@ mod tests {
 
     #[test]
     fn rtbuddy_nubs_the_ap_does_not_wait_for_refuse() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let name = b"iop-pmp-nub ".to_vec();
         let set = 1u32.to_le_bytes().to_vec();
         let plain = encode(&[("name", &name)], &[]);
@@ -2600,7 +2598,7 @@ mod tests {
         use crate::machine::Devices;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();
@@ -2634,7 +2632,9 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        devices.add_smc(&smc, crate::builds::DEFAULT).unwrap();
+        devices
+            .add_smc(&smc, stela_formats::builds::DEFAULT)
+            .unwrap();
         let epoch = pmu::RtcEpoch {
             counter: 100,
             ticks: 0,
@@ -2997,7 +2997,7 @@ mod tests {
         aic_properties: &[(&str, u32)],
         io_children: &[Vec<u8>],
     ) -> Vec<u8> {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let u32s = |cells: &[u32]| {
             cells
@@ -3112,7 +3112,7 @@ mod tests {
 
     #[test]
     fn a_board_states_its_dram_base_or_takes_its_socs() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let with_base = |base: Option<&[u8]>| {
             let mcc = base.map(|base| encode(&[("name", &z("mcc")), ("dram-base", base)], &[]));
@@ -3268,7 +3268,7 @@ mod tests {
     /// J473AP's `dart-sio` and the AES engine behind its `mapper-aes`.
     #[test]
     fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let u32s = |cells: &[u32]| {
@@ -3545,7 +3545,7 @@ mod tests {
 
     #[test]
     fn multiple_darts_preserve_numbered_windows_sids_and_remap_without_guessing_dma_routing() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let cells = |values: &[u32]| {
             values
                 .iter()
@@ -3665,7 +3665,7 @@ mod tests {
     /// ps-regs/devices. Virtual clocks have no hardware power-state word.
     #[test]
     fn ans_power_gates_are_placed_and_virtual_clocks_do_not_invent_registers() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let mut devices = Vec::new();
@@ -3717,7 +3717,7 @@ mod tests {
     /// block at its second, with a virtual device that has no register.
     #[test]
     fn a_pmgr_places_each_devices_power_state_register() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let u32s = |cells: &[u32]| {
@@ -3927,7 +3927,7 @@ mod tests {
     /// `/arm-io/pmgr/clpc`) that names the AIC (0x63) for its first three
     /// specifiers and the PTD for the four FourCCs after them.
     pub(super) fn clpc_with_ptd() -> Vec<Vec<u8>> {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let words = |cells: &[u32]| {
             cells
@@ -3974,7 +3974,7 @@ mod tests {
     fn original_j314s_sep_preserves_sole_trad_with_sixteen_sid_capacity() {
         let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();
@@ -4009,7 +4009,7 @@ mod tests {
     fn original_j314s_external_output_preserves_native_routes_and_identity() {
         let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();
@@ -4093,7 +4093,7 @@ mod tests {
                     dart.profile,
                     &native,
                     usize::from(dart.streams),
-                    Some(crate::platform::apple::interrupt::AicInput::new(
+                    Some(stela_contracts::interrupt::AicInput::new(
                         0,
                         dart.irq as u16,
                     )),
@@ -4135,7 +4135,7 @@ mod tests {
                 (owners[1], dcp.stream as usize),
                 dcp.window,
                 Some((owners[0], dcp.surface.unwrap().1 as usize)),
-                crate::builds::DEFAULT,
+                stela_formats::builds::DEFAULT,
             )
             .unwrap();
         let regions = dcp
@@ -4272,7 +4272,7 @@ mod tests {
     fn original_j314s_ans_geometry_and_handoff_qualify_independently_of_whole_board() {
         let data = std::fs::read(std::env::var("STELA_TEST_ANS_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();

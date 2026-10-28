@@ -30,11 +30,14 @@
 //! the hardware's power domains would not: which blocks lose state, and
 //! how XNU's drivers restore them, is not yet established block by block.
 use super::{AppleDevices, Reset, Start, Transition};
-use crate::platform::apple::{bus::DeviceId, pmu, smc::WakeSource, wake::WakeMasks};
 use alloc::{
     collections::{BTreeSet, VecDeque},
     format,
     string::String,
+};
+use {
+    crate::platform::apple::pmu, crate::platform::apple::smc::WakeSource,
+    crate::platform::apple::wake::WakeMasks, stela_contracts::bus::DeviceId,
 };
 
 /// One step of the SoC's sleep, for the host's log.
@@ -240,7 +243,7 @@ mod tests {
                         rtc: Some(48),
                     },
                 },
-                crate::builds::DEFAULT,
+                stela_formats::builds::DEFAULT,
             )
             .unwrap();
         devices

@@ -879,9 +879,10 @@ fn pause_cpu(cpu: &mut Cpu, waiting: Option<Wait>, now: u64, paused: bool) {
 mod tests {
     use super::super::tests::{BASE, FakeHost, board};
     use super::*;
-    use crate::machine::{
-        cpu::Reservation, engine::DeviceError, exception::DAIF_ALL, registers::Identity,
-        system::Register,
+    use {
+        crate::machine::cpu::Reservation, crate::machine::engine::DeviceError,
+        crate::machine::exception::DAIF_ALL, crate::machine::system::Register,
+        stela_contracts::identity::Identity,
     };
 
     const WFE: u32 = 0xd503_205f;
@@ -984,7 +985,7 @@ mod tests {
         fn transfer(
             &mut self,
             _: usize,
-            memory: &mut dyn crate::platform::dma::Memory,
+            memory: &mut dyn stela_contracts::dma::Memory,
             now: u64,
         ) -> Result<(), DeviceError> {
             if self.dma.is_some_and(|deadline| now >= deadline) {
@@ -1177,16 +1178,16 @@ mod tests {
         }
     }
 
-    const RETAINED_ACTIVE: crate::platform::apple::bus::LifecycleState =
-        crate::platform::apple::bus::LifecycleState {
+    const RETAINED_ACTIVE: stela_contracts::bus::LifecycleState =
+        stela_contracts::bus::LifecycleState {
             powered: true,
             clocked: true,
             quiesced: false,
             reset: false,
             retention: false,
         };
-    const RETAINED_GATED: crate::platform::apple::bus::LifecycleState =
-        crate::platform::apple::bus::LifecycleState {
+    const RETAINED_GATED: stela_contracts::bus::LifecycleState =
+        stela_contracts::bus::LifecycleState {
             clocked: false,
             ..RETAINED_ACTIVE
         };
@@ -1202,7 +1203,7 @@ mod tests {
     fn power_change(
         machine: &mut Machine<FakeHost, Board>,
         domain: u64,
-        state: crate::platform::apple::bus::LifecycleState,
+        state: stela_contracts::bus::LifecycleState,
     ) {
         let plan = machine
             .prepare_processor_power(&[ProcessorChange { domain, state }])
@@ -1250,7 +1251,7 @@ mod tests {
                 },
                 ProcessorChange {
                     domain: 2,
-                    state: crate::platform::apple::bus::LifecycleState {
+                    state: stela_contracts::bus::LifecycleState {
                         quiesced: true,
                         ..RETAINED_ACTIVE
                     },
@@ -1787,7 +1788,7 @@ mod tests {
     #[test]
     fn original_m6_mixed_cluster_shares_live_or_parked_owners_in_either_start_order() {
         use super::super::tests::board_on;
-        use crate::machine::{Chip, ctrr::Field, impdef};
+        use {crate::machine::ctrr::Field, crate::machine::impdef, stela_contracts::Chip};
         const MPIDRS: [u64; 12] = [
             0x8000_0000,
             0x8000_0001,
@@ -1896,7 +1897,7 @@ mod tests {
     #[test]
     fn every_pe_and_new_cluster_starts_from_the_core_lock_handoff() {
         use super::super::tests::board_on;
-        use crate::machine::Chip;
+        use stela_contracts::Chip;
         let identities = [0x8000_0000, 0x8001_0100]
             .into_iter()
             .map(|mpidr| Identity {
@@ -1951,7 +1952,7 @@ mod tests {
             })
             .collect();
         let mut machine = board_on(
-            crate::machine::Chip::AppleM2,
+            stela_contracts::Chip::AppleM2,
             &[],
             super::super::NoDevices,
             identities,
@@ -1989,7 +1990,7 @@ mod tests {
                     good,
                     ProcessorChange {
                         domain: 7,
-                        state: crate::platform::apple::bus::LifecycleState {
+                        state: stela_contracts::bus::LifecycleState {
                             reset: true,
                             ..RETAINED_ACTIVE
                         }

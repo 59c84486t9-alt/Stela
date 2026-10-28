@@ -223,9 +223,9 @@ impl AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::MmioDevice,
-        interrupt::{InterruptSink, Wire},
+    use {
+        stela_contracts::bus::MmioDevice, stela_contracts::interrupt::InterruptSink,
+        stela_contracts::interrupt::Wire,
     };
 
     const AIC: u64 = 0x7000_0000;
@@ -439,7 +439,7 @@ mod tests {
         states: Vec<LifecycleState>,
     }
 
-    impl crate::platform::apple::bus::Lifecycle for ResettingClient {
+    impl stela_contracts::bus::Lifecycle for ResettingClient {
         fn check_lifecycle(&self, _: LifecycleState) -> Result<(), &'static str> {
             Ok(())
         }
@@ -454,7 +454,7 @@ mod tests {
     }
 
     impl MmioDevice for ResettingClient {
-        fn lifecycle(&mut self) -> Option<&mut dyn crate::platform::apple::bus::Lifecycle> {
+        fn lifecycle(&mut self) -> Option<&mut dyn stela_contracts::bus::Lifecycle> {
             Some(self)
         }
 
@@ -625,11 +625,11 @@ mod tests {
 
         fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
             if self.refuse {
-                return Err(crate::platform::apple::bus::refuse(
+                return Err(stela_contracts::bus::refuse(
                     self.name(),
                     0,
                     Width::Word,
-                    crate::platform::apple::bus::Direction::Read,
+                    stela_contracts::bus::Direction::Read,
                     "advance refused",
                 ));
             }

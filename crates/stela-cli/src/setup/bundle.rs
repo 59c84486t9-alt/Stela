@@ -38,7 +38,7 @@ const FIRST_SCHEMA: u32 = 1;
 const FIRST_REVISION: u32 = 0;
 
 /// What a bundle's content is: its boot-bundle schema, the format
-/// `stela.efi` reads (`stela_runtime::boot_bundle::SCHEMA_VERSION`), and its
+/// `stela.efi` reads (`stela_formats::boot_bundle::SCHEMA_VERSION`), and its
 /// revision, that of the loader that prepared it
 /// (`stela_loader::boot_bundle::REVISION`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

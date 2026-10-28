@@ -2,7 +2,10 @@
 //! the ASL of `ISA_A64_xml_A_profile-2026-06` `shared_pseudocode.xml` for the
 //! profile: EL2 is implemented and enabled (no EL3, Non-secure only) and
 //! FEAT_VHE without FEAT_E2H0 (HCR_EL2.E2H is RES1).
-use super::{CacheOp, CacheScope, CacheType, Context, Effect, Feature, Register};
+use {
+    super::CacheOp, super::CacheScope, super::CacheType, super::Context, super::Effect,
+    super::Register, stela_contracts::Feature,
+};
 
 pub const HCR_TGE: u32 = 27;
 pub const VTTBR_VMID: u32 = 48;

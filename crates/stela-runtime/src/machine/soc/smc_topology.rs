@@ -134,7 +134,7 @@ mod tests {
     /// through `smc-pmu`.
     #[test]
     fn smc_placement_reads_its_banks_region_and_function_keys() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values

@@ -40,44 +40,21 @@ const DATA_EXTENSION_MASK: u64 = 0x00ff_ffff_ffff_ffff & !ADDRESS_MASK;
 #[cfg(test)]
 const DATA_PAC_MASK: u64 = DATA_EXTENSION_MASK & !REGION_BIT;
 
-/// Cryptographic key and address domain; XPAC uses only the address domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Key {
-    Ia,
-    Ib,
-    Da,
-    Db,
+use stela_contracts::pauth::Key;
+
+const fn key_domain(key: Key) -> policy::Domain {
+    if key.is_data() {
+        policy::Domain::Data
+    } else {
+        policy::Domain::Instruction
+    }
 }
-impl Key {
-    const fn index(self) -> usize {
-        match self {
-            Self::Ia => 0,
-            Self::Ib => 1,
-            Self::Da => 2,
-            Self::Db => 3,
-        }
-    }
-    pub const fn is_data(self) -> bool {
-        matches!(self, Self::Da | Self::Db)
-    }
-    const fn is_b(self) -> bool {
-        matches!(self, Self::Ib | Self::Db)
-    }
-    const fn domain(self) -> policy::Domain {
-        if self.is_data() {
-            policy::Domain::Data
-        } else {
-            policy::Domain::Instruction
-        }
-    }
-    #[cfg(test)]
-    const fn pac_mask(self) -> u64 {
-        if self.is_data() {
-            DATA_PAC_MASK
-        } else {
-            PAC_MASK
-        }
+#[cfg(test)]
+const fn key_pac_mask(key: Key) -> u64 {
+    if key.is_data() {
+        DATA_PAC_MASK
+    } else {
+        PAC_MASK
     }
 }
 
@@ -241,7 +218,7 @@ impl Context {
     /// than the older Unicorn invalid-extension behavior. Enhanced profiles XOR the PAC field.
     pub fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64> {
         let words = self.keys.get(key)?;
-        let layout = self.layout(key.domain(), pointer, true);
+        let layout = self.layout(key_domain(key), pointer, true);
         let input = policy::signing_input(layout, pointer);
         Ok(policy::sign(
             self.version,
@@ -266,7 +243,7 @@ impl Context {
         let words = self.keys.words[key.index()]
             .as_ref()
             .ok_or(AuthenticationError::KeyUnavailable { key })?;
-        let domain = key.domain();
+        let domain = key_domain(key);
         let layout = self.layout(domain, pointer, false);
         let input = policy::authentication_input(layout, pointer);
         let result = policy::authenticate(
@@ -307,7 +284,7 @@ impl Context {
     /// even when that domain's cryptographic key was not provided.
     pub fn strip(&self, key: Key, pointer: u64) -> Result<u64> {
         Ok(policy::authentication_input(
-            self.layout(key.domain(), pointer, false),
+            self.layout(key_domain(key), pointer, false),
             pointer,
         ))
     }
@@ -361,6 +338,19 @@ pub(crate) mod lr_effects;
 
 #[cfg(feature = "std")]
 pub(crate) mod conditional;
+
+impl stela_contracts::pauth::Signer for Context {
+    type Error = anyhow::Error;
+    fn address_space(&self) -> u64 {
+        self.address_space()
+    }
+    fn profile_id(&self) -> &'static str {
+        self.profile_id()
+    }
+    fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64> {
+        self.sign(key, pointer, modifier)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -856,7 +846,7 @@ mod tests {
             let shift = if key.is_data() { 53 } else { 61 };
             let poison = if key.is_b() { 2u64 } else { 1 };
             for bit in 0..64 {
-                if key.pac_mask() & (1 << bit) != 0 {
+                if key_pac_mask(key) & (1 << bit) != 0 {
                     assert_eq!(
                         context.authenticate(key, signed ^ (1 << bit), 0x2000)?,
                         AuthResult {
@@ -901,7 +891,7 @@ mod tests {
                         (tag << 56) | (DATA_EXTENSION_MASK & !(1 << bit)) | 0x1400,
                     ] {
                         let canonical =
-                            policy::authentication_input(key.domain().layout(), pointer);
+                            policy::authentication_input(key_domain(key).layout(), pointer);
                         let signed = context.sign(key, pointer, 0x2000)?;
                         assert_eq!(signed, context.sign(key, canonical, 0x2000)? ^ (1 << 54));
                         let failed = context.authenticate(key, signed, 0x2000)?;

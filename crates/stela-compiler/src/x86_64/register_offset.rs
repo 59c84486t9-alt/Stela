@@ -10,30 +10,54 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
     address(
         code,
         checks,
-        operand.base,
-        operand.index,
-        operand.extend,
-        operand.shift,
+        IndexedAddress::new(operand.base, operand.index, operand.extend, operand.shift),
         operand.bytes,
         operand.transfer == MemoryTransfer::Store,
     );
     transfer(code, operand, checks);
 }
 
-/// Shared integer/SIMD address calculation, without guest register writeback.
-/// RAX is the result; RCX/RDX and host flags are scratch. SP is checked first,
-/// and SCTLR_ELx.A checks the result against the access's `bytes`.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn address(
-    code: &mut Code,
-    checks: super::MemoryChecks,
+/// A decoded base, index extension and scale.
+#[derive(Clone, Copy)]
+pub(super) struct IndexedAddress {
     base: Register,
     index: Register,
     extend: IndexExtend,
     shift: u8,
+}
+
+impl IndexedAddress {
+    pub(super) const fn new(
+        base: Register,
+        index: Register,
+        extend: IndexExtend,
+        shift: u8,
+    ) -> Self {
+        Self {
+            base,
+            index,
+            extend,
+            shift,
+        }
+    }
+}
+
+/// Shared integer/SIMD address calculation, without guest register writeback.
+/// RAX is the result; RCX/RDX and host flags are scratch. SP is checked first,
+/// and SCTLR_ELx.A checks the result against the access's `bytes`.
+pub(super) fn address(
+    code: &mut Code,
+    checks: super::MemoryChecks,
+    address: IndexedAddress,
     bytes: u8,
     write: bool,
 ) {
+    let IndexedAddress {
+        base,
+        index,
+        extend,
+        shift,
+    } = address;
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
     // Only the final address is checked against the guest's ranges.
@@ -42,7 +66,17 @@ pub(super) fn address(
         ..checks
     };
     let access = Access::of(write, bytes.into());
-    memory_address(code, base_checks, base, 0, AddressMode::Offset, 1, access);
+    memory_address(
+        code,
+        base_checks,
+        crate::x86_64::ImmediateAddress {
+            base,
+            displacement: 0,
+            mode: AddressMode::Offset,
+        },
+        1,
+        access,
+    );
     index_add(code, index, extend, shift);
     super::address_checks(code, checks, bytes, access);
 }

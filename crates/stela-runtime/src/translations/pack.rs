@@ -279,7 +279,7 @@ const TRANSFER_BYTES: usize = 1 << 20;
 #[cfg(target_arch = "x86_64")]
 pub fn write_in_place(
     device: &mut dyn stela_drivers::block::BlockDevice,
-    extents: &[crate::payload::pieces::Extent],
+    extents: &[stela_formats::payload::pieces::Extent],
     layout: &Layout,
 ) -> Result<(), WriteError> {
     let block = u64::from(device.identity().block_size);
@@ -808,8 +808,8 @@ mod tests {
 
     #[test]
     fn a_pack_is_written_over_its_files_extents_and_never_past_them() {
-        use crate::payload::pieces::Extent;
         use stela_drivers::block::RamDisk;
+        use stela_formats::payload::pieces::Extent;
         const BLOCK: u32 = 512;
         let translator = Digest::of(b"translator");
         let records: Vec<(Digest, Piece)> = (0u8..40)

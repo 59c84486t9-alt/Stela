@@ -4,9 +4,9 @@ use super::{
     resources::{WaitKey, Wake},
     wire,
 };
-use crate::platform::apple::bus::Access;
 use alloc::rc::Rc;
 use core::cell::RefCell;
+use stela_contracts::bus::Access;
 
 #[derive(Default)]
 pub(super) struct Inbox {

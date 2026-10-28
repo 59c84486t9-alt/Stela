@@ -227,9 +227,10 @@ pub fn decode_system_instruction(
     word: u32,
 ) -> Result<Option<SystemInstruction>, CompileError> {
     if !pc.0.is_multiple_of(INSTRUCTION_BYTES) {
-        return Err(CompileError(
-            "system instruction PC must be aligned to 4 bytes".into(),
-        ));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
+                .at_instruction(pc, word),
+        );
     }
     let event = match synchronization::decode(word) {
         Some(synchronization::Operation::SendEvent { local }) => Some(local),
@@ -266,11 +267,14 @@ pub fn decode_system_instruction(
         return Ok(None);
     };
     if operations.next().is_some() {
-        return Err(CompileError("ambiguous system instruction family".into()));
+        return Err(CompileError::new(
+            crate::CompileErrorKind::AmbiguousSystemInstruction,
+        ));
     }
-    let next_pc = GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
-        CompileError("system continuation PC overflows guest address range".into())
-    })?);
+    let next_pc = GuestAddress(
+        pc.0.checked_add(INSTRUCTION_BYTES)
+            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+    );
     Ok(Some(SystemInstruction {
         instruction_pc: pc,
         next_pc,
@@ -293,9 +297,10 @@ pub(super) fn decode_el1_system_instruction(
     else {
         return Ok(None);
     };
-    let next_pc = GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
-        CompileError("system continuation PC overflows guest address range".into())
-    })?);
+    let next_pc = GuestAddress(
+        pc.0.checked_add(INSTRUCTION_BYTES)
+            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+    );
     Ok(Some(SystemInstruction {
         instruction_pc: pc,
         next_pc,
@@ -362,9 +367,10 @@ pub fn decode_system_mode_instruction(
             _ => return Ok(None),
         }
     };
-    let next_pc = GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
-        CompileError("system continuation PC overflows guest address range".into())
-    })?);
+    let next_pc = GuestAddress(
+        pc.0.checked_add(INSTRUCTION_BYTES)
+            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+    );
     Ok(Some(SystemInstruction {
         instruction_pc: pc,
         next_pc,

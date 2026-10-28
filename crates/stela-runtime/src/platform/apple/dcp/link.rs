@@ -29,7 +29,7 @@
 //! ## Bring-up
 //!
 //! The coprocessor says hello with its interface version (type 0, subtype
-//! 0, the build's `dcp_link_version` from [`crate::builds`], checked by
+//! 0, the build's `dcp_link_version` from [`stela_formats::builds`], checked by
 //! the AP's handler 0x3d7e47c when the
 //! `iomfb_version_check` boot-arg is set). The AP's `link_state_init`
 //! (0x3d7c7a0) writes the [`RegionHeader`] at the start of its region and
@@ -106,7 +106,7 @@ const FIELD: u64 = 0xffff;
 /// the interface `version`'s four bytes, extended by the empty interface
 /// string the 26A434 AP hashes after them (handler 0x3d7e528).
 pub fn interface_crc(version: u32) -> u32 {
-    crate::payload::gpt::crc32(&version.to_le_bytes())
+    stela_formats::payload::gpt::crc32(&version.to_le_bytes())
 }
 
 /// Which side owns a stream.
@@ -329,7 +329,9 @@ mod tests {
 
     #[test]
     fn the_interface_crc_is_the_26a434_value() {
-        let version = crate::builds::find("26A434").unwrap().dcp_link_version;
+        let version = stela_formats::builds::find("26A434")
+            .unwrap()
+            .dcp_link_version;
         assert_eq!(interface_crc(version), 0x15a5_c96b);
     }
 

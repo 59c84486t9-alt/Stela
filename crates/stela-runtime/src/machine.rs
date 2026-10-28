@@ -3,12 +3,10 @@
 //! and System registers implemented here and the x86 mechanisms supplied by a
 //! [`Host`].
 //! The design is in `docs/design/system.md#system-mode-execution`.
-pub mod adt;
 pub mod amu;
 pub mod amx;
 pub mod apple;
-pub mod caches;
-pub mod chip;
+mod capabilities;
 pub mod cpu;
 pub mod ctrr;
 pub mod debug;
@@ -31,9 +29,9 @@ pub mod tags;
 pub mod timer;
 pub mod vgic;
 
-pub use chip::Chip;
-#[cfg(test)]
-pub(crate) use chip::test_chip;
+use stela_contracts::Chip;
+use stela_contracts::caches;
+pub mod cram;
 pub use cpu::{Cpu, Exception};
 #[cfg(test)]
 pub(crate) use engine::test_preparation;
@@ -43,4 +41,6 @@ pub use engine::{
     Prepared, Refused, Regime, Requirement, RequirementKind, Reset, StaleCode, Statistics, Stop,
     Transition, Translations, window,
 };
-pub use registers::{CpuProfile, Identity, Lines};
+pub use registers::{CpuProfile, Lines};
+#[cfg(test)]
+pub(crate) use stela_contracts::chip::test_chip;

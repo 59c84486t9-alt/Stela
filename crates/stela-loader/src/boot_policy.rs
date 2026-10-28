@@ -20,8 +20,11 @@ use crate::apple_device_tree::DeviceTree;
 use crate::im4m::{Manifest, Value};
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
-pub use stela_runtime::boot_bundle::schema::{
-    Decision, OsEnvironment, SecurityMode, SecurityPolicy,
+pub use {
+    stela_formats::boot_bundle::schema::Decision,
+    stela_formats::boot_bundle::schema::OsEnvironment,
+    stela_formats::boot_bundle::schema::SecurityMode,
+    stela_formats::boot_bundle::schema::SecurityPolicy,
 };
 
 pub mod mcc;
@@ -482,7 +485,7 @@ pub fn apply_root_hash(
         }
     };
     let tag = volume.payload_type();
-    let kind = stela_runtime::img4::payload_type(im4p)
+    let kind = stela_formats::img4::payload_type(im4p)
         .map_err(|e| anyhow::anyhow!("the {tag} root hash: {e}"))?;
     ensure!(
         kind == tag.as_bytes(),

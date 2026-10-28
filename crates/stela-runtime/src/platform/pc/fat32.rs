@@ -8,9 +8,9 @@
 //! short entries, which every FAT driver writes beside a long name. A file
 //! comes back as the device extents of its cluster chain, cut to its size.
 //! Nothing is written, and a malformed volume or chain is refused.
-use crate::payload::{ReadAt, pieces::Extent};
 use alloc::{format, string::String, vec, vec::Vec};
 use core::fmt;
+use {stela_formats::payload::ReadAt, stela_formats::payload::pieces::Extent};
 
 const BOOT_SIGNATURE: u16 = 0xaa55;
 /// The fewest clusters a FAT32 volume has.

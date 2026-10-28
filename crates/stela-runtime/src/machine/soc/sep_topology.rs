@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn sep_placement_uses_the_native_nub_and_is_admitted_by_its_sep_role() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         const MODELED: [&str; 3] = [UART, WATCHDOG, "aic,2"];
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let words = |cells: &[u32]| {

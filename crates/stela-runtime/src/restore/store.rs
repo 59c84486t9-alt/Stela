@@ -22,10 +22,6 @@ use super::{
     Error, Result,
     plist::{self, Limits, Value},
 };
-use crate::payload::{
-    MemberRead, PayloadManifest, Purpose, ReadAt,
-    zip::{Archive, Entry},
-};
 use alloc::{
     collections::BTreeMap,
     format,
@@ -33,8 +29,13 @@ use alloc::{
     vec::Vec,
 };
 use sha2::{Digest, Sha256, Sha384};
+use {
+    stela_formats::payload::MemberRead, stela_formats::payload::PayloadManifest,
+    stela_formats::payload::Purpose, stela_formats::payload::ReadAt,
+    stela_formats::payload::zip::Archive, stela_formats::payload::zip::Entry,
+};
 
-pub const BLOCK_BYTES: usize = crate::payload::HASH_BLOCK_BYTES as usize;
+pub const BLOCK_BYTES: usize = stela_formats::payload::HASH_BLOCK_BYTES as usize;
 pub const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_BLOCKS: usize = 1 << 20;
 const MAX_BUILD_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
@@ -107,7 +108,7 @@ pub struct Store<R> {
     /// The most recently read member and its resumable inflate position, so
     /// reading a deflate member block by block inflates it once rather than
     /// replaying it from the start each block.
-    cursor: Option<(String, crate::payload::zip::Progress)>,
+    cursor: Option<(String, stela_formats::payload::zip::Progress)>,
 }
 fn payload(e: impl core::fmt::Display) -> Error {
     Error::Payload(e.to_string())
@@ -136,7 +137,7 @@ impl<R: ReadAt> Store<R> {
         archive
             .read_member_at(&mut reader, entry, 0, &mut bytes)
             .map_err(payload)?;
-        if crate::sha256(&bytes) != manifest.source.build_manifest_sha256 {
+        if stela_formats::sha256(&bytes) != manifest.source.build_manifest_sha256 {
             return Err(Error::Invalid("BuildManifest SHA-256"));
         }
         // A universal BuildManifest names every board. Only this board's
@@ -270,7 +271,7 @@ impl<R: ReadAt> Store<R> {
             .block_hashes
             .as_ref()
             .ok_or(Error::Invalid("the payload names no block hashes"))?;
-        if crate::sha256(file) != blocks.sha256 {
+        if stela_formats::sha256(file) != blocks.sha256 {
             return Err(Error::Payload(format!(
                 "{}: SHA-256 differs from the payload manifest",
                 blocks.file
@@ -540,16 +541,20 @@ impl<R: ReadAt> Store<R> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::payload::{
-        IdentitySet, Member,
-        tests::{Memory, manifest},
-        zip::tests::archive,
+    use {
+        stela_formats::payload::IdentitySet, stela_formats::payload::Member,
+        stela_formats::payload::test_support::Memory,
+        stela_formats::payload::test_support::manifest,
+        stela_formats::payload::zip::test_support::archive,
     };
     pub(crate) fn fixture(data: &[u8], deflate: bool) -> Store<Memory> {
         with_components(data, deflate, &[])
     }
     /// Give a store's manifest AEA keys, for the staged-answer tests.
-    pub(crate) fn set_aea_keys(store: &mut Store<Memory>, keys: Vec<crate::payload::AeaKey>) {
+    pub(crate) fn set_aea_keys(
+        store: &mut Store<Memory>,
+        keys: Vec<stela_formats::payload::AeaKey>,
+    ) {
         store.manifest.aea_keys = keys;
     }
     /// Set one Info field on the selected fixture identity.
@@ -682,7 +687,7 @@ pub(crate) mod tests {
         .unwrap();
         let (mut m, _) = manifest();
         m.device_class = "testap".into();
-        m.source.build_manifest_sha256 = crate::sha256(&build);
+        m.source.build_manifest_sha256 = stela_formats::sha256(&build);
         m.global_manifests.clear();
         m.aea_keys.clear();
         let mut files: Vec<(&str, &[u8])> = vec![("os.dmg", data)];
@@ -696,7 +701,7 @@ pub(crate) mod tests {
             .map(|(name, bytes)| Member {
                 name: (*name).into(),
                 bytes: bytes.len() as u64,
-                sha256: Some(crate::sha256(bytes)),
+                sha256: Some(stela_formats::sha256(bytes)),
                 sha384: None,
             })
             .collect();
@@ -719,10 +724,10 @@ pub(crate) mod tests {
             .flat_map(|block| Sha256::digest(block).to_vec())
             .collect();
         s.manifest.members[0].sha384 = Some(hex::encode(Sha384::digest(data)));
-        s.manifest.block_hashes = Some(crate::payload::BlockHashes {
-            file: crate::payload::BLOCK_HASHES_FILE.into(),
-            block_bytes: crate::payload::HASH_BLOCK_BYTES,
-            sha256: crate::sha256(&file),
+        s.manifest.block_hashes = Some(stela_formats::payload::BlockHashes {
+            file: stela_formats::payload::BLOCK_HASHES_FILE.into(),
+            block_bytes: stela_formats::payload::HASH_BLOCK_BYTES,
+            sha256: stela_formats::sha256(&file),
         });
         s.manifest.validate().unwrap();
         file
@@ -743,7 +748,7 @@ pub(crate) mod tests {
         let mut s = fixture(&data, true);
         let mut file = precomputed(&mut s, &data);
         file[64] ^= 1;
-        s.manifest.block_hashes.as_mut().unwrap().sha256 = crate::sha256(&file);
+        s.manifest.block_hashes.as_mut().unwrap().sha256 = stela_formats::sha256(&file);
         s.adopt_block_hashes(&file).unwrap();
         let error = s.prepare().unwrap_err().to_string();
         assert!(
@@ -793,7 +798,7 @@ pub(crate) mod tests {
         let mut s = fixture(&data, true);
         let mut file = precomputed(&mut s, &data);
         file[32] ^= 1;
-        s.manifest.block_hashes.as_mut().unwrap().sha256 = crate::sha256(&file);
+        s.manifest.block_hashes.as_mut().unwrap().sha256 = stela_formats::sha256(&file);
         s.set_verify(Verify::OnRead);
         s.adopt_block_hashes(&file).unwrap();
         s.prepare().unwrap();
@@ -885,7 +890,7 @@ pub(crate) mod tests {
     fn a_remote_images_device_verified_member_passes_through_unhashed() {
         let data = b"bytes the device verifies";
         let mut s = fixture(data, true);
-        s.manifest.layout = crate::payload::Layout::Remote {
+        s.manifest.layout = stela_formats::payload::Layout::Remote {
             url: "http://updates-http.cdn-apple.com/a.ipsw".into(),
             etag: "\"e\"".into(),
         };

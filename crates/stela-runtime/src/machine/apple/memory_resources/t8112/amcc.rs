@@ -7,15 +7,16 @@
 //! windows and DCS/PTD. See docs/research/apple-mcc.md for the source contract
 //! and missing all-access cache accounting. No Apple firmware is executed.
 use super::Prepared;
-use crate::{
-    machine::soc::MemoryController,
-    memory::{CanonicalRamService, RegisteredSystemRam},
-    platform::apple::{
-        amcc::{Amcc, Locked, Programmed, Register},
-        bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    },
-};
 use alloc::sync::Arc;
+use {
+    crate::machine::soc::MemoryController, crate::memory::CanonicalRamService,
+    crate::memory::RegisteredSystemRam, crate::platform::apple::amcc::Amcc,
+    crate::platform::apple::amcc::Locked, crate::platform::apple::amcc::Programmed,
+    crate::platform::apple::amcc::Register, stela_contracts::bus::Access,
+    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 const PLANES: u32 = 4;
 pub(super) const STRIDE: u64 = 0x40000;
@@ -276,15 +277,13 @@ impl MmioDevice for LockResource {
 pub(in crate::machine::apple) mod tests {
     use super::super::tests::{configuration, descriptor, ram_at};
     use super::*;
-    use crate::{
-        memory::{ReservedSystemRamRange, system_ram::fixture},
-        platform::apple::{
-            amcc::{Layout, LockGroup},
-            interrupt::InterruptLatch,
-        },
-    };
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use {
+        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
+        crate::platform::apple::amcc::Layout, crate::platform::apple::amcc::LockGroup,
+        stela_contracts::interrupt::InterruptLatch,
+    };
     const BASE: u64 = 0x200000000;
     const RAM: u64 = 0x800000000;
     const LIVE: LifecycleState = LifecycleState {
@@ -370,7 +369,7 @@ pub(in crate::machine::apple) mod tests {
         );
         assert_eq!(lock.source(), &source());
         assert!(owner.notifications().owns(owner.publication_bank()));
-        let mut bus = crate::platform::apple::bus::Bus::new();
+        let mut bus = stela_contracts::bus::Bus::new();
         let memory = owner.bindings();
         bus.install(Box::new(owner), &memory).unwrap();
         let lock_binding = lock.binding();
@@ -543,10 +542,10 @@ pub(in crate::machine::apple) mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires original J473 DeviceTree and iBoot via STELA_TEST_MCC_J473_DT and STELA_TEST_IBOOT_J473"]
     fn original_j473_iboot_lock_map_and_mcc_views_qualify_the_independent_owner() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let io = Node::root(&data).unwrap().child("arm-io").unwrap();
@@ -562,7 +561,7 @@ pub(in crate::machine::apple) mod tests {
         // complete source union grants no cache or additional lock semantics.
         let code = std::fs::read(std::env::var("STELA_TEST_IBOOT_J473").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&code),
+            stela_formats::sha256(&code),
             "082cf7b48f9827daefcb5a58e7fd0038aae00b3fe6d36db9ff1528ba3f3a3a3b"
         );
         for (offset, value) in [

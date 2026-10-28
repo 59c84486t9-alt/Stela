@@ -309,30 +309,30 @@ impl Ticket {
         if Sha384::digest(&*im4p).as_slice() == digest {
             return Ok(());
         }
-        let original =
-            crate::img4::payload_type(im4p).map_err(|_| Error::Invalid("IM4P payload type"))?;
+        let original = stela_formats::img4::payload_type(im4p)
+            .map_err(|_| Error::Invalid("IM4P payload type"))?;
         for tag in self.tags_with(digest) {
-            crate::img4::set_payload_type(im4p, tag)
+            stela_formats::img4::set_payload_type(im4p, tag)
                 .map_err(|_| Error::Invalid("IM4P payload type"))?;
             if Sha384::digest(&*im4p).as_slice() == digest {
                 return Ok(());
             }
         }
-        crate::img4::set_payload_type(im4p, original)
+        stela_formats::img4::set_payload_type(im4p, original)
             .map_err(|_| Error::Invalid("IM4P payload type"))?;
         Err(Error::Invalid(
             "the ticket does not cover the exact component digest",
         ))
     }
     pub fn wrap(&self, source: &[u8], manifest_digest: &[u8]) -> Result<Vec<u8>> {
-        let parts = crate::img4::parse(source)
+        let parts = stela_formats::img4::parse(source)
             .map_err(|_| Error::Invalid("personalized object needs original IM4P"))?;
         if parts.manifest.is_some() || parts.restore_info.is_some() {
             return Err(Error::Invalid(
                 "refuse replacing existing IMG4 manifest/restore info",
             ));
         }
-        let tag = crate::img4::payload_type(parts.payload)
+        let tag = stela_formats::img4::payload_type(parts.payload)
             .map_err(|_| Error::Invalid("IM4P payload type"))?;
         let digest = Sha384::digest(parts.payload);
         if digest.as_slice() != manifest_digest || !self.covers(tag, manifest_digest) {
@@ -492,7 +492,7 @@ pub(crate) mod tests {
         let g = Ticket::global(manifest(&p), store.identity()).unwrap();
         let hash = Sha384::digest(&p);
         let wrapped = g.wrap(&p, &hash).unwrap();
-        let parts = crate::img4::parse(&wrapped).unwrap();
+        let parts = stela_formats::img4::parse(&wrapped).unwrap();
         assert_eq!(parts.payload, p);
         assert_eq!(parts.manifest, Some(g.bytes()));
         assert!(g.wrap(&p, &[0; 48]).is_err());
@@ -517,14 +517,14 @@ pub(crate) mod tests {
             .concat(),
         );
         let mut rdtr = file.clone();
-        crate::img4::set_payload_type(&mut rdtr, *b"rdtr").unwrap();
+        stela_formats::img4::set_payload_type(&mut rdtr, *b"rdtr").unwrap();
         let digest = Sha384::digest(&rdtr);
         let g = Ticket::global(ticket_for(b"rdtr", &rdtr, None), store.identity()).unwrap();
         assert_eq!(g.tags_with(&digest), [*b"rdtr"]);
         let mut image = file.clone();
         g.retype_covered(&mut image, &digest).unwrap();
         assert_eq!(image, rdtr);
-        let parts = crate::img4::parse(&g.wrap(&image, &digest).unwrap())
+        let parts = stela_formats::img4::parse(&g.wrap(&image, &digest).unwrap())
             .unwrap()
             .payload
             .to_vec();

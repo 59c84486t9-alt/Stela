@@ -58,7 +58,7 @@ pub struct BindFixup {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Authentication {
-    pub key: stela_runtime::pauth::Key,
+    pub key: stela_contracts::pauth::Key,
     pub diversity: u16,
     pub address_diversity: bool,
 }
@@ -111,7 +111,13 @@ pub struct SignedFixupPlan {
 impl DecodedFixups {
     /// Compute signed values for every rebase under one process key set.
     /// Nothing is written and no bind is resolved.
-    pub fn sign_rebases(&self, context: &stela_runtime::pauth::Context) -> Result<SignedFixupPlan> {
+    pub fn sign_rebases<S: stela_contracts::pauth::Signer>(
+        &self,
+        context: &S,
+    ) -> Result<SignedFixupPlan>
+    where
+        S::Error: Into<anyhow::Error>,
+    {
         ensure!(
             self.binds.is_empty() && self.authenticated_binds.is_empty(),
             "authenticated rebase planning requires explicit bind resolution first"
@@ -130,7 +136,9 @@ impl DecodedFixups {
                 let value = if fixup.target == 0 {
                     0
                 } else {
-                    context.sign(fixup.authentication.key, fixup.target, modifier)?
+                    context
+                        .sign(fixup.authentication.key, fixup.target, modifier)
+                        .map_err(Into::into)?
                 };
                 Ok(SignedRebaseFixup {
                     fixup: fixup.clone(),
@@ -372,10 +380,10 @@ fn decode_pointer(
             );
             let authentication = Authentication {
                 key: match (raw >> 49) & 3 {
-                    0 => stela_runtime::pauth::Key::Ia,
-                    1 => stela_runtime::pauth::Key::Ib,
-                    2 => stela_runtime::pauth::Key::Da,
-                    _ => stela_runtime::pauth::Key::Db,
+                    0 => stela_contracts::pauth::Key::Ia,
+                    1 => stela_contracts::pauth::Key::Ib,
+                    2 => stela_contracts::pauth::Key::Da,
+                    _ => stela_contracts::pauth::Key::Db,
                 },
                 diversity: ((raw >> 32) & 0xffff) as u16,
                 address_diversity: raw & (1 << 48) != 0,
@@ -507,7 +515,7 @@ fn decode_impl(
     allow_authentication: bool,
 ) -> Result<DecodedFixups> {
     ensure!(
-        image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_runtime::sha256(data),
+        image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_formats::sha256(data),
         "chained-fixup image identity differs from load plan"
     );
     let text: Vec<_> = image
@@ -631,7 +639,7 @@ fn payload<'a>(data: &'a [u8], image: &LoadPlan) -> Result<Option<&'a [u8]>> {
         "chained-fixup payload exceeds planner limit"
     );
     ensure!(
-        source.sha256 == stela_runtime::sha256(payload),
+        source.sha256 == stela_formats::sha256(payload),
         "chained-fixup payload differs from load plan"
     );
     Ok(Some(payload))
@@ -1042,12 +1050,12 @@ mod tests {
         data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
     fn refresh(data: &[u8], image: &mut LoadPlan) {
-        image.slice_sha256 = stela_runtime::sha256(data);
+        image.slice_sha256 = stela_formats::sha256(data);
         image.slice_bytes = data.len() as u64;
         for payload in &mut image.payloads {
             let start = payload.file.offset as usize;
             payload.sha256 =
-                stela_runtime::sha256(&data[start..start + payload.file.bytes as usize]);
+                stela_formats::sha256(&data[start..start + payload.file.bytes as usize]);
         }
     }
     fn raw(format: u16, target: u64, high: u8, next: u64) -> u64 {
@@ -1631,7 +1639,7 @@ mod tests {
     }
     #[test]
     fn authenticated_rebases_preserve_all_metadata_and_always_use_image_relative_targets() {
-        use stela_runtime::pauth::Key;
+        use stela_contracts::pauth::Key;
         for format in [1, 9, 12] {
             for (key, domain) in [(0, Key::Ia), (1, Key::Ib), (2, Key::Da), (3, Key::Db)] {
                 for diversity in [0, 0x1234, u16::MAX] {
@@ -1698,7 +1706,7 @@ mod tests {
             assert_eq!(decoded.authenticated_binds[0].addend, -7);
             assert_eq!(
                 decoded.authenticated_binds[0].authentication.key,
-                stela_runtime::pauth::Key::Da
+                stela_contracts::pauth::Key::Da
             );
             assert_eq!(
                 decoded.authenticated_binds[0].authentication.diversity,
@@ -1762,10 +1770,10 @@ mod tests {
             null.sign_rebases(&ib_only).unwrap().authenticated_rebases[0].value,
             0
         );
-        assert_ne!(full.sign(stela_runtime::pauth::Key::Ia, 0, 0).unwrap(), 0);
+        assert_ne!(full.sign(stela_contracts::pauth::Key::Ia, 0, 0).unwrap(), 0);
         assert_eq!(
             Authentication {
-                key: stela_runtime::pauth::Key::Ia,
+                key: stela_contracts::pauth::Key::Ia,
                 diversity: 0x4321,
                 address_diversity: true
             }

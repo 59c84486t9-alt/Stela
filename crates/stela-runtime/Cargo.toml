@@ -9,11 +9,13 @@ workspace = true
 
 [features]
 default = ["std"]
-native-profile = []
-std = ["anyhow/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
+native-profile = ["stela-contracts/native-profile"]
+std = ["anyhow/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
 
 [dependencies]
+stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
+stela-formats = { path = "../stela-formats", default-features = false }
 anyhow = { version = "1", default-features = false }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
@@ -46,6 +48,8 @@ httparse = { version = "1.10", default-features = false }
 stela-fingerprint.workspace = true
 
 [dev-dependencies]
+stela-formats = { path = "../stela-formats", features = ["test-support"] }
+stela-contracts = { path = "../stela-contracts", features = ["test-support"] }
 # The drivers' RAM disk, which the device model tests run on.
 stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
 # The reference LZFSE encoder the no_std decoder is checked against.

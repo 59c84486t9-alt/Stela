@@ -45,9 +45,11 @@ pub(super) fn emit(
     super::super::memory_address(
         code,
         checks,
-        operand.base,
-        0,
-        AddressMode::Offset,
+        crate::x86_64::ImmediateAddress {
+            base: operand.base,
+            displacement: 0,
+            mode: AddressMode::Offset,
+        },
         operand.element_bytes,
         super::super::Access::of(
             operand.direction == Direction::Store,

@@ -423,5 +423,5 @@ pub(super) fn state_digest(state: &GuestState) -> String {
         bytes.extend(value.to_le_bytes());
     }
     bytes.extend(state.nzcv.to_le_bytes());
-    stela_runtime::sha256(&bytes)
+    stela_formats::sha256(&bytes)
 }

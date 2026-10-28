@@ -578,7 +578,15 @@ pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, targ
         }
         if let Predication::Merging(predicate) = operand.predication {
             load_z_chunk(code, operand.destination, chunk, 2, length, target);
-            read_predicate_mask(code, predicate, chunk, element, 3, 4, length, target);
+            read_predicate_mask(
+                code,
+                predicate,
+                chunk,
+                element,
+                crate::x86_64::scalable::MaskRegisters::new(3, 4),
+                length,
+                target,
+            );
             binary(code, Host::And, 0, 3);
             binary(code, Host::AndNot, 3, 2);
             binary(code, Host::Or, 0, 3);

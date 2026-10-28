@@ -101,8 +101,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use stela_formats::builds;
 use stela_loader::mount_interface::{self, Interface};
-use stela_runtime::builds;
 use uninstall::uninstall;
 
 /// The Mac model Stela presents by default.
@@ -255,7 +255,7 @@ impl InstallMedium {
         );
         let (_, build) = restore::payload::identity(&self.ipsw, &self.model)?;
         let bytes = fs::metadata(&self.ipsw)?.len();
-        let piece_bytes = stela_runtime::payload::PIECE_BYTES;
+        let piece_bytes = stela_formats::payload::PIECE_BYTES;
         medium::check_space(
             &host,
             medium::SpaceOptions {
@@ -293,8 +293,8 @@ impl InstallMedium {
         println!(
             "Engine options: --install \\{}\\{} --install-source <the partition's GPT unique \
              GUID>",
-            stela_runtime::payload::install_directory(&build).replace('/', "\\"),
-            stela_runtime::payload::MANIFEST_FILE
+            stela_formats::payload::install_directory(&build).replace('/', "\\"),
+            stela_formats::payload::MANIFEST_FILE
         );
         if expected.sha1.is_none() {
             println!(
@@ -335,7 +335,7 @@ struct Environment<'a> {
     /// The revision of the bundles this `stela` prepares
     /// (`stela_loader::boot_bundle::REVISION`).
     bundle_revision: u32,
-    /// The macOS builds setup prepares (`stela_runtime::builds::SUPPORTED`);
+    /// The macOS builds setup prepares (`stela_formats::builds::SUPPORTED`);
     /// tests add their synthetic images' builds.
     builds: &'a [builds::Build],
 }
@@ -451,7 +451,7 @@ impl Request {
                 let image = restore::select(&restore::catalog()?, Some(&build), Some(model))?;
                 restore::remote_inventory(&image, model, None)
             },
-            piece_bytes: stela_runtime::payload::PIECE_BYTES,
+            piece_bytes: stela_formats::payload::PIECE_BYTES,
             interface: mount_interface::CURRENT,
             bundle_revision: stela_loader::boot_bundle::REVISION,
             builds: builds::SUPPORTED,

@@ -51,7 +51,7 @@ use crate::apple_device_tree::DeviceTree;
 use crate::kernel_collection::PAGE_BYTES;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
-pub use stela_runtime::boot_bundle::schema::Placed;
+pub use stela_formats::boot_bundle::schema::Placed;
 use stela_runtime::machine::soc;
 
 pub const MEMORY_MAP: &str = "/chosen/carveout-memory-map";
@@ -741,7 +741,7 @@ mod tests {
         let directory = std::path::PathBuf::from(std::env::var_os("STELA_TEST_IBOOT_DIR").unwrap());
         for (chip_id, file, sha256, offset, stride, count) in ORIGINAL_TABLES {
             let input = std::fs::read(directory.join(file)).unwrap();
-            assert_eq!(stela_runtime::sha256(&input), sha256, "{file}");
+            assert_eq!(stela_formats::sha256(&input), sha256, "{file}");
             let (mut fixed, mut special) = (Vec::new(), Vec::new());
             for record in input[offset..offset + count * stride].chunks_exact(stride) {
                 let word = |at: usize| u64::from_le_bytes(record[at..at + 8].try_into().unwrap());

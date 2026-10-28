@@ -5,14 +5,14 @@
 mod projection;
 
 use super::*;
-use crate::machine::{
-    CpuProfile,
-    adt::Node,
-    engine::{CanonicalDeviceWrite, ConsumedWrite, ProcessorBinding, ProcessorWrite},
-    soc::{PowerStates, assigned::Plan},
-};
 pub(super) use projection::AssignedPower;
 use projection::Request;
+use {
+    crate::machine::CpuProfile, crate::machine::engine::CanonicalDeviceWrite,
+    crate::machine::engine::ConsumedWrite, crate::machine::engine::ProcessorBinding,
+    crate::machine::engine::ProcessorWrite, crate::machine::soc::PowerStates,
+    crate::machine::soc::assigned::Plan, stela_contracts::adt::Node,
+};
 
 impl AppleDevices {
     /// Cold placement only. Retain `plan` and its source/roster owners through
@@ -230,11 +230,11 @@ mod tests {
         engine::{InstallError, NativeCode, NativeExit},
         exception::Pstate,
     };
-    use crate::platform::apple::bus::Lifecycle;
     use alloc::{rc::Rc, vec};
     use core::cell::Cell;
     use projection::tests::{BASE, COMPLEX, CORE};
     use stela_compiler::{GuestState, TargetCpu};
+    use stela_contracts::bus::Lifecycle;
 
     struct Local;
     impl Host for Local {

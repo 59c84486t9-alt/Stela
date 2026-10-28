@@ -15,11 +15,13 @@
 //! micro-PC, cold state or unsupported native operation is manufactured.
 //! A retained pause preserves every input, observation and chronological prefix
 //! across all mapped views.
-use super::super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 pub mod clock;
 pub mod identity;
@@ -522,8 +524,8 @@ impl MmioDevice for View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{bus::Bus, interrupt::InterruptLatch};
     use alloc::{boxed::Box, vec};
+    use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,

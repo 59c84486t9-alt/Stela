@@ -81,18 +81,31 @@ fn format(bits: u32) -> Format {
     }
 }
 
+/// The shared ALU mode and source/destination lane formats.
+#[derive(Clone, Copy)]
+struct AluParameters {
+    xy_bits: u32,
+    z_bits: u32,
+    bf16: bool,
+    mode: u64,
+}
+
 /// One Z lane: either the result or zero when `omask` clears it.
-#[allow(clippy::too_many_arguments)]
 fn lane(
     registers: &mut AmxRegisters,
     row: usize,
     x: &Row,
     y: &Row,
     (i, xi, j): (usize, usize, usize),
-    (xy_bits, z_bits, bf16): (u32, u32, bool),
     write: bool,
-    mode: u64,
+    parameters: AluParameters,
 ) {
+    let AluParameters {
+        xy_bits,
+        z_bits,
+        bf16,
+        mode,
+    } = parameters;
     let z_bytes = (z_bits / 8) as usize;
     let xy_bytes = (xy_bits / 8) as usize;
     let z_lane = if z_bits == 32 && xy_bits == 16 {
@@ -153,6 +166,12 @@ pub(super) fn vector(generation: Generation, registers: &mut AmxRegisters, mut o
         return;
     }
     let (xy_bits, z_bits, bf16) = types(generation, operand);
+    let parameters = AluParameters {
+        xy_bits,
+        z_bits,
+        bf16,
+        mode,
+    };
     let xy_bytes = (xy_bits / 8) as usize;
     let mut z_row = operand >> 20;
     let mut z_step = 64;
@@ -266,9 +285,8 @@ pub(super) fn vector(generation: Generation, registers: &mut AmxRegisters, mut o
                 &x,
                 &y,
                 (i, i & x_lane_mask, j),
-                (xy_bits, z_bits, bf16),
                 write,
-                mode,
+                parameters,
             );
         }
         z_row += z_step;
@@ -290,6 +308,12 @@ pub(super) fn matrix(generation: Generation, registers: &mut AmxRegisters, mut o
         return;
     }
     let (xy_bits, z_bits, bf16) = types(generation, operand);
+    let parameters = AluParameters {
+        xy_bits,
+        z_bits,
+        bf16,
+        mode,
+    };
     let xy_bytes = (xy_bits / 8) as usize;
     let mut x = load_pool(&registers.x, (operand >> 10) & 0x1ff);
     let mut y = load_pool(&registers.y, operand & 0x1ff);
@@ -345,16 +369,7 @@ pub(super) fn matrix(generation: Generation, registers: &mut AmxRegisters, mut o
                 (32, _) => bit_select(j as u64 * 4, z_row, 3),
                 _ => bit_select(j as u64 * 8, z_row, 7),
             } as usize;
-            lane(
-                registers,
-                row,
-                &x,
-                &y,
-                (i, i, j),
-                (xy_bits, z_bits, bf16),
-                write,
-                mode,
-            );
+            lane(registers, row, &x, &y, (i, i, j), write, parameters);
         }
     }
 }

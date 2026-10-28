@@ -16,7 +16,10 @@ use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_runtime::hosted::{hardware::Hardware, host::ProcessHost, pe, tables::Tables};
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-use stela_runtime::machine::{Chip, Machine, NoDevices, Stop};
+use {
+    stela_contracts::Chip, stela_runtime::machine::Machine, stela_runtime::machine::NoDevices,
+    stela_runtime::machine::Stop,
+};
 
 /// One prepared function in one engine.
 pub(super) trait Runner {
@@ -116,11 +119,11 @@ fn refused(error: impl core::fmt::Debug) -> anyhow::Error {
 pub(super) fn digest(blocks: &[NativeBlock]) -> (usize, String) {
     let digests: String = blocks
         .iter()
-        .map(|block| stela_runtime::sha256(&block.code))
+        .map(|block| stela_formats::sha256(&block.code))
         .collect();
     (
         blocks.iter().map(|block| block.code.len()).sum(),
-        stela_runtime::sha256(digests.as_bytes()),
+        stela_formats::sha256(digests.as_bytes()),
     )
 }
 
@@ -259,7 +262,7 @@ impl Runner for Blocks {
             .collect();
         Some((
             manifests.iter().map(|manifest| manifest.native_bytes).sum(),
-            stela_runtime::sha256(digests.as_bytes()),
+            stela_formats::sha256(digests.as_bytes()),
         ))
     }
 }

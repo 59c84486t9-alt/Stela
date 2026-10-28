@@ -5,9 +5,9 @@ use super::{
     CACHE_COUNTS, CACHE_STATUS, Controller, GROUP_QUOTA, Observation, PLANE_STRIDE, PLANES,
     QUOTA_FIELDS, QUOTA_UNITS, Request, RequestKind, Role, State,
 };
-use crate::platform::apple::bus::LifecycleState;
 use alloc::vec::Vec;
 use core::cell::Ref;
+use stela_contracts::bus::LifecycleState;
 
 const DSIDS: u64 = 256;
 const USE_BASE: u64 = 0xc000;
@@ -269,9 +269,10 @@ pub(super) fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Access, Lifecycle, MmioDevice, Width},
-        interrupt::InterruptLatch,
+    use {
+        stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+        stela_contracts::interrupt::InterruptLatch,
     };
     fn lifecycle() -> LifecycleState {
         LifecycleState {

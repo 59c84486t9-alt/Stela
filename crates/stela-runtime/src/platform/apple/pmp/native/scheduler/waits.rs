@@ -298,7 +298,7 @@ impl Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     fn done(value: u32) -> Completion<u32> {
         Completion::Retired {
             value,

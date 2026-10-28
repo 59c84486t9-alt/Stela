@@ -5,14 +5,14 @@
 //! The mount gives the guest one of the screen mode's size (the mode
 //! `console::mode` chose, which the DCP model can advertise), 32 bits per
 //! pixel, at the top of guest DRAM, outside the range the kernel manages
-//! (`stela_runtime::boot_bundle::Machine`), and shows only the frames the
+//! (`stela_formats::boot_bundle::Machine`), and shows only the frames the
 //! modeled DCP presents. XNU's 32-bit pixels are x8r8g8b8 with blue in the
 //! low byte (public XNU `osfmk/console/video_console.c`), GOP's BGR order;
 //! an RGB or channel-mask mode re-encodes each pixel.
 use crate::console::{self, Framebuffer};
 use crate::output;
 use core::sync::atomic::{AtomicBool, Ordering};
-use stela_runtime::boot_bundle;
+use stela_formats::boot_bundle;
 use stela_runtime::machine::apple::{DisplayLog, Scanout, ScanoutFormat, ScanoutMode};
 
 /// Whether the DCP model has presented a swap: the first one takes the

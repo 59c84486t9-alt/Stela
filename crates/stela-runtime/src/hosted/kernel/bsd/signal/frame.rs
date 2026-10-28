@@ -17,8 +17,8 @@ use crate::hosted::darwin::{
     blend_discriminator,
 };
 use crate::hosted::kernel::status;
-use crate::pauth::{Context, Key};
 use anyhow::Result;
+use {crate::pauth::Context, stela_contracts::pauth::Key};
 
 /// `user64_siginfo_t`, `struct user_ucontext64` and `mcontext64_t`.
 pub(super) const SIGINFO_BYTES: usize = 104;

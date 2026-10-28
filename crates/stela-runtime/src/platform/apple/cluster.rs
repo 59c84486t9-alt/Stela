@@ -46,9 +46,13 @@
 //! Every other register refuses.
 pub mod t6000;
 
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::regfile::Held;
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "cpu-cluster";
 const COUNTER_BASE: u64 = 0x20400;
@@ -225,7 +229,7 @@ impl MmioDevice for Cluster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn cpu_commands_complete_against_the_same_state_table_and_scratch_holds_copies() {

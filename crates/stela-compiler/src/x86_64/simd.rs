@@ -528,7 +528,17 @@ pub(super) fn emit_after(
             mode,
         } => {
             let access = super::Access::of(!load, 2 * u16::from(bytes));
-            memory_address(code, checks, base, displacement, mode, bytes, access);
+            memory_address(
+                code,
+                checks,
+                crate::x86_64::ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
+                bytes,
+                access,
+            );
             let aligned = checks.stack_alignment
                 && super::memory_store::aligned_immediate(base, displacement, mode, bytes);
             if load {
@@ -575,7 +585,17 @@ pub(super) fn emit_after(
             mode,
         } => {
             let access = super::Access::of(!load, bytes.into());
-            memory_address(code, checks, base, displacement, mode, bytes, access);
+            memory_address(
+                code,
+                checks,
+                crate::x86_64::ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
+                bytes,
+                access,
+            );
             memory::transfer(
                 code,
                 load,

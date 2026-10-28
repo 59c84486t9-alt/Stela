@@ -1454,7 +1454,7 @@ mod tests {
     #[test]
     fn parallel_pes_refuse_independent_idle_leaps() {
         use super::super::tests::{BASE, board};
-        use crate::machine::{engine::NoDevices, registers::Identity};
+        use {crate::machine::engine::NoDevices, stela_contracts::identity::Identity};
 
         let identities = (0..2)
             .map(|pe| Identity {
@@ -1578,7 +1578,7 @@ mod tests {
             match value {
                 1 => {
                     self.reset = Some(Reset {
-                        transition: crate::platform::apple::bus::Transition::Restart,
+                        transition: stela_contracts::bus::Transition::Restart,
                         reason: "test".into(),
                     })
                 }

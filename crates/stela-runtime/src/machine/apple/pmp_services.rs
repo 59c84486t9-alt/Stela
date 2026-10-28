@@ -1,19 +1,13 @@
 //! Native system services joined to the actual cold PMP ASC and DMA owners.
 use super::{AppleDevices, ExplicitRuntimeConfiguration};
-use crate::{
-    machine::{engine::DeviceError, soc::Board},
-    memory::RegisteredSystemRam,
-    platform::apple::{
-        asc::Asc,
-        bus::{Access, DeviceId, Width},
-        pmp::{
-            self,
-            native::services::{Clock, Services},
-        },
-        rtkit::RtKit,
-    },
-};
 use alloc::{format, string::String, sync::Arc};
+use {
+    crate::machine::engine::DeviceError, crate::machine::soc::Board,
+    crate::memory::RegisteredSystemRam, crate::platform::apple::asc::Asc,
+    crate::platform::apple::pmp, crate::platform::apple::pmp::native::services::Clock,
+    crate::platform::apple::pmp::native::services::Services, crate::platform::apple::rtkit::RtKit,
+    stela_contracts::bus::Access, stela_contracts::bus::DeviceId, stela_contracts::bus::Width,
+};
 
 pub(super) struct NativePmpServices {
     asc: DeviceId,

@@ -35,11 +35,6 @@ mod namespace;
 mod prp;
 mod tunables;
 
-use super::{
-    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    interrupt::{AicInput, Wire},
-};
-use crate::platform::{apple::sart::Sart, dma::Port};
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
@@ -54,6 +49,13 @@ pub use namespace::Description;
 use namespace::Medium;
 use prp::dma_error;
 use stela_drivers::block::BlockDevice;
+use {crate::platform::apple::sart::Sart, stela_contracts::dma::Port};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
+};
 
 const NAME: &str = "ans2";
 /// Historical default software tag slots; configured dies use QueueGeometry.
@@ -1042,15 +1044,13 @@ impl MmioDevice for Ans {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{
-            interrupt::InterruptLatch,
-            sart::{Bounds, Sart},
-        },
-        dma::{Memory, Physical, tests::Ram},
-    };
     use alloc::{vec, vec::Vec};
     use stela_drivers::block::{BlockError, RamDisk};
+    use {
+        crate::platform::apple::sart::Bounds, crate::platform::apple::sart::Sart,
+        stela_contracts::dma::Memory, stela_contracts::dma::Physical,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
+    };
     const RAM: u64 = 0x8_0000_0000;
     const SQ: u64 = RAM;
     const CQ: u64 = RAM + 0x1000;

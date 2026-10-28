@@ -20,12 +20,14 @@
 //! guarantees, so their words are retained. Only OVERRIDE_CS may change in
 //! SHIFTCFG, and only while an external GPIO drives the chip select, since
 //! the internal CS output is then disconnected from the attached device.
-use super::{
-    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    interrupt::{AicInput, Wire},
-    nor::{Image, Nor},
-};
 use alloc::{collections::VecDeque, vec::Vec};
+use {
+    super::nor::Image, super::nor::Nor, stela_contracts::bus::Access,
+    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
+};
 
 pub const BYTES: u64 = 0x4000;
 const NAME: &str = "Apple SPI v1";
@@ -480,7 +482,7 @@ impl MmioDevice for Spi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     fn write(spi: &mut Spi, offset: u64, value: u32, access: &mut Access<'_>) {
         spi.write(offset, Width::Word, u64::from(value), access)
             .unwrap();

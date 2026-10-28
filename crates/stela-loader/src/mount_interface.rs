@@ -80,7 +80,7 @@ const TIMEOUT: &str = "timeout";
 /// What one `stela.efi` build reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Interface {
-    /// `stela_runtime::boot_bundle::SCHEMA_VERSION`.
+    /// `stela_formats::boot_bundle::SCHEMA_VERSION`.
     pub bundle_schema: u32,
     pub options_revision: u32,
     /// The NOR image at the machine-state partition's start.
@@ -91,7 +91,7 @@ pub struct Interface {
 
 /// The interface of this source tree.
 pub const CURRENT: Interface = Interface {
-    bundle_schema: stela_runtime::boot_bundle::SCHEMA_VERSION,
+    bundle_schema: stela_formats::boot_bundle::SCHEMA_VERSION,
     options_revision: OPTIONS_REVISION,
     nor_bytes: stela_runtime::machine::apple::nor::CAPACITY as u32,
     sep_bytes: stela_runtime::machine::apple::sep_state::BYTES as u32,

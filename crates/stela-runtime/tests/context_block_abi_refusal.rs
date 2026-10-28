@@ -11,7 +11,7 @@ use stela_runtime::{
     dispatch::LeafDispatcher,
     prepare_block_for_target, prepare_leaf_for_target,
 };
-use stela_runtime::{sha256, write_json};
+use {stela_formats::sha256, stela_runtime::write_json};
 
 const BASE: GuestAddress = GuestAddress(0x1000);
 const NOP: u32 = 0xd503_201f;

@@ -6,8 +6,8 @@
 //! inferred. A nonmatching actual read retains the packet PC. Read effects can
 //! be partial too: an uncertain route result quarantines all future claims.
 use super::{Error, FlightKind, InFlight, PacketCursor, Sram, control};
-use crate::platform::apple::bus::Width;
 use alloc::rc::Rc;
+use stela_contracts::bus::Width;
 
 const TAG: u32 = 2;
 const WIDE: u32 = 1 << 5;
@@ -473,12 +473,14 @@ mod tests {
     }
     #[test]
     fn mounted_partial_read_error_preserves_actual_mmio_effect_and_cannot_be_replayed() {
-        use crate::platform::apple::{
-            bus::{Access, Bus, Direction, MmioDevice, MmioError, refuse},
-            interrupt::InterruptLatch,
-        };
         use alloc::boxed::Box;
         use core::cell::Cell;
+        use {
+            stela_contracts::bus::Access, stela_contracts::bus::Bus,
+            stela_contracts::bus::Direction, stela_contracts::bus::MmioDevice,
+            stela_contracts::bus::MmioError, stela_contracts::bus::refuse,
+            stela_contracts::interrupt::InterruptLatch,
+        };
         struct ClearOnRead {
             value: Rc<Cell<u32>>,
             reads: Rc<Cell<usize>>,

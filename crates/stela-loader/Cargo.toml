@@ -9,7 +9,7 @@ default = ["std"]
 # Without `std` only the kernel boot-bundle builder (`boot_bundle` and the
 # formats it reads) is built, for `stela.efi`.
 std = [
-    "anyhow/std",
+    "anyhow/std", "stela-contracts/std", "stela-formats/std",
     "hex/std",
     "object/std",
     "serde/std",
@@ -19,6 +19,8 @@ std = [
 ]
 
 [dependencies]
+stela-contracts = { path = "../stela-contracts", default-features = false }
+stela-formats = { path = "../stela-formats", default-features = false }
 stela-drivers.workspace = true
 anyhow = { version = "1", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }

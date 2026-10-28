@@ -12,12 +12,12 @@
 //! (`cs_process_enforcement`). Page hashes are not validated; the
 //! signature's trust is the host file system's.
 use super::{Call, Kernel, Outcome, forward};
-use crate::code_signature;
 use crate::hosted::darwin::{EFAULT, EINVAL, ENOENT, ERANGE, ESRCH};
 use crate::hosted::pe::UserJop;
 use crate::hosted::{memory, threads::lock};
 pub(crate) use crate::hosted_registry::bsd::codesign::CALLS;
 use anyhow::{Context, Result, bail, ensure};
+use stela_formats::code_signature;
 
 const CS_OPS_STATUS: u64 = 0;
 const CS_OPS_MARKINVALID: u64 = 1;

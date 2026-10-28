@@ -105,7 +105,7 @@ fn bootstrap_windows(
             bytes.extend(instruction(data, plan, pc)?.to_le_bytes());
         }
         ensure!(
-            stela_runtime::sha256(&bytes) == hash,
+            stela_formats::sha256(&bytes) == hash,
             "unreviewed dyld clock bootstrap window at {start:#x}"
         );
         windows.push((
@@ -283,7 +283,7 @@ pub fn probe(
                 Ok((
                     r.guest_address,
                     r.virtual_bytes,
-                    stela_runtime::sha256(
+                    stela_formats::sha256(
                         &memory
                             .read_snapshot(r.guest_address, usize::try_from(r.virtual_bytes)?)?,
                     ),
@@ -399,7 +399,7 @@ pub fn probe(
     };
     let memory_effects = image_before.iter().map(|(address, bytes, initial)| {
         Ok(serde_json::json!({"address":address,"bytes":bytes,"initial_sha256":initial,
-            "final_sha256":stela_runtime::sha256(&memory.read_snapshot(*address, usize::try_from(*bytes)?)?)}))
+            "final_sha256":stela_formats::sha256(&memory.read_snapshot(*address, usize::try_from(*bytes)?)?)}))
     }).collect::<Result<Vec<_>>>()?;
     let clock_report = clock.as_ref().map(|c| -> Result<serde_json::Value> {
         Ok(serde_json::json!({"profile_id":c.profile_id(),"source_id":c.source_id(),"frequency":c.frequency(),
@@ -413,11 +413,11 @@ pub fn probe(
         .transpose()?;
     let mut report = serde_json::json!({
         "schema_version":1,"kind":"original_dyld_startup_prefix_probe",
-        "dyld":{"path":dyld_path,"container_sha256":stela_runtime::sha256(&dyld_data),"slice_offset":dyld_offset,"plan":dyld,"slide":options.dyld_slide},
-        "main":{"path":executable,"container_sha256":stela_runtime::sha256(&main_data),"slice_offset":main_offset,"plan":main,"load_base":options.image_base},
+        "dyld":{"path":dyld_path,"container_sha256":stela_formats::sha256(&dyld_data),"slice_offset":dyld_offset,"plan":dyld,"slide":options.dyld_slide},
+        "main":{"path":executable,"container_sha256":stela_formats::sha256(&main_data),"slice_offset":main_offset,"plan":main,"load_base":options.image_base},
         "arguments":arguments,"process_arguments":args,"stack":stack,"mapped_regions":memory.regions(),
         "unreserved_guards":{"main":main_mapping.unreserved_guards,"dyld":dyld_mapping.unreserved_guards},
-        "argument_payload_sha256":stela_runtime::sha256(&before),"argument_payload_after_sha256":stela_runtime::sha256(&after),
+        "argument_payload_sha256":stela_formats::sha256(&before),"argument_payload_after_sha256":stela_formats::sha256(&after),
         "entry_pc":entry,"stop_pc":stop,"target_pc":target_pc,"original_prefix_words":words,
         "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
         "pauth_instruction_executed":context.is_some(),"abi":runtime.profile().abi(),

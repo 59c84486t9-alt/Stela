@@ -12,7 +12,7 @@ use super::{
     message::{self, Frame},
     shared::Region,
 };
-use crate::platform::dma::{DmaError, Port};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const SET_INPUT_ADDRESS: u8 = 2;
 const SET_OUTPUT_ADDRESS: u8 = 3;
@@ -144,9 +144,9 @@ impl Buffers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{bus::Access, interrupt::InterruptLatch},
-        dma::{Iommu, Memory, tests::Ram},
+    use {
+        stela_contracts::bus::Access, stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
     };
     fn frame(opcode: u8, data: u32) -> Frame {
         Frame {

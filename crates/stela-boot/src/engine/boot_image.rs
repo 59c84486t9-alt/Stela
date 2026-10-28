@@ -1,6 +1,6 @@
 //! Load a verified bundle or raw guest image before hardware construction.
 use super::*;
-use stela_runtime::boot_bundle::Nvram;
+use stela_formats::boot_bundle::Nvram;
 
 /// Entry state and bundle provenance retained through machine construction.
 pub(super) struct GuestImage {
@@ -81,7 +81,7 @@ pub(super) fn load(
             "GUEST IMAGE pa={:#x} bytes={} sha256={}\n",
             options.load,
             source.len(),
-            stela_runtime::sha256(source),
+            stela_formats::sha256(source),
         ));
         GuestImage {
             entry: options.entry,

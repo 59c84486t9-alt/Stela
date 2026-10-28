@@ -15,20 +15,27 @@
 //! and `*_GL12` encodings reach the EL1 and GL1 state (inference from the
 //! names and from m1n1 `gxf_asm.S`). HCR_EL2.TIDCP traps the whole
 //! IMPLEMENTATION DEFINED space from EL1 to EL2.
-use super::{
-    cpu::{
-        Cpu, GXF_CONFIG_EL1_LOCK, GXF_CONFIG_EN, GXF_CONFIG_LOCKS, GuardedBank, HCR_VM,
-        PERM_EL0_10, PERM_EL0_20, PERM_EL1, PERM_EL2, TranslationRegime, VM_TIMER_FIQ_PHYSICAL,
-        VM_TIMER_FIQ_VIRTUAL,
-    },
-    exception::Pstate,
-    impdef,
-    pmu::Pmu,
-    system::{Feature, Register},
-    timer::agt,
-};
+use super::cpu::Cpu;
+use super::cpu::GXF_CONFIG_EL1_LOCK;
+use super::cpu::GXF_CONFIG_EN;
+use super::cpu::GXF_CONFIG_LOCKS;
+use super::cpu::GuardedBank;
+use super::cpu::HCR_VM;
+use super::cpu::PERM_EL0_10;
+use super::cpu::PERM_EL0_20;
+use super::cpu::PERM_EL1;
+use super::cpu::PERM_EL2;
+use super::cpu::TranslationRegime;
+use super::cpu::VM_TIMER_FIQ_PHYSICAL;
+use super::cpu::VM_TIMER_FIQ_VIRTUAL;
+use super::exception::Pstate;
+use super::impdef;
+use super::pmu::Pmu;
+use super::system::Register;
+use super::timer::agt;
 use alloc::vec::Vec;
 use stela_compiler::aarch64::system::registers::{Direction, Encoding, RegisterAccess};
+use stela_contracts::Feature;
 
 /// Identification and fixed registers of one declared CPU profile. A register
 /// without a value refuses: profile values need evidence.
@@ -45,19 +52,7 @@ pub struct CpuProfile {
     pub processors: Vec<Identity>,
 }
 
-/// The identification values one PE does not share with the others; they
-/// replace `fixed` entries of the same registers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Identity {
-    pub midr: u64,
-    pub mpidr: u64,
-    /// The core clock in Hz, where the SoC row has evidence of it; it paces
-    /// the cycle counter of Apple's performance monitor (`machine::pmu`).
-    pub clock: Option<u64>,
-    /// The PE's caches, where the SoC row and DeviceTree describe them;
-    /// without them CLIDR_EL1 and CCSIDR_EL1 take the profile's values.
-    pub caches: Option<super::caches::Caches>,
-}
+use stela_contracts::identity::Identity;
 
 /// Encodings named by the Arm ARM and by m1n1 `cpu_regs.h`.
 pub mod encodings {
@@ -733,7 +728,7 @@ impl Cpu {
             Outcome::Undefined
         } else if read {
             Outcome::Read(current)
-        } else if current & super::tag_storage::LOCK == 0 {
+        } else if current & stela_contracts::tag_storage::LOCK == 0 {
             Outcome::Refused(Refusal::UnsupportedSetting(
                 "TAG_OFFSET_EL2 write without the boot firmware's locked value",
             ))
@@ -1817,7 +1812,7 @@ mod tests {
             );
             assert_eq!(metadata.len(), length);
             let bytes = std::fs::read(path).unwrap();
-            assert_eq!(crate::sha256(&bytes), hash);
+            assert_eq!(stela_formats::sha256(&bytes), hash);
             bytes
         };
         let version = read(
@@ -1844,7 +1839,7 @@ mod tests {
 
     #[test]
     fn el0_apple_control_afpcr_uses_the_existing_pe_model_without_fp_effects() {
-        use crate::machine::Chip;
+        use stela_contracts::Chip;
 
         let encoding = impdef::AFPCR_EL0;
         let key = encoding.selector();
@@ -1910,7 +1905,7 @@ mod tests {
 
     #[test]
     fn el0_apple_control_afpcr_keeps_el1_tidcp_ordering_and_el2_access() {
-        use crate::machine::Chip;
+        use stela_contracts::Chip;
 
         let encoding = impdef::AFPCR_EL0;
         for chip in Chip::ALL {
@@ -1946,7 +1941,7 @@ mod tests {
 
     #[test]
     fn el0_apple_control_trace_permissions_remain_explicitly_unqualified() {
-        use crate::machine::Chip;
+        use stela_contracts::Chip;
 
         let encoding = impdef::TRACE_CLEARED;
         for chip in Chip::ALL {
@@ -2026,8 +2021,8 @@ mod tests {
     /// no rejected access can corrupt the PE's predictor configuration.
     #[test]
     fn objc_prediction_accesses_preserve_state_and_trap_before_writing() {
-        use crate::machine::Chip;
         use impdef::{BP_OBJC_ADR_EL1, BP_OBJC_CTL_EL1};
+        use stela_contracts::Chip;
 
         for chip in Chip::ALL {
             let mut cpu = Cpu::of(chip, 0, Pstate::reset(1));

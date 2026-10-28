@@ -3,11 +3,11 @@
 //! SPTMs execute. The contracts and their evidence are in
 //! `docs/design/system.md` (GXF).
 use super::{Devices, Host, Machine, RequirementKind, Step};
-use crate::machine::{
-    Chip, hacr,
-    mmu::tlbi::{Everywhere, Reach},
-};
 use stela_compiler::block::system::AppleMaintenance;
+use {
+    crate::machine::hacr, crate::machine::mmu::tlbi::Everywhere, crate::machine::mmu::tlbi::Reach,
+    stela_contracts::Chip,
+};
 
 /// The first chip with DC INCPA4K, operation 25 and `0x00201401`: XNU gives
 /// H16 and H17 `HAS_DC_INCPA`, the 26A434 SPTMs of the M4 to M6 (T8132,

@@ -15,9 +15,9 @@ fn majors(images: &[Image]) -> Vec<(String, Vec<usize>)> {
     groups
 }
 
-/// Whether Stela supports `image`'s build (`stela_runtime::builds`).
+/// Whether Stela supports `image`'s build (`stela_formats::builds`).
 fn supported(image: &Image) -> bool {
-    stela_runtime::builds::find(&image.build).is_ok()
+    stela_formats::builds::find(&image.build).is_ok()
 }
 
 /// The major-version group the release picker opens on: `preferred`'s, else
@@ -251,7 +251,7 @@ mod tests {
             url: String::new(),
             sha1: None,
         };
-        let supported = stela_runtime::builds::DEFAULT;
+        let supported = stela_formats::builds::DEFAULT;
         let images = [
             image("28.1", "28B70"),
             image("27.1", "27B74"),

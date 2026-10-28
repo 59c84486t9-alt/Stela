@@ -1,7 +1,7 @@
 //! Selected PE provenance and the prepared CPU sequence retained across loading.
 use alloc::{format, string::String, vec::Vec};
 use stela_loader::apple_device_tree::{DeviceTree, Node, Property};
-use stela_runtime::boot_bundle::{BootCpu, BootCpuSelection};
+use {stela_formats::boot_bundle::BootCpu, stela_formats::boot_bundle::BootCpuSelection};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Cpu {

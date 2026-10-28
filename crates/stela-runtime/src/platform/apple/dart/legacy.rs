@@ -20,12 +20,16 @@
 //! fields and the different 64-SID USB4 interface refuse explicitly.
 //! This module does not qualify those board configurations by constructing a
 //! successful-looking superset. Translation is cacheless and DMA synchronous.
-use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use super::super::interrupt::{AicInput, Wire};
 use super::{Profile, SMMU_BYTES, SMMU_OFFSET, descriptor::Format, legacy_umms};
-use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory};
+use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire};
 
 const PARAMS1: u64 = 0;
 const PARAMS2: u64 = 4;
@@ -673,9 +677,9 @@ impl MmioDevice for Dart {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::interrupt::InterruptLatch,
-        dma::{Port, tests::Ram},
+    use {
+        stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch,
     };
 
     const ROOT: u64 = 0x8_0000_0000;

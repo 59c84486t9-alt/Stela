@@ -135,11 +135,11 @@ impl Prepared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        memory::{ReservedSystemRamRange, system_ram::fixture},
-        platform::apple::interrupt::InterruptLatch,
-    };
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use {
+        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 128]>);

@@ -298,9 +298,9 @@ mod tests {
 
 #[cfg(all(test, feature = "std"))]
 mod original {
-    use crate::machine::adt::Node;
     use alloc::vec::Vec;
     use sha2::{Digest, Sha256};
+    use stela_contracts::adt::Node;
 
     fn original(variable: &str, digest: &str) -> Vec<u8> {
         let bytes = std::fs::read(std::env::var(variable).expect("pinned J314s input")).unwrap();

@@ -258,7 +258,7 @@ mod tests {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
     fn node(properties: Vec<(&str, Vec<u8>)>, children: &[Vec<u8>]) -> Vec<u8> {
-        crate::machine::adt::encode(
+        stela_contracts::adt::encode(
             &properties
                 .iter()
                 .map(|(k, v)| (*k, v.as_slice()))

@@ -19,7 +19,7 @@ use super::sequencer::PhysicalWrite;
 #[cfg(test)]
 use super::sequencer::poll::PhysicalRead;
 #[cfg(test)]
-use crate::platform::apple::bus::Width;
+use stela_contracts::bus::Width;
 
 /// Physical-controller ordinal in the original hardware table. Domain+0x9c
 /// selects this ordinal independently of PMGR power-domain IDs and names.
@@ -309,7 +309,7 @@ mod tests {
     fn original_native_protocol_keeps_hardware_identity_and_request_settlement_distinct() {
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMGR_PMP").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c"
         );
         // Complete source methods/tables, including the separate issue and
@@ -356,7 +356,10 @@ mod tests {
                 "4befcac752d421c415db3cbde8ee00b8dc52e5e40eeba58a23b48aaba4cce5cd",
             ),
         ] {
-            assert_eq!(crate::sha256(&bytes[offset..offset + length]), expected);
+            assert_eq!(
+                stela_formats::sha256(&bytes[offset..offset + length]),
+                expected
+            );
         }
         let word =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());

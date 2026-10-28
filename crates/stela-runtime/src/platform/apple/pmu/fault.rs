@@ -532,13 +532,14 @@ mod tests {
     #[test]
     fn original_ten_byte_fault_sequence_retires_real_spmi_chunks_and_keeps_failed_tail_unconsumed()
     {
-        use crate::platform::apple::{
-            bus::{Access, MmioDevice, MmioError, Width},
-            interrupt::{AicInput, InterruptLatch},
-            spmi::{self, Spmi},
-        };
         use alloc::{boxed::Box, rc::Rc};
         use core::cell::RefCell;
+        use {
+            crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
+            stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+            stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+            stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
+        };
         struct ObservedPmu(Rc<RefCell<Pmu>>);
         impl SpmiSlave for ObservedPmu {
             fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {

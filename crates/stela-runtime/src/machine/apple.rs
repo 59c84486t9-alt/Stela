@@ -11,58 +11,6 @@ use super::{
     soc::PowerOwner,
 };
 pub use crate::platform::apple::pmu::{RtcEpoch, WallClock};
-use crate::platform::apple::{
-    aes::{self, Aes},
-    agx::{
-        firmware::Coprocessor as GfxCoprocessor,
-        sgx::Sgx,
-        uat::{self, Agent},
-    },
-    aic::{Aic2, Aic2Config},
-    aic1::Aic1,
-    amcc::{self, Amcc},
-    ans::{self, Ans},
-    asc::{self, Asc},
-    atc_phy::{self, AtcPhy},
-    bridge::Bridge,
-    bus::{Access, Bus, DeviceId, LifecycleState, MapError, MmioDevice, MmioError, Width},
-    cluster::{self, Cluster},
-    core_counters::{self, CoreCounters},
-    coresight::{self, PcSampler, SoftwareLock},
-    cpm::Cpm,
-    cpustart::{self, CpuStart},
-    dart::{self, Dart},
-    dcp, display as display_hw,
-    dpe::Dpe,
-    dwc3::{self, Dwc3, PortState},
-    energy::{self, Energy},
-    fuse::{self, AonFuses},
-    gpio::{Gpio, Net, OpenDrain},
-    hpm::{Firmware, Hpm, Summary},
-    i2c::{self, I2c},
-    interrupt::{CpuIndex, InterruptLatch},
-    ipi::{self, Affinity, FastIpi},
-    lockdown::{self, Lockdown},
-    perf::PerfCounters,
-    pmgr::{
-        ACTIVE, DomainState, POWER_GATED, Pmgr, PowerState,
-        coverage::{self, Consumer, LifecycleSinks},
-    },
-    pmp,
-    pmu::{self, Pmu},
-    power::{self, Power},
-    ptd,
-    rtkit::RtKit,
-    sart::{self, Sart},
-    sep::{self, Sep},
-    smc::{self, Smc},
-    spi::Spi,
-    spmi::{self, Spmi},
-    uart::S5lUart,
-    wake::{self, WakeMasks},
-    wdt::{self, AppleWdt},
-};
-use crate::platform::dma::{Physical, Port};
 use crate::platform::usb::{
     Function, Speed,
     ecm::Ecm,
@@ -81,6 +29,54 @@ use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::cell::Cell;
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
+use {
+    crate::platform::apple::aes, crate::platform::apple::aes::Aes,
+    crate::platform::apple::agx::firmware::Coprocessor as GfxCoprocessor,
+    crate::platform::apple::agx::sgx::Sgx, crate::platform::apple::agx::uat,
+    crate::platform::apple::agx::uat::Agent, crate::platform::apple::aic::Aic2,
+    crate::platform::apple::aic::Aic2Config, crate::platform::apple::aic1::Aic1,
+    crate::platform::apple::amcc, crate::platform::apple::amcc::Amcc, crate::platform::apple::ans,
+    crate::platform::apple::ans::Ans, crate::platform::apple::asc,
+    crate::platform::apple::asc::Asc, crate::platform::apple::atc_phy,
+    crate::platform::apple::atc_phy::AtcPhy, crate::platform::apple::bridge::Bridge,
+    crate::platform::apple::cluster, crate::platform::apple::cluster::Cluster,
+    crate::platform::apple::core_counters, crate::platform::apple::core_counters::CoreCounters,
+    crate::platform::apple::coresight, crate::platform::apple::coresight::PcSampler,
+    crate::platform::apple::coresight::SoftwareLock, crate::platform::apple::cpm::Cpm,
+    crate::platform::apple::cpustart, crate::platform::apple::cpustart::CpuStart,
+    crate::platform::apple::dart, crate::platform::apple::dart::Dart, crate::platform::apple::dcp,
+    crate::platform::apple::display as display_hw, crate::platform::apple::dpe::Dpe,
+    crate::platform::apple::dwc3, crate::platform::apple::dwc3::Dwc3,
+    crate::platform::apple::dwc3::PortState, crate::platform::apple::energy,
+    crate::platform::apple::energy::Energy, crate::platform::apple::fuse,
+    crate::platform::apple::fuse::AonFuses, crate::platform::apple::gpio::Gpio,
+    crate::platform::apple::gpio::Net, crate::platform::apple::gpio::OpenDrain,
+    crate::platform::apple::hpm::Firmware, crate::platform::apple::hpm::Hpm,
+    crate::platform::apple::hpm::Summary, crate::platform::apple::i2c,
+    crate::platform::apple::i2c::I2c, crate::platform::apple::ipi,
+    crate::platform::apple::ipi::Affinity, crate::platform::apple::ipi::FastIpi,
+    crate::platform::apple::lockdown, crate::platform::apple::lockdown::Lockdown,
+    crate::platform::apple::perf::PerfCounters, crate::platform::apple::pmgr::ACTIVE,
+    crate::platform::apple::pmgr::DomainState, crate::platform::apple::pmgr::POWER_GATED,
+    crate::platform::apple::pmgr::Pmgr, crate::platform::apple::pmgr::PowerState,
+    crate::platform::apple::pmgr::coverage, crate::platform::apple::pmgr::coverage::Consumer,
+    crate::platform::apple::pmgr::coverage::LifecycleSinks, crate::platform::apple::pmp,
+    crate::platform::apple::pmu, crate::platform::apple::pmu::Pmu, crate::platform::apple::power,
+    crate::platform::apple::power::Power, crate::platform::apple::ptd,
+    crate::platform::apple::rtkit::RtKit, crate::platform::apple::sart,
+    crate::platform::apple::sart::Sart, crate::platform::apple::sep,
+    crate::platform::apple::sep::Sep, crate::platform::apple::smc,
+    crate::platform::apple::smc::Smc, crate::platform::apple::spi::Spi,
+    crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
+    crate::platform::apple::uart::S5lUart, crate::platform::apple::wake,
+    crate::platform::apple::wake::WakeMasks, crate::platform::apple::wdt,
+    crate::platform::apple::wdt::AppleWdt, stela_contracts::bus::Access, stela_contracts::bus::Bus,
+    stela_contracts::bus::DeviceId, stela_contracts::bus::LifecycleState,
+    stela_contracts::bus::MapError, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::interrupt::CpuIndex, stela_contracts::interrupt::InterruptLatch,
+};
+use {stela_contracts::dma::Physical, stela_contracts::dma::Port};
 
 mod canonical_reads;
 mod canonical_writes;
@@ -97,27 +93,26 @@ pub use service::{AicDelivery, ServiceBatch, ServiceInput};
 pub use sleep::PowerLog;
 pub use t8112_memory::cold as t8112_cold;
 
-pub use crate::platform::apple::{
-    aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
-    aic1::AIC1_EVENT,
-    asc::Lines as AscLines,
-    dart::Profile as DartProfile,
-    dcp::Log as DisplayLog,
-    interrupt::AicInput,
-    nor,
-    pmp::native::{self as native_pmp, services::Clock as NativePmpClock},
-    scanout::{
-        ChannelMasks as ScanoutMasks, Mode as ScanoutMode, PixelFormat as ScanoutFormat, Scanout,
-    },
-    sep::Entropy as SepEntropy,
-    sep::image::signature::{
-        Evidence as SepSignatureEvidence, ManifestEvidence as SepManifestEvidence,
-        inspect as inspect_sep_signature, verify_manifest as verify_sep_manifest_signature,
-    },
-    sep::state as sep_state,
-    smc::WriteLog as SmcWriteLog,
-    typec,
-    uart::{ConsoleBusy, ConsoleSink},
+pub use {
+    crate::platform::apple::aic::AIC2_IRQ_CFG, crate::platform::apple::aic::AIC3_IRQ_CFG,
+    crate::platform::apple::aic::AicLayout, crate::platform::apple::aic1::AIC1_EVENT,
+    crate::platform::apple::asc::Lines as AscLines,
+    crate::platform::apple::dart::Profile as DartProfile,
+    crate::platform::apple::dcp::Log as DisplayLog, crate::platform::apple::nor,
+    crate::platform::apple::pmp::native as native_pmp,
+    crate::platform::apple::pmp::native::services::Clock as NativePmpClock,
+    crate::platform::apple::scanout::ChannelMasks as ScanoutMasks,
+    crate::platform::apple::scanout::Mode as ScanoutMode,
+    crate::platform::apple::scanout::PixelFormat as ScanoutFormat,
+    crate::platform::apple::scanout::Scanout, crate::platform::apple::sep::Entropy as SepEntropy,
+    crate::platform::apple::sep::image::signature::Evidence as SepSignatureEvidence,
+    crate::platform::apple::sep::image::signature::ManifestEvidence as SepManifestEvidence,
+    crate::platform::apple::sep::image::signature::inspect as inspect_sep_signature,
+    crate::platform::apple::sep::image::signature::verify_manifest as verify_sep_manifest_signature,
+    crate::platform::apple::sep::state as sep_state,
+    crate::platform::apple::smc::WriteLog as SmcWriteLog, crate::platform::apple::typec,
+    crate::platform::apple::uart::ConsoleBusy, crate::platform::apple::uart::ConsoleSink,
+    stela_contracts::interrupt::AicInput,
 };
 
 /// One guest physical range of a device: DeviceTree `reg` translated
@@ -478,7 +473,7 @@ impl Default for AppleDevices {
 
 impl AppleDevices {
     #[cfg(feature = "native-profile")]
-    pub fn advance_statistics(&self) -> crate::platform::apple::bus::AdvanceStatistics {
+    pub fn advance_statistics(&self) -> stela_contracts::bus::AdvanceStatistics {
         self.bus.advance_statistics()
     }
 
@@ -1017,7 +1012,7 @@ impl AppleDevices {
         &mut self,
         placement: &super::soc::AnsController,
         backing: Box<dyn stela_drivers::block::BlockDevice>,
-        build: &crate::builds::Build,
+        build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         let irq = |n| AicInput::new(0, n);
         let rtkit = RtKit::new(
@@ -1107,7 +1102,7 @@ impl AppleDevices {
     pub fn add_smc(
         &mut self,
         placement: &super::soc::SmcController,
-        build: &crate::builds::Build,
+        build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         let sram = smc::Sram::default();
         let keys = placement
@@ -1155,7 +1150,7 @@ impl AppleDevices {
     pub fn add_pmp(
         &mut self,
         placement: &super::soc::PmpController,
-        build: &crate::builds::Build,
+        build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         let mut rtkit = RtKit::new(
             vec![(pmp::ENDPOINT, Box::new(pmp::Pmp::default()))],
@@ -1185,7 +1180,7 @@ impl AppleDevices {
     pub fn add_gfx(
         &mut self,
         placement: &super::soc::GfxController,
-        build: &crate::builds::Build,
+        build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         let sgx_physical = placement
             .sgx
@@ -1261,7 +1256,7 @@ impl AppleDevices {
         (dart, stream): (DartId, usize),
         window: Option<u64>,
         surface: Option<(DartId, usize)>,
-        build: &crate::builds::Build,
+        build: &stela_formats::builds::Build,
     ) -> Result<(), String> {
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
@@ -3604,12 +3599,12 @@ mod tests {
             },
         }
     }
-    use crate::platform::{
-        apple::bus::MmioDevice,
-        dma::{Iommu, tests::Ram},
-    };
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+    use {
+        stela_contracts::bus::MmioDevice, stela_contracts::dma::Iommu,
+        stela_contracts::dma::test_support::Ram,
+    };
 
     #[test]
     fn a_board_entry_given_an_earlier_count_is_named_in_the_stop_reason() {
@@ -3623,7 +3618,10 @@ mod tests {
 
     #[test]
     fn native_dart_mounts_program_the_selected_register_bank_and_transfer_real_dma_bytes() {
-        use crate::platform::dma::{Memory as _, Port, tests::Ram};
+        use {
+            stela_contracts::dma::Memory as _, stela_contracts::dma::Port,
+            stela_contracts::dma::test_support::Ram,
+        };
         const ROOT: u64 = 0x8_0000_0000;
         const PAGE: u64 = 0x4000;
         for profile in [
@@ -4075,7 +4073,7 @@ mod tests {
         reject: bool,
         committed: Vec<LifecycleState>,
     }
-    impl crate::platform::apple::bus::Lifecycle for CheckedPowerBank {
+    impl stela_contracts::bus::Lifecycle for CheckedPowerBank {
         fn check_lifecycle(&self, state: LifecycleState) -> Result<(), &'static str> {
             if self.reject && (!state.powered || state.reset) {
                 Err("native bank destructive transition remains unqualified")
@@ -4088,7 +4086,7 @@ mod tests {
         }
     }
     impl MmioDevice for CheckedPowerBank {
-        fn lifecycle(&mut self) -> Option<&mut dyn crate::platform::apple::bus::Lifecycle> {
+        fn lifecycle(&mut self) -> Option<&mut dyn stela_contracts::bus::Lifecycle> {
             Some(self)
         }
         fn name(&self) -> &'static str {
@@ -4337,7 +4335,7 @@ mod tests {
 
     #[test]
     fn mounted_t6000_groups_preserve_each_fault_on_the_same_physical_wire() {
-        use crate::platform::apple::interrupt::Wire;
+        use stela_contracts::interrupt::Wire;
         let mut d = AppleDevices::new();
         let input = AicInput::new(0, 873);
         d.add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 16))
@@ -4736,7 +4734,7 @@ mod tests {
 
     #[test]
     fn pmgr_accepted_edges_survive_a_later_wire_delivery_failure() {
-        use crate::platform::apple::interrupt::{InterruptSink, Wire};
+        use {stela_contracts::interrupt::InterruptSink, stela_contracts::interrupt::Wire};
         let (mut d, _, supply, base) = powered_dart(false, 1);
         d.write(0, base + 0x1000, 4, 1, 0).unwrap();
         d.latch.set_level(Wire::Aic(AicInput::new(0, 1)), true);
@@ -4973,7 +4971,7 @@ mod tests {
     fn ans_dma_and_sart_idle_share_the_nvme_aperture_without_aliasing() {
         use crate::machine::soc::AnsController;
         use crate::platform::apple::{ans, sart};
-        use crate::platform::dma::tests::Ram;
+        use stela_contracts::dma::test_support::Ram;
         use stela_drivers::block::RamDisk;
         const NVME: u64 = 0x2_7bcc_0000;
         const SART: u64 = 0x2_7bc5_0000;
@@ -5015,7 +5013,7 @@ mod tests {
             .add_ans(
                 &placement,
                 Box::new(RamDisk::new("backing", 16, 4096)),
-                crate::builds::DEFAULT,
+                stela_formats::builds::DEFAULT,
             )
             .unwrap();
         assert_eq!(devices.power_devices.len(), 4);
@@ -5206,7 +5204,7 @@ mod tests {
                     quiesced: false,
                     mapper: None,
                 },
-                crate::builds::DEFAULT,
+                stela_formats::builds::DEFAULT,
             )
             .unwrap();
         assert_eq!(devices.power_devices.len(), 2);
@@ -5250,7 +5248,7 @@ mod tests {
             }));
             devices.bus.map(foreign, base, bytes, 0).unwrap();
             assert_eq!(
-                devices.add_gfx(&placement, crate::builds::DEFAULT),
+                devices.add_gfx(&placement, stela_formats::builds::DEFAULT),
                 Err("GFX native ASC control is not wholly owned by its mounted SGX bank".into())
             );
             assert!(devices.gfx_masters.is_empty());
@@ -5287,7 +5285,9 @@ mod tests {
                 shared_l2: 0x100_0000_8000,
             };
             let mut devices = AppleDevices::new();
-            devices.add_gfx(&placement, crate::builds::DEFAULT).unwrap();
+            devices
+                .add_gfx(&placement, stela_formats::builds::DEFAULT)
+                .unwrap();
             let (asc, block) = devices.gfx_masters[0];
             assert_eq!(
                 devices.bus.route(WRAPPER + 0x8110, Width::Word),
@@ -5313,7 +5313,7 @@ mod tests {
     fn gfx_firmware_reads_its_initdata_through_the_uat_the_sgx_mmu_roots() {
         use crate::machine::soc::GfxController;
         use crate::platform::apple::agx::{firmware, generation, uat as table};
-        use crate::platform::dma::tests::Ram;
+        use stela_contracts::dma::test_support::Ram;
         const WRAPPER: u64 = 0x2_0640_0000;
         const SGX: u64 = 0x2_0400_0000;
         const RAM: u64 = 0x8_0000_0000;
@@ -5330,7 +5330,9 @@ mod tests {
         devices
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
-        devices.add_gfx(&placement, crate::builds::DEFAULT).unwrap();
+        devices
+            .add_gfx(&placement, stela_formats::builds::DEFAULT)
+            .unwrap();
         assert_eq!(devices.power_devices.len(), 3);
         assert_eq!(devices.power_devices[1].physical, WRAPPER);
         assert_eq!(devices.power_devices[2].physical, SGX);
@@ -5466,7 +5468,9 @@ mod tests {
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
         assert!(devices.power_button(true).is_err());
-        devices.add_smc(&placement, crate::builds::DEFAULT).unwrap();
+        devices
+            .add_smc(&placement, stela_formats::builds::DEFAULT)
+            .unwrap();
         // The press waits in the key endpoint until the AP enables
         // notifications.
         devices.power_button(true).unwrap();
@@ -5592,7 +5596,7 @@ mod tests {
                     (dart, input),
                     None,
                     None,
-                    crate::builds::DEFAULT
+                    stela_formats::builds::DEFAULT
                 )
                 .unwrap_err()
                 .contains("DART")
@@ -5653,7 +5657,7 @@ mod tests {
                     (owner, 1),
                     None,
                     Some((owner, 2)),
-                    crate::builds::DEFAULT
+                    stela_formats::builds::DEFAULT
                 )
                 .unwrap_err()
                 .contains("DCP surface")
@@ -5793,7 +5797,7 @@ mod tests {
             (dart, 5),
             Some(RAM),
             Some((dart, 5)),
-            crate::builds::DEFAULT,
+            stela_formats::builds::DEFAULT,
         )
         .unwrap();
         connect_native_power(&mut d, SUPPLY, &[("/arm-io/dcpext", WRAPPER)], true);
@@ -5903,7 +5907,7 @@ mod tests {
                 (dart, 5),
                 Some(0x8_0000_0000),
                 None,
-                crate::builds::DEFAULT,
+                stela_formats::builds::DEFAULT,
             )
             .unwrap();
         devices
@@ -6397,7 +6401,7 @@ mod tests {
     /// DART stream: here a bypassed one, ECB with the FIPS-197 C.1 key.
     #[test]
     fn aes_writes_move_data_through_the_dart_stream() {
-        use crate::platform::dma::tests::Ram;
+        use stela_contracts::dma::test_support::Ram;
         const DART: u64 = 0x2_3500_4000;
         const AES: u64 = 0x2_3500_c000;
         const RAM: u64 = 0x8_0000_0000;
@@ -6626,7 +6630,7 @@ mod tests {
                 reply
             };
             let mut ram = Ram::new(RAM, 0x8000);
-            let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+            let image = stela_formats::img4::test_support::im4p(b"sepi", b"stela-sepos");
             ram.bytes[..image.len()].copy_from_slice(&image);
             assert_eq!(send(&mut d, &mut ram, 5, 0).opcode, 105);
             assert_eq!(send(&mut d, &mut ram, 6, (RAM >> 12) as u32).opcode, 106);
@@ -6635,9 +6639,9 @@ mod tests {
 
     #[test]
     fn sep_rom_accepts_firmware_under_stela_policy_and_reaches_os_active() {
-        use crate::platform::{
-            apple::sep::message::{self, Frame, ROM},
-            dma::tests::Ram,
+        use {
+            crate::platform::apple::sep::message, crate::platform::apple::sep::message::Frame,
+            crate::platform::apple::sep::message::ROM, stela_contracts::dma::test_support::Ram,
         };
         const DART: u64 = 0x25d2c0000;
         const SEP: u64 = 0x25e400000;
@@ -6708,7 +6712,7 @@ mod tests {
 
         // The real IPSW SEP payload is a bare encrypted `sepi`; Stela accepts
         // it under its own policy and boots its native sepOS.
-        let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+        let image = stela_formats::img4::test_support::im4p(b"sepi", b"stela-sepos");
         let mut devices = board();
         let mut ram = Ram::new(RAM, 0x8000);
         ram.bytes[..image.len()].copy_from_slice(&image);
@@ -7335,7 +7339,7 @@ mod tests {
         };
         devices.set_connection(1, Some(host)).unwrap();
         assert_eq!(devices.dma_deadline(), Some(0));
-        let mut ram = crate::platform::dma::tests::Ram::new(0x800000000, 0x10000);
+        let mut ram = stela_contracts::dma::test_support::Ram::new(0x800000000, 0x10000);
         devices.transfer(0, &mut ram, 0).unwrap();
         assert_eq!(devices.dma_deadline(), Some(USB_POLL_TICKS));
         assert!(devices.usb_client(id).unwrap().open(62078).is_err());

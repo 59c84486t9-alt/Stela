@@ -28,10 +28,17 @@
 //! is a permitted one). `CONFIG` (0x10), the per-CPU views from 0x5000 and
 //! `IPI_SEND` bit 31 have no public description, so they stop explicitly, as
 //! does any CPU mask naming a CPU the model does not serve.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use super::interrupt::{AicInput, CpuIndex, Wire};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
+use {
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::CpuIndex,
+    stela_contracts::interrupt::Wire,
+};
 
 const NAME: &str = "aic1";
 
@@ -406,7 +413,7 @@ impl MmioDevice for Aic1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     const NR_IRQ: u16 = 0x380;
     const SW_SET: u64 = 0x4000;

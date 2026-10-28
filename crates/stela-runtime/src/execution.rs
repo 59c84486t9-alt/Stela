@@ -15,8 +15,6 @@ pub(crate) use native_image::ReachedCall as ObservedNativeCall;
 #[cfg(feature = "std")]
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};
 #[cfg(feature = "std")]
-use crate::sha256;
-#[cfg(feature = "std")]
 use alloc::rc::Rc;
 #[cfg(feature = "std")]
 use anyhow::{Context, Result, ensure};
@@ -26,6 +24,8 @@ use core::marker::PhantomData;
 use std::io::Read;
 #[cfg(feature = "std")]
 use stela_compiler::GuestState;
+#[cfg(feature = "std")]
+use stela_formats::sha256;
 
 // Bounds a cached artifact so it cannot force an unbounded allocation or
 // mapping.
