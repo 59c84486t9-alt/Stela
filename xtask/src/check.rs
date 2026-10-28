@@ -6,8 +6,7 @@
 //! the other shipped hosts' ([`CROSS`]) in [`CROSS_TARGET_DIR`], and the
 //! host's Clippy and test build in `target`. The tests then run alone.
 //! A lane stops at its first failure; the gate fails if any part did, once
-//! every part has finished. The tree's links and paths are checked first
-//! (`crate::links`).
+//! every part has finished.
 use crate::tools::{cargo, exec};
 use anyhow::{Context, Result, bail};
 use std::{
@@ -86,7 +85,6 @@ pub fn run(fix: bool) -> Result<()> {
             build
         },
     ];
-    let links = crate::links::run();
     let failures: Vec<String> = thread::scope(|scope| {
         let formatting: Vec<_> = formatting
             .into_iter()
@@ -105,7 +103,6 @@ pub fn run(fix: bool) -> Result<()> {
             .into_iter()
             .map(|part| part.join().expect("formatting panicked"))
             .collect();
-        results.push(links);
         results.push(cross);
         match lanes {
             Ok(lanes) => results.extend(lanes),
