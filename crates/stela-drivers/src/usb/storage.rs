@@ -82,6 +82,11 @@ trait Scsi {
     fn signals(&self) -> bool {
         false
     }
+    /// Whether a begun command's transfer may have completed; a look at
+    /// memory alone.
+    fn posted(&self) -> bool {
+        false
+    }
     /// Whether [`Self::begin`] runs commands without waiting for them.
     fn queued(&self) -> bool {
         false
@@ -168,6 +173,9 @@ impl<I: Io> Scsi for Bot<I> {
     fn signals(&self) -> bool {
         self.io.signals()
     }
+    fn posted(&self) -> bool {
+        self.io.posted()
+    }
     fn queued(&self) -> bool {
         true
     }
@@ -238,6 +246,9 @@ impl Scsi for uas::Host {
     }
     fn signals(&self) -> bool {
         uas::Host::signals(self)
+    }
+    fn posted(&self) -> bool {
+        uas::Host::posted(self)
     }
     fn queued(&self) -> bool {
         true
@@ -1025,6 +1036,13 @@ impl<T: Scsi> BlockDevice for Disk<T> {
             .try_borrow()
             .is_ok_and(|transport| transport.signals())
     }
+    fn posted(&self) -> bool {
+        self.running.is_some()
+            && self
+                .bot
+                .try_borrow()
+                .is_ok_and(|transport| transport.posted())
+    }
 
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         self.check_media()?;
@@ -1164,6 +1182,12 @@ impl BlockDevice for UsbDisk {
         match &self.disk {
             UsbTransport::Bot(disk) => disk.signals(),
             UsbTransport::Uas(disk) => disk.signals(),
+        }
+    }
+    fn posted(&self) -> bool {
+        match &self.disk {
+            UsbTransport::Bot(disk) => disk.posted(),
+            UsbTransport::Uas(disk) => disk.posted(),
         }
     }
     fn read(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {

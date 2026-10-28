@@ -85,6 +85,11 @@ impl Host {
         self.engine.io.signals()
     }
 
+    /// Whether a running transfer may have completed; a look at memory.
+    pub fn posted(&self) -> bool {
+        self.engine.io.posted()
+    }
+
     /// # Safety
     /// `device`, binding and controller must name the same physical attachment
     /// and configuration/reset epoch. The caller owns the interface exclusively
@@ -446,6 +451,10 @@ trait Io {
     fn signals(&self) -> bool {
         false
     }
+    /// Whether a submitted transfer may have completed; a look at memory.
+    fn posted(&self) -> bool {
+        false
+    }
     fn streams(&self) -> Option<u16> {
         None
     }
@@ -477,6 +486,11 @@ impl Io for Native {
         self.controller
             .try_borrow()
             .is_ok_and(|controller| controller.signals())
+    }
+    fn posted(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.posted_for(self.id))
     }
     fn ready(&mut self) -> Result<(), BlockError> {
         let mut controller = self.controller.borrow_mut();
