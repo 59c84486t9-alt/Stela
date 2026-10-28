@@ -1529,11 +1529,17 @@ pub(crate) mod tests {
             assert_ne!(bases[0], bases[2]);
             assert_ne!(bases[1], bases[2]);
         }
+        // The model answers on this thread, so a virtual counter expires the
+        // 3 s PCI deadline only after 30 000 unanswered polls. The guard lives
+        // as long as the test's own thread.
+        core::mem::forget(crate::test_clock::virtualize());
+        let clock = crate::Clock {
+            ticks_per_microsecond: 1,
+        };
         // SAFETY: all queues are exclusively owned parts of this one modeled chip;
-        // clock is a live RDTSC test boundary and all firmware events use real IOVAs.
+        // all firmware events use real IOVAs.
         let m =
-            unsafe { Mailbox::from_rings(identity(chip), wmring, fwring, rxring, model_clock()) }
-                .unwrap();
+            unsafe { Mailbox::from_rings(identity(chip), wmring, fwring, rxring, clock) }.unwrap();
         (m, wm, fwdl, rx)
     }
     #[test]
