@@ -3,15 +3,15 @@
 //! `stela_runtime::machine::apple::sep_state`, which the SEP model owns;
 //! setup only copies the area whole and never reads its keys).
 //!
-//! - `--reset-nvram` writes a fresh NOR image, as clearing a Mac's NVRAM
+//! - `nvram reset` writes a fresh NOR image, as clearing a Mac's NVRAM
 //!   does; the SEP's area is kept.
-//! - `--backup-state FILE` copies the NOR image and the SEP's area to a new
+//! - `state backup FILE` copies the NOR image and the SEP's area to a new
 //!   file only its owner can read: the area holds the machine's keys. The
 //!   file also names the machine (ECID, partition and serial) and carries
 //!   the SHA-256 of what it holds.
-//! - `--restore-state FILE` writes such a file back to the machine it came
+//! - `state restore FILE` writes such a file back to the machine it came
 //!   from, and to no other.
-//! - `--boot-log` prints the boot log `stela.efi` keeps after the SEP's area
+//! - `boot-log` prints the boot log `stela.efi` keeps after the SEP's area
 //!   on a partition of at least `boot_log::PARTITION_BYTES`
 //!   (`stela_runtime::pc::boot_log`), and writes nothing.
 //!
@@ -20,7 +20,7 @@
 //! whose machine state lives in its Apple region's tail is named by that
 //! partition, and every command addresses the tail
 //! (`installed::state_area`).
-use super::{Environment, Record, Setup, check_installed_efi, ecid::Ecid, installed, machines};
+use super::{Environment, Record, Request, check_installed_efi, ecid::Ecid, installed, machines};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -118,7 +118,7 @@ pub(super) fn next_boot(variables: &Variables) -> String {
 fn target<'a>(
     environment: &Environment<'_>,
     record: &'a Record,
-    command: &Setup,
+    command: &Request,
     write: bool,
 ) -> Result<(&'a machines::Install, installed::StateArea)> {
     let install = record.install(command.install.as_deref())?;
@@ -139,11 +139,11 @@ fn target<'a>(
     Ok((install, area))
 }
 
-/// `--reset-nvram`.
+/// `nvram reset`.
 pub(super) fn reset_nvram(
     environment: &Environment<'_>,
     record: &Record,
-    command: &Setup,
+    command: &Request,
 ) -> Result<String> {
     check_installed_efi(environment, record)?;
     let (install, area) = target(environment, record, command, true)?;
@@ -191,7 +191,7 @@ pub(super) fn reset_nvram(
     Ok(text)
 }
 
-/// `--boot-log`: the boot log `stela.efi` keeps after the SEP's area, when
+/// `boot-log`: the boot log `stela.efi` keeps after the SEP's area, when
 /// the partition holds one.
 /// The USB's own log (`mount_interface::BOOT_LOG_FILE`), which every boot
 /// writes from its first line, then the install's on its machine-state
@@ -199,7 +199,7 @@ pub(super) fn reset_nvram(
 pub(super) fn boot_log(
     environment: &Environment<'_>,
     record: &Record,
-    command: &Setup,
+    command: &Request,
 ) -> Result<String> {
     let path = record.esp.join(crate::efi::BOOT_LOG);
     let usb = fs::read(&path)
@@ -228,7 +228,11 @@ pub(super) fn boot_log(
     }
 }
 
-fn install_log(environment: &Environment<'_>, record: &Record, command: &Setup) -> Result<String> {
+fn install_log(
+    environment: &Environment<'_>,
+    record: &Record,
+    command: &Request,
+) -> Result<String> {
     let (install, area) = target(environment, record, command, false)?;
     let nor = area.describe();
     let bytes = area.bytes;
@@ -258,11 +262,11 @@ fn install_log(environment: &Environment<'_>, record: &Record, command: &Setup) 
     Ok(text)
 }
 
-/// `--backup-state FILE`.
+/// `state backup FILE`.
 pub(super) fn backup(
     environment: &Environment<'_>,
     record: &Record,
-    command: &Setup,
+    command: &Request,
     path: &Path,
 ) -> Result<String> {
     let (install, area) = target(environment, record, command, false)?;
@@ -352,11 +356,11 @@ fn read_backup(path: &Path) -> Result<(Header, Vec<u8>)> {
     Ok((header, bytes))
 }
 
-/// `--restore-state FILE`.
+/// `state restore FILE`.
 pub(super) fn restore(
     environment: &Environment<'_>,
     record: &Record,
-    command: &Setup,
+    command: &Request,
     path: &Path,
 ) -> Result<String> {
     check_installed_efi(environment, record)?;

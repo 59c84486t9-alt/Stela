@@ -23,7 +23,7 @@
 //! (`stela/boot`, `stela/install` and `stela/store`), installs `stela.efi`
 //! as the USB's boot loader (`efi`) with a `stela.cfg` that boots the
 //! installed macOS, and records what it wrote in `EFI/stela/setup.json` on
-//! the EFI partition. `--dry-run` stops after the checks; `--uninstall`
+//! the EFI partition. `--dry-run` stops after the checks; `uninstall`
 //! removes everything the record names.
 //!
 //! Each Stela machine has its own ECID (`setup::ecid`), drawn once, kept in
@@ -40,18 +40,19 @@
 //! (`setup::machines`), each its own machine, chosen at boot from
 //! `stela.efi`'s startup choices. Setup writes no disk but the USB, except
 //! fresh machine state with `--initialize-nor` and NVRAM with
-//! `--next-boot`.
+//! `nvram next-boot`.
 //!
-//! An existing setup is updated in place (`setup::update`): `--update-stela`
+//! An existing setup is updated in place (`setup::update`): `update stela`
 //! installs a new `stela.efi` and prepares the boot bundles again when it
 //! reads another schema or this `stela` prepares another bundle revision
-//! than theirs, `--update-os` a new macOS build's install medium and
-//! restore bundles, and `--rollback` undoes the last update or finishes
+//! than theirs, `update os` a new macOS build's install medium and
+//! restore bundles, and `rollback` undoes the last update or finishes
 //! undoing an interrupted one. Every path takes `--dry-run`. A `stela.efi`
 //! whose mount interface (`stela_loader::mount_interface`) differs from this
 //! `stela`'s is refused.
 mod assets;
 mod bundle;
+mod command;
 mod doctor;
 mod ecid;
 mod elevation;
@@ -67,13 +68,14 @@ mod translations;
 mod update;
 mod wizard;
 
+pub(crate) use command::Setup;
 pub(crate) use elevation::hold_window;
 pub(crate) use installed::NextBoot;
 
 use crate::{boot, efi, restore};
 use anyhow::{Context, Result, bail, ensure};
 use bundle::Kind;
-use clap::{Args, builder::TypedValueParser};
+use clap::Args;
 use ecid::Ecid;
 use host::{FileSystem, Host};
 use serde::{Deserialize, Serialize};
@@ -103,8 +105,8 @@ const INSTALL_CHOICE: &str = "Install macOS";
 /// The startup choice that updates a setup's one install in place.
 const UPDATE_CHOICE: &str = "Update macOS";
 /// The commands `--install-image` goes with.
-const INSTALL_IMAGE_ACTIONS: &str = "--install-image goes with a new setup, or with --target, \
-    --update-os or --repair (with --ipsw or --fetch), which write the install medium";
+const INSTALL_IMAGE_ACTIONS: &str = "--install-image goes with a new setup or --target; \
+    `stela setup update os` and `stela setup repair` take it with the image they write";
 /// Install media kept: the active build's and the one before it, for
 /// rollback.
 pub(super) const MEDIA_KEPT: usize = 2;
@@ -146,204 +148,62 @@ fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
     }
 }
 
-#[derive(Args)]
-pub(crate) struct Setup {
-    /// The USB's EFI partition, another mounted volume of the same USB, or
-    /// the whole USB disk (such as disk5 on macOS, /dev/sdb on Linux or
-    /// PhysicalDrive2 on Windows), which setup erases first into an EFI
-    /// partition and a FAT32 volume.
-    #[arg(long, default_value = "", value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from))]
-    usb: PathBuf,
-    /// The macOS 27 restore image (IPSW).
-    #[arg(long, conflicts_with = "fetch")]
-    ipsw: Option<PathBuf>,
-    /// Download the pinned restore image from Apple instead: its recovery
-    /// members, or the whole IPSW with `--install-image offline`.
-    #[arg(long)]
-    fetch: bool,
-    /// Where an install reads the macOS restore image: `offline` copies the
-    /// whole IPSW (about 27 GB) onto the USB; TSS still needs network.
-    /// `online` writes only its inventory, and `stela.efi` streams
-    /// the IPSW from Apple's servers during the install over the PC's wired
-    /// network. A complete local IPSW defaults to offline, including for
-    /// a disk chosen later in stela.efi. An image without the macOS system
-    /// image (`--fetch`) defaults to online.
-    #[arg(long, value_enum)]
-    install_image: Option<InstallImage>,
-    /// Where `--fetch` keeps the image.
-    #[arg(long)]
-    download_dir: Option<PathBuf>,
-    /// The `stela.efi` to install instead of the one built into `stela`.
-    #[arg(long)]
-    efi: Option<PathBuf>,
-    /// The Mac model Stela presents (MacBookPro18,3, M1 Pro, by default).
-    /// Preparation checks the selected board's platform requirements and
-    /// refuses unsupported ones. Every install of a setup presents the same model.
-    #[arg(long)]
-    model: Option<String>,
-    /// The build `--fetch` downloads: the newest supported one by default.
-    #[arg(long, default_value = builds::DEFAULT.build, hide = true)]
-    build: String,
-    /// Show what would change, and change nothing.
-    #[arg(long)]
-    dry_run: bool,
-    /// Remove everything a previous setup wrote to this USB.
-    #[arg(long)]
-    uninstall: bool,
-    /// The PC's partition that becomes the Mac's internal SSD, such as
-    /// disk1s2 on macOS, /dev/nvme0n1p2 on Linux or disk1p2 on Windows:
-    /// Install macOS restores macOS onto it, and it is booted from it.
-    /// Without --nor its last 16 MiB keep the machine state (NVRAM, the SEP's
-    /// state and the boot log), which the guest never sees. On an existing
-    /// setup, it adds another install.
-    #[arg(long, value_parser = partition_name)]
-    target: Option<String>,
-    /// Optional: a separate PC partition (at least 1 MiB and 64 KiB) for the
-    /// machine state instead of the target's tail: the Mac's NOR flash, where
-    /// NVRAM persists, and the SEP's state; with at least 0x510000 bytes it
-    /// also keeps stela.efi's boot log. Later commands name the install's
-    /// machine-state partition again with it (the target itself when its
-    /// tail holds the state).
-    #[arg(long, value_parser = partition_name)]
-    nor: Option<String>,
-    /// The serial number of the disk holding `--target` and `--nor`, when
-    /// this computer cannot read it.
-    #[arg(long, requires = "target")]
-    disk_serial: Option<String>,
-    /// Erase the other file system a `--target` holds, unmounting it first,
-    /// or with `--repair` the one an install's Apple region holds: the PC's
-    /// own OS would mount it and clear Stela's machine state.
-    #[arg(long)]
-    erase_target: bool,
-    /// Write a fresh NOR image over machine state that is neither blank nor
-    /// one, and blank a foreign SEP area.
-    #[arg(long, requires = "target")]
-    initialize_nor: bool,
-    /// The name of a new install, or the install another option acts on
-    /// (the default install otherwise).
-    #[arg(long)]
-    install: Option<String>,
-    /// The ECID of the machine being set up, in hexadecimal: reuse a known
-    /// machine's (from `--status` of its old USB or a `--backup-state` file).
-    #[arg(long, value_parser = |value: &str| Ecid::parse(value).map_err(|e| e.to_string()))]
-    ecid: Option<Ecid>,
-    /// Give the machine a new ECID although its machine state belongs to
-    /// another one. Its LocalPolicy and SEP state are then orphaned.
-    #[arg(long)]
-    new_ecid: bool,
-    /// Opt in to Apple's signing server: the restore host sends the
-    /// machine's ECID, the restore's nonces and the build's component hashes
-    /// to gs.apple.com for the restore's personalized root tickets and the
-    /// recoveryOS LocalPolicy. Required for a new setup, which installs
-    /// macOS: a local IPSW supplies the image files, but boot firmware still
-    /// needs personalized tickets. On an existing setup it turns the opt-in
-    /// on.
-    #[arg(long, conflicts_with = "no_tss")]
-    tss: bool,
-    /// Turn the Apple signing server opt-in off on an existing setup.
-    #[arg(long)]
-    no_tss: bool,
-    /// Have every startup choice time the engine (its `--profile`): each
-    /// heartbeat of the boot log then reports where the engine's time goes
-    /// between translated blocks, by phase and by exit kind.
-    #[arg(long, conflicts_with = "no_profile")]
-    profile: bool,
-    /// Turn the engine profile off on an existing setup.
-    #[arg(long)]
-    no_profile: bool,
-    /// Have the install refuse an IPSW without recorded block hashes, which
-    /// it otherwise reads whole before the restore starts; with them it
-    /// checks each block as the restore reads it either way. It adds the
-    /// engine's `--verify-on-read` to the Install macOS choice.
-    #[arg(long, requires = "target")]
-    verify_on_read: bool,
-    /// The USB's FAT32 data partition, when it has several, for the boot
-    /// bundles, the install medium (the full IPSW in pieces or its
-    /// inventory) and the translation store; the first one by default.
-    #[arg(long)]
-    install_volume: Option<PathBuf>,
-    /// Boot this install by default.
-    #[arg(long)]
-    default_install: Option<String>,
-    /// Remove this install from the setup; its partitions are kept.
-    #[arg(long)]
-    remove_install: Option<String>,
-    /// Seconds `stela.efi`'s startup choices wait (0: only when a key is
-    /// held).
-    #[arg(long)]
-    chooser_timeout: Option<u32>,
-    /// Replace `stela.efi` (`--efi`, or the one beside `stela`) on an
-    /// existing setup, keeping the old one for `--rollback`; `--ipsw` or
-    /// `--fetch` lets it prepare the boot bundles again when it reads a new
-    /// bundle schema or this `stela` prepares a new bundle revision.
-    #[arg(long)]
-    update_stela: bool,
-    /// Add a new macOS build's install medium and restore bundles (`--ipsw`
-    /// or `--fetch`) to an existing setup for Install macOS.
-    #[arg(long)]
-    update_os: bool,
-    /// Undo the last update, or an interrupted one.
-    #[arg(long)]
-    rollback: bool,
-    /// Choose the next boot of the installed disk in its NVRAM.
-    #[arg(long, value_enum)]
-    next_boot: Option<NextBoot>,
-    /// Report everything about the setup and check it, changing nothing;
-    /// fails when something needs fixing.
-    #[arg(long, visible_alias = "doctor")]
-    status: bool,
-    /// Put back what the setup record says (stela.efi, the entry,
-    /// stela.cfg, the startup choices); with `--ipsw` or `--fetch`, prepare
-    /// the active build's restore bundles again.
-    #[arg(long)]
-    repair: bool,
-    /// Write a fresh NVRAM to the install's NOR partition (named again with
-    /// `--nor`); its SEP state is kept.
-    #[arg(long)]
-    reset_nvram: bool,
-    /// Copy the install's machine state (NVRAM and SEP state, with its keys)
-    /// to a new private file.
-    #[arg(long, value_name = "FILE")]
-    backup_state: Option<PathBuf>,
-    /// Write a `--backup-state` file back to the install it came from (its
-    /// NOR partition named again with `--nor`).
-    #[arg(long, value_name = "FILE")]
-    restore_state: Option<PathBuf>,
-    /// Print the boot log stela.efi keeps on the install's machine-state
-    /// partition (`--install`, or the default install).
-    #[arg(long)]
-    boot_log: bool,
-    /// The bound of each translation pack `stela.efi` keeps on the USB, in
-    /// bytes (64 MiB to 4 GiB; 0 for none). By default 2 GiB, or what the
-    /// USB's FAT32 volumes have room for.
-    #[arg(long, value_name = "BYTES")]
-    translation_store_bytes: Option<u64>,
-    /// Install an authorized local host-device firmware package (manifest.json
-    /// and resources) onto an existing USB; independent of Apple boot bundles.
-    #[arg(long, value_name = "DIRECTORY")]
-    host_firmware: Option<PathBuf>,
-    /// Download pinned vendor firmware for exact requirements captured by native
-    /// drivers. The inventory must come from the target PC, not this setup host.
-    #[arg(long, value_name = "FILE")]
-    host_firmware_requirements: Option<PathBuf>,
-    /// Cache for pinned host firmware images and redistribution notices.
-    #[arg(
-        long,
-        value_name = "DIRECTORY",
-        requires = "host_firmware_requirements"
-    )]
-    host_firmware_cache: Option<PathBuf>,
-    /// The model or size, as setup shows it, of the whole disk `--usb`
-    /// names, which erasing a removable disk other than a USB (an SD card,
-    /// a FireWire or Thunderbolt disk) needs typed back.
-    #[arg(long, value_name = "MODEL|SIZE")]
-    confirm_disk: Option<String>,
+/// What one `stela setup` command does.
+#[derive(Default)]
+enum Action {
+    /// Create a setup, or add an install to one with `--target`.
+    #[default]
+    Create,
+    Status,
+    Repair,
+    UpdateStela,
+    UpdateOs,
+    Rollback,
+    Uninstall,
+    NextBoot(NextBoot),
+    ResetNvram,
+    BackupState(PathBuf),
+    RestoreState(PathBuf),
+    BootLog,
+    Configure,
+    HostFirmwareInstall(PathBuf),
+    HostFirmwareFetch(PathBuf),
 }
 
-/// A partition's name, given as is or by its device path (`/dev/disk1s2`,
-/// `/dev/sdb1`), as `--usb` takes a whole disk.
-fn partition_name(value: &str) -> Result<String, String> {
-    Ok(value.strip_prefix("/dev/").unwrap_or(value).to_owned())
+/// One `stela setup` command: its action and the options it was given
+/// (`setup::command` describes each).
+#[derive(Default)]
+struct Request {
+    action: Action,
+    usb: PathBuf,
+    ipsw: Option<PathBuf>,
+    fetch: bool,
+    install_image: Option<InstallImage>,
+    download_dir: Option<PathBuf>,
+    efi: Option<PathBuf>,
+    model: Option<String>,
+    build: String,
+    dry_run: bool,
+    target: Option<String>,
+    nor: Option<String>,
+    disk_serial: Option<String>,
+    erase_target: bool,
+    initialize_nor: bool,
+    install: Option<String>,
+    ecid: Option<Ecid>,
+    new_ecid: bool,
+    tss: bool,
+    no_tss: bool,
+    profile: bool,
+    no_profile: bool,
+    verify_on_read: bool,
+    install_volume: Option<PathBuf>,
+    default_install: Option<String>,
+    remove_install: Option<String>,
+    chooser_timeout: Option<u32>,
+    translation_store_bytes: Option<u64>,
+    host_firmware_cache: Option<PathBuf>,
+    confirm_disk: Option<String>,
 }
 
 #[derive(Args)]
@@ -401,7 +261,7 @@ impl InstallMedium {
     }
 }
 
-/// What setup writes, recorded on the ESP so `--uninstall` can remove it.
+/// What setup writes, recorded on the ESP so `uninstall` can remove it.
 /// Records before schema 8 also named a recoveryOS bundle on the USB, and
 /// records before schema 9 kept the data partition's files under `EFI/`;
 /// this `stela` reads them only to uninstall them.
@@ -442,7 +302,7 @@ struct Record {
     /// Schema 3: an update that started and has not finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending: Option<update::Change>,
-    /// Schema 3: finished updates, for `--rollback`.
+    /// Schema 3: finished updates, for `rollback`.
     #[serde(default)]
     history: Vec<update::Change>,
     /// Schema 4: the PC disks macOS installs onto, each its own machine.
@@ -511,7 +371,7 @@ impl Record {
         image_is_remote(ipsw, self.install_image)
     }
 
-    /// Bring an older schema's record to one `--uninstall` reads: its
+    /// Bring an older schema's record to one `uninstall` reads: its
     /// install medium is listed and its installed disk becomes the first
     /// install.
     fn migrate(&mut self) {
@@ -799,7 +659,7 @@ fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<Record> {
     ensure!(
         schema == u64::from(RECORD_SCHEMA),
         "{} is a schema {schema} setup, which this stela no longer reads: {}. Run `stela setup \
-         --uninstall --usb {}` and set the USB up again",
+         uninstall --usb {}` and set the USB up again",
         path.display(),
         match schema {
             8 => "it keeps its files under EFI/ on the data partition",
@@ -810,14 +670,14 @@ fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<Record> {
     let record: Record = stela_runtime::read_json(&path)?;
     ensure!(
         !record.installs.is_empty(),
-        "{} names no install; run `stela setup --uninstall --usb {}` and set the USB up again",
+        "{} names no install; run `stela setup uninstall --usb {}` and set the USB up again",
         path.display(),
         usb.display()
     );
     Ok(record)
 }
 
-/// Any schema's record, for `--uninstall`: the bundles of an older
+/// Any schema's record, for `uninstall`: the bundles of an older
 /// schema's record that name no kind or `recovery` are recoveryOS bundles,
 /// which this `stela` has no kind for; their build directories are removed
 /// with the rest. Before schema 9 the data partition's files were under
@@ -937,7 +797,7 @@ fn read_efi(environment: &Environment<'_>, path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Refuse to change a setup whose installed `stela.efi` reads another
-/// interface than this `stela` writes; `--update-stela` replaces it first.
+/// interface than this `stela` writes; `update stela` replaces it first.
 fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result<()> {
     let tool = record.esp.join(LOADER_PATH);
     let image = fs::read(&tool).with_context(|| format!("cannot read {}", tool.display()))?;
@@ -946,7 +806,7 @@ fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result
     {
         bail!(
             "the stela.efi on {} does not read what this stela writes ({reason}); install this \
-             stela's stela.efi first with `stela setup --update-stela`, or use the stela that \
+             stela's stela.efi first with `stela setup update stela`, or use the stela that \
              installed it",
             record.esp.display()
         );
@@ -955,7 +815,7 @@ fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result
 }
 
 /// Refuse to prepare bundles for `record` when its active ones are of
-/// another revision than this `stela` prepares: `--update-stela` prepares
+/// another revision than this `stela` prepares: `update stela` prepares
 /// them all at this one, keeping the old ones for its rollback.
 fn check_bundle_revision(environment: &Environment<'_>, record: &Record) -> Result<()> {
     match revision_mismatch(environment, record) {
@@ -974,7 +834,7 @@ fn revision_mismatch(environment: &Environment<'_>, record: &Record) -> Option<S
     Some(if theirs < ours {
         format!(
             "this setup's boot bundles are revision {theirs}, and this stela prepares revision \
-             {ours}: prepare them again with `stela setup --update-stela` and the macOS {} \
+             {ours}: prepare them again with `stela setup update stela` and the macOS {} \
              restore image (--ipsw or --fetch)",
             record.build
         )
@@ -1152,13 +1012,10 @@ fn check_space(host: &dyn Host, volume: &Path, prepared: &[Prepared]) -> Result<
     Ok(())
 }
 
-impl Setup {
-    pub(crate) fn run(mut self) -> Result<()> {
-        if self.usb.as_os_str().is_empty() {
-            wizard::check_creation(&self)?;
-            if !self.dry_run && elevation::relaunch()? {
-                return Ok(());
-            }
+impl Request {
+    fn run(mut self) -> Result<()> {
+        if self.usb.as_os_str().is_empty() && !self.dry_run && elevation::relaunch()? {
+            return Ok(());
         }
         debug_assert_eq!(
             stela_loader::boot_bundle::SCHEMA_VERSION,
@@ -1210,223 +1067,129 @@ impl Setup {
         self.model.as_deref().unwrap_or(PINNED_MODEL)
     }
 
-    /// Settings of an existing setup this command changes.
-    fn configures(&self) -> bool {
-        self.default_install.is_some()
-            || self.remove_install.is_some()
-            || self.no_tss
-            || self.no_profile
-            || self.chooser_timeout.is_some()
-    }
-
-    /// At most one action per command.
-    fn check_actions(&self) -> Result<()> {
-        let actions = [
-            ("--host-firmware", self.host_firmware.is_some()),
-            (
-                "--host-firmware-requirements",
-                self.host_firmware_requirements.is_some(),
-            ),
-            ("--uninstall", self.uninstall),
-            ("--update-stela", self.update_stela),
-            ("--update-os", self.update_os),
-            ("--rollback", self.rollback),
-            ("--next-boot", self.next_boot.is_some()),
-            ("--status", self.status),
-            ("--repair", self.repair),
-            ("--reset-nvram", self.reset_nvram),
-            ("--backup-state", self.backup_state.is_some()),
-            ("--restore-state", self.restore_state.is_some()),
-            ("--boot-log", self.boot_log),
-            ("--target", self.target.is_some()),
-            ("--default-install, --remove-install", self.configures()),
-        ];
-        let chosen: Vec<&str> = actions
-            .iter()
-            .filter(|(_, on)| *on)
-            .map(|(name, _)| *name)
-            .collect();
-        ensure!(
-            chosen.len() <= 1,
-            "{} are separate commands; run them one at a time",
-            chosen.join(" and ")
-        );
-        ensure!(
-            self.install_image.is_none()
-                || chosen.is_empty()
-                || self.target.is_some()
-                || self.update_os
-                || self.repair,
-            "{INSTALL_IMAGE_ACTIONS}"
-        );
-        ensure!(
-            self.nor.is_none()
-                || self.target.is_some()
-                || self.reset_nvram
-                || self.backup_state.is_some()
-                || self.restore_state.is_some()
-                || self.boot_log,
-            "--nor names a NOR partition for --target, --reset-nvram, --backup-state, \
-             --restore-state or --boot-log"
-        );
-        ensure!(
-            !self.erase_target || self.target.is_some() || self.repair,
-            "--erase-target goes with --target or --repair"
-        );
-        Ok(())
-    }
-
-    fn dispatch(self, environment: &Environment<'_>) -> Result<String> {
-        self.check_actions()?;
-        if let Some(inventory) = &self.host_firmware_requirements {
-            let record = read_record(environment, &self.usb)?;
-            check_installed_efi(environment, &record)?;
-            let mount_image = fs::read(record.esp.join(LOADER_PATH))?;
-            ensure!(
-                stela_loader::host_firmware::supports_mount(&mount_image),
-                "installed stela.efi predates host firmware resources; run stela setup --update-stela first"
-            );
-            let cache = self
-                .host_firmware_cache
-                .clone()
-                .unwrap_or_else(|| download_dir().with_file_name("firmware"));
-            return firmware::provision(
-                inventory,
-                &record.esp.join(stela_loader::host_firmware::DIRECTORY),
-                &cache,
-                self.dry_run,
-                &mount_image,
-            );
+    fn dispatch(mut self, environment: &Environment<'_>) -> Result<String> {
+        let action = std::mem::take(&mut self.action);
+        match action {
+            Action::Create => return self.create(environment),
+            Action::Status => return doctor::status(environment, &self.usb),
+            Action::Uninstall => return uninstall(environment, &self.usb, self.dry_run),
+            _ => {}
         }
-        if let Some(source) = &self.host_firmware {
-            let record = read_record(environment, &self.usb)?;
-            check_installed_efi(environment, &record)?;
-            let mount_image = fs::read(record.esp.join(LOADER_PATH))?;
-            ensure!(
-                stela_loader::host_firmware::supports_mount(&mount_image),
-                "installed stela.efi predates host firmware resources; run stela setup --update-stela first"
-            );
-            let package =
-                stela_loader::host_firmware::Package::read_for_mount(source, &mount_image)?;
-            let (images, bytes) = package.inventory();
-            let destination = record.esp.join(stela_loader::host_firmware::DIRECTORY);
-            let mut report = format!(
-                "Host firmware: {images} verified resources, {bytes} bytes to {}\n",
-                destination.display()
-            );
-            if self.dry_run {
-                report.push_str("Dry run: nothing was changed.\n");
-            } else {
-                package.publish(&destination)?;
-                report.push_str(
-                    "Published host firmware manifest. Device initialization is checked at boot.\n",
+        let mut record = read_record(environment, &self.usb)?;
+        // A maintenance `--fetch` downloads the image of the model the setup
+        // presents.
+        self.model.get_or_insert_with(|| record.model.clone());
+        match action {
+            Action::Repair => doctor::repair(environment, &self),
+            Action::ResetNvram => state::reset_nvram(environment, &record, &self),
+            Action::BackupState(path) => state::backup(environment, &record, &self, &path),
+            Action::RestoreState(path) => state::restore(environment, &record, &self, &path),
+            Action::BootLog => state::boot_log(environment, &record, &self),
+            Action::UpdateStela => {
+                let image = match &self.efi {
+                    Some(path) => path.clone(),
+                    None => assets::resolve()?,
+                };
+                let ipsw = self.optional_image()?;
+                update::update_stela(environment, record, &image, ipsw.as_deref(), self.dry_run)
+            }
+            Action::UpdateOs => {
+                check_installed_efi(environment, &record)?;
+                record.install_image = self.install_image.or(record.install_image);
+                let ipsw = self.image()?;
+                update::update_os(environment, record, &ipsw, self.dry_run)
+            }
+            Action::Rollback => update::rollback(record, self.dry_run),
+            Action::NextBoot(next) => self.next_boot(environment, &record, next),
+            Action::Configure => machines::configure(environment, &self),
+            Action::HostFirmwareInstall(source) => {
+                let mount_image = host_firmware_mount(environment, &record)?;
+                let package =
+                    stela_loader::host_firmware::Package::read_for_mount(&source, &mount_image)?;
+                let (images, bytes) = package.inventory();
+                let destination = record.esp.join(stela_loader::host_firmware::DIRECTORY);
+                let mut report = format!(
+                    "Host firmware: {images} verified resources, {bytes} bytes to {}\n",
+                    destination.display()
                 );
+                if self.dry_run {
+                    report.push_str("Dry run: nothing was changed.\n");
+                } else {
+                    package.publish(&destination)?;
+                    report.push_str(
+                        "Published host firmware manifest. Device initialization is checked at boot.\n",
+                    );
+                }
+                Ok(report)
             }
-            return Ok(report);
-        }
-        if self.uninstall {
-            return uninstall(environment, &self.usb, self.dry_run);
-        }
-        if self.status {
-            return doctor::status(environment, &self.usb);
-        }
-        if self.repair {
-            return doctor::repair(environment, &self);
-        }
-        if self.reset_nvram {
-            let record = read_record(environment, &self.usb)?;
-            return state::reset_nvram(environment, &record, &self);
-        }
-        if let Some(path) = &self.backup_state {
-            let record = read_record(environment, &self.usb)?;
-            return state::backup(environment, &record, &self, path);
-        }
-        if let Some(path) = &self.restore_state {
-            let record = read_record(environment, &self.usb)?;
-            return state::restore(environment, &record, &self, path);
-        }
-        if self.boot_log {
-            let record = read_record(environment, &self.usb)?;
-            return state::boot_log(environment, &record, &self);
-        }
-        if self.update_stela {
-            let record = read_record(environment, &self.usb)?;
-            let image = match &self.efi {
-                Some(path) => path.clone(),
-                None => assets::resolve()?,
-            };
-            let ipsw = (self.ipsw.is_some() || self.fetch)
-                .then(|| self.image())
-                .transpose()?;
-            return update::update_stela(
-                environment,
-                record,
-                &image,
-                ipsw.as_deref(),
-                self.dry_run,
-            );
-        }
-        if self.update_os {
-            let mut record = read_record(environment, &self.usb)?;
-            check_installed_efi(environment, &record)?;
-            record.install_image = self.install_image.or(record.install_image);
-            let ipsw = self.image()?;
-            return update::update_os(environment, record, &ipsw, self.dry_run);
-        }
-        if self.rollback {
-            return update::rollback(read_record(environment, &self.usb)?, self.dry_run);
-        }
-        if let Some(next) = self.next_boot {
-            let record = read_record(environment, &self.usb)?;
-            check_installed_efi(environment, &record)?;
-            let install = record.install(self.install.as_deref())?;
-            let disk = &install.disk;
-            let changes = installed::next_boot(environment.host, disk, next, self.dry_run)?;
-            let mut text = format!(
-                "NVRAM of {} (install \"{}\"'s machine state):\n",
-                match disk.machine_state_offset {
-                    Some(offset) => format!("{} from byte {offset:#x}", disk.nor),
-                    None => disk.nor.clone(),
-                },
-                install.name
-            );
-            if changes.is_empty() {
-                text.push_str("  nothing to change\n");
+            Action::HostFirmwareFetch(inventory) => {
+                let mount_image = host_firmware_mount(environment, &record)?;
+                let cache = self
+                    .host_firmware_cache
+                    .clone()
+                    .unwrap_or_else(|| download_dir().with_file_name("firmware"));
+                firmware::provision(
+                    &inventory,
+                    &record.esp.join(stela_loader::host_firmware::DIRECTORY),
+                    &cache,
+                    self.dry_run,
+                    &mount_image,
+                )
             }
-            for change in changes {
-                writeln!(text, "  {change}")?;
+            Action::Create | Action::Status | Action::Uninstall => {
+                unreachable!("these run without the setup record")
             }
-            text.push_str(if self.dry_run {
-                "Dry run: nothing was changed.\n"
-            } else {
-                "Done.\n"
-            });
-            return Ok(text);
         }
+    }
+
+    /// Create a setup, or add an install (`--target`) to an existing one.
+    fn create(self, environment: &Environment<'_>) -> Result<String> {
         let configured =
             locate_esp(environment.host, &self.usb).is_ok_and(|esp| esp.join(RECORD).is_file());
-        ensure!(
-            !configured || self.install_image.is_none() || self.target.is_some(),
-            "{INSTALL_IMAGE_ACTIONS}"
-        );
         if configured && self.target.is_some() {
             return machines::add(environment, &self);
         }
-        if configured
-            && (self.configures()
-                || ((self.tss || self.profile) && self.ipsw.is_none() && !self.fetch))
-        {
-            return machines::configure(environment, &self);
-        }
         ensure!(
-            !self.configures() && !self.no_tss && !self.no_profile,
-            "{} has no setup to change; run `stela setup` first",
-            self.usb.display()
+            !configured || self.install_image.is_none(),
+            "{INSTALL_IMAGE_ACTIONS}"
         );
         setup(environment, self)
     }
 
-    /// The restore image: `--ipsw`, or the pinned build `--fetch` downloads.
+    /// `nvram next-boot`.
+    fn next_boot(
+        &self,
+        environment: &Environment<'_>,
+        record: &Record,
+        next: NextBoot,
+    ) -> Result<String> {
+        check_installed_efi(environment, record)?;
+        let install = record.install(self.install.as_deref())?;
+        let disk = &install.disk;
+        let changes = installed::next_boot(environment.host, disk, next, self.dry_run)?;
+        let mut text = format!(
+            "NVRAM of {} (install \"{}\"'s machine state):\n",
+            match disk.machine_state_offset {
+                Some(offset) => format!("{} from byte {offset:#x}", disk.nor),
+                None => disk.nor.clone(),
+            },
+            install.name
+        );
+        if changes.is_empty() {
+            text.push_str("  nothing to change\n");
+        }
+        for change in changes {
+            writeln!(text, "  {change}")?;
+        }
+        text.push_str(if self.dry_run {
+            "Dry run: nothing was changed.\n"
+        } else {
+            "Done.\n"
+        });
+        Ok(text)
+    }
+
+    /// The restore image: `--ipsw`, or the build `--fetch` downloads.
     fn image(&self) -> Result<PathBuf> {
         match (&self.ipsw, self.fetch) {
             (Some(path), false) => Ok(path.clone()),
@@ -1447,6 +1210,18 @@ impl Setup {
             .then(|| self.image())
             .transpose()
     }
+}
+
+/// The installed `stela.efi`, which must read host firmware resources.
+fn host_firmware_mount(environment: &Environment<'_>, record: &Record) -> Result<Vec<u8>> {
+    check_installed_efi(environment, record)?;
+    let mount_image = fs::read(record.esp.join(LOADER_PATH))?;
+    ensure!(
+        stela_loader::host_firmware::supports_mount(&mount_image),
+        "installed stela.efi predates host firmware resources; run `stela setup update stela` \
+         first"
+    );
+    Ok(mount_image)
 }
 
 /// The ESP to change: the EFI partition of `usb`'s disk, which must be
@@ -1543,7 +1318,7 @@ pub(crate) fn download_dir() -> PathBuf {
 /// Download `--build`'s image, or reuse a complete earlier download: the
 /// whole IPSW for an offline install medium, else its recovery members,
 /// which prepare the boot bundles.
-fn fetch(command: &Setup) -> Result<PathBuf> {
+fn fetch(command: &Request) -> Result<PathBuf> {
     let directory = command.download_dir.clone().unwrap_or_else(download_dir);
     match command.install_image {
         Some(InstallImage::Offline) => fetch_image(&directory, &command.build, command.model()),
@@ -1986,7 +1761,7 @@ struct Plan {
 
 fn plan(
     environment: &Environment<'_>,
-    command: &Setup,
+    command: &Request,
     ipsw: PathBuf,
     early: Option<PreparedSetup>,
 ) -> Result<Plan> {
@@ -1996,8 +1771,8 @@ fn plan(
         let interrupted = stela_runtime::read_json::<Record>(&esp.join(RECORD))
             .is_ok_and(|record| !record.complete);
         bail!(
-            "{} was already set up{} ({}); run `stela setup --uninstall --usb {}` first, or \
-             update it with --update-stela or --update-os",
+            "{} was already set up{} ({}); run `stela setup uninstall --usb {}` first, or \
+             update it with `stela setup update stela` or `update os`",
             esp.display(),
             if interrupted {
                 ", and that setup was interrupted"
@@ -2162,7 +1937,7 @@ fn plan(
 fn tss_note() -> String {
     "TSS opt-in (--tss): the restore host sends this machine's ECID, the restore's nonces \
      and its boot components' hashes to Apple's signing server (gs.apple.com) for the \
-     restore's root tickets and the recoveryOS LocalPolicy; `stela setup --no-tss` turns it \
+     restore's root tickets and the recoveryOS LocalPolicy; `stela setup configure --no-tss` turns it \
      off."
         .into()
 }
@@ -2261,7 +2036,7 @@ fn state_line(disk: &installed::InstalledDisk) -> String {
     format!("{label:<14} {}", disk.state_description())
 }
 
-fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
+fn setup(environment: &Environment<'_>, mut command: Request) -> Result<String> {
     let host = environment.host;
     ensure!(command.tss, TSS_REQUIRED);
     if command.fetch {
@@ -2425,7 +2200,7 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
         report,
         "Done. Boot the PC from this USB (the firmware's boot menu lists it as a UEFI USB \
          device): {start}. Stela does not run recoveryOS to its window yet.\nCheck it with: \
-         stela setup --status --usb {}\nUndo with: stela setup --uninstall --usb {}",
+         stela setup status --usb {}\nUndo with: stela setup uninstall --usb {}",
         command.usb.display(),
         command.usb.display()
     )?;
@@ -2466,7 +2241,7 @@ fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     if let Some(nor) = &checked.nor_image {
         installed::initialize_nor(environment.host, &checked.disk, nor)?;
     }
-    // The version is kept first, so `--rollback` of a later update finds it.
+    // The version is kept first, so `rollback` of a later update finds it.
     let version = update::store_version(&esp, &plan.efi_image)?;
     debug_assert_eq!(Some(&version), record.stela_version.as_ref());
     let kept = update::version_path(&esp, &version);
@@ -2602,6 +2377,7 @@ mod tests {
         else {
             panic!("not a setup");
         };
+        let setup = setup.request();
         assert_eq!(setup.target.as_deref(), Some("nvme0n1p2"));
         assert_eq!(setup.nor.as_deref(), Some("sdc3"));
     }
@@ -2808,8 +2584,9 @@ mod tests {
         }
     }
 
-    fn command(f: &Fixture, usb: &Path) -> Setup {
-        Setup {
+    fn command(f: &Fixture, usb: &Path) -> Request {
+        Request {
+            action: Action::Create,
             usb: usb.to_path_buf(),
             ipsw: Some(f.ipsw.clone()),
             fetch: false,
@@ -2819,7 +2596,6 @@ mod tests {
             model: Some(restore::payload::SYNTHETIC_MODEL.into()),
             build: restore::payload::SYNTHETIC_BUILD.into(),
             dry_run: false,
-            uninstall: false,
             target: None,
             nor: None,
             disk_serial: None,
@@ -2838,22 +2614,10 @@ mod tests {
             default_install: None,
             remove_install: None,
             chooser_timeout: None,
-            update_stela: false,
-            update_os: false,
-            rollback: false,
-            next_boot: None,
-            status: false,
-            repair: false,
-            reset_nvram: false,
-            backup_state: None,
-            restore_state: None,
-            boot_log: false,
             // The smallest store: its spare is allocated at the bound, and
             // `snapshot` reads every file it compares. The default bound's
             // shrinking to fit is `translations::choose`'s to test.
             translation_store_bytes: Some(translations::MIN_PACK_BYTES),
-            host_firmware: None,
-            host_firmware_requirements: None,
             host_firmware_cache: None,
             confirm_disk: None,
         }
@@ -3058,7 +2822,7 @@ mod tests {
         );
 
         let report = setup(&environment(host), command(&f, &f.esp)).unwrap();
-        assert!(report.contains("stela setup --uninstall"), "{report}");
+        assert!(report.contains("stela setup uninstall"), "{report}");
         assert!(report.contains("pick the PC disk"), "{report}");
         let record = record(&f);
         let ecid = record.installs[0].ecid.unwrap();
@@ -3094,11 +2858,19 @@ mod tests {
         assert_eq!(record.schema_version, RECORD_SCHEMA);
         // A second setup is refused until the first is undone.
         let again = setup(&environment(host), command(&f, &f.esp));
-        assert!(again.unwrap_err().to_string().contains("--uninstall"));
+        assert!(
+            again
+                .unwrap_err()
+                .to_string()
+                .contains("stela setup uninstall")
+        );
         // The only install is not removed alone.
-        let error = rerun(&f, |c| c.remove_install = Some("macOS".into()))
-            .unwrap_err()
-            .to_string();
+        let error = rerun(&f, |c| {
+            c.action = Action::Configure;
+            c.remove_install = Some("macOS".into());
+        })
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("only one"), "{error}");
 
         let dry = uninstall(&environment(host), &f.esp, true).unwrap();
@@ -3298,8 +3070,10 @@ mod tests {
             .to_string();
         assert!(error.contains("schema 7 setup"), "{error}");
         assert!(error.contains("recoveryOS bundle"), "{error}");
-        assert!(error.contains("--uninstall"), "{error}");
-        let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
+        assert!(error.contains("stela setup uninstall"), "{error}");
+        let error = rerun(&f, |c| c.action = Action::Status)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("no longer reads"), "{error}");
         let dry = uninstall(&environment(&f.host), &f.esp, true).unwrap();
         assert!(dry.contains("keep     install \"macOS\""), "{dry}");
@@ -3418,7 +3192,7 @@ mod tests {
         add_disk(f, false, region, nor);
     }
 
-    fn installed_command(f: &Fixture) -> Setup {
+    fn installed_command(f: &Fixture) -> Request {
         let mut command = command(f, &f.esp);
         command.target = Some(REGION.into());
         command.nor = Some(NOR.into());
@@ -3693,11 +3467,13 @@ mod tests {
         let options = fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
         assert!(options.contains("--preboot @disk"), "{options}");
         // This computer never reaches the chosen disk's machine state.
-        let error = rerun(&f, |c| c.reset_nvram = true).unwrap_err().to_string();
+        let error = rerun(&f, |c| c.action = Action::ResetNvram)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("chosen in stela.efi"), "{error}");
     }
 
-    fn rerun(f: &Fixture, configure: impl Fn(&mut Setup)) -> Result<String> {
+    fn rerun(f: &Fixture, configure: impl Fn(&mut Request)) -> Result<String> {
         let mut command = command(f, &f.esp);
         command.ipsw = None;
         command.model = None;
@@ -3733,22 +3509,24 @@ mod tests {
         setup(&environment(&f.host), erase).unwrap();
         assert_eq!(*f.host.unmounted.borrow(), [REGION]);
         assert!(erased(&f));
-        // One an existing install's region gains is a problem --status
-        // names and --repair erases with --erase-target.
+        // One an existing install's region gains is a problem `status`
+        // names and `repair --erase-target` erases.
         let path = f.host.partitions[REGION].1.clone();
         let mut image = fs::read(&path).unwrap();
         image[..apfs.len()].copy_from_slice(&apfs);
         fs::write(&path, image).unwrap();
-        let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
+        let error = rerun(&f, |c| c.action = Action::Status)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("holds another file system"), "{error}");
-        let report = rerun(&f, |c| c.repair = true).unwrap();
+        let report = rerun(&f, |c| c.action = Action::Repair).unwrap();
         assert!(
             report.contains("pass --erase-target to erase it"),
             "{report}"
         );
         assert!(!erased(&f));
         rerun(&f, |c| {
-            c.repair = true;
+            c.action = Action::Repair;
             c.erase_target = true;
         })
         .unwrap();
@@ -3779,22 +3557,15 @@ mod tests {
             "{install}"
         );
         assert!(!install.contains("--install-source"), "{install}");
-        // The choice is the setup's; other commands do not take it.
-        let others: [fn(&mut Setup); 2] = [
-            |c| c.install_image = Some(InstallImage::Offline),
-            |c| {
-                c.status = true;
-                c.install_image = Some(InstallImage::Offline);
-            },
-        ];
-        for configure in others {
-            let error = rerun(&f, configure).unwrap_err().to_string();
-            assert!(error.contains("--install-image goes with"), "{error}");
-        }
+        // The choice is the setup's.
+        let error = rerun(&f, |c| c.install_image = Some(InstallImage::Offline))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--install-image goes with"), "{error}");
         // Repair turns it offline: the IPSW in pieces on the USB.
         let switch = |image| {
             rerun(&f, |c| {
-                c.repair = true;
+                c.action = Action::Repair;
                 c.ipsw = Some(f.ipsw.clone());
                 c.install_image = Some(image);
             })
@@ -3964,7 +3735,10 @@ mod tests {
             .join(stela_runtime::payload::piece_name(0));
         let piece = fs::read(&first).unwrap();
         fs::write(&first, &piece[1..]).unwrap();
-        let status = format!("{:#}", rerun(&f, |c| c.status = true).unwrap_err());
+        let status = format!(
+            "{:#}",
+            rerun(&f, |c| c.action = Action::Status).unwrap_err()
+        );
         assert!(status.contains("ipsw.000 holds"), "{status}");
         fs::write(&first, &piece).unwrap();
         // --verify-on-read is the engine's, on the Install choice alone.
@@ -3983,7 +3757,11 @@ mod tests {
             disks
         );
         // Turning the signing opt-in off removes the Install choice.
-        let off = rerun(&f, |c| c.no_tss = true).unwrap();
+        let off = rerun(&f, |c| {
+            c.action = Action::Configure;
+            c.no_tss = true;
+        })
+        .unwrap();
         assert!(off.contains("TSS/FDR        off"), "{off}");
         assert!(
             !fs::read_to_string(f.esp.join("EFI/stela/stela.cfg"))
@@ -4002,7 +3780,11 @@ mod tests {
         assert_eq!(off.missing_restore_bundles().len(), 1);
 
         // The engine profile turns on for every choice, and off again.
-        let on = rerun(&f, |c| c.profile = true).unwrap();
+        let on = rerun(&f, |c| {
+            c.action = Action::Configure;
+            c.profile = true;
+        })
+        .unwrap();
         assert!(on.contains("profile        on"), "{on}");
         let config = || fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
         assert!(config().trim_end().ends_with("--profile"), "{}", config());
@@ -4014,12 +3796,16 @@ mod tests {
                 .iter()
                 .all(|e| e.options.ends_with("--profile"))
         );
-        rerun(&f, |c| c.no_profile = true).unwrap();
+        rerun(&f, |c| {
+            c.action = Action::Configure;
+            c.no_profile = true;
+        })
+        .unwrap();
         assert!(!config().contains("--profile"));
 
         // The next boot is chosen in NVRAM, which a dry run leaves alone.
         let dry = rerun(&f, |c| {
-            c.next_boot = Some(NextBoot::Recovery);
+            c.action = Action::NextBoot(NextBoot::Recovery);
             c.dry_run = true;
         })
         .unwrap();
@@ -4028,7 +3814,7 @@ mod tests {
             "{dry}"
         );
         assert_eq!(partition_bytes(&f, NOR), disks.1);
-        rerun(&f, |c| c.next_boot = Some(NextBoot::Recovery)).unwrap();
+        rerun(&f, |c| c.action = Action::NextBoot(NextBoot::Recovery)).unwrap();
         let variables = nvram(&f);
         assert_eq!(
             stela_loader::boot_selection::select(&variables)
@@ -4036,7 +3822,7 @@ mod tests {
                 .target,
             stela_loader::boot_selection::Target::SystemRecovery
         );
-        rerun(&f, |c| c.next_boot = Some(NextBoot::Macos)).unwrap();
+        rerun(&f, |c| c.action = Action::NextBoot(NextBoot::Macos)).unwrap();
         assert_eq!(
             stela_loader::boot_selection::select(&nvram(&f))
                 .unwrap()
@@ -4047,7 +3833,7 @@ mod tests {
         // written: its identifier now names another partition.
         let nor = partition_bytes(&f, NOR);
         f.host.partitions.get_mut(NOR).unwrap().0.guid = REGION2_GUID.into();
-        let error = rerun(&f, |c| c.next_boot = Some(NextBoot::Recovery))
+        let error = rerun(&f, |c| c.action = Action::NextBoot(NextBoot::Recovery))
             .unwrap_err()
             .to_string();
         assert!(
@@ -4068,7 +3854,7 @@ mod tests {
 
     #[test]
     fn installed_disks_that_would_lose_data_or_cannot_boot_are_refused() {
-        let refusal = |f: &Fixture, configure: &dyn Fn(&mut Setup)| {
+        let refusal = |f: &Fixture, configure: &dyn Fn(&mut Request)| {
             let mut command = installed_command(f);
             configure(&mut command);
             setup(&environment(&f.host), command)
@@ -4259,7 +4045,11 @@ mod tests {
             second.digits()
         )));
         // The default moves, and stela.cfg with it.
-        rerun(&f, |c| c.default_install = Some("macOS 2".into())).unwrap();
+        rerun(&f, |c| {
+            c.action = Action::Configure;
+            c.default_install = Some("macOS 2".into());
+        })
+        .unwrap();
         assert_eq!(choices().entries[0].name, "macOS 2");
         assert!(
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg"))
@@ -4268,7 +4058,7 @@ mod tests {
         );
         // Each install's next boot is its own NVRAM.
         rerun(&f, |c| {
-            c.next_boot = Some(NextBoot::Recovery);
+            c.action = Action::NextBoot(NextBoot::Recovery);
             c.install = Some("macOS".into());
         })
         .unwrap();
@@ -4290,7 +4080,11 @@ mod tests {
         assert!(f2.contains("same model"), "{f2}");
         // Removing an install keeps its partitions and drops its bundle.
         let nor2 = partition_bytes(&f, NOR2);
-        f2 = rerun(&f, |c| c.remove_install = Some("macOS 2".into())).unwrap();
+        f2 = rerun(&f, |c| {
+            c.action = Action::Configure;
+            c.remove_install = Some("macOS 2".into());
+        })
+        .unwrap();
         assert!(f2.contains(&format!("--ecid {second}")), "{f2}");
         assert!(!bundle_of(&f, Some(second)).exists());
         assert!(!restore2.exists());
@@ -4322,7 +4116,7 @@ mod tests {
         let before_efi = fs::read(f.esp.join(efi::LOADER)).unwrap();
         let update = |dry_run| {
             rerun(&f, |c| {
-                c.update_stela = true;
+                c.action = Action::UpdateStela;
                 c.dry_run = dry_run;
             })
         };
@@ -4365,7 +4159,7 @@ mod tests {
         fs::write(&new, &new_efi).unwrap();
         let update = || {
             rerun(&f, |c| {
-                c.update_stela = true;
+                c.action = Action::UpdateStela;
                 c.efi = Some(new.clone());
             })
         };
@@ -4387,18 +4181,18 @@ mod tests {
         let before_rollback = fs::read(f.esp.join(RECORD)).unwrap();
         assert!(
             rerun(&f, |c| {
-                c.rollback = true;
+                c.action = Action::Rollback;
                 c.dry_run = true;
             })
             .unwrap()
             .contains("Dry run")
         );
         assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_rollback);
-        assert!(rerun(&f, |c| c.rollback = true).is_err());
+        assert!(rerun(&f, |c| c.action = Action::Rollback).is_err());
         assert_eq!(fs::read(&active).unwrap(), new_efi);
         assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_rollback);
         fs::remove_dir(&spare).unwrap();
-        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
         assert_eq!(fs::read(&active).unwrap(), old_efi);
         assert!(store.spare_ready());
         assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
@@ -4415,11 +4209,11 @@ mod tests {
         let new = f._dir.path().join("new.efi");
         fs::write(&new, efi_image(b"stela-2")).unwrap();
         rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(new.clone());
         })
         .unwrap();
-        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
         assert!(!f.esp.join(translations::DIRECTORY).exists());
         assert!(record(&f).translations.is_none());
         assert_eq!(
@@ -4440,7 +4234,7 @@ mod tests {
         fs::write(&new, efi_image(b"stela-2")).unwrap();
         let update = |dry_run: bool| {
             rerun(&f, |c| {
-                c.update_stela = true;
+                c.action = Action::UpdateStela;
                 c.efi = Some(new.clone());
                 c.dry_run = dry_run;
             })
@@ -4490,10 +4284,10 @@ mod tests {
         let record1 = record(&f);
         assert_eq!(record1.stela_versions.len(), 2);
         assert_eq!(record1.history.len(), 1);
-        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
         assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela"));
         assert!(
-            rerun(&f, |c| c.rollback = true)
+            rerun(&f, |c| c.action = Action::Rollback)
                 .unwrap_err()
                 .to_string()
                 .contains("no update")
@@ -4553,7 +4347,7 @@ mod tests {
             let mut command = command(&f, &f.esp);
             command.ipsw = ipsw.then(|| f.ipsw.clone());
             command.model = None;
-            command.update_stela = true;
+            command.action = Action::UpdateStela;
             command.efi = Some(new.clone());
             command.dispatch(&environment)
         };
@@ -4578,7 +4372,7 @@ mod tests {
         );
         // The old bundle stays for the rollback, which boots it again.
         assert!(old.join("bundle.json").is_file());
-        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
         assert_eq!(options(), first);
         assert!(!migrated.exists());
         assert_eq!(record(&f).bundle_schema, old_schema);
@@ -4620,31 +4414,34 @@ mod tests {
         };
         // A later stela prepares revision 1, with the same stela.efi.
         let new = environment_at(&f.host, &newer, 1);
-        let run = |configure: &dyn Fn(&mut Setup)| {
+        let run = |configure: &dyn Fn(&mut Request)| {
             let mut command = command(&f, &f.esp);
             command.ipsw = None;
             command.model = None;
             configure(&mut command);
             command.dispatch(&new)
         };
-        let status = run(&|c| c.status = true).unwrap_err().to_string();
+        let status = run(&|c| c.action = Action::Status).unwrap_err().to_string();
         assert!(
             status.contains("boot bundles are revision 0, and this stela prepares revision 1"),
             "{status}"
         );
-        assert!(status.contains("--update-stela"), "{status}");
+        assert!(status.contains("stela setup update stela"), "{status}");
         // Other changes that prepare bundles wait for the update.
         let repair = run(&|c| {
-            c.repair = true;
+            c.action = Action::Repair;
             c.ipsw = Some(f.ipsw.clone());
         });
         assert!(
-            repair.unwrap_err().to_string().contains("--update-stela"),
+            repair
+                .unwrap_err()
+                .to_string()
+                .contains("stela setup update stela"),
             "the repair is refused"
         );
         let update = |ipsw: bool, dry_run: bool| {
             run(&|c| {
-                c.update_stela = true;
+                c.action = Action::UpdateStela;
                 c.ipsw = ipsw.then(|| f.ipsw.clone());
                 c.dry_run = dry_run;
             })
@@ -4677,7 +4474,7 @@ mod tests {
         let leaf = restore.file_name().unwrap().to_string_lossy().into_owned();
         assert!(choices().contains(&leaf), "{}", choices());
         assert!(
-            run(&|c| c.status = true)
+            run(&|c| c.action = Action::Status)
                 .unwrap()
                 .contains("No problems found.")
         );
@@ -4687,15 +4484,15 @@ mod tests {
         // Going back to the earlier stela boots its kept bundles, and undoing
         // that keeps them for the first update's rollback.
         let mut back = command(&f, &f.esp);
-        (back.ipsw, back.model, back.update_stela) = (None, None, true);
+        (back.ipsw, back.model, back.action) = (None, None, Action::UpdateStela);
         back.dispatch(&old).unwrap();
         assert_eq!(record(&f).bundle_revision, 0);
-        run(&|c| c.rollback = true).unwrap();
+        run(&|c| c.action = Action::Rollback).unwrap();
         assert_eq!(record(&f).bundles, updated.bundles);
         let new_efi = f._dir.path().join("new.efi");
         fs::write(&new_efi, efi_image(b"stela-2")).unwrap();
         let report = run(&|c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(new_efi.clone());
         })
         .unwrap();
@@ -4703,9 +4500,9 @@ mod tests {
         assert_eq!(record(&f).bundles, updated.bundles);
         // Each rollback undoes one update: the second boots the revision 0
         // bundles again and removes the revision 1 ones.
-        run(&|c| c.rollback = true).unwrap();
+        run(&|c| c.action = Action::Rollback).unwrap();
         assert_eq!(record(&f).bundles, updated.bundles);
-        run(&|c| c.rollback = true).unwrap();
+        run(&|c| c.action = Action::Rollback).unwrap();
         let rolled = record(&f);
         assert_eq!(rolled.bundle_revision, 0);
         assert_eq!(rolled.stela_version, first.stela_version);
@@ -4722,7 +4519,7 @@ mod tests {
                 .all(|d| d.join(bundle::MANIFEST).is_file())
         );
         let mut status = command(&f, &f.esp);
-        (status.ipsw, status.model, status.status) = (None, None, true);
+        (status.ipsw, status.model, status.action) = (None, None, Action::Status);
         assert!(
             status
                 .dispatch(&old)
@@ -4761,7 +4558,7 @@ mod tests {
             fs::write(&image, efi_image(format!("stela-{revision}").as_bytes())).unwrap();
             let mut command = command(&f, &f.esp);
             command.model = None;
-            command.update_stela = true;
+            command.action = Action::UpdateStela;
             command.efi = Some(image);
             let environment = environment_at(&f.host, &preparers[revision as usize], revision);
             command.dispatch(&environment).unwrap();
@@ -4788,7 +4585,7 @@ mod tests {
         restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
         let update = |dry_run: bool| {
             rerun(&f, |c| {
-                c.update_os = true;
+                c.action = Action::UpdateOs;
                 c.ipsw = Some(newer.clone());
                 c.dry_run = dry_run;
             })
@@ -4817,7 +4614,7 @@ mod tests {
             current(),
         );
         assert!(old.join("bundle.json").is_file());
-        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
         assert_eq!(options(), first);
         assert!(!stela_volume(&f).join("stela/boot/STELA2").exists());
 
@@ -4833,7 +4630,7 @@ mod tests {
         fs::create_dir_all(&partial).unwrap();
         fs::write(partial.join("partial"), b"x").unwrap();
         let other = rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(f.efi.clone());
         });
         assert!(other.unwrap_err().to_string().contains("interrupted"));
@@ -4843,7 +4640,7 @@ mod tests {
         record1 = record(&f);
         record1.pending = record1.history.last().cloned();
         write_record(&f.esp, &record1).unwrap();
-        let undo = rerun(&f, |c| c.rollback = true).unwrap();
+        let undo = rerun(&f, |c| c.action = Action::Rollback).unwrap();
         assert!(undo.contains("interrupted macOS update"), "{undo}");
         assert_eq!(options(), first);
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
@@ -4858,7 +4655,7 @@ mod tests {
         let ecid = record(&f).installs[0].ecid.unwrap();
         assert_eq!(record(&f).media.len(), 1);
         assert!(
-            rerun(&f, |c| c.status = true)
+            rerun(&f, |c| c.action = Action::Status)
                 .unwrap()
                 .contains("No problems found.")
         );
@@ -4872,7 +4669,7 @@ mod tests {
         restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
         let update_to = |ipsw: &Path, dry_run: bool| {
             rerun(&f, |c| {
-                c.update_os = true;
+                c.action = Action::UpdateOs;
                 c.ipsw = Some(ipsw.to_path_buf());
                 c.dry_run = dry_run;
             })
@@ -4897,7 +4694,7 @@ mod tests {
                 entry.options
             );
         }
-        let status = rerun(&f, |c| c.status = true).unwrap();
+        let status = rerun(&f, |c| c.action = Action::Status).unwrap();
         assert!(status.contains("kept medium"), "{status}");
         // The update writes no disk of the PC.
         assert_eq!(
@@ -4905,7 +4702,7 @@ mod tests {
             disks
         );
         // A rollback drops the new medium and restores the old choices.
-        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
         let record2 = record(&f);
         assert_eq!(record2.build, first);
         let media: Vec<&str> = record2.media.iter().map(|m| m.build.as_str()).collect();
@@ -4925,13 +4722,13 @@ mod tests {
         assert_eq!(media, ["STELA2", "STELA3"]);
         assert!(!medium::directory(&stela_volume(&f), first).exists());
         assert!(
-            rerun(&f, |c| c.status = true)
+            rerun(&f, |c| c.action = Action::Status)
                 .unwrap()
                 .contains("No problems found.")
         );
         // Rolling back past the pruned medium says how to write it again.
-        rerun(&f, |c| c.rollback = true).unwrap();
-        let undo = rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
+        let undo = rerun(&f, |c| c.action = Action::Rollback).unwrap();
         assert!(undo.contains("no longer kept"), "{undo}");
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert!(!f.esp.join("EFI/stela").exists());
@@ -4943,7 +4740,7 @@ mod tests {
         let mut f = fixture(64 * GIB, false);
         add_installed_disk(&mut f, &[], &[]);
         setup(&environment(&f.host), installed_command(&f)).unwrap();
-        let status = || rerun(&f, |c| c.status = true);
+        let status = || rerun(&f, |c| c.action = Action::Status);
         let report = status().unwrap();
         assert!(report.contains("No problems found."), "{report}");
         assert!(report.contains("Install \"macOS\" (default)"), "{report}");
@@ -4969,18 +4766,20 @@ mod tests {
         assert!(error.contains("not the version setup installed"), "{error}");
         assert!(error.contains("stela.cfg differs"), "{error}");
         // ... and the bundle needs the restore image to be repaired.
-        let error = rerun(&f, |c| c.repair = true).unwrap_err().to_string();
+        let error = rerun(&f, |c| c.action = Action::Repair)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("--ipsw"), "{error}");
         let damaged = snapshot(&f.esp);
         rerun(&f, |c| {
-            c.repair = true;
+            c.action = Action::Repair;
             c.ipsw = Some(f.ipsw.clone());
             c.dry_run = true;
         })
         .unwrap();
         assert_eq!(snapshot(&f.esp), damaged);
         rerun(&f, |c| {
-            c.repair = true;
+            c.action = Action::Repair;
             c.ipsw = Some(f.ipsw.clone());
         })
         .unwrap();
@@ -5000,7 +4799,7 @@ mod tests {
         let error = status().unwrap_err().to_string();
         assert!(error.contains("has no ECID"), "{error}");
         rerun(&f, |c| {
-            c.repair = true;
+            c.action = Action::Repair;
             c.ipsw = Some(f.ipsw.clone());
         })
         .unwrap();
@@ -5055,24 +4854,24 @@ mod tests {
         fs::write(&new, efi_image(b"stela-2")).unwrap();
         let newer = f._dir.path().join("Newer.ipsw");
         restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
-        type Step<'a> = (&'a str, &'a dyn Fn(&mut Setup));
+        type Step<'a> = (&'a str, &'a dyn Fn(&mut Request));
         let steps: [Step<'_>; 7] = [
-            ("status", &|c| c.status = true),
+            ("status", &|c| c.action = Action::Status),
             ("update-stela", &|c| {
-                c.update_stela = true;
+                c.action = Action::UpdateStela;
                 c.efi = Some(new.clone());
             }),
-            ("rollback", &|c| c.rollback = true),
+            ("rollback", &|c| c.action = Action::Rollback),
             ("update-os", &|c| {
-                c.update_os = true;
+                c.action = Action::UpdateOs;
                 c.ipsw = Some(newer.clone());
             }),
-            ("rollback", &|c| c.rollback = true),
+            ("rollback", &|c| c.action = Action::Rollback),
             ("repair", &|c| {
-                c.repair = true;
+                c.action = Action::Repair;
                 c.ipsw = Some(f.ipsw.clone());
             }),
-            ("status", &|c| c.status = true),
+            ("status", &|c| c.action = Action::Status),
         ];
         for (name, step) in steps {
             rerun(&f, step).unwrap_or_else(|error| panic!("{name}: {error:#}"));
@@ -5095,23 +4894,25 @@ mod tests {
         fs::rename(&directory, &previous).unwrap();
         fs::create_dir_all(&partial).unwrap();
         fs::write(partial.join("ramdisk.img"), b"half").unwrap();
-        let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
+        let error = rerun(&f, |c| c.action = Action::Status)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("set aside"), "{error}");
         assert!(error.contains("stopped part way"), "{error}");
         // A dry run says so and changes nothing, and needs no restore image.
         let interrupted = snapshot(&f.esp);
         let dry = rerun(&f, |c| {
-            c.repair = true;
+            c.action = Action::Repair;
             c.dry_run = true;
         })
         .unwrap();
         assert!(dry.contains("would put right"), "{dry}");
         assert_eq!(snapshot(&f.esp), interrupted);
-        let report = rerun(&f, |c| c.repair = true).unwrap();
+        let report = rerun(&f, |c| c.action = Action::Repair).unwrap();
         assert!(report.contains("put back"), "{report}");
         assert!(!partial.exists() && !previous.exists());
         assert_eq!(snapshot(&f.esp), before);
-        rerun(&f, |c| c.status = true).unwrap();
+        rerun(&f, |c| c.action = Action::Status).unwrap();
     }
 
     #[test]
@@ -5121,16 +4922,18 @@ mod tests {
         add_disk(&mut f, true, &[], &[]);
         setup(&environment(&f.host), installed_command(&f)).unwrap();
         provision_sep(&f, NOR);
-        rerun(&f, |c| c.next_boot = Some(NextBoot::Recovery)).unwrap();
+        rerun(&f, |c| c.action = Action::NextBoot(NextBoot::Recovery)).unwrap();
         let capacity = stela_runtime::machine::apple::nor::CAPACITY;
         let sep = |f: &Fixture| partition_bytes(f, NOR)[capacity..].to_vec();
         let sep_before = sep(&f);
 
         // A reset needs the partition named again, and keeps the SEP state.
-        let error = rerun(&f, |c| c.reset_nvram = true).unwrap_err().to_string();
+        let error = rerun(&f, |c| c.action = Action::ResetNvram)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("--nor"), "{error}");
         let error = rerun(&f, |c| {
-            c.reset_nvram = true;
+            c.action = Action::ResetNvram;
             c.nor = Some(NOR2.into());
         })
         .unwrap_err()
@@ -5138,7 +4941,7 @@ mod tests {
         assert!(error.contains("not this install's NOR"), "{error}");
         let state = partition_bytes(&f, NOR);
         rerun(&f, |c| {
-            c.reset_nvram = true;
+            c.action = Action::ResetNvram;
             c.nor = Some(NOR.into());
             c.dry_run = true;
         })
@@ -5146,7 +4949,7 @@ mod tests {
         assert_eq!(partition_bytes(&f, NOR), state);
         // Back up before the reset.
         let file = f._dir.path().join("machine.state");
-        rerun(&f, |c| c.backup_state = Some(file.clone())).unwrap();
+        rerun(&f, |c| c.action = Action::BackupState(file.clone())).unwrap();
         #[cfg(unix)]
         assert_eq!(
             std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&file).unwrap().permissions())
@@ -5154,13 +4957,13 @@ mod tests {
             0o600
         );
         assert!(
-            rerun(&f, |c| c.backup_state = Some(file.clone()))
+            rerun(&f, |c| c.action = Action::BackupState(file.clone()))
                 .unwrap_err()
                 .to_string()
                 .contains("exists")
         );
         rerun(&f, |c| {
-            c.reset_nvram = true;
+            c.action = Action::ResetNvram;
             c.nor = Some(NOR.into());
         })
         .unwrap();
@@ -5171,7 +4974,7 @@ mod tests {
             stela_loader::boot_selection::Target::MacOs { safe: false }
         );
         assert_eq!(sep(&f), sep_before);
-        let status = rerun(&f, |c| c.status = true).unwrap();
+        let status = rerun(&f, |c| c.action = Action::Status).unwrap();
         assert!(status.contains("SEP state      provisioned"), "{status}");
         assert!(status.contains("next boot      macOS"), "{status}");
 
@@ -5183,7 +4986,7 @@ mod tests {
         second.model = None;
         second.dispatch(&environment(&f.host)).unwrap();
         let error = rerun(&f, |c| {
-            c.restore_state = Some(file.clone());
+            c.action = Action::RestoreState(file.clone());
             c.install = Some("Other".into());
             c.nor = Some(NOR2.into());
         })
@@ -5195,14 +4998,14 @@ mod tests {
         *bytes.last_mut().unwrap() ^= 1;
         fs::write(&damaged, bytes).unwrap();
         let error = rerun(&f, |c| {
-            c.restore_state = Some(damaged.clone());
+            c.action = Action::RestoreState(damaged.clone());
             c.nor = Some(NOR.into());
         })
         .unwrap_err()
         .to_string();
         assert!(error.contains("damaged"), "{error}");
         rerun(&f, |c| {
-            c.restore_state = Some(file.clone());
+            c.action = Action::RestoreState(file.clone());
             c.nor = Some(NOR.into());
         })
         .unwrap();
@@ -5228,14 +5031,17 @@ mod tests {
         let mut bytes = fs::read(&path).unwrap();
         bytes.resize(PARTITION_BYTES as usize, 0);
         fs::write(&path, &bytes).unwrap();
-        let error = format!("{:#}", rerun(&f, |c| c.boot_log = true).unwrap_err());
+        let error = format!(
+            "{:#}",
+            rerun(&f, |c| c.action = Action::BootLog).unwrap_err()
+        );
         assert!(error.contains("the log region is blank"), "{error}");
 
         let region = crate::boot_log::tests::region(&["NOR persistent fresh=true\n"]);
         bytes[OFFSET as usize..(OFFSET + LOG_BYTES) as usize].copy_from_slice(&region);
         fs::write(&path, &bytes).unwrap();
         let state = partition_bytes(&f, NOR);
-        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        let text = rerun(&f, |c| c.action = Action::BootLog).unwrap();
         assert!(
             text.contains("(disk1s3): Stela boot log: 1 boots, 47 bytes\n"),
             "{text}"
@@ -5248,7 +5054,7 @@ mod tests {
         // The USB's own log, which setup preallocates, comes first.
         let usb = crate::boot_log::tests::region(&["CHOICE 3 (Install macOS)\n"]);
         fs::write(f.esp.join(efi::BOOT_LOG), &usb).unwrap();
-        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        let text = rerun(&f, |c| c.action = Action::BootLog).unwrap();
         assert!(text.starts_with("Boot log on the USB ("), "{text}");
         assert!(text.contains("CHOICE 3 (Install macOS)\n"), "{text}");
         assert!(
@@ -5258,11 +5064,14 @@ mod tests {
         // The log is optional: a smaller partition is noted, not refused,
         // and the USB's log still prints.
         f.host.partitions.get_mut(NOR).unwrap().0.bytes = PARTITION_BYTES - 1;
-        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        let text = rerun(&f, |c| c.action = Action::BootLog).unwrap();
         assert!(text.starts_with("Boot log on the USB ("), "{text}");
         assert!(text.ends_with("without one\n"), "{text}");
         fs::write(f.esp.join(efi::BOOT_LOG), vec![0; LOG_BYTES as usize]).unwrap();
-        let error = format!("{:#}", rerun(&f, |c| c.boot_log = true).unwrap_err());
+        let error = format!(
+            "{:#}",
+            rerun(&f, |c| c.action = Action::BootLog).unwrap_err()
+        );
         assert!(
             error.contains("has no boot log: the log region is blank\n"),
             "{error}"
@@ -5318,7 +5127,7 @@ mod tests {
             .state_offset()
     }
 
-    fn split_command(f: &Fixture) -> Setup {
+    fn split_command(f: &Fixture) -> Request {
         let mut command = command(f, &f.esp);
         command.target = Some(REGION.into());
         command.tss = true;
@@ -5435,7 +5244,7 @@ mod tests {
         assert!(state_of(&f, REGION).iter().all(|&b| b == 0));
 
         // NVRAM is the tail's: the next boot is chosen there.
-        rerun(&f, |c| c.next_boot = Some(NextBoot::Recovery)).unwrap();
+        rerun(&f, |c| c.action = Action::NextBoot(NextBoot::Recovery)).unwrap();
         assert_eq!(
             next_target(&tail_nvram(&f)),
             stela_loader::boot_selection::Target::SystemRecovery
@@ -5447,7 +5256,7 @@ mod tests {
                 .iter()
                 .all(|&b| b == 0)
         );
-        let status = rerun(&f, |c| c.status = true).unwrap();
+        let status = rerun(&f, |c| c.action = Action::Status).unwrap();
         assert!(
             status.contains(&format!(
                 "machine state  the tail of disk1s2 from byte {:#x}",
@@ -5475,11 +5284,13 @@ mod tests {
             .unwrap();
         let state = state_of(&f, REGION);
         let file = f._dir.path().join("split.state");
-        rerun(&f, |c| c.backup_state = Some(file.clone())).unwrap();
-        let error = rerun(&f, |c| c.reset_nvram = true).unwrap_err().to_string();
+        rerun(&f, |c| c.action = Action::BackupState(file.clone())).unwrap();
+        let error = rerun(&f, |c| c.action = Action::ResetNvram)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Apple region, whose last bytes"), "{error}");
         let reset = rerun(&f, |c| {
-            c.reset_nvram = true;
+            c.action = Action::ResetNvram;
             c.nor = Some(REGION.into());
         })
         .unwrap();
@@ -5492,10 +5303,10 @@ mod tests {
             stela_loader::boot_selection::Target::MacOs { safe: false }
         );
         assert_eq!(state_of(&f, REGION)[CAPACITY..], state[CAPACITY..]);
-        let status = rerun(&f, |c| c.status = true).unwrap();
+        let status = rerun(&f, |c| c.action = Action::Status).unwrap();
         assert!(status.contains("SEP state      provisioned"), "{status}");
         rerun(&f, |c| {
-            c.restore_state = Some(file.clone());
+            c.action = Action::RestoreState(file.clone());
             c.nor = Some(REGION.into());
         })
         .unwrap();
@@ -5506,13 +5317,16 @@ mod tests {
         );
 
         // The boot log is read from the tail too.
-        let error = format!("{:#}", rerun(&f, |c| c.boot_log = true).unwrap_err());
+        let error = format!(
+            "{:#}",
+            rerun(&f, |c| c.action = Action::BootLog).unwrap_err()
+        );
         assert!(error.contains("the log region is blank"), "{error}");
         let log = crate::boot_log::tests::region(&["MACHINE STATE in the target's tail\n"]);
         f.host
             .write(REGION, tail() + stela_runtime::pc::boot_log::OFFSET, &log)
             .unwrap();
-        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        let text = rerun(&f, |c| c.action = Action::BootLog).unwrap();
         assert!(
             text.contains(&format!(
                 "(disk1s2 from byte {:#x}): Stela boot log: 1 boots",
@@ -5534,11 +5348,13 @@ mod tests {
 
         // A resized partition moves the tail: nothing is written there.
         f.host.partitions.get_mut(REGION).unwrap().0.bytes = SPLIT_BYTES - (1 << 20);
-        let error = rerun(&f, |c| c.next_boot = Some(NextBoot::Macos))
+        let error = rerun(&f, |c| c.action = Action::NextBoot(NextBoot::Macos))
             .unwrap_err()
             .to_string();
         assert!(error.contains("was resized"), "{error}");
-        let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
+        let error = rerun(&f, |c| c.action = Action::Status)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("was resized"), "{error}");
         f.host.partitions.get_mut(REGION).unwrap().0.bytes = SPLIT_BYTES;
         assert_eq!(state_of(&f, REGION), state);
@@ -5553,7 +5369,7 @@ mod tests {
 
     #[test]
     fn the_tail_is_checked_and_an_existing_guest_disk_is_never_converted() {
-        let refusal = |f: &Fixture, configure: &dyn Fn(&mut Setup)| {
+        let refusal = |f: &Fixture, configure: &dyn Fn(&mut Request)| {
             let mut command = split_command(f);
             configure(&mut command);
             setup(&environment(&f.host), command)
@@ -5676,7 +5492,7 @@ mod tests {
         let before = snapshot(&f.esp);
         assert!(
             rerun(&f, |c| {
-                c.host_firmware_requirements = Some(inventory.clone());
+                c.action = Action::HostFirmwareFetch(inventory.clone());
                 c.dry_run = true;
             })
             .unwrap_err()
@@ -5691,14 +5507,14 @@ mod tests {
         image.extend_from_slice(&legacy_marker);
         fs::write(&capable, image).unwrap();
         rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(capable.clone());
         })
         .unwrap();
         let before = snapshot(&f.esp);
         let cache = f._dir.path().join("firmware-cache");
         let report = rerun(&f, |c| {
-            c.host_firmware_requirements = Some(inventory.clone());
+            c.action = Action::HostFirmwareFetch(inventory.clone());
             c.host_firmware_cache = Some(cache.clone());
             c.dry_run = true;
         })
@@ -5707,14 +5523,6 @@ mod tests {
         assert!(report.contains("3872 bytes"));
         assert_eq!(snapshot(&f.esp), before);
         assert!(!cache.exists());
-        assert!(
-            rerun(&f, |c| {
-                c.host_firmware_requirements = Some(inventory.clone());
-                c.host_firmware = Some(f._dir.path().join("manual"));
-            })
-            .is_err()
-        );
-        assert_eq!(snapshot(&f.esp), before);
     }
 
     #[test]
@@ -5731,7 +5539,7 @@ mod tests {
         image.extend_from_slice(&marker);
         fs::write(&legacy, image).unwrap();
         rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(legacy.clone());
         })
         .unwrap();
@@ -5749,7 +5557,7 @@ mod tests {
         let before = snapshot(&f.esp);
         for dry in [true, false] {
             let error = rerun(&f, |c| {
-                c.host_firmware = Some(source.clone());
+                c.action = Action::HostFirmwareInstall(source.clone());
                 c.dry_run = dry;
             })
             .unwrap_err();
@@ -5761,17 +5569,20 @@ mod tests {
         image.extend_from_slice(&MOUNT_CAPABILITY);
         fs::write(&current, image).unwrap();
         rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(current.clone());
         })
         .unwrap();
-        rerun(&f, |c| c.host_firmware = Some(source.clone())).unwrap();
+        rerun(&f, |c| {
+            c.action = Action::HostFirmwareInstall(source.clone())
+        })
+        .unwrap();
         let loaded = Package::read(&f.esp.join(DIRECTORY)).unwrap();
         assert_eq!(loaded.inventory(), (1, 16 * 1024 * 1024 + 1));
         assert!(loaded.check_mount(&fs::read(&current).unwrap()).is_ok());
         assert!(loaded.check_mount(&fs::read(&legacy).unwrap()).is_err());
         let before = snapshot(&f.esp);
-        let error = rerun(&f, |c| c.rollback = true).unwrap_err();
+        let error = rerun(&f, |c| c.action = Action::Rollback).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -5780,7 +5591,7 @@ mod tests {
         );
         assert_eq!(snapshot(&f.esp), before);
         let error = rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(legacy.clone());
         })
         .unwrap_err();
@@ -5795,7 +5606,7 @@ mod tests {
         // Uninstall retains independently managed host firmware. A new setup
         // must check it during planning, even when there is no setup record.
         let firmware_before = snapshot(&f.esp.join(DIRECTORY));
-        rerun(&f, |c| c.uninstall = true).unwrap();
+        rerun(&f, |c| c.action = Action::Uninstall).unwrap();
         assert!(!f.esp.join(RECORD).exists());
         assert_eq!(snapshot(&f.esp.join(DIRECTORY)), firmware_before);
         let before = snapshot(&f.esp);
@@ -5842,7 +5653,7 @@ mod tests {
         })).unwrap()).unwrap();
         let old = snapshot(&f.esp);
         let mut unsupported = command(&f, &f.esp);
-        unsupported.host_firmware = Some(source.clone());
+        unsupported.action = Action::HostFirmwareInstall(source.clone());
         assert!(
             unsupported
                 .dispatch(&environment(&f.host))
@@ -5858,19 +5669,19 @@ mod tests {
         image.extend_from_slice(&legacy_marker);
         fs::write(&aware, image).unwrap();
         rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(aware.clone());
         })
         .unwrap();
         let before = snapshot(&f.esp);
         let mut dry = command(&f, &f.esp);
-        dry.host_firmware = Some(source.clone());
+        dry.action = Action::HostFirmwareInstall(source.clone());
         dry.dry_run = true;
         let report = dry.dispatch(&environment(&f.host)).unwrap();
         assert!(report.contains("1 verified resources, 3 bytes"));
         assert_eq!(snapshot(&f.esp), before);
         let mut write = command(&f, &f.esp);
-        write.host_firmware = Some(source.clone());
+        write.action = Action::HostFirmwareInstall(source.clone());
         write.dispatch(&environment(&f.host)).unwrap();
         let published = f.esp.join(stela_loader::host_firmware::MANIFEST_PATH);
         assert!(published.is_file());
@@ -5884,7 +5695,7 @@ mod tests {
         image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
         fs::write(&new_efi, image).unwrap();
         rerun(&f, |c| {
-            c.update_stela = true;
+            c.action = Action::UpdateStela;
             c.efi = Some(new_efi.clone());
         })
         .unwrap();
@@ -5892,11 +5703,11 @@ mod tests {
             snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
             firmware_before
         );
-        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
         let new_os = f._dir.path().join("firmware-test-update.ipsw");
         restore::payload::synthetic_ipsw_of(&new_os, "STELA2").unwrap();
         rerun(&f, |c| {
-            c.update_os = true;
+            c.action = Action::UpdateOs;
             c.ipsw = Some(new_os.clone());
         })
         .unwrap();
@@ -5904,8 +5715,8 @@ mod tests {
             snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
             firmware_before
         );
-        rerun(&f, |c| c.rollback = true).unwrap();
-        rerun(&f, |c| c.repair = true).unwrap();
+        rerun(&f, |c| c.action = Action::Rollback).unwrap();
+        rerun(&f, |c| c.action = Action::Repair).unwrap();
         assert_eq!(
             snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
             firmware_before
@@ -5913,7 +5724,7 @@ mod tests {
         let before_downgrade = snapshot(&f.esp);
         assert!(
             rerun(&f, |c| {
-                c.update_stela = true;
+                c.action = Action::UpdateStela;
                 c.efi = Some(f.efi.clone());
             })
             .unwrap_err()
@@ -5922,7 +5733,7 @@ mod tests {
         );
         assert_eq!(snapshot(&f.esp), before_downgrade);
         assert!(
-            rerun(&f, |c| c.rollback = true)
+            rerun(&f, |c| c.action = Action::Rollback)
                 .unwrap_err()
                 .to_string()
                 .contains("cannot load installed host firmware")
@@ -5930,7 +5741,7 @@ mod tests {
         assert_eq!(snapshot(&f.esp), before_downgrade);
         fs::write(source.join("data.bin"), b"abd").unwrap();
         let mut corrupt = command(&f, &f.esp);
-        corrupt.host_firmware = Some(source);
+        corrupt.action = Action::HostFirmwareInstall(source);
         assert!(corrupt.dispatch(&environment(&f.host)).is_err());
         assert_eq!(fs::read(published).unwrap(), active);
     }

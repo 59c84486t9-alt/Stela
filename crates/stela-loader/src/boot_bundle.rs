@@ -42,7 +42,7 @@ pub const SCHEMA_VERSION: u32 = 4;
 /// The revision of what [`prepare`] writes within its schema: bump it in the
 /// commit that changes the content of a prepared bundle (a DeviceTree
 /// property, a region, a patch, a boot argument) without changing its
-/// format, and name the change here. `stela setup --update-stela` prepares a
+/// format, and name the change here. `stela setup update stela` prepares a
 /// setup's bundles again when theirs are of another revision. Revision 0:
 /// the bundles of every loader before revisions were recorded; a
 /// `bundle.json` without `revision` is one. Revision 1: `/pram` `reg` and

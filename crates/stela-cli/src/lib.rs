@@ -149,8 +149,8 @@ fn commands() -> anyhow::Result<()> {
 }
 
 /// `stela.exe` is the installer alone: running it opens the setup wizard, and
-/// its arguments are setup's own flags. The research commands and running
-/// arm64 programs belong to other hosts.
+/// its arguments are `stela setup`'s own flags and commands. The research
+/// commands and running arm64 programs belong to other hosts.
 #[cfg(windows)]
 #[derive(Parser)]
 #[command(name = "stela", version, about = ABOUT)]
@@ -190,7 +190,8 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn the_windows_executable_is_the_installer_alone() {
-        // No arguments opens the wizard; setup's own flags stay scriptable.
+        // No arguments opens the wizard; setup's own flags and commands stay
+        // scriptable.
         Installer::command()
             .try_get_matches_from(["stela"])
             .unwrap();
@@ -198,10 +199,14 @@ mod tests {
             .try_get_matches_from(["stela", "--ipsw", "a.ipsw", "--profile"])
             .unwrap();
         assert!(scripted.get_flag("profile") && scripted.contains_id("ipsw"));
+        Installer::try_parse_from(["stela", "status", "--usb", "E:\\"]).unwrap();
         assert!(Installer::try_parse_from(["stela", "setup"]).is_err());
-        assert!(Installer::try_parse_from(["stela", "boot-log"]).is_err());
+        assert!(Installer::try_parse_from(["stela", "install-system"]).is_err());
         let help = Installer::command().render_help().to_string();
-        assert!(!help.contains("Commands:"), "{help}");
+        assert!(
+            help.contains("status") && !help.contains("install-system"),
+            "{help}"
+        );
         Installer::command().debug_assert();
     }
 
@@ -288,5 +293,49 @@ mod tests {
             parse(&["setup", "--ipsw", "local.ipsw", "--profile"]),
             Command::Setup(_)
         ));
+    }
+
+    #[test]
+    fn setup_actions_are_subcommands_that_take_only_their_own_options() {
+        let usb = ["--usb", "/Volumes/STELA"];
+        for words in [
+            &["status"][..],
+            &["doctor"],
+            &["repair", "--ipsw", "a.ipsw", "--erase-target"],
+            &["update", "stela", "--efi", "stela.efi"],
+            &["update", "os", "--fetch", "--install-image", "online"],
+            &["rollback", "--dry-run"],
+            &["uninstall"],
+            &["nvram", "next-boot", "recovery", "--install", "macOS"],
+            &["nvram", "reset", "--nor", "sdc3"],
+            &["state", "backup", "state.bin"],
+            &["state", "restore", "state.bin", "--nor", "sdc3"],
+            &["boot-log"],
+            &["configure", "--no-tss", "--chooser-timeout", "0"],
+            &["host-firmware", "install", "package"],
+            &[
+                "host-firmware",
+                "fetch",
+                "requests.json",
+                "--cache",
+                "cache",
+            ],
+        ] {
+            let line = ["stela", "setup"].into_iter().chain(words.iter().copied());
+            Cli::try_parse_from(line.chain(usb))
+                .unwrap_or_else(|error| panic!("{words:?}: {error}"));
+        }
+        // Each action takes neither creation's flags nor another action's.
+        for words in [
+            &["status", "--target", "sdc2"][..],
+            &["rollback", "--ipsw", "a.ipsw"],
+            &["configure", "--tss", "--no-tss"],
+            &["state", "backup", "state.bin", "--chooser-timeout", "0"],
+            &["--target", "sdc2", "status"],
+            &["status", "repair"],
+        ] {
+            let line = ["stela", "setup"].into_iter().chain(words.iter().copied());
+            assert!(Cli::try_parse_from(line.chain(usb)).is_err(), "{words:?}");
+        }
     }
 }

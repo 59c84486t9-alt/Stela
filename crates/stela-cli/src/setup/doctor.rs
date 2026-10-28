@@ -1,4 +1,4 @@
-//! `--status` (also `--doctor`) and `--repair`.
+//! `status` (also `doctor`) and `repair`.
 //!
 //! Status reads everything a setup consists of and changes nothing: the
 //! record and any pending update, the installed `stela.efi` against its
@@ -20,7 +20,7 @@
 //! machine's own ECID, and gives an install without one its ECID
 //! (`machines::machine_ecid`).
 use super::{
-    CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Setup, apply_install, bundle,
+    CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Request, apply_install, bundle,
     check_bundle_revision, describe_install, ecid::Ecid, host::Host, installed, machines,
     plan_install, publish, read_record, revision_mismatch, state, update, write_record,
 };
@@ -134,7 +134,7 @@ impl Report {
     }
 }
 
-/// The translation store's packs, and what `--repair` would fix.
+/// The translation store's packs, and what `repair` would fix.
 fn translations_status(record: &Record, report: &mut Report) {
     let Some(store) = &record.translations else {
         report.line(
@@ -155,9 +155,7 @@ fn translations_status(record: &Record, report: &mut Report) {
         );
     }
     for repair in store.repairs() {
-        report.problem(format!(
-            "translation store: {repair}: `stela setup --repair`"
-        ));
+        report.problem(format!("translation store: {repair}: `stela setup repair`"));
     }
 }
 
@@ -178,7 +176,7 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
             );
             if record.stela_version.as_deref() != Some(id.as_str()) {
                 report.problem(format!(
-                    "{} is not the version setup installed ({}): `stela setup --repair`",
+                    "{} is not the version setup installed ({}): `stela setup repair`",
                     tool.display(),
                     record.stela_version.as_deref().unwrap_or("unknown")
                 ));
@@ -186,12 +184,12 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
             if let Some(reason) = mount_interface::mismatch(environment.interface, interface) {
                 report.problem(format!(
                     "the installed stela.efi does not read what this stela writes ({reason}): \
-                     `stela setup --update-stela`"
+                     `stela setup update stela`"
                 ));
             }
         }
         Err(_) => report.problem(format!(
-            "{} is missing: `stela setup --repair`",
+            "{} is missing: `stela setup repair`",
             tool.display()
         )),
     }
@@ -209,7 +207,7 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
     let options = fs::read_to_string(record.esp.join("EFI/stela/stela.cfg")).unwrap_or_default();
     match record.options_text() {
         Ok(expected) if options != expected => {
-            report.problem("stela.cfg differs from the setup record: `stela setup --repair`".into())
+            report.problem("stela.cfg differs from the setup record: `stela setup repair`".into())
         }
         Ok(_) => {}
         Err(error) => report.problem(format!(
@@ -220,7 +218,7 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
     match record.choices_text() {
         Ok(expected) if choices != expected => report.problem(
             "the startup choices (choices.cfg) differ from the setup record: `stela setup \
-             --repair`"
+             repair`"
                 .into(),
         ),
         Ok(_) => {}
@@ -255,14 +253,14 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         );
         for problem in problems {
             report.problem(format!(
-                "{problem}: `stela setup --repair --ipsw` with the macOS {} restore image",
+                "{problem}: `stela setup repair --ipsw` with the macOS {} restore image",
                 kept.build
             ));
         }
     }
     for directory in record.build_directories() {
         for (_, what) in bundle::leftovers(&directory) {
-            report.problem(format!("{what}: `stela setup --repair` puts it right"));
+            report.problem(format!("{what}: `stela setup repair` puts it right"));
         }
     }
     if let Some(reason) = revision_mismatch(environment, record) {
@@ -271,7 +269,7 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     for (kind, ecid) in record.missing_restore_bundles() {
         report.problem(format!(
             "the active build {} has no {} bundle for {}, so its {} choice is missing: `stela \
-             setup --repair --ipsw`",
+             setup repair --ipsw`",
             record.build,
             kind.label(),
             ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}")),
@@ -281,7 +279,7 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     if record.installs_media() && record.active_medium().is_none() {
         report.problem(format!(
             "the active build {} has no install medium, so its Install macOS choice is \
-             missing: `stela setup --repair --ipsw` with its restore image",
+             missing: `stela setup repair --ipsw` with its restore image",
             record.build
         ));
     }
@@ -307,7 +305,7 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         );
         for problem in problems {
             report.problem(format!(
-                "{problem}: `stela setup --repair --ipsw` with the macOS {} restore image",
+                "{problem}: `stela setup repair --ipsw` with the macOS {} restore image",
                 medium.build
             ));
         }
@@ -338,7 +336,7 @@ fn install_status(
     match install.ecid {
         Some(ecid) => report.line("ECID", ecid),
         None => report.problem(format!(
-            "install \"{}\" has no ECID (an older setup made it): `stela setup --repair --ipsw`, \
+            "install \"{}\" has no ECID (an older setup made it): `stela setup repair --ipsw`, \
              with --ecid or --new-ecid when its SEP state is provisioned",
             install.name
         )),
@@ -431,23 +429,23 @@ fn install_status(
             }
         }
         state::Nvram::Invalid(error) => report.problem(format!(
-            "{nor}'s NVRAM is unreadable ({error}): `stela setup --reset-nvram --nor {nor}`"
+            "{nor}'s NVRAM is unreadable ({error}): `stela setup nvram reset --nor {nor}`"
         )),
     }
     match state::sep(sep_area) {
         Ok(true) => report.line(
             "SEP state",
-            "provisioned; back it up with `stela setup --backup-state FILE`",
+            "provisioned; back it up with `stela setup state backup FILE`",
         ),
         Ok(false) => report.line("SEP state", "blank: the SEP provisions it at first boot"),
         Err(error) => report.problem(format!(
-            "{nor}'s SEP area: {error}; restore it with `stela setup --restore-state FILE --nor \
+            "{nor}'s SEP area: {error}; restore it with `stela setup state restore FILE --nor \
              {nor}`"
         )),
     }
 }
 
-/// `--status`.
+/// `status`.
 /// An install's Apple region holds another file system.
 fn foreign_problem(install: &str, region: &str) -> String {
     format!(
@@ -470,12 +468,12 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
     );
     if !record.complete {
         report.problem(
-            "the setup was interrupted: `stela setup --uninstall`, then set up again".into(),
+            "the setup was interrupted: `stela setup uninstall`, then set up again".into(),
         );
     }
     if let Some(pending) = &record.pending {
         report.problem(format!(
-            "an update was interrupted ({pending:?}): run it again, or `stela setup --rollback`"
+            "an update was interrupted ({pending:?}): run it again, or `stela setup rollback`"
         ));
     }
     report.line("model", &record.model);
@@ -510,8 +508,8 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
     bail!("{text}")
 }
 
-/// `--repair`.
-pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<String> {
+/// `repair`.
+pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result<String> {
     let mut record = read_record(environment, &command.usb)?;
     update::ready(&record, |_| false)?;
     let esp = record.esp.clone();
@@ -532,7 +530,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     let Some(kept_image) = kept_image else {
         bail!(
             "the kept stela.efi {id} at {} is missing or damaged; install one with `stela setup \
-             --update-stela`",
+             update stela`",
             kept.display()
         );
     };
@@ -541,7 +539,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     {
         bail!(
             "the setup's stela.efi does not read what this stela writes ({reason}); `stela \
-             setup --update-stela` first"
+             setup update stela` first"
         );
     }
     update::check_firmware_support(&esp, &kept_image)?;
@@ -701,6 +699,6 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     publish(&mut record)?;
     write_record(&esp, &record)?;
     super::remove_bundles(&record, &stale)?;
-    text.push_str("Done. Check it with: stela setup --status\n");
+    text.push_str("Done. Check it with: stela setup status\n");
     Ok(text)
 }

@@ -1,6 +1,6 @@
 //! A small Clack-style front end to the same setup command used by scripts.
 use super::{
-    InstallImage, Setup,
+    InstallImage, Request,
     host::{self, Disk, Host, Removal},
 };
 use crate::{progress::Phase, restore};
@@ -109,30 +109,8 @@ fn local_image(path: &Path) -> Result<LocalImage> {
     Ok(plist::from_reader(std::io::Cursor::new(bytes))?)
 }
 
-pub(super) fn check_creation(command: &Setup) -> Result<()> {
-    ensure!(
-        !command.status
-            && !command.repair
-            && !command.uninstall
-            && !command.update_stela
-            && !command.update_os
-            && !command.rollback
-            && command.next_boot.is_none()
-            && !command.reset_nvram
-            && command.backup_state.is_none()
-            && command.restore_state.is_none()
-            && !command.boot_log
-            && !command.configures()
-            && command.host_firmware.is_none()
-            && command.host_firmware_requirements.is_none(),
-        "maintenance commands need --usb; run `stela setup` alone to create an installer"
-    );
-    Ok(())
-}
-
 /// `false` is cancellation. No disk is written by this function.
-pub(super) fn configure(command: &mut Setup, host: &dyn Host) -> Result<bool> {
-    check_creation(command)?;
+pub(super) fn configure(command: &mut Request, host: &dyn Host) -> Result<bool> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
         "interactive setup needs a terminal; scripts should pass --usb and --ipsw or --fetch"
@@ -149,7 +127,7 @@ pub(super) fn configure(command: &mut Setup, host: &dyn Host) -> Result<bool> {
     }
 }
 
-fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
+fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
     cliclack::set_theme(theme::Stela::default());
     crate::progress::follow(theme::rail());
     cliclack::intro(
@@ -307,7 +285,7 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
         models.dedup();
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
         // Every setup installs macOS, which needs TSS personalization, so the
-        // wizard does not offer it as a choice; `--no-tss` withdraws the
+        // wizard does not offer it as a choice; `configure --no-tss` withdraws the
         // opt-in from an existing setup.
         cliclack::set_theme(theme::Stela { extras: true });
         let extras = cliclack::multiselect("5 / 6  Choose extras")
@@ -399,21 +377,15 @@ mod tests {
     #[test]
     fn maintenance_without_a_usb_is_refused_before_opening_prompts() {
         use clap::Parser;
-        for action in [
-            "--status",
-            "--repair",
-            "--uninstall",
-            "--update-stela",
-            "--no-tss",
+        for words in [
+            &["status"][..],
+            &["repair"],
+            &["uninstall"],
+            &["update", "stela"],
+            &["configure", "--no-tss"],
         ] {
-            let crate::Command::Setup(command) =
-                crate::Cli::try_parse_from(["stela", "setup", action])
-                    .unwrap()
-                    .command
-            else {
-                panic!("not setup");
-            };
-            assert!(check_creation(&command).is_err(), "{action}");
+            let line = ["stela", "setup"].into_iter().chain(words.iter().copied());
+            assert!(crate::Cli::try_parse_from(line).is_err(), "{words:?}");
         }
     }
 }

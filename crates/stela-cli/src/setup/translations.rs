@@ -27,7 +27,7 @@
 //! [`PACKS_KEPT`] most recently written translator ids, one for each Stela
 //! version it keeps, so a rollback boots warm, and removes the others when
 //! Stela is updated or repaired. A damaged pack is harmless (the engine
-//! discards it); `--status` names it and `--repair` removes it.
+//! discards it); `status` names it and `repair` removes it.
 use super::{MARGIN, host::FileSystem, host::Host};
 use crate::efi;
 use anyhow::{Context, Result, bail, ensure};
@@ -177,7 +177,7 @@ impl Store {
         self.packs().iter().map(|p| p.bytes).sum()
     }
 
-    /// The store, for plans and `--status`.
+    /// The store, for plans and `status`.
     pub(super) fn describe(&self) -> String {
         format!(
             "{}: packs of up to {:.1} GB, the {PACKS_KEPT} newest kept",
@@ -393,7 +393,7 @@ pub(super) fn choose(
 }
 
 /// The store's directory, refused unless it is where setup puts it, for
-/// `--uninstall`.
+/// `uninstall`.
 pub(super) fn checked_directory(store: &Store) -> Result<PathBuf> {
     let directory = store.directory();
     ensure!(
