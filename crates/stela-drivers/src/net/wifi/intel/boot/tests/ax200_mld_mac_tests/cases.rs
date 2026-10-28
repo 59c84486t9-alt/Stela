@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn mld_mac_and_inactive_link_require_source_order_actual_ack_reclaim_and_control_remove() {
+fn mld_mac_preserves_command_order_identity_and_remove_lifetimes() {
     for (mac, link) in [(1, None), (2, Some(1)), (3, Some(8))] {
         exercise(&image(mac, link));
     }
@@ -9,7 +9,7 @@ fn mld_mac_and_inactive_link_require_source_order_actual_ack_reclaim_and_control
 
 #[test]
 #[ignore = "requires unchanged pinned AX200 firmware"]
-fn actual_ax200_mld_mac1_and_default_link1_drive_selected_original_owner() {
+fn pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -26,7 +26,7 @@ fn actual_ax200_mld_mac1_and_default_link1_drive_selected_original_owner() {
 }
 
 #[test]
-fn mld_unknown_mac_or_link_and_partial_link_effects_preserve_original_owner() {
+fn unsupported_mld_versions_and_partial_publication_retain_owner() {
     for case in 0..3 {
         let bytes = image(
             if case == 0 { 4 } else { 1 },
@@ -106,7 +106,7 @@ fn mld_unknown_mac_or_link_and_partial_link_effects_preserve_original_owner() {
 }
 
 #[test]
-fn mld_receive_rearm_visibility_failure_latches_cause_and_quarantines_failed_stop() {
+fn receive_rearm_failure_latches_error_and_quarantines_uncertain_dma() {
     let bytes = image(1, None);
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();

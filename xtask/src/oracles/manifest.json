@@ -1289,7 +1289,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "actual_ax200_mld_mac1_and_default_link1_drive_selected_original_owner",
+    "test": "pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands",
     "source": "crates/stela-drivers/src/net/wifi/intel/boot/tests/ax200_mld_mac_tests/cases.rs",
     "kind": "oracle",
     "inputs": [
