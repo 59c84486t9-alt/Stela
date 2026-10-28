@@ -15,7 +15,8 @@ fn programming_order_and_register_widths() {
             } else {
                 MESSAGE
             };
-            // SAFETY: qualified model registry route; no source in flight.
+            // SAFETY: this message belongs to the synthetic fixture route; its exact
+            // RAM config/root owners remain retained and no source is active.
             unsafe { helper.program(message) }.unwrap();
             {
                 let m = model.lock().unwrap();
@@ -50,7 +51,8 @@ fn programming_order_and_register_widths() {
                     assert_eq!(m.get(if wide { 0x60 } else { 0x5c }, 4), 0xa5a5_0003);
                 }
             }
-            // SAFETY: model callback published, all actual owners retained.
+            // SAFETY: programming retained the synthetic route and original RAM
+            // config/root guards. No physical callback or device source exists.
             unsafe { helper.unmask() }.unwrap();
             {
                 let m = model.lock().unwrap();
@@ -60,9 +62,16 @@ fn programming_order_and_register_widths() {
                 }
             }
             helper.mask().unwrap();
+            // SAFETY: Reversible masking kept the same programmed route and retained
+            // owners; this RAM model has no source or callback to race re-enabling.
             unsafe { helper.unmask() }.unwrap();
             helper.disable().unwrap();
-            assert_eq!(unsafe { helper.unmask() }, Err(MsiError::NotProgrammed));
+            assert_eq!(
+                // SAFETY: Disabling revoked the message, but the original model owners
+                // remain live. Rejection must precede any delivery enable.
+                unsafe { helper.unmask() },
+                Err(MsiError::NotProgrammed)
+            );
             // SAFETY: independent model source/CPU callbacks have drained.
             let (function, root) = unsafe { helper.release() }.unwrap();
             assert_eq!(function.address.device, 2);
@@ -76,18 +85,31 @@ fn mask_bitmap_preserves_other_vectors() {
     let f = fixture(true, true);
     f.model.lock().unwrap().put(0x60, 4, u32::MAX);
     let (mut helper, model) = attach(f);
+    // SAFETY: The all-ones mask is data in this live RAM config; MESSAGE belongs to
+    // the synthetic fixture route and no source is active.
     unsafe { helper.program(MESSAGE) }.unwrap();
     assert_eq!(model.lock().unwrap().get(0x60, 4), u32::MAX);
+    // SAFETY: The programmed fixture route and owners remain retained; unmask only
+    // updates the mutex-protected modeled vector-zero bit.
     unsafe { helper.unmask() }.unwrap();
     assert_eq!(model.lock().unwrap().get(0x60, 4), !1u32);
     helper.mask().unwrap();
     assert_eq!(model.lock().unwrap().get(0x60, 4), u32::MAX);
-    drop(unsafe { helper.release() }.unwrap());
+    drop(
+        // SAFETY: This RAM fixture has no device, posted message, callback or deferred
+        // work; masking completed synchronously before owner release.
+        unsafe { helper.release() }.unwrap(),
+    );
 }
 #[test]
 fn message_and_authorization_preflight() {
     let (mut helper, model) = attach(fixture(false, false));
-    assert_eq!(unsafe { helper.unmask() }, Err(MsiError::NotProgrammed));
+    assert_eq!(
+        // SAFETY: The live fixture retains its route/config owners but has no programmed
+        // message; this negative call must fail without enabling delivery.
+        unsafe { helper.unmask() },
+        Err(MsiError::NotProgrammed)
+    );
     for message in [
         MsiMessage {
             address: 1 << 32,
@@ -103,6 +125,9 @@ fn message_and_authorization_preflight() {
         },
     ] {
         assert_eq!(
+            // SAFETY: Each invalid message is tested only against the live isolated
+            // RAM model, with no source or callback; validation must reject the
+            // value.
             unsafe { helper.program(message) },
             Err(MsiError::InvalidMessage)
         );
@@ -115,5 +140,9 @@ fn message_and_authorization_preflight() {
             .iter()
             .any(|e| matches!(e, Event::Write(..)))
     );
-    drop(unsafe { helper.release() }.unwrap());
+    drop(
+        // SAFETY: No message was admitted and the fixture has no asynchronous users or
+        // DMA. Returning the original RAM config/root owners is safe.
+        unsafe { helper.release() }.unwrap(),
+    );
 }

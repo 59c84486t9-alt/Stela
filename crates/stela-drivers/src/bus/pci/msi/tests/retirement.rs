@@ -10,11 +10,17 @@ fn terminal_stop_releases_original_owners() {
             let configs = f.config_drops.clone();
             let roots = f.root_drops.clone();
             let (mut helper, model) = attach(f);
-            // SAFETY: isolated qualified message/source/callback model.
+            // SAFETY: MESSAGE names the synthetic fixture route; its RAM config/root
+            // guards are retained and no device source or IRQ callback is active.
             unsafe { helper.program(MESSAGE) }.unwrap();
+            // SAFETY: The synchronous RAM model retains the programmed route and
+            // owners; it has no device source or asynchronous callback to race
+            // unmask.
             unsafe { helper.unmask() }.unwrap();
             // Ordinary admission masking remains reversible.
             helper.mask().unwrap();
+            // SAFETY: Only reversible masking occurred; the same RAM route and owners
+            // remain retained, and no asynchronous source can restart.
             unsafe { helper.unmask() }.unwrap();
             let mut terminal = helper.begin_device_retirement().unwrap();
             assert_terminal(&mut helper, &model);
@@ -49,6 +55,9 @@ fn terminal_stop_releases_original_owners() {
             assert_eq!(roots.load(Ordering::Relaxed), 1);
             assert_eq!(terminal.address(), Err(MsiError::Released));
             assert!(matches!(
+                // SAFETY: The fixture has no asynchronous users and its original
+                // owners were already released; the repeated call must fail before
+                // owner access.
                 unsafe { terminal.release_after_drain() },
                 Err(MsiError::Released)
             ));
@@ -60,7 +69,11 @@ fn retirement_access_faults_retain_owners() {
     for wide in [false, true] {
         for mask in [false, true] {
             let (mut baseline, model) = attach(fixture(wide, mask));
+            // SAFETY: The baseline RAM config owns this synthetic route; no device,
+            // posted message or callback exists during programming.
             unsafe { baseline.program(MESSAGE) }.unwrap();
+            // SAFETY: The baseline retains the programmed route and backing Arc;
+            // unmask changes only the mutex-protected RAM config.
             unsafe { baseline.unmask() }.unwrap();
             model.lock().unwrap().events.clear();
             let terminal = baseline.begin_device_retirement().unwrap();
@@ -72,7 +85,12 @@ fn retirement_access_faults_retain_owners() {
                     let configs = f.config_drops.clone();
                     let roots = f.root_drops.clone();
                     let (mut helper, model) = attach(f);
+                    // SAFETY: This fresh fault fixture retains its own config/root
+                    // guards and has no source activity; fault injection begins only
+                    // after setup.
                     unsafe { helper.program(MESSAGE) }.unwrap();
+                    // SAFETY: The fresh fixture retains its programmed route and
+                    // owners; injected transport loss has not begun yet.
                     unsafe { helper.unmask() }.unwrap();
                     {
                         let mut m = model.lock().unwrap();
@@ -125,6 +143,8 @@ fn stop_unwind_prevents_replay_and_release() {
     );
     let before = model.lock().unwrap().events.len();
     assert_eq!(
+        // SAFETY: The previous synchronous stop already unwound. The retained
+        // terminal owner must reject this callback before invoking it.
         unsafe { terminal.with_device_stop::<()>(|_| panic!("replay after unwind")) },
         Err(MsiError::StopAlreadyAttempted)
     );
@@ -217,6 +237,8 @@ fn failed_stop_retains_owners() {
     assert_eq!(original, Err(0x4377_00ff));
     let before = model.lock().unwrap().events.len();
     assert_eq!(
+        // SAFETY: The failed stop retained its terminal owner; this second callback
+        // must be rejected without retrying the stop or touching config.
         unsafe { terminal.with_device_stop(|_| panic!("reset replay")) },
         Err::<(), _>(MsiError::StopAlreadyAttempted)
     );

@@ -33,8 +33,14 @@ fn standard_capability_extents() {
             m.put(0x44, 2, registers);
         }
         let (mut helper, _) = attach(f);
+        // SAFETY: The accepted disjoint capability belongs to this exclusive RAM
+        // Function; MESSAGE names its synthetic route and no source is in flight.
         unsafe { helper.program(MESSAGE) }.unwrap();
-        drop(unsafe { helper.release() }.unwrap());
+        drop(
+            // SAFETY: Only synchronous RAM programming occurred; no DMA, posted vector,
+            // callback or deferred user exists before releasing the exact owners.
+            unsafe { helper.release() }.unwrap(),
+        );
     }
 }
 #[test]
@@ -49,9 +55,15 @@ fn adjacent_extents_and_unknown_versions() {
             m.put(0x50, 2, if reverse { 0x4805 } else { 5 });
         }
         let (mut helper, model) = attach(f);
+        // SAFETY: The adjacent bodies are backed by this exclusive RAM config;
+        // MESSAGE belongs to its synthetic route and there is no asynchronous source.
         unsafe { helper.program(MESSAGE) }.unwrap();
         assert_eq!(model.lock().unwrap().get(0x4a, 2), 3);
-        drop(unsafe { helper.release() }.unwrap());
+        drop(
+            // SAFETY: The model never starts a device or callback; all accesses are
+            // synchronous and the original config/root guards may be returned.
+            unsafe { helper.release() }.unwrap(),
+        );
     }
     // Root-port and slot PCIe layouts are sized in full: the MSI header
     // at 0x50 lies inside their bodies.
@@ -69,7 +81,11 @@ fn adjacent_extents_and_unknown_versions() {
             m.put(0x40, 2, 0x5000 | id);
             m.put(0x42, 2, flags);
         }
-        let (error, owners) = match unsafe { MsiConfig::new(f.function, f.root) } {
+        let (error, owners) = match
+        // SAFETY: Unknown versions are held in live RAM with the exact Function/root
+        // guards retained. No physical delivery exists; admission must reject before
+        // writes.
+        unsafe { MsiConfig::new(f.function, f.root) } {
             Err(e) => e,
             Ok(_) => panic!("unknown capability format guessed"),
         };

@@ -61,7 +61,10 @@ fn capability_admission_preflight() {
                 }
             }
         };
-        let result = unsafe { MsiConfig::new(f.function, f.root) };
+        let result =
+        // SAFETY: The exact Function and root guard belong to this isolated Arc/Mutex
+        // RAM model. Malformed or live capability bits cannot deliver physical IRQs.
+        unsafe { MsiConfig::new(f.function, f.root) };
         let (e, (function, root)) = match result {
             Err(e) => e,
             Ok(_) => panic!("accepted case {case}"),
@@ -85,7 +88,10 @@ fn failed_admission_returns_original_owners() {
     for (offset, width) in [(0, 4), (STATUS, 2), (0x50, 2), (0x52, 2)] {
         let f = fixture(false, false);
         f.model.lock().unwrap().fail_read = Some((offset, width));
-        let (error, owners) = match unsafe { MsiConfig::new(f.function, f.root) } {
+        let (error, owners) = match
+        // SAFETY: The faulted reads target live mutex-protected RAM; the exact
+        // config/root owners remain owned, with no device or asynchronous delivery.
+        unsafe { MsiConfig::new(f.function, f.root) } {
             Err(e) => e,
             Ok(_) => panic!("failed config read admitted"),
         };
@@ -121,9 +127,17 @@ fn layout_configuration_bounds() {
             m.put(0x34, 1, u32::from(offset));
         }
         let (mut helper, _) = attach(f);
+        // SAFETY: The relocated capability remains inside the live 256-byte RAM
+        // model, and MESSAGE belongs to its synthetic route; no source is active.
         unsafe { helper.program(MESSAGE) }.unwrap();
+        // SAFETY: The programmed synthetic route and its original backing owners
+        // remain retained; the model has no IRQ callback or device source.
         unsafe { helper.unmask() }.unwrap();
-        drop(unsafe { helper.release() }.unwrap());
+        drop(
+            // SAFETY: Only synchronous RAM accesses occurred. No DMA, posted IRQ, timer
+            // or deferred user exists to drain before returning the original owners.
+            unsafe { helper.release() }.unwrap(),
+        );
         let f = fixture(wide, mask);
         {
             let mut m = f.model.lock().unwrap();
@@ -133,7 +147,10 @@ fn layout_configuration_bounds() {
             let flags = m.get(0x52, 2);
             m.put(too_far + 2, 2, flags);
         }
-        let (error, owners) = match unsafe { MsiConfig::new(f.function, f.root) } {
+        let (error, owners) = match
+        // SAFETY: The truncated layout is still backed by the complete live RAM
+        // config and original root guard. Admission must reject it without writes.
+        unsafe { MsiConfig::new(f.function, f.root) } {
             Err(e) => e,
             Ok(_) => panic!("truncated layout admitted"),
         };

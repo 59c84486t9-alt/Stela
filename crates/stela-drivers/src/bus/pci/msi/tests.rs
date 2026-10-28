@@ -106,7 +106,9 @@ impl ConfigSpace for Config {
         self.write(offset, 2, u32::from(value));
     }
 }
-// SAFETY: trace model implements genuine word writes without dword RMW.
+// SAFETY: each width-specific store copies only those bytes under the retained
+// Arc/Mutex model; write16 never reads or replays the adjacent Status word.
+// Every access is synchronous RAM with exclusive mutation under that mutex.
 unsafe impl MsiConfigSpace for Config {}
 struct Root(Arc<AtomicU64>);
 impl Drop for Root {
@@ -173,7 +175,9 @@ fn fixture(wide: bool, mask: bool) -> Fixture {
 }
 fn attach(f: Fixture) -> (MsiConfig<Config>, Arc<Mutex<Model>>) {
     let model = f.model;
-    // SAFETY: unique stopped model function and actual retained model root.
+    // SAFETY: fixture owns the exact RAM-backed Function and root guard; Arc/Mutex
+    // keeps config backing live and serializes accesses. No device, posted IRQ,
+    // callback, DMA or reset user exists, so the synthetic route is quiescent.
     let helper = match unsafe { MsiConfig::new(f.function, f.root) } {
         Ok(helper) => helper,
         Err((e, _)) => panic!("attach {e:?}"),
@@ -190,13 +194,15 @@ fn assert_terminal(helper: &mut MsiConfig<Config>, model: &Arc<Mutex<Model>>) {
     let before = model.lock().unwrap().events.len();
     assert_eq!(helper.mask(), Err(MsiError::TerminalRetirement));
     assert_eq!(helper.disable(), Err(MsiError::TerminalRetirement));
-    // SAFETY: isolated qualified model route; terminal calls must fail
-    // before touching hardware regardless of the old authorization.
     assert_eq!(
+        // SAFETY: this terminal RAM model retains the original config/root guards.
+        // No asynchronous source exists; programming must fail before register access.
         unsafe { helper.program(MESSAGE) },
         Err(MsiError::TerminalRetirement)
     );
     assert_eq!(
+        // SAFETY: The terminal model retains the original config/root owners; this
+        // rejected unmask must not reach any register or callback.
         unsafe { helper.unmask() },
         Err(MsiError::TerminalRetirement)
     );
@@ -205,6 +211,8 @@ fn assert_terminal(helper: &mut MsiConfig<Config>, model: &Arc<Mutex<Model>>) {
         Err(MsiError::TerminalRetirement)
     ));
     assert!(matches!(
+        // SAFETY: The terminal model has no DMA, IRQ or deferred users. This rejected
+        // release must retain its original owners.
         unsafe { helper.release() },
         Err(MsiError::TerminalRetirement)
     ));
