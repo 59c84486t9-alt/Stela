@@ -1,6 +1,6 @@
 //! SP alignment checks and address arithmetic for checked accesses.
-use super::{fault, patch_branch};
-use crate::x86_64::asm::Code;
+use super::fault;
+use crate::x86_64::asm::{Code, Cond, Gpr, Mem, Size};
 use crate::x86_64::load;
 use crate::{
     aarch64::{AddressMode, Register, register_offset::IndexExtend},
@@ -8,17 +8,6 @@ use crate::{
 };
 
 const STACK_ALIGNMENT_MASK: u8 = 15;
-const TEST_AL_IMM8: u8 = 0xa8;
-const JE_REL32: &[u8] = &[0x0f, 0x84];
-const JMP_REL32: u8 = 0xe9;
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const JE_REL8: u8 = 0x74;
-const RET: u8 = 0xc3;
-const LEA_RAX_RAX_DISP8: &[u8] = &[0x48, 0x8d, 0x40];
-const LEA_RAX_RAX_DISP32: &[u8] = &[0x48, 0x8d, 0x80];
-const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
-const MOV_R8_RAX: &[u8] = &[0x49, 0x89, 0xc0];
-const MOV_RAX_R8: &[u8] = &[0x4c, 0x89, 0xc0];
 
 /// Check SP before the offset is applied. The caller patches the returned rel32
 /// to its cleanup. On failure RAX holds the faulting SP. Clobbers RAX/RCX/RDX
@@ -28,24 +17,24 @@ pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize
         return None;
     }
     load(code, Register::Sp);
-    code.extend([TEST_AL_IMM8, STACK_ALIGNMENT_MASK]);
-    code.extend(JE_REL32);
-    let aligned = code.len();
-    code.extend(0_i32.to_le_bytes());
+    let mut asm = code.asm();
+    asm.test_accumulator_imm(Size::Byte, STACK_ALIGNMENT_MASK.into());
+    let aligned = asm.jcc(Cond::E);
     fault(code, MemoryStatus::StackAlignment, pc);
-    code.push(JMP_REL32);
-    let failed = code.len();
-    code.extend(0_i32.to_le_bytes());
-    let destination = code.len();
-    patch_branch(code, aligned, destination);
-    Some(failed)
+    let mut asm = code.asm();
+    let failed = asm.jmp();
+    asm.bind(aligned);
+    Some(failed.offset())
 }
 
 /// Return only after scratch cleanup. The checked outer CALL wrapper owns R15.
 /// The runtime inspects the fault view before interpreting native block returns.
 pub(crate) fn return_if_failed(code: &mut Code) {
-    code.extend(TEST_EAX_EAX);
-    code.extend([JE_REL8, 1, RET]);
+    let mut asm = code.asm();
+    asm.test(Size::Dword, Gpr::Rax, Gpr::Rax);
+    let succeeded = asm.jcc8(Cond::E);
+    asm.ret();
+    asm.bind(succeeded);
 }
 
 /// Unchecked arithmetic AFTER check_sp ([`crate::x86_64::address_add`]).
@@ -72,25 +61,22 @@ pub(crate) fn immediate_with_checks(
         return;
     }
     load(code, base);
-    code.extend(MOV_RDX_RAX);
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, Gpr::Rdx, Gpr::Rax);
     if mode == AddressMode::PostIndex {
-        code.extend(MOV_R8_RAX);
+        asm.mov(Size::Qword, Gpr::R8, Gpr::Rax);
     }
-    if let Ok(compact) = i8::try_from(displacement) {
-        code.extend(LEA_RAX_RAX_DISP8);
-        code.push(compact as u8);
-    } else {
-        code.extend(LEA_RAX_RAX_DISP32);
-        code.extend(displacement.to_le_bytes());
-    }
+    // A nonzero displacement: disp8 when it fits, else disp32.
+    asm.lea(Size::Qword, Gpr::Rax, Mem::base(Gpr::Rax, displacement));
     // The CPA recipe preserves RDX and, without multiplication, R8.
     // RAX/RCX/R9/R10/R11 and flags are scratch.
     crate::x86_64::pointer_checks::emit(code, false);
+    let mut asm = code.asm();
     if mode != AddressMode::Offset {
-        code.extend(MOV_RDX_RAX);
+        asm.mov(Size::Qword, Gpr::Rdx, Gpr::Rax);
     }
     if mode == AddressMode::PostIndex {
-        code.extend(MOV_RAX_R8);
+        asm.mov(Size::Qword, Gpr::Rax, Gpr::R8);
     }
 }
 
@@ -125,7 +111,7 @@ pub(crate) fn register_offset_with_checks(
     if index == Register::Zero {
         return;
     }
-    code.extend(MOV_RDX_RAX);
+    code.asm().mov(Size::Qword, Gpr::Rdx, Gpr::Rax);
     crate::x86_64::register_offset::index_add(code, index, extend, shift);
     crate::x86_64::pointer_checks::emit(code, false);
 }
