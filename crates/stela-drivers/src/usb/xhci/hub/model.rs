@@ -352,6 +352,10 @@ pub(in super::super) struct Hardware {
     event_base: u64,
     events: usize,
     next_slot: u8,
+    /// Disabled IDs, which Enable Slot hands out again, lowest first, once
+    /// every ID up to the enabled slot count has been used.
+    free_slots: alloc::collections::BTreeSet<u8>,
+    pub(crate) slot_limit: u8,
 }
 impl Hardware {
     pub fn new(context_bytes: usize, nodes: BTreeMap<u32, Node>) -> Self {
@@ -386,6 +390,8 @@ impl Hardware {
             event_base: 0,
             events: 0,
             next_slot: 1,
+            free_slots: Default::default(),
+            slot_limit: 32,
         }
     }
     pub fn notify_root(&mut self) {
@@ -439,8 +445,12 @@ impl Hardware {
         if code == SUCCESS {
             match kind {
                 ENABLE_SLOT => {
-                    slot = self.next_slot;
-                    self.next_slot += 1;
+                    slot = if self.next_slot <= self.slot_limit {
+                        self.next_slot += 1;
+                        self.next_slot - 1
+                    } else {
+                        self.free_slots.pop_first().unwrap_or(0)
+                    };
                 }
                 ADDRESS_DEVICE | CONFIGURE_ENDPOINT | EVALUATE_CONTEXT => {
                     let output = read64(self.register64(0x40 + DCBAAP) + u64::from(slot) * 8);
@@ -508,6 +518,7 @@ impl Hardware {
                     }
                 }
                 reset::DISABLE_SLOT => {
+                    self.free_slots.insert(slot);
                     assert!(self.pending_interrupts.keys().all(|(s, _)| *s != slot));
                     for &(s, dci) in self.endpoints.keys() {
                         if s == slot {

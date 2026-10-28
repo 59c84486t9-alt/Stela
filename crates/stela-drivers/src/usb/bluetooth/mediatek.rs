@@ -108,6 +108,8 @@ pub struct OwnedReport {
     pub reset_completion: Vec<u8>,
     pub local_version: [u8; 9],
     pub address: [u8; 6],
+    /// The HCI command allowance setup's last Command Complete returned.
+    pub command_credits: u8,
     pub recovery: RecoveryPolicy,
     pub policy: HostPolicy,
 }
@@ -232,6 +234,8 @@ mod tests {
     struct Trace {
         commands: Vec<Vec<u8>>,
         closed: usize,
+        reopened: usize,
+        iso_starts: usize,
         option_writes: usize,
         reads: usize,
     }
@@ -344,6 +348,8 @@ mod tests {
                         cc(op, &[0, 1, 2, 3, 4, 5, 6])
                     }
                 }
+                // btmtk_usb_isointf_init's vendor command.
+                0xfd98 => cc(op, &[0]),
                 _ => panic!("unexpected HCI command {op:x}"),
             };
             if op == 0x1009 && self.fault == Fault::TrailingEvent {
@@ -400,6 +406,12 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+        fn reopen(&mut self) -> core::result::Result<(), BlockError> {
+            let mut trace = self.trace.borrow_mut();
+            trace.closed = 0;
+            trace.reopened += 1;
+            Ok(())
         }
         fn now_us(&self) -> u64 {
             let t = self.time.get();
@@ -468,6 +480,15 @@ mod tests {
             product: pid,
             revision: 0x100,
         };
+        let trace = Rc::new(RefCell::new(Trace::default()));
+        let binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
+        (
+            Hci::from_io(binding, model(device, rom, fault, &trace)),
+            catalog(usb, device, rom),
+            trace,
+        )
+    }
+    fn catalog(usb: UsbIdentity, device: u32, rom: u32) -> Catalog {
         let identity = Identity::select(usb, 0, device, rom, 0).unwrap();
         let hardware = usb.hardware_label();
         let revision = identity.revision_label();
@@ -478,7 +499,7 @@ mod tests {
             board: None,
         };
         let bytes = firmware();
-        let catalog = Catalog::from_handoff(vec![Resource {
+        Catalog::from_handoff(vec![Resource {
             name: identity.firmware_name(),
             target,
             provenance: Provenance {
@@ -491,27 +512,63 @@ mod tests {
             expected_sha256: Sha256::digest(&bytes).into(),
             bytes,
         }])
-        .unwrap();
-        let trace = Rc::new(RefCell::new(Trace::default()));
-        let binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
-        (
-            Hci::from_io(
-                binding,
-                Model {
-                    registers: [0, device, rom, 0],
-                    events: VecDeque::new(),
-                    vendor: None,
-                    trace: trace.clone(),
-                    fault,
-                    time: Cell::new(0),
-                    queries: 0,
-                    fail_read: None,
-                    close_failure: false,
-                },
-            ),
-            catalog,
-            trace,
-        )
+        .unwrap()
+    }
+    fn model(device: u32, rom: u32, fault: Fault, trace: &Rc<RefCell<Trace>>) -> Model {
+        Model {
+            registers: [0, device, rom, 0],
+            events: VecDeque::new(),
+            vendor: None,
+            trace: trace.clone(),
+            fault,
+            time: Cell::new(0),
+            queries: 0,
+            fail_read: None,
+            close_failure: false,
+        }
+    }
+    /// The interrupt-interface media owner; this model carries no SCO.
+    impl media::MediaIo for Model {
+        fn start_iso(
+            &mut self,
+            _: media::Pair,
+            _: &mut dyn crate::bus::dma::DmaAllocator,
+        ) -> core::result::Result<(), BlockError> {
+            self.trace.borrow_mut().iso_starts += 1;
+            Ok(())
+        }
+        fn replace_sco(
+            &mut self,
+            _: Option<media::Pair>,
+            _: Option<media::Pair>,
+            _: &mut dyn crate::bus::dma::DmaAllocator,
+        ) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn read_media(
+            &mut self,
+            _: media::Kind,
+        ) -> core::result::Result<Option<media::Read>, BlockError> {
+            Ok(None)
+        }
+        fn write_media(&mut self, _: media::Kind, _: &[u8]) -> media::Result<()> {
+            unreachable!()
+        }
+        fn quiesce_media(&mut self) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn reset_media_epoch(&mut self) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn resume_media(&mut self) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn close_media(&mut self) -> core::result::Result<(), BlockError> {
+            Ok(())
+        }
+        fn reopen_media(&mut self) -> core::result::Result<(), BlockError> {
+            Ok(())
+        }
     }
     type Requests = Vec<(String, String, String, String)>;
     struct Recording<'a> {
@@ -532,6 +589,64 @@ mod tests {
             ));
             self.catalog.load(r)
         }
+    }
+    #[test]
+    fn power_on_after_shutdown_runs_setup_again_like_non_persistent_setup() {
+        struct NoDma;
+        impl crate::bus::dma::DmaAllocator for NoDma {
+            fn allocate(
+                &mut self,
+                _: usize,
+                _: usize,
+            ) -> core::result::Result<crate::bus::dma::DmaBuffer, BlockError> {
+                panic!("the model allocates no DMA")
+            }
+        }
+        // This PC's MT7925, bound with its media interfaces.
+        let usb = UsbIdentity {
+            vendor: 0x13d3,
+            product: 0x3602,
+            revision: 0x100,
+        };
+        let trace = Rc::new(RefCell::new(Trace::default()));
+        let catalog = catalog(usb, 0x7925, 0);
+        let mut hci = Hci::from_io(
+            media::tests::binding(),
+            model(0x7925, 0, Fault::None, &trace),
+        );
+        hci.initialize_with_provider(&catalog, PlatformInputs::default())
+            .unwrap();
+        let credits = match hci.initialization() {
+            Some(Ok(InitializationReport::MediaTek(r))) => r.command_credits,
+            _ => panic!("MediaTek report expected"),
+        };
+        assert_eq!(credits, 1);
+        let mut s = media::Session::start(hci, &mut NoDma, credits).unwrap();
+        assert!(matches!(
+            s.power_on(&catalog, &mut NoDma),
+            Err(media::PowerOnError::Media(_))
+        ));
+        assert_eq!(s.lifecycle(), media::Lifecycle::Running);
+        s.shutdown(1).unwrap();
+        assert_eq!(s.lifecycle(), media::Lifecycle::Off);
+        let resets = |trace: &Trace| {
+            trace
+                .commands
+                .iter()
+                .filter(|c| c[..2] == [3, 0x0c])
+                .count()
+        };
+        assert_eq!(resets(&trace.borrow()), 1);
+        // The function keeps its patch across power-off.
+        s.hci.io.fault = Fault::Present;
+        s.power_on(&catalog, &mut NoDma).unwrap();
+        assert_eq!(s.lifecycle(), media::Lifecycle::Running);
+        let trace = trace.borrow();
+        assert_eq!((trace.reopened, trace.iso_starts), (1, 2));
+        // Setup ran again through HCI Reset, then the ISO interface init.
+        assert_eq!(resets(&trace), 2);
+        assert_eq!(trace.commands.last().unwrap(), &[0x98, 0xfd, 2, 8, 1]);
+        assert_eq!(s.setup_report().completion, cc(0xfd98, &[0]));
     }
     fn attempt(e: &Error) -> (&Error, &Attempt) {
         match e {

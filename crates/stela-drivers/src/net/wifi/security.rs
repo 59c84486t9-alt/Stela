@@ -11,7 +11,8 @@
 // 2015-2017 Intel Deutschland GmbH; 2018-2020, 2022-2026 Intel Corporation.
 //! Hardware-key acknowledgements and software replay checks.
 //!
-//! This layer does not implement a WPA handshake or software encryption. A
+//! This layer does not implement a WPA handshake or software data encryption;
+//! `wep` encrypts only the shared-key authentication challenge response. A
 //! vendor must report successful hardware key installation only after its real
 //! firmware acknowledgement, and verified integrity only from the applicable
 //! negotiated RX status. Unknown evidence is refused. No hardware replay flag
@@ -32,6 +33,7 @@ pub mod aggregate;
 pub mod management;
 pub mod tx;
 pub mod unicast_management;
+pub mod wep;
 pub use tx::{HostTxNonce, NonceOwner, TransmitSeed};
 
 static NEXT_NATIVE_EPOCH: super::Identities = super::Identities::new();
@@ -49,14 +51,36 @@ pub enum Cipher {
     Ccmp256,
     Gcmp128,
     Gcmp256,
+    /// TKIP: a 16-byte temporal key with the 8-byte TX and RX Michael keys.
+    Tkip,
+    /// Static WEP default keys, which carry no packet number.
+    Wep40,
+    Wep104,
 }
 
 impl Cipher {
+    /// The trailer after the payload: TKIP's Michael MIC and ICV, the WEP
+    /// ICV, or the CCMP/GCMP MIC.
     const fn mic_length(self) -> usize {
         match self {
+            Self::Wep40 | Self::Wep104 => 4,
             Self::Ccmp128 => 8,
+            Self::Tkip => 12,
             _ => 16,
         }
+    }
+    /// `struct ieee80211_key_conf`'s keylen for the suite.
+    pub const fn key_length(self) -> usize {
+        match self {
+            Self::Wep40 => 5,
+            Self::Wep104 => 13,
+            Self::Ccmp128 | Self::Gcmp128 => 16,
+            Self::Ccmp256 | Self::Gcmp256 | Self::Tkip => 32,
+        }
+    }
+    /// mac80211 checks no replay counter for WEP.
+    pub const fn is_wep(self) -> bool {
+        matches!(self, Self::Wep40 | Self::Wep104)
     }
 }
 
@@ -81,6 +105,16 @@ impl PacketNumber {
         // Like Linux `ccmp_hdr2pn` and `ieee80211_get_keyid`, only the PN
         // bytes and the key ID are read.
         let value = u64::from_le_bytes([h[0], h[1], h[4], h[5], h[6], h[7], 0, 0]);
+        Ok((Self(value), h[3] >> 6))
+    }
+    /// The TSC of a TKIP IV/EIV, as `ieee80211_tkip_decrypt_data` reads
+    /// TSC0 at byte 2 and TSC1 at byte 0 ahead of the 32-bit IV32.
+    pub fn from_tkip_header(header: &[u8]) -> Result<(Self, u8), Error> {
+        let h: &[u8; 8] = header.get(..8).ok_or(Error::Truncated)?.try_into().unwrap();
+        if h[3] & 0x20 == 0 {
+            return Err(Error::Unsupported("TKIP without Extended IV"));
+        }
+        let value = u64::from_le_bytes([h[2], h[0], h[4], h[5], h[6], h[7], 0, 0]);
         Ok((Self(value), h[3] >> 6))
     }
 }
@@ -321,7 +355,9 @@ impl KeySlot {
         scope: KeyScope,
         transmit: TransmitSeed,
     ) -> Result<InstallTicket, Error> {
-        if index > 3 || (matches!(scope, KeyScope::Pairwise(_)) && index > 1) {
+        // A static WEP default key may sit at any index, also on the AP's
+        // station record, as mt7925_set_key installs it to both.
+        if index > 3 || (matches!(scope, KeyScope::Pairwise(_)) && index > 1 && !cipher.is_wep()) {
             return Err(Error::InvalidKeyIndex);
         }
         if scope.peer().is_multicast() || scope.peer().0 == [0; 6] {
@@ -330,11 +366,7 @@ impl KeySlot {
         if matches!(scope, KeyScope::Group(_)) && transmit.owner() != NonceOwner::ReceiveOnly {
             return Err(Error::WrongNonceOwner);
         }
-        let length = match cipher {
-            Cipher::Ccmp128 | Cipher::Gcmp128 => 16,
-            _ => 32,
-        };
-        if material.len() != length {
+        if material.len() != cipher.key_length() {
             return Err(Error::InvalidKeyLength);
         }
         let digest: [u8; 32] = Sha256::digest(material).into();
@@ -487,11 +519,26 @@ impl KeySlot {
             return Err(Error::WrongKey);
         }
         let mut start = mpdu.header().length;
-        let pn = if status.iv_stripped {
+        let pn = if key.cipher.is_wep() {
+            // ieee80211_crypto_wep_decrypt removes the IV and ICV; no packet
+            // number exists to check.
+            if !status.iv_stripped {
+                let iv = mpdu.bytes().get(start..start + 4).ok_or(Error::Truncated)?;
+                if iv[3] >> 6 != key.index {
+                    return Err(Error::WrongKey);
+                }
+                start += 4;
+            }
+            PacketNumber(0)
+        } else if status.iv_stripped {
             status.pn.or(parent_pn).ok_or(Error::MissingPacketNumber)?
         } else {
-            let (pn, index) =
-                PacketNumber::from_header(mpdu.bytes().get(start..).ok_or(Error::Truncated)?)?;
+            let header = mpdu.bytes().get(start..).ok_or(Error::Truncated)?;
+            let (pn, index) = if key.cipher == Cipher::Tkip {
+                PacketNumber::from_tkip_header(header)?
+            } else {
+                PacketNumber::from_header(header)?
+            };
             if index != key.index {
                 return Err(Error::WrongKey);
             }
@@ -515,6 +562,9 @@ impl KeySlot {
         Ok((start, end, pn))
     }
     fn commit_receive(&mut self, queue: usize, pn: PacketNumber) -> Result<(), Error> {
+        if self.installed().is_some_and(|key| key.cipher.is_wep()) {
+            return Ok(());
+        }
         if pn.0 <= self.rx_pn[queue] {
             return Err(Error::Replay);
         }

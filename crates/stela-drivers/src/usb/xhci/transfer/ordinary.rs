@@ -76,12 +76,12 @@ impl Controller {
     /// New asynchronous consumers should use [`Self::submit_ticket`].
     pub fn submit(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         buffer: u64,
         length: usize,
     ) -> Result<u64, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.submit_owned(slot, dci, buffer, length)
     }
 
@@ -100,12 +100,12 @@ impl Controller {
     /// Each TD fits a single TRB and a single 64 KiB DMA boundary.
     pub fn submit_ticket(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         buffer: u64,
         length: usize,
     ) -> Result<TransferTicket, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.submit_ticket_owned(slot, dci, buffer, length)
     }
 
@@ -177,14 +177,17 @@ impl Controller {
     /// The caller must discard this address after completion or cancellation.
     pub fn completed(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         trb: u64,
         length: usize,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.legacy_slot(slot) {
-            return Some(Err(error));
-        }
+        let slot = match id.current_slot(self) {
+            Ok(slot) => slot,
+            Err(error) => {
+                return Some(Err(error));
+            }
+        };
         self.completed_owned(slot, dci, trb, length)
     }
 
@@ -335,13 +338,13 @@ impl Controller {
     /// expiry may outlast the budget; failed retirement retains endpoint poison.
     pub fn transfer(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         buffer: u64,
         length: usize,
         microseconds: u64,
     ) -> Result<usize, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.transfer_owned(slot, dci, buffer, length, microseconds)
     }
 

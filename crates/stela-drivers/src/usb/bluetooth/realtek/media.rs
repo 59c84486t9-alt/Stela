@@ -16,17 +16,16 @@ pub use shared::{
 
 pub struct Session<B: MediaIo>(shared::Session<B>);
 /// Source ISO packetization. ALT6's empty services are real TDs, not timer
-/// sleeps or fabricated packet completions. The caller toggles flow only once
-/// the entire bounded plan can be admitted to its native owner.
+/// sleeps or fabricated packet completions, and the packet then takes one
+/// service, as `__fill_isoc_descriptor_msbc` gives it one frame. The caller
+/// toggles flow only once the entire bounded plan can be admitted to its
+/// native owner.
 pub(in crate::usb::bluetooth) fn output_lengths(
     packet: usize,
     service: usize,
     flow: Option<bool>,
 ) -> Result<alloc::vec::Vec<usize>> {
-    if service == 0
-        || !(3..=258).contains(&packet)
-        || (flow.is_some() && (packet > 63 || service != 63))
-    {
+    if service == 0 || !(3..=258).contains(&packet) || (flow.is_some() && packet > service) {
         return Err(Error::Packet("SCO packet/service size"));
     }
     let idle = flow.map_or(0, |old| if old { 7 } else { 6 });

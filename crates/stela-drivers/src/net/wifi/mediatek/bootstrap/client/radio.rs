@@ -33,8 +33,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // Complete fallible codec/capacity checks before Scanner owns the
         // request. A refused RNR list must leave this same owner reusable.
         let mut elements = [Vec::new(), Vec::new(), Vec::new()];
+        // A 6 GHz probe carries the HE 6 GHz capability, as mac80211 builds it.
         let prepared = !request.extra_elements().is_empty()
-            || (request.active() && !request.six_ghz().is_empty());
+            || (request.active()
+                && request
+                    .channels()
+                    .iter()
+                    .any(|ch| ch.band == wifi::Band::Ghz6));
         if prepared {
             let he6 = if actual_policy.capabilities().observed().six_ghz() == Some(true) {
                 local::current(s, wifi::Band::Ghz6)

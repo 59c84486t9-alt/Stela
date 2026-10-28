@@ -134,6 +134,11 @@ pub trait Io {
     /// Cancel/acknowledge a posted bulk IN before changing its framing mode.
     fn quiesce_bulk(&mut self) -> Result<(), BlockError>;
     fn close(&mut self) -> Result<(), BlockError>;
+    /// `btusb_open` after `btusb_close`: post the receives again. Only a
+    /// close that retired every transfer can reopen.
+    fn reopen(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("USB Bluetooth transport reopen"))
+    }
     fn now_us(&self) -> u64;
 }
 
@@ -390,6 +395,29 @@ impl<B: Io> Hci<B> {
             .map_err(|failure| self.fail(ErrorKind::Usb(failure)))?;
         self.acl = Assembler::new(if bootloader { Pipe::Event } else { Pipe::Acl });
         self.intel_bootloader = bootloader;
+        Ok(())
+    }
+
+    /// Open a cleanly closed transport again with empty assemblers, as power-on
+    /// does after power-off. A failed close stays terminal.
+    pub(in crate::usb::bluetooth) fn reopen(&mut self) -> Result<(), Error> {
+        self.io.validate().map_err(|e| error(ErrorKind::Usb(e)))?;
+        match self.state {
+            State::Closed => {}
+            State::Failed => return Err(error(ErrorKind::Failed)),
+            State::Open => {
+                return Err(error(ErrorKind::Usb(BlockError::Unsupported(
+                    "USB Bluetooth transport is open",
+                ))));
+            }
+        }
+        if let Err(e) = self.io.reopen() {
+            self.state = State::Failed;
+            return Err(error(ErrorKind::Usb(e)));
+        }
+        self.events = Assembler::new(Pipe::Event);
+        self.acl = Assembler::new(Pipe::Acl);
+        self.state = State::Open;
         Ok(())
     }
 

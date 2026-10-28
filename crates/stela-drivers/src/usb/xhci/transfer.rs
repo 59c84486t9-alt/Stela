@@ -74,8 +74,8 @@ impl Controller {
     /// Check controller/endpoint poison before modifying a buffer used by a
     /// previous failed transfer. This does not claim completion of a currently
     /// outstanding TD; its normal completion/cancellation must still be awaited.
-    pub fn endpoint_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn endpoint_ready(&mut self, id: impl DeviceRef, dci: u8) -> Result<(), BlockError> {
+        let slot = id.current_slot(self)?;
         self.endpoint_ready_owned(slot, dci)
     }
 
@@ -155,11 +155,11 @@ impl Controller {
     /// One control transfer on EP0; IN data is returned, OUT data sent.
     pub fn control(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         request: [u8; 8],
         out: &[u8],
     ) -> Result<Vec<u8>, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.control_owned(slot, request, out)
     }
 
@@ -296,8 +296,13 @@ impl Controller {
     }
 
     #[cfg(test)]
-    pub(crate) fn string(&mut self, slot: u8, language: u16, index: u8) -> Option<String> {
-        self.legacy_slot(slot).ok()?;
+    pub(crate) fn string(
+        &mut self,
+        id: impl DeviceRef,
+        language: u16,
+        index: u8,
+    ) -> Option<String> {
+        let slot = id.current_slot(self).ok()?;
         self.string_owned(slot, language, index)
     }
 
@@ -325,8 +330,8 @@ impl Controller {
 
     /// Current connection of the slot's root port. Downstream hub-port loss
     /// is reported by transfer errors; hotplug enumeration is not performed.
-    pub fn connected(&mut self, slot: u8) -> Result<bool, BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn connected(&mut self, id: impl DeviceRef) -> Result<bool, BlockError> {
+        let slot = id.current_slot(self)?;
         self.connected_owned(slot)
     }
 
@@ -348,8 +353,8 @@ impl Controller {
     /// Failure permanently poisons submission to this endpoint: callers must
     /// retain the buffers and must not read, rewrite or recycle them. Device
     /// disconnect alone is not proof that controller DMA has stopped.
-    pub fn cancel(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn cancel(&mut self, id: impl DeviceRef, dci: u8) -> Result<(), BlockError> {
+        let slot = id.current_slot(self)?;
         self.cancel_owned(slot, dci)
     }
 
@@ -369,8 +374,12 @@ impl Controller {
 
     /// Resets the host side of an endpoint a transaction error halted; the
     /// device's endpoint is not halted, so no CLEAR_FEATURE follows.
-    pub fn reset_endpoint(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn reset_endpoint(
+        &mut self,
+        id: impl DeviceRef,
+        endpoint: &Endpoint,
+    ) -> Result<(), BlockError> {
+        let slot = id.current_slot(self)?;
         self.reset_endpoint_owned(slot, endpoint)
     }
 
@@ -383,8 +392,8 @@ impl Controller {
     }
 
     /// Clears a halted bulk or interrupt endpoint on both sides.
-    pub fn clear(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn clear(&mut self, id: impl DeviceRef, endpoint: &Endpoint) -> Result<(), BlockError> {
+        let slot = id.current_slot(self)?;
         self.clear_owned(slot, endpoint)
     }
 

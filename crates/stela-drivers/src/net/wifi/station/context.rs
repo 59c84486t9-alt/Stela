@@ -190,9 +190,8 @@ impl AssociationContext {
             selection.width(),
         )
         .map_err(failure)?;
-        if negotiated.wmm.is_none() {
-            return Err(Error::Unsupported("modern WMM parameters required"));
-        }
+        // Negotiation requires WMM for every mode beyond legacy, which
+        // mac80211 enters for an AP without it.
         let operations = Operations::parse(&bytes).map_err(failure)?;
         let definition = operations
             .channel_for(join.channel, &negotiated)

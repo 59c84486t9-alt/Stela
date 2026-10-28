@@ -7,24 +7,74 @@
 // 2013-2014 Intel Mobile Communications GmbH; 2016-2017 Intel Deutschland GmbH;
 // 2018-2026 Intel Corporation.
 // CMAC subkeys/stream/finalization adapt Linux lib/crypto/aes.c:
-// Copyright 2026 Google LLC. Original notices and source pin in THIRD_PARTY.md.
+// Copyright 2026 Google LLC. BIP-GMAC nonce and AAD follow Linux
+// net/mac80211/aes_gmac.c: Copyright 2015, Qualcomm Atheros, Inc.
+// Original notices and source pin in THIRD_PARTY.md.
 //! Group robust-management authentication under an actually retained IGTK.
 //! Authentication is not PMF negotiation, current-association/port authority,
 //! physical key completion or permission to act on a delayed management frame.
 
-use super::{Cipher, KeyIdentity, KeyScope, PacketNumber, valid_receive_observations};
+use super::{KeyIdentity, KeyScope, PacketNumber, valid_receive_observations};
 use crate::net::wifi::{Aggregation, frame};
 use aes::{
-    Aes128,
+    Aes128, Aes256,
     cipher::{BlockEncrypt, KeyInit},
 };
+use alloc::boxed::Box;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 const MMIE_ID: u8 = 76;
-const MMIE_BYTES: usize = 18;
-const MIC_BYTES: usize = 8;
 const MANAGEMENT_HEADER: usize = 24;
+/// GHASH's reduction constant, R = 11100001 || 0^120 (NIST SP 800-38D 6.3).
+const GHASH_R: u128 = 0xe1 << 120;
+
+/// The RSNE group management cipher suite, BIP-CMAC-128 when it is omitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagementCipher {
+    Cmac128,
+    Cmac256,
+    Gmac128,
+    Gmac256,
+}
+impl ManagementCipher {
+    /// The 00-0F-AC suite type (`WLAN_CIPHER_SUITE_AES_CMAC`,
+    /// `_BIP_CMAC_256`, `_BIP_GMAC_128`, `_BIP_GMAC_256`).
+    pub const fn from_suite(suite: u8) -> Option<Self> {
+        match suite {
+            6 => Some(Self::Cmac128),
+            13 => Some(Self::Cmac256),
+            11 => Some(Self::Gmac128),
+            12 => Some(Self::Gmac256),
+            _ => None,
+        }
+    }
+    pub const fn suite(self) -> u8 {
+        match self {
+            Self::Cmac128 => 6,
+            Self::Cmac256 => 13,
+            Self::Gmac128 => 11,
+            Self::Gmac256 => 12,
+        }
+    }
+    pub const fn key_length(self) -> usize {
+        match self {
+            Self::Cmac128 | Self::Gmac128 => 16,
+            Self::Cmac256 | Self::Gmac256 => 32,
+        }
+    }
+    /// BIP-CMAC-128 truncates its MIC to 8 bytes; the others keep 16.
+    pub const fn mic_length(self) -> usize {
+        match self {
+            Self::Cmac128 => 8,
+            _ => 16,
+        }
+    }
+    /// The whole MMIE: element header, key ID, IPN and MIC.
+    pub const fn mmie_length(self) -> usize {
+        10 + self.mic_length()
+    }
+}
 const AAD_MASK: u16 = 0x3800; // source Retry | PwrMgt | MoreData
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,32 +153,49 @@ impl<'a> Authenticated<'a> {
 // The native owner still controls ACK, namespace, generation and retirement.
 pub(crate) struct BipKey {
     gtk: KeyIdentity,
+    cipher: ManagementCipher,
     index: u8,
     receive: PacketNumber,
-    cmac: Cmac,
+    mac: Mac,
     statistics: Statistics,
+}
+enum Mac {
+    Cmac(Cmac),
+    Gmac(Gmac),
 }
 impl BipKey {
     pub(crate) fn new(
         gtk: KeyIdentity,
+        cipher: ManagementCipher,
         index: u8,
         material: &[u8],
         receive: PacketNumber,
     ) -> Result<Self, Error> {
-        if gtk.cipher() != Cipher::Ccmp128
-            || !matches!(gtk.scope(), KeyScope::Group(_))
+        if !matches!(gtk.scope(), KeyScope::Group(_))
             || !matches!(index, 4 | 5)
-            || material.len() != 16
+            || material.len() != cipher.key_length()
         {
             return Err(Error::InvalidKey);
         }
+        let mac = match cipher {
+            ManagementCipher::Cmac128 | ManagementCipher::Cmac256 => {
+                Mac::Cmac(Cmac::new(material)?)
+            }
+            ManagementCipher::Gmac128 | ManagementCipher::Gmac256 => {
+                Mac::Gmac(Gmac::new(material)?)
+            }
+        };
         Ok(Self {
             gtk,
+            cipher,
             index,
             receive,
-            cmac: Cmac::new(material)?,
+            mac,
             statistics: Statistics::default(),
         })
+    }
+    pub(crate) const fn cipher(&self) -> ManagementCipher {
+        self.cipher
     }
     pub(crate) const fn statistics(&self) -> Statistics {
         self.statistics
@@ -160,14 +227,13 @@ impl BipKey {
         {
             return Err(Error::WrongPeer);
         }
-        let mmie = mpdu
-            .bytes()
-            .get(mpdu.bytes().len().saturating_sub(MMIE_BYTES)..)
-            .filter(|b| {
-                b.len() == MMIE_BYTES && mpdu.bytes().len() >= MANAGEMENT_HEADER + MMIE_BYTES
-            })
+        let (mmie_bytes, mic_bytes) = (self.cipher.mmie_length(), self.cipher.mic_length());
+        let bytes = mpdu.bytes();
+        let mmie = bytes
+            .get(bytes.len().saturating_sub(mmie_bytes)..)
+            .filter(|b| b.len() == mmie_bytes && bytes.len() >= MANAGEMENT_HEADER + mmie_bytes)
             .ok_or(Error::BadMmie)?;
-        if mmie[0] != MMIE_ID || usize::from(mmie[1]) != MMIE_BYTES - 2 {
+        if mmie[0] != MMIE_ID || usize::from(mmie[1]) != mmie_bytes - 2 {
             return Err(Error::BadMmie);
         }
         if u16::from_le_bytes(mmie[2..4].try_into().unwrap()) != u16::from(self.index) {
@@ -183,13 +249,28 @@ impl BipKey {
         }
         let mut aad = [0; 20];
         aad[..2].copy_from_slice(&(header.control & !AAD_MASK).to_le_bytes());
-        aad[2..].copy_from_slice(&mpdu.bytes()[4..22]);
-        let mut cmac = self.cmac.start();
-        cmac.update(&aad);
-        cmac.update(&mpdu.bytes()[MANAGEMENT_HEADER..mpdu.bytes().len() - MIC_BYTES]);
-        cmac.update(&[0; MIC_BYTES]);
-        let mic = cmac.finish();
-        if !bool::from(mic[..MIC_BYTES].ct_eq(&mmie[10..])) {
+        aad[2..].copy_from_slice(&bytes[4..22]);
+        let body = &bytes[MANAGEMENT_HEADER..bytes.len() - mic_bytes];
+        let zero = &[0; 16][..mic_bytes];
+        let mic = match &self.mac {
+            Mac::Cmac(cmac) => {
+                let mut stream = cmac.start();
+                stream.update(&aad);
+                stream.update(body);
+                stream.update(zero);
+                stream.finish()
+            }
+            // ieee80211_aes_gmac: A2 || IPN, most significant byte first.
+            Mac::Gmac(gmac) => {
+                let mut nonce = [0; 12];
+                nonce[..6].copy_from_slice(&bytes[10..16]);
+                for (to, from) in nonce[6..].iter_mut().zip(mmie[4..10].iter().rev()) {
+                    *to = *from;
+                }
+                gmac.tag(&nonce, &[&aad, body, zero])
+            }
+        };
+        if !bool::from(mic[..mic_bytes].ct_eq(&mmie[10..])) {
             self.statistics.mic_failures = self.statistics.mic_failures.wrapping_add(1);
             return Err(Error::Integrity);
         }
@@ -199,13 +280,36 @@ impl BipKey {
             gtk: self.gtk,
             index: self.index,
             pn,
-            end: mpdu.bytes().len() - MMIE_BYTES,
+            end: bytes.len() - mmie_bytes,
         })
     }
 }
 
+/// AES with a 128- or 256-bit key; both zeroize their schedules on drop.
+enum Aes {
+    Aes128(Box<Aes128>),
+    Aes256(Box<Aes256>),
+}
+impl Aes {
+    fn new(key: &[u8]) -> Result<Self, Error> {
+        match key.len() {
+            16 => Aes128::new_from_slice(key).map(|aes| Self::Aes128(Box::new(aes))),
+            32 => Aes256::new_from_slice(key).map(|aes| Self::Aes256(Box::new(aes))),
+            _ => return Err(Error::InvalidKey),
+        }
+        .map_err(|_| Error::InvalidKey)
+    }
+    fn encrypt(&self, block: &mut [u8; 16]) {
+        let block = aes::Block::from_mut_slice(block);
+        match self {
+            Self::Aes128(cipher) => cipher.encrypt_block(block),
+            Self::Aes256(cipher) => cipher.encrypt_block(block),
+        }
+    }
+}
+
 struct Cmac {
-    cipher: Aes128,
+    cipher: Aes,
     subkeys: Zeroizing<[[u8; 16]; 2]>,
 }
 fn double(mut value: [u8; 16]) -> [u8; 16] {
@@ -218,9 +322,9 @@ fn double(mut value: [u8; 16]) -> [u8; 16] {
 }
 impl Cmac {
     fn new(key: &[u8]) -> Result<Self, Error> {
-        let cipher = Aes128::new_from_slice(key).map_err(|_| Error::InvalidKey)?;
+        let cipher = Aes::new(key)?;
         let mut l = Zeroizing::new([0; 16]);
-        cipher.encrypt_block(aes::Block::from_mut_slice(l.as_mut()));
+        cipher.encrypt(&mut l);
         let first = double(*l);
         Ok(Self {
             cipher,
@@ -244,9 +348,7 @@ impl Stream<'_> {
     fn update(&mut self, bytes: &[u8]) {
         for &b in bytes {
             if self.used == 16 {
-                self.key
-                    .cipher
-                    .encrypt_block(aes::Block::from_mut_slice(self.state.as_mut()));
+                self.key.cipher.encrypt(&mut self.state);
                 self.used = 0;
             }
             self.state[self.used] ^= b;
@@ -261,11 +363,63 @@ impl Stream<'_> {
         for i in 0..16 {
             self.state[i] ^= self.key.subkeys[final_key][i];
         }
-        self.key
-            .cipher
-            .encrypt_block(aes::Block::from_mut_slice(self.state.as_mut()));
+        self.key.cipher.encrypt(&mut self.state);
         *self.state
     }
+}
+
+/// GMAC: GCM's tag over additional data alone (NIST SP 800-38D), as the
+/// kernel's gcm(aes) computes it for `ieee80211_aes_gmac`.
+struct Gmac {
+    cipher: Aes,
+    hash: Zeroizing<[u8; 16]>,
+}
+impl Gmac {
+    fn new(key: &[u8]) -> Result<Self, Error> {
+        let cipher = Aes::new(key)?;
+        let mut hash = Zeroizing::new([0; 16]);
+        cipher.encrypt(&mut hash);
+        Ok(Self { cipher, hash })
+    }
+    fn tag(&self, nonce: &[u8; 12], data: &[&[u8]]) -> [u8; 16] {
+        let hash = Zeroizing::new(u128::from_be_bytes(*self.hash));
+        let mut state = Zeroizing::new(0u128);
+        let mut block = Zeroizing::new([0; 16]);
+        let mut used = 0;
+        let mut length = 0u64;
+        for &b in data.iter().flat_map(|part| part.iter()) {
+            block[used] = b;
+            used += 1;
+            if used == 16 {
+                *state = multiply(*state ^ u128::from_be_bytes(*block), *hash);
+                used = 0;
+            }
+            length += 8;
+        }
+        if used != 0 {
+            block[used..].fill(0);
+            *state = multiply(*state ^ u128::from_be_bytes(*block), *hash);
+        }
+        // len(A) || len(C), in bits; there is no ciphertext.
+        *state = multiply(*state ^ u128::from(length) << 64, *hash);
+        let mut counter = [0; 16];
+        counter[..12].copy_from_slice(nonce);
+        counter[15] = 1;
+        self.cipher.encrypt(&mut counter);
+        (u128::from_be_bytes(counter) ^ *state).to_be_bytes()
+    }
+}
+
+/// Multiplication in GF(2^128) with GCM's bit order, without secret-dependent
+/// branches or table lookups.
+fn multiply(x: u128, y: u128) -> u128 {
+    let mut product = 0;
+    let mut v = y;
+    for bit in (0..128).rev() {
+        product ^= v & 0u128.wrapping_sub(x >> bit & 1);
+        v = v >> 1 ^ GHASH_R & 0u128.wrapping_sub(v & 1);
+    }
+    product
 }
 
 #[cfg(test)]
@@ -275,7 +429,7 @@ mod tests {
         Mac,
         wifi::{
             Band, RadioStatus, RawRate,
-            security::{InstallOutcome, KeySlot, ReplaySeed, SecurityStatus, TransmitSeed},
+            security::{Cipher, InstallOutcome, KeySlot, ReplaySeed, SecurityStatus, TransmitSeed},
         },
     };
     use alloc::{vec, vec::Vec};
@@ -414,6 +568,59 @@ mod tests {
     }
 
     #[test]
+    fn bip_cmac256_and_gmac_match_independent_aes_vectors() {
+        let gtk = gtk();
+        for (cipher, mic) in [
+            (
+                ManagementCipher::Cmac256,
+                [
+                    0x6b, 0x23, 0xeb, 0x1d, 0x5c, 0xba, 0x9a, 0x1f, 0xd9, 0xa7, 0x95, 0xd8, 0xb6,
+                    0x29, 0x55, 0x14,
+                ],
+            ),
+            (
+                ManagementCipher::Gmac128,
+                [
+                    0xed, 0x8b, 0x43, 0xa6, 0xc3, 0xa3, 0x04, 0x13, 0x6e, 0xa5, 0x3e, 0x3f, 0x60,
+                    0x23, 0xf2, 0x3b,
+                ],
+            ),
+            (
+                ManagementCipher::Gmac256,
+                [
+                    0x56, 0xf8, 0x6b, 0x82, 0x6a, 0x7b, 0xc6, 0xc9, 0x69, 0x5d, 0xf6, 0xf6, 0xa0,
+                    0xe0, 0x30, 0x9b,
+                ],
+            ),
+        ] {
+            // A deauthentication with a 26-byte MMIE, tags from Python
+            // cryptography's CMAC and AESGCM.
+            let mut bytes = vec![0; 24];
+            bytes[0] = 0xc0;
+            bytes[4..10].fill(0xff);
+            bytes[10..16].copy_from_slice(&[2, 6, 7, 8, 9, 10]);
+            bytes[16..22].copy_from_slice(&[2, 6, 7, 8, 9, 10]);
+            bytes.extend_from_slice(&[7, 0, 76, 24, 4, 0, 101, 0, 0, 0, 0, 0]);
+            bytes.extend_from_slice(&mic);
+            let material = vec![0x55; cipher.key_length()];
+            let mut key =
+                BipKey::new(gtk, cipher, 4, &material, PacketNumber::new(100).unwrap()).unwrap();
+            let mut forged = bytes.clone();
+            forged[25] ^= 1;
+            assert_eq!(
+                key.authenticate(&packet(forged)).err(),
+                Some(Error::Integrity)
+            );
+            let short = bytes[..bytes.len() - 8].to_vec();
+            assert_eq!(key.authenticate(&packet(short)).err(), Some(Error::BadMmie));
+            let frame = packet(bytes);
+            let accepted = key.authenticate(&frame).unwrap();
+            assert_eq!(accepted.body(), &[7, 0]);
+            assert_eq!(accepted.packet_number().value(), 101);
+        }
+    }
+
+    #[test]
     fn all_source_robust_categories_and_protected_action_rules_match() {
         let mut hash = Sha256::new();
         for kind in [0x00c0u16, 0x00a0, 0x00d0, 0x0080, 0x00b0, 0x0008] {
@@ -465,6 +672,7 @@ mod tests {
                         }
                         let mut key = BipKey::new(
                             parent,
+                            ManagementCipher::Cmac128,
                             4 + (i % 2) as u8,
                             &[0x55; 16],
                             PacketNumber::new(seed).unwrap(),
@@ -560,8 +768,14 @@ mod tests {
                 15 => frame.aggregation.ampdu = Some(7),
                 _ => {}
             }
-            let mut key =
-                BipKey::new(gtk, 4, &[0x55; 16], PacketNumber::new(100).unwrap()).unwrap();
+            let mut key = BipKey::new(
+                gtk,
+                ManagementCipher::Cmac128,
+                4,
+                &[0x55; 16],
+                PacketNumber::new(100).unwrap(),
+            )
+            .unwrap();
             assert!(
                 matches!(key.authenticate(&frame),Err(e) if e==expected),
                 "fault {fault}"

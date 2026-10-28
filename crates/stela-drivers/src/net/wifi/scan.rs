@@ -12,6 +12,7 @@ use super::{Band, Channel};
 use alloc::vec::Vec;
 
 pub mod result;
+pub mod six_ghz;
 
 static NEXT_SCAN: super::Identities = super::Identities::new();
 // Shared ceilings informed by initial AX200/210, MT7921/22/25, RTL8822CE/8852BE
@@ -47,7 +48,7 @@ pub trait Policy {
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel>;
 }
 
-/// Prepared cfg80211-style 6GHz target observations from the OS scan planner.
+/// A 6 GHz target [`six_ghz::second_part`] plans, as cfg80211_scan_6ghz does.
 /// RNR/PSC metadata selects firmware targets; it never grants probe authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SixGhz {
@@ -96,15 +97,6 @@ impl Request {
         }
         if channels.is_empty() || channels.len() > MAX_CHANNELS {
             return Err(Error::Invalid("explicit scan channel count"));
-        }
-        // Passive listening requires no RNR target. Active 6GHz needs an
-        // explicit OS-prepared target list, separately from probe authority.
-        // Physical encoders still enforce their actual firmware limits.
-        if !ssids.is_empty()
-            && six_ghz.is_empty()
-            && channels.iter().any(|channel| channel.band == Band::Ghz6)
-        {
-            return Err(Error::Unsupported("active 6GHz/RNR scanning"));
         }
         if channels
             .iter()
@@ -737,11 +729,13 @@ mod tests {
                 .unwrap_err(),
             Error::Regulatory
         );
+        // mt7925_mcu_hw_scan probes 6 GHz with or without RNR targets.
         for channels in [vec![SIX1], vec![CH1, SIX1]] {
-            assert!(matches!(
-                Request::new(channels, vec![vec![]], vec![]),
-                Err(Error::Unsupported(_))
-            ));
+            assert!(
+                Request::new(channels, vec![vec![]], vec![])
+                    .unwrap()
+                    .active()
+            );
         }
     }
 

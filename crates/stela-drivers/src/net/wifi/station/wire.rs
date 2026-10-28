@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Layouts adapted from Linux include/linux/ieee80211.h and
 // net/mac80211/{util.c,mlme.c}; source notices in THIRD_PARTY.md.
-//! Single-link open-system/RSN wire forms. Legacy constructors refuse PMF;
-//! the explicit modern PMF profile requires separate retained OS authority.
+//! Single-link open-system, shared-key, static WEP and RSN wire forms. Legacy
+//! constructors refuse PMF; the explicit modern PMF profile requires separate
+//! retained OS authority.
 
 use super::{PortPolicy, phy};
 use crate::net::{
     Mac,
-    wifi::{Band, frame::Mpdu, security::Cipher},
+    wifi::{
+        Band,
+        frame::Mpdu,
+        security::{Cipher, wep},
+    },
 };
 use alloc::{sync::Arc, vec, vec::Vec};
 
@@ -29,8 +34,34 @@ pub struct AssociationRequest {
     elements: Vec<u8>,
     rsn: Option<(Cipher, Cipher)>,
     legacy_wpa: bool,
+    wep: Option<Wep>,
     modern: Option<Arc<ModernSelection>>,
     pmf: Option<pmf::Selection>,
+}
+
+/// WLAN_AUTH_OPEN and WLAN_AUTH_SHARED_KEY.
+pub const OPEN_SYSTEM: u16 = 0;
+pub const SHARED_KEY: u16 = 1;
+
+/// A static WEP association: the default transmit key and the
+/// authentication algorithm `ieee80211_mgd_auth` takes with it.
+#[derive(Clone, Debug)]
+pub struct Wep {
+    key: wep::Key,
+    algorithm: u16,
+    initial_iv: u32,
+}
+impl Wep {
+    /// The OS's random starting IV, as `ieee80211_wep_init` draws it.
+    pub const fn initial_iv(&self) -> u32 {
+        self.initial_iv
+    }
+    pub const fn key(&self) -> &wep::Key {
+        &self.key
+    }
+    pub const fn algorithm(&self) -> u16 {
+        self.algorithm
+    }
 }
 
 /// Exact local association advertisement and explicit OS-selected PHY profile.
@@ -58,6 +89,7 @@ fn cipher(bytes: &[u8]) -> Result<Cipher, Error> {
         return Err(Error::Unsupported("cipher OUI"));
     }
     match bytes[3] {
+        2 => Ok(Cipher::Tkip),
         4 => Ok(Cipher::Ccmp128),
         8 => Ok(Cipher::Gcmp128),
         9 => Ok(Cipher::Gcmp256),
@@ -74,6 +106,68 @@ fn take<'a>(bytes: &mut &'a [u8], count: usize) -> Result<&'a [u8], Error> {
 
 fn word(bytes: &mut &[u8]) -> Result<u16, Error> {
     Ok(u16::from_le_bytes(take(bytes, 2)?.try_into().unwrap()))
+}
+
+/// The local capabilities a request selects. A legacy association, as
+/// mac80211's IEEE80211_CONN_MODE_LEGACY, advertises no HT, VHT, HE or EHT
+/// element and runs at 20 MHz with the advertised rates and any WMM element;
+/// any other mode advertises the device's capabilities unchanged.
+fn legacy_or_matching(
+    local: phy::Capabilities,
+    observed: phy::Capabilities,
+    mode: phy::Mode,
+    width: phy::Width,
+) -> Result<phy::Capabilities, Error> {
+    if mode != phy::Mode::Legacy {
+        return if local.matches_wire_capabilities(&observed) {
+            Ok(local)
+        } else {
+            Err(Error::Invalid("local source/advertisement mismatch"))
+        };
+    }
+    if width != phy::Width::Mhz20
+        || observed.ht().is_some()
+        || observed.vht().is_some()
+        || observed.he().is_some()
+        || observed.eht().is_some()
+        || observed.he_6ghz().is_some()
+    {
+        return Err(Error::Invalid("legacy association advertisement"));
+    }
+    Ok(observed)
+}
+
+/// The WPA1 vendor element after its 00:50:F2:1 header, as wpa_supplicant
+/// builds it: version 1, a group suite, one pairwise suite and one 802.1X or
+/// PSK AKM, all under the WPA OUI.
+fn wpa(mut bytes: &[u8]) -> Result<(Cipher, Cipher), Error> {
+    let suite = |bytes: &mut &[u8]| -> Result<Cipher, Error> {
+        let suite = take(bytes, 4)?;
+        match suite {
+            [0, 0x50, 0xf2, 2] => Ok(Cipher::Tkip),
+            [0, 0x50, 0xf2, 4] => Ok(Cipher::Ccmp128),
+            _ => Err(Error::Unsupported("WPA cipher suite")),
+        }
+    };
+    if word(&mut bytes)? != 1 {
+        return Err(Error::Unsupported("WPA version"));
+    }
+    let group = suite(&mut bytes)?;
+    if word(&mut bytes)? != 1 {
+        return Err(Error::Unsupported("multiple/empty WPA pairwise selection"));
+    }
+    let pairwise = suite(&mut bytes)?;
+    if word(&mut bytes)? != 1 || !matches!(take(&mut bytes, 4)?, [0, 0x50, 0xf2, 1 | 2]) {
+        return Err(Error::Unsupported("WPA AKM selection"));
+    }
+    // Optional capabilities carry no field mac80211 or mt7925 reads.
+    if !bytes.is_empty() {
+        word(&mut bytes)?;
+    }
+    if !bytes.is_empty() {
+        return Err(Error::Unsupported("trailing WPA fields"));
+    }
+    Ok((pairwise, group))
 }
 
 fn rsn(mut bytes: &[u8]) -> Result<(Cipher, Cipher), Error> {
@@ -145,9 +239,6 @@ impl AssociationRequest {
         mode: phy::Mode,
         width: phy::Width,
     ) -> Result<Self, Error> {
-        if mode == phy::Mode::Legacy {
-            return Err(Error::Invalid("modern mode selection"));
-        }
         let local = phy::Capabilities::parse(band, phy::Role::Station, &bytes).map_err(
             |error| match error {
                 phy::Error::Unsupported(effect) => Error::Unsupported(effect),
@@ -168,7 +259,7 @@ impl AssociationRequest {
         mode: phy::Mode,
         width: phy::Width,
     ) -> Result<Self, Error> {
-        if mode == phy::Mode::Legacy || local.role() != phy::Role::Station {
+        if local.role() != phy::Role::Station {
             return Err(Error::Invalid("modern local mode/role"));
         }
         let observed = phy::Capabilities::parse(local.band(), phy::Role::Station, &bytes).map_err(
@@ -177,10 +268,9 @@ impl AssociationRequest {
                 _ => Error::Invalid("local modern capabilities"),
             },
         )?;
-        if !local.matches_wire_capabilities(&observed) {
-            return Err(Error::Invalid("local source/advertisement mismatch"));
-        }
+        let local = legacy_or_matching(local, observed, mode, width)?;
         let mut request = Self::parse(capabilities, listen_interval, bytes, true)?;
+        request.validate_mode(mode)?;
         request.modern = Some(Arc::new(ModernSelection {
             capabilities: local,
             mode,
@@ -200,17 +290,15 @@ impl AssociationRequest {
         mode: phy::Mode,
         width: phy::Width,
     ) -> Result<Self, Error> {
-        if mode == phy::Mode::Legacy || local.role() != phy::Role::Station {
+        if local.role() != phy::Role::Station {
             return Err(Error::Invalid("modern local mode/role"));
         }
         let observed = phy::Capabilities::parse(local.band(), phy::Role::Station, &bytes)
             .map_err(|_| Error::Invalid("local modern capabilities"))?;
-        if !local.matches_wire_capabilities(&observed)
-            || !matches!(local.band(), Band::Ghz2 | Band::Ghz5)
-        {
-            return Err(Error::Invalid("PMF local source/band"));
-        }
+        let local = legacy_or_matching(local, observed, mode, width)
+            .map_err(|_| Error::Invalid("PMF local source"))?;
         let mut request = Self::parse_inner(capabilities, listen_interval, bytes, true, true)?;
+        request.validate_mode(mode)?;
         if request.pmf.is_none() || capabilities & 0x10 == 0 || request.legacy_wpa {
             return Err(Error::Invalid("PMF requires selected RSN"));
         }
@@ -222,8 +310,60 @@ impl AssociationRequest {
         Ok(request)
     }
 
+    /// `ieee80211_determine_our_sta_mode`: a TKIP pairwise cipher limits the
+    /// association to legacy mode.
+    fn validate_mode(&self, mode: phy::Mode) -> Result<(), Error> {
+        if mode != phy::Mode::Legacy
+            && self
+                .rsn
+                .is_some_and(|(pairwise, _)| pairwise == Cipher::Tkip)
+        {
+            return Err(Error::Unsupported("TKIP pairwise outside legacy mode"));
+        }
+        Ok(())
+    }
+
     pub fn pmf(&self) -> Option<&pmf::Selection> {
         self.pmf.as_ref()
+    }
+
+    /// Select static WEP with open-system or shared-key authentication. As
+    /// `ieee80211_determine_our_sta_mode` does for a WEP pairwise cipher, the
+    /// association stays in legacy mode.
+    pub fn with_wep(
+        mut self,
+        key: wep::Key,
+        algorithm: u16,
+        initial_iv: u32,
+    ) -> Result<Self, Error> {
+        if !matches!(algorithm, OPEN_SYSTEM | SHARED_KEY) {
+            return Err(Error::Invalid("WEP authentication algorithm"));
+        }
+        if self.capabilities & 0x10 == 0 || self.rsn.is_some() || self.pmf.is_some() {
+            return Err(Error::Invalid("WEP requires privacy without RSN/WPA"));
+        }
+        if self
+            .modern
+            .as_ref()
+            .is_some_and(|modern| modern.mode != phy::Mode::Legacy)
+        {
+            return Err(Error::Unsupported("WEP outside legacy mode"));
+        }
+        self.wep = Some(Wep {
+            key,
+            algorithm,
+            initial_iv,
+        });
+        Ok(self)
+    }
+
+    pub const fn wep(&self) -> Option<&Wep> {
+        self.wep.as_ref()
+    }
+
+    /// The authentication algorithm of the first frame.
+    pub fn algorithm(&self) -> u16 {
+        self.wep.as_ref().map_or(OPEN_SYSTEM, Wep::algorithm)
     }
 
     pub fn modern(&self) -> Option<&ModernSelection> {
@@ -280,16 +420,23 @@ impl AssociationRequest {
                 }
                 48 => {
                     if selected_rsn.is_some() {
-                        return Err(Error::Invalid("duplicate RSN"));
+                        return Err(Error::Invalid("duplicate RSN/WPA"));
                     }
                     if allow_pmf {
-                        selected_pmf = Some(pmf::Selection::parse(data)?);
-                        selected_rsn = Some((Cipher::Ccmp128, Cipher::Ccmp128));
+                        let selection = pmf::Selection::parse(data)?;
+                        selected_rsn = Some((selection.pairwise(), selection.group()));
+                        selected_pmf = Some(selection);
                     } else {
                         selected_rsn = Some(rsn(data)?);
                     }
                 }
-                221 if data.starts_with(&[0, 0x50, 0xf2, 1]) => legacy_wpa = true,
+                221 if data.starts_with(&[0, 0x50, 0xf2, 1]) => {
+                    if selected_rsn.is_some() {
+                        return Err(Error::Invalid("duplicate RSN/WPA"));
+                    }
+                    selected_rsn = Some(wpa(&data[4..])?);
+                    legacy_wpa = true;
+                }
                 // Do not advertise modes the current native state machine and
                 // actual driver association context cannot configure yet.
                 61 | 192 => {
@@ -316,6 +463,7 @@ impl AssociationRequest {
             elements: bytes,
             rsn: selected_rsn,
             legacy_wpa,
+            wep: None,
             modern: None,
             pmf: selected_pmf,
         })
@@ -329,7 +477,7 @@ impl AssociationRequest {
                 Ok(())
             }
             PortPolicy::Controlled
-                if self.capabilities & 0x10 != 0 && self.rsn.is_some() && !self.legacy_wpa =>
+                if self.capabilities & 0x10 != 0 && (self.rsn.is_some() || self.wep.is_some()) =>
             {
                 Ok(())
             }
@@ -337,8 +485,13 @@ impl AssociationRequest {
         }
     }
 
-    pub const fn key_ciphers(&self) -> Option<(Cipher, Cipher)> {
-        self.rsn
+    /// The pairwise and group ciphers, a static WEP key taking both.
+    pub fn key_ciphers(&self) -> Option<(Cipher, Cipher)> {
+        self.rsn.or_else(|| {
+            self.wep
+                .as_ref()
+                .map(|wep| (wep.key.cipher(), wep.key.cipher()))
+        })
     }
 
     pub const fn capabilities(&self) -> u16 {
@@ -374,9 +527,70 @@ fn header(control: u16, local: Mac, bssid: Mac, sequence: u16) -> Result<Vec<u8>
 }
 
 pub fn authentication(local: Mac, bssid: Mac, sequence: u16) -> Result<Vec<u8>, Error> {
+    authentication_with(local, bssid, sequence, OPEN_SYSTEM)
+}
+
+/// The first `ieee80211_send_auth` frame of `algorithm`.
+pub fn authentication_with(
+    local: Mac,
+    bssid: Mac,
+    sequence: u16,
+    algorithm: u16,
+) -> Result<Vec<u8>, Error> {
     let mut frame = header(0x00b0, local, bssid, sequence)?;
-    frame.extend_from_slice(&[0, 0, 1, 0, 0, 0]);
+    frame.extend_from_slice(&algorithm.to_le_bytes());
+    frame.extend_from_slice(&[1, 0, 0, 0]);
     Ok(frame)
+}
+
+/// `ieee80211_auth_challenge`: shared-key transaction 3 returns the AP's
+/// challenge element, WEP-encrypted in software under the default key.
+pub fn shared_key_response(
+    local: Mac,
+    bssid: Mac,
+    sequence: u16,
+    challenge: &[u8],
+    key: &wep::Key,
+    iv: [u8; 3],
+) -> Result<Vec<u8>, Error> {
+    let mut frame = header(0x40b0, local, bssid, sequence)?;
+    frame.extend_from_slice(&[1, 0, 3, 0, 0, 0, 16]);
+    frame.push(u8::try_from(challenge.len()).map_err(|_| Error::Invalid("challenge"))?);
+    frame.extend_from_slice(challenge);
+    wep::encrypt(&mut frame, key, iv);
+    Ok(frame)
+}
+
+/// An authentication frame as `ieee80211_rx_mgmt_auth` reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Authentication<'a> {
+    pub algorithm: u16,
+    pub transaction: u16,
+    pub status: u16,
+    pub elements: &'a [u8],
+}
+
+impl Authentication<'_> {
+    /// The WLAN_EID_CHALLENGE element, as `cfg80211_find_elem` finds it.
+    pub fn challenge(&self) -> Option<&[u8]> {
+        elements(self.elements)
+            .ok()?
+            .into_iter()
+            .find_map(|(id, data)| (id == 16).then_some(data))
+    }
+}
+
+pub fn authentication_frame(frame: &Mpdu) -> Result<Authentication<'_>, Error> {
+    if frame.header().control & 0x00fc != 0x00b0 {
+        return Err(Error::Invalid("authentication subtype"));
+    }
+    let mut body = frame.bytes().get(24..).ok_or(Error::Truncated)?;
+    Ok(Authentication {
+        algorithm: word(&mut body)?,
+        transaction: word(&mut body)?,
+        status: word(&mut body)?,
+        elements: body,
+    })
 }
 
 pub fn check_peer(frame: &Mpdu, local: Mac, bssid: Mac) -> Result<(), Error> {
@@ -404,14 +618,11 @@ pub fn check_peer(frame: &Mpdu, local: Mac, bssid: Mac) -> Result<(), Error> {
 }
 
 pub fn authentication_response(frame: &Mpdu) -> Result<u16, Error> {
-    if frame.header().control & 0x00fc != 0x00b0 {
-        return Err(Error::Invalid("authentication subtype"));
-    }
-    let mut body = frame.bytes().get(24..).ok_or(Error::Truncated)?;
-    if word(&mut body)? != 0 || word(&mut body)? != 2 {
+    let reply = authentication_frame(frame)?;
+    if reply.algorithm != OPEN_SYSTEM || reply.transaction != 2 {
         return Err(Error::Invalid("authentication transaction/algorithm"));
     }
-    word(&mut body)
+    Ok(reply.status)
 }
 
 #[derive(Clone, Debug)]
@@ -557,12 +768,61 @@ mod tests {
         assert!(no_rsn.validate_policy(PortPolicy::Open).is_err());
         let mut legacy = basic();
         legacy.extend_from_slice(&[221, 4, 0, 0x50, 0xf2, 1]);
+        assert!(AssociationRequest::new(1, 10, legacy).is_err());
+    }
+
+    #[test]
+    fn wpa1_and_tkip_select_like_wpa_supplicant_and_limit_to_legacy_mode() {
+        let wpa = [
+            221, 22, 0, 0x50, 0xf2, 1, 1, 0, 0, 0x50, 0xf2, 2, 1, 0, 0, 0x50, 0xf2, 2, 1, 0, 0,
+            0x50, 0xf2, 2,
+        ];
+        let mut bytes = basic();
+        bytes.extend_from_slice(&wpa);
+        let selected = AssociationRequest::new(0x11, 10, bytes.clone()).unwrap();
+        assert_eq!(selected.key_ciphers(), Some((Cipher::Tkip, Cipher::Tkip)));
+        selected.validate_policy(PortPolicy::Controlled).unwrap();
+        assert!(selected.validate_policy(PortPolicy::Open).is_err());
         assert!(
-            AssociationRequest::new(1, 10, legacy)
+            AssociationRequest::new(0x01, 10, bytes.clone())
                 .unwrap()
                 .validate_policy(PortPolicy::Open)
                 .is_err()
         );
+        // Only one of RSN and WPA; every WPA field is checked.
+        let mut both = bytes.clone();
+        both.extend_from_slice(&[48, 18]);
+        both.extend_from_slice(&selected_rsn());
+        assert!(AssociationRequest::new(0x11, 10, both).is_err());
+        for (at, value) in [(6, 2), (11, 9), (17, 9), (23, 3)] {
+            let mut bad = bytes.clone();
+            bad[basic().len() + at] = value;
+            assert!(AssociationRequest::new(0x11, 10, bad).is_err(), "{at}");
+        }
+        // A mixed RSN network: CCMP pairwise under a TKIP group.
+        let mut mixed = selected_rsn();
+        mixed[5] = 2;
+        assert_eq!(
+            request(&mixed).unwrap().key_ciphers(),
+            Some((Cipher::Ccmp128, Cipher::Tkip))
+        );
+        let mut tkip = selected_rsn();
+        tkip[11] = 2;
+        let local = phy::Capabilities::parse(Band::Ghz5, phy::Role::Station, &basic()).unwrap();
+        let mut elements = basic();
+        elements.extend_from_slice(&[48, 18]);
+        elements.extend_from_slice(&tkip);
+        for (mode, ok) in [(phy::Mode::Legacy, true), (phy::Mode::Ht, false)] {
+            let modern = AssociationRequest::new_modern_with_local(
+                0x11,
+                10,
+                elements.clone(),
+                local.clone(),
+                mode,
+                phy::Width::Mhz20,
+            );
+            assert_eq!(modern.is_ok(), ok, "{mode:?}");
+        }
     }
 
     #[test]
@@ -626,7 +886,7 @@ mod tests {
         }
         assert!(matches!(
             AssociationRequest::new(0x11, 10, bytes),
-            Err(Error::Invalid("duplicate RSN"))
+            Err(Error::Invalid("duplicate RSN/WPA"))
         ));
     }
 }

@@ -12,8 +12,8 @@ pub use binding::{AirMode, Bindings, Pair, Voice};
 use core::fmt;
 pub use framing::Kind;
 pub use session::{
-    Lifecycle, Loss, MediaIo, OutputDisposition, OutputReceipt, Read, Received, Session,
-    SetupReport, ShutdownReport,
+    Lifecycle, Loss, MediaIo, OutputDisposition, OutputReceipt, PowerOnError, Read, Received,
+    Session, SetupReport, ShutdownReport,
 };
 pub type Result<T> = core::result::Result<T, Error>;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -349,6 +349,7 @@ pub(in crate::usb::bluetooth) mod tests {
             reset_completion: vec![0x0e, 4, 1, 3, 0x0c, 0],
             local_version: [0; 9],
             address: [1; 6],
+            command_credits: 1,
             recovery: RecoveryPolicy::FreshRebindRequired,
             policy: HostPolicy::for_device(UsbIdentity {
                 vendor: 0x13d3,
@@ -419,7 +420,7 @@ pub(in crate::usb::bluetooth) mod tests {
                 .actions
                 .ends_with(&["wmt-function-off", "media-close", "base-close"])
         );
-        assert_eq!(s.lifecycle(), Lifecycle::Closed);
+        assert_eq!(s.lifecycle(), Lifecycle::Off);
         assert!(s.shutdown(1).is_err());
 
         // A function that never answers fails after HCI_INIT_TIMEOUT.

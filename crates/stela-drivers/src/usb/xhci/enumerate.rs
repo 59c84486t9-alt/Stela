@@ -78,10 +78,7 @@ impl Controller {
             self.validate_attachment_parent(attachment, parent_id),
         )?;
         let generation = during("allocate device generation", identity::next_generation())?;
-        let slot = during(
-            "Enable Slot without recycling retired IDs",
-            self.fresh_slot(),
-        )?;
+        let slot = during("Enable Slot", self.fresh_slot())?;
         if let Err(error) = self.reserve_current(slot, generation, attachment, parent_id) {
             let _ = self.disable_slot(slot, reset::Ownership::Vacant);
             return Err(("reserve USB upstream current".into(), error));
@@ -743,8 +740,12 @@ impl Controller {
     }
 
     #[cfg(test)]
-    pub(super) fn hub_port_status(&mut self, slot: u8, port: u8) -> Result<(u16, u16), BlockError> {
-        self.legacy_slot(slot)?;
+    pub(super) fn hub_port_status(
+        &mut self,
+        id: impl DeviceRef,
+        port: u8,
+    ) -> Result<(u16, u16), BlockError> {
+        let slot = id.current_slot(self)?;
         self.hub_port_status_owned(slot, port)
     }
 

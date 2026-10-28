@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // RSN/RSNX layouts follow pinned Linux IEEE headers; see wifi/THIRD_PARTY.md.
-//! Explicit SAE8/H2E/required-PMF selection. Parsed bytes are policy inputs,
-//! never authenticated SAE, a key, an associated peer or radio permission.
-use super::{Error, elements, take, word};
+//! The OS's 6 GHz SAE selection: any RSN the PMF selection takes with an SAE
+//! AKM, and any RSNX it carries, as mac80211 passes the supplicant's elements
+//! through. Parsed bytes are policy inputs, never authenticated SAE, a key,
+//! an associated peer or radio permission.
+use super::{Error, elements, pmf};
 use alloc::vec::Vec;
-
-const CCMP: [u8; 4] = [0, 15, 172, 4];
-const SAE: [u8; 4] = [0, 15, 172, 8];
-const BIP: [u8; 4] = [0, 15, 172, 6];
-const REQUIRED_PMF: u16 = 0xc0;
-const H2E: u8 = 1 << 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Selection {
@@ -18,26 +14,19 @@ pub struct Selection {
     rsnx: Vec<u8>,
 }
 impl Selection {
-    /// This finite profile selects only CCMP128/SAE8, required PMF and H2E.
-    /// FT, PMKSA shortcuts, extended key IDs and other selected RSNX effects
-    /// require a separately implemented authentication service/profile.
+    /// The selected elements are the RSNE and an optional RSNXE alone; the
+    /// OS's SAE engine owns the H2E and SAE-PK choices they encode.
     pub fn new(bytes: Vec<u8>) -> Result<Self, Error> {
         if bytes.len() > super::MAX_ELEMENTS {
             return Err(Error::Invalid("6GHz selected element bound"));
         }
         let (rsn, rsnx) = security(&bytes, true)?;
-        let profile = Profile::parse(rsn)?;
-        if profile.pairwise != [CCMP]
-            || profile.akms != [SAE]
-            || profile.capabilities != REQUIRED_PMF
-            || profile.pmkids != 0
-            || rsnx != [H2E]
-        {
-            return Err(Error::Unsupported("6GHz SAE8/H2E/required-PMF profile"));
+        if !pmf::Selection::parse(rsn)?.sae() {
+            return Err(Error::Unsupported("6GHz SAE AKM"));
         }
         Ok(Self {
             rsn: rsn.to_vec(),
-            rsnx: rsnx.to_vec(),
+            rsnx: rsnx.unwrap_or_default().to_vec(),
             elements: bytes,
         })
     }
@@ -50,20 +39,13 @@ impl Selection {
     pub fn rsnx(&self) -> &[u8] {
         &self.rsnx
     }
+    /// The AP must offer the selected suites, as the PMF selection checks.
     pub(in crate::net::wifi) fn validate_peer(&self, bytes: &[u8]) -> Result<(), Error> {
-        let (rsn, rsnx) = security(bytes, false)?;
-        let ap = Profile::parse(rsn)?;
-        if !ap.pairwise.contains(&CCMP)
-            || !ap.akms.contains(&SAE)
-            || ap.capabilities & REQUIRED_PMF != REQUIRED_PMF
-            || rsnx[0] & H2E == 0
-        {
-            return Err(Error::Invalid("AP does not offer selected 6GHz security"));
-        }
-        Ok(())
+        security(bytes, false)?;
+        pmf::Selection::parse(&self.rsn)?.validate_peer(bytes, &[])
     }
 }
-fn security(bytes: &[u8], selected: bool) -> Result<(&[u8], &[u8]), Error> {
+fn security(bytes: &[u8], selected: bool) -> Result<(&[u8], Option<&[u8]>), Error> {
     let (mut rsn, mut rsnx) = (None, None);
     for (id, data) in elements(bytes)? {
         match id {
@@ -87,61 +69,13 @@ fn security(bytes: &[u8], selected: bool) -> Result<(&[u8], &[u8]), Error> {
             _ => (),
         }
     }
-    Ok((
-        rsn.ok_or(Error::Invalid("6GHz RSNE absent"))?,
-        rsnx.ok_or(Error::Invalid("6GHz RSNXE absent"))?,
-    ))
-}
-struct Profile {
-    pairwise: Vec<[u8; 4]>,
-    akms: Vec<[u8; 4]>,
-    capabilities: u16,
-    pmkids: usize,
-}
-fn suites(bytes: &mut &[u8]) -> Result<Vec<[u8; 4]>, Error> {
-    let count = usize::from(word(bytes)?);
-    if count == 0 {
-        return Err(Error::Invalid("empty 6GHz suite list"));
-    }
-    Ok(take(bytes, count.checked_mul(4).ok_or(Error::Truncated)?)?
-        .as_chunks::<4>()
-        .0
-        .to_vec())
-}
-impl Profile {
-    fn parse(mut bytes: &[u8]) -> Result<Self, Error> {
-        if word(&mut bytes)? != 1 || take(&mut bytes, 4)? != CCMP {
-            return Err(Error::Unsupported("6GHz RSN version/group cipher"));
-        }
-        let pairwise = suites(&mut bytes)?;
-        let akms = suites(&mut bytes)?;
-        let capabilities = word(&mut bytes)?;
-        let pmkids = if bytes.is_empty() {
-            0
-        } else {
-            let count = usize::from(word(&mut bytes)?);
-            take(&mut bytes, count.checked_mul(16).ok_or(Error::Truncated)?)?;
-            count
-        };
-        // Source-defined omitted management-group suite defaults to BIP-CMAC128.
-        if !bytes.is_empty() && take(&mut bytes, 4)? != BIP {
-            return Err(Error::Unsupported("6GHz BIP-CMAC128 only"));
-        }
-        if !bytes.is_empty() {
-            return Err(Error::Unsupported("trailing 6GHz RSN fields"));
-        }
-        Ok(Self {
-            pairwise,
-            akms,
-            capabilities,
-            pmkids,
-        })
-    }
+    Ok((rsn.ok_or(Error::Invalid("6GHz RSNE absent"))?, rsnx))
 }
 
 #[cfg(test)]
 pub(in crate::net::wifi) mod tests {
     use super::*;
+    const H2E: u8 = 1 << 5;
     pub(in crate::net::wifi) fn selected() -> Vec<u8> {
         vec![
             48, 26, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 4, 1, 0, 0, 15, 172, 8, 0xc0, 0, 0, 0,
@@ -149,14 +83,15 @@ pub(in crate::net::wifi) mod tests {
         ]
     }
     #[test]
-    fn exact_sae_h2e_selection_retains_bytes_and_requires_ap_offer() {
+    fn sae_selection_retains_bytes_and_requires_ap_offer() {
         let bytes = selected();
         let selection = Selection::new(bytes.clone()).unwrap();
         assert_eq!(selection.elements(), bytes);
         assert_eq!(selection.rsn(), &bytes[2..28]);
         assert_eq!(selection.rsnx(), &[H2E]);
         selection.validate_peer(&bytes).unwrap();
-        for at in [7, 13, 19, 20, 27, 30] {
+        // Group, pairwise and AKM suites, and the group management cipher.
+        for at in [7, 13, 19, 27] {
             let mut bad = bytes.clone();
             bad[at] = 0;
             assert!(Selection::new(bad.clone()).is_err(), "selected {at}");
@@ -170,10 +105,37 @@ pub(in crate::net::wifi) mod tests {
         );
     }
     #[test]
+    fn any_mt7925_suite_with_an_sae_akm_selects_like_mac80211() {
+        // GCMP-256 with SAE-EXT-KEY and BIP-GMAC-256, without an RSNXE.
+        let mut gcmp = selected();
+        gcmp.truncate(28);
+        for at in [7, 13] {
+            gcmp[at] = 9;
+        }
+        gcmp[19] = 24;
+        gcmp[27] = 12;
+        let selection = Selection::new(gcmp.clone()).unwrap();
+        assert!(selection.rsnx().is_empty());
+        selection.validate_peer(&gcmp).unwrap();
+        // Any RSNX capability the OS sets, SAE-PK among them.
+        let mut pk = selected();
+        pk[30] |= 1 << 6;
+        Selection::new(pk).unwrap();
+        // Only an SAE AKM has an exchange to hold: PSK and FT-SAE do not.
+        for akm in [2, 9] {
+            let mut other = selected();
+            other[19] = akm;
+            assert!(Selection::new(other).is_err());
+        }
+    }
+    #[test]
     fn all_truncations_duplicate_security_and_selected_extensions_refuse() {
         let bytes = selected();
-        for end in 0..bytes.len() {
-            assert!(Selection::new(bytes[..end].to_vec()).is_err());
+        for end in 1..bytes.len() {
+            if end == 28 {
+                continue; // The RSNE alone.
+            }
+            assert!(Selection::new(bytes[..end].to_vec()).is_err(), "{end}");
         }
         for extra in [
             vec![48, 0],
@@ -183,14 +145,5 @@ pub(in crate::net::wifi) mod tests {
         ] {
             assert!(Selection::new([bytes.clone(), extra].concat()).is_err());
         }
-        let mut rsnx = bytes.clone();
-        rsnx[30] |= 1;
-        assert!(Selection::new(rsnx).is_err());
-        let mut ft = bytes.clone();
-        ft[19] = 9;
-        assert!(Selection::new(ft).is_err());
-        let mut extra = bytes.clone();
-        extra[30] |= 0x40;
-        assert!(Selection::new(extra).is_err());
     }
 }

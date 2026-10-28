@@ -115,6 +115,7 @@ fn fixture() -> Fixture {
     unsafe {
         key.install_igtk(
             &mut mailbox,
+            ManagementCipher::Cmac128,
             4,
             &[0x55; 16],
             PacketNumber::new(100).unwrap(),
@@ -317,7 +318,15 @@ fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
     let before = wm.lock().unwrap().completed.len();
     // SAFETY: new authentic model GTK namespace with no old users; reuse must still refuse.
     assert_eq!(
-        unsafe { key.install_igtk(&mut mailbox, 4, &[0x55; 16], PacketNumber::new(0).unwrap()) },
+        unsafe {
+            key.install_igtk(
+                &mut mailbox,
+                ManagementCipher::Cmac128,
+                4,
+                &[0x55; 16],
+                PacketNumber::new(0).unwrap(),
+            )
+        },
         Err(super::super::Error::Bip(Error::RetiredMaterial))
     );
     assert_eq!(wm.lock().unwrap().completed.len(), before);

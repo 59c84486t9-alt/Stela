@@ -120,8 +120,8 @@ fn whole_slot_retirement_stops_actual_ordinary_and_stream_dma_before_disable() {
                     .iter()
                     .any(|event| { event.kind() == TRANSFER_EVENT && event.slot() == old.slot })
             );
-            // This cut deliberately preserves boot-lifetime refusal of the old
-            // hardware number. Its retained allocation is not a recycling API.
+            // The old device's port still holds its current grant, so the ID
+            // that comes back stays unaddressed with its retained allocation.
             assert_eq!(c.fresh_slot().unwrap(), 2);
             assert_eq!(c.slot_ownership[1], Ownership::Tombstone);
             assert_eq!(c.slot(old.slot).unwrap()._output.physical(), output);
@@ -231,7 +231,7 @@ impl Registers for InvalidDescriptor {
     }
 
     fn write32(&mut self, offset: usize, value: u32) {
-        let data = if offset == 0x1000 + 2 * 4 && value == 1 {
+        let data = if offset == 0x1000 + 4 && value == 1 {
             // SAFETY: this is the actual current DCBAA output context and EP0
             // TRB memory retained by the controller under test. No pointer is
             // synthesized as proof of readiness or retirement.
@@ -274,7 +274,7 @@ impl Registers for InvalidDescriptor {
             // SAFETY: the actual peer just completed this descriptor DMA. The
             // adversarial device returns an invalid descriptor's bLength byte.
             if self.stall {
-                self.hardware.borrow_mut().stall_completed_control(2);
+                self.hardware.borrow_mut().stall_completed_control(1);
             } else {
                 unsafe { (buffer as *mut u8).write_volatile(0) };
             }
@@ -314,7 +314,7 @@ fn failed_real_descriptor_enumeration_stops_ep0_before_returning_unpublished_slo
             c.registers = Box::new(InvalidDescriptor {
                 inner,
                 hardware: hardware.clone(),
-                output: c.dcbaa.physical() + 2 * 8,
+                output: c.dcbaa.physical() + 8,
                 context,
                 cursor: None,
                 corrupted: corrupted.clone(),
@@ -332,19 +332,16 @@ fn failed_real_descriptor_enumeration_stops_ep0_before_returning_unpublished_slo
                 hardware.borrow().commands_seen[before..],
                 [
                     (ENABLE_SLOT, 0, 0),
-                    (ENABLE_SLOT, 0, 0),
-                    (ADDRESS_DEVICE, 2, 0),
-                    (STOP_ENDPOINT, 2, 1),
-                    (SET_DEQUEUE, 2, 1),
-                    (reset::DISABLE_SLOT, 2, 0),
+                    (ADDRESS_DEVICE, 1, 0),
+                    (STOP_ENDPOINT, 1, 1),
+                    (SET_DEQUEUE, 1, 1),
+                    (reset::DISABLE_SLOT, 1, 0),
                 ]
             );
-            assert_eq!(c.slot_ownership[2], Ownership::Vacant);
-            assert!(c.slots[2].is_none());
-            assert_eq!(c.dcbaa.read::<u64>(2 * 8), 0);
-            assert!(c.power.retained(2), "physical current survives Disable");
-            assert_eq!(c.slot_ownership[1], Ownership::Tombstone);
-            assert!(c.slots[1].as_ref().unwrap().retiring);
+            assert_eq!(c.slot_ownership[1], Ownership::Vacant);
+            assert!(c.slots[1].is_none());
+            assert_eq!(c.dcbaa.read::<u64>(8), 0);
+            assert!(c.power.retained(1), "physical current survives Disable");
         }
     }
 }
@@ -369,7 +366,7 @@ fn failed_real_descriptor_cleanup_retains_ep0_dma_on_stop_reset_and_dequeue_faul
         c.registers = Box::new(InvalidDescriptor {
             inner,
             hardware: hardware.clone(),
-            output: c.dcbaa.physical() + 2 * 8,
+            output: c.dcbaa.physical() + 8,
             context: 64,
             cursor: None,
             corrupted: corrupted.clone(),
@@ -383,26 +380,26 @@ fn failed_real_descriptor_cleanup_retains_ep0_dma_on_stop_reset_and_dequeue_faul
         );
         assert_eq!(*corrupted.borrow(), 1);
         let seen = hardware.borrow().commands_seen[before..].to_vec();
-        assert!(seen.contains(&(if stall { RESET_ENDPOINT } else { STOP_ENDPOINT }, 2, 1)));
+        assert!(seen.contains(&(if stall { RESET_ENDPOINT } else { STOP_ENDPOINT }, 1, 1)));
         assert!(!seen.iter().any(|(kind, _, _)| *kind == reset::DISABLE_SLOT));
-        assert_eq!(c.slot_ownership[2], Ownership::Enabled);
-        let output = c.slots[2].as_ref().unwrap()._output.physical();
-        let control = c.slots[2].as_ref().unwrap().control.physical();
+        assert_eq!(c.slot_ownership[1], Ownership::Enabled);
+        let output = c.slots[1].as_ref().unwrap()._output.physical();
+        let control = c.slots[1].as_ref().unwrap().control.physical();
         assert_ne!(output, 0);
         assert_ne!(control, 0);
-        assert_eq!(c.dcbaa.read::<u64>(2 * 8), output);
-        assert!(c.slots[2].as_ref().unwrap().retiring);
+        assert_eq!(c.dcbaa.read::<u64>(8), output);
+        assert!(c.slots[1].as_ref().unwrap().retiring);
         assert!(
-            c.slots[2].as_ref().unwrap().endpoints[1]
+            c.slots[1].as_ref().unwrap().endpoints[1]
                 .as_ref()
                 .unwrap()
                 .poisoned
         );
-        assert!(c.power.retained(2));
+        assert!(c.power.retained(1));
         let accesses = hardware.borrow().accesses;
-        assert!(c.connected(2).is_err());
+        assert!(c.connected(1).is_err());
         assert!(
-            c.control(2, setup(0x80, GET_DESCRIPTOR, 1 << 8, 0, 8), &[])
+            c.control(1, setup(0x80, GET_DESCRIPTOR, 1 << 8, 0, 8), &[])
                 .is_err()
         );
         assert_eq!(hardware.borrow().accesses, accesses);
@@ -559,15 +556,14 @@ fn failed_actual_address_device_retires_disabled_ep0_without_illegal_stop_or_deq
             hardware.borrow().commands_seen[before..],
             [
                 (ENABLE_SLOT, 0, 0),
-                (ENABLE_SLOT, 0, 0),
-                (ADDRESS_DEVICE, 2, 0),
-                (reset::DISABLE_SLOT, 2, 0),
+                (ADDRESS_DEVICE, 1, 0),
+                (reset::DISABLE_SLOT, 1, 0),
             ]
         );
-        assert_eq!(c.slot_ownership[2], Ownership::Vacant);
-        assert!(c.slots[2].is_none());
-        assert_eq!(c.dcbaa.read::<u64>(2 * 8), 0);
-        assert!(c.power.retained(2));
+        assert_eq!(c.slot_ownership[1], Ownership::Vacant);
+        assert!(c.slots[1].is_none());
+        assert_eq!(c.dcbaa.read::<u64>(8), 0);
+        assert!(c.power.retained(1));
     }
 }
 

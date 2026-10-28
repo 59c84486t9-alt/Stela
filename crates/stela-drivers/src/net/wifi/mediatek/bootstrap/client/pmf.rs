@@ -156,6 +156,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             authority.with_pmf_authentication(self, |client, guard| {
                 let s = client.state_mut();
                 let ciphers = join.request.key_ciphers();
+                let management_cipher = join.request.pmf().map(|pmf| pmf.management());
                 let action = s
                     .station
                     .associate_external_pmf(session, join, observed.clone(), now, policy)
@@ -178,6 +179,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     return Err(error);
                 }
                 s.ciphers = ciphers;
+                s.management_cipher = management_cipher;
                 Self::claim_keys(s, profile)?;
                 let result = Self::action_guarded(s, action, now, source, policy, Some(guard));
                 if result.is_err() {

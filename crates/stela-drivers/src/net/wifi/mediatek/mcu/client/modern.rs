@@ -6,7 +6,7 @@
 use super::{Error, Profile, put16, put32, tlv};
 use crate::net::wifi::{
     Band,
-    station::phy::{AccessCategory, McsMaps, Mode, Negotiated, Width},
+    station::phy::{AccessCategory, McsMaps, Negotiated, Width},
 };
 use alloc::vec::Vec;
 
@@ -103,14 +103,12 @@ impl Configuration {
         )
         .map_err(|_| Error::InvalidNegotiation)?;
         if checked != negotiated
-            || negotiated.mode == Mode::Legacy
             || negotiated.local().band() != profile.channel.band
             || negotiated.rx_nss > profile.antenna_mask.count_ones() as u8
             || negotiated.tx_nss > profile.antenna_mask.count_ones() as u8
             || (profile.channel.band != Band::Ghz6
                 && (profile.basic_rates != negotiated.legacy.basic
                     || profile.supported_rates != negotiated.legacy.supported))
-            || negotiated.wmm.is_none()
         {
             return Err(Error::InvalidNegotiation);
         }
@@ -321,12 +319,7 @@ impl Configuration {
     /// from ieee80211_ac_numbers VO/VI/BE/BK consumed by mt7925_mcu_set_tx.
     pub fn edca_request(&self, p: Profile) -> Result<Vec<u8>, Error> {
         self.matches(p)?;
-        let w = self
-            .negotiated
-            .wmm
-            .as_ref()
-            .ok_or(Error::InvalidNegotiation)?;
-        self.edca_restricted_request(p, &w.access_categories)
+        self.edca_restricted_request(p, &self.negotiated.edca())
     }
     /// Private native queue restriction; never change negotiated AP metadata.
     pub(in crate::net::wifi::mediatek) fn edca_restricted_request(
@@ -335,13 +328,7 @@ impl Configuration {
         effective: &[AccessCategory; 4],
     ) -> Result<Vec<u8>, Error> {
         self.matches(p)?;
-        let original = &self
-            .negotiated
-            .wmm
-            .as_ref()
-            .ok_or(Error::InvalidNegotiation)?
-            .access_categories;
-        Self::observed_edca_request(p, original, effective)
+        Self::observed_edca_request(p, &self.negotiated.edca(), effective)
     }
     /// Current native RX supplies the new AP baseline; it is not a replacement
     /// association or a mutation of the immutable negotiated capability object.
@@ -521,7 +508,7 @@ mod tests {
         Mac,
         wifi::{
             Channel,
-            station::phy::{Capabilities, McsMaps, Role},
+            station::phy::{Capabilities, McsMaps, Mode, Role},
         },
     };
     use alloc::{vec, vec::Vec};

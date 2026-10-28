@@ -360,7 +360,10 @@ impl Station {
             if key.scope() != expected {
                 return Err(Error::WrongKey);
             }
-            if matches!(expected, KeyScope::Pairwise(_)) && key.index() != 0 {
+            if matches!(expected, KeyScope::Pairwise(_))
+                && key.index() != 0
+                && !key.cipher().is_wep()
+            {
                 return Err(Error::Unsupported("extended pairwise key ID"));
             }
             let (pairwise, group) = join.request.key_ciphers().ok_or(Error::WrongKey)?;
@@ -599,7 +602,7 @@ impl Station {
             }
         };
         let (protection, crypto_header) = if let Some(key) = selected {
-            if key.index() != 0 {
+            if key.index() != 0 && !key.cipher().is_wep() {
                 return Err(Error::Unsupported("extended pairwise key ID"));
             }
             if key.scope() != KeyScope::Pairwise(join.bssid)

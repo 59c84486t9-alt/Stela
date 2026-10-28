@@ -137,9 +137,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .as_ref()
             .and_then(|k| k.slot().installed())
             .ok_or(Error::NoKey)?;
-        if ptk.cipher() != Cipher::Ccmp128
-            || gtk.cipher() != Cipher::Ccmp128
-            || ptk.scope() != KeyScope::Pairwise(p.peer)
+        if ptk.scope() != KeyScope::Pairwise(p.peer)
             || gtk.scope() != KeyScope::Group(p.peer)
             || ptk.slot() != p.wcid
             || gtk.slot() != p.interface.broadcast_wcid
@@ -217,15 +215,19 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         controller: &mut Controller<I, Q, C>,
         phase: &mut Phase,
         key: &mut HardwareKey<Arc<C>>,
+        cipher: Option<ManagementCipher>,
         index: u8,
         material: &[u8],
         receive: PacketNumber,
     ) -> Result<bip::Identity, Error> {
+        // BIP-CMAC-128 is the suite an RSNE without one selects.
+        let cipher = cipher.unwrap_or(ManagementCipher::Cmac128);
         // SAFETY: caller checked all native users and supplies the independent
         // actual old hardware/RX/IRQ/deferred-key-user drain and authentic input.
         let outcome = unsafe {
             key.install_igtk(
                 controller.state_mut().mailbox.as_mut().unwrap(),
+                cipher,
                 index,
                 material,
                 receive,
@@ -310,6 +312,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 &mut s.controller,
                 &mut s.phase,
                 s.gtk.as_mut().ok_or(Error::NoKey)?,
+                s.management_cipher,
                 index,
                 material,
                 receive,

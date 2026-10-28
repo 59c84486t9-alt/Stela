@@ -398,20 +398,24 @@ impl Native {
                 let pair = self
                     .sco
                     .ok_or(BlockError::Unsupported("MT7925 SCO alternate inactive"))?;
-                let service = media::service_bytes(pair.output);
-                let count = bytes.len().div_ceil(service);
-                if count > DEPTH || self.output.iter().any(|b| b.queued.is_some()) {
+                let lengths = self.sco_lengths(pair, bytes.len())?;
+                if lengths.len() > DEPTH || self.output.iter().any(|b| b.queued.is_some()) {
                     return Err(media::Error::Unsupported(
                         "bounded SCO output queue ownership",
                     ));
                 }
+                if pair.alternate == 6 {
+                    self.alt6_packet_flow = !self.alt6_packet_flow;
+                }
                 // Separate buffers for all services; none is overwritten before
                 // its actual terminal completion or acknowledged cancellation.
-                for (b, chunk) in self.output.iter_mut().zip(bytes.chunks(service)) {
+                let mut offset = 0;
+                for (b, &length) in self.output.iter_mut().zip(&lengths) {
                     if deadline.passed() {
                         return Err(BlockError::Timeout.into());
                     }
-                    b.dma.bytes_mut()[..chunk.len()].copy_from_slice(chunk);
+                    b.dma.bytes_mut()[..length].copy_from_slice(&bytes[offset..offset + length]);
+                    offset += length;
                     fence(Ordering::Release);
                     if deadline.passed() {
                         return Err(BlockError::Timeout.into());
@@ -419,10 +423,10 @@ impl Native {
                     b.queued = Some(host.controller.borrow_mut().device(host.id)?.submit_iso(
                         pair.output.dci(),
                         b.dma.physical(),
-                        chunk.len(),
+                        length,
                     )?);
                 }
-                for (b, chunk) in self.output.iter_mut().zip(bytes.chunks(service)) {
+                for (b, &length) in self.output.iter_mut().zip(&lengths) {
                     loop {
                         if let Some(result) = host
                             .controller
@@ -432,13 +436,13 @@ impl Native {
                         {
                             let done = result?;
                             b.queued = None;
-                            if done.status != IsoStatus::Success || done.bytes != chunk.len() {
+                            if done.status != IsoStatus::Success || done.bytes != length {
                                 // Even a terminal loss cannot credit successful
                                 // HCI delivery; caller closes and drains the rest.
                                 return Err(media::Error::OutputCompletion {
                                     kind,
                                     status: done.status,
-                                    expected: chunk.len(),
+                                    expected: length,
                                     actual: done.bytes,
                                 });
                             }
@@ -455,19 +459,24 @@ impl Native {
             }
         }
     }
+    /// One HCI packet's isochronous services. `btusb_isoc_tx` paces every
+    /// alternate-6 URB (`__fill_isoc_descriptor_msbc`): six or seven empty
+    /// services, alternately, then the packet, for its 7.5 ms interval.
+    fn sco_lengths(&self, pair: Pair, packet: usize) -> media::Result<Vec<usize>> {
+        let flow = (pair.alternate == 6).then_some(self.alt6_packet_flow);
+        crate::usb::bluetooth::realtek::media::output_lengths(
+            packet,
+            media::service_bytes(pair.output),
+            flow,
+        )
+    }
     fn queue_sco(&mut self, host: &mut Host, bytes: &[u8]) -> media::Result<Option<u64>> {
         host.validate()?;
         self.active()?;
         let pair = self
             .sco
             .ok_or(BlockError::Unsupported("queued SCO alternate inactive"))?;
-        let service = media::service_bytes(pair.output);
-        let paced = !self.bindings.has_iso() && pair.alternate == 6;
-        let lengths = crate::usb::bluetooth::realtek::media::output_lengths(
-            bytes.len(),
-            service,
-            paced.then_some(self.alt6_packet_flow),
-        )?;
+        let lengths = self.sco_lengths(pair, bytes.len())?;
         let count = lengths.len();
         // Backpressure precedes sequence, pacing, buffer or hardware mutation.
         let slots: Vec<_> = self
@@ -499,7 +508,7 @@ impl Native {
         }
         let sequence = self.output_sequence;
         self.output_sequence = next;
-        if paced {
+        if pair.alternate == 6 {
             self.alt6_packet_flow = !self.alt6_packet_flow;
         }
         // Retain the intended packet before its first publication. Any later
@@ -733,6 +742,32 @@ impl Native {
             Ok(())
         }
     }
+    /// A clean close left both interfaces at alternate 0 and retired every
+    /// TD, so the next power-on may claim them again. The mSBC flow persists,
+    /// as btusb keeps `usb_alt6_packet_flow` for the device's life.
+    fn reopen(&mut self) -> Result<(), BlockError> {
+        if !self.retired
+            || self.poisoned
+            || self.iso_receive.is_some()
+            || self.iso_send
+            || !self.queued_output.is_empty()
+            || self
+                .input
+                .iter()
+                .chain(&self.output)
+                .any(|b| b.queued.is_some())
+        {
+            return Err(BlockError::Unsupported(
+                "MT7925 media did not close cleanly",
+            ));
+        }
+        self.iso = None;
+        self.sco = None;
+        self.next_input = 0;
+        self.running = !self.bindings.has_iso();
+        self.retired = false;
+        Ok(())
+    }
 }
 fn loss(status: IsoStatus) -> Loss {
     match status {
@@ -803,6 +838,13 @@ impl MediaIo for Host {
         let result = media.close(self);
         self.media = Some(media);
         result
+    }
+    fn reopen_media(&mut self) -> Result<(), BlockError> {
+        self.open()?;
+        self.media
+            .as_mut()
+            .ok_or(BlockError::Unsupported("native MT7925 media not prepared"))?
+            .reopen()
     }
 }
 
@@ -918,6 +960,8 @@ mod tests {
             // Base close cannot turn the failed media retirement into success.
             assert!(hci.close().is_err());
             assert_eq!(hci.state(), State::Failed);
+            // A quarantined owner never reopens for a later power-on.
+            assert!(hci.io.reopen_media().is_err());
             assert_eq!(backing, before);
         }
     }
@@ -1016,6 +1060,33 @@ mod tests {
         );
         controller.borrow_mut().cancel(1, pair.input.dci()).unwrap();
     }
+    #[test]
+    fn mt7925_wideband_sco_paces_alternate_6_like_btusb_isoc_tx() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: exclusive synthetic RAM outlives the class owner.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut native = Native::new(Bindings::new(&binding()).unwrap(), &mut dma).unwrap();
+        assert!(native.bindings.has_iso());
+        let pair = native
+            .bindings
+            .sco(media::Voice {
+                connections: 1,
+                air_mode: media::AirMode::Transparent,
+                voice_setting: 0,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(pair.alternate, 6);
+        let service = media::service_bytes(pair.output);
+        let paced = |idle| [vec![0; idle], vec![service]].concat();
+        assert_eq!(native.sco_lengths(pair, service).unwrap(), paced(6));
+        native.alt6_packet_flow = true;
+        assert_eq!(native.sco_lengths(pair, service).unwrap(), paced(7));
+        // A packet goes in one frame; one larger than a service cannot.
+        assert!(native.sco_lengths(pair, service + 1).is_err());
+    }
+
     #[test]
     fn native_realtek_alt6_queues_actual_zero_services_and_payloads_with_bounded_receipts() {
         for speed in [xhci::FULL_SPEED, xhci::HIGH_SPEED] {
