@@ -28,9 +28,11 @@
 //! `--sep-observe` can retain their requests without inventing authorization.
 use super::{
     Entropy,
-    keys::Roots,
     store::{Backend, Nonces, POLICY_NONCE_BYTES, PolicyNonce},
 };
+#[cfg(test)]
+use crate::platform::apple::sep::keys::Roots;
+#[cfg(test)]
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha384};
 use zeroize::Zeroizing;
@@ -38,8 +40,10 @@ use zeroize::Zeroizing;
 /// The LocalPolicy digest size: `ronh`, `lpnh` and `nsih` are each SHA-384.
 pub const DIGEST_BYTES: usize = 48;
 /// The key-derivation purpose for the macOS LocalPolicy signing key.
+#[cfg(test)]
 const SIGNING_PURPOSE: &[u8] = b"bootpolicy/local-policy-signing/v1";
 /// The domain that separates a LocalPolicy signature from other MACs.
+#[cfg(test)]
 const SIGNATURE_DOMAIN: &[u8] = b"Stela SEP LocalPolicy v1\0";
 
 /// An in-progress policy-nonce update: the proposed nonce awaiting `end`.
@@ -53,10 +57,6 @@ impl Update {
     /// the SHA-384 of the proposed nonce.
     pub fn proposed_digest(&self) -> [u8; DIGEST_BYTES] {
         Sha384::digest(*self.proposed).into()
-    }
-
-    pub fn which(&self) -> PolicyNonce {
-        self.which
     }
 }
 
@@ -101,10 +101,11 @@ pub fn committed_digest<B: Backend>(
 /// body, so a policy signed on one machine is rejected on another, exactly as
 /// a real SEP-signed LocalPolicy is. This is Stela's own signing scheme, not a
 /// claim to reproduce Apple's SEP key or its Image4 signature.
+#[cfg(test)]
 pub struct PolicyKeys {
     key: Zeroizing<[u8; 32]>,
 }
-
+#[cfg(test)]
 impl PolicyKeys {
     pub fn derive(roots: &Roots) -> Result<Self, &'static str> {
         Ok(Self {

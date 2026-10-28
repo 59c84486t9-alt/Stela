@@ -51,6 +51,7 @@ use crate::apple_device_tree::DeviceTree;
 use crate::kernel_collection::PAGE_BYTES;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
+pub use stela_runtime::boot_bundle::schema::Placed;
 use stela_runtime::machine::soc;
 
 pub const MEMORY_MAP: &str = "/chosen/carveout-memory-map";
@@ -67,14 +68,6 @@ pub const MANAGED_ALIGNMENT: u64 = 32 << 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Carveout {
     pub id: u16,
-    pub bytes: u64,
-}
-
-/// A carveout at its guest physical address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct Placed {
-    pub id: u16,
-    pub base: u64,
     pub bytes: u64,
 }
 

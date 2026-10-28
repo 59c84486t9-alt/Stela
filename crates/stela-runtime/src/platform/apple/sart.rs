@@ -245,6 +245,7 @@ pub struct Sart {
 }
 
 impl Sart {
+    #[cfg(test)]
     pub fn new(bounds: Bounds) -> Self {
         Self::with_layout(bounds, Layout::V3)
     }

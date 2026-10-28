@@ -77,6 +77,16 @@ trait Scsi {
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
     fn poisoned(&self) -> bool;
+    /// Whether the transport's host controller sends the handoff's
+    /// completion signal as the transport's transfers complete.
+    fn signals(&self) -> bool {
+        false
+    }
+    /// Whether a begun command's transfer may have completed; a look at
+    /// memory alone.
+    fn posted(&self) -> bool {
+        false
+    }
     /// Whether [`Self::begin`] runs commands without waiting for them.
     fn queued(&self) -> bool {
         false
@@ -160,6 +170,12 @@ impl<I: Io> Scsi for Bot<I> {
     fn poisoned(&self) -> bool {
         Bot::poisoned(self)
     }
+    fn signals(&self) -> bool {
+        self.io.signals()
+    }
+    fn posted(&self) -> bool {
+        self.io.posted()
+    }
     fn queued(&self) -> bool {
         true
     }
@@ -227,6 +243,12 @@ impl Scsi for uas::Host {
     }
     fn poisoned(&self) -> bool {
         self.requires_rebind()
+    }
+    fn signals(&self) -> bool {
+        uas::Host::signals(self)
+    }
+    fn posted(&self) -> bool {
+        uas::Host::posted(self)
     }
     fn queued(&self) -> bool {
         true
@@ -1009,6 +1031,18 @@ impl<T: Scsi> BlockDevice for Disk<T> {
     fn identity(&self) -> &Identity {
         &self.identity
     }
+    fn signals(&self) -> bool {
+        self.bot
+            .try_borrow()
+            .is_ok_and(|transport| transport.signals())
+    }
+    fn posted(&self) -> bool {
+        self.running.is_some()
+            && self
+                .bot
+                .try_borrow()
+                .is_ok_and(|transport| transport.posted())
+    }
 
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         self.check_media()?;
@@ -1142,6 +1176,18 @@ impl BlockDevice for UsbDisk {
         match &self.disk {
             UsbTransport::Bot(disk) => disk.identity(),
             UsbTransport::Uas(disk) => disk.identity(),
+        }
+    }
+    fn signals(&self) -> bool {
+        match &self.disk {
+            UsbTransport::Bot(disk) => disk.signals(),
+            UsbTransport::Uas(disk) => disk.signals(),
+        }
+    }
+    fn posted(&self) -> bool {
+        match &self.disk {
+            UsbTransport::Bot(disk) => disk.posted(),
+            UsbTransport::Uas(disk) => disk.posted(),
         }
     }
     fn read(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {

@@ -14,7 +14,7 @@ use crate::{
             self, Disposition, Handler, IrqController, IrqRegistration, Route, RouteRequest, Source,
         },
         pci::{
-            Address, Function,
+            Address, CapabilityError, Function, Layout,
             msi::{self, DisabledMsiConfig, MsiConfig, MsiConfigSpace, RetainedOwner},
             owned::OwnedConfig,
         },
@@ -246,8 +246,9 @@ pub struct Native<
 impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     /// # Safety
     /// Inputs retain the actual exclusive native9d35 endpoint, original config,
-    /// complete UC BAR0, powered D0 root/resource/reset/firmware epoch and actual
-    /// requester-matched isolated domain. No old DMA/postedMSI, IRQ/worker, alias,
+    /// complete UC BAR0, powered D0 root/resource/reset/firmware epoch and the
+    /// requester's DMA domain, isolated or the passthrough domain, meeting the
+    /// `DmaDomain` contract for its kind. No old DMA/postedMSI, IRQ/worker, alias,
     /// firmware or reset/removal user remains; this is independently drained,
     /// never inferred from disabled bits. MSI routing is genuinely qualified.
     /// The same retained root producer has examined the complete actual PCI
@@ -969,62 +970,47 @@ fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
     if c.read16(6) == u16::MAX || c.read16(6) & 0x10 == 0 {
         return Err(Error::Requirement("actual native PCI capabilities"));
     }
-    let mut at = u16::from(c.read8(0x34));
-    let mut occupied = [false; 256];
     let mut msi = false;
     let mut pm = false;
-    while at != 0 {
-        if !(0x40..=0xfc).contains(&at)
-            || !at.is_multiple_of(4)
-            || occupied[at as usize..at as usize + 2].iter().any(|v| *v)
-        {
-            return Err(Error::Requirement(
-                "bounded nonoverlapping native capabilities",
-            ));
-        }
-        let h = c.read16(at);
-        if h == u16::MAX {
-            return Err(Error::Config(at));
-        }
-        let id = h as u8;
-        let bytes = if id == 5 {
-            if msi {
-                return Err(Error::Requirement("one actual MSI capability"));
+    for entry in crate::bus::pci::capability::capabilities(c) {
+        let entry = entry.map_err(|error| match error {
+            CapabilityError::FailedRead { offset } => Error::Config(offset),
+            CapabilityError::OutOfRange { .. } | CapabilityError::Overlap { .. } => {
+                Error::Requirement("native capability extent")
             }
-            msi = true;
-            let flags = c.read16(at + 2);
-            if flags & !0x1fe != 0 || (flags >> 1) & 7 > 5 || (flags >> 4) & 7 > (flags >> 1) & 7 {
-                return Err(Error::Requirement("inactive supported single-message MSI"));
+            _ => Error::Requirement("bounded nonoverlapping native capabilities"),
+        })?;
+        let at = entry.offset;
+        match entry.id {
+            5 => {
+                if msi {
+                    return Err(Error::Requirement("one actual MSI capability"));
+                }
+                msi = true;
+                let flags = c.read16(at + 2);
+                if flags & !0x1fe != 0
+                    || (flags >> 1) & 7 > 5
+                    || (flags >> 4) & 7 > (flags >> 1) & 7
+                {
+                    return Err(Error::Requirement("inactive supported single-message MSI"));
+                }
             }
-            match (flags & 0x80 != 0, flags & 0x100 != 0) {
-                (false, false) => 10,
-                (true, false) => 14,
-                (false, true) => 20,
-                (true, true) => 24,
+            1 => {
+                if pm || c.read16(at + 4) & 3 != 0 {
+                    return Err(Error::Requirement("actual single D0 PM capability"));
+                }
+                pm = true;
             }
-        } else {
-            msi::other_capability_bytes(c, at, id, 0).map_err(Error::Msi)?
-        };
-        if at + bytes > 256
-            || occupied[at as usize..(at + bytes) as usize]
-                .iter()
-                .any(|v| *v)
-        {
-            return Err(Error::Requirement("native capability extent"));
-        }
-        occupied[at as usize..(at + bytes) as usize].fill(true);
-        if id == 1 {
-            if pm || c.read16(at + 4) & 3 != 0 {
-                return Err(Error::Requirement("actual single D0 PM capability"));
+            0x11 if c.read16(at + 2) & 0x8000 != 0 => {
+                return Err(Error::Requirement(
+                    "inactive MSI-X before native ISH admission",
+                ));
             }
-            pm = true;
+            _ if entry.layout == Layout::Unsupported => {
+                return Err(Error::Msi(msi::MsiError::Unsupported));
+            }
+            _ => {}
         }
-        if id == 0x11 && c.read16(at + 2) & 0x8000 != 0 {
-            return Err(Error::Requirement(
-                "inactive MSI-X before native ISH admission",
-            ));
-        }
-        at = u16::from((h >> 8) as u8);
     }
     if !msi || !pm {
         return Err(Error::Requirement(

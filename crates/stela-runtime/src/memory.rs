@@ -102,6 +102,10 @@ struct Allocation {
     maximum_readable: bool,
     maximum_writable: bool,
     maximum_executable: bool,
+    #[cfg_attr(
+        not(host_memory),
+        allow(dead_code, reason = "only host-memory protection reads it")
+    )]
     executable: bool,
     alias_tag: u8,
     inheritance: DataInheritance,

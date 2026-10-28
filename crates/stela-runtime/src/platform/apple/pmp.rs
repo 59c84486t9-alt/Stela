@@ -62,6 +62,7 @@ pub struct Pmp {
     pings: u64,
 }
 
+#[cfg(test)]
 impl Pmp {
     /// Pings the AP sent.
     pub fn pings(&self) -> u64 {

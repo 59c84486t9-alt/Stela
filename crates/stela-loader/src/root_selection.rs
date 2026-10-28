@@ -33,7 +33,7 @@
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, ensure};
-use serde::Serialize;
+pub use stela_runtime::boot_bundle::schema::Root;
 
 const CHOSEN: &str = "/chosen";
 pub const APFS_PREBOOT_UUID: &str = "apfs-preboot-uuid";
@@ -44,37 +44,6 @@ pub const BOOT_OBJECTS_PATH: &str = "boot-objects-path";
 const UUID_PROPERTY_BYTES: usize = 37;
 /// The kernel's bound on `boot-objects-path`.
 const BOOT_OBJECTS_PATH_LIMIT: usize = 0x400;
-
-/// The volume the kernel roots from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case", tag = "kind")]
-pub enum Root {
-    /// The System volume of `volume_group`, booting from its Preboot
-    /// directory `boot_hash`.
-    System {
-        volume_group: String,
-        boot_hash: String,
-    },
-    /// The Recovery volume paired with `volume_group`, booting from its
-    /// directory `<volume_group>/boot/<boot_hash>`.
-    PairedRecovery {
-        volume_group: String,
-        recovery_volume: String,
-        boot_hash: String,
-    },
-    /// System Recovery: the RecoveryOSContainer's volume `volume`, booting
-    /// from its directory `<directory>/boot/<boot_hash>`. It pairs with no
-    /// installed system, so only `boot-uuid` names the root (Inferred:
-    /// without `apfs-preboot-uuid` and `associated-volume-group`,
-    /// AppleFileSystemDriver roots from the volume `boot-uuid` names).
-    SystemRecovery {
-        volume: String,
-        directory: String,
-        boot_hash: String,
-    },
-    /// A ramdisk; no installed volume.
-    Ramdisk,
-}
 
 fn uuid_property(text: &str) -> Result<Vec<u8>> {
     ensure!(

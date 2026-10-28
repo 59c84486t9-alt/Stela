@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2024 Intel Corporation
+//! Ring layout and DMA buffers of the Intel PCIe Bluetooth transport.
 use super::{Error, Result};
 use crate::bus::dma::{DmaAllocator, DmaBuffer};
 pub(super) const TX_COUNT: usize = 32;

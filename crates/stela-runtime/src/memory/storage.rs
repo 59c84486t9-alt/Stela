@@ -1,6 +1,6 @@
 //! Lifetime of native mappings, independent of guest views.
 
-#[cfg(feature = "std")]
+#[cfg(host_memory)]
 use alloc::sync::Arc;
 use core::ptr::NonNull;
 #[cfg(host_memory)]
@@ -8,7 +8,7 @@ use std::fs::File;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageKind {
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     Anonymous,
     #[cfg(host_memory)]
     PrivateFile,
@@ -95,7 +95,7 @@ impl core::fmt::Debug for NativeStorage {
 }
 
 impl NativeStorage {
-    #[cfg(feature = "std")]
+    #[cfg(host_memory)]
     pub(super) fn anonymous(primary: NativeMapping) -> Arc<Self> {
         Arc::new(Self {
             primary,

@@ -233,16 +233,19 @@ impl Methods {
     }
 
     /// The last `setPowerState` the AP asked for.
+    #[cfg(test)]
     pub fn powered(&self) -> Option<bool> {
         self.display.borrow().powered
     }
 
     /// The `(color, timing)` IDs of the last `set_digital_out_mode`.
+    #[cfg(test)]
     pub fn digital_out(&self) -> Option<(u32, u32)> {
         self.digital_out
     }
 
     /// The last refusal's full text.
+    #[cfg(test)]
     pub fn last_refusal(&self) -> Option<&str> {
         self.last_refusal.as_deref()
     }

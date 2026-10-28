@@ -1,3 +1,4 @@
+//! Negotiating HT, VHT, HE and EHT parameters between the station and its AP.
 use super::{
     AccessCategory, Band, Capabilities, Eht, EhtMcsUnion, Error, He, Ht, LegacyRates, McsMaps,
     Mode, Role, Vht, Width,
@@ -336,6 +337,32 @@ fn aggregate_limits(cap: &Capabilities, mode: Mode) -> (u8, u8, u16) {
 }
 
 impl Negotiated {
+    /// The EDCA parameters the station programs: the AP's WMM parameters, or
+    /// without WMM those of `ieee80211_set_wmm_default` without QoS, 802.11-
+    /// 2007 Table 7-37's AIFSN 2 and aCWmin/aCWmax on every queue, with CWmin
+    /// 31 for an 11b-only 2.4 GHz BSS (no rate above 11 Mbps).
+    pub fn edca(&self) -> [AccessCategory; 4] {
+        if let Some(wmm) = &self.wmm {
+            return wmm.access_categories;
+        }
+        let ecw_min = if self.local.band == Band::Ghz2 && self.legacy.supported & 0xfc0 == 0 {
+            5
+        } else {
+            4
+        };
+        core::array::from_fn(|aci| AccessCategory {
+            aci: aci as u8,
+            admission_control: false,
+            aifsn: 2,
+            ecw_min,
+            ecw_max: 10,
+            txop_32us: 0,
+        })
+    }
+    /// mac80211 starts block-ack sessions only with an HT, VHT, HE or EHT peer.
+    pub fn aggregates(&self) -> bool {
+        self.ht.is_some() || self.vht.is_some() || self.he.is_some() || self.eht.is_some()
+    }
     pub fn between(
         local: &Capabilities,
         peer: &Capabilities,

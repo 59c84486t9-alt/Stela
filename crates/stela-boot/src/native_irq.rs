@@ -1,5 +1,8 @@
-//! BSP physical MSI and owned IOAPIC line routes through the existing IDT/APIC.
-//! Production attachment, AP ownership and interrupt remapping remain explicit.
+//! The boot processor's device interrupts: physical MSI and owned I/O APIC
+//! line routes through the engine's IDT vectors 0x50..=0x5f and its local
+//! APIC. [`start`] attaches the registry once the host is installed; the
+//! host drivers request routes through [`service`], and the engine takes
+//! their interrupts in its wait windows. Interrupt remapping is off.
 use crate::apic::{self, Apic};
 use alloc::{boxed::Box, sync::Arc};
 use core::{
@@ -92,6 +95,24 @@ pub static CONTROLLER: Registry<NativePlatform> = Registry::new(NativePlatform((
 pub fn service() -> Result<&'static dyn IrqController, IrqError> {
     NativePlatform(()).check_cpu()?;
     Ok(&CONTROLLER)
+}
+
+/// Attach the registry to the installed boot processor's local APIC, which
+/// `registers` maps in every root, with a two-second drain bound.
+///
+/// # Safety
+/// The boot processor after `host::install`, with interrupts off; its IDT
+/// routes 0x50..=0x5f to [`dispatch`] and nothing else owns those vectors.
+pub(crate) unsafe fn start(registers: u64, tsc_hz: u64) -> Result<(), IrqError> {
+    let timeout = tsc_hz.checked_mul(2).ok_or(IrqError::Unsupported)?;
+    // SAFETY: forwarded from the caller; `registers` maps the APIC base MSR's
+    // page in every root.
+    unsafe { initialize(apic::base_msr(), registers, timeout) }
+}
+
+/// Whether this processor is running a device interrupt's handler.
+pub(crate) fn in_device_dispatch() -> bool {
+    matches!(current_context(), Ok(Some(_)))
 }
 
 fn controller() -> Apic {

@@ -289,7 +289,7 @@ impl UsbInput {
                 "touch assembly requires running HID",
             ));
         }
-        let profile = self.descriptor.as_ref().and_then(|d| Profile::select(d,report,application)).ok_or(BlockError::Unsupported("HID hybrid assembly requires one scalar Finger, count, scan time and maximum feature"))?;
+        let profile = self.translator.descriptor().and_then(|d| Profile::select(d,report,application)).ok_or(BlockError::Unsupported("HID hybrid assembly requires one scalar Finger, count, scan time and maximum feature"))?;
         let bytes = self.get_report(ReportType::Feature, profile.feature_report)?;
         let maximum = profile.maximum(&bytes).ok_or(BlockError::Protocol(
             "invalid HID Contact Count Maximum; host limit is 64",

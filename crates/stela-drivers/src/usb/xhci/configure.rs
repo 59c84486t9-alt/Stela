@@ -4,8 +4,8 @@ use super::*;
 
 impl Controller {
     /// Cached device state, updated only by acknowledged standard requests.
-    pub fn current_configuration(&mut self, slot: u8) -> Result<Option<u8>, BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn current_configuration(&mut self, id: impl DeviceRef) -> Result<Option<u8>, BlockError> {
+        let slot = id.current_slot(self)?;
         self.current_configuration_owned(slot)
     }
 
@@ -20,8 +20,8 @@ impl Controller {
 
     /// Idempotent class-binding request. Repeating SET_CONFIGURATION, even with
     /// the same value, resets alternate settings and endpoint state (USB 9.4.7).
-    pub fn set_configuration(&mut self, slot: u8, value: u8) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn set_configuration(&mut self, id: impl DeviceRef, value: u8) -> Result<(), BlockError> {
+        let slot = id.current_slot(self)?;
         self.set_configuration_owned(slot, value)
     }
 
@@ -45,12 +45,12 @@ impl Controller {
     /// fields when `hub` is `Some((ports, think_time, multi_tt))`.
     pub fn configure(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         endpoints: &[Endpoint],
         hub: Option<(u8, u8, bool)>,
         dma: &mut dyn DmaAllocator,
     ) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.configure_owned(slot, endpoints, hub, dma)
     }
 
@@ -72,10 +72,10 @@ impl Controller {
     /// before recording or publishing any endpoint ownership.
     pub fn preflight_endpoints(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         endpoints: &[Endpoint],
     ) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.preflight_endpoints_owned(slot, endpoints)
     }
 

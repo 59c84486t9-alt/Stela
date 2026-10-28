@@ -28,7 +28,7 @@ pub enum CacheResource {
 pub(super) fn exclusive(role: Role) -> bool {
     matches!(
         role,
-        Role::QuotaUse(_)
+        Role::QuotaUse
             | Role::Persistence(_)
             | Role::PersistenceAuxiliary(_)
             | Role::DsidCommand(_)
@@ -37,7 +37,7 @@ pub(super) fn exclusive(role: Role) -> bool {
 
 pub(super) fn role(offset: u64) -> Option<Role> {
     if (USE_BASE..USE_BASE + DSIDS * 4).contains(&offset) {
-        return Some(Role::QuotaUse(((offset - USE_BASE) / 4) as u8));
+        return Some(Role::QuotaUse);
     }
     // Original persistence/deprioritization consumers exclude DSID0. Their
     // writable tables start at base+4; no adjacent word is silently admitted.
@@ -221,7 +221,7 @@ pub(super) fn apply(
             RequestKind::PersistenceAuxiliaryClear { dsid, broadcast }
         }
         Role::DsidCommand(dsid) if written == 2 => RequestKind::Deprioritize { dsid, broadcast },
-        Role::QuotaUse(_) => return Err("write to actual cacheless outer occupancy"),
+        Role::QuotaUse => return Err("write to actual cacheless outer occupancy"),
         _ => return Err("cacheless MCC policy/command value is not source-qualified"),
     };
     let serial = state

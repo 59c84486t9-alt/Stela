@@ -312,6 +312,21 @@ impl Station {
         }
         Ok(())
     }
+    /// The exchange is the station's until its association is answered, as
+    /// `ieee80211_mgd_assoc` keeps the authenticated data while it waits.
+    pub fn validate_external_exchange(&self, session: &Session) -> Result<(), Error> {
+        if !matches!(
+            self.phase,
+            Phase::ExternalAuthenticating | Phase::Associating
+        ) || self
+            .external
+            .as_ref()
+            .is_none_or(|current| !core::ptr::eq(current.as_ref(), session))
+        {
+            return Err(Error::Stale);
+        }
+        Ok(())
+    }
     /// Whether the exchange authenticated the station, as
     /// `ieee80211_mark_sta_auth` records it: the AP confirmed after the
     /// station's confirm, or before it.

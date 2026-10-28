@@ -1,14 +1,14 @@
 //! Copy processor identity/capabilities while UEFI MP Services still owns APs.
 //! Every callback returns before ExitBootServices; persistent executors use
 //! Stela's own INIT/SIPI entry, stacks and control memory afterward.
-mod record;
 pub(crate) use record::Capture;
+use stela_boot_core::record;
 
 use super::{
     memory_types::amd,
     topology::{self, Cpuid, Location, Msr, Processor, Snapshot},
 };
-use crate::{handoff::Region, tables::PAGE};
+use crate::{cpu::msr, handoff::Region, tables::PAGE};
 use alloc::vec::Vec;
 use core::{
     arch::{
@@ -26,14 +26,7 @@ use uefi::{
 };
 
 const MAGIC: u64 = 0x5354_4c53_4d50_3031;
-const VERSION: u32 = 2;
-pub(super) const EFER: u32 = 0xc000_0080;
-const PAT: u32 = 0x277;
-const APIC_BASE: u32 = 0x1b;
-const MTRR_CAP: u32 = 0xfe;
-const MTRR_DEFAULT: u32 = 0x2ff;
-const MTRR_VARIABLE_BASE: u32 = 0x200;
-const TSC_ADJUST: u32 = 0x3b;
+const VERSION: u32 = 3;
 const MAX_VARIABLE_MTRRS: usize = 16;
 const CR4_OSXSAVE: u64 = 1 << 18;
 
@@ -57,8 +50,10 @@ impl Error {
         match self {
             Self::NoMpServices => "native cores need UEFI MP Services source identity",
             Self::ProcessorInventory => "native processor inventory is invalid",
-            Self::Topology(_) => "native physical-core topology is ambiguous or exceeds capacity",
-            Self::CoreCount => "requested native count exceeds available physical cores",
+            Self::Topology(_) => "native physical-core topology is ambiguous",
+            Self::CoreCount => {
+                "requested native count exceeds the available physical cores or the executor's core capacity"
+            }
             Self::WrongBootstrapProcessor => {
                 "native BSP differs from the firmware processor identity"
             }
@@ -73,23 +68,6 @@ impl Error {
                 "AMD encrypted/SNP or fixed-attribute visibility controls are unqualified"
             }
         }
-    }
-}
-
-pub(super) unsafe fn read_msr(index: u32) -> u64 {
-    let (low, high): (u32, u32);
-    // SAFETY: caller checks that this known architectural MSR is implemented.
-    unsafe {
-        asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags))
-    };
-    (u64::from(high) << 32) | u64::from(low)
-}
-
-pub(super) unsafe fn write_msr(index: u32, value: u64) {
-    // SAFETY: caller has qualified this actual processor/MSR and value.
-    unsafe {
-        asm!("wrmsr", in("ecx") index, in("eax") value as u32,
-        in("edx") (value >> 32) as u32, options(nostack, preserves_flags));
     }
 }
 
@@ -110,7 +88,7 @@ impl FixedVisibility {
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
-        let original = unsafe { read_msr(amd::SYSCFG) };
+        let original = unsafe { msr::AMD_SYSCFG.read() };
         let mut guard = Self {
             syscfg: original,
             interrupts: flags & (1 << 9) != 0,
@@ -122,11 +100,20 @@ impl FixedVisibility {
         if fixed && original & amd::FIXED_MODIFY == 0 {
             guard.changed = true;
             unsafe {
-                write_msr(amd::SYSCFG, original | amd::FIXED_MODIFY);
+                msr::AMD_SYSCFG.write(original | amd::FIXED_MODIFY);
             }
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
-            if unsafe { read_msr(amd::SYSCFG) } != original | amd::FIXED_MODIFY {
-                return Err(Error::AmdMemoryControls);
+            if unsafe { msr::AMD_SYSCFG.read() } != original | amd::FIXED_MODIFY {
+                // With MtrrFixDramEn clear the fixed MTRRs' RdMem and WrMem
+                // bits have no effect (AMD APM Vol. 2 7.7.4), so the type
+                // bits read without the modify enable are the whole policy.
+                if original & amd::FIXED_DRAM != 0 {
+                    return Err(Error::AmdMemoryControls);
+                }
+                guard.changed = false;
+                unsafe {
+                    msr::AMD_SYSCFG.write(original);
+                }
             }
         }
         Ok(guard)
@@ -139,7 +126,7 @@ impl Drop for FixedVisibility {
         unsafe {
             if self.changed {
                 core::sync::atomic::compiler_fence(Ordering::SeqCst);
-                write_msr(amd::SYSCFG, self.syscfg);
+                msr::AMD_SYSCFG.write(self.syscfg);
             }
             if self.interrupts {
                 asm!("sti", options(nomem, nostack));
@@ -249,22 +236,26 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
         asm!("mov {}, cr0",out(reg) snapshot.cr0,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr3",out(reg) snapshot.cr3,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr4",out(reg) snapshot.cr4,options(nomem,nostack,preserves_flags));
-        snapshot.efer = read_msr(EFER);
+        snapshot.efer = msr::EFER.read();
         if basic.edx & (1 << 9) != 0 {
-            snapshot.apic_base = read_msr(APIC_BASE);
+            snapshot.apic_base = msr::APIC_BASE.read();
         }
         if basic.edx & (1 << 16) != 0 {
-            snapshot.pat = read_msr(PAT);
+            snapshot.pat = msr::PAT.read();
             snapshot.pat_valid = true;
         }
         if basic.edx & (1 << 12) != 0 {
-            let cap = read_msr(MTRR_CAP);
+            let cap = msr::MTRR_CAP.read();
             let variables = (cap & 0xff) as usize;
             if variables > MAX_VARIABLE_MTRRS {
                 return Err(Error::SnapshotCapacity);
             }
-            push_msr(&mut snapshot, MTRR_CAP, cap)?;
-            push_msr(&mut snapshot, MTRR_DEFAULT, read_msr(MTRR_DEFAULT))?;
+            push_msr(&mut snapshot, msr::MTRR_CAP.index, cap)?;
+            push_msr(
+                &mut snapshot,
+                msr::MTRR_DEFAULT.index,
+                msr::MTRR_DEFAULT.read(),
+            )?;
             let amd_controls = amd::architectural(&snapshot);
             let visibility = if amd_controls {
                 Some(FixedVisibility::open(cap & (1 << 8) != 0)?)
@@ -275,32 +266,32 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
                 for index in [
                     0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
                 ] {
-                    push_msr(&mut snapshot, index, read_msr(index))?;
+                    push_msr(&mut snapshot, index, msr::rdmsr(index))?;
                 }
             }
             if let Some(visibility) = visibility {
                 let original = visibility.syscfg;
                 drop(visibility);
-                if read_msr(amd::SYSCFG) != original {
+                if msr::AMD_SYSCFG.read() != original {
                     return Err(Error::AmdMemoryControls);
                 }
                 // Do not report masked fixed zeros as physical source state.
                 snapshot.amd_fixed_raw = true;
                 push_msr(&mut snapshot, amd::SYSCFG, original)?;
                 for index in amd::REGISTERS.into_iter().skip(1) {
-                    push_msr(&mut snapshot, index, read_msr(index))?;
+                    push_msr(&mut snapshot, index, msr::rdmsr(index))?;
                 }
             }
             for offset in 0..variables as u32 * 2 {
-                let index = MTRR_VARIABLE_BASE + offset;
-                push_msr(&mut snapshot, index, read_msr(index))?;
+                let index = msr::MTRR_PHYS_BASE.at(offset).index;
+                push_msr(&mut snapshot, index, msr::rdmsr(index))?;
             }
         }
         if snapshot
             .get(7, 0)
             .is_some_and(|record| record.ebx & (1 << 1) != 0)
         {
-            push_msr(&mut snapshot, TSC_ADJUST, read_msr(TSC_ADJUST))?;
+            push_msr(&mut snapshot, msr::TSC_ADJUST.index, msr::TSC_ADJUST.read())?;
         }
         if basic.ecx & ((1 << 26) | (1 << 27)) == (1 << 26) | (1 << 27)
             && snapshot.cr4 & CR4_OSXSAVE != 0
@@ -329,15 +320,16 @@ extern "efiapi" fn observe_ap(argument: *mut c_void) {
     }
 }
 
-/// Observe all available physical cores even when no explicit assignment was
-/// given. The default assignment is the actual selected physical-core roster;
+/// Observe the assignable physical cores (`min(physical, MAX_CORES)`) even when
+/// no explicit assignment was given. The default assignment is that roster;
 /// --native-cores narrows ownership explicitly, never supplies invented PEs.
 pub(crate) fn capture_assignment(requested: Option<usize>) -> Result<(Region, usize), Error> {
     let region = capture(requested.unwrap_or(1))?;
     // SAFETY: capture just allocated and initialized this exact retained UEFI
     // allocation; before EBS its physical address is directly accessible.
-    let count = unsafe { (&*(region.physical as *const Capture)).core_count as usize };
-    let assigned = topology::assignment_count(requested, count).map_err(|_| Error::CoreCount)?;
+    let physical = unsafe { Capture::from_raw(region.physical as *const u8, 0).physical_count };
+    let assigned =
+        topology::assignment_count(requested, physical as usize).map_err(|_| Error::CoreCount)?;
     Ok((region, assigned))
 }
 
@@ -348,7 +340,7 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
     let count = mp
         .get_number_of_processors()
         .map_err(|_| Error::ProcessorInventory)?;
-    if count.total == 0 || count.total > topology::MAX_PROCESSORS || count.enabled > count.total {
+    if count.total == 0 || count.total > u32::MAX as usize || count.enabled > count.total {
         return Err(Error::ProcessorInventory);
     }
     let mut processors = Vec::with_capacity(count.total);
@@ -408,10 +400,13 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
             thread,
         });
     }
-    let selected = topology::select(&processors).map_err(Error::Topology)?;
-    if requested == 0 || requested > selected.len() {
+    let physical = topology::select(&processors).map_err(Error::Topology)?;
+    let assignable =
+        topology::assignment_count(None, physical.len()).map_err(|_| Error::CoreCount)?;
+    if requested == 0 || requested > assignable {
         return Err(Error::CoreCount);
     }
+    let selected = &physical[..assignable];
     if mp.who_am_i().map_err(|_| Error::WrongBootstrapProcessor)?
         != processors[selected[0]].processor_number as usize
     {
@@ -448,22 +443,22 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
         }
         snapshots.push(snapshot);
     }
-    let pages = size_of::<Capture>().div_ceil(PAGE as usize);
+    let pages = record_pages(processors.len()).ok_or(Error::Memory)?;
     let memory = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
         .map_err(|_| Error::Memory)?;
-    let raw = memory.as_ptr().cast::<Capture>();
     // SAFETY: fresh owned firmware pages; all-zero is valid for this closed
     // record of integers/booleans/arrays. No large intermediate sits on a UEFI
     // stack. All protocol/callback/Vec borrows end before ExitBootServices.
     unsafe {
         memory.as_ptr().write_bytes(0, pages * PAGE as usize);
-        let capture = &mut *raw;
+        let capture = Capture::from_raw_mut(memory.as_ptr(), processors.len());
         capture.magic = MAGIC;
         capture.version = VERSION;
         capture.processor_count = processors.len() as u32;
         capture.enabled_count = count.enabled as u32;
         capture.core_count = selected.len() as u32;
-        capture.processors[..processors.len()].copy_from_slice(&processors);
+        capture.physical_count = physical.len() as u32;
+        capture.processors.copy_from_slice(&processors);
         for (slot, &index) in selected.iter().enumerate() {
             capture.selected[slot] = index as u32;
             capture.snapshots[slot] = snapshots[slot];
@@ -475,28 +470,42 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
     })
 }
 
+/// Whole pages holding a record of `processors` inventory entries.
+fn record_pages(processors: usize) -> Option<usize> {
+    Some(Capture::layout(processors)?.size().div_ceil(PAGE as usize))
+}
+
 /// # Safety
 /// This is the loader's immutable owned record, mapped in the engine physmap.
 pub(crate) unsafe fn captured(region: Region) -> Result<&'static Capture, Error> {
-    if region.bytes != (size_of::<Capture>() as u64).next_multiple_of(PAGE)
+    let header_pages = record_pages(0).ok_or(Error::Memory)?;
+    if region.bytes < (header_pages as u64) * PAGE
         || region.physical == 0
         || !region.physical.is_multiple_of(PAGE)
     {
         return Err(Error::Memory);
     }
-    // SAFETY: caller retains the exact loader allocation and its physmap.
-    let capture = unsafe { &*(crate::layout::physical(region.physical) as *const Capture) };
+    let base = crate::layout::physical(region.physical) as *const u8;
+    // SAFETY: caller retains the exact loader allocation and its physmap; the
+    // header-only view lies within the checked region.
+    let count = unsafe { Capture::from_raw(base, 0) }.processor_count as usize;
+    if record_pages(count).map(|pages| pages as u64 * PAGE) != Some(region.bytes) {
+        return Err(Error::Memory);
+    }
+    // SAFETY: the region holds exactly the record for `count` entries.
+    let capture = unsafe { Capture::from_raw(base, count) };
+    let physical = capture.physical_count as usize;
     if capture.magic != MAGIC
         || capture.version != VERSION
-        || capture.processor_count as usize > topology::MAX_PROCESSORS
         || capture.core_count == 0
-        || capture.core_count as usize > topology::MAX_CORES
+        || topology::assignment_count(None, physical) != Ok(capture.core_count as usize)
     {
         return Err(Error::ProcessorInventory);
     }
-    let processors = &capture.processors[..capture.processor_count as usize];
-    let selected = topology::select(processors).map_err(Error::Topology)?;
-    if selected.len() != capture.core_count as usize
+    let processors = &capture.processors;
+    let all = topology::select(processors).map_err(Error::Topology)?;
+    let selected = &all[..all.len().min(topology::MAX_CORES)];
+    if all.len() != physical
         || capture.enabled_count as usize
             != processors
                 .iter()

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Exact source SPI PCI profiles: intel-lpss-pci.c at
 // cc9de5d4b5ab6459f5774946aa3195ad51236fa8. Copyright (C) 2015 Intel.
+//! Intel LPSS SPI PCI profiles from intel-lpss-pci.c.
 use super::{Error, Identity, pxa2xx};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Profile {

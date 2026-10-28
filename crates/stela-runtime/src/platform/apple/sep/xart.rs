@@ -253,6 +253,7 @@ impl Xart {
     }
 
     /// The OS UUID the AP handed over with `setup_OS_UUID`, if any.
+    #[cfg(test)]
     pub fn os_uuid(&self) -> Option<&[u8]> {
         self.os_uuid.as_deref()
     }

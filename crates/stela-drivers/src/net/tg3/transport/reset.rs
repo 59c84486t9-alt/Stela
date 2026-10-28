@@ -5,10 +5,10 @@
 // Copyright (C) 2005-2018 Broadcom
 //! Unmanaged core reset: no DMA rings or packet-ready state is implied.
 use super::*;
+use crate::bus::pci::{Capabilities, capability::Transport};
 
 const PCI_COMMAND: u16 = 4;
 const PCI_STATUS_CAP_LIST: u32 = 1 << 20;
-const PCI_CAP_PTR: u16 = 0x34;
 const PCI_EXPRESS: u8 = 0x10;
 const PCI_MASTER: u16 = 4;
 const PCI_MWI: u16 = 0x10;
@@ -52,20 +52,23 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         if command_status & PCI_STATUS_CAP_LIST == 0 {
             return Err(Error::UnsupportedPcie);
         }
-        let mut next = (self.regs().config_read32(PCI_CAP_PTR)? & 0xfc) as u16;
-        let mut seen = [false; 64];
-        for _ in 0..48 {
-            if next < 0x40 || next & 3 != 0 || seen[usize::from(next / 4)] {
-                return Err(Error::UnsupportedPcie);
-            }
-            seen[usize::from(next / 4)] = true;
-            let entry = Self::checked(self.regs().config_read32(next)?)?;
-            if entry as u8 == PCI_EXPRESS {
-                return Ok(next);
-            }
-            next = ((entry >> 8) & 0xfc) as u16;
-        }
-        Err(Error::UnsupportedPcie)
+        let registers = self.regs();
+        let read = |offset: u16, bytes: u8| -> Result<u32, Error> {
+            let word = Self::checked(registers.config_read32(offset & !3)?)?;
+            let value = word >> ((offset & 3) * 8);
+            Ok(match bytes {
+                1 => value & 0xff,
+                2 => value & 0xffff,
+                _ => value,
+            })
+        };
+        Capabilities::new(Transport(read))
+            .find_map(|entry| match entry {
+                Ok(entry) if entry.id == PCI_EXPRESS => Some(Ok(entry.offset)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .unwrap_or(Err(Error::UnsupportedPcie))
     }
     pub(super) fn unmanaged(&mut self) -> Result<(), Error> {
         // The managed APE/ASF handshake is deliberately not inferred from an

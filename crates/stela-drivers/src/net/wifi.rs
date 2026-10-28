@@ -11,9 +11,11 @@ pub mod intel;
 pub mod mediatek;
 pub mod realtek;
 pub mod regulatory;
+pub mod sae;
 pub mod scan;
 pub mod security;
 pub mod station;
+pub mod supplicant;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -8,12 +8,13 @@ mod device_access;
 mod device_read;
 mod device_write;
 mod exclusive;
-// The profiles' reports belong to the hosted runtime, which only an Intel
-// Mac builds (`crate::hosted`); elsewhere the engine records them unread.
 #[cfg(all(feature = "std", feature = "native-profile"))]
 #[cfg_attr(
     not(all(target_os = "macos", target_arch = "x86_64")),
-    allow(dead_code)
+    expect(
+        dead_code,
+        reason = "the hosted runtime, which only an Intel Mac builds, reads the reports"
+    )
 )]
 pub(crate) mod floating_profile;
 mod guarded;
@@ -22,7 +23,10 @@ pub mod installed_code;
 #[cfg(all(feature = "std", feature = "native-profile"))]
 #[cfg_attr(
     not(all(target_os = "macos", target_arch = "x86_64")),
-    allow(dead_code)
+    expect(
+        dead_code,
+        reason = "the hosted runtime, which only an Intel Mac builds, reads the reports"
+    )
 )]
 pub(crate) mod metrics;
 mod monitor;
@@ -2492,7 +2496,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// What iBoot left in the core lock registers (`machine::ctrr`): every
     /// cluster and PE takes it now, and again when it starts. The boot
     /// mount calls this before the first instruction.
-    pub fn hand_off_core_locks(&mut self, handoff: ctrr::Handoff) {
+    pub fn hand_off_core_locks(&mut self, handoff: ctrr::CoreLocks) {
         let handoff = alloc::sync::Arc::new(handoff);
         let parked = self.peers.iter_mut().filter_map(|peer| match peer {
             processors::Peer::Parked(parked) => Some(parked.cpu_mut()),

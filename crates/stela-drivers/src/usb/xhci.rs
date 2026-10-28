@@ -96,7 +96,7 @@ mod transfer;
 pub use bind::Plan;
 use bind::bind_with_provider;
 pub use descriptor::{Device, Endpoint, Interface, SuperSpeedCompanion, interfaces};
-pub use identity::{DeviceAccess, SlotId};
+pub use identity::{DeviceAccess, DeviceRef, SlotId};
 pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
 use ring::{Event, Ring};
@@ -127,6 +127,13 @@ const IMAN: usize = 0x20;
 const ERSTSZ: usize = 0x28;
 const ERSTBA: usize = 0x30;
 const ERDP: usize = 0x38;
+const IMOD: usize = 0x24;
+const IMAN_IP: u32 = 1;
+const IMAN_IE: u32 = 1 << 1;
+const USBCMD_INTE: u32 = 1 << 2;
+const USBSTS_EINT: u32 = 1 << 3;
+/// Linux's default 40 us interrupt moderation, in 250 ns units.
+const MODERATION: u32 = 160;
 
 const RUN: u32 = 1;
 const CRCR_ABORT: u32 = 1 << 2;
@@ -172,11 +179,6 @@ const PORT_KEEP: u32 = PP | 0x7 << 25;
 
 const LEGACY_SUPPORT: u32 = 1;
 const SUPPORTED_PROTOCOL: u32 = 2;
-const BIOS_OWNED: u32 = 1 << 16;
-const OS_OWNED: u32 = 1 << 24;
-/// USBLEGCTLSTS: the SMI enables, and the RW1C SMI status bits.
-const LEGACY_SMI_ENABLES: u32 = 1 | 1 << 4 | 0x7 << 13;
-const LEGACY_SMI_STATUS: u32 = 0x7 << 29;
 
 pub(crate) const RING_TRBS: usize = 256;
 pub(crate) const TRB: usize = 16;
@@ -280,7 +282,6 @@ const DEBOUNCE_TIMEOUT_US: u64 = 2_000_000;
 /// Linux `PORT_INIT_TRIES`: resets and enumerations a port gets.
 const PORT_INIT_TRIES: usize = 4;
 const ADDRESS_RECOVERY_US: u64 = 2_000;
-const BIOS_HANDOFF_US: u64 = 1_000_000;
 
 // bmRequestType: direction, type and recipient (USB 2.0 Table 9-2).
 pub const DEVICE_TO_HOST: u8 = 0x80;
@@ -454,10 +455,12 @@ pub struct Controller {
     event_cycle: bool,
     slots: Vec<Option<Slot>>,
     slot_ownership: Vec<reset::Ownership>,
+    /// Slot numbers a test may no longer name bare ([`DeviceRef`] for u8).
+    #[cfg(test)]
+    test_retired_numbers: Vec<bool>,
     retry_resources: slot_resources::Cache,
-    /// A raw slot number never regains authority after its first retirement.
-    /// Only the retirement owner can set this monotonic fence.
-    legacy_slot_fenced: Vec<bool>,
+    /// Class requests to reset and rebind a device, in arrival order.
+    queued_resets: Vec<SlotId>,
     /// Transfer events that arrived while waiting for something else.
     pending: Vec<Event>,
     /// USBSTS once the controller reported a fatal error.
@@ -470,6 +473,8 @@ pub struct Controller {
     command_ring_stopped: bool,
     /// Events taken since ERDP last moved past them.
     unpublished: usize,
+    /// Whether interrupter 0 sends the function's vector as events post.
+    signalled: bool,
     /// Drains since USBSTS was last read.
     quiet_drains: u8,
     /// The command on the ring and its timer.
@@ -589,7 +594,9 @@ impl Controller {
                     return Err(outside());
                 }
                 match header & 0xff {
-                    LEGACY_SUPPORT => take_from_firmware(&mut *registers, at, clock),
+                    LEGACY_SUPPORT => {
+                        crate::usb::handoff::xhci_legacy(&mut *registers, at, clock);
+                    }
                     SUPPORTED_PROTOCOL => {
                         let ports = registers.read32(at + 8);
                         let (first, count) =
@@ -712,8 +719,10 @@ impl Controller {
             event_index: 0,
             event_cycle: true,
             slot_ownership: vec![reset::Ownership::Vacant; slots.len()],
-            legacy_slot_fenced: vec![false; slots.len()],
+            #[cfg(test)]
+            test_retired_numbers: vec![false; slots.len()],
             retry_resources: slot_resources::Cache::new(slots.len()),
+            queued_resets: Vec::new(),
             power: power::Ledger::new(slots.len()),
             slots,
             pending: Vec::new(),
@@ -721,6 +730,7 @@ impl Controller {
             command_poisoned: false,
             command_ring_stopped: false,
             unpublished: 0,
+            signalled: false,
             quiet_drains: 0,
             outstanding: None,
             finished: Vec::new(),
@@ -818,6 +828,36 @@ impl Controller {
         self.registers.write64(self.runtime + ERDP, dequeue | EHB);
     }
 
+    /// Send interrupter 0's interrupt, which the function's vector carries,
+    /// as xhci_run enables it: moderated, then IMAN.IE and USBCMD.INTE set.
+    /// Moving ERDP with Event Handler Busy lets the next event send it.
+    fn signal(&mut self) {
+        let runtime = self.runtime;
+        self.registers.write32(runtime + IMOD, MODERATION);
+        self.registers.write32(runtime + IMAN, IMAN_IE | IMAN_IP);
+        let command = self.registers.read32(self.operational + USBCMD);
+        self.registers
+            .write32(self.operational + USBCMD, command | USBCMD_INTE);
+        self.signalled = true;
+    }
+
+    /// Whether the controller sends the handoff's completion signal
+    /// ([`crate::Handoff::completion`]) as it posts an event.
+    pub fn signals(&self) -> bool {
+        self.signalled
+    }
+
+    /// Whether a transfer of `slot` may have completed: the event ring holds
+    /// an event software has not taken, or a taken transfer event for the
+    /// slot waits. A look at memory alone.
+    pub(crate) fn posted_for(&self, slot: SlotId) -> bool {
+        self.event_posted()
+            || self
+                .pending
+                .iter()
+                .any(|event| event.kind() == TRANSFER_EVENT && event.slot() == slot.hardware_slot())
+    }
+
     /// Whether the controller posted an event software has not taken, read
     /// from the event ring alone. An unreadable ring counts as posted so
     /// `next_event` fails it.
@@ -854,6 +894,11 @@ impl Controller {
         }
         self.quiet_drains = 0;
         self.check_status();
+        if self.signalled {
+            // xhci_irq clears USBSTS.EINT with each batch.
+            self.registers
+                .write32(self.operational + USBSTS, USBSTS_EINT);
+        }
         while let Some(event) = self.next_event() {
             // A transfer event for a slot no longer enabled has no waiter.
             let stale = event.kind() == TRANSFER_EVENT
@@ -1006,20 +1051,15 @@ fn wait(
     clock.wait(microseconds, || ready(registers))
 }
 
-/// The BIOS handoff (7.1.1): the OS Owned semaphore, then the SMIs off.
-/// Firmware that never lets go loses ownership anyway, as other operating
-/// systems do; its SMIs are disabled either way.
-fn take_from_firmware(registers: &mut dyn Registers, at: usize, clock: Clock) {
-    let header = registers.read32(at);
-    registers.write32(at, header | OS_OWNED);
-    if !wait(registers, clock, BIOS_HANDOFF_US, |r| {
-        r.read32(at) & BIOS_OWNED == 0
-    }) {
-        let header = registers.read32(at);
-        registers.write32(at, header & !BIOS_OWNED | OS_OWNED);
+// The BIOS handoff (7.1.1) is shared with the early handoff probe runs on
+// every USB host controller.
+impl crate::usb::handoff::Dwords for dyn Registers + '_ {
+    fn read32(&mut self, offset: usize) -> u32 {
+        Registers::read32(self, offset)
     }
-    let control = registers.read32(at + 4);
-    registers.write32(at + 4, control & !LEGACY_SMI_ENABLES | LEGACY_SMI_STATUS);
+    fn write32(&mut self, offset: usize, value: u32) {
+        Registers::write32(self, offset, value)
+    }
 }
 
 /// What the class drivers found on one controller.
@@ -1102,6 +1142,11 @@ pub fn attach_with_firmware_diagnostics(
         bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
     };
     function.enable_polled();
+    // xhci_try_enable_msi: MSI-X, otherwise MSI, for interrupter 0.
+    let signalled = match handoff.completion {
+        Some(message) => function.enable_message(handoff, &bars, message)?,
+        None => false,
+    };
     let address = function.address;
     let location = format!(
         "xhci {:04x}:{:02x}:{:02x}.{}",
@@ -1118,6 +1163,7 @@ pub fn attach_with_firmware_diagnostics(
             dma: dma_profile,
             quirks,
         },
+        signalled,
         || quirks::after_reset(function, handoff.clock),
     )?;
     found.controller_firmware = controller_firmware;
@@ -1157,10 +1203,15 @@ pub fn start_with_provider(
         location,
         firmware,
         hardware::Policy::default(),
+        false,
         || Ok(()),
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hardware profile, signal route and reset hook each come from the PCI function"
+)]
 fn start_with_policies(
     registers: Box<dyn Registers>,
     clock: Clock,
@@ -1168,10 +1219,14 @@ fn start_with_policies(
     location: String,
     firmware: &dyn crate::firmware::Provider,
     policy: hardware::Policy,
+    signal: bool,
     after_reset: impl FnOnce() -> Result<(), BlockError>,
 ) -> Result<Found, BlockError> {
     let mut controller =
         Controller::with_hardware_profile(registers, clock, dma, location, policy, after_reset)?;
+    if signal {
+        controller.signal();
+    }
     // The policy came from this same actual PCI function before BAR access,
     // and applies only to the controller reset just completed above. No public
     // raw-register caller can supply a guessed PCI identity or enable streams.
@@ -1212,6 +1267,85 @@ mod tests {
         model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
         controller.drain();
         assert_eq!(reads(), before + 2);
+    }
+
+    /// A signalled controller moderates and enables interrupter 0, and
+    /// clears USBSTS.EINT with each batch of events.
+    #[test]
+    fn signalled_controller_enables_interrupter_zero_and_clears_eint_per_batch() {
+        struct Idle;
+        impl Registers for Idle {
+            fn read32(&mut self, _: usize) -> u32 {
+                0
+            }
+            fn write32(&mut self, _: usize, _: u32) {}
+        }
+        struct Recording {
+            inner: Box<dyn Registers>,
+            writes: Rc<RefCell<Vec<(usize, u32)>>>,
+        }
+        impl Registers for Recording {
+            fn read32(&mut self, offset: usize) -> u32 {
+                self.inner.read32(offset)
+            }
+            fn write32(&mut self, offset: usize, value: u32) {
+                self.writes.borrow_mut().push((offset, value));
+                self.inner.write32(offset, value);
+            }
+        }
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all modeled controller DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let inner = core::mem::replace(&mut controller.registers, Box::new(Idle));
+        controller.registers = Box::new(Recording {
+            inner,
+            writes: writes.clone(),
+        });
+        assert!(!controller.signals());
+        controller.signal();
+        assert!(controller.signals());
+        let (runtime, operational) = (controller.runtime, controller.operational);
+        {
+            let writes = writes.borrow();
+            assert!(writes.contains(&(runtime + IMOD, MODERATION)));
+            assert!(writes.contains(&(runtime + IMAN, IMAN_IE | IMAN_IP)));
+            assert!(
+                writes
+                    .iter()
+                    .any(|&(at, value)| at == operational + USBCMD && value & USBCMD_INTE != 0)
+            );
+        }
+        writes.borrow_mut().clear();
+        model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
+        controller.drain();
+        assert!(
+            writes
+                .borrow()
+                .contains(&(operational + USBSTS, USBSTS_EINT))
+        );
+    }
+
+    /// A slot's transfer counts as posted while its event sits on the ring
+    /// and once taken until its waiter takes it, and only for that slot.
+    #[test]
+    fn a_slots_transfer_is_posted_from_the_ring_until_its_waiter_takes_it() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all modeled controller DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let (one, two) = (SlotId::fixture(1), SlotId::fixture(2));
+        assert!(!controller.posted_for(one));
+        model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
+        assert!(controller.posted_for(one) && controller.posted_for(two));
+        controller.drain();
+        assert!(controller.posted_for(one));
+        assert!(!controller.posted_for(two));
+        controller.take(|event| event.kind() == TRANSFER_EVENT);
+        assert!(!controller.posted_for(one));
     }
 
     #[test]

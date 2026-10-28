@@ -47,6 +47,28 @@ const DEVICES: [u16; 14] = [
 ];
 
 const STATUS: usize = 0x0008;
+/// Interrupt registers igc_configure_msix and igc_irq_enable program.
+const ICR: usize = 0x1500;
+const IMS: usize = 0x1508;
+const GPIE: usize = 0x1514;
+const EIMS: usize = 0x1524;
+const EIAC: usize = 0x152c;
+const EIAM: usize = 0x1530;
+const EITR0: usize = 0x1680;
+const IVAR0: usize = 0x1700;
+const IVAR_MISC: usize = 0x1740;
+const GPIE_NSICR: u32 = 1;
+const GPIE_MSIX_MODE: u32 = 1 << 4;
+const GPIE_EIAME: u32 = 1 << 30;
+const GPIE_PBA: u32 = 1 << 31;
+const IVAR_VALID: u32 = 0x80;
+const IMS_LSC: u32 = 1 << 2;
+/// igc.h IGC_START_ITR, with IGC_EITR_CNT_IGNR as igc_write_itr sets it.
+const START_ITR: u32 = 648 | 1 << 31;
+/// The one MSI-X vector: queue 0's receive and the link causes.
+const VECTOR: u32 = 0;
+/// An MSI-X table entry's bytes.
+const MSIX_ENTRY_BYTES: u64 = 16;
 const RCTL: usize = 0x0100;
 const TCTL: usize = 0x0400;
 const RAL: usize = 0x5400;
@@ -150,6 +172,8 @@ pub struct Igc {
     pub location: String,
     /// Actual internal PHY identifier, including its silicon revision.
     pub phy_identity: u32,
+    /// Whether MSI-X vector 0 sends the handoff's completion signal.
+    signalled: bool,
 }
 
 impl Igc {
@@ -176,8 +200,28 @@ impl Igc {
             unsafe { pci::disable_aspm_l1_2_link(function, handoff) }
         })?;
         function.power_up(&handoff.clock)?;
-        let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
+        let bars = function.bars();
+        let device = registers(handoff, bars[0], 0, REGISTER_BYTES)?;
         function.enable_polled();
+        let signalled = match (handoff.completion, function.interrupts().msix) {
+            (Some(message), Some(msix)) => {
+                let table = registers(
+                    handoff,
+                    bars[usize::from(msix.table_bar)],
+                    u64::from(msix.table_offset),
+                    MSIX_ENTRY_BYTES,
+                )?;
+                function.enable_msix(msix, || {
+                    table.write32(0, message.address as u32);
+                    table.write32(4, (message.address >> 32) as u32);
+                    table.write32(8, message.data);
+                    table.write32(12, 0);
+                    Ok(())
+                })?;
+                true
+            }
+            _ => false,
+        };
         let clock = handoff.clock;
         let mut hardware = hardware::Hardware::new(&device, &clock)?;
         let phy_identity = hardware.initialize()?;
@@ -197,6 +241,7 @@ impl Igc {
             clock,
             location: format!("{}", function.address),
             phy_identity,
+            signalled,
         };
         net.start_receive()?;
         net.start_transmit()?;
@@ -236,7 +281,25 @@ impl Igc {
         // donor's IFF_ALLMULTI path does, so IPv6/other multicast reaches it.
         self.device
             .write32(RCTL, RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
+        if self.signalled {
+            self.arm_interrupts();
+        }
         Ok(())
+    }
+
+    /// igc_configure_msix and igc_irq_enable for one vector: queue 0's
+    /// receive and the link causes send it, auto-masked until the next
+    /// empty receive re-arms it.
+    fn arm_interrupts(&self) {
+        let device = &self.device;
+        device.write32(GPIE, GPIE_MSIX_MODE | GPIE_PBA | GPIE_EIAME | GPIE_NSICR);
+        device.write32(IVAR_MISC, (VECTOR | IVAR_VALID) << 8);
+        device.write32(IVAR0, VECTOR | IVAR_VALID);
+        device.write32(EITR0, START_ITR);
+        device.write32(EIAC, device.read32(EIAC) | 1 << VECTOR);
+        device.write32(EIAM, device.read32(EIAM) | 1 << VECTOR);
+        device.write32(EIMS, 1 << VECTOR);
+        device.write32(IMS, IMS_LSC);
     }
 
     fn start_transmit(&mut self) -> Result<(), BlockError> {
@@ -427,6 +490,10 @@ impl Link for Igc {
         Ok(())
     }
 
+    fn signals(&self) -> bool {
+        self.signalled
+    }
+
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         self.watchdog()?;
         loop {
@@ -439,6 +506,16 @@ impl Link for Igc {
                 if let Some(tail) = self.receive.idle() {
                     fence(Ordering::SeqCst);
                     self.device.write32(RDT, tail);
+                }
+                if self.signalled {
+                    // igc_msix_other reads the link cause, clearing it so
+                    // the next change sends the vector; igc_ring_irq_enable
+                    // unmasks the vector, auto-masked when it fired.
+                    let link = self.device.read32(ICR) & IMS_LSC != 0;
+                    self.device.write32(EIMS, 1 << VECTOR);
+                    if link {
+                        self.watchdog()?;
+                    }
                 }
                 return Ok(None);
             };
@@ -471,7 +548,6 @@ mod tests {
         full_duplex: true,
         flow_control: FlowControl::Full,
     };
-    const ICR: usize = 0x1500;
 
     struct Fixture {
         net: Igc,
@@ -505,6 +581,7 @@ mod tests {
                 },
                 location: "model".into(),
                 phy_identity: 0x67c9dc01,
+                signalled: false,
             };
             net.start_receive().unwrap();
             net.start_transmit().unwrap();
@@ -514,6 +591,16 @@ mod tests {
                 _backing: backing,
             }
         }
+    }
+
+    /// An empty receive unmasks the vector, auto-masked when it fired.
+    #[test]
+    fn empty_receive_unmasks_the_signal_vector() {
+        let mut fixture = Fixture::new();
+        fixture.net.signalled = true;
+        assert!(fixture.net.signals());
+        assert_eq!(fixture.net.receive(), Ok(None));
+        assert_eq!(fixture.registers[EIMS / 4], 1 << VECTOR);
     }
 
     #[test]

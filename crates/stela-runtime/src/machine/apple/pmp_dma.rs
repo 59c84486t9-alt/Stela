@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn mounted_profile_and_actual_bus_identity_are_required_beside_numeric_geometry() {
         let mut devices = AppleDevices::new();
-        devices.add_pmp(&pmp()).unwrap();
+        devices.add_pmp(&pmp(), crate::builds::DEFAULT).unwrap();
         let asc = devices
             .coprocessors
             .iter()

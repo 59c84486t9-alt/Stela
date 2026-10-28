@@ -78,10 +78,7 @@ impl Controller {
             self.validate_attachment_parent(attachment, parent_id),
         )?;
         let generation = during("allocate device generation", identity::next_generation())?;
-        let slot = during(
-            "Enable Slot without recycling retired IDs",
-            self.fresh_slot(),
-        )?;
+        let slot = during("Enable Slot", self.fresh_slot())?;
         if let Err(error) = self.reserve_current(slot, generation, attachment, parent_id) {
             let _ = self.disable_slot(slot, reset::Ownership::Vacant);
             return Err(("reserve USB upstream current".into(), error));
@@ -331,6 +328,28 @@ impl Controller {
 
     /// Choose an enumerated device's configuration and bring up a hub's
     /// ports; the device joins the inventory either way.
+    /// `usb_choose_configuration` for a freshly identified device. A failed
+    /// selection leaves the descriptor inventory with no configuration.
+    pub(super) fn choose(
+        &mut self,
+        device: &mut Device,
+        location: &str,
+        failures: &mut Vec<(String, BlockError)>,
+    ) -> bool {
+        if let Err(error) = self.preflight_vendor_ethernet(device) {
+            failures.push((format!("{location} RTL815x configuration preflight"), error));
+        }
+        if let Err(why) = configuration::select_with_controller(device, Some(self)) {
+            device.configuration.clear();
+            failures.push((
+                format!("{location} {} choose configuration", device.name()),
+                BlockError::Unsupported(why),
+            ));
+            return false;
+        }
+        true
+    }
+
     fn adopt(
         &mut self,
         mut device: Device,
@@ -340,16 +359,8 @@ impl Controller {
         devices: &mut Vec<Device>,
         failures: &mut Vec<(String, BlockError)>,
     ) {
-        if let Err(error) = self.preflight_vendor_ethernet(&mut device) {
-            failures.push((format!("{location} RTL815x configuration preflight"), error));
-        }
-        if let Err(why) = configuration::select_with_controller(&mut device, Some(self)) {
-            device.configuration.clear();
-            failures.push((
-                format!("{location} {} choose configuration", device.name()),
-                BlockError::Unsupported(why),
-            ));
-        } else if device.descriptor[4] == HUB_CLASS
+        if self.choose(&mut device, &location, failures)
+            && device.descriptor[4] == HUB_CLASS
             && let Err(error) = self.hub(&device, attachment, dma, devices, failures)
         {
             failures.push((format!("{location} {} enumerate hub", device.name()), error));
@@ -743,8 +754,12 @@ impl Controller {
     }
 
     #[cfg(test)]
-    pub(super) fn hub_port_status(&mut self, slot: u8, port: u8) -> Result<(u16, u16), BlockError> {
-        self.legacy_slot(slot)?;
+    pub(super) fn hub_port_status(
+        &mut self,
+        id: impl DeviceRef,
+        port: u8,
+    ) -> Result<(u16, u16), BlockError> {
+        let slot = id.current_slot(self)?;
         self.hub_port_status_owned(slot, port)
     }
 

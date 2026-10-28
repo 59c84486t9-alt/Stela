@@ -17,7 +17,7 @@ use stela_compiler::{
 
 /// The memory view's fault fields as the native code left them, kept for
 /// failure reports.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "failure reports read the fields through Debug")]
 #[derive(Debug, Clone, Copy)]
 struct RawView {
     access_code: u32,

@@ -106,8 +106,7 @@ fn parent_command<R: Registers>(host: &mut Host<R>) -> Result<u16, Error> {
         .ok_or(Error::ReadFailed)
 }
 /// The current Host preparation profile requires its parent already in D0.
-/// Original parent capability bodies were validated by stopped admission. This
-/// traversal still bounds/cycle-checks every header before following the link.
+/// The parent's capability list is validated again before its PM control is read.
 pub(super) fn parent_d0<R: Registers>(host: &mut Host<R>) -> Result<(), Error> {
     if host.io().parent_read(0, 4)? != host.identity {
         return Err(Error::UnsupportedDevice);
@@ -119,25 +118,9 @@ pub(super) fn parent_d0<R: Registers>(host: &mut Host<R>) -> Result<(), Error> {
     if status & 0x10 == 0 {
         return Ok(());
     }
-    let mut offset = host.io().parent_read(0x34, 1)? as u16;
-    let mut visited = [false; 256];
-    while offset != 0 {
-        if !(0x40..=0xfc).contains(&offset)
-            || !offset.is_multiple_of(4)
-            || visited[usize::from(offset)]
-        {
-            return Err(Error::Capability);
-        }
-        visited[usize::from(offset)] = true;
-        let header = host.io().parent_read(offset, 2)?;
-        if header == u32::from(u16::MAX) {
-            return Err(Error::ReadFailed);
-        }
-        if header & 255 == 1 {
-            if offset + 8 > 256 {
-                return Err(Error::Capability);
-            }
-            let control = host.io().parent_read(offset + 4, 2)?;
+    for entry in host.parent_capabilities()? {
+        if entry.id == 1 {
+            let control = host.io().parent_read(entry.offset + 4, 2)?;
             if control == u32::from(u16::MAX) {
                 return Err(Error::ReadFailed);
             }
@@ -145,7 +128,6 @@ pub(super) fn parent_d0<R: Registers>(host: &mut Host<R>) -> Result<(), Error> {
                 return Err(Error::Suspended);
             }
         }
-        offset = (header >> 8) as u16;
     }
     Ok(())
 }

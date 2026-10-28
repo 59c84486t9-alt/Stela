@@ -516,6 +516,7 @@ impl Smc {
 
     /// The last power notice the AP gave (`offw`, `rest`, `slpw`, `waka`,
     /// `panb` or `pane`).
+    #[cfg(test)]
     pub fn notice(&self) -> Option<u32> {
         self.notice
     }

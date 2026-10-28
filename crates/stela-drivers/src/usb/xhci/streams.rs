@@ -353,12 +353,12 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn stream_capacity(
         &self,
-        slot: u8,
+        id: impl DeviceRef,
         endpoints: &[Endpoint],
         selected: &[u8],
         requested: u16,
     ) -> Result<u16, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.stream_capacity_owned(slot, endpoints, selected, requested)
     }
 
@@ -411,13 +411,13 @@ impl Controller {
     /// Returns the actual usable nonzero IDs shared by every selected endpoint.
     pub fn configure_streams(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         endpoints: &[Endpoint],
         stream_endpoints: &[u8],
         requested: u16,
         dma: &mut dyn DmaAllocator,
     ) -> Result<u16, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.configure_streams_owned(slot, endpoints, stream_endpoints, requested, dma)
     }
 
@@ -440,13 +440,13 @@ impl Controller {
     /// permission to reuse any possibly outstanding contributor's buffer.
     pub fn submit_stream(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         dci: u8,
         stream_id: u16,
         buffer: u64,
         length: usize,
     ) -> Result<StreamTransfer, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         self.submit_stream_owned(slot, dci, stream_id, buffer, length)
     }
 
@@ -1084,9 +1084,10 @@ mod tests {
                 _event_table: dma.allocate(16, 64).unwrap().into(),
                 event_index: 0,
                 event_cycle: true,
-                legacy_slot_fenced: vec![false; slots.len()],
                 retry_resources: slot_resources::Cache::new(slots.len()),
+                queued_resets: Vec::new(),
                 slot_ownership: vec![reset::Ownership::Vacant, reset::Ownership::Enabled],
+                test_retired_numbers: vec![false; 2],
                 power: power::Ledger::new(2),
                 slots,
                 pending: Vec::new(),
@@ -1094,6 +1095,7 @@ mod tests {
                 command_poisoned: false,
                 command_ring_stopped: false,
                 unpublished: 0,
+                signalled: false,
                 quiet_drains: 0,
                 outstanding: None,
                 finished: Vec::new(),

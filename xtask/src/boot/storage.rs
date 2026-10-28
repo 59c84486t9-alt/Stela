@@ -1,0 +1,308 @@
+//! A run's storage: the boot volume it writes and every disk QEMU attaches.
+use super::{
+    PayloadMode, Run, SYNTHETIC_SLICE_BYTES, TARGET_BYTES, TARGET_SERIAL, TARGET_SLOT,
+    UsbDiskModel, VVFAT_BYTES, copy_bundle, directory_bytes, disks, fat_image, option_path,
+    preboot::Preboot, usb_serial,
+};
+use anyhow::{Context, Result, ensure};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command as Process,
+};
+use stela_cli::efi;
+
+/// Where a run keeps what it boots and what it records.
+pub(super) struct Paths {
+    pub(super) output: PathBuf,
+    /// The boot volume, as a directory.
+    pub(super) volume: PathBuf,
+    /// `\EFI\stela\source.bin`: the system-mode guest image, when the run
+    /// has one.
+    pub(super) source: PathBuf,
+    /// The blank disk `--payload stage` partitions and stages onto.
+    pub(super) target: PathBuf,
+    /// The guest's UART log.
+    pub(super) serial: PathBuf,
+}
+
+impl Paths {
+    pub(super) fn new(output: PathBuf) -> Self {
+        let volume = output.join("volume");
+        Self {
+            source: volume.join("EFI/stela/source.bin"),
+            target: output.join("target.img"),
+            serial: output.join("serial.txt"),
+            volume,
+            output,
+        }
+    }
+}
+
+/// `--storage-check`'s disks, made in the output directory, each named in
+/// `options`.
+pub(super) fn check_disks(
+    arguments: &Run,
+    paths: &Paths,
+    options: &mut String,
+) -> Result<Vec<disks::Disk>> {
+    let disks = match arguments.storage_check {
+        true => {
+            fs::create_dir_all(&paths.output)?;
+            disks::create(&paths.output)?
+        }
+        false => Vec::new(),
+    };
+    options.extend(disks.iter().map(disks::Disk::option));
+    Ok(disks)
+}
+
+/// Check the USB disks, and name each `--usb-storage-disk` in `options`.
+pub(super) fn usb_options(arguments: &Run, options: &mut String) -> Result<()> {
+    for path in &arguments.usb_disk {
+        ensure!(path.is_file(), "USB disk is not a file: {}", path.display());
+    }
+    ensure!(
+        arguments.usb_storage_disk.len() <= 6,
+        "the guest's native hub carries at most six USB disks"
+    );
+    for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
+        ensure!(
+            path.is_file(),
+            "USB storage disk is not a file: {}",
+            path.display()
+        );
+        options.push_str(&format!(" --usb-storage {}", usb_serial(index)));
+    }
+    Ok(())
+}
+
+/// `--payload`: a synthetic IPSW split onto the volume, and `options` with
+/// the install mode that reads it; staging also makes the blank target.
+pub(super) fn payload(arguments: &Run, paths: &Paths, options: String) -> Result<String> {
+    let Some(mode) = arguments.payload else {
+        return Ok(options);
+    };
+    let ipsw = paths.output.join("synthetic.ipsw");
+    fs::create_dir_all(&paths.output)?;
+    efi::synthetic_ipsw(&ipsw)?;
+    efi::write_payload(&efi::PayloadOptions {
+        image: &ipsw,
+        model: efi::SYNTHETIC_MODEL,
+        root: &paths.volume,
+        layout: match mode {
+            PayloadMode::VerifyArchive => efi::PayloadLayout::Archive,
+            _ => efi::PayloadLayout::Split,
+        },
+        slice_bytes: SYNTHETIC_SLICE_BYTES,
+        fetch_keys: false,
+    })?;
+    let mut install = format!(
+        "{options} --install-build {} --install-mode ",
+        efi::SYNTHETIC_BUILD
+    );
+    match mode {
+        PayloadMode::Verify | PayloadMode::VerifyArchive => install.push_str("verify"),
+        PayloadMode::Stage | PayloadMode::StagePath => {
+            fs::File::create_new(&paths.target)?.set_len(TARGET_BYTES)?;
+            let identity = match mode {
+                PayloadMode::Stage => format!("--install-target-serial {TARGET_SERIAL}"),
+                _ => format!(
+                    "--install-target-path PciRoot(0x0)/Pci({TARGET_SLOT:#x},0x0) \
+                     --install-target-bytes {TARGET_BYTES}"
+                ),
+            };
+            // A 4 GiB disk: 1 GiB cache, and an Apple region of at
+            // least 1 GiB instead of a real restore's 64 GiB.
+            install.push_str(&format!(
+                "stage {identity} \
+                 --install-cache-bytes 0x40000000 --install-min-apple-bytes 0x40000000"
+            ));
+        }
+    }
+    Ok(install)
+}
+
+/// Write the boot volume: the application, `source.bin`, `stela.cfg` and
+/// what the run adds, or only the output directory for a `--usb-image`.
+/// Returns the FAT32 image of a volume too large for QEMU's directory one.
+pub(super) fn write_volume(
+    arguments: &Run,
+    paths: &Paths,
+    image: &Path,
+    bytes: Vec<u8>,
+    options: &str,
+) -> Result<Option<PathBuf>> {
+    let volume = &paths.volume;
+    if arguments.usb_image.is_some() {
+        fs::create_dir_all(&paths.output)?;
+    } else {
+        fs::create_dir_all(volume.join("EFI/BOOT"))?;
+        fs::create_dir_all(volume.join("EFI/stela"))?;
+        fs::copy(image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
+        if !bytes.is_empty() {
+            fs::write(&paths.source, bytes)?;
+        }
+        fs::write(volume.join("EFI/stela/stela.cfg"), options)?;
+        if let Some(directory) = &arguments.host_firmware {
+            let package =
+                stela_loader::host_firmware::Package::read_for_mount(directory, &fs::read(image)?)?;
+            package.publish(&volume.join(stela_loader::host_firmware::DIRECTORY))?;
+        }
+        if let Some(bundle) = &arguments.bundle {
+            copy_bundle(bundle, &volume.join("EFI/stela/bundle"))?;
+        }
+        if let Some(manifest) = &arguments.restore_manifest {
+            fs::copy(manifest, volume.join("EFI/stela/payload.json"))
+                .with_context(|| format!("restore manifest {}", manifest.display()))?;
+            // The block hashes the manifest names go beside it, so the
+            // restore host needs no scan of the payload.
+            let parsed = stela_runtime::payload::PayloadManifest::parse(&fs::read(manifest)?)
+                .map_err(|error| anyhow::anyhow!("{}: {error}", manifest.display()))?;
+            if let Some(blocks) = &parsed.block_hashes {
+                let from = manifest.with_file_name(&blocks.file);
+                fs::copy(&from, volume.join("EFI/stela").join(&blocks.file))
+                    .with_context(|| format!("block hashes {}", from.display()))?;
+            }
+        }
+    }
+    // QEMU's directory volume is FAT16 and holds 516 MB; larger volumes,
+    // such as a restore bundle with its ramdisk, go into a FAT32 image.
+    Ok(match &arguments.usb_image {
+        None if !arguments.directory_volume && directory_bytes(volume)? > VVFAT_BYTES => {
+            Some(fat_image(volume, &paths.output)?)
+        }
+        _ => None,
+    })
+}
+
+/// The boot volume's drive: the USB image, the FAT32 image or the
+/// directory itself, on a virtio disk unless the USB carries it.
+pub(super) fn attach_volume(
+    arguments: &Run,
+    paths: &Paths,
+    fat: Option<&Path>,
+    format: &str,
+    command: &mut Process,
+) {
+    // A USB's setup writes the boot log.
+    let access = if arguments.usb_image.is_some() {
+        "readonly=off,file=fat:rw:"
+    } else {
+        "readonly=on,file=fat:"
+    };
+    command.arg("-drive").arg(match &arguments.usb_image {
+        Some(usb) => format!(
+            "if=none,id=volume,format={format},snapshot={},file={}",
+            if arguments.usb_writable { "off" } else { "on" },
+            option_path(usb)
+        ),
+        None => match fat {
+            Some(image) => format!(
+                "if=none,id=volume,format=raw,readonly=on,file={}",
+                option_path(image)
+            ),
+            None => format!(
+                "if=none,id=volume,format=raw,{access}{}",
+                option_path(&paths.volume)
+            ),
+        },
+    });
+    if arguments.usb_image.is_none() {
+        command.args(["-device", "virtio-blk-pci,drive=volume"]);
+    }
+}
+
+/// `--storage-check`'s disks, the Preboot disk and the staging target.
+pub(super) fn attach_disks(
+    arguments: &Run,
+    paths: &Paths,
+    disks: &[disks::Disk],
+    preboot: Option<&Preboot>,
+    command: &mut Process,
+) {
+    for (index, disk) in disks.iter().enumerate() {
+        disk.attach(index, command);
+    }
+    if let Some(preboot) = preboot {
+        preboot.attach(command);
+    }
+    if paths.target.exists() {
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=target,format=raw,file={}",
+                option_path(&paths.target)
+            ))
+            .arg("-device")
+            .arg(match arguments.payload {
+                Some(PayloadMode::StagePath) => {
+                    format!("virtio-blk-pci,drive=target,addr={TARGET_SLOT:#x}")
+                }
+                _ => format!("nvme,drive=target,serial={TARGET_SERIAL},addr={TARGET_SLOT:#x}"),
+            });
+    }
+}
+
+/// The `--usb-image` stick on the host's USB controller, as the boot disk.
+pub(super) fn attach_usb_boot(arguments: &Run, command: &mut Process) {
+    if arguments.usb_image.is_some() {
+        command.arg("-device").arg(format!(
+            "usb-storage,drive=volume,serial={},bus=host-usb.0,bootindex=0",
+            arguments.usb_serial
+        ));
+    }
+}
+
+/// `--usb-disk`s on the host's USB controller, and the NVMe disks
+/// `--usb-storage-disk` names.
+pub(super) fn attach_usb_disks(arguments: &Run, command: &mut Process) {
+    for (index, path) in arguments.usb_disk.iter().enumerate() {
+        command.arg("-drive").arg(format!(
+            "if=none,id=usbdisk{index},format=raw,file={}",
+            option_path(path)
+        ));
+        match arguments.usb_disk_model.unwrap_or(UsbDiskModel::Bot) {
+            UsbDiskModel::Bot => {
+                command.arg("-device").arg(format!(
+                    "usb-storage,drive=usbdisk{index},serial=STELAUSBDISK{index},bus=host-usb.0"
+                ));
+            }
+            UsbDiskModel::Uas | UsbDiskModel::UasUsb2 => {
+                command.arg("-device").arg(format!(
+                    "usb-uas,id=host-uas{index},serial=STELAUSBDISK{index},bus=host-usb.0"
+                ));
+                command.arg("-device").arg(format!(
+                    "scsi-hd,drive=usbdisk{index},bus=host-uas{index}.0,scsi-id=0,lun=0"
+                ));
+            }
+        }
+    }
+    for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=usb{index},format=raw,file={}",
+                option_path(path)
+            ))
+            .arg("-device")
+            .arg(format!(
+                "nvme,drive=usb{index},serial={}",
+                usb_serial(index)
+            ));
+    }
+}
+
+/// `--storage-disk`s, each an NVMe disk with its serial.
+pub(super) fn attach_storage_disks(attached: &[(PathBuf, String)], command: &mut Process) {
+    for (index, (path, serial)) in attached.iter().enumerate() {
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=ans{index},format=raw,file={}",
+                option_path(path)
+            ))
+            .arg("-device")
+            .arg(format!("nvme,drive=ans{index},serial={serial}"));
+    }
+}

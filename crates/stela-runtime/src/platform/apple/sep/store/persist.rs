@@ -101,6 +101,7 @@ impl HostStore {
     }
 
     /// Hand the backing device back, for a reopen across a simulated reboot.
+    #[cfg(test)]
     pub fn into_device(self) -> Box<dyn BlockDevice> {
         self.device
     }

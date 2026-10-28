@@ -1,7 +1,7 @@
 //! Cold fixed-physical-core adapter over the boot's existing physical reservations.
 //! Final Apple topology/device/DMA/reset admission belongs to the mount. This
 //! constructs the actual checked Machine; it never certifies legacy raw V1.
-mod bindings;
+use stela_boot_core::worker_bindings as bindings;
 
 use super::{executor::Executors, firmware::Capture, transport::FixedWorkers};
 use crate::{apic::Apic, engine::host, handoff::Handoff, layout};
@@ -59,7 +59,7 @@ pub(crate) unsafe fn reserve_for_workers(
     if cores == 0
         || cores > capture.core_count as usize
         || cores > super::topology::MAX_CORES
-        || count > super::topology::MAX_PROCESSORS
+        || count != capture.processors.len()
         || executors.processors().len() + 1 != cores
     {
         return Err("canonical target has an invalid assigned physical roster");
@@ -113,8 +113,7 @@ unsafe fn reserve_with_limit(
     ranges: &[host::RamRange],
     limit: Option<stela_compiler::TargetCpu>,
 ) -> Result<Arc<RegisteredSystemRam>, &'static str> {
-    let (cr0, cr3, cr4, flags): (u64, u64, u64, u64);
-    let (low, high): (u32, u32);
+    let (cr0, cr3, cr4, flags, efer): (u64, u64, u64, u64, u64);
     // SAFETY: the same cold CPL0 owner required by registration. Read only
     // live BSP controls, without changing firmware MTRR visibility or using
     // the firmware snapshot/an AP's startup controls as current evidence.
@@ -123,10 +122,8 @@ unsafe fn reserve_with_limit(
         core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
         core::arch::asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
-        core::arch::asm!("rdmsr", in("ecx") super::firmware::EFER,
-            out("eax") low, out("edx") high, options(nostack, preserves_flags));
+        efer = crate::cpu::msr::EFER.read();
     }
-    let efer = u64::from(low) | u64::from(high) << 32;
     crate::output::arguments(format_args!(
         "NATIVE RAM BSP cr0={cr0:#x} cr3={cr3:#x} cr4={cr4:#x} efer={efer:#x} rflags={flags:#x}\n"
     ));
@@ -271,7 +268,7 @@ pub(crate) unsafe fn prepare_with_locks<'a, D: Devices>(
     assignments: &[WorkerBinding],
     processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
     trace_artifacts: bool,
-    core_locks: Option<stela_runtime::machine::ctrr::Handoff>,
+    core_locks: Option<stela_runtime::machine::ctrr::CoreLocks>,
 ) -> Result<CanonicalMachine<'a, D>, &'static str> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 0

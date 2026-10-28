@@ -25,10 +25,10 @@ impl Controller {
     #[cfg(test)]
     pub(in super::super) fn hub_port(
         &mut self,
-        slot: u8,
+        id: impl DeviceRef,
         port: u8,
     ) -> Result<Option<u8>, BlockError> {
-        self.legacy_slot(slot)?;
+        let slot = id.current_slot(self)?;
         let id = self.device_id(slot)?;
         self.hub_port_for(id, port)
     }

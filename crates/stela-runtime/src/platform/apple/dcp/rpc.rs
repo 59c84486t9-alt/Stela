@@ -156,6 +156,8 @@ pub struct Link<S> {
     /// The DART window base the AP's 32-bit DVAs lie in, when it restricts
     /// them (`truncate-dvas`).
     window: Option<u64>,
+    /// The interface version it announces and hashes into its ready CRC.
+    version: u32,
     phase: Phase,
     heap: Option<RegionHeader>,
     /// Words from the AP waiting for the DMA step.
@@ -178,10 +180,13 @@ fn align(bytes: u32) -> Option<u32> {
 }
 
 impl<S: Service> Link<S> {
-    pub fn new(service: S, window: Option<u64>) -> Self {
+    /// A link announcing interface `version` (the build's
+    /// `dcp_link_version`).
+    pub fn new(service: S, window: Option<u64>, version: u32) -> Self {
         Self {
             service,
             window,
+            version,
             phase: Phase::Hello,
             heap: None,
             incoming: VecDeque::new(),
@@ -203,6 +208,7 @@ impl<S: Service> Link<S> {
     }
 
     /// The heap the AP lent the coprocessor, once announced.
+    #[cfg(test)]
     pub fn heap(&self) -> Option<RegionHeader> {
         self.heap
     }
@@ -223,7 +229,7 @@ impl<S: Service> Link<S> {
         self.phase = Phase::Hello;
         self.heap = None;
         Ok(Word::Hello {
-            version: u64::from(link::VERSION),
+            version: u64::from(self.version),
         }
         .encode())
     }
@@ -355,7 +361,7 @@ impl<S: Service> Link<S> {
                 self.phase = Phase::Up { region };
                 outbox.push(
                     Word::Ready {
-                        crc: link::interface_crc(),
+                        crc: link::interface_crc(self.version),
                         alignment: ALIGNMENT,
                     }
                     .encode(),
@@ -621,6 +627,7 @@ mod tests {
     use alloc::string::String;
 
     const WINDOW: u64 = 0x8_0000_0000;
+    const VERSION: u32 = crate::builds::DEFAULT.dcp_link_version;
     const REGION_DVA: u64 = 0x4000;
     const REGION: u64 = WINDOW + REGION_DVA;
 
@@ -697,7 +704,7 @@ mod tests {
     }
 
     fn up(memory: &mut Memory) -> Link<Test> {
-        let mut link = Link::new(Test::default(), Some(WINDOW));
+        let mut link = Link::new(Test::default(), Some(WINDOW), VERSION);
         assert_eq!(link.start().unwrap(), 0x100 | 211 << 16);
         link.receive(Word::Region { dva: REGION_DVA }.encode());
         let mut out = Vec::new();
@@ -838,7 +845,7 @@ mod tests {
         }
     }
     fn effects_up(memory: &mut Memory) -> Link<Effects> {
-        let mut link = Link::new(Effects::default(), Some(WINDOW));
+        let mut link = Link::new(Effects::default(), Some(WINDOW), VERSION);
         link.start().unwrap();
         link.receive(Word::Region { dva: REGION_DVA }.encode());
         link.dma(memory, &mut Vec::new()).unwrap();
@@ -882,7 +889,7 @@ mod tests {
             assert!(link.retained_idle());
         }
         let mut memory = Memory::mapped();
-        let mut link = Link::new(Effects::default(), Some(WINDOW));
+        let mut link = Link::new(Effects::default(), Some(WINDOW), VERSION);
         link.start().unwrap();
         link.receive(Word::Region { dva: REGION_DVA }.encode());
         assert!(
@@ -1287,7 +1294,7 @@ mod tests {
     fn protocol_violations_refuse_by_name_without_consuming_the_input() {
         let mut memory = Memory::mapped();
         let mut out = Vec::new();
-        let mut early = Link::new(Test::default(), None);
+        let mut early = Link::new(Test::default(), None, VERSION);
         let word = ap_call(&mut memory, AP0, 0x40, b"A100", &[0], 1, true);
         early.receive(word);
         assert!(early.dma(&mut memory, &mut out).is_err());
@@ -1320,9 +1327,12 @@ mod tests {
 
     #[test]
     fn an_untruncated_dva_is_used_as_is() {
-        let link = Link::new(Test::default(), Some(WINDOW));
+        let link = Link::new(Test::default(), Some(WINDOW), VERSION);
         assert_eq!(link.bus(0x8_1000_0000), 0x8_1000_0000);
         assert_eq!(link.bus(0x1000_0000), 0x8_1000_0000);
-        assert_eq!(Link::new(Test::default(), None).bus(0x1000), 0x1000);
+        assert_eq!(
+            Link::new(Test::default(), None, VERSION).bus(0x1000),
+            0x1000
+        );
     }
 }

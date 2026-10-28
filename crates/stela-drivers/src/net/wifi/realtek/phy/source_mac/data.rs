@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright(c) 2018-2019 Realtek Corporation
 // Source RTL8822C MAC register/bit/value constants, not a policy default.
+//! RTL8822C MAC register, bit and value constants.
 pub(super) const BITS_RRSR_RSC: u32 = 0x600000;
 pub(super) const BIT_APP_PHYSTS: u32 = 0x10000000;
 pub(super) const BIT_BA_PARSER_EN: u32 = 0x20;

@@ -1,12 +1,6 @@
 //! Execution of translated ARM64 code: the native code cache, block dispatch,
 //! guest memory, system state and Darwin services.
 #![cfg_attr(not(feature = "std"), no_std)]
-// A std host without POSIX mappings (Windows, for setup) backs no guest
-// memory, so the execution paths built on it are present but never reached.
-#![cfg_attr(
-    all(feature = "std", not(host_memory)),
-    allow(dead_code, unused_imports)
-)]
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::ToOwned, string::String};
 #[macro_use]
@@ -19,6 +13,7 @@ pub mod amx;
 pub mod apfs;
 pub mod blocks;
 pub mod boot_bundle;
+pub mod builds;
 mod checksum;
 pub mod clock;
 #[cfg(feature = "std")]

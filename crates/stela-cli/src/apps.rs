@@ -52,27 +52,3 @@ pub(crate) struct Apps {
 
 #[derive(Args)]
 pub(crate) struct Stelad {}
-
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-impl Apps {
-    pub(crate) fn run(self) -> Result<()> {
-        crate::require_hosted("stela apps")
-    }
-}
-
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-impl Stelad {
-    pub(crate) fn run(self) -> Result<()> {
-        crate::require_hosted("stela stelad")
-    }
-}
-
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-pub(crate) fn install_service(_dry_run: bool) -> Result<()> {
-    crate::require_hosted("stela install-system")
-}
-
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-pub(crate) fn remove_service(_dry_run: bool) -> Result<()> {
-    crate::require_hosted("stela install-system --remove")
-}

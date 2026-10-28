@@ -6,10 +6,7 @@ use crate::{
         bridge::Bridge,
         bus::{DeviceId, LifecycleState, MmioDevice},
         cluster::t6000::{Complex, Snapshot, T6000},
-        pmgr::{
-            install::t6000::{SRAM_BASE, SRAM_LIMIT},
-            t6000::reconfiguration,
-        },
+        pmgr::t6000::{SRAM_BASE, SRAM_LIMIT, reconfiguration},
         power::t6000::{self as power, Controller, identity, native},
     },
 };

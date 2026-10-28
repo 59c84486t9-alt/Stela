@@ -34,12 +34,9 @@ mod shared;
 
 use crate::platform::sync::Mutex;
 use crate::system::events::{EventEndpoint, EventProducer};
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 
 use stela_compiler::{
     TargetCpu,
@@ -231,7 +228,7 @@ pub struct DataAccess<'a> {
 type ReservationDomain = monitor::MonitorDomain<MemoryBacking, MemoryView, MappingAttributes>;
 type ReservationThread = monitor::ThreadMonitor<MemoryBacking, MemoryView, MappingAttributes>;
 type ReservationMapping = monitor::Mapping<MemoryView, MappingAttributes>;
-type MappingRegistry = HashMap<MappingId, Weak<ReservationMapping>>;
+type MappingRegistry = BTreeMap<MappingId, Weak<ReservationMapping>>;
 
 #[derive(Clone)]
 pub(super) struct RegisteredView {
@@ -257,7 +254,7 @@ impl MemorySystem {
         Ok(Arc::new(Self {
             identity: Arc::new(()),
             reservations,
-            mappings: Mutex::new(HashMap::new()),
+            mappings: Mutex::new(BTreeMap::new()),
             failed: AtomicBool::new(false),
             device_ram_order: Mutex::new(()),
         }))

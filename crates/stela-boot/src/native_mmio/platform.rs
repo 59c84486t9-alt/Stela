@@ -32,7 +32,7 @@ struct Backing {
     owner: Arc<Resources>,
     span: PhysicalSpan,
 }
-// SAFETY: Source's concrete claim methods reserve only the retained actual
+// SAFETY: ScopedSource's concrete claim methods reserve only the retained actual
 // MADT/MCFG resources after the explicit native device handoff. The original
 // root assignment, final map exclusions and epoch remain pinned permanently.
 unsafe impl ResourceBacking for Backing {
@@ -65,13 +65,9 @@ unsafe impl Send for Platform {}
 unsafe impl Sync for Platform {}
 
 fn msr(index: u32) -> u64 {
-    let (low, high): (u32, u32);
     // SAFETY: only qualified Intel architectural registers from observe's
     // CPUID-checked memory image are read by this module.
-    unsafe {
-        asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
-    }
-    u64::from(low) | u64::from(high) << 32
+    unsafe { crate::cpu::msr::rdmsr(index) }
 }
 fn memory_register(index: u32) -> bool {
     index == 0xfe
@@ -91,8 +87,8 @@ impl Platform {
         if cr0 != self.snapshot.cr0
             || cr3 != self.snapshot.cr3
             || cr4 != self.snapshot.cr4
-            || msr(0xc000_0080) != self.snapshot.efer
-            || msr(0x277) != self.snapshot.pat
+            || msr(crate::cpu::msr::EFER.index) != self.snapshot.efer
+            || msr(crate::cpu::msr::PAT.index) != self.snapshot.pat
             || self.snapshot.msrs[..self.snapshot.msr_count as usize]
                 .iter()
                 .filter(|m| memory_register(m.index))
@@ -351,7 +347,7 @@ unsafe impl MappingPlatform for Platform {
     }
 }
 
-pub(crate) struct Source {
+pub(crate) struct ScopedSource {
     platform: Arc<Platform>,
     authority: Authority,
 }
@@ -389,7 +385,7 @@ impl Drop for Session {
         unsafe { self.source.context.restore(saved) };
     }
 }
-impl Source {
+impl ScopedSource {
     /// # Safety
     /// Actual post-EBS dispatcher on its single admitted processor. `wire` is
     /// the sealed capture retained by this exact handoff; execution owns the
@@ -621,21 +617,57 @@ impl Source {
 
 fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<ExistingAlias>, Error> {
     let wire = platform.resources.wire;
-    let roots = platform.resources._roots.roots();
-    if !roots.contains(&(platform.snapshot.cr3 & ADDRESS)) {
+    let written = [Some(wire.leaf), write_table];
+    let aliases = aliases(
+        wire,
+        &platform.resources._roots,
+        &platform.snapshot,
+        platform.space,
+        &written.iter().flatten().copied().collect::<Vec<_>>(),
+    )?;
+    platform.check_context(platform.space)?;
+    Ok(aliases)
+}
+
+/// A table page the loader owns, through the physmap.
+pub(super) fn owned_table(wire: &Wire, physical: u64) -> Result<*mut u64, Error> {
+    if !wire.table_owned(physical) {
+        return Err(Error::Unavailable);
+    }
+    Ok(crate::layout::physical(physical) as *mut u64)
+}
+
+/// Every existing alias the retained roots and the guest's RAM hold, with
+/// its cache policy where the roots fix one, after checking each root leads
+/// to the aperture's leaf table. `written` are the table pages the caller
+/// writes, whose aliases must be write-back.
+pub(super) fn aliases(
+    wire: &Wire,
+    catalog: &MmioRoots,
+    snapshot: &Snapshot,
+    space: AddressSpace,
+    written: &[u64],
+) -> Result<Vec<ExistingAlias>, Error> {
+    let roots = catalog.roots();
+    if !roots.contains(&(snapshot.cr3 & ADDRESS)) {
         return Err(Error::Unavailable);
     }
     let mut visited = Vec::new();
     let mut aliases = Vec::new();
-    let image = Image::from_snapshot(&platform.snapshot).map_err(failed)?;
+    let image = Image::from_snapshot(snapshot).map_err(failed)?;
+    struct Walk<'a> {
+        wire: &'a Wire,
+        snapshot: &'a Snapshot,
+        space: AddressSpace,
+        image: Image,
+        written: &'a [u64],
+    }
     fn walk(
-        p: &Platform,
+        p: &Walk<'_>,
         table: u64,
         level: u32,
         visited: &mut Vec<(u64, u32)>,
         aliases: &mut Vec<ExistingAlias>,
-        image: &Image,
-        write_table: Option<u64>,
     ) -> Result<(), Error> {
         if visited.contains(&(table, level)) {
             return Ok(());
@@ -645,8 +677,8 @@ fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<Existi
         }
         visited.try_reserve(1).map_err(failed)?;
         visited.push((table, level));
-        image.writeback_ram(table, PAGE).map_err(failed)?;
-        let address = p.table(table)?;
+        p.image.writeback_ram(table, PAGE).map_err(failed)?;
+        let address = owned_table(p.wire, table)?;
         for index in 0..ENTRIES {
             let entry = unsafe { address.add(index).read_volatile() };
             if entry & PRESENT == 0 {
@@ -669,13 +701,12 @@ fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<Existi
                 }
                 let pat_index =
                     (entry >> 3 & 3) | ((entry >> if level == 0 { 7 } else { 12 }) & 1) << 2;
-                // This is the only table page the adapter writes. Every data
-                // alias of it must agree with its proven WB CPU access and WB
+                // The adapter writes these table pages. Every data alias of
+                // them must agree with their proven WB CPU access and WB
                 // page-walker fetch policy; UC/WC/WT/unknown aliases refuse.
-                if ((physical < p.resources.wire.leaf + PAGE
-                    && p.resources.wire.leaf < physical + bytes)
-                    || write_table
-                        .is_some_and(|table| physical < table + PAGE && table < physical + bytes))
+                if p.written
+                    .iter()
+                    .any(|&table| physical < table + PAGE && table < physical + bytes)
                     && (p.snapshot.pat >> (8 * pat_index)) & 0xff != 6
                 {
                     return Err(Error::CacheConflict);
@@ -694,34 +725,25 @@ fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<Existi
                 if entry & ((1 << 3) | (1 << 4)) != 0 {
                     return Err(Error::UnsupportedCache);
                 }
-                walk(
-                    p,
-                    entry & ADDRESS,
-                    level - 1,
-                    visited,
-                    aliases,
-                    image,
-                    write_table,
-                )?;
+                walk(p, entry & ADDRESS, level - 1, visited, aliases)?;
             }
         }
         Ok(())
     }
+    let walker = Walk {
+        wire,
+        snapshot,
+        space,
+        image,
+        written,
+    };
     // Every real root is scanned; shared table pages are visited once. Future
     // guest aliases are restricted by HostOwner to its retained RAM inventory,
     // conservatively imported below with unknown policy (blocks device reuse).
     for root in roots {
-        walk(
-            platform,
-            *root,
-            wire.levels - 1,
-            &mut visited,
-            &mut aliases,
-            &image,
-            write_table,
-        )?;
+        walk(&walker, *root, wire.levels - 1, &mut visited, &mut aliases)?;
     }
-    for physical in platform.resources._roots.ram() {
+    for physical in catalog.ram() {
         aliases.try_reserve(1).map_err(failed)?;
         aliases.push(ExistingAlias {
             physical: *physical,
@@ -732,7 +754,7 @@ fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<Existi
         let mut table = *root;
         for level in (1..wire.levels).rev() {
             let slot = ((wire.virtual_base >> (12 + 9 * level)) & 511) as usize;
-            let entry = unsafe { platform.table(table)?.add(slot).read_volatile() };
+            let entry = unsafe { owned_table(wire, table)?.add(slot).read_volatile() };
             if entry & (PRESENT | WRITABLE | HUGE) != (PRESENT | WRITABLE) {
                 return Err(Error::Unavailable);
             }
@@ -742,6 +764,5 @@ fn inventory(platform: &Platform, write_table: Option<u64>) -> Result<Vec<Existi
             return Err(Error::Unavailable);
         }
     }
-    platform.check_context(platform.space)?;
     Ok(aliases)
 }

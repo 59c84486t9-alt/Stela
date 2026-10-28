@@ -322,6 +322,7 @@ impl PacketCursor {
         self.committed_writes
     }
 
+    #[cfg(test)]
     pub fn packet_progress(&self) -> Option<(usize, usize)> {
         self.packet
             .as_ref()

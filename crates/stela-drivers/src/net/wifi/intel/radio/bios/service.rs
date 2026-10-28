@@ -6,6 +6,8 @@
 use super::{GeneralConfiguration, Scalar, ScalarKind};
 use crate::net::wifi::intel::{platform::Variable, radio::lari};
 use alloc::{string::String, vec::Vec};
+#[cfg(feature = "native-acpi")]
+pub mod native;
 pub(crate) mod power;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

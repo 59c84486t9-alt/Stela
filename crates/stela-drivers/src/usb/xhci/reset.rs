@@ -9,7 +9,7 @@ use super::*;
 pub(super) const DISABLE_SLOT: u32 = 10;
 pub(super) const PORT_STATUS_CHANGE: u32 = 34;
 const POST_RESET_US: u64 = 50_000;
-pub(super) const EXHAUSTED: &str = "xHCI boot-lifetime non-recycled slot budget exhausted";
+pub(super) const EXHAUSTED: &str = "xHCI slot budget exhausted";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Ownership {
@@ -17,7 +17,8 @@ pub(super) enum Ownership {
     Enabled,
     /// Disable Slot completed; a later Enable Slot may hand this ID back.
     Retired,
-    /// That Enable Slot was acknowledged and deliberately remains unaddressed.
+    /// That Enable Slot was acknowledged while the old device's port still
+    /// held its current grant, and deliberately remains unaddressed.
     Tombstone,
 }
 impl Controller {
@@ -40,10 +41,10 @@ impl Controller {
     /// Permanently block class reconstruction failure; this is not a claim
     /// that hardware/DMA has stopped. All original allocations remain retained.
     #[cfg(test)]
-    pub(crate) fn quarantine_slot(&mut self, slot: u8) {
-        // This legacy notification has no result channel. A retired raw
-        // number cannot quarantine a later addressed generation.
-        if self.legacy_slot(slot).is_ok() {
+    pub(crate) fn quarantine_slot(&mut self, id: impl DeviceRef) {
+        // This notification has no result channel. A retired generation
+        // cannot quarantine a later device in the same slot.
+        if let Ok(slot) = id.current_slot(self) {
             self.quarantine_slot_owned(slot);
         }
     }
@@ -59,7 +60,7 @@ impl Controller {
             .slot_ownership
             .iter()
             .skip(1)
-            .all(|state| *state != Ownership::Vacant)
+            .all(|state| !matches!(state, Ownership::Vacant | Ownership::Retired))
         {
             return Err(BlockError::Unsupported(EXHAUSTED));
         }
@@ -74,6 +75,15 @@ impl Controller {
                 Ownership::Vacant => {
                     // Keep this grant even if any following allocation fails.
                     // Enabled slots do not fetch DCBAA or accept doorbells.
+                    self.slot_ownership[id] = Ownership::Enabled;
+                    return Ok(id as u8);
+                }
+                // xhci_free_virt_device ends the old device once Disable Slot
+                // completes, and Enable Slot may hand its ID to the next one.
+                // Every identity of the old generation fails `known_id` once
+                // its record goes; its port's current grant must have retired.
+                Ownership::Retired if !self.power.retained(id as u8) => {
+                    self.slots[id] = None;
                     self.slot_ownership[id] = Ownership::Enabled;
                     return Ok(id as u8);
                 }
@@ -261,6 +271,58 @@ impl Controller {
         }
     }
 
+    /// `usb_queue_reset_device`: the device's native class owner asks the
+    /// topology owner to reset it and bind its drivers again, as Linux does for
+    /// a driver without pre_reset/post_reset. Every access through `id` fails
+    /// once the reset runs.
+    pub fn queue_reset(&mut self, id: SlotId) -> Result<(), BlockError> {
+        let slot = self.validate_id(id)?;
+        if self.slot(slot)?.consumer != identity::Consumer::Native {
+            return Err(BlockError::Unsupported(
+                "USB reset request without a native class owner",
+            ));
+        }
+        if !self.queued_resets.contains(&id) {
+            self.queued_resets.push(id);
+        }
+        Ok(())
+    }
+    pub(super) fn take_queued_resets(&mut self) -> Vec<SlotId> {
+        core::mem::take(&mut self.queued_resets)
+    }
+    /// `usb_reset_device` for a queued request: Disable Slot stops every
+    /// class transfer, as unbinding the drivers kills their URBs, and the fresh
+    /// device chooses its configuration again, unclaimed for normal binding.
+    pub(super) fn reset_queued(
+        &mut self,
+        device: &Device,
+        dma: &mut dyn DmaAllocator,
+        failures: &mut Vec<(String, BlockError)>,
+    ) -> Result<Device, (String, BlockError)> {
+        let slot = during("validate queued reset", self.validate_id(device.id))?;
+        let configured = &self.slot(slot).unwrap().endpoints;
+        let mut endpoints: Vec<Endpoint> = Vec::new();
+        for endpoint in interfaces(&device.configuration)
+            .iter()
+            .flat_map(|interface| interface.endpoints.iter())
+        {
+            let dci = endpoint.dci();
+            if configured[usize::from(dci)].is_some()
+                && !endpoints.iter().any(|known| known.dci() == dci)
+            {
+                endpoints.push(*endpoint);
+            }
+        }
+        // SAFETY: the class owner asked for this reset and its old-generation
+        // identity fails every access afterwards; Disable Slot retires every
+        // configured endpoint before any of its buffers could be reused.
+        let mut fresh = unsafe { self.reset_and_identify(device, &endpoints, dma) }?;
+        self.choose(&mut fresh, &device.location, failures);
+        let slot = self.slot(fresh.slot).unwrap();
+        slot.consumer = identity::Consumer::Unclaimed;
+        slot.inventory = Some(fresh.clone());
+        Ok(fresh)
+    }
     fn reset_preflight(&self, device: &Device, endpoints: &[Endpoint]) -> Result<(), BlockError> {
         if self.validate_id(device.id)? != device.slot {
             return Err(BlockError::Unsupported(
@@ -580,7 +642,7 @@ pub(crate) mod tests {
             match kind {
                 ENABLE_SLOT => {
                     if self.fault == Fault::EnableAfterReset && self.resets > 0
-                        || self.fault == Fault::Reserve && self.resets > 0 && self.enables.len() > 1
+                        || self.fault == Fault::Reserve && self.resets > 0
                     {
                         code = 9;
                     } else {
@@ -1351,15 +1413,17 @@ pub(crate) mod tests {
             slots: core::iter::repeat_with(|| None)
                 .take(max_slots + 1)
                 .collect(),
-            legacy_slot_fenced: vec![false; max_slots + 1],
             retry_resources: slot_resources::Cache::new(max_slots + 1),
+            queued_resets: Vec::new(),
             slot_ownership: vec![Ownership::Vacant; max_slots + 1],
+            test_retired_numbers: vec![false; max_slots + 1],
             power: power::Ledger::new(max_slots + 1),
             pending: Vec::new(),
             error: None,
             command_poisoned: false,
             command_ring_stopped: false,
             unpublished: 0,
+            signalled: false,
             quiet_drains: 0,
             outstanding: None,
             finished: Vec::new(),
@@ -1487,14 +1551,16 @@ pub(crate) mod tests {
                     before,
                     "stale handle reached MMIO"
                 );
-                assert!(!c.power.retained(old.slot));
+                // The reset port's grant retired with the old device, so the
+                // slot goes to the fresh one, as xhci_alloc_dev reuses IDs.
                 assert!(c.power.retained(fresh.slot));
-                assert_eq!((old.slot, fresh.slot), (1, 2));
-                assert_eq!(hardware.borrow().enables, vec![1, 1, 2]);
+                assert_eq!((old.slot, fresh.slot), (1, 1));
+                assert_ne!(old.id, fresh.id);
+                assert_eq!(hardware.borrow().enables, vec![1, 1]);
                 assert_eq!(hardware.borrow().resets, 1);
-                assert_eq!(c.slot(old.slot).unwrap()._output.physical(), old_output);
-                assert_eq!(c.dcbaa.read::<u64>(8), 0);
-                assert_eq!(c.slot_ownership[1], Ownership::Tombstone);
+                assert_ne!(c.slot(fresh.slot).unwrap()._output.physical(), 0);
+                let _ = old_output;
+                assert_eq!(c.slot_ownership[1], Ownership::Enabled);
             }
         }
     }
@@ -1592,21 +1658,23 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn slot_budget_exhaustion_and_fresh_allocation_failure_retain_grants() {
+    fn single_slot_reset_reuses_its_slot_and_fresh_allocation_failure_retains_grants() {
         let mut memory = vec![0u64; 512 * 1024];
         let (shared, old, endpoints, hardware, mut dma) = prepared(&mut memory, HIGH_SPEED, 32, 1);
+        // One slot is enough: the reset retires the old device's grant and
+        // its slot goes to the fresh one.
+        let fresh = unsafe {
+            shared
+                .borrow_mut()
+                .reset_and_identify(&old, &endpoints, &mut dma)
+        }
+        .unwrap();
         assert_eq!(
-            unsafe {
-                shared
-                    .borrow_mut()
-                    .reset_and_identify(&old, &endpoints, &mut dma)
-            }
-            .unwrap_err()
-            .1,
-            BlockError::Unsupported(EXHAUSTED)
+            (fresh.slot, hardware.borrow().enables.clone()),
+            (1, vec![1, 1])
         );
-        assert_eq!(hardware.borrow().enables, vec![1]);
-        assert_eq!(shared.borrow().slot_ownership[1], Ownership::Retired);
+        assert_ne!(fresh.id, old.id);
+        assert_eq!(shared.borrow().slot_ownership[1], Ownership::Enabled);
         struct Failing<'a> {
             inner: &'a mut RegionAllocator,
             at: usize,
@@ -1642,11 +1710,11 @@ pub(crate) mod tests {
                 }
                 .is_err()
             );
-            assert_eq!(hardware.borrow().enables, vec![1, 1, 2]);
-            assert_eq!(shared.borrow().slot_ownership[2], Ownership::Enabled);
-            assert!(shared.borrow().slots[2].is_none());
-            assert_eq!(shared.borrow().dcbaa.read::<u64>(16), 0);
-            assert!(shared.borrow_mut().endpoint_ready(2, 1).is_err());
+            assert_eq!(hardware.borrow().enables, vec![1, 1]);
+            assert_eq!(shared.borrow().slot_ownership[1], Ownership::Enabled);
+            assert!(shared.borrow().slots[1].is_none());
+            assert_eq!(shared.borrow().dcbaa.read::<u64>(8), 0);
+            assert!(shared.borrow_mut().endpoint_ready(old.id, 1).is_err());
             let end = failing
                 .allocations
                 .last()

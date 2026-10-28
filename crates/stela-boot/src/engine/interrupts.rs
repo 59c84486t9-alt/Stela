@@ -12,6 +12,8 @@ use core::arch::{asm, global_asm};
 pub const TIMER_VECTOR: u8 = 0x40;
 /// Native worker doorbell; host-device IRQs own 0x50..=0x5f.
 pub(crate) const NATIVE_WAKE_VECTOR: u8 = 0x60;
+/// The MMIO aperture's TLB shootdown (`native_mmio::shootdown`).
+pub(crate) const SHOOTDOWN_VECTOR: u8 = 0x61;
 pub const SPURIOUS_VECTOR: u8 = 0xff;
 const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
@@ -357,7 +359,7 @@ vectors!(
     64 none,
     80 none, 81 none, 82 none, 83 none, 84 none, 85 none, 86 none, 87 none,
     88 none, 89 none, 90 none, 91 none, 92 none, 93 none, 94 none, 95 none,
-    96 none, 255 none,
+    96 none, 97 none, 255 none,
 );
 
 unsafe extern "C" {
@@ -490,6 +492,7 @@ pub extern "sysv64" fn interrupt(frame: &mut Frame) {
         13 | 6 => host::native_exception(frame),
         TIMER_VECTOR => host::timer_interrupt(),
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
+        SHOOTDOWN_VECTOR => host::shootdown_interrupt(),
         SPURIOUS_VECTOR => {}
         vector @ 32.. => host::stray_interrupt(vector),
         _ => fatal(frame),
@@ -514,22 +517,21 @@ pub(crate) unsafe fn observe() -> Observation {
     let mut gdt = Pointer { limit: 0, base: 0 };
     let mut idt = Pointer { limit: 0, base: 0 };
     let (rsp, task): (u64, u16);
-    let (low, high): (u32, u32);
+    let gs: u64;
     // SAFETY: caller is the owning CPL0 processor with stable private tables.
     unsafe {
         asm!("sgdt [{}]", in(reg) &mut gdt, options(nostack, preserves_flags));
         asm!("sidt [{}]", in(reg) &mut idt, options(nostack, preserves_flags));
         asm!("str {0:x}", out(reg) task, options(nostack, preserves_flags));
         asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags));
-        asm!("rdmsr", in("ecx") 0xc000_0101u32, out("eax") low, out("edx") high,
-            options(nostack, preserves_flags));
+        gs = crate::cpu::msr::GS_BASE.read();
     }
     Observation {
         rsp,
         gdt: gdt.base,
         idt: idt.base,
         task,
-        gs: u64::from(low) | u64::from(high) << 32,
+        gs,
     }
 }
 

@@ -63,28 +63,7 @@ pub unsafe trait Registers: 'static {
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError>;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ErrorKind {
-    Configuration,
-    Length,
-    Allocation,
-    Io,
-    Link,
-    ForeignResponse,
-    Timeout,
-    Nack,
-    Ignored,
-    Faulted,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Error {
-    pub kind: ErrorKind,
-    pub offset: Option<usize>,
-    /// The lower command store was attempted and may have reached the wire.
-    pub issued: bool,
-    /// Successfully acknowledged byte commands, including page commands.
-    pub completed: usize,
-}
+pub use super::{Error, ErrorKind};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Message {
     pub device: u8,

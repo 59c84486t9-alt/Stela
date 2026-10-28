@@ -102,7 +102,7 @@ impl ExclusiveHpet {
 fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
-impl Source {
+impl ScopedSource {
     /// Inspect actual complete PTE/journal retirement while the permanent
     /// adopted Clock still retains its one original typed HPET mapping.
     pub(crate) fn verify_only_hpet(&self, owner: &HpetMapping) -> Result<(), Error> {

@@ -4,7 +4,7 @@
 use super::vtd::VtdError;
 #[cfg(test)]
 use crate::boot_vtd::VtdError;
-use stela_drivers::bus::pci::{ConfigSpace, Function};
+use stela_drivers::bus::pci::{CapabilityError, ConfigSpace, Function};
 
 pub struct RequesterClaim {
     rid: u16,
@@ -80,102 +80,56 @@ impl RequesterClaim {
         {
             return Err(VtdError::Busy);
         }
-        // Enumerate the actual list strictly here: the generic reporting helper
-        // deliberately truncates malformed lists and cannot qualify ownership.
+        // Walk the complete list strictly here: Function::capabilities stops
+        // quietly at a malformed entry and cannot qualify ownership.
         let status = function.config().read16(6);
         if status == u16::MAX {
             return Err(VtdError::RegisterRead);
         }
+        let failed = |error| match error {
+            CapabilityError::FailedRead { .. } => VtdError::RegisterRead,
+            _ => VtdError::Unsupported,
+        };
+        let config = &*function.config();
+        let read16 = |offset| match config.read16(offset) {
+            u16::MAX => Err(VtdError::RegisterRead),
+            value => Ok(value),
+        };
         let mut pcie = false;
-        if status & 16 != 0 {
-            let mut offset = u16::from(function.config().read8(0x34));
-            let mut seen = alloc::vec::Vec::new();
-            while offset != 0 {
-                if !(0x40..=0xfc).contains(&offset)
-                    || !offset.is_multiple_of(4)
-                    || seen.contains(&offset)
-                {
-                    return Err(VtdError::Unsupported);
-                }
-                seen.push(offset);
-                let header = function.config().read16(offset);
-                if header == u16::MAX {
-                    return Err(VtdError::RegisterRead);
-                }
-                let id = header as u8;
-                if matches!(id, 0 | 0xff) {
-                    return Err(VtdError::Unsupported);
-                }
-                let (register, mask) = match id {
-                    5 => (Some(offset + 2), 1),
-                    0x11 => {
-                        if offset > 0xf4 {
-                            return Err(VtdError::Unsupported);
-                        }
-                        (Some(offset + 2), 1 << 15)
+        for entry in config.capabilities() {
+            let entry = entry.map_err(failed)?;
+            let offset = entry.offset;
+            let (register, mask) = match entry.id {
+                0 => return Err(VtdError::Unsupported),
+                5 => (offset + 2, 1),
+                0x11 => (offset + 2, 1 << 15),
+                0x10 => {
+                    if core::mem::replace(&mut pcie, true) {
+                        return Err(VtdError::Unsupported);
                     }
-                    0x10 => {
-                        if pcie || offset > 0xf4 {
-                            return Err(VtdError::Unsupported);
-                        }
-                        pcie = true;
-                        (Some(offset + 8), 1 << 11)
-                    }
-                    _ => (None, 0),
-                };
-                if let Some(register) = register {
-                    let value = function.config().read16(register);
-                    if value == u16::MAX {
-                        return Err(VtdError::RegisterRead);
-                    }
-                    if value & mask != 0 {
-                        return Err(VtdError::Busy);
-                    }
+                    (offset + 8, 1 << 11)
                 }
-                offset = header >> 8;
+                _ => continue,
+            };
+            if read16(register)? & mask != 0 {
+                return Err(VtdError::Busy);
             }
         }
-        let mut seen = alloc::vec::Vec::new();
-        let mut offset = 0x100u16;
-        loop {
-            if !(0x100..=0xffc).contains(&offset)
-                || !offset.is_multiple_of(4)
-                || seen.contains(&offset)
-            {
-                return Err(VtdError::Unsupported);
-            }
-            seen.push(offset);
-            let header = function.config().read32(offset);
-            // Exact old-style fixture endpoints expose no extended config.
-            // The unsafe native grant must establish that this is absence,
-            // never a guessed answer to a failed live configuration read.
-            if header == u32::MAX && pcie {
-                return Err(VtdError::RegisterRead);
-            }
-            if matches!(header, 0 | u32::MAX) {
-                break;
-            }
-            if matches!(header as u16, 0x000f | 0x0013 | 0x001b) && offset > 0xff8 {
-                return Err(VtdError::Unsupported);
-            }
-            let control = match header as u16 {
-                0x000f => Some((offset + 6, 1 << 15)),
-                0x0013 => Some((offset + 4, 1)),
-                0x001b => Some((offset + 6, 1)),
-                _ => None,
+        // Old-style fixture endpoints expose no extended config. The unsafe
+        // native grant establishes that this is absence, not a failed read.
+        if pcie && config.read32(0x100) == u32::MAX {
+            return Err(VtdError::RegisterRead);
+        }
+        for entry in config.extended_capabilities() {
+            let entry = entry.map_err(failed)?;
+            let (register, mask) = match entry.id {
+                0x000f => (entry.offset + 6, 1 << 15),
+                0x0013 => (entry.offset + 4, 1),
+                0x001b => (entry.offset + 6, 1),
+                _ => continue,
             };
-            if let Some((offset, mask)) = control {
-                let value = function.config().read16(offset);
-                if value == u16::MAX {
-                    return Err(VtdError::RegisterRead);
-                }
-                if value & mask != 0 {
-                    return Err(VtdError::Unsupported);
-                }
-            }
-            offset = (header >> 20) as u16;
-            if offset == 0 {
-                break;
+            if read16(register)? & mask != 0 {
+                return Err(VtdError::Unsupported);
             }
         }
         Ok(())

@@ -6,7 +6,7 @@
 //! `aic_handle_fiq`; Asahi Linux "AIC" documentation: the timer "is wired
 //! straight to FIQ"). Every wire is level-sensitive, so a sink only ever sees
 //! the current level of each wire.
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -76,6 +76,7 @@ impl InterruptLatch {
     pub fn take_aic_inputs(&mut self) -> Vec<(AicInput, bool)> {
         core::mem::take(&mut self.aic_inputs)
     }
+    #[cfg(test)]
     pub fn is_asserted(&self, wire: Wire) -> bool {
         self.asserted.contains(&wire)
     }
@@ -90,16 +91,6 @@ impl InterruptLatch {
                 .next()
                 .is_some(),
         }
-    }
-    /// Current level of every asserted FIQ source per CPU, for diagnostics.
-    pub fn fiq_sources(&self) -> BTreeMap<CpuIndex, Vec<FiqSource>> {
-        let mut sources = BTreeMap::<CpuIndex, Vec<FiqSource>>::new();
-        for wire in &self.asserted {
-            if let Wire::Fiq(cpu, source) = *wire {
-                sources.entry(cpu).or_default().push(source);
-            }
-        }
-        sources
     }
 }
 impl InterruptSink for InterruptLatch {

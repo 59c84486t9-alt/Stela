@@ -1,8 +1,10 @@
 //! Host keyboards and pointers, plus SFH sensors ([`sfh`]). Pointer/keyboard
 //! changes are read as [`Input`] changes for the native
 //! USB peripheral: virtio-input ([`virtio`]) and i8042 PS/2 ([`ps2`]). USB HID devices are in
-//! [`usb::hid`](crate::usb::hid).
+//! [`usb::hid`](crate::usb::hid); ELAN and Cypress touchpads read as a mouse in
+//! [`touchpad`]. [`InputDevice`] polls any of them.
 pub mod cyapa;
+mod device;
 pub mod elan;
 pub mod hid_i2c;
 pub mod ish;
@@ -11,7 +13,30 @@ pub mod rmi;
 pub mod sfh;
 #[cfg(test)]
 mod timing_tests;
+pub mod touchpad;
 pub mod virtio;
+
+pub use device::{InputDevice, InputError};
+
+/// What masking an I2C touchpad's interrupt after a failed operation
+/// achieved, as Cypress and Elan drivers report with their errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchpadRecovery {
+    NotAttempted,
+    IrqMasked,
+    MaskFailed,
+}
+
+impl TouchpadRecovery {
+    /// Mask and drain `interrupt` after a failure.
+    pub fn mask(interrupt: &mut impl hid_i2c::Interrupt) -> Self {
+        if interrupt.mask_and_drain().is_ok() {
+            Self::IrqMasked
+        } else {
+            Self::MaskFailed
+        }
+    }
+}
 
 /// The largest absolute pointer coordinate on either axis.
 pub const POINTER_MAX: u16 = 0x7fff;

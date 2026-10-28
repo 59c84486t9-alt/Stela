@@ -44,9 +44,8 @@ const CPUS: usize = 64;
 /// at once.
 const CACHED: usize = 64;
 const BATCH: usize = 32;
-/// IA32_TSC_AUX, which RDTSCP reads: `TAG` and the core's cache index.
-#[cfg(target_os = "uefi")]
-const TSC_AUX: u32 = 0xc000_0103;
+/// What IA32_TSC_AUX holds, for RDTSCP to read: `TAG` and the core's cache
+/// index.
 const TAG: u32 = 0x5a7e_0000;
 
 /// One core's free blocks by class.
@@ -341,10 +340,7 @@ impl Heap {
             return;
         }
         // SAFETY: as the caller guarantees.
-        unsafe {
-            core::arch::asm!("wrmsr", in("ecx") TSC_AUX, in("eax") TAG | cpu as u32,
-                in("edx") 0, options(nostack, preserves_flags));
-        }
+        unsafe { crate::cpu::msr::TSC_AUX.write(u64::from(TAG | cpu as u32)) };
         self.any_tagged.store(true, Ordering::Release);
     }
 

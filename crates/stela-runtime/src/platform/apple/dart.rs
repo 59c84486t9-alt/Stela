@@ -2,6 +2,13 @@
 //! register/table profile; a compatible string is never a generation alias.
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
 //! See `docs/research/dart-iommu.md` for evidence and qualification limits.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "wired when T6000's USB DART contexts are assigned"
+    )
+)]
 pub mod context_route;
 mod descriptor;
 pub mod gen3;
@@ -295,6 +302,7 @@ impl Dart {
         self
     }
 
+    #[cfg(test)]
     pub fn with_smmu(mut self) -> Result<Self, &'static str> {
         self.enable_smmu()?;
         Ok(self)
@@ -312,6 +320,7 @@ impl Dart {
     }
 
     /// Validate support and uniqueness before placing any physical window.
+    #[cfg(test)]
     pub fn can_attach_smmu(&self) -> bool {
         self.supports_smmu() && !self.has_smmu()
     }

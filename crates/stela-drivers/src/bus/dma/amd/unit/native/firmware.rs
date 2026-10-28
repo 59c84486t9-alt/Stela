@@ -1,3 +1,4 @@
+//! Admission of the IVRS description of one AMD IOMMU unit.
 use super::*;
 use crate::bus::dma::amd::{
     device::REQUESTERS,

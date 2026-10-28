@@ -154,10 +154,6 @@ impl Controller {
         self.opened = false;
     }
 
-    pub fn opened(&self) -> bool {
-        self.opened
-    }
-
     pub fn handle(
         &mut self,
         packet_type: u8,

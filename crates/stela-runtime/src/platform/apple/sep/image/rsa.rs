@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256, Sha384};
 const MAX_BYTES: usize = 512;
 const MIN_BYTES: usize = 256;
 const PUBLIC_EXPONENT: &[u8] = &[1, 0, 1];
+#[cfg(feature = "std")]
 const SHA1_INFO: &[u8] = b"\x30\x21\x30\x09\x06\x05\x2b\x0e\x03\x02\x1a\x05\0\x04\x14";
 const SHA256_INFO: &[u8] =
     b"\x30\x31\x30\x0d\x06\x09\x60\x86\x48\x01\x65\x03\x04\x02\x01\x05\0\x04\x20";
@@ -20,6 +21,7 @@ const SHA384_INFO: &[u8] =
 #[derive(Clone, Copy)]
 pub(crate) enum Hash {
     /// For certificate chains that still sign with it (code signing's).
+    #[cfg(feature = "std")]
     Sha1,
     Sha256,
     Sha384,
@@ -72,6 +74,7 @@ impl Key {
             .to_be_bytes();
         let mut expected = [0xff; MAX_BYTES];
         let (prefix, digest) = match hash {
+            #[cfg(feature = "std")]
             Hash::Sha1 => (SHA1_INFO, sha1::Sha1::digest(message).to_vec()),
             Hash::Sha256 => (SHA256_INFO, Sha256::digest(message).to_vec()),
             Hash::Sha384 => (SHA384_INFO, Sha384::digest(message).to_vec()),

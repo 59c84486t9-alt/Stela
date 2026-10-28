@@ -33,8 +33,6 @@ use alloc::vec::Vec;
 
 /// Entries in every ring.
 pub const ENTRIES: u32 = 0x100;
-/// Bytes of a ring's state block.
-pub const STATE_BYTES: u64 = 0x30;
 /// The read index's offset in the state block.
 pub const READ: u64 = 0x00;
 /// The CFI index's offset.
@@ -67,8 +65,10 @@ pub trait Shared {
 
     /// A GPU-unit read in UAT `context`: the work the firmware runs reaches
     /// its address space with the GPU's permissions ([`uat::gpu_stream`]).
+    #[cfg(test)]
     fn gpu_read(&mut self, context: usize, va: u64, buffer: &mut [u8]) -> Result<(), DmaError>;
     /// A GPU-unit write in UAT `context`.
+    #[cfg(test)]
     fn gpu_write(&mut self, context: usize, va: u64, data: &[u8]) -> Result<(), DmaError>;
 }
 
@@ -99,15 +99,18 @@ impl Shared for Port<'_, '_> {
     fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
         Port::write(self, va, data).map_err(reason)
     }
+    #[cfg(test)]
     fn gpu_read(&mut self, context: usize, va: u64, buffer: &mut [u8]) -> Result<(), DmaError> {
         gpu_port(self, context)?.read(va, buffer)
     }
+    #[cfg(test)]
     fn gpu_write(&mut self, context: usize, va: u64, data: &[u8]) -> Result<(), DmaError> {
         gpu_port(self, context)?.write(va, data)
     }
 }
 
 /// The same bus master's port for GPU-unit accesses in `context`.
+#[cfg(test)]
 fn gpu_port<'c, 'b>(port: &'c mut Port<'_, 'b>, context: usize) -> Result<Port<'c, 'b>, DmaError> {
     let stream = uat::gpu_stream(context)?;
     Ok(Port {

@@ -7,7 +7,7 @@
 //! Register layouts and narrow message programming follow Linux PCI MSI at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. Ownership, validation, readback and
 //! quarantine are Stela integration. This is not an IRQ controller or DMA stop.
-use super::{Address, ConfigSpace, EcamConfig, Function};
+use super::{Address, ConfigSpace, EcamConfig, Function, capability, capability::CapabilityError};
 use crate::bus::irq::MsiMessage;
 use alloc::sync::Arc;
 use core::{
@@ -19,8 +19,10 @@ mod retirement;
 pub use retirement::DisabledMsiConfig;
 
 const COMMAND: u16 = 4;
+#[cfg(test)]
 const STATUS: u16 = 6;
 const INTX_DISABLE: u16 = 1 << 10;
+#[cfg(test)]
 const CAP_LIST: u16 = 1 << 4;
 const MSI: u8 = 5;
 const MSIX: u8 = 0x11;
@@ -82,14 +84,13 @@ impl Layout {
         (self.features & MASK_CAPABLE != 0)
             .then_some(self.offset + if self.wide() { 16 } else { 12 })
     }
-    fn end(self) -> u16 {
-        self.offset
-            + match (self.wide(), self.mask().is_some()) {
-                (false, false) => 10,
-                (true, false) => 14,
-                (false, true) => 20,
-                (true, true) => 24,
-            }
+}
+impl From<CapabilityError> for MsiError {
+    fn from(error: CapabilityError) -> Self {
+        match error {
+            CapabilityError::FailedRead { offset } => Self::FailedRead { offset },
+            _ => Self::MalformedCapability,
+        }
     }
 }
 fn read16<C: ConfigSpace>(c: &C, offset: u16) -> Result<u16, MsiError> {
@@ -129,70 +130,6 @@ fn write32<C: MsiConfigSpace>(c: &mut C, offset: u16, value: u32) -> Result<(), 
     verify32(c, offset, value)
 }
 
-/// Full standard extents from the pinned pci_regs.h. Unknown capability
-/// formats still reserve their two-byte headers; no body length is invented.
-pub(crate) fn other_capability_bytes<C: MsiConfigSpace>(
-    c: &C,
-    offset: u16,
-    id: u8,
-    header_type: u8,
-) -> Result<u16, MsiError> {
-    Ok(match id {
-        0x01 => 8,  // PCI_PM_SIZEOF, including PPB extensions/data.
-        0x02 => 12, // PCI_AGP_SIZEOF.
-        0x03 => 8,  // PCI_CAP_VPD_SIZEOF.
-        0x04 => 4,  // Slot identification ESR + chassis number.
-        0x0d => 8,  // Bridge subsystem vendor/device IDs at offsets 4/6.
-        0x13 => 6,  // PCI_CAP_AF_SIZEOF.
-        0x09 => {
-            // Vendor-specific capability byte two is its declared total size.
-            let bytes = u16::from(c.read8(offset + 2));
-            if bytes < 3 {
-                return Err(MsiError::MalformedCapability);
-            }
-            bytes
-        }
-        0x07 => {
-            // Pinned PCI-X endpoint sizes; bridge extended layout is separate.
-            if header_type != 0 {
-                return Err(MsiError::Unsupported);
-            }
-            match (read16(c, offset + 2)? >> 12) & 3 {
-                0 => 8,
-                1 | 2 => 24,
-                _ => return Err(MsiError::Unsupported),
-            }
-        }
-        0x10 => {
-            let flags = read16(c, offset + 2)?;
-            // Exact endpoint layouts from PCI_CAP_EXP_*_SIZEOF_V1/V2.
-            // Ports/bridges/collectors and unknown versions need their actual
-            // conditional slot/root layout, never an assumed endpoint size.
-            if flags & 0x100 != 0 {
-                return Err(MsiError::Unsupported);
-            }
-            match (flags & 15, (flags >> 4) & 15) {
-                (1, 0 | 1) => 20,
-                (1, 9) => 12,
-                (2, 0 | 1) => 0x34,
-                (2, 9) => 0x2c,
-                _ => return Err(MsiError::Unsupported),
-            }
-        }
-        0x12 => {
-            if offset + 8 > 256 {
-                return Err(MsiError::MalformedCapability);
-            }
-            match read16(c, offset + 4)? & 15 {
-                0..=5 => 8,
-                15 => 16,
-                _ => return Err(MsiError::Unsupported),
-            }
-        } // PCI_SATA_SIZEOF_SHORT/LONG, BAR or inline register block.
-        _ => 2,
-    })
-}
-
 fn discover<C: MsiConfigSpace>(f: &mut Function<C>) -> Result<(Layout, u16), MsiError> {
     let expected = u32::from(f.vendor) | u32::from(f.device) << 16;
     let c = f.config();
@@ -207,24 +144,13 @@ fn discover<C: MsiConfigSpace>(f: &mut Function<C>) -> Result<(Layout, u16), Msi
     if !matches!(header_type, 0 | 1) {
         return Err(MsiError::Unsupported);
     }
-    if read16(c, STATUS)? & CAP_LIST == 0 {
-        return Err(MsiError::MissingCapability);
-    }
-    let mut offset = u16::from(c.read8(0x34));
-    let mut occupied = [false; 256];
+    // The walk reads Status; without a capability list nothing is found.
     let mut found = None;
-    let mut msix = None;
-    while offset != 0 {
-        if !(0x40..=0xfc).contains(&offset)
-            || !offset.is_multiple_of(4)
-            || occupied[usize::from(offset)..usize::from(offset + 2)]
-                .iter()
-                .any(|v| *v)
-        {
-            return Err(MsiError::MalformedCapability);
-        }
-        let header = read16(c, offset)?;
-        let bytes = match header as u8 {
+    let mut msix = false;
+    for entry in c.capabilities() {
+        let entry = entry?;
+        let offset = entry.offset;
+        match entry.id {
             MSI => {
                 if found.is_some() {
                     return Err(MsiError::MalformedCapability);
@@ -240,40 +166,25 @@ fn discover<C: MsiConfigSpace>(f: &mut Function<C>) -> Result<(Layout, u16), Msi
                 }
                 let layout = Layout {
                     offset,
-                    header,
+                    header: entry.header,
                     features: control & !(ENABLE | MME),
                 };
-                if layout.end() > 256 {
-                    return Err(MsiError::MalformedCapability);
-                }
                 found = Some((layout, control));
-                layout.end() - offset
             }
             MSIX => {
-                if msix.replace(()).is_some() {
-                    return Err(MsiError::MalformedCapability);
-                }
-                if offset + 12 > 256 {
+                if core::mem::replace(&mut msix, true) {
                     return Err(MsiError::MalformedCapability);
                 }
                 if read16(c, offset + 2)? & MSIX_ENABLE != 0 {
                     return Err(MsiError::ActiveMsix);
                 }
-                12
             }
-            0 | 0xff => return Err(MsiError::MalformedCapability),
-            id => other_capability_bytes(c, offset, id, header_type)?,
-        };
-        let end = offset
-            .checked_add(bytes)
-            .filter(|end| *end <= 256)
-            .ok_or(MsiError::MalformedCapability)?;
-        let extent = &mut occupied[usize::from(offset)..usize::from(end)];
-        if extent.iter().any(|v| *v) {
-            return Err(MsiError::MalformedCapability);
+            0 => return Err(MsiError::MalformedCapability),
+            _ if entry.layout == capability::Layout::Unsupported => {
+                return Err(MsiError::Unsupported);
+            }
+            _ => {}
         }
-        extent.fill(true);
-        offset = header >> 8;
     }
     found.ok_or(MsiError::MissingCapability)
 }
@@ -1248,12 +1159,14 @@ mod tests {
             assert_eq!(model.lock().unwrap().get(0x4a, 2), 3);
             drop(unsafe { helper.release() }.unwrap());
         }
-        for (id, flags) in [
-            (7, 0x3000),
-            (0x10, 0),
-            (0x10, 3),
-            (0x10, 0x42),
-            (0x10, 0x102),
+        // Root-port and slot PCIe layouts are sized in full: the MSI header
+        // at 0x50 lies inside their bodies.
+        for (id, flags, expected) in [
+            (7, 0x3000, MsiError::Unsupported),
+            (0x10, 0, MsiError::Unsupported),
+            (0x10, 3, MsiError::Unsupported),
+            (0x10, 0x42, MsiError::MalformedCapability),
+            (0x10, 0x102, MsiError::MalformedCapability),
         ] {
             let f = fixture(false, false);
             {
@@ -1266,7 +1179,7 @@ mod tests {
                 Err(e) => e,
                 Ok(_) => panic!("unknown capability format guessed"),
             };
-            assert_eq!(error, MsiError::Unsupported);
+            assert_eq!(error, expected);
             assert!(
                 !f.model
                     .lock()

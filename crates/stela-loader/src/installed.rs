@@ -1,6 +1,6 @@
 //! The kernel boot bundle of an installed system, built from its APFS
 //! container's Preboot volume (`stela_runtime::preboot`), in `no_std` so
-//! `stela.efi` builds the same bundle `stela boot prepare --disk` writes.
+//! `stela.efi` builds the same bundle `stela-dev boot prepare --disk` writes.
 //!
 //! The volume group is the one NVRAM's boot volume names
 //! (`stela_loader::boot_selection`), else any. Within a group the boot
@@ -449,7 +449,7 @@ impl<R: ReadAt> Disk<'_, R> {
                 container_sha256: sha256(&file),
                 payload_type: receipt.payload_type,
                 description: receipt.description,
-                decoded_bytes: bytes.len(),
+                decoded_bytes: bytes.len() as u64,
                 decoded_sha256: sha256(&bytes),
             },
             bytes,
@@ -471,7 +471,7 @@ impl<R: ReadAt> Disk<'_, R> {
                 container_sha256: sha256(&file),
                 payload_type: "opaque".into(),
                 description: String::new(),
-                decoded_bytes: parts.payload.len(),
+                decoded_bytes: parts.payload.len() as u64,
                 decoded_sha256: sha256(parts.payload),
             },
             bytes: parts.payload.to_vec(),
@@ -598,7 +598,7 @@ pub fn prepare<R: ReadAt>(
             container_sha256: sha256(&bytes),
             payload_type: "im4m".into(),
             description: "the kernel collection's personalized manifest".into(),
-            decoded_bytes: bytes.len(),
+            decoded_bytes: bytes.len() as u64,
             decoded_sha256: sha256(&bytes),
         },
         bytes,

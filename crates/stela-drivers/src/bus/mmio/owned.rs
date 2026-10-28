@@ -307,8 +307,15 @@ pub enum MapFailure {
 /// actual mapping/table/virtual reservation is removed. Failure must retain
 /// every possibly live table/virtual reservation; successful retry targets the
 /// same exact token. A provider's final release never invalidates a live lease.
-/// All operations/final drops require process/deferred context.
+///
+/// Access through an existing mapping may run inside an interrupt handler:
+/// `check_context` succeeds there on a CPU that takes part in the address
+/// space, so a handler reads and writes registers through a live lease.
+/// `map`, `unmap` and final drops require process or deferred context, and
+/// the provider refuses `map` and `unmap` inside an interrupt handler.
 pub unsafe trait MappingPlatform: Send + Sync {
+    /// Whether this CPU may reach `address_space` through an existing
+    /// mapping now, including from an interrupt handler.
     fn check_context(&self, address_space: AddressSpace) -> Result<(), Error>;
     /// # Safety
     /// The one active authority already atomically reserved this request's

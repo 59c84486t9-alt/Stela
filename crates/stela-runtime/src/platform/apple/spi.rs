@@ -127,6 +127,7 @@ impl Spi {
             configuration: u8::MAX,
         }
     }
+    #[cfg(test)]
     pub fn image(&self) -> &Image {
         self.nor.image()
     }

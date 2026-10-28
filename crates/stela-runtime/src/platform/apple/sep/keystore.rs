@@ -148,6 +148,7 @@ impl KeyStore {
         }
     }
 
+    #[cfg(test)]
     pub fn environment(&self) -> Option<Environment> {
         self.environment
     }

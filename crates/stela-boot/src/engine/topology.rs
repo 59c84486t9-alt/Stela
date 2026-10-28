@@ -23,12 +23,9 @@ use stela_runtime::machine::{
 
 #[cfg(not(test))]
 use super::bundle::live_tree::LiveTree;
-#[cfg(not(test))]
-use crate::native_smp::{firmware::Capture, topology as native};
 #[cfg(test)]
-use crate::{
-    boot_live_tree::LiveTree, boot_native_capture::Capture, boot_native_topology as native,
-};
+use crate::boot_live_tree::LiveTree;
+use stela_boot_core::{record::Capture, topology as native};
 #[cfg(test)]
 use stela_runtime::machine::soc::assigned::GuestSlotId;
 
@@ -84,9 +81,12 @@ impl<'a> BspRoster<'a> {
             .processors
             .get(..capture.processor_count as usize)
             .ok_or("assigned topology has an invalid captured processor count")?;
-        let selected =
+        let physical =
             native::select(processors).map_err(|e| format!("assigned BSP source roster: {e:?}"))?;
-        if selected.len() != capture.core_count as usize
+        let selected = physical
+            .get(..capture.core_count as usize)
+            .ok_or("assigned topology has more captured cores than physical cores")?;
+        if physical.len() != capture.physical_count as usize
             || selected
                 .iter()
                 .enumerate()
@@ -857,19 +857,11 @@ mod tests {
             bytes: 0x9008,
         }
     }
-    fn capture() -> Capture {
-        let mut capture = Capture {
-            magic: 0,
-            version: 0,
-            processor_count: 0,
-            core_count: 0,
-            enabled_count: 0,
-            processors: [native::Processor::default(); native::MAX_PROCESSORS],
-            selected: [0; native::MAX_CORES],
-            snapshots: [native::Snapshot::default(); native::MAX_CORES],
-        };
+    fn capture() -> alloc::boxed::Box<Capture> {
+        let mut capture = Capture::boxed(2).unwrap();
         capture.processor_count = 2;
         capture.core_count = 2;
+        capture.physical_count = 2;
         capture.enabled_count = 2;
         for index in 0..2 {
             capture.processors[index] = native::Processor {
@@ -1133,7 +1125,7 @@ mod tests {
         )
         .unwrap();
         let bytes = tree.serialize();
-        let args = BootArgs {
+        let args = boot_args::encode(&BootArgs {
             revision: boot_args::REVISION,
             version: boot_args::VERSION,
             virt_base: 0xfffffe0000000000,
@@ -1147,8 +1139,7 @@ mod tests {
             command_line: command.into(),
             boot_flags: 0,
             mem_size_actual: BYTES as u64,
-        }
-        .encode()
+        })
         .unwrap();
         let mut input = Input(vec![0; BYTES]);
         input.0[ARGS as usize..ARGS as usize + args.len()].copy_from_slice(&args);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2019 Intel Corporation
+//! Tearing down a Thunderbolt DisplayPort tunnel: stopping its paths and releasing its adapters.
 use super::*;
 use crate::bus::thunderbolt::{
     channel,
@@ -139,10 +140,8 @@ impl<R: Registers> Stop<R> {
     }
     fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
         self.stage = stage;
-        self.deadline = now
-            .checked_add(REQUEST_MS)
-            .ok_or(Error::ClockOverflow)?
-            .min(self.job_deadline);
+        self.deadline = crate::bus::thunderbolt::stage_deadline(now, REQUEST_MS, self.job_deadline)
+            .ok_or(Error::ClockOverflow)?;
         Ok(())
     }
     fn request(

@@ -80,6 +80,16 @@ pub struct Host {
     binding: Binding,
 }
 impl Host {
+    /// Whether the host controller sends the handoff's completion signal.
+    pub fn signals(&self) -> bool {
+        self.engine.io.signals()
+    }
+
+    /// Whether a running transfer may have completed; a look at memory.
+    pub fn posted(&self) -> bool {
+        self.engine.io.posted()
+    }
+
     /// # Safety
     /// `device`, binding and controller must name the same physical attachment
     /// and configuration/reset epoch. The caller owns the interface exclusively
@@ -437,6 +447,14 @@ fn read_block_zero<I: Io>(
 trait Io {
     type Ticket;
     fn ready(&mut self) -> Result<(), BlockError>;
+    /// Whether the host controller sends the handoff's completion signal.
+    fn signals(&self) -> bool {
+        false
+    }
+    /// Whether a submitted transfer may have completed; a look at memory.
+    fn posted(&self) -> bool {
+        false
+    }
     fn streams(&self) -> Option<u16> {
         None
     }
@@ -464,6 +482,16 @@ enum NativeTicket {
 }
 impl Io for Native {
     type Ticket = NativeTicket;
+    fn signals(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.signals())
+    }
+    fn posted(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.posted_for(self.id))
+    }
     fn ready(&mut self) -> Result<(), BlockError> {
         let mut controller = self.controller.borrow_mut();
         let mut device = controller.device(self.id)?;
@@ -2090,7 +2118,7 @@ mod tests {
             // Mirror normal Found/probe retention after typed disks are drained.
             let mut found = xhci::Found::default();
             found.storage.push(storage);
-            let mut probed = crate::probe::Disks::default();
+            let mut probed = crate::probe::Devices::default();
             probed.usb_storage.extend(found.storage);
             let mut storage = probed.usb_storage.remove(0);
             hardware.borrow_mut().empty_media = false;

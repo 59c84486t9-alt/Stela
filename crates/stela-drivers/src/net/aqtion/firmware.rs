@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2014-2019 aQuantia Corporation
 // Copyright (C) 2019-2020 Marvell International Ltd.
+//! The AQtion firmware mailbox: version, MAC address and link control.
 use super::{Error, Generation, Hardware, Mac, Profile, Registers, Result, Timer, registers as f};
 const IN: usize = 0x12000;
 const OUT: usize = 0x13000;

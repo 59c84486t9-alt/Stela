@@ -3,7 +3,7 @@
 //! `udisksctl` mounts and unmounts where it runs, `mount` and `umount`
 //! otherwise. Partitions are read and written through `/dev`, and a USB is
 //! erased by writing setup's own layout to its whole disk.
-use super::{Cpu, Disk, FileSystem, Host, Partition, PartitionInfo, Volume};
+use super::{Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Deserializer};
 use std::{
@@ -23,7 +23,7 @@ pub(crate) const PARTITION_LISTING: &str = "`lsblk -o NAME,PARTUUID`";
 /// type.
 const ESP_TYPES: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
 /// `lsblk`'s columns, for [`Device`].
-const COLUMNS: &str = "NAME,TYPE,SIZE,MODEL,TRAN,RM,HOTPLUG,RO,MOUNTPOINT,PARTTYPE,PARTUUID,PKNAME";
+const COLUMNS: &str = "NAME,TYPE,SIZE,MODEL,TRAN,RM,RO,MOUNTPOINT,PARTTYPE,PARTUUID,PKNAME";
 /// The `BLKRRPART` ioctl: reread the partition table.
 const BLKRRPART: u64 = 0x125f;
 
@@ -48,8 +48,6 @@ struct Device {
     #[serde(default, deserialize_with = "flag")]
     rm: bool,
     #[serde(default, deserialize_with = "flag")]
-    hotplug: bool,
-    #[serde(default, deserialize_with = "flag")]
     ro: bool,
     mountpoint: Option<String>,
     parttype: Option<String>,
@@ -63,6 +61,20 @@ impl Device {
     /// Whether it, or a device on it, is mounted at `/`.
     fn holds_root(&self) -> bool {
         self.mountpoint.as_deref() == Some("/") || self.children.iter().any(Device::holds_root)
+    }
+
+    /// What decides whether setup may erase this whole disk.
+    fn facts(&self) -> DiskFacts {
+        DiskFacts {
+            bus: match self.tran.as_deref() {
+                _ if self.kind == "loop" => Bus::Image,
+                Some("usb") => Bus::Usb,
+                Some("ieee1394") => Bus::FireWire,
+                _ => Bus::Other,
+            },
+            removable_media: self.rm,
+            external: false,
+        }
     }
 
     fn content(&self) -> String {
@@ -221,32 +233,26 @@ impl Host for System {
             // A loop device stands in for a USB, as a disk image does on a
             // Mac; read-only ones hold snaps and images, never a USB.
             .filter(|d| d.kind == "disk" || d.kind == "loop" && !d.ro && d.size > 0)
-            .map(|d| {
-                let removable = d.rm
-                    || d.hotplug
-                    || d.kind == "loop"
-                    || matches!(d.tran.as_deref(), Some("usb" | "mmc"));
-                Disk {
-                    system: d.holds_root(),
-                    bytes: d.size,
-                    name: match d.model.as_deref().map(str::trim) {
-                        Some(model) if !model.is_empty() => model.to_owned(),
-                        _ if d.kind == "loop" => "loop device".into(),
-                        _ => String::new(),
-                    },
-                    internal: !removable,
-                    partitions: d
-                        .children
-                        .iter()
-                        .filter(|p| p.kind == "part")
-                        .map(|p| Partition {
-                            identifier: p.name.clone(),
-                            content: p.content(),
-                            mount: p.mount(),
-                        })
-                        .collect(),
-                    identifier: d.name,
-                }
+            .map(|d| Disk {
+                removal: d.facts().removal(),
+                system: d.holds_root(),
+                bytes: d.size,
+                name: match d.model.as_deref().map(str::trim) {
+                    Some(model) if !model.is_empty() => model.to_owned(),
+                    _ if d.kind == "loop" => "loop device".into(),
+                    _ => String::new(),
+                },
+                partitions: d
+                    .children
+                    .iter()
+                    .filter(|p| p.kind == "part")
+                    .map(|p| Partition {
+                        identifier: p.name.clone(),
+                        content: p.content(),
+                        mount: p.mount(),
+                    })
+                    .collect(),
+                identifier: d.name,
             })
             .collect())
     }
@@ -468,6 +474,7 @@ impl Host for System {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Removal;
     use super::*;
 
     #[test]
@@ -507,5 +514,34 @@ mod tests {
         assert_eq!(ssd.size, 500_107_862_016);
         assert!(!ssd.rm && ssd.holds_root());
         assert_eq!(ssd.children[0].content(), "0x83");
+        assert_eq!(usb.facts().removal(), Removal::Usb);
+        assert_eq!(ssd.facts().removal(), Removal::Fixed);
+    }
+
+    #[test]
+    fn hotplug_nvme_and_emmc_are_fixed_and_an_sd_card_typed() {
+        let listing = r#"{"blockdevices": [
+            {"name": "nvme1n1", "type": "disk", "size": 1000204886016, "model": "WD Blue",
+             "tran": "nvme", "rm": false, "hotplug": true, "ro": false, "mountpoint": null,
+             "parttype": null, "partuuid": null, "pkname": null},
+            {"name": "mmcblk0", "type": "disk", "size": 62537072640, "model": null,
+             "tran": "mmc", "rm": false, "hotplug": false, "ro": false, "mountpoint": null,
+             "parttype": null, "partuuid": null, "pkname": null},
+            {"name": "mmcblk1", "type": "disk", "size": 63864569856, "model": null,
+             "tran": "mmc", "rm": true, "hotplug": true, "ro": false, "mountpoint": null,
+             "parttype": null, "partuuid": null, "pkname": null},
+            {"name": "loop3", "type": "loop", "size": 8589934592, "model": null,
+             "tran": null, "rm": false, "hotplug": false, "ro": false, "mountpoint": null,
+             "parttype": null, "partuuid": null, "pkname": null}]}"#;
+        let listing: Listing = serde_json::from_str(listing).unwrap();
+        let removal: Vec<_> = listing
+            .blockdevices
+            .iter()
+            .map(|d| d.facts().removal())
+            .collect();
+        assert_eq!(
+            removal,
+            [Removal::Fixed, Removal::Fixed, Removal::Typed, Removal::Usb]
+        );
     }
 }

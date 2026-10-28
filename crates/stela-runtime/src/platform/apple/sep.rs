@@ -20,6 +20,10 @@ mod der;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;
+#[expect(
+    dead_code,
+    reason = "wired when the SEP's sks service installs ANS keys"
+)]
 pub mod inline_key;
 pub mod keys;
 pub mod keystore;
@@ -103,6 +107,7 @@ impl Sep {
     /// Apple's BootROM cold state, an authenticated sepOS, or a ready-bit shim.
     /// Entropy, identity, security qualification and persistence remain the
     /// caller's actual inputs, exactly as for `new`.
+    #[cfg(test)]
     pub fn booted_rom(
         entropy: Box<dyn Entropy>,
         lines: Lines,
@@ -150,6 +155,7 @@ impl Sep {
     }
 
     /// Firmware Stela measured and accepted under its own trust policy, if any.
+    #[cfg(test)]
     pub fn evidence(&self) -> Option<&firmware::Evidence> {
         self.mailbox
             .firmware::<firmware::SepFirmware>()
@@ -159,6 +165,7 @@ impl Sep {
 
     /// Whether sepOS has reported OS active (the kernel then publishes
     /// `sepBootedOnce`).
+    #[cfg(test)]
     pub fn booted(&self) -> bool {
         self.mailbox
             .firmware::<firmware::SepFirmware>()

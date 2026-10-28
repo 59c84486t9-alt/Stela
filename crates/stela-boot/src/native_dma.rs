@@ -1,7 +1,149 @@
 //! Native IOMMU backends. Discovery/ownership must supply a qualified unit;
 //! there is no identity-mapping substitute for an unavailable domain.
 pub(crate) mod diagnostic;
-pub mod dmar;
+pub use stela_boot_core::dmar;
+pub use stela_boot_core::firmware_state;
 mod isolation_diagnostic;
 pub mod requester;
 pub mod vtd;
+
+use crate::output;
+use firmware_state::{Found, Kind, TableError, Units, Window};
+use stela_runtime::pc::acpi;
+
+/// Before ExitBootServices: every remapping unit the firmware's DMAR and IVRS
+/// tables list. A table Stela cannot read is reported once; strict mode
+/// refuses it.
+pub(crate) fn firmware_units(strict: bool) -> Result<Units, &'static str> {
+    let mut units = Units::default();
+    let Some(rsdp) = crate::storage::rsdp() else {
+        return Ok(units);
+    };
+    for signature in [b"DMAR", b"IVRS"] {
+        // SAFETY: the firmware's RSDP; its tables stay mapped while boot
+        // services run, and `find` checks every checksum on the way.
+        let added = match unsafe { acpi::find(rsdp, signature) } {
+            Ok(table) if signature == b"DMAR" => units.add_dmar(table),
+            Ok(table) => units.add_ivrs(table),
+            Err(acpi::AcpiError::Missing(_)) => Ok(()),
+            Err(_) => Err(TableError::Header),
+        };
+        match added {
+            Ok(()) => {}
+            Err(TableError::Capacity) => {
+                return Err("the host lists more IOMMU units than Stela can check");
+            }
+            Err(error) => {
+                output::arguments(format_args!(
+                    "UNSUPPORTED host IOMMU table {} unreadable ({error:?}): units past the defect are not checked for firmware DMA protection\n",
+                    core::str::from_utf8(signature).unwrap_or("?"),
+                ));
+                if strict {
+                    return Err("strict mode requires readable IOMMU tables");
+                }
+            }
+        }
+    }
+    Ok(units)
+}
+
+/// A unit's registers through the firmware's identity map, with a TSC
+/// deadline.
+struct Identity {
+    base: *mut u8,
+    timeout: u64,
+}
+
+impl Identity {
+    fn at<T>(&self, offset: usize) -> *mut T {
+        // SAFETY: offsets stay within the unit's register window (`Window`).
+        unsafe { self.base.add(offset).cast() }
+    }
+}
+
+// SAFETY: `release_firmware_units` builds this only for a unit's register
+// base, which the firmware's page tables still identity-map uncached.
+unsafe impl Window for Identity {
+    fn read32(&self, offset: usize) -> u32 {
+        // SAFETY: aligned register within the mapped window.
+        unsafe { self.at::<u32>(offset).read_volatile() }
+    }
+    fn read64(&self, offset: usize) -> u64 {
+        // SAFETY: aligned register within the mapped window.
+        unsafe { self.at::<u64>(offset).read_volatile() }
+    }
+    fn write32(&self, offset: usize, value: u32) {
+        // SAFETY: aligned register within the mapped window.
+        unsafe { self.at::<u32>(offset).write_volatile(value) }
+    }
+    fn write64(&self, offset: usize, value: u64) {
+        // SAFETY: aligned register within the mapped window.
+        unsafe { self.at::<u64>(offset).write_volatile(value) }
+    }
+    fn expired(&self, start: u64) -> bool {
+        self.now().wrapping_sub(start) > self.timeout
+    }
+    fn now(&self) -> u64 {
+        // SAFETY: RDTSC has no memory effects.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+}
+
+/// After ExitBootServices, before any Stela driver starts DMA or firmware
+/// memory is reused: turn off the translation, interrupt remapping, logs and
+/// protected memory regions the firmware left on in each unit. Strict mode
+/// refuses instead; a unit that does not turn off stops the boot.
+///
+/// # Safety
+/// CR3 is still the firmware's identity map, which reaches every unit's
+/// registers uncached; only this CPU runs Stela code and no firmware code
+/// touches the units.
+pub(crate) unsafe fn release_firmware_units(units: &Units, strict: bool, tsc_hz: u64) {
+    let opt_in = if units.dmar_flags & 4 != 0 {
+        " (DMAR asks the OS to keep DMA protection on)"
+    } else {
+        ""
+    };
+    for unit in units.as_slice() {
+        let window = Identity {
+            base: unit.base as *mut u8,
+            timeout: tsc_hz,
+        };
+        let kind = match unit.kind {
+            Kind::Vtd => "VT-d",
+            Kind::AmdVi => "AMD-Vi",
+        };
+        match firmware_state::inspect(unit.kind, &window) {
+            Found::Inactive => continue,
+            Found::Unreadable => {
+                output::arguments(format_args!(
+                    "UNSUPPORTED host IOMMU {kind} unit {:#x} segment {} reads all ones: ignored\n",
+                    unit.base, unit.segment,
+                ));
+                continue;
+            }
+            found => {
+                output::arguments(format_args!(
+                    "UNSUPPORTED host IOMMU {kind} unit {:#x} segment {} left on by the firmware {found:?}{opt_in}: Stela turns it off and host devices DMA untranslated\n",
+                    unit.base, unit.segment,
+                ));
+                if strict {
+                    output::fatal("strict mode refuses to turn off the firmware's DMA protection");
+                }
+            }
+        }
+        // SAFETY: forwarded post-EBS exclusivity; no Stela driver runs yet.
+        if let Err(firmware_state::Failure::Timeout(feature)) =
+            unsafe { firmware_state::release(unit.kind, &window) }
+        {
+            output::arguments(format_args!(
+                "HOST IOMMU {kind} unit {:#x}: {feature} stayed on after one second\n",
+                unit.base,
+            ));
+            output::fatal(
+                "an IOMMU unit the firmware left on did not turn off; turn off pre-boot DMA \
+                 protection (VT-d or AMD-Vi) in the firmware settings",
+            );
+        }
+    }
+}

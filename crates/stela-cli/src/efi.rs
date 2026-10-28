@@ -43,7 +43,7 @@ pub(crate) const BOOT_LOG: &str = "EFI/stela/boot.log";
 const SOURCE: &str = "EFI/stela/source.bin";
 
 #[derive(Subcommand)]
-pub(crate) enum EfiCommand {
+pub enum EfiCommand {
     /// Install `stela.efi` as an EFI partition's removable-media boot loader.
     Install(Install),
     /// Remove everything `install` added.
@@ -51,7 +51,7 @@ pub(crate) enum EfiCommand {
 }
 
 impl EfiCommand {
-    pub(crate) fn run(self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         let report = match self {
             Self::Install(command) => install(&command)?,
             Self::Uninstall(command) => uninstall(&command.esp, false)?,
@@ -95,7 +95,7 @@ pub struct Install {
 }
 
 #[derive(Args)]
-pub(crate) struct Uninstall {
+pub struct Uninstall {
     /// The EFI system partition root.
     #[arg(long)]
     esp: PathBuf,

@@ -267,6 +267,7 @@ impl Afk {
         }
     }
 
+    #[cfg(test)]
     pub fn started(&self) -> bool {
         matches!(self.state, State::Started { .. })
     }
@@ -728,11 +729,6 @@ fn entry_block(size: u32) -> Result<u32, &'static str> {
 
 fn advance(pointer: u32, bytes: u32) -> u32 {
     let next = pointer + bytes;
-    if next == DATA_BYTES { 0 } else { next }
-}
-
-fn next_pointer(pointer: u32) -> u32 {
-    let next = pointer + ENTRY_BLOCK;
     if next == DATA_BYTES { 0 } else { next }
 }
 
@@ -1368,7 +1364,7 @@ mod tests {
         bytes[20] = 4;
         bytes[24] = opcode;
         memory.write(at, &bytes).unwrap();
-        let next = next_pointer(pointer);
+        let next = advance(pointer, ENTRY_BLOCK);
         memory.write(ring + WPTR, &next.to_le_bytes()).unwrap();
         next
     }

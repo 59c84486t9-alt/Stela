@@ -33,8 +33,7 @@ pub(crate) struct OwnedRunRequest {
     pub block_budget: usize,
 }
 
-// Stop details are read through Debug, in run reports.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "run reports read the stop details through Debug")]
 #[derive(Debug)]
 pub(crate) enum OwnedStop {
     StopAddress,
@@ -87,8 +86,7 @@ pub(crate) struct SettledPrefix {
 }
 
 #[derive(Clone, Copy, Debug)]
-// The fault address is read through Debug, in run reports.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "run reports read the fault through Debug")]
 pub(crate) struct OwnedMemoryFault {
     pub access: stela_compiler::context::memory::FaultAccess,
     pub status: stela_compiler::context::memory::MemoryStatus,
