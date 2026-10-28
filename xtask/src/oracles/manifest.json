@@ -1,6 +1,6 @@
 [
   {
-    "package": "stela-boot",
+    "package": "xtask",
     "test": "original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources",
     "source": "crates/stela-boot/src/engine/topology.rs",
     "kind": "oracle",
@@ -10,7 +10,7 @@
     "reason": "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"
   },
   {
-    "package": "stela-boot",
+    "package": "xtask",
     "test": "original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission",
     "source": "crates/stela-boot/src/engine/topology.rs",
     "kind": "oracle",
@@ -21,7 +21,7 @@
     "reason": "requires retained original26A434J314s and prepared bundle DT"
   },
   {
-    "package": "stela-boot",
+    "package": "xtask",
     "test": "original_mode1_keeps_discovery_order_with_nonzero_logical_boot_pe",
     "source": "crates/stela-boot/src/engine/topology.rs",
     "kind": "oracle",
@@ -38,10 +38,12 @@
     "kind": "oracle",
     "inputs": [
       "STELA_AEA_BENCH_INVENTORY",
-      "STELA_AEA_BENCH_IPSW",
-      "STELA_AEA_BENCH_MEMBER"
+      "STELA_AEA_BENCH_IPSW"
     ],
-    "reason": "requires STELA_AEA_BENCH_IPSW, STELA_AEA_BENCH_INVENTORY and STELA_AEA_BENCH_MEMBER"
+    "reason": "requires STELA_AEA_BENCH_IPSW, STELA_AEA_BENCH_INVENTORY and STELA_AEA_BENCH_MEMBER",
+    "values": [
+      "STELA_AEA_BENCH_MEMBER"
+    ]
   },
   {
     "package": "stela-cli",

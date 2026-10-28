@@ -180,7 +180,7 @@ impl Oracles {
                 stdout: None,
                 stderr: None,
             };
-            match readiness(&entry, |name| env::var_os(name)) {
+            match readiness(&entry, tools::root(), |name| env::var_os(name)) {
                 Err(reason) => test.reason = reason,
                 Ok(paths) => {
                     test.status = if self.list { "ready" } else { "pending" };
@@ -282,6 +282,7 @@ struct Binding {
 
 fn readiness(
     entry: &Entry,
+    working_directory: &Path,
     mut variable: impl FnMut(&str) -> Option<std::ffi::OsString>,
 ) -> std::result::Result<Vec<Binding>, String> {
     if entry.kind != Kind::Oracle {
@@ -297,7 +298,7 @@ fn readiness(
             let value = variable(name)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| format!("missing {name}"))?;
-            let path = Path::new(&value);
+            let path = working_directory.join(&value);
             match kind {
                 BindingKind::Path if !path.exists() => {
                     return Err(format!("{name}: input does not exist: {}", path.display()));
@@ -309,7 +310,11 @@ fn readiness(
             }
             bindings.push(Binding {
                 variable: name.clone(),
-                value,
+                value: if matches!(kind, BindingKind::Value) {
+                    value
+                } else {
+                    path.into_os_string()
+                },
                 kind,
             });
         }
@@ -570,19 +575,33 @@ mod tests {
     #[test]
     fn missing_inputs_and_isolation_children_are_not_ready() {
         assert!(
-            readiness(&entry(Kind::Oracle), |_| None)
+            readiness(&entry(Kind::Oracle), Path::new("."), |_| None)
                 .unwrap_err()
                 .contains("STELA_ORACLE")
         );
         assert!(
-            readiness(&entry(Kind::Isolation), |_| panic!(
+            readiness(&entry(Kind::Isolation), Path::new("."), |_| panic!(
                 "isolation child must not inspect inputs"
             ))
             .is_err()
         );
         let directory = tempfile::tempdir().unwrap();
-        let ready = readiness(&entry(Kind::Oracle), |_| Some(directory.path().into())).unwrap();
+        let ready = readiness(&entry(Kind::Oracle), Path::new("."), |_| {
+            Some(directory.path().into())
+        })
+        .unwrap();
         assert_eq!(Path::new(&ready[0].value), directory.path());
+    }
+
+    #[test]
+    fn relative_inputs_use_the_test_process_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("trace"), "fixture").unwrap();
+        let ready = readiness(&entry(Kind::Oracle), directory.path(), |_| {
+            Some("trace".into())
+        })
+        .unwrap();
+        assert_eq!(Path::new(&ready[0].value), directory.path().join("trace"));
     }
 
     #[test]
@@ -600,7 +619,7 @@ mod tests {
                 output.as_os_str().to_owned()
             })
         };
-        let ready = readiness(&declared, lookup).unwrap();
+        let ready = readiness(&declared, Path::new("."), lookup).unwrap();
         let value = identity(ready.into_iter().next().unwrap(), false).unwrap();
         assert_eq!(value.kind, "value");
         assert!(value.path.is_none());
@@ -608,7 +627,7 @@ mod tests {
         assert!(value.sha256.is_some());
         fs::create_dir(&output).unwrap();
         assert!(
-            readiness(&declared, lookup)
+            readiness(&declared, Path::new("."), lookup)
                 .unwrap_err()
                 .contains("already exists")
         );
@@ -646,11 +665,20 @@ mod tests {
             .iter()
             .map(|entry| (entry.package.clone(), entry.test.clone()))
             .collect();
+        for entry in &entries {
+            let source = fs::read_to_string(tools::root().join(&entry.source)).unwrap();
+            assert!(
+                source.contains(&format!("fn {}(", entry.test)),
+                "{} does not contain {}",
+                entry.source.display(),
+                entry.test
+            );
+        }
         let files = git(&["ls-files", "--", "crates/**/*.rs", "xtask/**/*.rs"]).unwrap();
         let mut observed = BTreeSet::new();
         for file in files.lines() {
             let text = fs::read_to_string(tools::root().join(file)).unwrap();
-            let package = if file.starts_with("xtask/") {
+            let package = if file.starts_with("xtask/") || file.starts_with("crates/stela-boot/") {
                 "xtask"
             } else {
                 file.split('/').nth(1).unwrap()
@@ -666,6 +694,72 @@ mod tests {
         assert_eq!(
             declared, observed,
             "update oracle metadata when ignored tests change"
+        );
+    }
+
+    #[test]
+    fn boot_source_oracles_bind_to_the_hosted_xtask_harness() {
+        let entries: Vec<Entry> =
+            serde_json::from_str(include_str!("oracles/manifest.json")).unwrap();
+        let boot: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.source.starts_with("crates/stela-boot"))
+            .collect();
+        assert!(boot.iter().all(|entry| entry.package == "xtask"));
+        let metadata = tools::cargo()
+            .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+            .output()
+            .unwrap();
+        assert!(metadata.status.success());
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let packages: BTreeSet<_> = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|package| package["name"].as_str())
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| packages.contains(entry.package.as_str()))
+        );
+    }
+
+    #[test]
+    fn aea_archive_member_is_a_literal_value() {
+        let entries: Vec<Entry> =
+            serde_json::from_str(include_str!("oracles/manifest.json")).unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.test == "native_stream_authentication_benchmark")
+            .unwrap();
+        assert_eq!(entry.values, ["STELA_AEA_BENCH_MEMBER"]);
+        assert!(
+            !entry
+                .inputs
+                .iter()
+                .any(|name| name == "STELA_AEA_BENCH_MEMBER")
+        );
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("ipsw"), "archive fixture").unwrap();
+        fs::write(directory.path().join("inventory"), "inventory fixture").unwrap();
+        let bindings = readiness(entry, directory.path(), |name| {
+            Some(
+                match name {
+                    "STELA_AEA_BENCH_MEMBER" => "nested/member.dmg.aea",
+                    "STELA_AEA_BENCH_IPSW" => "ipsw",
+                    "STELA_AEA_BENCH_INVENTORY" => "inventory",
+                    _ => unreachable!(),
+                }
+                .into(),
+            )
+        })
+        .unwrap();
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| binding.variable == "STELA_AEA_BENCH_MEMBER"
+                    && matches!(binding.kind, BindingKind::Value))
         );
     }
 
