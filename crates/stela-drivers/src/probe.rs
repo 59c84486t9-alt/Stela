@@ -21,7 +21,7 @@ use crate::{
     storage::{ahci, nvme, rtsx, sdhci, virtio},
     usb::{self, bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, xhci},
 };
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 #[cfg(feature = "native-acpi")]
@@ -418,9 +418,18 @@ impl Devices {
 /// with its ranges mapped as it says, and nothing else may drive these
 /// controllers afterwards.
 pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
-    let firmware = crate::firmware::HandoffProvider::new(handoff.firmware.as_deref());
+    // Attached devices keep borrowing their firmware for as long as they
+    // run, so the handoff's catalog lives for the rest of the boot.
+    let catalog = handoff
+        .firmware
+        .clone()
+        // SAFETY: the reference count is never given back, so the catalog
+        // stays allocated for every later borrow.
+        .map(|catalog| unsafe { &*Arc::into_raw(catalog) });
+    let firmware: &'static crate::firmware::HandoffProvider<'static> =
+        Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)));
     // SAFETY: the caller granted the complete machine/controller contract.
-    unsafe { probe_with_provider(handoff, dma, &firmware, None) }
+    unsafe { probe_with_provider(handoff, dma, firmware, None) }
 }
 
 /// Enumerate and attach devices using an explicit exact firmware provider.
@@ -433,11 +442,13 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
 /// # Safety
 /// The machine, mappings, DMA and exclusive post-ExitBootServices ownership
 /// requirements of [`probe`] apply. The provider must preserve its documented
-/// exact identity and integrity contract for every resource it returns.
+/// exact identity and integrity contract for every resource it returns. It
+/// lives for the rest of the boot because attached devices keep borrowing
+/// the firmware it returned.
 pub unsafe fn probe_with_provider(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
-    firmware: &dyn crate::firmware::Provider,
+    firmware: &'static dyn crate::firmware::Provider,
     services: Option<&dyn NativeServices>,
 ) -> Devices {
     let mut devices = Devices {
