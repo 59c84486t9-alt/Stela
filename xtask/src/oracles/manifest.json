@@ -3460,7 +3460,7 @@
   {
     "package": "stela-runtime",
     "test": "unchanged_j314s_entry_fetches_from_live_canonical_aperture_before_original_consumers",
-    "source": "crates/stela-runtime/src/machine/caches/cram.rs",
+    "source": "crates/stela-runtime/src/machine/cram.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3470,7 +3470,7 @@
   {
     "package": "stela-runtime",
     "test": "unchanged_j314s_entry_uses_actual_whole_reservation_initialization_before_image_copy",
-    "source": "crates/stela-runtime/src/machine/caches/cram.rs",
+    "source": "crates/stela-runtime/src/machine/cram.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3480,7 +3480,7 @@
   {
     "package": "stela-runtime",
     "test": "unchanged_j314s_entry_exchanges_full_mailbox_frames_with_native_sep_rom",
-    "source": "crates/stela-runtime/src/machine/caches/cram.rs",
+    "source": "crates/stela-runtime/src/machine/cram.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3490,7 +3490,7 @@
   {
     "package": "stela-runtime",
     "test": "unchanged_original_allocation_and_release_execute_against_actual_view_owner",
-    "source": "crates/stela-runtime/src/machine/caches/cram.rs",
+    "source": "crates/stela-runtime/src/machine/cram.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3500,7 +3500,7 @@
   {
     "package": "stela-runtime",
     "test": "unchanged_original_capacity_and_initial_completion_branches_remain_distinct",
-    "source": "crates/stela-runtime/src/machine/caches/cram.rs",
+    "source": "crates/stela-runtime/src/machine/cram.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3510,7 +3510,7 @@
   {
     "package": "stela-runtime",
     "test": "unchanged_j314s_allocation_and_release_execute_against_actual_view_owner",
-    "source": "crates/stela-runtime/src/machine/caches/cram.rs",
+    "source": "crates/stela-runtime/src/machine/cram.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
@@ -3520,7 +3520,7 @@
   {
     "package": "stela-runtime",
     "test": "unchanged_j314s_capacity_and_initial_completion_branches_remain_distinct",
-    "source": "crates/stela-runtime/src/machine/caches/cram.rs",
+    "source": "crates/stela-runtime/src/machine/cram.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_PMGR_M1_ADT"
