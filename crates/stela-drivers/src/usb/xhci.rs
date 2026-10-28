@@ -127,6 +127,13 @@ const IMAN: usize = 0x20;
 const ERSTSZ: usize = 0x28;
 const ERSTBA: usize = 0x30;
 const ERDP: usize = 0x38;
+const IMOD: usize = 0x24;
+const IMAN_IP: u32 = 1;
+const IMAN_IE: u32 = 1 << 1;
+const USBCMD_INTE: u32 = 1 << 2;
+const USBSTS_EINT: u32 = 1 << 3;
+/// Linux's default 40 us interrupt moderation, in 250 ns units.
+const MODERATION: u32 = 160;
 
 const RUN: u32 = 1;
 const CRCR_ABORT: u32 = 1 << 2;
@@ -466,6 +473,8 @@ pub struct Controller {
     command_ring_stopped: bool,
     /// Events taken since ERDP last moved past them.
     unpublished: usize,
+    /// Whether interrupter 0 sends the function's vector as events post.
+    signalled: bool,
     /// Drains since USBSTS was last read.
     quiet_drains: u8,
     /// The command on the ring and its timer.
@@ -721,6 +730,7 @@ impl Controller {
             command_poisoned: false,
             command_ring_stopped: false,
             unpublished: 0,
+            signalled: false,
             quiet_drains: 0,
             outstanding: None,
             finished: Vec::new(),
@@ -818,6 +828,25 @@ impl Controller {
         self.registers.write64(self.runtime + ERDP, dequeue | EHB);
     }
 
+    /// Send interrupter 0's interrupt, which the function's vector carries,
+    /// as xhci_run enables it: moderated, then IMAN.IE and USBCMD.INTE set.
+    /// Moving ERDP with Event Handler Busy lets the next event send it.
+    fn signal(&mut self) {
+        let runtime = self.runtime;
+        self.registers.write32(runtime + IMOD, MODERATION);
+        self.registers.write32(runtime + IMAN, IMAN_IE | IMAN_IP);
+        let command = self.registers.read32(self.operational + USBCMD);
+        self.registers
+            .write32(self.operational + USBCMD, command | USBCMD_INTE);
+        self.signalled = true;
+    }
+
+    /// Whether the controller sends the handoff's completion signal
+    /// ([`crate::Handoff::completion`]) as it posts an event.
+    pub fn signals(&self) -> bool {
+        self.signalled
+    }
+
     /// Whether the controller posted an event software has not taken, read
     /// from the event ring alone. An unreadable ring counts as posted so
     /// `next_event` fails it.
@@ -854,6 +883,11 @@ impl Controller {
         }
         self.quiet_drains = 0;
         self.check_status();
+        if self.signalled {
+            // xhci_irq clears USBSTS.EINT with each batch.
+            self.registers
+                .write32(self.operational + USBSTS, USBSTS_EINT);
+        }
         while let Some(event) = self.next_event() {
             // A transfer event for a slot no longer enabled has no waiter.
             let stale = event.kind() == TRANSFER_EVENT
@@ -1097,6 +1131,11 @@ pub fn attach_with_firmware_diagnostics(
         bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
     };
     function.enable_polled();
+    // xhci_try_enable_msi: MSI-X, otherwise MSI, for interrupter 0.
+    let signalled = match handoff.completion {
+        Some(message) => function.enable_message(handoff, &bars, message)?,
+        None => false,
+    };
     let address = function.address;
     let location = format!(
         "xhci {:04x}:{:02x}:{:02x}.{}",
@@ -1113,6 +1152,7 @@ pub fn attach_with_firmware_diagnostics(
             dma: dma_profile,
             quirks,
         },
+        signalled,
         || quirks::after_reset(function, handoff.clock),
     )?;
     found.controller_firmware = controller_firmware;
@@ -1152,10 +1192,15 @@ pub fn start_with_provider(
         location,
         firmware,
         hardware::Policy::default(),
+        false,
         || Ok(()),
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the hardware profile, signal route and reset hook each come from the PCI function"
+)]
 fn start_with_policies(
     registers: Box<dyn Registers>,
     clock: Clock,
@@ -1163,10 +1208,14 @@ fn start_with_policies(
     location: String,
     firmware: &dyn crate::firmware::Provider,
     policy: hardware::Policy,
+    signal: bool,
     after_reset: impl FnOnce() -> Result<(), BlockError>,
 ) -> Result<Found, BlockError> {
     let mut controller =
         Controller::with_hardware_profile(registers, clock, dma, location, policy, after_reset)?;
+    if signal {
+        controller.signal();
+    }
     // The policy came from this same actual PCI function before BAR access,
     // and applies only to the controller reset just completed above. No public
     // raw-register caller can supply a guessed PCI identity or enable streams.
@@ -1207,6 +1256,65 @@ mod tests {
         model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
         controller.drain();
         assert_eq!(reads(), before + 2);
+    }
+
+    /// A signalled controller moderates and enables interrupter 0, and
+    /// clears USBSTS.EINT with each batch of events.
+    #[test]
+    fn signalled_controller_enables_interrupter_zero_and_clears_eint_per_batch() {
+        struct Idle;
+        impl Registers for Idle {
+            fn read32(&mut self, _: usize) -> u32 {
+                0
+            }
+            fn write32(&mut self, _: usize, _: u32) {}
+        }
+        struct Recording {
+            inner: Box<dyn Registers>,
+            writes: Rc<RefCell<Vec<(usize, u32)>>>,
+        }
+        impl Registers for Recording {
+            fn read32(&mut self, offset: usize) -> u32 {
+                self.inner.read32(offset)
+            }
+            fn write32(&mut self, offset: usize, value: u32) {
+                self.writes.borrow_mut().push((offset, value));
+                self.inner.write32(offset, value);
+            }
+        }
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all modeled controller DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let inner = core::mem::replace(&mut controller.registers, Box::new(Idle));
+        controller.registers = Box::new(Recording {
+            inner,
+            writes: writes.clone(),
+        });
+        assert!(!controller.signals());
+        controller.signal();
+        assert!(controller.signals());
+        let (runtime, operational) = (controller.runtime, controller.operational);
+        {
+            let writes = writes.borrow();
+            assert!(writes.contains(&(runtime + IMOD, MODERATION)));
+            assert!(writes.contains(&(runtime + IMAN, IMAN_IE | IMAN_IP)));
+            assert!(
+                writes
+                    .iter()
+                    .any(|&(at, value)| at == operational + USBCMD && value & USBCMD_INTE != 0)
+            );
+        }
+        writes.borrow_mut().clear();
+        model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
+        controller.drain();
+        assert!(
+            writes
+                .borrow()
+                .contains(&(operational + USBSTS, USBSTS_EINT))
+        );
     }
 
     #[test]
