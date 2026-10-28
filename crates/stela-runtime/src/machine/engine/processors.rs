@@ -333,8 +333,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Err(Stop::Waiting);
             }
             let deadline = self.next_deadline(now);
-            // In parallel, other machines' PEs can still wake this one.
-            if deadline.is_none() && self.parallel.is_none() && !self.devices.waits_on_host() {
+            // Another parallel PE can send an event or start this PE. A
+            // single-PE hub has the same wake sources as a serialized board.
+            let remote_pe = self.parallel.as_ref().is_some_and(|hub| hub.pes() > 1);
+            if deadline.is_none() && !remote_pe && !self.devices.waits_on_host() {
                 return Err(Stop::Idle);
             }
             if let (Some(deadline), true) = (deadline, self.idle_skip) {
@@ -2063,6 +2065,31 @@ mod tests {
         machine.peers[1] = Peer::Off;
         assert!(machine.device_read(base + PC_SAMPLE, 4, 0).is_err());
         assert_eq!(machine.device_read(base + PC_SAMPLE, 8, 0), Ok(pc + 4));
+    }
+
+    #[test]
+    fn single_pe_parallel_waits_match_serial() {
+        struct NoKick;
+        impl super::super::parallel::Kick for NoKick {
+            fn kick(&self, _: usize) {}
+        }
+        for (pes, host_wake, expected) in [
+            (1, false, Stop::Idle),
+            (1, true, Stop::Waiting),
+            (2, false, Stop::Waiting),
+            (2, true, Stop::Waiting),
+        ] {
+            let devices = Board {
+                host_wake,
+                ..Board::default()
+            };
+            let identities = (0..pes).map(|pe| identity(pe as u64)).collect();
+            let mut machine = board(&[], devices, identities);
+            let hub = super::super::parallel::Hub::new(pes, NoKick);
+            machine.enter_parallel(hub).unwrap();
+            machine.system_instruction(WFI).unwrap();
+            assert_eq!(machine.schedule(), Err(expected));
+        }
     }
 
     #[test]
