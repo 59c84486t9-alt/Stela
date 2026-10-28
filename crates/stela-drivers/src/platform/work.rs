@@ -73,6 +73,7 @@ enum Lane {
     General,
     Notify,
     Service,
+    Firmware,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextId(u64);
@@ -171,6 +172,7 @@ struct Job {
 }
 struct State<const N: usize> {
     jobs: [Option<Job>; N],
+    reserved_services: bool,
     next: u64,
     closed: bool,
     poisoned: bool,
@@ -279,6 +281,7 @@ impl<const N: usize> Queue<N> {
             owner: ManuallyDrop::new(owner),
             state: ManuallyDrop::new(UnsafeCell::new(State {
                 jobs: [None; N],
+                reserved_services: false,
                 next: 1,
                 closed: false,
                 poisoned: false,
@@ -345,10 +348,18 @@ impl<const N: usize> Queue<N> {
         if state.closed || state.poisoned || self.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        let slot = state
-            .jobs
-            .iter()
-            .position(Option::is_none)
+        let range = if state.reserved_services {
+            match lane {
+                Lane::Service => N - 2..N - 1,
+                Lane::Firmware => N - 1..N,
+                _ => 0..N - 2,
+            }
+        } else {
+            0..N
+        };
+        let slot = range
+            .into_iter()
+            .find(|index| state.jobs[*index].is_none())
             .ok_or(WorkError::Full)?;
         let sequence = state.next;
         state.next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
@@ -693,8 +704,8 @@ struct Task {
     signal: Arc<WakeSignal>,
 }
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
-/// task one is serial Notify; an optional service reserves task two, with all
-/// remaining stacks running general work. The dispatcher
+/// task one is serial Notify; an optional Linux service reserves task two and
+/// firmware reserves task three. Remaining stacks run general work. The dispatcher
 /// itself has no fabricated thread ID. All switching happens with IF=0.
 #[cfg(target_arch = "x86_64")]
 pub struct Runtime<const N: usize> {
@@ -705,6 +716,8 @@ pub struct Runtime<const N: usize> {
     cursor: Cell<usize>,
     retired: Cell<bool>,
     service_started: Cell<bool>,
+    firmware_started: Cell<bool>,
+    firmware_turn: Cell<bool>,
     service_domain: ManuallyDrop<UnsafeCell<Option<Arc<service::Domain<N>>>>>,
     _local: PhantomData<*mut ()>,
     _pinned: PhantomPinned,
@@ -754,7 +767,18 @@ impl<const N: usize> Runtime<N> {
         controls: context::Controls,
         reserve_service: bool,
     ) -> Result<Pin<Box<Self>>, WorkError> {
-        if reserve_service && stacks.len() < 5 {
+        Self::with_reserved_controls(queue, stacks, controls, reserve_service, false)
+    }
+    fn with_reserved_controls(
+        queue: Arc<Queue<N>>,
+        stacks: Vec<Stack>,
+        controls: context::Controls,
+        reserve_service: bool,
+        reserve_firmware: bool,
+    ) -> Result<Pin<Box<Self>>, WorkError> {
+        if (reserve_service && stacks.len() < 5)
+            || (reserve_firmware && (!reserve_service || stacks.len() < 6 || N < 3))
+        {
             return Err(WorkError::Unavailable);
         }
         let mut tasks = Vec::new();
@@ -770,6 +794,7 @@ impl<const N: usize> Runtime<N> {
                     0 => Lane::Foreground,
                     1 => Lane::Notify,
                     2 if reserve_service => Lane::Service,
+                    3 if reserve_firmware => Lane::Firmware,
                     _ => Lane::General,
                 },
                 stack,
@@ -787,12 +812,22 @@ impl<const N: usize> Runtime<N> {
                 }),
             });
         }
-        if queue
-            .executor_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
         {
-            return Err(WorkError::Busy);
+            let mut admission = queue.lock()?;
+            let state = admission.state();
+            if reserve_firmware && state.jobs[N - 2..].iter().any(Option::is_some) {
+                return Err(WorkError::Busy);
+            }
+            if queue
+                .executor_claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Err(WorkError::Busy);
+            }
+            // The real constructor atomically reserves both admission slots.
+            // Existing queued jobs are never moved, discarded or reinterpreted.
+            state.reserved_services = reserve_firmware;
         }
         let executor = Box::pin(Self {
             queue,
@@ -802,6 +837,8 @@ impl<const N: usize> Runtime<N> {
             cursor: Cell::new(0),
             retired: Cell::new(false),
             service_started: Cell::new(false),
+            firmware_started: Cell::new(false),
+            firmware_turn: Cell::new(true),
             service_domain: ManuallyDrop::new(UnsafeCell::new(None)),
             _local: PhantomData,
             _pinned: PhantomPinned,
@@ -892,6 +929,41 @@ impl<const N: usize> Runtime<N> {
         let ticket = self.queue.enqueue_lane(Lane::Service, callback, context)?;
         self.service_started.set(true);
         Ok(ticket)
+    }
+    /// Start the independently reserved firmware continuation once. Its lane
+    /// cannot be consumed by General/Notify work or the Linux service domain.
+    /// Reservation supplies no AML, SCI, hardware or Linux entry authority.
+    ///
+    /// # Safety
+    /// The retained owner covers callback/code/context until genuine stop,
+    /// drain and join. The callback never unwinds or returns with a live foreign
+    /// entry; every suspended frame remains on its owned stack until resumed.
+    pub unsafe fn start_firmware(
+        self: Pin<&Self>,
+        callback: Callback,
+        context: *mut c_void,
+    ) -> Result<Ticket, WorkError> {
+        self.queue.process()?;
+        if self.retired.get() {
+            return Err(WorkError::Closed);
+        }
+        if self.current.get() != NONE || self.firmware_started.get() {
+            return Err(WorkError::Busy);
+        }
+        // SAFETY: all runtimes retain at least four tasks. The qualified taskless
+        // dispatcher reads immutable constructor metadata without invoking work.
+        if unsafe { (*self.task(3)).lane } != Lane::Firmware {
+            return Err(WorkError::Unavailable);
+        }
+        let ticket = self.queue.enqueue_lane(Lane::Firmware, callback, context)?;
+        self.firmware_started.set(true);
+        Ok(ticket)
+    }
+    /// Check actual CPU/current/RSP before identifying the firmware continuation.
+    pub fn firmware_current(&self) -> Result<bool, WorkError> {
+        self.current_id()?;
+        // SAFETY: current_id validated the current index, state and retained stack.
+        Ok(unsafe { (*self.task(self.current.get())).lane } == Lane::Firmware)
     }
     /// Check actual CPU/current/RSP before identifying the reserved service.
     pub fn service_current(&self) -> Result<bool, WorkError> {
@@ -1013,7 +1085,7 @@ impl<const N: usize> Runtime<N> {
         self: Pin<&Self>,
     ) -> Result<scheduling::SchedulingHandle<N>, WorkError> {
         self.current_id()?;
-        if self.domain().is_none() {
+        if self.domain().is_none() || self.firmware_current()? {
             return Err(WorkError::Unavailable);
         }
         let wake = self.wake_handle()?;
@@ -1214,6 +1286,10 @@ impl<const N: usize> Runtime<N> {
         // SAFETY: the task list's length never changes after construction.
         let count = unsafe { (*self.tasks.get()).len() };
         let mut selected = None;
+        let mut firmware = None;
+        // SAFETY: the immutable constructor layout always retains at least four
+        // tasks; this qualified taskless dispatcher owns their metadata at IF0.
+        let has_firmware = unsafe { (*self.task(3)).lane } == Lane::Firmware;
         for n in 0..count {
             let i = (if due_service { 2 } else { self.cursor.get() } + n) % count;
             // SAFETY: no task runs while the dispatcher steps, so this is the only
@@ -1266,9 +1342,18 @@ impl<const N: usize> Runtime<N> {
                 task.state = TaskState::Runnable;
             }
             if matches!(task.state, TaskState::Ready | TaskState::Runnable) {
+                if task.lane == Lane::Firmware {
+                    firmware = Some(i);
+                    continue;
+                }
                 if self.domain().is_none() {
-                    selected = Some(i);
-                    break; // Preserve the default Runtime's exact RR behavior.
+                    if selected.is_none() {
+                        selected = Some(i);
+                    }
+                    if !has_firmware {
+                        break; // Preserve the legacy Runtime's exact RR behavior.
+                    }
+                    continue;
                 }
                 let precedes = if due_service && i == 2 {
                     true
@@ -1301,12 +1386,22 @@ impl<const N: usize> Runtime<N> {
                 }
             }
         }
+        // Firmware is outside Linux FIFO ranks. At most one firmware turn
+        // separates eligible non-firmware turns; an idle peer set permits it to
+        // continue. Due Linux deadline/IRQ work retains its existing precedence.
+        if let Some(index) = firmware
+            && !(due_service && selected == Some(2))
+            && (self.firmware_turn.get() || selected.is_none())
+        {
+            selected = Some(index);
+        }
         let Some(i) = selected else {
             // SAFETY: `flags` came from the save_disable above, and no lock is held.
             unsafe { self.queue.cpu.restore(flags) };
             return Ok(false);
         };
         if !(due_service && i == 2) {
+            self.firmware_turn.set(Some(i) != firmware);
             self.cursor.set((i + 1) % count);
         }
         // SAFETY: immutable selected actual job at IF0; no borrow spans switch.
@@ -1443,13 +1538,14 @@ impl<const N: usize> Runtime<N> {
                 {
                     return Err(WorkError::WouldDeadlock);
                 }
-                let mut queued_lanes = [false; 4];
+                let mut queued_lanes = [false; 5];
                 for job in s.jobs.iter().flatten().filter(|job| !job.running) {
                     let lane = match job.lane {
                         Lane::Foreground => 0,
                         Lane::Notify => 1,
                         Lane::General => 2,
                         Lane::Service => 3,
+                        Lane::Firmware => 4,
                     };
                     queued_lanes[lane] = true;
                 }
@@ -1473,6 +1569,7 @@ impl<const N: usize> Runtime<N> {
                                             Lane::Notify => 1,
                                             Lane::General => 2,
                                             Lane::Service => 3,
+                                            Lane::Firmware => 4,
                                         }]
                                     }
                                     TaskState::Running => false,
@@ -1654,6 +1751,25 @@ impl<const N: usize> Executor<N> {
         Ok(Self {
             runtime: ManuallyDrop::new(Runtime::with_service_controls(
                 queue, stacks, controls, true,
+            )?),
+        })
+    }
+    /// Reserve independent Linux and firmware continuations at indices two
+    /// and three, alongside Foreground, Notify and at least two General tasks.
+    /// Reserve two queue admission slots as well (N must be at least three).
+    /// Preexisting jobs in either final slot reject construction with Busy;
+    /// no queued work moves or disappears. Guarded stacks and CPU ownership
+    /// are validated as in new(). Starting grants no foreign service capability.
+    pub fn new_with_services(queue: Arc<Queue<N>>, stacks: Vec<Stack>) -> Result<Self, WorkError> {
+        Runtime::<N>::validate_stacks(&queue, &stacks)?;
+        if stacks.len() < 6 {
+            return Err(WorkError::Unavailable);
+        }
+        // SAFETY: same qualified native construction boundary as new().
+        let controls = unsafe { context::controls()? };
+        Ok(Self {
+            runtime: ManuallyDrop::new(Runtime::with_reserved_controls(
+                queue, stacks, controls, true, true,
             )?),
         })
     }

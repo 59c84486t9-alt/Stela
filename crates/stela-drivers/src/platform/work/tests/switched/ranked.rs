@@ -195,6 +195,9 @@ unsafe extern "C" fn timer(p: *mut c_void) {
     unsafe { h.update(boosted, normal, false) }.unwrap();
     while !f.stop.load(Ordering::Acquire) {
         if let Some(batch) = domain.begin(r).unwrap() {
+            if f.mode == 3 {
+                f.event(100);
+            }
             // SAFETY: generic fixture consumer only; no original C timers
             // or IRQ-work storage is admitted by this scheduler test.
             // SAFETY: begin returned this batch for the current service continuation.
@@ -357,6 +360,69 @@ unsafe extern "C" fn stale(p: *mut c_void) {
         Ok(before)
     );
 }
+unsafe extern "C" fn fifo_peer(p: *mut c_void) {
+    // SAFETY: p is this queue's retained Ranked Arc through callback join.
+    let f = unsafe { ranked(p) };
+    // SAFETY: setup published this retained pinned Runtime before submission.
+    let r = unsafe { f.runtime() };
+    f.bind(1);
+    f.rank(1, BasePolicy::Fifo(60), 39, false);
+    for event in 1..=5 {
+        f.event(event);
+        r.yield_now().unwrap();
+    }
+    f.rank(1, BasePolicy::Normal, 120, false);
+}
+unsafe fn normal_peer(p: *mut c_void, index: usize) {
+    // SAFETY: caller forwards this queue's retained Ranked Arc and real task index.
+    let f = unsafe { ranked(p) };
+    f.bind(index);
+    // SAFETY: setup published this retained pinned Runtime before submission.
+    unsafe { f.runtime() }.yield_now().unwrap();
+}
+unsafe extern "C" fn normal_peer_two(p: *mut c_void) {
+    // SAFETY: queue retains the matching Ranked fixture, whose binding two is idle.
+    unsafe { normal_peer(p, 2) };
+}
+unsafe extern "C" fn normal_peer_three(p: *mut c_void) {
+    // SAFETY: queue retains the matching Ranked fixture, whose binding three is idle.
+    unsafe { normal_peer(p, 3) };
+}
+unsafe extern "C" fn firmware_turns(p: *mut c_void) {
+    // SAFETY: p is this queue's retained Ranked Arc, and the executor remains
+    // pinned with all guarded mappings until every firmware turn has joined.
+    let f = unsafe { ranked(p) };
+    // SAFETY: setup published the retained pinned Runtime before submission.
+    let r = unsafe { f.runtime() };
+    for turn in 0..8 {
+        assert_eq!(r.firmware_current(), Ok(true));
+        assert_eq!(r.service_current(), Ok(false));
+        assert!(matches!(r.scheduling_handle(), Err(WorkError::Unavailable)));
+        if turn == 1 {
+            assert!(
+                f.events.lock().unwrap().contains(&100),
+                "due Linux service precedes the next firmware turn"
+            );
+        }
+        f.event(90 + turn);
+        if turn == 0 {
+            f.domain
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .raised_work()
+                .unwrap()
+                .raise()
+                .unwrap();
+        }
+        r.yield_now().unwrap();
+    }
+}
+#[test]
+fn firmware_turns_remain_independent_of_linux_fifo() {
+    roundtrip(3);
+}
 #[test]
 fn priority_dispatch_and_wake_order() {
     roundtrip(0);
@@ -391,8 +457,14 @@ fn roundtrip(mode: u64) {
     let controls = unsafe { context::read_controls() };
     let executor = Executor {
         runtime: ManuallyDrop::new(
-            Runtime::with_service_controls(queue, stacks_count(dropped.clone(), 6), controls, true)
-                .unwrap(),
+            Runtime::with_reserved_controls(
+                queue,
+                stacks_count(dropped.clone(), if mode == 3 { 7 } else { 6 }),
+                controls,
+                true,
+                mode == 3,
+            )
+            .unwrap(),
         ),
     };
     let r = executor.runtime();
@@ -414,13 +486,26 @@ fn roundtrip(mode: u64) {
     // The pinned executor and its dedicated service stack survive until service join.
     let service = unsafe { r.start_service(timer, p) }.unwrap();
     assert!(r.step().unwrap());
-    let jobs = [low, medium, high]
+    let firmware = if mode == 3 {
+        // SAFETY: the queue retains this Ranked Arc and static callback through
+        // all yielded firmware frames, which are joined before stack release.
+        Some(unsafe { r.start_firmware(firmware_turns, p) }.unwrap())
+    } else {
+        None
+    };
+    let callbacks: [Callback; 3] = if mode == 3 {
+        [fifo_peer, normal_peer_two, normal_peer_three]
+    } else {
+        [low, medium, high]
+    };
+    let jobs = callbacks
         // SAFETY: The callback and context identify this queue's retained fixture Arc.
         // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
         .map(|callback| unsafe { r.queue().execute(Kind::General, callback, p) }.unwrap());
     let mut attempts = 0;
     while jobs
         .iter()
+        .chain(firmware.iter())
         .any(|ticket| !r.queue().completed(*ticket).unwrap())
     {
         assert!(attempts < 128);
@@ -428,13 +513,38 @@ fn roundtrip(mode: u64) {
         attempts += 1;
     }
     assert_eq!(
-        *f.events.lock().unwrap(),
+        f.events
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|value| *value < 90)
+            .collect::<Vec<_>>(),
         match mode {
-            0 => std::vec![1, 2, 3, 4, 5],
+            0 | 3 => std::vec![1, 2, 3, 4, 5],
             1 => std::vec![10, 11, 12, 13, 14, 15],
             _ => std::vec![20, 21, 22],
         }
     );
+    if mode == 3 {
+        let events = f.events.lock().unwrap();
+        let position = |value| events.iter().position(|event| *event == value).unwrap();
+        assert!(
+            position(90) < position(5),
+            "Linux FIFO cannot starve firmware"
+        );
+        assert!(
+            position(1) < position(97),
+            "persistent firmware readiness cannot starve Linux work"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| (90..98).contains(*event))
+                .count(),
+            8
+        );
+    }
     // SAFETY: The callback and context identify this queue's retained fixture Arc.
     // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     let reuse = unsafe { r.queue().execute(Kind::General, stale, p) }.unwrap();
@@ -470,6 +580,9 @@ fn roundtrip(mode: u64) {
     unsafe { r.retire() }.unwrap();
     drop(domain);
     drop(executor);
-    assert_eq!(dropped.load(Ordering::Relaxed), 6);
+    assert_eq!(
+        dropped.load(Ordering::Relaxed),
+        if mode == 3 { 7 } else { 6 }
+    );
     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
 }

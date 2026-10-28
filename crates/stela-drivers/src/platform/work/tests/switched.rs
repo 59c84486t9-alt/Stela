@@ -73,6 +73,7 @@ struct Fixture {
     runtime: AtomicU64,
     events: Mutex<Vec<(u64, u64, usize)>>,
     done: AtomicBool,
+    parked: Mutex<Vec<(Arc<firmware::Parked>, WakeHandle<16>)>>,
 }
 impl Fixture {
     /// # Safety
@@ -208,6 +209,12 @@ fn setup() -> (Executor<16>, Arc<Fixture>, Arc<CpuModel>, Arc<AtomicU64>) {
 fn setup_with_service(
     reserve_service: bool,
 ) -> (Executor<16>, Arc<Fixture>, Arc<CpuModel>, Arc<AtomicU64>) {
+    setup_with_reservations(reserve_service, false)
+}
+fn setup_with_reservations(
+    reserve_service: bool,
+    reserve_firmware: bool,
+) -> (Executor<16>, Arc<Fixture>, Arc<CpuModel>, Arc<AtomicU64>) {
     let cpu = CpuModel::new();
     let f = Arc::new(Fixture {
         cpu: cpu.clone(),
@@ -217,19 +224,24 @@ fn setup_with_service(
         runtime: AtomicU64::new(0),
         events: Mutex::new(Vec::new()),
         done: AtomicBool::new(false),
+        parked: Mutex::new(Vec::new()),
     });
     // SAFETY: The queue retains the fixture Arc and same-thread CpuModel. setup stores
     // the pinned runtime pointer before admitting any callback that can read it.
     let q = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicU64::new(0));
     // Hosted context switching uses guarded mappings and unprivileged FP controls.
-    let runtime = Runtime::with_service_controls(
+    let runtime = Runtime::with_reserved_controls(
         q,
-        stacks_count(dropped.clone(), if reserve_service { 5 } else { 4 }),
+        stacks_count(
+            dropped.clone(),
+            4 + usize::from(reserve_service) + usize::from(reserve_firmware),
+        ),
         // SAFETY: The hosted x86-64 process has x87/SSE enabled. read_controls only
         // snapshots their control registers into local storage; it performs no privileged access.
         unsafe { context::read_controls() },
         reserve_service,
+        reserve_firmware,
     )
     .unwrap();
     f.runtime.store(
@@ -484,3 +496,5 @@ fn timeout_quarantines_executor() {
 // Genuine switched-stack fixtures for the generic binding contract.
 // This is a hosted state/IRQ model, not a native Linux/C task producer.
 mod bound;
+
+mod firmware;
