@@ -421,6 +421,91 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
 /// `source.bin`, the bundle files, and the storage drivers' ranges.
 type Inputs = (Vec<u8>, BundleFiles, Option<stela_drivers::Handoff>);
 
+/// `EFI_MEMORY_RUNTIME`: the region stays the firmware's after boot
+/// services, for its runtime services.
+const RUNTIME_ATTRIBUTE: u64 = 1 << 63;
+
+/// The firmware's runtime regions, and its `ResetSystem` service: zero when
+/// the system table has none.
+struct Runtime {
+    regions: Vec<(u64, u64, MemoryType)>,
+    reset: u64,
+}
+
+impl Runtime {
+    /// Read before boot services end. Without SetVirtualAddressMap the
+    /// firmware's runtime services run at their physical addresses.
+    fn capture() -> Result<Self, &'static str> {
+        let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
+        let regions = map
+            .entries()
+            .filter(|entry| entry.att.bits() & RUNTIME_ATTRIBUTE != 0)
+            .map(|entry| {
+                let start = entry.phys_start;
+                (start, start + entry.page_count * PAGE, entry.ty)
+            })
+            .collect();
+        let reset = uefi::table::system_table_raw().map_or(0, |table| {
+            // SAFETY: the firmware's live system table, before EBS.
+            let runtime = unsafe { table.as_ref().runtime_services };
+            if runtime.is_null() {
+                0
+            } else {
+                // SAFETY: as above; its runtime services table.
+                unsafe { (*runtime).reset_system as usize as u64 }
+            }
+        });
+        Ok(Self { regions, reset })
+    }
+
+    /// Runtime code, which the identity map makes writable and executable,
+    /// as Linux maps it without a memory attributes table.
+    fn code(&self) -> impl Iterator<Item = (u64, u64, u64)> + '_ {
+        self.regions
+            .iter()
+            .filter(|&&(_, _, kind)| runtime_code(kind))
+            .map(|&(start, end, _)| (start, end, PRESENT | WRITABLE))
+    }
+
+    /// Map the runtime regions outside RAM by identity: device registers
+    /// uncached, anything else write-back, code RWX and the rest RW+NX. A
+    /// region overlapping RAM, which the identity map holds, or the storage
+    /// registers, mapped already, is left as it is.
+    fn map(
+        &self,
+        frames: &mut dyn Frames,
+        root: u64,
+        ram: &[(usize, usize)],
+        devices: &[Range<u64>],
+    ) -> Result<(), &'static str> {
+        for &(start, end, kind) in &self.regions {
+            let overlaps = ram.iter().any(|r| (r.0 as u64) < end && start < r.1 as u64)
+                || devices
+                    .iter()
+                    .any(|r| r.start & !(PAGE - 1) < end && start < r.end.next_multiple_of(PAGE));
+            if overlaps {
+                continue;
+            }
+            let attributes = match kind {
+                MemoryType::MMIO | MemoryType::MMIO_PORT_SPACE => NX | UNCACHED,
+                _ if runtime_code(kind) => 0,
+                _ => NX,
+            };
+            for page in (start..end).step_by(PAGE as usize) {
+                tables::map_page(frames, root, page, page, PRESENT | WRITABLE | attributes)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn runtime_code(kind: MemoryType) -> bool {
+    matches!(
+        kind,
+        MemoryType::RUNTIME_SERVICES_CODE | MemoryType::PAL_CODE
+    )
+}
+
 /// Identity-map the storage controllers' registers uncached; none may
 /// overlap RAM.
 fn map_devices(
@@ -650,12 +735,14 @@ fn load(
         }
     };
 
+    let runtime = Runtime::capture()?;
     let mut frames = FirmwareFrames;
     let mut image_rights: Vec<(u64, u64, u64)> = image
         .sections
         .iter()
         .map(|&(start, end, rights)| (start as u64, end as u64, rights))
         .chain(core::iter::once((trampoline, trampoline + PAGE, PRESENT)))
+        .chain(runtime.code())
         .collect();
     if native_resources.sipi != 0 {
         image_rights.push((native_resources.sipi, native_resources.sipi + PAGE, PRESENT));
@@ -664,6 +751,10 @@ fn load(
     if let Some(storage) = &storage {
         map_devices(&mut frames, root, &ram, &storage.mapped)?;
     }
+    let mapped = storage
+        .as_ref()
+        .map_or(&[][..], |storage| &storage.mapped[..]);
+    runtime.map(&mut frames, root, &ram, mapped)?;
     let mut storage = match &storage {
         Some(storage) => Storage::new(storage)?,
         None => Storage::absent(),
@@ -898,6 +989,7 @@ fn load(
             storage,
             host_firmware,
             power,
+            efi_reset: runtime.reset,
         });
     }
     // SAFETY: boot services are over, interrupts go off now, and the new

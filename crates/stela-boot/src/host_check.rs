@@ -851,8 +851,11 @@ fn finish(machine: &mut Machine, keyboards: &mut [UsbInput]) -> ! {
         count(Verdict::Skip)
     ));
     output::flush_log();
+    // The host check keeps the firmware's tables, which map no runtime
+    // services for a firmware power-off.
     let mut power = HostPowerControl::new(
         machine.power,
+        None,
         machine.timing.tsc_hz,
         crate::engine::storage::HostDisks::none(),
     );
