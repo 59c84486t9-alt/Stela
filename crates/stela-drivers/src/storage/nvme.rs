@@ -220,6 +220,9 @@ const IO_ENTRIES: u16 = 64;
 /// domain, whose buffers change hands whole.
 const DEPTH: usize = 8;
 const BOUNCE_BYTES: usize = 128 * 1024;
+// Linux PCI NVME_MAX_BYTES bounds the logical command range independently of
+// payload storage. Write Zeroes transfers no host data through the bounce pool.
+const MAX_COMMAND_BYTES: usize = 8 * 1024 * 1024;
 const COMMAND_TIMEOUT_US: u64 = 30_000_000;
 /// Linux `NVME_ADMIN_TIMEOUT`.
 const ADMIN_TIMEOUT_US: u64 = 60_000_000;
@@ -565,7 +568,10 @@ struct Controller {
     /// The I/O completion queue raises MSI-X vector 0, which the host
     /// gave the message of its completion signal.
     signalled: bool,
+    /// Maximum data payload, bounded by the bounce allocation.
     max_transfer: usize,
+    /// MDTS/host command bound used when no non-MDTS limit is supplied.
+    max_command_bytes: usize,
     /// How long a normal shutdown may take.
     shutdown_timeout_us: u64,
     /// The controller acknowledged a shutdown; it takes no more commands.
@@ -1698,8 +1704,20 @@ impl Controller {
     }
 
     /// What `nvme_init_ctrl_finish` keeps from Identify Controller: the
-    /// retry delays and the events to enable.
+    /// retry delays, transfer limits and the events to enable. A reset's fresh
+    /// Identify updates both limits before namespace features are rescanned.
     fn identified(&mut self, identify: &[u8]) {
+        let mdts = identify[CONTROLLER_MAXIMUM_TRANSFER];
+        let bytes = if mdts == 0 {
+            usize::MAX
+        } else {
+            1usize
+                .checked_shl(u32::from(mdts))
+                .unwrap_or(usize::MAX)
+                .saturating_mul(PAGE)
+        };
+        self.max_transfer = BOUNCE_BYTES.min(bytes);
+        self.max_command_bytes = MAX_COMMAND_BYTES.min(bytes);
         for (index, delay) in self.retry_delays.iter_mut().enumerate() {
             let at = CONTROLLER_RETRY_DELAYS + 2 * index;
             *delay = u16::from_le_bytes([identify[at], identify[at + 1]]);
@@ -2147,6 +2165,7 @@ pub fn attach(
         recovery: None,
         signalled,
         max_transfer: BOUNCE_BYTES,
+        max_command_bytes: MAX_COMMAND_BYTES,
         shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
         shut_down: false,
         command_id: 0,
@@ -2197,8 +2216,6 @@ fn discover(
     let request = HostMemoryRequest::from_identify(&identify);
     let serial = ascii(&identify[CONTROLLER_SERIAL]);
     let model = ascii(&identify[CONTROLLER_MODEL]);
-    // The maximum transfer, in minimum pages as a power of two; 0 is none.
-    let maximum = identify[CONTROLLER_MAXIMUM_TRANSFER];
     let rtd3_entry_us = u64::from(le32(&identify[CONTROLLER_RTD3_ENTRY], 0));
     let namespaces = le32(&identify[CONTROLLER_NAMESPACES], 0);
     controller.commands = u16::from_le_bytes([
@@ -2208,10 +2225,6 @@ fn discover(
     // Linux `nvme_init_identify` takes a present cache as one to flush and
     // leaves the controller's Volatile Write Cache feature as it is.
     let write_cache = identify[CONTROLLER_VOLATILE_CACHE] & 1 != 0;
-    if maximum != 0 {
-        let limit = 1usize.checked_shl(u32::from(maximum)).unwrap_or(usize::MAX);
-        controller.max_transfer = controller.max_transfer.min(limit.saturating_mul(PAGE));
-    }
     controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
     controller.identified(&identify);
     controller.allocate_host_memory(request, host_memory);
@@ -2249,8 +2262,9 @@ fn discover(
         failures: Vec::new(),
     };
     let mut found = Vec::new();
-    let (max_transfer, commands, scans, limits) = (
+    let (max_transfer, max_command_bytes, commands, scans, limits) = (
         controller.max_transfer,
+        controller.max_command_bytes,
         controller.commands,
         controller.scans,
         controller.limits,
@@ -2297,7 +2311,16 @@ fn discover(
                 blocks: format.blocks,
                 block_size: format.block_size,
                 read_only: format.read_only,
-                features: features(write_cache, commands, limits, &format, max_transfer),
+                features: features(
+                    write_cache,
+                    commands,
+                    limits,
+                    &format,
+                    TransferLimits {
+                        data: max_transfer,
+                        command: max_command_bytes,
+                    },
+                ),
             },
         })
         .collect();
@@ -2344,10 +2367,18 @@ fn apst_table(identify: &[u8]) -> Option<[u64; 32]> {
     Some(table)
 }
 
+/// Payload storage and logical command-range limits are separate: a no-data
+/// command does not consume the smaller DMA bounce-buffer allowance.
+#[derive(Clone, Copy)]
+struct TransferLimits {
+    data: usize,
+    command: usize,
+}
+
 /// A namespace's features, as Linux `nvme_update_disk_info` sets them:
 /// FUA with a volatile write cache; Deallocate as discard with Dataset
 /// Management, one range of up to DMRSL blocks, or else `UINT_MAX` sectors;
-/// and Write Zeroes up to WZSL, or else the largest transfer
+/// and Write Zeroes up to WZSL, or else the controller's command range
 /// (`nvme_init_non_mdts_limits`), which may deallocate where the namespace
 /// reads deallocated blocks as zeros and says Write Zeroes deallocates
 /// (`NVME_NS_DEAC`). A Write Zeroes command takes at most 2^16 blocks.
@@ -2356,13 +2387,13 @@ fn features(
     commands: u16,
     limits: Limits,
     format: &Format,
-    max_transfer: usize,
+    transfer: TransferLimits,
 ) -> Features {
     let block_shift = format.block_size.trailing_zeros();
     let sectors = u64::from(u32::MAX) >> (block_shift - 9);
     let deallocate = u64::from(limits.deallocate);
     let zeroes = match limits.write_zeroes {
-        0 => max_transfer as u64,
+        0 => transfer.command as u64,
         // 2^WZSL minimum pages of 4 KiB, saturating as nvme_mps_to_sectors.
         units => 1u64
             .checked_shl(u32::from(units) + 12)
@@ -2372,7 +2403,7 @@ fn features(
     Features {
         write_cache,
         fua: write_cache,
-        max_transfer,
+        max_transfer: transfer.data,
         discard: (commands & COMMANDS_DATASET_MANAGEMENT != 0).then_some(
             if deallocate != 0 && deallocate <= sectors {
                 deallocate
@@ -2463,7 +2494,11 @@ impl Namespace {
             self.scanned = scans;
             return Ok(());
         };
-        let (version, max_transfer) = (controller.version, controller.max_transfer);
+        let (version, max_transfer, max_command_bytes) = (
+            controller.version,
+            controller.max_transfer,
+            controller.max_command_bytes,
+        );
         let (commands, limits) = (controller.commands, controller.limits);
         let data = match controller.identify(IDENTIFY_NAMESPACE, self.namespace) {
             Ok(data) => data,
@@ -2485,8 +2520,16 @@ impl Namespace {
                 self.identity.block_size = format.block_size;
                 self.identity.read_only = format.read_only;
                 let write_cache = self.identity.features.write_cache;
-                self.identity.features =
-                    features(write_cache, commands, limits, &format, max_transfer);
+                self.identity.features = features(
+                    write_cache,
+                    commands,
+                    limits,
+                    &format,
+                    TransferLimits {
+                        data: max_transfer,
+                        command: max_command_bytes,
+                    },
+                );
                 Ok(())
             }
             Err(error) if allocated && ids == self.ids => {
@@ -2669,6 +2712,7 @@ mod tests {
                 recovery: None,
                 signalled: false,
                 max_transfer: BOUNCE_BYTES,
+                max_command_bytes: MAX_COMMAND_BYTES,
                 shutdown_timeout_us: 1000,
                 shut_down: false,
                 command_id: 0,

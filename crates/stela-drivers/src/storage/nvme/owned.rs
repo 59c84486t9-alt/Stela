@@ -447,6 +447,7 @@ unsafe fn attach_with_timeout(
         recovery: None,
         signalled: false,
         max_transfer: BOUNCE_BYTES,
+        max_command_bytes: MAX_COMMAND_BYTES,
         shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
         shut_down: false,
         command_id: 0,
@@ -638,6 +639,7 @@ pub(crate) use tests::protocol;
 
 #[cfg(test)]
 mod tests {
+    mod limits;
     pub(crate) mod protocol;
     use super::*;
     use crate::bus::dma::{
@@ -827,6 +829,7 @@ mod tests {
         /// ONCS, and the NVM Identify Controller's WZSL and DMRSL; none
         /// refuses the Identify.
         oncs: u16,
+        mdts: u8,
         nvm_limits: Option<(u8, u32)>,
         nvm_identifies: usize,
     }
@@ -899,6 +902,7 @@ mod tests {
                 fatal: false,
                 aborts: 0,
                 oncs: 0,
+                mdts: 0,
                 nvm_limits: None,
                 nvm_identifies: 0,
             }
@@ -1038,6 +1042,7 @@ mod tests {
                         1 => {
                             data[4..24].fill(b'S');
                             data[24..64].fill(b'M');
+                            data[77] = self.mdts;
                             data[516..520].copy_from_slice(&1u32.to_le_bytes());
                             data[520..522].copy_from_slice(&self.oncs.to_le_bytes());
                             data[525] = 1; // A volatile write cache.
@@ -1766,7 +1771,8 @@ mod tests {
         let attached = f.attach().unwrap();
         let features = attached.namespaces[0].identity().features;
         assert_eq!(features.discard, Some(u64::from(u32::MAX)));
-        let transfer = (features.max_transfer / 512) as u64;
+        let transfer = (MAX_COMMAND_BYTES / 512) as u64;
+        assert_eq!(features.max_transfer, BOUNCE_BYTES);
         assert_eq!(features.write_zeroes.unwrap().blocks, transfer);
         assert_eq!(f.model.lock().unwrap().nvm_identifies, 0);
         drop(attached);
