@@ -513,10 +513,7 @@ pub(super) fn prefix(
         if let Some((_, offset)) = emitter.output.source_map.first_mut() {
             *offset = 0;
         }
-        let Some(count) = super::analysis::allocated_output_instruction_count(&emitter.output.code)
-        else {
-            continue;
-        };
+        let count = emitter.output.code.instructions();
         emitter.output.stats.native_instructions = count;
         // A callee pool is useful only when its complete emitted recipe wins.
         // Ties keep the earlier, smaller pool and its cheaper native ABI setup.

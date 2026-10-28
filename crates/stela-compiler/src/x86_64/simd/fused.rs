@@ -88,13 +88,20 @@ pub(in crate::x86_64) fn emit(
     }
     let native_fma = target.supports(TargetCpu::Fma);
     let (mut helper, sticky) = if native_fma {
-        let (full, helper, done, mut crossing) = sticky_path(code, operand, target, entry);
+        let StickyPath {
+            full,
+            helper,
+            done,
+            mut crossing,
+            cold,
+            inline_end,
+        } = sticky_path(code, operand, target, entry);
         let full_start = code.len();
         for &patch in &full {
             resolve(code, patch, full_start);
         }
         crossing.extend(full);
-        (helper, Some((done, full_start, crossing)))
+        (helper, Some((done, full_start, crossing, cold, inline_end)))
     } else {
         (Vec::new(), None)
     };
@@ -185,11 +192,12 @@ pub(in crate::x86_64) fn emit(
         }
         commit(code, operand.destination, LEFT);
     }
-    let (done, full, crossing) = sticky?;
+    let (done, full, crossing, cold, inline_end) = sticky?;
     let end = code.len();
     resolve(code, done, end);
     Some(ColdSplit {
-        cold: done + size_of::<i32>(),
+        cold,
+        inline_end,
         full,
         crossing,
         result: operand.destination,
@@ -203,12 +211,16 @@ pub(in crate::x86_64) fn emit(
 /// zero-product check. Returns the branches to the full path, to the helper
 /// and past the full path, and those between the sticky path and the rest
 /// ([`ColdSplit`]).
-fn sticky_path(
-    code: &mut Code,
-    operand: &Operand,
-    target: TargetCpu,
-    entry: Entry,
-) -> (Vec<usize>, Vec<usize>, usize, Vec<usize>) {
+struct StickyPath {
+    full: Vec<usize>,
+    helper: Vec<usize>,
+    done: usize,
+    crossing: Vec<usize>,
+    cold: crate::x86_64::asm::Checkpoint,
+    inline_end: crate::x86_64::asm::Checkpoint,
+}
+
+fn sticky_path(code: &mut Code, operand: &Operand, target: TargetCpu, entry: Entry) -> StickyPath {
     let full = sticky_inexact(code, entry);
     // A zeroing load of the destination LEFT leaves a scalar result's
     // upper bits clear.
@@ -233,7 +245,9 @@ fn sticky_path(
         packed(code, Host::MoveQword, LEFT, LEFT);
     }
     commit(code, operand.destination, LEFT);
+    let inline_end = code.checkpoint();
     let done = jump(code);
+    let cold = code.checkpoint();
     let check = code.len();
     resolve(code, rejected, check);
     let mut crossing = vec![rejected];
@@ -249,5 +263,12 @@ fn sticky_path(
         resume,
         &mut crossing,
     );
-    (full, helper, done, crossing)
+    StickyPath {
+        full,
+        helper,
+        done,
+        crossing,
+        cold,
+        inline_end,
+    }
 }
