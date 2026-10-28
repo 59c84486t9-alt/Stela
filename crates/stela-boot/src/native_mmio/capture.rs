@@ -54,7 +54,6 @@ impl Wire {
             && self.mcfg_bytes <= TABLE_BYTES
             && self.fadt_bytes <= TABLE_BYTES
             && matches!(self.hpet_bytes, 0 | 56)
-            && self.cores == 1
             && matches!(self.levels, 4 | 5)
     }
     pub(crate) fn madt(&self) -> &[u8] {

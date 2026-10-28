@@ -438,7 +438,7 @@ impl Drop for Inner {
     }
 }
 
-impl Source {
+impl ScopedSource {
     /// Bind the SAME actual root catalog and publication lock to a RAM-only
     /// provider. This is not a new host owner, device grant or root activation.
     pub(crate) fn root_publication(

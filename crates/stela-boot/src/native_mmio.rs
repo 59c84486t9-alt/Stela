@@ -1,15 +1,21 @@
 //! Native MMIO root publication. Firmware descriptions supply permissions;
 //! exclusive device ownership is acquired separately by the native dispatcher.
-//! The initial adapter admits one physical processor, Intel UC, and a bounded
-//! preallocated aperture. WC, additional processors and dynamic roots refuse.
+//! [`Source`] serves the host drivers on every host processor through a
+//! preallocated uncached aperture; [`ScopedSource`] binds the same aperture
+//! to one processor's root epoch for the HPET, clock and stack diagnostics.
+//! WC and dynamic roots refuse.
 mod capture;
 mod ecam;
+mod shared;
 use ecam::RootWindow;
 pub(crate) mod diagnostic;
 mod platform;
 
 pub(crate) use capture::{Prepared, Wire};
-pub(crate) use platform::{ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication, Source};
+pub(crate) use platform::{
+    ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication, ScopedSource,
+};
+pub(crate) use shared::{PROCESSORS, Source};
 
 use stela_drivers::bus::mmio::owned::Error;
 const PAGE: u64 = 4096;

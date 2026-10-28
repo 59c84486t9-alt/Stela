@@ -1217,6 +1217,11 @@ pub(crate) fn wake_interrupt() {
 /// which runs the engine's devices and looks for the disk's completions.
 /// `None` where the ID needs more than a compatibility-format MSI address
 /// holds.
+/// Whether this host processor is inside an interrupt or exception handler.
+pub(crate) fn in_interrupt() -> bool {
+    local::irq_active()
+}
+
 pub(crate) fn completion_signal(id: u64) -> Option<stela_drivers::bus::irq::MsiMessage> {
     (id < 255).then(|| stela_drivers::bus::irq::MsiMessage {
         address: 0xfee0_0000 | id << 12,

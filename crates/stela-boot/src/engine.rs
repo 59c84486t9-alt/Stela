@@ -862,6 +862,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .unwrap_or_default(),
         handoff.tsc_hz,
     );
+    // The owned MMIO authority the host devices' services map through. A
+    // host it cannot qualify is reported, and those services refuse.
+    // SAFETY: this boot's capture, on the installed boot processor before
+    // the other host processors start.
+    let _native_mmio = unsafe { crate::native_mmio::captured(handoff) }
+        .and_then(|wire| unsafe { crate::native_mmio::Source::activate(wire, &mut host_owner) })
+        .inspect(|_| output::arguments(format_args!("NATIVE MMIO aperture owned\n")))
+        .inspect_err(|error| {
+            output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));
+        })
+        .ok();
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
@@ -1136,6 +1147,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         None => (None, None, None, None),
     };
     let worker_ram = ram;
+    // From here the other host processors may translate through the MMIO
+    // aperture, so its mappings stay for the boot.
+    crate::native_mmio::PROCESSORS.share();
     crate::status::begin("Starting the other host processors");
     // SAFETY: the retained physical inventory and loader-owned reservations
     // were validated before any SIPI; the BSP Host is installed, guest entry

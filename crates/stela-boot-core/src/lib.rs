@@ -5,6 +5,7 @@
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
+pub mod aperture;
 pub mod console_lines;
 pub mod dmar;
 pub mod firmware_state;
