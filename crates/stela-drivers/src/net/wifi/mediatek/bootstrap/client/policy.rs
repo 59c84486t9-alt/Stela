@@ -475,9 +475,7 @@ impl Os {
                 return false;
             }
         }
-        let Some(parameters) = n.wmm.as_ref().map(|w| &w.access_categories) else {
-            return false;
-        };
+        let parameters = n.edca();
         let Some(rule) = self
             .country
             .rule(u32::from(def.control.frequency_mhz) * 1000, 20_000)
@@ -486,7 +484,7 @@ impl Os {
         };
         // ManagedClient installs the exact derived local queues before its
         // private configuration publication. AP observations stay unchanged.
-        reg::wmm::station(parameters, rule.wmm.as_ref()).is_ok()
+        reg::wmm::station(&parameters, rule.wmm.as_ref()).is_ok()
     }
 }
 impl reg::OsLease for OsGuard<'_> {
@@ -889,13 +887,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .country
             .rule(u32::from(context.channel().frequency_mhz) * 1000, 20_000)
             .ok_or(PolicyError::RestrictionMismatch)?;
-        let parameters = &context
-            .negotiated()
-            .wmm
-            .as_ref()
-            .ok_or(PolicyError::RestrictionMismatch)?
-            .access_categories;
-        let effective = reg::wmm::station(parameters, rule.wmm.as_ref())
+        // ieee80211_set_wmm_default limits its defaults as it does WMM's.
+        let parameters = context.negotiated().edca();
+        let effective = reg::wmm::station(&parameters, rule.wmm.as_ref())
             .map_err(|_| PolicyError::RestrictionMismatch)?;
         self.client
             .restrict_prepared_edca(&effective)

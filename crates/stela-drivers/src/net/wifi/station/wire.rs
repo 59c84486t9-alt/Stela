@@ -76,6 +76,35 @@ fn word(bytes: &mut &[u8]) -> Result<u16, Error> {
     Ok(u16::from_le_bytes(take(bytes, 2)?.try_into().unwrap()))
 }
 
+/// The local capabilities a request selects. A legacy association, as
+/// mac80211's IEEE80211_CONN_MODE_LEGACY, advertises no HT, VHT, HE or EHT
+/// element and runs at 20 MHz with the advertised rates and any WMM element;
+/// any other mode advertises the device's capabilities unchanged.
+fn legacy_or_matching(
+    local: phy::Capabilities,
+    observed: phy::Capabilities,
+    mode: phy::Mode,
+    width: phy::Width,
+) -> Result<phy::Capabilities, Error> {
+    if mode != phy::Mode::Legacy {
+        return if local.matches_wire_capabilities(&observed) {
+            Ok(local)
+        } else {
+            Err(Error::Invalid("local source/advertisement mismatch"))
+        };
+    }
+    if width != phy::Width::Mhz20
+        || observed.ht().is_some()
+        || observed.vht().is_some()
+        || observed.he().is_some()
+        || observed.eht().is_some()
+        || observed.he_6ghz().is_some()
+    {
+        return Err(Error::Invalid("legacy association advertisement"));
+    }
+    Ok(observed)
+}
+
 fn rsn(mut bytes: &[u8]) -> Result<(Cipher, Cipher), Error> {
     if word(&mut bytes)? != 1 {
         return Err(Error::Unsupported("RSN version"));
@@ -145,9 +174,6 @@ impl AssociationRequest {
         mode: phy::Mode,
         width: phy::Width,
     ) -> Result<Self, Error> {
-        if mode == phy::Mode::Legacy {
-            return Err(Error::Invalid("modern mode selection"));
-        }
         let local = phy::Capabilities::parse(band, phy::Role::Station, &bytes).map_err(
             |error| match error {
                 phy::Error::Unsupported(effect) => Error::Unsupported(effect),
@@ -168,7 +194,7 @@ impl AssociationRequest {
         mode: phy::Mode,
         width: phy::Width,
     ) -> Result<Self, Error> {
-        if mode == phy::Mode::Legacy || local.role() != phy::Role::Station {
+        if local.role() != phy::Role::Station {
             return Err(Error::Invalid("modern local mode/role"));
         }
         let observed = phy::Capabilities::parse(local.band(), phy::Role::Station, &bytes).map_err(
@@ -177,9 +203,7 @@ impl AssociationRequest {
                 _ => Error::Invalid("local modern capabilities"),
             },
         )?;
-        if !local.matches_wire_capabilities(&observed) {
-            return Err(Error::Invalid("local source/advertisement mismatch"));
-        }
+        let local = legacy_or_matching(local, observed, mode, width)?;
         let mut request = Self::parse(capabilities, listen_interval, bytes, true)?;
         request.modern = Some(Arc::new(ModernSelection {
             capabilities: local,
@@ -200,14 +224,13 @@ impl AssociationRequest {
         mode: phy::Mode,
         width: phy::Width,
     ) -> Result<Self, Error> {
-        if mode == phy::Mode::Legacy || local.role() != phy::Role::Station {
+        if local.role() != phy::Role::Station {
             return Err(Error::Invalid("modern local mode/role"));
         }
         let observed = phy::Capabilities::parse(local.band(), phy::Role::Station, &bytes)
             .map_err(|_| Error::Invalid("local modern capabilities"))?;
-        if !local.matches_wire_capabilities(&observed) {
-            return Err(Error::Invalid("PMF local source"));
-        }
+        let local = legacy_or_matching(local, observed, mode, width)
+            .map_err(|_| Error::Invalid("PMF local source"))?;
         let mut request = Self::parse_inner(capabilities, listen_interval, bytes, true, true)?;
         if request.pmf.is_none() || capabilities & 0x10 == 0 || request.legacy_wpa {
             return Err(Error::Invalid("PMF requires selected RSN"));

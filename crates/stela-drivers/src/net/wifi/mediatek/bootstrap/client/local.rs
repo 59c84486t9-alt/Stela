@@ -97,7 +97,8 @@ impl Advertisement {
             || requested
                 .he_6ghz()
                 .is_some_and(|h| Some(h) != actual.he_6ghz())
-            || requested.wmm() != actual.wmm()
+            // A legacy request to an AP without WMM omits it, as mac80211 does.
+            || requested.wmm().is_some_and(|w| Some(w) != actual.wmm())
             || (requested.he().is_some()
                 && requested.local_he_source_maps() != Some(&self.he_source_maps))
             || !family(rates.selectors & 1 != 0, requested.ht().is_some())

@@ -1191,6 +1191,57 @@ mod tests {
         assert_eq!(&ethernet[12..14], &0x800u16.to_be_bytes());
     }
     #[test]
+    fn an_ap_without_wmm_or_ht_associates_in_legacy_mode_like_mac80211() {
+        use station::{
+            phy::{Mode, Width},
+            wire::AssociationRequest,
+        };
+        // Neither side advertises HT, VHT, HE, EHT or WMM.
+        let legacy = |elements: &[u8]| {
+            let mut out = Vec::new();
+            let mut rest = elements;
+            while let [id, length, tail @ ..] = rest {
+                let (data, tail) = tail.split_at(usize::from(*length));
+                let wmm = *id == 221 && data.starts_with(&[0, 0x50, 0xf2, 2]);
+                if !matches!(id, 45 | 61 | 191 | 192 | 255) && !wmm {
+                    out.extend_from_slice(&[*id, *length]);
+                    out.extend_from_slice(data);
+                }
+                rest = tail;
+            }
+            out
+        };
+        let (client, model) = setup_modern();
+        let (mut join, mut bss) = modern_inputs(&client);
+        let local = client.local_advertisement(Band::Ghz5).unwrap();
+        join.request = AssociationRequest::new_modern_with_local(
+            0x11,
+            10,
+            legacy(join.request.elements()),
+            local.capabilities().clone(),
+            Mode::Legacy,
+            Width::Mhz20,
+        )
+        .unwrap();
+        bss.elements = legacy(&bss.elements);
+        let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut link = ManagedLink::new(
+            client,
+            Provider(drops, core::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        associate(&mut link, &model, join, bss);
+        secure(&mut link);
+        // Data goes without a QoS header, as ieee80211_select_queue does
+        // for a non-WMM station.
+        link.transmit(&eth(0x800)).unwrap();
+        let frames = finish_tx(&model);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0][0], 0x08);
+        assert_ne!(frames[0][1] & 0x40, 0);
+    }
+    #[test]
     fn aborting_a_join_deauthenticates_like_ieee80211_mgd_deauth() {
         let (mut link, model, join, bss, _) = setup_link();
         scan_join(&mut link, &model, join, bss);
