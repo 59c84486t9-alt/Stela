@@ -8,7 +8,7 @@
 //! 1024-byte command line, so that is the revision emitted here.
 use alloc::string::String;
 use anyhow::{Result, ensure};
-pub use stela_runtime::boot_bundle::schema::{BootArgs, Video};
+pub use {stela_formats::boot_bundle::schema::BootArgs, stela_formats::boot_bundle::schema::Video};
 
 pub const BOOT_LINE_LENGTH: usize = 1024;
 pub const REVISION: u16 = 3;

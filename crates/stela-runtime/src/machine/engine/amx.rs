@@ -244,12 +244,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
 mod tests {
     use super::super::tests::{BASE, machine_on};
     use super::*;
-    use crate::machine::Chip;
     use crate::machine::system::Register as SystemRegister;
     use crate::machine::{
         amx::{AMX_CTL_EL1, AMX_STATE_T, AmxView},
         exception::syndrome,
     };
+    use stela_contracts::Chip;
 
     fn machine(words: &[u32]) -> Machine<super::super::tests::FakeHost, super::super::NoDevices> {
         machine_on(Chip::AppleM2, words)

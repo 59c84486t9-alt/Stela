@@ -153,7 +153,7 @@ pub(crate) fn raw_initial_bytes(
         file.seek(SeekFrom::Start(source.offset))?;
         file.read_exact(&mut bytes)?;
         ensure!(
-            stela_runtime::sha256(&bytes) == source.sha256,
+            stela_formats::sha256(&bytes) == source.sha256,
             "raw memory file hash differs"
         );
         Ok(bytes)
@@ -226,7 +226,7 @@ pub(crate) fn memory_hashes(
 ) -> Result<Vec<serde_json::Value>> {
     memory.regions().iter().filter(|r| r.readable).map(|r| Ok(serde_json::json!({
         "address":r.guest_address,"bytes":r.virtual_bytes,
-        "sha256":stela_runtime::sha256(&memory.read_snapshot(r.guest_address, usize::try_from(r.virtual_bytes)?)?),
+        "sha256":stela_formats::sha256(&memory.read_snapshot(r.guest_address, usize::try_from(r.virtual_bytes)?)?),
     }))).collect()
 }
 
@@ -297,10 +297,10 @@ mod tests {
         let context = pauth_all_keys_context(&path, 92)?;
         assert_eq!(context.address_space(), 92);
         for key in [
-            stela_runtime::pauth::Key::Ia,
-            stela_runtime::pauth::Key::Ib,
-            stela_runtime::pauth::Key::Da,
-            stela_runtime::pauth::Key::Db,
+            stela_contracts::pauth::Key::Ia,
+            stela_contracts::pauth::Key::Ib,
+            stela_contracts::pauth::Key::Da,
+            stela_contracts::pauth::Key::Db,
         ] {
             assert!(context.has_key(key));
         }
@@ -369,7 +369,7 @@ mod tests {
         let region = serde_json::json!({"guest_address":0,"virtual_bytes":4096,
         "readable":true,"writable":false,
         "initial_file":{"path":"payload.bin","offset":2,"bytes":3,
-            "sha256":stela_runtime::sha256(&[7,6,5])}});
+            "sha256":stela_formats::sha256(&[7,6,5])}});
         let parsed: RawMemoryRegionInput = serde_json::from_value(region.clone())?;
         assert_eq!(raw_initial_bytes(&parsed, folder.path())?, [7, 6, 5]);
         for change in [

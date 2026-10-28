@@ -49,11 +49,11 @@ mod tests {
     #[test]
     #[ignore = "requires original26A434 KC and J314s DT via STELA_TEST_PMGR_M1_KERNELCACHE/STELA_TEST_SPMI_DT"]
     fn original_rtc_helper_uses_raw_keyr_with_actual_interface_dispatch() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let bytes =
             std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
         );
         for (offset, size, hash) in [
@@ -129,7 +129,7 @@ mod tests {
             ), // rtc-tick-units
         ] {
             assert_eq!(
-                crate::sha256(&bytes[offset..offset + size]),
+                stela_formats::sha256(&bytes[offset..offset + size]),
                 hash,
                 "source span {offset:#x}"
             );
@@ -144,7 +144,7 @@ mod tests {
         }
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();

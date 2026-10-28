@@ -74,7 +74,7 @@ mod tests {
         configuration::tests::{config_policy, provenance},
         tests::{fixture, prepare, w32, w64},
     };
-    use stela_runtime::sha256;
+    use stela_formats::sha256;
 
     fn input(choice: u8) -> Input {
         Input {

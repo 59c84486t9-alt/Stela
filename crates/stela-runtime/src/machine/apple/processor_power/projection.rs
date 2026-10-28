@@ -1,14 +1,12 @@
 //! Physical CPU-domain identities projected through one retained assigned Plan.
 use super::*;
-use crate::machine::{
-    engine::{ProcessorChange, ProcessorTarget, Processors},
-    registers::Identity,
-    soc::{
-        ProcessorAssociation,
-        assigned::{PlanIdentity, PlannedPe},
-    },
-};
 use crate::platform::apple::pmgr::{DomainTransition, coverage::DomainId};
+use {
+    crate::machine::engine::ProcessorChange, crate::machine::engine::ProcessorTarget,
+    crate::machine::engine::Processors, crate::machine::soc::ProcessorAssociation,
+    crate::machine::soc::assigned::PlanIdentity, crate::machine::soc::assigned::PlannedPe,
+    stela_contracts::identity::Identity,
+};
 
 struct Domain {
     identity: DomainId,
@@ -217,8 +215,8 @@ impl AssignedPower {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::machine::{Chip, caches::Cache, soc::assigned::*};
     use alloc::vec;
+    use {crate::machine::soc::assigned::*, stela_contracts::Chip, stela_contracts::caches::Cache};
 
     pub const BASE: u64 = 0x1000;
     pub const CORE: u64 = BASE + 8;
@@ -549,7 +547,7 @@ pub(super) mod tests {
         let directory = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap());
         let raw = std::fs::read(directory.join("DeviceTree.j473ap.adt")).unwrap();
         assert_eq!(
-            crate::sha256(&raw),
+            stela_formats::sha256(&raw),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let mut prepared = raw.clone();

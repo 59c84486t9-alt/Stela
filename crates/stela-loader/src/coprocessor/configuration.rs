@@ -6,7 +6,7 @@ use super::{Plan, Staged, digest, label, macho::file_bytes};
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 pub mod arguments;
 pub mod entropy;

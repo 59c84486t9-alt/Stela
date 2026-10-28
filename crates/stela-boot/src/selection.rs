@@ -31,19 +31,7 @@ use stela_loader::{
     mount_interface::ChoiceKind,
     recovery,
 };
-use stela_runtime::{
-    apfs::{self, ApfsError, Container},
-    machine::apple::nor::{
-        CAPACITY, Image, SECTOR_SIZE,
-        nvram::{Variables, empty_bank},
-    },
-    payload::{
-        PayloadError, ReadAt,
-        gpt::{self, Disk, Role},
-    },
-    pc::{machine_state, storage::Target},
-    preboot::{self, PrebootError},
-};
+use {stela_formats::apfs, stela_formats::apfs::ApfsError, stela_formats::apfs::Container, stela_runtime::machine::apple::nor::CAPACITY, stela_runtime::machine::apple::nor::Image, stela_runtime::machine::apple::nor::SECTOR_SIZE, stela_runtime::machine::apple::nor::nvram::Variables, stela_runtime::machine::apple::nor::nvram::empty_bank, stela_formats::payload::PayloadError, stela_formats::payload::ReadAt, stela_formats::payload::gpt, stela_formats::payload::gpt::Disk, stela_formats::payload::gpt::Role, stela_runtime::pc::machine_state, stela_runtime::pc::storage::Target, stela_formats::preboot, stela_formats::preboot::PrebootError};
 use uefi::{
     Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},

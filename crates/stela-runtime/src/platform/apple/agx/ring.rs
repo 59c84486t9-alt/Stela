@@ -28,8 +28,8 @@
 //! what an entry means belongs to its consumer ([`super::firmware`]).
 
 use super::uat;
-use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 /// Entries in every ring.
 pub const ENTRIES: u32 = 0x100;
@@ -243,9 +243,9 @@ pub(crate) mod tests {
 
     #[test]
     fn an_invalid_gpu_context_cannot_alias_context_zero_or_access_its_memory() {
-        use crate::platform::apple::bus::Access;
-        use crate::platform::apple::interrupt::InterruptLatch;
-        use crate::platform::dma::tests::Ram;
+        use stela_contracts::bus::Access;
+        use stela_contracts::dma::test_support::Ram;
+        use stela_contracts::interrupt::InterruptLatch;
 
         let base = 0x8_0000_0000;
         let mut ram = Ram::new(base, 5 * uat::PAGE_BYTES as usize);

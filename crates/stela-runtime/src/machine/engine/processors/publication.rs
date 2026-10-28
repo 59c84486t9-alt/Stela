@@ -961,15 +961,16 @@ impl WorkerRelease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::{
-        engine::NoDevices,
-        engine::tests::board,
-        engine::{FaultCause, InstallError, NativeCode, NativeExit, NativeFault, Regime},
-        engine::{ProcessorBinding, ProcessorChange, ProcessorTarget},
-        registers::Identity,
-    };
-    use crate::platform::apple::bus::LifecycleState;
     use stela_compiler::GuestState;
+    use stela_contracts::bus::LifecycleState;
+    use {
+        crate::machine::engine::FaultCause, crate::machine::engine::InstallError,
+        crate::machine::engine::NativeCode, crate::machine::engine::NativeExit,
+        crate::machine::engine::NativeFault, crate::machine::engine::NoDevices,
+        crate::machine::engine::ProcessorBinding, crate::machine::engine::ProcessorChange,
+        crate::machine::engine::ProcessorTarget, crate::machine::engine::Regime,
+        crate::machine::engine::tests::board, stela_contracts::identity::Identity,
+    };
 
     #[derive(Default)]
     struct LocalHost {

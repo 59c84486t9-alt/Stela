@@ -33,10 +33,12 @@
 //! word still holds it when the count returns to 0 (0xfffffff0270d8c9c), so
 //! a lost write shows a power loss. Here the word is plain storage at
 //! [`CANARY`]; the SART refuses non-retained power loss.
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
 };
-use crate::platform::dma::{DmaError, Iommu, Memory};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory};
 
 const NAME: &str = "sart";
 /// The most entries a layout has, v4's.
@@ -462,9 +464,9 @@ impl MmioDevice for Sart {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::interrupt::InterruptLatch,
-        dma::{Port, tests::Ram},
+    use {
+        stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch,
     };
 
     #[test]
@@ -721,7 +723,7 @@ mod tests {
             assert_eq!(sart.read(status, Width::Word, &mut access), Ok(0));
         }
         sart.write(0x801c, Width::Word, 0, &mut access).unwrap();
-        let mut memory = crate::platform::dma::tests::Ram::new(0, 0x1000);
+        let mut memory = stela_contracts::dma::test_support::Ram::new(0, 0x1000);
         assert!(
             sart.translate(&mut memory, 0, address, address, false, &mut access)
                 .is_err()

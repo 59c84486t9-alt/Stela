@@ -12,7 +12,6 @@
 //! bytes are retained configuration metadata, not a claim to execute the Apple
 //! stack ABI. Rc ownership restricts this resource to one cooperative executor.
 use super::platform::owner::Completion;
-use crate::platform::apple::bus::Access;
 use alloc::{
     boxed::Box,
     rc::{Rc, Weak},
@@ -23,6 +22,7 @@ use core::{
     cell::{Cell, RefCell},
     sync::atomic::{Ordering, fence},
 };
+use stela_contracts::bus::Access;
 
 mod dispatch;
 mod waits;
@@ -549,7 +549,7 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     struct Count(Rc<Cell<u32>>);
     impl Callback for Count {
         fn advance(&mut self, i: &Invocation, _: &mut Access<'_>) -> Completion<u32> {

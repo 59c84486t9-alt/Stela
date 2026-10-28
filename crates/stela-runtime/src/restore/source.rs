@@ -1,8 +1,8 @@
 //! Exact archive extent within read-only host storage. Partition padding is
 //! excluded from ZIP end-record searches; no read can escape the extent.
 use super::{Error, Result};
-use crate::payload::ReadAt;
 use alloc::{format, string::String};
+use stela_formats::payload::ReadAt;
 pub struct Extent<R> {
     reader: R,
     bytes: u64,

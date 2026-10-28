@@ -1,4 +1,4 @@
-//! Inspect APFS images with Stela's own reader (`stela_runtime::apfs`), the
+//! Inspect APFS images with Stela's own reader (`stela_formats::apfs`), the
 //! one `stela.efi` uses: list containers and volumes, directories, and copy
 //! files out with their SHA-256.
 use anyhow::{Context, Result, bail, ensure};
@@ -9,9 +9,10 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
-use stela_runtime::{
-    apfs::{self, Container, Volume, uuid_text, volume::Snapshot},
-    payload::ReadAt,
+use {
+    stela_formats::apfs, stela_formats::apfs::Container, stela_formats::apfs::Volume,
+    stela_formats::apfs::uuid_text, stela_formats::apfs::volume::Snapshot,
+    stela_formats::payload::ReadAt,
 };
 
 /// An image file as a reader source.
@@ -199,7 +200,7 @@ impl ApfsCommand {
                                 match volume.read(&mut container.device, &inode) {
                                     Ok(bytes) => {
                                         json!({"path": child, "kind": "file", "bytes": inode.logical_size(),
-                                    "sha256": stela_runtime::sha256(&bytes)})
+                                    "sha256": stela_formats::sha256(&bytes)})
                                     }
                                     Err(error) => {
                                         json!({"path": child, "kind": "file", "bytes": inode.logical_size(),
@@ -226,7 +227,7 @@ impl ApfsCommand {
                 File::create_new(&output)?.write_all(&bytes)?;
                 println!(
                     "{}",
-                    json!({"path": target.path, "bytes": bytes.len(), "sha256": stela_runtime::sha256(&bytes)})
+                    json!({"path": target.path, "bytes": bytes.len(), "sha256": stela_formats::sha256(&bytes)})
                 );
             }
         }

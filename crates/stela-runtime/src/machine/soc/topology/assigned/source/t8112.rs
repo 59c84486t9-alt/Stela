@@ -340,7 +340,7 @@ mod tests {
 
     type Properties = Vec<(&'static str, Vec<u8>)>;
     fn encode(properties: Properties, children: &[Vec<u8>]) -> Vec<u8> {
-        crate::machine::adt::encode(
+        stela_contracts::adt::encode(
             &properties
                 .iter()
                 .map(|(name, value)| (*name, value.as_slice()))

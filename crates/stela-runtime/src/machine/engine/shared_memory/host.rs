@@ -245,20 +245,20 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         physical: u64,
         bytes: usize,
         write: bool,
-    ) -> Result<(), crate::platform::dma::DmaError> {
+    ) -> Result<(), stela_contracts::dma::DmaError> {
         self.ram
             .check_dma_range(physical, bytes, write)
-            .map_err(|_| crate::platform::dma::DmaError::Memory)
+            .map_err(|_| stela_contracts::dma::DmaError::Memory)
     }
     fn read_ram_progress(
         &mut self,
         physical: u64,
         buffer: &mut [u8],
-    ) -> Result<(), crate::platform::dma::TransferFault> {
+    ) -> Result<(), stela_contracts::dma::TransferFault> {
         // SAFETY: private DMA staging, same canonical reader/owner contract.
         unsafe { self.ram.read_physical_progress(physical, buffer) }.map_err(|fault| {
-            crate::platform::dma::TransferFault {
-                error: crate::platform::dma::DmaError::Memory,
+            stela_contracts::dma::TransferFault {
+                error: stela_contracts::dma::DmaError::Memory,
                 completed: fault.completed,
             }
         })
@@ -267,11 +267,11 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         &mut self,
         physical: u64,
         data: &[u8],
-    ) -> Result<(), crate::platform::dma::TransferFault> {
+    ) -> Result<(), stela_contracts::dma::TransferFault> {
         // SAFETY: private staging, every writer participates in this same domain.
         unsafe { self.ram.publish_physical(physical, data) }.map_err(|fault| {
-            crate::platform::dma::TransferFault {
-                error: crate::platform::dma::DmaError::Memory,
+            stela_contracts::dma::TransferFault {
+                error: stela_contracts::dma::DmaError::Memory,
                 completed: fault.completed,
             }
         })
@@ -601,7 +601,7 @@ pub(in crate::machine::engine::shared_memory) mod tests {
         if count > 1 {
             // Synthetic modeled slots, not a claim about a physical Apple SKU.
             profile.processors = (0..count)
-                .map(|pe| crate::machine::registers::Identity {
+                .map(|pe| stela_contracts::identity::Identity {
                     midr: 0x611f0220,
                     mpidr: 0x80000000 | pe as u64,
                     clock: None,

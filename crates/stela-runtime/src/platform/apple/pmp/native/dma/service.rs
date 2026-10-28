@@ -6,9 +6,9 @@ use super::super::platform::owner::Completion;
 use super::broker::{
     Descriptor, Grant, Job, Life, Op, Output, Owners, Reply, ServiceRequest, State, reason,
 };
-use crate::platform::dma::Port;
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
+use stela_contracts::dma::Port;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {

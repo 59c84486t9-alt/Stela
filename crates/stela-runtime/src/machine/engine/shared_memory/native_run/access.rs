@@ -208,7 +208,7 @@ mod tests {
             })?;
             if self.clock {
                 use engine::ProcessorChange;
-                let active = crate::platform::apple::bus::LifecycleState {
+                let active = stela_contracts::bus::LifecycleState {
                     powered: true,
                     clocked: true,
                     quiesced: false,
@@ -219,7 +219,7 @@ mod tests {
                     .processors()?
                     .apply(&[ProcessorChange {
                         domain: 1,
-                        state: crate::platform::apple::bus::LifecycleState {
+                        state: stela_contracts::bus::LifecycleState {
                             clocked: false,
                             ..active
                         },
@@ -423,7 +423,7 @@ mod tests {
                 .bind_processor_power(&[engine::ProcessorBinding {
                     domain: 1,
                     target: engine::ProcessorTarget::Core { pe: 0 },
-                    initial: crate::platform::apple::bus::LifecycleState {
+                    initial: stela_contracts::bus::LifecycleState {
                         powered: true,
                         clocked: true,
                         quiesced: false,

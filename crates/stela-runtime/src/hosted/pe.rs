@@ -10,14 +10,14 @@
 //! clear, so EL0 exceptions reach EL1.
 use super::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK, Hardware};
 use super::tables::{T0SZ, Tables};
-use crate::machine::{
-    Chip, Cpu, CpuProfile,
-    exception::Pstate,
-    registers::encodings::{DCZID_EL0, ID_AA64PFR1_EL1, ID_AA64SMFR0_EL1},
-    soc,
-    system::Register,
-};
 use stela_compiler::TargetCpu;
+use {
+    crate::machine::Cpu, crate::machine::CpuProfile, crate::machine::exception::Pstate,
+    crate::machine::registers::encodings::DCZID_EL0,
+    crate::machine::registers::encodings::ID_AA64PFR1_EL1,
+    crate::machine::registers::encodings::ID_AA64SMFR0_EL1, crate::machine::soc,
+    crate::machine::system::Register, stela_contracts::Chip,
+};
 
 /// EL1's vector base. Nothing executes there: the host stops at each entry
 /// (`Machine::set_breakpoints`) and returns with `return_from_exception`.

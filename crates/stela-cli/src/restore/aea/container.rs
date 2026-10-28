@@ -141,11 +141,11 @@ impl Root {
             return Ok(data);
         }
         let decoded = match self.compression {
-            LZFSE => stela_runtime::lzfse::decode(&data, raw),
-            LZVN if stela_runtime::lzfse::is_lzfse(&data) => {
-                stela_runtime::lzfse::decode(&data, raw)
+            LZFSE => stela_formats::lzfse::decode(&data, raw),
+            LZVN if stela_formats::lzfse::is_lzfse(&data) => {
+                stela_formats::lzfse::decode(&data, raw)
             }
-            LZVN => stela_runtime::lzfse::decode_lzvn(&data, raw),
+            LZVN => stela_formats::lzfse::decode_lzvn(&data, raw),
             _ => bail!(
                 "an AEA1 segment of stored data is {} bytes, not {raw}",
                 data.len()
@@ -181,7 +181,7 @@ pub(super) fn decrypt(
     );
     let auth = read_vec(input, auth_bytes, "metadata")?;
     ensure!(
-        stela_runtime::sha256(&[&fixed[..], &auth].concat()) == header_sha256,
+        stela_formats::sha256(&[&fixed[..], &auth].concat()) == header_sha256,
         "the AEA1 header differs from the one inspected"
     );
     let salt: [u8; SALT_BYTES] = read(input, "salt")?;

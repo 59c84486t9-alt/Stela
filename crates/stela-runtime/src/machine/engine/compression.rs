@@ -13,14 +13,14 @@
 //! MTE tag checking (the 26A434 kernel disables checking around the
 //! compressor).
 use super::{Devices, FETCH_PAGE, Host, Machine, RequirementKind, Step, Stop, Translated};
-use crate::machine::{
-    Chip, debug,
-    mmu::{Access, MemoryType},
-};
 use alloc::{format, vec, vec::Vec};
 use stela_compiler::wkdm::{
     self, Instruction, Operation, PAGE_BYTES, Population, Status, UNIT_BYTES,
     codec::{self, Compressed, HEADER_BYTES},
+};
+use {
+    crate::machine::debug, crate::machine::mmu::Access, crate::machine::mmu::MemoryType,
+    stela_contracts::Chip,
 };
 
 /// What the population count field counts on `chip`. XNU names M1 (H13,

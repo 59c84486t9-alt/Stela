@@ -865,9 +865,16 @@ mod tests {
     #[test]
     fn programmed_control_dma_retains_queued_replies_and_effects_across_faults() {
         use super::super::{Error as NhiError, Layout, Nhi, Profile};
-        use crate::platform::apple::bus::{Access, MmioDevice, Width};
-        use crate::platform::apple::interrupt::{AicInput, InterruptLatch};
-        use crate::platform::dma::{DmaError, Iommu, Memory, Port, tests::Ram};
+        use {
+            stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+            stela_contracts::bus::Width,
+        };
+        use {
+            stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,
+            stela_contracts::dma::Memory, stela_contracts::dma::Port,
+            stela_contracts::dma::test_support::Ram,
+        };
+        use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch};
         struct Fault(Option<u64>);
         impl Iommu for Fault {
             fn page(&self) -> u64 {

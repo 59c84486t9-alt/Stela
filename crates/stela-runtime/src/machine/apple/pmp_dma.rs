@@ -37,8 +37,8 @@ impl SourceProvenance {
             return Err("PMP native DMA static configuration changed or requires an unsupported address transformation".into());
         }
         Ok(Self {
-            original_tree_sha256: crate::sha256(original),
-            prepared_tree_sha256: crate::sha256(prepared),
+            original_tree_sha256: stela_formats::sha256(original),
+            prepared_tree_sha256: stela_formats::sha256(prepared),
             pmp: *pmp,
             mapper_index_property: original_configuration.0,
             asc_dram_mask_property: original_configuration.1,
@@ -470,9 +470,9 @@ impl dma::Coherence for WriteBackCoherence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{machine::adt::encode, memory::ReservedSystemRamRange};
     use alloc::{boxed::Box, vec, vec::Vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use {crate::memory::ReservedSystemRamRange, stela_contracts::adt::encode};
 
     fn pmp() -> soc::PmpController {
         soc::PmpController {
@@ -523,7 +523,10 @@ mod tests {
     fn static_mapper_configuration_requires_both_source_coordinates_and_exact_properties() {
         let absent = tree(None, None, false, 0x7d);
         let source = SourceProvenance::from_trees(&absent, &absent, &pmp()).unwrap();
-        assert_eq!(source.original_tree_sha256(), crate::sha256(&absent));
+        assert_eq!(
+            source.original_tree_sha256(),
+            stela_formats::sha256(&absent)
+        );
         assert_eq!(source.mapper_index_property, None);
         assert_eq!(source.asc_dram_mask_property, None);
         let zero = tree(
@@ -615,7 +618,9 @@ mod tests {
     #[test]
     fn mounted_profile_and_actual_bus_identity_are_required_beside_numeric_geometry() {
         let mut devices = AppleDevices::new();
-        devices.add_pmp(&pmp(), crate::builds::DEFAULT).unwrap();
+        devices
+            .add_pmp(&pmp(), stela_formats::builds::DEFAULT)
+            .unwrap();
         let asc = devices
             .coprocessors
             .iter()
@@ -704,7 +709,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let pmp = soc::board(&bytes).unwrap().pmp.unwrap();

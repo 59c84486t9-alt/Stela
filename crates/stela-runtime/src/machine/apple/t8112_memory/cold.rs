@@ -6,23 +6,18 @@ use super::super::{
     AppleDevices,
     memory_resources::{amcc, t8112},
 };
-use crate::{
-    machine::{
-        Chip,
-        soc::{Board, MemoryCache, MemoryController, PowerOwner, PowerStates},
-    },
-    memory::RegisteredSystemRam,
-    platform::apple::{
-        bus::{LifecycleState, Width},
-        pmgr::{
-            self, Pmgr,
-            coverage::{self, Consumer, LifecycleSinks},
-        },
-        ptd::{self, Geometry},
-    },
-};
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use t8112::cache::{EmptyResource, SoftwareImage, ZeroWayConfiguration};
+use {
+    crate::machine::soc::Board, crate::machine::soc::MemoryCache,
+    crate::machine::soc::MemoryController, crate::machine::soc::PowerOwner,
+    crate::machine::soc::PowerStates, crate::memory::RegisteredSystemRam,
+    crate::platform::apple::pmgr, crate::platform::apple::pmgr::Pmgr,
+    crate::platform::apple::pmgr::coverage, crate::platform::apple::pmgr::coverage::Consumer,
+    crate::platform::apple::pmgr::coverage::LifecycleSinks, crate::platform::apple::ptd,
+    crate::platform::apple::ptd::Geometry, stela_contracts::Chip,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::Width,
+};
 
 const SHARED: (u64, u64) = (0x100000, 0x80000);
 const BROADCAST: u64 = 0xf00000;
@@ -516,21 +511,16 @@ fn geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        machine::{
-            Devices,
-            soc::{ClockRole, PowerResource},
-        },
-        platform::apple::{
-            bus::{Access, MmioDevice},
-            interrupt::InterruptLatch,
-            pmgr::{
-                DomainState, PowerState,
-                coverage::{Admission, Domain, DomainId},
-            },
-        },
-    };
     use alloc::boxed::Box;
+    use {
+        crate::machine::Devices, crate::machine::soc::ClockRole,
+        crate::machine::soc::PowerResource, crate::platform::apple::pmgr::DomainState,
+        crate::platform::apple::pmgr::PowerState,
+        crate::platform::apple::pmgr::coverage::Admission,
+        crate::platform::apple::pmgr::coverage::Domain,
+        crate::platform::apple::pmgr::coverage::DomainId, stela_contracts::bus::Access,
+        stela_contracts::bus::MmioDevice, stela_contracts::interrupt::InterruptLatch,
+    };
 
     const SUPPLY: u64 = 0x1000;
     fn id(device: u16) -> DomainId {

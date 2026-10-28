@@ -14,12 +14,9 @@ mod selected;
 mod t6000;
 mod t8112;
 use super::*;
-use crate::machine::{
-    adt::Node,
-    soc::{self, PowerStates},
-};
 use alloc::{format, string::String, vec, vec::Vec};
 use sha2::{Digest, Sha256};
+use {crate::machine::soc, crate::machine::soc::PowerStates, stela_contracts::adt::Node};
 
 /// Actual selected restore/bundle identity, supplied by its retained owner.
 /// Original chosen IDs may be templates; this record never observes hardware
@@ -503,7 +500,7 @@ mod tests {
     use super::*;
     #[test]
     fn source_retention_distinguishes_fill_in_recipes_from_structural_values() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let fixed = 7u32.to_le_bytes();
         let mut original = encode(&[("fixed", &fixed), ("recipe", b"syscfg/ABCD\0")], &[]);
         let value = Node::root(&original).unwrap().property("recipe").unwrap();
@@ -543,7 +540,7 @@ mod tests {
         let input = std::env::var("STELA_TEST_ASSIGNED_DT").unwrap();
         let bytes = std::fs::read(input).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let prepared =

@@ -1,10 +1,10 @@
 //! Original native PMP registry producer and class4 callback. Allocations are
 //! actual class1 client objects; no numeric slot/DMA address grants ownership.
 use super::{Progress, Step, memory};
-use crate::platform::apple::bus::Access;
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::Cell;
 use memory::Mapping;
+use stela_contracts::bus::Access;
 mod operations;
 mod wire;
 use wire::Kind;
@@ -709,12 +709,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::{
         collections::{BTreeMap, VecDeque},
         vec,
     };
     use core::cell::RefCell;
+    use stela_contracts::interrupt::InterruptLatch;
     struct Object {
         data: Vec<u8>,
         mapped: bool,

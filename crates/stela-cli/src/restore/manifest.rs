@@ -152,7 +152,7 @@ pub fn inspect(bytes: &[u8], model: Option<&str>) -> Result<RestoreManifest> {
         .collect::<Result<_>>()?;
     Ok(RestoreManifest {
         schema_version: 1,
-        manifest_sha256: stela_runtime::sha256(bytes),
+        manifest_sha256: stela_formats::sha256(bytes),
         product_version: required(root, "ProductVersion")?,
         product_build: required(root, "ProductBuildVersion")?,
         supported_models,

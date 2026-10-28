@@ -8,8 +8,8 @@
 //! Without a signer (an arm64 image, or user JOP disabled) the pointers
 //! pass through unchanged, as `ARM_MACHINE_THREAD_DISABLE_USER_JOP` makes
 //! the conversions return early.
-use crate::pauth::{AuthenticationError, Context, Key};
 use anyhow::{Result, bail};
+use {crate::pauth::AuthenticationError, crate::pauth::Context, stela_contracts::pauth::Key};
 
 /// `ptrauth_key_function_pointer`'s discriminator: none.
 const FUNCTION_POINTER_DISCRIMINATOR: u64 = 0;

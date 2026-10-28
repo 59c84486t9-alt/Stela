@@ -53,7 +53,7 @@ impl AppleDevices {
         // The PMGR/AP full PTD bank and display's update view name the same
         // physical resource. Only the actual prepared owner can supply this
         // subview; a bare overlap or matching name never qualifies it.
-        let mut shared: Vec<crate::platform::apple::bus::SharedView> = Vec::new();
+        let mut shared: Vec<stela_contracts::bus::SharedView> = Vec::new();
         if let Some(device) = self.memory_publication.or(self.memory_controller)
             && let Some(owner) = memory_resources::resource_for(&self.bus, device)
         {
@@ -192,7 +192,7 @@ mod tests {
                 (owners[1], 5),
                 None,
                 Some((owners[0], 0)),
-                crate::builds::DEFAULT,
+                stela_formats::builds::DEFAULT,
             )
             .unwrap();
         let views = [
@@ -289,15 +289,14 @@ mod tests {
         assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
         assert!(devices.bus.route(SHARED, Width::Word).is_err());
     }
-    use crate::{
-        machine::soc::{DirectMemoryCache, MemoryController, PtdBank},
-        platform::apple::{
-            amcc::{Layout, LockGroup, Register},
-            bus::{Lifecycle, LifecycleState, MmioError},
-            interrupt::InterruptLatch,
-            mcc::{self, Configuration},
-            ptd,
-        },
+    use {
+        crate::machine::soc::DirectMemoryCache, crate::machine::soc::MemoryController,
+        crate::machine::soc::PtdBank, crate::platform::apple::amcc::Layout,
+        crate::platform::apple::amcc::LockGroup, crate::platform::apple::amcc::Register,
+        crate::platform::apple::mcc, crate::platform::apple::mcc::Configuration,
+        crate::platform::apple::ptd, stela_contracts::bus::Lifecycle,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioError,
+        stela_contracts::interrupt::InterruptLatch,
     };
     fn prepared() -> memory_resources::Prepared {
         let reg = |offset, mask, value| Register {
@@ -639,12 +638,12 @@ mod tests {
     #[test]
     #[ignore = "requires unchanged original 26A434 J314s DeviceTree"]
     fn original_j314s_display_ptd_view_is_the_actual_pmgr_pmp_update_bank() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let input =
             std::env::var("STELA_T6000_MCC_DEVICE_TREE").expect("explicit original ADT input");
         let bytes = std::fs::read(&input).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();

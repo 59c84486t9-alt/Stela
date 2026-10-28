@@ -8,9 +8,9 @@ use super::{
     resources::{MapResult, Mapping, Request, Resources, WaitKey},
     wire,
 };
-use crate::platform::apple::bus::Access;
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::bus::Access;
 
 pub const NO_DATABASE: u32 = 0x8000_0007;
 #[derive(Clone, Debug)]
@@ -922,9 +922,9 @@ fn convert<T, U>(value: Completion<T>, f: impl FnOnce(T) -> U) -> Completion<U> 
 mod tests {
     use super::super::{getter, resources::Wake};
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::vec;
     use core::cell::Cell;
+    use stela_contracts::interrupt::InterruptLatch;
 
     fn done<T>(value: T) -> Completion<T> {
         Completion::Retired {

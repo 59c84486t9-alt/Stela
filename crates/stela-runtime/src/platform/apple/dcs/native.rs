@@ -20,11 +20,13 @@
 //! them; `_enablePerfCtrl` panics unless a clear bit reads clear within
 //! 20 us, and a clear completes at once. The counters at +4000 count DRAM
 //! events, which no producer supplies, so their reads refuse.
-use crate::platform::apple::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "dcs";
 pub const CHANNEL_STRIDE: u64 = 0x400000;
@@ -380,7 +382,7 @@ mod tests {
         };
         let mut owner =
             Controller::initialized(alloc::vec![configuration; CHANNELS], live).unwrap();
-        let mut latch = crate::platform::apple::interrupt::InterruptLatch::new();
+        let mut latch = stela_contracts::interrupt::InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let base = 3 * CHANNEL_STRIDE;
         assert_eq!(

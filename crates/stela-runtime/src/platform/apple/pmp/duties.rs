@@ -18,11 +18,12 @@
 //!
 //! Every other update, the memory cache's commands among them, only holds
 //! what the AP wrote.
-use crate::platform::apple::{
-    bus::{Access, MmioDevice, MmioError, Width},
-    ptd::{Range, UPDATE_OFFSET, transport::Ptd},
-};
 use core::cell::Cell;
+use {
+    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+    crate::platform::apple::ptd::transport::Ptd, stela_contracts::bus::Access,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+};
 
 const STATUS: &str = "PMP-STATUS";
 const REQUESTS: &str = "SOC-DEV-PS-REQ";
@@ -106,8 +107,8 @@ fn publish(bank: &Ptd, entry: u32, value: u64, access: &mut Access<'_>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{bus::LifecycleState, interrupt::InterruptLatch};
     use alloc::{vec, vec::Vec};
+    use {stela_contracts::bus::LifecycleState, stela_contracts::interrupt::InterruptLatch};
 
     fn range(id: u32, start: u32, count: u32, name: &str) -> Range {
         Range {

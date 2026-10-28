@@ -7,10 +7,9 @@
 //! calls them ([`Chip::checks`](super::Chip::checks)). No Apple chip has
 //! FEAT_SVE or FEAT_SME_FA64, so streaming mode is what admits SVE, and
 //! there it makes the AdvSIMD and non-streaming SVE forms illegal.
-use super::{
-    chip::Check,
-    cpu::Cpu,
-    system::{Feature, Register},
+use {
+    super::cpu::Cpu, super::system::Register, stela_contracts::Feature,
+    stela_contracts::chip::Check,
 };
 
 /// `SMEExceptionType`, as ISS[2:0] (SMTC) of EC 0x1D.
@@ -341,7 +340,7 @@ pub struct VectorDestinations(pub [Option<u8>; 2]);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::{Chip, exception::Pstate};
+    use {crate::machine::exception::Pstate, stela_contracts::Chip};
 
     #[test]
     fn every_scalar_fp_form_of_the_sme_chips_names_its_vector_destinations() {

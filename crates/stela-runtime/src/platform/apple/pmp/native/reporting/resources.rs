@@ -1,8 +1,8 @@
 //! Actual owners required by the source endpoint. No successful defaults.
 use super::super::platform::owner::Completion;
 use super::wire::Buffer;
-use crate::platform::apple::bus::Access;
 use alloc::rc::Rc;
+use stela_contracts::bus::Access;
 
 #[derive(Clone, Debug)]
 pub struct Request {

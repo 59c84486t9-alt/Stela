@@ -279,7 +279,7 @@ pub fn check(device: &mut dyn BlockDevice, bytes: usize) -> Result<String, Stora
         }
         Err(error) => return Err(error.into()),
     }
-    Ok(crate::sha256(&read))
+    Ok(stela_formats::sha256(&read))
 }
 
 #[cfg(test)]
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(device.identity().blocks, 100);
         let hash = check(&mut device, 4096).unwrap();
         let expected: Vec<u8> = (0..4096).map(pattern).collect();
-        assert_eq!(hash, crate::sha256(&expected));
+        assert_eq!(hash, stela_formats::sha256(&expected));
 
         let mut devices = disks();
         assert_eq!(

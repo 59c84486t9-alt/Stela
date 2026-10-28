@@ -159,7 +159,7 @@ mod tests {
     fn fixture(count: usize) -> (Machine<Local, Board>, Vec<WorkerOwner>) {
         let (cpu, mut profile, missing, ram) = super::super::policy::tests::fixture();
         profile.processors = (0..count)
-            .map(|pe| crate::machine::registers::Identity {
+            .map(|pe| stela_contracts::identity::Identity {
                 midr: 0x611f0220,
                 mpidr: 0x80000000 | pe as u64,
                 clock: None,
@@ -295,7 +295,7 @@ mod tests {
         let (mut cpu, mut profile, missing, ram) = super::super::policy::tests::fixture();
         // Authored E,E,P,P roster; preserve the original indices and affinities.
         profile.processors = (0..4)
-            .map(|pe| crate::machine::registers::Identity {
+            .map(|pe| stela_contracts::identity::Identity {
                 midr: if pe < FIRST_P { 0x611f0220 } else { 0x611f0230 },
                 mpidr: 0x80000000
                     | if pe < FIRST_P {

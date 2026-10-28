@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn spmi_placement_reads_banks_aic_line_and_pmu_windows() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn chapel_places_a_shared_alarm_byte_and_explicit_off_to_wake_history() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn an_rtc_without_a_clock_offset_register_keeps_it_in_the_legacy_scratchpad() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values
@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn a_firmware_mailbox_names_its_vector_registers_and_doorbell() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn a_pmu_output_needs_no_rtc_but_the_primary_service_does() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values
@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn gen3_and_gen4_spmi_controllers_place_their_arbiter_bank() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values

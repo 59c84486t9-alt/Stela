@@ -32,10 +32,10 @@ pub(crate) mod metrics;
 mod monitor;
 mod native_timing;
 mod parallel;
-pub use crate::platform::dma::{DmaError, TransferFault};
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 pub use parallel::{Call, Counts, Hub, Kick, SharedDevices};
+pub use {stela_contracts::dma::DmaError, stela_contracts::dma::TransferFault};
 mod pointer;
 mod prepare;
 pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
@@ -53,26 +53,6 @@ mod tags;
 mod unprivileged;
 mod watch;
 
-use super::{
-    chip::{AdmitTable, Check},
-    cpu::{
-        Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
-        HCR_VI, HCR_VSE,
-    },
-    ctrr, debug,
-    exception::{
-        Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, IllegalReturn, Pstate, SYNCHRONOUS_EXTERNAL_ABORT,
-        Vector, data_abort_iss,
-    },
-    hacr, identification,
-    mmu::{self, Access, Controls, Outcome as Translated},
-    registers::{self, CpuProfile, HCR_TIDCP, Lines, Outcome as RegisterOutcome, Refusal},
-    streaming::{self, Denial},
-    system::{Feature, Register as SystemRegister},
-    timer,
-};
-pub use crate::platform::apple::bus::Transition;
-pub use crate::platform::dma::Memory;
 use crate::{pauth, scalable::ScalableState};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -125,8 +105,25 @@ use stela_compiler::{
         pointer as x86_64_pointer, register_read, zero_block,
     },
 };
+pub use stela_contracts::bus::Transition;
+pub use stela_contracts::dma::Memory;
 pub use stored::{Offer, Translations};
 pub use system::FP_TRAPS_WRITABLE;
+use {
+    super::cpu::Cpu, super::cpu::Exception, super::cpu::HCR_AMO, super::cpu::HCR_API,
+    super::cpu::HCR_FMO, super::cpu::HCR_HCD, super::cpu::HCR_IMO, super::cpu::HCR_TGE,
+    super::cpu::HCR_TSC, super::cpu::HCR_VF, super::cpu::HCR_VI, super::cpu::HCR_VSE, super::ctrr,
+    super::debug, super::exception::Class, super::exception::DAIF_A, super::exception::DAIF_D,
+    super::exception::DAIF_F, super::exception::DAIF_I, super::exception::IllegalReturn,
+    super::exception::Pstate, super::exception::SYNCHRONOUS_EXTERNAL_ABORT,
+    super::exception::Vector, super::exception::data_abort_iss, super::hacr, super::identification,
+    super::mmu, super::mmu::Access, super::mmu::Controls, super::mmu::Outcome as Translated,
+    super::registers, super::registers::CpuProfile, super::registers::HCR_TIDCP,
+    super::registers::Lines, super::registers::Outcome as RegisterOutcome,
+    super::registers::Refusal, super::streaming, super::streaming::Denial,
+    super::system::Register as SystemRegister, super::timer, stela_contracts::Feature,
+    stela_contracts::chip::AdmitTable, stela_contracts::chip::Check,
+};
 
 const PROFILE: BlockProfile = BlockProfile::new(Features::SYSTEM_MODE);
 const INSTRUCTION: u64 = 4;
@@ -428,8 +425,8 @@ pub trait Host {
         _physical: u64,
         _bytes: usize,
         _write: bool,
-    ) -> Result<(), crate::platform::dma::DmaError> {
-        Err(crate::platform::dma::DmaError::Unsupported(
+    ) -> Result<(), stela_contracts::dma::DmaError> {
+        Err(stela_contracts::dma::DmaError::Unsupported(
             "host DMA range validation is unavailable",
         ))
     }
@@ -439,11 +436,11 @@ pub trait Host {
         &mut self,
         physical: u64,
         buffer: &mut [u8],
-    ) -> Result<(), crate::platform::dma::TransferFault> {
+    ) -> Result<(), stela_contracts::dma::TransferFault> {
         self.read_ram(physical, buffer)
             .then_some(())
-            .ok_or(crate::platform::dma::TransferFault {
-                error: crate::platform::dma::DmaError::Memory,
+            .ok_or(stela_contracts::dma::TransferFault {
+                error: stela_contracts::dma::DmaError::Memory,
                 completed: 0,
             })
     }
@@ -451,11 +448,11 @@ pub trait Host {
         &mut self,
         physical: u64,
         data: &[u8],
-    ) -> Result<(), crate::platform::dma::TransferFault> {
+    ) -> Result<(), stela_contracts::dma::TransferFault> {
         self.write_ram(physical, data)
             .then_some(())
-            .ok_or(crate::platform::dma::TransferFault {
-                error: crate::platform::dma::DmaError::Memory,
+            .ok_or(stela_contracts::dma::TransferFault {
+                error: stela_contracts::dma::DmaError::Memory,
                 completed: 0,
             })
     }
@@ -849,19 +846,19 @@ impl<H: Host> Memory for HostMemory<'_, H> {
         physical: u64,
         bytes: usize,
         write: bool,
-    ) -> Result<(), crate::platform::dma::DmaError> {
+    ) -> Result<(), stela_contracts::dma::DmaError> {
         if write && bytes != 0 {
             let last = u64::try_from(bytes - 1)
                 .ok()
                 .and_then(|n| physical.checked_add(n))
-                .ok_or(crate::platform::dma::DmaError::Memory)?;
+                .ok_or(stela_contracts::dma::DmaError::Memory)?;
             if self
                 .lock
                 .into_iter()
                 .flatten()
                 .any(|(first, end)| physical <= end && first <= last)
             {
-                return Err(crate::platform::dma::DmaError::Memory);
+                return Err(stela_contracts::dma::DmaError::Memory);
             }
         }
         self.host.check_ram_range(physical, bytes, write)
@@ -870,16 +867,16 @@ impl<H: Host> Memory for HostMemory<'_, H> {
         &mut self,
         physical: u64,
         buffer: &mut [u8],
-    ) -> Result<(), crate::platform::dma::TransferFault> {
+    ) -> Result<(), stela_contracts::dma::TransferFault> {
         self.host.read_ram_progress(physical, buffer)
     }
     fn write_progress(
         &mut self,
         physical: u64,
         data: &[u8],
-    ) -> Result<(), crate::platform::dma::TransferFault> {
-        let refused = crate::platform::dma::TransferFault {
-            error: crate::platform::dma::DmaError::Memory,
+    ) -> Result<(), stela_contracts::dma::TransferFault> {
+        let refused = stela_contracts::dma::TransferFault {
+            error: stela_contracts::dma::DmaError::Memory,
             completed: 0,
         };
         if !data.is_empty() {
@@ -2219,10 +2216,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let stripping = self.pointer.revalidate(inputs);
         let trapped = self.pointer_authentication_trapped();
         for (key, block) in [
-            (pauth::Key::Ia, PointerAuthenticationKey::Ia),
-            (pauth::Key::Ib, PointerAuthenticationKey::Ib),
-            (pauth::Key::Da, PointerAuthenticationKey::Da),
-            (pauth::Key::Db, PointerAuthenticationKey::Db),
+            (
+                stela_contracts::pauth::Key::Ia,
+                PointerAuthenticationKey::Ia,
+            ),
+            (
+                stela_contracts::pauth::Key::Ib,
+                PointerAuthenticationKey::Ib,
+            ),
+            (
+                stela_contracts::pauth::Key::Da,
+                PointerAuthenticationKey::Da,
+            ),
+            (
+                stela_contracts::pauth::Key::Db,
+                PointerAuthenticationKey::Db,
+            ),
         ] {
             let enabled = self.key_enabled(block);
             self.pointer.reopen(key, enabled, trapped);
@@ -3265,7 +3274,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub fn strip_instruction_pointer(&self, pointer: u64) -> u64 {
         self.pointer_context()
             .ok()
-            .and_then(|context| context.strip(pauth::Key::Ia, pointer).ok())
+            .and_then(|context| context.strip(stela_contracts::pauth::Key::Ia, pointer).ok())
             .unwrap_or(pointer)
     }
 
@@ -4983,7 +4992,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// case, and every form under PSTATE.PACM, to the general path.
     fn implicit_pointer_authentication(&mut self, word: u32) -> Option<Step> {
         use PointerAuthenticationKey as Block;
-        use pauth::Key;
+        use stela_contracts::pauth::Key;
         #[derive(PartialEq)]
         enum Form {
             Sign,
@@ -5095,10 +5104,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return None;
         }
         let key = match key {
-            PointerAuthenticationKey::Ia => pauth::Key::Ia,
-            PointerAuthenticationKey::Ib => pauth::Key::Ib,
-            PointerAuthenticationKey::Da => pauth::Key::Da,
-            PointerAuthenticationKey::Db => pauth::Key::Db,
+            PointerAuthenticationKey::Ia => stela_contracts::pauth::Key::Ia,
+            PointerAuthenticationKey::Ib => stela_contracts::pauth::Key::Ib,
+            PointerAuthenticationKey::Da => stela_contracts::pauth::Key::Da,
+            PointerAuthenticationKey::Db => stela_contracts::pauth::Key::Db,
         };
         let pc = self.cpu.pc;
         let pointer = self.cpu.state.x[usize::from(register)];
@@ -5134,7 +5143,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn pointer_result(
         &mut self,
         operation: PointerOperation,
-        key: pauth::Key,
+        key: stela_contracts::pauth::Key,
         pointer: u64,
         modifier: u64,
     ) -> Result<PointerResult, Stop> {
@@ -5239,8 +5248,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         use pauth::lr_instruction::{Action, Key};
         let pc = self.cpu.pc;
         let (key, runtime_key) = match operands.key {
-            Key::Ia => (PointerAuthenticationKey::Ia, pauth::Key::Ia),
-            Key::Ib => (PointerAuthenticationKey::Ib, pauth::Key::Ib),
+            Key::Ia => (
+                PointerAuthenticationKey::Ia,
+                stela_contracts::pauth::Key::Ia,
+            ),
+            Key::Ib => (
+                PointerAuthenticationKey::Ib,
+                stela_contracts::pauth::Key::Ib,
+            ),
         };
         if !self.key_enabled(key) {
             return self.disabled_pointer_authentication(word, instruction);
@@ -5387,8 +5402,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             &mut self.cpu.state,
             |key, pointer| {
                 let key = match key {
-                    stela_compiler::block::pauth_memory::DataKey::A => pauth::Key::Da,
-                    stela_compiler::block::pauth_memory::DataKey::B => pauth::Key::Db,
+                    stela_compiler::block::pauth_memory::DataKey::A => {
+                        stela_contracts::pauth::Key::Da
+                    }
+                    stela_compiler::block::pauth_memory::DataKey::B => {
+                        stela_contracts::pauth::Key::Db
+                    }
                 };
                 match context {
                     Some(context) => context
@@ -6297,8 +6316,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return self.pointer_authentication_trap();
                 }
                 let runtime_key = match key {
-                    PointerAuthenticationKey::Ia => pauth::Key::Ia,
-                    _ => pauth::Key::Ib,
+                    PointerAuthenticationKey::Ia => stela_contracts::pauth::Key::Ia,
+                    _ => stela_contracts::pauth::Key::Ib,
                 };
                 // A combined authentication: a failure corrupts the pointer,
                 // or with FEAT_FPACCOMBINE takes the PAC Fail exception at
@@ -7006,7 +7025,7 @@ mod tests {
             Machine::table_base_changed,
         ];
         for operation in operations {
-            let mut machine = board_on(crate::machine::Chip::AppleM1, &[], NoDevices, Vec::new());
+            let mut machine = board_on(stela_contracts::Chip::AppleM1, &[], NoDevices, Vec::new());
             machine.translation_generation = u64::MAX;
             assert!(
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&mut machine)))
@@ -7204,10 +7223,10 @@ mod tests {
     /// The chip the tests run on, or the M2 where it has the Apple generic
     /// timer's two banks (`timer::agt`): for tests of one bank's
     /// architectural generic timer.
-    pub(super) fn one_timer_bank() -> crate::machine::Chip {
+    pub(super) fn one_timer_bank() -> stela_contracts::Chip {
         let chip = crate::machine::test_chip();
         if crate::machine::timer::agt::present(chip) {
-            crate::machine::Chip::AppleM2
+            stela_contracts::Chip::AppleM2
         } else {
             chip
         }
@@ -7215,7 +7234,7 @@ mod tests {
 
     /// [`machine`] on `chip`, for a test that fixes its chip.
     pub(super) fn machine_on(
-        chip: crate::machine::Chip,
+        chip: stela_contracts::Chip,
         words: &[u32],
     ) -> Machine<FakeHost, NoDevices> {
         board_on(chip, words, NoDevices, Vec::new())
@@ -7260,17 +7279,17 @@ mod tests {
     pub(super) fn board<D: Devices>(
         words: &[u32],
         devices: D,
-        processors: Vec<registers::Identity>,
+        processors: Vec<stela_contracts::identity::Identity>,
     ) -> Machine<FakeHost, D> {
         board_on(crate::machine::test_chip(), words, devices, processors)
     }
 
     /// [`board`] on `chip`.
     pub(super) fn board_on<D: Devices>(
-        chip: crate::machine::Chip,
+        chip: stela_contracts::Chip,
         words: &[u32],
         devices: D,
-        processors: Vec<registers::Identity>,
+        processors: Vec<stela_contracts::identity::Identity>,
     ) -> Machine<FakeHost, D> {
         let mut ram = vec![0u8; 0x10000];
         for (index, word) in words.iter().enumerate() {
@@ -7421,7 +7440,7 @@ mod tests {
         const KEY_READ: u32 = 0xd53c_fdc0;
         const CONTROL_READ: u32 = 0xd53c_fc00;
         const CONTROL_WRITE: u32 = 0xd51c_fc00;
-        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
+        let mut machine = machine_on(stela_contracts::Chip::AppleM2, &[]);
         machine.cpu.set_pstate(Pstate::reset(1));
         let run = |machine: &mut Machine<_, _>, word, x0| {
             machine.cpu.pc = BASE;
@@ -7984,14 +8003,14 @@ mod tests {
         assert_eq!(machine.statistics.compiled, 1, "cached");
         // An SVE instruction compiles as the UDF it is on a chip without SVE
         // or SME, such as the M2.
-        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[0x9100_0400, 0x04a0_0000]);
+        let mut machine = machine_on(stela_contracts::Chip::AppleM2, &[0x9100_0400, 0x04a0_0000]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("block with UDF")
         };
         assert_eq!(machine.blocks[index].source_map.len(), 2);
         // On the M4, whose SME has it in streaming mode, the block ends
         // before it, and the engine applies its access checks on its own.
-        let mut machine = machine_on(crate::machine::Chip::AppleM4, &[0x9100_0400, 0x04a0_0000]);
+        let mut machine = machine_on(stela_contracts::Chip::AppleM4, &[0x9100_0400, 0x04a0_0000]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("prefix block")
         };
@@ -8444,7 +8463,7 @@ mod tests {
         // The M2 kernel's JIT box: its range (S3_4_C15_C15_1) and mode
         // (S3_4_C15_C15_4) are held. A mode that enables the box, whose
         // enforcement is undocumented, is reported once.
-        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
+        let mut machine = machine_on(stela_contracts::Chip::AppleM2, &[]);
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.cpu.pc = BASE;
         machine.cpu.state.x[0] = 0x0000_0001_0200_0006;
@@ -8468,7 +8487,7 @@ mod tests {
         const MRS_X0_HCRX_EL2: u32 = 0xd53c_1240;
         const NV: u64 = 1 << 42;
         const NV2: u64 = 1 << 45;
-        let chip = crate::machine::Chip::AppleM3;
+        let chip = stela_contracts::Chip::AppleM3;
         let mut machine = machine_on(chip, &[]);
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
@@ -8530,7 +8549,7 @@ mod tests {
         machine.system_instruction(MRS_X0_HCRX_EL2).unwrap();
         assert_eq!(machine.take_unmodeled().len(), 1);
         // The M2 has no FEAT_NV: the bits are RES0 and ERET returns.
-        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
+        let mut machine = machine_on(stela_contracts::Chip::AppleM2, &[]);
         machine
             .cpu
             .registers
@@ -8547,8 +8566,8 @@ mod tests {
 
     #[test]
     fn all_chip_performance_monitors_count_retirement_and_signal_their_overflow_fiq() {
-        for chip in crate::machine::Chip::ALL {
-            let overflow = if chip == crate::machine::Chip::AppleM1 {
+        for chip in stela_contracts::Chip::ALL {
+            let overflow = if chip == stela_contracts::Chip::AppleM1 {
                 1u64 << 47
             } else {
                 1u64 << 63
@@ -8579,7 +8598,7 @@ mod tests {
             // The EL1 vectors at BASE + 0x800: current EL, SPx, synchronous.
             words.resize(0xa00 / 4, 0);
             words.extend([MRS_X5_PMC1, SVC]);
-            let identity = registers::Identity {
+            let identity = stela_contracts::identity::Identity {
                 // No hardware identity is claimed by this synthetic PMU fixture.
                 midr: 0,
                 mpidr: 0x8001_0000,
@@ -8594,7 +8613,7 @@ mod tests {
                 .set(SystemRegister::VBAR_EL1, 0, BASE + 0x800);
             let programmable = matches!(
                 chip,
-                crate::machine::Chip::AppleM1 | crate::machine::Chip::AppleM2
+                stela_contracts::Chip::AppleM1 | stela_contracts::Chip::AppleM2
             );
             if programmable {
                 machine.cpu.state.x[9] = 0x8c00; // INST_ALL on PMC7 only.
@@ -9465,7 +9484,7 @@ mod tests {
         assert!(matches!(machine.peer_states()[0], PeerState::Down));
         assert_eq!(machine.host.now, 2000);
         // A WFIT's local timeout would be the core's too.
-        let mut machine = machine_on(crate::machine::Chip::AppleM4, &[]);
+        let mut machine = machine_on(stela_contracts::Chip::AppleM4, &[]);
         machine.cpu.state.x[0] = 3 << 24;
         machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
         machine.cpu.state.x[1] = u64::MAX;
@@ -9480,7 +9499,7 @@ mod tests {
         const WFIT_X1: u32 = 0xd503_1021;
         const WFET_X2: u32 = 0xd503_1002;
         const HCR_TWI: u64 = 1 << 13;
-        let chip = crate::machine::Chip::AppleM4;
+        let chip = stela_contracts::Chip::AppleM4;
         let mut machine = machine_on(chip, &[]);
         machine
             .cpu
@@ -9508,7 +9527,7 @@ mod tests {
             0x0600_0000 | 1 << 24 | 0b1110 << 20 | 1 << 5 | 1 << 2 | 0b10
         );
         // The M2 has no FEAT_WFxT: the timeout forms are UNDEFINED.
-        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
+        let mut machine = machine_on(stela_contracts::Chip::AppleM2, &[]);
         machine
             .cpu
             .registers
@@ -9996,8 +10015,8 @@ mod tests {
         const AT_S1E1RP_X2: u32 = 0xd508_7902;
         const EPAN: u64 = 1 << 57;
         for (chip, pan3) in [
-            (crate::machine::Chip::AppleM2, false),
-            (crate::machine::Chip::AppleM4, true),
+            (stela_contracts::Chip::AppleM2, false),
+            (stela_contracts::Chip::AppleM4, true),
         ] {
             let mut machine = machine_on(chip, &[]);
             // A level-1 block maps VA 0-1 GiB at BASE, privileged
@@ -10371,7 +10390,7 @@ mod tests {
     }
 
     /// [`pac_machine`] on `chip`, running `words` at BASE.
-    fn pac_machine_for(chip: crate::machine::Chip, words: &[u32]) -> Machine<FakeHost, NoDevices> {
+    fn pac_machine_for(chip: stela_contracts::Chip, words: &[u32]) -> Machine<FakeHost, NoDevices> {
         pac_setup(machine_on(chip, words))
     }
 
@@ -10446,7 +10465,7 @@ mod tests {
         let expected = machine
             .pointer_context()
             .unwrap()
-            .sign(pauth::Key::Ia, 0x4000, 0x8000)
+            .sign(stela_contracts::pauth::Key::Ia, 0x4000, 0x8000)
             .unwrap();
         machine.pointer_authentication(PACIASP).unwrap();
         assert_eq!(machine.cpu.state.x[30], expected);
@@ -10505,7 +10524,7 @@ mod tests {
             machine
                 .pointer_context()
                 .unwrap()
-                .sign(pauth::Key::Ia, 0x4000, 0x8000)
+                .sign(stela_contracts::pauth::Key::Ia, 0x4000, 0x8000)
                 .unwrap(),
             expected
         );
@@ -10524,7 +10543,7 @@ mod tests {
         // Original SPTM's early canary instruction, used here with authored
         // operands. Its preceding standard-name MSRs must feed actual EL2 PAC.
         const PACGA: u32 = 0x9ac0_33e1;
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM2, &[PACGA]);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM2, &[PACGA]);
         machine
             .cpu
             .registers
@@ -10625,7 +10644,7 @@ mod tests {
         const AUTIASP: u32 = 0xd503_23bf;
         const NOP: u32 = 0xd503_201f;
         let code = [PACM, PACIASP, PACM, AUTIASP, PACM, NOP, PACIASP];
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &code);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM6, &code);
         let pointer = 0xffff_ff80_0000_4000_u64;
         let sp = 0xffff_ff80_0001_0000_u64;
         machine.cpu.state.x[30] = pointer;
@@ -10649,7 +10668,7 @@ mod tests {
         pac(&mut machine, BASE + 4);
         let context = machine.pointer_context().unwrap();
         let signed = context
-            .sign_two_modifiers(pauth::Key::Ia, pointer, sp, BASE + 4)
+            .sign_two_modifiers(stela_contracts::pauth::Key::Ia, pointer, sp, BASE + 4)
             .unwrap();
         assert_eq!(machine.cpu.state.x[30], signed);
         assert!(!machine.cpu.pstate.pacm);
@@ -10670,7 +10689,9 @@ mod tests {
         pac(&mut machine, BASE + 24);
         assert_eq!(
             machine.cpu.state.x[30],
-            context.sign(pauth::Key::Ia, pointer, sp).unwrap()
+            context
+                .sign(stela_contracts::pauth::Key::Ia, pointer, sp)
+                .unwrap()
         );
     }
 
@@ -10679,7 +10700,7 @@ mod tests {
         const PACIASP: u32 = 0xd503_233f;
         const ERET: u32 = 0xd69f_03e0;
         const SPSR_PACM: u64 = 1 << 35;
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM6, &[]);
         enable_pacm(&mut machine);
         machine.system_instruction_for_test(PACM);
         assert!(machine.cpu.pstate.pacm);
@@ -10712,7 +10733,7 @@ mod tests {
         let retaasppc = |n: u32| 0x5500_001f | n << 5;
         let pointer = 0xffff_ff80_0000_4000_u64;
         let sp = 0xffff_ff80_0001_0000_u64;
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM6, &[]);
         let context = machine.pointer_context().unwrap();
         let at = |machine: &mut Machine<FakeHost, NoDevices>, pc: u64, word: u32| {
             machine.cpu.pc = pc;
@@ -10722,7 +10743,7 @@ mod tests {
         machine.cpu.state.x[30] = pointer;
         at(&mut machine, BASE, PACIASPPC);
         let signed = context
-            .sign_two_modifiers(pauth::Key::Ia, pointer, sp, BASE)
+            .sign_two_modifiers(stela_contracts::pauth::Key::Ia, pointer, sp, BASE)
             .unwrap();
         assert_eq!(
             (machine.cpu.state.x[30], machine.cpu.pc),
@@ -10749,7 +10770,7 @@ mod tests {
         assert_eq!(
             machine.cpu.state.x[17],
             context
-                .sign_two_modifiers(pauth::Key::Ia, pointer, 0x1234, 0x5678)
+                .sign_two_modifiers(stela_contracts::pauth::Key::Ia, pointer, 0x1234, 0x5678)
                 .unwrap()
         );
         at(&mut machine, BASE + 4, AUTIA171615);
@@ -10759,7 +10780,7 @@ mod tests {
         assert!(machine.branch_target_compatible(PACIASPPC));
         assert!(!machine.branch_target_compatible(0xdac1_83fe));
         // Without FEAT_PAuth_LR (the M5) they are UNDEFINED.
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM5, &[]);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM5, &[]);
         at(&mut machine, BASE, PACIASPPC);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
     }
@@ -10878,14 +10899,14 @@ mod tests {
         // and a failed AUT writes the key B error code without an exception,
         // at bits 62:61 without TBI (Arm `Auth`); the M2 XORs the PAC in and
         // faults.
-        let (classic, failed, taken) = run(crate::machine::Chip::AppleM1);
+        let (classic, failed, taken) = run(stela_contracts::Chip::AppleM1);
         assert_eq!(
             classic & 0x0000_007f_ffff_ffff,
             pointer & 0x0000_007f_ffff_ffff
         );
         assert!(!taken);
         assert_eq!(failed, pointer & !(0b11 << 61) | 0b10 << 61);
-        let (enhanced, _, taken) = run(crate::machine::Chip::AppleM2);
+        let (enhanced, _, taken) = run(stela_contracts::Chip::AppleM2);
         assert_ne!(enhanced, classic);
         assert!(taken);
     }
@@ -10899,8 +10920,8 @@ mod tests {
         const MADDPT: u32 = 0x9b62_1023;
         const MSUBPT: u32 = 0x9b62_9025;
         for (chip, cpa) in [
-            (crate::machine::Chip::AppleM5, false),
-            (crate::machine::Chip::AppleM6, true),
+            (stela_contracts::Chip::AppleM5, false),
+            (stela_contracts::Chip::AppleM6, true),
         ] {
             let mut machine = machine_on(chip, &[]);
             machine
@@ -10938,8 +10959,8 @@ mod tests {
         const LDRAA_X0_X1: u32 = 0xf820_0420;
         let pointer = 0xffff_ff80_0000_4000_u64;
         for (chip, faults) in [
-            (crate::machine::Chip::AppleM2, false),
-            (crate::machine::Chip::AppleM6, true),
+            (stela_contracts::Chip::AppleM2, false),
+            (stela_contracts::Chip::AppleM6, true),
         ] {
             let mut machine = pac_machine_for(chip, &[]);
             machine.cpu.state.x[30] = pointer;
@@ -10966,7 +10987,7 @@ mod tests {
             }
         }
         // LDRAA of an unsigned base faults with the data key A (ISS 0b10).
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM6, &[]);
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::APDAKeyLo_EL1, 0, 0x2468_ace0_1357_9bdf);
         registers.set(SystemRegister::APDAKeyHi_EL1, 0, 0x0f1e_2d3c_4b5a_6978);
@@ -10980,7 +11001,7 @@ mod tests {
         // With EnDA clear AuthDA returns the unsigned base unchanged:
         // LDRAA reads through it, here an unmapped address, whose data
         // abort (EC 0x25) reports the base itself.
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM6, &[]);
         let registers = &mut machine.cpu.registers;
         let sctlr = registers.get(SystemRegister::SCTLR_EL1, 0) & !(1 << 27);
         registers.set(SystemRegister::SCTLR_EL1, 0, sctlr);
@@ -11048,7 +11069,10 @@ mod tests {
             (0xd503_233f, 0xd503_23bf, 0xd65f_0bff, 0),
             (0xd503_237f, 0xd503_23ff, 0xd65f_0fff, 1),
         ] {
-            for chip in [crate::machine::Chip::AppleM2, crate::machine::Chip::AppleM6] {
+            for chip in [
+                stela_contracts::Chip::AppleM2,
+                stela_contracts::Chip::AppleM6,
+            ] {
                 for (word, combined) in [(authenticate, false), (ret, true)] {
                     for btype in 1..=3 {
                         let mut machine = pac_machine_for(chip, &[]);
@@ -11066,7 +11090,7 @@ mod tests {
                         // Invoke the actual implicit path after its source-entry
                         // boundary; this fixture does not model a guarded leaf.
                         machine.system_instruction_for_test(word);
-                        let faults = !combined || chip == crate::machine::Chip::AppleM6;
+                        let faults = !combined || chip == stela_contracts::Chip::AppleM6;
                         if faults {
                             assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1), saved);
                             assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
@@ -11108,7 +11132,11 @@ mod tests {
         let expected = machine
             .pointer_context()
             .unwrap()
-            .sign(pauth::Key::Ib, pointer, machine.cpu.state.sp)
+            .sign(
+                stela_contracts::pauth::Key::Ib,
+                pointer,
+                machine.cpu.state.sp,
+            )
             .unwrap();
         assert_eq!(signed, expected);
         assert_eq!(sign(&mut machine), signed, "remembered");
@@ -11125,7 +11153,9 @@ mod tests {
         let context = machine.pointer_context().unwrap();
         assert_eq!(
             machine.cpu.state.x[17],
-            context.sign(pauth::Key::Ia, pointer, 0x55).unwrap()
+            context
+                .sign(stela_contracts::pauth::Key::Ia, pointer, 0x55)
+                .unwrap()
         );
         // A key the guest writes changes every later result.
         machine
@@ -11177,7 +11207,12 @@ mod tests {
         let mut machine = pac_machine();
         assert_eq!(machine.pointer.tags, [0; 4]);
         machine
-            .pointer_result(PointerOperation::Sign, pauth::Key::Ib, 0x4000, 0x10)
+            .pointer_result(
+                PointerOperation::Sign,
+                stela_contracts::pauth::Key::Ib,
+                0x4000,
+                0x10,
+            )
             .unwrap()
             .unwrap();
         let ib = x86_64_pointer::key_index(PointerAuthenticationKey::Ib);
@@ -11235,8 +11270,8 @@ mod tests {
             machine.cpu.registers.set(SystemRegister::TCR_EL1, 0, tcr);
             machine.derived_changed();
             for (word, data, key) in [
-                (0xdac1_43f1, false, pauth::Key::Ia),
-                (XPACD_X17, true, pauth::Key::Da),
+                (0xdac1_43f1, false, stela_contracts::pauth::Key::Ia),
+                (XPACD_X17, true, stela_contracts::pauth::Key::Da),
             ] {
                 for pointer in [0xdead_1234_5678_aaaa, 0xdead_9234_5678_aaaa] {
                     machine.cpu.state.x[17] = pointer;
@@ -11560,7 +11595,7 @@ mod tests {
                 let plain = machine.cpu.state.x[10] == machine.clock.last().wrapping_sub(offset);
                 // The M2 reads both as the count less CNTVOFF_EL2.
                 assert!(
-                    plain || machine.cpu.registers.chip() != crate::machine::chip::Chip::AppleM2
+                    plain || machine.cpu.registers.chip() != stela_contracts::chip::Chip::AppleM2
                 );
                 assert_eq!(
                     machine.mirrors[index],
@@ -11679,7 +11714,12 @@ mod tests {
                 .set(SystemRegister::APIBKeyLo_EL1, 0, key);
             machine.derived_changed();
             let signed = machine
-                .pointer_result(PointerOperation::Sign, pauth::Key::Ib, pointer, modifier)
+                .pointer_result(
+                    PointerOperation::Sign,
+                    stela_contracts::pauth::Key::Ib,
+                    pointer,
+                    modifier,
+                )
                 .unwrap()
                 .unwrap();
             (signed, machine.pointer.generation)
@@ -11688,10 +11728,12 @@ mod tests {
         let (other, other_generation) = sign(&mut machine, 2);
         assert_ne!((other, other_generation), (first, generation));
         assert_eq!(sign(&mut machine, 1), (first, generation));
-        let remembered =
-            machine
-                .pointer
-                .remembered(PointerOperation::Sign, pauth::Key::Ib, pointer, modifier);
+        let remembered = machine.pointer.remembered(
+            PointerOperation::Sign,
+            stela_contracts::pauth::Key::Ib,
+            pointer,
+            modifier,
+        );
         assert_eq!(remembered, Some(Ok(first)));
         for key in 0..pointer::POINTER_INPUTS_SEEN as u64 {
             sign(&mut machine, 0x1000 + key);
@@ -11713,12 +11755,13 @@ mod tests {
         let combined = PointerOperation::Authenticate { combined: true };
         let pointer = 0xffff_ff80_0000_4000;
         let (signed, _) = machine
-            .pointer_result(sign, pauth::Key::Ib, pointer, modifier)
+            .pointer_result(sign, stela_contracts::pauth::Key::Ib, pointer, modifier)
             .unwrap()
             .unwrap();
-        let remembered = machine
-            .pointer
-            .remembered(plain, pauth::Key::Ib, signed, modifier);
+        let remembered =
+            machine
+                .pointer
+                .remembered(plain, stela_contracts::pauth::Key::Ib, signed, modifier);
         assert_eq!(remembered, Some(Ok((pointer, true))));
         let context = machine.pointer_context().unwrap();
         for operation in [plain, combined] {
@@ -11726,27 +11769,38 @@ mod tests {
                 unreachable!()
             };
             let computed = context
-                .authenticate_operation(pauth::Key::Ib, signed, modifier, combined)
+                .authenticate_operation(stela_contracts::pauth::Key::Ib, signed, modifier, combined)
                 .unwrap();
             assert_eq!(
-                machine.pointer_result(operation, pauth::Key::Ib, signed, modifier),
+                machine.pointer_result(
+                    operation,
+                    stela_contracts::pauth::Key::Ib,
+                    signed,
+                    modifier
+                ),
                 Ok(Ok((computed.pointer, computed.authenticated)))
             );
         }
         // A pointer whose extension bits disagree does not strip back.
         let odd = 0x7fff_ff80_0000_4000;
         let (signed, _) = machine
-            .pointer_result(sign, pauth::Key::Ib, odd, modifier)
+            .pointer_result(sign, stela_contracts::pauth::Key::Ib, odd, modifier)
             .unwrap()
             .unwrap();
         assert_eq!(
             machine
                 .pointer
-                .remembered(plain, pauth::Key::Ib, signed, modifier),
+                .remembered(plain, stela_contracts::pauth::Key::Ib, signed, modifier),
             None
         );
-        let computed = context.authenticate_operation(pauth::Key::Ib, signed, modifier, false);
-        let result = machine.pointer_result(plain, pauth::Key::Ib, signed, modifier);
+        let computed = context.authenticate_operation(
+            stela_contracts::pauth::Key::Ib,
+            signed,
+            modifier,
+            false,
+        );
+        let result =
+            machine.pointer_result(plain, stela_contracts::pauth::Key::Ib, signed, modifier);
         match computed {
             Ok(computed) => assert_eq!(result, Ok(Ok((computed.pointer, computed.authenticated)))),
             Err(pauth::AuthenticationError::Failure { code }) => assert_eq!(result, Ok(Err(code))),
@@ -11766,26 +11820,34 @@ mod tests {
         machine.cpu.state.x[0] = pointer;
         machine.cpu.state.x[1] = 0x1234;
         machine.system_instruction_for_test(PACIA_X0_X1);
-        let signed = context.sign(pauth::Key::Ia, pointer, 0x1234).unwrap();
+        let signed = context
+            .sign(stela_contracts::pauth::Key::Ia, pointer, 0x1234)
+            .unwrap();
         assert_eq!(machine.cpu.state.x[0], signed);
         machine.system_instruction_for_test(AUTIA_X0_X1);
         assert_eq!(machine.cpu.state.x[0], pointer);
         // BLRAA links after authenticating the target with X3.
-        machine.cpu.state.x[2] = context.sign(pauth::Key::Ia, pointer, 0x99).unwrap();
+        machine.cpu.state.x[2] = context
+            .sign(stela_contracts::pauth::Key::Ia, pointer, 0x99)
+            .unwrap();
         machine.cpu.state.x[3] = 0x99;
         let pc = machine.cpu.pc;
         machine.system_instruction_for_test(BLRAA_X2_X3);
         assert_eq!((machine.cpu.pc, machine.cpu.state.x[30]), (pointer, pc + 4));
         // BRAAZ authenticates with a zero modifier; a wrong one corrupts
         // the target, as the general path's combined authentication does.
-        machine.cpu.state.x[2] = context.sign(pauth::Key::Ia, pointer, 0).unwrap();
+        machine.cpu.state.x[2] = context
+            .sign(stela_contracts::pauth::Key::Ia, pointer, 0)
+            .unwrap();
         machine.system_instruction_for_test(BRAAZ_X2);
         assert_eq!(machine.cpu.pc, pointer);
-        let wrong = context.sign(pauth::Key::Ia, pointer, 1).unwrap();
+        let wrong = context
+            .sign(stela_contracts::pauth::Key::Ia, pointer, 1)
+            .unwrap();
         machine.cpu.state.x[2] = wrong;
         let fault_pc = machine.cpu.pc;
         machine.system_instruction_for_test(BRAAZ_X2);
-        match context.authenticate_operation(pauth::Key::Ia, wrong, 0, true) {
+        match context.authenticate_operation(stela_contracts::pauth::Key::Ia, wrong, 0, true) {
             Ok(result) => assert_eq!(machine.cpu.pc, result.pointer),
             Err(pauth::AuthenticationError::Failure { code }) => {
                 // FEAT_FPACCOMBINE (M6) faults the failed branch instead of
@@ -11813,7 +11875,11 @@ mod tests {
         let signed = machine
             .pointer_context()
             .unwrap()
-            .sign(pauth::Key::Ia, target, machine.cpu.state.sp)
+            .sign(
+                stela_contracts::pauth::Key::Ia,
+                target,
+                machine.cpu.state.sp,
+            )
             .unwrap();
         machine
             .cpu
@@ -11850,7 +11916,7 @@ mod tests {
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x2600_0000);
         // With FEAT_FPACCOMBINE (M6) the failed combined check takes EC 0x1C,
         // ISS {data=0, key A=0}, at the ERETAA and the return is not made.
-        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        let mut machine = pac_machine_for(stela_contracts::Chip::AppleM6, &[]);
         machine.cpu.state.sp = 0xffff_ff80_0002_0010;
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::ELR_EL1, 0, signed);
@@ -12214,8 +12280,8 @@ mod tests {
         const MSR_FPCR_X0: u32 = 0xd51b_4400;
         const MRS_X1_FPCR: u32 = 0xd53b_4401;
         for (chip, afp) in [
-            (crate::machine::Chip::AppleM2, false),
-            (crate::machine::Chip::AppleM4, true),
+            (stela_contracts::Chip::AppleM2, false),
+            (stela_contracts::Chip::AppleM4, true),
         ] {
             let mut machine = machine_on(chip, &[]);
             for register in [SystemRegister::CPACR_EL1, SystemRegister::CPTR_EL2] {
@@ -12321,8 +12387,8 @@ mod tests {
             0xd500_001f | u32::from(accessor.value) << 5
         };
         for (chip, xs) in [
-            (crate::machine::Chip::AppleM2, false),
-            (crate::machine::Chip::AppleM4, true),
+            (stela_contracts::Chip::AppleM2, false),
+            (stela_contracts::Chip::AppleM4, true),
         ] {
             let fresh = |el| {
                 let mut machine = machine_on(chip, &[]);
@@ -12520,8 +12586,8 @@ mod tests {
         const COSP_RCTX_X0: u32 = 0xd50b_73c0;
         const SCTLR_ENRCTX: u64 = 1 << 10;
         for (chip, specres2) in [
-            (crate::machine::Chip::AppleM4, false),
-            (crate::machine::Chip::AppleM5, true),
+            (stela_contracts::Chip::AppleM4, false),
+            (stela_contracts::Chip::AppleM5, true),
         ] {
             let fresh = |el| {
                 let mut machine = machine_on(chip, &[]);

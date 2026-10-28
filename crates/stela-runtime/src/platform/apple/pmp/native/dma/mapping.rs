@@ -7,8 +7,8 @@ use super::{
     broker::{Broker, Descriptor, Key, Life, Op, Output, Reply, convert, reason},
     service::Effect,
 };
-use crate::platform::apple::bus::Access;
 use alloc::vec::Vec;
+use stela_contracts::bus::Access;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Action {
@@ -380,12 +380,13 @@ impl trace::Mapping for TraceMapping {
 mod tests {
     use super::super::{Coherence, Configuration, Owners, Route, Service, ServiceRequest, pair};
     use super::*;
-    use crate::platform::{
-        apple::interrupt::InterruptLatch,
-        dma::{self, DmaError, Memory, Port, TransferFault},
-    };
     use alloc::{rc::Rc, vec};
     use core::cell::Cell;
+    use {
+        stela_contracts::dma, stela_contracts::dma::DmaError, stela_contracts::dma::Memory,
+        stela_contracts::dma::Port, stela_contracts::dma::TransferFault,
+        stela_contracts::interrupt::InterruptLatch,
+    };
     struct Ram {
         bytes: Vec<u8>,
         writes: Vec<(u64, usize)>,

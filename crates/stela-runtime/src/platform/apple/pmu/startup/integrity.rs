@@ -162,7 +162,7 @@ mod tests {
     fn original_maverick_tag_matches_all_1132_actual_covered_bytes() {
         let llb = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&llb),
+            stela_formats::sha256(&llb),
             "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1"
         );
         let bytes = &llb[0x1f9b20..0x1fbd90];
@@ -184,7 +184,7 @@ mod tests {
                 "79c85be1994e8260bde5248ee0968858bb839a510ef27977c3e259c209e4072c",
             ),
         ] {
-            assert_eq!(crate::sha256(&bytes[range]), hash);
+            assert_eq!(stela_formats::sha256(&bytes[range]), hash);
         }
     }
 }

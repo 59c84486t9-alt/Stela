@@ -3,9 +3,9 @@
 //! A wire reply is not local mapping authority. The backend must retain the
 //! actual canonical RAM/DMA mapping and retire each real map/unmap operation.
 use super::{Progress, Step};
-use crate::platform::apple::bus::Access;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::bus::Access;
 
 mod regions;
 mod wire;
@@ -445,8 +445,8 @@ impl<B: Backend> Client<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::{collections::VecDeque, vec};
+    use stela_contracts::interrupt::InterruptLatch;
     struct Mapped {
         geometry: MapRequest,
         bytes: Vec<u8>,

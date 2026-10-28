@@ -13,10 +13,9 @@
 use super::Decoded;
 use anyhow::{Context, Result, bail};
 use stela_loader::boot_bundle::{Bundle, DEVICE_TREE_FILE, Source};
-use stela_runtime::{
-    apfs::{self, Container},
-    machine::soc,
-    payload::ReadAt,
+use {
+    stela_formats::apfs, stela_formats::apfs::Container, stela_formats::payload::ReadAt,
+    stela_runtime::machine::soc,
 };
 
 /// Where the restore ramdisk keeps the board's firmware images.
@@ -90,7 +89,7 @@ pub(super) fn from_ramdisk(
                     )
                 })?;
             let bytes = volume.read(&mut container.device, &inode)?;
-            let digest = stela_runtime::sha256(&bytes);
+            let digest = stela_formats::sha256(&bytes);
             let source = Source {
                 component: "BoardFirmware".into(),
                 member: member.clone(),
@@ -127,7 +126,7 @@ mod tests {
         assert_eq!(compressed[3], 0, "gzip -n: no optional header fields");
         let bytes = miniz_oxide::inflate::decompress_to_vec(&compressed[10..compressed.len() - 8])
             .expect("gzip -n deflate stream");
-        let digest = stela_runtime::sha256(&bytes);
+        let digest = stela_formats::sha256(&bytes);
         Decoded {
             source: Source {
                 component: "RestoreRamDisk".into(),
@@ -156,7 +155,7 @@ mod tests {
         assert_eq!((name.as_str(), &image.bytes), ("pattern.bin", &pattern));
         assert_eq!(image.source.member, "ramdisk.dmg");
         assert_eq!(image.source.container_sha256, "c".repeat(64));
-        assert_eq!(image.source.decoded_sha256, stela_runtime::sha256(&pattern));
+        assert_eq!(image.source.decoded_sha256, stela_formats::sha256(&pattern));
         assert!(
             image
                 .source

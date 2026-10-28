@@ -597,13 +597,15 @@ mod tests {
 
     #[test]
     fn real_gen1_fifo_retires_each_sram_chunk_and_does_not_consume_failed_tail() {
-        use crate::platform::apple::{
-            bus::{Access, Lifecycle, LifecycleState, MmioDevice, MmioError, Width},
-            interrupt::{AicInput, InterruptLatch},
-            spmi::{self, Spmi},
-        };
         use alloc::{boxed::Box, rc::Rc};
         use core::cell::RefCell;
+        use {
+            crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
+            stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
+            stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+            stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+            stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
+        };
         struct Observed(Rc<RefCell<Pmu>>);
         impl SpmiSlave for Observed {
             fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {
@@ -789,7 +791,7 @@ mod tests {
     fn original_images_full_producers_and_ap_sram_read_write_contract_are_pinned() {
         let data = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1"
         );
         for (offset, bytes, digest) in [
@@ -859,7 +861,7 @@ mod tests {
                 "68879f00e937ba85942f3912e3ba6f77d6bd367bd8f6caede2f81cf3d99255a7",
             ), // second-fw
         ] {
-            assert_eq!(crate::sha256(&data[offset..offset + bytes]), digest);
+            assert_eq!(stela_formats::sha256(&data[offset..offset + bytes]), digest);
         }
         // Positive original board records and the actual dispatch/container consumers.
         for (offset, bytes, digest) in [
@@ -894,7 +896,7 @@ mod tests {
                 "4ed5798c0adf84593f1ef9acf6322fca8a391243bc9fa414130758dc88068353",
             ), // full-runtime-descriptor-accessors
         ] {
-            assert_eq!(crate::sha256(&data[offset..offset + bytes]), digest);
+            assert_eq!(stela_formats::sha256(&data[offset..offset + bytes]), digest);
         }
         let base = 0x1fc058000u64;
         let qword = |offset| u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
@@ -917,11 +919,11 @@ mod tests {
         }
         let kc = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&kc),
+            stela_formats::sha256(&kc),
             "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
         );
         assert_eq!(
-            crate::sha256(&kc[0x2d552f8..0x2d552f8 + 1216]),
+            stela_formats::sha256(&kc[0x2d552f8..0x2d552f8 + 1216]),
             "f6a80ac867c834d37f1e75c71a9f4b0d908ef3bac3193b1f0490019ae4c990fe"
         );
         // These exact encoded entries retain image descriptor/upload functions.

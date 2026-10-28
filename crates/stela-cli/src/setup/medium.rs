@@ -33,9 +33,13 @@ use std::{
     path::{Path, PathBuf},
 };
 use stela_boot_core::options::System;
-use stela_runtime::payload::{
-    BLOCK_HASHES_FILE, BlockHashes, HASH_BLOCK_BYTES, Layout, MANIFEST_FILE, MAX_PIECES,
-    PIECE_HASHES_FILE, Piece, install_directory, piece_name, piece_sizes,
+use {
+    stela_formats::payload::BLOCK_HASHES_FILE, stela_formats::payload::BlockHashes,
+    stela_formats::payload::HASH_BLOCK_BYTES, stela_formats::payload::Layout,
+    stela_formats::payload::MANIFEST_FILE, stela_formats::payload::MAX_PIECES,
+    stela_formats::payload::PIECE_HASHES_FILE, stela_formats::payload::Piece,
+    stela_formats::payload::install_directory, stela_formats::payload::piece_name,
+    stela_formats::payload::piece_sizes,
 };
 
 pub(super) mod download;
@@ -111,13 +115,13 @@ impl Medium {
             Ok(bytes) => bytes,
             Err(_) => return vec![format!("{} is missing", manifest.display())],
         };
-        if stela_runtime::sha256(&bytes) != self.manifest_sha256 {
+        if stela_formats::sha256(&bytes) != self.manifest_sha256 {
             return vec![format!(
                 "{} differs from the one setup wrote",
                 manifest.display()
             )];
         }
-        let Ok(parsed) = stela_runtime::payload::PayloadManifest::parse(&bytes) else {
+        let Ok(parsed) = stela_formats::payload::PayloadManifest::parse(&bytes) else {
             return vec![format!("{} is not a restore inventory", manifest.display())];
         };
         if self.remote {
@@ -512,7 +516,7 @@ pub(super) fn write(
         block_hashes: BlockHashes {
             file: PIECE_HASHES_FILE.into(),
             block_bytes: HASH_BLOCK_BYTES,
-            sha256: stela_runtime::sha256(&piece_blocks),
+            sha256: stela_formats::sha256(&piece_blocks),
         },
     };
     manifest
@@ -522,7 +526,7 @@ pub(super) fn write(
     efi::write_atomic(&directory.join(BLOCK_HASHES_FILE), &inventory.blocks, false)?;
     let json = manifest.to_json();
     efi::write_atomic(&manifest_path, json.as_bytes(), false)?;
-    written.manifest_sha256 = stela_runtime::sha256(json.as_bytes());
+    written.manifest_sha256 = stela_formats::sha256(json.as_bytes());
     progress.finish();
     Ok(written)
 }
@@ -543,7 +547,7 @@ pub(super) fn write_remote(
     efi::write_atomic(&directory.join(BLOCK_HASHES_FILE), &inventory.blocks, false)?;
     let json = inventory.manifest.to_json();
     efi::write_atomic(&directory.join(MANIFEST_FILE), json.as_bytes(), false)?;
-    Ok(stela_runtime::sha256(json.as_bytes()))
+    Ok(stela_formats::sha256(json.as_bytes()))
 }
 
 /// Remove what `previous`, the medium of the same build that `current`
@@ -577,7 +581,7 @@ pub(super) fn remove_replaced(previous: &Medium, current: &Medium) -> Result<()>
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use stela_runtime::payload::{PayloadManifest, pieces::Extent};
+    use {stela_formats::payload::PayloadManifest, stela_formats::payload::pieces::Extent};
 
     /// Small pieces, so the synthetic IPSW takes several.
     pub(in crate::setup) const PIECE_BYTES: u64 = HASH_BLOCK_BYTES;
@@ -596,7 +600,7 @@ pub(super) mod tests {
     fn expected(ipsw: &Path) -> Expected {
         let bytes = fs::read(ipsw).unwrap();
         Expected {
-            sha256: Some(stela_runtime::sha256(&bytes)),
+            sha256: Some(stela_formats::sha256(&bytes)),
             sha1: Some(hex::encode(Sha1::digest(&bytes))),
         }
     }
@@ -604,7 +608,7 @@ pub(super) mod tests {
     /// An in-memory disk image holding the pieces back to back.
     struct Joined(Vec<u8>);
 
-    impl stela_runtime::payload::ReadAt for Joined {
+    impl stela_formats::payload::ReadAt for Joined {
         type Error = &'static str;
         fn len(&self) -> u64 {
             self.0.len() as u64
@@ -655,10 +659,10 @@ pub(super) mod tests {
         }
         let hashes = fs::read(directory.join(PIECE_HASHES_FILE)).unwrap();
         let mut joined =
-            stela_runtime::payload::pieces::Joined::new(Joined(disk), &manifest, extents, &hashes)
+            stela_formats::payload::pieces::Joined::new(Joined(disk), &manifest, extents, &hashes)
                 .unwrap();
         let mut read = vec![0; bytes.len()];
-        stela_runtime::payload::ReadAt::read_at(&mut joined, 0, &mut read).unwrap();
+        stela_formats::payload::ReadAt::read_at(&mut joined, 0, &mut read).unwrap();
         assert_eq!(read, bytes);
         assert!(
             Medium {

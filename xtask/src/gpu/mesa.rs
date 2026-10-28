@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(fs::read(snapshot).unwrap(), bytes);
         assert_eq!(
             records[0]["snapshot"]["sha256"],
-            stela_runtime::sha256(bytes)
+            stela_formats::sha256(bytes)
         );
         assert!(
             snapshot_air_inputs(std::slice::from_ref(&input), temp.path(), "air-input").is_err()

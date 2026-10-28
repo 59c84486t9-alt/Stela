@@ -6,15 +6,20 @@
 //! This engine executes supplied, finalized programs; it is not a capture of
 //! Apple's hidden micro-PC, cold state, or unimplemented control instructions.
 use super::{Controller, Entry, Error as NativeError, effects::Effects};
-use crate::platform::apple::{
-    bus::Width,
-    pmgr::sequencer::{self, AddressFormat, PacketCursor, PacketKind, RouteOutcome, WriteClaim},
-    power::t6000::{Bank, CIO, RequestKind},
-};
 use alloc::{collections::BTreeMap, rc::Rc, vec, vec::Vec};
 use core::{
     cell::RefCell,
     ops::{Deref, DerefMut},
+};
+use {
+    crate::platform::apple::pmgr::sequencer,
+    crate::platform::apple::pmgr::sequencer::AddressFormat,
+    crate::platform::apple::pmgr::sequencer::PacketCursor,
+    crate::platform::apple::pmgr::sequencer::PacketKind,
+    crate::platform::apple::pmgr::sequencer::RouteOutcome,
+    crate::platform::apple::pmgr::sequencer::WriteClaim,
+    crate::platform::apple::power::t6000::Bank, crate::platform::apple::power::t6000::CIO,
+    crate::platform::apple::power::t6000::RequestKind, stela_contracts::bus::Width,
 };
 
 const BINDING: u64 = 0x28e099068;
@@ -536,16 +541,22 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
-    use crate::platform::apple::{
-        bus::{Access, Bus, DeviceId, Lifecycle, LifecycleState, MmioDevice, MmioError},
-        interrupt::InterruptLatch,
-        pmgr::{
-            install::{Action, NativeImage, Outcome, t6000},
-            sequencer::{FinishError, copy, poll},
-        },
-        power::t6000::{Instance, Observation, clock},
-    };
     use alloc::boxed::Box;
+    use {
+        crate::platform::apple::pmgr::install::Action,
+        crate::platform::apple::pmgr::install::NativeImage,
+        crate::platform::apple::pmgr::install::Outcome,
+        crate::platform::apple::pmgr::install::t6000,
+        crate::platform::apple::pmgr::sequencer::FinishError,
+        crate::platform::apple::pmgr::sequencer::copy,
+        crate::platform::apple::pmgr::sequencer::poll,
+        crate::platform::apple::power::t6000::Instance,
+        crate::platform::apple::power::t6000::Observation,
+        crate::platform::apple::power::t6000::clock, stela_contracts::bus::Access,
+        stela_contracts::bus::Bus, stela_contracts::bus::DeviceId, stela_contracts::bus::Lifecycle,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::MmioError, stela_contracts::interrupt::InterruptLatch,
+    };
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,

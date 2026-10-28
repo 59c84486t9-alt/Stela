@@ -2,9 +2,9 @@
 //!
 //! Original J314s firmware and surface DART nodes both name AIC873. The
 //! grouping boundary is a software ownership boundary, not a wired-OR gate.
-use super::super::interrupt::AicInput;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::interrupt::AicInput;
 
 /// Retain one owner per physical input across every logical DART group on
 /// that input. Bind each translator before publishing its MMIO aperture.

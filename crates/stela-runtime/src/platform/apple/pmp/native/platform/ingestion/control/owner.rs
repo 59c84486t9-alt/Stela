@@ -11,10 +11,10 @@ use super::{
     Caller, Configuration, FlagsMethod, Identity, Operation, ResourceRequest, ResourceValue,
     Resources, SoftwareImage,
 };
-use crate::platform::apple::bus::Access;
 use crate::platform::apple::ptd::transport::notifications::LocalNotifications;
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::bus::Access;
 
 /// Retained identity of the actual101cff0 context allocation. Cloning carries
 /// that identity, not permission to mark registration complete or set flags.
@@ -948,16 +948,16 @@ mod tests {
     };
     use super::super::super::{Auxiliary, Pair};
     use super::*;
-    use crate::platform::apple::{
-        bus::{LifecycleState, MmioDevice, Width},
-        interrupt::InterruptLatch,
-        ptd::{
-            Geometry, Ptd, Range, UPDATE_OFFSET,
-            transport::notifications::{LocalNotifications, NativeProfile},
-        },
-    };
     use alloc::{vec, vec::Vec};
     use core::cell::Cell;
+    use {
+        crate::platform::apple::ptd::Geometry, crate::platform::apple::ptd::Ptd,
+        crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+        crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+        crate::platform::apple::ptd::transport::notifications::NativeProfile,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::Width, stela_contracts::interrupt::InterruptLatch,
+    };
 
     fn descriptor(ordinal: usize) -> super::super::super::Descriptor {
         super::super::super::super::profile::tests::fixture().descriptors()[ordinal].clone()

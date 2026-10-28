@@ -94,10 +94,13 @@ pub(crate) struct Release {
 
 impl Release {
     pub(crate) fn read(roots: &[PathBuf]) -> Result<Self> {
-        let path = [OS_CRYPTEX_SYSTEM_VERSION, crate::preboot::SYSTEM_VERSION]
-            .iter()
-            .flat_map(|path| roots.iter().map(move |root| root.join(path)))
-            .find(|path| path.is_file());
+        let path = [
+            OS_CRYPTEX_SYSTEM_VERSION,
+            stela_formats::preboot::SYSTEM_VERSION,
+        ]
+        .iter()
+        .flat_map(|path| roots.iter().map(move |root| root.join(path)))
+        .find(|path| path.is_file());
         let Some(path) = path else {
             return Ok(Self::default());
         };
@@ -698,7 +701,7 @@ fn meta(kernel: &mut Kernel, call: &Call, oid: &[i32], request: &Request) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::Chip;
+    use stela_contracts::Chip;
 
     /// A synthetic kernel version, as an install records it, and release.
     const VERSION: &str = "Darwin Kernel Version 1.2.3: synthetic; root:test~1/RELEASE_TEST";
@@ -724,7 +727,7 @@ mod tests {
     #[test]
     fn the_release_is_the_guest_systems_version_file() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let path = root.path().join(crate::preboot::SYSTEM_VERSION);
+        let path = root.path().join(stela_formats::preboot::SYSTEM_VERSION);
         std::fs::create_dir_all(path.parent().unwrap())?;
         std::fs::write(
             &path,

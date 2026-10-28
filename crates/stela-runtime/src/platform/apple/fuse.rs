@@ -23,7 +23,11 @@
 //! ones. The registers' other bits are fields no reader of this kernel is
 //! known to take, so they read 0 as well, and every other register refuses.
 //! Fuses are read-only.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "aon-fuse";
 
@@ -75,7 +79,7 @@ impl MmioDevice for AonFuses {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn the_rail_leakage_and_gpu_power_fields_read_uncalibrated() {

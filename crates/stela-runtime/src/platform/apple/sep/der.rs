@@ -97,6 +97,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn sequence(bytes: &[u8]) -> Result<Cursor<'_>, &'static str> {
     let mut cursor = Cursor(bytes);
     let element = cursor.take(16)?;

@@ -18,15 +18,6 @@ use super::{
     DeviceError, Devices, FETCH_PAGE, Fetched, Host, InstallError, Machine, NativeCode, RamTables,
     RequirementKind, Step, Stop, Translated, Variant, tags::TagCheck,
 };
-use crate::machine::{
-    cpu::{Exception, STREAMING_VECTOR_BYTES},
-    debug,
-    exception::Class,
-    mmu::{self, Access, MemoryType, alignment},
-    streaming::{self, VectorDestinations},
-    system::Feature,
-    system::File,
-};
 use crate::scalable::ScalableState;
 use alloc::{format, string::String, vec::Vec};
 use stela_compiler::{
@@ -55,6 +46,13 @@ use stela_compiler::{
         },
     },
     scalable_context::ScalableProfile,
+};
+use {
+    crate::machine::cpu::Exception, crate::machine::cpu::STREAMING_VECTOR_BYTES,
+    crate::machine::debug, crate::machine::exception::Class, crate::machine::mmu,
+    crate::machine::mmu::Access, crate::machine::mmu::MemoryType, crate::machine::mmu::alignment,
+    crate::machine::streaming, crate::machine::streaming::VectorDestinations,
+    crate::machine::system::File, stela_contracts::Feature,
 };
 
 /// The numerical features of every Apple chip's identification: no
@@ -1078,7 +1076,7 @@ mod tests {
     /// the reserved encodings they hit.
     #[test]
     fn every_sve_and_sme_form_of_the_sme_chips_runs_or_is_undefined() {
-        use crate::machine::{Chip, chip::Check};
+        use {stela_contracts::Chip, stela_contracts::chip::Check};
         // BFSCALE, of FEAT_SVE_BFSCALE, which no Apple chip has, lies inside
         // FSCALE's encodings, and the compiler declines it as unknown: the
         // SVE form, and the multi-vector forms, FSCALE's with size 0.
@@ -1154,7 +1152,7 @@ mod tests {
 
     #[test]
     fn features_the_chip_lacks_and_debug_state_movt_are_undefined_before_their_checks() {
-        use crate::machine::Chip;
+        use stela_contracts::Chip;
         const BFADD_Z0_Z1: u32 = 0x6500_8020; // bfadd z0.h, p0/m, z0.h, z1.h
         const MOVT_X0_ZT0: u32 = 0xc04c_03e0; // movt x0, zt0[0]
         const UNDEFINED: u64 = 1 << 25;
@@ -1276,7 +1274,7 @@ mod tests {
             FSCALE,
             F1CVT,
         ];
-        let mut machine = super::super::tests::machine_on(crate::machine::Chip::AppleM6, &words);
+        let mut machine = super::super::tests::machine_on(stela_contracts::Chip::AppleM6, &words);
         enable_streaming(&mut machine);
         for _ in 0..5 {
             machine.step().unwrap();
@@ -1326,7 +1324,10 @@ mod tests {
         const HCR_ATA: u64 = 1 << 56;
         const SCTLR_ATA_TCF_SYNC: u64 = 1 << 43 | 1 << 40;
         const TCR_TBI0: u64 = 1 << 37;
-        for chip in [crate::machine::Chip::AppleM5, crate::machine::Chip::AppleM6] {
+        for chip in [
+            stela_contracts::Chip::AppleM5,
+            stela_contracts::Chip::AppleM6,
+        ] {
             let mut machine = super::super::tests::machine_on(chip, &[PTRUE_P0_B, LD1B_Z2_X5]);
             enable_streaming(&mut machine);
             normal_memory(&mut machine, false);

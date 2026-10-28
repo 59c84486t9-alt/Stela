@@ -1,11 +1,8 @@
 //! Direct T6000 MCC placement, qualified independently of T8112's PMP service.
 //! Descriptor parsing does not admit a native-memory completion capability.
 use super::{MemoryController, PTD_RANGE, PtdBank};
-use crate::{
-    machine::adt::Node,
-    platform::apple::{mcc, ptd},
-};
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use {crate::platform::apple::mcc, crate::platform::apple::ptd, stela_contracts::adt::Node};
 
 pub mod t6020;
 
@@ -263,9 +260,9 @@ pub(super) fn direct_memory_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
     use crate::machine::soc::tests::flat_fixture_extent;
     use alloc::vec;
+    use stela_contracts::adt::encode;
 
     fn tree(reg_suffix: &[u8], update_bytes: u64, interrupt: u32) -> Vec<u8> {
         let mut regs = Vec::new();
@@ -445,7 +442,7 @@ mod tests {
         let input =
             std::env::var("STELA_T6000_MCC_DEVICE_TREE").expect("explicit original ADT input");
         let bytes = std::fs::read(&input).unwrap();
-        let hash = crate::sha256(&bytes);
+        let hash = stela_formats::sha256(&bytes);
         assert_eq!(
             hash,
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"

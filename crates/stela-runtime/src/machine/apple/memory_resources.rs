@@ -1,20 +1,23 @@
 //! Prepared direct MCC/AMCC/PTD resources. No native RAM/DSB authority is
 //! manufactured here and no engine mount is enabled by constructing this object.
-use crate::{
-    machine::soc::{DirectMemoryCache, MemoryController},
-    platform::apple::{
-        amcc::{Amcc, Layout, Register},
-        bus::{Access, Direction, Lifecycle, MmioDevice, MmioError, Width, refuse},
-        interrupt::Wire,
-        mcc::{Configuration, Controller},
-        ptd::{Ptd, transport::notifications::LocalNotifications},
-    },
-};
 use alloc::vec::Vec;
+use {
+    crate::machine::soc::DirectMemoryCache, crate::machine::soc::MemoryController,
+    crate::platform::apple::amcc::Amcc, crate::platform::apple::amcc::Layout,
+    crate::platform::apple::amcc::Register, crate::platform::apple::mcc::Configuration,
+    crate::platform::apple::mcc::Controller, crate::platform::apple::ptd::Ptd,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse, stela_contracts::interrupt::Wire,
+};
 
 // The mount configures these actual resources; it must be able to name their
 // typed configuration, lifecycle and original register/publication geometry.
-pub use crate::platform::apple::{amcc, bus::LifecycleState, mcc, ptd};
+pub use {
+    crate::platform::apple::amcc, crate::platform::apple::mcc, crate::platform::apple::ptd,
+    stela_contracts::bus::LifecycleState,
+};
 
 mod canonical;
 pub mod dcs;
@@ -466,13 +469,12 @@ impl MmioDevice for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        machine::soc::PtdBank,
-        platform::apple::{
-            amcc::LockGroup, bus::Bus, interrupt::InterruptLatch, mcc::RequestKind, ptd,
-        },
-    };
     use alloc::{boxed::Box, vec};
+    use {
+        crate::machine::soc::PtdBank, crate::platform::apple::amcc::LockGroup,
+        crate::platform::apple::mcc::RequestKind, crate::platform::apple::ptd,
+        stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch,
+    };
 
     pub(super) fn prepared() -> Prepared {
         let reg = |offset, mask, value| Register {
@@ -825,9 +827,9 @@ mod tests {
 
     #[test]
     fn paired_read_keeps_data_and_pending_service_after_wire_forwarding_refusal() {
-        use crate::{
-            machine::Devices,
-            platform::apple::interrupt::{AicInput, InterruptSink},
+        use {
+            crate::machine::Devices, stela_contracts::interrupt::AicInput,
+            stela_contracts::interrupt::InterruptSink,
         };
         let owner = prepared();
         let publication = owner.publication_bank().clone();

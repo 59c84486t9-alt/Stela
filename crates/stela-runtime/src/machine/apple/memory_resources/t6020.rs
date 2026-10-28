@@ -4,17 +4,18 @@
 //! their service/interrupt state is not inferred from the original ADT's
 //! physical capacity. Construction is not native PMP admission, a cache grant
 //! or a source-supported initial CPU/PMGR handoff. Root owns those joins.
-use crate::{
-    machine::soc::{MemoryController, T6020Memory},
-    memory::{CanonicalRamService, RegisteredSystemRam},
-    platform::apple::{
-        amcc::{self, Amcc},
-        bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-        mcc::t6020::{self, Configuration, Controller, View},
-        ptd,
-    },
-};
 use alloc::{string::String, sync::Arc, vec::Vec};
+use {
+    crate::machine::soc::MemoryController, crate::machine::soc::T6020Memory,
+    crate::memory::CanonicalRamService, crate::memory::RegisteredSystemRam,
+    crate::platform::apple::amcc, crate::platform::apple::amcc::Amcc,
+    crate::platform::apple::mcc::t6020, crate::platform::apple::mcc::t6020::Configuration,
+    crate::platform::apple::mcc::t6020::Controller, crate::platform::apple::mcc::t6020::View,
+    crate::platform::apple::ptd, stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 pub mod cold;
 
@@ -398,15 +399,14 @@ impl crate::machine::apple::AppleDevices {
 #[cfg(test)]
 pub(in crate::machine::apple) mod tests {
     use super::*;
-    use crate::{
-        machine::{Devices, apple::AppleDevices, engine::DeviceReadShape, soc::PtdBank},
-        memory::{ReservedSystemRamRange, system_ram::fixture},
-        platform::apple::{
-            amcc::{Layout, LockGroup, Register},
-            interrupt::InterruptLatch,
-        },
-    };
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use {
+        crate::machine::Devices, crate::machine::apple::AppleDevices,
+        crate::machine::engine::DeviceReadShape, crate::machine::soc::PtdBank,
+        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
+        crate::platform::apple::amcc::Layout, crate::platform::apple::amcc::LockGroup,
+        crate::platform::apple::amcc::Register, stela_contracts::interrupt::InterruptLatch,
+    };
     const RAM: u64 = 0x10000000000;
     #[repr(C, align(16))]
     struct Storage(UnsafeCell<[u8; 0x10000]>);

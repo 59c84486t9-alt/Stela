@@ -19,7 +19,7 @@
 //! `System/Library/Caches/com.apple.kernelcaches/` and iBoot, the
 //! DeviceTree, `base_system_root_hash.img4`, the monitors and trust caches
 //! (`FUD/`) and `arm64eBaseSystem.dmg` under `usr/standalone/firmware/`.
-//! Objects are identified by Image4 payload type (`stela_runtime::preboot`);
+//! Objects are identified by Image4 payload type (`stela_formats::preboot`);
 //! the J473 iBoot names the image and the BaseSystem trust cache by path
 //! (`base-system-path`, `bs-tc-path`).
 //!
@@ -57,15 +57,13 @@ use crate::{
 };
 use alloc::{format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use stela_runtime::{
-    apfs::{
-        self, ApfsError, Container, FileKind, Volume, uuid_text as apfs_uuid,
-        volume::APFS_VOL_ROLE_RECOVERY,
-    },
-    img4,
-    payload::{ReadAt, gpt::Guid},
-    preboot::{self, BootSet, SYSTEM_VERSION},
-    sha256,
+use {
+    stela_formats::apfs, stela_formats::apfs::ApfsError, stela_formats::apfs::Container,
+    stela_formats::apfs::FileKind, stela_formats::apfs::Volume,
+    stela_formats::apfs::uuid_text as apfs_uuid,
+    stela_formats::apfs::volume::APFS_VOL_ROLE_RECOVERY, stela_formats::img4,
+    stela_formats::payload::ReadAt, stela_formats::payload::gpt::Guid, stela_formats::preboot,
+    stela_formats::preboot::BootSet, stela_formats::preboot::SYSTEM_VERSION, stela_formats::sha256,
 };
 
 /// The RecoveryOSContainer (`Apple_APFS_Recovery`) partition type.
@@ -705,7 +703,7 @@ pub fn prepare_disk<R: ReadAt>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stela_runtime::{apfs::object::fletcher64, payload::gpt};
+    use {stela_formats::apfs::object::fletcher64, stela_formats::payload::gpt};
 
     const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";
     const BLOCK: usize = 4096;

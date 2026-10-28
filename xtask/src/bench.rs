@@ -321,7 +321,7 @@ impl Bench {
                 "symbol": workload.symbol,
                 "origin": origin,
                 "code": hex(&code),
-                "code_sha256": stela_runtime::sha256(&code),
+                "code_sha256": stela_formats::sha256(&code),
             }));
         }
         let path = work.join("fixtures.json");

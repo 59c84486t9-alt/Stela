@@ -1,7 +1,7 @@
 //! NHI's sixteen-byte DMA descriptor and programmed ring state.
 use super::{Frame, Options};
-use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 pub(super) const POSTED: u32 = 1 << 22;
 pub(super) const COMPLETED: u32 = 1 << 21;

@@ -229,8 +229,11 @@ pub(super) mod tests {
 
     #[test]
     fn cached_blocks_do_not_cross_presented_instruction_features() {
-        use crate::machine::system::{Feature, Register};
-        use crate::machine::{Chip, identification, registers::encodings::ID_AA64ISAR1_EL1};
+        use {
+            crate::machine::identification, crate::machine::registers::encodings::ID_AA64ISAR1_EL1,
+            stela_contracts::Chip,
+        };
+        use {crate::machine::system::Register, stela_contracts::Feature};
 
         const SMMLA: u32 = 0x4e9b_a781;
         let words = [0x9100_0400, SMMLA, 0xd400_0001];

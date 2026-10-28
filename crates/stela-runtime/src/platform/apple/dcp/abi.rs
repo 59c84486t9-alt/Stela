@@ -1,5 +1,5 @@
 //! The method and callback ABI of the DCP IOMFB link (the 26A434 interface
-//! version, [`crate::builds`]): which four-character tag names which method,
+//! version, [`stela_formats::builds`]): which four-character tag names which method,
 //! the wire sizes of its input and output, and how a method's arguments are
 //! packed into those bytes.
 //!

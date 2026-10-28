@@ -516,7 +516,7 @@ pub fn watch_calendar() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::Chip;
+    use stela_contracts::Chip;
 
     #[test]
     fn data_page_carries_the_declared_fields() {

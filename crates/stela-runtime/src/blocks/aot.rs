@@ -227,7 +227,7 @@ mod tests {
         let native = plan.compile()?.native;
         let manifest = crate::Manifest {
             identity,
-            native_sha256: crate::sha256(&native.x86_64_code),
+            native_sha256: stela_formats::sha256(&native.x86_64_code),
             native_bytes: native.x86_64_code.len(),
             source_map: native.source_map,
             verified: false,
@@ -238,7 +238,7 @@ mod tests {
 
     fn serialized(manifest: &crate::Manifest) -> Result<(Vec<u8>, Vec<u8>)> {
         let bytes = serde_json::to_vec(manifest)?;
-        let checksum = serde_json::to_vec(&crate::sha256(&bytes))?;
+        let checksum = serde_json::to_vec(&stela_formats::sha256(&bytes))?;
         Ok((bytes, checksum))
     }
 

@@ -53,13 +53,13 @@ use super::initdata::{self, Root};
 use super::ring::{self, Kind, Shared};
 use super::signal;
 use super::uat;
-use crate::builds::Build;
-use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use stela_contracts::dma::Port;
+use stela_formats::builds::Build;
 
 /// An RTKit application endpoint with its number, as [`RtKit::new`] takes them.
 ///
@@ -1205,7 +1205,7 @@ mod tests {
     }
 
     fn booted_gfx(family: &'static Family) -> Coprocessor {
-        let mut firmware = Coprocessor::new(family, crate::builds::DEFAULT).unwrap();
+        let mut firmware = Coprocessor::new(family, stela_formats::builds::DEFAULT).unwrap();
         firmware.start(&mut Vec::new()).unwrap();
         for payload in [
             2 << 52 | 12 | 12 << 16,
@@ -1247,9 +1247,13 @@ mod tests {
             let mut sgx = Sgx::new(gpu).unwrap();
             let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
             let mut firmware =
-                Coprocessor::with_power(family, power.clone(), crate::builds::DEFAULT).unwrap();
+                Coprocessor::with_power(family, power.clone(), stela_formats::builds::DEFAULT)
+                    .unwrap();
             let other = if family == &G14G { &G13G } else { &G14G };
-            assert!(Coprocessor::with_power(other, power.clone(), crate::builds::DEFAULT).is_err());
+            assert!(
+                Coprocessor::with_power(other, power.clone(), stela_formats::builds::DEFAULT)
+                    .is_err()
+            );
             // A truthful target binding alone is not enough to acknowledge
             // unimplemented config-dependent callback effects.
             firmware.protocol.0.borrow_mut().initdata_va = Some(ROOT);
@@ -1279,8 +1283,11 @@ mod tests {
             );
             assert!(outbox.is_empty());
             if family == &G13G || family == &G14G {
-                use crate::platform::apple::bus::{Access, MmioDevice, Width};
-                use crate::platform::apple::interrupt::InterruptLatch;
+                use stela_contracts::interrupt::InterruptLatch;
+                use {
+                    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+                    stela_contracts::bus::Width,
+                };
                 let mut latch = InterruptLatch::new();
                 let mut access = Access::new(0, 0, &mut latch);
                 sgx.write(0xd04074, Width::Word, 1, &mut access).unwrap();
@@ -1448,7 +1455,7 @@ mod tests {
             context: usize,
             va: u64,
             data: &mut [u8],
-        ) -> Result<(), crate::platform::dma::DmaError> {
+        ) -> Result<(), stela_contracts::dma::DmaError> {
             self.flat.gpu_read(context, va, data)
         }
         fn gpu_write(
@@ -1456,7 +1463,7 @@ mod tests {
             context: usize,
             va: u64,
             data: &[u8],
-        ) -> Result<(), crate::platform::dma::DmaError> {
+        ) -> Result<(), stela_contracts::dma::DmaError> {
             self.flat.gpu_write(context, va, data)
         }
     }
@@ -2206,7 +2213,7 @@ mod tests {
             _: usize,
             _: u64,
             _: &mut [u8],
-        ) -> Result<(), crate::platform::dma::DmaError> {
+        ) -> Result<(), stela_contracts::dma::DmaError> {
             panic!("a signal command cannot execute GPU reads");
         }
         fn gpu_write(
@@ -2214,7 +2221,7 @@ mod tests {
             _: usize,
             _: u64,
             _: &[u8],
-        ) -> Result<(), crate::platform::dma::DmaError> {
+        ) -> Result<(), stela_contracts::dma::DmaError> {
             panic!("a signal command cannot execute GPU writes");
         }
     }
@@ -2922,9 +2929,9 @@ mod tests {
 
     #[test]
     fn the_initdata_root_is_read_through_the_uat() {
-        use crate::platform::apple::bus::Access;
-        use crate::platform::apple::interrupt::InterruptLatch;
-        use crate::platform::dma::tests::Ram;
+        use stela_contracts::bus::Access;
+        use stela_contracts::dma::test_support::Ram;
+        use stela_contracts::interrupt::InterruptLatch;
         use uat::{Access as Ap, Agent, Flags, MemoryAttr, Uat};
         // TTBAT, PCE, PDE, PTE and the initdata page.
         let base = 0x8_0000_0000;
@@ -2992,7 +2999,7 @@ mod tests {
     }
 
     /// Write a kext-shaped root at physical `at` whose objects follow `va`.
-    pub(crate) fn put_root(ram: &mut crate::platform::dma::tests::Ram, at: u64, va: u64) {
+    pub(crate) fn put_root(ram: &mut stela_contracts::dma::test_support::Ram, at: u64, va: u64) {
         ram.put_u64(at, MAGIC_G13_G14G);
         ram.put_u64(at + 0x28, 1 << 32);
         for (n, field) in [0x08, 0x18, 0x20, 0xa8, 0xb0, 0xb8, 0xc0]

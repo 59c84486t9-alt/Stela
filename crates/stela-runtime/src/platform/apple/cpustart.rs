@@ -20,8 +20,12 @@
 //! core's release for the machine ([`CpuStart::take`]), and the start words
 //! read 0. Stopping a core is not modelled: a stop request refuses, as does
 //! every other register.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "cpu-start";
 
@@ -117,7 +121,7 @@ impl MmioDevice for CpuStart {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn start_bits_release_their_cores_and_stops_refuse() {

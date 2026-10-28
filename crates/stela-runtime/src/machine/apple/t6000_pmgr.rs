@@ -1,16 +1,19 @@
 //! Explicit private T6000 native resource assembly; no public PMGR admission.
 use super::AppleDevices;
-use crate::{
-    machine::soc::t6000_pmgr::Descriptor,
-    platform::apple::{
-        bridge::Bridge,
-        bus::{DeviceId, LifecycleState, MmioDevice},
-        cluster::t6000::{Complex, Snapshot, T6000},
-        pmgr::t6000::{SRAM_BASE, SRAM_LIMIT, reconfiguration},
-        power::t6000::{self as power, Controller, identity, native},
-    },
-};
 use alloc::{boxed::Box, format, string::String, vec::Vec};
+use {
+    crate::machine::soc::t6000_pmgr::Descriptor, crate::platform::apple::bridge::Bridge,
+    crate::platform::apple::cluster::t6000::Complex,
+    crate::platform::apple::cluster::t6000::Snapshot,
+    crate::platform::apple::cluster::t6000::T6000, crate::platform::apple::pmgr::t6000::SRAM_BASE,
+    crate::platform::apple::pmgr::t6000::SRAM_LIMIT,
+    crate::platform::apple::pmgr::t6000::reconfiguration,
+    crate::platform::apple::power::t6000 as power,
+    crate::platform::apple::power::t6000::Controller,
+    crate::platform::apple::power::t6000::identity, crate::platform::apple::power::t6000::native,
+    stela_contracts::bus::DeviceId, stela_contracts::bus::LifecycleState,
+    stela_contracts::bus::MmioDevice,
+};
 
 /// Supplied provenance is not authenticated by naming it. No variant supplies
 /// omitted register bytes, PS states, lifecycle observations or completion.
@@ -44,7 +47,7 @@ pub struct Inputs {
     pub clusters: [Snapshot; 3],
     /// Every original bridge in ID order; an empty image explicitly keeps
     /// that bank unknown. Missing entries cannot default into zero banks.
-    pub bridges: Vec<Vec<(u64, crate::platform::apple::bus::Width, u64)>>,
+    pub bridges: Vec<Vec<(u64, stela_contracts::bus::Width, u64)>>,
     pub requests: Requests,
     pub native: native::Handoff,
     pub ibootdata: IbootData,
@@ -122,7 +125,7 @@ impl Prepared {
                 .expected_sha256
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit())
-            || !crate::sha256(&input.ibootdata.bytes)
+            || !stela_formats::sha256(&input.ibootdata.bytes)
                 .eq_ignore_ascii_case(&input.ibootdata.expected_sha256)
         {
             return Err("T6000 iBootData provenance/digest does not bind the actual input".into());
@@ -138,7 +141,7 @@ impl Prepared {
                 offset: source.offset(),
                 bytes: source.bytes().len(),
                 rows: source.rows().len(),
-                sha256: crate::sha256(source.bytes()),
+                sha256: stela_formats::sha256(source.bytes()),
             }
         };
         if input.bridges.len() != descriptor.bridges.len() {
@@ -394,8 +397,8 @@ pub struct Mounted {
 #[cfg(all(test, feature = "std"))]
 mod original {
     use super::*;
-    use crate::{machine::engine::Devices, platform::apple::bus::Access};
     use alloc::vec;
+    use {crate::machine::engine::Devices, stela_contracts::bus::Access};
     const ADT_SHA: &str = "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad";
     const IBDT_SHA: &str = "6d38d4b30deedb1be526e36179205004957f10e23254392fc3645c63dfd2b095";
     // These values declare a newly owned test resource, never Apple reset.
@@ -437,7 +440,7 @@ mod original {
             })
             .collect();
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_IBOOTDATA").unwrap()).unwrap();
-        assert_eq!(crate::sha256(&bytes), IBDT_SHA);
+        assert_eq!(stela_formats::sha256(&bytes), IBDT_SHA);
         Inputs {
             authority: Authority::DeclaredStela {
                 entry: "explicit test resource".into(),
@@ -480,7 +483,7 @@ mod original {
     }
     fn adt() -> Vec<u8> {
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_ADT").unwrap()).unwrap();
-        assert_eq!(crate::sha256(&bytes), ADT_SHA);
+        assert_eq!(stela_formats::sha256(&bytes), ADT_SHA);
         bytes
     }
     #[test]

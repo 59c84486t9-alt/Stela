@@ -1,8 +1,8 @@
 //! Borrowed dispatch to the actual placed memory resource, never copied state.
 use super::{Prepared, amcc, t6020, t8112};
-use crate::{
-    memory::CanonicalRamService,
-    platform::apple::bus::{Access, Bus, DeviceId, Width},
+use {
+    crate::memory::CanonicalRamService, stela_contracts::bus::Access, stela_contracts::bus::Bus,
+    stela_contracts::bus::DeviceId, stela_contracts::bus::Width,
 };
 
 pub(in crate::machine::apple) enum Resource<'a> {

@@ -859,7 +859,7 @@ mod tests {
         let (mut inventory, mut owners, mut hosts, held) = held();
         let mut services = inventory.open_services(&held, 1).unwrap();
         let cpu = crate::machine::Cpu::of(
-            crate::machine::Chip::AppleM1,
+            stela_contracts::Chip::AppleM1,
             0,
             crate::machine::exception::Pstate::reset(2),
         );

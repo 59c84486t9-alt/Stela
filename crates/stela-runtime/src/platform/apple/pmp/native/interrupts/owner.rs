@@ -4,9 +4,9 @@
 //! the current-source state with foreground signals.
 use super::super::platform::owner::Completion;
 use super::{Device, Error, Outcome, Placement, SPECIAL, SoftwareConfiguration, refused};
-use crate::platform::apple::bus::Access;
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::cell::Cell;
+use stela_contracts::bus::Access;
 
 /// Actual handler invocation, pinned to the sole consumed hardware event.
 /// Cloning this value grants no right to create another dispatch operation.

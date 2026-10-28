@@ -35,17 +35,19 @@ mod apple;
 mod regs;
 pub mod xhci;
 
-use super::{
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
-    interrupt::{AicInput, Wire},
-    typec::Usb2Speed,
-};
-use crate::platform::{
-    dma::{DmaError, Port},
-    usb::{BusPeer, Function, MAX_PACKET, Reply, Token},
-};
 use alloc::{collections::VecDeque, string::String};
 use regs::*;
+use {
+    super::typec::Usb2Speed, stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse, stela_contracts::interrupt::AicInput,
+    stela_contracts::interrupt::Wire,
+};
+use {
+    crate::platform::usb::BusPeer, crate::platform::usb::Function,
+    crate::platform::usb::MAX_PACKET, crate::platform::usb::Reply, crate::platform::usb::Token,
+    stela_contracts::dma::DmaError, stela_contracts::dma::Port,
+};
 
 const NAME: &str = "dwc3-device";
 pub const PLATFORM_WINDOW_BASE: u64 = 0x20000;
@@ -1339,11 +1341,11 @@ impl MmioDevice for Dwc3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{dart::Dart, interrupt::InterruptLatch},
-        dma::{Memory, tests::Ram},
-    };
     use alloc::vec;
+    use {
+        crate::platform::apple::dart::Dart, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
+    };
     const RAM: u64 = 0x1_0000_0000;
     const TRB: u64 = RAM + 0x1000;
     const PAYLOAD: u64 = RAM + 0x2000;

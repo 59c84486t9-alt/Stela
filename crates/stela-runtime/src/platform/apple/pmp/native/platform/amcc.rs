@@ -11,8 +11,8 @@ use super::super::counters::{CaptureIdentity, Captured, Copied, Frame, Frames, R
 use super::ingestion::{self, Backend, Pair, Statistics};
 use super::owner::{CounterContext, EffectValue};
 use super::{CounterReference, Descriptor};
-use crate::platform::apple::bus::Access;
 use alloc::rc::Rc;
+use stela_contracts::bus::Access;
 
 pub use ingestion::{Error, Progress};
 const TIME_MASK: u64 = (1 << 54) - 1;
@@ -562,16 +562,16 @@ mod tests {
     use super::super::ingestion::{Call, Request, Value};
     use super::super::owner::Completion;
     use super::*;
-    use crate::platform::apple::{
-        bus::{LifecycleState, MmioDevice, Width},
-        interrupt::InterruptLatch,
-        ptd::{
-            Geometry, Ptd, Range, UPDATE_OFFSET,
-            transport::notifications::{LocalNotifications, NativeProfile},
-        },
-    };
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::Cell;
+    use {
+        crate::platform::apple::ptd::Geometry, crate::platform::apple::ptd::Ptd,
+        crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+        crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+        crate::platform::apple::ptd::transport::notifications::NativeProfile,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::Width, stela_contracts::interrupt::InterruptLatch,
+    };
 
     struct NoProviders;
     impl Backend for NoProviders {
@@ -1226,7 +1226,7 @@ mod tests {
             hex::encode(Sha256::digest(&dt)),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
-        let root = crate::machine::adt::Node::root(&dt).unwrap();
+        let root = stela_contracts::adt::Node::root(&dt).unwrap();
         let nub = root
             .child("arm-io")
             .unwrap()

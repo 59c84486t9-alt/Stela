@@ -10,7 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 pub fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))

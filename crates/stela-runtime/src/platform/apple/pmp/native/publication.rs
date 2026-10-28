@@ -1,11 +1,12 @@
 //! A source update target retains actual bank identity and one startup lifetime.
 use super::{Error, transport};
-use crate::platform::apple::{
-    bus::Access,
-    ptd::{Range, transport::notifications::LocalNotifications},
-};
 use alloc::rc::Rc;
 use core::cell::Cell;
+use {
+    crate::platform::apple::ptd::Range,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access,
+};
 
 /// Bounded native publisher capability. A later startup creates a new epoch;
 /// an old cloned target cannot acquire the new lifetime via mutable context.

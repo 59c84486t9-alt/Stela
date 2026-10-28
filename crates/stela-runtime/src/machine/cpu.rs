@@ -5,18 +5,16 @@
 //! exception is routed to its target EL as Arm's pseudocode routes it, and
 //! entry and return use that EL's ELR, SPSR, ESR, FAR, VBAR and SP (Arm
 //! `AArch64_TakeException`, `AArch64_ExceptionReturn`).
-use super::{
-    exception::{self, Class, IllegalReturn, Pstate, Vector},
-    mmu::{self, Controls, Sprr},
-    system::{
-        Feature, File, Register,
-        helpers::{bits, effective_nvx},
-    },
-};
 use crate::scalable::ScalableState;
 use stela_compiler::{
     GuestState,
     aarch64::scalable::{ScalableMode, VectorLength},
+};
+use {
+    super::exception, super::exception::Class, super::exception::IllegalReturn,
+    super::exception::Pstate, super::exception::Vector, super::mmu, super::mmu::Controls,
+    super::mmu::Sprr, super::system::File, super::system::Register, super::system::helpers::bits,
+    super::system::helpers::effective_nvx, stela_contracts::Feature,
 };
 
 pub const HCR_VM: u32 = 0;
@@ -404,7 +402,9 @@ impl Cpu {
             canonical_memory: None,
             amx: super::amx::Unit::on(chip),
             vgic: super::vgic::CpuInterface::default(),
-            scalable: (chip.implemented(Feature::FEAT_SME) == Ok(true)).then(|| {
+            scalable: (crate::machine::capabilities::implemented(chip, Feature::FEAT_SME)
+                == Ok(true))
+            .then(|| {
                 let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)
                     .expect("a 512-bit vector length");
                 ScalableState::new(length, Feature::FEAT_SME2.on(chip))

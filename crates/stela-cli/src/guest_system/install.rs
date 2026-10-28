@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
-use stela_runtime::payload::Purpose;
+use stela_formats::payload::Purpose;
 
 /// The receipt's `kind`.
 pub(super) const KIND: &str = "stela_guest_system";
@@ -567,7 +567,7 @@ mod tests {
             listed.push(disk::Copied {
                 path: path.to_string(),
                 bytes: bytes.len() as u64,
-                sha256: stela_runtime::sha256(bytes),
+                sha256: stela_formats::sha256(bytes),
             });
         }
         stela_runtime::write_json(
@@ -589,7 +589,7 @@ mod tests {
             &cache,
             &[("/System/Library/dyld/dyld_shared_cache_arm64e", b"cache")],
         )?;
-        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
+        let layout = Layout::new(work.path().join("Stela"), stela_formats::builds::DEFAULT);
         from_roots(&layout, &[files.clone(), cache.clone()], true)?;
         assert!(!layout.directory().exists(), "a dry run changes nothing");
         from_roots(&layout, &[files.clone(), cache.clone()], false)?;
@@ -618,7 +618,7 @@ mod tests {
             ],
         )?;
         fs::write(files.join("usr/lib/dyld"), b"changed")?;
-        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
+        let layout = Layout::new(work.path().join("Stela"), stela_formats::builds::DEFAULT);
         let error = from_roots(&layout, &[files], false)
             .unwrap_err()
             .to_string();
@@ -632,7 +632,7 @@ mod tests {
         let work = tempfile::tempdir()?;
         let files = work.path().join("guest-files");
         extraction(&files, &[("/usr/lib/dyld", b"dyld")])?;
-        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
+        let layout = Layout::new(work.path().join("Stela"), stela_formats::builds::DEFAULT);
         assert!(from_roots(&layout, &[files], false).is_err());
         Ok(())
     }
@@ -642,7 +642,7 @@ mod tests {
         let work = tempfile::tempdir()?;
         let ipsw = work.path().join("other.ipsw");
         restore::payload::synthetic_ipsw_of(&ipsw, "99Z999")?;
-        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
+        let layout = Layout::new(work.path().join("Stela"), stela_formats::builds::DEFAULT);
         let error = from_ipsw(&layout, &ipsw, None, false)
             .unwrap_err()
             .to_string();

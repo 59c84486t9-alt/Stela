@@ -129,12 +129,14 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Access, Lifecycle, LifecycleState, MmioDevice, Width as BusWidth},
-        interrupt::InterruptLatch,
-        ptd::{Range, UPDATE_OFFSET, transport::Observation},
-    };
     use alloc::vec::Vec;
+    use {
+        crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+        crate::platform::apple::ptd::transport::Observation, stela_contracts::bus::Access,
+        stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::Width as BusWidth,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     const PATTERN: [u32; 12] = [
         0x01234567, 0x89abcdef, 0x13579bdf, 0x2468ace0, 0x55667788, 0x99aabbcc, 0xddeeff00,

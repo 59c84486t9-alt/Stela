@@ -97,10 +97,13 @@
 //! CTRR-A/B on these chips are iBoot-locked handoff values whose limits no
 //! component reads (m1n1 `src/kboot.c` reports a small CTRR-C region left
 //! enabled on secondary cores at power-on, not modeled).
-use super::Chip;
 use super::mmu;
 use super::registers::encodings::Encoding;
-pub use crate::boot_bundle::schema::{CoreLocks, LockRegion, Locked};
+use stela_contracts::Chip;
+pub use {
+    stela_formats::boot_bundle::schema::CoreLocks, stela_formats::boot_bundle::schema::LockRegion,
+    stela_formats::boot_bundle::schema::Locked,
+};
 
 const fn sys(op1: u8, crn: u8, crm: u8, op2: u8) -> Encoding {
     Encoding::new(3, op1, crn, crm, op2)

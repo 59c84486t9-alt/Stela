@@ -14,7 +14,7 @@
 //! `physBase + memSize - tag bytes` rounded down to 1 MiB and bit 63 to be
 //! set, and types that range `MTE_TAG_STORAGE` at the top of the range it
 //! hands XNU (XNU's `vm_mteinfo.c`: iBoot places the tag storage "at the
-//! end of the managed address space"). [`hand_off`] gives that value.
+//! end of the managed address space"). [`stela_contracts::tag_storage::hand_off`] gives that value.
 //!
 //! The tags themselves stay in `machine::tags`, apart from RAM. XNU moves
 //! tags only with the tag instructions (its compressor and tag copy use
@@ -26,66 +26,22 @@
 //! tag write returns the last tags (0 from reset) instead of stale bytes,
 //! and a DRAM image of active tag storage (a hibernation image) does not
 //! carry tags.
-use super::Chip;
 use super::identification;
 use super::registers::encodings::Encoding;
+use stela_contracts::Chip;
 
 pub const TAG_OFFSET_EL2: Encoding = Encoding::new(3, 0, 11, 9, 0);
-/// Bit 63 locks the register.
-pub const LOCK: u64 = 1 << 63;
-/// Bits 41:20: the tag storage's physical base.
-pub const BASE_MASK: u64 = 0x3f_ffff << ALIGNMENT_SHIFT;
-const ALIGNMENT_SHIFT: u32 = 20;
-/// DRAM bytes one tag storage byte covers: two 4-bit tags of 16 bytes.
-pub const COVERAGE: u64 = 32;
 
-/// Whether `chip` has the register: the chips with memory tagging.
+/// Whether the declared chip owns this implementation-defined register.
 pub fn owns(chip: Chip, encoding: Encoding) -> bool {
     encoding == TAG_OFFSET_EL2 && identification::memory_tagging(chip)
-}
-
-/// The tag storage's bytes for `dram_size` bytes of DRAM.
-pub const fn bytes(dram_size: u64) -> u64 {
-    dram_size / COVERAGE
-}
-
-/// The locked value iBoot leaves for the managed range `phys_base` to
-/// `phys_base + mem_size` in `dram_size` bytes of DRAM, or `None` when its
-/// base does not fit the register.
-pub fn hand_off(phys_base: u64, mem_size: u64, dram_size: u64) -> Option<u64> {
-    let end = phys_base.checked_add(mem_size)?;
-    let base = end.checked_sub(bytes(dram_size))? >> ALIGNMENT_SHIFT << ALIGNMENT_SHIFT;
-    (base & !BASE_MASK == 0).then_some(base | LOCK)
-}
-
-/// The tag storage's first byte in a TAG_OFFSET_EL2 value.
-pub const fn base(value: u64) -> u64 {
-    value & BASE_MASK
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn the_handoff_matches_what_sptm_checks() {
-        // The J813 qemu-sptm trace: 8 GiB at 0x100_0000_0000 with a 31/32
-        // memSize reads 0x80000101e0000000.
-        let dram = 0x2_0000_0000;
-        assert_eq!(
-            hand_off(0x100_0000_0000, dram / 32 * 31, dram),
-            Some(0x8000_0101_e000_0000)
-        );
-        // The managed range to the end of DRAM puts it in DRAM's last 1/32.
-        let value = hand_off(0x100_0200_0000, dram - 0x200_0000, dram).unwrap();
-        assert_eq!(base(value), 0x100_0000_0000 + dram - bytes(dram));
-        assert_ne!(value & LOCK, 0);
-        // An unaligned end rounds down to 1 MiB; bases above bit 41 do not fit.
-        assert_eq!(
-            hand_off(0x100_0000_0000, dram - 0x4000, dram).map(base),
-            Some(0x101_eff0_0000)
-        );
-        assert_eq!(hand_off(1 << 42, dram, dram), None);
+    fn only_memory_tagging_chips_own_the_tag_storage_register() {
         assert!(owns(Chip::AppleM5, TAG_OFFSET_EL2) && owns(Chip::AppleM6, TAG_OFFSET_EL2));
         assert!(!owns(Chip::AppleM4, TAG_OFFSET_EL2));
     }

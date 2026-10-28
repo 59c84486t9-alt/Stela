@@ -271,7 +271,9 @@ pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool, mte: bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::system::{Feature, File, Register};
+    use {
+        crate::machine::system::File, crate::machine::system::Register, stela_contracts::Feature,
+    };
 
     /// `value` written to `register` of the test chip's register file and
     /// read back: the fields the chip lacks read 0, as the engine's MSR

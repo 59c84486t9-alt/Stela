@@ -12,15 +12,18 @@ use stela_compiler::{
     block::{BlockProfile, Features},
     context::memory::MemoryStatus,
 };
-use stela_runtime::{
-    blocks::{BlockRuntime, StopReason, ThreadState},
-    memory::{
-        backing::{AccessPermissions, MemoryBacking, MemoryView},
-        domain::{MappingAttributes, MemoryDomain, MemorySystem},
-        policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode},
-        tags::{AllocationTag, TAG_GRANULE_BYTES},
-    },
-    pauth::{Context, Key, Keys, Version},
+use {
+    stela_contracts::pauth::Key, stela_runtime::blocks::BlockRuntime,
+    stela_runtime::blocks::StopReason, stela_runtime::blocks::ThreadState,
+    stela_runtime::memory::backing::AccessPermissions,
+    stela_runtime::memory::backing::MemoryBacking, stela_runtime::memory::backing::MemoryView,
+    stela_runtime::memory::domain::MappingAttributes, stela_runtime::memory::domain::MemoryDomain,
+    stela_runtime::memory::domain::MemorySystem,
+    stela_runtime::memory::policy::LowerAddressProfile,
+    stela_runtime::memory::policy::MemoryControls,
+    stela_runtime::memory::policy::TagCheckFaultMode, stela_runtime::memory::tags::AllocationTag,
+    stela_runtime::memory::tags::TAG_GRANULE_BYTES, stela_runtime::pauth::Context,
+    stela_runtime::pauth::Keys, stela_runtime::pauth::Version,
 };
 
 const ADDRESS_SPACE: u64 = 73;

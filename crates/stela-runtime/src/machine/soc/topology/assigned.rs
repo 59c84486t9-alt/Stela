@@ -5,13 +5,12 @@
 mod source;
 pub use source::{BspSource, SourceIdentity};
 
-use crate::machine::{
-    Chip,
-    caches::{Cache, Caches},
-    registers::Identity,
-};
 pub use crate::platform::apple::pmgr::coverage::DomainId;
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
+use {
+    stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::Caches,
+    stela_contracts::identity::Identity,
+};
 
 const AFFINITY_MASK: u32 = 0xffff;
 const AFFINITY_PART_MASK: u32 = 0xff;

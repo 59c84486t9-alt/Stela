@@ -7,11 +7,13 @@
 //! DCS flush2ece46c selects200a40+channel*200000 and preserves high16.
 //! These are request/consumer facts, not evidence that a write powers a cache,
 //! programs DRAM or produces an event counter. Unknown effects stay pending.
-use crate::platform::apple::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 pub const APERTURE_BYTES: u64 = 0x1000000;
 pub const MAX_APERTURES: usize = 16;
@@ -421,7 +423,7 @@ impl MmioDevice for View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     fn running() -> LifecycleState {
         LifecycleState {
             powered: true,

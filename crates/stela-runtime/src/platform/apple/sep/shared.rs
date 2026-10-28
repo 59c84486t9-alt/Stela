@@ -11,8 +11,8 @@ use super::{
     super::asc::Message,
     message::{self, Frame},
 };
-use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const ENTRY_BYTES: u64 = 16;
 const NULL: u32 = u32::from_be_bytes(*b"null");
@@ -175,9 +175,9 @@ pub fn raw_timebase(message: Message) -> Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{bus::Access, interrupt::InterruptLatch},
-        dma::{Iommu, Memory, tests::Ram},
+    use {
+        stela_contracts::bus::Access, stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
     };
 
     struct Mapper {

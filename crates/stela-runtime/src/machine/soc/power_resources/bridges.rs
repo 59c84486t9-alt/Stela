@@ -99,7 +99,7 @@ fn dependency_ids(row: &[u8; 76]) -> impl Iterator<Item = u8> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
+    use stela_contracts::adt::encode;
 
     #[test]
     fn first_zero_is_a_bridge_and_later_zero_terminates_without_reading_tail() {

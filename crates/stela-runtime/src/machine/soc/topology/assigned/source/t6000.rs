@@ -271,7 +271,7 @@ mod tests {
     fn original_t6000_assigned_prefix_preserves_all_source_coordinates_and_full_power_graph() {
         let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&original),
+            stela_formats::sha256(&original),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let prepared =

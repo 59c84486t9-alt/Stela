@@ -5,8 +5,12 @@
 //! 408a0. The five raw words and the native clock phase are separate inputs;
 //! no enable, lock, frequency, phase or physical reset value is invented.
 use super::identity::Authority;
-use crate::platform::apple::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{rc::Rc, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 pub(super) mod phase;
 pub use phase::{Phase, Snapshot};
@@ -263,8 +267,8 @@ impl MmioDevice for Image {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{bus::Bus, interrupt::InterruptLatch};
     use alloc::{boxed::Box, vec};
+    use {stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch};
 
     pub(super) fn image(selection: u32, pll0: u32, pll1: u32, config0: u32, config1: u32) -> Image {
         let values = [pll0, config0, pll1, config1, selection];

@@ -57,7 +57,7 @@ fn write_from(
 ) -> Result<Written> {
     ensure!(
         piece_bytes > 0
-            && piece_bytes <= stela_runtime::payload::MAX_SLICE_BYTES
+            && piece_bytes <= stela_formats::payload::MAX_SLICE_BYTES
             && piece_bytes.is_multiple_of(HASH_BLOCK_BYTES),
         "invalid FAT32 piece size"
     );
@@ -150,7 +150,7 @@ fn write_from(
         block_hashes: BlockHashes {
             file: PIECE_HASHES_FILE.into(),
             block_bytes: HASH_BLOCK_BYTES,
-            sha256: stela_runtime::sha256(&piece_blocks),
+            sha256: stela_formats::sha256(&piece_blocks),
         },
     };
     inventory.manifest.validate().map_err(anyhow::Error::msg)?;
@@ -161,7 +161,7 @@ fn write_from(
     Ok(Written {
         wrote: sizes.len(),
         kept: 0,
-        manifest_sha256: stela_runtime::sha256(json.as_bytes()),
+        manifest_sha256: stela_formats::sha256(json.as_bytes()),
     })
 }
 
@@ -255,10 +255,10 @@ mod tests {
             "the fixture must exercise joined-piece reads"
         );
         let manifest = fs::read(directory(&volume, &image.build).join(MANIFEST_FILE))?;
-        let manifest = stela_runtime::payload::PayloadManifest::parse(&manifest)
+        let manifest = stela_formats::payload::PayloadManifest::parse(&manifest)
             .map_err(anyhow::Error::msg)?;
         assert!(matches!(manifest.layout, Layout::Pieces { .. }));
-        assert_eq!(manifest.source.sha256, Some(stela_runtime::sha256(&bytes)));
+        assert_eq!(manifest.source.sha256, Some(stela_formats::sha256(&bytes)));
         let mut damaged = bytes.clone();
         damaged[0] ^= 1;
         let mut oversized = bytes.clone();

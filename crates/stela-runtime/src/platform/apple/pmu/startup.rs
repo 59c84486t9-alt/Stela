@@ -615,13 +615,15 @@ mod tests {
 
     #[test]
     fn real_master_retains_native_loader_ownership_and_failed_start_payload() {
-        use crate::platform::apple::{
-            bus::{Access, Lifecycle, LifecycleState, MmioDevice, MmioError, Width},
-            interrupt::{AicInput, InterruptLatch},
-            spmi::{self, Spmi},
-        };
         use alloc::{boxed::Box, rc::Rc};
         use core::cell::RefCell;
+        use {
+            crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
+            stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
+            stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+            stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+            stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
+        };
         struct Owned(Rc<RefCell<Pmu>>);
         impl SpmiSlave for Owned {
             fn read(&mut self, address: u16, bytes: &mut [u8], now: u64) -> Result<(), SlaveError> {
@@ -762,13 +764,14 @@ mod tests {
     }
     #[test]
     fn paused_master_still_advances_the_same_native_pmic_clock_without_firmware_completion() {
-        use crate::platform::apple::{
-            bus::{Access, Lifecycle, LifecycleState, MmioDevice},
-            interrupt::{AicInput, InterruptLatch},
-            spmi::{self, Spmi},
-        };
         use alloc::{boxed::Box, rc::Rc};
         use core::cell::RefCell;
+        use {
+            crate::platform::apple::spmi, crate::platform::apple::spmi::Spmi,
+            stela_contracts::bus::Access, stela_contracts::bus::Lifecycle,
+            stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+            stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
+        };
         struct Owned(Rc<RefCell<Pmu>>);
         impl SpmiSlave for Owned {
             fn read(&mut self, at: u16, bytes: &mut [u8], now: u64) -> Result<(), SlaveError> {
@@ -930,7 +933,7 @@ mod tests {
     fn original_images_and_exact_protected_sequences_replay_without_completion_credit() {
         let source = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&source),
+            stela_formats::sha256(&source),
             "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1"
         );
         for (profile, start, len, metadata, configuration, version) in [

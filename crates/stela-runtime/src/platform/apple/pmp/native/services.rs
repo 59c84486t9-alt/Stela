@@ -5,15 +5,15 @@
 //! executes. Mailboxes are actual paired RTKit slots; mappings retain the real
 //! DMA broker. Startup never supplies an AP allocation or echoes an AP message.
 use super::{dma, platform::owner::Completion, reporting, scheduler, trace};
-use crate::platform::apple::{
-    bus::Access,
-    rtkit::{self, channel},
-};
 use alloc::{
     boxed::Box,
     rc::{Rc, Weak},
 };
 use core::cell::{Cell, RefCell};
+use {
+    crate::platform::apple::rtkit, crate::platform::apple::rtkit::channel,
+    stela_contracts::bus::Access,
+};
 
 mod clock;
 mod metrics_backend;
@@ -265,8 +265,8 @@ impl Services {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::vec::Vec;
+    use stela_contracts::interrupt::InterruptLatch;
     fn ticks() -> u64 {
         24_000_000
     }

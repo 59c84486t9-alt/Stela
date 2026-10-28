@@ -1,0 +1,606 @@
+//! An image's embedded code signature (`LC_CODE_SIGNATURE`), as the kernel
+//! reads it at exec (`bsd/kern/ubc_subr.c`, `osfmk/kern/cs_blobs.h`): the
+//! best code directory's flags, platform and identifiers, its cdhash, and
+//! the entitlements blobs, and whether a verified CMS signature shows
+//! Apple signed it ([`cms`]). Page hashes are not checked here.
+use alloc::{format, string::String, vec::Vec};
+use serde::Serialize;
+use sha1::{Digest as _, Sha1};
+use sha2::Sha256;
+
+mod cms;
+
+const LC_CODE_SIGNATURE: u32 = 0x1d;
+const MH_MAGIC_64: u32 = 0xfeed_facf;
+const MACH_HEADER_64_BYTES: usize = 32;
+const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
+const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
+const CSMAGIC_EMBEDDED_ENTITLEMENTS: u32 = 0xfade_7171;
+const CSMAGIC_EMBEDDED_DER_ENTITLEMENTS: u32 = 0xfade_7172;
+const CSMAGIC_BLOBWRAPPER: u32 = 0xfade_0b01;
+const CSSLOT_SIGNATURESLOT: u32 = 0x1_0000;
+/// The SHA-256 fingerprint of the Apple Code Signing Certification
+/// Authority certificate, which issues only Apple's own signing identities
+/// (Software Signing) under the Apple Root CA.
+const APPLE_CODE_SIGNING_CA: [u8; 32] = [
+    0x5b, 0xda, 0xb1, 0x28, 0x8f, 0xc1, 0x68, 0x92, 0xfe, 0xf5, 0x0c, 0x65, 0x8d, 0xb5, 0x4f, 0x1e,
+    0x2e, 0x19, 0xcf, 0x8f, 0x71, 0xcc, 0x55, 0xf7, 0x7d, 0xe2, 0xb9, 0x5e, 0x05, 0x1e, 0x25, 0x62,
+];
+/// The SHA-256 fingerprint of the Apple Root CA certificate.
+const APPLE_ROOT_CA: [u8; 32] = [
+    0xb0, 0xb1, 0x73, 0x0e, 0xcb, 0xc7, 0xff, 0x45, 0x05, 0x14, 0x2c, 0x49, 0xf1, 0x29, 0x5e, 0x6e,
+    0xda, 0x6b, 0xca, 0xed, 0x7e, 0x2c, 0x68, 0xc5, 0xbe, 0x91, 0xb5, 0xa1, 0x10, 0x01, 0xf0, 0x24,
+];
+const APPLE_ANCHORS: cms::Anchors = cms::Anchors {
+    authority: APPLE_CODE_SIGNING_CA,
+    root: APPLE_ROOT_CA,
+};
+const CSSLOT_CODEDIRECTORY: u32 = 0;
+/// `CSSLOT_ALTERNATE_CODEDIRECTORIES` through its last slot.
+const CSSLOT_ALTERNATE_FIRST: u32 = 0x1000;
+const CSSLOT_ALTERNATE_LAST: u32 = 0x1004;
+pub const CS_HASHTYPE_SHA1: u8 = 1;
+pub const CS_HASHTYPE_SHA256: u8 = 2;
+pub const CS_HASHTYPE_SHA256_TRUNCATED: u8 = 3;
+pub const CS_HASHTYPE_SHA384: u8 = 4;
+/// `CS_CDHASH_LEN`.
+pub const CDHASH_BYTES: usize = 20;
+/// CodeDirectory field offsets (`CS_CodeDirectory`, big-endian).
+const CD_VERSION: usize = 8;
+const CD_FLAGS: usize = 12;
+const CD_IDENT_OFFSET: usize = 20;
+const CD_CODE_LIMIT: usize = 32;
+const CD_HASH_TYPE: usize = 37;
+const CD_PLATFORM: usize = 38;
+const CD_PAGE_SIZE: usize = 39;
+const CD_SCATTER_OFFSET: usize = 44;
+const CD_TEAM_OFFSET: usize = 48;
+const CS_SUPPORTSSCATTER: u32 = 0x20100;
+const CS_SUPPORTSTEAMID: u32 = 0x20200;
+/// `SC_Scatter.base`, in hash pages.
+const SCATTER_BASE: usize = 4;
+
+/// An invalid field or extent in a Mach-O embedded signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeSignatureError {
+    Truncated {
+        offset: usize,
+        needed: usize,
+        available: usize,
+    },
+    RangeOverflow {
+        offset: usize,
+        bytes: usize,
+    },
+    MachOMagic {
+        found: u32,
+    },
+    SuperblobMagic {
+        found: u32,
+    },
+    LoadCommandSize {
+        command: u32,
+        bytes: usize,
+        minimum: usize,
+    },
+    MissingCodeDirectory,
+    PageShift {
+        value: u8,
+    },
+    HashType {
+        value: u8,
+    },
+}
+
+impl core::fmt::Display for CodeSignatureError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Truncated {
+                offset,
+                needed,
+                available,
+            } => write!(
+                f,
+                "code signature needs {needed} bytes at {offset:#x}, container has {available}"
+            ),
+            Self::RangeOverflow { offset, bytes } => {
+                write!(f, "code signature extent {offset:#x}+{bytes:#x} overflows")
+            }
+            Self::MachOMagic { found } => write!(f, "not a 64-bit Mach-O slice: magic {found:#x}"),
+            Self::SuperblobMagic { found } => {
+                write!(f, "not an embedded signature superblob: magic {found:#x}")
+            }
+            Self::LoadCommandSize {
+                command,
+                bytes,
+                minimum,
+            } => write!(
+                f,
+                "load command {command:#x} has {bytes} bytes, requires at least {minimum}"
+            ),
+            Self::MissingCodeDirectory => f.write_str("code signature has no code directory"),
+            Self::PageShift { value } => {
+                write!(f, "code directory page shift {value} is out of range")
+            }
+            Self::HashType { value } => write!(f, "unsupported code directory hash type {value}"),
+        }
+    }
+}
+
+impl core::error::Error for CodeSignatureError {}
+
+pub type Result<T> = core::result::Result<T, CodeSignatureError>;
+
+fn extent(bytes: &[u8], offset: usize, length: usize) -> Result<&[u8]> {
+    let end = offset
+        .checked_add(length)
+        .ok_or(CodeSignatureError::RangeOverflow {
+            offset,
+            bytes: length,
+        })?;
+    bytes.get(offset..end).ok_or(CodeSignatureError::Truncated {
+        offset,
+        needed: length,
+        available: bytes.len(),
+    })
+}
+
+fn byte(bytes: &[u8], at: usize) -> Result<u8> {
+    Ok(extent(bytes, at, 1)?[0])
+}
+
+fn be32(bytes: &[u8], at: usize) -> Result<u32> {
+    let b = extent(bytes, at, 4)?;
+    Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn le32(bytes: &[u8], at: usize) -> Result<u32> {
+    let b = extent(bytes, at, 4)?;
+    Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn c_string(bytes: &[u8], at: usize) -> Option<String> {
+    let tail = bytes.get(at..)?;
+    let end = tail.iter().position(|&b| b == 0)?;
+    String::from_utf8(tail[..end].to_vec()).ok()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeSignature {
+    /// The chosen code directory's `flags`.
+    pub flags: u32,
+    pub platform: u8,
+    pub hash_type: u8,
+    pub identifier: Option<String>,
+    pub team_identifier: Option<String>,
+    #[serde(with = "hex_bytes")]
+    pub cdhash: [u8; CDHASH_BYTES],
+    pub entitlements: Option<Vec<u8>>,
+    pub der_entitlements: Option<Vec<u8>>,
+    /// The range of the file, from the slice's start, that the code
+    /// directory's page hashes cover, as `cs_blob_init_validated` records
+    /// it: from the scatter base (zero without one) to `codeLimit` rounded
+    /// up to the hash page.
+    pub start_offset: u64,
+    pub end_offset: u64,
+    /// Whether a verified CMS signature binds the code directory to a
+    /// signing certificate the Apple Code Signing Certification Authority
+    /// issued under the Apple Root CA: code Apple itself signed ("anchor
+    /// apple"). A signature that fails verification is not Apple's.
+    pub apple_signed: bool,
+}
+
+/// `<key>name</key>` followed by `<true/>` in an XML entitlements plist.
+pub fn xml_entitlement_true(plist: &[u8], name: &str) -> bool {
+    let key = format!("<key>{name}</key>");
+    let Some(text) = core::str::from_utf8(plist).ok() else {
+        return false;
+    };
+    text.match_indices(&key)
+        .any(|(at, _)| text[at + key.len()..].trim_start().starts_with("<true/>"))
+}
+
+/// Whether the XML entitlements plist holds `name` with any value
+/// (`IOVnodeIsEntitlementPresentWithAnyValue`).
+pub fn xml_entitlement_present(plist: &[u8], name: &str) -> bool {
+    let key = format!("<key>{name}</key>");
+    core::str::from_utf8(plist).is_ok_and(|text| text.contains(&key))
+}
+
+impl CodeSignature {
+    /// Whether the kernel treats this code as platform code: a code
+    /// directory platform identifier (the trust caches' code), or code
+    /// Apple signed. macOS's AMFI grants Apple-anchored code platform status
+    /// when the blob is added (`ubc_cs_blob_add` takes `CS_PLATFORM_BINARY`
+    /// from `mac_vnode_check_signature`): Xcode's `python3`, signed by
+    /// Software Signing with Team ID 59GAB85EFG and no platform identifier,
+    /// runs on the 25G241 host with `CS_PLATFORM_BINARY`.
+    pub fn platform_code(&self) -> bool {
+        self.platform != 0 || self.apple_signed
+    }
+
+    /// Whether the XML entitlements grant the boolean `name`.
+    pub fn entitled(&self, name: &str) -> bool {
+        self.entitlements
+            .as_deref()
+            .is_some_and(|plist| xml_entitlement_true(plist, name))
+    }
+}
+
+mod hex_bytes {
+    pub fn serialize<S: serde::Serializer>(
+        bytes: &[u8],
+        serializer: S,
+    ) -> core::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+}
+
+/// XNU's preference among a signature's code directories
+/// (`hash_rank`): SHA-256 over truncated SHA-256 over SHA-1; SHA-384 last
+/// among the supported ones.
+fn rank(hash_type: u8) -> u8 {
+    match hash_type {
+        CS_HASHTYPE_SHA1 => 1,
+        CS_HASHTYPE_SHA256_TRUNCATED => 2,
+        CS_HASHTYPE_SHA256 => 3,
+        CS_HASHTYPE_SHA384 => 4,
+        _ => 0,
+    }
+}
+
+fn cdhash(hash_type: u8, directory: &[u8]) -> Option<[u8; CDHASH_BYTES]> {
+    let digest: Vec<u8> = match hash_type {
+        CS_HASHTYPE_SHA1 => Sha1::digest(directory).to_vec(),
+        CS_HASHTYPE_SHA256 | CS_HASHTYPE_SHA256_TRUNCATED => Sha256::digest(directory).to_vec(),
+        CS_HASHTYPE_SHA384 => sha2::Sha384::digest(directory).to_vec(),
+        _ => return None,
+    };
+    digest[..CDHASH_BYTES].try_into().ok()
+}
+
+/// BER nesting deeper than this is refused.
+const BER_DEPTH: u8 = 32;
+
+/// One BER element at the start of `bytes` (X.690; codesign writes CMS with
+/// indefinite lengths around DER certificates): its tag, its contents and
+/// the whole element. Over-long lengths and malformed elements are `None`.
+fn ber_element(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    ber(bytes, BER_DEPTH)
+}
+
+fn ber(bytes: &[u8], depth: u8) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *bytes.first()?;
+    let first = *bytes.get(1)?;
+    if first == 0x80 {
+        // Indefinite: the contents run to the end-of-contents octets.
+        let depth = depth.checked_sub(1)?;
+        let mut at = 2;
+        loop {
+            let rest = bytes.get(at..)?;
+            if rest.starts_with(&[0, 0]) {
+                return Some((tag, &bytes[2..at], &bytes[..at + 2]));
+            }
+            at += ber(rest, depth)?.2.len();
+        }
+    }
+    let (length, header) = if first & 0x80 == 0 {
+        (usize::from(first), 2)
+    } else {
+        let count = usize::from(first & 0x7f);
+        if count > 4 {
+            return None;
+        }
+        let length = bytes
+            .get(2..2 + count)?
+            .iter()
+            .fold(0usize, |length, &byte| length << 8 | usize::from(byte));
+        (length, 2 + count)
+    };
+    let whole = bytes.get(..header.checked_add(length)?)?;
+    Some((tag, &whole[header..], whole))
+}
+
+/// The elements of a constructed element's contents.
+fn ber_children(mut contents: &[u8]) -> impl Iterator<Item = (u8, &[u8], &[u8])> {
+    core::iter::from_fn(move || {
+        let element = ber_element(contents)?;
+        contents = &contents[element.2.len()..];
+        Some(element)
+    })
+}
+
+/// The signature of a thin 64-bit Mach-O slice, or `None` without one.
+pub fn read(slice: &[u8]) -> Result<Option<CodeSignature>> {
+    let found = le32(slice, 0)?;
+    if found != MH_MAGIC_64 {
+        return Err(CodeSignatureError::MachOMagic { found });
+    }
+    let count = le32(slice, 16)? as usize;
+    let mut offset = MACH_HEADER_64_BYTES;
+    let mut blob = None;
+    for _ in 0..count {
+        let command = le32(slice, offset)?;
+        let size = le32(slice, offset + 4)? as usize;
+        let minimum = if command == LC_CODE_SIGNATURE { 16 } else { 8 };
+        if size < minimum {
+            return Err(CodeSignatureError::LoadCommandSize {
+                command,
+                bytes: size,
+                minimum,
+            });
+        }
+        extent(slice, offset, size)?;
+        if command == LC_CODE_SIGNATURE {
+            blob = Some((
+                le32(slice, offset + 8)? as usize,
+                le32(slice, offset + 12)? as usize,
+            ));
+        }
+        offset += size;
+    }
+    let Some((start, size)) = blob else {
+        return Ok(None);
+    };
+    let blob = extent(slice, start, size)?;
+    parse(blob).map(Some)
+}
+
+/// An embedded signature superblob, as `F_ADDFILESIGS` reads it from a file.
+pub fn parse(blob: &[u8]) -> Result<CodeSignature> {
+    let found = be32(blob, 0)?;
+    if found != CSMAGIC_EMBEDDED_SIGNATURE {
+        return Err(CodeSignatureError::SuperblobMagic { found });
+    }
+    let slots = be32(blob, 8)? as usize;
+    let mut best: Option<(u8, &[u8])> = None;
+    let mut entitlements = None;
+    let mut der_entitlements = None;
+    let mut signed = None;
+    let mut cms = None;
+    for index in 0..slots {
+        let slot = be32(blob, 12 + index * 8)?;
+        let at = be32(blob, 16 + index * 8)? as usize;
+        let magic = be32(blob, at)?;
+        let length = be32(blob, at + 4)? as usize;
+        let body = extent(blob, at, length)?;
+        match magic {
+            CSMAGIC_CODEDIRECTORY
+                if slot == CSSLOT_CODEDIRECTORY
+                    || (CSSLOT_ALTERNATE_FIRST..=CSSLOT_ALTERNATE_LAST).contains(&slot) =>
+            {
+                let hash_type = byte(body, CD_HASH_TYPE)?;
+                if slot == CSSLOT_CODEDIRECTORY {
+                    signed = Some(body);
+                }
+                if best.is_none_or(|(kind, _)| rank(hash_type) > rank(kind)) {
+                    best = Some((hash_type, body));
+                }
+            }
+            CSMAGIC_EMBEDDED_ENTITLEMENTS => {
+                entitlements = Some(extent(body, 8, length.saturating_sub(8))?.to_vec())
+            }
+            CSMAGIC_EMBEDDED_DER_ENTITLEMENTS => {
+                der_entitlements = Some(extent(body, 8, length.saturating_sub(8))?.to_vec())
+            }
+            CSMAGIC_BLOBWRAPPER if slot == CSSLOT_SIGNATURESLOT => cms = body.get(8..),
+            _ => {}
+        }
+    }
+    let (hash_type, directory) = best.ok_or(CodeSignatureError::MissingCodeDirectory)?;
+    let apple_signed = matches!((cms, signed), (Some(cms), Some(signed))
+        if cms::verify(cms, signed, directory, hash_type, &APPLE_ANCHORS).is_ok());
+    let version = be32(directory, CD_VERSION)?;
+    let identifier = c_string(directory, be32(directory, CD_IDENT_OFFSET)? as usize);
+    let team_identifier = if version >= CS_SUPPORTSTEAMID {
+        match be32(directory, CD_TEAM_OFFSET)? {
+            0 => None,
+            at => c_string(directory, at as usize),
+        }
+    } else {
+        None
+    };
+    let page_shift = byte(directory, CD_PAGE_SIZE)?;
+    if page_shift >= 32 {
+        return Err(CodeSignatureError::PageShift { value: page_shift });
+    }
+    let page_mask = (1u64 << page_shift) - 1;
+    let end_offset = (u64::from(be32(directory, CD_CODE_LIMIT)?) + page_mask) & !page_mask;
+    let scatter = if version >= CS_SUPPORTSSCATTER {
+        be32(directory, CD_SCATTER_OFFSET)? as usize
+    } else {
+        0
+    };
+    let start_offset = if scatter == 0 {
+        0
+    } else {
+        u64::from(be32(directory, scatter + SCATTER_BASE)?) << page_shift
+    };
+    Ok(CodeSignature {
+        flags: be32(directory, CD_FLAGS)?,
+        platform: byte(directory, CD_PLATFORM)?,
+        hash_type,
+        identifier,
+        team_identifier,
+        cdhash: cdhash(hash_type, directory)
+            .ok_or(CodeSignatureError::HashType { value: hash_type })?,
+        entitlements,
+        der_entitlements,
+        start_offset,
+        end_offset,
+        apple_signed,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn directory(hash_type: u8, platform: u8, flags: u32) -> Vec<u8> {
+        let mut cd = vec![0u8; 64];
+        cd[..4].copy_from_slice(&CSMAGIC_CODEDIRECTORY.to_be_bytes());
+        cd[CD_VERSION..CD_VERSION + 4].copy_from_slice(&0x20400u32.to_be_bytes());
+        cd[CD_FLAGS..CD_FLAGS + 4].copy_from_slice(&flags.to_be_bytes());
+        cd[CD_IDENT_OFFSET..CD_IDENT_OFFSET + 4].copy_from_slice(&56u32.to_be_bytes());
+        cd[CD_HASH_TYPE] = hash_type;
+        cd[CD_PLATFORM] = platform;
+        cd[CD_PAGE_SIZE] = 12;
+        cd[CD_CODE_LIMIT..CD_CODE_LIMIT + 4].copy_from_slice(&0x1801u32.to_be_bytes());
+        cd[56..63].copy_from_slice(b"com.ex\0");
+        let length = cd.len() as u32;
+        cd[4..8].copy_from_slice(&length.to_be_bytes());
+        cd
+    }
+
+    #[test]
+    fn rejects_short_signature_command() {
+        let directory = directory(CS_HASHTYPE_SHA256, 0, 0);
+        let mut blob = Vec::new();
+        blob.extend(CSMAGIC_EMBEDDED_SIGNATURE.to_be_bytes());
+        blob.extend((20u32 + directory.len() as u32).to_be_bytes());
+        blob.extend(1u32.to_be_bytes());
+        blob.extend(CSSLOT_CODEDIRECTORY.to_be_bytes());
+        blob.extend(20u32.to_be_bytes());
+        blob.extend(directory);
+        let mut slice = vec![0u8; MACH_HEADER_64_BYTES + 16];
+        slice[..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
+        slice[16..20].copy_from_slice(&1u32.to_le_bytes());
+        slice[20..24].copy_from_slice(&8u32.to_le_bytes());
+        slice[32..36].copy_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
+        slice[36..40].copy_from_slice(&8u32.to_le_bytes());
+        // These fields lie outside the declared command, although the image
+        // contains enough trailing bytes to make their values look valid.
+        slice[40..44].copy_from_slice(&48u32.to_le_bytes());
+        slice[44..48].copy_from_slice(&(blob.len() as u32).to_le_bytes());
+        slice.extend(blob);
+        assert!(matches!(
+            read(&slice),
+            Err(CodeSignatureError::LoadCommandSize {
+                command: LC_CODE_SIGNATURE,
+                bytes: 8,
+                minimum: 16,
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_short_entitlement_blob() {
+        for (slot, magic) in [
+            (5u32, CSMAGIC_EMBEDDED_ENTITLEMENTS),
+            (7, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS),
+        ] {
+            for length in 0..8u32 {
+                let mut blob = Vec::new();
+                blob.extend(CSMAGIC_EMBEDDED_SIGNATURE.to_be_bytes());
+                blob.extend(28u32.to_be_bytes());
+                blob.extend(1u32.to_be_bytes());
+                blob.extend(slot.to_be_bytes());
+                blob.extend(20u32.to_be_bytes());
+                blob.extend(magic.to_be_bytes());
+                blob.extend(length.to_be_bytes());
+                assert!(
+                    matches!(parse(&blob), Err(CodeSignatureError::Truncated { .. })),
+                    "magic {magic:#x}, declared bytes {length}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn best_directory_supplies_flags_and_cdhash() {
+        let sha1 = directory(CS_HASHTYPE_SHA1, 0, 1);
+        let sha256 = directory(CS_HASHTYPE_SHA256, 13, 0x2_0000);
+        let mut superblob = Vec::new();
+        let header = 12 + 2 * 8;
+        superblob.extend(CSMAGIC_EMBEDDED_SIGNATURE.to_be_bytes());
+        superblob.extend(0u32.to_be_bytes());
+        superblob.extend(2u32.to_be_bytes());
+        superblob.extend(CSSLOT_CODEDIRECTORY.to_be_bytes());
+        superblob.extend((header as u32).to_be_bytes());
+        superblob.extend(CSSLOT_ALTERNATE_FIRST.to_be_bytes());
+        superblob.extend(((header + sha1.len()) as u32).to_be_bytes());
+        superblob.extend(&sha1);
+        superblob.extend(&sha256);
+        let total = superblob.len() as u32;
+        superblob[4..8].copy_from_slice(&total.to_be_bytes());
+        let mut slice = vec![0u8; 32 + 16];
+        slice[..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
+        slice[16..20].copy_from_slice(&1u32.to_le_bytes());
+        slice[32..36].copy_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
+        slice[36..40].copy_from_slice(&16u32.to_le_bytes());
+        slice[40..44].copy_from_slice(&48u32.to_le_bytes());
+        slice[44..48].copy_from_slice(&total.to_le_bytes());
+        slice.extend(&superblob);
+        let signature = read(&slice).unwrap().unwrap();
+        assert_eq!(signature.hash_type, CS_HASHTYPE_SHA256);
+        assert_eq!(signature.platform, 13);
+        assert_eq!(signature.flags, 0x2_0000);
+        assert_eq!(signature.identifier.as_deref(), Some("com.ex"));
+        assert_eq!(signature.cdhash[..], Sha256::digest(&sha256)[..20]);
+        assert_eq!((signature.start_offset, signature.end_offset), (0, 0x2000));
+        assert_eq!(parse(&superblob).unwrap().cdhash, signature.cdhash);
+        assert!(!signature.apple_signed);
+    }
+
+    /// A DER element with a definite length.
+    fn element(tag: u8, contents: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match contents.len() {
+            length @ 0..0x80 => out.push(length as u8),
+            length => {
+                out.push(0x82);
+                out.extend((length as u16).to_be_bytes());
+            }
+        }
+        out.extend(contents);
+        out
+    }
+
+    #[test]
+    fn certificates_are_found_in_cms_signed_data() {
+        const SIGNED_DATA: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+        let leaf = element(0x30, &[0x02, 0x01, 0x07]);
+        let authority = element(0x30, &[0u8; 200]);
+        let signer = element(0x31, &element(0x30, &element(0x02, &[1])));
+        let cms = |certificates: &[u8]| {
+            let signed_data = element(
+                0x30,
+                &[
+                    element(0x02, &[1]),
+                    element(0x31, &[]),
+                    element(0x30, &element(0x06, &[0x2a])),
+                    element(0xa0, certificates),
+                    signer.clone(),
+                ]
+                .concat(),
+            );
+            element(
+                0x30,
+                &[element(0x06, &SIGNED_DATA), element(0xa0, &signed_data)].concat(),
+            )
+        };
+        let both = cms(&[leaf.clone(), authority.clone()].concat());
+        assert_eq!(cms::certificates(&both), [&leaf[..], &authority[..]]);
+        assert_eq!(cms::certificates(&cms(&leaf)), [&leaf[..]]);
+        // codesign's indefinite lengths around the certificates.
+        let indefinite = |tag: u8, contents: &[u8]| [&[tag, 0x80], contents, &[0, 0]].concat();
+        let signed_data = indefinite(
+            0x30,
+            &[
+                element(0x02, &[1]),
+                element(0x31, &[]),
+                indefinite(0x30, &element(0x06, &[0x2a])),
+                indefinite(0xa0, &[leaf.clone(), authority.clone()].concat()),
+                signer.clone(),
+            ]
+            .concat(),
+        );
+        let ber = indefinite(
+            0x30,
+            &[element(0x06, &SIGNED_DATA), indefinite(0xa0, &signed_data)].concat(),
+        );
+        assert_eq!(cms::certificates(&ber), [&leaf[..], &authority[..]]);
+        assert!(cms::certificates(&ber[..ber.len() - 2]).is_empty());
+        assert!(cms::certificates(&[0x30, 0x80, 0, 0]).is_empty());
+    }
+}

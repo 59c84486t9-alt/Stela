@@ -27,12 +27,12 @@ use crate::hosted::darwin::{
     FLAGS_NO_PTRAUTH, PSR64_NZCV_MASK, USER_DIVERSIFIER_MASK, blend_discriminator, user_cpsr,
 };
 use crate::machine::system::Register;
-use crate::pauth::{Context, Key};
 use anyhow::Result;
 use std::sync::{
     Condvar, Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use {crate::pauth::Context, stela_contracts::pauth::Key};
 
 mod exception;
 pub(crate) use exception::ExceptionState;

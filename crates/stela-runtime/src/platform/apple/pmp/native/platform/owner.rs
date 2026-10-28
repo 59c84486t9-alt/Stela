@@ -8,8 +8,8 @@ use super::super::{
     power::policy::{ConstraintState, Resolution},
 };
 use super::{Descriptor, Evaluation, Hook, McSelection, Ordinal, Packed, Profile, Slice};
-use crate::platform::apple::bus::Access;
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
+use stela_contracts::bus::Access;
 
 pub mod controllers;
 
@@ -1420,8 +1420,8 @@ impl<B: Backend> Owner<B> {
 mod tests {
     use super::super::profile::tests::fixture;
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::vec;
+    use stela_contracts::interrupt::InterruptLatch;
     struct Snapshot(u128, u128);
     impl Pending for Snapshot {
         fn bits(&self, start: u32, count: u32) -> Result<u128, &'static str> {

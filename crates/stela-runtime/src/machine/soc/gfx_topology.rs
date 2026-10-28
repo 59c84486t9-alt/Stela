@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn gfx_placement_needs_the_coprocessor_and_the_gpu_together() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values

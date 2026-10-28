@@ -38,8 +38,12 @@
 //! the memory-stall deltas to 48 bits itself, testing bit 47 for overflow,
 //! which a counter that never counts never sets. So each is held as 64 bits
 //! (inference).
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use stela_compiler::aarch64::system::registers::Encoding;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "cpu-impl-reg counters";
 /// The core performance counters' slots: eight 0x10 apart, then the
@@ -247,7 +251,7 @@ impl MmioDevice for CoreCounters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     const AON_1: Encoding = Encoding::new(3, 7, 15, 2, 3);
     const AON_3: Encoding = Encoding::new(3, 7, 15, 6, 3);

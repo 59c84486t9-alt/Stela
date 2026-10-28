@@ -14,7 +14,7 @@
 use super::manifest::{Component, Identity, RestoreManifest};
 use anyhow::{Context, Result, bail};
 use std::fmt;
-use stela_runtime::payload::Purpose;
+use stela_formats::payload::Purpose;
 
 /// The profile registry: each board's `Ap,ProductType`, `ApChipID`,
 /// `ApBoardID` and `DeviceClass`.

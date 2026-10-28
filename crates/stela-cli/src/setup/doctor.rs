@@ -28,11 +28,11 @@ use crate::efi;
 use anyhow::{Result, bail};
 use std::{fmt::Write as _, fs, path::Path};
 use stela_loader::{boot_selection, mount_interface, recovery};
-use stela_runtime::{
-    apfs::{self, Container, volume::APFS_VOL_ROLE_UPDATE},
-    machine::apple::{nor::CAPACITY, sep_state},
-    payload::ReadAt,
-    preboot,
+use {
+    stela_formats::apfs, stela_formats::apfs::Container,
+    stela_formats::apfs::volume::APFS_VOL_ROLE_UPDATE, stela_formats::payload::ReadAt,
+    stela_formats::preboot, stela_runtime::machine::apple::nor::CAPACITY,
+    stela_runtime::machine::apple::sep_state,
 };
 
 /// A host partition as an APFS source.

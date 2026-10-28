@@ -9,25 +9,20 @@
 //! and the memory is Tagged (`attributes::TAGGED`): elsewhere a tag reads 0
 //! and a tag write has no effect.
 use super::{Devices, Host, Machine, RamTables, RequirementKind, Step, Stop, Translated};
-use crate::{
-    machine::{
-        cpu::Exception,
-        debug,
-        exception::Class,
-        mmu::{self, Access, Translation, alignment, attributes::TAGGED},
-        system::{Feature, Register as SystemRegister},
-        tags::GRANULE,
-    },
-    memory::tags::{
-        AllocationTag, TagGenerationControls, TagGenerationState, TagRandomization,
-        choose_non_excluded_tag,
-    },
-};
 use alloc::vec::Vec;
 use stela_compiler::aarch64::{
     AddressMode, Operation, Register,
     tag_arithmetic::{self, Kind as ArithmeticKind},
     tag_memory::{BulkKind, Operand, StoreKind},
+};
+use {
+    crate::machine::cpu::Exception, crate::machine::debug, crate::machine::exception::Class,
+    crate::machine::mmu, crate::machine::mmu::Access, crate::machine::mmu::Translation,
+    crate::machine::mmu::alignment, crate::machine::mmu::attributes::TAGGED,
+    crate::machine::system::Register as SystemRegister, crate::machine::tags::GRANULE,
+    crate::memory::tags::AllocationTag, crate::memory::tags::TagGenerationControls,
+    crate::memory::tags::TagGenerationState, crate::memory::tags::TagRandomization,
+    crate::memory::tags::choose_non_excluded_tag, stela_contracts::Feature,
 };
 
 /// GCR_EL1.Exclude and RRND.
@@ -629,11 +624,12 @@ mod tests {
         tests::{BASE, FakeHost, machine_on, normal_memory},
     };
     use super::*;
-    use crate::machine::{
-        Chip, NoDevices, exception::Pstate, identification, registers::encodings,
-        system::Register as SystemRegister,
-    };
     use stela_compiler::{TargetCpu, block::ExitKind};
+    use {
+        crate::machine::NoDevices, crate::machine::exception::Pstate,
+        crate::machine::identification, crate::machine::registers::encodings,
+        crate::machine::system::Register as SystemRegister, stela_contracts::Chip,
+    };
 
     type Test = Machine<FakeHost, NoDevices>;
 

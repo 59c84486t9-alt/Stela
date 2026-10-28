@@ -306,7 +306,7 @@ pub fn next_event(cpu: &Cpu, now: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::{Chip, exception::Pstate};
+    use {crate::machine::exception::Pstate, stela_contracts::Chip};
 
     #[test]
     fn native_epoch_omits_stable_assertions_but_keeps_every_future_channel() {
@@ -415,7 +415,7 @@ mod tests {
         // EVNTIS (FEAT_ECV) adds 8 to EVNTI; without it (the M1) the bit is
         // RES0 and EVNTI 0 signals every count.
         cpu.registers.set(Register::CNTHCTL_EL2, 0, EVNTEN | EVNTIS);
-        let ecv = cpu.registers.has(crate::machine::system::Feature::FEAT_ECV);
+        let ecv = cpu.registers.has(stela_contracts::Feature::FEAT_ECV);
         assert_eq!(next_event(&cpu, 0), Some(if ecv { 256 } else { 1 }));
         // The EL1 stream counts the virtual count and only outside the host.
         cpu.registers.set(Register::CNTHCTL_EL2, 0, 0);

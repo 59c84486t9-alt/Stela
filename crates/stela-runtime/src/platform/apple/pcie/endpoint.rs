@@ -1,8 +1,10 @@
 //! Actual endpoint bank ownership. Configuration alone cannot back a peer.
 use super::{ConfigSpace, MmioDevice};
-use crate::platform::apple::bus::{Access, LifecycleState, Width};
 use alloc::{boxed::Box, vec::Vec};
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::LifecycleState, stela_contracts::bus::Width,
+};
 
 /// Exact offset of a function's whole memory BAR within its actual device.
 /// Explicit overlapping offsets may describe aliases of the same real bank.

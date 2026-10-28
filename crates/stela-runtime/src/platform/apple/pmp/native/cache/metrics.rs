@@ -11,12 +11,12 @@ use super::super::{
     platform::owner::Completion,
     scheduler::{Invocation, Work},
 };
-use crate::platform::apple::bus::Access;
 use alloc::{format, rc::Rc, string::String, vec::Vec};
 use core::{
     cell::Cell,
     sync::atomic::{Ordering, fence},
 };
+use stela_contracts::bus::Access;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -881,7 +881,7 @@ impl<B: Backend> Owner<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     #[derive(Clone)]
     struct Samples {
         geometry: Geometry,

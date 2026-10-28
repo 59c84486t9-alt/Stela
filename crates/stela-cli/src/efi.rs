@@ -30,7 +30,7 @@ use std::{
 use stela_loader::mount_interface;
 use stela_runtime::pc::boot_log;
 
-use stela_runtime::payload::MAX_SLICE_BYTES;
+use stela_formats::payload::MAX_SLICE_BYTES;
 
 /// The removable-media boot loader path for x64 (UEFI 2.10, Removable Media
 /// Boot Behavior).

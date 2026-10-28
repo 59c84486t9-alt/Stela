@@ -647,7 +647,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 if checks.iter().any(|check| {
                     !matches!(
                         check,
-                        crate::machine::chip::Check::Fp | crate::machine::chip::Check::FpAdvSimd
+                        stela_contracts::chip::Check::Fp | stela_contracts::chip::Check::FpAdvSimd
                     )
                 }) {
                     return Err(self.unsupported(RequirementKind::Native(

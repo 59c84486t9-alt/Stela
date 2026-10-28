@@ -479,7 +479,7 @@ fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
         let start = region["file_offset"].as_u64().unwrap() as usize;
         let end = start + region["bytes"].as_u64().unwrap() as usize;
         assert_eq!(
-            stela_runtime::sha256(&file[start..end]),
+            stela_formats::sha256(&file[start..end]),
             region["sha256"].as_str().unwrap()
         );
     }

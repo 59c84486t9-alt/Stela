@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn dcp_placement_reads_the_wrapper_irqs_nub_and_display_apertures_without_admitting_it() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         const MODELED: [&str; 3] = [UART, WATCHDOG, "aic,2"];
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let words = |cells: &[u32]| {

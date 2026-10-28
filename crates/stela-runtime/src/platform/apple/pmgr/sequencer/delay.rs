@@ -91,10 +91,10 @@ impl PacketCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::bus::Width;
     use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use crate::platform::apple::pmgr::sequencer::{AddressFormat, PhysicalWrite, RouteOutcome};
     use alloc::vec::Vec;
+    use stela_contracts::bus::Width;
     fn cursor(words: &[u32]) -> PacketCursor {
         let mut cursor = PacketCursor::unknown();
         cursor.bind_initial_control(test_initial()).unwrap();

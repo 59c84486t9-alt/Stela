@@ -91,7 +91,7 @@ fn data<'a>(properties: &'a [Property], name: &str, bytes: usize) -> Result<Opti
 impl LocalPolicy {
     /// Parse the LocalPolicy file at `path`.
     pub fn parse(path: &str, file: &[u8]) -> Result<Self> {
-        let manifest = match stela_runtime::img4::parse(file) {
+        let manifest = match stela_formats::img4::parse(file) {
             Ok(parts) => parts
                 .manifest
                 .with_context(|| format!("{path} is an IMG4 without a manifest"))?

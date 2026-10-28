@@ -21,7 +21,7 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 #[derive(Debug)]
 struct Inconclusive(String);

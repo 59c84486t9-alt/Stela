@@ -6,8 +6,8 @@
 //! configuration only; compilation's live AP reads/effects, later activation,
 //! request-to-PC selection and native execution/retirement are not performed.
 use super::{Error, History, Installation, NativeImage, Placement, Step, align, write};
-use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
+use stela_contracts::bus::Width;
 
 pub mod activation;
 
@@ -286,18 +286,20 @@ fn bind(steps: &mut Vec<Step>, placement: Placement, code: u64, bound: &mut bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{
-            bus::{Access, Bus, Direction, MmioDevice, MmioError},
-            interrupt::InterruptLatch,
-            pmgr::install::{Action, Blockage, FinishError, Outcome},
-        },
-        dma::{Memory, tests::Ram},
-    };
     use alloc::{
         boxed::Box,
         collections::{BTreeMap, BTreeSet},
         vec,
+    };
+    use {
+        crate::platform::apple::pmgr::install::Action,
+        crate::platform::apple::pmgr::install::Blockage,
+        crate::platform::apple::pmgr::install::FinishError,
+        crate::platform::apple::pmgr::install::Outcome, stela_contracts::bus::Access,
+        stela_contracts::bus::Bus, stela_contracts::bus::Direction,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
+        stela_contracts::dma::Memory, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch,
     };
 
     const CAPTURED: u64 = 0xa5a55aa5;
@@ -365,7 +367,7 @@ mod tests {
             })
             .collect()
     }
-    fn bus(installation: &Installation) -> (Bus, crate::platform::apple::bus::DeviceId) {
+    fn bus(installation: &Installation) -> (Bus, stela_contracts::bus::DeviceId) {
         let mut addresses = BTreeSet::new();
         for step in &installation.steps {
             match step {

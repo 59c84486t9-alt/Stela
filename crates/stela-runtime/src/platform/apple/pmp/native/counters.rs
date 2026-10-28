@@ -9,15 +9,13 @@
 //! No hardware events, lifecycle eligibility, generic provider decode, arrival
 //! mask, IRQ admission, metrics completion or command ACK is supplied here.
 use super::power::DeviceTable;
-use crate::platform::apple::{
-    bus::Access,
-    ptd::{
-        Range,
-        transport::{Entry, notifications::LocalNotifications},
-    },
-};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use {
+    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::transport::Entry,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access,
+};
 
 type Error = &'static str;
 const ENTRIES_PER_BLOCK: u32 = 8;
@@ -670,12 +668,15 @@ fn next(value: u64) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Lifecycle, LifecycleState, MmioDevice, Width},
-        interrupt::InterruptLatch,
-        ptd::{Geometry, Ptd, UPDATE_OFFSET, transport::notifications::NativeProfile},
-    };
     use alloc::vec;
+    use {
+        crate::platform::apple::ptd::Geometry, crate::platform::apple::ptd::Ptd,
+        crate::platform::apple::ptd::UPDATE_OFFSET,
+        crate::platform::apple::ptd::transport::notifications::NativeProfile,
+        stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+        stela_contracts::interrupt::InterruptLatch,
+    };
     const LIVE: LifecycleState = LifecycleState {
         powered: true,
         clocked: true,
@@ -1359,15 +1360,15 @@ mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
     fn original_dynamic_slices_and_metadata_copy_match_actual_ptd_effects() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let pmp = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         let dt = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&pmp),
+            stela_formats::sha256(&pmp),
             "b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c"
         );
         assert_eq!(
-            crate::sha256(&dt),
+            stela_formats::sha256(&dt),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         for (start, end, hash) in [
@@ -1402,7 +1403,7 @@ mod tests {
                 "5ffb9090d6b2b23dcf29a50bca350fb6c57a73815f27d0ccab92c25f7a1e40aa",
             ),
         ] {
-            assert_eq!(crate::sha256(&pmp[start..end]), hash);
+            assert_eq!(stela_formats::sha256(&pmp[start..end]), hash);
         }
         let io = Node::root(&dt).unwrap().child("arm-io").unwrap();
         let pmp_node = io.child("pmp").unwrap();

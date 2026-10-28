@@ -15,9 +15,13 @@
 //! All writes to a locked register refuse; no ignored hardware write is
 //! invented. Destructive lifecycle changes invalidate knowledge rather than
 //! fabricating a reset value. Native protocol firmware alone supplies no word.
-use super::super::bus::{Access, Direction, LifecycleState, MmioDevice, MmioError, Width, refuse};
 use alloc::rc::Rc;
 use core::cell::RefCell;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "asc-iorvbar";
 const LOCK: u64 = 1;
@@ -271,10 +275,10 @@ impl MmioDevice for Auxiliary {
 mod tests {
     use super::*;
     use crate::platform::apple::asc::{Asc, Firmware, Lines, Message};
-    use crate::platform::apple::bus::Lifecycle;
-    use crate::platform::apple::interrupt::{AicInput, InterruptLatch};
-    use crate::platform::dma::{Memory, tests::Ram};
     use alloc::{boxed::Box, vec::Vec};
+    use stela_contracts::bus::Lifecycle;
+    use {stela_contracts::dma::Memory, stela_contracts::dma::test_support::Ram};
+    use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch};
 
     struct FetchOwner {
         ram: Ram,

@@ -11,6 +11,8 @@ name = "stela-dev"
 path = "src/main.rs"
 
 [dependencies]
+stela-contracts = { path = "../stela-contracts" }
+stela-formats = { path = "../stela-formats", default-features = false }
 anyhow.workspace = true
 clap.workspace = true
 serde = { workspace = true, features = ["std"] }

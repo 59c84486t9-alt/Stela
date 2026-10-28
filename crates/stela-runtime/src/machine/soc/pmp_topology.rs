@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn pmp_placement_reads_its_wrapper_and_needs_a_user_managed_nub() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values
@@ -235,7 +235,7 @@ mod tests {
             .join("DeviceTree.j473ap.adt");
         let bytes = std::fs::read(path).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let root = Node::root(&bytes).unwrap();

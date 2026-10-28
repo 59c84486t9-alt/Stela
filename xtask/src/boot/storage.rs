@@ -157,7 +157,7 @@ pub(super) fn write_volume(
                 .with_context(|| format!("restore manifest {}", manifest.display()))?;
             // The block hashes the manifest names go beside it, so the
             // restore host needs no scan of the payload.
-            let parsed = stela_runtime::payload::PayloadManifest::parse(&fs::read(manifest)?)
+            let parsed = stela_formats::payload::PayloadManifest::parse(&fs::read(manifest)?)
                 .map_err(|error| anyhow::anyhow!("{}: {error}", manifest.display()))?;
             if let Some(blocks) = &parsed.block_hashes {
                 let from = manifest.with_file_name(&blocks.file);

@@ -13,8 +13,8 @@
 //! allocations. An actual no-buffer/disabled/filtered return is an Emitted
 //! outcome with its source code; it does not claim any record was published.
 use super::platform::owner::Completion;
-use crate::platform::apple::bus::Access;
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
+use stela_contracts::bus::Access;
 
 mod protocol;
 use protocol::{Command, encode_body};
@@ -1011,9 +1011,9 @@ impl<B: Backend> Owner<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::collections::VecDeque;
     use core::cell::RefCell;
+    use stela_contracts::interrupt::InterruptLatch;
 
     type WriteLog = Rc<RefCell<Vec<(Request, u64, Vec<u8>)>>>;
     #[derive(Clone)]

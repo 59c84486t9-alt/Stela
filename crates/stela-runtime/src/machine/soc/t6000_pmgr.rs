@@ -128,7 +128,7 @@ impl Descriptor {
             tuning,
             power,
             coverage_requirement,
-            source_sha256: crate::sha256(tree),
+            source_sha256: stela_formats::sha256(tree),
         })
     }
     pub fn layout(&self) -> Result<t6000::Layout<'_>, &'static str> {
@@ -152,7 +152,7 @@ mod original {
     fn original_complete_descriptor_and_sparse_ownership_have_no_fabricated_state() {
         let data = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_ADT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let d = Descriptor::parse(&data, 0x6000, 8, 0).unwrap();
@@ -219,7 +219,7 @@ mod original {
     fn original_descriptor_rejects_incomplete_or_crossed_resource_owners() {
         let original = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_ADT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&original),
+            stela_formats::sha256(&original),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         fn offset(bytes: &[u8], property: &str) -> usize {

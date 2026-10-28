@@ -26,7 +26,7 @@ impl Fixture {
         let body: Vec<u8> = (0..BODY_BYTES)
             .map(|index| index.wrapping_mul(73).wrapping_add(index >> 8) as u8)
             .collect();
-        let sha256 = stela_runtime::sha256(&body);
+        let sha256 = stela_formats::sha256(&body);
         thread::spawn(move || {
             let result = server
                 .accept()
@@ -154,7 +154,7 @@ mod tests {
         assert!(headers.contains(&format!("\r\nContent-Length: {BODY_BYTES}\r\n")));
         let body = &response[split..];
         assert_eq!(body.len(), BODY_BYTES);
-        assert_eq!(stela_runtime::sha256(body), fixture.sha256);
+        assert_eq!(stela_formats::sha256(body), fixture.sha256);
         assert_eq!(
             fixture.sha256,
             "1f1747c499dd2b60e4aad488fd4cb9ba0d4df3f9be8f91827f2d6bb90f94384e"

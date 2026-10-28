@@ -1564,7 +1564,7 @@ fn host_info(hardware: &hardware::Hardware, flavor: u32, count: u32) -> Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::Chip;
+    use stela_contracts::Chip;
 
     fn words(reply: Reply) -> Vec<u32> {
         let Reply::Success(body) = reply else {

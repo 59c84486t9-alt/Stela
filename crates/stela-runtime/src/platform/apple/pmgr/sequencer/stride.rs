@@ -67,12 +67,15 @@ pub(super) fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
 mod tests {
     use super::*;
     use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
-    use crate::platform::apple::{
-        bus::{Access, Bus, MmioDevice, MmioError},
-        interrupt::InterruptLatch,
-        pmgr::sequencer::{FinishError, PacketCursor, PacketKind, RouteOutcome},
-    };
     use alloc::{boxed::Box, vec};
+    use {
+        crate::platform::apple::pmgr::sequencer::FinishError,
+        crate::platform::apple::pmgr::sequencer::PacketCursor,
+        crate::platform::apple::pmgr::sequencer::PacketKind,
+        crate::platform::apple::pmgr::sequencer::RouteOutcome, stela_contracts::bus::Access,
+        stela_contracts::bus::Bus, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::MmioError, stela_contracts::interrupt::InterruptLatch,
+    };
 
     fn cursor(
         base: u64,

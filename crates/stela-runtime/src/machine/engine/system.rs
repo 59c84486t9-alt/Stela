@@ -18,27 +18,32 @@ use super::{
         tlbi::{self, Reach, Scope},
     },
 };
-use crate::machine::{
-    CpuProfile,
-    amu::{self, Amu},
-    cpu::{
-        Cpu, Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE,
-        TranslationRegime,
-    },
-    debug::{self, DCC_FULL},
-    exception::{self, Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
-    pmu::Pmu,
-    registers::{Lines, Refusal, trap_iss},
-    system::{
-        ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
-        Feature, File, Limit, Operation, Pstate, Register, Stage, Tlbi, helpers::sign_extend,
-    },
-    timer::{self, Channel, agt::Bank},
-};
 use alloc::vec::Vec;
 use core::cell::Cell;
 use stela_compiler::aarch64::system::registers::{Encoding, RegisterAccess};
 use stela_compiler::x86_64::cache_clean;
+use {
+    crate::machine::CpuProfile, crate::machine::amu, crate::machine::amu::Amu,
+    crate::machine::cpu::Cpu, crate::machine::cpu::Exception, crate::machine::cpu::HCR_AMO,
+    crate::machine::cpu::HCR_FMO, crate::machine::cpu::HCR_IMO, crate::machine::cpu::HCR_TGE,
+    crate::machine::cpu::HCR_VF, crate::machine::cpu::HCR_VI, crate::machine::cpu::HCR_VSE,
+    crate::machine::cpu::TranslationRegime, crate::machine::debug, crate::machine::debug::DCC_FULL,
+    crate::machine::exception, crate::machine::exception::Class, crate::machine::exception::DAIF_A,
+    crate::machine::exception::DAIF_D, crate::machine::exception::DAIF_F,
+    crate::machine::exception::DAIF_I, crate::machine::exception::Pstate as PstateBits,
+    crate::machine::pmu::Pmu, crate::machine::registers::Lines, crate::machine::registers::Refusal,
+    crate::machine::registers::trap_iss, crate::machine::system::ACCESSORS,
+    crate::machine::system::AtAccess, crate::machine::system::CacheOp,
+    crate::machine::system::CacheScope, crate::machine::system::CacheType,
+    crate::machine::system::Context, crate::machine::system::Effect,
+    crate::machine::system::ErrorRecord, crate::machine::system::File,
+    crate::machine::system::Limit, crate::machine::system::Operation,
+    crate::machine::system::Pstate, crate::machine::system::Register,
+    crate::machine::system::Stage, crate::machine::system::Tlbi,
+    crate::machine::system::helpers::sign_extend, crate::machine::timer,
+    crate::machine::timer::Channel, crate::machine::timer::agt::Bank, stela_contracts::Chip,
+    stela_contracts::Feature,
+};
 
 /// The FPCR fields of every chip: AHP, DN, FZ, RMode and FZ16 (FEAT_FP16).
 /// The trap enables IOE, DZE, OFE, UFE, IXE and IDE are RAZ/WI because the M2
@@ -1512,13 +1517,13 @@ pub(super) fn identify(
 mod tests {
     use super::super::tests::{BASE, machine, machine_on, normal_memory, one_timer_bank};
     use super::{ACTLR_EN_TSO, ACTLR_ICDSB, Code, Translation};
-    use crate::machine::{
-        Chip, Stop,
-        cpu::{HCR_HCD, HCR_TGE, HCR_TSC},
-        exception::{Pstate, Vector},
-        system::{Feature, Register},
-    };
     use stela_compiler::aarch64::system::registers::Encoding;
+    use {
+        crate::machine::Stop, crate::machine::cpu::HCR_HCD, crate::machine::cpu::HCR_TGE,
+        crate::machine::cpu::HCR_TSC, crate::machine::exception::Pstate,
+        crate::machine::exception::Vector, crate::machine::system::Register, stela_contracts::Chip,
+        stela_contracts::Feature,
+    };
 
     /// Configure an unlocked authored CTRR region through the existing
     /// generation's register bank. This is not an original-image SMP test.
@@ -1729,7 +1734,7 @@ mod tests {
 
     #[test]
     fn core_monitor_construction_needs_a_qualified_layout_and_an_explicit_pe_clock() {
-        use crate::machine::{Identity, pmu};
+        use {crate::machine::pmu, stela_contracts::identity::Identity};
         for chip in Chip::ALL {
             let mut machine = machine_on(chip, &[]);
             assert!(machine.cpu.pmu.is_none());
@@ -1893,9 +1898,9 @@ mod tests {
 
     #[test]
     fn ccsidr_reads_the_cache_csselr_selects() {
-        use crate::machine::{
-            caches::{Cache, Caches},
-            registers::Identity,
+        use {
+            stela_contracts::caches::Cache, stela_contracts::caches::Caches,
+            stela_contracts::identity::Identity,
         };
         const CLIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 1);
         const CCSIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 0);
@@ -2183,7 +2188,7 @@ mod tests {
 
     #[test]
     fn smidr_tpidr2_priority_mapping_and_mpamsm_follow_the_chips_sme() {
-        use crate::machine::registers::Identity;
+        use stela_contracts::identity::Identity;
         const SMIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 6);
         const TPIDR2_EL0: Encoding = Encoding::new(3, 3, 13, 0, 5);
         const HCRX_EL2: Encoding = Encoding::new(3, 4, 1, 2, 2);
@@ -3038,7 +3043,7 @@ mod tests {
         assert_eq!(machine.cpu.read(Register::ESR_EL1) >> 26, 0);
         // A board without one leaves the reset address unknown: the read is
         // reported once.
-        let mut bare = machine_on(crate::machine::Chip::AppleM2, &[]);
+        let mut bare = machine_on(stela_contracts::Chip::AppleM2, &[]);
         bare.cpu.pstate = Pstate::reset(2);
         bare.system_instruction(access(true, RVBAR_EL2, 1)).unwrap();
         assert_eq!(bare.take_unmodeled().len(), 1);

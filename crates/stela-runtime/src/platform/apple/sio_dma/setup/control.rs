@@ -2,7 +2,7 @@
 //! This is a setup component, not a complete SIO firmware or version handshake.
 use super::{Effect, EffectResult, FinishError, Request, TunableProgram};
 use crate::platform::apple::sio_dma::Error;
-use crate::platform::dma::Port;
+use stela_contracts::dma::Port;
 
 /// A physical map range qualified by the actual owner. Geometry alone does
 /// not qualify its registers; requests still use checked machine MMIO.
@@ -227,15 +227,13 @@ impl TunableControl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{
-            bus::{Access, Bus, MmioError, Width},
-            gpio::Gpio,
-            interrupt::{AicInput, InterruptLatch},
-        },
-        dma::{Physical, tests::Ram},
-    };
     use alloc::{boxed::Box, vec};
+    use {
+        crate::platform::apple::gpio::Gpio, stela_contracts::bus::Access,
+        stela_contracts::bus::Bus, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+        stela_contracts::dma::Physical, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch,
+    };
 
     const TABLE: u64 = 0x8000;
     const BASE: u64 = 0x238300000;

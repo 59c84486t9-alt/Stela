@@ -10,11 +10,11 @@ use super::descriptor::Encoding;
 use super::fault::{Capture, Code, Level, Record};
 use super::handoff::Handoff;
 use super::streams::{self, Command, Snapshot};
-use crate::platform::{
-    apple::bus::Access,
-    dma::{DmaError, Iommu, Memory},
-};
 use alloc::{vec, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::dma::DmaError, stela_contracts::dma::Iommu,
+    stela_contracts::dma::Memory,
+};
 
 const PA_BITS: u32 = 42;
 const TRANSLATE: u32 = 1;
@@ -337,9 +337,9 @@ impl Iommu for Tables {
 mod tests {
     use super::super::context::{BoundsPolicy, TableLevel};
     use super::*;
-    use crate::platform::{
-        apple::interrupt::InterruptLatch,
-        dma::{Port, tests::Ram},
+    use {
+        stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch,
     };
 
     const ROOT: u64 = 0x8_0000_0000;

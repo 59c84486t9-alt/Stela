@@ -10,24 +10,20 @@
 //! the drivers wait for are modeled behaviorally (`pmp::duties`).
 use super::dcs::NativeDcs;
 pub use crate::platform::apple::dcs::native::{CHANNEL_STRIDE, CHANNELS, ChannelConfiguration};
-use crate::{
-    machine::soc::MemoryCache,
-    memory::{CanonicalRamService, RegisteredSystemRam},
-    platform::apple::{
-        bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-        dcs::native::ChannelProgress,
-        pmp::duties::Duties,
-        ptd::{
-            self, Geometry, Ptd,
-            transport::{
-                IRQ_STATUS,
-                notifications::{LocalNotifications, NativeProfile},
-                status,
-            },
-        },
-    },
-};
 use alloc::{sync::Arc, vec::Vec};
+use {
+    crate::machine::soc::MemoryCache, crate::memory::CanonicalRamService,
+    crate::memory::RegisteredSystemRam, crate::platform::apple::dcs::native::ChannelProgress,
+    crate::platform::apple::pmp::duties::Duties, crate::platform::apple::ptd,
+    crate::platform::apple::ptd::Geometry, crate::platform::apple::ptd::Ptd,
+    crate::platform::apple::ptd::transport::IRQ_STATUS,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    crate::platform::apple::ptd::transport::notifications::NativeProfile,
+    crate::platform::apple::ptd::transport::status, stela_contracts::bus::Access,
+    stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 const DCS_BYTES: u64 = CHANNEL_STRIDE * CHANNELS as u64;
 const PTD_OFFSET: u64 = DCS_BYTES;
@@ -350,13 +346,13 @@ impl crate::machine::apple::AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        machine::{Devices, apple::AppleDevices, soc::PtdBank},
-        memory::{ReservedSystemRamRange, system_ram::fixture},
-        platform::apple::{amcc, interrupt::InterruptLatch},
-    };
     use alloc::{boxed::Box, vec};
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use {
+        crate::machine::Devices, crate::machine::apple::AppleDevices, crate::machine::soc::PtdBank,
+        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
+        crate::platform::apple::amcc, stela_contracts::interrupt::InterruptLatch,
+    };
     const DCS: u64 = 0x201000000;
     const PTD: u64 = 0x23b3c0000;
     const DRAIN: u64 = 0xa40;
@@ -740,10 +736,10 @@ mod tests {
     #[cfg(feature = "std")]
     #[ignore = "requires unchanged original J473 DeviceTree via STELA_TEST_MCC_J473_DT"]
     fn original_j473_dcs_and_ptd_placement_builds_one_source_profiled_resource() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let bytes = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();

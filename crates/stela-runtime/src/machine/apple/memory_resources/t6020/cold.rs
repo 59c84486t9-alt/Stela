@@ -6,21 +6,15 @@
 //! Parent provider recipes, absent arrays and caller booleans are never
 //! controller/PMP/cache completion. Full source PowerStates remain retained.
 use super::{Configuration, MemoryController, Prepared, T6020Memory, amcc, validate_ram};
-use crate::{
-    machine::{
-        apple::AppleDevices,
-        soc::{PowerOwner, PowerStates},
-    },
-    memory::RegisteredSystemRam,
-    platform::apple::{
-        bus::{LifecycleState, Width},
-        pmgr::{
-            self, Pmgr,
-            coverage::{self, Consumer, LifecycleSinks},
-        },
-    },
-};
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use {
+    crate::machine::apple::AppleDevices, crate::machine::soc::PowerOwner,
+    crate::machine::soc::PowerStates, crate::memory::RegisteredSystemRam,
+    crate::platform::apple::pmgr, crate::platform::apple::pmgr::Pmgr,
+    crate::platform::apple::pmgr::coverage, crate::platform::apple::pmgr::coverage::Consumer,
+    crate::platform::apple::pmgr::coverage::LifecycleSinks, stela_contracts::bus::LifecycleState,
+    stela_contracts::bus::Width,
+};
 
 /// Private inputs retain actual source identities. Construction supplies no
 /// lifecycle status, native topology, firmware PTD service or cache grant.
@@ -345,18 +339,15 @@ fn contains(descriptor: &T6020Memory, address: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        machine::soc::{ClockRole, PowerResource},
-        platform::apple::{
-            bus::Access,
-            interrupt::InterruptLatch,
-            pmgr::{
-                PowerState,
-                coverage::{Admission, Domain, DomainId},
-            },
-        },
-    };
     use alloc::boxed::Box;
+    use {
+        crate::machine::soc::ClockRole, crate::machine::soc::PowerResource,
+        crate::platform::apple::pmgr::PowerState,
+        crate::platform::apple::pmgr::coverage::Admission,
+        crate::platform::apple::pmgr::coverage::Domain,
+        crate::platform::apple::pmgr::coverage::DomainId, stela_contracts::bus::Access,
+        stela_contracts::interrupt::InterruptLatch,
+    };
     const SUPPLY: u64 = 0x1000;
     fn id(device: u16) -> DomainId {
         DomainId { die: 0, device }

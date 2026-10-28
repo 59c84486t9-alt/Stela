@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn io_access_description_preserves_optional_controls_and_absolute_page_basis() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let chosen = |partial_enable: bool, extra_address_byte: bool| {
             let mut properties: Vec<(String, Vec<u8>)> = vec![
                 ("name".into(), b"ioa-ctrr-a\0".to_vec()),
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn every_filled_amcc_lock_group_is_described() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let word = |value: u32| value.to_le_bytes().to_vec();
         let group = |name: &str, index: u32, filled: bool| {
             let mut properties = vec![("name".to_string(), [name.as_bytes(), &[0]].concat())];
@@ -432,7 +432,7 @@ mod tests {
     /// AMCC aperture.
     #[test]
     fn an_mcc_places_its_cache_channels_and_ptd_bank() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let u32s = |cells: &[u32]| {

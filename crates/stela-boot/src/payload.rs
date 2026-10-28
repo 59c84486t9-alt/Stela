@@ -23,14 +23,7 @@ use alloc::{
     vec::Vec,
 };
 use sha2::{Digest, Sha256};
-use stela_runtime::payload::{
-    CopyError, Layout, MANIFEST_FILE, MemberRead, PayloadError, PayloadManifest, PayloadSource,
-    ReadAt, copy_verified,
-    gpt::{self, Disk, Guid, Request, Role},
-    images_directory, slice_count, slice_path,
-    staging::{self, Header},
-    zip::{Archive, MemberStream},
-};
+use {stela_formats::payload::CopyError, stela_formats::payload::Layout, stela_formats::payload::MANIFEST_FILE, stela_formats::payload::MemberRead, stela_formats::payload::PayloadError, stela_formats::payload::PayloadManifest, stela_formats::payload::PayloadSource, stela_formats::payload::ReadAt, stela_formats::payload::copy_verified, stela_formats::payload::gpt, stela_formats::payload::gpt::Disk, stela_formats::payload::gpt::Guid, stela_formats::payload::gpt::Request, stela_formats::payload::gpt::Role, stela_formats::payload::images_directory, stela_formats::payload::slice_count, stela_formats::payload::slice_path, stela_formats::payload::staging, stela_formats::payload::staging::Header, stela_formats::payload::zip::Archive, stela_formats::payload::zip::MemberStream};
 use uefi::{
     CString16, Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
@@ -828,7 +821,7 @@ fn stage(
     payload_path: &str,
 ) -> Result<(), &'static str> {
     let source_json = source.manifest.to_json();
-    let header = Header::plan(subset, stela_runtime::sha256(source_json.as_bytes()));
+    let header = Header::plan(subset, stela_formats::sha256(source_json.as_bytes()));
     let mut target = find_target(install, payload_path)?;
     output::arguments(format_args!(
         "TARGET path={} block={} blocks={}\n",

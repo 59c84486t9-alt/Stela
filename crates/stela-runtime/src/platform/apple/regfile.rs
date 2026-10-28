@@ -2,8 +2,8 @@
 //! share a width and a role the model gives meaning to. An offset no span
 //! covers, or an access of another width, has no described meaning and
 //! refuses.
-use super::bus::Width;
 use alloc::collections::BTreeMap;
+use stela_contracts::bus::Width;
 
 /// Registers `[start, end)` of `width`, one every `width` bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

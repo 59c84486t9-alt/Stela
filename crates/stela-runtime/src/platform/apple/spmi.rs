@@ -71,11 +71,13 @@
 mod config;
 pub use config::{Configuration, Profile};
 
-use super::{
-    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    interrupt::{AicInput, Wire},
-};
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire,
+};
 
 pub const BANK_BYTES: u64 = 0x4000;
 /// Bank B's device offset; the placement maps `reg[1]` here.
@@ -678,7 +680,7 @@ impl MmioDevice for Spmi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     // The Gen1 and Gen2 offsets and status bits.
     const STATUS: u64 = 0x00;
@@ -1322,7 +1324,7 @@ mod tests {
         );
         c.attach_with_interrupt(15, 2, Box::new(model)).unwrap();
         struct Sink(alloc::rc::Rc<core::cell::Cell<bool>>, Wire);
-        impl crate::platform::apple::interrupt::InterruptSink for Sink {
+        impl stela_contracts::interrupt::InterruptSink for Sink {
             fn set_level(&mut self, wire: Wire, asserted: bool) {
                 assert_eq!(wire, self.1);
                 self.0.set(asserted);
@@ -1542,7 +1544,7 @@ mod tests {
     }
     #[test]
     fn mounted_spmi_aliases_share_one_checked_controller_capability() {
-        use crate::platform::apple::bus::Bus;
+        use stela_contracts::bus::Bus;
         let mut bus = Bus::new();
         let device = bus.add(Box::new(controller()));
         bus.map(device, 0x10000, BANK_BYTES, 0).unwrap();
@@ -1769,10 +1771,10 @@ mod tests {
     #[test]
     #[ignore = "requires original26A434 J314s DT through STELA_TEST_SPMI_DT"]
     fn original_j314s_all_seven_gen1_resource_views_match_the_qualified_contract() {
-        use crate::machine::adt::Node;
+        use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&data),
+            stela_formats::sha256(&data),
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let root = Node::root(&data).unwrap();
@@ -1863,7 +1865,7 @@ mod tests {
         let bytes =
             std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
         );
         let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());

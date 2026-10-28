@@ -7,11 +7,11 @@
 mod t6000;
 
 use super::records::{Layout, Record};
-use crate::{
-    machine::{Chip, adt::Node, engine::ProcessorTarget, registers::Identity},
-    platform::apple::pmgr::coverage::DomainId,
-};
 use alloc::{collections::BTreeSet, vec::Vec};
+use {
+    crate::machine::engine::ProcessorTarget, crate::platform::apple::pmgr::coverage::DomainId,
+    stela_contracts::Chip, stela_contracts::adt::Node, stela_contracts::identity::Identity,
+};
 
 /// The existing board reader supplies these normalized views in original
 /// record order. This module reuses that reader's record parser to check the

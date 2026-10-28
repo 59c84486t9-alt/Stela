@@ -4,7 +4,7 @@
 //! permissions, subpage bounds and valid bits. m1n1's dart8020.py names the
 //! wider address fields through bit39. A profile's smaller PA width must
 //! reject those high address bits rather than silently truncate them.
-use crate::platform::dma::DmaError;
+use stela_contracts::dma::DmaError;
 
 const VALID: u64 = 1;
 /// DART1: subpage protection disable. DART2: no-cache. Neither adds an

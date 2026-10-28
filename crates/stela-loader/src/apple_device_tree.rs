@@ -18,7 +18,7 @@ pub mod assigned;
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
-pub use stela_runtime::boot_bundle::schema::Placeholder;
+pub use stela_formats::boot_bundle::schema::Placeholder;
 
 /// `kPropNameLength`: the NUL-padded property name field.
 pub const PROPERTY_NAME_BYTES: usize = 32;

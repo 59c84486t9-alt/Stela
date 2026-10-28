@@ -31,11 +31,11 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use stela_runtime::{
-    apfs::{self, ApfsError, Container, FileKind, Volume, volume::ROOT_DIR_INO_NUM},
-    img4,
-    payload::ReadAt,
-    sha256,
+use {
+    stela_formats::apfs, stela_formats::apfs::ApfsError, stela_formats::apfs::Container,
+    stela_formats::apfs::FileKind, stela_formats::apfs::Volume,
+    stela_formats::apfs::volume::ROOT_DIR_INO_NUM, stela_formats::img4,
+    stela_formats::payload::ReadAt, stela_formats::sha256,
 };
 
 /// The variant recorded for a bundle read from an Update volume.

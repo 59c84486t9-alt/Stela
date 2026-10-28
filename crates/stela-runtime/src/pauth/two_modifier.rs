@@ -1,6 +1,9 @@
 //! Two-modifier instruction PAuth (FEAT_PAuth_LR forms).
 
-use super::{AuthResult, AuthenticationError, Context, Key, Version};
+use {
+    super::AuthResult, super::AuthenticationError, super::Context, super::Version,
+    stela_contracts::pauth::Key,
+};
 
 const FIRST_MODIFIER_LOW_BIT: u32 = 4;
 const SECOND_MODIFIER_LOW_BIT: u32 = 5;

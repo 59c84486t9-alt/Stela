@@ -98,18 +98,15 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{
-            bus::Access,
-            dart::gen3::{
-                context::Context,
-                fault::{Code, Record},
-                handoff::Handoff,
-                tables::Tables,
-            },
-            interrupt::InterruptLatch,
-        },
-        dma::{DmaError, Iommu, Memory, Port, tests::Ram},
+    use {
+        crate::platform::apple::dart::gen3::context::Context,
+        crate::platform::apple::dart::gen3::fault::Code,
+        crate::platform::apple::dart::gen3::fault::Record,
+        crate::platform::apple::dart::gen3::handoff::Handoff,
+        crate::platform::apple::dart::gen3::tables::Tables, stela_contracts::bus::Access,
+        stela_contracts::dma::DmaError, stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::Port, stela_contracts::dma::test_support::Ram,
+        stela_contracts::interrupt::InterruptLatch,
     };
 
     const PAGE: u64 = 0x4000;

@@ -227,9 +227,9 @@ impl CompileBlock {
         let preparation_requirements = plan.memory_requirements();
         let compiled = plan.compile()?;
         let mut manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot","target_cpu":cpu_target.id(),
-            "source_bytes":compiled.source_bytes,"source_sha256":stela_runtime::sha256(&source[..compiled.source_bytes]),
+            "source_bytes":compiled.source_bytes,"source_sha256":stela_formats::sha256(&source[..compiled.source_bytes]),
             "guest_base":guest_base,"abi":options.profile().abi(),
-            "native_sha256":stela_runtime::sha256(&compiled.native.x86_64_code),
+            "native_sha256":stela_formats::sha256(&compiled.native.x86_64_code),
             "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
             "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
             "verified":false});
@@ -313,10 +313,10 @@ impl CompileLeaf {
             "schema_version": 1,
             "kind": "raw_arm64_leaf_aot",
             "target_cpu":cpu_target.id(),
-            "source_sha256": stela_runtime::sha256(source),
+            "source_sha256": stela_formats::sha256(source),
             "guest_base": guest_base,
             "guest_instructions": source.len() / 4,
-            "native_sha256": stela_runtime::sha256(&block.x86_64_code),
+            "native_sha256": stela_formats::sha256(&block.x86_64_code),
             "native_bytes": block.x86_64_code.len(),
             "source_map": block.source_map,
             "abi": options.profile().abi(),

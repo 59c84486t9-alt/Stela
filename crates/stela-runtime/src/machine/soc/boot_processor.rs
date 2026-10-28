@@ -73,8 +73,8 @@ pub(super) fn boot_processor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
     use alloc::vec::Vec;
+    use stela_contracts::adt::encode;
 
     fn tree(states: &[Option<&[u8]>]) -> Vec<u8> {
         let children: Vec<_> = states

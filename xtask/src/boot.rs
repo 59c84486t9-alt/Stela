@@ -31,8 +31,10 @@ use std::{
     process::{Command as Process, ExitCode, Stdio},
     time::{Duration, Instant},
 };
-use stela_runtime::payload::{
-    PayloadError, PayloadSource, ReadAt, copy_verified, gpt, staging::StagedSource,
+use {
+    stela_formats::payload::PayloadError, stela_formats::payload::PayloadSource,
+    stela_formats::payload::ReadAt, stela_formats::payload::copy_verified,
+    stela_formats::payload::gpt, stela_formats::payload::staging::StagedSource,
 };
 
 mod audio_check;

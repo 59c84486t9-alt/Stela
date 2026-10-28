@@ -26,10 +26,14 @@ pub mod install;
 pub mod sequencer;
 pub mod t6000;
 
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "pmgr";
 
@@ -309,7 +313,7 @@ impl MmioDevice for Pmgr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     /// `t8112.dtsi` pmgr base and `t8112-pmgr.dtsi` `ps_uart0` / `ps_aic`.
     const PMGR: u64 = 0x2_3b70_0000;

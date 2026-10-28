@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn typec_placement_distinguishes_i2c_addresses_from_mmio_and_preserves_phy_aliases() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let c = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let r = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let hpm = |name: &[u8], address: u32, rid: u32, personality: Option<&[u8]>| {
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let words = |cells: &[u32]| {
             cells
                 .iter()

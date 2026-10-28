@@ -12,10 +12,7 @@ use super::bundle::{self, Bytes};
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use stela_drivers::block::BlockDevice;
-use stela_runtime::{
-    payload::{Layout, PayloadManifest, piece_name, pieces::Joined},
-    pc::fat32::Fat32,
-};
+use {stela_formats::payload::Layout, stela_formats::payload::PayloadManifest, stela_formats::payload::piece_name, stela_formats::payload::pieces::Joined, stela_runtime::pc::fat32::Fat32};
 use uefi::proto::media::file::Directory;
 
 /// The joined install medium the restore host reads.

@@ -50,8 +50,11 @@
 //! bank's EL1&0 CNTKCTL from EL1 and EL2 alike (inference: SPTM saves it,
 //! clears it for an EL1 guest whose CNTKCTL it then writes through
 //! AGTCNTKCTL_EL12, and restores it after).
-use super::super::{Chip, cpu::Cpu, impdef, system::Register};
 use stela_compiler::aarch64::system::registers::{CNTVCT_EL0, Encoding};
+use {
+    super::super::cpu::Cpu, super::super::impdef, super::super::system::Register,
+    stela_contracts::Chip,
+};
 
 macro_rules! encodings {
     ($($name:ident = $op0:literal, $op1:literal, $crn:literal, $crm:literal, $op2:literal;)*) => {

@@ -171,7 +171,7 @@ pub struct Stage2 {
 /// `Cpu::controls` states it in [`Controls::xs`] and [`Stage2::xs`].
 #[cfg(test)]
 pub(crate) fn test_xs() -> bool {
-    super::system::Feature::FEAT_XS.on(super::test_chip())
+    stela_contracts::Feature::FEAT_XS.on(super::test_chip())
 }
 
 /// The chip the tests run on, after checking that its identification

@@ -12,7 +12,11 @@
 //! `reg-private` and a 4 KiB component map within the DT's larger CoreSight
 //! region. Only the lock pair of that component is mapped here; other debug registers
 //! and accesses with undescribed widths or directions still refuse.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "coresight-software-lock";
 /// Offset of the write-only external debug lock-access register.
@@ -162,7 +166,7 @@ impl MmioDevice for PcSampler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     #[test]
     fn pc_sampler_latches_only_on_word_read_and_keeps_per_pe_state() {
         let mut sink = InterruptLatch::new();

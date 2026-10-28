@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use stela_runtime::builds::{self, Build};
+use {stela_formats::builds, stela_formats::builds::Build};
 
 /// Development override: a colon-separated list of guest roots.
 #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]

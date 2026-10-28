@@ -4,13 +4,11 @@
 //! IOVA in 4-KiB units without a length. DER supplies the container extent;
 //! the caller supplies its permitted maximum. This is source-integrity
 //! evidence only: measurement never authenticates Image4 or boots sepOS.
-use super::der;
-pub(crate) mod rsa;
 pub mod signature;
 
-use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
 use sha2::{Digest, Sha256};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 const SEQUENCE: u8 = 0x30;
 const IA5: u8 = 0x16;
@@ -148,9 +146,9 @@ pub fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{bus::Access, interrupt::InterruptLatch},
-        dma::{Iommu, Memory, tests::Ram},
+    use {
+        stela_contracts::bus::Access, stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
     };
 
     struct Mapping {

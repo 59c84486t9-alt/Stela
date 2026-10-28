@@ -10,36 +10,26 @@ compile_error!(
     "freestanding runtime requires aborting panic; platform must terminate the machine on panic"
 );
 pub mod amx;
-pub mod apfs;
 pub mod blocks;
-pub mod boot_bundle;
-pub mod builds;
 mod checksum;
 pub mod clock;
-#[cfg(feature = "std")]
-pub mod code_signature;
 pub mod commpage;
 pub mod darwin;
 #[cfg(feature = "std")]
 pub mod dispatch;
 pub mod execution;
 mod floating;
-mod hash;
 #[cfg(all(feature = "std", target_os = "macos", target_arch = "x86_64"))]
 pub mod hosted;
 #[cfg(feature = "std")]
 pub mod hosted_registry;
-pub mod img4;
 #[cfg(feature = "std")]
 mod json;
-pub mod lzfse;
 pub mod mach;
 pub mod machine;
 pub mod memory;
 pub mod pauth;
-pub mod payload;
 mod platform;
-pub mod preboot;
 pub mod restore;
 /// Stela's own IPv4 client stack over any raw Ethernet link.
 pub use platform::net;
@@ -60,7 +50,6 @@ pub mod translations;
 #[cfg(feature = "std")]
 use anyhow::ensure;
 use anyhow::{Context, Result};
-pub use hash::sha256;
 #[cfg(feature = "std")]
 pub use json::{read_json, write_json};
 use serde::Serialize;
@@ -71,6 +60,7 @@ use std::path::{Path, PathBuf};
 use stela_compiler::GuestAddress;
 #[cfg(feature = "std")]
 use stela_compiler::NativeBlock;
+use stela_formats::sha256;
 
 fn compiler_source_sha256() -> &'static str {
     stela_compiler::SOURCE_SHA256

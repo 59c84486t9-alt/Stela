@@ -10,9 +10,9 @@ use super::{
     store::{MAX_READ_BYTES, Store},
     stream::{ByteStream, Endian, Framed, Output},
 };
-use crate::payload::ReadAt;
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 use core::task::Poll;
+use stela_formats::payload::ReadAt;
 pub const PORT: u16 = 62078;
 pub const PROTOCOL: u64 = 15;
 const MAX_JOBS: usize = 16;
@@ -656,19 +656,32 @@ mod tests {
         stream::tests::{Memory, receive},
     };
     use super::*;
-    fn ready() -> (Session, Answers<crate::payload::tests::Memory>) {
+    fn ready() -> (
+        Session,
+        Answers<stela_formats::payload::test_support::Memory>,
+    ) {
         let (session, answers, _) = ready_with(fixture(b"payload", false));
         (session, answers)
     }
-    type Fixture = super::super::store::Store<crate::payload::tests::Memory>;
+    type Fixture = super::super::store::Store<stela_formats::payload::test_support::Memory>;
     /// A session past StartRestore, and the StartRestore request it sent.
-    fn ready_with(store: Fixture) -> (Session, Answers<crate::payload::tests::Memory>, Value) {
+    fn ready_with(
+        store: Fixture,
+    ) -> (
+        Session,
+        Answers<stela_formats::payload::test_support::Memory>,
+        Value,
+    ) {
         ready_with_fdr(store, None)
     }
     fn ready_with_fdr(
         store: Fixture,
         diagnostic: Option<super::super::fdr::Diagnostic>,
-    ) -> (Session, Answers<crate::payload::tests::Memory>, Value) {
+    ) -> (
+        Session,
+        Answers<stela_formats::payload::test_support::Memory>,
+        Value,
+    ) {
         let mut s = Session::new();
         let mut a = Answers::new(store);
         a.fdr_diagnostic = diagnostic;

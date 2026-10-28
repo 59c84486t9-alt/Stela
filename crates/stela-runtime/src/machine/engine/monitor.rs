@@ -92,8 +92,11 @@ mod tests {
         tests::{BASE, FakeHost},
     };
     use super::*;
-    use crate::machine::{Chip, Identity, exception::Pstate};
     use alloc::{format, vec::Vec};
+    use {
+        crate::machine::exception::Pstate, stela_contracts::Chip,
+        stela_contracts::identity::Identity,
+    };
 
     const GENTER: u32 = 0x0020_1420;
     const GEXIT: u32 = 0x0020_1400;

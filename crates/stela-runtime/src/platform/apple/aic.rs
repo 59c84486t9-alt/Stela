@@ -126,12 +126,17 @@ pub mod layout;
 pub use layout::Aic2Layout;
 
 use super::aic1::AIC1_MAX_IRQ;
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
-use super::interrupt::{AicInput, CpuIndex, Wire};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
+use {
+    stela_contracts::interrupt::AicInput, stela_contracts::interrupt::CpuIndex,
+    stela_contracts::interrupt::Wire,
+};
 
 const NAME: &str = "aic2";
 
@@ -814,7 +819,7 @@ impl MmioDevice for Aic2 {
 mod tests {
     use super::layout::Aic2DieLayout;
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     const NR_IRQ: u16 = 0x3a0;
     const MAX_IRQ: u16 = 0x400;

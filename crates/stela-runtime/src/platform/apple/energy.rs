@@ -18,7 +18,11 @@
 //! both counts zero: accumulators disabled, with no other field set, as a
 //! boot chain that programs none of them would. Configuration then holds
 //! full writes. iBoot's conditional programming is not reproduced.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "cpu-energy";
 const SRAM: u64 = 8;
@@ -103,7 +107,7 @@ impl MmioDevice for Energy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn the_boot_stage_hands_off_disabled_energy_and_samples_hold_without_physical_activity() {

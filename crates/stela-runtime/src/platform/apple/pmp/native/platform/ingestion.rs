@@ -14,10 +14,10 @@ mod model;
 use super::super::counters::{Copied, Frame, Frames, Retained};
 use super::owner::{Completion, CounterContext, EffectValue};
 use super::{CounterReference, Descriptor, Ordinal};
-use crate::platform::apple::bus::Access;
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
 pub use arithmetic::{Delta, Pair, Statistics};
 pub use model::{Auxiliary, Configuration, Frequency};
+use stela_contracts::bus::Access;
 
 const TIME_MASK: u64 = (1 << 54) - 1;
 /// Pure original101b974 field arithmetic over supplied frame data; no copy,
@@ -1151,15 +1151,15 @@ mod tests {
     use super::super::super::counters::{Claim, CopyStep};
     use super::super::super::power::DeviceTable;
     use super::*;
-    use crate::platform::apple::{
-        bus::{LifecycleState, MmioDevice, Width},
-        interrupt::InterruptLatch,
-        ptd::{
-            Geometry, Ptd, Range, UPDATE_OFFSET,
-            transport::notifications::{LocalNotifications, NativeProfile},
-        },
-    };
     use core::cell::Cell;
+    use {
+        crate::platform::apple::ptd::Geometry, crate::platform::apple::ptd::Ptd,
+        crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+        crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+        crate::platform::apple::ptd::transport::notifications::NativeProfile,
+        stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+        stela_contracts::bus::Width, stela_contracts::interrupt::InterruptLatch,
+    };
     struct TestBackend {
         calls: Vec<(Request, Call)>,
         busy: bool,

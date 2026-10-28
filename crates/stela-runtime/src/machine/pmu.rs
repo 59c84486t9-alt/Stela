@@ -47,7 +47,7 @@
 //! selectors within the layout's field masks. An enabled event/slot must
 //! have qualified semantics; unsupported reconfiguration refuses atomically. M6's new controls refuse every access until their effects
 //! are independently qualified.
-use super::Chip;
+use stela_contracts::Chip;
 
 mod events;
 mod layout;

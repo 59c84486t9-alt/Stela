@@ -763,7 +763,7 @@ mod tests {
             panic!()
         };
         let policy = reply.required("Ap,LocalPolicy").unwrap().data().unwrap();
-        let parts = crate::img4::parse(policy).unwrap();
+        let parts = stela_formats::img4::parse(policy).unwrap();
         assert_eq!(parts.payload, LOCAL_POLICY);
         assert!(parts.manifest.is_some());
         answers.signer = Some(Signer {

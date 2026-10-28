@@ -666,15 +666,25 @@ mod tests {
     use core::cell::Cell;
     use sha2::{Digest, Sha256};
     use stela_loader::apple_device_tree::Node;
-    use stela_runtime::machine::{
-        Chip,
-        caches::{Cache, Caches},
-        registers::Identity,
-        soc::assigned::{
-            CacheId, Capacity, CapacityKind, ClusterId, ClusterSlot, CoreKind, DomainId,
-            InterruptId, InterruptTarget, KindId, PeSlot, PowerResource, ResourceProfile,
-            Resources, SharedCache, StartId, StartResource,
-        },
+    use {
+        stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::Caches,
+        stela_contracts::identity::Identity, stela_runtime::machine::soc::assigned::CacheId,
+        stela_runtime::machine::soc::assigned::Capacity,
+        stela_runtime::machine::soc::assigned::CapacityKind,
+        stela_runtime::machine::soc::assigned::ClusterId,
+        stela_runtime::machine::soc::assigned::ClusterSlot,
+        stela_runtime::machine::soc::assigned::CoreKind,
+        stela_runtime::machine::soc::assigned::DomainId,
+        stela_runtime::machine::soc::assigned::InterruptId,
+        stela_runtime::machine::soc::assigned::InterruptTarget,
+        stela_runtime::machine::soc::assigned::KindId,
+        stela_runtime::machine::soc::assigned::PeSlot,
+        stela_runtime::machine::soc::assigned::PowerResource,
+        stela_runtime::machine::soc::assigned::ResourceProfile,
+        stela_runtime::machine::soc::assigned::Resources,
+        stela_runtime::machine::soc::assigned::SharedCache,
+        stela_runtime::machine::soc::assigned::StartId,
+        stela_runtime::machine::soc::assigned::StartResource,
     };
 
     fn cpuid_identity(maximum: u32, vendor: [u32; 3]) -> native::Cpuid {
@@ -1093,8 +1103,8 @@ mod tests {
     }
     fn captured_live_tree(mut tree: DeviceTree, command: &str) -> LiveTree {
         use crate::boot_live_tree::Ram;
+        use stela_formats::boot_bundle::LoadedRegion;
         use stela_loader::boot_args::{self, BootArgs, Video};
-        use stela_runtime::boot_bundle::LoadedRegion;
         const ARGS: u64 = 0x1000;
         const TREE: u64 = 0x10000;
         const BYTES: usize = 1 << 20;
@@ -1168,7 +1178,7 @@ mod tests {
             .join("DeviceTree.j473ap.adt");
         let original = std::fs::read(file).unwrap();
         assert_eq!(
-            stela_runtime::sha256(&original),
+            stela_formats::sha256(&original),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let mut tree = DeviceTree::parse(&original).unwrap();
@@ -1295,7 +1305,7 @@ mod tests {
     #[test]
     #[ignore = "requires retained original26A434J314s and prepared bundle DT"]
     fn original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission() {
-        use stela_runtime::machine::{adt, soc};
+        use {stela_contracts::adt, stela_runtime::machine::soc};
         let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
         let raw = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_PREPARED_DT").unwrap()).unwrap();
         assert_eq!(

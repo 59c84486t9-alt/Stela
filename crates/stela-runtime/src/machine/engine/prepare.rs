@@ -9,15 +9,15 @@
 //! those bytes in that variant, which is what lets the store key it by its
 //! page bytes and context alone.
 use super::{FETCH_PAGE, INSTRUCTION, MAX_BLOCK_BYTES, PROFILE, is_floating_point};
-use crate::{
-    machine::chip::{AdmitTable, Check, Chip},
-    translations::{self, Digest},
-};
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use stela_compiler::{
     CompileError, GuestAddress, TargetCpu,
     block::{self, CompilationPlan, CompiledBlock},
     x86_64::{MemoryChecks, NativeSystem},
+};
+use {
+    crate::translations, crate::translations::Digest, stela_contracts::chip::AdmitTable,
+    stela_contracts::chip::Check, stela_contracts::chip::Chip,
 };
 
 /// The bytes of the source window of a block at `pc`: to the end of its
@@ -322,7 +322,7 @@ pub(crate) fn test_preparation() -> Preparation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::system::Feature;
+    use stela_contracts::Feature;
 
     /// A description makes its preparation again, and one whose withheld set
     /// has no admit table is refused rather than trusted.

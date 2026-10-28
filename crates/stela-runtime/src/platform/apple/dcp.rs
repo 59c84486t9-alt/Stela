@@ -41,14 +41,14 @@ pub mod swap;
 use super::asc::{Firmware, Message, TransitionRequest};
 use super::rtkit::{Endpoint, RtKit};
 use super::scanout::{Scanout, Surface};
-use crate::builds::Build;
-use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use stela_contracts::dma::Port;
+use stela_formats::builds::Build;
 
 /// The RTKit endpoint numbers the J473AP DCPEXT advertises to the AP. 0x37 is
 /// the IOMFB link service (DCPEXTEndpoint24); the AFK/EPIC endpoints are the
@@ -504,8 +504,8 @@ impl Firmware for Coprocessor {
 mod tests {
     use super::super::scanout::PixelFormat;
     use super::*;
-    use crate::builds::DEFAULT;
-    use crate::platform::dma::{DmaError, tests::Ram};
+    use stela_formats::builds::DEFAULT;
+    use {stela_contracts::dma::DmaError, stela_contracts::dma::test_support::Ram};
 
     const RAM: u64 = 0x8_0000_0000;
 
@@ -531,13 +531,13 @@ mod tests {
     }
 
     struct Identity;
-    impl crate::platform::dma::Iommu for Identity {
+    impl stela_contracts::dma::Iommu for Identity {
         fn page(&self) -> u64 {
             0x4000
         }
         fn translate(
             &mut self,
-            _: &mut dyn crate::platform::dma::Memory,
+            _: &mut dyn stela_contracts::dma::Memory,
             _: usize,
             iova: u64,
             _: u64,

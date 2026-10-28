@@ -5,12 +5,14 @@
 #[cfg(test)]
 use super::PTD_BYTES;
 use super::{MAX_ENTRIES, Range, UPDATE_OFFSET};
-use crate::platform::apple::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
-use crate::platform::apple::interrupt::Wire;
 use alloc::{collections::BTreeSet, rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::interrupt::Wire;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 
 pub mod notifications;
 pub mod status;
@@ -617,7 +619,7 @@ impl MmioDevice for Ptd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::{AicInput, InterruptLatch};
+    use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::InterruptLatch};
 
     fn lifecycle() -> LifecycleState {
         LifecycleState {

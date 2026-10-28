@@ -9,9 +9,13 @@
 //! at +40f8. The restore request completes immediately against the already
 //! retained configuration. Its completion is recorded; electrical effects and
 //! command readback are not proved. Other values and reads of it refuse.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::regfile::Held;
 use alloc::vec::Vec;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 const NAME: &str = "cpm-power";
 const RESTORE: u64 = 0x40f8;
 const THROTTLERS: [u64; 4] = [0x250, 0x270, 0x8400, 0x8408];
@@ -85,7 +89,7 @@ impl MmioDevice for Cpm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     #[test]
     fn throttlers_retain_configuration_and_restore_does_not_discard_it() {
         let mut sink = InterruptLatch::new();

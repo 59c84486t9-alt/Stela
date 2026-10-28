@@ -668,7 +668,7 @@ fn set32(bytes: &mut [u8], at: u64, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{hosted::hardware::Hardware, machine::Chip};
+    use {crate::hosted::hardware::Hardware, stela_contracts::Chip};
 
     #[test]
     fn parallelism_follows_the_edge_scheduler_over_the_m2() {

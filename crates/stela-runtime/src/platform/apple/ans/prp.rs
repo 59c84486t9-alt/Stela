@@ -6,8 +6,8 @@
 //! the next, page-aligned list page while more than one data page remains.
 //! Every list entry consumes data or chains to a whole list page, so the
 //! transfer limit bounds traversal even if a guest supplies a cyclic list.
-use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 pub(super) const MAX_TRANSFER: usize = 1024 * 1024;
 
@@ -106,9 +106,9 @@ impl Prps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{bus::Access, interrupt::InterruptLatch},
-        dma::{Physical, tests::Ram},
+    use {
+        stela_contracts::bus::Access, stela_contracts::dma::Physical,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
     };
 
     #[test]

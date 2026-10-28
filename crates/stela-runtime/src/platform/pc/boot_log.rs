@@ -1176,7 +1176,7 @@ mod tests {
 
     #[test]
     fn a_file_gives_the_block_runs_of_its_clusters_that_hold_the_layout() {
-        use crate::payload::pieces::Extent;
+        use stela_formats::payload::pieces::Extent;
         let file = |extents: &[(u64, u64)]| fat32::File {
             bytes: extents.iter().map(|e| e.1).sum(),
             extents: extents

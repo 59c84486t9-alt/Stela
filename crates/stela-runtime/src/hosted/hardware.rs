@@ -13,8 +13,8 @@ mod availability;
 pub use availability::DarwinAvailability;
 use availability::SharedScheduler;
 
-use crate::machine::{Chip, identification, soc};
 use anyhow::{Context, Result, bail, ensure};
+use {crate::machine::identification, crate::machine::soc, stela_contracts::Chip};
 
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 pub const CPU_SUBTYPE_ARM64E: u32 = 2;

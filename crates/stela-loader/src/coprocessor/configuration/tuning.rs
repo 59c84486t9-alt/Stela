@@ -7,7 +7,7 @@ use crate::coprocessor::Staged;
 use alloc::vec::Vec;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::sha256;
+use stela_formats::sha256;
 
 pub mod source;
 

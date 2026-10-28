@@ -14,13 +14,7 @@
 use super::network::Shared;
 use crate::output;
 use alloc::{collections::VecDeque, string::String};
-use stela_runtime::{
-    net::{
-        NetError, Transfer,
-        http::{self, Ranged},
-    },
-    payload::{Layout, PayloadManifest, ReadAt},
-};
+use {stela_runtime::net::NetError, stela_runtime::net::Transfer, stela_runtime::net::http, stela_runtime::net::http::Ranged, stela_formats::payload::Layout, stela_formats::payload::PayloadManifest, stela_formats::payload::ReadAt};
 
 /// How far [`Remote::pump`] fills ahead of the restore.
 const AHEAD: usize = 32 << 20;

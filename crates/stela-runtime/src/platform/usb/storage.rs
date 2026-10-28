@@ -272,7 +272,7 @@ impl MassStorage {
     /// identity across boots, and its model in INQUIRY.
     pub fn of(device: Box<dyn BlockDevice>) -> Result<Self, &'static str> {
         let identity = device.identity();
-        let digest = crate::hash::sha256(
+        let digest = stela_formats::sha256(
             alloc::format!("{}\0{}", identity.serial, identity.location).as_bytes(),
         );
         let serial = digest[..24].to_ascii_uppercase();

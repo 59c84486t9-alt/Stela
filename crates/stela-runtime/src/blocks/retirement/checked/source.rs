@@ -197,7 +197,7 @@ impl<'code> BoundSource<'code> {
             identity.guest_base == pc.0
                 && identity.abi == runtime.profile.abi()
                 && identity.target_cpu == runtime.target_cpu().id()
-                && identity.source_sha256 == crate::sha256(source)
+                && identity.source_sha256 == stela_formats::sha256(source)
                 && identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "source/compiler/profile/target differs"
         );

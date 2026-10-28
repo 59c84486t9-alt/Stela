@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn spi_nor_placement_uses_dt_ranges_bank_proxy_and_gpio_function() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let partitions: Vec<_> = [
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn ans2_placement_uses_phandles_interrupt_index_and_sparse_register_banks() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let cells = |values: &[u32]| {
             values

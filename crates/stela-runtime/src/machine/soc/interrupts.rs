@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn aic_vectors_follow_each_specifiers_own_parent() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let words = |cells: &[u32]| {
             cells
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn aic_inputs_split_vectors_into_dies() {
-        use crate::machine::adt::encode;
+        use stela_contracts::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let mask = |words: usize| {
             encode(

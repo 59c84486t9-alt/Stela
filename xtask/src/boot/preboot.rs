@@ -17,9 +17,9 @@ use stela_loader::{
     boot_bundle::{Manifest, Options},
     installed,
 };
-use stela_runtime::{
-    apfs::{self, Container},
-    payload::{ReadAt, gpt},
+use {
+    stela_formats::apfs, stela_formats::apfs::Container, stela_formats::payload::ReadAt,
+    stela_formats::payload::gpt,
 };
 
 /// The serial the NVMe disk reports, which `stela.cfg` names.

@@ -3,8 +3,11 @@
 //! at 0 and RES1 at 1 in every layout the PE's profile allows
 //! (`Register::res0`, `Register::res1`, and `WITHHELD_LAYOUTS` for a PE that
 //! withholds some of its chip's features).
-use super::{Chip, Feature, Register, WithheldLayout, generated::WITHHELD_LAYOUTS};
 use alloc::{boxed::Box, vec, vec::Vec};
+use {
+    super::Register, super::WithheldLayout, super::generated::WITHHELD_LAYOUTS,
+    stela_contracts::Chip, stela_contracts::Feature,
+};
 
 #[derive(Debug, Clone)]
 pub struct File {
@@ -96,7 +99,7 @@ impl File {
         if self.withheld & 1 << feature as u64 != 0 {
             Ok(false)
         } else {
-            self.chip.implemented(feature)
+            crate::machine::capabilities::implemented(self.chip, feature)
         }
     }
 

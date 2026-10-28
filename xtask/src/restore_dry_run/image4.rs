@@ -1,5 +1,5 @@
 //! Image4 as restored and the guest's Image4 validator read it, written
-//! independently of `stela_runtime::img4` and `restore::ticket` so the dry
+//! independently of `stela_formats::img4` and `restore::ticket` so the dry
 //! run does not check the host with the host's own parser.
 //!
 //! An `IMG4` is `SEQUENCE { IA5String "IMG4", IM4P, [0] IM4M, [1] IM4R? }`.

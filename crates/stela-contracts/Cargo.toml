@@ -1,0 +1,17 @@
+[package]
+name = "stela-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+std = ["serde/std"]
+test-support = []
+native-profile = []
+
+[dependencies]
+serde.workspace = true

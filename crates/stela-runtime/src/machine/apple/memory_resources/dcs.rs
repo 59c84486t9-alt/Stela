@@ -1,14 +1,16 @@
 //! Canonical RAM service join for the actual T8112 DCS channel owner.
 //! This component is composed into the prepared memory resource; it does not
 //! create another AMCC/PTD owner or qualify missing PMP service producers.
-use crate::{
-    memory::{CanonicalRamService, RegisteredSystemRam},
-    platform::apple::{
-        bus::{Access, Lifecycle, LifecycleState, MmioDevice, MmioError, Width},
-        dcs::native::{CHANNELS, ChannelConfiguration, ChannelProgress, Controller},
-    },
-};
 use alloc::{sync::Arc, vec::Vec};
+use {
+    crate::memory::CanonicalRamService, crate::memory::RegisteredSystemRam,
+    crate::platform::apple::dcs::native::CHANNELS,
+    crate::platform::apple::dcs::native::ChannelConfiguration,
+    crate::platform::apple::dcs::native::ChannelProgress,
+    crate::platform::apple::dcs::native::Controller, stela_contracts::bus::Access,
+    stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+};
 
 /// Exact channel backing and canonical guest RAM association. Clones retain
 /// the same controller, lifecycle, pending effects and actual memory identity.
@@ -128,11 +130,11 @@ mod tests {
     const GATING: u64 = 0x18;
     const REFRESH: u64 = 0x41c;
     const DRAIN: u64 = 0xa40;
-    use crate::{
-        memory::{ReservedSystemRamRange, system_ram::fixture},
-        platform::apple::interrupt::InterruptLatch,
-    };
     use core::{cell::UnsafeCell, ptr::NonNull};
+    use {
+        crate::memory::ReservedSystemRamRange, crate::memory::system_ram::fixture,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     const LIVE: LifecycleState = LifecycleState {
         powered: true,

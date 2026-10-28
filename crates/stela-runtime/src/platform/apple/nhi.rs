@@ -8,12 +8,16 @@
 //! capability template, CIO readiness or machine admission is supplied here.
 //! DMA completion is a separate retained phase so a fault cannot replay an
 //! already accepted frame. Payload and timestamp precede completion ownership.
-use super::bus::{Access, Direction as AccessDirection, MmioDevice, MmioError, Width, refuse};
-use super::interrupt::{AicInput, Wire};
-use crate::platform::dma::{DmaError, Port};
 use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
 pub use ring::Direction;
 use ring::{Descriptor, Ring, Transfer};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction as AccessDirection,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
+use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
+use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire};
 pub mod control;
 mod ring;
 pub mod router;
@@ -790,10 +794,13 @@ impl MmioDevice for Nhi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
-    use crate::platform::dma::{Iommu, Memory, tests::Ram};
     use alloc::rc::Rc;
     use core::cell::RefCell;
+    use stela_contracts::interrupt::InterruptLatch;
+    use {
+        stela_contracts::dma::Iommu, stela_contracts::dma::Memory,
+        stela_contracts::dma::test_support::Ram,
+    };
 
     #[derive(Default)]
     struct State {

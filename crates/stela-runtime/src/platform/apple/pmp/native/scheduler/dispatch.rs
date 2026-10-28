@@ -319,7 +319,7 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     struct Order {
         name: &'static str,
         log: Rc<RefCell<Vec<&'static str>>>,
@@ -475,7 +475,7 @@ mod tests {
 #[cfg(test)]
 mod retained_tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     struct AbandonedLease {
         runtime: Runtime,
         queue: Queue,

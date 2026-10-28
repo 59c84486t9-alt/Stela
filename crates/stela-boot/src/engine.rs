@@ -53,16 +53,7 @@ use stela_compiler::TargetCpu;
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle, installed};
 use stela_runtime::machine::apple::WallClock;
 use stela_runtime::machine::engine::{Call, step_timing};
-use stela_runtime::machine::{
-    Chip, Cpu, CpuProfile, Event, Host, Machine, PeerState, Stop, Transition,
-    apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
-    exception::Pstate,
-    identification::Speculation,
-    mount,
-    registers::encodings::DCZID_EL0,
-    soc,
-    system::Register,
-};
+use {stela_contracts::Chip, stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile, stela_runtime::machine::Event, stela_runtime::machine::Host, stela_runtime::machine::Machine, stela_runtime::machine::PeerState, stela_runtime::machine::Stop, stela_runtime::machine::Transition, stela_runtime::machine::apple::AicInput, stela_runtime::machine::apple::AicLayout, stela_runtime::machine::apple::AppleDevices, stela_runtime::machine::apple::ConsoleBusy, stela_runtime::machine::apple::ConsoleSink, stela_runtime::machine::apple::Range, stela_runtime::machine::exception::Pstate, stela_runtime::machine::identification::Speculation, stela_runtime::machine::mount, stela_runtime::machine::registers::encodings::DCZID_EL0, stela_runtime::machine::soc, stela_runtime::machine::system::Register};
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 use stela_runtime::restore::store::Verify;
 
@@ -861,7 +852,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 output::arguments(format_args!(
                     "NETWORK CHECK body bytes={} sha256={}\n",
                     body.len(),
-                    stela_runtime::sha256(&body)
+                    stela_formats::sha256(&body)
                 ));
                 output::arguments(format_args!("NETWORK CHECK passed\n"))
             }
@@ -1111,7 +1102,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             "GUEST IMAGE pa={:#x} bytes={} sha256={}\n",
             options.load,
             source.len(),
-            stela_runtime::sha256(source),
+            stela_formats::sha256(source),
         ));
         (options.entry, options.x0)
     };
@@ -1387,7 +1378,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             scanout,
             firmware: &firmware,
             build: loaded_source.as_ref().map(|source| {
-                stela_runtime::builds::find(&source.selected().product_build)
+                stela_formats::builds::find(&source.selected().product_build)
                     .unwrap_or_else(|error| output::fatal(&alloc::format!("{error}")))
             }),
         },
@@ -1450,7 +1441,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     let processor_power = match (&topology_source, &assigned, &loaded_source) {
         (Some(source), Some(assigned), Some(intake)) => {
-            let original = stela_runtime::machine::adt::Node::root(intake.original())
+            let original = stela_contracts::adt::Node::root(intake.original())
                 .unwrap_or_else(|| output::fatal("retained original source ADT is malformed"));
             devices
                 .connect_processor_power(
@@ -1479,7 +1470,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     let restore = source.map(|source| {
         let boot_ecid = tree
-            .and_then(stela_runtime::machine::adt::Node::root)
+            .and_then(stela_contracts::adt::Node::root)
             .and_then(|root| root.child("chosen"))
             .and_then(|chosen| chosen.property("unique-chip-id"))
             .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())

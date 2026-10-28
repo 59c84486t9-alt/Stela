@@ -181,7 +181,7 @@ fn payload_bytes<'a>(data: &'a [u8], source: &Payload) -> Result<&'a [u8]> {
         .get(start..end)
         .context("export payload exceeds image")?;
     ensure!(
-        source.sha256 == stela_runtime::sha256(bytes),
+        source.sha256 == stela_formats::sha256(bytes),
         "export payload differs from load plan"
     );
     Ok(bytes)
@@ -221,7 +221,7 @@ fn regular_address(image: &LoadPlan, preferred: u64, loaded: u64, value: u64) ->
 /// payload size and total name length are bounded.
 pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export>> {
     ensure!(
-        image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_runtime::sha256(data),
+        image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_formats::sha256(data),
         "export image identity differs from load plan"
     );
     let mut selected = None;
@@ -636,7 +636,7 @@ mod tests {
         let (mut data, mut image) = fixture(&trie(&[(b"a", 0, 0x300)]), false);
         image.payloads[0].sha256 = "wrong".into();
         assert!(parse(&data, &image, BASE).is_err());
-        image.payloads[0].sha256 = stela_runtime::sha256(
+        image.payloads[0].sha256 = stela_formats::sha256(
             &data[TRIE_OFFSET..TRIE_OFFSET + image.payloads[0].file.bytes as usize],
         );
         let mut duplicate = image.payloads[0].clone();

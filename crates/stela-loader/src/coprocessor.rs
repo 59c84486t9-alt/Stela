@@ -8,7 +8,7 @@ use crate::{boot_bundle::Source, im4p, kernel_collection::Segment, thread_state:
 use alloc::{string::String, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use stela_runtime::{pauth, sha256};
+use {stela_formats::sha256, stela_runtime::pauth};
 
 pub mod configuration;
 mod fixups;

@@ -31,7 +31,6 @@ use super::{
 use crate::hosted::darwin::THREAD_SELF_TRAP;
 use crate::hosted::unsupported::{self, Failure, Kind};
 use crate::machine::engine::RequirementKind;
-use crate::machine::{Chip, CpuProfile, Machine, NoDevices, Stop, system::Register};
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::{
     collections::BTreeMap,
@@ -42,6 +41,10 @@ use std::{
     },
 };
 use stela_compiler::TargetCpu;
+use {
+    crate::machine::CpuProfile, crate::machine::Machine, crate::machine::NoDevices,
+    crate::machine::Stop, crate::machine::system::Register, stela_contracts::Chip,
+};
 
 #[cfg(feature = "native-profile")]
 mod profile_output;

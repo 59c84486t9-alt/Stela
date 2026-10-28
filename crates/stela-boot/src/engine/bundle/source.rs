@@ -8,12 +8,11 @@ mod cpus;
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use sha2::{Digest, Sha256};
 use stela_loader::{apple_device_tree::DeviceTree, boot_bundle::ORIGINAL_DEVICE_TREE_FILE};
-use stela_runtime::{
-    boot_bundle::{Manifest, Source, Target, Verified},
-    machine::{
-        Chip,
-        soc::assigned::{ResourceProfile, SourceIdentity},
-    },
+use {
+    stela_contracts::Chip, stela_formats::boot_bundle::Manifest,
+    stela_formats::boot_bundle::Source, stela_formats::boot_bundle::Target,
+    stela_formats::boot_bundle::Verified, stela_runtime::machine::soc::assigned::ResourceProfile,
+    stela_runtime::machine::soc::assigned::SourceIdentity,
 };
 
 /// Retains the verified original and exact selected metadata. Original bytes
@@ -332,19 +331,19 @@ mod tests {
             },
             "sources": [{
                 "component": "RestoreDeviceTree", "member": "Firmware/test.im4p",
-                "container_sha256": stela_runtime::sha256(b"synthetic container"),
+                "container_sha256": stela_formats::sha256(b"synthetic container"),
                 "payload_type": "dtre", "description": "",
-                "decoded_bytes": original.len(), "decoded_sha256": stela_runtime::sha256(original)
+                "decoded_bytes": original.len(), "decoded_sha256": stela_formats::sha256(original)
             }],
             "options": {"dram_base": 0x800000000u64, "dram_size": 0x40000000, "phys_base": 0x800000000u64},
             "files": [
-                {"name": ORIGINAL_DEVICE_TREE_FILE, "bytes": original.len(), "sha256": stela_runtime::sha256(original)},
-                {"name": "devicetree.adt", "bytes": prepared.len(), "sha256": stela_runtime::sha256(prepared)}
+                {"name": ORIGINAL_DEVICE_TREE_FILE, "bytes": original.len(), "sha256": stela_formats::sha256(original)},
+                {"name": "devicetree.adt", "bytes": prepared.len(), "sha256": stela_formats::sha256(prepared)}
             ],
             "regions": [{
                 "name": "DeviceTree", "file": "devicetree.adt", "file_offset": 0,
                 "bytes": prepared.len(), "guest_pa": 0x800000000u64, "memory_bytes": 0x4000,
-                "sha256": stela_runtime::sha256(prepared)
+                "sha256": stela_formats::sha256(prepared)
             }],
             "entry": {"image": "synthetic", "virtual_address": 0, "physical_address": 0x800000000u64},
             "entry_x0": 0x800004000u64, "boot_args": {"command_line": "-v"},
@@ -519,7 +518,7 @@ mod tests {
         for (key, value) in [
             (
                 "decoded_sha256",
-                json!(stela_runtime::sha256(b"different source")),
+                json!(stela_formats::sha256(b"different source")),
             ),
             ("decoded_bytes", json!(original.len() + 1)),
             ("container_sha256", json!("0".repeat(64))),
@@ -532,7 +531,7 @@ mod tests {
         let mut loaded = base.clone();
         loaded["regions"][0]["file"] = json!(ORIGINAL_DEVICE_TREE_FILE);
         loaded["regions"][0]["bytes"] = json!(original.len());
-        loaded["regions"][0]["sha256"] = json!(stela_runtime::sha256(&original));
+        loaded["regions"][0]["sha256"] = json!(stela_formats::sha256(&original));
         assert!(intake(&loaded, &original, &prepared).is_err());
         let mut patched = base.clone();
         patched["patches"] = json!([{

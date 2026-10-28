@@ -17,11 +17,13 @@
 //! hardware sampling/restoration effects and refuse before commit. Clock-stop
 //! MMIO availability is unqualified; quiesce permits nonmutating reads. This
 //! native-bank hook does not establish its implicit PMGR domain association.
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
 use super::regfile::Held;
 use alloc::{collections::BTreeMap, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
 const NAME: &str = "soc-dpe";
 pub const ENGINES: [u64; 6] = [0x2400, 0x2800, 0x2c00, 0x3000, 0x3400, 0x3800];
 pub const CONTROLS: [u64; 3] = [0, 0x200, 0x300];
@@ -173,7 +175,7 @@ impl MmioDevice for Dpe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     #[test]
     fn restore_slots_and_dt_reporting_samples_are_independent_address_sources() {
         let mut sink = InterruptLatch::new();
@@ -316,8 +318,8 @@ mod tests {
     }
     #[test]
     fn mounted_saved_counter_aliases_keep_the_same_lifecycle_owner() {
-        use crate::platform::apple::bus::Bus;
         use alloc::boxed::Box;
+        use stela_contracts::bus::Bus;
         let mut bus = Bus::new();
         let device = bus.add(Box::new(Dpe::new(&[]).unwrap()));
         bus.map(device, 0x10000, 8, 0x2708).unwrap();

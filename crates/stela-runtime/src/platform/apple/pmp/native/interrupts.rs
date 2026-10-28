@@ -11,9 +11,12 @@ pub mod device;
 mod owner;
 
 use super::platform::owner::Completion;
-use crate::platform::apple::bus::{Access, MmioDevice, MmioError, Width};
 pub use auxiliary::{AuxiliaryHandler, AuxiliaryReset, AuxiliaryTarget};
 pub use owner::{Event, Handler, Owner, Registration, Signal, Signals, Snapshot};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+};
 
 pub const SPECIAL: u32 = 0x0800_0000;
 
@@ -166,9 +169,9 @@ pub(super) fn refused(error: Error) -> Completion<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec, vec::Vec};
     use core::cell::RefCell;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn mapped_bounds_refuse_before_borrowing_the_supplied_actual_view() {

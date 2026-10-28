@@ -4,7 +4,7 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use stela_runtime::machine::adt::Node;
+use stela_contracts::adt::Node;
 
 fn original(variable: &str, digest: &str) -> Vec<u8> {
     let bytes =

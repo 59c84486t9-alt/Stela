@@ -69,8 +69,8 @@ pub(super) fn visit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
     use alloc::vec;
+    use stela_contracts::adt::encode;
 
     fn ranges(rows: &[(u64, u64, u64)]) -> Vec<u8> {
         rows.iter()

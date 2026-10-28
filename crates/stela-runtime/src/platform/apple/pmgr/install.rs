@@ -8,8 +8,8 @@
 //! route. Release controller/bus borrows before dispatch; never run two program
 //! installations concurrently against the same physical controller/SRAM.
 use super::sequencer::PhysicalWrite;
-use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
+use stela_contracts::bus::Width;
 
 pub mod t6000;
 
@@ -697,13 +697,14 @@ fn checked_write(steps: &mut Vec<Step>, address: u64, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::{
-        bus::{Access, Bus, Direction, MmioDevice, MmioError},
-        interrupt::InterruptLatch,
-    };
-    use crate::platform::dma::{Memory, tests::Ram};
     use alloc::{boxed::Box, collections::BTreeMap, vec};
     use core::sync::atomic::{Ordering, fence};
+    use {
+        stela_contracts::bus::Access, stela_contracts::bus::Bus, stela_contracts::bus::Direction,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
+        stela_contracts::interrupt::InterruptLatch,
+    };
+    use {stela_contracts::dma::Memory, stela_contracts::dma::test_support::Ram};
 
     /// Test-only captured configuration bank, without any hardware execution or
     /// completion semantics. All SRAM data still traverses the actual RAM API.
@@ -790,7 +791,7 @@ mod tests {
     fn install(kind: ProgramKind, stage: u32) -> Installation {
         Installation::new(inputs(kind, stage), images(kind)).unwrap()
     }
-    fn bus(installation: &Installation) -> (Bus, crate::platform::apple::bus::DeviceId) {
+    fn bus(installation: &Installation) -> (Bus, stela_contracts::bus::DeviceId) {
         let mut bank = Captured::default();
         bank.words.insert(0x23d050008, 0);
         bank.words.insert(0x23d054008, 0);

@@ -18,11 +18,13 @@
 //! state is the 8N1, FIFO-enabled, polled console left by the boot firmware.
 //! Transmitted bytes go to the host [`ConsoleSink`] immediately; bytes it cannot
 //! take stay in the 16-byte TX FIFO and are reported as FIFO occupancy.
-use super::bus::{
-    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
-};
-use super::interrupt::{AicInput, Wire};
 use alloc::collections::VecDeque;
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction, stela_contracts::bus::Lifecycle,
+    stela_contracts::bus::LifecycleState, stela_contracts::bus::MmioDevice,
+    stela_contracts::bus::MmioError, stela_contracts::bus::Width, stela_contracts::bus::refuse,
+};
+use {stela_contracts::interrupt::AicInput, stela_contracts::interrupt::Wire};
 
 const NAME: &str = "s5l-uart";
 const FIFO_BYTES: usize = 16;
@@ -471,8 +473,8 @@ impl<C: ConsoleSink + 'static> MmioDevice for S5lUart<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
     use alloc::vec::Vec;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[derive(Default)]
     struct Console {

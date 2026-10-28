@@ -152,7 +152,7 @@ pub struct Inputs<'f> {
     pub firmware: &'f dyn Fn(&str) -> Option<&'f [u8]>,
     /// The boot bundle's macOS build, whose firmware protocols the
     /// coprocessor models speak; `None` without a bundle.
-    pub build: Option<&'static crate::builds::Build>,
+    pub build: Option<&'static stela_formats::builds::Build>,
 }
 
 /// Place `board`'s devices, writing `DEVICES` summaries to `log`, and return

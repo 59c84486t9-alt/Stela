@@ -119,12 +119,12 @@ pub(super) fn serialize_instruction_execution() -> Result<()> {
     anyhow::bail!("instruction synchronization requires the x86-64 runtime")
 }
 
-pub(super) fn runtime_pauth_key(key: PointerAuthenticationKey) -> pauth::Key {
+pub(super) fn runtime_pauth_key(key: PointerAuthenticationKey) -> stela_contracts::pauth::Key {
     match key {
-        PointerAuthenticationKey::Ia => pauth::Key::Ia,
-        PointerAuthenticationKey::Ib => pauth::Key::Ib,
-        PointerAuthenticationKey::Da => pauth::Key::Da,
-        PointerAuthenticationKey::Db => pauth::Key::Db,
+        PointerAuthenticationKey::Ia => stela_contracts::pauth::Key::Ia,
+        PointerAuthenticationKey::Ib => stela_contracts::pauth::Key::Ib,
+        PointerAuthenticationKey::Da => stela_contracts::pauth::Key::Da,
+        PointerAuthenticationKey::Db => stela_contracts::pauth::Key::Db,
     }
 }
 
@@ -206,7 +206,7 @@ pub(crate) fn complete_pauth_with_memory(
         }
         PointerAuthenticationOperation::AuthenticateIbSp => {
             let result = context.authenticate_operation(
-                pauth::Key::Ib,
+                stela_contracts::pauth::Key::Ib,
                 registers.x[30],
                 registers.sp,
                 false,
@@ -216,9 +216,9 @@ pub(crate) fn complete_pauth_with_memory(
         }
         PointerAuthenticationOperation::ReturnIbSp | PointerAuthenticationOperation::ReturnIaSp => {
             let key = if instruction.operation == PointerAuthenticationOperation::ReturnIbSp {
-                pauth::Key::Ib
+                stela_contracts::pauth::Key::Ib
             } else {
-                pauth::Key::Ia
+                stela_contracts::pauth::Key::Ia
             };
             let result =
                 context.authenticate_operation(key, registers.x[30], registers.sp, true)?;
@@ -307,8 +307,12 @@ pub(crate) fn complete_pauth_with_memory(
                 registers,
                 |key, pointer| -> core::result::Result<u64, pauth::AuthenticationError> {
                     let key = match key {
-                        stela_compiler::block::pauth_memory::DataKey::A => pauth::Key::Da,
-                        stela_compiler::block::pauth_memory::DataKey::B => pauth::Key::Db,
+                        stela_compiler::block::pauth_memory::DataKey::A => {
+                            stela_contracts::pauth::Key::Da
+                        }
+                        stela_compiler::block::pauth_memory::DataKey::B => {
+                            stela_contracts::pauth::Key::Db
+                        }
                     };
                     let result = context.authenticate_operation(key, pointer, 0, true)?;
                     authenticated = result.authenticated;
@@ -362,8 +366,14 @@ pub(crate) fn complete_pauth_with_memory(
             };
             // XPAC selects an address domain, not a key, so no key needs to
             // exist.
-            let value =
-                context.strip(if data { pauth::Key::Da } else { pauth::Key::Ia }, pointer)?;
+            let value = context.strip(
+                if data {
+                    stela_contracts::pauth::Key::Da
+                } else {
+                    stela_contracts::pauth::Key::Ia
+                },
+                pointer,
+            )?;
             if destination != ZERO_REGISTER_INDEX {
                 registers.x[usize::from(destination)] = value;
             }

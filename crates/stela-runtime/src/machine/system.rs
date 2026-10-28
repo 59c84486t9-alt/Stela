@@ -13,9 +13,10 @@ pub mod file;
 pub mod generated;
 pub mod helpers;
 
-pub use super::chip::Chip;
 pub use file::File;
-pub use generated::{ACCESSORS, Feature, Register};
+pub use generated::{ACCESSORS, Register};
+use stela_contracts::Chip;
+use stela_contracts::Feature;
 
 /// How an access ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -8,8 +8,8 @@
 pub mod control;
 
 use super::Error;
-use crate::platform::{apple::bus::Width, dma::Port};
 use alloc::vec::Vec;
+use {stela_contracts::bus::Width, stela_contracts::dma::Port};
 
 const ROW_BYTES: usize = 24;
 /// Native resource bound, not a hardware table-length claim. Larger tables
@@ -232,15 +232,15 @@ impl TunableProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{
-            bus::{Access, Bus, Direction, MmioDevice, MmioError, refuse},
-            gpio::Gpio,
-            interrupt::{AicInput, InterruptLatch},
-        },
-        dma::{Physical, tests::Ram},
-    };
     use alloc::{boxed::Box, vec};
+    use {
+        crate::platform::apple::gpio::Gpio, stela_contracts::bus::Access,
+        stela_contracts::bus::Bus, stela_contracts::bus::Direction,
+        stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError,
+        stela_contracts::bus::refuse, stela_contracts::dma::Physical,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::AicInput,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     const TABLE: u64 = 0x8000;
     const BANK: u64 = 0x238300000;

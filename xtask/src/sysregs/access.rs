@@ -17,6 +17,7 @@ use std::{
 };
 
 pub const GENERATED: &str = "crates/stela-runtime/src/machine/system/generated.rs";
+pub const FEATURES: &str = "crates/stela-contracts/src/cpu_features.rs";
 
 /// A register of the profile: instances and, per chip, the bits that are
 /// RES0 or RES1 in every layout the chip allows.
@@ -561,7 +562,7 @@ pub fn generate(
          //! {}).\n\
          //! Regenerate with `cargo xtask sysregs --aarchmrs DIR`, `DIR` holding both\n\
          //! downloads. Do not edit.\n\
-         #![allow(\n    clippy::all,\n    clippy::pedantic,\n    unused_parens,\n    unused_variables,\n    unreachable_code,\n    non_camel_case_types\n)]\n\
+         #![allow(\n    clippy::all,\n    clippy::pedantic,\n    unused_parens,\n    unused_variables,\n    unreachable_code,\n    non_camel_case_types,\n    reason = \"Arm-derived output preserves vendor names, folded branches and helper shapes\"\n)]\n\
          use super::{{\n    Accessor, Broadcast, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord, Limit,
     Operation,\n    \
          Pstate, Regime, Restrict, Stage, AtAccess, Tlbi, TlbiAttr, TlbiKind, TlbiLevel, WithheldLayout, helpers::*,\n}};\n",
@@ -656,7 +657,7 @@ pub fn generate(
         )?;
     }
     writeln!(out, "];\n")?;
-    write_features(&mut out, profiles)?;
+    writeln!(out, "use stela_contracts::Feature;\n")?;
     writeln!(
         out,
         "pub static ACCESSORS: [Accessor; {}] = [",
@@ -695,6 +696,15 @@ fn chip_variant(name: &str) -> String {
             })
         })
         .collect()
+}
+
+/// Canonical CPU metadata, independent of the engine and generated accessors.
+pub fn generate_features(profiles: &Profiles) -> Result<String> {
+    let mut out = String::from(
+        "//! Generated Apple CPU feature profiles from Arm AARCHMRS 2026-06.\n//! Arm data: BSD-3-Clause, Copyright (c) 2010-2026 Arm Limited\n//! or its affiliates.\n//! Regenerate with `cargo xtask sysregs --aarchmrs DIR`.\n#![allow(non_camel_case_types, reason = \"feature names follow Arm AARCHMRS\")]\nuse crate::Chip;\n\n",
+    );
+    write_features(&mut out, profiles)?;
+    Ok(out)
 }
 
 /// The chips in generation order, and the features only some of them have,

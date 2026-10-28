@@ -191,7 +191,7 @@ mod tests {
                 trace: None,
                 reporting: Some(Box::new(endpoint)),
             },
-            crate::builds::DEFAULT.rtkit_version,
+            stela_formats::builds::DEFAULT.rtkit_version,
         )
         .unwrap();
         let mut output = Vec::new();

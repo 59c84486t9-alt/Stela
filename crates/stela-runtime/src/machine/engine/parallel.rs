@@ -1532,7 +1532,7 @@ mod tests {
             match value {
                 1 => {
                     self.reset = Some(Reset {
-                        transition: crate::platform::apple::bus::Transition::Restart,
+                        transition: stela_contracts::bus::Transition::Restart,
                         reason: "test".into(),
                     })
                 }

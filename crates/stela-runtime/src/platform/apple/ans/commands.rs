@@ -14,9 +14,9 @@ use super::{
     prp::{MAX_TRANSFER, Prps, dma_error},
     tunables,
 };
-use crate::platform::{apple::sart::Sart, dma::Port};
 use alloc::{vec, vec::Vec};
 use stela_drivers::block::{BlockError, Finished, Request};
+use {crate::platform::apple::sart::Sart, stela_contracts::dma::Port};
 
 pub(super) const IDENTIFY_BYTES: usize = 4096;
 /// `AppleANS2NVMeController::AllocateTunnelBuffer` (0x3dbe83c) rounds every
@@ -1137,20 +1137,17 @@ impl Ans {
 mod tests {
     use super::super::Description;
     use super::*;
-    use crate::platform::{
-        apple::{
-            bus::Access,
-            interrupt::InterruptLatch,
-            sart::{Bounds, Sart},
-        },
-        dma::{Physical, tests::Ram},
-    };
     use alloc::boxed::Box;
     use stela_drivers::block::{BlockDevice, RamDisk};
+    use {
+        crate::platform::apple::sart::Bounds, crate::platform::apple::sart::Sart,
+        stela_contracts::bus::Access, stela_contracts::dma::Physical,
+        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
+    };
 
     #[test]
     fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
-        use crate::platform::apple::bus::{MmioDevice, Width};
+        use {stela_contracts::bus::MmioDevice, stela_contracts::bus::Width};
         let mut ans = Ans::new(
             Box::new(RamDisk::new("", 4, 4096)),
             &[Description {
@@ -1258,7 +1255,7 @@ mod tests {
 
     #[test]
     fn device_time_tunnel_records_the_recovery_request_and_unserved_types_refuse_by_name() {
-        use crate::platform::apple::bus::{MmioDevice, Width};
+        use {stela_contracts::bus::MmioDevice, stela_contracts::bus::Width};
         let mut ans = Ans::new(
             Box::new(RamDisk::new("", 4, 4096)),
             &[Description {
@@ -1368,7 +1365,7 @@ mod tests {
 
     #[test]
     fn sanitize_counter_tunnel_fills_its_whole_output_with_zero_counters() {
-        use crate::platform::apple::bus::{MmioDevice, Width};
+        use {stela_contracts::bus::MmioDevice, stela_contracts::bus::Width};
         let mut ans = Ans::new(
             Box::new(RamDisk::new("", 4, 4096)),
             &[Description {
@@ -1430,7 +1427,7 @@ mod tests {
 
     #[test]
     fn tunable_table_tunnel_records_its_buffer_and_refuses_other_shapes() {
-        use crate::platform::apple::bus::{MmioDevice, Width};
+        use {stela_contracts::bus::MmioDevice, stela_contracts::bus::Width};
         let mut ans = Ans::new(
             Box::new(RamDisk::new("", 4, 4096)),
             &[Description {

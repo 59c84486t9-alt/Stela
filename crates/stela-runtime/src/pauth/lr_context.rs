@@ -1,9 +1,9 @@
 //! QARMA5 key service for FEAT_PAuth_LR.
-use super::{
-    AuthResult, AuthenticationError, Context, Key, TwoModifierError,
-    features::LinkRegisterPauthCapability,
-};
 use crate::system::identification_snapshot::Snapshot;
+use {
+    super::AuthResult, super::AuthenticationError, super::Context, super::TwoModifierError,
+    super::features::LinkRegisterPauthCapability, stela_contracts::pauth::Key,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstructionKey {

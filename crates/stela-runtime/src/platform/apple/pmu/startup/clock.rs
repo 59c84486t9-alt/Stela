@@ -261,7 +261,7 @@ mod tests {
     fn original_reload_branch_fields_and_first_arm_have_immutable_source_identity() {
         let llb = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&llb),
+            stela_formats::sha256(&llb),
             "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1"
         );
         for (range, hash) in [
@@ -282,7 +282,7 @@ mod tests {
                 "cc9f198e19cd463c0697009f601f80ff9048b0c9c08002a36cd79fc673d9fc8f",
             ),
         ] {
-            assert_eq!(crate::sha256(&llb[range]), hash);
+            assert_eq!(stela_formats::sha256(&llb[range]), hash);
         }
         let image = &llb[0x1f9b20..0x1fbd90];
         assert_eq!(

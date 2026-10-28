@@ -190,7 +190,7 @@ impl Snapshot {
                 input.extend(value.to_le_bytes());
             }
         }
-        let input_sha256 = crate::sha256(&input);
+        let input_sha256 = stela_formats::sha256(&input);
         Ok(Self {
             values,
             provenance: Provenance {
@@ -234,7 +234,7 @@ impl Snapshot {
                 u64::from_le_bytes(input[offset..end].try_into().expect("checked u64 readback"));
             insert(&mut values, register, value)?;
         }
-        let input_sha256 = crate::sha256(&input);
+        let input_sha256 = stela_formats::sha256(&input);
         Ok(Self {
             values,
             provenance: Provenance {
@@ -425,7 +425,10 @@ mod tests {
         assert_eq!(snapshot.read(Register::IdAa64Isar2El1), Ok(u64::MAX));
         assert_eq!(snapshot.provenance().origin(), Origin::CapturedHardware);
         assert_eq!(snapshot.provenance().input(), input.as_ref());
-        assert_eq!(snapshot.provenance().input_sha256(), crate::sha256(&input));
+        assert_eq!(
+            snapshot.provenance().input_sha256(),
+            stela_formats::sha256(&input)
+        );
         assert_eq!(snapshot.provenance().captured_fields(), fields);
         assert!(Arc::ptr_eq(&input, &snapshot.provenance.input));
         assert!(matches!(

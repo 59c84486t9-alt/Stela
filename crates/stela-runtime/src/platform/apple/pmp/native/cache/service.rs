@@ -15,15 +15,14 @@ use super::{
     metrics,
     publisher::{Bank, Publisher},
 };
-use crate::platform::apple::{
-    bus::{Access, MmioDevice, Width},
-    ptd::{
-        Range, UPDATE_OFFSET,
-        transport::{Entry, notifications::LocalNotifications},
-    },
-};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
+use {
+    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+    crate::platform::apple::ptd::transport::Entry,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+};
 
 const GROUPS: usize = 24;
 const GROUP_BYTES: usize = 64;
@@ -746,13 +745,15 @@ impl<B: metrics::Backend> Owner<B> {
 mod tests {
     use super::super::{policy, publisher};
     use super::*;
-    use crate::{
-        machine::apple::memory_resources::t8112::{Prepared, cache::EmptyResource},
-        platform::apple::{interrupt::InterruptLatch, pmp::native, ptd::transport::Entry},
-    };
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use owner::{Completion, EffectValue};
+    use {
+        crate::machine::apple::memory_resources::t8112::Prepared,
+        crate::machine::apple::memory_resources::t8112::cache::EmptyResource,
+        crate::platform::apple::pmp::native, crate::platform::apple::ptd::transport::Entry,
+        stela_contracts::interrupt::InterruptLatch,
+    };
 
     struct MissingResources;
     impl native::Resources for MissingResources {
@@ -1528,7 +1529,7 @@ mod tests {
     }
     #[test]
     fn consumed_budget_payload_is_not_replayed_after_real_cache_pause_and_new_input() {
-        use crate::platform::apple::bus::{Lifecycle, LifecycleState};
+        use {stela_contracts::bus::Lifecycle, stela_contracts::bus::LifecycleState};
         let live = LifecycleState {
             powered: true,
             clocked: true,
@@ -1729,7 +1730,7 @@ mod tests {
     fn original_t8112_mc_command_housekeeping_ack_and_initialized_geometry_match() {
         let b = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&b),
+            stela_formats::sha256(&b),
             "b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c"
         );
         for (start, len, hash) in [
@@ -1749,7 +1750,7 @@ mod tests {
                 "de72571fe3bba53a8c2ae3058a4b09b323ee2976026efb334ed10f04d03c05c3",
             ),
         ] {
-            assert_eq!(crate::sha256(&b[start..start + len]), hash);
+            assert_eq!(stela_formats::sha256(&b[start..start + len]), hash);
         }
         let w =
             |a: usize| u32::from_le_bytes(b[a - 0xfff000..a - 0xfff000 + 4].try_into().unwrap());
@@ -1808,10 +1809,10 @@ mod tests {
         assert_eq!([w(0x1034380), w(0x1034384)], [8, 2]);
         let dt = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&dt),
+            stela_formats::sha256(&dt),
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
-        let root = crate::machine::adt::Node::root(&dt).unwrap();
+        let root = stela_contracts::adt::Node::root(&dt).unwrap();
         let nub = root
             .child("arm-io")
             .unwrap()

@@ -4,11 +4,12 @@
 //! group's hardware store. This component supplies neither command consumption
 //! nor event housekeeping/ACK, native startup, IRQ admission or cache capacity.
 use super::policy::{GROUPS, HardwareUpdate, Inputs, Policy};
-use crate::platform::apple::{
-    bus::{Access, MmioDevice, Width},
-    ptd::{Range, UPDATE_OFFSET, transport::notifications::LocalNotifications},
-};
 use alloc::rc::Rc;
+use {
+    crate::platform::apple::ptd::Range, crate::platform::apple::ptd::UPDATE_OFFSET,
+    crate::platform::apple::ptd::transport::notifications::LocalNotifications,
+    stela_contracts::bus::Access, stela_contracts::bus::MmioDevice, stela_contracts::bus::Width,
+};
 
 type Error = &'static str;
 

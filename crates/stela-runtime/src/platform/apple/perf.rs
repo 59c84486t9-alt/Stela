@@ -21,8 +21,12 @@
 //!
 //! Only DT-selected counters exist; holes, other widths, layout versions,
 //! class-1 busy status and control fields without described effects refuse.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{collections::BTreeMap, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "pmgr-perf";
 pub const COUNTER_BASE: u64 = 0x100;
@@ -182,7 +186,7 @@ impl MmioDevice for PerfCounters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
 
     #[test]
     fn the_boot_stage_hands_off_disabled_controls_and_empty_counts() {

@@ -42,7 +42,7 @@ impl<'a> Placement<'a> {
         }
         let path = core::str::from_utf8(bytes.get(HEADER..path_end).ok_or("FDR path bounds")?)
             .map_err(|_| "FDR path is not UTF-8")?;
-        if !stela_runtime::payload::safe_path(path) {
+        if !stela_formats::payload::safe_path(path) {
             return Err(String::from("invalid FDR state file path"));
         }
         Ok(Self {
@@ -133,7 +133,7 @@ pub fn writer(
         output::arguments(format_args!(
             "FDR COMMIT durable bytes={} sha256={} flushed/readback verified\n",
             bytes.len(),
-            stela_runtime::sha256(bytes)
+            stela_formats::sha256(bytes)
         ));
         Ok(())
     }))

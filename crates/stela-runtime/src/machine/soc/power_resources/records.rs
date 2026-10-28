@@ -192,7 +192,7 @@ mod tests {
         let bytes =
             std::fs::read(std::env::var("STELA_TEST_PMGR_M6_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "09746d1f442153956ba00b385f49bc245460c1ebea92cae7e9e0e4f240745b85"
         );
         // SystemProp::_getDTDeviceList divides the devices property's byte
@@ -216,7 +216,10 @@ mod tests {
                 "7984c104d25466e4633e24a2eda944cbdb0675eb8f7dd30e3fb4e867314afe7a",
             ),
         ] {
-            assert_eq!(crate::sha256(&bytes[offset..offset + length]), expected);
+            assert_eq!(
+                stela_formats::sha256(&bytes[offset..offset + length]),
+                expected
+            );
         }
         assert_eq!(&bytes[0x775c08..0x775c10], b"devices\0");
         for (offset, expected) in [

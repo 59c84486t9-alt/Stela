@@ -6,8 +6,12 @@
 //! Native performance/APSC, DVMR, throttling and autonomous counter execution
 //! require their actual controller owner; neither zero nor a cleared BUSY is
 //! manufactured to satisfy the driver's polls.
-use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{collections::BTreeMap, vec::Vec};
+use {
+    stela_contracts::bus::Access, stela_contracts::bus::Direction,
+    stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
+    stela_contracts::bus::refuse,
+};
 
 const NAME: &str = "t6000-cpu-cluster";
 pub const COMMAND: u64 = 0xe20020;
@@ -323,7 +327,7 @@ impl MmioDevice for T6000 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::interrupt::InterruptLatch;
+    use stela_contracts::interrupt::InterruptLatch;
     #[test]
     fn all_three_banks_preserve_unknownness_actual_table_stride_and_disabled_samples() {
         let mut irq = InterruptLatch::new();
@@ -427,12 +431,12 @@ mod tests {
 #[cfg(all(test, feature = "std"))]
 mod original {
     use super::*;
-    use crate::{
-        machine::adt::Node,
-        platform::apple::{bus::Bus, interrupt::InterruptLatch, pmgr::t6000::Layout},
-    };
     use alloc::boxed::Box;
     use sha2::{Digest, Sha256};
+    use {
+        crate::platform::apple::pmgr::t6000::Layout, stela_contracts::adt::Node,
+        stela_contracts::bus::Bus, stela_contracts::interrupt::InterruptLatch,
+    };
     fn original(variable: &str, digest: &str) -> Vec<u8> {
         let bytes = std::fs::read(std::env::var(variable).expect("pinned J314s original")).unwrap();
         assert_eq!(hex::encode(Sha256::digest(&bytes)), digest);

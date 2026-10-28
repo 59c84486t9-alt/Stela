@@ -6,12 +6,127 @@
 //! but grants NO trust: missing roots, certificate constraints, board/nonce
 //! policy and rollback remain the admission owner's obligations. In particular
 //! a key supplied by an untrusted manifest cannot authenticate itself as Apple.
-use super::{
-    der::{self, Cursor, Element},
-    rsa::{Hash, Key},
-};
 use alloc::vec::Vec;
 use sha2::{Digest, Sha384};
+use stela_formats::{
+    der::{self, Cursor, Element},
+    rsa::{self, Hash, Key},
+};
+
+/// A structural or cryptographic failure, with its original parser cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureError {
+    Der(der::Error),
+    Rsa(rsa::Error),
+    Payload(stela_formats::img4::Img4Error),
+    Violation(SignatureViolation),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureViolation {
+    AlgorithmParameters,
+    UnusedBits,
+    CertificateSignatureAlgorithm,
+    CertificateVersion,
+    CertificateSerial,
+    CertificateAlgorithmMismatch,
+    CertificateKeyAlgorithm,
+    CertificateOptionalField,
+    ManifestTag,
+    ManifestName,
+    ManifestProperties,
+    ManifestBody,
+    ObjectLimit,
+    DuplicateObject,
+    PropertyLimit,
+    DuplicateProperty,
+    DigestAlgorithm,
+    MissingPayload,
+    ManifestLimit,
+    PayloadType,
+    ManifestType,
+    ManifestVersion,
+    PayloadDigest,
+    CertificateLimit,
+    DuplicateCertificate,
+    MissingCertificate,
+    CertificateIssuer,
+}
+impl SignatureViolation {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::AlgorithmParameters => "SEP algorithm parameters are not NULL",
+            Self::UnusedBits => "SEP signature/key BIT STRING has unused bits",
+            Self::CertificateSignatureAlgorithm => {
+                "SEP certificate signature algorithm is unsupported"
+            }
+            Self::CertificateVersion => "SEP certificate version is unsupported",
+            Self::CertificateSerial => "SEP certificate version/serial is malformed",
+            Self::CertificateAlgorithmMismatch => "SEP certificate signature algorithms disagree",
+            Self::CertificateKeyAlgorithm => "SEP certificate key algorithm is unsupported",
+            Self::CertificateOptionalField => "SEP certificate optional field is unsupported",
+            Self::ManifestTag => "SEP manifest entry is not a private constructed tag",
+            Self::ManifestName => "SEP manifest entry name differs from its tag",
+            Self::ManifestProperties => "SEP manifest properties are not a SET",
+            Self::ManifestBody => "SEP manifest has no MANB",
+            Self::ObjectLimit => "SEP manifest object count exceeds the resource bound",
+            Self::DuplicateObject => "SEP manifest has duplicate objects",
+            Self::PropertyLimit => "SEP manifest property count exceeds the resource bound",
+            Self::DuplicateProperty => "SEP manifest has duplicate properties",
+            Self::DigestAlgorithm => "SEP manifest digest is not SHA-384",
+            Self::MissingPayload => "SEP manifest does not cover this payload type",
+            Self::ManifestLimit => "SEP manifest exceeds the resource bound",
+            Self::PayloadType => "SEP payload type is unsupported",
+            Self::ManifestType => "SEP firmware manifest is not an IM4M",
+            Self::ManifestVersion => "SEP manifest version is unsupported",
+            Self::PayloadDigest => "SEP manifest payload digest mismatch",
+            Self::CertificateLimit => "SEP certificate chain exceeds the resource bound",
+            Self::DuplicateCertificate => "SEP certificate chain contains a duplicate certificate",
+            Self::MissingCertificate => "SEP manifest has no signing certificate",
+            Self::CertificateIssuer => "SEP certificate issuer/subject mismatch",
+        }
+    }
+}
+impl SignatureError {
+    /// Description for the legacy ROM protocol's static refusal vocabulary.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Der(_) => "SEP signature DER is malformed",
+            Self::Rsa(_) => "SEP RSA signature verification failed",
+            Self::Payload(_) => "SEP payload is not an IM4P",
+            Self::Violation(reason) => reason.reason(),
+        }
+    }
+}
+impl From<der::Error> for SignatureError {
+    fn from(error: der::Error) -> Self {
+        Self::Der(error)
+    }
+}
+impl From<rsa::Error> for SignatureError {
+    fn from(error: rsa::Error) -> Self {
+        Self::Rsa(error)
+    }
+}
+impl core::fmt::Display for SignatureError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Der(error) => write!(f, "SEP signature: {error}"),
+            Self::Rsa(error) => write!(f, "SEP signature: {error}"),
+            Self::Payload(error) => write!(f, "SEP payload: {error}"),
+            Self::Violation(reason) => f.write_str(reason.reason()),
+        }
+    }
+}
+impl core::error::Error for SignatureError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Der(error) => Some(error),
+            Self::Rsa(error) => Some(error),
+            Self::Payload(error) => Some(error),
+            Self::Violation(_) => None,
+        }
+    }
+}
 
 const RSA_ENCRYPTION: &[u8] = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";
 const RSA_SHA256: &[u8] = b"\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0b";
@@ -37,11 +152,13 @@ pub struct Evidence {
     pub payload_sha384: [u8; 48],
 }
 
-fn algorithm(encoded: &[u8]) -> Result<&[u8], &'static str> {
+fn algorithm(encoded: &[u8]) -> Result<&[u8], SignatureError> {
     let mut fields = der::sequence(encoded)?;
     let oid = fields.take(6)?.value;
     if !fields.0.is_empty() && !fields.take(5)?.value.is_empty() {
-        return Err("SEP algorithm parameters are not NULL");
+        return Err(SignatureError::Violation(
+            SignatureViolation::AlgorithmParameters,
+        ));
     }
     fields.end()?;
     Ok(oid)
@@ -57,54 +174,68 @@ struct Certificate<'a> {
     key: Key,
 }
 
-fn bit_string(value: &[u8]) -> Result<&[u8], &'static str> {
+fn bit_string(value: &[u8]) -> Result<&[u8], SignatureError> {
     if value.first() != Some(&0) {
-        return Err("SEP signature/key BIT STRING has unused bits");
+        return Err(SignatureError::Violation(SignatureViolation::UnusedBits));
     }
     Ok(&value[1..])
 }
 
-fn certificate(encoded: &[u8]) -> Result<Certificate<'_>, &'static str> {
+fn certificate(encoded: &[u8]) -> Result<Certificate<'_>, SignatureError> {
     let mut outer = der::sequence(encoded)?;
     let tbs = outer.take(16)?;
     let alg = outer.take(16)?;
     let hash = match algorithm(alg.encoded)? {
         RSA_SHA256 => Hash::Sha256,
         RSA_SHA384 => Hash::Sha384,
-        _ => return Err("SEP certificate signature algorithm is unsupported"),
+        _ => {
+            return Err(SignatureError::Violation(
+                SignatureViolation::CertificateSignatureAlgorithm,
+            ));
+        }
     };
     let signature = bit_string(outer.take(3)?.value)?;
     outer.end()?;
     let mut fields = Cursor(tbs.value);
-    let first = fields.next()?;
+    let first = fields.next_element()?;
     if first.class == 2 && first.tag == 0 && first.constructed {
         if first.value != b"\x02\x01\x02" {
-            return Err("SEP certificate version is unsupported");
+            return Err(SignatureError::Violation(
+                SignatureViolation::CertificateVersion,
+            ));
         }
         der::unsigned(fields.take(2)?.value)?;
     } else if first.class == 0 && first.tag == 2 && !first.constructed {
         der::unsigned(first.value)?; // X.509 v1 omits the DEFAULT version.
     } else {
-        return Err("SEP certificate version/serial is malformed");
+        return Err(SignatureError::Violation(
+            SignatureViolation::CertificateSerial,
+        ));
     }
     if fields.take(16)?.encoded != alg.encoded {
-        return Err("SEP certificate signature algorithms disagree");
+        return Err(SignatureError::Violation(
+            SignatureViolation::CertificateAlgorithmMismatch,
+        ));
     }
     let issuer = fields.take(16)?.encoded;
     fields.take(16)?; // Validity is preserved in tbs, not evaluated as trust here.
     let subject = fields.take(16)?.encoded;
     let mut spki = Cursor(fields.take(16)?.value);
     if algorithm(spki.take(16)?.encoded)? != RSA_ENCRYPTION {
-        return Err("SEP certificate key algorithm is unsupported");
+        return Err(SignatureError::Violation(
+            SignatureViolation::CertificateKeyAlgorithm,
+        ));
     }
     let key = Key::parse(bit_string(spki.take(3)?.value)?)?;
     spki.end()?;
     // Only the optional X.509 v3 extensions field is supported; never claim
     // extension/role/time validation merely because a signature verified.
     if !fields.0.is_empty() {
-        let extensions = fields.next()?;
+        let extensions = fields.next_element()?;
         if extensions.class != 2 || extensions.tag != 3 || !extensions.constructed {
-            return Err("SEP certificate optional field is unsupported");
+            return Err(SignatureError::Violation(
+                SignatureViolation::CertificateOptionalField,
+            ));
         }
         der::sequence(extensions.value)?;
     }
@@ -120,32 +251,34 @@ fn certificate(encoded: &[u8]) -> Result<Certificate<'_>, &'static str> {
     })
 }
 
-fn named(element: Element<'_>) -> Result<([u8; 4], Element<'_>), &'static str> {
+fn named(element: Element<'_>) -> Result<([u8; 4], Element<'_>), SignatureError> {
     if element.class != 3 || !element.constructed {
-        return Err("SEP manifest entry is not a private constructed tag");
+        return Err(SignatureError::Violation(SignatureViolation::ManifestTag));
     }
     let name = element.tag.to_be_bytes();
     let mut fields = der::sequence(element.value)?;
     if fields.take(22)?.value != name {
-        return Err("SEP manifest entry name differs from its tag");
+        return Err(SignatureError::Violation(SignatureViolation::ManifestName));
     }
-    let value = fields.next()?;
+    let value = fields.next_element()?;
     fields.end()?;
     Ok((name, value))
 }
 
-fn set(element: Element<'_>) -> Result<Cursor<'_>, &'static str> {
+fn set(element: Element<'_>) -> Result<Cursor<'_>, SignatureError> {
     if element.class != 0 || element.tag != 17 || !element.constructed {
-        return Err("SEP manifest properties are not a SET");
+        return Err(SignatureError::Violation(
+            SignatureViolation::ManifestProperties,
+        ));
     }
     Ok(Cursor(element.value))
 }
 
-fn digest_for(body: Element<'_>, payload_type: [u8; 4]) -> Result<&[u8], &'static str> {
+fn digest_for(body: Element<'_>, payload_type: [u8; 4]) -> Result<&[u8], SignatureError> {
     let mut body = set(body)?;
-    let (name, entries) = named(body.next()?)?;
+    let (name, entries) = named(body.next_element()?)?;
     if name != *b"MANB" {
-        return Err("SEP manifest has no MANB");
+        return Err(SignatureError::Violation(SignatureViolation::ManifestBody));
     }
     body.end()?;
     let mut entries = set(entries)?;
@@ -153,22 +286,26 @@ fn digest_for(body: Element<'_>, payload_type: [u8; 4]) -> Result<&[u8], &'stati
     let mut digest = None;
     while !entries.0.is_empty() {
         if names.len() == MAX_ENTRIES {
-            return Err("SEP manifest object count exceeds the resource bound");
+            return Err(SignatureError::Violation(SignatureViolation::ObjectLimit));
         }
-        let (name, properties) = named(entries.next()?)?;
+        let (name, properties) = named(entries.next_element()?)?;
         if names.contains(&name) {
-            return Err("SEP manifest has duplicate objects");
+            return Err(SignatureError::Violation(
+                SignatureViolation::DuplicateObject,
+            ));
         }
         names.push(name);
         let mut properties = set(properties)?;
         let mut property_names = Vec::new();
         while !properties.0.is_empty() {
             if property_names.len() == MAX_ENTRIES {
-                return Err("SEP manifest property count exceeds the resource bound");
+                return Err(SignatureError::Violation(SignatureViolation::PropertyLimit));
             }
-            let (property_name, value) = named(properties.next()?)?;
+            let (property_name, value) = named(properties.next_element()?)?;
             if property_names.contains(&property_name) {
-                return Err("SEP manifest has duplicate properties");
+                return Err(SignatureError::Violation(
+                    SignatureViolation::DuplicateProperty,
+                ));
             }
             property_names.push(property_name);
             if name == payload_type && property_name == *b"DGST" {
@@ -177,38 +314,44 @@ fn digest_for(body: Element<'_>, payload_type: [u8; 4]) -> Result<&[u8], &'stati
                     || value.constructed
                     || value.value.len() != 48
                 {
-                    return Err("SEP manifest digest is not SHA-384");
+                    return Err(SignatureError::Violation(
+                        SignatureViolation::DigestAlgorithm,
+                    ));
                 }
                 digest = Some(value.value);
             }
         }
     }
-    digest.ok_or("SEP manifest does not cover this payload type")
+    digest.ok_or(SignatureError::Violation(
+        SignatureViolation::MissingPayload,
+    ))
 }
 
 /// Verify signatures and IM4P digest binding using the supplied certificates.
 /// The returned evidence deliberately has no `trusted`/`booted` flag.
-pub fn inspect(payload: &[u8], manifest: &[u8]) -> Result<Evidence, &'static str> {
+pub fn inspect(payload: &[u8], manifest: &[u8]) -> Result<Evidence, SignatureError> {
     if manifest.len() > MAX_MANIFEST_BYTES {
-        return Err("SEP manifest exceeds the resource bound");
+        return Err(SignatureError::Violation(SignatureViolation::ManifestLimit));
     }
     let payload_type =
-        crate::img4::payload_type(payload).map_err(|_| "SEP payload is not an IM4P")?;
+        stela_formats::img4::payload_type(payload).map_err(SignatureError::Payload)?;
     if ![*b"sepi", *b"rsep"].contains(&payload_type) {
-        return Err("SEP payload type is unsupported");
+        return Err(SignatureError::Violation(SignatureViolation::PayloadType));
     }
     let mut fields = der::sequence(manifest)?;
     if fields.take(22)?.value != b"IM4M" {
-        return Err("SEP firmware manifest is not an IM4M");
+        return Err(SignatureError::Violation(SignatureViolation::ManifestType));
     }
     if fields.take(2)?.value != [0] {
-        return Err("SEP manifest version is unsupported");
+        return Err(SignatureError::Violation(
+            SignatureViolation::ManifestVersion,
+        ));
     }
     let body = fields.take(17)?;
     let digest = digest_for(body, payload_type)?;
     let payload_sha384: [u8; 48] = Sha384::digest(payload).into();
     if digest != payload_sha384 {
-        return Err("SEP manifest payload digest mismatch");
+        return Err(SignatureError::Violation(SignatureViolation::PayloadDigest));
     }
     // Parse the remaining fields here too, so no trailing or duplicate
     // envelope is ignored before the signature check.
@@ -223,16 +366,18 @@ pub fn inspect(payload: &[u8], manifest: &[u8]) -> Result<Evidence, &'static str
 
 /// Verify the manifest signature without asserting coverage of any payload.
 /// Useful when an IPSW supplies a manifest that does not cover SEP at all.
-pub fn verify_manifest(manifest: &[u8]) -> Result<ManifestEvidence, &'static str> {
+pub fn verify_manifest(manifest: &[u8]) -> Result<ManifestEvidence, SignatureError> {
     if manifest.len() > MAX_MANIFEST_BYTES {
-        return Err("SEP manifest exceeds the resource bound");
+        return Err(SignatureError::Violation(SignatureViolation::ManifestLimit));
     }
     let mut fields = der::sequence(manifest)?;
     if fields.take(22)?.value != b"IM4M" {
-        return Err("SEP firmware manifest is not an IM4M");
+        return Err(SignatureError::Violation(SignatureViolation::ManifestType));
     }
     if fields.take(2)?.value != [0] {
-        return Err("SEP manifest version is unsupported");
+        return Err(SignatureError::Violation(
+            SignatureViolation::ManifestVersion,
+        ));
     }
     let body = fields.take(17)?;
     let signature = fields.take(4)?.value;
@@ -241,24 +386,30 @@ pub fn verify_manifest(manifest: &[u8]) -> Result<ManifestEvidence, &'static str
     let mut certificates: Vec<Certificate<'_>> = Vec::new();
     while !chain.0.is_empty() {
         if certificates.len() == MAX_CERTIFICATES {
-            return Err("SEP certificate chain exceeds the resource bound");
+            return Err(SignatureError::Violation(
+                SignatureViolation::CertificateLimit,
+            ));
         }
         let encoded = chain.take(16)?.encoded;
         if certificates.iter().any(|c| c.encoded == encoded) {
-            return Err("SEP certificate chain contains a duplicate certificate");
+            return Err(SignatureError::Violation(
+                SignatureViolation::DuplicateCertificate,
+            ));
         }
         certificates.push(certificate(encoded)?);
     }
-    let leaf = certificates
-        .first()
-        .ok_or("SEP manifest has no signing certificate")?;
+    let leaf = certificates.first().ok_or(SignatureError::Violation(
+        SignatureViolation::MissingCertificate,
+    ))?;
     leaf.key.verify(body.encoded, signature, Hash::Sha384)?;
     for pair in certificates.windows(2) {
         let [child, issuer] = pair else {
             unreachable!()
         };
         if child.issuer != issuer.subject {
-            return Err("SEP certificate issuer/subject mismatch");
+            return Err(SignatureError::Violation(
+                SignatureViolation::CertificateIssuer,
+            ));
         }
         issuer.key.verify(child.tbs, child.signature, child.hash)?;
     }
@@ -292,7 +443,7 @@ pub(crate) mod tests {
         *altered.last_mut().unwrap() ^= 1;
         assert_eq!(
             inspect(&altered, &manifest),
-            Err("SEP manifest payload digest mismatch")
+            Err(SignatureError::Violation(SignatureViolation::PayloadDigest))
         );
         for length in 0..manifest.len() {
             assert!(inspect(&payload, &manifest[..length]).is_err());
@@ -307,7 +458,7 @@ pub(crate) mod tests {
         modified[offset] ^= 1;
         assert_eq!(
             inspect(&payload, &modified),
-            Err("SEP RSA PKCS1 signature verification failed")
+            Err(SignatureError::Rsa(rsa::Error::SignatureMismatch))
         );
         let mut excess = manifest.clone();
         excess.push(0);
@@ -319,11 +470,15 @@ pub(crate) mod tests {
         let mut fields = der::sequence(&manifest).unwrap();
         let mut prefix = Vec::new();
         for _ in 0..4 {
-            prefix.extend_from_slice(fields.next().unwrap().encoded);
+            prefix.extend_from_slice(fields.next_element().unwrap().encoded);
         }
-        let chain_manifest = crate::img4::tests::der(
+        let chain_manifest = stela_formats::img4::test_support::der(
             0x30,
-            &[prefix.clone(), crate::img4::tests::der(0x30, &chain)].concat(),
+            &[
+                prefix.clone(),
+                stela_formats::img4::test_support::der(0x30, &chain),
+            ]
+            .concat(),
         );
         assert_eq!(
             inspect(&payload, &chain_manifest)
@@ -334,29 +489,35 @@ pub(crate) mod tests {
         );
         let mut c = Cursor(&chain);
         let child = c.take(16).unwrap().encoded;
-        let duplicate = crate::img4::tests::der(
+        let duplicate = stela_formats::img4::test_support::der(
             0x30,
             &[
                 prefix.clone(),
-                crate::img4::tests::der(0x30, &[child, child].concat()),
+                stela_formats::img4::test_support::der(0x30, &[child, child].concat()),
             ]
             .concat(),
         );
         assert_eq!(
             inspect(&payload, &duplicate),
-            Err("SEP certificate chain contains a duplicate certificate")
+            Err(SignatureError::Violation(
+                SignatureViolation::DuplicateCertificate
+            ))
         );
         let mut broken = chain.clone();
         // Last byte of the child is its signature; the manifest's key/body
         // remain intact, so this exercises issuer verification specifically.
         broken[child.len() - 1] ^= 1;
-        let broken = crate::img4::tests::der(
+        let broken = stela_formats::img4::test_support::der(
             0x30,
-            &[prefix, crate::img4::tests::der(0x30, &broken)].concat(),
+            &[
+                prefix,
+                stela_formats::img4::test_support::der(0x30, &broken),
+            ]
+            .concat(),
         );
         assert_eq!(
             inspect(&payload, &broken),
-            Err("SEP RSA PKCS1 signature verification failed")
+            Err(SignatureError::Rsa(rsa::Error::SignatureMismatch))
         );
     }
 }

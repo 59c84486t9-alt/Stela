@@ -139,7 +139,7 @@ mod tests {
     fn original_t6000_llb_writes_all_five_typed_pairs_with_ordering() {
         let bytes = std::fs::read(std::env::var("STELA_TEST_PAUTH_LLB").unwrap()).unwrap();
         assert_eq!(
-            crate::sha256(&bytes),
+            stela_formats::sha256(&bytes),
             "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1"
         );
         for (pair, offset) in [0x22858, 0x2286c, 0x22880, 0x22894, 0x228a8]

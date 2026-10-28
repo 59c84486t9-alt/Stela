@@ -240,7 +240,7 @@ fn sign(
     location: u64,
     address_diversity: bool,
     diversity: u64,
-    key: pauth::Key,
+    key: stela_contracts::pauth::Key,
 ) -> Option<u64> {
     if target == 0 {
         return Some(0);
@@ -297,9 +297,9 @@ fn fix_page(
             let target = (value & 0x3_ffff_ffff) + link.image;
             let fixed = if value >> 63 != 0 {
                 let key = if value & 1 << 51 != 0 {
-                    pauth::Key::Da
+                    stela_contracts::pauth::Key::Da
                 } else {
-                    pauth::Key::Ia
+                    stela_contracts::pauth::Key::Ia
                 };
                 sign(
                     signer,
@@ -318,8 +318,8 @@ fn fix_page(
             let is_bind = value & 1 << 62 != 0;
             let fixed = if value >> 63 != 0 {
                 let key = match (value >> 49) & 3 {
-                    0 => Some(pauth::Key::Ia),
-                    2 => Some(pauth::Key::Da),
+                    0 => Some(stela_contracts::pauth::Key::Ia),
+                    2 => Some(stela_contracts::pauth::Key::Da),
                     // The pager signs only with the A keys.
                     _ => None,
                 };
