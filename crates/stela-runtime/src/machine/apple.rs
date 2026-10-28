@@ -52,7 +52,7 @@ use crate::platform::apple::{
     pmu::{self, Pmu},
     power::{self, Power},
     ptd,
-    rtkit::{Management, RtKit},
+    rtkit::RtKit,
     sart::{self, Sart},
     sep::{self, Sep},
     smc::{self, Smc},
@@ -1038,10 +1038,10 @@ impl AppleDevices {
         backing: Box<dyn stela_drivers::block::BlockDevice>,
     ) -> Result<(), String> {
         let irq = |n| AicInput::new(0, n);
-        let rtkit = RtKit::new(
-            vec![(ans::RTKIT_ENDPOINT, Box::new(ans::Endpoint) as Box<_>)],
-            Management::Ordinary,
-        )
+        let rtkit = RtKit::new(vec![(
+            ans::RTKIT_ENDPOINT,
+            Box::new(ans::Endpoint) as Box<_>,
+        )])
         .map_err(String::from)?;
         let wrapper = Asc::booted(
             Box::new(rtkit),
@@ -1132,11 +1132,8 @@ impl AppleDevices {
         let endpoint = Smc::new(sram.clone(), placement.region.0, keys)
             .map_err(String::from)?
             .with_wake_bits(placement.wake_bits);
-        let mut rtkit = RtKit::new(
-            vec![(smc::ENDPOINT, Box::new(endpoint))],
-            Management::Ordinary,
-        )
-        .map_err(String::from)?;
+        let mut rtkit =
+            RtKit::new(vec![(smc::ENDPOINT, Box::new(endpoint))]).map_err(String::from)?;
         if placement.quiesced {
             rtkit = rtkit.quiesced();
         }
@@ -1167,11 +1164,8 @@ impl AppleDevices {
     /// RTKit with the native `PMPEndpoint1` (`pmp::Pmp`). Its PTD bank is
     /// the memory cache's ([`Self::add_memory_channels`]).
     pub fn add_pmp(&mut self, placement: &super::soc::PmpController) -> Result<(), String> {
-        let mut rtkit = RtKit::new(
-            vec![(pmp::ENDPOINT, Box::new(pmp::Pmp::default()))],
-            Management::Ordinary,
-        )
-        .map_err(String::from)?;
+        let mut rtkit = RtKit::new(vec![(pmp::ENDPOINT, Box::new(pmp::Pmp::default()))])
+            .map_err(String::from)?;
         if placement.quiesced {
             rtkit = rtkit.quiesced();
         }

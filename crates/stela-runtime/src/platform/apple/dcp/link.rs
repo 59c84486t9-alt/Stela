@@ -77,13 +77,16 @@ pub const STREAMS: u8 = 4;
 /// One stream buffer.
 pub const STREAM_BYTES: u32 = 0x8000;
 /// The whole region the AP allocates.
+#[cfg(test)]
 pub const REGION_BYTES: u64 = 0xc0000;
 const AP_CALLS: u64 = 0;
 const AP_NESTED: u64 = 0x20000;
 const DCP_CALLS: u64 = 0x40000;
 const DCP_NESTED: u64 = 0x60000;
 /// The shared-variable area and its size.
+#[cfg(test)]
 pub const SHARED: u64 = 0x80000;
+#[cfg(test)]
 pub const SHARED_BYTES: u64 = 0x40000;
 
 /// The call header's size.

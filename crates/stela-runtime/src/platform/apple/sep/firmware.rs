@@ -98,6 +98,7 @@ impl SepFirmware {
     }
 
     /// The firmware Stela measured and accepted, if any.
+    #[cfg(test)]
     pub fn evidence(&self) -> Option<&Evidence> {
         self.evidence.as_ref()
     }
@@ -106,6 +107,7 @@ impl SepFirmware {
     /// `sepBootedOnce`). `sep-booted` itself is the AP's own property, set by
     /// `AppleSEPManager::_bootSEP` once the ROM handshake (opcode 6 accept)
     /// succeeds.
+    #[cfg(test)]
     pub fn booted(&self) -> bool {
         matches!(&self.phase, Phase::Active(os) if os.os_active_sent())
     }

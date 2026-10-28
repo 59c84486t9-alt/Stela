@@ -46,7 +46,9 @@ use alloc::{
     vec,
     vec::Vec,
 };
-pub use bfh::{BootImage, Identity};
+pub use bfh::BootImage;
+#[cfg(test)]
+use bfh::Identity;
 pub use geometry::QueueGeometry;
 pub use namespace::Description;
 use namespace::Medium;
@@ -283,6 +285,7 @@ impl Ans {
         features
     }
 
+    #[cfg(test)]
     pub fn new(
         backing: Box<dyn BlockDevice>,
         namespaces: &[Description],
@@ -341,12 +344,14 @@ impl Ans {
     }
 
     /// The identity of the last committed boot-from-host image.
+    #[cfg(test)]
     pub fn boot_image(&self) -> Option<&BootImage> {
         self.boot_image.as_ref()
     }
 
     /// The identity of the last tunable table of each accepted kind,
     /// keyed by its tunnel request type.
+    #[cfg(test)]
     pub fn tunable_tables(&self) -> &[(u32, Identity)] {
         self.tunables.recorded()
     }
@@ -400,6 +405,7 @@ impl Ans {
     }
 
     /// Logical blocks erased and not written since, which read as zeros.
+    #[cfg(test)]
     pub fn erased_blocks(&self) -> u64 {
         self.medium.erased_blocks()
     }

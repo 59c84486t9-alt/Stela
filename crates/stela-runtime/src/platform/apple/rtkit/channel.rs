@@ -151,7 +151,7 @@ impl Drop for Mailbox {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Firmware, Management, Message, RtKit, SystemEndpoints};
+    use super::super::{Firmware, Message, RtKit, SystemEndpoints};
     use super::*;
     use alloc::{boxed::Box, vec};
 
@@ -187,7 +187,6 @@ mod tests {
         let (endpoint, mut mailbox) = channel();
         let mut kit = RtKit::with_system_endpoints(
             Vec::new(),
-            Management::Enumeration,
             SystemEndpoints {
                 trace: None,
                 reporting: Some(Box::new(endpoint)),

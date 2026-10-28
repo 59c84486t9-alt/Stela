@@ -62,10 +62,11 @@ impl HostDisk {
             .is_some_and(|zeroes| zeroes.unmap)
     }
 
+    #[cfg(test)]
     pub(super) fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         self.device.read(address, buffer)
     }
-
+    #[cfg(test)]
     pub(super) fn write(&mut self, address: u64, data: &[u8]) -> Result<(), BlockError> {
         self.device.write(address, data)
     }

@@ -203,6 +203,7 @@ impl<S: Service> Link<S> {
     }
 
     /// The heap the AP lent the coprocessor, once announced.
+    #[cfg(test)]
     pub fn heap(&self) -> Option<RegionHeader> {
         self.heap
     }

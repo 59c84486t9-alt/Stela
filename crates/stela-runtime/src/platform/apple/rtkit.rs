@@ -43,7 +43,8 @@
 //! application endpoint as an `RTBuddyEndpointService` named after the
 //! role (`createEndpoint` 0x465dca8, `createName` 0x4665818: "ANS2" +
 //! "Endpoint" + endpoint - 0x1f), so client drivers start and enable
-//! endpoints while the AP still waits.
+//! endpoints while the AP still waits. This coprocessor always sends that
+//! power-on announcement.
 //!
 //! A nub marked `quiesced` was used and quiesced by the boot chain:
 //! `RTBuddy::_initConfigEDT` (0xfffffe000b665158) starts it in power state
@@ -74,8 +75,7 @@
 //! return, `0x232fc..0x23330` invokes callbacks back to the saved running
 //! state0x21 and announces it through the same notifier: `0x25704` and
 //! `0x2fbb28` map it to wire0x20, `0x2374c` adds type7. Unenumerated, awake,
-//! memory-loss and enumeration-only/rail-gated CPU-stop paths explicitly
-//! refuse rather than substituting an ordinary retained wake.
+//! memory-loss and rail-gated CPU-stop paths refuse.
 //!
 //! The roll call lists exactly the endpoints the model provides. Of RTKit's
 //! system endpoints (crashlog 1, syslog 2, kdebug 3, IOReporting 4, OSLog 8,
@@ -188,18 +188,6 @@ enum Stage {
     Ready,
 }
 
-/// What completes the coprocessor's start-up for the AP (see the module
-/// comment).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Management {
-    /// `remote-only` or `automatic-rail-gating-enabled`: enumeration does,
-    /// and the coprocessor announces nothing.
-    Enumeration,
-    /// Every other nub: the coprocessor announces power-on after
-    /// enumeration.
-    Ordinary,
-}
-
 /// Optional native system services with independent endpoint ownership. The
 /// caller must supply actual protocol/resource implementations; these slots
 /// never create a successful empty service or borrow application endpoint0x20.
@@ -214,7 +202,6 @@ pub struct RtKit {
     endpoints: BTreeMap<u8, (Box<dyn Endpoint>, bool)>,
     /// Whether the AP enabled the crashlog endpoint.
     crashlog: bool,
-    management: Management,
     stage: Stage,
     quiesced: bool,
     /// The wake state acknowledged when enumeration completes.
@@ -236,11 +223,8 @@ fn management(kind: u64, fields: u64) -> Message {
 impl RtKit {
     /// A coprocessor providing `endpoints`, each numbered from
     /// [`FIRST_APPLICATION`] up to 255.
-    pub fn new(
-        endpoints: Vec<(u8, Box<dyn Endpoint>)>,
-        management: Management,
-    ) -> Result<Self, &'static str> {
-        Self::with_system_endpoints(endpoints, management, SystemEndpoints::default())
+    pub fn new(endpoints: Vec<(u8, Box<dyn Endpoint>)>) -> Result<Self, &'static str> {
+        Self::with_system_endpoints(endpoints, SystemEndpoints::default())
     }
 
     /// Original RTBuddy consumes trace and IOReporting on system endpoints3/4.
@@ -250,7 +234,6 @@ impl RtKit {
     /// responsibility; attaching an endpoint supplies no such authority.
     pub fn with_system_endpoints(
         endpoints: Vec<(u8, Box<dyn Endpoint>)>,
-        management: Management,
         system: SystemEndpoints,
     ) -> Result<Self, &'static str> {
         let mut map = BTreeMap::new();
@@ -270,7 +253,6 @@ impl RtKit {
         Ok(Self {
             endpoints: map,
             crashlog: false,
-            management,
             stage: Stage::Hello,
             quiesced: false,
             wake: None,
@@ -421,7 +403,7 @@ impl RtKit {
                         self.stage = Stage::Ready;
                         if let Some(state) = self.wake.take() {
                             outbox.push(management(IOP_POWER_ACK, state));
-                        } else if self.management == Management::Ordinary {
+                        } else {
                             outbox.push(management(IOP_POWER_ACK, POWER_ON));
                         }
                     }
@@ -505,9 +487,6 @@ impl Firmware for RtKit {
     }
 
     fn stop(&mut self) -> Result<(), &'static str> {
-        if self.management != Management::Ordinary {
-            return Err("RTKit retained CPU stop for enumeration-only management is not modeled");
-        }
         if self.stage != Stage::Ready || !matches!(self.iop_power, 0x201 | 0x202) {
             return Err("RTKit CPU stop requires a completed retained-sleep handshake");
         }
@@ -590,12 +569,9 @@ mod tests {
 
     #[test]
     fn a_physical_reset_clears_enumeration_without_reusing_boot_quiescence() {
-        let mut kit = RtKit::new(
-            vec![(0x20, Box::new(super::super::pmp::Pmp::default()))],
-            Management::Ordinary,
-        )
-        .unwrap()
-        .quiesced();
+        let mut kit = RtKit::new(vec![(0x20, Box::new(super::super::pmp::Pmp::default()))])
+            .unwrap()
+            .quiesced();
         let mut output = Vec::new();
         kit.start(&mut output).unwrap();
         assert!(output.is_empty());
@@ -638,14 +614,11 @@ mod tests {
         step(rtkit, 0, management(kind, fields).payload)
     }
 
-    fn booted(management_kind: Management) -> RtKit {
-        let mut rtkit = RtKit::new(
-            vec![
-                (0x20, Box::new(Complement) as Box<dyn Endpoint>),
-                (0x41, Box::new(Complement)),
-            ],
-            management_kind,
-        )
+    fn booted() -> RtKit {
+        let mut rtkit = RtKit::new(vec![
+            (0x20, Box::new(Complement) as Box<dyn Endpoint>),
+            (0x41, Box::new(Complement)),
+        ])
         .unwrap();
         let mut outbox = Vec::new();
         rtkit.start(&mut outbox).unwrap();
@@ -655,7 +628,7 @@ mod tests {
 
     #[test]
     fn cold_system_binding_keeps_the_started_session_and_precedes_roll_call() {
-        let mut kit = RtKit::new(Vec::new(), Management::Ordinary).unwrap();
+        let mut kit = RtKit::new(Vec::new()).unwrap();
         let mut initial = Vec::new();
         kit.start(&mut initial).unwrap();
         kit.attach_cold_system_endpoints(SystemEndpoints {
@@ -681,7 +654,7 @@ mod tests {
 
     #[test]
     fn late_or_duplicate_native_binding_refuses_before_changing_the_endpoint_map() {
-        let mut kit = RtKit::new(Vec::new(), Management::Enumeration).unwrap();
+        let mut kit = RtKit::new(Vec::new()).unwrap();
         let mut initial = Vec::new();
         kit.start(&mut initial).unwrap();
         mgmt(&mut kit, HELLO_REPLY, VERSION | VERSION << 16).unwrap();
@@ -695,7 +668,6 @@ mod tests {
         assert_eq!(kit.bitmap(0), 3);
         let mut kit = RtKit::with_system_endpoints(
             Vec::new(),
-            Management::Ordinary,
             SystemEndpoints {
                 trace: Some(Box::new(Complement)),
                 reporting: None,
@@ -716,7 +688,6 @@ mod tests {
     fn explicit_system_owners_enumerate_and_receive_on_their_own_session() {
         let mut kit = RtKit::with_system_endpoints(
             Vec::new(),
-            Management::Enumeration,
             SystemEndpoints {
                 trace: Some(Box::new(Complement)),
                 reporting: Some(Box::new(Complement)),
@@ -762,18 +733,12 @@ mod tests {
         assert!(step(&mut kit, FIRST_APPLICATION, 7).is_err());
         // Existing callers cannot smuggle a system service into the ordinary
         // application constructor or replace the reserved crashlog owner.
-        assert!(
-            RtKit::new(
-                vec![(IOREPORTING, Box::new(Complement))],
-                Management::Ordinary
-            )
-            .is_err()
-        );
+        assert!(RtKit::new(vec![(IOREPORTING, Box::new(Complement))]).is_err());
     }
 
     #[test]
     fn the_coprocessor_says_hello_rolls_call_and_serves_its_endpoints() {
-        let mut rtkit = booted(Management::Enumeration);
+        let mut rtkit = booted();
         assert!(mgmt(&mut rtkit, HELLO_REPLY, 11 | 11 << 16).is_err());
         // Group 0 holds the management and crashlog endpoints.
         let call = mgmt(&mut rtkit, HELLO_REPLY, 1 << 32 | 12 | 12 << 16).unwrap();
@@ -788,12 +753,9 @@ mod tests {
             vec![management(ROLL_CALL, ROLL_CALL_LAST | 2 << 32 | 2)]
         );
         assert!(step(&mut rtkit, 0x20, 1).is_err());
-        // An IOP the AP does not wait for announces nothing at the end of
-        // enumeration.
-        assert!(
-            mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32).unwrap(),
+            vec![management(IOP_POWER_ACK, POWER_ON)]
         );
         let started = mgmt(&mut rtkit, ENDPOINT_CONTROL, 0x20 << 32 | ENABLE).unwrap();
         assert_eq!(
@@ -823,7 +785,7 @@ mod tests {
 
     #[test]
     fn the_crashlog_endpoint_starts_silently_and_takes_no_ap_message() {
-        let mut rtkit = booted(Management::Enumeration);
+        let mut rtkit = booted();
         // Endpoint control before the roll call names anything refuses.
         assert!(mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | ENABLE).is_err());
         mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
@@ -855,7 +817,7 @@ mod tests {
 
     #[test]
     fn power_pings_and_naps_are_answered_as_the_ap_expects() {
-        let mut rtkit = booted(Management::Ordinary);
+        let mut rtkit = booted();
         mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
         mgmt(&mut rtkit, ROLL_CALL, 1).unwrap();
         mgmt(&mut rtkit, ROLL_CALL, 1 << 32).unwrap();
@@ -886,7 +848,7 @@ mod tests {
     #[test]
     fn retained_cpu_halt_requires_sleep_and_resumes_without_enumeration() {
         for sleep in [0x201, 0x202] {
-            let mut rtkit = booted(Management::Ordinary);
+            let mut rtkit = booted();
             assert!(rtkit.stop().is_err()); // Incomplete protocol start.
             mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
             mgmt(&mut rtkit, ROLL_CALL, 1).unwrap();
@@ -920,37 +882,11 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_only_retained_cpu_wake_is_not_substituted_by_ordinary_running() {
-        let mut rtkit = booted(Management::Enumeration);
-        mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
-        mgmt(&mut rtkit, ROLL_CALL, 1).unwrap();
-        mgmt(&mut rtkit, ROLL_CALL, 1 << 32).unwrap();
-        mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32).unwrap();
-        mgmt(&mut rtkit, IOP_POWER, 0x201).unwrap();
-        assert_eq!(
-            rtkit.stop(),
-            Err("RTKit retained CPU stop for enumeration-only management is not modeled")
-        );
-        let mut out = Vec::new();
-        assert!(rtkit.resume(&mut out).is_err());
-        assert!(out.is_empty());
-        assert_eq!(rtkit.iop_power(), 0x201);
-        assert!(!rtkit.cpu_stopped);
-        assert_eq!(
-            mgmt(&mut rtkit, PING, 91).unwrap(),
-            [management(PING_ACK, 91)]
-        );
-    }
-
-    #[test]
     fn the_restore_boot_pmp_handshake_ends_with_the_power_on_announcement() {
         // The AP's side of restore boot s25's PMP mailbox log, word for
         // word: the AP waited 20 s for running after its last answer.
-        let mut rtkit = RtKit::new(
-            vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
-            Management::Ordinary,
-        )
-        .unwrap();
+        let mut rtkit =
+            RtKit::new(vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)]).unwrap();
         let raw = |rtkit: &mut RtKit, payload| step(rtkit, 0, payload).unwrap();
         let mut outbox = Vec::new();
         rtkit.start(&mut outbox).unwrap();
@@ -988,12 +924,9 @@ mod tests {
 
     #[test]
     fn a_quiesced_coprocessor_waits_for_its_wake_and_acks_it_after_enumeration() {
-        let mut rtkit = RtKit::new(
-            vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
-            Management::Ordinary,
-        )
-        .unwrap()
-        .quiesced();
+        let mut rtkit = RtKit::new(vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)])
+            .unwrap()
+            .quiesced();
         let mut outbox = Vec::new();
         rtkit.start(&mut outbox).unwrap();
         assert!(outbox.is_empty());
@@ -1044,10 +977,10 @@ mod tests {
 
     #[test]
     fn enabled_endpoints_send_board_events_and_carry_transitions() {
-        let mut rtkit = RtKit::new(
-            vec![(0x20, Box::new(Board::default()) as Box<dyn Endpoint>)],
-            Management::Ordinary,
-        )
+        let mut rtkit = RtKit::new(vec![(
+            0x20,
+            Box::new(Board::default()) as Box<dyn Endpoint>,
+        )])
         .unwrap();
         rtkit.start(&mut Vec::new()).unwrap();
         rtkit.endpoint_mut::<Board>(0x20).unwrap().pending.push(9);
@@ -1081,7 +1014,7 @@ mod tests {
     #[test]
     fn endpoints_are_application_endpoints_once_each() {
         let one = || Box::new(Complement) as Box<dyn Endpoint>;
-        assert!(RtKit::new(vec![(0x2, one())], Management::Ordinary).is_err());
-        assert!(RtKit::new(vec![(0x20, one()), (0x20, one())], Management::Ordinary).is_err());
+        assert!(RtKit::new(vec![(0x2, one())]).is_err());
+        assert!(RtKit::new(vec![(0x20, one()), (0x20, one())]).is_err());
     }
 }

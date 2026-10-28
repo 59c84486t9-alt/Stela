@@ -55,18 +55,10 @@ pub struct Image<'a> {
 /// and conditional nesting before interpreting or emitting any effects.
 #[derive(Debug, Clone, Copy)]
 pub struct Program<'a> {
-    profile: Profile,
-    record: u32,
     offset: usize,
     bytes: &'a [u8],
 }
 impl<'a> Program<'a> {
-    pub fn profile(self) -> Profile {
-        self.profile
-    }
-    pub fn record(self) -> u32 {
-        self.record
-    }
     pub fn offset(self) -> usize {
         self.offset
     }
@@ -148,6 +140,7 @@ impl<'a> Image<'a> {
         Ok(Self { bytes, profiles })
     }
 
+    #[cfg(test)]
     pub fn profiles(&self) -> impl Iterator<Item = Profile> + '_ {
         self.profiles.iter().map(|selected| selected.profile)
     }
@@ -198,8 +191,6 @@ impl<'a> Image<'a> {
         }
         let offset = u64_at(selected, 8)?;
         Ok(Program {
-            profile,
-            record,
             offset: usize::try_from(offset).map_err(|_| Error::Extent)?,
             bytes: relative(self.bytes, offset, length)?,
         })
@@ -296,15 +287,16 @@ mod tests {
         assert_eq!(program.rows()[1], [0x55; ROW_BYTES]);
         assert_eq!(image.t6000(0).unwrap_err(), Error::Revision);
         assert_eq!(image.t6000(0x10).unwrap_err(), Error::MissingProfile);
-        let mut profile = program.profile;
+        let mut profile = Profile {
+            chip: 0x6000,
+            revision: 0x20,
+            selector: 0,
+        };
+        assert_eq!(image.program(profile, 1).unwrap_err(), Error::MissingRecord);
         profile.selector = 1;
         assert_eq!(
             image.program(profile, 0).unwrap_err(),
             Error::MissingProfile
-        );
-        assert_eq!(
-            image.program(program.profile, 1).unwrap_err(),
-            Error::MissingRecord
         );
     }
 

@@ -86,6 +86,7 @@ pub struct Snapshot {
 
 pub struct T6000 {
     complex: Complex,
+    #[cfg(test)]
     states: usize,
     roles: BTreeMap<u64, Role>,
     words: BTreeMap<u64, u64>,
@@ -135,6 +136,7 @@ impl T6000 {
         }
         let mut model = Self {
             complex,
+            #[cfg(test)]
             states,
             roles,
             words: BTreeMap::new(),
@@ -182,6 +184,7 @@ impl T6000 {
         Ok(model)
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             complex: self.complex,

@@ -110,6 +110,7 @@ pub enum Access {
 }
 
 impl Access {
+    #[cfg(test)]
     const fn bits(self) -> u64 {
         match self {
             Access::FirmwareGpu => 0,
@@ -138,6 +139,7 @@ pub enum MemoryAttr {
     Uncached,
 }
 
+#[cfg(test)]
 impl MemoryAttr {
     const fn index(self) -> u64 {
         match self {
@@ -164,6 +166,7 @@ impl Flags {
     /// The flag bits of a leaf entry, as `encodePTEFlags` forms them. `kind`
     /// 0 marks the mapping non-global (its `0xc03` base), any other value
     /// keeps it global (`0x403`).
+    #[cfg(test)]
     pub fn encode(&self) -> u64 {
         let base = if self.global { 0x403 } else { 0xc03 };
         base | self.access.bits() << AP_SHIFT
@@ -192,6 +195,7 @@ impl Flags {
 
 /// Encode a leaf (page) entry for a 16 KiB-aligned physical address within
 /// the translator's output size.
+#[cfg(test)]
 pub fn encode_pte(physical: u64, flags: &Flags) -> u64 {
     (physical & ENTRY_ADDRESS) | flags.encode()
 }
@@ -203,11 +207,13 @@ const fn output_mask(bits: u32) -> u64 {
 }
 
 /// Encode a table descriptor (PDE or PCE) for a 16 KiB-aligned table base.
+#[cfg(test)]
 pub fn encode_table(table: u64) -> u64 {
     (table & !PAGE_MASK) | TABLE
 }
 
 /// Encode the two GPTBAT words for a context: TTBR0 then TTBR1.
+#[cfg(test)]
 pub fn encode_gptbat(context: u16, ttbr0: u64, ttbr1: u64) -> [u64; 2] {
     let tag = (u64::from(context) << 48) | VALID;
     [(ttbr0 & !PAGE_MASK) | tag, (ttbr1 & !PAGE_MASK) | tag]
@@ -253,6 +259,7 @@ pub const FIRMWARE_CONTEXT: usize = 0;
 pub const GPU_STREAM: usize = 1 << 8;
 
 /// The port stream of a GPU-unit access in `context`.
+#[cfg(test)]
 pub const fn gpu_stream(context: usize) -> Result<usize, DmaError> {
     // Validate before inserting the agent bit: otherwise context 0x100
     // would be encoded exactly like GPU context 0 and silently alias it.
@@ -319,6 +326,7 @@ pub struct Mapping {
 /// RAM, whose entries hold `output_bits`-bit addresses. `ttbr` is the
 /// 16 KiB-aligned base of the top-level (PCE) table. `input`'s bits above
 /// [`IAS`] must all equal its TTBR-select bit.
+#[cfg(test)]
 pub fn translate(
     memory: &mut dyn Memory,
     ttbr: u64,
@@ -540,6 +548,7 @@ impl Uat {
     }
 
     /// The shared TTBR1 window's page-directory page, once configured.
+    #[cfg(test)]
     pub fn shared_l2(&self) -> Option<u64> {
         self.shared_l2
     }

@@ -309,6 +309,7 @@ impl FirmwarePower {
     }
 
     /// The declared physical ASC wrapper used by the original native mapping.
+    #[cfg(test)]
     pub fn asc_wrapper(&self) -> Option<u64> {
         self.asc_wrapper
     }
@@ -331,11 +332,11 @@ impl FirmwarePower {
         }
         Ok(())
     }
-
+    #[cfg(test)]
     fn logical(&self, physical: u64) -> Result<u64, &'static str> {
         self.logical_range(physical, 4)
     }
-
+    #[cfg(test)]
     fn logical_range(&self, physical: u64, width: u64) -> Result<u64, &'static str> {
         for &(base, bytes, offset) in &self.banks {
             if let Some(at) = physical.checked_sub(base)
@@ -350,6 +351,7 @@ impl FirmwarePower {
     /// Resolve a PIO word through the firmware's UAT permissions before any
     /// device effect. The AP descriptor's physical base is checked against the
     /// translation and then the concrete device geometry, never trusted as DMA.
+    #[cfg(test)]
     fn target(
         &self,
         port: &mut crate::platform::dma::Port<'_, '_>,
@@ -394,6 +396,7 @@ impl FirmwarePower {
 
     /// Read a source-qualified native callback register. Unknown registers
     /// refuse; the RAM DMA port is used only for the UAT table walk.
+    #[cfg(test)]
     pub fn read(
         &self,
         port: &mut crate::platform::dma::Port<'_, '_>,
@@ -403,7 +406,7 @@ impl FirmwarePower {
         let logical = self.target(port, region, offset, false)?;
         self.native.borrow().read(self.family, logical)
     }
-
+    #[cfg(test)]
     pub fn write(
         &self,
         port: &mut crate::platform::dma::Port<'_, '_>,

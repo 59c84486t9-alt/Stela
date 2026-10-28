@@ -38,6 +38,10 @@ pub mod firmware;
 pub mod firmware_image;
 pub mod generation;
 pub mod initdata;
+#[expect(
+    dead_code,
+    reason = "wired when the AGX firmware's initdata publishes PIO descriptors"
+)]
 pub mod pio;
 pub mod ring;
 pub mod sgx;

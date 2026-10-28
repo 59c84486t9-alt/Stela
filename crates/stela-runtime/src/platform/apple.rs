@@ -39,9 +39,18 @@ pub mod interrupt;
 pub mod ipi;
 pub mod lockdown;
 pub mod mcc;
+#[expect(
+    dead_code,
+    reason = "wired when the guest's ACIO coprocessor is admitted"
+)]
 pub mod mxwrap;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired with the ACIO NHI behind mxwrap")
+)]
 pub mod nhi;
 pub mod nor;
+#[expect(dead_code, reason = "wired once its downstream endpoint models exist")]
 pub mod pcie;
 pub mod perf;
 pub mod pmgr;
@@ -54,6 +63,10 @@ pub mod rtkit;
 pub mod sart;
 pub mod scanout;
 pub mod sep;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired when SmartIO's DMA service is admitted")
+)]
 pub mod sio_dma;
 pub mod smc;
 pub mod spi;

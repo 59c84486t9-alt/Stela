@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn recovered_recovery_commands_bind_the_durable_nonce_and_exact_reply_lengths() {
-        let mut policy = BootPolicy::new(None);
+        let mut policy = BootPolicy::default();
         let mut store = store();
         let generation = store.generation().unwrap();
         assert_eq!(success(&mut policy, &mut store, BEGIN).len(), HEADER_BYTES);
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(store.policy_nonce(PolicyNonce::MacOs), Ok(None));
         assert!(ask(&mut policy, &mut store, &mut command(PROPOSED_DIGEST)).is_err());
         let mut reopened = Nonces::open(&roots(), store.into_backend()).unwrap();
-        let mut policy = BootPolicy::new(None);
+        let mut policy = BootPolicy::default();
         assert_eq!(
             success(&mut policy, &mut reopened, BLESSED_DIGEST),
             proposed
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn duplicate_begin_and_bad_bodies_leave_the_proposal_and_durable_state_unchanged() {
-        let mut policy = BootPolicy::new(None);
+        let mut policy = BootPolicy::default();
         let mut store = store();
         success(&mut policy, &mut store, BEGIN);
         let proposed = success(&mut policy, &mut store, PROPOSED_DIGEST);
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn entropy_and_begin_output_failures_never_publish_a_proposal() {
-        let mut policy = BootPolicy::new(None);
+        let mut policy = BootPolicy::default();
         let mut store = store();
         let mut buffers = command(BEGIN);
         let frame = Frame {
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn an_intervening_xart_mutation_or_erase_cannot_commit_a_stale_proposal() {
         for erase in [false, true] {
-            let mut policy = BootPolicy::new(None);
+            let mut policy = BootPolicy::default();
             let mut store = store();
             success(&mut policy, &mut store, BEGIN);
             if erase {
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn successful_commit_with_failed_output_is_not_answered_or_replayed() {
-        let mut policy = BootPolicy::new(None);
+        let mut policy = BootPolicy::default();
         let mut store = store();
         success(&mut policy, &mut store, BEGIN);
         let proposed = success(&mut policy, &mut store, PROPOSED_DIGEST);
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn reset_cancels_a_live_proposal_and_failed_reset_output_never_acknowledges() {
-        let mut policy = BootPolicy::new(None);
+        let mut policy = BootPolicy::default();
         let mut store = store();
         success(&mut policy, &mut store, BEGIN);
         success(&mut policy, &mut store, END);
@@ -435,7 +435,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let mut policy = BootPolicy::new(None);
+            let mut policy = BootPolicy::default();
             success(&mut policy, &mut store, BEGIN);
             let proposed = success(&mut policy, &mut store, PROPOSED_DIGEST);
             fail.set(true);
@@ -447,7 +447,7 @@ mod tests {
             let mut reopened = Nonces::open(&roots(), store.into_backend()).unwrap();
             if op == END {
                 assert_eq!(
-                    success(&mut BootPolicy::new(None), &mut reopened, BLESSED_DIGEST),
+                    success(&mut BootPolicy::default(), &mut reopened, BLESSED_DIGEST),
                     proposed
                 );
             } else {

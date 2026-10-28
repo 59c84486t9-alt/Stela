@@ -21,10 +21,12 @@ use core::cell::RefCell;
 
 const NAME: &str = "asc-iorvbar";
 const LOCK: u64 = 1;
+#[cfg(test)]
 const ADDRESS: u64 = 0x3ff_ffff_f800;
 
 /// Which boot owner established the initial word. A native boot-resource
 /// initialization is an emulated-machine choice, not an Apple observation.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     PhysicalCapture,
@@ -36,9 +38,12 @@ pub enum Origin {
 /// prove current allocation/mapping ownership and perform the instruction fetch.
 #[derive(Debug, Clone, Copy)]
 pub struct EntryMapping {
+    #[cfg(test)]
     pub linked_base: u64,
     pub physical_base: u64,
+    #[cfg(test)]
     pub iop_base: u64,
+    #[cfg(test)]
     pub bytes: u64,
 }
 
@@ -59,6 +64,7 @@ pub struct EntryHandoff {
     instruction: u32,
     entry: u64,
     word: u64,
+    #[cfg(test)]
     origin: Origin,
 }
 
@@ -70,6 +76,7 @@ impl EntryHandoff {
     ///
     /// `word` is separately established/captured. Geometry and source bytes do
     /// not establish initial lock state, vendor trust or an execution backend.
+    #[cfg(test)]
     pub fn from_mapping(
         mapping: EntryMapping,
         offset: u64,
@@ -105,13 +112,11 @@ impl EntryHandoff {
             origin,
         })
     }
-
+    #[cfg(test)]
     pub const fn origin(self) -> Origin {
         self.origin
     }
-    pub const fn mapping(self) -> EntryMapping {
-        self.mapping
-    }
+    #[cfg(test)]
     pub const fn linked_entry(self) -> u64 {
         self.mapping.linked_base + self.offset
     }
@@ -153,6 +158,7 @@ impl Auxiliary {
         })))
     }
 
+    #[cfg(test)]
     pub(super) fn establish(&self, handoff: EntryHandoff) -> Result<(), &'static str> {
         let mut state = self.0.borrow_mut();
         if state.handoff.is_some() {

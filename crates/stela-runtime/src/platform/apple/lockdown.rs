@@ -62,16 +62,8 @@ pub const BYTES: u64 = 16;
 /// Each word of a PE's block ([`PE_WORDS`]).
 pub const WORD_BYTES: u64 = 8;
 const LOCK: u64 = 1;
-/// The per-PE groups XNU's `CPU_PIO_RO_CTL_VAL` leaves writable.
-pub const CPU_PIO_DBG_WRAP: u64 = 1 << 49;
+#[cfg(test)]
 pub const CPU_PIO_TRACE_CORE_CFG: u64 = 1 << 54;
-/// The per-cluster groups XNU's `ACC_PIO_RO_CTL_VAL` leaves writable:
-/// PBLK_OVRD (47), DBG_CTL (48), DBG_PMGR (50), DBG_WRAP_GLB (51),
-/// TRACE_CTL (53), TRC_UT_CTL (55) and OCLA_CTL (56).
-pub const ACC_PIO_WRITABLE: u64 =
-    1 << 47 | 1 << 48 | 1 << 50 | 1 << 51 | ACC_PIO_TRACE_CTL | ACC_PIO_TRC_UT_CTL | 1 << 56;
-pub const ACC_PIO_TRACE_CTL: u64 = 1 << 53;
-pub const ACC_PIO_TRC_UT_CTL: u64 = 1 << 55;
 const RVBAR: u64 = 0;
 const RVBAR_ADDRESS: u64 = 0x0000_ffff_ffff_f000;
 /// XNU's `CPU_PIO_CPU_STS_OFFSET` and `CORE_THRTL_CFG2_OFFSET`.

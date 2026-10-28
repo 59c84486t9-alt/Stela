@@ -285,6 +285,7 @@ impl Asc {
     /// The ASCv4 provider's second register aperture. It shares this owner's
     /// lifecycle; do not bind a second PMGR lifecycle owner to the handle.
     /// Native protocol firmware does not imply an ARM entry-register value.
+    #[cfg(test)]
     pub fn auxiliary(&self) -> Auxiliary {
         self.auxiliary.clone()
     }
@@ -294,6 +295,7 @@ impl Asc {
     /// three address domains and the expected original instruction.
     /// This never loads or executes ARM firmware, or derives an entry from a
     /// native Rust implementation address.
+    #[cfg(test)]
     pub fn establish_entry(&mut self, handoff: EntryHandoff) -> Result<(), &'static str> {
         self.check_entry_fetch(handoff)?;
         self.auxiliary.establish(handoff)
@@ -1225,7 +1227,7 @@ mod tests {
 
     #[test]
     fn rtkit_poll_preserves_both_prior_and_failing_endpoint_events_and_irqs() {
-        use super::super::rtkit::{Endpoint, Management, RtKit};
+        use super::super::rtkit::{Endpoint, RtKit};
         let endpoints = (0x20..=0x22)
             .map(|number| {
                 (
@@ -1239,7 +1241,7 @@ mod tests {
                 )
             })
             .collect();
-        let rtkit = RtKit::new(endpoints, Management::Ordinary).unwrap();
+        let rtkit = RtKit::new(endpoints).unwrap();
         let mut asc = Asc::booted(Box::new(rtkit), Lines::from_interrupts(LINES)).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);

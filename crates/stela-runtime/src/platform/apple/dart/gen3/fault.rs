@@ -76,12 +76,13 @@ pub enum Level {
 /// A supplied original TRAD summary, not a generated fault header. The
 /// native classifier at mac18g92889b4..9288cc0 and jump table9288e68
 /// identify these fields. Unknown bits are retained without interpretation.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedSummary {
     raw: u32,
     code: Code,
 }
-
+#[cfg(test)]
 impl ObservedSummary {
     pub fn trad(raw: u32) -> Result<Self, &'static str> {
         if raw & 0x600 != 0 {

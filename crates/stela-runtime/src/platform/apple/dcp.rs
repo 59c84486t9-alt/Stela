@@ -39,8 +39,8 @@ pub mod rpc;
 pub mod swap;
 
 use super::asc::{Firmware, Message, TransitionRequest};
-use super::rtkit::{Endpoint, Management, RtKit};
-use super::scanout::{Mode, Scanout, Surface};
+use super::rtkit::{Endpoint, RtKit};
+use super::scanout::{Scanout, Surface};
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -56,6 +56,8 @@ use core::cell::RefCell;
 pub const SYSTEM_ENDPOINT: u8 = 0x20;
 pub const DPAV_ENDPOINT: u8 = 0x24;
 pub const DPTX_ENDPOINT: u8 = 0x2a;
+#[cfg(test)]
+use super::scanout::Mode;
 pub use link::IOMFB_ENDPOINT;
 
 /// Identity of the one backed external output. The unnumbered DCPEXT and
@@ -311,6 +313,7 @@ impl Coprocessor {
     /// `vm-base` when the node is `truncate-dvas`: `AppleA7IOP::_restrictDVA`
     /// (kernel file 0x1bb1424) then hands the coprocessor only a DVA's low
     /// 32 bits, which lie in that window.
+    #[cfg(test)]
     pub fn new(scanout: Box<dyn Scanout>, window: Option<u64>) -> Result<Self, &'static str> {
         Self::for_external(scanout, window, ExternalIdentity::Unnumbered)
     }
@@ -354,7 +357,7 @@ impl Coprocessor {
             })
             .collect();
         endpoints.push((IOMFB_ENDPOINT, Box::new(Iomfb(link.clone()))));
-        let rtkit = RtKit::new(endpoints, Management::Ordinary)?;
+        let rtkit = RtKit::new(endpoints)?;
         Ok(Self { rtkit, link, afk })
     }
 
@@ -365,6 +368,7 @@ impl Coprocessor {
     }
 
     /// The fixed mode the one connected display runs.
+    #[cfg(test)]
     pub fn mode(&self) -> Mode {
         self.link.borrow().service().mode()
     }

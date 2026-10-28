@@ -14,8 +14,11 @@
 //! nor implement MMIO. There is no initial state, current-state setter, BUSY
 //! clear, IRQ wire or completion receipt. Each descriptor retains the missing
 //! native effect-owner requirement, which machine admission must report.
-
-use super::sequencer::{PhysicalWrite, poll::PhysicalRead};
+#[cfg(test)]
+use super::sequencer::PhysicalWrite;
+#[cfg(test)]
+use super::sequencer::poll::PhysicalRead;
+#[cfg(test)]
 use crate::platform::apple::bus::Width;
 
 /// Physical-controller ordinal in the original hardware table. Domain+0x9c
@@ -28,12 +31,13 @@ pub enum Controller {
     Display = 2,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Current,
     Requested,
 }
-
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     LogicalState {
@@ -49,6 +53,7 @@ pub enum Error {
 
 /// Decoded supplied data, without proof of a physical observation or effects.
 /// It is intentionally not an applied-state or settlement token.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {
     pub current: u8,
@@ -101,12 +106,15 @@ pub const T8112: [Descriptor; 3] = [
 ];
 
 impl Descriptor {
+    #[cfg(test)]
     pub const fn controller(self) -> Controller {
         self.controller
     }
+    #[cfg(test)]
     pub const fn aperture(self) -> (u64, u64) {
         (self.physical, 0x4000)
     }
+    #[cfg(test)]
     pub const fn codes(self) -> &'static [u8] {
         self.codes
     }
@@ -116,26 +124,21 @@ impl Descriptor {
             physical: self.physical,
         }
     }
-
-    pub const fn control_read(self) -> PhysicalRead {
-        PhysicalRead {
-            address: self.physical,
-            width: Width::Word,
-        }
-    }
+    #[cfg(test)]
     pub const fn interrupt_control_read(self) -> PhysicalRead {
         PhysicalRead {
             address: self.physical + self.irq_control,
             width: Width::Word,
         }
     }
+    #[cfg(test)]
     pub const fn interrupt_status_read(self) -> PhysicalRead {
         PhysicalRead {
             address: self.physical + self.irq_control + 4,
             width: Width::Word,
         }
     }
-
+    #[cfg(test)]
     fn logical(self, field: Field, raw: u8) -> Result<u8, Error> {
         self.codes
             .iter()
@@ -151,6 +154,7 @@ impl Descriptor {
     /// The original lookup falls back to logical zero for an unknown raw code.
     /// That fallback is not qualified controller state: preserve the unknown
     /// field explicitly rather than letting it grant a native vote or ACK.
+    #[cfg(test)]
     pub fn decode(self, control: u32) -> Result<Observation, Error> {
         Ok(Observation {
             current: self.logical(Field::Current, ((control >> 8) & 15) as u8)?,
@@ -161,6 +165,7 @@ impl Descriptor {
 
     /// Exact driver store, not an RMW and not an issued/applied request. Only
     /// a separately qualified physical sink may execute or complete this write.
+    #[cfg(test)]
     pub fn request_write(self, logical: u8) -> Result<PhysicalWrite, Error> {
         let code = self
             .codes
@@ -178,6 +183,7 @@ impl Descriptor {
 
     /// Driver enable/disable RMW against an actually supplied control word.
     /// Describing it supplies no initial mask, local IRQ or AIC-wire ownership.
+    #[cfg(test)]
     pub fn interrupt_control_write(self, observed: u32, enabled: bool) -> PhysicalWrite {
         PhysicalWrite {
             address: self.interrupt_control_read().address,
@@ -188,6 +194,7 @@ impl Descriptor {
 
     /// The original ack reads status and writes the complete same word back.
     /// The receiving bank must qualify its effects; no W1C state is fabricated.
+    #[cfg(test)]
     pub fn acknowledgment_write(self, observed: u32) -> PhysicalWrite {
         PhysicalWrite {
             address: self.interrupt_status_read().address,
@@ -197,6 +204,7 @@ impl Descriptor {
     }
 
     /// Source method100842c tests whole-word equality, not merely bit zero.
+    #[cfg(test)]
     pub const fn interrupt_pending(self, observed: u32) -> bool {
         observed == 1
     }

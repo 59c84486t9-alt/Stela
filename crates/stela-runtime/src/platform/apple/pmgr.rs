@@ -21,6 +21,7 @@
 //! arbitration is not modeled; coverage includes their actual consumers.
 pub mod coverage;
 pub mod dvfs;
+#[cfg(test)]
 pub mod install;
 pub mod sequencer;
 pub mod t6000;
@@ -208,6 +209,7 @@ impl Pmgr {
     }
 
     /// The completed hardware state of a described domain register.
+    #[cfg(test)]
     pub fn state(&self, address: u64) -> Option<u8> {
         self.registers
             .get(&address)
@@ -215,6 +217,7 @@ impl Pmgr {
     }
 
     /// Addresses whose actual state is not active, for diagnostics.
+    #[cfg(test)]
     pub fn inactive(&self) -> Vec<u64> {
         self.registers
             .iter()

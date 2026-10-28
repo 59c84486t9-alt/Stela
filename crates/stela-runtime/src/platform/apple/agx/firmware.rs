@@ -267,7 +267,6 @@ impl ActiveCommand {
 struct ActiveWork {
     descriptor: ring::Descriptor,
     next_read: u32,
-    channel_state: u64,
     submission: channel::Submission,
     command: Option<ActiveCommand>,
     retiring: bool,
@@ -706,7 +705,6 @@ impl State {
                 self.active_work = Some(ActiveWork {
                     descriptor,
                     next_read: ring::next(read),
-                    channel_state,
                     submission,
                     command: None,
                     retiring: false,
@@ -1049,7 +1047,7 @@ impl Coprocessor {
     /// (`power-managed`).
     pub fn new(family: &'static Family) -> Result<Self, &'static str> {
         let (endpoints, protocol) = endpoints(family);
-        let rtkit = RtKit::new(endpoints, super::super::rtkit::Management::Ordinary)?;
+        let rtkit = RtKit::new(endpoints)?;
         Ok(Self {
             rtkit,
             protocol,
@@ -1070,7 +1068,7 @@ impl Coprocessor {
         coprocessor.power = Some(power);
         Ok(coprocessor)
     }
-
+    #[cfg(test)]
     pub fn protocol(&self) -> &Protocol {
         &self.protocol
     }
