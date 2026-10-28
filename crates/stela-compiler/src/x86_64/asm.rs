@@ -25,6 +25,19 @@ pub(crate) struct Code {
     instructions: usize,
 }
 
+/// A byte and instruction position captured at an emission boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Checkpoint {
+    bytes: usize,
+    instructions: usize,
+}
+
+impl Checkpoint {
+    pub(crate) const fn offset(self) -> usize {
+        self.bytes
+    }
+}
+
 impl Code {
     pub(crate) const fn new() -> Self {
         Self {
@@ -51,6 +64,32 @@ impl Code {
     pub(crate) fn append(&mut self, other: Code) {
         self.bytes.extend(other.bytes);
         self.instructions += other.instructions;
+    }
+    /// The current emission boundary, for splitting or truncating this buffer.
+    pub(crate) fn checkpoint(&self) -> Checkpoint {
+        Checkpoint { bytes: self.bytes.len(), instructions: self.instructions }
+    }
+    /// Move the instructions emitted after `at` into a separate buffer.
+    pub(crate) fn split_off(&mut self, at: Checkpoint) -> Self {
+        assert!(at.bytes <= self.bytes.len() && at.instructions <= self.instructions);
+        let tail = Self {
+            bytes: self.bytes.split_off(at.bytes),
+            instructions: self.instructions - at.instructions,
+        };
+        self.instructions = at.instructions;
+        tail
+    }
+    /// Discard the instructions emitted after `at`.
+    pub(crate) fn truncate(&mut self, at: Checkpoint) {
+        assert!(at.bytes <= self.bytes.len() && at.instructions <= self.instructions);
+        self.bytes.truncate(at.bytes);
+        self.instructions = at.instructions;
+    }
+    /// Remove one complete instruction whose bytes the caller identified.
+    pub(crate) fn remove_instruction(&mut self, range: core::ops::Range<usize>) {
+        assert!(!range.is_empty());
+        self.bytes.drain(range);
+        self.instructions = self.instructions.checked_sub(1).expect("counted instruction");
     }
     /// Remove every byte and instruction.
     pub(crate) fn clear(&mut self) {
@@ -1386,6 +1425,29 @@ mod tests {
             assert_eq!(code, expected);
             assert_eq!(count, 1);
         }
+    }
+
+    #[test]
+    fn checkpoints_preserve_counts_when_moving_cold_code() {
+        let mut code = Code::new();
+        code.asm().mov_imm64(Gpr::Rax, 0x1234);
+        let hot = code.checkpoint();
+        let skip = code.asm().jmp();
+        let cold = code.checkpoint();
+        resolve(&mut code, skip, cold.offset());
+        code.asm().mov_imm32(Gpr::Rcx, 1);
+        code.asm().ret();
+        let tail = code.split_off(cold);
+        assert_eq!(tail.instructions(), 2);
+        assert_eq!(code.instructions(), 2);
+        code.truncate(hot);
+        assert_eq!(code.instructions(), 1);
+        let bytes = code.len();
+        code.append(tail);
+        assert_eq!(code.instructions(), 3);
+        code.remove_instruction(0..bytes);
+        assert_eq!(code.instructions(), 2);
+        assert_eq!(*code, [0xb9, 1, 0, 0, 0, 0xc3]);
     }
 
     #[test]

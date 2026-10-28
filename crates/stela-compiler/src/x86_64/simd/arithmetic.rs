@@ -297,13 +297,17 @@ fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetC
         Shape::Scalar | Shape::Vector128 => {}
     }
     commit(code, operand.destination, LEFT_VECTOR);
+    let inline_end = code.checkpoint();
     let done = jump(code);
+    let cold = code.checkpoint();
     let mut crossing = vec![rejected];
     if !zero_product(operand.operation) {
         return StickyPath {
             full,
             helper: vec![rejected],
             done,
+            cold,
+            inline_end,
             crossing,
         };
     }
@@ -325,6 +329,8 @@ fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetC
         full,
         helper,
         done,
+        cold,
+        inline_end,
         crossing,
     }
 }
@@ -334,6 +340,8 @@ struct StickyPath {
     full: Vec<usize>,
     helper: Vec<usize>,
     done: usize,
+    cold: crate::x86_64::asm::Checkpoint,
+    inline_end: crate::x86_64::asm::Checkpoint,
     crossing: Vec<usize>,
 }
 
@@ -424,7 +432,8 @@ fn finish(code: &mut [u8], sticky: StickyPath, full: usize, operand: &Operand) -
     let done = code.len();
     resolve(code, sticky.done, done);
     ColdSplit {
-        cold: sticky.done + size_of::<i32>(),
+        cold: sticky.cold,
+        inline_end: sticky.inline_end,
         full,
         crossing: sticky.crossing,
         result: operand.destination,

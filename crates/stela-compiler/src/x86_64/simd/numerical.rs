@@ -311,7 +311,9 @@ impl Entry {
 /// ended. Neither part accesses guest memory.
 pub(in crate::x86_64) struct ColdSplit {
     /// Start of the rest, just after the `jmp` past it.
-    pub(in crate::x86_64) cold: usize,
+    pub(in crate::x86_64) cold: crate::x86_64::asm::Checkpoint,
+    /// End of the inline path, before its jump over the cold path.
+    pub(in crate::x86_64) inline_end: crate::x86_64::asm::Checkpoint,
     /// The full path's entry, correct in every FPCR and FPSR state.
     pub(in crate::x86_64) full: usize,
     /// Every rel32 branch field in one part that targets the other.

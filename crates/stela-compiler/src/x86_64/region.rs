@@ -1251,18 +1251,16 @@ fn emit_prefix_selected<'a>(
 /// Conservative first ordinary-block gate. Actual emitted body bytes and
 /// selected native instruction counts must both improve or preserve cost.
 /// Timing-derived restrictions can narrow this gate; they never widen semantics.
-pub fn admits_allocated(region: &OptimizedRegion, baseline_code: &[u8]) -> bool {
+pub fn admits_allocated(region: &OptimizedRegion, baseline_code: &Code) -> bool {
     region.consumed_instructions >= 2
         && region.code.len() < baseline_code.len()
-        && analysis::allocated_output_instruction_count(baseline_code)
-            .is_some_and(|count| region.stats.native_instructions <= count)
+        && region.stats.native_instructions <= baseline_code.instructions()
 }
 
-pub fn admits_ordinary(region: &OptimizedRegion, baseline_code: &[u8]) -> bool {
+pub fn admits_ordinary(region: &OptimizedRegion, baseline_code: &Code) -> bool {
     region.consumed_instructions >= 2
         && region.code.len() < baseline_code.len()
-        && analysis::selected_output_instruction_count(baseline_code)
-            .is_some_and(|count| region.stats.native_instructions <= count)
+        && region.stats.native_instructions <= baseline_code.instructions()
 }
 
 #[cfg(test)]
@@ -1298,6 +1296,7 @@ mod tests {
         assert_eq!(result.stats.exit_stores, 1);
         assert_eq!(result.stats.commits, 256);
         assert_eq!(result.stats.peak_resident, 1);
+        assert_eq!(result.code.instructions(), result.stats.native_instructions);
     }
 
     #[test]
@@ -1400,17 +1399,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn selected_math_cost_inspection_refuses_unselected_memory_forms() {
-        use analysis::selected_output_instruction_count as count;
-        assert_eq!(count(&[0x4d, 0x0f, 0xaf, 0xd3]), Some(1));
-        assert_eq!(count(&[0x48, 0x0f, 0xac, 0xc1, 63]), Some(1));
-        assert_eq!(count(&[0x48, 0xf7, 0xd8]), Some(1));
-        assert_eq!(count(&[0x48, 0x0f, 0xaf, 0x07]), None);
-        assert_eq!(count(&[0x48, 0xf7, 0x1f]), None);
-        assert_eq!(count(&[0x0f, 0xac, 0xc1]), None);
-        assert_eq!(count(&[0x66, 0x0f, 0xaf, 0xc1]), None);
-    }
+
     #[test]
     fn pressure_never_discards_final_architectural_values() {
         let mut instructions: Vec<_> = (0..31)
@@ -1542,32 +1531,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn selected_output_counter_is_fail_closed_and_tracks_wide_store_recipes() {
-        use analysis::selected_output_instruction_count as count;
-        assert_eq!(count(&[]), Some(0));
-        assert_eq!(count(&[0x66, 0xc7, 0x47, 2, 0x34, 0x12]), Some(1));
-        assert_eq!(
-            count(&[0x66, 0xc7, 0x87, 0x98, 0, 0, 0, 0x34, 0x12]),
-            Some(1)
-        );
-        assert_eq!(count(&[0xc7, 0x47, 4, 0, 0, 0, 0]), Some(1));
-        assert_eq!(count(&[0x48, 0xc7, 0xc0, 1, 0, 0, 0]), Some(1));
-        assert_eq!(count(&[0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0x90]), Some(2));
-        for unsupported in [
-            vec![0xc3],
-            vec![0xc5, 0xf8, 0x77],
-            vec![0x48],
-            vec![0x66],
-            vec![0x48, 0x8b, 0x04, 0x24], // SIB: outside selected output.
-            vec![0x48, 0x8b, 0x05, 0, 0, 0, 0], // RIP-relative.
-            vec![0x49, 0x8b, 0x07],       // R15, not the stable RDI frame.
-            vec![0xf7, 0xf8],             // IDIV rather than NOT.
-            vec![0x81, 0xc0, 1, 0],       // Truncated immediate.
-        ] {
-            assert_eq!(count(&unsupported), None, "{unsupported:02x?}");
-        }
-    }
 
     #[test]
     fn cached_right_is_read_directly_only_without_transform() {
@@ -1753,7 +1716,7 @@ mod tests {
                 },
             );
         }
-        let count = analysis::selected_output_instruction_count(&baseline).unwrap();
+        let count = baseline.instructions();
         assert_eq!(
             checked.stats.native_instructions,
             unchecked.stats.native_instructions
@@ -2006,7 +1969,7 @@ mod tests {
                 super::super::MemoryChecks::DEFAULT,
             );
         }
-        assert!(analysis::selected_output_instruction_count(&baseline).is_some());
+        assert!(baseline.instructions() > 0);
         assert!(admits_ordinary(&region, &baseline));
     }
 
@@ -2188,7 +2151,7 @@ mod tests {
                     super::super::MemoryChecks::system(stack_alignment, false, true, false),
                 );
             }
-            assert!(analysis::selected_output_instruction_count(&baseline).is_some());
+            assert!(baseline.instructions() > 0);
             assert!(admits_ordinary(&region, &baseline));
         }
     }
@@ -2959,11 +2922,7 @@ mod tests {
         }
         let mut capture = Code::new();
         crate::x86_64::capture_nzcv(&mut capture, true);
-        assert_eq!(analysis::selected_output_instruction_count(&capture), None);
-        assert_eq!(
-            analysis::allocated_output_instruction_count(&capture),
-            Some(7)
-        );
+        assert_eq!(capture.instructions(), 7);
     }
 
     #[test]

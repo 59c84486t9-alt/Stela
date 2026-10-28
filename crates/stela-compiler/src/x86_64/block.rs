@@ -261,7 +261,8 @@ fn emit_selected(
                 (code, map, after)
             };
             let offset = code.len();
-            if super::region::admits_ordinary(&region, &baseline(&gate_at).0) {
+            let gate_baseline = baseline(&gate_at);
+            if super::region::admits_ordinary(&region, &gate_baseline.0) {
                 block
                     .source_map
                     .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
@@ -276,7 +277,18 @@ fn emit_selected(
             } else {
                 // Reject the complete eligible chunk. Rescanning its suffix
                 // could bypass the measured cost gate with a different shape.
-                let (baseline_code, baseline_map, baseline_after) = baseline(&checks_at);
+                let same_stack_checks = chunk.iter().enumerate().all(|(index, instruction)| {
+                    match instruction.operation {
+                        Operation::Memory { base, .. } | Operation::MemoryPair { base, .. }
+                            if base == Register::Sp => stack[cursor + index],
+                        _ => true,
+                    }
+                });
+                let (baseline_code, baseline_map, baseline_after) = if same_stack_checks {
+                    gate_baseline
+                } else {
+                    baseline(&checks_at)
+                };
                 block
                     .source_map
                     .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
@@ -374,7 +386,7 @@ fn emit_single(
         if let Some(vector) = held.xmm0 {
             let load = super::simd::xmm0_load(vector);
             if code[start..].starts_with(&load) && code.len() > start + load.len() {
-                code.drain(start..start + load.len());
+                code.remove_instruction(start..start + load.len());
             }
         }
     } else {
@@ -386,7 +398,7 @@ fn emit_single(
         && code[start..].starts_with(&load)
         && code.len() > start + load.len()
     {
-        code.drain(start..start + load.len());
+        code.remove_instruction(start..start + load.len());
     }
     let rax = super::rax_after(&instruction.operation);
     debug_assert!(match rax {
@@ -411,7 +423,6 @@ enum Place {
 
 const JMP_REL32: u8 = 0xe9;
 const REL32_BYTES: usize = size_of::<i32>();
-const JMP_REL32_BYTES: usize = 1 + REL32_BYTES;
 
 /// The slow paths of numerical instructions ([`ColdSplit`]), moved after
 /// the block's last ordinary instruction behind one jump, before the
@@ -458,7 +469,7 @@ impl OutOfLine {
         let continued = split.as_ref().filter(|_| self.continues_at(start));
         if let Some((site, end)) = self.open.take() {
             let target = continued.map_or(Place::Inline(end), |split| {
-                Place::OutOfLine(base + split.full - split.cold)
+                Place::OutOfLine(base + split.full - split.cold.offset())
             });
             self.fixups.push((Place::OutOfLine(site), target));
         }
@@ -466,17 +477,18 @@ impl OutOfLine {
             return;
         };
         let end = code.len();
-        let inline_end = split.cold - JMP_REL32_BYTES;
+        let inline_end = split.inline_end.offset();
+        let cold = split.cold.offset();
         debug_assert_eq!(code[inline_end], JMP_REL32);
         debug_assert_eq!(target_of(code, inline_end + 1), end);
         // A branch from the sticky path past the full path now falls
         // through; one from the moved part to its end takes the jump back.
         let place = |offset: usize, inline: bool| {
-            debug_assert!(!(inline_end..split.cold).contains(&offset));
+            debug_assert!(!(inline_end..cold).contains(&offset));
             if offset < inline_end || (offset == end && inline) {
                 Place::Inline(offset.min(inline_end))
             } else {
-                Place::OutOfLine(base + offset - split.cold)
+                Place::OutOfLine(base + offset - cold)
             }
         };
         for &site in &split.crossing {
@@ -485,10 +497,10 @@ impl OutOfLine {
             self.fixups
                 .push((place(site, inline), place(target, inline)));
         }
-        self.code.extend(&code[split.cold..]);
+        self.code.append(code.split_off(split.cold));
         let back = self.code.asm().jmp();
         self.open = Some((back.offset(), inline_end));
-        code.truncate(inline_end);
+        code.truncate(split.inline_end);
     }
 
     /// Lay out the moved code at the end of `code` behind a jump over it.
