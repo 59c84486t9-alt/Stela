@@ -1,4 +1,6 @@
 //! Decoded instructions and the state, memory and prefix requirements they carry.
+use crate::aarch64::Unsupported;
+use crate::x86_64::asm::Code;
 use alloc::{boxed::Box, format, vec::Vec};
 
 use crate::{
@@ -232,7 +234,7 @@ impl Decoded {
     pub(super) fn prefix_requirement(
         &self,
         original_word: u32,
-    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, Unsupported> {
         match self {
             Self::PrefetchHint => Ok(None),
             Self::SharedMemory(_)
@@ -385,7 +387,7 @@ impl Decoded {
     }
     pub(crate) fn emit_checked_ordinary(
         &self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         pc: GuestAddress,
         target: TargetCpu,
         fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
@@ -527,7 +529,7 @@ mod checked_register_tests {
     use crate::{
         Lifter,
         aarch64::Decoder,
-        block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},
+        block::{BlockProfile, CheckedMemoryProfile, CompilationPlan, Features},
     };
     use alloc::vec;
 
@@ -569,7 +571,7 @@ mod checked_register_tests {
                     let decoded = Decoded::checked_ordinary(instruction.clone(), profile).unwrap();
                     assert!(matches!(decoded, Decoded::PrefetchHint));
                     assert_eq!(decoded.memory_requirements(), Default::default());
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     let mut recovery = Vec::new();
                     decoded
                         .emit_checked_ordinary(&mut code, pc, TargetCpu::Baseline, &mut recovery)
@@ -592,8 +594,11 @@ mod checked_register_tests {
         let compiled = CompilationPlan::new(
             &source,
             pc,
-            BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentDisabled),
-            TargetCpu::Baseline,
+            &crate::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE)
+                    .with_checked_memory(CheckedMemoryProfile::SpAlignmentDisabled),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap()
         .compile()
@@ -677,8 +682,10 @@ mod checked_register_tests {
             let plan = CompilationPlan::new(
                 &source,
                 base,
-                BlockProfile::SystemModeSharedV1(specialization),
-                TargetCpu::Baseline,
+                &crate::Options::new(
+                    BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(specialization),
+                    TargetCpu::Baseline,
+                ),
             )
             .unwrap();
             assert_eq!(plan.source_bytes(), 24);
@@ -744,7 +751,7 @@ mod checked_register_tests {
                         decoded.memory_requirements().required_flags & flags::ASIMD,
                         flags::ASIMD
                     );
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     decoded
                         .emit_checked_ordinary(&mut code, pc, TargetCpu::Baseline, &mut Vec::new())
                         .unwrap();

@@ -17,6 +17,7 @@
 //! clock shows at the host's TSC ([`Count`]), less the cell's `value`.
 //! It also clobbers RCX and RDX, which are dead at every block exit (the
 //! direct exit returns in RAX and RDX, and chaining uses RCX).
+use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, ShiftOp, Size, Unary, resolve};
 use super::pointer::Thunk;
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
@@ -30,7 +31,7 @@ pub struct Cell {
     pub value: u64,
 }
 
-const VALUE: u8 = core::mem::offset_of!(Cell, value) as u8;
+const VALUE: i8 = core::mem::offset_of!(Cell, value) as i8;
 const _: () = assert!(core::mem::offset_of!(Cell, readable) == 0);
 
 /// The engine's system count at a host TSC value `tsc`: the larger of
@@ -45,72 +46,75 @@ pub struct Count {
     pub last: u64,
 }
 
-const BASE: u8 = core::mem::offset_of!(Count, base) as u8;
-const PER_TSC: u8 = core::mem::offset_of!(Count, per_tsc) as u8;
-const OFFSET: u8 = core::mem::offset_of!(Count, offset) as u8;
-const LAST: u8 = core::mem::offset_of!(Count, last) as u8;
+const BASE: i8 = core::mem::offset_of!(Count, base) as i8;
+const PER_TSC: i8 = core::mem::offset_of!(Count, per_tsc) as i8;
+const OFFSET: i8 = core::mem::offset_of!(Count, offset) as i8;
+const LAST: i8 = core::mem::offset_of!(Count, last) as i8;
+
+/// Xt's frame slot.
+fn register(rt: u8) -> Mem {
+    Mem::base_disp32(Gpr::Rdi, i32::from(rt) * 8)
+}
 
 /// The thunk completing `MRS Xt, <register>` at `pc` from the cell at
 /// `cell`, else exiting at `pc` for the engine.
 pub fn thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
-    let mut code = open(cell);
-    let fixup = code.len() - 4;
+    let (mut code, miss) = open(cell);
     if rt != 31 {
-        code.extend([0x48, 0x8b, 0x40, VALUE]); // mov rax,[rax+value]
-        code.extend([0x48, 0x89, 0x87]); // mov [rdi+x(rt)],rax
-        code.extend((u32::from(rt) * 8).to_le_bytes());
+        let mut asm = Asm::new(&mut code);
+        asm.mov_load(Size::Qword, Gpr::Rax, Mem::base_disp8(Gpr::Rax, VALUE));
+        asm.mov_store(Size::Qword, register(rt), Gpr::Rax);
     }
-    finish(code, fixup, pc)
+    finish(code, miss, pc)
 }
 
 /// The thunk completing `MRS Xt, <count>` at `pc` with the count at
 /// `count` less the `value` of the cell at `cell`, else exiting at `pc`.
 pub fn count_thunk(pc: GuestAddress, rt: u8, cell: u64, count: u64) -> Thunk {
-    let mut code = open(cell);
-    let fixup = code.len() - 4;
-    code.extend([0x48, 0xb9]); // movabs rcx,count
-    code.extend(count.to_le_bytes());
-    code.extend([0x0f, 0x31]); // rdtsc
-    code.extend([0x48, 0xc1, 0xe2, 0x20]); // shl rdx,32
-    code.extend([0x48, 0x09, 0xd0]); // or rax,rdx
-    code.extend([0x48, 0x2b, 0x41, BASE]); // sub rax,[rcx+base]
-    code.extend([0x48, 0xf7, 0x61, PER_TSC]); // mul qword [rcx+per_tsc]
-    code.extend([0x48, 0x03, 0x51, OFFSET]); // add rdx,[rcx+offset]
-    code.extend([0x48, 0x8b, 0x41, LAST]); // mov rax,[rcx+last]
-    code.extend([0x48, 0x39, 0xc2]); // cmp rdx,rax
-    code.extend([0x48, 0x0f, 0x42, 0xd0]); // cmovb rdx,rax
-    code.extend([0x48, 0x89, 0x51, LAST]); // mov [rcx+last],rdx
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::Qword;
+    let (mut code, miss) = open(cell);
+    let field = |offset| Mem::base_disp8(Rcx, offset);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_imm64(Rcx, count);
+    asm.rdtsc();
+    asm.shift_imm(ShiftOp::Shl, Qword, Rdx, 32);
+    asm.alu(Alu::Or, Qword, Rax, Rdx);
+    asm.alu_load(Alu::Sub, Qword, Rax, field(BASE));
+    asm.unary(Unary::Mul, Qword, field(PER_TSC));
+    asm.alu_load(Alu::Add, Qword, Rdx, field(OFFSET));
+    asm.mov_load(Qword, Rax, field(LAST));
+    asm.alu(Alu::Cmp, Qword, Rdx, Rax);
+    asm.cmov(Cond::B, Qword, Rdx, Rax);
+    asm.mov_store(Qword, field(LAST), Rdx);
     if rt != 31 {
-        code.extend([0x48, 0xb8]); // movabs rax,cell
-        code.extend(cell.to_le_bytes());
-        code.extend([0x48, 0x2b, 0x50, VALUE]); // sub rdx,[rax+value]
-        code.extend([0x48, 0x89, 0x97]); // mov [rdi+x(rt)],rdx
-        code.extend((u32::from(rt) * 8).to_le_bytes());
+        asm.mov_imm64(Rax, cell);
+        asm.alu_load(Alu::Sub, Qword, Rdx, Mem::base_disp8(Rax, VALUE));
+        asm.mov_store(Qword, register(rt), Rdx);
     }
-    finish(code, fixup, pc)
+    finish(code, miss, pc)
 }
 
-/// Load `cell` and branch to the miss while it is not readable; the
-/// branch's 32-bit displacement ends the code.
-fn open(cell: u64) -> Vec<u8> {
+/// Load `cell` and branch to the miss while it is not readable.
+fn open(cell: u64) -> (Vec<u8>, Patch) {
     let mut code = Vec::with_capacity(128);
-    code.extend([0x48, 0xb8]); // movabs rax,cell
-    code.extend(cell.to_le_bytes());
-    code.extend([0x48, 0x83, 0x38, 0x00]); // cmp qword [rax],0
-    code.extend([0x0f, 0x84, 0, 0, 0, 0]); // je miss
-    code
+    let mut asm = Asm::new(&mut code);
+    asm.mov_imm64(Gpr::Rax, cell);
+    asm.alu_imm8(Alu::Cmp, Size::Qword, Mem::base(Gpr::Rax, 0), 0);
+    let miss = asm.jcc(Cond::E);
+    (code, miss)
 }
 
-/// The direct exit to the next instruction, then the miss at `fixup`'s
-/// branch: the original exit at `pc`.
-fn finish(mut code: Vec<u8>, fixup: usize, pc: GuestAddress) -> Thunk {
+/// The direct exit to the next instruction, then the `miss` branch's
+/// target: the original exit at `pc`.
+fn finish(mut code: Vec<u8>, miss: Patch, pc: GuestAddress) -> Thunk {
     let next = code.len();
     code.extend(super::chain::direct_exit(
         GuestAddress(pc.0.wrapping_add(4)),
         ExitKind::Fallthrough,
     ));
-    let relative = (code.len() - fixup - 4) as i32;
-    code[fixup..fixup + 4].copy_from_slice(&relative.to_le_bytes());
+    let original = code.len();
+    resolve(&mut code, miss, original);
     code.extend(super::chain::direct_exit(pc, ExitKind::System));
     Thunk {
         code,

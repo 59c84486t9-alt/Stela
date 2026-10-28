@@ -1,5 +1,6 @@
 //! Predicate generation: PTRUE, PFALSE, WHILE*, BRK* and PNEXT. PN registers are
 //! P8-P15.
+use crate::aarch64::Unsupported;
 
 pub use basic::BasicOperand;
 pub use breaks::{Boundary, BreakKind, BreakOperand};
@@ -28,7 +29,7 @@ impl Operand {
 
 /// None means another decoder owns the word; Err means an owned but invalid
 /// operand.
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if let Some(result) = basic::decode_basic(word) {
         return Some(result.map(Operand::Basic));
     }
@@ -41,7 +42,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 mod basic {
     //! Basic predicate generation. Predicate indices are packed architectural P registers.
     use crate::aarch64::scalable::ElementSize;
-    use crate::aarch64::{Register, Width, register};
+    use crate::aarch64::{Register, Unsupported, Width, register};
 
     const PREDICATE_MASK: u32 = 15;
     const SCALAR_REGISTER_MASK: u32 = 31;
@@ -108,7 +109,7 @@ mod basic {
 
     /// No basic form has reserved operand encodings. Unnamed five-bit PTRUE patterns
     /// execute with zero active elements; they are not decoder errors. GPR31 is ZR.
-    pub fn decode_basic(word: u32) -> Option<Result<BasicOperand, ()>> {
+    pub fn decode_basic(word: u32) -> Option<Result<BasicOperand, Unsupported>> {
         let destination = (word & PREDICATE_MASK) as u8;
         let element = ElementSize::from_bytes(1 << ((word >> SIZE_SHIFT) & SIZE_MASK))?;
         let near_source = ((word >> FIRST_SOURCE_SHIFT) & PREDICATE_MASK) as u8;
@@ -253,6 +254,8 @@ mod basic {
 
 mod breaks {
     //! Predicate breaks decode operand roles without state-layout assumptions.
+    use crate::aarch64::Unsupported;
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Boundary {
         Before,
@@ -298,7 +301,7 @@ mod breaks {
         ((word >> shift) & PREDICATE_FIELD_MASK) as u8
     }
 
-    pub fn decode(word: u32) -> Option<Result<BreakOperand, ()>> {
+    pub fn decode(word: u32) -> Option<Result<BreakOperand, Unsupported>> {
         let previous_source = predicate(word, PREVIOUS_SOURCE_SHIFT);
         let (kind, set_flags) = match word & BREAK_FLAGS_MASK {
             BRKAS => (
@@ -434,7 +437,7 @@ mod whiles {
     const PAIR_DESTINATION_MASK: u32 = 14;
 
     use crate::aarch64::scalable::ElementSize;
-    use crate::aarch64::{Register, Width, register};
+    use crate::aarch64::{Register, Unsupported, Width, register};
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Comparison {
         SignedLt,
@@ -638,7 +641,7 @@ mod whiles {
     }
     /// All matching operand fields are allocated; mode/feature checks belong to the caller.
     /// Scalar sources31 are ZR, never SP. Pair destinations are encoded even first registers.
-    pub fn decode(word: u32) -> Option<Result<WhileOperand, ()>> {
+    pub fn decode(word: u32) -> Option<Result<WhileOperand, Unsupported>> {
         let form = FORMS.iter().find(|form| word & form.mask == form.class)?;
         let element =
             ElementSize::from_bytes(1 << ((word >> ELEMENT_SIZE_SHIFT) & ELEMENT_SIZE_MASK))?;

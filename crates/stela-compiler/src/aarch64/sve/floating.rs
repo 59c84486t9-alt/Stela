@@ -1,4 +1,5 @@
 //! SVE floating-point families.
+use crate::aarch64::Unsupported;
 
 pub mod arithmetic;
 pub mod bfloat16;
@@ -76,8 +77,7 @@ impl Operation {
         FeatureRequirement::all(required)
     }
 
-    #[allow(clippy::result_unit_err)]
-    pub fn decode(word: u32) -> Option<Result<Self, ()>> {
+    pub fn decode(word: u32) -> Option<Result<Self, Unsupported>> {
         if let Some(result) = fp8::decode(word) {
             return Some(result.map(Self::Fp8));
         }

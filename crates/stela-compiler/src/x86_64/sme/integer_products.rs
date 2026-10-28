@@ -1,6 +1,6 @@
 //! Integer product kernels shared by the SME families.
+use crate::x86_64::asm::Code;
 use crate::{TargetCpu, x86_64::isa::SimdOpcode as Host};
-use alloc::vec::Vec;
 
 pub(crate) const PRODUCT_LEFT: u8 = 0;
 pub(crate) const PRODUCT_RIGHT: u8 = 1;
@@ -13,7 +13,7 @@ pub(crate) const PRODUCT_HIGH: u8 = 4;
 /// XMM3 is scratch. All other XMM/GPR registers, memory and FP state survive.
 /// Widen each resulting product before any 64-bit sum; PMADDWD overflow cannot
 /// be repaired by sign-extending its already truncated pair result.
-pub(crate) fn word_products(code: &mut Vec<u8>, signed: bool, target: TargetCpu) {
+pub(crate) fn word_products(code: &mut Code, signed: bool, target: TargetCpu) {
     Host::MoveAligned.register(code, PRODUCT_TEMPORARY, PRODUCT_LEFT, target);
     Host::MultiplyLowWord.register(code, PRODUCT_LEFT, PRODUCT_RIGHT, target);
     (if signed {

@@ -1,21 +1,24 @@
 //! Bitfield moves using shifts and masks. Guest NZCV is untouched.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::bitfield::{Kind, Operand};
-use alloc::vec::Vec;
+use crate::x86_64::asm::{
+    Alu, Code,
+    Gpr::{Rax, Rcx, Rdx},
+    ShiftOp, Size,
+};
 
-fn shift(code: &mut Vec<u8>, width: Width, opcode: u8, amount: u8) {
+/// `op (e/r)ax,amount`, or nothing for a zero amount.
+fn shift(code: &mut Code, width: Width, op: ShiftOp, amount: u8) {
     if amount != 0 {
-        if width == Width::X64 {
-            code.push(0x48);
-        }
-        code.extend([0xc1, opcode, amount]);
+        code.asm()
+            .shift_imm(op, Size::of(width == Width::X64), Rax, amount);
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero {
         // Discarding a result must still own a nonempty source-map interval.
-        code.push(0x90);
+        code.asm().nop();
         return;
     }
     let bits = match operand.width {
@@ -32,7 +35,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     load(code, operand.source);
     if operand.width == Width::W32 {
         // Required even when both shifts are absent (the full-width MOV alias).
-        code.extend([0x89, 0xc0]); // mov eax,eax
+        code.asm().mov(Size::Dword, Rax, Rax);
     }
     // Move the source field to the operand's MSB, then extract it. Arithmetic
     // extraction replicates source[imms], including wrapping SBFIZ aliases.
@@ -41,36 +44,34 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     shift(
         code,
         operand.width,
-        0xe0, // shl (e/r)ax,imm8
+        ShiftOp::Shl,
         bits - source_shift - field_width,
     );
     shift(
         code,
         operand.width,
         if operand.kind == Kind::Signed {
-            0xf8 // sar (e/r)ax,imm8
+            ShiftOp::Sar
         } else {
-            0xe8 // shr (e/r)ax,imm8
+            ShiftOp::Shr
         },
         bits - field_width,
     );
-    shift(code, operand.width, 0xe0, destination_shift);
+    shift(code, operand.width, ShiftOp::Shl, destination_shift);
 
     if operand.kind == Kind::Insert {
         let field_mask = (u64::MAX >> (64 - field_width)) << destination_shift;
         // Nothing has been written yet, so source and destination may alias.
         // RCX receives the old destination after the source is staged.
         right_operand(code, operand.destination, Width::X64, Shift::Lsl, 0);
+        let mut asm = code.asm();
         if operand.width == Width::X64 {
-            code.extend([0x48, 0xba]); // movabs rdx,~field_mask
-            code.extend((!field_mask).to_le_bytes());
-            code.extend([0x48, 0x21, 0xd1]); // and rcx,rdx
-            code.push(0x48);
+            asm.mov_imm64(Rdx, !field_mask);
+            asm.alu(Alu::And, Size::Qword, Rcx, Rdx);
         } else {
-            code.extend([0x81, 0xe1]); // and ecx,imm32
-            code.extend((!(field_mask as u32)).to_le_bytes());
+            asm.alu_imm32(Alu::And, Size::Dword, Rcx, !(field_mask as u32) as i32);
         }
-        code.extend([0x09, 0xc8]); // or (e/r)ax,(e/r)cx
+        asm.alu(Alu::Or, Size::of(operand.width == Width::X64), Rax, Rcx);
     }
     store(code, operand.destination);
 }
@@ -78,11 +79,11 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+
     use alloc::vec::Vec;
 
     fn code(width: Width, kind: Kind, rotation: u8, mask_end: u8) -> Vec<u8> {
-        let mut result = vec![];
+        let mut result = Code::new();
         emit(
             &mut result,
             &Operand {
@@ -94,7 +95,7 @@ mod tests {
                 mask_end,
             },
         );
-        result
+        result.into_bytes()
     }
 
     #[test]
@@ -168,7 +169,7 @@ mod tests {
 
     #[test]
     fn aliased_insert_stages_both_original_operands_before_the_only_state_store() {
-        let mut emitted = vec![];
+        let mut emitted = Code::new();
         emit(
             &mut emitted,
             &Operand {
@@ -207,7 +208,7 @@ mod tests {
                 rotation: 0,
                 mask_end: 63,
             };
-            let mut emitted = vec![];
+            let mut emitted = Code::new();
             emit(&mut emitted, &operand);
             assert_eq!(&emitted[..2], [0x31, 0xc0]);
             operand.destination = Register::Zero;
@@ -219,8 +220,8 @@ mod tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        let leaf = crate::compile(&source, crate::GuestAddress(0x100000)).unwrap();
-        let block = crate::block::compile(&source, crate::GuestAddress(0x100000)).unwrap();
+        let leaf = crate::testing::leaf(&source, crate::GuestAddress(0x100000)).unwrap();
+        let block = crate::testing::block(&source, crate::GuestAddress(0x100000)).unwrap();
         for native in [&leaf, &block.native] {
             assert_eq!(
                 native.source_map,

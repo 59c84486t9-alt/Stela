@@ -1,5 +1,5 @@
 //! SVE BF16 arithmetic and single-precision accumulation.
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 mod accumulation;
 mod arithmetic;
 
@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

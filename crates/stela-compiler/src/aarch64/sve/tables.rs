@@ -1,4 +1,5 @@
 //! SVE LUTI2 and LUTI4.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 
 const REGISTER_MASK: u32 = 31;
@@ -50,8 +51,7 @@ impl Operand {
     }
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let high_part = ((word >> PART_SHIFT) & 3) as u8;
     let (element, index_bits, part, table_registers) = if word & LUTI2_BYTE_MASK == LUTI2_BYTE {
         (ElementSize::Byte, 2, high_part, 1)

@@ -1,4 +1,5 @@
 //! FCSEL, FABS and FNEG, including FPCR.AH/NEP behavior.
+use crate::aarch64::Unsupported;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignOperation {
@@ -37,17 +38,16 @@ const VECTOR_FLOAT_MASK: u32 = 0xbfbf_fc00;
 const VECTOR_FLOAT_ABS: u32 = 0x0ea0_f800;
 const VECTOR_FLOAT_NEG: u32 = 0x2ea0_f800;
 
-fn scalar_lane(word: u32) -> Result<u8, ()> {
+fn scalar_lane(word: u32) -> Result<u8, Unsupported> {
     match (word >> 22) & 3 {
         0 => Ok(4),
         1 => Ok(8),
         3 => Ok(2),
-        _ => Err(()),
+        _ => Err(Unsupported),
     }
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let destination = (word & 31) as u8;
     let source = ((word >> 5) & 31) as u8;
     if word & SELECT_MASK == SELECT {
@@ -92,7 +92,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         4 << ((word >> 22) & 1)
     };
     if lane_bytes == 8 && bytes == 8 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand::Sign {
         operation,
@@ -143,10 +143,10 @@ mod tests {
             }
         }
         for base in [SELECT, SCALAR_ABS, SCALAR_NEG] {
-            assert_eq!(decode(base | (2 << 22)), Some(Err(())));
+            assert_eq!(decode(base | (2 << 22)), Some(Err(Unsupported)));
         }
         for base in [VECTOR_FLOAT_ABS, VECTOR_FLOAT_NEG] {
-            assert_eq!(decode(base | (1 << 22)), Some(Err(())));
+            assert_eq!(decode(base | (1 << 22)), Some(Err(Unsupported)));
             assert!(matches!(
                 decode(base | (1 << 22) | (1 << 30)),
                 Some(Ok(Operand::Sign {

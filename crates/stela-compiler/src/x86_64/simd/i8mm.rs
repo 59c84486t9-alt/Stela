@@ -1,5 +1,6 @@
 //! Byte dot products and 2x8-by-8x2 matrix multiply-accumulate.
 use super::{Host, commit, packed, read_vector, shuffle};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::simd::{
@@ -8,7 +9,6 @@ use crate::{
     },
     x86_64::isa::ShiftOpcode as Shift,
 };
-use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -33,7 +33,7 @@ const MATRIX_RIGHT_HIGH: u8 = 0xdd; // Dwords [1, 3, 1, 3].
 /// XMM0/1 hold four byte groups. Separate even/odd bytes into exact signed
 /// words (unsigned bytes fit positive signed words), then combine PMADDWD sums.
 /// Six shifts avoid materializing the low-byte mask for one guest instruction.
-fn dot_sum(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
+fn dot_sum(code: &mut Code, left_signed: bool, right_signed: bool) {
     packed(code, Host::MoveAligned, LEFT_HIGH, LEFT);
     packed(code, Host::MoveAligned, RIGHT_HIGH, RIGHT);
     for (low, high, signed) in [
@@ -54,7 +54,7 @@ fn dot_sum(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
     packed(code, Host::AddDword, RESULT, LEFT_HIGH);
 }
 
-fn matrix_sse2(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
+fn matrix_sse2(code: &mut Code, left_signed: bool, right_signed: bool) {
     // XMM5/6 keep the left and right inputs for both halves.
     shuffle(code, LEFT, ORIGINAL_LEFT, MATRIX_LEFT_LOW);
     shuffle(code, RIGHT, ORIGINAL_RIGHT, MATRIX_RIGHT_LOW);
@@ -66,7 +66,7 @@ fn matrix_sse2(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
     packed(code, Host::AddDword, RESULT, FIRST_HALF_SUM);
 }
 
-fn matrix_ssse3(code: &mut Vec<u8>, left_signed: bool, right_signed: bool, target: TargetCpu) {
+fn matrix_ssse3(code: &mut Code, left_signed: bool, right_signed: bool, target: TargetCpu) {
     // Widen the two contiguous rows/columns to words. XMM0/2 are rows 0/1;
     // XMM1/3 are columns 0/1. A single zero mask serves both unsigned inputs.
     packed(code, Host::Xor, EXTENSION_MASK, EXTENSION_MASK);
@@ -106,7 +106,7 @@ fn matrix_ssse3(code: &mut Vec<u8>, left_signed: bool, right_signed: bool, targe
     Host::HorizontalAddDword.register(code, RESULT, LEFT_HIGH, target);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let (left_signed, right_signed) = operand.kind.signedness();
     match operand.kind {
         Kind::Matrix(_) if target.supports(TargetCpu::Ssse3) => {
@@ -143,9 +143,9 @@ mod tests {
 
     fn emitted(word: u32, target: TargetCpu) -> Vec<u8> {
         let operand = crate::aarch64::simd::i8mm::decode(word).unwrap().unwrap();
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(&mut code, &operand, target);
-        code
+        code.into_bytes()
     }
 
     #[test]

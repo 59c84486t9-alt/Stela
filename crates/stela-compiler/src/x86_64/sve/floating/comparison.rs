@@ -1,4 +1,7 @@
 //! SVE FP comparisons without exceptions; signaling cases use software completion.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Alu, Code, Rm, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -25,12 +28,6 @@ const PREDICATE_SCRATCH: u8 = CLASSIFICATION_SCRATCH[0];
 const CLASSIFICATION_MASKS: [u8; 2] = [6, 7];
 const MAGNITUDE_MASK: u8 = CLASSIFICATION_SCRATCH[0];
 const EAX_REGISTER: u8 = 0;
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_FIELD_SHIFT: u8 = 3;
-const CMPPS: &[u8] = &[0x0f, 0xc2];
-const CMPPD: &[u8] = &[0x66, 0x0f, 0xc2];
-const AND_EAX_IMMEDIATE: &[u8] = &[0x25];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 const SIGN_BITS: u8 = 1;
 
 #[repr(u8)]
@@ -42,7 +39,7 @@ enum Comparison {
     NotEqual = 4,
 }
 
-fn magnitudes(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn magnitudes(code: &mut Code, format: Format, target: TargetCpu) {
     Host::EqualDword.register(code, MAGNITUDE_MASK, MAGNITUDE_MASK, target);
     match format {
         Format::Single => ShiftOpcode::RightDword,
@@ -56,7 +53,7 @@ fn magnitudes(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
 
 /// Operands contain only normals, signed zero or infinity. Return FF/00 lanes.
 /// Masking inactive lanes and classification belong to the instruction emitter.
-fn compare_mask(code: &mut Vec<u8>, kind: Kind, format: Format, target: TargetCpu) -> u8 {
+fn compare_mask(code: &mut Code, kind: Kind, format: Format, target: TargetCpu) -> u8 {
     if matches!(kind, Kind::AbsoluteGreaterEqual | Kind::AbsoluteGreater) {
         magnitudes(code, format, target);
     }
@@ -74,15 +71,22 @@ fn compare_mask(code: &mut Vec<u8>, kind: Kind, format: Format, target: TargetCp
             return LEFT;
         }
     };
-    code.extend(match format {
-        Format::Single => CMPPS,
-        Format::Double => CMPPD,
+    let mut asm = code.asm();
+    match format {
+        Format::Single => asm.float_compare(
+            FloatLanes::PackedSingle,
+            destination,
+            Rm::Xmm(source),
+            comparison as u8,
+        ),
+        Format::Double => asm.float_compare(
+            FloatLanes::PackedDouble,
+            destination,
+            Rm::Xmm(source),
+            comparison as u8,
+        ),
         Format::Half => unreachable!("native comparison width validated before emission"),
-    });
-    code.extend([
-        REGISTER_DIRECT | (destination << REGISTER_FIELD_SHIFT) | source,
-        comparison as u8,
-    ]);
+    }
     destination
 }
 
@@ -97,7 +101,7 @@ fn packed_leading_bits(element: ElementSize) -> u32 {
 /// Accepted host comparisons preserve caller MXCSR without saving/installing it.
 /// Clobbers RAX/RCX/RDX, host flags and XMM0..7; preserves RDI/R15 and guest NZCV.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -149,10 +153,13 @@ pub(crate) fn emit(
                 Kind::Equal | Kind::GreaterEqual | Kind::LessEqual | Kind::AbsoluteGreaterEqual
             ) {
                 Host::ByteSignMask.register(code, EAX_REGISTER, ACTIVE, target);
-                code.extend(AND_EAX_IMMEDIATE);
-                code.extend(packed_leading_bits(element).to_le_bytes());
+                code.asm().alu_accumulator_imm32(
+                    Alu::And,
+                    Size::Dword,
+                    (packed_leading_bits(element)) as i32,
+                );
             } else {
-                code.extend(XOR_EAX_EAX);
+                code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
             }
         } else {
             if let Some(right) = operand.right {
@@ -172,8 +179,11 @@ pub(crate) fn emit(
             let result = compare_mask(code, operand.kind, operand.format, target);
             Host::And.register(code, result, ACTIVE, target);
             Host::ByteSignMask.register(code, EAX_REGISTER, result, target);
-            code.extend(AND_EAX_IMMEDIATE);
-            code.extend(packed_leading_bits(element).to_le_bytes());
+            code.asm().alu_accumulator_imm32(
+                Alu::And,
+                Size::Dword,
+                (packed_leading_bits(element)) as i32,
+            );
         }
         numerical::stage_predicate_bits16(code, &frame, 0, chunk);
     }
@@ -188,7 +198,7 @@ mod tests {
 
     #[test]
     fn half_refusal_emits_no_frame_or_guard() {
-        let mut code = vec![0x90];
+        let mut code = Code::from(vec![0x90]);
         let operand = Operand {
             kind: Kind::Equal,
             format: Format::Half,

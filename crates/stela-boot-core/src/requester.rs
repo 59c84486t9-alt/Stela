@@ -1,10 +1,9 @@
 //! Exclusive stopped PCI requester retained by its VT-d context. A numeric RID
 //! or a cache-policy bit never grants this ownership or DMA coherency.
-#[cfg(not(test))]
-use super::vtd::VtdError;
-#[cfg(test)]
-use crate::boot_vtd::VtdError;
-use stela_drivers::bus::pci::{CapabilityError, ConfigSpace, Function};
+use crate::vtd::VtdError;
+use stela_drivers::bus::pci::{
+    CapabilityError, ConfigSpace, Function, requester::RequesterBinding,
+};
 
 pub struct RequesterClaim {
     rid: u16,
@@ -12,8 +11,11 @@ pub struct RequesterClaim {
 }
 enum Owner {
     Pci(Function),
+    /// A driver's binding: the driver keeps the configuration owner, and
+    /// with it bus mastering.
+    Binding(RequesterBinding),
     #[cfg(test)]
-    Model(ModelOwner),
+    Model(#[expect(dead_code, reason = "dropped with the claim, counting its release")] ModelOwner),
 }
 #[cfg(test)]
 struct ModelOwner(alloc::sync::Arc<core::sync::atomic::AtomicU64>);
@@ -54,15 +56,29 @@ impl RequesterClaim {
         claim.check_stopped()?;
         Ok(claim)
     }
+    /// Retain a driver's binding of its stopped function.
+    ///
+    /// # Safety
+    /// The function is stopped as [`StoppedRequester::from_stopped_pci`]
+    /// requires, and its driver enables bus mastering only after mapping
+    /// its DMA through the domain this claim attaches to.
+    ///
+    /// [`StoppedRequester::from_stopped_pci`]: stela_drivers::bus::pci::requester::StoppedRequester::from_stopped_pci
+    pub unsafe fn from_binding(binding: RequesterBinding) -> Result<Self, VtdError> {
+        binding.check_live().map_err(|_| VtdError::Busy)?;
+        Ok(Self {
+            rid: binding.requester(),
+            owner: Owner::Binding(binding),
+        })
+    }
     pub fn requester(&self) -> u16 {
         self.rid
     }
     pub(super) fn check_stopped(&mut self) -> Result<(), VtdError> {
-        #[cfg(not(test))]
-        let Owner::Pci(function) = &mut self.owner;
-        #[cfg(test)]
         let function = match &mut self.owner {
             Owner::Pci(f) => f,
+            Owner::Binding(binding) => return binding.check_live().map_err(|_| VtdError::Busy),
+            #[cfg(test)]
             Owner::Model(_) => return Ok(()),
         };
         Self::validate_stopped(function)
@@ -136,11 +152,10 @@ impl RequesterClaim {
     }
     /// Bus-master gating is not device completion or quiescence.
     pub(super) fn set_bus_master(&mut self, enabled: bool) -> Result<(), VtdError> {
-        #[cfg(not(test))]
-        let Owner::Pci(function) = &mut self.owner;
-        #[cfg(test)]
         let function = match &mut self.owner {
             Owner::Pci(f) => f,
+            Owner::Binding(_) => return Err(VtdError::Unsupported),
+            #[cfg(test)]
             Owner::Model(_) => return Ok(()),
         };
         let command = function.config().read16(4);
@@ -161,6 +176,7 @@ impl RequesterClaim {
     pub fn into_function(self) -> Result<Function, VtdError> {
         match self.owner {
             Owner::Pci(function) => Ok(function),
+            Owner::Binding(_) => Err(VtdError::Unsupported),
             #[cfg(test)]
             Owner::Model(_) => Err(VtdError::Unsupported),
         }

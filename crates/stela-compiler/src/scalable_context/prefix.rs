@@ -1,4 +1,5 @@
 //! MOVPRFX pairs compiled as one unit with their follower.
+use crate::aarch64::Unsupported;
 
 use super::{Decoded, INSTRUCTION_BYTES, ScalableProfile, decode_recording_features};
 use crate::{
@@ -117,7 +118,7 @@ pub(super) fn decode_pair(
     follower.require_total_inline_prefix(follower_pc)?;
     let requirement = follower
         .prefix_requirement(follower_word)
-        .map_err(|()| CompileError("MOVPRFX follower source/operand mismatch".into()))?
+        .map_err(|Unsupported| CompileError("MOVPRFX follower source/operand mismatch".into()))?
         .ok_or_else(|| {
             CompileError(format!(
                 "MOVPRFX pair validation: follower metadata not reviewed at {:#x}",
@@ -240,7 +241,7 @@ mod tests {
         #[test]
         fn direct_follower_targets_retain_the_follower_map_entry() {
             for bytes in [16, 32, 64, 128, 256] {
-                let native = super::super::super::compile_for_profile(
+                let native = crate::testing::context_leaf(
                     &source(&[BRANCH_TO_FOLLOWER, PREFIX, AND_DESTRUCTIVE, RET]),
                     BASE,
                     profile(bytes),

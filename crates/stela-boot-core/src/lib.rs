@@ -9,6 +9,7 @@ pub mod aperture;
 pub mod console_lines;
 pub mod dmar;
 pub mod firmware_state;
+pub mod memory_types;
 pub mod options;
 pub mod paging_controls;
 pub mod passthrough;
@@ -16,6 +17,10 @@ pub mod pe;
 pub mod ram;
 pub mod record;
 pub mod remapping;
+#[cfg(target_arch = "x86_64")]
+pub mod requester;
 pub mod storage;
 pub mod topology;
+#[cfg(target_arch = "x86_64")]
+pub mod vtd;
 pub mod worker_bindings;

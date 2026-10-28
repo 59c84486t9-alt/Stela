@@ -2,9 +2,9 @@
 //! incoming SP and keeps completed store prefixes on a fault.
 use super::{AddressMode, memory};
 use crate::aarch64::unprivileged::Operand;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
     memory(
         code,
         checks,

@@ -1,5 +1,7 @@
 //! FADDP, FADDV and FADDQV. NaNs, subnormals and any host status other than
 //! inexact take the software path for the whole instruction.
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, ShiftOp, Size};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -36,16 +38,9 @@ const FIRST_SUBTREE: u8 = 6;
 const ACCUMULATOR: u8 = 7;
 const REGISTER_ONLY_DEPTH: usize = 2;
 const OUTPUT_SLOT: usize = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const TEST_EAX_LOW_PREDICATE: &[u8] = &[0xa8, 1];
-const JUMP_REL32: u8 = 0xe9;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
 
 fn element(format: Format) -> ElementSize {
     match format {
@@ -55,7 +50,7 @@ fn element(format: Format) -> ElementSize {
     }
 }
 
-fn low_lane(code: &mut Vec<u8>, format: Format, lane: usize, register: u8) {
+fn low_lane(code: &mut Code, format: Format, lane: usize, register: u8) {
     let bytes = format.bits() as usize / BITS_PER_BYTE;
     if lane != 0 {
         ShiftOpcode::RightBytes.emit(code, register, (lane * bytes) as u8);
@@ -66,7 +61,7 @@ fn low_lane(code: &mut Vec<u8>, format: Format, lane: usize, register: u8) {
 }
 
 fn guard(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     classification: Classification,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -97,7 +92,7 @@ impl Tree {
     // inactive.
     fn emit(
         &self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         start: usize,
         count: usize,
         depth: usize,
@@ -147,22 +142,21 @@ impl Tree {
     }
 }
 
-fn status(code: &mut Vec<u8>, frame: &numerical::Frame, failures: &mut Vec<usize>) {
+fn status(code: &mut Code, frame: &numerical::Frame, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     failures.push(branch(code, Condition::NotZero));
-    code.extend(MOV_EAX_ECX);
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
-    code.extend(SHR_EAX_IMMEDIATE);
-    code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, Rcx);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
     numerical::add_fpsr(code, frame);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn pairwise(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     left: u8,
     right: u8,
@@ -193,9 +187,9 @@ fn pairwise(
             if lane != 0 {
                 ShiftOpcode::RightBytes.emit(code, FIRST_SUBTREE, (lane * lane_bytes) as u8);
             }
-            Host::ByteSignMask.append(code, target);
-            code.push(MODRM_REGISTER | FIRST_SUBTREE); // EAX receives the mask.
-            code.extend(TEST_EAX_LOW_PREDICATE);
+            code.asm()
+                .simd_to_gpr(Host::ByteSignMask, Rax, FIRST_SUBTREE, target);
+            code.asm().test_accumulator_imm(Size::Byte, 1);
             let inactive = branch(code, Condition::Zero);
             guard_active_exception_enables(code, FIRST_SUBTREE, features, failures, target);
             let source = if lane % 2 == 0 { left } else { right };
@@ -219,9 +213,7 @@ fn pairwise(
                 RIGHT,
             );
             guard(code, classification, failures, target);
-            code.push(JUMP_REL32);
-            let selected = code.len();
-            code.extend(0_i32.to_le_bytes());
+            let selected = code.asm().jmp().offset();
             let inactive_start = code.len();
             resolve(code, inactive, inactive_start);
             load_z_chunk(code, operand.destination, chunk, VALUE, length, target);
@@ -240,7 +232,7 @@ fn pairwise(
 /// Unsupported lengths or formats return false before emitting, leaving the
 /// instruction to software completion.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

@@ -2,27 +2,39 @@
 use super::super::isa::ShiftOpcode;
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::aarch64::floating::{FPCR_AH, FPCR_NEP};
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Size};
+use crate::x86_64::simd::encode::{cond, guest};
 use crate::{
     TargetCpu,
     aarch64::simd::floating::{Operand, SignOperation},
 };
-use alloc::vec::Vec;
 
-fn test_control(code: &mut Vec<u8>, mask: u32) {
-    code.extend([0xf7, 0x87]); // test dword [rdi+fpcr],mask
-    code.extend((core::mem::offset_of!(crate::GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(mask.to_le_bytes());
+fn test_control(code: &mut Code, mask: u32) {
+    code.asm().test_imm(
+        Size::Dword,
+        guest(core::mem::offset_of!(crate::GuestState, fpcr) as u32),
+        mask as i32,
+    );
 }
 
-fn jump(code: &mut Vec<u8>, condition: Option<u8>) -> usize {
-    if let Some(condition) = condition {
-        code.extend([0x0f, condition]);
-    } else {
-        code.push(0xe9);
+fn jump(code: &mut Code, condition: Option<Cond>) -> usize {
+    let mut asm = code.asm();
+    match condition {
+        Some(condition) => asm.jcc(condition),
+        None => asm.jmp(),
     }
-    let patch = code.len();
-    code.extend([0; 4]);
-    patch
+    .offset()
+}
+
+/// The operand size of a `bytes`-byte scalar lane.
+fn size(bytes: u8) -> Size {
+    match bytes {
+        2 => Size::Word,
+        4 => Size::Dword,
+        8 => Size::Qword,
+        _ => unreachable!("reviewed FP scalar size"),
+    }
 }
 
 fn resolve(code: &mut [u8], patch: usize) {
@@ -30,91 +42,75 @@ fn resolve(code: &mut [u8], patch: usize) {
     code[patch..patch + 4].copy_from_slice(&delta.to_le_bytes());
 }
 
-fn load_lane(code: &mut Vec<u8>, vector: u8, bytes: u8, rcx: bool) {
-    match bytes {
-        2 => code.extend([0x0f, 0xb7]),
-        4 => code.push(0x8b),
-        8 => code.extend([0x48, 0x8b]),
-        _ => unreachable!("reviewed FP scalar size"),
+fn load_lane(code: &mut Code, vector: u8, bytes: u8, rcx: bool) {
+    let register = if rcx { Gpr::Rcx } else { Gpr::Rax };
+    let lane = guest(vector_offset(vector));
+    if bytes == 2 {
+        code.asm().movzx(Size::Dword, register, Size::Word, lane);
+    } else {
+        code.asm().mov_load(size(bytes), register, lane);
     }
-    code.push(if rcx { 0x8f } else { 0x87 });
-    code.extend(vector_offset(vector).to_le_bytes());
 }
 
-fn zero_extended_commit(code: &mut Vec<u8>, destination: u8) {
+fn zero_extended_commit(code: &mut Code, destination: u8) {
     packed(code, Host::MoveGprQword, 0, 0); // RAX was loaded at the exact scalar width.
     commit(code, destination, 0);
 }
 
-fn scalar_sign(
-    code: &mut Vec<u8>,
-    operation: SignOperation,
-    destination: u8,
-    source: u8,
-    bytes: u8,
-) {
+fn scalar_sign(code: &mut Code, operation: SignOperation, destination: u8, source: u8, bytes: u8) {
     load_lane(code, source, bytes, false);
     test_control(code, FPCR_AH);
-    let ordinary = jump(code, Some(0x84)); // AH=0 skips all NaN classification.
+    let ordinary = jump(code, Some(Cond::E)); // AH=0 skips all NaN classification.
     // Compare unsigned magnitude to positive infinity. Strictly greater means
     // NaN, including signaling payloads; no numerical host FP instruction runs.
-    code.extend([0x48, 0x89, 0xc1]); // mov rcx,rax
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, Gpr::Rcx, Gpr::Rax);
     if bytes == 8 {
-        code.extend([0x48, 0x0f, 0xba, 0xf1, 63]); // btr rcx,63
-        code.extend([0x48, 0xba]); // movabs rdx,+infinity
-        code.extend(0x7ff0_0000_0000_0000u64.to_le_bytes());
-        code.extend([0x48, 0x39, 0xd1]); // cmp rcx,rdx
+        asm.bit_imm(BitTest::Btr, Size::Qword, Gpr::Rcx, 63);
+        asm.mov_imm64(Gpr::Rdx, 0x7ff0_0000_0000_0000);
+        asm.alu(Alu::Cmp, Size::Qword, Gpr::Rcx, Gpr::Rdx);
     } else {
-        code.extend([0x81, 0xe1]); // and ecx,magnitude_mask
-        code.extend((if bytes == 2 { 0x7fffu32 } else { 0x7fff_ffff }).to_le_bytes());
-        code.extend([0x81, 0xf9]); // cmp ecx,+infinity
-        code.extend((if bytes == 2 { 0x7c00u32 } else { 0x7f80_0000 }).to_le_bytes());
+        let magnitude: u32 = if bytes == 2 { 0x7fff } else { 0x7fff_ffff };
+        let infinity: u32 = if bytes == 2 { 0x7c00 } else { 0x7f80_0000 };
+        asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rcx, magnitude as i32);
+        asm.alu_imm32(Alu::Cmp, Size::Dword, Gpr::Rcx, infinity as i32);
     }
-    let nan = jump(code, Some(0x87)); // AH=1 leaves every original NaN bit unchanged.
+    let nan = jump(code, Some(Cond::A)); // AH=1 leaves every original NaN bit unchanged.
     resolve(code, ordinary);
-    if bytes == 8 {
-        code.push(0x48);
-    }
-    code.extend([
-        0x0f,
-        0xba,
+    code.asm().bit_imm(
         if operation == SignOperation::Abs {
-            0xf0
+            BitTest::Btr
         } else {
-            0xf8
+            BitTest::Btc
         },
+        if bytes == 8 { Size::Qword } else { Size::Dword },
+        Gpr::Rax,
         bytes * 8 - 1,
-    ]); // BTR/BTC RAX/EAX,sign
+    );
     resolve(code, nan);
     test_control(code, FPCR_NEP);
-    let merging = jump(code, Some(0x85));
+    let merging = jump(code, Some(Cond::Ne));
     zero_extended_commit(code, destination);
     let completed = jump(code, None);
     resolve(code, merging);
     // NEP merges with old Vd, not Vn. Exact-width store avoids a destination load.
-    match bytes {
-        2 => code.extend([0x66, 0x89, 0x87]),
-        4 => code.extend([0x89, 0x87]),
-        8 => code.extend([0x48, 0x89, 0x87]),
-        _ => unreachable!(),
-    }
-    code.extend(vector_offset(destination).to_le_bytes());
+    code.asm()
+        .mov_store(size(bytes), guest(vector_offset(destination)), Gpr::Rax);
     resolve(code, completed);
 }
 
-fn splat(code: &mut Vec<u8>, xmm: u8, lane: u64, lane_bytes: u8) {
+fn splat(code: &mut Code, xmm: u8, lane: u64, lane_bytes: u8) {
     let mut low = 0;
     for index in 0..8 / lane_bytes {
         low |= lane << (index * lane_bytes * 8);
     }
-    code.extend([0x48, 0xb9]);
-    code.extend(low.to_le_bytes());
+    code.asm().mov_imm64(Gpr::Rcx, low);
     packed(code, Host::MoveGprQword, xmm, 1);
     packed(code, Host::UnpackLowQword, xmm, xmm);
 }
 
 fn vector_sign(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: SignOperation,
     destination: u8,
     source: u8,
@@ -134,7 +130,7 @@ fn vector_sign(
     }
     .emit(code, 1, lane_bytes * 8 - 1);
     test_control(code, FPCR_AH);
-    let ordinary = jump(code, Some(0x84));
+    let ordinary = jump(code, Some(Cond::E));
     packed(code, Host::MoveAligned, 2, 1);
     packed(code, Host::AndNot, 2, 0); // XMM2 = unsigned magnitude.
     let infinity = match lane_bytes {
@@ -179,7 +175,7 @@ fn vector_sign(
     commit(code, destination, result);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match *operand {
         Operand::Select {
             destination,
@@ -192,10 +188,17 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             load_lane(code, left, lane_bytes, false);
             if let Some(jcc) = predicate {
                 load_lane(code, right, lane_bytes, true); // MOV loads preserve predicate flags.
-                if lane_bytes == 8 {
-                    code.push(0x48);
-                }
-                code.extend([0x0f, (jcc ^ 1) - 0x40, 0xc1]); // CMOV false RAX/EAX,RCX/ECX
+                // CMOV on the false condition: RAX/EAX takes RCX/ECX.
+                code.asm().cmov(
+                    cond(jcc ^ 1),
+                    if lane_bytes == 8 {
+                        Size::Qword
+                    } else {
+                        Size::Dword
+                    },
+                    Gpr::Rax,
+                    Gpr::Rcx,
+                );
             }
             zero_extended_commit(code, destination);
         }
@@ -233,7 +236,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn checked_qword_classifier_and_no_numeric_host_fp() {
@@ -245,9 +247,9 @@ mod tests {
             bytes: 16,
             scalar: false,
         };
-        let mut baseline = Vec::new();
+        let mut baseline = Code::new();
         emit(&mut baseline, &operation, TargetCpu::Baseline);
-        let mut optimized = Vec::new();
+        let mut optimized = Code::new();
         emit(&mut optimized, &operation, TargetCpu::Sse42);
         assert!(
             !baseline

@@ -1,4 +1,6 @@
 //! BF16 min/max and clamp on finite values and zeros, without FP status.
+use crate::x86_64::asm::Gpr::{Rax, Rdi};
+use crate::x86_64::asm::{Code, Mem, Rm, Size};
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -37,12 +39,6 @@ const BFLOAT_EXPONENT_BITS: u8 = 8;
 const BFLOAT_SIGN_BITS: u8 = 1;
 const SIGN_SHIFT: u8 = BFLOAT_BITS - BFLOAT_SIGN_BITS;
 const FRACTION_TO_SIGN_SHIFT: u8 = BFLOAT_BITS - BFLOAT_FRACTION_BITS;
-const GPR_RAX: u8 = 0;
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const PBLENDVB: &[u8] = &[0x66, 0x0f, 0x38, 0x10];
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Recipe {
@@ -50,14 +46,14 @@ enum Recipe {
     CheckedBlend,
 }
 
-fn reject_mask(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: TargetCpu) {
-    Host::ByteSignMask.append(code, target);
-    code.push(MODRM_REGISTER | (GPR_RAX << MODRM_REGISTER_SHIFT) | TEMPORARY);
-    code.extend(TEST_EAX_EAX);
+fn reject_mask(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
+    code.asm()
+        .simd_to_gpr(Host::ByteSignMask, Rax, TEMPORARY, target);
+    code.asm().test(Size::Dword, Rax, Rax);
     failures.push(branch(code, Condition::NotZero));
 }
 
-fn constants(code: &mut Vec<u8>, target: TargetCpu) {
+fn constants(code: &mut Code, target: TargetCpu) {
     Host::Xor.register(code, ZERO, ZERO, target);
     Host::EqualWord.register(code, EXPONENT_MAXIMUM, EXPONENT_MAXIMUM, target);
     ShiftOpcode::RightWord.emit(code, EXPONENT_MAXIMUM, BFLOAT_BITS - BFLOAT_EXPONENT_BITS);
@@ -66,7 +62,7 @@ fn constants(code: &mut Vec<u8>, target: TargetCpu) {
 /// Preserve raw inputs and classify only active lanes. Exponent-all-ones values
 /// and nonzero subnormals use shared exact completion; signed zeros pass.
 fn guard(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     input: u8,
     predicated: bool,
     failures: &mut Vec<usize>,
@@ -91,7 +87,7 @@ fn guard(
 
 /// LEFT and RIGHT keep their inputs until the comparison. Equal encodings may
 /// return either source; opposite zeros follow the standard numeric order.
-fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, target: TargetCpu) {
+fn select(code: &mut Code, minimum: bool, alternative: bool, recipe: Recipe, target: TargetCpu) {
     if alternative {
         Host::MoveAligned.register(code, TEMPORARY, LEFT, target);
         Host::Or.register(code, TEMPORARY, RIGHT, target);
@@ -109,9 +105,11 @@ fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, 
         Host::Xor.register(code, RESULT, SECOND_TEMPORARY, target);
     }
     if alternative {
-        code.extend(TEST_STATE_IMMEDIATE);
-        code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-        code.extend(FPCR_AH.to_le_bytes());
+        code.asm().test_imm(
+            Size::Dword,
+            Mem::base_disp32(Rdi, (core::mem::offset_of!(GuestState, fpcr)) as i32),
+            FPCR_AH as i32,
+        );
         let ordinary = branch(code, Condition::Zero);
         Host::AndNot.register(code, TEMPORARY, RESULT, target);
         Host::MoveAligned.register(code, RESULT, TEMPORARY, target);
@@ -120,8 +118,7 @@ fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, 
     }
     if recipe == Recipe::CheckedBlend {
         debug_assert!(target.supports(TargetCpu::Sse41));
-        code.extend(PBLENDVB);
-        code.push(MODRM_REGISTER | (RIGHT << MODRM_REGISTER_SHIFT) | LEFT);
+        code.asm().pblendvb(RIGHT, Rm::Xmm(LEFT));
         Host::MoveAligned.register(code, RESULT, RIGHT, target);
     } else {
         Host::And.register(code, LEFT, RESULT, target);
@@ -131,7 +128,7 @@ fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, 
 }
 
 fn emit_with_recipe(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -220,7 +217,7 @@ fn emit_with_recipe(
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -242,7 +239,6 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     const DESTINATION: u8 = 0;
     const CLAMP_LEFT: u8 = 1;
@@ -284,16 +280,16 @@ mod tests {
         changes_default: bool,
     ) {
         let length = VectorLength::from_bytes(bytes).unwrap();
-        let mut selected = Vec::new();
+        let mut selected = Code::new();
         assert!(emit(&mut selected, operand, length, FEATURES, PC, target).unwrap());
-        let mut expected = Vec::new();
+        let mut expected = Code::new();
         assert!(
             emit_with_recipe(&mut expected, operand, length, FEATURES, PC, target, recipe,)
                 .unwrap()
         );
         assert_eq!(selected, expected, "{operand:?}, {bytes}, {target:?}");
         if changes_default {
-            let mut baseline = Vec::new();
+            let mut baseline = Code::new();
             assert!(
                 emit_with_recipe(
                     &mut baseline,
@@ -349,7 +345,7 @@ mod tests {
     #[test]
     fn explicit_blend_declines_missing_capability_before_emission() {
         for operand in operands() {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             assert!(
                 !emit_with_recipe(
                     &mut code,

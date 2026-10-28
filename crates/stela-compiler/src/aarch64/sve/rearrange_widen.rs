@@ -1,4 +1,5 @@
 //! SVE unpacks, pairwise arithmetic and high-narrowing operations.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication};
 
 const SIZE_SHIFT: u32 = 22;
@@ -104,15 +105,14 @@ pub struct Operand {
 
 impl Operand {
     /// MOVPRFX follower requirements from the specification.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         original_word: u32,
-    ) -> Result<Option<super::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<super::prefix::PrefixRequirement>, Unsupported> {
         use super::prefix::{PredicatedPrefixRequirement, PrefixRequirement};
 
         if decode(original_word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         let (source, predicated) = match (original_word & PREDICATED_MASK, self.kind) {
             (ADDP | SMAXP | UMAXP | SMINP | UMINP, Kind::Pair { right, .. }) => (right, None),
@@ -121,7 +121,7 @@ impl Operand {
                 Kind::Extend { source, .. } | Kind::PairAccumulate { source, .. },
             ) => {
                 let Predication::Merging(predicate) = self.predication else {
-                    return Err(());
+                    return Err(Unsupported);
                 };
                 (
                     source,
@@ -145,8 +145,7 @@ impl Operand {
     }
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     use Arithmetic::{Add, Subtract};
     use Half::{Bottom, Top};
     use Signedness::{Signed, Unsigned};
@@ -303,7 +302,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         _ => ElementSize::Halfword.bits(),
     };
     if element_size.bits() < minimum_bits {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let predication = match kind {
         Kind::Extend { .. } | Kind::Pair { .. } | Kind::PairAccumulate { .. } => {
@@ -635,7 +634,7 @@ mod tests {
                         ..operand
                     },
                 ] {
-                    assert_eq!(changed.prefix_requirement(original), Err(()));
+                    assert_eq!(changed.prefix_requirement(original), Err(Unsupported));
                 }
                 if let Kind::NarrowHigh {
                     left,
@@ -655,15 +654,18 @@ mod tests {
                         },
                         ..operand
                     };
-                    assert_eq!(changed.prefix_requirement(original), Err(()));
+                    assert_eq!(changed.prefix_requirement(original), Err(Unsupported));
                 }
                 for invalid_original in [0, u32::MAX, original ^ 1] {
-                    assert_eq!(operand.prefix_requirement(invalid_original), Err(()));
+                    assert_eq!(
+                        operand.prefix_requirement(invalid_original),
+                        Err(Unsupported)
+                    );
                 }
                 for size in 0..first_size {
                     let reserved = encoding | size << SIZE_SHIFT;
-                    assert_eq!(decode(reserved), Some(Err(())));
-                    assert_eq!(operand.prefix_requirement(reserved), Err(()));
+                    assert_eq!(decode(reserved), Some(Err(Unsupported)));
+                    assert_eq!(operand.prefix_requirement(reserved), Err(Unsupported));
                 }
             }
         }

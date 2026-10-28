@@ -1122,6 +1122,98 @@ impl<Q: BootIo> Drop for RomBoot<'_, Q> {
     }
 }
 
+/// The ROM boot every owner nests, which device models complete against.
+#[cfg(test)]
+mod rom {
+    use super::*;
+    use crate::net::wifi::{intel::radio::bios::service::BiosIo, regulatory::OsPolicy};
+    impl<'a, Q: BootIo> RomBoot<'a, Q> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            Some(self)
+        }
+    }
+    impl<'a, Q: BootIo> UnifiedNvm<'a, Q> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            Some(&self.boot)
+        }
+    }
+    impl<'a, Q: BootIo> ColdRadio<'a, Q> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.initialized.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo> LariRadio<'a, Q, B> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.radio.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo> Ax200Setup<'a, Q, B> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.lari.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo> Ax200Mcc<'a, Q, B> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.setup.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo> Ax200ScanConfiguration<'a, Q, B> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.mcc.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo> Ax200BoardPolicy<'a, Q, B> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.scan.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.board.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.country.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.mac.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.scan.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.phy.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Binding<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.power.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.binding.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.peer.as_ref()?.rom()
+        }
+    }
+    impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, B, O> {
+        pub(crate) fn rom(&self) -> Option<&RomBoot<'a, Q>> {
+            self.queue.rom()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;

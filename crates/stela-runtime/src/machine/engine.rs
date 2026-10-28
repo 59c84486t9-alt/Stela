@@ -114,7 +114,7 @@ use stela_compiler::{
         },
     },
     block::{
-        self, BlockProfile, ExitKind, PointerAuthentication, PointerAuthenticationKey,
+        self, BlockProfile, ExitKind, Features, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation,
         scalar::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::SystemOperation,
@@ -128,7 +128,7 @@ use stela_compiler::{
 pub use stored::{Offer, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 
-const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
+const PROFILE: BlockProfile = BlockProfile::new(Features::SYSTEM_MODE);
 const INSTRUCTION: u64 = 4;
 const FETCH_PAGE: u64 = 4096;
 const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
@@ -515,7 +515,7 @@ pub trait Host {
     }
 
     /// The address to call installed context-leaf code at, with
-    /// `stela_compiler::extended`'s two-argument ABI (the SVE and SME
+    /// `stela_compiler::scalable_context`'s two-argument ABI (the SVE and SME
     /// instructions run so), or `None` on a host that cannot run it. The
     /// engine calls it outside any borrow of the host, whose RAM the leaf's
     /// memory service then reads and writes.
@@ -1964,7 +1964,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// The context leaves SVE and SME instructions run as, by PC, word and
     /// scalable profile ([`scalable`]); discarded with the blocks.
     scalable_leaves:
-        BTreeMap<(u64, u32, stela_compiler::extended::ScalableProfile), scalable::Leaf>,
+        BTreeMap<(u64, u32, stela_compiler::scalable_context::ScalableProfile), scalable::Leaf>,
     /// The Allocation Tags of guest memory (FEAT_MTE2).
     tags: crate::machine::tags::Store,
     /// The current [`Regime::tag_checks`].
@@ -8027,7 +8027,7 @@ mod tests {
         // With one, PSTATE.DIT selects a block of its own, of plain accesses
         // (LOCK has no listed timing), which load first and so report WnR as
         // Arm requires: such a host runs one PE at a time.
-        machine.target = TargetCpu::Sse42Complete.with_doit();
+        machine.target = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS[2].with_doit();
         machine.cpu.pstate.dit = true;
         let Ok(Fetched::Block(timed)) = machine.fetch_block(BASE, false) else {
             panic!("timed block")

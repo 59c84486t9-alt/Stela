@@ -1,16 +1,16 @@
 //! FCADD and FCMLA.
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 mod half;
 
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, Condition, FusedOpcode, VZEROUPPER, branch, commit_inexact, emit_fma,
-    emit_opcode, environment, prepare_vector_input_range, prepare_vector_result_range,
-    read_numerical_vector, reject_other_status, reject_product_status, resolve,
-    restore_environment, restore_environment_with_product, save_product_status, test_control,
-    vector_exponent_range,
+    ArithmeticOpcode, Condition, FusedOpcode, branch, commit_inexact, emit_fma, emit_opcode,
+    environment, prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
+    reject_other_status, reject_product_status, resolve, restore_environment,
+    restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
 };
-use super::{Host, commit, packed, read_vector, shuffle};
+use super::{Host, commit, packed, packed_imm, read_vector, shuffle};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -40,16 +40,14 @@ const BROADCAST_LOW_SINGLE_PAIR: u8 = 0x44; // Dwords [0, 1, 0, 1].
 const BROADCAST_HIGH_SINGLE_PAIR: u8 = 0xee; // Dwords [2, 3, 2, 3].
 const BROADCAST_HALF_PAIR_STRIDE: u8 = 0x55; // Repeat one selected dword in all positions.
 
-fn half_shuffle(code: &mut Vec<u8>, shape: Shape, vector: u8, control: u8) {
-    packed(code, Host::ShuffleLowWord, vector, vector);
-    code.push(control);
+fn half_shuffle(code: &mut Code, shape: Shape, vector: u8, control: u8) {
+    packed_imm(code, Host::ShuffleLowWord, vector, vector, control);
     if shape == Shape::Vector128 {
-        packed(code, Host::ShuffleHighWord, vector, vector);
-        code.push(control);
+        packed_imm(code, Host::ShuffleHighWord, vector, vector, control);
     }
 }
 
-fn duplicate_left_component(code: &mut Vec<u8>, operand: &Operand) {
+fn duplicate_left_component(code: &mut Code, operand: &Operand) {
     let imaginary = operand.rotation.left_component() == IMAGINARY;
     let control = if imaginary {
         DUPLICATE_IMAGINARY
@@ -72,7 +70,7 @@ fn duplicate_left_component(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
+fn prepare_right(code: &mut Code, operand: &Operand) {
     match operand.right {
         Source::Vector(source) => {
             read_numerical_vector(code, operand.shape, source, RIGHT);
@@ -110,7 +108,7 @@ fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-fn prepare_sources(code: &mut Vec<u8>, operand: &Operand) {
+fn prepare_sources(code: &mut Code, operand: &Operand) {
     read_numerical_vector(code, operand.shape, operand.left, LEFT);
     if operand.kind == Kind::MultiplyAdd {
         // Unselected N real/imaginary components, including signaling NaNs,
@@ -122,7 +120,7 @@ fn prepare_sources(code: &mut Vec<u8>, operand: &Operand) {
 
 /// Toggle only the architectural rotated M signs after normal-input guards.
 /// XMM2 is scratch; staged XMM0/1 and the accumulator retain their source roles.
-pub(super) fn rotate_right_sign(code: &mut Vec<u8>, format: Format, rotation: Rotation) {
+pub(super) fn rotate_right_sign(code: &mut Code, format: Format, rotation: Rotation) {
     if rotation == Rotation::Degrees0 {
         return;
     }
@@ -153,7 +151,7 @@ pub(super) fn rotate_right_sign(code: &mut Vec<u8>, format: Format, rotation: Ro
     packed(code, Host::Xor, RIGHT, SIGN_MASK);
 }
 
-fn input_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn input_guard(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     prepare_vector_input_range(code, operand.format);
     vector_exponent_range(code, operand.format, operand.shape, LEFT);
     helper.push(branch(code, Condition::NotZero));
@@ -164,7 +162,7 @@ fn input_guard(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
     }
 }
 
-fn arithmetic(code: &mut Vec<u8>, operand: &Operand, native_fma: bool, target: TargetCpu) {
+fn arithmetic(code: &mut Code, operand: &Operand, native_fma: bool, target: TargetCpu) {
     let negative_product = native_fma && operand.rotation == Rotation::Degrees180;
     if !negative_product {
         rotate_right_sign(code, operand.format, operand.rotation);
@@ -215,7 +213,7 @@ fn arithmetic(code: &mut Vec<u8>, operand: &Operand, native_fma: bool, target: T
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
@@ -225,7 +223,7 @@ pub(in crate::x86_64) fn emit(
         && target.supports(TargetCpu::Fma);
     let native_f16c = operand.format == Format::Half && target.supports(TargetCpu::F16c);
     if native_fma || native_f16c {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     prepare_sources(code, operand);
     if operand.format == Format::Half {

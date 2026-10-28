@@ -1,5 +1,6 @@
 //! SVE saturating, halving and absolute-difference arithmetic. Saturation does
 //! not set FPSR.QC.
+use crate::aarch64::Unsupported;
 
 use crate::aarch64::scalable::{ElementSize, Predication};
 
@@ -146,8 +147,7 @@ fn difference(signedness: Signedness, widening: Option<Half>, accumulate: bool) 
     }
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     use Arithmetic::{Add, ReverseSubtract, Subtract};
     use Half::{Bottom, Top};
     use Signedness::{Signed, Unsigned};
@@ -214,7 +214,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     if let Some(kind) = immediate {
         let scaled = word & IMMEDIATE_SCALE_FLAG != 0;
         if element_size == ElementSize::Byte && scaled {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let immediate = ((word >> SOURCE_SHIFT) & IMMEDIATE_MASK)
             << if scaled { IMMEDIATE_SCALE_SHIFT } else { 0 };
@@ -264,7 +264,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         }
     ) && element_size == ElementSize::Byte
     {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         destination,
@@ -279,15 +279,14 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 impl Operand {
     /// MOVPRFX requirements of the follower word. Call before normalizing
     /// destructive operands; the typed operand must still match the word.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         original_word: u32,
-    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, Unsupported> {
         use crate::aarch64::sve::prefix::{PredicatedPrefixRequirement, PrefixRequirement};
 
         if decode(original_word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         let vector = |predicated, other_vector_sources| PrefixRequirement::Vector {
             destination: self.destination,
@@ -319,12 +318,12 @@ impl Operand {
                 | USQADD_Z_P_ZZ
         ) {
             let Predication::Merging(predicate) = self.predication else {
-                return Err(());
+                return Err(Unsupported);
             };
             let source = match self.right {
                 Input::None => self.left,
                 Input::Vector(source) => source,
-                Input::Immediate(_) => return Err(()),
+                Input::Immediate(_) => return Err(Unsupported),
             };
             // All twenty forms use equal destination and first-source widths.
             return Ok(Some(vector(
@@ -343,14 +342,14 @@ impl Operand {
         }
         if original_word & COMPLEX_OPCODE_MASK == SQCADD_Z_ZZ {
             let Input::Vector(source) = self.right else {
-                return Err(());
+                return Err(Unsupported);
             };
             return Ok(Some(vector(None, source_bit(source))));
         }
         let requirement = match original_word & REGISTER_OPCODE_MASK {
             SABA_Z_ZZZ | SABALB_Z_ZZZ | SABALT_Z_ZZZ | UABA_Z_ZZZ | UABALB_Z_ZZZ | UABALT_Z_ZZZ => {
                 let Input::Vector(right) = self.right else {
-                    return Err(());
+                    return Err(Unsupported);
                 };
                 Some(vector(None, source_bit(self.left) | source_bit(right)))
             }
@@ -850,32 +849,35 @@ mod tests {
                 let operand = decode(word).unwrap().unwrap();
                 let mut forged = operand;
                 forged.destination = 4;
-                assert_eq!(forged.prefix_requirement(word), Err(()));
+                assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
                 forged = operand;
                 forged.left ^= 1;
-                assert_eq!(forged.prefix_requirement(word), Err(()));
+                assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
                 forged = operand;
                 forged.right = match operand.right {
                     Input::Vector(v) => Input::Vector(v ^ 1),
                     Input::Immediate(v) => Input::Immediate(v ^ 1),
                     Input::None => Input::Vector(0),
                 };
-                assert_eq!(forged.prefix_requirement(word), Err(()));
+                assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
                 forged = operand;
                 forged.element_size = ElementSize::Quadword;
-                assert_eq!(forged.prefix_requirement(word), Err(()));
+                assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
                 forged = operand;
                 forged.predication = Predication::Zeroing(2);
-                assert_eq!(forged.prefix_requirement(word), Err(()));
+                assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
                 forged = operand;
                 forged.kind = if operand.kind == Kind::Absolute {
                     Kind::Negate
                 } else {
                     Kind::Absolute
                 };
-                assert_eq!(forged.prefix_requirement(word), Err(()));
-                assert_eq!(operand.prefix_requirement(word ^ (1 << 31)), Err(()));
-                assert_eq!(operand.prefix_requirement(0), Err(()));
+                assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
+                assert_eq!(
+                    operand.prefix_requirement(word ^ (1 << 31)),
+                    Err(Unsupported)
+                );
+                assert_eq!(operand.prefix_requirement(0), Err(Unsupported));
             }
         }
 
@@ -892,9 +894,9 @@ mod tests {
                                     | 31
                                     | if shifted { 1 << 13 } else { 0 };
                                 if size == 0 && shifted {
-                                    assert_eq!(decode(word), Some(Err(())));
+                                    assert_eq!(decode(word), Some(Err(Unsupported)));
                                     let operand = decode(fact.word).unwrap().unwrap();
-                                    assert_eq!(operand.prefix_requirement(word), Err(()));
+                                    assert_eq!(operand.prefix_requirement(word), Err(Unsupported));
                                 } else {
                                     let operand = decode(word).unwrap().unwrap();
                                     assert_eq!(
@@ -911,9 +913,9 @@ mod tests {
                     }
                 }
                 if fact.minimum_size == 1 {
-                    assert_eq!(decode(fact.word), Some(Err(())));
+                    assert_eq!(decode(fact.word), Some(Err(Unsupported)));
                     let operand = decode(fact.word | (1 << 22)).unwrap().unwrap();
-                    assert_eq!(operand.prefix_requirement(fact.word), Err(()));
+                    assert_eq!(operand.prefix_requirement(fact.word), Err(Unsupported));
                 }
             }
             for size in 0..4 {
@@ -933,7 +935,7 @@ mod tests {
             for zeroing in [0x440aa000, 0x440ba000] {
                 assert_eq!(decode(zeroing), None);
                 let operand = decode(0x4408a000).unwrap().unwrap();
-                assert_eq!(operand.prefix_requirement(zeroing), Err(()));
+                assert_eq!(operand.prefix_requirement(zeroing), Err(Unsupported));
             }
         }
 
@@ -1049,7 +1051,10 @@ mod tests {
     #[test]
     fn immediate_scaling_and_widening_reserved_sizes_are_explicit() {
         for opcode in [SQADD_Z_ZI, UQADD_Z_ZI, SQSUB_Z_ZI, UQSUB_Z_ZI] {
-            assert_eq!(decode(opcode | IMMEDIATE_SCALE_FLAG), Some(Err(())));
+            assert_eq!(
+                decode(opcode | IMMEDIATE_SCALE_FLAG),
+                Some(Err(Unsupported))
+            );
             for size in 1..=SIZE_MASK {
                 let operand = decode(
                     opcode
@@ -1072,7 +1077,7 @@ mod tests {
             UABALB_Z_ZZZ,
             UABALT_Z_ZZZ,
         ] {
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
             for size in 1..=SIZE_MASK {
                 assert!(decode(opcode | (size << SIZE_SHIFT)).unwrap().is_ok());
             }

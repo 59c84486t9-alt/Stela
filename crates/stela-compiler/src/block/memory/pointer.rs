@@ -1,10 +1,11 @@
 //! FEAT_CPA arithmetic within checked memory plans.
+use crate::x86_64::asm::Code;
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{Instruction, Operation},
     context::{memory::MemoryRequirements, pointer::PointerArithmeticRequirement},
-    extended::Decoded,
+    scalable_context::Decoded,
 };
 use alloc::vec::Vec;
 
@@ -79,7 +80,7 @@ impl CheckedOperation {
 
     pub(crate) fn emit(
         &self,
-        code: &mut Vec<u8>,
+        code: &mut Code,
         pc: GuestAddress,
         target: TargetCpu,
         fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
@@ -160,8 +161,10 @@ mod tests {
                 let plan = CompilationPlan::new(
                     &bytes,
                     SOURCE_PC,
-                    BlockProfile::CheckedMemory(profile(mode)),
-                    TargetCpu::Baseline,
+                    &crate::Options::new(
+                        BlockProfile::ORDINARY.with_checked_memory(profile(mode)),
+                        TargetCpu::Baseline,
+                    ),
                 )
                 .unwrap();
                 let requirements = plan.memory_requirements().unwrap();
@@ -202,8 +205,10 @@ mod tests {
                     CompilationPlan::new(
                         &bytes,
                         SOURCE_PC,
-                        BlockProfile::CheckedMemory(profile),
-                        TargetCpu::Baseline
+                        &crate::Options::new(
+                            BlockProfile::ORDINARY.with_checked_memory(profile),
+                            TargetCpu::Baseline
+                        )
                     )
                     .is_err()
                 );
@@ -214,8 +219,11 @@ mod tests {
         let plan = CompilationPlan::new(
             &bytes,
             SOURCE_PC,
-            BlockProfile::CheckedMemory(profile(EffectivePointerChecks::Unchecked)),
-            TargetCpu::Baseline,
+            &crate::Options::new(
+                BlockProfile::ORDINARY
+                    .with_checked_memory(profile(EffectivePointerChecks::Unchecked)),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -251,13 +259,13 @@ mod tests {
 
     #[test]
     fn combined_profile_keeps_exact_raw_nop_provenance() {
-        let profile = BlockProfile::CheckedMemory(profile(EffectivePointerChecks::Addition));
+        let profile =
+            BlockProfile::ORDINARY.with_checked_memory(profile(EffectivePointerChecks::Addition));
         assert!(
             CompilationPlan::new(
                 &source(&[NOP, ADDPT_X0_X1_X2, RET_X30]),
                 SOURCE_PC,
-                profile,
-                TargetCpu::Baseline
+                &crate::Options::new(profile, TargetCpu::Baseline)
             )
             .is_ok()
         );
@@ -265,8 +273,7 @@ mod tests {
             CompilationPlan::new(
                 &source(&[LDP_X0_X0_X9_16, ADDPT_X0_X1_X2, RET_X30]),
                 SOURCE_PC,
-                profile,
-                TargetCpu::Baseline
+                &crate::Options::new(profile, TargetCpu::Baseline)
             )
             .is_err()
         );

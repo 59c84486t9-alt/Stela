@@ -1,4 +1,5 @@
 //! FMLAL and FMLSL (half to single).
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, widening::WideningOperation};
 
 use super::arithmetic::Shape;
@@ -59,8 +60,7 @@ pub struct Operand {
 
 /// Exact fixed bits keep sz=1 and adjacent FP8/SME forms outside this family.
 /// All registers are ordinary V registers; indexed Vm is limited to V0..V15.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (operation, part) = match word & VECTOR_MASK {
         VECTOR_FMLAL => (WideningOperation::Add, Part::Lower),
         VECTOR_FMLAL2 => (WideningOperation::Add, Part::Upper),
@@ -103,7 +103,7 @@ fn operand(
     }
 }
 
-fn decode_indexed(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_indexed(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (operation, part) = match word & INDEXED_MASK {
         INDEXED_FMLAL => (WideningOperation::Add, Part::Lower),
         INDEXED_FMLAL2 => (WideningOperation::Add, Part::Upper),

@@ -1,26 +1,53 @@
 //! Lane moves and permutes. All inputs are read before the destination is written.
 use super::{Host, commit, packed, read_vector, vector_offset};
+use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     TargetCpu,
     aarch64::simd::rearrange::{LaneSource, Operand},
 };
-use alloc::vec::Vec;
+use Gpr::{R8, Rax, Rcx, Rdi, Rdx};
 
-pub(super) fn constant(code: &mut Vec<u8>, xmm: u8, bytes: [u8; 16]) {
+pub(super) fn constant(code: &mut Code, xmm: u8, bytes: [u8; 16]) {
     // MOVQ from a GPR followed by PUNPCKLQDQ avoids constant-pool relocations.
     for (register, limb) in [(xmm, &bytes[..8]), (7, &bytes[8..])] {
-        code.extend([0x48, 0xb9]); // movabs rcx,imm64
-        code.extend(limb);
+        let limb = u64::from_le_bytes(limb.try_into().expect("an eight-byte limb"));
+        code.asm().mov_imm64(Rcx, limb);
         packed(code, Host::MoveGprQword, register, 1);
     }
     packed(code, Host::UnpackLowQword, xmm, 7);
 }
 
-fn load_lane(code: &mut Vec<u8>, source: LaneSource, bytes: u8) {
+/// Load `value` repeated in each `lane`-byte lane of `xmm` (clobbers RCX and XMM7).
+pub(super) fn lane_constant(code: &mut Code, xmm: u8, lane: u8, value: u64) {
+    let bytes = value.to_le_bytes();
+    constant(
+        code,
+        xmm,
+        core::array::from_fn(|i| bytes[i % usize::from(lane)]),
+    );
+}
+
+/// Packed ADD or SUB for `lane`-byte lanes.
+pub(super) fn add_or_subtract(lane: u8, subtract: bool) -> Host {
+    match (subtract, lane) {
+        (false, 1) => Host::AddByte,
+        (false, 2) => Host::AddWord,
+        (false, 4) => Host::AddDword,
+        (false, 8) => Host::AddQword,
+        (true, 1) => Host::SubByte,
+        (true, 2) => Host::SubWord,
+        (true, 4) => Host::SubDword,
+        (true, 8) => Host::SubQword,
+        _ => unreachable!("lane of 1, 2, 4 or 8 bytes"),
+    }
+}
+
+fn load_lane(code: &mut Code, source: LaneSource, bytes: u8) {
     use crate::aarch64::Register;
     let offset = match source {
         LaneSource::General(Register::Zero) => {
-            code.extend([0x31, 0xc0]);
+            code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
             return;
         }
         LaneSource::General(Register::X(index)) => u32::from(index) * 8,
@@ -28,27 +55,20 @@ fn load_lane(code: &mut Vec<u8>, source: LaneSource, bytes: u8) {
         LaneSource::General(Register::Sp) => unreachable!("lane transfers use ZR, not SP"),
     };
     // Zero-extending load of the exact width into RAX, from GuestState.
+    let mut asm = code.asm();
     match bytes {
-        1 => code.extend([0x0f, 0xb6, 0x87]),
-        2 => code.extend([0x0f, 0xb7, 0x87]),
-        4 => code.extend([0x8b, 0x87]),
-        8 => code.extend([0x48, 0x8b, 0x87]),
+        1 => asm.movzx(Size::Dword, Rax, Size::Byte, guest(offset)),
+        2 => asm.movzx(Size::Dword, Rax, Size::Word, guest(offset)),
+        4 => asm.mov_load(Size::Dword, Rax, guest(offset)),
+        8 => asm.mov_load(Size::Qword, Rax, guest(offset)),
         _ => unreachable!("reviewed lane size"),
     }
-    code.extend(offset.to_le_bytes());
 }
-
-/// MOVD EAX,XMM0 and MOVQ RAX,XMM0.
-const MOVD_EAX_XMM0: [u8; 4] = [0x66, 0x0f, 0x7e, 0xc0];
-const MOVQ_RAX_XMM0: [u8; 5] = [0x66, 0x48, 0x0f, 0x7e, 0xc0];
-/// MOVZX EAX,AL and MOVZX EAX,AX.
-const MOVZX_EAX_AL: [u8; 3] = [0x0f, 0xb6, 0xc0];
-const MOVZX_EAX_AX: [u8; 3] = [0x0f, 0xb7, 0xc0];
 
 /// UMOV, SMOV and FMOV to a general register ([`Operand::Extract`]),
 /// which ends with the destination's store from RAX. With `held`, XMM0
 /// holds the source vector whole and the lane is its lowest.
-pub(super) fn extract(code: &mut Vec<u8>, operand: &Operand, held: bool) {
+pub(super) fn extract(code: &mut Code, operand: &Operand, held: bool) {
     let Operand::Extract {
         destination,
         source,
@@ -62,14 +82,15 @@ pub(super) fn extract(code: &mut Vec<u8>, operand: &Operand, held: bool) {
     };
     if held {
         debug_assert_eq!(byte, 0);
+        let mut asm = code.asm();
         match lane_bytes {
-            1 | 2 | 4 => code.extend(MOVD_EAX_XMM0),
-            8 => code.extend(MOVQ_RAX_XMM0),
+            1 | 2 | 4 => asm.movd_from_xmm(Rax, 0),
+            8 => asm.movq_from_xmm(Rax, 0),
             _ => unreachable!("reviewed lane size"),
         }
         match lane_bytes {
-            1 => code.extend(MOVZX_EAX_AL),
-            2 => code.extend(MOVZX_EAX_AX),
+            1 => asm.movzx(Size::Dword, Rax, Size::Byte, Rax),
+            2 => asm.movzx(Size::Dword, Rax, Size::Word, Rax),
             _ => {}
         }
     } else {
@@ -84,29 +105,36 @@ pub(super) fn extract(code: &mut Vec<u8>, operand: &Operand, held: bool) {
     }
     if signed {
         let shift = 64 - lane_bytes * 8;
-        code.extend([0x48, 0xc1, 0xe0, shift, 0x48, 0xc1, 0xf8, shift]); // shl/sar rax for sign extension
+        let mut asm = code.asm();
+        asm.shift_imm(ShiftOp::Shl, Size::Qword, Rax, shift);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, Rax, shift);
         if !x64 {
-            code.extend([0x89, 0xc0]); // W writes clear X high half
+            // W writes clear X high half.
+            asm.mov(Size::Dword, Rax, Rax);
         }
     }
     // An unsigned lane of at most four bytes is zero-extended already.
     super::super::store(code, destination);
 }
 
-fn insert_lane(code: &mut Vec<u8>, destination: u8, byte: u8, bytes: u8) {
+fn insert_lane(code: &mut Code, destination: u8, byte: u8, bytes: u8) {
     // Only the selected lane changes; even scalar-size INS preserves all others.
-    match bytes {
-        1 => code.extend([0x88, 0x87]),
-        2 => code.extend([0x66, 0x89, 0x87]),
-        4 => code.extend([0x89, 0x87]),
-        8 => code.extend([0x48, 0x89, 0x87]),
+    let size = match bytes {
+        1 => Size::Byte,
+        2 => Size::Word,
+        4 => Size::Dword,
+        8 => Size::Qword,
         _ => unreachable!("reviewed lane size"),
-    }
-    code.extend((vector_offset(destination) + u32::from(byte)).to_le_bytes());
+    };
+    code.asm().mov_store(
+        size,
+        guest(vector_offset(destination) + u32::from(byte)),
+        Rax,
+    );
 }
 
 fn permutation(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     left: u8,
     right: u8,
@@ -133,45 +161,49 @@ fn permutation(
     }
     // Scalar byte gather fallback. RAX/RDX accumulate both halves before stores;
     // RCX is the zero-extended byte scratch. No guest RAM or host stack accesses.
-    code.extend([0x31, 0xc0, 0x31, 0xd2]);
+    clear_halves(code);
     for (output, input) in selection.into_iter().enumerate() {
         if input == 255 {
             continue;
         }
         let vector = if input < 16 { left } else { right };
-        code.extend([0x0f, 0xb6, 0x8f]); // movzx ecx,byte [rdi+disp32]
-        code.extend((vector_offset(vector) + u32::from(input % 16)).to_le_bytes());
+        code.asm().movzx(
+            Size::Dword,
+            Rcx,
+            Size::Byte,
+            guest(vector_offset(vector) + u32::from(input % 16)),
+        );
         accumulate_byte(code, output, false);
     }
     commit_halves(code, destination);
 }
 
-fn accumulate_byte(code: &mut Vec<u8>, output: usize, r8: bool) {
-    let shift = (output % 8 * 8) as u8;
-    if shift != 0 {
-        code.extend(if r8 {
-            [0x49, 0xc1, 0xe0, shift]
-        } else {
-            [0x48, 0xc1, 0xe1, shift]
-        }); // shl r8/rcx,imm8
-    }
-    code.extend(match (r8, output < 8) {
-        (false, true) => [0x48, 0x09, 0xc8],  // or rax,rcx
-        (false, false) => [0x48, 0x09, 0xca], // or rdx,rcx
-        (true, true) => [0x4c, 0x09, 0xc0],   // or rax,r8
-        (true, false) => [0x4c, 0x09, 0xc2],  // or rdx,r8
-    });
+/// Clear RAX and RDX, the low and high halves of a gathered vector.
+fn clear_halves(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
+    asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
 }
-fn commit_halves(code: &mut Vec<u8>, destination: u8) {
-    code.extend([0x48, 0x89, 0x87]); // mov [rdi+disp32],rax
-    code.extend(vector_offset(destination).to_le_bytes());
-    code.extend([0x48, 0x89, 0x97]); // mov [rdi+disp32+8],rdx
-    code.extend((vector_offset(destination) + 8).to_le_bytes());
+
+fn accumulate_byte(code: &mut Code, output: usize, r8: bool) {
+    let shift = (output % 8 * 8) as u8;
+    let byte = if r8 { R8 } else { Rcx };
+    let mut asm = code.asm();
+    if shift != 0 {
+        asm.shift_imm(ShiftOp::Shl, Size::Qword, byte, shift);
+    }
+    let half = if output < 8 { Rax } else { Rdx };
+    asm.alu(Alu::Or, Size::Qword, half, byte);
+}
+fn commit_halves(code: &mut Code, destination: u8) {
+    let mut asm = code.asm();
+    asm.mov_store(Size::Qword, guest(vector_offset(destination)), Rax);
+    asm.mov_store(Size::Qword, guest(vector_offset(destination) + 8), Rdx);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn table(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     destination: u8,
     first: u8,
     registers: u8,
@@ -207,33 +239,44 @@ fn table(
         commit(code, destination, 0);
         return;
     }
-    code.extend([0x31, 0xc0, 0x31, 0xd2]);
+    clear_halves(code);
     for output in 0..bytes {
+        let mut asm = code.asm();
         if preserve {
-            code.extend([0x44, 0x0f, 0xb6, 0x87]); // movzx r8d,old destination byte
-            code.extend((vector_offset(destination) + u32::from(output)).to_le_bytes());
+            // The old destination byte.
+            asm.movzx(
+                Size::Dword,
+                R8,
+                Size::Byte,
+                guest(vector_offset(destination) + u32::from(output)),
+            );
         } else {
-            code.extend([0x45, 0x31, 0xc0]);
+            asm.alu(Alu::Xor, Size::Dword, R8, R8);
         }
-        code.extend([0x0f, 0xb6, 0x8f]); // movzx ecx,index byte
-        code.extend((vector_offset(indices) + u32::from(output)).to_le_bytes());
-        code.extend([0x83, 0xf9, registers * 16, 0x0f, 0x83]); // cmp ecx,bound; jae fallback
-        let fixup = code.len();
-        code.extend([0; 4]);
-        code.extend([0x81, 0xc1]); // add ecx,first register byte offset
-        code.extend((u32::from(first) * 16).to_le_bytes());
-        code.extend([0x81, 0xe1]); // and ecx,511: vector bank wraps at V31
-        code.extend((32u32 * 16 - 1).to_le_bytes());
-        code.extend([0x44, 0x0f, 0xb6, 0x84, 0x0f]); // movzx r8d,[rdi+rcx+V0]
-        code.extend(vector_offset(0).to_le_bytes());
-        let distance = (code.len() - fixup - 4) as u32;
-        code[fixup..fixup + 4].copy_from_slice(&distance.to_le_bytes());
+        asm.movzx(
+            Size::Dword,
+            Rcx,
+            Size::Byte,
+            guest(vector_offset(indices) + u32::from(output)),
+        );
+        asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, (registers * 16) as i8);
+        let fallback = asm.jcc(Cond::Ae);
+        // The first register's byte offset; the vector bank wraps at V31.
+        asm.alu_imm32(Alu::Add, Size::Dword, Rcx, i32::from(first) * 16);
+        asm.alu_imm32(Alu::And, Size::Dword, Rcx, 32 * 16 - 1);
+        asm.movzx(
+            Size::Dword,
+            R8,
+            Size::Byte,
+            Mem::indexed(Rdi, Rcx, 1, vector_offset(0) as i32).with_width(Disp::Dword),
+        );
+        asm.bind(fallback);
         accumulate_byte(code, usize::from(output), true);
     }
     commit_halves(code, destination);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match *operand {
         Operand::Duplicate {
             destination,

@@ -1,4 +1,5 @@
 //! SVE integer multiplies. Saturation does not set FPSR.QC.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication};
 
 const REGISTER_MASK: u32 = 31;
@@ -235,7 +236,7 @@ enum Format {
     IndexedComplexWord,
 }
 
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (kind, format) = classify(word)?;
     let element_size = match format {
         Format::IndexedHalfword | Format::IndexedComplexHalfword => ElementSize::Halfword,
@@ -251,11 +252,11 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         },
     };
     if kind.widening() && element_size == ElementSize::Byte {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     if matches!(kind, Kind::Polynomial { widening: true, .. }) && element_size == ElementSize::Word
     {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let destination = (word & REGISTER_MASK) as u8;
     let source_field = ((word >> SOURCE_SHIFT) & REGISTER_MASK) as u8;
@@ -645,15 +646,14 @@ fn classify(word: u32) -> Option<(Kind, Format)> {
 impl Operand {
     /// MOVPRFX requirements of the follower word, independent of the normalized
     /// kind. Unlisted encodings are refused.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         original_word: u32,
-    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, Unsupported> {
         use crate::aarch64::sve::prefix::{PredicatedPrefixRequirement, PrefixRequirement};
 
         if decode(original_word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         let source_bit = |register: u8| 1_u32 << register;
         let multiplier_mask = match self.multiplier {
@@ -693,7 +693,7 @@ impl Operand {
         ) {
             return Ok(Some(vector(
                 predicated,
-                multiplier_mask | source_bit(self.accumulator.ok_or(())?),
+                multiplier_mask | source_bit(self.accumulator.ok_or(Unsupported)?),
             )));
         }
         if matches!(
@@ -928,7 +928,7 @@ mod tests {
             SQDMULLB_Z_ZZ,
             SQDMULLT_Z_ZZ,
         ] {
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
         }
         let cross = decode(SQDMLALBT_Z_ZZZ | (1 << SIZE_SHIFT))
             .unwrap()

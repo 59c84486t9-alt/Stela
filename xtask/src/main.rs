@@ -35,17 +35,9 @@ mod boot_native_memory;
 #[path = "../../crates/stela-boot/src/engine/host/profile.rs"]
 mod boot_native_profile;
 #[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_dma/requester.rs"]
-#[allow(dead_code)]
-mod boot_requester;
-#[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/topology.rs"]
 #[allow(dead_code)] // Actual GS-owner constructor is UEFI-only.
 mod boot_topology;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_dma/vtd.rs"]
-#[allow(dead_code)]
-mod boot_vtd;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/xstate.rs"]
 #[allow(dead_code)] // Actual descriptor/IST capture and entry execute only in UEFI.

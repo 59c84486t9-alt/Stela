@@ -4,31 +4,10 @@ use crate::aarch64::{
     Width,
     literal::{Operand, Transfer},
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::{Code, Gpr, Mem, Size};
 
-/// Family-local baseline opcodes; address/state displacements follow separately.
-#[derive(Clone, Copy)]
-enum Opcode {
-    MoveAddress,
-    LoadWord,
-    LoadDoubleword,
-    LoadSignedWord,
-}
-
-impl Opcode {
-    fn emit(self, code: &mut Vec<u8>) {
-        code.extend(match self {
-            Self::MoveAddress => &[0x48, 0xb8][..], // movabs rax,imm64
-            Self::LoadWord => &[0x8b, 0x00],        // mov eax,[rax], zeroextends RAX
-            Self::LoadDoubleword => &[0x48, 0x8b, 0x00], // mov rax,[rax]
-            Self::LoadSignedWord => &[0x48, 0x63, 0x00], // movsxd rax,[rax]
-        });
-    }
-}
-
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
-    Opcode::MoveAddress.emit(code);
-    code.extend(operand.address.to_le_bytes());
+pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
+    code.asm().mov_imm64(Gpr::Rax, operand.address);
     let bytes = match operand.transfer {
         Transfer::Integer {
             width: Width::X64,
@@ -45,13 +24,15 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
             width,
             signed,
         } => {
+            let address = Mem::base(Gpr::Rax, 0);
+            let mut asm = code.asm();
             match (width, signed) {
-                (Width::W32, false) => Opcode::LoadWord,
-                (Width::X64, false) => Opcode::LoadDoubleword,
-                (Width::X64, true) => Opcode::LoadSignedWord,
+                // MOV EAX zero-extends RAX.
+                (Width::W32, false) => asm.mov_load(Size::Dword, Gpr::Rax, address),
+                (Width::X64, false) => asm.mov_load(Size::Qword, Gpr::Rax, address),
+                (Width::X64, true) => asm.movsxd(Gpr::Rax, address),
                 (Width::W32, true) => unreachable!("literal signed load writes X register"),
             }
-            .emit(code);
             // ZR discards only the result; its access and possible fault remain.
             store(code, destination);
         }
@@ -65,7 +46,6 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
 mod tests {
     use super::*;
     use crate::{GuestState, aarch64::Register};
-    use alloc::vec;
 
     #[test]
     fn integer_discard_still_loads_and_signed_load_has_exact_width() {
@@ -74,7 +54,7 @@ mod tests {
             (Width::X64, false, &[0x48, 0x8b, 0x00][..]),
             (Width::X64, true, &[0x48, 0x63, 0x00][..]),
         ] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {
@@ -100,7 +80,7 @@ mod tests {
             (Width::X64, false, 8),
             (Width::X64, true, 4),
         ] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {
@@ -127,7 +107,7 @@ mod tests {
             (8, [0xf3, 0x0f, 0x7e, 0x00]),
             (16, [0xf3, 0x0f, 0x6f, 0x00]),
         ] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand {

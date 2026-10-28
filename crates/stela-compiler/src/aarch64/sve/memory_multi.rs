@@ -1,6 +1,7 @@
 //! SME2/SVE2.1 multi-vector loads and stores governed by predicate-as-counter.
 use super::super::{Register, register};
 use super::memory::{Address, Offset, Scale};
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{
     ElementSize,
     execution::{GuestMemoryQuantity, ScalableAccessCheck, ScalableAccessRequirements},
@@ -62,15 +63,14 @@ pub(crate) const fn guest_memory_quantity(operand: &Operand) -> GuestMemoryQuant
 }
 
 /// Reserved tuple alignment and immediate fields decline without another decode.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & CLASS_MASK != CLASS_VALUE {
         return None;
     }
     let immediate = word & IMMEDIATE_ADDRESS != 0;
     let quad = word & FOUR_REGISTERS != 0;
     if (immediate && word & IMMEDIATE_RESERVED != 0) || (quad && word & QUAD_RESERVED != 0) {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let offset = if immediate {
         let raw = ((word >> OFFSET_SHIFT) & IMMEDIATE_MASK) as i8;
@@ -195,11 +195,11 @@ mod tests {
     fn reserved_fields_are_explicit_and_other_classes_do_not_match() {
         assert_eq!(
             decode(CLASS_VALUE | FOUR_REGISTERS | QUAD_RESERVED),
-            Some(Err(()))
+            Some(Err(Unsupported))
         );
         assert_eq!(
             decode(CLASS_VALUE | IMMEDIATE_ADDRESS | IMMEDIATE_RESERVED),
-            Some(Err(()))
+            Some(Err(Unsupported))
         );
         for bit in 23..32 {
             assert_eq!(decode(CLASS_VALUE ^ (1 << bit)), None);

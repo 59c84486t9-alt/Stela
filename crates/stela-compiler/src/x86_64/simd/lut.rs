@@ -1,4 +1,5 @@
 //! AdvSIMD LUTI2/LUTI4 on the shared constant-time lookup.
+use crate::x86_64::asm::Code;
 
 use super::{commit, read_vector};
 use crate::TargetCpu;
@@ -6,14 +7,13 @@ use crate::aarch64::scalable::{ElementSize, VECTOR_REGISTER_COUNT};
 use crate::aarch64::simd::lut::Operand;
 use crate::x86_64::isa::ShiftOpcode;
 use crate::x86_64::scalable::lut;
-use alloc::vec::Vec;
 
 const INDICES_XMM: u8 = 0;
 const LOW_TABLE_XMM: u8 = 4;
 const HIGH_TABLE_XMM: u8 = 5;
 const RESULT_XMM: u8 = 6;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     read_vector(code, operand.indices, INDICES_XMM);
     let offset = operand.index_byte_offset();
     if offset != 0 {

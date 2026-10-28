@@ -1,16 +1,16 @@
 //! SSE2 interleave and deinterleave networks for whole 128-bit chunks.
+use crate::x86_64::asm::{Code, Mem, Rm};
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
-use alloc::vec::Vec;
 
 const SECOND_EVEN_XMM: u8 = 6;
 const SECOND_ODD_XMM: u8 = 7;
 const EVEN_DWORDS: u8 = 0x88;
 const ODD_DWORDS: u8 = 0xdd;
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8, target: TargetCpu) {
+fn copy(code: &mut Code, destination: u8, source: u8, target: TargetCpu) {
     if destination != source {
         Host::MoveAligned.register(code, destination, source, target);
     }
@@ -19,7 +19,7 @@ fn copy(code: &mut Vec<u8>, destination: u8, source: u8, target: TargetCpu) {
 /// Preserve both inputs, producing their concatenated even/odd element streams.
 /// Outputs differ from inputs and XMM6/7. XMM6/7 are clobbered.
 pub(crate) fn split(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     first: u8,
     second: u8,
     even: u8,
@@ -41,8 +41,13 @@ pub(crate) fn split(
                 (odd, first, ODD_DWORDS),
                 (SECOND_ODD_XMM, second, ODD_DWORDS),
             ] {
-                Host::ShuffleDword.register(code, destination, source, target);
-                code.push(control);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    destination,
+                    Rm::Xmm(source),
+                    control,
+                    target,
+                );
             }
             Host::UnpackLowQword.register(code, even, SECOND_EVEN_XMM, target);
             Host::UnpackLowQword.register(code, odd, SECOND_ODD_XMM, target);
@@ -106,7 +111,7 @@ fn unpack(element: ElementSize, high: bool) -> Host {
 /// Interleave two chunks into low/high outputs. Outputs differ from each other
 /// and from second. First may be an output; no GPRs or extra XMMs are clobbered.
 pub(crate) fn merge(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     first: u8,
     second: u8,
     low: u8,
@@ -133,7 +138,7 @@ const ODD_MASK_XMM: u8 = 7;
 /// into the low qword and zero the upper qword. Byte/Halfword lane masks belong
 /// to the caller; this kernel does not infer element sizes or access state.
 pub(crate) fn split_destructive(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     first: u8,
     second: u8,
     even: u8,
@@ -156,10 +161,7 @@ pub(crate) fn split_destructive(
     Host::UnpackLowQword.register(code, odd, second, target);
 }
 
-const MODRM_RIP: u8 = 0x05;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const SHUFFLE_ZERO: u8 = 0x80;
-const JMP_REL32: u8 = 0xe9;
 const REL32_BYTES: usize = core::mem::size_of::<i32>();
 const JUMP_BYTES: usize = core::mem::size_of::<u8>() + REL32_BYTES;
 const CHUNK_BYTES: usize = crate::aarch64::scalable::VECTOR_CHUNK_BYTES;
@@ -168,29 +170,34 @@ const HALF_CHUNK_BYTES: usize = CHUNK_BYTES / 2;
 /// Prepare even/odd Byte or Halfword routing masks in XMM6/7. Embedded masks
 /// use MOVDQU loads, avoiding the alignment requirement of legacy PSHUFB memory.
 /// Preserves XMM0..5 and every GPR. The caller owns checked SSSE3 selection.
-pub(crate) fn prepare_split_masks(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
+pub(crate) fn prepare_split_masks(code: &mut Code, element: ElementSize, target: TargetCpu) {
     assert!(target.supports(TargetCpu::Ssse3));
     assert!(matches!(element, ElementSize::Byte | ElementSize::Halfword));
     let load_bytes =
         Host::LoadUnaligned.encoding().len() + core::mem::size_of::<u8>() + REL32_BYTES;
+    let mut asm = code.asm();
     for (register, displacement) in [
         (EVEN_MASK_XMM, load_bytes + JUMP_BYTES),
         (ODD_MASK_XMM, JUMP_BYTES + CHUNK_BYTES),
     ] {
-        Host::LoadUnaligned.append(code, target);
-        code.push(MODRM_RIP | (register << MODRM_REGISTER_SHIFT));
-        code.extend((displacement as i32).to_le_bytes());
+        asm.simd(
+            Host::LoadUnaligned,
+            register,
+            Mem::rip(displacement as i32),
+            target,
+        );
     }
-    code.push(JMP_REL32);
-    code.extend((2 * CHUNK_BYTES as i32).to_le_bytes());
+    let over_masks = asm.jmp();
     for parity in 0..2 {
-        for byte in 0..CHUNK_BYTES {
-            code.push(if byte < HALF_CHUNK_BYTES {
+        let mask: [u8; CHUNK_BYTES] = core::array::from_fn(|byte| {
+            if byte < HALF_CHUNK_BYTES {
                 ((byte / element.bytes() * 2 + parity) * element.bytes() + byte % element.bytes())
                     as u8
             } else {
                 SHUFFLE_ZERO
-            });
-        }
+            }
+        });
+        asm.data(&mask);
     }
+    asm.bind(over_masks);
 }

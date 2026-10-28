@@ -1,4 +1,5 @@
 //! SVE predicated bit operations: CLS, CLZ, CNT, RBIT and REVB/REVH/REVW.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication};
 
 const OPCODE_MASK: u32 = 0xff3f_e000;
@@ -34,8 +35,7 @@ pub struct Operand {
     pub predication: Predication,
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     use ElementSize::{Byte, Halfword, Word};
     use Kind::{LeadingSignBits, LeadingZeros, PopulationCount, ReverseBits, ReverseGroups};
     let kind = match word & OPCODE_MASK {
@@ -52,12 +52,12 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     };
     let bytes = 1usize << ((word >> SIZE_SHIFT) & SIZE_MASK);
     let Some(element_size) = ElementSize::from_bytes(bytes) else {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     };
     if let ReverseGroups { group_size } = kind
         && element_size <= group_size
     {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         kind,
@@ -115,7 +115,7 @@ mod tests {
                                     }))
                                 );
                             } else {
-                                assert_eq!(decode(word), Some(Err(())));
+                                assert_eq!(decode(word), Some(Err(Unsupported)));
                             }
                         }
                     }

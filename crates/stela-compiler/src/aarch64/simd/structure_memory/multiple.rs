@@ -1,5 +1,6 @@
 //! LD1-4 and ST1-4 (multiple structures).
 use super::{Direction, Layout, Operand, decode_addressing};
+use crate::aarch64::Unsupported;
 
 const CLASS_MASK: u32 = 0xbf20_0000;
 const CLASS: u32 = 0x0c00_0000;
@@ -21,12 +22,12 @@ const TWO_STRUCTURES: u32 = 0b1000;
 const TWO_REGISTERS: u32 = 0b1010;
 
 /// None denotes a different instruction class; Err denotes a reserved encoding.
-pub(super) fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub(super) fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & CLASS_MASK != CLASS {
         return None;
     }
     if word & POST_INDEX_BIT == 0 && word & INDEX_MASK != 0 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let (repetitions, structures) = match (word >> OPCODE_SHIFT) & OPCODE_MASK {
         FOUR_STRUCTURES => (1, 4),
@@ -36,12 +37,12 @@ pub(super) fn decode(word: u32) -> Option<Result<Operand, ()>> {
         ONE_REGISTER => (1, 1),
         TWO_STRUCTURES => (1, 2),
         TWO_REGISTERS => (2, 1),
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     let size = (word >> SIZE_SHIFT) & SIZE_MASK;
     let vector_bytes = if word & Q_BIT == 0 { 8 } else { 16 };
     if structures != 1 && vector_bytes == 8 && size == SIZE_MASK {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let (base, post_index) = decode_addressing(word);
     Some(Ok(Operand {

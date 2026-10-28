@@ -1,5 +1,6 @@
 //! SME2 multi-vector integer arithmetic and narrowing. Saturation does not set
 //! FPSR.QC.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{BITS_PER_BYTE, ElementSize, VECTOR_REGISTER_COUNT};
 
 const SIZE_SHIFT: u32 = 22;
@@ -668,7 +669,7 @@ fn element(size: u32) -> ElementSize {
     }
 }
 
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     for encoding in &ARITHMETIC_ENCODINGS {
         if word & encoding.mask != encoding.opcode {
             continue;
@@ -717,7 +718,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
                 if encoding.rounded_shift {
                     let size = (word >> NARROW_SHIFT_SIZE_SHIFT) & SIZE_MASK;
                     let destination_bits = match size {
-                        0 => return Some(Err(())),
+                        0 => return Some(Err(Unsupported)),
                         1 => ElementSize::Byte.bits(),
                         _ => ElementSize::Halfword.bits(),
                     } as u8;
@@ -871,7 +872,7 @@ mod tests {
                         | (size << NARROW_SHIFT_SIZE_SHIFT)
                         | (immediate << NARROW_IMMEDIATE_SHIFT);
                     if size == 0 {
-                        assert_eq!(decode(word), Some(Err(())));
+                        assert_eq!(decode(word), Some(Err(Unsupported)));
                         continue;
                     }
                     let Operand::Narrow(narrow) = decode(word).unwrap().unwrap() else {

@@ -1,6 +1,6 @@
 //! DC CVAC, DC CVAU and DC CIVAC in system-mode blocks the engine compiles
 //! where they neither trap nor are UNDEFINED
-//! (`CompilationPlan::with_cache_clean`). The host is cache-coherent, so
+//! (`Options::with_native_system`). The host is cache-coherent, so
 //! all the engine does for them is translate Xt as a read, taking the Data
 //! Abort of a failed translation (`engine::system` `check_maintenance`).
 //! Native code makes the same check by reading the byte at Xt through the
@@ -15,7 +15,7 @@ use crate::aarch64::{
     system::registers::{Direction, Encoding},
 };
 use crate::block::{SystemInstruction, system::SystemOperation};
-use alloc::vec::Vec;
+use crate::x86_64::asm::{Code, Gpr, Mem, Size};
 
 /// SYS #3, C7, Cm, #1 of each operation.
 const DC_CVAC: Encoding = Encoding::new(1, 3, 7, 10, 1);
@@ -78,7 +78,7 @@ pub fn operand(instruction: &SystemInstruction) -> Option<(Operations, u8)> {
 }
 
 /// Read the byte at Xt, so the access faults where its translation would.
-pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, checks: super::MemoryChecks) {
+pub(crate) fn emit(code: &mut Code, rt: u8, checks: super::MemoryChecks) {
     super::load(
         code,
         if rt == 31 {
@@ -88,7 +88,8 @@ pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, checks: super::MemoryChecks) {
         },
     );
     super::range_check(code, checks, super::Access::read(1));
-    code.extend([0x0f, 0xb6, 0x08]); // movzx ecx,byte [rax]
+    code.asm()
+        .movzx(Size::Dword, Gpr::Rcx, Size::Byte, Mem::base(Gpr::Rax, 0));
 }
 
 #[cfg(test)]
@@ -155,9 +156,11 @@ mod tests {
         let memory = [0x5au8, 0xc3];
         let mut state = GuestState::default();
         state.x[7] = memory.as_ptr() as u64 + 1;
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(&mut code, 7, super::super::MemoryChecks::DEFAULT);
-        code.extend([0x89, 0xc8, 0xc3]); // mov eax,ecx; ret
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Gpr::Rax, Gpr::Rcx);
+        asm.ret();
         // SAFETY: private anonymous memory, RX after the copy, unmapped
         // after the call; the code reads one byte of `memory`.
         let read = unsafe {

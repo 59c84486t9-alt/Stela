@@ -21,22 +21,22 @@ fn config32<C: ConfigSpace>(config: &C, offset: u16) -> Result<u32, Error> {
     }
 }
 
-/// The complete conventional list, validated by the shared walk. Secure
-/// device bodies, which the walk reserves only the header of, are sized here
-/// and checked against every other entry.
+/// The complete conventional list's headers, validated by the shared walk.
+/// The secure device bodies, the only bodies this unit reads, are sized here
+/// and checked against every other header. Another ID may repeat: the first
+/// entry is the one a driver finds, as with Linux `pci_find_capability`.
 pub(super) fn scan<C: ConfigSpace>(config: &C) -> Result<Capabilities, Error> {
     let mut result = Capabilities {
         entries: [None; CAP_LIMIT],
         count: 0,
         has_msix: false,
     };
-    let entries = capability::capabilities(config)
+    let entries = capability::capability_headers(config)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| match error {
             CapabilityError::FailedRead { offset } => Error::ReadFailed(offset),
             error => Error::Capability(error.offset()),
         })?;
-    let mut singleton = 0u32;
     for entry in &entries {
         let (offset, id) = (entry.offset, entry.id);
         let header = config32(config, offset)?;
@@ -48,13 +48,6 @@ pub(super) fn scan<C: ConfigSpace>(config: &C) -> Result<Capabilities, Error> {
             return Err(Error::Capability(other));
         }
         result.has_msix |= id == 0x11;
-        if !matches!(id, SECURE_DEVICE | 9) {
-            let bit = 1u32 << id;
-            if singleton & bit != 0 {
-                return Err(Error::Capability(offset));
-            }
-            singleton |= bit;
-        }
         if id == SECURE_DEVICE {
             if result.count == CAP_LIMIT {
                 return Err(Error::Capability(offset));
@@ -82,12 +75,18 @@ pub(super) fn scan<C: ConfigSpace>(config: &C) -> Result<Capabilities, Error> {
     Ok(result)
 }
 
+/// HyperTransport (PCI_CAP_ID_HT), which an AMD IOMMU lists for its MSI
+/// mapping.
+const HYPERTRANSPORT: u8 = 8;
+
 fn capability_bytes(entry: &Capability, header: u32) -> Result<u16, Error> {
     let (offset, id) = (entry.offset, entry.id);
     let flags = (header >> 16) as u16;
     match id {
         SECURE_DEVICE => {
-            if (header >> 16) & 7 != IOMMU_TYPE || (header >> 19) & 31 != IOMMU_REVISION {
+            // Revision 0, which QEMU's amd-iommu reports, frames revision 1's
+            // registers.
+            if (header >> 16) & 7 != IOMMU_TYPE || (header >> 19) & 31 > IOMMU_REVISION {
                 return Err(Error::UnsupportedLayout(offset));
             }
             Ok(if header & CAP_EXTENDED != 0 { 24 } else { 20 })
@@ -101,7 +100,7 @@ fn capability_bytes(entry: &Capability, header: u32) -> Result<u16, Error> {
             }
             Ok(entry.bytes)
         }
-        9 | 0x11 => Ok(entry.bytes),
+        HYPERTRANSPORT | 9 | 0x11 => Ok(entry.bytes),
         0x10 => {
             let version = flags & 15;
             let kind = (flags >> 4) & 15;
@@ -166,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn full_chain_rejects_cycles_overlap_misalignment_duplicates_and_unknown_layouts() {
+    fn full_chain_rejects_cycles_overlap_misalignment_and_unknown_layouts() {
         for (first, second, expected) in [
             (secure_header() | 0x4000, 0, Error::Capability(CAP)),
             (
@@ -177,10 +176,10 @@ mod tests {
             (secure_header() | 0x6100, 0, Error::Capability(0x61)),
             (
                 secure_header() | 0x6000,
-                0x0000_0008,
+                0x0000_000a,
                 Error::UnsupportedCapability {
                     offset: 0x60,
-                    id: 8,
+                    id: 0x0a,
                 },
             ),
             (
@@ -197,8 +196,20 @@ mod tests {
             }
             assert_eq!(scan(&config).err(), Some(expected));
         }
-        let mut config = make_config(0x0000_6005);
-        config.words[0x60 / 4] = 5;
-        assert_eq!(scan(&config).err(), Some(Error::Capability(0x60)));
+    }
+
+    #[test]
+    fn unread_bodies_are_framed_by_header_and_their_ids_may_repeat() {
+        // QEMU's amd-iommu, newest entry first: msi_init's MSI, then
+        // HyperTransport and a four-byte MSI entry, each right after the
+        // last, and the secure device.
+        let mut config = make_config(IOMMU_TYPE << 16 | u32::from(SECURE_DEVICE) | CAP_EXTENDED);
+        config.words[0x34 / 4] = 0x60;
+        config.words[0x60 / 4] = 0x0080_5c05;
+        config.words[0x5c / 4] = 0x0000_5808;
+        config.words[0x58 / 4] = 0x0000_4005;
+        let result = scan(&config).unwrap();
+        assert_eq!(result.count, 1);
+        assert!(!result.has_msix);
     }
 }

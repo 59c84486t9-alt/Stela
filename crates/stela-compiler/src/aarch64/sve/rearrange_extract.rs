@@ -1,4 +1,5 @@
 //! SVE element extraction, broadcast and insertion (LAST*, CLAST*, INSR, ...).
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::{Register, register};
 
@@ -84,8 +85,8 @@ fn element_size(word: u32) -> ElementSize {
     }
 }
 
-/// None is outside this family; Some(Err(())) is a reserved family encoding.
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+/// None is outside this family; Some(Err(Unsupported)) is a reserved family encoding.
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let mut element_size = element_size(word);
     let destination_index = (word & REGISTER_MASK) as u8;
     let source_index = ((word >> SOURCE_SHIFT) & REGISTER_MASK) as u8;
@@ -135,7 +136,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     } else if word & DUP_IMMEDIATE_MASK == DUP_IMMEDIATE {
         let shifted = word & SHIFT_FLAG != 0;
         if element_size == ElementSize::Byte && shifted {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let immediate = ((word >> IMMEDIATE_SHIFT) & IMMEDIATE_MASK) as u8 as i8 as i16;
         (
@@ -154,7 +155,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     } else if word & DUP_INDEX_MASK == DUP_INDEX {
         let size = (word >> INDEX_SIZE_SHIFT) & INDEX_SIZE_MASK;
         if size == 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let lowest = size.trailing_zeros();
         element_size = ElementSize::from_bytes(1 << lowest)?;
@@ -189,15 +190,14 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 impl Operand {
     /// Canonical-word MOVPRFX requirements for the four documented followers.
     /// Scalar V sources share Z storage; general-register sources do not.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         original_word: u32,
-    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, Unsupported> {
         use crate::aarch64::sve::prefix::PrefixRequirement;
 
         if decode(original_word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         let Destination::Vector(destination) = self.destination else {
             return Ok(None);
@@ -415,7 +415,7 @@ mod tests {
             let word = word(INSR_SCALAR, SOURCE, DESTINATION);
             let decoded = operand(word);
             for other in [word ^ 1, 0, DUP_INDEX, DUP_IMMEDIATE | SHIFT_FLAG] {
-                assert_eq!(decoded.prefix_requirement(other), Err(()));
+                assert_eq!(decoded.prefix_requirement(other), Err(Unsupported));
             }
             for forged in [
                 Operand {
@@ -431,7 +431,7 @@ mod tests {
                     ..decoded
                 },
             ] {
-                assert_eq!(forged.prefix_requirement(word), Err(()));
+                assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
             }
         }
 
@@ -585,7 +585,7 @@ mod tests {
                         | (immediate << IMMEDIATE_SHIFT)
                         | if shifted { SHIFT_FLAG } else { 0 };
                     if size == 0 && shifted {
-                        assert_eq!(decode(word), Some(Err(())));
+                        assert_eq!(decode(word), Some(Err(Unsupported)));
                     } else {
                         let signed = immediate as u8 as i8 as i16;
                         let expected = if shifted {
@@ -607,7 +607,7 @@ mod tests {
             for high in 0..=INDEX_HIGH_MASK {
                 let word = DUP_INDEX | (size << INDEX_SIZE_SHIFT) | (high << INDEX_HIGH_SHIFT);
                 if size == 0 {
-                    assert_eq!(decode(word), Some(Err(())));
+                    assert_eq!(decode(word), Some(Err(Unsupported)));
                     continue;
                 }
                 let lowest = size.trailing_zeros();

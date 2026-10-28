@@ -122,7 +122,7 @@ impl Owner {
     ///
     /// # Safety
     /// This is the source-qualified registered RAM for this executor. Its
-    /// all-writer contract is retained. Direct SystemModeV1 guest data writers
+    /// all-writer contract is retained. Direct `SYSTEM_MODE` guest data writers
     /// must never bypass this all-writer owner, including between checked calls.
     /// Only the source-qualified checked service and registered host/table
     /// publishers may touch data; returning to serial execution additionally

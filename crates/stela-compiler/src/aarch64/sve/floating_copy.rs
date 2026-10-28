@@ -1,4 +1,5 @@
 //! FCPY (merging) and FDUP.
+use crate::aarch64::Unsupported;
 
 use crate::aarch64::floating::Format;
 
@@ -43,8 +44,7 @@ fn expand_immediate(format: Format, immediate: u8) -> u64 {
         | (u64::from(fraction) << (fraction_bits - IMMEDIATE_FRACTION_BITS))
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let governing = if word & FCPY_MASK == FCPY {
         Some(((word >> COPY_GOVERNING_SHIFT) & COPY_GOVERNING_MASK) as u8)
     } else if word & FDUP_MASK == FDUP {
@@ -56,7 +56,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         1 => Format::Half,
         2 => Format::Single,
         3 => Format::Double,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         format,
@@ -89,8 +89,8 @@ mod tests {
                 assert_eq!(decode(word).unwrap().unwrap().governing, None);
             }
         }
-        assert_eq!(decode(FCPY), Some(Err(())));
-        assert_eq!(decode(FDUP), Some(Err(())));
+        assert_eq!(decode(FCPY), Some(Err(Unsupported)));
+        assert_eq!(decode(FDUP), Some(Err(Unsupported)));
         // VFP imm8 0x70 is exactly +1.0 in every destination format.
         assert_eq!(expand_immediate(Format::Half, 0x70), 0x3c00);
         assert_eq!(expand_immediate(Format::Single, 0x70), 0x3f80_0000);

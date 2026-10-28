@@ -5,8 +5,11 @@
 //! local: the original PCI/UC/root owner is not promoted to Send/Sync. Native
 //! provisioning and a cross-thread process-context adapter remain platform work.
 //!
-//! The bounded profile admits one remapper, plain firmware RID coverage, no
-//! IVMD, aliases, ATS/PASID/PRI, guest translation or interrupt-table owners.
+//! Each unit is one IVHD's remapper, with its device entries' coverage,
+//! aliases and DTE settings; ATS/PASID/PRI, guest translation and
+//! interrupt-table owners stay absent. A unit can give its covered
+//! requesters a window domain that maps given memory one to one
+//! ([`Unit::window`]), which a requester leaves when it attaches.
 //! Faults retain every original owner; they never disable translation into
 //! bypass. Completion stores acknowledge invalidations, not device stop or an
 //! arbitrary posted-payload drain. No DmaDomain implementation is fabricated.
@@ -271,12 +274,21 @@ unsafe impl<P: ColdPlatform> TableHardware for Hardware<P> {
     }
 }
 
+/// The window domain: one to one page tables shared by the requesters that
+/// have no domain of their own.
+struct Window<P: ColdPlatform> {
+    tree: PageTables<Hardware<P>>,
+    requesters: Vec<u16>,
+}
+
 /// Original cold unit plus complete blocked DTE table and bounded RID policy.
 /// Requesters and their page trees retain this exact engine independently.
 pub struct Unit<P: ColdPlatform> {
     engine: Rc<Engine<P>>,
     table: Rc<RefCell<DeviceTable<Hardware<P>>>>,
     coverage: Vec<bool>,
+    aliases: Vec<(u16, u16)>,
+    window: Option<Window<P>>,
     active: Rc<RefCell<Vec<u16>>>,
     next_domain: Cell<u32>,
     segment: u16,
@@ -354,12 +366,138 @@ impl<P: ColdPlatform> Unit<P> {
             engine,
             table: Rc::new(RefCell::new(table)),
             coverage: admitted.coverage,
+            aliases: admitted.aliases,
+            window: None,
             active: Rc::new(RefCell::new(Vec::new())),
             next_domain: Cell::new(1),
             segment: admitted.segment,
             physical_bits: admitted.bits,
             limits,
         })
+    }
+
+    /// Whether the unit's IVHD covers requester `rid` on `segment`.
+    pub fn covers(&self, segment: u16, rid: u16) -> bool {
+        segment == self.segment && self.coverage[usize::from(rid)]
+    }
+
+    /// The requester IDs `rid`'s DMA arrives under: its own and its alias.
+    fn group(&self, rid: u16) -> Vec<u16> {
+        let mut group = alloc::vec![rid];
+        group.extend(
+            self.aliases
+                .iter()
+                .filter(|&&(source, _)| source == rid)
+                .map(|&(_, target)| target),
+        );
+        group
+    }
+
+    /// Whether another requester's DMA arrives under one of `group`'s IDs,
+    /// so `group` cannot have a domain of its own.
+    fn shared(&self, rid: u16, group: &[u16]) -> bool {
+        self.aliases.iter().any(|&(source, target)| {
+            source != rid && (group.contains(&target) || group.contains(&source))
+        })
+    }
+
+    /// Give `requesters`, with their aliases, the window domain, which maps
+    /// each of `ranges` (one physically contiguous run each) at its own
+    /// physical address.
+    ///
+    /// # Safety
+    /// Each requester DMAs only to `ranges` until it attaches, and each
+    /// range is memory the platform admits for device DMA and keeps for the
+    /// boot.
+    pub unsafe fn window(
+        &mut self,
+        requesters: &[u16],
+        ranges: Vec<DmaPages>,
+    ) -> Result<(), Error> {
+        if self.engine.retired.get() || self.engine.poisoned.get() {
+            return Err(Error::Poisoned);
+        }
+        if self.window.is_some() || ranges.is_empty() {
+            return Err(Error::Busy);
+        }
+        let mut covered = Vec::new();
+        for &rid in requesters {
+            if !self.coverage[usize::from(rid)] {
+                return Err(Error::Requester);
+            }
+            for member in self.group(rid) {
+                if !covered.contains(&member) {
+                    covered.push(member);
+                }
+            }
+        }
+        let mut end = 0u64;
+        let mut leaves = 0usize;
+        for pages in &ranges {
+            let size = 1u64 << pages.page_shift();
+            let first = *pages.physical_pages().first().ok_or(Error::Mapping)?;
+            if pages
+                .physical_pages()
+                .iter()
+                .enumerate()
+                .any(|(index, &page)| page != first + index as u64 * size)
+            {
+                return Err(Error::Mapping);
+            }
+            end = end.max(first + pages.bytes() as u64);
+            leaves += pages.bytes().div_ceil(1 << 21) + 1;
+        }
+        let bits = (u64::BITS - (end - 1).leading_zeros()).max(21) as u8;
+        let mode = (1..=4u8)
+            .find(|mode| 12 + 9 * u32::from(*mode) >= u32::from(bits))
+            .ok_or(Error::Profile)?;
+        let level = TableLevel::new(mode).map_err(|_| Error::Profile)?;
+        let next = self.next_domain.get();
+        let id = u16::try_from(next)
+            .ok()
+            .and_then(DomainId::new)
+            .ok_or(Error::Exhausted)?;
+        self.next_domain.set(next + 1);
+        let hardware = Hardware {
+            engine: self.engine.clone(),
+            domain: Some(id),
+            requester: None,
+        };
+        let pages = leaves * usize::from(mode) + 1;
+        let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
+        self.engine.health()?;
+        // SAFETY: the level covers every range's physical address, within
+        // the admitted host translation; the tree is this domain's alone.
+        let mut tree = unsafe {
+            PageTables::new(
+                hardware,
+                level,
+                self.physical_bits,
+                level.address_bits() as u8,
+                pages,
+                pages * 4096,
+            )
+        }
+        .map_err(Error::Translation)?;
+        for range in ranges {
+            let address = range.physical_pages()[0];
+            // SAFETY: a fresh tree no device walks yet; each range maps at
+            // its own address, and the ranges are the caller's.
+            unsafe { tree.map(address, range, Direction::Bidirectional) }
+                .map_err(Error::Translation)?;
+        }
+        let root = tree.root_for_publication().map_err(Error::Translation)?;
+        for &rid in &covered {
+            // SAFETY: forwarded: the requester DMAs only to the ranges.
+            unsafe { self.table.borrow_mut().translate(rid, root, level, id) }
+                .map_err(Error::DeviceTable)?;
+        }
+        drop(_guard);
+        self.window = Some(Window {
+            tree,
+            requesters: covered,
+        });
+        Ok(())
     }
 
     /// Poll without clearing event/fault evidence. A fault poisons this exact
@@ -387,6 +525,15 @@ impl<P: ColdPlatform> Unit<P> {
             return Err(Error::Busy);
         }
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
+        if let Some(window) = &mut self.window {
+            for &rid in &window.requesters {
+                // SAFETY: forwarded: every covered requester is stopped.
+                unsafe { self.table.borrow_mut().block(rid) }.map_err(Error::DeviceTable)?;
+            }
+            // SAFETY: every DTE that named the tree is blocked and invalidated.
+            unsafe { window.tree.retire() };
+            self.window = None;
+        }
         self.engine.execute(&[Command::invalidate_all()])?;
         self.engine.poisoned.set(true);
         self.engine.write(CONTROL, 0)?;

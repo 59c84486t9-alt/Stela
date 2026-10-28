@@ -1,4 +1,6 @@
 //! SME2 integer dot products, including 16-to-64-bit products.
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
@@ -15,14 +17,11 @@ use crate::{
         },
     },
 };
-use alloc::vec::Vec;
 
 const ACCUMULATOR: u8 = 2;
 const TEMPORARY: u8 = 5;
 const SIGN_MASK: u8 = 6;
 const VERTICAL_MASK: u8 = 7;
-const MODRM_REGISTER: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
 const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
 const PACK_EVEN_DWORDS: u8 = 0x88;
 const SWAP_QWORDS: u8 = 0x4e;
@@ -32,54 +31,50 @@ const REPEAT_HIGH_QWORD: u8 = 0xee;
 const DWORD_SIGN_SHIFT: u8 = 31;
 const GPR_BYTES: u32 = core::mem::size_of::<u64>() as u32;
 const BROADCAST_DWORD_INDEX: u8 = 0x55;
-const MOV_ECX_STATE_DISP32: &[u8] = &[0x8b, 0x8f];
-const ADD_ECX_IMM8: &[u8] = &[0x83, 0xc1];
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
-const ADD_R8_RCX: &[u8] = &[0x49, 0x01, 0xc8];
-const MOV_EAX_IMM32: u8 = 0xb8;
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
 // At 16 bytes the longer SSE2 reduction wins for ordinary dots; 64-byte
 // candidates favor PHADDD. Unmeasured 32-byte ordinary shapes stay on SSE2.
 const MIN_PHADDD_VECTOR_BYTES: usize = 64;
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8, target: TargetCpu) {
+fn copy(code: &mut Code, destination: u8, source: u8, target: TargetCpu) {
     Host::MoveAligned.register(code, destination, source, target);
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, destination, source, target);
-    code.push(control);
+fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8, target: TargetCpu) {
+    Host::ShuffleDword.register_imm(code, destination, source, control, target);
 }
 
 /// ZA pointer stays in caller-saved R8; shared Z helpers clobber only RDX.
-fn za_pointer(code: &mut Vec<u8>, operand: &Operand, length: VectorLength) {
+fn za_pointer(code: &mut Code, operand: &Operand, length: VectorLength) {
     load_za_pointer_r8(code);
-    code.extend(MOV_ECX_STATE_DISP32);
-    code.extend(
-        (core::mem::offset_of!(GuestState, x) as u32 + u32::from(operand.selector) * GPR_BYTES)
-            .to_le_bytes(),
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Dword,
+        Gpr::Rcx,
+        guest(
+            core::mem::offset_of!(GuestState, x) as u32 + u32::from(operand.selector) * GPR_BYTES,
+        ),
     );
     // Partition rows are powers of two dividing 2^32. ECX wrap therefore
     // preserves (UInt(Wselector)+offset) modulo the selected partition.
     if operand.offset != 0 {
-        code.extend(ADD_ECX_IMM8);
-        code.push(operand.offset);
+        asm.alu_imm8(Alu::Add, Size::Dword, Gpr::Rcx, operand.offset as i8);
     }
     let partition_rows = length.bytes() / usize::from(operand.groups);
-    code.extend(AND_ECX_IMM32);
-    code.extend(((partition_rows - 1) as u32).to_le_bytes());
-    code.extend(SHL_RCX_IMM8);
-    code.push(length.bytes().trailing_zeros() as u8);
-    code.extend(ADD_R8_RCX);
+    asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rcx, (partition_rows - 1) as i32);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Qword,
+        Gpr::Rcx,
+        length.bytes().trailing_zeros() as u8,
+    );
+    asm.alu(Alu::Add, Size::Qword, Gpr::R8, Gpr::Rcx);
 }
 
-fn vertical_mask(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn vertical_mask(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let source_bits = operand.accumulator.bits() / usize::from(operand.terms);
-    code.push(MOV_EAX_IMM32);
-    code.extend(((1u32 << source_bits) - 1).to_le_bytes());
-    code.extend(MOVD_XMM_EAX);
-    code.push(MODRM_REGISTER | (VERTICAL_MASK << REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.mov_imm32(Gpr::Rax, (1u32 << source_bits) - 1);
+    asm.movd_to_xmm(VERTICAL_MASK, Gpr::Rax);
     shuffle(
         code,
         VERTICAL_MASK,
@@ -94,7 +89,7 @@ fn vertical_mask(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 }
 
 fn left_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     group: u8,
     chunk: usize,
@@ -139,7 +134,7 @@ fn left_chunk(
     }
 }
 
-fn adjacent_pair_sums(code: &mut Vec<u8>, low: u8, high: u8, target: TargetCpu, horizontal: bool) {
+fn adjacent_pair_sums(code: &mut Code, low: u8, high: u8, target: TargetCpu, horizontal: bool) {
     if horizontal {
         Host::HorizontalAddDword.register(code, low, high, target);
         return;
@@ -153,7 +148,7 @@ fn adjacent_pair_sums(code: &mut Vec<u8>, low: u8, high: u8, target: TargetCpu, 
     Host::UnpackLowQword.register(code, low, high, target);
 }
 
-fn extend_bytes(code: &mut Vec<u8>, low: u8, high: u8, signed: bool, target: TargetCpu) {
+fn extend_bytes(code: &mut Code, low: u8, high: u8, signed: bool, target: TargetCpu) {
     copy(code, high, low, target);
     Host::Xor.register(code, SIGN_MASK, SIGN_MASK, target);
     if signed {
@@ -165,7 +160,7 @@ fn extend_bytes(code: &mut Vec<u8>, low: u8, high: u8, signed: bool, target: Tar
 
 /// Four exact 32-bit products become a duplicated 64-bit sum. Widen first:
 /// PMADDWD's 0x8000*0x8000 pair overflow cannot be sign-extended to 64 bits.
-fn reduce_four_products(code: &mut Vec<u8>, source: u8, signed: bool, target: TargetCpu) {
+fn reduce_four_products(code: &mut Code, source: u8, signed: bool, target: TargetCpu) {
     if signed {
         copy(code, SIGN_MASK, source, target);
         Shift::ArithmeticDword.emit(code, SIGN_MASK, DWORD_SIGN_SHIFT);
@@ -181,7 +176,7 @@ fn reduce_four_products(code: &mut Vec<u8>, source: u8, signed: bool, target: Ta
 }
 
 /// XMM0/1 inputs, XMM2 accumulator, XMM0 result; XMM3..6 scratch, XMM7 preserved.
-fn dot_chunk(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, horizontal: bool) {
+fn dot_chunk(code: &mut Code, operand: &Operand, target: TargetCpu, horizontal: bool) {
     if operand.accumulator == ElementSize::Doubleword {
         word_products(code, operand.left_signed, target);
         reduce_four_products(code, LEFT, operand.left_signed, target);
@@ -209,7 +204,7 @@ fn dot_chunk(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, horizonta
 
 /// Caller validates SME2, SM+ZA, SVL and I16I64 before entry. This unpredicated
 /// family touches only selected ZA vectors; all Z/P/flags/control state survives.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     za_pointer(code, operand, length);
     if operand.kind == Kind::VerticalDot {
         vertical_mask(code, operand, target);

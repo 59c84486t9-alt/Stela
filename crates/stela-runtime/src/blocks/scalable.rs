@@ -8,7 +8,7 @@ use stela_compiler::{
         AdmittedScalableNumericalInstruction, admit_scalable_numerical_instruction,
         decode_scalable_numerical_instruction,
     },
-    extended::ScalableProfile,
+    scalable_context::ScalableProfile,
 };
 
 use super::validate_interior_word;

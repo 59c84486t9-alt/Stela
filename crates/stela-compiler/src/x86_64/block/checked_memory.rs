@@ -3,7 +3,8 @@ use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu,
     aarch64::Instruction,
     block::{Terminator, memory::CheckedOperation},
-    extended,
+    scalable_context,
+    x86_64::Emitted,
 };
 use alloc::vec::Vec;
 
@@ -15,8 +16,8 @@ pub(crate) fn emit(
     register_regions: bool,
     mut profile: Option<&mut crate::block::profile::CompileProfile>,
 ) -> Result<NativeBlock, CompileError> {
-    let mut block = NativeBlock {
-        x86_64_code: extended::context_wrapper(),
+    let mut block = Emitted {
+        x86_64_code: scalable_context::context_wrapper(),
         source_map: Vec::new(),
     };
     let mut fixups = Vec::new();
@@ -88,11 +89,11 @@ pub(crate) fn emit(
                 traffic,
             });
     }
-    Ok(block)
+    Ok(block.into_native())
 }
 
 fn emit_register_span(
-    block: &mut NativeBlock,
+    block: &mut Emitted,
     instructions: &[Instruction],
     target: TargetCpu,
     source_start: usize,
@@ -109,10 +110,7 @@ fn emit_register_span(
         let count = candidate
             .as_ref()
             .map_or(1, |region| region.consumed_instructions.max(1));
-        let mut baseline = NativeBlock {
-            x86_64_code: Vec::new(),
-            source_map: Vec::new(),
-        };
+        let mut baseline = Emitted::default();
         let mut fixups = Vec::new();
         for instruction in &remaining[..count] {
             baseline
@@ -159,7 +157,7 @@ fn emit_register_span(
                     .into_iter()
                     .map(|(pc, at)| (pc, offset + at)),
             );
-            block.x86_64_code.extend(region.code);
+            block.x86_64_code.append(region.code);
         } else {
             // A rejected candidate consumes its exact original span. Trying
             // shorter suffixes could evade the candidate's measured cost gate.
@@ -169,7 +167,7 @@ fn emit_register_span(
                     .into_iter()
                     .map(|(pc, at)| (pc, offset + at)),
             );
-            block.x86_64_code.extend(baseline.x86_64_code);
+            block.x86_64_code.append(baseline.x86_64_code);
         }
         cursor += count;
     }
@@ -179,7 +177,7 @@ fn emit_register_span(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{BlockProfile, CheckedMemoryProfile, CompilationPlan};
+    use crate::block::{BlockProfile, CheckedMemoryProfile, CompilationPlan, Features};
     use alloc::vec;
 
     const PC: GuestAddress = GuestAddress(0x4000);
@@ -200,15 +198,19 @@ mod tests {
             let baseline = CompilationPlan::new(
                 &source,
                 PC,
-                BlockProfile::CheckedMemory(recipe),
-                TargetCpu::Baseline,
+                &crate::Options::new(
+                    BlockProfile::ORDINARY.with_checked_memory(recipe),
+                    TargetCpu::Baseline,
+                ),
             )
             .unwrap();
             let selected = CompilationPlan::new(
                 &source,
                 PC,
-                BlockProfile::SystemModeSharedV1(recipe),
-                TargetCpu::Baseline,
+                &crate::Options::new(
+                    BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(recipe),
+                    TargetCpu::Baseline,
+                ),
             )
             .unwrap();
             assert_eq!(
@@ -260,14 +262,15 @@ mod tests {
         ] {
             let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
             let compile = |profile| {
-                CompilationPlan::new(&source, PC, profile, target)
+                CompilationPlan::new(&source, PC, &crate::Options::new(profile, target))
                     .unwrap()
                     .compile()
                     .unwrap()
             };
             let recipe = CheckedMemoryProfile::SpAlignmentEnabled;
-            let baseline = compile(BlockProfile::CheckedMemory(recipe));
-            let selected = compile(BlockProfile::SystemModeSharedV1(recipe));
+            let baseline = compile(BlockProfile::ORDINARY.with_checked_memory(recipe));
+            let selected =
+                compile(BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(recipe));
             assert_eq!(baseline.native.x86_64_code, selected.native.x86_64_code);
             assert_eq!(baseline.native.source_map, selected.native.source_map);
         }

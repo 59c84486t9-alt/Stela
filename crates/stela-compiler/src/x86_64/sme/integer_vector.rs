@@ -1,4 +1,6 @@
 //! SME2 multi-vector integer arithmetic on the shared SVE kernels.
+use crate::x86_64::asm::Code;
+use crate::x86_64::simd::encode::stack;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -10,7 +12,7 @@ use crate::{
         },
     },
     x86_64::{
-        isa::SimdOpcode as Host,
+        isa::{ShiftOpcode, SimdOpcode as Host},
         scalable::{load_z_chunk, store_z_chunk},
         sve::{
             integer_arithmetic::emit_binary_chunk,
@@ -20,53 +22,40 @@ use crate::{
         },
     },
 };
-use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
 const SAVED: u8 = 7;
-const MOD_REGISTER: u8 = 0xc0;
-const MOD_STACK_DISP32: u8 = 0x84;
-const REGISTER_SHIFT: u8 = 3;
-const STACK_SIB: u8 = 0x24;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const PSLLDQ: &[u8] = &[0x66, 0x0f, 0x73];
-const LEFT_BYTES_GROUP: u8 = 7;
 
-fn packed(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
-fn copy(code: &mut Vec<u8>, destination: u8, source: u8) {
+fn copy(code: &mut Code, destination: u8, source: u8) {
     packed(code, Host::MoveAligned, destination, source);
 }
 
-fn stack_space(code: &mut Vec<u8>, bytes: usize, reserve: bool) {
-    code.extend(if reserve {
-        SUB_RSP_IMM32
+fn stack_space(code: &mut Code, bytes: usize, reserve: bool) {
+    if reserve {
+        code.asm().reserve_stack(bytes);
     } else {
-        ADD_RSP_IMM32
-    });
-    code.extend((bytes as u32).to_le_bytes());
+        code.asm().release_stack(bytes);
+    }
 }
 
-fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, store: bool, target: TargetCpu) {
+fn stack_chunk(code: &mut Code, register: u8, offset: usize, store: bool, target: TargetCpu) {
     if store {
         Host::StoreUnaligned
     } else {
         Host::LoadUnaligned
     }
-    .append(code, target);
-    code.push(MOD_STACK_DISP32 | (register << REGISTER_SHIFT));
-    code.push(STACK_SIB);
-    code.extend((offset as u32).to_le_bytes());
+    .emit(code, register, stack(offset), target);
 }
 
-fn byte_shift(code: &mut Vec<u8>, bytes: usize, group: u8) {
+/// Shift the RESULT chunk left by `bytes`.
+fn byte_shift(code: &mut Code, bytes: usize) {
     if bytes != 0 {
-        code.extend(PSLLDQ);
-        code.extend([MOD_REGISTER | group << REGISTER_SHIFT, bytes as u8]);
+        ShiftOpcode::LeftBytes.emit(code, RESULT, bytes as u8);
     }
 }
 
@@ -76,7 +65,7 @@ fn unsigned(signedness: Signedness) -> bool {
 
 /// RDI/R15 preserve the shared entry context; all kernels preserve XMM7.
 /// Access/profile checks are performed before entering this emitter.
-pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, target: TargetCpu) {
+pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     match operand {
         Operand::Arithmetic(operand) => {
             arithmetic(code, operand, length, target);
@@ -85,7 +74,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: &Operand, length: VectorLength, 
     }
 }
 
-fn arithmetic(code: &mut Vec<u8>, operand: &Arithmetic, length: VectorLength, target: TargetCpu) {
+fn arithmetic(code: &mut Code, operand: &Arithmetic, length: VectorLength, target: TargetCpu) {
     let clamp = matches!(operand.kind, ArithmeticKind::Clamp(_));
     if clamp {
         stack_space(code, VECTOR_CHUNK_BYTES, true);
@@ -200,7 +189,7 @@ fn narrow_kind(source: Signedness, destination: Signedness, rounded: bool) -> Na
     }
 }
 
-fn narrow_source_chunk(code: &mut Vec<u8>, operand: &Narrow, target: TargetCpu) {
+fn narrow_source_chunk(code: &mut Code, operand: &Narrow, target: TargetCpu) {
     let intermediate = ElementSize::from_bytes(operand.source_element.bytes() / 2).unwrap();
     let project = if operand.interleaved {
         narrow_chunk
@@ -233,7 +222,7 @@ fn narrow_source_chunk(code: &mut Vec<u8>, operand: &Narrow, target: TargetCpu) 
     }
 }
 
-fn narrow(code: &mut Vec<u8>, operand: &Narrow, length: VectorLength, target: TargetCpu) {
+fn narrow(code: &mut Code, operand: &Narrow, length: VectorLength, target: TargetCpu) {
     let register_count = usize::from(operand.group.count());
     let aliases =
         (operand.source..operand.source + operand.group.count()).contains(&operand.destination);
@@ -275,17 +264,9 @@ fn narrow(code: &mut Vec<u8>, operand: &Narrow, length: VectorLength, target: Ta
             }
             narrow_source_chunk(code, operand, target);
             if operand.interleaved {
-                byte_shift(
-                    code,
-                    piece * operand.destination_element.bytes(),
-                    LEFT_BYTES_GROUP,
-                );
+                byte_shift(code, piece * operand.destination_element.bytes());
             } else {
-                byte_shift(
-                    code,
-                    piece * (VECTOR_CHUNK_BYTES / register_count),
-                    LEFT_BYTES_GROUP,
-                );
+                byte_shift(code, piece * (VECTOR_CHUNK_BYTES / register_count));
             }
             packed(code, Host::Or, SAVED, RESULT);
         }

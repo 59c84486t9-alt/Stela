@@ -4,6 +4,8 @@
 //! stay readable until `finish`, which commits every staged output byte at once.
 //! No CALL or mode change may occur while the frame is live. RDI, R15 and
 //! callee-saved GPRs survive; RAX/RCX/RDX, flags and the chosen XMM are clobbered.
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdi, Rsp};
+use crate::x86_64::asm::{Alu, Code, Mem, Size};
 
 use super::{
     DWORD_BYTES, HALFWORD_BYTES, Host, QWORD_BYTES, clear_z_upper, store_z_chunk,
@@ -32,29 +34,9 @@ const MXCSR_STATUS_MASK: u32 = 0x3f;
 const PACKED_P_CHUNK_BYTES: usize = core::mem::size_of::<u64>();
 const PREDICATE_BITS16_BYTES: usize = core::mem::size_of::<u16>();
 const REL32_BYTES: usize = core::mem::size_of::<i32>();
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const STMXCSR_RSP_DISP32: &[u8] = &[0x0f, 0xae, 0x9c, 0x24];
-const LDMXCSR_RSP_DISP32: &[u8] = &[0x0f, 0xae, 0x94, 0x24];
-const MOV_RSP_DISP32_IMM32: &[u8] = &[0xc7, 0x84, 0x24];
-const MOV_RSP_DISP32_EAX: &[u8] = &[0x89, 0x84, 0x24];
-const MOV_RSP_DISP32_AX: &[u8] = &[0x66, 0x89, 0x84, 0x24];
-const MOV_EAX_RSP_DISP32: &[u8] = &[0x8b, 0x84, 0x24];
-const MOV_ECX_RSP_DISP32: &[u8] = &[0x8b, 0x8c, 0x24];
-const MOVZX_EAX_WORD_RSP_DISP32: &[u8] = &[0x0f, 0xb7, 0x84, 0x24];
-const MOV_RAX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
-const OR_RSP_DISP32_EAX: &[u8] = &[0x09, 0x84, 0x24];
-const AND_EAX_IMM32: &[u8] = &[0x25];
-const OR_EAX_IMM32: &[u8] = &[0x0d];
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const OR_STATE_FPSR_EAX: &[u8] = &[0x09, 0x87];
-const JMP_REL32: u8 = 0xe9;
 const CONDITIONAL_ESCAPE: u8 = 0x0f;
 const FIRST_CONDITIONAL_REL32: u8 = 0x80;
 const LAST_CONDITIONAL_REL32: u8 = 0x8f;
-const MODRM_STACK_DISP32: u8 = 0x84;
-const XMM_REGISTER_SHIFT: u8 = 3;
-const SIB_STACK: u8 = 0x24;
 const COMMIT_XMM: u8 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,25 +95,20 @@ pub(crate) struct Frame {
     guards_start: usize,
 }
 
-fn memory(code: &mut Vec<u8>, opcode: &[u8], offset: u32) {
-    code.extend(opcode);
-    code.extend(offset.to_le_bytes());
+/// `[rsp + offset]` with a 32-bit displacement field.
+fn stack(offset: u32) -> Mem {
+    Mem::base_disp32(Rsp, offset as i32)
 }
 
-fn stack_vector(code: &mut Vec<u8>, opcode: Host, register: u8, offset: u32, target: TargetCpu) {
+fn stack_vector(code: &mut Code, opcode: Host, register: u8, offset: u32, target: TargetCpu) {
     xmm(register);
-    opcode.append(code, target);
-    code.extend([
-        MODRM_STACK_DISP32 | (register << XMM_REGISTER_SHIFT),
-        SIB_STACK,
-    ]);
-    code.extend(offset.to_le_bytes());
+    code.asm().simd(opcode, register, stack(offset), target);
 }
 
 /// Validate the full constant layout before emitting or reserving any bytes.
 /// A source may alias a destination; two output slots may not overlap.
 pub(crate) fn begin(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     length: VectorLength,
     outputs: &[Output],
     environment: Environment,
@@ -166,12 +143,11 @@ pub(crate) fn begin(
         .collect();
     let bytes = (offset + CALL_ALIGNMENT_PAD) as u32;
     assert!(bytes as usize <= MAX_FRAME_BYTES);
-    code.extend(SUB_RSP_IMM32);
-    code.extend(bytes.to_le_bytes());
+    let mut asm = code.asm();
+    asm.alu_imm32(Alu::Sub, Size::Qword, Rsp, bytes as i32);
     if environment == Environment::PrivateMxcsr {
-        memory(code, STMXCSR_RSP_DISP32, SAVED_MXCSR);
-        memory(code, MOV_RSP_DISP32_IMM32, PENDING_GUEST_FPSR);
-        code.extend(0u32.to_le_bytes());
+        asm.stmxcsr(stack(SAVED_MXCSR));
+        asm.mov_rm_imm32(Size::Dword, stack(PENDING_GUEST_FPSR), 0);
     }
     Ok(Frame {
         length,
@@ -184,7 +160,7 @@ pub(crate) fn begin(
 
 /// Stage one complete 16-byte Z/V segment; other XMMs and guest banks survive.
 pub(crate) fn stage_vector_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     output: usize,
     chunk: usize,
@@ -206,7 +182,7 @@ pub(crate) fn stage_vector_chunk(
 /// Stage exactly two packed P bytes from low16 RAX, one per 16-byte Z chunk.
 /// The caller has already cleared inactive and nonleading predicate bits.
 pub(crate) fn stage_predicate_bits16(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     output: usize,
     z_chunk: usize,
@@ -214,10 +190,10 @@ pub(crate) fn stage_predicate_bits16(
     let slot = &frame.slots[output];
     assert!(matches!(slot.output, Output::Predicate(_)));
     assert!(z_chunk < frame.length.chunks());
-    memory(
-        code,
-        MOV_RSP_DISP32_AX,
-        slot.offset + (z_chunk * PREDICATE_BITS16_BYTES) as u32,
+    code.asm().mov_store(
+        Size::Word,
+        stack(slot.offset + (z_chunk * PREDICATE_BITS16_BYTES) as u32),
+        Rax,
     );
 }
 
@@ -227,46 +203,46 @@ fn private(frame: &Frame) {
 
 /// Install only EAX rounding bits, masked exceptions, fresh status and no flush.
 /// Effective guest control interpretation remains the instruction family's job.
-pub(crate) fn install_mxcsr(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn install_mxcsr(code: &mut Code, frame: &Frame) {
     private(frame);
-    code.extend(AND_EAX_IMM32);
-    code.extend(MXCSR_ROUNDING_MASK.to_le_bytes());
-    code.extend(OR_EAX_IMM32);
-    code.extend(MXCSR_EXCEPTION_MASKS.to_le_bytes());
-    memory(code, MOV_RSP_DISP32_EAX, PRIVATE_MXCSR);
-    memory(code, LDMXCSR_RSP_DISP32, PRIVATE_MXCSR);
+    let mut asm = code.asm();
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_ROUNDING_MASK as i32);
+    asm.alu_accumulator_imm32(Alu::Or, Size::Dword, MXCSR_EXCEPTION_MASKS as i32);
+    asm.mov_store(Size::Dword, stack(PRIVATE_MXCSR), Rax);
+    asm.ldmxcsr(stack(PRIVATE_MXCSR));
 }
 
 /// Return the six raw host status bits in ECX. This is not an ARM FPSR mapping.
-pub(crate) fn capture_status(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn capture_status(code: &mut Code, frame: &Frame) {
     private(frame);
-    memory(code, STMXCSR_RSP_DISP32, CAPTURED_HOST_STATUS);
-    memory(code, MOV_ECX_RSP_DISP32, CAPTURED_HOST_STATUS);
-    code.extend(AND_ECX_IMM32);
-    code.extend(MXCSR_STATUS_MASK.to_le_bytes());
+    let mut asm = code.asm();
+    asm.stmxcsr(stack(CAPTURED_HOST_STATUS));
+    asm.mov_load(Size::Dword, Rcx, stack(CAPTURED_HOST_STATUS));
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, MXCSR_STATUS_MASK as i32);
 }
 
 /// Clear host stage status after installation, retaining approved pending FPSR.
-pub(crate) fn clear_status(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn clear_status(code: &mut Code, frame: &Frame) {
     private(frame);
-    memory(code, LDMXCSR_RSP_DISP32, PRIVATE_MXCSR);
+    code.asm().ldmxcsr(stack(PRIVATE_MXCSR));
 }
 
 /// Accumulate only family-approved guest FPSR bits from EAX, without committing.
-pub(crate) fn add_fpsr(code: &mut Vec<u8>, frame: &Frame) {
+pub(crate) fn add_fpsr(code: &mut Code, frame: &Frame) {
     private(frame);
-    memory(code, OR_RSP_DISP32_EAX, PENDING_GUEST_FPSR);
+    code.asm()
+        .alu(Alu::Or, Size::Dword, stack(PENDING_GUEST_FPSR), Rax);
 }
 
-fn restore(code: &mut Vec<u8>, frame: &Frame) {
+fn restore(code: &mut Code, frame: &Frame) {
     if frame.environment == Environment::PrivateMxcsr {
-        memory(code, LDMXCSR_RSP_DISP32, SAVED_MXCSR);
+        code.asm().ldmxcsr(stack(SAVED_MXCSR));
     }
 }
 
-fn release(code: &mut Vec<u8>, frame: &Frame) {
-    code.extend(ADD_RSP_IMM32);
-    code.extend(frame.bytes.to_le_bytes());
+fn release(code: &mut Code, frame: &Frame) {
+    code.asm()
+        .alu_imm32(Alu::Add, Size::Qword, Rsp, frame.bytes as i32);
 }
 
 fn patch(code: &mut [u8], displacement: usize, destination: usize) {
@@ -280,7 +256,7 @@ fn patch(code: &mut [u8], displacement: usize, destination: usize) {
 /// Failure restores MXCSR/RSP before returning the still-unexecuted exact PC.
 /// Success clobbers XMM0 and RAX/RDX, and private mode ORs approved FPSR once.
 pub(crate) fn finish(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     failures: &[usize],
     pc: GuestAddress,
@@ -314,13 +290,14 @@ pub(crate) fn finish(
             Output::Predicate(register) => {
                 for offset in (0..frame.length.predicate_bytes()).step_by(PACKED_P_CHUNK_BYTES) {
                     let bytes = (frame.length.predicate_bytes() - offset).min(PACKED_P_CHUNK_BYTES);
-                    let opcode = match bytes {
-                        HALFWORD_BYTES => MOVZX_EAX_WORD_RSP_DISP32,
-                        DWORD_BYTES => MOV_EAX_RSP_DISP32,
-                        QWORD_BYTES => MOV_RAX_RSP_DISP32,
+                    let source = stack(slot.offset + offset as u32);
+                    let mut asm = code.asm();
+                    match bytes {
+                        HALFWORD_BYTES => asm.movzx(Size::Dword, Rax, Size::Word, source),
+                        DWORD_BYTES => asm.mov_load(Size::Dword, Rax, source),
+                        QWORD_BYTES => asm.mov_load(Size::Qword, Rax, source),
                         _ => unreachable!("validated predicate width"),
-                    };
-                    memory(code, opcode, slot.offset + offset as u32);
+                    }
                     write_predicate_chunk(
                         code,
                         register,
@@ -332,20 +309,16 @@ pub(crate) fn finish(
         }
     }
     if frame.environment == Environment::PrivateMxcsr {
-        memory(code, MOV_EAX_RSP_DISP32, PENDING_GUEST_FPSR);
-        memory(
-            code,
-            OR_STATE_FPSR_EAX,
-            core::mem::offset_of!(GuestState, fpsr) as u32,
-        );
+        let fpsr = core::mem::offset_of!(GuestState, fpsr) as i32;
+        let mut asm = code.asm();
+        asm.mov_load(Size::Dword, Rax, stack(PENDING_GUEST_FPSR));
+        asm.alu(Alu::Or, Size::Dword, Mem::base_disp32(Rdi, fpsr), Rax);
     }
     release(code, frame);
     if failures.is_empty() {
         return;
     }
-    code.push(JMP_REL32);
-    let success = code.len();
-    code.extend([0; REL32_BYTES]);
+    let success = code.asm().jmp();
     let abort = code.len();
     restore(code, frame);
     release(code, frame);
@@ -353,15 +326,13 @@ pub(crate) fn finish(
     for &displacement in failures {
         patch(code, displacement, abort);
     }
-    let end = code.len();
-    patch(code, success, end);
+    code.asm().bind(success);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn invalid_layout_does_not_emit() {
@@ -375,7 +346,7 @@ mod tests {
             vec![Output::Predicate(1); 2],
             vec![Output::Z(0); 5],
         ] {
-            let mut code = vec![0xaa];
+            let mut code = Code::from(vec![0xaa]);
             assert!(begin(&mut code, length, &outputs, Environment::Exact).is_err());
             assert_eq!(code, [0xaa]);
         }
@@ -392,7 +363,7 @@ mod tests {
                     vec![Output::Z(0)],
                     vec![Output::Z(0), Output::Z(1), Output::Z(2), Output::Z(3)],
                 ] {
-                    let frame = begin(&mut Vec::new(), length, &outputs, environment).unwrap();
+                    let frame = begin(&mut Code::new(), length, &outputs, environment).unwrap();
                     assert_eq!(
                         frame.bytes as usize % VECTOR_CHUNK_BYTES,
                         CALL_ALIGNMENT_PAD

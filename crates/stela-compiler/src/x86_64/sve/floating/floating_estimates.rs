@@ -1,5 +1,9 @@
 //! SVE FRECPE/FRSQRTE tables on normal values. Host RCP/RSQRT approximations
 //! are never used; integer DIV and a masked SQRTSD compute the exact table values.
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdi, Rdx};
+use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, Rm, ShiftOp, Size, Unary};
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -37,107 +41,28 @@ const RECIPROCAL_NUMERATOR_BITS: u32 = 19;
 const ENHANCED_RECIPROCAL_NUMERATOR_BITS: u32 = 26;
 const ROOT_NUMERATOR_BITS: u32 = 28;
 const ENHANCED_ROOT_NUMERATOR_BITS: u32 = 39;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const GPR_RAX: u8 = 0;
-const GPR_RCX: u8 = 1;
-const GPR_RDX: u8 = 2;
-const REL32_BYTES: usize = size_of::<i32>();
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-const JAE_REL32: &[u8] = &[0x0f, 0x83];
-const JC_REL32: &[u8] = &[0x0f, 0x82];
-const JMP_REL32: &[u8] = &[0xe9];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const XOR_EDX_EDX: &[u8] = &[0x31, 0xd2];
-const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
-const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
-const MOV_R8_RAX: &[u8] = &[0x49, 0x89, 0xc0];
-const SHR_R8_IMMEDIATE: &[u8] = &[0x49, 0xc1, 0xe8];
-const AND_R8D_IMMEDIATE: &[u8] = &[0x41, 0x81, 0xe0];
-const TEST_R8D_R8D: &[u8] = &[0x45, 0x85, 0xc0];
-const CMP_R8D_IMMEDIATE: &[u8] = &[0x41, 0x81, 0xf8];
-const TEST_R8B_PARITY: &[u8] = &[0x41, 0xf6, 0xc0, 1];
-const BT_RAX_IMMEDIATE: &[u8] = &[0x48, 0x0f, 0xba, 0xe0];
-const MOV_ECX_IMMEDIATE: u8 = 0xb9;
-const SUB_ECX_R8D: &[u8] = &[0x44, 0x29, 0xc1];
-const SHR_ECX_ONE: &[u8] = &[0xd1, 0xe9];
-const SHL_RCX_IMMEDIATE: &[u8] = &[0x48, 0xc1, 0xe1];
-const MOV_R9_RAX: &[u8] = &[0x49, 0x89, 0xc1];
-const SHR_R9_IMMEDIATE: &[u8] = &[0x49, 0xc1, 0xe9];
-const SHL_R9_IMMEDIATE: &[u8] = &[0x49, 0xc1, 0xe1];
-const OR_R9_RCX: &[u8] = &[0x49, 0x09, 0xc9];
-const MOV_R9_RCX: &[u8] = &[0x49, 0x89, 0xc9];
-const SHL_RAX_IMMEDIATE: &[u8] = &[0x48, 0xc1, 0xe0];
-const SHR_RAX_IMMEDIATE: &[u8] = &[0x48, 0xc1, 0xe8];
-const SHL_RAX_CL: &[u8] = &[0x48, 0xd3, 0xe0];
-const SHR_RAX_CL: &[u8] = &[0x48, 0xd3, 0xe8];
-const MOV_ECX_R10D: &[u8] = &[0x44, 0x89, 0xd1];
-const MOV_ECX_R11D: &[u8] = &[0x44, 0x89, 0xd9];
-const MOV_R10D_IMMEDIATE: &[u8] = &[0x41, 0xba];
-const MOV_R11D_IMMEDIATE: &[u8] = &[0x41, 0xbb];
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const OR_EAX_IMMEDIATE: u8 = 0x0d;
-const OR_RAX_RCX: &[u8] = &[0x48, 0x09, 0xc8];
-const AND_EAX_EVEN: &[u8] = &[0x83, 0xe0, 0xfe];
-const LEA_ECX_TWICE_RAX_PLUS_ONE: &[u8] = &[0x8d, 0x4c, 0x00, 1];
-const LEA_ECX_TWICE_RAX_PLUS_TWO: &[u8] = &[0x8d, 0x4c, 0x00, 2];
-const SHR_EAX_ONE: &[u8] = &[0xd1, 0xe8];
-const DIV_RCX: &[u8] = &[0x48, 0xf7, 0xf1];
-const DIV_ECX: &[u8] = &[0xf7, 0xf1];
-const ADD_EAX_ONE: &[u8] = &[0x83, 0xc0, 1];
-const SUB_EAX_IMMEDIATE: u8 = 0x2d;
-const SUB_EAX_EDX: &[u8] = &[0x29, 0xd0];
-const OR_RAX_R9: &[u8] = &[0x4c, 0x09, 0xc8];
-const MOVQ_GPR_XMM: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const CVTSI2SD_XMM2_RAX: &[u8] = &[0xf2, 0x48, 0x0f, 0x2a, 0xd0];
-const CVTTSD2SI_RAX_XMM2: &[u8] = &[0xf2, 0x48, 0x0f, 0x2c, 0xc2];
-const PINSRW_XMM1_EAX: &[u8] = &[0x66, 0x0f, 0xc4, 0xc8];
-const PINSRD_XMM1_EAX: &[u8] = &[0x66, 0x0f, 0x3a, 0x22, 0xc8];
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Reciprocal,
     ReciprocalSquareRoot,
 }
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+fn test_ah(code: &mut Code) {
+    code.asm().test_imm(
+        Size::Dword,
+        Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
+        FPCR_AH as i32,
+    );
 }
 
-fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
-    let next = displacement + REL32_BYTES;
-    let relative = i32::try_from(destination as i64 - next as i64)
-        .expect("bounded estimate branch fits rel32");
-    code[displacement..next].copy_from_slice(&relative.to_le_bytes());
+fn xmm_to_gpr(code: &mut Code, source: u8, destination: Gpr) {
+    code.asm().movq_from_xmm(destination, source);
 }
 
-fn immediate(code: &mut Vec<u8>, opcode: &[u8], value: u32) {
-    code.extend(opcode);
-    code.extend(value.to_le_bytes());
-}
-
-fn test_ah(code: &mut Vec<u8>) {
-    code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(FPCR_AH.to_le_bytes());
-}
-
-fn xmm_to_gpr(code: &mut Vec<u8>, source: u8, destination: u8) {
-    code.extend(MOVQ_GPR_XMM);
-    code.push(MODRM_REGISTER | (source << MODRM_REGISTER_SHIFT) | destination);
-}
-
-fn xmm_constant(code: &mut Vec<u8>, destination: u8, bits: u64, target: TargetCpu) {
-    code.extend(MOV_RAX_IMMEDIATE);
-    code.extend(bits.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (destination << MODRM_REGISTER_SHIFT) | GPR_RAX);
+fn xmm_constant(code: &mut Code, destination: u8, bits: u64, target: TargetCpu) {
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, bits);
+    asm.simd(Host::MoveGprQword, destination, Rax, target);
 }
 
 fn numerator(operation: Operation, enhanced: bool) -> u64 {
@@ -150,7 +75,7 @@ fn numerator(operation: Operation, enhanced: bool) -> u64 {
 }
 
 fn constants(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: Operation,
     format: Format,
     enhanced: bool,
@@ -166,126 +91,138 @@ fn constants(
     } else {
         STANDARD_RESULT_BITS
     };
-    immediate(code, MOV_R10D_IMMEDIATE, GPR_BITS - input_bits);
-    immediate(
-        code,
-        MOV_R11D_IMMEDIATE,
-        format.fraction_bits() - result_bits,
-    );
+    let mut asm = code.asm();
+    asm.mov_imm32(R10, GPR_BITS - input_bits);
+    asm.mov_imm32(R11, format.fraction_bits() - result_bits);
     xmm_constant(code, NUMERATOR, numerator(operation, enhanced), target);
     xmm_constant(code, INPUT_UNIT, 1 << input_bits, target);
     xmm_constant(code, RESULT_UNIT, 1 << result_bits, target);
 }
 
-fn guard_normal(
-    code: &mut Vec<u8>,
-    operation: Operation,
-    format: Format,
-    failures: &mut Vec<usize>,
-) {
-    code.extend(MOV_R8_RAX);
-    code.extend(SHR_R8_IMMEDIATE);
-    code.push(format.fraction_bits() as u8);
-    immediate(
-        code,
-        AND_R8D_IMMEDIATE,
-        (format.exponent_mask() >> format.fraction_bits()) as u32,
+fn guard_normal(code: &mut Code, operation: Operation, format: Format, failures: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, R8, Rax);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, R8, format.fraction_bits() as u8);
+    asm.alu_imm32(
+        Alu::And,
+        Size::Dword,
+        R8,
+        (format.exponent_mask() >> format.fraction_bits()) as i32,
     );
-    code.extend(TEST_R8D_R8D);
-    failures.push(branch(code, JZ_REL32));
+    asm.test(Size::Dword, R8, R8);
+    failures.push(asm.jcc(Cond::E).offset());
     let ceiling = match operation {
         Operation::Reciprocal => format.exponent_bias() * 2 - 1,
         Operation::ReciprocalSquareRoot => {
             (format.exponent_mask() >> format.fraction_bits()) as u32
         }
     };
-    immediate(code, CMP_R8D_IMMEDIATE, ceiling);
-    failures.push(branch(code, JAE_REL32));
+    asm.alu_imm32(Alu::Cmp, Size::Dword, R8, ceiling as i32);
+    failures.push(asm.jcc(Cond::Ae).offset());
     if operation == Operation::ReciprocalSquareRoot {
-        code.extend(BT_RAX_IMMEDIATE);
-        code.push((format.bits() - 1) as u8);
-        failures.push(branch(code, JC_REL32));
+        asm.bit_imm(BitTest::Bt, Size::Qword, Rax, (format.bits() - 1) as u8);
+        failures.push(asm.jcc(Cond::B).offset());
     }
 }
 
-fn result_exponent(code: &mut Vec<u8>, operation: Operation, format: Format) {
+fn result_exponent(code: &mut Code, operation: Operation, format: Format) {
     let exponent_base = match operation {
         Operation::Reciprocal => format.exponent_bias() * 2 - 1,
         Operation::ReciprocalSquareRoot => format.exponent_bias() * 3 - 1,
     };
-    immediate(code, &[MOV_ECX_IMMEDIATE], exponent_base);
-    code.extend(SUB_ECX_R8D);
+    let mut asm = code.asm();
+    asm.mov_imm32(Rcx, exponent_base);
+    asm.alu(Alu::Sub, Size::Dword, Rcx, R8);
     if operation == Operation::ReciprocalSquareRoot {
-        code.extend(SHR_ECX_ONE);
+        code.asm().shift_one(ShiftOp::Shr, Size::Dword, Rcx);
     }
-    code.extend(SHL_RCX_IMMEDIATE);
-    code.push(format.fraction_bits() as u8);
+    code.asm()
+        .shift_imm(ShiftOp::Shl, Size::Qword, Rcx, format.fraction_bits() as u8);
     if operation == Operation::Reciprocal {
-        code.extend(MOV_R9_RAX);
-        code.extend(SHR_R9_IMMEDIATE);
-        code.push((format.bits() - 1) as u8);
-        code.extend(SHL_R9_IMMEDIATE);
-        code.push((format.bits() - 1) as u8);
-        code.extend(OR_R9_RCX);
+        let mut asm = code.asm();
+        asm.mov(Size::Qword, R9, Rax);
+        asm.shift_imm(ShiftOp::Shr, Size::Qword, R9, (format.bits() - 1) as u8);
+        asm.shift_imm(ShiftOp::Shl, Size::Qword, R9, (format.bits() - 1) as u8);
+        asm.alu(Alu::Or, Size::Qword, R9, Rcx);
     } else {
-        code.extend(MOV_R9_RCX);
+        code.asm().mov(Size::Qword, R9, Rcx);
     }
 }
 
-fn midpoint(code: &mut Vec<u8>, operation: Operation, format: Format, dynamic: bool) {
+fn midpoint(code: &mut Code, operation: Operation, format: Format, dynamic: bool) {
     // Strip sign/exponent first. The second shift selects only the top fixed
     // fraction bits, including the enhanced Single table's eleven-bit input.
-    code.extend(SHL_RAX_IMMEDIATE);
-    code.push((GPR_BITS - format.fraction_bits()) as u8);
+    code.asm().shift_imm(
+        ShiftOp::Shl,
+        Size::Qword,
+        Rax,
+        (GPR_BITS - format.fraction_bits()) as u8,
+    );
     if dynamic {
-        code.extend(MOV_ECX_R10D);
-        code.extend(SHR_RAX_CL);
-        xmm_to_gpr(code, INPUT_UNIT, GPR_RCX);
-        code.extend(OR_RAX_RCX);
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Rcx, R10);
+        asm.shift_cl(ShiftOp::Shr, Size::Qword, Rax);
+        xmm_to_gpr(code, INPUT_UNIT, Rcx);
+        code.asm().alu(Alu::Or, Size::Qword, Rax, Rcx);
     } else {
-        code.extend(SHR_RAX_IMMEDIATE);
-        code.push((GPR_BITS - STANDARD_INPUT_BITS) as u8);
-        immediate(code, &[OR_EAX_IMMEDIATE], 1 << STANDARD_INPUT_BITS);
+        code.asm().shift_imm(
+            ShiftOp::Shr,
+            Size::Qword,
+            Rax,
+            (GPR_BITS - STANDARD_INPUT_BITS) as u8,
+        );
+        code.asm()
+            .alu_accumulator_imm32(Alu::Or, Size::Dword, 1 << STANDARD_INPUT_BITS);
     }
     if operation == Operation::Reciprocal {
-        code.extend(LEA_ECX_TWICE_RAX_PLUS_ONE);
+        code.asm().lea(
+            Size::Dword,
+            Rcx,
+            Mem::indexed(Rax, Rax, 1, 1).with_width(Disp::Byte),
+        );
     } else {
-        code.extend(TEST_R8B_PARITY);
-        let odd = branch(code, JNZ_REL32);
-        code.extend(AND_EAX_EVEN);
-        code.extend(LEA_ECX_TWICE_RAX_PLUS_TWO);
-        let ready = branch(code, JMP_REL32);
-        let odd_start = code.len();
-        resolve(code, odd, odd_start);
-        code.extend(SHR_EAX_ONE);
-        code.extend(LEA_ECX_TWICE_RAX_PLUS_ONE);
-        let end = code.len();
-        resolve(code, ready, end);
+        let mut asm = code.asm();
+        asm.test_imm(Size::Byte, R8, 1);
+        let odd = asm.jcc(Cond::Ne);
+        asm.alu_imm8(Alu::And, Size::Dword, Rax, -2);
+        asm.lea(
+            Size::Dword,
+            Rcx,
+            Mem::indexed(Rax, Rax, 1, 2).with_width(Disp::Byte),
+        );
+        let ready = asm.jmp();
+        asm.bind(odd);
+        asm.shift_one(ShiftOp::Shr, Size::Dword, Rax);
+        asm.lea(
+            Size::Dword,
+            Rcx,
+            Mem::indexed(Rax, Rax, 1, 1).with_width(Disp::Byte),
+        );
+        asm.bind(ready);
     }
 }
 
 fn estimate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: Operation,
     format: Format,
     dynamic: bool,
     target: TargetCpu,
 ) {
     if dynamic {
-        xmm_to_gpr(code, NUMERATOR, GPR_RAX);
+        xmm_to_gpr(code, NUMERATOR, Rax);
     } else {
-        immediate(
-            code,
-            &[MOV_EAX_IMMEDIATE],
-            numerator(operation, false) as u32,
-        );
+        code.asm()
+            .mov_imm32(Rax, numerator(operation, false) as u32);
     }
     if dynamic && operation == Operation::ReciprocalSquareRoot {
-        code.extend(XOR_EDX_EDX);
-        code.extend(DIV_RCX);
+        let mut asm = code.asm();
+        asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+        asm.unary(Unary::Div, Size::Qword, Rcx);
     } else {
-        code.extend(XOR_EDX_EDX);
-        code.extend(DIV_ECX);
+        let mut asm = code.asm();
+        asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+        asm.unary(Unary::Div, Size::Dword, Rcx);
     }
     if operation == Operation::ReciprocalSquareRoot {
         // q=floor((2^n-1)/midpoint) is a positive integer below 2^28 in
@@ -293,44 +230,51 @@ fn estimate(
         // root is below 2^14; for nonsquares distance to either neighboring
         // integer exceeds 2^-15, while RNE error is at most 2^-40. An exact
         // square rounds exactly. Truncating SQRTSD is consequently isqrt(q).
-        code.extend(CVTSI2SD_XMM2_RAX);
+        code.asm()
+            .cvtsi2float(FloatLanes::ScalarDouble, Size::Qword, 2, Rax);
         Host::SquareRootScalarDouble.register(code, ROOT, ROOT, target);
-        code.extend(CVTTSD2SI_RAX_XMM2);
+        code.asm()
+            .cvtfloat2si(FloatLanes::ScalarDouble, true, Size::Qword, Rax, Rm::Xmm(2));
     }
-    code.extend(ADD_EAX_ONE);
-    code.extend(SHR_EAX_ONE);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Add, Size::Dword, Rax, 1);
+    asm.shift_one(ShiftOp::Shr, Size::Dword, Rax);
     if dynamic {
-        xmm_to_gpr(code, RESULT_UNIT, GPR_RDX);
-        code.extend(SUB_EAX_EDX);
-        code.extend(MOV_ECX_R11D);
-        code.extend(SHL_RAX_CL);
+        xmm_to_gpr(code, RESULT_UNIT, Rdx);
+        let mut asm = code.asm();
+        asm.alu(Alu::Sub, Size::Dword, Rax, Rdx);
+        asm.mov(Size::Dword, Rcx, R11);
+        asm.shift_cl(ShiftOp::Shl, Size::Qword, Rax);
     } else {
-        immediate(code, &[SUB_EAX_IMMEDIATE], 1 << STANDARD_RESULT_BITS);
-        code.extend(SHL_RAX_IMMEDIATE);
-        code.push((format.fraction_bits() - STANDARD_RESULT_BITS) as u8);
+        code.asm()
+            .alu_accumulator_imm32(Alu::Sub, Size::Dword, 1 << STANDARD_RESULT_BITS);
+        code.asm().shift_imm(
+            ShiftOp::Shl,
+            Size::Qword,
+            Rax,
+            (format.fraction_bits() - STANDARD_RESULT_BITS) as u8,
+        );
     }
-    code.extend(OR_RAX_R9);
+    code.asm().alu(Alu::Or, Size::Qword, Rax, R9);
 }
 
-fn insert(code: &mut Vec<u8>, format: Format, lane: usize, checked: bool, target: TargetCpu) {
+fn insert(code: &mut Code, format: Format, lane: usize, checked: bool, target: TargetCpu) {
     match format {
         Format::Half => {
-            code.extend(PINSRW_XMM1_EAX);
-            code.push(lane as u8);
+            code.asm().pinsrw(1, Rax, lane as u8);
         }
 
         Format::Single if checked => {
             assert!(target.supports(TargetCpu::Sse41));
-            code.extend(PINSRD_XMM1_EAX);
-            code.push(lane as u8);
+            code.asm().pinsrd(1, Rax, lane as u8);
         }
         Format::Single | Format::Double => {
             // The unpredicated first lane initializes the complete chunk:
             // MOVQ clears its high64 bits. Later lanes only OR fresh disjoint
             // bits; no initial PXOR or first-lane temporary/OR is needed.
             let destination = if lane == 0 { RESULT } else { INSERT };
-            Host::MoveGprQword.append(code, target);
-            code.push(MODRM_REGISTER | (destination << MODRM_REGISTER_SHIFT) | GPR_RAX);
+            code.asm()
+                .simd(Host::MoveGprQword, destination, Rax, target);
             if lane != 0 {
                 ShiftOpcode::LeftBytes.emit(
                     code,
@@ -351,7 +295,7 @@ fn insert(code: &mut Vec<u8>, format: Format, lane: usize, checked: bool, target
 /// raised. Clobbers RAX/RCX/RDX/R8-R11, flags and XMM0-7; preserves the
 /// callee-saved GPRs, RDI/R15, the sources and the caller's MXCSR.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -387,38 +331,37 @@ pub(in crate::x86_64) fn emit(
     };
     let frame = numerical::begin(code, length, &[Output::Z(operand.destination)], environment)?;
     if environment == Environment::PrivateMxcsr {
-        code.extend(XOR_EAX_EAX);
+        code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
         numerical::install_mxcsr(code, &frame);
     }
     let mut failures = Vec::new();
     if features.full_a64() {
         test_ah(code);
-        let suppressed = branch(code, JNZ_REL32);
+        let suppressed = code.asm().jcc(Cond::Ne);
         Host::EqualDword.register(code, ACTIVE, ACTIVE, target);
         guard_active_exception_enables(code, ACTIVE, features, &mut failures, target);
-        let next = code.len();
-        resolve(code, suppressed, next);
+        code.asm().bind(suppressed);
     }
     let dynamic = operand.format == Format::Single && features.rpres();
     if dynamic {
         test_ah(code);
-        let standard = branch(code, JZ_REL32);
+        let standard = code.asm().jcc(Cond::E);
         constants(code, operation, operand.format, true, target);
-        let ready = branch(code, JMP_REL32);
-        let standard_start = code.len();
-        resolve(code, standard, standard_start);
+        let mut asm = code.asm();
+        let ready = asm.jmp();
+        asm.bind(standard);
         constants(code, operation, operand.format, false, target);
-        let next = code.len();
-        resolve(code, ready, next);
+        code.asm().bind(ready);
     }
     let element_bytes = operand.format.bits() as usize / u8::BITS as usize;
     for chunk in 0..length.chunks() {
         load_z_chunk(code, source, chunk, SOURCE, length, target);
         for lane in 0..VECTOR_CHUNK_BYTES / element_bytes {
-            xmm_to_gpr(code, SOURCE, GPR_RAX);
+            xmm_to_gpr(code, SOURCE, Rax);
+            let mut asm = code.asm();
             match operand.format {
-                Format::Half => code.extend(MOVZX_EAX_AX),
-                Format::Single => code.extend(MOV_EAX_EAX),
+                Format::Half => asm.movzx(Size::Dword, Rax, Size::Word, Rax),
+                Format::Single => asm.mov(Size::Dword, Rax, Rax),
                 Format::Double => (),
             }
             guard_normal(code, operation, operand.format, &mut failures);

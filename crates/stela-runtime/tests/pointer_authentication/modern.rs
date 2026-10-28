@@ -2,7 +2,10 @@
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 
 use anyhow::Result;
-use stela_compiler::{GuestAddress, GuestState, block::BlockProfile};
+use stela_compiler::{
+    GuestAddress, GuestState,
+    block::{BlockProfile, Features},
+};
 use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
     pauth::{Context, Key, Keys, Version},
@@ -12,7 +15,7 @@ const ADDRESS_SPACE: u64 = 73;
 const BASE: GuestAddress = GuestAddress(0x1000);
 const NEXT: GuestAddress = GuestAddress(BASE.0 + 4);
 const STOP: GuestAddress = GuestAddress(0x1400);
-const PROFILE: BlockProfile = BlockProfile::AppleArm64eSoftwarePauthV1;
+const PROFILE: BlockProfile = BlockProfile::new(Features::POINTER_AUTHENTICATION);
 const KEY: [u64; 2] = [0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff00];
 const PACGA_X1_X2_X3: u32 = 0x9ac3_3041;
 const PACGA_XZR_X2_SP: u32 = 0x9adf_305f;

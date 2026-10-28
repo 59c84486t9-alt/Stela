@@ -1,7 +1,7 @@
 //! A run's QEMU machine: its CPU, memory, firmware, devices other than
 //! storage and network, console and debugging.
 use super::{
-    Display, FIRMWARE_CODE, FIRMWARE_VARIABLES, Run, UsbDiskModel, option_path, overlay,
+    Display, FIRMWARE_CODE, FIRMWARE_VARIABLES, Iommu, Run, UsbDiskModel, option_path, overlay,
     qemu_accelerator, qemu_cpu, qemu_machine,
 };
 use anyhow::{Result, ensure};
@@ -115,6 +115,12 @@ pub(super) fn command(
             "if=pflash,format={format},file={}",
             option_path(variables)
         ));
+    // An IOMMU precedes the PCI devices it translates for.
+    match arguments.iommu {
+        Some(Iommu::Intel) => command.args(["-device", "intel-iommu,intremap=off"]),
+        Some(Iommu::Amd) => command.args(["-device", "amd-iommu,intremap=off"]),
+        None => &mut command,
+    };
     command
 }
 

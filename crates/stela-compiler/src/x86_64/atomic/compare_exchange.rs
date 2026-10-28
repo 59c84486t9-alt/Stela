@@ -1,28 +1,13 @@
 //! CAS through a same-width LOCK CMPXCHG, or for a single agent a plain
 //! load, compare, CMOVNE and store ([`plain`]).
 use super::{
-    QWORD_BYTES, REX_PREFIX, REX_W_BIT, ValueRegister, commit_rax, input_rax, input_rcx,
-    locked_compare_exchange, read_r8, store_rcx,
+    QWORD_BYTES, commit_rax, input_rax, input_rcx, locked_compare_exchange, read_r8, size,
+    store_rcx,
 };
 use crate::aarch64::atomic::{Kind, Operand};
-use alloc::vec::Vec;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Size};
 
-const BYTE_BYTES: u8 = 1;
-const HALFWORD_BYTES: u8 = 2;
-const OPERAND_SIZE_PREFIX: u8 = 0x66;
-const REX_R_BIT: u8 = 0x04;
-const REX_B_BIT: u8 = 0x01;
-const TWO_BYTE_OPCODE: u8 = 0x0f;
-const CMP_BYTE: u8 = 0x38;
-const CMP_WORD_OR_WIDER: u8 = 0x39;
-const CMOVNE: u8 = 0x45;
-const MOV_STORE: u8 = 0x89;
-/// `eax, r8d` (CMP and MOV with REX.R).
-const MODRM_RAX_R8: u8 = 0xc0;
-/// `ecx, r8d` (CMOVNE with REX.B).
-const MODRM_RCX_R8: u8 = 0xc8;
-
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, plain_access: bool) {
     let Kind::CompareExchange { compare, source } = operand.kind else {
         unreachable!("compare-exchange emitter receives a CAS operand");
     };
@@ -33,7 +18,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
     if plain_access {
         plain(code, operand.bytes);
     } else {
-        locked_compare_exchange(code, operand.bytes, ValueRegister::Rcx);
+        locked_compare_exchange(code, operand.bytes, Gpr::Rcx);
     }
     // Narrow inputs already zero the accumulator's upper bits. Both success
     // and failure therefore return the zero-extended old value without another
@@ -46,35 +31,24 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
 /// LOCK CMPXCHG writes back a failed comparison's old value (Arm permits a
 /// failed CAS to write, `Unpredictable_WRITEFAILEDCAS`). RAX then returns
 /// the old value. No branch, LOCK prefix or retry.
-fn plain(code: &mut Vec<u8>, bytes: u8) {
-    let wide = if bytes == QWORD_BYTES { REX_W_BIT } else { 0 };
+fn plain(code: &mut Code, bytes: u8) {
+    let wide = Size::of(bytes == QWORD_BYTES);
     read_r8(code, bytes);
-    if bytes == HALFWORD_BYTES {
-        code.push(OPERAND_SIZE_PREFIX);
-    }
-    code.extend([
-        REX_PREFIX | REX_R_BIT | wide,
-        if bytes == BYTE_BYTES {
-            CMP_BYTE
-        } else {
-            CMP_WORD_OR_WIDER
-        },
-        MODRM_RAX_R8,
-    ]);
-    code.extend([
-        REX_PREFIX | REX_B_BIT | wide,
-        TWO_BYTE_OPCODE,
-        CMOVNE,
-        MODRM_RCX_R8,
-    ]);
+    let mut asm = code.asm();
+    asm.alu(Alu::Cmp, size(bytes), Gpr::Rax, Gpr::R8);
+    asm.cmov(Cond::Ne, wide, Gpr::Rcx, Gpr::R8);
     store_rcx(code, bytes);
-    code.extend([REX_PREFIX | REX_R_BIT | wide, MOV_STORE, MODRM_RAX_R8]);
+    code.asm().mov(wide, Gpr::Rax, Gpr::R8);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::aarch64::{Register, atomic::Order};
+    use alloc::vec::Vec;
+
+    const BYTE_BYTES: u8 = 1;
+    const HALFWORD_BYTES: u8 = 2;
 
     #[test]
     fn a_single_agent_cas_loads_compares_selects_and_stores() {
@@ -121,7 +95,7 @@ mod tests {
                     source: Register::X(2),
                 },
             };
-            let mut code = Vec::new();
+            let mut code = Code::new();
             emit(&mut code, &operand, true);
             let expected: Vec<u8> = [load, compare, select, store, result].concat();
             let at = code
@@ -130,7 +104,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{bytes}: {code:02x?}"));
             // Then only the commit of the old value to X1.
             assert_eq!(&code[at + expected.len()..], [0x48, 0x89, 0x87, 8, 0, 0, 0]);
-            let mut locked = Vec::new();
+            let mut locked = Code::new();
             emit(&mut locked, &operand, false);
             assert!(locked.contains(&0xf0) && !code.contains(&0xf0));
         }

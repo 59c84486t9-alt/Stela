@@ -42,7 +42,7 @@ smoltcp = { version = "0.14", default-features = false, features = ["alloc", "me
 httparse = { version = "1.10", default-features = false }
 
 [build-dependencies]
-sha2.workspace = true
+stela-fingerprint.workspace = true
 
 [dev-dependencies]
 # The drivers' RAM disk, which the device model tests run on.

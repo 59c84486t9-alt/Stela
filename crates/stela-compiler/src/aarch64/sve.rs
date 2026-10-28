@@ -1,4 +1,5 @@
 //! SVE operands shared by the SVE instruction families.
+use crate::aarch64::Unsupported;
 
 pub mod address;
 pub mod dot;
@@ -56,8 +57,7 @@ pub enum Operand {
     Tables(tables::Operand),
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     tables::decode(word)
         .map(|operand| operand.map(Operand::Tables))
         .or_else(|| address::decode(word).map(|operand| operand.map(Operand::Address)))

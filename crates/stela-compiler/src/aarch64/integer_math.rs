@@ -1,6 +1,7 @@
 //! Integer data processing: MADD/MSUB, SMADDL/SMSUBL/UMADDL/UMSUBL, SMULH/UMULH,
 //! SDIV/UDIV, LSLV/LSRV/ASRV/RORV, EXTR, CLZ, CLS, RBIT and REV*. Register 31 is ZR.
 use super::{Register, Shift, Width, register};
+use crate::aarch64::Unsupported;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -29,8 +30,7 @@ pub struct Operand {
 /// Match scalar SDIV/UDIV and the product three-source class. Reserved product class
 /// members return Err, so they cannot accidentally become a nearby multiply.
 /// MUL/MNEG and long aliases are represented by an ordinary ZR accumulator.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let width = if word >> 31 == 0 {
         Width::W32
     } else {
@@ -49,7 +49,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     } else if word & 0x7fa00000 == 0x13800000 {
         let amount = ((word >> 10) & 63) as u8;
         if ((word >> 22) & 1) != word >> 31 || (width == Width::W32 && amount >= 32) {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         Some(Kind::Extract { width, amount })
     } else {
@@ -134,7 +134,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         (5, true, _) => Kind::Long { signed: false },
         (2, true, false) => Kind::High { signed: true },
         (6, true, false) => Kind::High { signed: false },
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         kind,
@@ -190,7 +190,7 @@ mod tests {
             for amount in 0..64 {
                 let decoded = decode(base | (amount << 10) | (31 << 16) | (31 << 5) | 31).unwrap();
                 if width == Width::W32 && amount >= 32 {
-                    assert_eq!(decoded, Err(()));
+                    assert_eq!(decoded, Err(Unsupported));
                 } else {
                     let operand = decoded.unwrap();
                     assert_eq!(
@@ -206,7 +206,7 @@ mod tests {
                     );
                 }
             }
-            assert_eq!(decode(base ^ (1 << 22)), Some(Err(()))); // N must match sf.
+            assert_eq!(decode(base ^ (1 << 22)), Some(Err(Unsupported))); // N must match sf.
             assert!(decode(base | (1 << 21)).is_none()); // fixed o0
         }
     }

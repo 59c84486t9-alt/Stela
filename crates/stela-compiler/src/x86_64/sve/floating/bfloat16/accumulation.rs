@@ -1,4 +1,6 @@
 //! BFDOT (classic and FEAT_EBF16) and BFMLAL/BFMLSL.
+use crate::x86_64::asm::Gpr::Rdi;
+use crate::x86_64::asm::{Code, Mem, Rm, Size};
 use alloc::vec::Vec;
 mod classic_dot;
 mod enhanced_dot;
@@ -29,25 +31,29 @@ const RIGHT: u8 = 1;
 const ADDEND: u8 = 6;
 const OUTPUT_SLOT: usize = 0;
 const REPEAT_DWORD: u8 = 0x55;
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const JMP_REL32: u8 = 0xe9;
-const REL32_BYTES: usize = size_of::<i32>();
 
-fn test_control(code: &mut Vec<u8>, mask: u32) {
-    code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(mask.to_le_bytes());
+fn test_control(code: &mut Code, mask: u32) {
+    code.asm().test_imm(
+        Size::Dword,
+        Mem::base_disp32(Rdi, (core::mem::offset_of!(GuestState, fpcr)) as i32),
+        mask as i32,
+    );
 }
 
-fn shuffle(code: &mut Vec<u8>, register: u8, order: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, register, register, target);
-    code.push(order);
+fn shuffle(code: &mut Code, register: u8, order: u8, target: TargetCpu) {
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        register,
+        Rm::Xmm(register),
+        order,
+        target,
+    );
 }
 
 /// Returns false before emitting for the BF16 arithmetic forms, which are
 /// emitted elsewhere. Outputs stay private until every guard passes.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -104,9 +110,7 @@ pub(in crate::x86_64) fn emit(
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, chunk, LEFT, target);
     }
     if let Some(enhanced) = enhanced {
-        code.push(JMP_REL32);
-        let classic_done = code.len();
-        code.extend([0; REL32_BYTES]);
+        let classic_done = code.asm().jmp().offset();
         let enhanced_start = code.len();
         resolve(code, enhanced, enhanced_start);
         // Enhanced BFDOT uses guest RC under both AH values; status/traps are

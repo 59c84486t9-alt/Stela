@@ -6,6 +6,7 @@ use super::super::numerical::{
     vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed, read_vector};
+use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -22,21 +23,8 @@ const HALF_BYTES: u8 = (Format::Half.bits() / u8::BITS) as u8;
 const HALF_TO_DOUBLE_FRACTION_SHIFT: u8 =
     (Format::Double.fraction_bits() - Format::Half.fraction_bits()) as u8;
 const HALF_TO_DOUBLE_SIGN_SHIFT: u8 = (Format::Double.bits() - Format::Half.bits()) as u8;
-const MOVD_EAX_XMM7: &[u8] = &[0x66, 0x0f, 0x7e, 0xf8];
-const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
-const MOVD_XMM6_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xf0];
-const CVTSS2SD_XMM6_XMM6: &[u8] = &[0xf3, 0x0f, 0x5a, 0xf6];
-const MOV_EDX_EAX: &[u8] = &[0x89, 0xc2];
-const AND_EAX_IMM32: u8 = 0x25;
-const AND_EDX_IMM32: &[u8] = &[0x81, 0xe2];
-const SHL_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe0];
-const SHL_RDX_IMM8: &[u8] = &[0x48, 0xc1, 0xe2];
-const ADD_RAX_R9: &[u8] = &[0x4c, 0x01, 0xc8];
-const OR_RAX_RDX: &[u8] = &[0x48, 0x09, 0xd0];
-const MOVQ_XMM6_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xf0];
-const TEST_ECX_IMM32: &[u8] = &[0xf7, 0xc1];
 
-fn normal_inputs(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn normal_inputs(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     if operand.kind == Kind::MultiplyAdd {
@@ -57,34 +45,43 @@ fn normal_inputs(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>)
     super::rotate_right_sign(code, Format::Half, operand.rotation);
 }
 
-fn widen_addend(code: &mut Vec<u8>, target: TargetCpu) {
+fn widen_addend(code: &mut Code, target: TargetCpu) {
     // The addend's private XMM7 snapshot advances one Half per completed lane.
     // R9 is the shared unscaled Half-to-Double bias and survives MXCSR setup.
-    code.extend(MOVD_EAX_XMM7);
+    code.asm().movd_from_xmm(Gpr::Rax, lanes::ORIGINAL_LEFT);
     if target.supports(TargetCpu::F16c) {
         // Isolate the selected Half before packed conversion: the next lane in
         // XMM7 may be an inactive sNaN. MOVD also zeros every higher Half lane.
-        code.extend(MOVZX_EAX_AX);
-        code.extend(MOVD_XMM6_EAX);
+        let mut asm = code.asm();
+        asm.movzx(Size::Dword, Gpr::Rax, Size::Word, Gpr::Rax);
+        asm.movd_to_xmm(lanes::RESULT, Gpr::Rax);
         Host::ConvertHalfToSingle.register(code, lanes::RESULT, lanes::RESULT, target);
-        code.extend(CVTSS2SD_XMM6_XMM6);
+        code.asm().cvtss2sd(lanes::RESULT, Rm::Xmm(lanes::RESULT));
         return;
     }
-    code.extend(MOV_EDX_EAX);
-    code.push(AND_EAX_IMM32);
-    code.extend((Format::Half.sign_mask() as u32 - 1).to_le_bytes());
-    code.extend(SHL_RAX_IMM8);
-    code.push(HALF_TO_DOUBLE_FRACTION_SHIFT);
-    code.extend(ADD_RAX_R9);
-    code.extend(AND_EDX_IMM32);
-    code.extend((Format::Half.sign_mask() as u32).to_le_bytes());
-    code.extend(SHL_RDX_IMM8);
-    code.push(HALF_TO_DOUBLE_SIGN_SHIFT);
-    code.extend(OR_RAX_RDX);
-    code.extend(MOVQ_XMM6_RAX);
+    let sign = Format::Half.sign_mask() as u32;
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Gpr::Rdx, Gpr::Rax);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, (sign - 1) as i32);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Qword,
+        Gpr::Rax,
+        HALF_TO_DOUBLE_FRACTION_SHIFT,
+    );
+    asm.alu(Alu::Add, Size::Qword, Gpr::Rax, Gpr::R9);
+    asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rdx, sign as i32);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Qword,
+        Gpr::Rdx,
+        HALF_TO_DOUBLE_SIGN_SHIFT,
+    );
+    asm.alu(Alu::Or, Size::Qword, Gpr::Rax, Gpr::Rdx);
+    asm.movq_to_xmm(lanes::RESULT, Gpr::Rax);
 }
 
-fn arithmetic(code: &mut Vec<u8>, kind: Kind, target: TargetCpu, rollback: &mut Vec<usize>) {
+fn arithmetic(code: &mut Code, kind: Kind, target: TargetCpu, rollback: &mut Vec<usize>) {
     if kind == Kind::Add {
         packed(code, Host::MoveAligned, lanes::RESULT, lanes::LEFT);
         // Normal Half sums need at most 41 bits; nonzero sums are normal Double.
@@ -125,12 +122,12 @@ fn arithmetic(code: &mut Vec<u8>, kind: Kind, target: TargetCpu, rollback: &mut 
     // Normal Half inputs bound every Double result to finite normal or exact
     // zero, so PE is the only possible fresh status. Test it after restoration:
     // the shared rollback then drops exactly its own 48-byte frame.
-    code.extend(TEST_ECX_IMM32);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
+    code.asm()
+        .test_imm(Size::Dword, Gpr::Rcx, MXCSR_INEXACT as i32);
     rollback.push(branch(code, Condition::NotZero));
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     debug_assert_eq!(operand.format, Format::Half);
     let mut helper = Vec::new();
     let mut rollback = Vec::new();

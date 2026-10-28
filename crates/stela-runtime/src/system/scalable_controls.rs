@@ -25,7 +25,7 @@ use stela_compiler::{
         features::{ScalableFeature, ScalableFeatures},
     },
     context::memory::MemoryImplementationProfile,
-    extended::ScalableProfile,
+    scalable_context::ScalableProfile,
 };
 
 const ZEN_SHIFT: u32 = 16;
@@ -614,6 +614,23 @@ mod tests {
         )
         .unwrap()
     }
+    /// The scalable execution requirements of the context leaf `source`.
+    fn execution_requirements(
+        source: &[u8],
+        profile: ScalableProfile,
+    ) -> stela_compiler::aarch64::scalable::execution::ScalableExecutionRequirements {
+        use stela_compiler::block::{BlockProfile, CompilationPlan, Features};
+        let options = stela_compiler::Options::new(
+            BlockProfile::new(Features::LEAF | Features::CONTEXT),
+            TargetCpu::Baseline,
+        )
+        .with_scalable(profile);
+        CompilationPlan::new(source, PC, &options)
+            .unwrap()
+            .execution_requirements()
+            .unwrap()
+    }
+
     fn profile(owner: &ScalableControlOwner<'_>, mode: ScalableMode) -> ScalableProfile {
         ScalableProfile::new_with_features(
             owner.current_svl(),
@@ -854,12 +871,10 @@ mod tests {
         let mut registers = GuestState::default();
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let requirements = execution_requirements(&source, profile);
         let mut called = false;
         let result = owner.with_checked_execution(
-            &prepared.execution_requirements,
+            &requirements,
             profile,
             &state,
             &mut registers,
@@ -891,12 +906,10 @@ mod tests {
             .unwrap();
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let requirements = execution_requirements(&source, profile);
         owner
             .with_checked_execution(
-                &prepared.execution_requirements,
+                &requirements,
                 profile,
                 &state,
                 &mut registers,
@@ -927,13 +940,11 @@ mod tests {
             .unwrap();
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let requirements = execution_requirements(&source, profile);
         let mut called = false;
         assert_eq!(
             owner.with_checked_execution(
-                &prepared.execution_requirements,
+                &requirements,
                 profile,
                 &state,
                 &mut registers,
@@ -949,7 +960,7 @@ mod tests {
             .unwrap();
         owner
             .with_checked_execution(
-                &prepared.execution_requirements,
+                &requirements,
                 profile,
                 &state,
                 &mut registers,
@@ -989,12 +1000,10 @@ mod tests {
         let mut scalable = ScalableState::new(length(16), true);
         let profile = profile(&owner, scalable.mode());
         let source: Vec<u8> = [NOP, RET].into_iter().flat_map(u32::to_le_bytes).collect();
-        let prepared =
-            stela_compiler::extended::prepare_leaf(&source, PC, profile, TargetCpu::Baseline)
-                .unwrap();
+        let requirements = execution_requirements(&source, profile);
         assert_eq!(
             owner.with_checked_execution(
-                &prepared.execution_requirements,
+                &requirements,
                 profile,
                 &state,
                 &mut registers,

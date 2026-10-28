@@ -1,4 +1,5 @@
 //! SVE FCM* and FAC* comparisons into predicates.
+use crate::aarch64::Unsupported;
 use crate::aarch64::flags::{NZCV_V, NZCV_Z};
 use crate::aarch64::floating::{
     Format, UnsupportedControl,
@@ -99,8 +100,7 @@ pub fn evaluate(
 
 /// All Z registers and P destinations are ordinary storage. Pg is P0..P7;
 /// Pd is P0..P15. An allocated byte-size encoding is architecturally reserved.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (kind, right) = match word & REGISTER_COMPARE_MASK {
         FCMEQ_REG => (
             Kind::Equal,
@@ -147,7 +147,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         1 => Format::Half,
         2 => Format::Single,
         3 => Format::Double,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         kind,
@@ -174,7 +174,7 @@ mod tests {
             (FACGE_REG, Kind::AbsoluteGreaterEqual),
             (FACGT_REG, Kind::AbsoluteGreater),
         ] {
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
             for (size, format) in [(1, Format::Half), (2, Format::Single), (3, Format::Double)] {
                 for governing in 0..=GOVERNING_MASK {
                     for destination in 0..=PREDICATE_MASK {
@@ -206,7 +206,7 @@ mod tests {
         for opcode in [
             FCMEQ_ZERO, FCMGE_ZERO, FCMGT_ZERO, FCMLE_ZERO, FCMLT_ZERO, FCMNE_ZERO,
         ] {
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
             assert!(
                 decode(opcode | (2 << SIZE_SHIFT) | (31 << SOURCE_SHIFT) | 15)
                     .unwrap()

@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::path::Path;
 use stela_compiler::{
     GuestAddress, GuestState,
-    block::{BlockProfile, PointerAuthenticationOperation},
+    block::{BlockProfile, Features, PointerAuthenticationOperation},
 };
 use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
@@ -18,7 +18,7 @@ const AUTIBSP: u32 = 0xd50323ff;
 const RETAB: u32 = 0xd65f0fff;
 const RET: u32 = 0xd65f03c0;
 const ADD: u32 = 0x91000400;
-const PROFILE: BlockProfile = BlockProfile::AppleArm64eSoftwarePauthV1;
+const PROFILE: BlockProfile = BlockProfile::new(Features::POINTER_AUTHENTICATION);
 
 fn context(address_space: u64) -> Context {
     Context::new(

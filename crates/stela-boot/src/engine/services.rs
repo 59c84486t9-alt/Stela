@@ -48,6 +48,7 @@ static PASSTHROUGH_REPORTED: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct Services<'a> {
     mmio: &'a native_mmio::Source,
+    remappers: &'a super::remapping::Remappers,
     acpi: Option<&'static HostAcpi>,
     heap: core::ops::Range<u64>,
     tsc_hz: u64,
@@ -102,6 +103,7 @@ impl<'a> Services<'a> {
     /// the i8042's interrupts are masked, as its port grant requires.
     pub(super) fn new(
         mmio: &'a native_mmio::Source,
+        remappers: &'a super::remapping::Remappers,
         acpi: Option<&'static HostAcpi>,
         heap: core::ops::Range<u64>,
         tsc_hz: u64,
@@ -118,6 +120,7 @@ impl<'a> Services<'a> {
         });
         Self {
             mmio,
+            remappers,
             acpi,
             heap,
             tsc_hz,
@@ -276,13 +279,25 @@ unsafe impl NativeServices for Services<'_> {
     }
 
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError> {
+        let address = binding.address();
+        let binding = match self.remappers.domain(binding) {
+            Ok(domain) => {
+                return domain.map_err(|error| {
+                    output::arguments(format_args!(
+                        "HOST IOMMU domain for {address:?} refused: {error:?}\n"
+                    ));
+                    ServiceError::Refused("the IOMMU refused the requester's domain")
+                });
+            }
+            Err(binding) => binding,
+        };
         if !PASSTHROUGH_REPORTED.swap(true, Ordering::Relaxed) {
             output::arguments(format_args!("no IOMMU: device DMA unrestricted\n"));
         }
         Ok(Arc::new(Passthrough::retaining(self.heap.clone(), binding)))
     }
 
-    fn pages(&self) -> &dyn PageSource {
+    fn pages(&self) -> &'static dyn PageSource {
         &native_memory::SOURCE
     }
 

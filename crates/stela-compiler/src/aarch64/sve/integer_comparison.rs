@@ -1,4 +1,5 @@
 //! SVE integer comparisons into predicates (CMP*).
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 
 const SIZE_SHIFT: u32 = 22;
@@ -241,13 +242,13 @@ const ENCODINGS: [Encoding; 26] = [
     },
 ];
 
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = ENCODINGS
         .iter()
         .find(|entry| word & entry.mask == entry.value)?;
     let element_bytes = 1 << ((word >> SIZE_SHIFT) & SIZE_MASK);
     if encoding.source == SourceKind::WideVector && element_bytes == 8 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let right = match encoding.source {
         SourceKind::Immediate => {
@@ -300,7 +301,7 @@ mod tests {
                                     | destination;
                                 let operand = decode(word);
                                 if encoding.source == SourceKind::WideVector && size == SIZE_MASK {
-                                    assert_eq!(operand, Some(Err(())));
+                                    assert_eq!(operand, Some(Err(Unsupported)));
                                 } else {
                                     let operand = operand.unwrap().unwrap();
                                     assert_eq!(operand.relation, encoding.relation);
