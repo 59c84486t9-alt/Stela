@@ -81,6 +81,17 @@ pub unsafe trait NativeServices {
     /// [`platform::acpi::resources`](crate::platform::acpi::resources)).
     #[cfg(feature = "native-acpi")]
     fn acpi(&self) -> Option<&crate::platform::acpi::Session>;
+
+    /// Reserve memory resource `ordinal` of `device`'s `_CRS` from the
+    /// mount's native broker, for a controller the namespace describes, as
+    /// [`MemoryBroker::reserve`](crate::platform::acpi::resources::MemoryBroker::reserve)
+    /// reserves it.
+    #[cfg(feature = "native-acpi")]
+    fn acpi_memory(
+        &self,
+        device: &crate::platform::acpi::resources::DeviceResources<'_>,
+        ordinal: usize,
+    ) -> Result<owned::Resource, ServiceError>;
 }
 
 /// ACPI hardware IDs of the classes attached through [`NativeServices`].
@@ -157,6 +168,14 @@ pub(crate) mod tests {
         }
         fn pages(&self) -> &dyn PageSource {
             &NoPages
+        }
+        #[cfg(feature = "native-acpi")]
+        fn acpi_memory(
+            &self,
+            _: &crate::platform::acpi::resources::DeviceResources<'_>,
+            _: usize,
+        ) -> Result<owned::Resource, ServiceError> {
+            Err(ServiceError::Unavailable)
         }
         #[cfg(feature = "native-acpi")]
         fn acpi(&self) -> Option<&crate::platform::acpi::Session> {

@@ -13,7 +13,7 @@ use core::{alloc::Layout, fmt::Write};
 use resources::gpio::{Direction, LinePolicy, NativeController, sealed};
 use resources::{DeviceResources, MemoryBroker, MemoryReservation, Resource, Space};
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Firmware(resources::Error),
     Acpi(acpi::Error),

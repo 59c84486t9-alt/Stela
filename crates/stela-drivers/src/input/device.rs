@@ -2,8 +2,9 @@
 //! One host keyboard or pointer, whatever its transport: probe returns them
 //! in one list and each is polled the same way for [`Input`] changes and sent
 //! the guest's lock-key LEDs.
-use super::{Input, ps2, virtio::VirtioInput};
-use crate::{block::BlockError, usb::hid::UsbInput};
+use super::{Input, hid_i2c, ps2, touchpad, virtio::VirtioInput};
+use crate::{Clock, block::BlockError, bus::i2c::Bus, usb::hid::UsbInput};
+use alloc::boxed::Box;
 use alloc::{format, string::String, vec::Vec};
 
 /// A host keyboard or pointer.
@@ -12,13 +13,21 @@ pub enum InputDevice {
     Usb(UsbInput),
     /// The i8042 controller, for both of its ports.
     Ps2(ps2::Controller),
+    I2cHid(Box<I2cHid>),
+    /// An ELAN or Cypress touchpad, read as a mouse.
+    Touchpad(Box<touchpad::TouchpadInput>),
 }
+
+/// An I²C-HID device on whichever bus and interrupt pin probe found it.
+pub type I2cHid = hid_i2c::HidInput<Box<dyn Bus>, Box<dyn hid_i2c::Interrupt>, Clock>;
 
 /// Why polling an input device or setting its LEDs failed.
 #[derive(Debug)]
 pub enum InputError {
     Usb(BlockError),
     Ps2(ps2::Error),
+    I2cHid(hid_i2c::Error),
+    Touchpad(touchpad::Error),
 }
 
 impl core::fmt::Display for InputError {
@@ -26,6 +35,8 @@ impl core::fmt::Display for InputError {
         match self {
             Self::Usb(error) => write!(f, "{}", crate::usb::xhci::explain(error)),
             Self::Ps2(error) => write!(f, "{error}"),
+            Self::I2cHid(error) => write!(f, "{error}"),
+            Self::Touchpad(error) => write!(f, "{error}"),
         }
     }
 }
@@ -37,6 +48,8 @@ impl InputDevice {
             Self::Virtio(device) => format!("virtio-input {:?}", device.name),
             Self::Usb(device) => format!("USB {}", device.name),
             Self::Ps2(_) => String::from("i8042 PS/2"),
+            Self::I2cHid(device) => device.name.clone(),
+            Self::Touchpad(device) => device.name.clone(),
         }
     }
 
@@ -64,6 +77,8 @@ impl InputDevice {
                     Err(InputError::Ps2(error))
                 }
             },
+            Self::I2cHid(device) => device.poll(inputs).map_err(InputError::I2cHid),
+            Self::Touchpad(device) => device.poll(inputs).map_err(InputError::Touchpad),
         }
     }
 
@@ -72,12 +87,13 @@ impl InputDevice {
     /// device without LEDs ignores it.
     pub fn set_leds(&mut self, leds: u8) -> Result<(), InputError> {
         match self {
-            Self::Virtio(_) => Ok(()),
+            Self::Virtio(_) | Self::Touchpad(_) => Ok(()),
             Self::Usb(device) => device.set_leds(u16::from(leds)).map_err(InputError::Usb),
             Self::Ps2(controller) if controller.has_keyboard() => {
                 controller.set_leds(ps2_leds(leds)).map_err(InputError::Ps2)
             }
             Self::Ps2(_) => Ok(()),
+            Self::I2cHid(device) => device.set_leds(u16::from(leds)).map_err(InputError::I2cHid),
         }
     }
 
@@ -86,7 +102,8 @@ impl InputDevice {
     pub fn last_report(&self) -> &[u8] {
         match self {
             Self::Usb(device) => device.last_report(),
-            Self::Virtio(_) | Self::Ps2(_) => &[],
+            Self::I2cHid(device) => device.last_report(),
+            Self::Virtio(_) | Self::Ps2(_) | Self::Touchpad(_) => &[],
         }
     }
 
@@ -96,6 +113,8 @@ impl InputDevice {
             Self::Virtio(device) => device.broken,
             Self::Usb(device) => device.failed(),
             Self::Ps2(controller) => controller.needs_reset(),
+            Self::I2cHid(device) => device.device().needs_reset(),
+            Self::Touchpad(device) => device.stopped(),
         }
     }
 }

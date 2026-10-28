@@ -24,6 +24,8 @@ use crate::{
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
+#[cfg(feature = "native-acpi")]
+mod i2c;
 pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
@@ -83,6 +85,14 @@ pub enum PlatformError {
     /// The description or the machine state rules attachment out.
     Refused(&'static str),
     Ps2(input::ps2::Error),
+    Native(ServiceError),
+    I2c(crate::bus::i2c::Error),
+    Lpss(crate::bus::lpss::Error),
+    LpssAttach(crate::bus::lpss::AttachError),
+    HidI2c(input::hid_i2c::Error),
+    Touchpad(input::touchpad::Error),
+    #[cfg(feature = "native-acpi")]
+    Gpio(crate::bus::gpio::native::Error),
 }
 
 impl fmt::Display for PlatformError {
@@ -93,6 +103,14 @@ impl fmt::Display for PlatformError {
             Self::Acpi(error) => write!(f, "ACPI: {error:?}"),
             Self::Refused(why) => f.write_str(why),
             Self::Ps2(error) => error.fmt(f),
+            Self::Native(error) => error.fmt(f),
+            Self::I2c(error) => write!(f, "I2C controller: {error:?}"),
+            Self::Lpss(error) => write!(f, "LPSS: {error:?}"),
+            Self::LpssAttach(error) => write!(f, "LPSS I2C attach: {error:?}"),
+            Self::HidI2c(error) => error.fmt(f),
+            Self::Touchpad(error) => error.fmt(f),
+            #[cfg(feature = "native-acpi")]
+            Self::Gpio(error) => write!(f, "GPIO controller: {error:?}"),
         }
     }
 }
@@ -674,6 +692,9 @@ pub unsafe fn probe_with_provider(
             .iter()
             .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
         platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
+        if let Some(services) = services {
+            i2c::attach(services, session, handoff.clock, &mut devices);
+        }
     }
     devices
 }
