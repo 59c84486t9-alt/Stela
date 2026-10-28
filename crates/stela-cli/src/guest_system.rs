@@ -58,11 +58,6 @@ impl Layout {
         Self { base, build }
     }
 
-    /// `build`'s layout under the user's home.
-    pub(crate) fn of(build: &'static Build) -> Result<Self> {
-        Ok(Self::new(support_directory()?, build))
-    }
-
     /// The installed layout of the newest supported build that has one.
     pub(crate) fn installed_any(base: &Path) -> Option<Self> {
         builds::SUPPORTED
@@ -288,7 +283,6 @@ pub(crate) struct InstallSystem {
 
 impl InstallSystem {
     pub(crate) fn run(self) -> Result<()> {
-        crate::require_hosted("stela install-system")?;
         let base = support_directory()?;
         if self.remove {
             for build in builds::SUPPORTED {
@@ -374,7 +368,7 @@ pub(crate) fn system_version(roots: &[PathBuf]) -> Option<String> {
     roots.iter().find_map(|root| {
         let bytes = std::fs::read(root.parent()?.join(RECEIPT)).ok()?;
         let receipt: install::Receipt = serde_json::from_slice(&bytes).ok()?;
-        (receipt.kind == install::KIND).then(|| receipt.product_version)
+        (receipt.kind == install::KIND).then_some(receipt.product_version)
     })
 }
 

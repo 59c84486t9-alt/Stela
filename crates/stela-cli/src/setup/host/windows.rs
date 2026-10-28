@@ -192,11 +192,14 @@ impl Descriptor {
     /// media alone, as eMMC reports the same buses.
     fn facts(&self) -> DiskFacts {
         DiskFacts {
-            bus: match self.bus {
-                BusTypeUsb => Bus::Usb,
-                BusType1394 => Bus::FireWire,
-                BusTypeFileBackedVirtual => Bus::Image,
-                _ => Bus::Other,
+            bus: if self.bus == BusTypeUsb {
+                Bus::Usb
+            } else if self.bus == BusType1394 {
+                Bus::FireWire
+            } else if self.bus == BusTypeFileBackedVirtual {
+                Bus::Image
+            } else {
+                Bus::Other
             },
             removable_media: self.removable,
             external: false,

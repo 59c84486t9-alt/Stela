@@ -76,6 +76,9 @@ mod wizard;
 pub(crate) use command::Setup;
 pub(crate) use elevation::hold_window;
 pub(crate) use installed::NextBoot;
+pub(crate) use prepare::download_dir;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub(crate) use prepare::fetch_image;
 
 use crate::{efi, restore};
 use anyhow::{Context, Result, bail, ensure};
@@ -88,8 +91,8 @@ use create::{
 use ecid::Ecid;
 use host::{FileSystem, Host};
 use prepare::{
-    Prepared, check_space, copy_bundles, download_dir, fetch, prepare_kind, prepare_restore,
-    prepare_update, supported,
+    Prepared, check_space, copy_bundles, fetch, prepare_kind, prepare_restore, prepare_update,
+    supported,
 };
 use record::{Record, first_schema, publish, read_record, remove_bundles, write_record};
 use serde::{Deserialize, Serialize};
