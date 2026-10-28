@@ -4,7 +4,7 @@
 extern crate std;
 
 use super::*;
-use crate::platform::acpi::{Argument, Mode, tests::TEST_SERIAL};
+use crate::platform::acpi::{Argument, Mode, ObjectType, Reference, tests::TEST_SERIAL};
 use alloc::{collections::VecDeque, rc::Rc};
 use core::{
     cell::{Cell, RefCell, UnsafeCell},
@@ -434,7 +434,10 @@ fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
     assert_eq!(attachment.device.dependencies(), &[ec]);
     assert_eq!(
         handle.evaluate(Some("_DEP"), &[]).unwrap(),
-        Some(Value::Package(vec![Value::Reference(ec)]))
+        Some(Value::Package(vec![Value::Reference(Reference {
+            handle: ec,
+            actual_type: ObjectType::DEVICE
+        })]))
     );
     handle
         .evaluate(Some("SSTA"), &[Argument::Integer(0)])
@@ -466,9 +469,10 @@ fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
     handle.evaluate(Some("CDEP"), &[]).unwrap();
     assert_eq!(
         handle.evaluate(Some("_DEP"), &[]).unwrap(),
-        Some(Value::Package(vec![Value::Reference(
-            session.handle("\\_SB.HIDE").unwrap()
-        )]))
+        Some(Value::Package(vec![Value::Reference(Reference {
+            handle: session.handle("\\_SB.HIDE").unwrap(),
+            actual_type: ObjectType::DEVICE,
+        })]))
     );
     assert_eq!(attachment.detach(), Err(Error::ResourcesChanged));
     assert_eq!(peer.borrow().controls.len(), before);
@@ -477,7 +481,10 @@ fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
     handle.evaluate(Some("RDEP"), &[]).unwrap();
     assert_eq!(
         handle.evaluate(Some("_DEP"), &[]).unwrap(),
-        Some(Value::Package(vec![Value::Reference(ec)]))
+        Some(Value::Package(vec![Value::Reference(Reference {
+            handle: ec,
+            actual_type: ObjectType::DEVICE
+        })]))
     );
     attachment.detach().unwrap();
     assert_eq!(peer.borrow().mapping_drops, 1);

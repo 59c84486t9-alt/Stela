@@ -201,7 +201,7 @@ pub fn dependencies(device: Handle<'_>) -> Result<Vec<Handle<'_>>, Error> {
         Ok(Some(Value::Package(values))) => values
             .into_iter()
             .map(|value| match value {
-                Value::Reference(handle) => Ok(handle),
+                Value::Reference(reference) => Ok(reference.handle),
                 _ => Err(Error::InvalidObject("_DEP")),
             })
             .collect(),

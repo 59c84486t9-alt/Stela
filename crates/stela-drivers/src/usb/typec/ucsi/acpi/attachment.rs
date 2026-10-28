@@ -121,7 +121,7 @@ fn inspect(handle: Handle<'_>) -> Result<Device<'_>, Error> {
         Some(Value::Package(values)) => values
             .into_iter()
             .map(|value| match value {
-                Value::Reference(handle) => Ok(handle),
+                Value::Reference(reference) => Ok(reference.handle),
                 _ => Err(Error::InvalidObject("_DEP")),
             })
             .collect::<Result<Vec<_>, _>>()?,

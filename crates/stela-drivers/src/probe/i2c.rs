@@ -430,6 +430,7 @@ mod attach {
                 let Value::Reference(resource) = resource else {
                     return Err(PlatformError::Refused("_PR0 holds a non-reference"));
                 };
+                let resource = resource.handle;
                 if resource.evaluate(Some("_STA"), &[]).map_err(acpi)? != Some(Value::Integer(1)) {
                     resource.evaluate(Some("_ON"), &[]).map_err(acpi)?;
                 }

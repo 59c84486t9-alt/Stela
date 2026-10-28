@@ -272,6 +272,9 @@ u64 stela_acpi_layout(u32 field) {
     case 7: return ACPI_OFFSET(struct acpi_buffer, pointer);
     case 8: return sizeof(acpi_cpu_flags);
     case 9: return ACPI_OFFSET(struct stela_acpi_services, fatal);
+    case 10: return ACPI_OFFSET(union acpi_object, reference.actual_type);
+    case 11: return ACPI_OFFSET(union acpi_object, reference.handle);
+    case 12: return sizeof(((union acpi_object *)0)->reference.actual_type);
     default: return ~0ull;
     }
 }

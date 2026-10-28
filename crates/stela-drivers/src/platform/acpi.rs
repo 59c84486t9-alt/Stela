@@ -593,13 +593,36 @@ impl PartialEq for Handle<'_> {
     }
 }
 impl Eq for Handle<'_> {}
+/// Exact ACPICA external object type code, including values unknown here.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObjectType(u32);
+impl ObjectType {
+    pub const INTEGER: Self = Self(1);
+    pub const DEVICE: Self = Self(6);
+    pub const POWER: Self = Self(11);
+
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+/// Namespace reference and its external ACPICA ActualType. The handle still
+/// borrows its single Session; this metadata grants no independent ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reference<'a> {
+    pub handle: Handle<'a>,
+    pub actual_type: ObjectType,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value<'a> {
     Integer(u64),
     String(Vec<u8>),
     Buffer(Vec<u8>),
     Package(Vec<Value<'a>>),
-    Reference(Handle<'a>),
+    Reference(Reference<'a>),
     Uninitialized,
 }
 pub enum Argument<'a> {
@@ -607,7 +630,7 @@ pub enum Argument<'a> {
     String(&'a CStr),
     Buffer(&'a [u8]),
     Package(&'a [Argument<'a>]),
-    Reference(Handle<'a>),
+    Reference(Reference<'a>),
 }
 struct Arguments {
     objects: Vec<RawObject>,
@@ -641,11 +664,15 @@ impl Arguments {
                     result.children.push(child);
                     entry
                 }
-                Argument::Reference(handle) => {
-                    if !ptr::eq(session, handle.session) {
+                Argument::Reference(reference) => {
+                    if !ptr::eq(session, reference.handle.session) {
                         return Err(BAD_PARAMETER);
                     }
-                    (0x14, 0, handle.raw as u64)
+                    (
+                        0x14,
+                        reference.actual_type.raw(),
+                        reference.handle.raw as u64,
+                    )
                 }
             };
             result.objects.push(RawObject {
@@ -1045,9 +1072,12 @@ unsafe fn read_value<'a>(
         }
         0x14 => {
             guard.bind(raw.payload as *mut c_void)?;
-            Ok(Value::Reference(Handle {
-                session,
-                raw: raw.payload as *mut c_void,
+            Ok(Value::Reference(Reference {
+                handle: Handle {
+                    session,
+                    raw: raw.payload as *mut c_void,
+                },
+                actual_type: ObjectType::from_raw(raw.length),
             }))
         }
         _ => Err(SUPPORT),
@@ -1056,6 +1086,7 @@ unsafe fn read_value<'a>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod references;
     include!("acpi/battery_tests.rs");
     include!("ec/native_tests.rs");
     include!("battery/native_tests.rs");
@@ -1722,6 +1753,9 @@ pub(crate) mod tests {
             core::mem::offset_of!(RawBuffer, pointer),
             8,
             core::mem::offset_of!(Services, fatal),
+            core::mem::offset_of!(RawObject, length),
+            core::mem::offset_of!(RawObject, payload),
+            size_of::<ObjectType>(),
         ];
         for (field, expected) in expected.into_iter().enumerate() {
             assert_eq!(
@@ -1846,9 +1880,10 @@ pub(crate) mod tests {
         let deps = ucsi.evaluate(Some("_DEP"), &[]).unwrap().unwrap();
         assert_eq!(
             deps,
-            Value::Package(vec![Value::Reference(
-                session.handle("\\_SB.EC00").unwrap()
-            )])
+            Value::Package(vec![Value::Reference(Reference {
+                handle: session.handle("\\_SB.EC00").unwrap(),
+                actual_type: ObjectType::DEVICE,
+            })])
         );
         let crs = ucsi.evaluate(Some("_CRS"), &[]).unwrap().unwrap();
         assert!(
@@ -1970,7 +2005,8 @@ pub(crate) mod tests {
         let Value::Reference(reference) = references.pop().unwrap() else {
             panic!("package name must return a namespace reference")
         };
-        assert_eq!(reference.path().unwrap(), device.path().unwrap());
+        assert_eq!(reference.handle.path().unwrap(), device.path().unwrap());
+        assert_eq!(reference.actual_type, ObjectType::DEVICE);
         // Current ACPICA Load/LoadTable return integers, not old DDB handles.
         // Real AML Unload rejects these inputs; do not invent an operable handle
         // or claim those unsupported operations exercised native deletion.
@@ -2019,7 +2055,7 @@ pub(crate) mod tests {
         assert_eq!(device.path(), Err(SUPPORT));
         assert_eq!(device.child("TEST").err(), Some(SUPPORT));
         assert_eq!(device.evaluate(Some("TEST"), &[]).err(), Some(SUPPORT));
-        assert_eq!(reference.path(), Err(SUPPORT));
+        assert_eq!(reference.handle.path(), Err(SUPPORT));
         assert_eq!(device.dsm(&[0; 16], 1, 1).err(), Some(SUPPORT));
         assert_eq!(device.notify(|_| {}).err(), Some(SUPPORT));
         assert_eq!(session.devices("STLA0003").err(), Some(SUPPORT));
@@ -2114,7 +2150,11 @@ pub(crate) mod tests {
         }
         fn describe(value: &Value<'_>) -> std::string::String {
             match value {
-                Value::Reference(handle) => std::format!("Reference({})", handle.path().unwrap()),
+                Value::Reference(reference) => std::format!(
+                    "Reference({},{:?})",
+                    reference.handle.path().unwrap(),
+                    reference.actual_type
+                ),
                 Value::Package(items) => std::format!(
                     "Package[{}]",
                     items.iter().map(describe).collect::<Vec<_>>().join(", ")
