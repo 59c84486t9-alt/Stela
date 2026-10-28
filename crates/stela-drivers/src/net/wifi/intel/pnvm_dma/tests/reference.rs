@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 #[ignore = "requires pinned actual PNVM asset; see THIRD_PARTY.md"]
-fn actual_pnvm_all_four_skus_stage_both_source_layouts_without_payload_changes() {
+fn actual_pnvm_skus_preserve_payloads_in_both_layouts() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -59,7 +59,7 @@ fn actual_pnvm_all_four_skus_stage_both_source_layouts_without_payload_changes()
 }
 #[test]
 #[ignore = "requires actual PNVM and unchanged Linux payload/setter helper oracle; see THIRD_PARTY.md"]
-fn unchanged_linux_pnvm_and_reduced_power_contiguous_fragmented_dma() {
+fn pnvm_and_reduced_power_tables_match_linux_for_both_layouts() {
     use sha2::{Digest, Sha256};
     fn hex(bytes: &[u8]) -> alloc::string::String {
         bytes.iter().map(|b| alloc::format!("{b:02x}")).collect()

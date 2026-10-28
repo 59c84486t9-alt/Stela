@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn contiguous_order_fragment_addresses_zero_unused_and_coherent_permissions() {
+fn payload_order_and_fragment_descriptors_preserve_coherent_mapping() {
     for fragmented in [false, true] {
         for count in if fragmented {
             vec![1, 2, 3, 64]
@@ -64,7 +64,7 @@ fn contiguous_order_fragment_addresses_zero_unused_and_coherent_permissions() {
     }
 }
 #[test]
-fn all_staging_faults_unwind_and_stop_invalidation_failure_retains_for_retry() {
+fn staging_failures_unwind_and_failed_stop_invalidation_retries() {
     let bytes = vec![vec![1; 16], vec![2; 32], vec![3; 64]];
     let chunks = chunks(&bytes);
     for stage in 0..3 {
@@ -118,7 +118,7 @@ fn all_staging_faults_unwind_and_stop_invalidation_failure_retains_for_retry() {
     assert_eq!(source.released.load(Ordering::Relaxed), 0);
 }
 #[test]
-fn invalid_shape_and_missing_domain_never_allocate() {
+fn invalid_shapes_and_missing_domain_allocate_nothing() {
     let source = Source::default();
     let domain = Arc::new(Domain::default());
     for (fragmented, data) in [
