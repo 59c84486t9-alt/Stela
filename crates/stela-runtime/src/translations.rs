@@ -64,7 +64,7 @@ pub fn translator_id() -> Digest {
     Digest(hasher.finalize().into())
 }
 
-/// The engine's compile-driver sources (`build.rs`).
+/// The runtime crate's sources (`build.rs`).
 pub const ENGINE_SOURCE_SHA256: &str = env!("STELA_ENGINE_SOURCE_SHA256");
 
 /// The address class of a page: bits 47..63 of its address.

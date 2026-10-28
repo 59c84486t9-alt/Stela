@@ -5,6 +5,7 @@ members = [
     "crates/stela-compiler",
     "crates/stela-drivers",
     "crates/stela-drivers/src/gpu/metal/input",
+    "crates/stela-fingerprint",
     "crates/stela-runtime",
     "xtask",
 ]
@@ -39,6 +40,7 @@ hex = "0.4"
 libc = "0.2"
 tempfile = "3"
 stela-compiler = { path = "crates/stela-compiler" }
+stela-fingerprint = { path = "crates/stela-fingerprint" }
 stela-drivers = { path = "crates/stela-drivers" }
 stela-runtime = { path = "crates/stela-runtime" }
 stela-loader = { path = "crates/stela-loader" }
