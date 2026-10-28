@@ -21,7 +21,6 @@ pub const SYSTEM: &str = "--system";
 pub const INSTALL: &str = mount_interface::INSTALL_OPTION;
 pub const INSTALL_SOURCE: &str = "--install-source";
 pub const VERIFY_ON_READ: &str = "--verify-on-read";
-pub const STRICT: &str = "--strict";
 pub const UPDATE_RESTORE: &str = mount_interface::UPDATE_RESTORE_OPTION;
 pub const EXTERNAL_DISKS: &str = "--external-disks";
 pub const NATIVE_CORES: &str = "--native-cores";
@@ -280,9 +279,6 @@ pub struct System {
     /// Advertise and log the SEP services whose contracts are not recovered
     /// (`--sep-observe`), each request refused by name.
     pub sep_observe: bool,
-    /// Stop every PE at the first unsupported operation (`--strict`)
-    /// instead of answering it degraded and reporting it once.
-    pub strict: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`).
     pub breakpoints: Vec<u64>,
     /// Log, without stopping, when a PE reaches one of these guest PCs
@@ -350,7 +346,6 @@ impl Default for System {
             wifi_key: None,
             wifi_country: None,
             sep_observe: false,
-            strict: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             monitor_trace: false,
@@ -578,7 +573,6 @@ impl System {
                     }
                 }
                 "--sep-observe" => options.sep_observe = true,
-                STRICT => options.strict = true,
                 "--storage" => {
                     let target = partition(value().ok_or("missing ANS storage partition")?)?;
                     if options.storage_ram.is_some() || options.storage.replace(target).is_some() {
@@ -710,11 +704,9 @@ impl System {
         if self.update_restore && self.install.is_none() {
             return Err("--update-restore applies to --install");
         }
-        if self.development_restore
-            && (self.install.is_none() || self.update_restore || self.strict)
-        {
+        if self.development_restore && (self.install.is_none() || self.update_restore) {
             return Err(
-                "--development-restore requires a non-strict erase --install and refuses --update-restore",
+                "--development-restore requires an erase --install and refuses --update-restore",
             );
         }
         if self.verify_on_read && self.install.is_none() && !self.restore {
@@ -911,7 +903,6 @@ impl fmt::Display for System {
         line.flag("--idle-skip", self.idle_skip)?;
         line.flag("--survey", self.survey)?;
         line.flag("--sep-observe", self.sep_observe)?;
-        line.flag(STRICT, self.strict)?;
         line.value(NATIVE_CORES, self.native_cores)?;
         line.flag("--native-rounds", self.native_rounds)?;
         line.flag("--native-artifacts", self.native_artifacts)?;

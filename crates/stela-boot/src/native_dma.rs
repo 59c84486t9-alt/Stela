@@ -12,9 +12,9 @@ use firmware_state::{Found, Kind, TableError, Units, Window};
 use stela_runtime::pc::acpi;
 
 /// Before ExitBootServices: every remapping unit the firmware's DMAR and IVRS
-/// tables list. A table Stela cannot read is reported once; strict mode
-/// refuses it.
-pub(crate) fn firmware_units(strict: bool) -> Result<Units, &'static str> {
+/// tables list. A table Stela cannot read is reported once and the units
+/// past the defect stay unchecked.
+pub(crate) fn firmware_units() -> Result<Units, &'static str> {
     let mut units = Units::default();
     let Some(rsdp) = crate::storage::rsdp() else {
         return Ok(units);
@@ -38,9 +38,6 @@ pub(crate) fn firmware_units(strict: bool) -> Result<Units, &'static str> {
                     "UNSUPPORTED host IOMMU table {} unreadable ({error:?}): units past the defect are not checked for firmware DMA protection\n",
                     core::str::from_utf8(signature).unwrap_or("?"),
                 ));
-                if strict {
-                    return Err("strict mode requires readable IOMMU tables");
-                }
             }
         }
     }
@@ -91,14 +88,14 @@ unsafe impl Window for Identity {
 
 /// After ExitBootServices, before any Stela driver starts DMA or firmware
 /// memory is reused: turn off the translation, interrupt remapping, logs and
-/// protected memory regions the firmware left on in each unit. Strict mode
-/// refuses instead; a unit that does not turn off stops the boot.
+/// protected memory regions the firmware left on in each unit, reporting
+/// each once; a unit that does not turn off stops the boot.
 ///
 /// # Safety
 /// CR3 is still the firmware's identity map, which reaches every unit's
 /// registers uncached; only this CPU runs Stela code and no firmware code
 /// touches the units.
-pub(crate) unsafe fn release_firmware_units(units: &Units, strict: bool, tsc_hz: u64) {
+pub(crate) unsafe fn release_firmware_units(units: &Units, tsc_hz: u64) {
     let opt_in = if units.dmar_flags & 4 != 0 {
         " (DMAR asks the OS to keep DMA protection on)"
     } else {
@@ -127,9 +124,6 @@ pub(crate) unsafe fn release_firmware_units(units: &Units, strict: bool, tsc_hz:
                     "UNSUPPORTED host IOMMU {kind} unit {:#x} segment {} left on by the firmware {found:?}{opt_in}: Stela turns it off and host devices DMA untranslated\n",
                     unit.base, unit.segment,
                 ));
-                if strict {
-                    output::fatal("strict mode refuses to turn off the firmware's DMA protection");
-                }
             }
         }
         // SAFETY: forwarded post-EBS exclusivity; no Stela driver runs yet.
