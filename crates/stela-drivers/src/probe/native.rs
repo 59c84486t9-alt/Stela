@@ -241,6 +241,7 @@ pub type IntelWifi = wifi::intel::link::Wifi<
     clippy::result_large_err,
     reason = "a failed attach hands back the owners that must outlive the device"
 )]
+#[cfg(feature = "native-acpi")]
 pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     services: &dyn NativeServices,
     address: Address,
