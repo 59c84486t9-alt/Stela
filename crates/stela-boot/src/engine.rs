@@ -731,6 +731,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         output::fatal("native clock fixture requires one exclusive processor and volatile input");
     }
+    #[cfg(feature = "diagnostics")]
     if options.native_memory_check {
         output::arguments(format_args!(
             "CHECK native-memory heap cpu={heap:#x} physical={:#x} bytes={:#x}\n",
@@ -771,6 +772,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .chain(options.restore_source.iter())
         .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
+    #[cfg(feature = "diagnostics")]
     if let Some(mode) = options.audio_check {
         let audio_handoff = handoff
             .storage
@@ -851,6 +853,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             range.guest, range.bytes, range.host
         ));
     }
+    #[cfg(feature = "diagnostics")]
     if let Some(url) = &options.network_check {
         let Some(Ok(network)) = &host_network else {
             output::fatal("the network check failed")
@@ -985,6 +988,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         handoff.apic_base,
         layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
     );
+    #[cfg(feature = "diagnostics")]
     if options.native_bootstrap_check || options.native_shared_check {
         for processor in executors.processors() {
             // SAFETY: BSP owns its ICR, physical AP/private descriptors ready.
@@ -1687,14 +1691,17 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
     // SAFETY: once on the BSP, with interrupts off and owned native resources.
     // Retain the processor-local state through every native call and handler.
     crate::status::begin("Installing the host processor state");
-    let mut host_owner =
-        unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
+    let host_owner = unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
+    #[cfg(feature = "diagnostics")]
+    let mut host_owner = host_owner;
+    #[cfg(feature = "diagnostics")]
     if options.native_bootstrap_check {
         host::fp_diagnostic::check(&mut host_owner.host())
             .unwrap_or_else(|error| output::fatal(error));
     }
     let apic_hz = host::statistics().apic_hz;
     crate::status::done("");
+    #[cfg(feature = "diagnostics")]
     if options.native_clock_check {
         // SAFETY: original loader capture remains pinned in this actual
         // HostOwner's physmap. Parsing never supplies hardware ownership.
@@ -1716,6 +1723,7 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
             });
         stop_here("bounded native clock fixture complete", 0x10);
     }
+    #[cfg(feature = "diagnostics")]
     if options.native_mmio_check {
         // SAFETY: explicit bounded native diagnostic on the original retained
         // handoff/owner. Success stops before guest entry; permanent mapping
@@ -1934,6 +1942,7 @@ fn start_devices(
             let bsp = native_processors.expect("validated native roster");
             storage_handoff.completion =
                 host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
+            #[cfg(feature = "diagnostics")]
             if options.audio_check.is_some() {
                 // The audio check retains the final slice even after shutdown.
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;

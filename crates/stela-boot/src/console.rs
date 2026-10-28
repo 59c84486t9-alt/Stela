@@ -170,11 +170,13 @@ impl Framebuffer {
     }
 
     /// Pixels per row in memory, at least the width.
+    #[cfg(feature = "diagnostics")]
     pub fn stride(&self) -> usize {
         self.stride
     }
 
     /// The mode's pixel layout, as GOP names it.
+    #[cfg(feature = "diagnostics")]
     pub fn format(&self) -> &'static str {
         match self.encoding {
             Encoding::Bgr => "BGR",
@@ -185,6 +187,7 @@ impl Framebuffer {
 
     /// The same mode with only its top `height` rows, so that text written
     /// to it leaves the rows below for something else.
+    #[cfg(feature = "diagnostics")]
     pub fn top(self, height: usize) -> Self {
         Self {
             height: height.min(self.height),
@@ -203,6 +206,7 @@ impl Framebuffer {
     }
 
     /// The pixel value of a colour in this mode's layout.
+    #[cfg(feature = "diagnostics")]
     pub fn rgb(&self, red: u8, green: u8, blue: u8) -> u32 {
         let (red, green, blue) = (u32::from(red), u32::from(green), u32::from(blue));
         self.encoding.encode((red << 16) | (green << 8) | blue)
@@ -221,6 +225,7 @@ impl Framebuffer {
     }
 
     /// The pixel at (`x`, `y`), which is visible.
+    #[cfg(feature = "diagnostics")]
     pub fn read(&self, x: usize, y: usize) -> u32 {
         assert!(x < self.width && y < self.height, "pixel outside the mode");
         let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *const u32;

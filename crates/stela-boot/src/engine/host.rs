@@ -39,6 +39,7 @@ use stela_runtime::machine::{
     },
 };
 
+#[cfg(feature = "diagnostics")]
 pub(crate) mod fp_diagnostic;
 pub(super) mod local;
 #[cfg(feature = "native-profile")]

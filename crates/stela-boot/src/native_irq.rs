@@ -15,14 +15,17 @@ use stela_drivers::platform::work::Cpu;
 mod context;
 #[allow(dead_code)]
 mod crs;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
 #[allow(dead_code)]
 pub mod ioapic;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod level_diagnostic;
 #[allow(dead_code)]
 pub mod madt;
 #[allow(dead_code)]
 pub(crate) mod root;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod work_diagnostic;
 
 static CONTEXT: context::Context = context::Context::new();
@@ -179,6 +182,7 @@ pub fn dispatch(vector: u8) -> bool {
 /// # Safety
 /// Called only by the genuine existing CPU interrupt handler with IRQs off;
 /// `interrupted_rsp` is Frame.rsp from that entry, not the ISR's current RSP.
+#[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn dispatch_frame(vector: u8, interrupted_rsp: usize) -> bool {
     unsafe { dispatch_entry(vector, Some(interrupted_rsp)) }
 }

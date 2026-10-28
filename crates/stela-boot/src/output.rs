@@ -399,6 +399,7 @@ pub fn disable_firmware_console() {
 }
 
 /// Send every line to the screen as well, for a report that is all detail.
+#[cfg(feature = "diagnostics")]
 pub fn raw_screen() {
     RAW_SCREEN.store(true, Ordering::Relaxed);
 }

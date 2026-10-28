@@ -311,6 +311,10 @@ pub const INSTALL_PIECES_FILE: &str = "install-pieces.bin";
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
     let system = System::parse(text)?;
+    #[cfg(not(feature = "diagnostics"))]
+    if system.diagnostic_option().is_some() {
+        return Err("diagnostic options require a diagnostics build");
+    }
     // Read while the firmware's FAT driver runs; the engine reports a file
     // it cannot use.
     let wifi_key = system

@@ -4,9 +4,11 @@
 //! is distinct from the direct `SYSTEM_MODE` profile's single-agent translation contract.
 pub(crate) mod bootstrap;
 pub(crate) mod canonical;
+#[cfg(feature = "diagnostics")]
 mod context_check;
 pub(crate) mod executor;
 pub(crate) mod firmware;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod kernel_check;
 pub(crate) use stela_boot_core::memory_types;
 pub(crate) mod resources;

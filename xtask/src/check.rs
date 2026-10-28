@@ -52,6 +52,7 @@ pub fn run(fix: bool) -> Result<()> {
         // are checked.
         uefi(["-p", "stela-runtime", "--no-default-features"]),
         uefi(BOOT),
+        uefi([BOOT[0], BOOT[1], "--features", "diagnostics"]),
         // Native GPU hooks are optional while their larger vendor ports are
         // in progress, but their C/Rust ABI and UEFI target still belong to
         // the gate.

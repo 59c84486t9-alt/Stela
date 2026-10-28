@@ -63,7 +63,6 @@ use stela_runtime::pc::{
 };
 use uefi::boot;
 
-pub const OPTION: &[u8] = stela_boot_core::options::HOST_CHECK.as_bytes();
 const BEAT_SECONDS: u64 = 10;
 /// The stop code at `--deadline`.
 const DEADLINE_CODE: u32 = 0x10;

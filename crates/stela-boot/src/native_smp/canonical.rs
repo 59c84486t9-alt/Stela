@@ -33,6 +33,7 @@ pub(crate) type CanonicalMachine<'a, D> =
 /// its shared-window WB CPU aliases for the entire boot. All earlier input
 /// copies have completed; no raw V1 guest or asynchronous producer can access
 /// these bytes after registration. The physical map and controls stay pinned.
+#[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn reserve(
     handoff: &'static Handoff,
     ranges: &[host::RamRange],
@@ -222,6 +223,7 @@ pub(crate) struct Preparation<'host, 'plan, D> {
 /// mappings and synchronous device producers stay pinned for the machine's
 /// lifetime. Guest execution and asynchronous writers begin only after this
 /// constructor returns and their complete platform state has been installed.
+#[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn prepare<'host, D: Devices>(
     preparation: Preparation<'host, '_, D>,
 ) -> Result<CanonicalMachine<'host, D>, &'static str> {
@@ -320,6 +322,7 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
 /// # Safety
 /// `prepare`'s complete closed producer/mount contract remains valid. This is
 /// admitted only after the final platform owner joins its complete graph.
+#[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn run_slice<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,
