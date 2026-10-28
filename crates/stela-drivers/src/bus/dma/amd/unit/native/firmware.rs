@@ -12,6 +12,8 @@ pub(super) struct Admission {
     pub(super) hardware_errors: bool,
     pub(super) policies: Vec<u8>,
     pub(super) coverage: Vec<bool>,
+    /// Each requester whose DMA arrives under another ID, with that ID.
+    pub(super) aliases: Vec<(u16, u16)>,
 }
 
 pub(super) fn admit(
@@ -22,17 +24,22 @@ pub(super) fn admit(
     if inspection.native_firmware() != ivrs.raw() {
         return Err(Error::Firmware);
     }
-    if inspection.profiles().len() != 1
-        || ivrs.units().len() != 1
-        || ivrs.memory_definitions().next().is_some()
-    {
+    if inspection.profiles().len() != 1 {
         return Err(Error::Firmware);
     }
-    let unit = ivrs.units().next().ok_or(Error::Firmware)?;
     let profile = inspection.profiles()[0];
     let address = inspection.address();
     let rid =
         u16::from(address.bus) << 8 | u16::from(address.device) << 3 | u16::from(address.function);
+    // One IVHD per unit; a system with several units has one per function.
+    let unit = ivrs
+        .units()
+        .find(|unit| {
+            unit.id().segment == address.segment
+                && unit.id().device_id == rid
+                && unit.capability_offset() == profile.configuration.capability_offset
+        })
+        .ok_or(Error::Firmware)?;
     if unit.id().segment != address.segment
         || unit.id().device_id != rid
         || unit.capability_offset() != profile.configuration.capability_offset
@@ -86,41 +93,62 @@ pub(super) fn admit(
         .try_reserve_exact(REQUESTERS)
         .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
     coverage.resize(REQUESTERS, false);
+    let mut aliases = Vec::new();
     let mut start = None;
+    // The device-setting flags (INITPass, EIntPass, NMIPass, SysMgt,
+    // Lint0Pass, Lint1Pass) go into each DTE (`entry::Policy`); ATCPermit
+    // stays metadata. A later entry overrides an earlier one, as Linux's
+    // init_iommu_from_acpi applies them.
     for entry in unit.entries() {
-        // ATCPermit is retained metadata, never actual ATS enable. System/IRQ
-        // bypass policies require a wider owner and are deliberately refused.
-        if entry.flags() & !8 != 0 {
-            return Err(Error::Firmware);
-        }
-        let range = match entry.kind {
+        let (range, alias) = match entry.kind {
             DeviceKind::Padding if entry.raw()[1..].iter().all(|byte| *byte == 0) => continue,
-            DeviceKind::Select(id) => Some((id.device_id, id.device_id, entry.flags())),
-            DeviceKind::All if entry.raw()[1..3] == [0, 0] => Some((0, u16::MAX, entry.flags())),
-            DeviceKind::RangeStart {
-                first,
-                policy: RangePolicy::Plain,
-            } => {
-                start = Some((first.device_id, entry.flags()));
+            DeviceKind::NotUsed => continue,
+            DeviceKind::Select(id) | DeviceKind::Extended { requester: id, .. } => {
+                ((id.device_id, id.device_id, entry.flags()), None)
+            }
+            DeviceKind::Hid { requester, .. } => (
+                (requester.device_id, requester.device_id, entry.flags()),
+                None,
+            ),
+            DeviceKind::Alias { requester, target } => (
+                (requester.device_id, requester.device_id, entry.flags()),
+                Some(target.device_id),
+            ),
+            DeviceKind::All if entry.raw()[1..3] == [0, 0] => ((0, u16::MAX, entry.flags()), None),
+            DeviceKind::RangeStart { first, policy } => {
+                let alias = match policy {
+                    RangePolicy::Alias(target) => Some(target.device_id),
+                    RangePolicy::Plain | RangePolicy::Extended(_) => None,
+                };
+                start = Some((first.device_id, entry.flags(), alias));
                 continue;
             }
             DeviceKind::RangeEnd(last) => {
-                let (first, flags) = start.take().ok_or(Error::Firmware)?;
+                let (first, flags, alias) = start.take().ok_or(Error::Firmware)?;
                 if entry.flags() != 0 {
                     return Err(Error::Firmware);
                 }
-                Some((first, last.device_id, flags))
+                ((first, last.device_id, flags), alias)
             }
+            // IOAPIC and HPET entries name interrupt sources, which matter
+            // only to interrupt remapping.
+            DeviceKind::Special { .. } => continue,
             _ => return Err(Error::Firmware),
         };
-        if let Some((first, last, flags)) = range {
-            for rid in usize::from(first)..=usize::from(last) {
-                // No guessed override precedence or duplicate routing authority.
-                if coverage[rid] {
-                    return Err(Error::Firmware);
-                }
-                coverage[rid] = true;
-                policies[rid] = flags;
+        let (first, last, flags) = range;
+        for requester in first..=last {
+            coverage[usize::from(requester)] = true;
+            policies[usize::from(requester)] = flags;
+            aliases.retain(|&(source, _)| source != requester);
+            if let Some(target) = alias.filter(|target| *target != requester) {
+                // The alias carries the source's settings, as Linux's
+                // set_dev_entry_from_acpi gives both.
+                coverage[usize::from(target)] = true;
+                policies[usize::from(target)] = flags;
+                aliases
+                    .try_reserve(1)
+                    .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
+                aliases.push((requester, target));
             }
         }
     }
@@ -143,5 +171,6 @@ pub(super) fn admit(
         hardware_errors: features & (1 << 8) != 0,
         policies,
         coverage,
+        aliases,
     })
 }
