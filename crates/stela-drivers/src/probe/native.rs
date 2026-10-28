@@ -2,6 +2,8 @@
 //! a stopped requester, its DMA domain and owned BAR mappings from the mount.
 //! Among them are the AMD and Intel sensor hubs ([`SensorHub`]).
 use super::{Error, NativeServices, ServiceError};
+#[cfg(feature = "native-acpi")]
+use crate::net::wifi;
 use crate::{
     Clock,
     bus::{
@@ -18,7 +20,7 @@ use crate::{
     net::{
         Link, LinkError, Mac,
         aqtion::{self, Aqtion, MappedRegisters},
-        tg3, wifi,
+        tg3,
     },
     storage::nvme,
 };
