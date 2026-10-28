@@ -50,6 +50,11 @@ impl Code {
         self.bytes.extend(other.bytes);
         self.instructions += other.instructions;
     }
+    /// Remove every byte and instruction.
+    pub(crate) fn clear(&mut self) {
+        self.bytes.clear();
+        self.instructions = 0;
+    }
 }
 
 impl From<Vec<u8>> for Code {
@@ -1365,6 +1370,8 @@ mod tests {
         asm.alu(Alu::Add, Size::Dword, Mem::base(Gpr::Rdi, 0), Gpr::Rax);
         assert_eq!(code.instructions(), 2);
         assert_eq!(*code, [0x89, 0xc8, 0xf0, 0x01, 0x07]);
+        code.clear();
+        assert_eq!((code.len(), code.instructions()), (0, 0));
     }
 
     #[test]
