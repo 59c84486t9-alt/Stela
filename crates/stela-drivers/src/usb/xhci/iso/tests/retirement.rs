@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn acknowledged_endpoint_drop_retains_rings_and_failure_quarantines_every_selected_owner() {
+fn endpoint_retirement_retains_or_quarantines_rings() {
     for failure in [
         None,
         Some(CONFIGURE_ENDPOINT),
@@ -83,7 +83,7 @@ fn acknowledged_endpoint_drop_retains_rings_and_failure_quarantines_every_select
 }
 
 #[test]
-fn silent_cancellation_and_fatal_controller_status_never_release_queued_buffers() {
+fn stalled_cancellation_retains_buffers() {
     for silent in [STOP_ENDPOINT, SET_DEQUEUE] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;

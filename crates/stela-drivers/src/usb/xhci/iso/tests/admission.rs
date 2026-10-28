@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn invalid_descriptor_route_teardown_and_submission_have_no_dma_publication() {
+fn descriptor_route_and_submission_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
@@ -46,7 +46,7 @@ fn invalid_descriptor_route_teardown_and_submission_have_no_dma_publication() {
 }
 
 #[test]
-fn any_xhci_1_0_controller_admits_isochronous_transport() {
+fn xhci_1_0_iso_admission() {
     assert!(Capabilities::new(0x96, 0, 0).admit().is_err());
     for version in [0x100, 0x110, 0x120] {
         Capabilities::new(version, 0, 0).admit().unwrap();

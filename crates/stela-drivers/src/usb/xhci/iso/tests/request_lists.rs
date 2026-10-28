@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn iso_request_list_wraps_using_retained_interval_and_services_each_native_td() {
+fn request_list_wrap_and_service() {
     for context_bytes in [32, 64] {
         let mut backing = vec![0u64; 32 * 1024];
         let base = backing.as_mut_ptr() as u64;
@@ -62,7 +62,7 @@ fn iso_request_list_wraps_using_retained_interval_and_services_each_native_td() 
 }
 
 #[test]
-fn iso_request_list_refuses_entire_cfc_horizon_phase_and_count_before_publication() {
+fn request_list_window_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
@@ -110,7 +110,7 @@ fn iso_request_list_refuses_entire_cfc_horizon_phase_and_count_before_publicatio
 }
 
 #[test]
-fn iso_request_list_uses_retained_next_and_does_not_authorize_later_submission() {
+fn request_list_continuation_and_bounds() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
@@ -158,7 +158,7 @@ fn iso_request_list_uses_retained_next_and_does_not_authorize_later_submission()
 }
 
 #[test]
-fn iso_request_list_refuses_exact_future_ring_collision_even_with_count_capacity() {
+fn request_list_ring_collision() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };

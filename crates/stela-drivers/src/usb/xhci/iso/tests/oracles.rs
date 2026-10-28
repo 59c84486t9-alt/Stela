@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 #[ignore = "requires immutable pinned Linux isochronous helper trace"]
-fn unchanged_linux_iso_context_scheduling_burst_and_terminal_completion() {
+fn xhci_iso_contexts_match_linux() {
     use sha2::{Digest, Sha256};
     let trace = std::fs::read_to_string(
         std::env::var("STELA_XHCI_ISO_ORACLE").expect("path to fresh source oracle trace"),
@@ -110,7 +110,7 @@ fn unchanged_linux_iso_context_scheduling_burst_and_terminal_completion() {
 
 #[test]
 #[ignore = "requires immutable pinned Linux AMD PCI quirk and PLL trace"]
-fn unchanged_linux_actual_amd_pci_profiles_and_saved_smbus_do_not_inherit_legacy_quirks() {
+fn xhci_amd_quirks_match_linux() {
     use sha2::{Digest, Sha256};
     let trace = std::fs::read_to_string(
         std::env::var("STELA_XHCI_AMD_PCI_ORACLE").expect("path to fresh source oracle trace"),

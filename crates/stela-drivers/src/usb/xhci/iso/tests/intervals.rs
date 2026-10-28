@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn explicit_iso_uses_each_actual_ist_encoding_and_supported_endpoint_interval() {
+fn ist_encoding_and_endpoint_intervals() {
     for ist in 0..16 {
         for exponent in 0..=12 {
             let mut backing = vec![0u64; 32 * 1024];
@@ -48,7 +48,7 @@ fn explicit_iso_uses_each_actual_ist_encoding_and_supported_endpoint_interval() 
 }
 
 #[test]
-fn explicit_iso_requires_actual_cfc_for_continuation_and_preserves_asap_fallback() {
+fn cfc_admission_and_asap_fallback() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };

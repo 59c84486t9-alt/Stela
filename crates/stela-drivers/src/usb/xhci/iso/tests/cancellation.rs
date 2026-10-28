@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn cancellation_acknowledges_all_intervals_and_stale_events_before_reuse() {
+fn cancellation_drains_intervals_and_stale_events() {
     for failure in [None, Some(STOP_ENDPOINT), Some(SET_DEQUEUE)] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -50,7 +50,7 @@ fn cancellation_acknowledges_all_intervals_and_stale_events_before_reuse() {
 }
 
 #[test]
-fn occupancy_wrap_schedule_and_descriptor_failures_do_not_overwrite_owned_trbs() {
+fn ring_capacity_and_descriptor_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };

@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn retired_device_iso_ticket_is_pure_before_readiness_and_preserves_current_dma() {
+fn retired_ticket_preserves_current_dma() {
     struct NoAccess;
     impl Registers for NoAccess {
         fn read32(&mut self, _: usize) -> u32 {
@@ -113,7 +113,7 @@ fn retired_device_iso_ticket_is_pure_before_readiness_and_preserves_current_dma(
 }
 
 #[test]
-fn iso_request_list_stale_identity_refuses_before_mmio_or_native_state_changes() {
+fn stale_request_list_identity() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
@@ -155,7 +155,7 @@ fn iso_request_list_stale_identity_refuses_before_mmio_or_native_state_changes()
 }
 
 #[test]
-fn explicit_iso_stale_identity_refuses_before_ring_or_device_access() {
+fn stale_scheduled_identity() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };

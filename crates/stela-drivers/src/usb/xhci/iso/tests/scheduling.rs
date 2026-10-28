@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn explicit_iso_wrap_and_subframe_continuations_service_actual_dma_in_order() {
+fn scheduled_wrap_and_subframes() {
     for context_bytes in [32, 64] {
         let mut backing = vec![0u64; 32 * 1024];
         let base = backing.as_mut_ptr() as u64;
@@ -45,7 +45,7 @@ fn explicit_iso_wrap_and_subframe_continuations_service_actual_dma_in_order() {
 }
 
 #[test]
-fn explicit_iso_refuses_bad_windows_phases_alignment_and_queue_gaps_without_effects() {
+fn scheduled_window_and_phase_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
@@ -108,7 +108,7 @@ fn explicit_iso_refuses_bad_windows_phases_alignment_and_queue_gaps_without_effe
 }
 
 #[test]
-fn explicit_iso_late_continuation_refuses_but_asap_retains_missed_service_semantics() {
+fn late_continuation_and_asap_missed_service() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };

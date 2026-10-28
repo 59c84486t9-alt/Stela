@@ -3174,7 +3174,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_superspeed_iso_burst_counts_and_large_esit_mult",
+    "test": "xhci_superspeed_bursts_match_linux",
     "source": "crates/stela-drivers/src/usb/xhci/iso/tests/superspeed.rs",
     "kind": "oracle",
     "inputs": [
@@ -3184,7 +3184,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_iso_context_scheduling_burst_and_terminal_completion",
+    "test": "xhci_iso_contexts_match_linux",
     "source": "crates/stela-drivers/src/usb/xhci/iso/tests/oracles.rs",
     "kind": "oracle",
     "inputs": [
@@ -3194,7 +3194,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_actual_amd_pci_profiles_and_saved_smbus_do_not_inherit_legacy_quirks",
+    "test": "xhci_amd_quirks_match_linux",
     "source": "crates/stela-drivers/src/usb/xhci/iso/tests/oracles.rs",
     "kind": "oracle",
     "inputs": [

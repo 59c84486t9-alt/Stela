@@ -10,7 +10,7 @@ impl DmaAllocator for Exhausted {
 }
 
 #[test]
-fn repeated_drop_and_configure_preserves_ring_cursor_without_more_dma_allocations() {
+fn reconfiguration_reuses_ring_cursor() {
     for context_bytes in [32, 64] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -88,7 +88,7 @@ fn repeated_drop_and_configure_preserves_ring_cursor_without_more_dma_allocation
 }
 
 #[test]
-fn failed_prepublication_allocation_retains_reclaimed_rings_for_retry() {
+fn allocation_failure_retains_reclaimed_rings() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
@@ -127,7 +127,7 @@ fn failed_prepublication_allocation_retains_reclaimed_rings_for_retry() {
 }
 
 #[test]
-fn rejected_or_unacknowledged_replacement_never_returns_its_ring_to_the_cache() {
+fn replacement_failure_quarantines_ring() {
     for silent in [false, true] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -182,7 +182,7 @@ fn rejected_or_unacknowledged_replacement_never_returns_its_ring_to_the_cache() 
 }
 
 #[test]
-fn endpoint_preflight_refuses_foreign_owners_without_commands_or_ring_mutation() {
+fn endpoint_owner_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };

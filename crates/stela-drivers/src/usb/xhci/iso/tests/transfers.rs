@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn routed_usb2_and_superspeed_iso_complete_actual_retained_ring_payloads() {
+fn routed_payload_completion() {
     for speed in [FULL_SPEED, HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS] {
         let mut backing = vec![0u64; 256 * 1024];
         let base = backing.as_mut_ptr() as u64;
@@ -74,7 +74,7 @@ fn routed_usb2_and_superspeed_iso_complete_actual_retained_ring_payloads() {
 }
 
 #[test]
-fn queued_native_iso_contexts_and_scheduling_complete_actual_dma_for_both_directions() {
+fn queued_dma_contexts_and_schedules() {
     for speed in [FULL_SPEED, HIGH_SPEED] {
         for context_bytes in [32, 64] {
             for cfc in [false, true] {

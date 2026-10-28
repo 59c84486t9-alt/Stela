@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 #[ignore = "requires fresh pinned Linux STELA_XHCI_SS_ISO_ORACLE directory; authored UNRUN"]
-fn unchanged_linux_superspeed_iso_burst_counts_and_large_esit_mult() {
+fn xhci_superspeed_bursts_match_linux() {
     use sha2::{Digest, Sha256};
     let directory = std::path::PathBuf::from(std::env::var("STELA_XHCI_SS_ISO_ORACLE").unwrap());
     let trace = std::fs::read(directory.join("trace.txt")).unwrap();
@@ -56,7 +56,7 @@ fn unchanged_linux_superspeed_iso_burst_counts_and_large_esit_mult() {
 }
 
 #[test]
-fn superspeed_service_bursts_and_lec_contexts_cover_all_standard_mult_values() {
+fn superspeed_mult_and_lec_fields() {
     for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
         for burst in 0..=15u8 {
             for mult in 0..=2u8 {

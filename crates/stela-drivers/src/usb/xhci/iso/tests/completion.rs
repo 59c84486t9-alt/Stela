@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn packet_failures_are_terminal_but_invalid_residual_and_transport_faults_retain_dma() {
+fn packet_and_transport_failures() {
     for (code, status) in [
         (23, IsoStatus::MissedService),
         (4, IsoStatus::Transaction),
@@ -35,7 +35,7 @@ fn packet_failures_are_terminal_but_invalid_residual_and_transport_faults_retain
 }
 
 #[test]
-fn ring_xruns_are_ignored_and_missed_service_skips_earlier_tds() {
+fn ring_xrun_and_missed_service_events() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
@@ -87,7 +87,7 @@ fn ring_xruns_are_ignored_and_missed_service_skips_earlier_tds() {
 }
 
 #[test]
-fn transferless_errors_stalls_and_incompatible_slots_never_release_an_arbitrary_ticket() {
+fn incompatible_completions_retain_tickets() {
     for code in [6, 22, 36, 99] {
         let mut backing = vec![0u64; 32 * 1024];
         let start = backing.as_mut_ptr() as u64;
