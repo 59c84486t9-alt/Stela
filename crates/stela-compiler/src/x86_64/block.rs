@@ -1,5 +1,5 @@
 //! Block control transfers: every branch returns to the dispatcher.
-use crate::x86_64::asm::{Asm, Code, Gpr};
+use crate::x86_64::asm::{Asm, Code, Cond, Gpr, Size};
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
@@ -7,7 +7,7 @@ pub(crate) use super::region::ResidentLoopPlan;
 
 use crate::{
     GuestAddress, NativeBlock,
-    aarch64::{Instruction, Operation, Register, Width},
+    aarch64::{Instruction, Operation, Register},
     block::{ExitKind, Terminator},
 };
 
@@ -34,21 +34,19 @@ pub(super) fn direct_exit_with(asm: &mut Asm, target: GuestAddress, kind: ExitKi
 
 fn conditional_exit(
     code: &mut Code,
-    opcode: Option<u8>,
+    taken: Option<Cond>,
     target: GuestAddress,
     fallthrough: GuestAddress,
 ) {
-    if let Some(opcode) = opcode {
-        code.extend([0x0f, opcode]);
-        let fixup = code.len();
-        code.extend([0; 4]);
-        direct_exit(code, fallthrough, ExitKind::Fallthrough);
+    let mut asm = code.asm();
+    if let Some(taken) = taken {
+        let branch = asm.jcc(taken);
+        direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
         // The taken branch skips the complete fallthrough exit. Both paths
         // leave saved NZCV untouched regardless of host predicate evaluation.
-        let relative = (code.len() - fixup - 4) as i32;
-        code[fixup..fixup + 4].copy_from_slice(&relative.to_le_bytes());
+        asm.bind(branch);
     }
-    direct_exit(code, target, ExitKind::Direct);
+    direct_exit_with(&mut asm, target, ExitKind::Direct);
 }
 
 #[cfg(test)]
@@ -392,7 +390,7 @@ fn emit_single(
     let rax = super::rax_after(&instruction.operation);
     debug_assert!(match rax {
         super::Rax::Unknown => true,
-        super::Rax::Nzcv => code.ends_with(&STORE_EAX_NZCV),
+        super::Rax::Nzcv => code.ends_with(&nzcv_store()),
         super::Rax::Guest(register) =>
             super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
     });
@@ -487,9 +485,8 @@ impl OutOfLine {
                 .push((place(site, inline), place(target, inline)));
         }
         self.code.extend(&code[split.cold..]);
-        self.code.push(JMP_REL32);
-        self.open = Some((self.code.len(), inline_end));
-        self.code.extend([0; REL32_BYTES]);
+        let back = self.code.asm().jmp();
+        self.open = Some((back.offset(), inline_end));
         code.truncate(inline_end);
     }
 
@@ -502,14 +499,10 @@ impl OutOfLine {
         if self.code.is_empty() {
             return;
         }
-        code.push(JMP_REL32);
-        code.extend(
-            i32::try_from(self.code.len())
-                .expect("bounded block")
-                .to_le_bytes(),
-        );
+        let over = code.asm().jmp();
         let base = code.len();
-        code.extend(&self.code);
+        code.append(self.code);
+        code.asm().bind(over);
         let at = |place| match place {
             Place::Inline(offset) => offset,
             Place::OutOfLine(offset) => base + offset,
@@ -528,10 +521,11 @@ fn target_of(code: &[u8], site: usize) -> usize {
 
 /// `mov [rdi+GuestState.nzcv],eax`, which ends each emission after which
 /// RAX holds [`super::Rax::Nzcv`].
-const STORE_EAX_NZCV: [u8; 6] = {
-    let offset = (core::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes();
-    [0x89, 0x87, offset[0], offset[1], offset[2], offset[3]]
-};
+fn nzcv_store() -> Code {
+    let mut code = Code::new();
+    super::store_nzcv(&mut code.asm());
+    code
+}
 /// The direct exits to static successors that [`emit_terminal`] ended
 /// `code` with: the target's last, after a conditional branch's fallthrough.
 pub(crate) fn successor_exits(
@@ -651,19 +645,18 @@ fn emit_terminal(
                 load(code, *source);
                 if *kind == ExitKind::Call {
                     // Capture BLR X30's target before LR is overwritten.
-                    code.extend([0x48, 0x89, 0xc1]); // mov rcx,rax
+                    code.asm().mov(Size::Qword, Gpr::Rcx, Gpr::Rax);
                     super::immediate(code, fallthrough.0);
                     super::store(code, Register::X(30));
-                    code.extend([0x48, 0x89, 0xc8]); // mov rax,rcx
+                    code.asm().mov(Size::Qword, Gpr::Rax, Gpr::Rcx);
                 }
                 exit_kind(code, *kind);
             }
             Terminator::Branch(operation) => match *operation {
                 Operation::Branch { target } => direct_exit(code, target, ExitKind::Direct),
                 Operation::BranchCondition { target, condition } => {
-                    let opcode = super::condition_holds(code, condition, rax == super::Rax::Nzcv)
-                        .map(|cond| 0x80 | cond as u8);
-                    conditional_exit(code, opcode, target, fallthrough);
+                    let taken = super::condition_holds(code, condition, rax == super::Rax::Nzcv);
+                    conditional_exit(code, taken, target, fallthrough);
                 }
                 Operation::BranchZero {
                     target,
@@ -672,16 +665,8 @@ fn emit_terminal(
                     nonzero,
                 } => {
                     load(code, source);
-                    if width == Width::X64 {
-                        code.push(0x48);
-                    }
-                    code.extend([0x85, 0xc0]); // test (e/r)ax,(e/r)ax
-                    conditional_exit(
-                        code,
-                        Some(if nonzero { 0x85 } else { 0x84 }),
-                        target,
-                        fallthrough,
-                    );
+                    let taken = super::test_zero(code, width, nonzero);
+                    conditional_exit(code, Some(taken), target, fallthrough);
                 }
                 Operation::BranchBit {
                     target,
@@ -690,13 +675,8 @@ fn emit_terminal(
                     nonzero,
                 } => {
                     load(code, source);
-                    code.extend([0x48, 0x0f, 0xba, 0xe0, bit]); // bt rax,bit
-                    conditional_exit(
-                        code,
-                        Some(if nonzero { 0x82 } else { 0x83 }),
-                        target,
-                        fallthrough,
-                    );
+                    let taken = super::test_bit(code, bit, nonzero);
+                    conditional_exit(code, Some(taken), target, fallthrough);
                 }
                 _ => unreachable!("block decoder restricts branch terminators"),
             },
@@ -712,6 +692,26 @@ mod tests {
     use crate::block::{SynchronousTrap, TrapKind};
     use alloc::vec;
     use alloc::vec::Vec;
+
+    /// A conditional exit's branch skips its fallthrough exit, and each of
+    /// its instructions counts.
+    #[test]
+    fn conditional_exits_branch_over_the_fallthrough_exit() {
+        let mut code = Code::new();
+        conditional_exit(
+            &mut code,
+            Some(Cond::Ne),
+            GuestAddress(0x2000),
+            GuestAddress(0x1004),
+        );
+        let fallthrough =
+            super::super::chain::direct_exit(GuestAddress(0x1004), ExitKind::Fallthrough);
+        let taken = super::super::chain::direct_exit(GuestAddress(0x2000), ExitKind::Direct);
+        assert_eq!(code[..6], [0x0f, 0x85, 16, 0, 0, 0]);
+        assert_eq!(code[6..22], fallthrough);
+        assert_eq!(code[22..], taken);
+        assert_eq!(code.instructions(), 7);
+    }
 
     /// add x10, x10, #4; cmp x10, #0x600; b.ne: the CMP takes X10 from
     /// RAX where the ADD stored it, and the branch tests the NZCV word the
