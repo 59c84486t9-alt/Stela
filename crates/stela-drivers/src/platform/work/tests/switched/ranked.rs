@@ -109,12 +109,19 @@ struct Ranked {
     mode: u64,
 }
 impl Ranked {
+    /// # Safety
+    /// setup must have published the live pinned Executor runtime, and that
+    /// Executor must remain retained while this reference is used.
     unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
+        // SAFETY: setup wrote this pointer from the already pinned Runtime before
+        // callback admission. The Executor retains that allocation through every use here.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<16>))
         }
     }
     fn bind(&self, index: usize) {
+        // SAFETY: setup published this pinned Runtime pointer before callback admission.
+        // The fixture is used while its Executor is live, including all suspended callbacks.
         let r = unsafe { self.runtime() };
         let wake = r.bind_current(self.bindings[index].clone()).unwrap();
         *self.bindings[index].handle.lock().unwrap() = Some(wake.clone());
@@ -130,20 +137,28 @@ impl Ranked {
     fn rank(&self, index: usize, base: BasePolicy, effective: u8, head: bool) {
         let handle = self.handle(index);
         let before = handle.snapshot().unwrap();
-        // SAFETY: direct hosted scheduler-boundary model; there is no C
-        // task or Linux PI claim. This mirrors a serialized old/new foreign
-        // priority commit solely to exercise the real Runtime dispatch.
+        // SAFETY: This same-thread scheduler fixture has no foreign C priority state.
+        // The snapshots are serialized here; invalid/closed cases are checked before updates.
         unsafe { handle.update(before, Snapshot { base, effective }, head) }.unwrap();
     }
     fn event(&self, value: u32) {
         self.events.lock().unwrap().push(value);
     }
 }
+/// # Safety
+/// p must be the queue-retained Arc pointer for Ranked; the returned borrow
+/// must end before that owner can be released.
 unsafe fn ranked<'a>(p: *mut c_void) -> &'a Ranked {
+    // SAFETY: The caller supplies the aligned Arc::as_ptr allocation of this fixture
+    // type. Its queue retains the Arc while callbacks use this shared reference.
     unsafe { &*p.cast::<Ranked>() }
 }
 unsafe extern "C" fn timer(p: *mut c_void) {
+    // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
+    // The queue retains that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
+    // SAFETY: setup published this pinned Runtime pointer before callback admission.
+    // The fixture is used while its Executor is live, including all suspended callbacks.
     let r = unsafe { f.runtime() };
     f.bind(0);
     let domain = f.domain.lock().unwrap().as_ref().unwrap().clone();
@@ -152,6 +167,8 @@ unsafe extern "C" fn timer(p: *mut c_void) {
     let h = f.handle(0);
     let normal = h.snapshot().unwrap();
     assert_eq!(
+        // SAFETY: This same-thread scheduler fixture has no foreign C priority state.
+        // The snapshots are serialized here; invalid/closed cases are checked before updates.
         unsafe {
             h.update(
                 normal,
@@ -170,12 +187,18 @@ unsafe extern "C" fn timer(p: *mut c_void) {
         base: BasePolicy::Normal,
         effective: 0,
     };
+    // SAFETY: This same-thread scheduler fixture has no foreign C priority state.
+    // The snapshots are serialized here; invalid/closed cases are checked before updates.
     unsafe { h.update(normal, boosted, false) }.unwrap();
+    // SAFETY: This same-thread scheduler fixture has no foreign C priority state.
+    // The snapshots are serialized here; invalid/closed cases are checked before updates.
     unsafe { h.update(boosted, normal, false) }.unwrap();
     while !f.stop.load(Ordering::Acquire) {
         if let Some(batch) = domain.begin(r).unwrap() {
             // SAFETY: generic fixture consumer only; no original C timers
             // or IRQ-work storage is admitted by this scheduler test.
+            // SAFETY: begin returned this batch for the current service continuation.
+            // This generic fixture has no C timer/IRQ storage requiring a foreign callback.
             unsafe { domain.finish(r, batch, None) }.unwrap();
         }
         f.bindings[0].blocked.store(true, Ordering::Release);
@@ -183,7 +206,11 @@ unsafe extern "C" fn timer(p: *mut c_void) {
     }
 }
 unsafe extern "C" fn low(p: *mut c_void) {
+    // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
+    // The queue retains that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
+    // SAFETY: setup published this pinned Runtime pointer before callback admission.
+    // The fixture is used while its Executor is live, including all suspended callbacks.
     let r = unsafe { f.runtime() };
     f.bind(1);
     r.yield_now().unwrap();
@@ -206,6 +233,8 @@ unsafe extern "C" fn low(p: *mut c_void) {
         (normal, true),
     ] {
         assert_eq!(
+            // SAFETY: This same-thread scheduler fixture has no foreign C priority state.
+            // The snapshots are serialized here; invalid/closed cases are checked before updates.
             unsafe { f.handle(1).update(normal, after, head) },
             Err(WorkError::Unavailable)
         );
@@ -249,8 +278,12 @@ unsafe extern "C" fn low(p: *mut c_void) {
     f.rank(1, BasePolicy::Normal, 120, false);
 }
 unsafe extern "C" fn medium(p: *mut c_void) {
+    // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
+    // The queue retains that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
     f.bind(2);
+    // SAFETY: setup published this pinned Runtime pointer before callback admission.
+    // The fixture is used while its Executor is live, including all suspended callbacks.
     unsafe { f.runtime() }.yield_now().unwrap();
     if f.mode == 2 {
         f.event(21);
@@ -259,8 +292,12 @@ unsafe extern "C" fn medium(p: *mut c_void) {
     }
     if f.mode == 1 {
         f.event(11);
+        // SAFETY: setup published this pinned Runtime pointer before callback admission.
+        // The fixture is used while its Executor is live, including all suspended callbacks.
         unsafe { f.runtime() }.reschedule().unwrap();
         f.event(12);
+        // SAFETY: setup published this pinned Runtime pointer before callback admission.
+        // The fixture is used while its Executor is live, including all suspended callbacks.
         unsafe { f.runtime() }.yield_now().unwrap();
         f.event(14);
         f.rank(2, BasePolicy::Normal, 120, false);
@@ -270,7 +307,11 @@ unsafe extern "C" fn medium(p: *mut c_void) {
     f.rank(2, BasePolicy::Normal, 120, false);
 }
 unsafe extern "C" fn high(p: *mut c_void) {
+    // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
+    // The queue retains that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
+    // SAFETY: setup published this pinned Runtime pointer before callback admission.
+    // The fixture is used while its Executor is live, including all suspended callbacks.
     let r = unsafe { f.runtime() };
     f.bind(3);
     r.yield_now().unwrap();
@@ -292,6 +333,8 @@ unsafe extern "C" fn high(p: *mut c_void) {
     f.rank(3, BasePolicy::Normal, 120, false);
 }
 unsafe extern "C" fn stale(p: *mut c_void) {
+    // SAFETY: p is the matching fixture Arc pointer submitted to this callback.
+    // The queue retains that owner across every suspension and callback return.
     let f = unsafe { ranked(p) };
     assert_eq!(f.handle(1).snapshot(), Err(WorkError::Closed));
     let before = Snapshot {
@@ -299,10 +342,14 @@ unsafe extern "C" fn stale(p: *mut c_void) {
         effective: 120,
     };
     assert_eq!(
+        // SAFETY: This same-thread scheduler fixture has no foreign C priority state.
+        // The snapshots are serialized here; invalid/closed cases are checked before updates.
         unsafe { f.handle(1).update(before, before, false) },
         Err(WorkError::Closed)
     );
     assert_eq!(
+        // SAFETY: setup published this pinned Runtime pointer before callback admission.
+        // The fixture is used while its Executor is live, including all suspended callbacks.
         unsafe { f.runtime() }
             .scheduling_handle()
             .unwrap()
@@ -335,8 +382,12 @@ fn roundtrip(mode: u64) {
         stop: AtomicBool::new(false),
         mode,
     });
+    // SAFETY: The queue retains the fixture Arc and same-thread CpuModel. setup stores
+    // the pinned runtime pointer before admitting any callback that can read it.
     let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicU64::new(0));
+    // SAFETY: The hosted x86-64 process has x87/SSE enabled. read_controls only
+    // snapshots their control registers into local storage; it performs no privileged access.
     let controls = unsafe { context::read_controls() };
     let executor = Executor {
         runtime: ManuallyDrop::new(
@@ -359,9 +410,13 @@ fn roundtrip(mode: u64) {
     r.attach_service_domain(domain.clone()).unwrap();
     *f.domain.lock().unwrap() = Some(domain.clone());
     let p = Arc::as_ptr(&f) as *mut c_void;
+    // SAFETY: The service callback receives the queue-retained fixture Arc pointer.
+    // The pinned executor and its dedicated service stack survive until service join.
     let service = unsafe { r.start_service(timer, p) }.unwrap();
     assert!(r.step().unwrap());
     let jobs = [low, medium, high]
+        // SAFETY: The callback and context identify this queue's retained fixture Arc.
+        // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
         .map(|callback| unsafe { r.queue().execute(Kind::General, callback, p) }.unwrap());
     let mut attempts = 0;
     while jobs
@@ -380,6 +435,8 @@ fn roundtrip(mode: u64) {
             _ => std::vec![20, 21, 22],
         }
     );
+    // SAFETY: The callback and context identify this queue's retained fixture Arc.
+    // The owning Executor keeps its pinned runtime/stacks alive while the job is suspended.
     let reuse = unsafe { r.queue().execute(Kind::General, stale, p) }.unwrap();
     while !r.queue().completed(reuse).unwrap() {
         assert!(r.step().unwrap());
@@ -389,9 +446,13 @@ fn roundtrip(mode: u64) {
     while !r.queue().completed(service).unwrap() {
         assert!(r.step().unwrap());
     }
+    // SAFETY: stop_producers ran and the service ticket completed above. No
+    // external producer can publish more work; this test still retains the domain Arc.
     unsafe { domain.retire() }.unwrap();
     for binding in &f.bindings {
         let retained =
+            // SAFETY: Binding storage is retained by the fixture on the dispatcher thread.
+            // The runtime checks completed/pending state before returning or releasing that owner.
             unsafe { r.detach_binding(ContextId(binding.id.load(Ordering::Acquire))) }.unwrap();
         drop(retained);
         binding.handle.lock().unwrap().take();
@@ -404,6 +465,8 @@ fn roundtrip(mode: u64) {
     });
     f.domain.lock().unwrap().take();
     r.queue().close().unwrap();
+    // SAFETY: This test has no asynchronous producers and calls on the dispatcher.
+    // Completed jobs/bindings permit retirement; pending continuations keep their owners.
     unsafe { r.retire() }.unwrap();
     drop(domain);
     drop(executor);

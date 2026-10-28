@@ -18,9 +18,9 @@ impl CpuModel {
         })
     }
 }
-// SAFETY: explicit hosted exclusion/flags model only. It never installs a
-// native provider or attests privileged CLI/IRQ behavior; QEMU tests bind
-// those separately. Real x86 continuations use actual OS-owned VM stacks.
+// SAFETY: the private hosted fixture checks its creating ThreadId before queue
+// access. Atomics model IF/IRQ state and ticks advance during calls. Context
+// switches use OS-owned guarded stacks through the hosted test constructor.
 unsafe impl Cpu for CpuModel {
     fn check_cpu(&self) -> Result<(), WorkError> {
         if thread::current().id() == self.thread {
@@ -57,11 +57,19 @@ unsafe extern "C" fn noop(_: *mut c_void) {}
 fn admission_bounds_and_flag_restore() {
     let cpu = CpuModel::new();
     let drops = Arc::new(AtomicU64::new(0));
+    // SAFETY: CpuModel binds this queue to the current host thread. noop is static
+    // code and ignores its null context; the retained owner covers its full lifetime.
     let queue = unsafe { Queue::<2>::new(cpu.clone(), Arc::new(Owner(drops.clone()))) }.unwrap();
     cpu.irq.store(true, Ordering::Release);
+    // SAFETY: noop is static and never dereferences its null context. Queue Arcs
+    // and CpuModel remain retained on this host thread for the admitted jobs.
     let a = unsafe { queue.execute(Kind::Notify, noop, core::ptr::null_mut()) }.unwrap();
+    // SAFETY: noop is static and never dereferences its null context. Queue Arcs
+    // and CpuModel remain retained on this host thread for the admitted jobs.
     let b = unsafe { queue.execute(Kind::General, noop, core::ptr::null_mut()) }.unwrap();
     assert_eq!(
+        // SAFETY: noop is static and never dereferences its null context. Queue Arcs
+        // and CpuModel remain retained on this host thread for the admitted jobs.
         unsafe { queue.execute(Kind::General, noop, core::ptr::null_mut()) },
         Err(WorkError::Full)
     );
@@ -72,10 +80,14 @@ fn admission_bounds_and_flag_restore() {
     assert!(!queue.completed(a).unwrap());
     assert!(!queue.completed(b).unwrap());
     assert_eq!(
+        // SAFETY: noop is static and never dereferences its null context. Queue Arcs
+        // and CpuModel remain retained on this host thread for the admitted jobs.
         unsafe { queue.execute(Kind::General, noop, core::ptr::null_mut()) },
         Err(WorkError::Closed)
     );
     cpu.irq.store(false, Ordering::Release);
+    // SAFETY: No asynchronous producers or active executor exist in this queue-only
+    // fixture. Pending jobs retain their owners; an empty closed queue can retire.
     assert_eq!(unsafe { queue.retire() }, Err(WorkError::Pending));
     let foreign = queue.clone();
     assert_eq!(
@@ -91,8 +103,14 @@ fn admission_bounds_and_flag_restore() {
 fn ticket_identity_and_sequence_exhaustion() {
     let cpu = CpuModel::new();
     let owner: RetainedOwner = Arc::new(());
+    // SAFETY: CpuModel binds this queue to the current host thread. noop is static
+    // code and ignores its null context; the retained owner covers its full lifetime.
     let a = unsafe { Queue::<2>::new(cpu.clone(), owner.clone()) }.unwrap();
+    // SAFETY: CpuModel binds this queue to the current host thread. noop is static
+    // code and ignores its null context; the retained owner covers its full lifetime.
     let b = unsafe { Queue::<2>::new(cpu, owner) }.unwrap();
+    // SAFETY: noop is static and never dereferences its null context. Queue Arcs
+    // and CpuModel remain retained on this host thread for the admitted jobs.
     let ticket = unsafe { a.execute(Kind::General, noop, core::ptr::null_mut()) }.unwrap();
     assert_eq!(b.completed(ticket), Err(WorkError::InvalidTicket));
     {
@@ -100,11 +118,15 @@ fn ticket_identity_and_sequence_exhaustion() {
         g.state().next = u64::MAX;
     }
     assert_eq!(
+        // SAFETY: noop is static and never dereferences its null context. Queue Arcs
+        // and CpuModel remain retained on this host thread for the admitted jobs.
         unsafe { b.execute(Kind::General, noop, core::ptr::null_mut()) },
         Err(WorkError::Exhausted)
     );
     assert!(b.lock().unwrap().state().jobs.iter().all(Option::is_none));
     b.close().unwrap();
+    // SAFETY: No asynchronous producers or active executor exist in this queue-only
+    // fixture. Pending jobs retain their owners; an empty closed queue can retire.
     unsafe { b.retire() }.unwrap();
     drop((a, b));
 }
