@@ -1,5 +1,5 @@
 //! The polled descriptor rings the PCI Ethernet drivers share: sixteen-byte
-//! descriptors, 32 unless a driver asks for more, with one 2 KiB DMA buffer
+//! descriptors, 256 unless a driver asks otherwise, with one 2 KiB DMA buffer
 //! each, the next descriptor the driver fills and, for transmit, the oldest
 //! one the controller still owns.
 use crate::{
@@ -9,12 +9,18 @@ use crate::{
 };
 use core::sync::atomic::{Ordering, fence};
 
-pub(crate) const DESCRIPTORS: usize = 32;
+/// Linux e1000e's and igb's default ring length (`E1000_DEFAULT_RXD`,
+/// `IGB_DEFAULT_RXD`): a polled host drains less often than an interrupt
+/// handler, and a short ring drops frames that arrive meanwhile.
+pub(crate) const DESCRIPTORS: usize = 256;
 pub(crate) const DESCRIPTOR: usize = 16;
 pub(crate) const BUFFER: usize = 2048;
 const PAGE: usize = 4096;
 /// How long a transmit waits for the controller to hand a descriptor back.
 const TRANSMIT_WAIT_US: u64 = 100_000;
+/// Receive descriptors handed back per tail write, as Linux's
+/// `E1000_RX_BUFFER_WRITE`: the tail is an MMIO write a hypervisor traps.
+pub(crate) const RECEIVE_BATCH: usize = 16;
 
 pub(crate) struct Ring {
     pub(crate) descriptors: DmaBuffer,
@@ -25,6 +31,10 @@ pub(crate) struct Ring {
     pub(crate) next: usize,
     /// The oldest transmit descriptor the controller has not written back.
     pub(crate) clean: usize,
+    /// Receive descriptors handed back since the tail last moved, and the
+    /// last of them.
+    unposted: usize,
+    offered: usize,
 }
 
 impl Ring {
@@ -56,6 +66,8 @@ impl Ring {
             count,
             next: 0,
             clean: 0,
+            unposted: 0,
+            offered: 0,
         })
     }
 
@@ -118,11 +130,32 @@ impl Ring {
         self.reclaim(&done) || clock.wait(TRANSMIT_WAIT_US, || self.reclaim(&done))
     }
 
+    /// Receive descriptor `index` went back to the controller: the tail to
+    /// write, once per [`RECEIVE_BATCH`] of them.
+    pub(crate) fn offered(&mut self, index: usize) -> Option<u32> {
+        self.offered = index;
+        self.unposted += 1;
+        (self.unposted >= RECEIVE_BATCH).then(|| self.post())
+    }
+
+    /// The tail covering every receive descriptor handed back, when one
+    /// has not been published: the ring ran dry, so the controller gets
+    /// them all.
+    pub(crate) fn idle(&mut self) -> Option<u32> {
+        (self.unposted != 0).then(|| self.post())
+    }
+
+    fn post(&mut self) -> u32 {
+        self.unposted = 0;
+        self.offered as u32
+    }
+
     /// Forget every descriptor, once the controller's queue is stopped and
     /// its head and tail are back at zero.
     pub(crate) fn reset(&mut self) {
         self.descriptors.bytes_mut().fill(0);
         self.next = 0;
         self.clean = 0;
+        self.unposted = 0;
     }
 }

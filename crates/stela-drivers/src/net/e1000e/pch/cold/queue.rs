@@ -743,6 +743,12 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Link for Ethernet<R, D> {
             let base = index * DESCRIPTOR;
             let status = self.receive.descriptors.read::<u32>(base + 8);
             if status & RX_DONE == 0 {
+                if let Some(tail) = self.receive.idle() {
+                    fence(Ordering::SeqCst);
+                    if let Err(error) = self.controller.write(RDT, tail) {
+                        return Err(self.error(error));
+                    }
+                }
                 return Ok(None);
             }
             fence(Ordering::Acquire);
@@ -764,13 +770,21 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Link for Ethernet<R, D> {
             };
             self.discard_rx = !eop;
             self.offer(index);
-            fence(Ordering::SeqCst);
-            if let Err(error) = self.controller.write(RDT, index as u32) {
-                return Err(self.error(error));
+            if let Some(tail) = self.receive.offered(index) {
+                fence(Ordering::SeqCst);
+                if let Err(error) = self.controller.write(RDT, tail) {
+                    return Err(self.error(error));
+                }
             }
             self.next_rx = (index + 1) % DESCRIPTORS;
             if frame.is_some() {
                 return Ok(frame);
+            }
+        }
+        if let Some(tail) = self.receive.idle() {
+            fence(Ordering::SeqCst);
+            if let Err(error) = self.controller.write(RDT, tail) {
+                return Err(self.error(error));
             }
         }
         Ok(None)
@@ -794,7 +808,7 @@ pub(super) mod tests {
     }
     impl Memory {
         fn new() -> Self {
-            let mut ram = vec![0u128; (256 * 1024 + 4096) / 16];
+            let mut ram = vec![0u128; (4096 * 1024 + 4096) / 16];
             let start = ram.as_mut_ptr() as u64;
             // SAFETY: exclusively owned native test RAM, used only by the
             // synchronous software device model while this owner is alive.
@@ -1163,11 +1177,18 @@ pub(super) mod tests {
                         assert_eq!(net.next_tx, 0);
                     }
                     1 => {
-                        inject(&mut net, 0, RX_DONE | RX_EOP, 64, 0x44);
+                        // The batch's last frame carries the RDT store.
+                        let last = crate::net::ring::RECEIVE_BATCH - 1;
+                        for index in 0..=last {
+                            inject(&mut net, index, RX_DONE | RX_EOP, 64, 0x44);
+                        }
+                        for _ in 0..last {
+                            assert!(net.receive().unwrap().is_some());
+                        }
                         let at = state.borrow().accesses + 2;
                         state.borrow_mut().fail_at = Some(at);
                         assert!(net.receive().is_err());
-                        assert_eq!(net.next_rx, 0);
+                        assert_eq!(net.next_rx, last);
                     }
                     2 => {
                         state.borrow_mut().master_busy = 10_000;

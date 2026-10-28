@@ -436,6 +436,10 @@ impl Link for Igc {
             let status: u32 = self.receive.descriptors.read(base + 8);
             let length: u16 = self.receive.descriptors.read(base + 12);
             let Some(frame) = received(status, length) else {
+                if let Some(tail) = self.receive.idle() {
+                    fence(Ordering::SeqCst);
+                    self.device.write32(RDT, tail);
+                }
                 return Ok(None);
             };
             let discarded = self.discarding || status & RX_EOP == 0;
@@ -445,8 +449,10 @@ impl Link for Igc {
                 .map(|length| self.receive.buffer(index)[..length].to_vec());
             advanced::offer_receive(&mut self.receive, index);
             self.receive.advance();
-            fence(Ordering::SeqCst);
-            self.device.write32(RDT, index as u32);
+            if let Some(tail) = self.receive.offered(index) {
+                fence(Ordering::SeqCst);
+                self.device.write32(RDT, tail);
+            }
             if frame.is_some() {
                 return Ok(frame);
             }
@@ -676,7 +682,10 @@ mod tests {
                 .descriptors
                 .write(index * DESCRIPTOR + 12, frame.len() as u16);
             assert_eq!(net.receive().unwrap(), Some(frame));
-            assert_eq!(registers[RDT / 4], index as u32);
+            // Linux's IGC_RX_BUFFER_WRITE: one tail write per sixteen.
+            if (sequence + 1) % 16 == 0 {
+                assert_eq!(registers[RDT / 4], index as u32);
+            }
         }
         for (index, status) in [(0, RX_DD), (1, RX_DD | RX_EOP), (2, RX_DD | RX_EOP)] {
             net.receive.buffer(index)[..60].fill(index as u8);
