@@ -6,7 +6,8 @@ use crate::aarch64::simd::structure_memory::{
     Access, Direction, Layout, LoadCommit, Operand, PostIndex,
 };
 use crate::aarch64::{AddressMode, Register};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Size};
+use crate::x86_64::simd::encode::guest;
 
 mod multiple;
 mod single;
@@ -16,26 +17,22 @@ const HALFWORD_BYTES: u8 = 2;
 const DWORD_BYTES: u8 = 4;
 const QWORD_BYTES: u8 = 8;
 const STACK_ALIGNMENT_BYTES: u8 = 16;
-const OPERAND_SIZE_PREFIX: u8 = 0x66;
-const REX_W: u8 = 0x48;
-const MOV_BYTE_STORE: u8 = 0x88;
-const MOV_STORE: u8 = 0x89;
-const MOV_LOAD: u8 = 0x8b;
-const MODRM_RCX_STATE_DISP32: u8 = 0x8f;
-const MODRM_RCX_RAX: u8 = 0x08;
-const MODRM_DISP8: u8 = 0x40;
-const MOVZX_ECX_BYTE: &[u8] = &[0x0f, 0xb6];
-const MOVZX_ECX_HALFWORD: &[u8] = &[0x0f, 0xb7];
-const LEA_RDX_RAX_DISP32: &[u8] = &[0x48, 0x8d, 0x90];
-/// LEA RDX,[RAX+RCX]: the address plus the post-index register.
-const LEA_RDX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x14, 0x08];
-const ADD_RAX_IMM8: &[u8] = &[0x48, 0x83, 0xc0];
-const LEA_R10D_RAX_DISP8: &[u8] = &[0x44, 0x8d, 0x50];
-const XOR_R10D_EAX: &[u8] = &[0x41, 0x31, 0xc2];
-const TEST_R10D_IMM32: &[u8] = &[0x41, 0xf7, 0xc2];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-const JMP_REL32: u8 = 0xe9;
-const MOV_ZERO_QWORD_STATE: &[u8] = &[0x48, 0xc7, 0x87];
+
+/// The operand size of a `bytes`-byte element.
+fn size(bytes: u8) -> Size {
+    match bytes {
+        BYTE_BYTES => Size::Byte,
+        HALFWORD_BYTES => Size::Word,
+        DWORD_BYTES => Size::Dword,
+        QWORD_BYTES => Size::Qword,
+        _ => unreachable!("decoder validates scalar structure width"),
+    }
+}
+
+/// `[rax + displacement]`, the element at `displacement` in the footprint.
+fn element(displacement: u8) -> Mem {
+    Mem::base(Gpr::Rax, displacement.into())
+}
 
 pub(super) fn emit(
     code: &mut Code,
@@ -60,8 +57,11 @@ pub(super) fn emit(
     match operand.post_index {
         PostIndex::None => {}
         PostIndex::TransferredBytes => {
-            code.extend(LEA_RDX_RAX_DISP32);
-            code.extend(i32::from(operand.transferred_bytes()).to_le_bytes());
+            code.asm().lea(
+                Size::Qword,
+                Gpr::Rdx,
+                Mem::base_disp32(Gpr::Rax, operand.transferred_bytes().into()),
+            );
         }
         PostIndex::Register(index) => {
             scalar_state_transfer(
@@ -70,7 +70,12 @@ pub(super) fn emit(
                 QWORD_BYTES,
                 super::super::offset(Register::X(index)).expect("post-index is X0..X30"),
             );
-            code.extend(LEA_RDX_RAX_RCX);
+            // The address plus the post-index register.
+            code.asm().lea(
+                Size::Qword,
+                Gpr::Rdx,
+                Mem::indexed(Gpr::Rax, Gpr::Rcx, 1, 0),
+            );
         }
     }
     // A checked SP is 16-byte aligned; an unchecked one is an ordinary base.
@@ -82,16 +87,21 @@ pub(super) fn emit(
     } else {
         // N <= 64: bit12 changes exactly when this footprint crosses a 4KiB
         // boundary, including wrapping addresses. No memory is read by the guard.
-        code.extend(LEA_R10D_RAX_DISP8);
-        code.push(operand.transferred_bytes() - 1);
-        code.extend(XOR_R10D_EAX);
-        code.extend(TEST_R10D_IMM32);
-        code.extend(super::super::memory_store::PROTECTION_GRANULE_BYTES.to_le_bytes());
-        code.extend(JNZ_REL32);
-        let crossing_jump = branch_placeholder(code);
+        let mut asm = code.asm();
+        asm.lea(
+            Size::Dword,
+            Gpr::R10,
+            Mem::base_disp8(Gpr::Rax, (operand.transferred_bytes() - 1) as i8),
+        );
+        asm.alu(Alu::Xor, Size::Dword, Gpr::R10, Gpr::Rax);
+        asm.test_imm(
+            Size::Dword,
+            Gpr::R10,
+            super::super::memory_store::PROTECTION_GRANULE_BYTES as i32,
+        );
+        let crossing_jump = asm.jcc(Cond::Ne).offset();
         packed(code, operand, target);
-        code.push(JMP_REL32);
-        let complete_jump = branch_placeholder(code);
+        let complete_jump = code.asm().jmp().offset();
         patch_jump(code, crossing_jump);
         ordered(code, operand, aligned_sp);
         patch_jump(code, complete_jump);
@@ -115,8 +125,12 @@ fn ordered(code: &mut Code, operand: &Operand, aligned_sp: bool) {
     for (ordinal, access) in operand.accesses().enumerate() {
         transfer_access(code, operand, access, 0, false, aligned_sp);
         if ordinal + 1 != usize::from(count) {
-            code.extend(ADD_RAX_IMM8);
-            code.push(operand.element_bytes);
+            code.asm().alu_imm8(
+                Alu::Add,
+                Size::Qword,
+                Gpr::Rax,
+                operand.element_bytes as i8,
+            );
         }
     }
 }
@@ -147,9 +161,11 @@ fn transfer_access(
                 vector_offset(access.vector) + u32::from(index * operand.element_bytes),
             );
             if clear_upper {
-                code.extend(MOV_ZERO_QWORD_STATE);
-                code.extend((vector_offset(access.vector) + u32::from(QWORD_BYTES)).to_le_bytes());
-                code.extend(0i32.to_le_bytes());
+                code.asm().mov_rm_imm32(
+                    Size::Qword,
+                    guest(vector_offset(access.vector) + u32::from(QWORD_BYTES)),
+                    0,
+                );
             }
         }
         (Direction::Load, LoadCommit::Replicate { vector_bytes }) => {
@@ -184,67 +200,32 @@ fn transfer_access(
 
 /// Exact-width RAM read into zero-extended RCX; no guest state commit yet.
 fn element_load(code: &mut Code, bytes: u8, displacement: u8) {
+    let mut asm = code.asm();
     match bytes {
-        BYTE_BYTES => code.extend(MOVZX_ECX_BYTE),
-        HALFWORD_BYTES => code.extend(MOVZX_ECX_HALFWORD),
-        DWORD_BYTES => code.push(MOV_LOAD),
-        QWORD_BYTES => code.extend([REX_W, MOV_LOAD]),
-        _ => unreachable!("decoder validates scalar structure width"),
-    }
-    code.push(MODRM_RCX_RAX | if displacement == 0 { 0 } else { MODRM_DISP8 });
-    if displacement != 0 {
-        code.push(displacement);
+        BYTE_BYTES | HALFWORD_BYTES => {
+            asm.movzx(Size::Dword, Gpr::Rcx, size(bytes), element(displacement));
+        }
+        _ => asm.mov_load(size(bytes), Gpr::Rcx, element(displacement)),
     }
 }
 
 /// Exact scalar RCX store, used only after the whole-footprint granule proof.
 fn element_store(code: &mut Code, bytes: u8, displacement: u8) {
-    if bytes == HALFWORD_BYTES {
-        code.push(OPERAND_SIZE_PREFIX);
-    } else if bytes == QWORD_BYTES {
-        code.push(REX_W);
-    }
-    code.push(if bytes == BYTE_BYTES {
-        MOV_BYTE_STORE
-    } else {
-        MOV_STORE
-    });
-    code.push(MODRM_RCX_RAX | if displacement == 0 { 0 } else { MODRM_DISP8 });
-    if displacement != 0 {
-        code.push(displacement);
-    }
+    code.asm()
+        .mov_store(size(bytes), element(displacement), Gpr::Rcx);
 }
 
 /// true writes RCX to the selected state lane; false reads it into RCX.
 fn scalar_state_transfer(code: &mut Code, load: bool, bytes: u8, state_offset: u32) {
-    if !load && bytes <= HALFWORD_BYTES {
-        code.extend(if bytes == BYTE_BYTES {
-            MOVZX_ECX_BYTE
-        } else {
-            MOVZX_ECX_HALFWORD
-        });
+    let lane = guest(state_offset);
+    let mut asm = code.asm();
+    if load {
+        asm.mov_store(size(bytes), lane, Gpr::Rcx);
+    } else if bytes <= HALFWORD_BYTES {
+        asm.movzx(Size::Dword, Gpr::Rcx, size(bytes), lane);
     } else {
-        if bytes == HALFWORD_BYTES {
-            code.push(OPERAND_SIZE_PREFIX);
-        } else if bytes == QWORD_BYTES {
-            code.push(REX_W);
-        }
-        code.push(if !load {
-            MOV_LOAD
-        } else if bytes == BYTE_BYTES {
-            MOV_BYTE_STORE
-        } else {
-            MOV_STORE
-        });
+        asm.mov_load(size(bytes), Gpr::Rcx, lane);
     }
-    code.push(MODRM_RCX_STATE_DISP32);
-    code.extend(state_offset.to_le_bytes());
-}
-
-fn branch_placeholder(code: &mut Code) -> usize {
-    let offset = code.len();
-    code.extend(0i32.to_le_bytes());
-    offset
 }
 
 fn patch_jump(code: &mut [u8], offset: usize) {

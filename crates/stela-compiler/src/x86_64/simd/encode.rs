@@ -51,6 +51,8 @@ sse! {
     movlhps => None, [0x0f, 0x16];
     /// `movhlps xmm, xmm`: the high qword of the source to the low qword.
     movhlps => None, [0x0f, 0x12];
+    /// `movq m64, xmm` (66 0F D6), named by its register first.
+    movq_store => Some(0x66), [0x0f, 0xd6];
 }
 
 sse_imm! {
@@ -70,10 +72,6 @@ impl Asm<'_> {
     /// `movd r/m32, xmm`.
     pub(in crate::x86_64) fn movd_from_xmm(&mut self, rm: impl Into<Rm>, xmm: u8) {
         self.legacy(Size::Dword, Some(0x66), &[0x0f, 0x7e], xmm, false, rm.into());
-    }
-    /// `movq r/m64, xmm` (66 REX.W 0F 7E).
-    pub(in crate::x86_64) fn movq_store_xmm(&mut self, rm: impl Into<Rm>, xmm: u8) {
-        self.legacy(Size::Qword, Some(0x66), &[0x0f, 0x7e], xmm, false, rm.into());
     }
     /// `stmxcsr m32`.
     pub(in crate::x86_64) fn stmxcsr(&mut self, memory: impl Into<Rm>) {
@@ -131,8 +129,8 @@ mod tests {
         assert_eq!(one(|a| a.movd_from_xmm(Rax, 6)), [0x66, 0x0f, 0x7e, 0xf0]);
         assert_eq!(one(|a| a.movd_to_xmm(4, Rax)), [0x66, 0x0f, 0x6e, 0xe0]);
         assert_eq!(
-            one(|a| a.movq_store_xmm(Rax, 6)),
-            [0x66, 0x48, 0x0f, 0x7e, 0xf0]
+            one(|a| a.movq_store(1, Mem::base(Rax, 8))),
+            [0x66, 0x0f, 0xd6, 0x48, 0x08]
         );
         assert_eq!(
             one(|a| a.pinsrw(0, Rax, 1)),

@@ -1,7 +1,7 @@
 //! LD1-4/ST1-4 (single lane) and LD1R-4R within one page.
 use super::super::{commit, vector_offset};
 use super::{element_load, element_store, scalar_state_transfer};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Gpr};
 use crate::{
     TargetCpu,
     aarch64::simd::structure_memory::{Direction, Layout, Operand},
@@ -17,7 +17,6 @@ const VECTOR_REGISTER_MASK: u8 = 31;
 const RESULT_XMM: u8 = 0;
 const BROADCAST_MASK_XMM: u8 = 1;
 const ECX: u8 = 1;
-const MOVD_XMM0_ECX: [u8; 4] = [0x66, 0x0f, 0x6e, 0xc1];
 const REPEAT_LOW_ELEMENT: u8 = 0;
 
 /// RAX is the address; the pending writeback in RDX and the state in RDI
@@ -76,7 +75,7 @@ fn replicate(
         match operand.element_bytes {
             BYTE_BYTES | HALFWORD_BYTES => {
                 element_load(code, operand.element_bytes, displacement);
-                code.extend(MOVD_XMM0_ECX);
+                code.asm().movd_to_xmm(RESULT_XMM, Gpr::Rcx);
             }
             DWORD_BYTES | QWORD_BYTES => super::super::memory::wide_transfer(
                 code,
@@ -104,7 +103,7 @@ pub(super) fn broadcast(code: &mut Code, bytes: u8, vector_bytes: u8) {
     if bytes == QWORD_BYTES {
         Host::MoveGprQword.register(code, RESULT_XMM, ECX, TargetCpu::Baseline);
     } else {
-        code.extend(MOVD_XMM0_ECX);
+        code.asm().movd_to_xmm(RESULT_XMM, Gpr::Rcx);
     }
     broadcast_xmm(code, bytes, vector_bytes);
 }
@@ -142,6 +141,11 @@ fn broadcast_xmm(code: &mut Code, bytes: u8, vector_bytes: u8) {
 }
 
 fn shuffle(code: &mut Code, opcode: Host) {
-    opcode.register(code, RESULT_XMM, RESULT_XMM, TargetCpu::Baseline);
-    code.push(REPEAT_LOW_ELEMENT);
+    opcode.register_imm(
+        code,
+        RESULT_XMM,
+        RESULT_XMM,
+        REPEAT_LOW_ELEMENT,
+        TargetCpu::Baseline,
+    );
 }

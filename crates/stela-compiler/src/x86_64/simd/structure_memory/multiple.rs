@@ -3,7 +3,7 @@ use super::super::{commit, read_vector};
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::simd::structure_memory::{Direction, Layout, Operand};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Gpr, Mem};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use crate::x86_64::scalable::routing;
 use alloc::vec::Vec;
@@ -18,11 +18,6 @@ const THREE_STRUCTURES: u8 = 3;
 const RESULT_XMM: u8 = 4;
 const PARTIAL_XMM: u8 = 5;
 const SCRATCH_XMM: u8 = 6;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MODRM_DISP8: u8 = 0x40;
-const MODRM_RIP: u8 = 0x05;
-const MOVQ_STORE: &[u8] = &[0x66, 0x0f, 0xd6];
-const JMP_REL32: u8 = 0xe9;
 const SHUFFLE_ZERO: u8 = 0x80;
 
 /// RAX is the guest address; RDI and the pending writeback in RDX survive.
@@ -70,16 +65,14 @@ fn copy(code: &mut Code, destination: u8, source: u8) {
 }
 
 fn chunk(code: &mut Code, load: bool, bytes: u8, xmm: u8, displacement: u8) {
+    let address = Mem::base(Gpr::Rax, displacement.into());
+    let baseline = TargetCpu::Baseline;
     match (load, bytes) {
-        (true, QWORD_BYTES) => Host::MoveQword.append(code, TargetCpu::Baseline),
-        (true, VECTOR_BYTES) => Host::LoadUnaligned.append(code, TargetCpu::Baseline),
-        (false, QWORD_BYTES) => code.extend(MOVQ_STORE),
-        (false, VECTOR_BYTES) => Host::StoreUnaligned.append(code, TargetCpu::Baseline),
+        (true, QWORD_BYTES) => Host::MoveQword.emit(code, xmm, address, baseline),
+        (true, VECTOR_BYTES) => Host::LoadUnaligned.emit(code, xmm, address, baseline),
+        (false, QWORD_BYTES) => code.asm().movq_store(xmm, address),
+        (false, VECTOR_BYTES) => Host::StoreUnaligned.emit(code, xmm, address, baseline),
         _ => unreachable!("multiple footprint consists of exact qword/vector chunks"),
-    }
-    code.push((xmm << MODRM_REGISTER_SHIFT) | if displacement == 0 { 0 } else { MODRM_DISP8 });
-    if displacement != 0 {
-        code.push(displacement);
     }
 }
 
@@ -101,12 +94,11 @@ fn contiguous(code: &mut Code, operand: &Operand, repetitions: u8, bytes: u8) {
 /// inputs first broadcast their selected lanes, then interleave the low dwords.
 fn dword_pair(code: &mut Code, destination: u8, first: (u8, u8), second: (u8, u8)) {
     let shuffle = |code: &mut Code, destination, source, low, high| {
-        simd(code, Host::ShuffleDword, destination, source);
         let control = low
             | high << DWORD_INDEX_BITS
             | low << (2 * DWORD_INDEX_BITS)
             | high << (3 * DWORD_INDEX_BITS);
-        code.push(control);
+        Host::ShuffleDword.register_imm(code, destination, source, control, TargetCpu::Baseline);
     };
     if first.0 == second.0 {
         shuffle(code, destination, first.0, first.1, second.1);
@@ -366,10 +358,8 @@ fn shuffled_interleaved(
             }
             let destination = if first { RESULT_XMM } else { PARTIAL_XMM };
             copy(code, destination, input);
-            Host::LoadUnaligned.append(code, TargetCpu::Baseline);
-            code.push((SCRATCH_XMM << MODRM_REGISTER_SHIFT) | MODRM_RIP);
-            let displacement = code.len();
-            code.extend(0i32.to_le_bytes());
+            Host::LoadUnaligned.emit(code, SCRATCH_XMM, Mem::rip(0), TargetCpu::Baseline);
+            let displacement = code.len() - size_of::<i32>();
             masks.push((mask, displacement));
             Host::ByteShuffle.register(code, destination, SCRATCH_XMM, target);
             if !first {
@@ -389,13 +379,11 @@ fn shuffled_interleaved(
     }
     // Every mask is exactly sixteen bytes. One unconditional branch skips the
     // trailing mask pool, and each RIP-relative load targets its own mask.
-    code.push(JMP_REL32);
-    let done = code.len();
-    code.extend(0i32.to_le_bytes());
+    let done = code.asm().jmp().offset();
     for (mask, displacement) in masks {
         let target = code.len();
         patch_relative(code, displacement, target);
-        code.extend(mask);
+        code.asm().data(&mask);
     }
     let target = code.len();
     patch_relative(code, done, target);
