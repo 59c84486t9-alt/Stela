@@ -1197,7 +1197,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     let mut assigned = topology_source.as_ref().map(|source| {
         source
-            .prepare(&roster, full_profile.clone())
+            .prepare_on(
+                &roster,
+                full_profile.clone(),
+                native_processors.expect("validated native roster"),
+            )
             .unwrap_or_else(|error| output::fatal(&error))
     });
     if options.development_restore {
