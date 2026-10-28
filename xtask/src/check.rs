@@ -24,7 +24,7 @@ pub const BOOT_TARGET_DIR: &str = "target/boot";
 const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft --cfg chacha20_backend=\"soft\"";
 const BOOT: [&str; 2] = ["--manifest-path", BOOT_MANIFEST];
 /// The other hosts Stela ships for, with the packages Clippy checks there
-/// without linking: macOS runs the hosted runtime and `stela-launcher`,
+/// without linking: macOS compiles installer and native preparation tools,
 /// Windows the installer. The development tasks stay on this host.
 const CROSS: [(&str, &[&str]); 2] = [
     (

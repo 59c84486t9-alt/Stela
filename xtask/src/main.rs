@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 // The UEFI binary cannot run libtest. Exercise its platform-independent
-// UART text and panic capture in the shared hosted gate instead.
+// UART text and panic capture in the shared host test gate instead.
 #[cfg(test)]
 extern crate alloc;
 #[cfg(test)]
@@ -16,14 +16,14 @@ mod boot_live_tree;
 #[path = "../../crates/stela-boot/src/cpu/msr.rs"]
 #[allow(
     dead_code,
-    reason = "hosted tests exercise CPUID gates; RDMSR and WRMSR require CPL0"
+    reason = "host tests exercise CPUID gates; RDMSR and WRMSR require CPL0"
 )]
 mod boot_msr;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/apic.rs"]
 #[allow(
     dead_code,
-    reason = "hosted tests exercise admission; APIC delivery requires CPL0"
+    reason = "host tests exercise admission; APIC delivery requires CPL0"
 )]
 mod boot_native_apic;
 #[cfg(test)]
@@ -48,7 +48,7 @@ mod boot_xstate;
 #[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]
 #[allow(
     dead_code,
-    reason = "hosted tests exercise route planning; IOAPIC programming requires CPL0"
+    reason = "host tests exercise route planning; IOAPIC programming requires CPL0"
 )]
 mod boot_ioapic;
 #[cfg(all(test, feature = "fetched-sources"))]
@@ -56,18 +56,10 @@ mod boot_ioapic;
 mod boot_irq_crs;
 
 mod amx;
-// The bench runs the hosted engine, which only an Intel Mac has
-// (`stela_runtime::hosted`).
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-mod bench;
 mod boot;
-mod census;
 mod check;
-mod darwin_catalogs;
 mod dist;
 mod gpu;
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-mod hosted_platform;
 mod links;
 mod oracles;
 mod pages;
@@ -84,7 +76,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Task {
-    /// Check formatting, run strict hosted and freestanding Clippy, then test.
+    /// Check formatting, run strict host and freestanding Clippy, then test.
     Check {
         /// Format sources before checking.
         #[arg(long)]
@@ -103,24 +95,15 @@ enum Task {
     /// Build native GPU components and report their remaining platform imports.
     #[command(subcommand)]
     Gpu(gpu::Command),
-    /// Time unchanged real-program functions in the process engines, against
-    /// a baseline build (release builds only); `bench hosted` times
-    /// same-source programs natively and as hosted processes.
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    Bench(bench::Bench),
     /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
     AmxReference(amx::AmxReference),
     /// Disassemble, size and time the native AMX kernels against the model.
     AmxKernels(amx::kernels::AmxKernels),
-    /// Generate the BSD system-call and Mach-trap catalogs from xnu sources.
-    DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
     /// Generate the System register accessors from Arm's AARCHMRS.
     Sysregs(sysregs::Sysregs),
-    /// Generate the hosted call-site census from a macOS restore image.
-    Census(census::Census),
 }
 
 fn main() -> ExitCode {
@@ -131,17 +114,32 @@ fn main() -> ExitCode {
         Task::Oracles(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        Task::Bench(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
         Task::Sysregs(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::Census(task) => task.run().map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");
         ExitCode::FAILURE
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removed_process_tasks_are_unknown() {
+        for task in ["bench", "census", "darwin-catalogs"] {
+            let error = Cli::try_parse_from(["xtask", task, "--help"])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{task}"
+            );
+        }
+    }
 }
