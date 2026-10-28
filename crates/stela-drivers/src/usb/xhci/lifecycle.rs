@@ -53,8 +53,8 @@ struct Hub {
 
 /// Retains the controller even when no leaf class currently owns it. Call
 /// `poll` from the native service loop, and deliver its changes to consumers.
-/// Automatic reconnection uses fresh hardware IDs and explicitly refuses when
-/// its boot-lifetime slot capacity is exhausted. The separate exclusive root-leaf
+/// Automatic reconnection uses fresh generations, reusing a retired slot once
+/// its port's current grant has retired. The separate exclusive root-leaf
 /// class reset service can reuse storage only after its typed retirement and
 /// physical-reset proof; this Host path does not mint that authority. A class
 /// owner's `queue_reset` is serviced here instead, without storage reuse.
