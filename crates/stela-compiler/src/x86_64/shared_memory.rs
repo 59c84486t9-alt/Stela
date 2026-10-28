@@ -73,7 +73,9 @@ impl CheckedOperand {
                         }
                     };
                 if !valid {
-                    return Err(CompileError("invalid checked LSE operand".into()));
+                    return Err(CompileError::new(
+                        crate::CompileErrorKind::InvalidLseOperand,
+                    ));
                 }
                 Operand::Atomic(operand)
             }
@@ -89,7 +91,9 @@ impl CheckedOperand {
                             _ => ordered::Barrier::All,
                         };
                         if option > 15 || requirement != expected {
-                            return Err(CompileError("invalid checked DMB operand".into()));
+                            return Err(CompileError::new(
+                                crate::CompileErrorKind::InvalidDmbOperand,
+                            ));
                         }
                     }
                     ordered::Operand::Transfer {
@@ -137,7 +141,9 @@ impl CheckedOperand {
                             || !data_register(data)
                             || !base_register(base)
                         {
-                            return Err(CompileError("invalid checked ordered operand".into()));
+                            return Err(CompileError::new(
+                                crate::CompileErrorKind::InvalidOrderedOperand,
+                            ));
                         }
                     }
                 }
@@ -149,8 +155,8 @@ impl CheckedOperand {
             profile,
             CheckedMemoryProfile::SpAlignmentEnabled | CheckedMemoryProfile::SpAlignmentDisabled
         ) {
-            return Err(CompileError(
-                "checked shared operations require the fixed address contract".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::FixedAddressContractRequired,
             ));
         }
         Ok(Some(Self { operand, profile }))

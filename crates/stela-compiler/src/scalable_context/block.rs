@@ -15,8 +15,6 @@ use crate::{
     x86_64,
 };
 use alloc::boxed::Box;
-use alloc::format;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 
 enum Terminal {
@@ -37,10 +35,7 @@ fn reject_unavailable_service(pc: GuestAddress, word: u32) -> Result<(), Compile
         || block::decode_thread_register_instruction(pc, word)?.is_some()
         || crate::amx::decode(pc, word)?.is_some()
     {
-        return Err(CompileError(format!(
-            "context block service is not integrated at {:#x}",
-            pc.0
-        )));
+        return Err(CompileError::new(crate::CompileErrorKind::ContextServiceUnimplemented).at(pc));
     }
     Ok(())
 }
@@ -56,7 +51,7 @@ fn shared_terminal(
         return Ok(None);
     }
     let analysis = block::analyze_with_profile(bytes, pc, BlockProfile::ORDINARY)
-        .map_err(|error| CompileError(error.to_string()))?;
+        .map_err(CompileError::from)?;
     // The ordinary scalar numerical boundary is deliberately excluded until
     // its low-V/upper-Z effects have been integrated in context mode.
     let permitted = analysis.trap.is_some()
@@ -107,8 +102,8 @@ impl Prefix {
             || !base.0.is_multiple_of(INSTRUCTION_BYTES as u64)
             || source.len() / INSTRUCTION_BYTES > MAX_BLOCK_INSTRUCTIONS
         {
-            return Err(CompileError(
-                "context block input must be aligned, nonempty and bounded".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::InvalidContextSourceLayout,
             ));
         }
         let mut instructions = Vec::new();
@@ -117,10 +112,10 @@ impl Prefix {
         let mut source_bytes = 0;
         for bytes in source.as_chunks::<INSTRUCTION_BYTES>().0 {
             let pc = next_pc;
-            next_pc = GuestAddress(
-                pc.0.checked_add(INSTRUCTION_BYTES as u64)
-                    .ok_or_else(|| CompileError("context block guest address overflow".into()))?,
-            );
+            next_pc =
+                GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES as u64).ok_or_else(|| {
+                    CompileError::new(crate::CompileErrorKind::GuestAddressOverflow)
+                })?);
             source_bytes += INSTRUCTION_BYTES;
             let word = u32::from_le_bytes(*bytes);
             reject_unavailable_service(pc, word)?;
@@ -137,10 +132,10 @@ impl Prefix {
                 Ok(instruction)
                     if instruction.memory_requirements() != MemoryRequirements::default() =>
                 {
-                    return Err(CompileError(format!(
-                        "context block memory entry is not integrated at {:#x}",
-                        pc.0
-                    )));
+                    return Err(CompileError::new(
+                        crate::CompileErrorKind::ContextMemoryUnimplemented,
+                    )
+                    .at(pc));
                 }
                 Ok(Decoded::Ordinary(instruction)) if is_transfer(&instruction.operation) => {
                     terminal = shared_terminal(bytes, pc, target)?
@@ -268,10 +263,9 @@ mod tests {
     use super::*;
     use crate::aarch64::scalable::{ScalableMode, VectorLength};
     use crate::block::Features;
-    use alloc::format;
-    use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
+    use alloc::{format, string::ToString};
 
     const BASE: GuestAddress = GuestAddress(0x1000);
     const ADD_X5_ONE: u32 = 0x9100_04a5;

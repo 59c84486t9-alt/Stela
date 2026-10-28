@@ -165,9 +165,9 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
 
 /// A host capability needed by an SME memory transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Error {
-    pub(crate) required: TargetCpu,
-    pub(crate) available: TargetCpu,
+pub struct Error {
+    pub required: TargetCpu,
+    pub available: TargetCpu,
 }
 
 impl core::fmt::Display for Error {

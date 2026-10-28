@@ -38,6 +38,20 @@ pub enum RegionError {
     ChangedInstructions,
 }
 
+impl core::fmt::Display for RegionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::TooLong => "region input exceeds the instruction limit",
+            Self::Misaligned => "region instruction address is misaligned",
+            Self::NonContiguous => "region instructions are not contiguous",
+            Self::AddressOverflow => "region guest address overflows",
+            Self::ChangedMemoryEncoding => "region memory encoding differs from its analyzed form",
+            Self::ChangedInstructions => "region instructions differ from the analyzed input",
+        })
+    }
+}
+impl core::error::Error for RegionError {}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AllocationStats {
     pub state_loads: usize,

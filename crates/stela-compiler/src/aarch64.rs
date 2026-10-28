@@ -933,7 +933,7 @@ mod tests {
 
     #[test]
     fn logical_immediate_masks_match_all_rotated_runs_and_reserved_encodings() {
-        for (width, bits) in [(Width::W32, 32), (Width::X64, 64)] {
+        for (width, bits) in [(Width::W32, 32_i32), (Width::X64, 64)] {
             let mut expected = alloc::collections::BTreeMap::new();
             for element_bits in [2, 4, 8, 16, 32, 64] {
                 if element_bits > bits {

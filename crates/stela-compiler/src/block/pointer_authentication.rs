@@ -120,9 +120,10 @@ pub fn decode_pointer_authentication(
     use PointerAuthenticationModifier::{Register, StackPointer, Zero};
     use PointerAuthenticationOperation::{Authenticate, Sign, Strip};
     if !pc.0.is_multiple_of(4) {
-        return Err(CompileError(
-            "PAC instruction PC must be aligned to 4 bytes".into(),
-        ));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
+                .at_instruction(pc, word),
+        );
     }
     let operation = if let Some(instruction) = pauth_lr::decode(word) {
         PointerAuthenticationOperation::LinkRegister(instruction)
@@ -241,8 +242,9 @@ pub fn decode_pointer_authentication(
     Ok(Some(PointerAuthentication {
         operation,
         instruction_pc: pc,
-        next_pc: GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
-            CompileError("PAC continuation PC overflows guest address range".into())
-        })?),
+        next_pc: GuestAddress(
+            pc.0.checked_add(4)
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+        ),
     }))
 }

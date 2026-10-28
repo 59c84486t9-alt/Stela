@@ -20,9 +20,10 @@ pub fn decode_thread_register_instruction(
     word: u32,
 ) -> Result<Option<ThreadRegisterInstruction>, CompileError> {
     if !pc.0.is_multiple_of(INSTRUCTION_BYTES) {
-        return Err(CompileError(
-            "thread-register instruction PC must be aligned to 4 bytes".into(),
-        ));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
+                .at_instruction(pc, word),
+        );
     }
     if word & !DESTINATION_MASK != MRS_TPIDRRO_EL0 {
         return Ok(None);
@@ -30,9 +31,10 @@ pub fn decode_thread_register_instruction(
     Ok(Some(ThreadRegisterInstruction {
         destination: (word & DESTINATION_MASK) as u8,
         instruction_pc: pc,
-        next_pc: GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
-            CompileError("thread-register continuation PC overflows guest address range".into())
-        })?),
+        next_pc: GuestAddress(
+            pc.0.checked_add(INSTRUCTION_BYTES)
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+        ),
     }))
 }
 

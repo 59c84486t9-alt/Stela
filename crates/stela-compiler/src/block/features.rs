@@ -2,7 +2,7 @@
 //! from them.
 use super::CheckedMemoryProfile;
 use crate::CompileError;
-use alloc::{format, string::String};
+use alloc::string::String;
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 
 /// Shared by every compiled function; the features follow it in the identity.
@@ -207,7 +207,9 @@ impl BlockProfile {
         if valid {
             Ok(())
         } else {
-            Err(CompileError(format!("no emitter implements {self:?}")))
+            Err(CompileError::new(
+                crate::CompileErrorKind::ProfileNotImplemented { profile: self },
+            ))
         }
     }
 }

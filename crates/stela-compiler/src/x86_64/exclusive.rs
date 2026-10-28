@@ -96,7 +96,9 @@ fn validate(operand: &Operand) -> Result<(), CompileError> {
         (Data::Pair([first, second]), Kind::Load { .. }) => first == second,
         (data, Kind::Store { status, .. }) => {
             if !data_register(status) {
-                return Err(CompileError("invalid exclusive status register".into()));
+                return Err(CompileError::new(
+                    crate::CompileErrorKind::InvalidExclusiveStatusRegister,
+                ));
             }
             let data_overlap = match data {
                 Data::Scalar(register) => status == register,
@@ -107,12 +109,13 @@ fn validate(operand: &Operand) -> Result<(), CompileError> {
         _ => false,
     };
     if !base_valid || !data_valid {
-        return Err(CompileError("invalid exclusive transfer operands".into()));
+        return Err(CompileError::new(
+            crate::CompileErrorKind::InvalidExclusiveTransfer,
+        ));
     }
     if constrained {
-        return Err(CompileError(
-            "constrained exclusive operands require a generic undefined-instruction boundary"
-                .into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::ConstrainedExclusiveOperands,
         ));
     }
     Ok(())

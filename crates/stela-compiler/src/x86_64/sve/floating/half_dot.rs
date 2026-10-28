@@ -263,14 +263,16 @@ pub(in crate::x86_64) fn emit_candidate(
         return Ok(false);
     }
     if operand.element_size != ElementSize::Word {
-        return Err(CompileError("Half numerical outputs must be Single".into()));
+        return Err(CompileError::new(
+            crate::CompileErrorKind::InvalidHalfOutputFormat,
+        ));
     }
     if recipe.half_convert && !target.supports(TargetCpu::F16c)
         || recipe.fused_widening && !target.supports(TargetCpu::Fma)
         || recipe.byte_shuffle && !target.supports(TargetCpu::Ssse3)
     {
-        return Err(CompileError(
-            "Half candidate host capability unavailable".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::HalfHostCapabilityUnavailable,
         ));
     }
     if recipe.half_convert || recipe.fused_widening {

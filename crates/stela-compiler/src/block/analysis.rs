@@ -7,10 +7,10 @@ use super::{
     system,
 };
 use crate::{
-    CompileError, GuestAddress, Lifter,
+    CompileError, CompileErrorKind, GuestAddress, Lifter,
     aarch64::{Decoder, Instruction, Operation, Register},
 };
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use serde::Serialize;
 
 pub(super) struct ParsedBlock {
@@ -24,14 +24,29 @@ pub(super) struct ParsedBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlockAnalysisError {
     pub pc: GuestAddress,
-    pub detail: String,
+    pub encoding: Option<u32>,
+    pub kind: CompileErrorKind,
 }
 impl core::fmt::Display for BlockAnalysisError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{} at {:#x}", self.detail, self.pc.0)
+        write!(f, "{} at {:#x}", self.kind, self.pc.0)?;
+        if let Some(word) = self.encoding {
+            write!(f, " ({word:#010x})")?;
+        }
+        Ok(())
     }
 }
 impl core::error::Error for BlockAnalysisError {}
+impl From<BlockAnalysisError> for CompileError {
+    fn from(error: BlockAnalysisError) -> Self {
+        let result = CompileError::new(error.kind);
+        match error.encoding {
+            Some(word) => result.at_instruction(error.pc, word),
+            None => result.at(error.pc),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuccessorKind {
@@ -222,13 +237,17 @@ pub(super) fn parse(
     if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
         return Err(BlockAnalysisError {
             pc: base,
-            detail: "block input and guest base must be nonempty/aligned to 4 bytes".into(),
+            encoding: None,
+            kind: CompileErrorKind::InvalidSourceLayout,
         });
     }
     if source.len() / 4 > MAX_BLOCK_INSTRUCTIONS {
         return Err(BlockAnalysisError {
             pc: base,
-            detail: format!("block input exceeds {MAX_BLOCK_INSTRUCTIONS} instructions"),
+            encoding: None,
+            kind: CompileErrorKind::TooManyInstructions {
+                maximum: MAX_BLOCK_INSTRUCTIONS,
+            },
         });
     }
     let mut instructions = vec![];
@@ -237,9 +256,10 @@ pub(super) fn parse(
     let mut next_pc = base;
     for bytes in source.as_chunks::<4>().0 {
         let pc = next_pc;
-        next_pc = GuestAddress(pc.0.checked_add(4).ok_or_else(|| BlockAnalysisError {
+        next_pc = GuestAddress(pc.0.checked_add(4).ok_or(BlockAnalysisError {
             pc,
-            detail: "block guest address overflow".into(),
+            encoding: None,
+            kind: CompileErrorKind::GuestAddressOverflow,
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
@@ -248,7 +268,8 @@ pub(super) fn parse(
             if let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
-                    detail: error.0,
+                    encoding: Some(word),
+                    kind: error.kind,
                 })?
             {
                 terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
@@ -291,7 +312,8 @@ pub(super) fn parse(
                 system::decode_system_mode_instruction(pc, word).map_err(|error| {
                     BlockAnalysisError {
                         pc,
-                        detail: error.0,
+                        encoding: Some(word),
+                        kind: error.kind,
                     }
                 })?
             {
@@ -311,7 +333,8 @@ pub(super) fn parse(
             && let Some(decoded) =
                 decode_system_instruction(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
-                    detail: error.0,
+                    encoding: Some(word),
+                    kind: error.kind,
                 })?
             && (profile.has(Features::SYSTEM_REGISTERS)
                 || !matches!(
@@ -327,7 +350,8 @@ pub(super) fn parse(
             && let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
-                    detail: error.0,
+                    encoding: Some(word),
+                    kind: error.kind,
                 })?
         {
             terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
@@ -337,7 +361,8 @@ pub(super) fn parse(
             && let Some(decoded) =
                 decode_clock_instruction(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
-                    detail: error.0,
+                    encoding: Some(word),
+                    kind: error.kind,
                 })?
         {
             terminal = Some((pc, Terminator::Clock(decoded)));
@@ -348,7 +373,8 @@ pub(super) fn parse(
                 decode_thread_register_instruction(pc, word).map_err(|error| {
                     BlockAnalysisError {
                         pc,
-                        detail: error.0,
+                        encoding: Some(word),
+                        kind: error.kind,
                     }
                 })?
         {
@@ -359,7 +385,8 @@ pub(super) fn parse(
             && let Some(decoded) =
                 crate::amx::decode(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
-                    detail: error.0,
+                    encoding: Some(word),
+                    kind: error.kind,
                 })?
         {
             terminal = Some((pc, Terminator::Amx(decoded)));
@@ -367,14 +394,16 @@ pub(super) fn parse(
         }
         if let Some(decoded) = decode_terminator(pc, word).map_err(|error| BlockAnalysisError {
             pc,
-            detail: error.0,
+            encoding: Some(word),
+            kind: error.kind,
         })? {
             terminal = Some((pc, decoded));
             break;
         }
         let instruction = Decoder.lift(pc, word).map_err(|error| BlockAnalysisError {
             pc,
-            detail: format!("unsupported ARM64 semantics: {error:?}"),
+            encoding: Some(word),
+            kind: CompileErrorKind::Unsupported(error),
         })?;
         if profile.checked_memory().is_some()
             && instruction.operation == Operation::Nop
@@ -382,7 +411,8 @@ pub(super) fn parse(
         {
             return Err(BlockAnalysisError {
                 pc,
-                detail: "unadmitted original NOP provenance in checked memory profile".into(),
+                encoding: Some(word),
+                kind: CompileErrorKind::UnadmittedNopProvenance,
             });
         }
         if profile.has(Features::SYSTEM)
@@ -391,7 +421,8 @@ pub(super) fn parse(
         {
             return Err(BlockAnalysisError {
                 pc,
-                detail: "operation outside restricted System prefix profile".into(),
+                encoding: Some(word),
+                kind: CompileErrorKind::OutsideRestrictedSystemProfile,
             });
         }
         if let Operation::FloatingPoint(operand) = &instruction.operation
@@ -435,7 +466,7 @@ pub fn source_bytes_with_profile(
     base: GuestAddress,
     profile: BlockProfile,
 ) -> Result<usize, CompileError> {
-    let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+    let parsed = parse(source, base, profile).map_err(CompileError::from)?;
     if let Some(selected) = profile.checked_memory() {
         memory::CheckedPlan::new(
             &parsed.instructions,

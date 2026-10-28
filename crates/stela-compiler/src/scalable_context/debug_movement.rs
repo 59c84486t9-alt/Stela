@@ -78,15 +78,15 @@ pub fn prepare(
     recipe: Recipe,
 ) -> Result<PreparedDebugMovement, CompileError> {
     let operand = movement::decode(word)
-        .ok_or_else(|| CompileError("not an allocated movement instruction".into()))?;
+        .ok_or_else(|| CompileError::new(crate::CompileErrorKind::UnallocatedMovement))?;
     let Kind::TableGpr {
         direction,
         register,
         ..
     } = operand.kind
     else {
-        return Err(CompileError(
-            "debug movement accepts only the two MOVT GPR/ZT0 forms".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::InvalidDebugMovement,
         ));
     };
     let feature = FeatureRequirement::all(
@@ -94,8 +94,8 @@ pub fn prepare(
     );
     profile.require_features(feature, EXTERNAL_WORD_ANCHOR)?;
     if !profile.mode().za_enabled() || !profile.controls().zt0_enabled() {
-        return Err(CompileError(
-            "halted MOVT specialization requires active ZA and enabled ZT0".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::DebugMovementStateRequired,
         ));
     }
     let requirements =
@@ -120,7 +120,7 @@ pub fn prepare(
     }
     let native_offset = code.len();
     x86_64::sme::movement::emit_debug_table_gpr(&mut code, &operand, recipe)
-        .map_err(|error| CompileError(alloc::format!("{error}")))?;
+        .map_err(CompileError::from)?;
     let mut asm = code.asm();
     if !discarded {
         asm.pop(Gpr::R15);

@@ -193,9 +193,10 @@ pub fn decode(pc: GuestAddress, word: u32) -> Result<Option<AmxInstruction>, Com
         return Ok(None);
     }
     if !pc.0.is_multiple_of(INSTRUCTION_BYTES) {
-        return Err(CompileError(
-            "AMX instruction PC must be aligned to 4 bytes".into(),
-        ));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
+                .at_instruction(pc, word),
+        );
     }
     let operation = (word >> OPERATION_SHIFT) & FIELD_MASK;
     let field = word & FIELD_MASK;
@@ -204,9 +205,13 @@ pub fn decode(pc: GuestAddress, word: u32) -> Result<Option<AmxInstruction>, Com
             0 => (AmxOperation::Set, AmxOperand::None),
             1 => (AmxOperation::Clear, AmxOperand::None),
             _ => {
-                return Err(CompileError(alloc::format!(
-                    "AMX operation 17 immediate {field} has no researched behavior"
-                )));
+                return Err(
+                    CompileError::new(crate::CompileErrorKind::UnresearchedAmxImmediate {
+                        operation: 17,
+                        field,
+                    })
+                    .at_instruction(pc, word),
+                );
             }
         },
         0..=22 => {
@@ -223,9 +228,10 @@ pub fn decode(pc: GuestAddress, word: u32) -> Result<Option<AmxInstruction>, Com
         operand,
         word,
         instruction_pc: pc,
-        next_pc: GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
-            CompileError("AMX continuation PC overflows guest address range".into())
-        })?),
+        next_pc: GuestAddress(
+            pc.0.checked_add(INSTRUCTION_BYTES)
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+        ),
     }))
 }
 

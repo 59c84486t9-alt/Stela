@@ -39,7 +39,7 @@ fn za(displacement: usize) -> Mem {
 
 /// Why an SME movement cannot be emitted in the supplied execution context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     StreamingLength {
         required_bits: usize,
         actual_bits: usize,

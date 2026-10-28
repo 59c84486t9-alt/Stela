@@ -114,14 +114,14 @@ pub(crate) fn begin(
     environment: Environment,
 ) -> Result<Frame, CompileError> {
     if outputs.is_empty() || outputs.len() > MAX_OUTPUTS {
-        return Err(CompileError(
-            "numerical frame requires one to four outputs".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::InvalidNumericalOutputCount,
         ));
     }
     for (index, &output) in outputs.iter().enumerate() {
         if !output.valid() || outputs[..index].iter().any(|&prior| output.overlaps(prior)) {
-            return Err(CompileError(
-                "invalid or overlapping numerical outputs".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::InvalidNumericalOutputs,
             ));
         }
     }

@@ -1,7 +1,6 @@
 //! Host CPU feature requirements, detection and generated-code target identities.
 
 use alloc::borrow::ToOwned;
-use alloc::format;
 use alloc::string::String;
 
 const CPUID_AVX_HARDWARE: u32 = 1 << 28;
@@ -614,8 +613,20 @@ impl PartialOrd for TargetCpu {
     }
 }
 
+/// An invalid target identity, including unknown or incorrectly ordered suffixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetParseError {
+    pub identity: String,
+}
+impl core::fmt::Display for TargetParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "unknown x86-64 CPU target {}", self.identity)
+    }
+}
+impl core::error::Error for TargetParseError {}
+
 impl core::str::FromStr for TargetCpu {
-    type Err = String;
+    type Err = TargetParseError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut target = Self::Baseline;
         let mut tier_name = value;
@@ -632,7 +643,11 @@ impl core::str::FromStr for TargetCpu {
             "ssse3" | "x86_64-baseline+ssse3" => SseTier::Ssse3,
             "sse4.1" | "x86_64-baseline+ssse3+sse4.1" => SseTier::Sse41,
             "sse4.2" | "x86_64-baseline+ssse3+sse4.1+sse4.2" => SseTier::Sse42,
-            _ => return Err(format!("unknown x86-64 CPU target {value}")),
+            _ => {
+                return Err(TargetParseError {
+                    identity: value.to_owned(),
+                });
+            }
         };
         Ok(target)
     }
@@ -799,7 +814,12 @@ mod tests {
             "baseline+line-atomic+avx512f",
             "avx512f",
         ] {
-            assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
+            assert_eq!(
+                invalid.parse::<TargetCpu>().unwrap_err(),
+                TargetParseError {
+                    identity: invalid.to_owned()
+                }
+            );
         }
         for (_, name, _) in FEATURES {
             for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
