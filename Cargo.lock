@@ -1773,6 +1773,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "stela-boot-core",
  "stela-compiler",
  "stela-drivers",
  "stela-loader",
