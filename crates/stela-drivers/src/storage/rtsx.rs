@@ -850,9 +850,12 @@ mod tests {
                 self.delayed.push(point);
             }
         }
+        /// The counter the host's clock reads, virtual under `test_clock`.
         fn ticks() -> u64 {
-            // SAFETY: model timestamps use the same native invariant TSC as Clock.
-            unsafe { core::arch::x86_64::_rdtsc() }
+            crate::test_clock::read().unwrap_or_else(|| {
+                // SAFETY: RDTSC has no memory effects; x86-64 always has it.
+                unsafe { core::arch::x86_64::_rdtsc() }
+            })
         }
         fn low_voltage_phy(&self) -> u16 {
             if self.config[2..4] == [0x29, 0x52] {
@@ -1474,30 +1477,9 @@ mod tests {
             assert_eq!(chip.borrow().accesses, before.2);
         }
     }
-    fn measured_host_clock() -> Clock {
-        // The recovery scenario exercises real Clock/Deadline code. Its clock
-        // must describe the running TSC, rather than shorten every command and
-        // retirement budget by pretending that it advances at 100 ticks/us.
-        // This remains a hosted timing test, not a virtual-time device model.
-        let mut rates = [0_u64; 3];
-        for rate in &mut rates {
-            let started = std::time::Instant::now();
-            let before = Chip::ticks();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let after = Chip::ticks();
-            let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap();
-            assert!(elapsed_us != 0, "monotonic reference clock must advance");
-            *rate = after.checked_sub(before).expect("monotonic host TSC") / elapsed_us;
-            assert!(*rate != 0, "host TSC must advance during calibration");
-        }
-        rates.sort_unstable();
-        Clock {
-            ticks_per_microsecond: rates[1],
-        }
-    }
     fn inject(host: &Host, chip: &Rc<RefCell<Chip>>, fault: Fault) {
-        // Keep positive setup generous; fault waits use a smaller, still-real
-        // TSC clock so the actual deadlines expire without multi-second stalls.
+        // Fault waits run at 100 ticks per microsecond, so their deadlines
+        // expire in fewer counter reads than setup's.
         host.inner.borrow_mut().clock = Clock {
             ticks_per_microsecond: 100,
         };
@@ -1703,7 +1685,12 @@ mod tests {
         stale(&mut card, &chip);
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
-        let setup_clock = measured_host_clock();
+        // Request and recovery deadlines expire after a fixed number of
+        // counter reads (`test_clock`), whatever the host's scheduling.
+        let _virtual = crate::test_clock::virtualize();
+        let setup_clock = Clock {
+            ticks_per_microsecond: 1000,
+        };
         host.inner.borrow_mut().clock = setup_clock;
         let mut card = host.poll().unwrap().unwrap();
         let status_before = chip
@@ -1731,13 +1718,12 @@ mod tests {
         assert_eq!(
             host.inner.borrow().clock.ticks_per_microsecond,
             setup_clock.ticks_per_microsecond,
-            "readiness and recovery share the measured host clock"
+            "readiness and recovery share the host clock"
         );
         stale(&mut card, &chip);
         chip.borrow_mut().card.nonready = false;
-        // The original acknowledged Stop permits fresh identification. Do not
-        // scale either the failed request or its cleanup to a subsecond host
-        // scheduling window, and do not clear a retained retirement failure.
+        // The acknowledged Stop permits fresh identification; the failed
+        // request's retirement failure stays recorded.
         let retired_generation = card.generation;
         let mut card = host.poll().unwrap().unwrap();
         assert_ne!(card.generation, retired_generation);
