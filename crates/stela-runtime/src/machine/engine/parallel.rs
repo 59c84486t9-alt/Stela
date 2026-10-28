@@ -50,6 +50,8 @@ use stela_compiler::aarch64::system::registers::Encoding;
 
 mod observation;
 pub use observation::{MaterializedSource, SourceObservation, SourcePhase};
+mod profile;
+pub use profile::{BroadcastCounts, BroadcastKind, BroadcastProfile};
 
 /// Brings the host core that runs a PE out of native code, or out of a wait,
 /// to read its mail. Delivery is a host interrupt; a kick of a core already
@@ -106,6 +108,7 @@ struct Inbox {
     /// Its machine's counts, as it last published them ([`Hub::publish`]).
     counts: Mutex<Counts>,
     source: observation::Slot,
+    broadcasts: profile::Slot,
     mail: Mutex<Mail>,
 }
 
@@ -207,6 +210,7 @@ impl Hub {
                     lines: AtomicU64::new(0),
                     counts: Mutex::new(Counts::default()),
                     source: observation::Slot::default(),
+                    broadcasts: profile::Slot::default(),
                     mail: Mutex::new(Mail::default()),
                 })
                 .collect(),
@@ -247,6 +251,15 @@ impl Hub {
             return None;
         }
         self.inboxes.get(pe)?.source.read()
+    }
+
+    /// Bounded retained broadcast counters, enabled with owner observations.
+    /// These may already be stale and never authorize native reclamation.
+    pub fn broadcast_profile(&self, pe: usize) -> Option<BroadcastProfile> {
+        if !self.source_observations_enabled() {
+            return None;
+        }
+        self.inboxes.get(pe)?.broadcasts.read()
     }
 
     fn post(&self, pe: usize, write: impl FnOnce(&mut Mail)) {
@@ -635,19 +648,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(hub) = self.parallel.as_ref() else {
             return;
         };
-        if !hub.source_observations_enabled() {
-            return;
-        }
-        let Some(owner) = self.attached.as_ref() else {
-            return;
-        };
-        if owner.pe != self.current
-            || !Arc::ptr_eq(&owner.hub, hub)
-            || !matches!(self.peers.get(self.current), Some(Peer::Running))
-        {
-            return;
-        }
-        let Some(inbox) = hub.inboxes.get(owner.pe) else {
+        let Some(inbox) = self.observation_inbox(hub) else {
             return;
         };
         inbox.source.publish(MaterializedSource {
@@ -659,6 +660,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             el: self.cpu.pstate.el,
             daif: self.cpu.pstate.daif,
         });
+    }
+
+    fn observation_inbox<'a>(&self, hub: &'a Arc<Hub>) -> Option<&'a Inbox> {
+        if !hub.source_observations_enabled() {
+            return None;
+        }
+        let owner = self.attached.as_ref()?;
+        if owner.pe != self.current
+            || !Arc::ptr_eq(&owner.hub, hub)
+            || !matches!(self.peers.get(self.current), Some(Peer::Running))
+        {
+            return None;
+        }
+        hub.inboxes.get(owner.pe)
     }
 
     /// Become the home machine of a board whose PEs each run on their own
@@ -902,16 +917,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let started = self.host.counter();
         self.observe_parallel_source(SourcePhase::BroadcastEnter);
         let mut posted = hub.broadcast(self.current, maintenance);
+        let profile = self.observation_inbox(&hub).map(|inbox| &inbox.broadcasts);
+        let kind = match maintenance {
+            Maintenance::Tlb(_) => BroadcastKind::Tlb,
+            Maintenance::Code(_) => BroadcastKind::Code,
+            Maintenance::Power(_) => BroadcastKind::Power,
+        };
+        let active = profile.and_then(|slot| slot.begin(kind, started, posted.len()));
+        let mut polls = 0u64;
         // A PE stopping the others need not wait for this one meanwhile.
         hub.set_parked(self.current, true);
         let mut applied = Ok(());
         while !hub.applied(&mut posted) {
+            if profile.is_some() {
+                polls = polls.saturating_add(1);
+            }
             applied = applied.and(self.wait_for_others(&hub));
             core::hint::spin_loop();
         }
         hub.set_parked(self.current, false);
         self.statistics.broadcasts += 1;
-        self.statistics.sync_ticks += self.host.counter().wrapping_sub(started);
+        let elapsed = self.host.counter().wrapping_sub(started);
+        self.statistics.sync_ticks += elapsed;
+        // Publish only at boundaries, including a returned maintenance error.
+        if let (Some(slot), Some(active)) = (profile, active) {
+            slot.finish(active, elapsed, polls);
+        }
         self.observe_parallel_source(SourcePhase::BroadcastExit);
         applied
     }
@@ -1983,6 +2014,37 @@ mod tests {
         assert_eq!(dma.sequence, 8);
         assert_eq!(dma.source.phase, SourcePhase::DeviceAdvanceExit);
         assert_eq!(hub.source_observation(1), Some(second));
+    }
+
+    #[test]
+    fn broadcast_profile_reuses_boundary_clocks_and_requires_the_attached_owner() {
+        use super::super::tests::machine;
+        let mut machine = machine(&[0xd503_201f]);
+        let (hub, _) = hub(1);
+        machine.enter_parallel(Arc::clone(&hub)).unwrap();
+        let reads = machine.host.counter_reads;
+        machine.broadcast(Maintenance::Code(None)).unwrap();
+        assert_eq!(machine.host.counter_reads - reads, 2);
+        assert!(hub.broadcast_profile(0).is_none());
+
+        hub.set_source_observations(true);
+        let reads = machine.host.counter_reads;
+        machine.broadcast(Maintenance::Code(None)).unwrap();
+        // The two existing broadcast clocks and two source observations;
+        // accounting adds no clock read or native notification.
+        assert_eq!(machine.host.counter_reads - reads, 4);
+        let observed = hub.broadcast_profile(0).unwrap();
+        let code = observed.kinds[BroadcastKind::Code.index()];
+        assert_eq!(
+            (code.started, code.completed, code.recipients, code.polls),
+            (1, 1, 0, 0)
+        );
+        assert_eq!((observed.active, observed.dropped_updates), (None, false));
+        assert!(hub.broadcast_profile(1).is_none());
+        let attached = machine.attached.take().unwrap();
+        machine.broadcast(Maintenance::Code(None)).unwrap();
+        assert_eq!(hub.broadcast_profile(0), Some(observed));
+        machine.attached = Some(attached);
     }
 
     #[test]

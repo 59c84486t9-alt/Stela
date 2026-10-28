@@ -243,6 +243,44 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
             )),
         }
     }
+    output::arguments(format_args!(
+        "PE BROADCAST retained=true coherent-across-pes=false counter_hz={} fields=started/completed/recipients/elapsed/max/polls\n",
+        host::COUNTER_HZ
+    ));
+    for pe in 0..hub.pes() {
+        match hub.broadcast_profile(pe) {
+            Some(profile) => {
+                let [tlb, code, power] = profile.kinds;
+                output::arguments(format_args!(
+                    "PE BROADCAST pe={pe} tlb={}/{}/{}/{}/{}/{} code={}/{}/{}/{}/{}/{} power={}/{}/{}/{}/{}/{} active={:?} active_start={:#x} dropped={}\n",
+                    tlb.started,
+                    tlb.completed,
+                    tlb.recipients,
+                    tlb.elapsed_ticks,
+                    tlb.maximum_ticks,
+                    tlb.polls,
+                    code.started,
+                    code.completed,
+                    code.recipients,
+                    code.elapsed_ticks,
+                    code.maximum_ticks,
+                    code.polls,
+                    power.started,
+                    power.completed,
+                    power.recipients,
+                    power.elapsed_ticks,
+                    power.maximum_ticks,
+                    power.polls,
+                    profile.active,
+                    profile.active_start,
+                    profile.dropped_updates
+                ));
+            }
+            None => output::arguments(format_args!(
+                "PE BROADCAST pe={pe} unavailable=no-stable-observation\n"
+            )),
+        }
+    }
 }
 
 /// A PE's machine stopped, which only the home machine may: the board stops.

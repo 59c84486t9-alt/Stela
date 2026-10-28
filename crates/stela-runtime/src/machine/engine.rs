@@ -21,8 +21,8 @@ mod parallel;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 pub use parallel::{
-    Call, Counts, Hub, Kick, MaterializedSource, ParallelAdmissionError, SharedDevices,
-    SourceObservation, SourcePhase,
+    BroadcastCounts, BroadcastKind, BroadcastProfile, Call, Counts, Hub, Kick, MaterializedSource,
+    ParallelAdmissionError, SharedDevices, SourceObservation, SourcePhase,
 };
 pub use stela_contracts::dma::{DmaError, TransferFault};
 mod pointer;
