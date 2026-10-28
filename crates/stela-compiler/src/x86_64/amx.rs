@@ -14,12 +14,10 @@
 //! where `z` is the 4 KiB Z grid, `x`/`y` are the 64-byte operands after the
 //! circular-pool wrap, and `row` is operand bits 25:20. The kernel writes only
 //! the Z rows its shape selects.
-use crate::x86_64::asm::Code;
-mod encoding;
-
+use crate::x86_64::asm::{Alu, Asm, Code, Evex, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Vex};
 use crate::{TargetCpu, amx::AmxOperation};
+use Gpr::{Rax, Rcx, Rdi, Rdx, Rsi, Rsp};
 use alloc::vec::Vec;
-use encoding::{Gpr, Map, Operand, Prefix, at, evex, legacy_memory, vex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Precision {
@@ -231,11 +229,19 @@ const UNORDERED: u8 = 5;
 const SIGN: u8 = 6;
 const DEFAULT_NAN: u8 = 7;
 const OPMASK: u8 = 1;
+/// The kernel frame: [rsp] AMX MXCSR, [rsp+4] caller MXCSR, [rsp+8] a
+/// constant being broadcast.
+const FRAME_BYTES: i8 = 16;
+const CALLER_MXCSR: i32 = 4;
+const CONSTANT: i32 = 8;
+/// log2 of the 64-byte Z row.
+const ROW_SHIFT: u8 = 6;
 
 /// Emit one kernel for one tier.
 pub fn emit(kernel: Kernel, tier: Tier) -> Vec<u8> {
     let mut code = Code::new();
-    prologue(&mut code, kernel, tier);
+    let mut asm = code.asm();
+    prologue(&mut asm, kernel, tier);
     let rows = match kernel.shape {
         Shape::Matrix => kernel.lanes(),
         Shape::Vector => 1,
@@ -249,73 +255,92 @@ pub fn emit(kernel: Kernel, tier: Tier) -> Vec<u8> {
     for row in 0..rows {
         let offset = row * stride;
         match tier {
-            Tier::Fma => vex_row(&mut code, kernel, row, offset),
+            Tier::Fma => vex_row(&mut asm, kernel, row, offset),
             Tier::Avx512 => {
                 let accumulator = EVEX_Z_FIRST + (row as u8 % EVEX_Z_ROTATION);
-                evex_row(&mut code, kernel, row, offset, accumulator);
+                evex_row(&mut asm, kernel, row, offset, accumulator);
             }
         }
     }
-    epilogue(&mut code);
+    epilogue(&mut asm);
     code.into_bytes()
 }
 
-fn prologue(code: &mut Code, kernel: Kernel, tier: Tier) {
-    // sub rsp, 16: [rsp+4] caller MXCSR, [rsp] AMX MXCSR, [rsp+8] constants.
-    code.extend([0x48, 0x83, 0xec, 0x10]);
-    legacy_memory(code, &[0x0f, 0xae], 3, at(Gpr::Rsp, 4));
-    code.extend([0xc7, 0x04, 0x24]);
-    code.extend(MXCSR_ARM_ENVIRONMENT.to_le_bytes());
-    legacy_memory(code, &[0x0f, 0xae], 2, at(Gpr::Rsp, 0));
+/// VEX.256 fields.
+const fn ymm(map: Map, pp: Pp, w: bool) -> Vex {
+    Vex {
+        map,
+        pp,
+        w,
+        l: true,
+    }
+}
+
+/// EVEX.512 fields. A broadcast reads one element; other memory operands
+/// compress their displacement by the 64-byte vector.
+const fn zmm(map: Map, pp: Pp, w: bool, broadcast: bool, mask: u8) -> Evex {
+    Evex {
+        map,
+        pp,
+        w,
+        length: 2,
+        mask,
+        zeroing: false,
+        broadcast,
+        scale: match (broadcast, w) {
+            (false, _) => 64,
+            (true, false) => 4,
+            (true, true) => 8,
+        },
+    }
+}
+
+/// `vbroadcastss/sd ymm, m` (VEX.256.66.0F38.W0 18/19).
+fn vbroadcast(asm: &mut Asm<'_>, double: bool, register: u8, memory: Mem) {
+    let opcode = if double { 0x19 } else { 0x18 };
+    asm.vex(
+        ymm(Map::M0f38, Pp::P66, false),
+        opcode,
+        register,
+        0,
+        memory.into(),
+    );
+}
+
+/// Load `value` into every lane of `register`, through [rsp+8] for VEX.
+fn constant(asm: &mut Asm<'_>, tier: Tier, double: bool, value: u64, register: u8) {
+    asm.mov_imm64(Rax, value);
+    match tier {
+        Tier::Fma => {
+            asm.mov_store(Size::Qword, Mem::base(Rsp, CONSTANT), Rax);
+            vbroadcast(asm, double, register, Mem::base(Rsp, CONSTANT));
+        }
+        // vpbroadcastd/q zmm, eax/rax
+        Tier::Avx512 => asm.evex(
+            zmm(Map::M0f38, Pp::P66, double, false, 0),
+            0x7c,
+            register,
+            0,
+            Rm::Reg(Rax),
+        ),
+    }
+}
+
+fn prologue(asm: &mut Asm<'_>, kernel: Kernel, tier: Tier) {
+    asm.alu_imm8(Alu::Sub, Size::Qword, Rsp, FRAME_BYTES);
+    asm.stmxcsr(Mem::base(Rsp, CALLER_MXCSR));
+    asm.mov_rm_imm32(Size::Dword, Mem::base(Rsp, 0), MXCSR_ARM_ENVIRONMENT as i32);
+    asm.ldmxcsr(Mem::base(Rsp, 0));
     let double = kernel.precision == Precision::Double;
     let sign = if double { 1u64 << 63 } else { 1 << 31 };
-    let constant = |code: &mut Code, value: u64, register: u8| {
-        // mov rax, imm64
-        code.extend([0x48, 0xb8]);
-        code.extend(value.to_le_bytes());
-        match tier {
-            Tier::Fma => {
-                // mov [rsp+8], rax; vbroadcastss/sd ymm, [rsp+8]
-                code.extend([0x48, 0x89, 0x44, 0x24, 0x08]);
-                let opcode = if double { 0x19 } else { 0x18 };
-                vex(
-                    code,
-                    Map::Escape38,
-                    Prefix::OperandSize,
-                    false,
-                    true,
-                    opcode,
-                    register,
-                    0,
-                    Operand::Memory(at(Gpr::Rsp, 8)),
-                );
-            }
-            // vpbroadcastd/q zmm, eax/rax
-            Tier::Avx512 => evex(
-                code,
-                Map::Escape38,
-                Prefix::OperandSize,
-                double,
-                0x7c,
-                register,
-                0,
-                Operand::Register(Gpr::Rax as u8),
-                false,
-                0,
-            ),
-        }
+    let nan = if double {
+        DOUBLE_DEFAULT_NAN
+    } else {
+        u64::from(SINGLE_DEFAULT_NAN)
     };
-    constant(
-        code,
-        if double {
-            DOUBLE_DEFAULT_NAN
-        } else {
-            u64::from(SINGLE_DEFAULT_NAN)
-        },
-        DEFAULT_NAN,
-    );
+    constant(asm, tier, double, nan, DEFAULT_NAN);
     if kernel.subtract && kernel.product_only {
-        constant(code, sign, SIGN);
+        constant(asm, tier, double, sign, SIGN);
     }
     // Select the Z row group: rdi += (row & (rows per group - 1)) * 64.
     let group_mask = match (kernel.shape, kernel.precision) {
@@ -323,271 +348,165 @@ fn prologue(code: &mut Code, kernel: Kernel, tier: Tier) {
         (Shape::Matrix, Precision::Double) => 7,
         (Shape::Vector, _) => 63,
     };
-    code.extend([0x83, 0xe1, group_mask]); // and ecx, mask
-    code.extend([0xc1, 0xe1, 0x06]); // shl ecx, 6
-    code.extend([0x48, 0x01, 0xcf]); // add rdi, rcx
+    asm.alu_imm8(Alu::And, Size::Dword, Rcx, group_mask);
+    asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, ROW_SHIFT);
+    asm.alu(Alu::Add, Size::Qword, Rdi, Rcx);
     match tier {
         Tier::Fma => {
             for half in 0..2u8 {
-                vmovups_load(code, X + half, at(Gpr::Rsi, i32::from(half) * 32));
+                vmovups_load(asm, X + half, Mem::base(Rsi, i32::from(half) * 32));
             }
         }
-        Tier::Avx512 => evex(
-            code,
-            Map::Primary,
-            Prefix::None,
-            false,
+        Tier::Avx512 => asm.evex(
+            zmm(Map::M0f, Pp::None, false, false, 0),
             0x10,
             X,
             0,
-            Operand::Memory(at(Gpr::Rsi, 0)),
-            false,
-            0,
+            Mem::base(Rsi, 0).into(),
         ),
     }
 }
 
-fn epilogue(code: &mut Code) {
-    code.extend([0xc5, 0xf8, 0x77]); // vzeroupper
-    legacy_memory(code, &[0x0f, 0xae], 2, at(Gpr::Rsp, 4));
-    code.extend([0x48, 0x83, 0xc4, 0x10, 0xc3]); // add rsp, 16; ret
+fn epilogue(asm: &mut Asm<'_>) {
+    asm.vzeroupper();
+    asm.ldmxcsr(Mem::base(Rsp, CALLER_MXCSR));
+    asm.alu_imm8(Alu::Add, Size::Qword, Rsp, FRAME_BYTES);
+    asm.ret();
 }
 
-fn vmovups_load(code: &mut Code, register: u8, memory: encoding::Memory) {
-    vex(
-        code,
-        Map::Primary,
-        Prefix::None,
-        false,
-        true,
+fn vmovups_load(asm: &mut Asm<'_>, register: u8, memory: Mem) {
+    asm.vex(
+        ymm(Map::M0f, Pp::None, false),
         0x10,
         register,
         0,
-        Operand::Memory(memory),
+        memory.into(),
     );
 }
 
-fn vmovups_store(code: &mut Code, register: u8, memory: encoding::Memory) {
-    vex(
-        code,
-        Map::Primary,
-        Prefix::None,
-        false,
-        true,
+fn vmovups_store(asm: &mut Asm<'_>, register: u8, memory: Mem) {
+    asm.vex(
+        ymm(Map::M0f, Pp::None, false),
         0x11,
         register,
         0,
-        Operand::Memory(memory),
+        memory.into(),
     );
 }
 
 /// The packed-arithmetic prefix and W bit for the precision.
-fn packed(kernel: Kernel) -> (Prefix, bool) {
+fn packed(kernel: Kernel) -> (Pp, bool) {
     match kernel.precision {
-        Precision::Single => (Prefix::None, false),
-        Precision::Double => (Prefix::OperandSize, true),
+        Precision::Single => (Pp::None, false),
+        Precision::Double => (Pp::P66, true),
     }
 }
 
-fn vex_row(code: &mut Code, kernel: Kernel, row: i32, offset: i32) {
+fn vex_row(asm: &mut Asm<'_>, kernel: Kernel, row: i32, offset: i32) {
     let double = kernel.precision == Precision::Double;
-    let (prefix, wide) = packed(kernel);
-    match kernel.shape {
-        Shape::Matrix => vex(
-            code,
-            Map::Escape38,
-            Prefix::OperandSize,
-            false,
-            true,
-            if double { 0x19 } else { 0x18 },
-            Y,
-            0,
-            Operand::Memory(at(Gpr::Rdx, row * kernel.element_bytes())),
-        ),
-        Shape::Vector => {}
+    let (pp, wide) = packed(kernel);
+    if kernel.shape == Shape::Matrix {
+        vbroadcast(asm, double, Y, Mem::base(Rdx, row * kernel.element_bytes()));
     }
     for half in 0..2u8 {
         let z = Z_FIRST + half;
-        let memory = at(Gpr::Rdi, offset + i32::from(half) * 32);
-        let y = match kernel.shape {
-            Shape::Matrix => Y,
-            Shape::Vector => {
-                vmovups_load(code, Y, at(Gpr::Rdx, i32::from(half) * 32));
-                Y
-            }
-        };
+        let memory = Mem::base(Rdi, offset + i32::from(half) * 32);
+        if kernel.shape == Shape::Vector {
+            vmovups_load(asm, Y, Mem::base(Rdx, i32::from(half) * 32));
+        }
         if kernel.product_only {
             // vmulps/pd z, x, y
-            vex(
-                code,
-                Map::Primary,
-                prefix,
-                false,
-                true,
-                0x59,
-                z,
-                X + half,
-                Operand::Register(y),
-            );
+            asm.vex(ymm(Map::M0f, pp, false), 0x59, z, X + half, Rm::Xmm(Y));
             if kernel.subtract {
                 // vxorps/pd z, z, sign
-                vex(
-                    code,
-                    Map::Primary,
-                    prefix,
-                    false,
-                    true,
-                    0x57,
-                    z,
-                    z,
-                    Operand::Register(SIGN),
-                );
+                asm.vex(ymm(Map::M0f, pp, false), 0x57, z, z, Rm::Xmm(SIGN));
             }
         } else {
-            vmovups_load(code, z, memory);
-            // vfmadd231 / vfnmadd231: z = ±(x*y) + z
+            vmovups_load(asm, z, memory);
+            // vfmadd231 / vfnmadd231: z = ??(x*y) + z
             let opcode = if kernel.subtract { 0xbc } else { 0xb8 };
-            vex(
-                code,
-                Map::Escape38,
-                Prefix::OperandSize,
-                wide,
-                true,
+            asm.vex(
+                ymm(Map::M0f38, Pp::P66, wide),
                 opcode,
                 z,
                 X + half,
-                Operand::Register(y),
+                Rm::Xmm(Y),
             );
         }
         // vcmpunordps/pd mask, z, z; vblendvps/pd z, z, nan, mask
-        vex(
-            code,
-            Map::Primary,
-            prefix,
-            false,
-            true,
-            0xc2,
-            UNORDERED,
-            z,
-            Operand::Register(z),
-        );
-        code.push(CMP_UNORDERED);
-        vex(
-            code,
-            Map::Escape3a,
-            Prefix::OperandSize,
-            false,
-            true,
+        asm.vex(ymm(Map::M0f, pp, false), 0xc2, UNORDERED, z, Rm::Xmm(z));
+        asm.data(&[CMP_UNORDERED]);
+        asm.vex(
+            ymm(Map::M0f3a, Pp::P66, false),
             if double { 0x4b } else { 0x4a },
             z,
             z,
-            Operand::Register(DEFAULT_NAN),
+            Rm::Xmm(DEFAULT_NAN),
         );
-        code.push(UNORDERED << 4);
-        vmovups_store(code, z, memory);
+        asm.data(&[UNORDERED << 4]);
+        vmovups_store(asm, z, memory);
     }
 }
 
-fn evex_row(code: &mut Code, kernel: Kernel, row: i32, offset: i32, z: u8) {
-    let (prefix, wide) = packed(kernel);
-    let memory = at(Gpr::Rdi, offset);
+fn evex_row(asm: &mut Asm<'_>, kernel: Kernel, row: i32, offset: i32, z: u8) {
+    let (pp, wide) = packed(kernel);
+    let memory = Mem::base(Rdi, offset);
     let (y, broadcast) = match kernel.shape {
-        Shape::Matrix => (at(Gpr::Rdx, row * kernel.element_bytes()), true),
-        Shape::Vector => (at(Gpr::Rdx, 0), false),
+        Shape::Matrix => (Mem::base(Rdx, row * kernel.element_bytes()), true),
+        Shape::Vector => (Mem::base(Rdx, 0), false),
     };
     if kernel.product_only {
         // vmulps/pd z, x, y
-        evex(
-            code,
-            Map::Primary,
-            prefix,
-            wide,
-            0x59,
-            z,
-            X,
-            Operand::Memory(y),
-            broadcast,
-            0,
-        );
+        asm.evex(zmm(Map::M0f, pp, wide, broadcast, 0), 0x59, z, X, y.into());
         if kernel.subtract {
             // vpxord/q z, z, sign
-            evex(
-                code,
-                Map::Primary,
-                Prefix::OperandSize,
-                wide,
+            asm.evex(
+                zmm(Map::M0f, Pp::P66, wide, false, 0),
                 0xef,
                 z,
                 z,
-                Operand::Register(SIGN),
-                false,
-                0,
+                Rm::Xmm(SIGN),
             );
         }
     } else {
-        evex(
-            code,
-            Map::Primary,
-            Prefix::None,
-            false,
+        asm.evex(
+            zmm(Map::M0f, Pp::None, false, false, 0),
             0x10,
             z,
             0,
-            Operand::Memory(memory),
-            false,
-            0,
+            memory.into(),
         );
         let opcode = if kernel.subtract { 0xbc } else { 0xb8 };
-        evex(
-            code,
-            Map::Escape38,
-            Prefix::OperandSize,
-            wide,
+        asm.evex(
+            zmm(Map::M0f38, Pp::P66, wide, broadcast, 0),
             opcode,
             z,
             X,
-            Operand::Memory(y),
-            broadcast,
-            0,
+            y.into(),
         );
     }
     // vcmpunordps/pd k1, z, z; vmovaps/pd z{k1}, nan
-    evex(
-        code,
-        Map::Primary,
-        prefix,
-        wide,
+    asm.evex(
+        zmm(Map::M0f, pp, wide, false, 0),
         0xc2,
         OPMASK,
         z,
-        Operand::Register(z),
-        false,
-        0,
+        Rm::Xmm(z),
     );
-    code.push(CMP_UNORDERED);
-    evex(
-        code,
-        Map::Primary,
-        prefix,
-        wide,
+    asm.data(&[CMP_UNORDERED]);
+    asm.evex(
+        zmm(Map::M0f, pp, wide, false, OPMASK),
         0x28,
         z,
         0,
-        Operand::Register(DEFAULT_NAN),
-        false,
-        OPMASK,
+        Rm::Xmm(DEFAULT_NAN),
     );
-    evex(
-        code,
-        Map::Primary,
-        Prefix::None,
-        false,
+    asm.evex(
+        zmm(Map::M0f, Pp::None, false, false, 0),
         0x11,
         z,
         0,
-        Operand::Memory(memory),
-        false,
-        0,
+        memory.into(),
     );
 }
 
