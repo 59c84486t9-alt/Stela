@@ -132,12 +132,14 @@ fn write_from(
     };
     let mut inventory = restore::payload::inventory_from(
         BufReader::with_capacity(1024 * 1024, joined),
-        Path::new(&image.url)
-            .file_name()
-            .map(Path::new)
-            .context("image URL has no file name")?,
-        model,
-        (total, sha256),
+        restore::payload::VerifiedSource {
+            image: Path::new(&image.url)
+                .file_name()
+                .map(Path::new)
+                .context("image URL has no file name")?,
+            model,
+            digest: (total, sha256),
+        },
     )?;
     ensure!(
         inventory.manifest.product_build == image.build,

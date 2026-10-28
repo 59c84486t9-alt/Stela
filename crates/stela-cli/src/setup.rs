@@ -258,7 +258,15 @@ impl InstallMedium {
         let piece_bytes = stela_runtime::payload::PIECE_BYTES;
         medium::check_space(&host, &self.volume, &build, bytes, piece_bytes)?;
         let expected = medium::Expected::of(restore::receipt(&self.ipsw)?.as_ref());
-        let inventory = restore::payload::inventory(&self.ipsw, &self.model, true, None, None)?;
+        let inventory = restore::payload::inventory(
+            &self.ipsw,
+            &self.model,
+            restore::payload::KeyOptions {
+                fetch: true,
+                output: None,
+                input: None,
+            },
+        )?;
         let written = medium::write(&self.volume, &self.ipsw, inventory, &expected, piece_bytes)?;
         let directory = medium::directory(&self.volume, &build);
         println!(
@@ -413,7 +421,17 @@ impl Request {
             download: None,
             prepare_restore: &prepare_restore,
             prepare_update: &prepare_update,
-            inventory: &|ipsw, model| restore::payload::inventory(ipsw, model, true, None, None),
+            inventory: &|ipsw, model| {
+                restore::payload::inventory(
+                    ipsw,
+                    model,
+                    restore::payload::KeyOptions {
+                        fetch: true,
+                        output: None,
+                        input: None,
+                    },
+                )
+            },
             remote_inventory: &|ipsw, model| {
                 let (_, build) = restore::payload::identity(ipsw, model)?;
                 let image = restore::select(&restore::catalog()?, Some(&build), Some(model))?;

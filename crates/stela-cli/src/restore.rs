@@ -312,7 +312,16 @@ pub fn remote_inventory(
         .and_then(|mut segments| segments.next_back())
         .context("the image URL names no file")?;
     let bytes = source.size();
-    payload::remote_inventory(source, Path::new(name), bytes, layout, model, keys_in)
+    payload::remote_inventory(
+        source,
+        payload::RemoteInventoryOptions {
+            image: Path::new(name),
+            bytes,
+            layout,
+            model,
+            keys_in,
+        },
+    )
 }
 
 /// Apple's update CDN serves each object over plain HTTP from its `-http`

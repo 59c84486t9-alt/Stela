@@ -414,19 +414,12 @@ pub struct Inventory {
     pub blocks: Vec<u8>,
 }
 
-/// The `image-manifest --payload` report: member sets with SHA-256s, the
-/// global manifests and each AEA member's key URL. With `fetch_keys` the
-/// public AEA key responses go into the returned manifest; with `key_dir`
-/// they also go to 0600 files named by header SHA-256, and never into the
-/// report. The manifest describes the IPSW read in place (a restore source
-/// disk), and the hashes of every member's blocks come with it.
-pub fn inventory(
-    image: &Path,
-    model: &str,
-    fetch_keys: bool,
-    key_dir: Option<&Path>,
-    keys_in: Option<&Path>,
-) -> Result<Inventory> {
+/// The `image-manifest --payload` report: member sets with SHA-256s, global
+/// manifests and each AEA member's key URL. The options select local or fetched
+/// recipient keys and optional 0600 copies named by header SHA-256. Key bodies
+/// are omitted from the report. The returned manifest binds the in-place IPSW
+/// and each member's block hashes.
+pub fn inventory(image: &Path, model: &str, keys: KeyOptions<'_>) -> Result<Inventory> {
     let mut archive = ZipArchive::new(File::open(image)?)?;
     let selection = select(&mut archive, model)?;
     let metadata = aea_metadata(&mut archive, image, &selection.names)?;
@@ -436,27 +429,26 @@ pub fn inventory(
         (whole.join().expect("hash worker panicked"), members)
     });
     let hashed = members?;
-    finish_inventory(
-        image,
-        selection,
-        metadata,
-        hashed,
-        ipsw?,
-        KeyOptions {
-            fetch: fetch_keys,
-            output: key_dir,
-            input: keys_in,
-        },
-    )
+    finish_inventory(image, selection, metadata, hashed, ipsw?, keys)
+}
+
+/// Identity and verified whole-file digest of a joined IPSW reader.
+pub(crate) struct VerifiedSource<'a> {
+    pub(crate) image: &'a Path,
+    pub(crate) model: &'a str,
+    pub(crate) digest: (u64, String),
 }
 
 /// Inventory a verified, joined IPSW without creating a full host-side file.
 pub(crate) fn inventory_from<R: Read + Seek>(
     source: R,
-    image: &Path,
-    model: &str,
-    digest: (u64, String),
+    identity: VerifiedSource<'_>,
 ) -> Result<Inventory> {
+    let VerifiedSource {
+        image,
+        model,
+        digest,
+    } = identity;
     let mut archive = ZipArchive::new(source)?;
     let selection = select(&mut archive, model)?;
     let metadata = aea_metadata(&mut archive, image, &selection.names)?;
@@ -493,10 +485,16 @@ pub(crate) fn inventory_from<R: Read + Seek>(
     )
 }
 
-struct KeyOptions<'a> {
-    fetch: bool,
-    output: Option<&'a Path>,
-    input: Option<&'a Path>,
+/// Public AEA recipient key sources and optional owner-only output copies.
+/// Requesting output also fetches keys when no input directory is supplied.
+#[derive(Default)]
+pub struct KeyOptions<'a> {
+    /// Fetch public keys unless an input directory is supplied.
+    pub fetch: bool,
+    /// Write key copies here with owner-only permissions.
+    pub output: Option<&'a Path>,
+    /// Read keys here instead of fetching them.
+    pub input: Option<&'a Path>,
 }
 
 fn finish_inventory(
@@ -569,6 +567,20 @@ fn finish_inventory(
     })
 }
 
+/// Remote IPSW identity, source layout and optional local recipient keys.
+pub struct RemoteInventoryOptions<'a> {
+    /// IPSW name recorded in source and AEA member identities.
+    pub image: &'a Path,
+    /// Whole archive length reported by the range transport.
+    pub bytes: u64,
+    /// Remote URL and ETag used by the restore host.
+    pub layout: Layout,
+    /// Product type selecting the restore identity.
+    pub model: &'a str,
+    /// Local recipient keys; absence requests public key fetching.
+    pub keys_in: Option<&'a Path>,
+}
+
 /// The restore inventory of the IPSW `source` of `bytes` named `image`,
 /// read by ranges where it is, for `stela.efi` to stream from `layout`'s
 /// URL during the install ([`Layout::Remote`]). Only members no device
@@ -578,12 +590,15 @@ fn finish_inventory(
 /// pass through unhashed, and the sealed system volume checks itself.
 pub fn remote_inventory<R: Read + Seek>(
     source: R,
-    image: &Path,
-    bytes: u64,
-    layout: Layout,
-    model: &str,
-    keys_in: Option<&Path>,
+    options: RemoteInventoryOptions<'_>,
 ) -> Result<Inventory> {
+    let RemoteInventoryOptions {
+        image,
+        bytes,
+        layout,
+        model,
+        keys_in,
+    } = options;
     ensure!(
         matches!(layout, Layout::Remote { .. }),
         "a remote inventory needs a remote layout"
@@ -1121,7 +1136,7 @@ mod tests {
             assert_eq!(kept, source, "{name}");
         }
         // Its inventory names only the erase and installed identities.
-        let recovery = inventory(&trimmed, SYNTHETIC_MODEL, false, None, None)?;
+        let recovery = inventory(&trimmed, SYNTHETIC_MODEL, KeyOptions::default())?;
         let purposes: Vec<Purpose> = recovery
             .manifest
             .identities
@@ -1137,7 +1152,7 @@ mod tests {
                 .any(|m| m.name == "Firmware/stelatest-os.dmg")
         );
         // A full IPSW's inventory is unchanged.
-        let full = inventory(&image, SYNTHETIC_MODEL, false, None, None)?;
+        let full = inventory(&image, SYNTHETIC_MODEL, KeyOptions::default())?;
         assert_eq!(full.manifest.identities.len(), 3);
         Ok(())
     }
@@ -1165,7 +1180,15 @@ mod tests {
             report,
             manifest: in_place,
             blocks,
-        } = inventory(&image, SYNTHETIC_MODEL, true, None, None)?;
+        } = inventory(
+            &image,
+            SYNTHETIC_MODEL,
+            KeyOptions {
+                fetch: true,
+                output: None,
+                input: None,
+            },
+        )?;
         assert_eq!(report["payload"]["members"], json!(manifest.members));
         // The in-place manifest describes the same archive bytes.
         assert_eq!(in_place.members, manifest.members);
@@ -1189,7 +1212,7 @@ mod tests {
             }
         }
         assert_eq!(at, blocks.len());
-        assert!(inventory(&image, "Missing1,1", false, None, None).is_err());
+        assert!(inventory(&image, "Missing1,1", KeyOptions::default()).is_err());
         Ok(())
     }
 
@@ -1205,11 +1228,13 @@ mod tests {
         };
         let remote = remote_inventory(
             File::open(&image)?,
-            &image,
-            bytes,
-            layout.clone(),
-            SYNTHETIC_MODEL,
-            None,
+            RemoteInventoryOptions {
+                image: &image,
+                bytes,
+                layout: layout.clone(),
+                model: SYNTHETIC_MODEL,
+                keys_in: None,
+            },
         )?;
         let manifest = &remote.manifest;
         assert_eq!(manifest.layout, layout);
@@ -1217,7 +1242,7 @@ mod tests {
             (manifest.source.bytes, &manifest.source.sha256),
             (bytes, &None)
         );
-        let full = inventory(&image, SYNTHETIC_MODEL, false, None, None)?.manifest;
+        let full = inventory(&image, SYNTHETIC_MODEL, KeyOptions::default())?.manifest;
         let names =
             |m: &PayloadManifest| m.members.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(manifest), names(&full));
@@ -1247,11 +1272,13 @@ mod tests {
         assert!(
             remote_inventory(
                 File::open(&image)?,
-                &image,
-                bytes,
-                Layout::Staged,
-                SYNTHETIC_MODEL,
-                None
+                RemoteInventoryOptions {
+                    image: &image,
+                    bytes,
+                    layout: Layout::Staged,
+                    model: SYNTHETIC_MODEL,
+                    keys_in: None
+                }
             )
             .is_err()
         );

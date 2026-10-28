@@ -589,8 +589,12 @@ pub(super) mod tests {
     }
 
     fn inventory(ipsw: &Path) -> restore::payload::Inventory {
-        restore::payload::inventory(ipsw, restore::payload::SYNTHETIC_MODEL, false, None, None)
-            .unwrap()
+        restore::payload::inventory(
+            ipsw,
+            restore::payload::SYNTHETIC_MODEL,
+            restore::payload::KeyOptions::default(),
+        )
+        .unwrap()
     }
 
     fn expected(ipsw: &Path) -> Expected {
@@ -746,11 +750,13 @@ pub(super) mod tests {
         };
         let remote = restore::payload::remote_inventory(
             fs::File::open(&ipsw).unwrap(),
-            &ipsw,
-            bytes,
-            layout,
-            restore::payload::SYNTHETIC_MODEL,
-            None,
+            restore::payload::RemoteInventoryOptions {
+                image: &ipsw,
+                bytes,
+                layout,
+                model: restore::payload::SYNTHETIC_MODEL,
+                keys_in: None,
+            },
         )
         .unwrap();
         assert!(write_remote(&volume, inventory(&ipsw)).is_err());

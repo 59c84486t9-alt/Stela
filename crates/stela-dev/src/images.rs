@@ -181,9 +181,11 @@ impl ImageManifest {
             let inventory = restore::payload::inventory(
                 &input,
                 model,
-                false,
-                aea_keys.as_deref(),
-                aea_keys_in.as_deref(),
+                restore::payload::KeyOptions {
+                    fetch: false,
+                    output: aea_keys.as_deref(),
+                    input: aea_keys_in.as_deref(),
+                },
             )?;
             value["payload"] = inventory.report;
             write_json(&output, &value)?;

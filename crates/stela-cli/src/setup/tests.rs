@@ -312,7 +312,7 @@ fn fake_prepare_update(
 /// The synthetic IPSW's inventory: it names no AEA member to fetch a
 /// key for.
 fn fake_inventory(ipsw: &Path, model: &str) -> Result<restore::payload::Inventory> {
-    restore::payload::inventory(ipsw, model, false, None, None)
+    restore::payload::inventory(ipsw, model, restore::payload::KeyOptions::default())
 }
 
 /// The synthetic IPSW's inventory as if it were on Apple's servers.
@@ -322,7 +322,16 @@ fn fake_remote_inventory(ipsw: &Path, model: &str) -> Result<restore::payload::I
         etag: "\"synthetic\"".into(),
     };
     let bytes = fs::metadata(ipsw)?.len();
-    restore::payload::remote_inventory(fs::File::open(ipsw)?, ipsw, bytes, layout, model, None)
+    restore::payload::remote_inventory(
+        fs::File::open(ipsw)?,
+        restore::payload::RemoteInventoryOptions {
+            image: ipsw,
+            bytes,
+            layout,
+            model,
+            keys_in: None,
+        },
+    )
 }
 
 fn environment(host: &FakeHost) -> Environment<'_> {
