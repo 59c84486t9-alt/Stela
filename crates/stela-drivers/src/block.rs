@@ -980,7 +980,7 @@ impl Held<'_> {
         run: impl FnOnce(&mut Box<dyn BlockDevice>) -> T,
     ) -> T {
         let started = crate::Clock::ticks();
-        let result = run(&mut **self);
+        let result = run(self);
         let now = crate::Clock::ticks();
         let stats = &mut self.requests().stats;
         stats.busy += now.wrapping_sub(started);

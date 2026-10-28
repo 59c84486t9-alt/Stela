@@ -1224,6 +1224,10 @@ pub(crate) fn completion_signal(id: u64) -> Option<stela_drivers::bus::irq::MsiM
     })
 }
 
+/// Doorbells a local APIC did not deliver since the last report: each may
+/// leave its processor asleep until its next wake.
+static UNDELIVERED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Ring the doorbell of the processor whose APIC ID is `destination`,
 /// through this processor's own local APIC.
 pub(crate) fn ring(destination: u32) {
@@ -1231,13 +1235,21 @@ pub(crate) fn ring(destination: u32) {
     // SAFETY: interrupts are off in the engine, so nothing else on this
     // processor writes its ICR meanwhile; every installed host handles the
     // doorbell vector.
-    let _ = unsafe {
+    let sent = unsafe {
         state.apic.notify(
             destination,
             super::interrupts::NATIVE_WAKE_VECTOR,
             state.tsc_hz,
         )
     };
+    if sent.is_err() {
+        UNDELIVERED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The doorbells left undelivered since the last call.
+pub(crate) fn undelivered_doorbells() -> u64 {
+    UNDELIVERED.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
 
 pub(crate) fn doorbell_counter() -> &'static core::sync::atomic::AtomicU64 {

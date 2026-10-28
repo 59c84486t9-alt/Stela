@@ -5,8 +5,9 @@
 //! which starts with everything the record still holds, and [`flush_log`]
 //! stores what each has not: at every step and at every stop, which
 //! [`terminate`] reaches. Between engine slices [`flush_due`] stores the
-//! machine state's log each second but the USB's, slow flash the guest
-//! waits on, only every [`USB_FLUSH_SECONDS`]. The screen shows the curated
+//! machine state's log every [`MACHINE_FLUSH_SECONDS`], as ext4 commits its
+//! journal, and the USB's, slow flash the guest waits on, only every
+//! [`USB_FLUSH_SECONDS`]. The screen shows the curated
 //! steps of [`status`](crate::status) instead, and a fatal error or panic, which
 //! reach it before the console exists through the firmware's.
 use crate::{console, serial::Serial};
@@ -283,6 +284,9 @@ impl Sink {
     }
 }
 
+/// Seconds between the machine state's log stores while the engine runs:
+/// ext4's default journal commit interval. A stop stores at once.
+const MACHINE_FLUSH_SECONDS: u64 = 5;
 /// Seconds between the USB log's stores while the engine runs.
 const USB_FLUSH_SECONDS: u64 = 10;
 
@@ -302,10 +306,29 @@ pub enum Log {
     Usb,
 }
 
+/// The open logs, which any processor may flush or report: reached only
+/// while holding [`HELD`].
 static SINKS: Global<Vec<Sink>> = Global(RefCell::new(Vec::new()));
-/// A flush is running: a fatal or panic raised inside it halts without
-/// flushing again.
-static FLUSHING: AtomicBool = AtomicBool::new(false);
+/// A processor holds [`SINKS`]: a fatal or panic raised inside a flush
+/// halts without flushing again.
+static HELD: AtomicBool = AtomicBool::new(false);
+
+/// Run `f` on the open logs once no other processor holds them, or `None`
+/// at once when one does and `wait` is false.
+fn with_sinks<R>(wait: bool, f: impl FnOnce(&mut Vec<Sink>) -> R) -> Option<R> {
+    while HELD
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        if !wait {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+    let result = SINKS.0.try_borrow_mut().ok().map(|mut sinks| f(&mut sinks));
+    HELD.store(false, Ordering::Release);
+    result
+}
 /// Boot services still run, so the firmware's console can show a fatal
 /// error before Stela's own console takes the screen.
 static FIRMWARE_CONSOLE: AtomicBool = AtomicBool::new(true);
@@ -361,9 +384,9 @@ impl Write for Stamp {
 pub fn leave_boot_services() {
     crate::firmware::stop_ticker();
     flush_log();
-    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
-        sinks.retain(|sink| sink.kind != Log::Firmware);
-    }
+    with_sinks(true, |sinks| {
+        sinks.retain(|sink| sink.kind != Log::Firmware)
+    });
     disable_firmware_console();
 }
 
@@ -453,7 +476,7 @@ pub fn add_log(
     .unwrap_or(0);
     writer.flush(&mut *device).map_err(Unopened::Store)?;
     writer.verify(&mut *device).map_err(Unopened::Unkept)?;
-    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
+    with_sinks(true, |sinks| {
         sinks.push(Sink {
             writer,
             device,
@@ -464,8 +487,8 @@ pub fn add_log(
             ticks: 0,
             began: None,
             request: None,
-        });
-    }
+        })
+    });
     Ok(())
 }
 
@@ -473,9 +496,7 @@ pub fn add_log(
 /// they live on are shut down; later output reaches the serial port only.
 pub fn close_logs() {
     flush_log();
-    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
-        sinks.clear();
-    }
+    with_sinks(true, Vec::clear);
 }
 
 /// Store in every open log the output it does not hold yet, waiting for
@@ -487,13 +508,20 @@ pub fn flush_log() {
 }
 
 /// Begin storing the logs whose store is due, the machine state's every
-/// call and the USB's every [`USB_FLUSH_SECONDS`], and move every store in
-/// progress on; never waits for a device ([`advance_logs`]).
+/// [`MACHINE_FLUSH_SECONDS`] and the USB's every [`USB_FLUSH_SECONDS`], and
+/// move every store in progress on; never waits for a device
+/// ([`advance_logs`]).
 pub fn flush_due() {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     let now = rdtsc();
     flush_where(
-        |sink| sink.kind != Log::Usb || now.wrapping_sub(sink.flushed) >= USB_FLUSH_SECONDS * hz,
+        |sink| {
+            let seconds = match sink.kind {
+                Log::Usb => USB_FLUSH_SECONDS,
+                _ => MACHINE_FLUSH_SECONDS,
+            };
+            now.wrapping_sub(sink.flushed) >= seconds * hz
+        },
         false,
     );
 }
@@ -509,11 +537,8 @@ pub fn advance_logs() {
 static STORING: AtomicBool = AtomicBool::new(false);
 
 fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
-    if FLUSHING.swap(true, Ordering::Acquire) {
-        return;
-    }
     let mut failed = Vec::new();
-    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
+    with_sinks(false, |sinks| {
         // A log whose store is in progress takes new bytes at its next one.
         let due: Vec<bool> = sinks
             .iter()
@@ -551,8 +576,7 @@ fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
             sinks.iter().any(|sink| sink.writer.storing()),
             Ordering::Release,
         );
-    }
-    FLUSHING.store(false, Ordering::Release);
+    });
     for (kind, error) in failed {
         arguments(format_args!("BOOT LOG refusal: {error}\n"));
         if kind == Log::Machine {
@@ -577,14 +601,14 @@ pub fn millis_since(start: u64) -> u64 {
 /// Report each open log's stores so far and the milliseconds they took.
 pub fn report_log_stores() {
     let hz = TSC_HZ.load(Ordering::Relaxed).max(1);
-    let Ok(sinks) = SINKS.0.try_borrow() else {
+    let Some(costs) = with_sinks(false, |sinks| {
+        sinks
+            .iter()
+            .map(|sink| (sink.kind, sink.stores, sink.ticks * 1000 / hz))
+            .collect::<Vec<(Log, u64, u64)>>()
+    }) else {
         return;
     };
-    let costs: Vec<(Log, u64, u64)> = sinks
-        .iter()
-        .map(|sink| (sink.kind, sink.stores, sink.ticks * 1000 / hz))
-        .collect();
-    drop(sinks);
     for (kind, stores, millis) in costs {
         let name = match kind {
             Log::Machine => "machine",

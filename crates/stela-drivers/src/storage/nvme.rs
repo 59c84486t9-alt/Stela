@@ -239,7 +239,7 @@ enum Tag {
         namespace: u32,
         block: usize,
         command: Command,
-        deadline: Option<crate::Deadline>,
+        deadline: crate::Deadline,
         retries: u8,
     },
     /// Interrupted by a controller reset, to run again once it completes.
@@ -765,17 +765,19 @@ impl Controller {
     /// Publish `command` under `tag`, which holds no other.
     fn submit(&mut self, tag: usize, namespace: u32, block: usize, command: Command, retries: u8) {
         let slot = self.io.tail;
-        let published = self
-            .io_command(tag, namespace, block, &command)
-            .and_then(|words| self.publish(true, words, tag));
+        // A command whose deadline cannot be kept is not sent.
+        let published = self.deadline(self.command_timeout_us).and_then(|deadline| {
+            let words = self.io_command(tag, namespace, block, &command)?;
+            self.publish(true, words, tag).map(|id| (id, deadline))
+        });
         self.tags[tag] = match published {
-            Ok(id) => Tag::Running {
+            Ok((id, deadline)) => Tag::Running {
                 id,
                 slot,
                 namespace,
                 block,
                 command,
-                deadline: self.clock.try_deadline(self.command_timeout_us).ok(),
+                deadline,
                 retries,
             },
             Err(error) => Tag::Done(Err(self.poison(error))),
@@ -824,9 +826,10 @@ impl Controller {
             self.fail_all();
             return;
         }
-        let expired = self.tags.iter().any(
-            |tag| matches!(tag, Tag::Running { deadline: Some(deadline), .. } if deadline.passed()),
-        );
+        let expired = self
+            .tags
+            .iter()
+            .any(|tag| matches!(tag, Tag::Running { deadline, .. } if deadline.passed()));
         if expired {
             self.reset();
         }
