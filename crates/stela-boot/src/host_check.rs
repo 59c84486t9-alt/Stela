@@ -856,6 +856,7 @@ fn finish(machine: &mut Machine, keyboards: &mut [UsbInput]) -> ! {
     let mut power = HostPowerControl::new(
         machine.power,
         None,
+        None,
         machine.timing.tsc_hz,
         crate::engine::storage::HostDisks::none(),
     );

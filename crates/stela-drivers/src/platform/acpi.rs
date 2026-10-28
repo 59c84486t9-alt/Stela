@@ -177,6 +177,8 @@ unsafe extern "C" {
     ) -> Status;
     fn acpi_remove_notify_handler(handle: *mut c_void, kind: u32, callback: Notify) -> Status;
     fn acpi_os_wait_events_complete();
+    fn acpi_get_sleep_type_data(state: u8, a: *mut u8, b: *mut u8) -> Status;
+    fn acpi_enter_sleep_state_prep(state: u8) -> Status;
     fn acpi_install_address_space_handler(
         handle: *mut c_void,
         space: u32,
@@ -359,6 +361,24 @@ impl Session {
                 Ok(Handle { session: self, raw })
             })
             .collect()
+    }
+    /// SLP_TYPa and SLP_TYPb of sleep `state`, as ACPICA evaluates `\_Sx`.
+    pub fn sleep_types(&self, state: u8) -> Result<(u8, u8), Error> {
+        let guard = self.guard()?;
+        let (mut a, mut b) = (0, 0);
+        // SAFETY: the live session owns ACPICA; both outputs are writable.
+        checked(unsafe { acpi_get_sleep_type_data(state, &mut a, &mut b) })?;
+        guard.check()?;
+        Ok((a, b))
+    }
+    /// Prepare to enter sleep `state` as Linux's `acpi_sleep_prepare` does with
+    /// `acpi_enter_sleep_state_prep`: `\_PTS` and the `\_SST` indicator. Entering
+    /// the state, its PM1 or sleep-control writes, stays the caller's.
+    pub fn prepare_sleep(&self, state: u8) -> Result<(), Error> {
+        let guard = self.guard()?;
+        // SAFETY: the live session owns ACPICA.
+        checked(unsafe { acpi_enter_sleep_state_prep(state) })?;
+        guard.check()
     }
     /// False after native table deletion. The whole facade then returns AE_SUPPORT;
     /// native driver rebinding into a changed namespace is not implemented.
@@ -1506,6 +1526,44 @@ pub(crate) mod tests {
         assert_eq!(counts.port_writes.load(Ordering::SeqCst), writes);
         session.shutdown().unwrap();
         assert!(counts.destroyed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn sleep_preparation_evaluates_s5_and_runs_pts() {
+        let _serial = TEST_SERIAL.lock().unwrap();
+        let mut dsdt = include_bytes!("acpi/fixtures/namespace.aml").to_vec();
+        // Name (PTSV, Zero)
+        dsdt.extend_from_slice(&[0x08, b'P', b'T', b'S', b'V', 0x00]);
+        // Name (_S5, Package () { 5, 7, Zero, Zero })
+        dsdt.extend_from_slice(&[
+            0x08, b'_', b'S', b'5', b'_', 0x12, 8, 4, 0x0a, 5, 0x0a, 7, 0, 0,
+        ]);
+        // Method (_PTS, 1) { Store (Arg0, PTSV) }
+        dsdt.extend_from_slice(&[0x14, 12, b'_', b'P', b'T', b'S', 1, 0x70, 0x68]);
+        dsdt.extend_from_slice(b"PTSV");
+        let length = dsdt.len() as u32;
+        dsdt[4..8].copy_from_slice(&length.to_le_bytes());
+        checksum(&mut dsdt, 9);
+        let (provider, counts) = fixture_dsdt(dsdt);
+        // SAFETY: actual test provider owns all services; singleton serialized.
+        let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+        let prepared = || {
+            session
+                .handle("\\PTSV")
+                .unwrap()
+                .evaluate(None, &[])
+                .unwrap()
+        };
+        assert_eq!(session.sleep_types(5), Ok((5, 7)));
+        assert_eq!(prepared(), Some(Value::Integer(0)));
+        session.prepare_sleep(5).unwrap();
+        assert_eq!(prepared(), Some(Value::Integer(5)));
+        // No \_S3: AE_NOT_FOUND, and no _PTS for a state the firmware lacks.
+        assert_eq!(session.sleep_types(3), Err(Error(0x0005)));
+        assert_eq!(session.prepare_sleep(3), Err(Error(0x0005)));
+        assert_eq!(prepared(), Some(Value::Integer(5)));
+        assert_eq!(counts.port_writes.load(Ordering::SeqCst), 0);
+        session.shutdown().unwrap();
     }
 
     #[test]

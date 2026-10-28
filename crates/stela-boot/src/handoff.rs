@@ -186,6 +186,8 @@ pub struct Handoff {
     /// The firmware's `ResetSystem` runtime service, whose regions the
     /// loader keeps mapped by identity; zero without one.
     pub efi_reset: u64,
+    /// The firmware's ACPI RSDP; zero without one.
+    pub rsdp: u64,
 }
 
 #[cfg(test)]

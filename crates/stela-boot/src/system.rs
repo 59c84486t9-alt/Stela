@@ -990,6 +990,7 @@ fn load(
             host_firmware,
             power,
             efi_reset: runtime.reset,
+            rsdp: storage::rsdp().unwrap_or(0),
         });
     }
     // SAFETY: boot services are over, interrupts go off now, and the new

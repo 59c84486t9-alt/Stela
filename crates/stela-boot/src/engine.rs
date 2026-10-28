@@ -7,6 +7,7 @@
 //! installed; `--preboot` builds the boot bundle from the installed
 //! system's partition that probe opened.
 
+mod aml;
 pub(crate) mod bundle;
 mod console_lines;
 mod display;
@@ -2593,6 +2594,16 @@ fn run_machine<H: Host>(
         host_nor,
         power::HostPowerControl::new(
             handoff.power,
+            aml::HostAcpi::start(
+                handoff.rsdp,
+                handoff.root,
+                handoff
+                    .storage
+                    .handoff()
+                    .map(|storage| storage.ecam)
+                    .unwrap_or_default(),
+                handoff.tsc_hz,
+            ),
             power::EfiReset::new(handoff.efi_reset, handoff.root),
             handoff.tsc_hz,
             host_disks,
