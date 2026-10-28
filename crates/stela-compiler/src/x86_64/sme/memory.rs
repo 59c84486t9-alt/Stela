@@ -1,7 +1,7 @@
 //! SME loads and stores through the memory service. Loads commit after every
 //! element succeeds; stores submit one active element at a time.
 use crate::x86_64::asm::BitTest;
-use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Patch, ShiftOp, Size};
 use crate::x86_64::simd::encode::stack;
 use alloc::vec::Vec;
 mod za;
@@ -199,9 +199,9 @@ pub(crate) fn emit(
     stack_space(code, scratch.bytes, false);
     code.asm().ret();
     let done = code.len();
-    service::patch_branch(code, success, done);
+    crate::x86_64::asm::resolve(code, success, done);
     for displacement in failures {
-        service::patch_branch(code, displacement, failure);
+        crate::x86_64::asm::resolve(code, displacement, failure);
     }
     Ok(())
 }
@@ -277,18 +277,16 @@ fn pointer(code: &mut Code, field: u32) {
     asm.mov_load(Size::Qword, Gpr::R8, Mem::base_disp8(Gpr::R8, field as i8));
 }
 
-/// A rel32 `jcc` on `condition`, or a `jmp` without one; returns the
-/// displacement offset.
-fn jump(code: &mut Code, condition: Option<Cond>) -> usize {
+/// A rel32 `jcc` on `condition`, or a `jmp` without one, resolved later.
+fn jump(code: &mut Code, condition: Option<Cond>) -> Patch {
     let mut asm = code.asm();
     match condition {
         Some(condition) => asm.jcc(condition),
         None => asm.jmp(),
     }
-    .offset()
 }
 
-fn check_sp(code: &mut Code, base: Register, pc: u64, failures: &mut Vec<usize>) {
+fn check_sp(code: &mut Code, base: Register, pc: u64, failures: &mut Vec<Patch>) {
     if base != Register::Sp {
         return;
     }
@@ -299,7 +297,7 @@ fn check_sp(code: &mut Code, base: Register, pc: u64, failures: &mut Vec<usize>)
     service::fault(code, MemoryStatus::StackAlignment, pc);
     failures.push(jump(code, None));
     let destination = code.len();
-    service::patch_branch(code, aligned, destination);
+    crate::x86_64::asm::resolve(code, aligned, destination);
 }
 
 fn transfer_loop(
@@ -307,7 +305,7 @@ fn transfer_loop(
     transfer: Transfer,
     pc: u64,
     scratch: &Scratch,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     service::request(
         code,
@@ -333,7 +331,7 @@ fn transfer_loop(
         failures.push(service::branch_failed(code));
         let destination = code.len();
         if let Some(branch) = inactive {
-            service::patch_branch(code, branch, destination);
+            crate::x86_64::asm::resolve(code, branch, destination);
         }
         // The final address/data-pointer increments are dead private state in
         // the supported no-CPA profile. No later access consumes those values.
@@ -356,7 +354,7 @@ fn transfer_loop(
     failures.push(service::branch_failed(code));
     let increment = code.len();
     if let Some(displacement) = inactive {
-        service::patch_branch(code, displacement, increment);
+        crate::x86_64::asm::resolve(code, displacement, increment);
     }
     for offset in [
         scratch.request + MEMORY_REQUEST_ADDRESS_OFFSET,
@@ -377,7 +375,7 @@ fn transfer_loop(
         transfer.bytes as i32,
     );
     let repeat = jump(code, Some(Cond::B));
-    service::patch_branch(code, repeat, head);
+    crate::x86_64::asm::resolve(code, repeat, head);
 }
 
 fn emit_vectors(
@@ -387,7 +385,7 @@ fn emit_vectors(
     target: TargetCpu,
     pc: u64,
     scratch: &Scratch,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     check_sp(code, operand.address.base, pc, failures);
     let loading = operand.direction == Direction::Load;

@@ -372,6 +372,31 @@ pub(crate) enum Cond {
     G,
 }
 
+impl Cond {
+    /// The condition that holds exactly when this one does not.
+    pub(crate) const fn negate(self) -> Self {
+        use Cond::*;
+        match self {
+            O => No,
+            No => O,
+            B => Ae,
+            Ae => B,
+            E => Ne,
+            Ne => E,
+            Be => A,
+            A => Be,
+            S => Ns,
+            Ns => S,
+            P => Np,
+            Np => P,
+            L => Ge,
+            Ge => L,
+            Le => G,
+            G => Le,
+        }
+    }
+}
+
 /// Group 3 unary operations, numbered by their ModRM reg digit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

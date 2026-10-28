@@ -250,7 +250,7 @@ impl CheckedOperand {
         code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
         let cleanup = code.len();
         for failure in failures {
-            service::patch_branch(code, failure, cleanup);
+            crate::x86_64::asm::resolve(code, failure, cleanup);
         }
         code.asm()
             .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);

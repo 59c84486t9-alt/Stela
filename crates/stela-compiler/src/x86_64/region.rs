@@ -1204,7 +1204,7 @@ fn emit_prefix_selected<'a>(
     }
     let mut emitter = Emitter {
         output: OptimizedRegion {
-            code: Code::from(vec![]),
+            code: Code::new(),
             consumed_instructions: consumed,
             source_map: vec![],
             stats: AllocationStats::default(),

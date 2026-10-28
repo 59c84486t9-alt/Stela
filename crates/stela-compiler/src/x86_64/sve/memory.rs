@@ -1,6 +1,6 @@
 //! Address computation and fault exits shared by the SVE memory families.
 use crate::x86_64::asm::Gpr::{Rax, Rcx};
-use crate::x86_64::asm::{Alu, Code, Cond, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Patch, ShiftOp, Size};
 
 use super::super::{load, scalable::memory as service};
 use crate::aarch64::{
@@ -68,9 +68,9 @@ pub(crate) fn address(code: &mut Code, operand: Address, length: VectorLength) {
 }
 
 /// Check SP before applying the displacement. Requires SA/SA0 enabled, with
-/// CHECKSPNONEACTIVE true. Prefetches must not call this. The caller patches
-/// the fault site to its cleanup.
-pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize> {
+/// CHECKSPNONEACTIVE true. Prefetches must not call this. The caller resolves
+/// the fault branch to its cleanup.
+pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<Patch> {
     if base != Register::Sp {
         return None;
     }
@@ -82,7 +82,7 @@ pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize
     let mut asm = code.asm();
     let failed = asm.jmp();
     asm.bind(aligned);
-    Some(failed.offset())
+    Some(failed)
 }
 
 /// After family scratch cleanup, return a failed inner body to its outer entry.

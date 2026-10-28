@@ -397,7 +397,7 @@ impl Decoded {
             // forbids synchronous translation/alignment faults and Device
             // accesses. A host prefetch using a raw guest VA would not preserve
             // the guest translation/permission boundary. Keep a source interval.
-            Self::PrefetchHint => code.push(x86_64::NOP),
+            Self::PrefetchHint => code.asm().nop(),
             Self::Ordinary(instruction) => {
                 if instruction.pc != pc {
                     return Err(CompileError("checked instruction PC differs".into()));
@@ -576,7 +576,7 @@ mod checked_register_tests {
                     decoded
                         .emit_checked_ordinary(&mut code, pc, TargetCpu::Baseline, &mut recovery)
                         .unwrap();
-                    assert_eq!(code, [x86_64::NOP]);
+                    assert_eq!(code, [0x90]); // nop
                     assert!(recovery.is_empty());
                 }
             }
@@ -611,7 +611,7 @@ mod checked_register_tests {
         );
         assert_eq!(
             &compiled.native.x86_64_code[map[1].1..map[2].1],
-            &[x86_64::NOP]
+            &[0x90] // nop
         );
         assert!(compiled.fault_recovery.is_empty());
         let checked = CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(

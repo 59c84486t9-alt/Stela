@@ -17,7 +17,7 @@
 //! clock shows at the host's TSC ([`Count`]), less the cell's `value`.
 //! It also clobbers RCX and RDX, which are dead at every block exit (the
 //! direct exit returns in RAX and RDX, and chaining uses RCX).
-use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, ShiftOp, Size, Unary, resolve};
+use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, ShiftOp, Size, Unary};
 use super::pointer::Thunk;
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
@@ -109,13 +109,14 @@ fn open(cell: u64) -> (Vec<u8>, Patch) {
 /// target: the original exit at `pc`.
 fn finish(mut code: Vec<u8>, miss: Patch, pc: GuestAddress) -> Thunk {
     let next = code.len();
-    code.extend(super::chain::direct_exit(
+    let mut asm = Asm::new(&mut code);
+    super::block::direct_exit_with(
+        &mut asm,
         GuestAddress(pc.0.wrapping_add(4)),
         ExitKind::Fallthrough,
-    ));
-    let original = code.len();
-    resolve(&mut code, miss, original);
-    code.extend(super::chain::direct_exit(pc, ExitKind::System));
+    );
+    asm.bind(miss);
+    super::block::direct_exit_with(&mut asm, pc, ExitKind::System);
     Thunk {
         code,
         next: Some(next),

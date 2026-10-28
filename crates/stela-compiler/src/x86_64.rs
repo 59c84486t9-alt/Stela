@@ -12,8 +12,6 @@ use alloc::vec::Vec;
 
 pub struct Emitter;
 
-pub(crate) const NOP: u8 = 0x90;
-
 /// Check semantic host requirements before either leaf or block emission.
 pub(crate) fn validate_target(
     instruction: &Instruction,
@@ -938,13 +936,6 @@ fn jump(
         None => asm.jmp(),
     };
     fixups.push((pc, target, patch.offset()));
-}
-
-/// Evaluate ARM conditions from saved NZCV, independent of incidental host
-/// flags: the second opcode byte of the `jcc rel32` taken when it holds.
-fn condition(code: &mut Code, condition: u8) -> Option<u8> {
-    const JCC_REL32: u8 = 0x80;
-    condition_holds(code, condition, false).map(|cond| JCC_REL32 | cond as u8)
 }
 
 /// The host condition under which ARM `condition` holds, from saved NZCV or

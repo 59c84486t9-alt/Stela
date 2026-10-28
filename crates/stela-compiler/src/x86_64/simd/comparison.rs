@@ -9,7 +9,7 @@ use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
 use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
-use crate::x86_64::simd::encode::{cond, guest};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -268,8 +268,8 @@ fn emit_conditional_flags(
     pc: GuestAddress,
 ) {
     // A false condition bypasses numerical enables and every operand effect.
-    let failed = super::super::condition(code, condition)
-        .map(|condition| code.asm().jcc(cond(condition ^ 1)).offset());
+    let failed = super::super::condition_holds(code, condition, false)
+        .map(|holds| code.asm().jcc(holds.negate()).offset());
     emit_flags(code, format, left, CompareSource::Register(right), pc);
     if let Some(failed) = failed {
         let completed = jump(code);

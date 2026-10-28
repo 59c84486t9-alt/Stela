@@ -216,7 +216,7 @@ pub(crate) fn emit(
     code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     let cleanup = code.len();
     for failure in failures {
-        memory::patch_branch(code, failure, cleanup);
+        crate::x86_64::asm::resolve(code, failure, cleanup);
     }
     code.asm()
         .alu_imm32(Alu::Add, Size::Qword, Rsp, scratch.bytes as i32);
