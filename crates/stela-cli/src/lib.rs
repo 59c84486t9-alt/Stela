@@ -65,14 +65,26 @@ const ABOUT: &str = "Prepare a USB that boots Stela to install macOS on a PC";
     after_help = EXAMPLES,
     arg_required_else_help = true
 )]
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows runs Installer directly; the shared command grammar remains covered by tests"
+    )
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows runs Installer directly; the shared command grammar remains covered by tests"
+    )
+)]
 pub(crate) enum Command {
     /// Run an arm64 program, #! script or app bundle (the same as `stela
     /// PROGRAM`).
@@ -103,7 +115,13 @@ pub(crate) enum Command {
 }
 
 // Windows ships only the installer; the commands stay for other hosts and tests.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows runs Installer directly; the shared command grammar remains covered by tests"
+    )
+)]
 impl Command {
     fn run(self) -> anyhow::Result<()> {
         match self {

@@ -11,7 +11,13 @@
 //! 2, holding only the volume label.
 // macOS erases a USB with diskutil, so only the other hosts write this
 // layout themselves.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+#![cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "macOS uses diskutil; only ESP_BYTES is used outside the shared FAT32 encoder tests"
+    )
+)]
 use anyhow::{Result, bail, ensure};
 use stela_runtime::pc::gpt::{self, Guid, Partition};
 
