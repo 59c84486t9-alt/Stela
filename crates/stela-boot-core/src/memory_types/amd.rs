@@ -1,19 +1,19 @@
 //! AMD APM 24593 rev3.44 §§3.2.1,7.9: routing controls beyond common MTRRs.
 //! Common AMD64 controls are selected by actual vendor/capability observations;
 //! family names do not grant additional model-specific or encryption authority.
-use crate::native_smp::topology::Snapshot;
+use crate::topology::Snapshot;
 
-pub(crate) const SYSCFG: u32 = 0xc001_0010;
-pub(crate) const IORR_BASE: u32 = 0xc001_0016;
-pub(crate) const TOP_MEM: u32 = 0xc001_001a;
-pub(crate) const TOP_MEM2: u32 = 0xc001_001d;
-pub(crate) const FIXED_DRAM: u64 = 1 << 18;
-pub(crate) const FIXED_MODIFY: u64 = 1 << 19;
-pub(crate) const VARIABLE_DRAM: u64 = 1 << 20;
-pub(crate) const TOM2_ENABLE: u64 = 1 << 21;
-pub(crate) const TOM2_WB: u64 = 1 << 22;
-pub(crate) const ENCRYPTION: u64 = 0xf << 23;
-pub(crate) const REGISTERS: [u32; 7] = [
+pub const SYSCFG: u32 = 0xc001_0010;
+pub const IORR_BASE: u32 = 0xc001_0016;
+pub const TOP_MEM: u32 = 0xc001_001a;
+pub const TOP_MEM2: u32 = 0xc001_001d;
+pub const FIXED_DRAM: u64 = 1 << 18;
+pub const FIXED_MODIFY: u64 = 1 << 19;
+pub const VARIABLE_DRAM: u64 = 1 << 20;
+pub const TOM2_ENABLE: u64 = 1 << 21;
+pub const TOM2_WB: u64 = 1 << 22;
+pub const ENCRYPTION: u64 = 0xf << 23;
+pub const REGISTERS: [u32; 7] = [
     SYSCFG,
     IORR_BASE,
     IORR_BASE + 1,
@@ -22,13 +22,13 @@ pub(crate) const REGISTERS: [u32; 7] = [
     TOP_MEM,
     TOP_MEM2,
 ];
-pub(crate) const VENDOR: [u32; 3] = [
+pub const VENDOR: [u32; 3] = [
     u32::from_le_bytes(*b"Auth"),
     u32::from_le_bytes(*b"enti"),
     u32::from_le_bytes(*b"cAMD"),
 ];
 
-pub(crate) fn architectural(snapshot: &Snapshot) -> bool {
+pub fn architectural(snapshot: &Snapshot) -> bool {
     let Some(vendor) = snapshot.get(0, 0) else {
         return false;
     };
@@ -48,7 +48,7 @@ pub(crate) fn architectural(snapshot: &Snapshot) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct State {
+pub struct State {
     pub syscfg: u64,
     pub iorr: [(u64, u64); 2],
     pub top_mem: u64,
@@ -56,10 +56,7 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub(crate) fn from_snapshot(
-        snapshot: &Snapshot,
-        physical_bits: u8,
-    ) -> Result<Self, &'static str> {
+    pub fn from_snapshot(snapshot: &Snapshot, physical_bits: u8) -> Result<Self, &'static str> {
         if !architectural(snapshot) || !snapshot.amd_fixed_raw {
             return Err("AMD64 controls or full fixed-DRAM observation is unqualified");
         }
@@ -107,7 +104,7 @@ impl State {
     /// a hypervisor without the registers (QEMU's TCG) reads every routing
     /// field as zero. Without them RAM is routed as the firmware's memory map
     /// classifies it, and only the MTRR types are checked.
-    pub(crate) fn routes(&self) -> bool {
+    pub fn routes(&self) -> bool {
         self.syscfg & (FIXED_DRAM | VARIABLE_DRAM | TOM2_ENABLE | TOM2_WB) != 0
             || self.top_mem != 0
             || self.top_mem2 != 0
@@ -116,7 +113,7 @@ impl State {
 
     /// Per-processor opaque non-memory fields are retained, never interpreted
     /// as feature authority or overwritten from a different processor.
-    pub(crate) fn compatible(self, other: Self) -> Result<(), &'static str> {
+    pub fn compatible(self, other: Self) -> Result<(), &'static str> {
         if (self.syscfg ^ other.syscfg) & !FIXED_MODIFY != 0
             || self.iorr != other.iorr
             || self.top_mem != other.top_mem
@@ -129,7 +126,7 @@ impl State {
 }
 
 /// APM Table7-13. Only the defined type/routing combinations are accepted.
-pub(crate) fn fixed_type(value: u8, cap: u64) -> bool {
+pub fn fixed_type(value: u8, cap: u64) -> bool {
     let kind = value & 7;
     let route = value & 0x18;
     value & !0x1f == 0
@@ -146,7 +143,7 @@ pub(crate) fn fixed_type(value: u8, cap: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_smp::topology::{Cpuid, Msr};
+    use crate::topology::{Cpuid, Msr};
     const SIGNATURE: u32 = 0x00b4_0f40;
     fn snapshot() -> Snapshot {
         let mut snapshot = Snapshot::default();

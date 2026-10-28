@@ -9,6 +9,7 @@ pub mod aperture;
 pub mod console_lines;
 pub mod dmar;
 pub mod firmware_state;
+pub mod memory_types;
 pub mod options;
 pub mod paging_controls;
 pub mod passthrough;

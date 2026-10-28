@@ -8,7 +8,7 @@ mod context_check;
 pub(crate) mod executor;
 pub(crate) mod firmware;
 pub(crate) mod kernel_check;
-pub(crate) mod memory_types;
+pub(crate) use stela_boot_core::memory_types;
 pub(crate) mod resources;
 pub(crate) use stela_boot_core::topology;
 pub(crate) mod transport;

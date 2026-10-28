@@ -4,7 +4,7 @@
 use super::{Image, VARIABLE_BASE, amd};
 use core::ops::Range;
 
-pub(super) fn range(base: u64, mask: u64, bits: u8) -> Result<Range<u64>, &'static str> {
+pub fn range(base: u64, mask: u64, bits: u8) -> Result<Range<u64>, &'static str> {
     let address = ((1u64 << bits) - 1) & !4095;
     let size = (!mask & address) + 4096;
     let start = base & address;
@@ -27,7 +27,7 @@ impl Image {
     /// ([`amd::State::routes`]), both read/write DRAM routing for every byte.
     /// Undefined overlaps and partial coverage refuse. No page/PAT or
     /// live-current-control assertion is implied by a captured image query.
-    pub(crate) fn writeback_ram(&self, start: u64, bytes: u64) -> Result<(), &'static str> {
+    pub fn writeback_ram(&self, start: u64, bytes: u64) -> Result<(), &'static str> {
         let end = start
             .checked_add(bytes)
             .ok_or("native RAM range overflow")?;
