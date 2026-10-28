@@ -3,8 +3,9 @@
 //! WPA2-Personal key management for one station: the PSK from a passphrase
 //! (IEEE 802.11-2020 J.4.1), the pairwise key hierarchy (12.7.1) and the
 //! supplicant side of the EAPOL-Key 4-way and group key handshakes (12.7.6,
-//! 12.7.7) for AKM 00-0F-AC:2 (PSK, HMAC-SHA1 MIC) and 00-0F-AC:6
-//! (PSK-SHA256, AES-128-CMAC MIC), in the order wpa_supplicant's
+//! 12.7.7) for AKM 00-0F-AC:2 (PSK, HMAC-SHA1 MIC), 00-0F-AC:6
+//! (PSK-SHA256, AES-128-CMAC MIC) and 00-0F-AC:8 (SAE, whose PMK
+//! [`sae`](super::sae) derives; AES-128-CMAC MIC), in the order wpa_supplicant's
 //! `wpa_sm_rx_eapol` checks them. The suites come from the association's
 //! [`pmf::Selection`] or its RSN key ciphers; the keys it yields are the
 //! arguments of [`KeySlot::begin_install`] and the IGTK's of
@@ -68,6 +69,9 @@ pub enum Akm {
     Psk,
     /// 00-0F-AC:6, key descriptor version 3.
     PskSha256,
+    /// 00-0F-AC:8, key descriptor version 0: the AKM defines the SHA-256
+    /// KDF and AES-128-CMAC MIC.
+    Sae,
 }
 
 impl Akm {
@@ -77,6 +81,7 @@ impl Akm {
         match suite {
             2 => Some(Self::Psk),
             6 => Some(Self::PskSha256),
+            8 => Some(Self::Sae),
             _ => None,
         }
     }
@@ -84,6 +89,7 @@ impl Akm {
         match self {
             Self::Psk => 2,
             Self::PskSha256 => 3,
+            Self::Sae => 0,
         }
     }
 }
@@ -115,7 +121,7 @@ impl Suites {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// An AKM or cipher this supplicant does not derive keys for: AKMs
-    /// other than 2 and 6, a TKIP or WEP pairwise cipher, a WEP group.
+    /// other than 2, 6 and 8, a TKIP or WEP pairwise cipher, a WEP group.
     Unsupported,
     /// Not an EAPOL-Key frame with the RSN descriptor.
     NotKey,
@@ -150,7 +156,7 @@ fn hmac_sha1(key: &[u8], parts: &[&[u8]]) -> [u8; 20] {
     mac.finalize().into_bytes().into()
 }
 
-fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+pub(super) fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut mac =
         <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC takes any key length");
     for part in parts {
@@ -191,7 +197,12 @@ fn prf_sha1(key: &[u8], label: &[u8], data: &[u8], bytes: usize) -> Zeroizing<Ve
 }
 
 /// The SHA-256 KDF (12.7.1.7.2): `bytes` of output.
-fn kdf_sha256(key: &[u8], label: &[u8], context: &[u8], bytes: usize) -> Zeroizing<Vec<u8>> {
+pub(super) fn kdf_sha256(
+    key: &[u8],
+    label: &[u8],
+    context: &[u8],
+    bytes: usize,
+) -> Zeroizing<Vec<u8>> {
     let mut out = Zeroizing::new(Vec::with_capacity(bytes + 32));
     let length = ((bytes * 8) as u16).to_le_bytes();
     let mut counter = 1u16;
@@ -331,7 +342,7 @@ impl Ptk {
         let label = b"Pairwise key expansion";
         Self(match suites.akm {
             Akm::Psk => prf_sha1(pmk, label, &data, bytes),
-            Akm::PskSha256 => kdf_sha256(pmk, label, &data, bytes),
+            Akm::PskSha256 | Akm::Sae => kdf_sha256(pmk, label, &data, bytes),
         })
     }
     fn kck(&self) -> &[u8; 16] {
@@ -349,7 +360,7 @@ impl Ptk {
 fn mic(akm: Akm, kck: &[u8; 16], frame: &[u8]) -> [u8; 16] {
     match akm {
         Akm::Psk => hmac_sha1(kck, &[frame])[..16].try_into().unwrap(),
-        Akm::PskSha256 => cmac(kck, frame),
+        Akm::PskSha256 | Akm::Sae => cmac(kck, frame),
     }
 }
 

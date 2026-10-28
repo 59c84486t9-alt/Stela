@@ -33,6 +33,8 @@ metal = []
 aes = { version = "0.8", default-features = false, features = ["zeroize"] }
 # WPA2-Personal: PBKDF2/PRF/MIC over HMAC-SHA1 and HMAC-SHA256.
 hmac = { version = "0.12", default-features = false }
+# WPA3-Personal: SAE over P-256, hash-to-element through its simplified SWU map.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "expose-field", "hash2curve"] }
 sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 # Cryptographic MIC comparison retains an explicit optimization barrier.
