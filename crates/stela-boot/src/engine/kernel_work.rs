@@ -284,6 +284,10 @@ impl KernelWork {
             root: handoff.root,
             busy: Cell::new(false),
         };
+        // Qualification enters the owned-call boundary, which acquires the
+        // global driver/root guard itself. No mapping walk or table borrower
+        // survives here; release this non-reentrant construction guard first.
+        drop(_root);
         result.qualify_foreground()?;
         Ok(result)
     }

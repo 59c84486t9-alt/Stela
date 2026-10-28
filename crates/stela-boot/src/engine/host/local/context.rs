@@ -116,7 +116,11 @@ impl RootIdentity {
     /// loan by starting a separate work executor underneath it.
     pub(crate) fn check_dispatch(&self) -> Result<(), WorkError> {
         self.check_irq_cpu()?;
-        if irq_active() || !native_frames_idle() {
+        let flags: u64;
+        // SAFETY: read the actual CPL0 caller's flags without changing IF.
+        // Reject an interruptible boundary before reading affine frame slots.
+        unsafe { asm!("pushfq", "pop {}", out(reg) flags) };
+        if flags & IF != 0 || irq_active() || !native_frames_idle() {
             return Err(WorkError::Busy);
         }
         Ok(())
