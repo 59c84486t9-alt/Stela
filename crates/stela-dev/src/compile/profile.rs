@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use stela_compiler::block::Features;
 use stela_compiler::{
-    CompileError,
+    CompileError, CompileErrorKind,
     block::CheckedMemoryProfile,
     context::{
         memory::address::{AccessEl, AddressAddChecks, EffectiveAddressChecks},
@@ -38,7 +38,7 @@ pub(crate) fn checked_process(
         EffectiveAddressChecks::new(addition, AddressAddChecks::Disabled),
     )
     .with_pointer_arithmetic(mode)
-    .ok_or_else(|| CompileError("incompatible CPA/address specialization".into()))
+    .ok_or_else(|| CompileError::new(CompileErrorKind::IncompatibleMemoryRequirements))
 }
 
 pub(crate) fn block_profile(
