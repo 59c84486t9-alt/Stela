@@ -1873,6 +1873,55 @@ fn start_platform(handoff: &Handoff, host_owner: &mut host::HostOwner) -> Platfo
     }
 }
 
+/// The network `--wifi` names, with the secret of the key file the loader
+/// read, whose bytes are wiped here. A file it cannot use is reported once,
+/// without its contents, and no network is joined.
+fn wifi_network(handoff: &Handoff, options: &Options) -> Option<stela_drivers::probe::WifiConfig> {
+    let ssid = options.ssid.as_ref()?;
+    let path = options
+        .wifi_key
+        .as_deref()
+        .unwrap_or(stela_boot_core::options::DEFAULT_WIFI_KEY);
+    let bytes = handoff.wifi_key.bytes as usize;
+    if bytes == 0 {
+        output::arguments(format_args!(
+            "HOST Wi-Fi key {path} is missing, empty or unreadable: the network is not joined\n"
+        ));
+        return None;
+    }
+    // SAFETY: the loader left the key's bytes allocated, and only this
+    // reads them.
+    let key = unsafe {
+        core::slice::from_raw_parts_mut(
+            layout::physical(handoff.wifi_key.physical) as *mut u8,
+            bytes,
+        )
+    };
+    let secret = stela_drivers::probe::WifiSecret::parse(key);
+    for byte in key.iter_mut() {
+        // SAFETY: a byte of the key, which nothing else reads.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    let secret = match secret {
+        Ok(secret) => secret,
+        Err(error) => {
+            output::arguments(format_args!(
+                "HOST Wi-Fi key {path} unusable ({error}): the network is not joined\n"
+            ));
+            return None;
+        }
+    };
+    let country = options
+        .wifi_country
+        .as_deref()
+        .and_then(|code| code.as_bytes().try_into().ok());
+    Some(stela_drivers::probe::WifiConfig {
+        ssid: ssid.as_bytes().to_vec(),
+        secret,
+        country,
+    })
+}
+
 /// What the host devices are opened for.
 struct Wanted<'a> {
     firmware: Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
@@ -1995,6 +2044,7 @@ fn start_devices(
                         fdr: fdr_partition,
                     },
                     &options.usb_storage,
+                    wifi_network(handoff, options).as_ref(),
                     options.external_disks.then(|| {
                         stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
                             .saturating_sub(options.usb_storage.len())
