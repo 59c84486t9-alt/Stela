@@ -88,7 +88,6 @@ mod boot_madt;
 #[allow(dead_code)] // Only pure FADT/counter tests run hosted; port I/O is UEFI-only.
 mod boot_native_clock_pm;
 
-mod agx_isa;
 mod amx;
 // The bench runs the hosted engine, which only an Intel Mac has
 // (`stela_runtime::hosted`).
@@ -103,7 +102,6 @@ mod hosted_platform;
 mod pages;
 mod restore_dry_run;
 mod tools;
-mod xml;
 
 #[derive(Parser)]
 #[command(about = "Stela development tasks")]
@@ -137,8 +135,6 @@ enum Task {
     AmxKernels(amx::kernels::AmxKernels),
     /// Generate the BSD system-call and Mach-trap catalogs from xnu sources.
     DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
-    /// Generate the AGX2 shader ISA tables from Mesa's AGX2.xml.
-    AgxIsa(agx_isa::AgxIsa),
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
@@ -154,7 +150,6 @@ fn main() -> ExitCode {
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
     };
     result.unwrap_or_else(|error| {

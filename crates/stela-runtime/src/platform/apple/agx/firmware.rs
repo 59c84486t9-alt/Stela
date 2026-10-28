@@ -53,7 +53,6 @@ use super::initdata::{self, Root};
 use super::ring::{self, Kind, Shared};
 use super::signal;
 use super::uat;
-use super::work_decode;
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -203,46 +202,28 @@ const STARTUP_STATUS: [(u64, u32); 4] = [
     (STATUS_READY, 1),
 ];
 
-/// One accepted channel command, including ordered effects and its exact
+/// One accepted signal command, including ordered effects and its exact
 /// ring retirement. The owner survives every fallible DMA boundary.
 #[derive(Debug)]
 struct ActiveCommand {
-    execution: Execution,
+    actions: Vec<signal::Action>,
+    next: usize,
+    publication: Option<event::Publication>,
     retirement: channel::Retirement,
 }
 
-#[derive(Debug)]
-enum Execution {
-    Signal {
-        actions: Vec<signal::Action>,
-        next: usize,
-        publication: Option<event::Publication>,
-    },
-    Stock(work_decode::Accepted),
-}
-
 impl ActiveCommand {
+    /// GPU-work commands refuse by name here: only signal commands are
+    /// accepted.
     fn accept(
         memory: &mut dyn Shared,
-        family: &Family,
         command: channel::Command,
         retirement: channel::Retirement,
     ) -> Result<Self, &'static str> {
-        let execution = match command.kind {
-            channel::Kind::Ta
-            | channel::Kind::ThreeD
-            | channel::Kind::FastBlit
-            | channel::Kind::Cl => {
-                Execution::Stock(work_decode::Accepted::read(memory, family, command)?)
-            }
-            _ => Execution::Signal {
-                actions: signal::prepare(memory, &command)?,
-                next: 0,
-                publication: None,
-            },
-        };
         Ok(Self {
-            execution,
+            actions: signal::prepare(memory, &command)?,
+            next: 0,
+            publication: None,
             retirement,
         })
     }
@@ -254,33 +235,17 @@ impl ActiveCommand {
         outbox: &mut Vec<Mail>,
         events: &mut u64,
     ) -> Result<bool, &'static str> {
-        let Execution::Signal {
-            actions,
-            next,
-            publication,
-        } = &mut self.execution
-        else {
-            let Execution::Stock(work) = &mut self.execution else {
-                unreachable!()
-            };
-            // This is the actual ingress owner for all five source layouts.
-            // Keep the accepted envelope and whole current record while its
-            // native setup/start/effect consumer remains unqualified. No end,
-            // stamp or ring retirement can turn this into a completed job.
-            work.current(memory)?;
-            return Err(work.submission().command.kind.unexecuted());
-        };
-        while let Some(&action) = actions.get(*next) {
+        while let Some(&action) = self.actions.get(self.next) {
             match action {
                 signal::Action::Event(event) => {
-                    if publication.is_none() {
-                        *publication = event::Publication::reserve(memory, root, event)?;
-                        if publication.is_none() {
+                    if self.publication.is_none() {
+                        self.publication = event::Publication::reserve(memory, root, event)?;
+                        if self.publication.is_none() {
                             return Ok(false);
                         }
                     }
-                    publication.as_mut().unwrap().commit(memory)?;
-                    *publication = None;
+                    self.publication.as_mut().unwrap().commit(memory)?;
+                    self.publication = None;
                     outbox.push(Mail {
                         endpoint: MESSAGE_ENDPOINT,
                         payload: EVENT_TYPE << TYPE_SHIFT,
@@ -289,7 +254,7 @@ impl ActiveCommand {
                 }
                 write => write.write(memory)?,
             }
-            *next += 1;
+            self.next += 1;
         }
         self.retirement.commit(memory)?;
         Ok(true)
@@ -776,12 +741,8 @@ impl State {
                         );
                     }
                     let retirement = active.submission.retirement();
-                    self.active_work.as_mut().unwrap().command = Some(ActiveCommand::accept(
-                        memory,
-                        self.family,
-                        command,
-                        retirement,
-                    )?);
+                    self.active_work.as_mut().unwrap().command =
+                        Some(ActiveCommand::accept(memory, command, retirement)?);
                 }
                 let active = self.active_work.as_mut().unwrap();
                 if !active.command.as_mut().unwrap().advance(
@@ -2092,121 +2053,6 @@ mod tests {
         idle.1 = memory;
         idle.0.doorbell(work(0, 0)).unwrap();
         idle.0.dma(&mut idle.1, &mut Vec::new()).unwrap();
-    }
-
-    #[test]
-    fn stock_frontend_owns_each_envelope_and_record_across_input_faults_without_retirement() {
-        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
-            // Independent literal AP producer rows: kind, pipe, stream,
-            // completion and first setup header for each native interface.
-            let rows = if family == &G14X {
-                [
-                    (0, 0, 0x770, 0x898, 5),
-                    (1, 1, 0x14, 0xbe0, 7),
-                    (2, 1, 0x788, 0x8bc, 9),
-                    (3, 2, 0x760, 0x820, 11),
-                ]
-            } else if family == &G15G {
-                [
-                    (0, 0, 0x770, 0x888, 5),
-                    (1, 1, 0x14, 0xbd0, 7),
-                    (2, 1, 0x788, 0x8bc, 9),
-                    (3, 2, 0x760, 0x810, 11),
-                ]
-            } else {
-                [
-                    (0, 0, 0x46c, 0x594, 5),
-                    (1, 1, 0x14, 0x8f8, 7),
-                    (2, 1, 0x498, 0x5cc, 9),
-                    (3, 2, 0x1e8, 0x2a8, 11),
-                ]
-            };
-            for (kind, pipe, stream_offset, stamp, header) in rows {
-                let (mut state, mut flat) = with_device_control_on(family, &[]).unwrap();
-                let channel = BASE + 0xd000;
-                let command = BASE + 0x10000;
-                let stream = BASE + 0x14000;
-                let (master, entries) = one_3d_entry(&mut flat, channel, command);
-                flat.put_descriptor(RINGS + 0x20 + pipe * 0x20, master, entries);
-                flat.put_u32(entries + 0x10, pipe as u32);
-                flat.put_u32(command, kind);
-                flat.put_u64(command + 4, 0x1234_5678);
-                flat.put_u32(command + 12, 7);
-                flat.put_u64(command + stream_offset, stream);
-                flat.put_u32(command + stream_offset + 8, 0x400);
-                flat.put_u64(command + stamp - 16, BASE + 0x18000);
-                flat.put_u64(command + stamp - 8, BASE + 0x18004);
-                flat.put_u32(command + stamp, 0xabcdef);
-                flat.put_u32(command + stamp + 4, 127);
-                flat.put_u32(stream, header);
-                flat.put_u64(stream + 4, 0x1122_3344_5566_7788);
-                state.doorbell(work(pipe, 0)).unwrap();
-                let mut memory = WorkMemory {
-                    flat,
-                    fail_write: None,
-                    fail_read: Some(stream),
-                    writes: Vec::new(),
-                };
-                let mut outbox = Vec::new();
-                assert_eq!(
-                    state.dma(&mut memory, &mut outbox),
-                    Err("injected work input read fault")
-                );
-                // The first record fault follows acceptance of the envelope.
-                // Redirecting every AP command field cannot replace it.
-                memory.flat.put_u32(command, 9);
-                memory.flat.put_u64(command + 4, 999);
-                memory.flat.put_u32(command + 12, u32::MAX);
-                memory.flat.put_u64(command + stream_offset, u64::MAX);
-                memory.flat.put_u32(command + stamp + 4, u32::MAX);
-                let expected = channel::Kind::decode(kind).unwrap().unexecuted();
-                assert_eq!(state.dma(&mut memory, &mut outbox), Err(expected));
-                let active = state
-                    .active_work
-                    .as_ref()
-                    .unwrap()
-                    .command
-                    .as_ref()
-                    .unwrap();
-                let Execution::Stock(owned) = &active.execution else {
-                    panic!("stock owner lost")
-                };
-                assert_eq!(owned.submission().command.va, command);
-                assert_eq!(owned.submission().counter, 0x1234_5678);
-                assert_eq!(owned.submission().context, 7);
-                assert_eq!(owned.submission().stream, stream);
-                assert_eq!(owned.submission().stamp.index, 127);
-                // Once accepted, the record is not reread on refusal/retry.
-                memory.flat.put_u32(stream, u32::MAX);
-                memory.flat.put_u64(stream + 4, 0);
-                memory.fail_read = Some(stream);
-                assert_eq!(state.dma(&mut memory, &mut outbox), Err(expected));
-                assert_eq!(memory.fail_read, Some(stream));
-                let active = state
-                    .active_work
-                    .as_mut()
-                    .unwrap()
-                    .command
-                    .as_mut()
-                    .unwrap();
-                let Execution::Stock(owned) = &mut active.execution else {
-                    unreachable!()
-                };
-                assert_eq!(
-                    owned.current(&mut memory).unwrap().u64(4),
-                    Ok(0x1122_3344_5566_7788)
-                );
-                assert_eq!(memory.flat.read_u32(master), Ok(0));
-                assert_eq!(memory.flat.read_u32(channel + 0x1000), Ok(0));
-                assert_eq!(memory.flat.read_u32(BASE + 0x18000), Ok(0));
-                assert_eq!(memory.flat.read_u32(BASE + 0x18004), Ok(0));
-                assert_eq!((state.commands, state.events), (0, 0));
-                assert!(outbox.is_empty());
-                assert_eq!(memory.writes.len(), 2); // submitted-tail fields only
-                let protocol = Protocol(Rc::new(RefCell::new(state)));
-                assert!(Message(protocol).check_reset().is_err());
-            }
-        }
     }
 
     #[test]

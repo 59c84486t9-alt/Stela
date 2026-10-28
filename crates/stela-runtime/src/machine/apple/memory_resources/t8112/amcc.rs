@@ -51,7 +51,7 @@ impl CacheRequirement {
 }
 
 /// A newly initialized software lock image, associated with the existing
-/// DCS/PTD RAM owner. Its private cache=None AMCC cannot expose FirmwareCache.
+/// DCS/PTD RAM owner.
 /// Do not clone the lock model into another state bank or assign the DCS/PTD
 /// publication ID as this resource's distinct memory-controller identity.
 pub struct LockResource {
