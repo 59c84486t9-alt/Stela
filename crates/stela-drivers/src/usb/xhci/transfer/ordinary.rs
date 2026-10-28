@@ -585,7 +585,7 @@ mod tests {
                 let (mut c, peer) = cancellation_controller(&mut dma);
                 let mut buffer = dma.allocate(64, 64).unwrap();
                 buffer.bytes_mut().fill(0xa5);
-                peer.borrow_mut().incoming_events.push_back(vec![0x79; 64]);
+                peer.borrow_mut().push_event(vec![0x79; 64]);
                 peer.borrow_mut().fail = failing.map(|kind| (kind, 17));
                 let inner = core::mem::replace(&mut c.registers, Box::new(Empty));
                 c.registers = Box::new(Delayed {
@@ -907,7 +907,7 @@ mod tests {
         let (mut controller, model) = cancellation_controller(&mut dma);
         let mut buffer = dma.allocate(64, 64).unwrap();
         buffer.bytes_mut().fill(0xa5);
-        model.borrow_mut().incoming_events.push_back(vec![9, 8, 7]);
+        model.borrow_mut().push_event(vec![9, 8, 7]);
         let ticket = controller
             .submit_ticket(1, 3, buffer.physical(), 64)
             .unwrap();
@@ -1264,7 +1264,7 @@ mod tests {
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut controller, model) = cancellation_controller(&mut dma);
         let buffer = dma.allocate(128, 64).unwrap();
-        model.borrow_mut().incoming_events.push_back(vec![1, 2, 3]);
+        model.borrow_mut().push_event(vec![1, 2, 3]);
         let first = controller
             .submit_ticket(1, 3, buffer.physical(), 64)
             .unwrap();

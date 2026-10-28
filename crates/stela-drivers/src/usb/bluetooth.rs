@@ -971,14 +971,8 @@ mod tests {
                 &([0x20, 0, 0, 0, 0, 0, 3, 0], vec![3, 0x0c, 0])
             );
             assert!(hci.poll().unwrap().is_empty());
-            model
-                .borrow_mut()
-                .incoming_events
-                .push_back(vec![0x0e, 4, 1, 3, 0x0c, 0]);
-            model
-                .borrow_mut()
-                .incoming_acl
-                .push_back(vec![1, 0x20, 2, 0, 0xab, 0xcd]);
+            model.borrow_mut().push_event(vec![0x0e, 4, 1, 3, 0x0c, 0]);
+            model.borrow_mut().push_acl(vec![1, 0x20, 2, 0, 0xab, 0xcd]);
             assert_eq!(
                 hci.poll().unwrap(),
                 vec![

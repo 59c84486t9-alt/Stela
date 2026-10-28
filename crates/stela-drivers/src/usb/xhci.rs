@@ -261,6 +261,7 @@ const CONFIGURATION_INVENTORY_BYTES: usize = 64 * 1024;
 const RESET_US: u64 = 1_000_000;
 const HALT_US: u64 = 20_000;
 const COMMAND_US: u64 = 5_000_000;
+const QUIET_DRAINS: u8 = 64;
 /// Linux xhci_abort_cmd_ring: CRR must clear within five seconds and the
 /// Command Ring Stopped event follow within two.
 const ABORT_US: u64 = 5_000_000;
@@ -468,6 +469,8 @@ pub struct Controller {
     command_ring_stopped: bool,
     /// Events taken since ERDP last moved past them.
     unpublished: usize,
+    /// Drains since USBSTS was last read.
+    quiet_drains: u8,
     pub location: String,
 }
 
@@ -718,6 +721,7 @@ impl Controller {
             command_poisoned: false,
             command_ring_stopped: false,
             unpublished: 0,
+            quiet_drains: 0,
             location,
         })
     }
@@ -809,17 +813,42 @@ impl Controller {
         self.registers.write64(self.runtime + ERDP, dequeue | EHB);
     }
 
-    /// Takes every posted event: transfer events wait in `pending`. A host
-    /// system or host controller error (5.4.2) stops the controller for
-    /// good.
-    fn drain(&mut self) {
-        if self.hardware.ready().is_err() {
-            return;
-        }
+    /// Whether the controller posted an event software has not taken, read
+    /// from the event ring alone. An unreadable ring counts as posted so
+    /// `next_event` fails it.
+    fn event_posted(&self) -> bool {
+        let at = self.event_index * TRB;
+        !matches!(
+            self.events.coherent_u32(at + 12),
+            Ok(control) if (control & CYCLE != 0) != self.event_cycle
+        )
+    }
+
+    /// A host system or host controller error (5.4.2) stops the controller
+    /// for good.
+    fn check_status(&mut self) {
         let status = self.registers.read32(self.operational + USBSTS);
         if status & (HSE | HCE) != 0 && self.error.is_none() {
             self.error = Some(status);
         }
+    }
+
+    /// Takes every posted event: transfer events wait in `pending`. USBSTS
+    /// is read with each batch, as `xhci_irq` reads it per interrupt, and
+    /// every `QUIET_DRAINS` drains that found the ring empty, for the fatal
+    /// errors that post no event.
+    fn drain(&mut self) {
+        if self.hardware.ready().is_err() {
+            return;
+        }
+        if !self.event_posted() {
+            self.quiet_drains += 1;
+            if self.quiet_drains < QUIET_DRAINS {
+                return;
+            }
+        }
+        self.quiet_drains = 0;
+        self.check_status();
         while let Some(event) = self.next_event() {
             // A transfer event for a slot no longer enabled has no waiter.
             let stale = event.kind() == TRANSFER_EVENT
@@ -875,6 +904,12 @@ impl Controller {
                 return Err(BlockError::Device { status });
             }
             if deadline.passed() {
+                // Quiet drains read no USBSTS: a controller that died
+                // without an event is reported as such.
+                self.check_status();
+                if let Some(status) = self.error {
+                    return Err(BlockError::Device { status });
+                }
                 return Err(BlockError::Timeout);
             }
             crate::waiting();
@@ -890,6 +925,8 @@ impl Controller {
             memory.ready()?;
         }
         self.drain();
+        // Once per new command or publication, never per spin.
+        self.check_status();
         if let Some(status) = self.error {
             self.command_poisoned = true;
             return Err(BlockError::Device { status });
@@ -1253,6 +1290,26 @@ mod tests {
     use super::model::*;
     use super::*;
     use crate::bus::dma::RegionAllocator;
+
+    #[test]
+    fn quiet_drains_read_usbsts_only_every_64th_or_with_events_like_xhci_irq() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all modeled controller DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let reads = || model.borrow().status_reads;
+        let before = reads();
+        for _ in 1..QUIET_DRAINS {
+            controller.drain();
+        }
+        assert_eq!(reads(), before);
+        controller.drain();
+        assert_eq!(reads(), before + 1);
+        model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
+        controller.drain();
+        assert_eq!(reads(), before + 2);
+    }
 
     #[test]
     fn unavailable_native_clock_refuses_before_any_controller_register_or_dma_effect() {

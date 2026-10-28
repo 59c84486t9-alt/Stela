@@ -285,10 +285,7 @@ fn broadcom_diagnostic_real_native_bulk_mode_records_and_failed_retirement_own_d
         assert_eq!(model.borrow().outgoing_bulk[&6], [vec![0xf0, 1]]);
         model
             .borrow_mut()
-            .incoming_bulk
-            .get_mut(&7)
-            .unwrap()
-            .extend([vec![0xa5; MAX_RECORD], vec![]]);
+            .extend_bulk(7, [vec![0xa5; MAX_RECORD], vec![]]);
         assert_eq!(
             owner.poll().unwrap(),
             [Received::Diagnostic(vec![0xa5; MAX_RECORD])]
@@ -328,12 +325,7 @@ fn broadcom_diagnostic_real_native_bulk_mode_records_and_failed_retirement_own_d
             assert_eq!(model.borrow().outgoing_bulk[&6].len(), n);
         } else {
             owner.set_enabled(false).unwrap();
-            model
-                .borrow_mut()
-                .incoming_bulk
-                .get_mut(&7)
-                .unwrap()
-                .push_back(vec![0x42, 0, 0xaa]);
+            model.borrow_mut().extend_bulk(7, [vec![0x42, 0, 0xaa]]);
             owner.close().unwrap();
             assert_eq!(owner.state(), State::Closed);
             let input = owner.retirement().unwrap().input.as_ref().unwrap();

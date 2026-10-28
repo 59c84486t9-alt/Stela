@@ -968,23 +968,16 @@ mod tests {
             let mut block = b"NCMH\x0c\x00\x00\x00\x40\x00\x10\x00\x00\x00\x00\x00NCM0\x10\x00\x00\x00\x22\x00\x1e\x00\x00\x00\x00\x00\x00\x00".to_vec();
             block.extend_from_slice(&frame);
             assert_eq!(model.borrow().outgoing, [block.clone(), Vec::new()]);
-            model.borrow_mut().incoming_acl.push_back(block);
+            model.borrow_mut().push_acl(block);
             assert_eq!(link.receive().unwrap(), Some(frame));
             assert_eq!(link.receive().unwrap(), None);
             // The next transfer is malformed and is dropped whole.
-            model.borrow_mut().incoming_acl.push_back(b"NCMX".to_vec());
+            model.borrow_mut().push_acl(b"NCMX".to_vec());
             assert_eq!(link.receive().unwrap(), None);
             for connected in [false, true] {
-                model.borrow_mut().incoming_events.push_back(vec![
-                    0xa1,
-                    0,
-                    u8::from(connected),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ]);
+                model
+                    .borrow_mut()
+                    .push_event(vec![0xa1, 0, u8::from(connected), 0, 0, 0, 0, 0]);
                 assert_eq!(link.carrier(), connected);
             }
         }

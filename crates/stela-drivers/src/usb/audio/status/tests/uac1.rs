@@ -52,10 +52,7 @@ fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
         let pending = model.borrow().active[3];
         assert_eq!(owner.poll().unwrap(), 0); // NAK retains the genuine TD
         assert_eq!(model.borrow().active[3], pending);
-        model
-            .borrow_mut()
-            .incoming_events
-            .push_back(vec![0x80, 2, 0xc0, 4]);
+        model.borrow_mut().push_event(vec![0x80, 2, 0xc0, 4]);
         assert_eq!(owner.poll().unwrap(), 2);
         assert!(model.borrow().active[3].is_none());
         assert!(owner.next_notice().is_err()); // cannot consume entity as selector/channel
@@ -78,7 +75,7 @@ fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
     assert!(model.borrow().seen.contains(&16));
     assert!(model.borrow().seen.contains(&12));
     owner.start().unwrap();
-    model.borrow_mut().incoming_events.push_back(vec![0, 2]);
+    model.borrow_mut().push_event(vec![0, 2]);
     assert_eq!(owner.poll().unwrap(), 1); // donor does not gate on IRQ_PENDING
     assert_eq!(owner.next_event().unwrap(), Some(notice([0, 2])));
     owner.stop().unwrap();
@@ -102,14 +99,14 @@ fn actual_uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() 
         vec![0x80, 2, 0x80], // do not silently drop a trailing half-word
     ];
     for packet in bad {
-        model.borrow_mut().incoming_events.push_back(packet);
+        model.borrow_mut().push_event(packet);
         assert!(owner.poll().is_err());
         assert!(owner.notices.is_empty() && owner.ticket.is_none());
         assert!(!owner.poisoned);
         assert_eq!(owner.next_event().unwrap(), None);
         assert_eq!(owner.poll().unwrap(), 0);
     }
-    model.borrow_mut().incoming_events.push_back(vec![0x40, 2]);
+    model.borrow_mut().push_event(vec![0x40, 2]);
     assert_eq!(owner.poll().unwrap(), 1);
     assert_eq!(owner.next_event().unwrap(), Some(notice([0x40, 2])));
     owner.stop().unwrap();
@@ -193,7 +190,7 @@ fn actual_uac1_stall_usb_clear_failure_retains_dma_until_real_recovery() {
     assert_eq!(model.borrow().halt_transfer, None);
     assert!(model.borrow().seen.contains(&14));
     owner.start().unwrap();
-    model.borrow_mut().incoming_events.push_back(vec![0x80, 2]);
+    model.borrow_mut().push_event(vec![0x80, 2]);
     assert_eq!(owner.poll().unwrap(), 1);
     assert_eq!(owner.next_event().unwrap(), Some(notice([0x80, 2])));
     owner.stop().unwrap();
@@ -206,7 +203,7 @@ fn actual_uac1_cached_event_refuses_retired_device_before_any_mmio() {
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(2));
     let mut owner = audio.status_notifications(&mut dma).unwrap().unwrap();
     owner.start().unwrap();
-    model.borrow_mut().incoming_events.push_back(vec![0x80, 2]);
+    model.borrow_mut().push_event(vec![0x80, 2]);
     assert_eq!(owner.poll().unwrap(), 1);
     let queued = owner.notices.clone();
     let (_, _, foreign) = peer_configuration(&mut dma, &configuration(2));

@@ -292,7 +292,7 @@ fn actual_get_descriptor_dma_poll_and_control_use_only_selected_aliases() {
     assert!(input.poll_hid().reports.is_empty());
     let ticket = input.queued.unwrap();
     input.buffer.bytes_mut().fill(0xa5);
-    hardware.borrow_mut().incoming_events.push_back(vec![1, 7]);
+    hardware.borrow_mut().push_event(vec![1, 7]);
     let first = input.poll_hid();
     assert_eq!(&input.buffer.bytes()[..2], &[1, 7]);
     assert_ne!(input.queued, Some(ticket));
@@ -323,7 +323,7 @@ fn actual_get_descriptor_dma_poll_and_control_use_only_selected_aliases() {
         panic!("actual DMA report required")
     };
     assert_eq!(frame.bytes, [1, 7]);
-    hardware.borrow_mut().incoming_events.push_back(vec![2, 1]);
+    hardware.borrow_mut().push_event(vec![2, 1]);
     let second = input.poll_hid();
     assert!(second.inputs.is_empty());
     assert_eq!(
@@ -359,7 +359,7 @@ fn malformed_ordinary_descriptors_refuse_before_hid_allocation_or_input_publicat
             .borrow_mut()
             .descriptors
             .push((REPORT_DESCRIPTOR, 0, bytes.clone()));
-        hardware.borrow_mut().incoming_events.push_back(vec![0xa5]);
+        hardware.borrow_mut().push_event(vec![0xa5]);
         let shared: Shared = Rc::new(RefCell::new(controller));
         let mut device = model::device(Vec::new());
         device.id = shared.borrow().test_device_id(1).unwrap();
@@ -453,8 +453,7 @@ fn actual_boot_subclass_retains_existing_fallback_and_original_rejected_bytes() 
     );
     hardware
         .borrow_mut()
-        .incoming_events
-        .push_back(vec![0, 0, 4, 0, 0, 0, 0, 0]);
+        .push_event(vec![0, 0, 4, 0, 0, 0, 0, 0]);
     assert_eq!(
         input.poll(),
         [Input::Key {

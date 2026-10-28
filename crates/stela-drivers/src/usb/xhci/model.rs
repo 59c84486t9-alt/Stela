@@ -298,6 +298,7 @@ fn address_controller_with_capabilities(
         command_poisoned: false,
         command_ring_stopped: false,
         unpublished: 0,
+        quiet_drains: 0,
         location: String::from("test xhci"),
     };
     model.borrow_mut().dcbaa = controller.dcbaa.physical();
@@ -352,6 +353,7 @@ pub(crate) struct CancelModel {
     pub(crate) outgoing_bulk: alloc::collections::BTreeMap<usize, Vec<Vec<u8>>>,
     pub(crate) outgoing: Vec<Vec<u8>>,
     pub(crate) fatal_status: u32,
+    pub(crate) status_reads: usize,
     pub(crate) fatal_on_command: Option<u32>,
     pub(crate) silence_transfer: Option<usize>,
     pub(crate) halt_transfer: Option<usize>,
@@ -410,6 +412,39 @@ impl CancelModel {
                 .write_volatile(1 << 24 | u32::from(dci) << 16 | kind << 10 | cycle);
         }
         self.event_index += 1;
+    }
+    /// The device sends interrupt-IN (DCI 3) data, bulk-IN (DCI 5) data or
+    /// an independent peripheral's bulk-IN data, as soon as a TD waits.
+    pub(crate) fn push_event(&mut self, bytes: Vec<u8>) {
+        self.incoming_events.push_back(bytes);
+        self.deliver();
+    }
+    pub(crate) fn extend_events(&mut self, packets: impl IntoIterator<Item = Vec<u8>>) {
+        self.incoming_events.extend(packets);
+        self.deliver();
+    }
+    pub(crate) fn push_acl(&mut self, bytes: Vec<u8>) {
+        self.incoming_acl.push_back(bytes);
+        self.deliver();
+    }
+    pub(crate) fn extend_bulk(&mut self, dci: usize, packets: impl IntoIterator<Item = Vec<u8>>) {
+        self.incoming_bulk.entry(dci).or_default().extend(packets);
+        self.deliver();
+    }
+    /// Moves queued IN data into every endpoint with a TD waiting.
+    pub(crate) fn deliver(&mut self) {
+        let registered: Vec<_> = self.incoming_bulk.keys().copied().collect();
+        for dci in registered {
+            self.receive(dci);
+        }
+        if self.asix.is_some() || self.asix_legacy.is_some() {
+            for dci in (3..32).step_by(2) {
+                self.receive(dci);
+            }
+        } else {
+            self.receive(3);
+            self.receive(5);
+        }
     }
     pub(crate) fn receive(&mut self, dci: usize) {
         let queue = if let Some(queue) = self.incoming_bulk.get_mut(&dci) {
@@ -794,18 +829,8 @@ impl Registers for CancelRegisters {
                 | if model.connected { CCS | PED } else { 0 };
         }
         if offset == 0x40 + USBSTS {
-            let registered: Vec<_> = model.incoming_bulk.keys().copied().collect();
-            for dci in registered {
-                model.receive(dci);
-            }
-            if model.asix.is_some() || model.asix_legacy.is_some() {
-                for dci in (3..32).step_by(2) {
-                    model.receive(dci);
-                }
-            } else {
-                model.receive(3);
-                model.receive(5);
-            }
+            model.status_reads += 1;
+            model.deliver();
             return model.fatal_status;
         }
         0
@@ -816,7 +841,10 @@ impl Registers for CancelRegisters {
         } else if offset == 0x1000 {
             self.0.borrow_mut().command();
         } else if offset == 0x1004 {
-            self.0.borrow_mut().transfer(value as usize);
+            let mut model = self.0.borrow_mut();
+            model.transfer(value as usize);
+            // Waiting IN data meets the TD the doorbell announced.
+            model.deliver();
         }
     }
 }
@@ -939,6 +967,7 @@ fn cancellation_controller_with_context(
         outgoing_bulk: Default::default(),
         outgoing: Vec::new(),
         fatal_status: 0,
+        status_reads: 0,
         fatal_on_command: None,
         silence_transfer: None,
         halt_transfer: None,

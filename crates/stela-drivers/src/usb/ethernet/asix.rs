@@ -867,15 +867,9 @@ mod tests {
                             .to_le_bytes()
                             .to_vec();
                         bytes.extend_from_slice(&vec![0x73; 1514]);
-                        model
-                            .borrow_mut()
-                            .incoming_events
-                            .push_back(bytes[..62].to_vec());
+                        model.borrow_mut().push_event(bytes[..62].to_vec());
                         assert_eq!(link.receive().unwrap(), None);
-                        model
-                            .borrow_mut()
-                            .incoming_events
-                            .push_back(bytes[62..].to_vec());
+                        model.borrow_mut().push_event(bytes[62..].to_vec());
                         assert_eq!(link.receive().unwrap(), Some(vec![0x73; 1514]));
                         assert_eq!(link.receive().unwrap(), None);
                         if scenario == 0 {
@@ -884,7 +878,7 @@ mod tests {
                             // two-byte transfer before the payload arrives.
                             let header = (60u32 | (0xffc3 << 16)).to_le_bytes();
                             for chunk in [&header[..2], &header[2..], &[0x53; 60][..]] {
-                                model.borrow_mut().incoming_events.push_back(chunk.to_vec());
+                                model.borrow_mut().push_event(chunk.to_vec());
                                 let frame = link.receive().unwrap();
                                 if chunk.len() == 60 {
                                     assert_eq!(frame, Some(vec![0x53; 60]));
@@ -1129,7 +1123,7 @@ mod tests {
                     aggregate.extend_from_slice(&headers);
                     aggregate.extend_from_slice(&[0; 4]);
                     aggregate.extend_from_slice(&((offset as u32) << 16 | 24).to_le_bytes());
-                    model.borrow_mut().incoming_events.push_back(aggregate);
+                    model.borrow_mut().push_event(aggregate);
                     for value in 0..12 {
                         assert_eq!(link.receive().unwrap(), Some(vec![value; 1514]));
                     }

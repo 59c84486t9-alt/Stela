@@ -986,9 +986,13 @@ impl Registers for RegistersModel {
                     | SUPPORTED_PROTOCOL
             }
             0x88 => 1 | 1 << 8,
-            0x440 => state
-                .root_status
-                .unwrap_or(PP | CCS | PED | PRC | u32::from(state.nodes[&0].speed) << 10),
+            0x440 => {
+                // Hubs answer their interrupt TDs while the host samples ports.
+                state.complete_interrupts();
+                state
+                    .root_status
+                    .unwrap_or(PP | CCS | PED | PRC | u32::from(state.nodes[&0].speed) << 10)
+            }
             _ => *state.registers.get(&at).unwrap_or(&0),
         }
     }

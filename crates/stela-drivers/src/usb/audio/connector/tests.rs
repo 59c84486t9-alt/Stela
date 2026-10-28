@@ -191,7 +191,7 @@ fn actual_connector_interrupt_invalidates_but_never_replaces_a_status_query() {
     status.start().unwrap();
     for terminal in [3, 4] {
         let raw = [0, 1, 0, 2, 0, terminal];
-        model.borrow_mut().incoming_events.push_back(raw.to_vec());
+        model.borrow_mut().push_event(raw.to_vec());
         assert_eq!(status.poll().unwrap(), 1);
         let notice = status.next_notice().unwrap().unwrap();
         assert_eq!(notice.raw, raw);
@@ -208,7 +208,7 @@ fn actual_connector_interrupt_invalidates_but_never_replaces_a_status_query() {
         [0, 1, 0, 1, 0, 3],
         [0, 1, 0, 2, 0, 1],
     ] {
-        model.borrow_mut().incoming_events.push_back(raw.to_vec());
+        model.borrow_mut().push_event(raw.to_vec());
         assert!(status.poll().is_err());
         assert!(status.next_notice().unwrap().is_none());
         assert_eq!(status.poll().unwrap(), 0);

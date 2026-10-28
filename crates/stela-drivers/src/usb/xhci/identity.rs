@@ -673,7 +673,7 @@ mod tests {
             let mut cdc = (!vendor).then(|| cdc_peer::peer(previous.clone(), &mut dma));
             let mut ethernet = vendor.then(|| vendor_peer::peer(previous.clone(), &mut dma));
             if let Some(peer) = &mut cdc {
-                old_hardware.borrow_mut().incoming_events.push_back(vec![
+                old_hardware.borrow_mut().push_event(vec![
                     DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_INTERFACE,
                     0,
                     1,
@@ -740,10 +740,7 @@ mod tests {
                 .unwrap()
                 .submit_ticket(5, data.physical(), 64)
                 .unwrap();
-            new_hardware
-                .borrow_mut()
-                .incoming_acl
-                .push_back(vec![0x6a; 64]);
+            new_hardware.borrow_mut().push_acl(vec![0x6a; 64]);
             new_hardware.borrow_mut().receive(5);
             if already_pending {
                 current.borrow_mut().drain();
@@ -872,10 +869,7 @@ mod tests {
                 .unwrap()
                 .submit_ticket(5, data.physical(), 64)
                 .unwrap();
-            current_hardware
-                .borrow_mut()
-                .incoming_acl
-                .push_back(vec![0x6a; 64]);
+            current_hardware.borrow_mut().push_acl(vec![0x6a; 64]);
             current_hardware.borrow_mut().receive(5);
             if already_pending {
                 current.borrow_mut().drain();

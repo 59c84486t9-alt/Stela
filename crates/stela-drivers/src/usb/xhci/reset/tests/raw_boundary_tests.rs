@@ -118,6 +118,7 @@ fn unpublished_profile(
         command_poisoned: false,
         command_ring_stopped: false,
         unpublished: 0,
+        quiet_drains: 0,
         location: "reset model".into(),
     };
     let slot = controller.address(attachment(speed), &mut dma).unwrap();

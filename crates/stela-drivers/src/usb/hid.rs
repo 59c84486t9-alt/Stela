@@ -992,10 +992,7 @@ mod tests {
         assert!(ticket.is_some());
         assert!(input.poll_hid().reports.is_empty());
         assert_eq!(input.queued, ticket);
-        hardware
-            .borrow_mut()
-            .incoming_events
-            .push_back(vec![2, 0xff, 5, 0x80]);
+        hardware.borrow_mut().push_event(vec![2, 0xff, 5, 0x80]);
         let polled = input.poll_hid();
         assert!(
             polled.inputs.is_empty(),
@@ -1039,10 +1036,7 @@ mod tests {
         assert!(hardware.borrow().seen.contains(&xhci::SET_DEQUEUE));
         assert!(input.poll_hid().reports.is_empty());
         input.restart().unwrap();
-        hardware
-            .borrow_mut()
-            .incoming_events
-            .push_back(vec![2, 1, 2, 0]);
+        hardware.borrow_mut().push_event(vec![2, 1, 2, 0]);
         assert_eq!(input.poll_hid().reports.len(), 1);
     }
 
@@ -1120,8 +1114,7 @@ mod tests {
             hardware.borrow_mut().stall_control = None;
             hardware
                 .borrow_mut()
-                .incoming_events
-                .push_back(vec![1, 0, 0, 4, 0, 0, 0, 0, 0]);
+                .push_event(vec![1, 0, 0, 4, 0, 0, 0, 0, 0]);
             assert_eq!(
                 input.poll(),
                 [Input::Key {
@@ -1164,8 +1157,7 @@ mod tests {
         );
         hardware
             .borrow_mut()
-            .incoming_events
-            .push_back(vec![1, 0, 0, 4, 0, 0, 0, 0, 0]);
+            .push_event(vec![1, 0, 0, 4, 0, 0, 0, 0, 0]);
         assert_eq!(
             input.poll(),
             [Input::Key {
@@ -1173,7 +1165,7 @@ mod tests {
                 pressed: true
             }]
         );
-        hardware.borrow_mut().incoming_events.push_back(vec![1, 0]);
+        hardware.borrow_mut().push_event(vec![1, 0]);
         let bad = input.poll_hid();
         assert!(bad.inputs.is_empty());
         assert!(matches!(
@@ -1185,8 +1177,7 @@ mod tests {
         ));
         hardware
             .borrow_mut()
-            .incoming_events
-            .push_back(vec![1, 0, 0, 1, 1, 1, 1, 1, 1]);
+            .push_event(vec![1, 0, 0, 1, 1, 1, 1, 1, 1]);
         assert!(input.poll().is_empty());
         assert_eq!(
             input.stop().unwrap(),
@@ -1313,8 +1304,7 @@ mod tests {
             .unwrap();
             hardware
                 .borrow_mut()
-                .incoming_events
-                .push_back(vec![0x11, 127, 0, 1, 0xfe]);
+                .push_event(vec![0x11, 127, 0, 1, 0xfe]);
             let polled = input.poll_hid();
             let expected = if relative {
                 vec![
@@ -1373,8 +1363,7 @@ mod tests {
         );
         hardware
             .borrow_mut()
-            .incoming_events
-            .push_back(vec![0, 0, 4, 0, 0, 0, 0, 0]);
+            .push_event(vec![0, 0, 4, 0, 0, 0, 0, 0]);
         let polled = input.poll_hid();
         assert_eq!(
             polled.inputs,

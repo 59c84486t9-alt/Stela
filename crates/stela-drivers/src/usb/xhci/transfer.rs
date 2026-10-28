@@ -912,7 +912,7 @@ mod tests {
                 assert_eq!(result, Err(BlockError::Timeout));
                 assert_eq!(model.borrow().seen, vec![STOP_ENDPOINT, SET_DEQUEUE]);
                 assert!(model.borrow().active[5].is_none());
-                model.borrow_mut().incoming_acl.push_back(vec![1, 2, 3]);
+                model.borrow_mut().push_acl(vec![1, 2, 3]);
                 assert_eq!(
                     controller.transfer(1, 5, buffer.physical(), 512, 50_000_000),
                     Ok(3)

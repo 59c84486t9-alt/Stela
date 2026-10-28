@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(model.borrow().configuration_value, 19);
         let incoming = owner.submit(0x81, 0, 16, &[]).unwrap();
         assert!(owner.poll(incoming).unwrap().is_none());
-        model.borrow_mut().incoming_events.push_back(vec![4, 5, 6]);
+        model.borrow_mut().push_event(vec![4, 5, 6]);
         let done = owner.poll(incoming).unwrap().unwrap();
         assert_eq!((done.actual, done.data), (Some(3), vec![4, 5, 6]));
         assert!(owner.poll(incoming).is_err());

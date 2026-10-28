@@ -119,7 +119,7 @@ fn fixture(
     )
 }
 fn feed(input: &mut UsbInput, peer: &Rc<RefCell<model::CancelModel>>, raw: &[u8]) -> Poll {
-    peer.borrow_mut().incoming_events.push_back(raw.to_vec());
+    peer.borrow_mut().push_event(raw.to_vec());
     input.poll_hid()
 }
 fn key(usage: u8, pressed: bool) -> Input {
@@ -187,7 +187,7 @@ fn actual_mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder()
     ];
     for (index, (raw, expected)) in sequence.iter().enumerate() {
         let polled = feed(&mut rich, &peer, raw);
-        other.borrow_mut().incoming_events.push_back(raw.clone());
+        other.borrow_mut().push_event(raw.clone());
         assert_eq!(polled.inputs, *expected);
         assert_eq!(
             legacy.poll(),
@@ -297,7 +297,7 @@ fn stale_sparse_binding_cannot_touch_current_native_dma_or_consume_its_completio
     assert_ne!(old.id, current.id);
     assert_eq!(feed(&mut old, &old_peer, &[1, 1, 0]).inputs, [key(4, true)]);
     assert!(current.poll_hid().reports.is_empty());
-    peer.borrow_mut().incoming_events.push_back(vec![1, 1, 0]);
+    peer.borrow_mut().push_event(vec![1, 1, 0]);
     peer.borrow_mut().receive(3);
     let original = old.controller.clone();
     old.controller = current.controller.clone();

@@ -102,7 +102,7 @@ fn actual_descriptor_dma_completion_rearm_and_bounded_backpressure() {
     assert!(!owner.configured);
     owner.start().unwrap();
     let allocation = owner.allocator.remaining();
-    model.borrow_mut().incoming_events.push_back(Vec::new());
+    model.borrow_mut().push_event(Vec::new());
     assert_eq!(owner.poll().unwrap(), 0); // real zero-length terminal packet
     assert!(owner.ticket.is_none() && owner.notices.is_empty());
     assert_eq!(owner.poll().unwrap(), 0); // rearm only after retirement
@@ -114,8 +114,7 @@ fn actual_descriptor_dma_completion_rearm_and_bounded_backpressure() {
         }
         model
             .borrow_mut()
-            .incoming_events
-            .push_back([FREQUENCY.as_slice(), VOLUME.as_slice()].concat());
+            .push_event([FREQUENCY.as_slice(), VOLUME.as_slice()].concat());
         assert_eq!(owner.poll().unwrap(), 2);
         assert!(owner.ticket.is_none());
         assert!(model.borrow().active[3].is_none());
@@ -182,8 +181,7 @@ fn actual_hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
     for raw in hostile {
         model
             .borrow_mut()
-            .incoming_events
-            .push_back([FREQUENCY.as_slice(), raw.as_slice()].concat());
+            .push_event([FREQUENCY.as_slice(), raw.as_slice()].concat());
         assert!(owner.poll().is_err());
         assert!(owner.notices.is_empty());
         assert!(owner.ticket.is_none()); // terminal event, not fake cancellation
@@ -192,10 +190,7 @@ fn actual_hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
         assert_eq!(owner.poll().unwrap(), 0);
     }
     for length in [1, 5, 7, 11] {
-        model
-            .borrow_mut()
-            .incoming_events
-            .push_back(vec![0; length]);
+        model.borrow_mut().push_event(vec![0; length]);
         assert_eq!(
             owner.poll(),
             Err(Error::Packet("truncated audio status packet"))
@@ -203,10 +198,7 @@ fn actual_hostile_packets_publish_no_valid_prefix_and_rearm_after_retirement() {
         assert!(owner.notices.is_empty());
         assert_eq!(owner.poll().unwrap(), 0);
     }
-    model
-        .borrow_mut()
-        .incoming_events
-        .push_back(FREQUENCY.to_vec());
+    model.borrow_mut().push_event(FREQUENCY.to_vec());
     assert_eq!(owner.poll().unwrap(), 1);
     assert_eq!(owner.next_notice().unwrap().unwrap().raw, FREQUENCY);
     owner.stop().unwrap();
@@ -292,10 +284,7 @@ fn actual_stale_identity_refuses_before_cached_dequeue_or_any_mmio() {
     let (audio, model, _) = peer(&mut dma);
     let mut owner = audio.status_notifications(&mut dma).unwrap().unwrap();
     owner.start().unwrap();
-    model
-        .borrow_mut()
-        .incoming_events
-        .push_back(FREQUENCY.to_vec());
+    model.borrow_mut().push_event(FREQUENCY.to_vec());
     owner.poll().unwrap();
     let notices = owner.notices.clone();
     let (_, _, foreign) = peer(&mut dma);
@@ -390,10 +379,7 @@ fn actual_fragmented_packet_dma_alignment_preserves_one_td_boundary() {
         .unwrap();
     assert!((owner.packet.physical() & 0xffff) + owner.packet.len() as u64 <= 65536);
     owner.start().unwrap();
-    model
-        .borrow_mut()
-        .incoming_events
-        .push_back(FREQUENCY.to_vec());
+    model.borrow_mut().push_event(FREQUENCY.to_vec());
     assert_eq!(owner.poll().unwrap(), 1);
     assert_eq!(owner.next_notice().unwrap().unwrap().raw, FREQUENCY);
     owner.stop().unwrap();
@@ -416,7 +402,7 @@ fn actual_descriptor_advertised_clock_selector_multiplier_and_feature_attributes
         [0, 1, 0, 1, 0, 2],
         [0, 1, 2, 2, 0, 2], // feature master mute/channel volume CUR
     ] {
-        model.borrow_mut().incoming_events.push_back(raw.to_vec());
+        model.borrow_mut().push_event(raw.to_vec());
         assert_eq!(owner.poll().unwrap(), 1);
         assert_eq!(owner.next_notice().unwrap().unwrap().raw, raw);
         assert_eq!(owner.poll().unwrap(), 0);
@@ -448,10 +434,7 @@ fn actual_scalar_feature_status_accepts_advertised_cur_and_numeric_range_only() 
         };
         for &attribute in attributes {
             let notice = [0, attribute, 2, selector, 0, 2];
-            model
-                .borrow_mut()
-                .incoming_events
-                .push_back(notice.to_vec());
+            model.borrow_mut().push_event(notice.to_vec());
             assert_eq!(owner.poll().unwrap(), 1);
             assert_eq!(owner.next_notice().unwrap().unwrap().raw, notice);
             assert_eq!(owner.poll().unwrap(), 0);
@@ -460,8 +443,7 @@ fn actual_scalar_feature_status_accepts_advertised_cur_and_numeric_range_only() 
     for selector in [7, 9, 10, 13] {
         model
             .borrow_mut()
-            .incoming_events
-            .push_back(vec![0, 1, 0, 3, 0, 2, 0, 2, 0, selector, 0, 2]);
+            .push_event(vec![0, 1, 0, 3, 0, 2, 0, 2, 0, selector, 0, 2]);
         assert!(owner.poll().is_err());
         assert_eq!(owner.next_event().unwrap(), None);
         assert_eq!(owner.poll().unwrap(), 0);
@@ -488,10 +470,7 @@ fn dropping_pending_owner_retains_boot_dma_and_cannot_mint_replacement_authority
     assert_eq!(model.borrow().active[3], Some(original));
     // The allocator's boot-lived original packet remains writable by hardware;
     // dropping a Rust owner did not free or overwrite the submitted allocation.
-    model
-        .borrow_mut()
-        .incoming_events
-        .push_back(FREQUENCY.to_vec());
+    model.borrow_mut().push_event(FREQUENCY.to_vec());
     model.borrow_mut().receive(3);
     assert!(model.borrow().active[3].is_none());
     // SAFETY: original still-live DMA lies in this test's retained backing RAM.
@@ -541,10 +520,7 @@ fn actual_transfer_error_retains_ticket_until_reset_dequeue_and_drop_ack() {
     let producer = model.borrow().dequeues.last().copied().unwrap() & !0xf;
     owner.start().unwrap();
     assert_eq!(model.borrow().active[3].unwrap().0, producer);
-    model
-        .borrow_mut()
-        .incoming_events
-        .push_back(FREQUENCY.to_vec());
+    model.borrow_mut().push_event(FREQUENCY.to_vec());
     assert_eq!(owner.poll().unwrap(), 1);
     assert_eq!(owner.next_notice().unwrap().unwrap().raw, FREQUENCY);
     owner.stop().unwrap();
@@ -678,10 +654,7 @@ fn actual_unpolled_stall_is_cleared_on_device_before_acknowledged_restart() {
     let producer = model.borrow().dequeues.last().copied().unwrap() & !0xf;
     owner.start().unwrap();
     assert_eq!(model.borrow().active[3].unwrap().0, producer);
-    model
-        .borrow_mut()
-        .incoming_events
-        .push_back(FREQUENCY.to_vec());
+    model.borrow_mut().push_event(FREQUENCY.to_vec());
     assert_eq!(owner.poll().unwrap(), 1);
     assert_eq!(owner.next_notice().unwrap().unwrap().raw, FREQUENCY);
     owner.stop().unwrap();

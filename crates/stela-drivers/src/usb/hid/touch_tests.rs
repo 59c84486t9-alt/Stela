@@ -145,7 +145,7 @@ fn enable(
     input.enable_touch_frames(1, 0)
 }
 fn feed(input: &mut UsbInput, peer: &Rc<RefCell<model::CancelModel>>, raw: Vec<u8>) -> TouchPoll {
-    peer.borrow_mut().incoming_events.push_back(raw);
+    peer.borrow_mut().push_event(raw);
     input.poll_touch_hid()
 }
 
@@ -340,9 +340,7 @@ fn stale_native_identity_discards_pending_before_mmio_or_current_completion() {
             .is_empty()
     );
     assert!(current.poll_hid().reports.is_empty());
-    peer.borrow_mut()
-        .incoming_events
-        .push_back(packet(2, true, 1, 12));
+    peer.borrow_mut().push_event(packet(2, true, 1, 12));
     peer.borrow_mut().receive(3);
     let original = old.controller.clone();
     old.controller = current.controller.clone();

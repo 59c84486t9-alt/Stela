@@ -356,7 +356,7 @@ fn intel_bulk_iso_uses_real_native_bulk_dma_and_retains_failed_short_transfer() 
         let controller = Rc::new(RefCell::new(controller));
         let mut d = device();
         d.id = controller.borrow().test_device_id(1).unwrap();
-        model.borrow_mut().incoming_events.extend([
+        model.borrow_mut().extend_events([
             cc(0xfc05, 1, &version(0x18)),
             cc(0x1009, 1, &[0, 1, 2, 3, 4, 5, 6]),
             cc(0xfc05, 1, &version(0x18)),
@@ -396,10 +396,7 @@ fn intel_bulk_iso_uses_real_native_bulk_dma_and_retains_failed_short_transfer() 
             assert_eq!(model.borrow().outgoing.len(), sent);
             assert_eq!(credits, 1);
         } else {
-            model
-                .borrow_mut()
-                .incoming_events
-                .push_back(cc(0x0c03, 0, &[0]));
+            model.borrow_mut().push_event(cc(0x0c03, 0, &[0]));
             let report = owner.shutdown(1).unwrap();
             assert!(report.transport_retired);
             assert_eq!(report.command_credits, 0);

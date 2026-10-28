@@ -227,10 +227,7 @@ mod tests {
             assert_eq!(previous.id.hardware_slot(), current.id.hardware_slot());
             assert_ne!(previous.id, current.id);
             let key_report = vec![1, 0, 0, 4, 0, 0, 0, 0, 0];
-            old_peer
-                .borrow_mut()
-                .incoming_events
-                .push_back(key_report.clone());
+            old_peer.borrow_mut().push_event(key_report.clone());
             assert_eq!(
                 previous.poll_hid().inputs,
                 [Input::Key {
@@ -250,7 +247,7 @@ mod tests {
             }
             assert!(current.poll_hid().reports.is_empty());
             assert!(current.queued.is_some());
-            peer.borrow_mut().incoming_events.push_back(key_report);
+            peer.borrow_mut().push_event(key_report);
             peer.borrow_mut().receive(3); // Real DMA data and unread event-ring completion.
             let original = previous.controller.clone();
             previous.controller = current.controller.clone();

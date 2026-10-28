@@ -1078,7 +1078,7 @@ pub(crate) mod tests {
             aggregate[24..84].fill(0x5a);
             aggregate[88..92].copy_from_slice(&64u32.to_le_bytes());
             aggregate[112..172].fill(0x6a);
-            model.borrow_mut().incoming_events.push_back(aggregate);
+            model.borrow_mut().push_event(aggregate);
             assert_eq!(link.receive().unwrap(), Some(vec![0x5a; 60]));
             assert_eq!(link.receive().unwrap(), Some(vec![0x6a; 60]));
             assert_eq!(link.receive().unwrap(), None);
@@ -1491,7 +1491,7 @@ pub(crate) mod tests {
             if frames >= 21 {
                 assert!(aggregate.len() > 16384);
             }
-            model.borrow_mut().incoming_events.push_back(aggregate);
+            model.borrow_mut().push_event(aggregate);
             for value in 0..frames {
                 assert_eq!(link.receive().unwrap(), Some(vec![value as u8; frame_size]));
             }
