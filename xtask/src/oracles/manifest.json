@@ -4771,5 +4771,13 @@
       "STELA_TEST_PMGR_M1_LLB"
     ],
     "reason": "requires original J314s LLB; complete native SEP command table and mailbox phases"
+  },
+  {
+    "package": "stela-compiler",
+    "test": "all_half_conversions_match_quad",
+    "source": "crates/stela-compiler/src/aarch64/floating/integer/half.rs",
+    "kind": "oracle",
+    "inputs": [],
+    "reason": "oracle: exhaustive"
   }
 ]
