@@ -1399,7 +1399,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn pressure_never_discards_final_architectural_values() {
         let mut instructions: Vec<_> = (0..31)
@@ -1530,7 +1529,6 @@ mod tests {
             Err(RegionError::Misaligned)
         );
     }
-
 
     #[test]
     fn cached_right_is_read_directly_only_without_transform() {

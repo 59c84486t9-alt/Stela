@@ -88,7 +88,14 @@ pub(in crate::x86_64) fn emit(
     }
     let native_fma = target.supports(TargetCpu::Fma);
     let (mut helper, sticky) = if native_fma {
-        let StickyPath { full, helper, done, mut crossing, cold, inline_end } = sticky_path(code, operand, target, entry);
+        let StickyPath {
+            full,
+            helper,
+            done,
+            mut crossing,
+            cold,
+            inline_end,
+        } = sticky_path(code, operand, target, entry);
         let full_start = code.len();
         for &patch in &full {
             resolve(code, patch, full_start);
@@ -213,12 +220,7 @@ struct StickyPath {
     inline_end: crate::x86_64::asm::Checkpoint,
 }
 
-fn sticky_path(
-    code: &mut Code,
-    operand: &Operand,
-    target: TargetCpu,
-    entry: Entry,
-) -> StickyPath {
+fn sticky_path(code: &mut Code, operand: &Operand, target: TargetCpu, entry: Entry) -> StickyPath {
     let full = sticky_inexact(code, entry);
     // A zeroing load of the destination LEFT leaves a scalar result's
     // upper bits clear.
@@ -261,5 +263,12 @@ fn sticky_path(
         resume,
         &mut crossing,
     );
-    StickyPath { full, helper, done, crossing, cold, inline_end }
+    StickyPath {
+        full,
+        helper,
+        done,
+        crossing,
+        cold,
+        inline_end,
+    }
 }

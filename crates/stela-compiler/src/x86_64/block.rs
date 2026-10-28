@@ -280,7 +280,10 @@ fn emit_selected(
                 let same_stack_checks = chunk.iter().enumerate().all(|(index, instruction)| {
                     match instruction.operation {
                         Operation::Memory { base, .. } | Operation::MemoryPair { base, .. }
-                            if base == Register::Sp => stack[cursor + index],
+                            if base == Register::Sp =>
+                        {
+                            stack[cursor + index]
+                        }
                         _ => true,
                     }
                 });

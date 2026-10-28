@@ -67,7 +67,10 @@ impl Code {
     }
     /// The current emission boundary, for splitting or truncating this buffer.
     pub(crate) fn checkpoint(&self) -> Checkpoint {
-        Checkpoint { bytes: self.bytes.len(), instructions: self.instructions }
+        Checkpoint {
+            bytes: self.bytes.len(),
+            instructions: self.instructions,
+        }
     }
     /// Move the instructions emitted after `at` into a separate buffer.
     pub(crate) fn split_off(&mut self, at: Checkpoint) -> Self {
@@ -89,7 +92,10 @@ impl Code {
     pub(crate) fn remove_instruction(&mut self, range: core::ops::Range<usize>) {
         assert!(!range.is_empty());
         self.bytes.drain(range);
-        self.instructions = self.instructions.checked_sub(1).expect("counted instruction");
+        self.instructions = self
+            .instructions
+            .checked_sub(1)
+            .expect("counted instruction");
     }
     /// Remove every byte and instruction.
     pub(crate) fn clear(&mut self) {
