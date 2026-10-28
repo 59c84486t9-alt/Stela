@@ -102,6 +102,18 @@ impl State {
         Ok(state)
     }
 
+    /// Whether the processor implements the DRAM routing registers. Firmware
+    /// on AMD hardware always enables variable DRAM routing and sets TOP_MEM;
+    /// a hypervisor without the registers (QEMU's TCG) reads every routing
+    /// field as zero. Without them RAM is routed as the firmware's memory map
+    /// classifies it, and only the MTRR types are checked.
+    pub(crate) fn routes(&self) -> bool {
+        self.syscfg & (FIXED_DRAM | VARIABLE_DRAM | TOM2_ENABLE | TOM2_WB) != 0
+            || self.top_mem != 0
+            || self.top_mem2 != 0
+            || self.iorr.iter().any(|&(_, mask)| mask & (1 << 11) != 0)
+    }
+
     /// Per-processor opaque non-memory fields are retained, never interpreted
     /// as feature authority or overwritten from a different processor.
     pub(crate) fn compatible(self, other: Self) -> Result<(), &'static str> {
