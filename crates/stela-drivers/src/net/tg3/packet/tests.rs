@@ -91,6 +91,37 @@ impl PageSource for Pages {
         )
     }
 }
+/// Device-completed ranges the CPU may take back, as the furthest end
+/// completed from each start address.
+#[derive(Default)]
+struct Completions {
+    ends: BTreeMap<u64, u64>,
+    longest: u64,
+}
+impl Completions {
+    fn complete(&mut self, range: Range<u64>) {
+        self.longest = self.longest.max(range.end - range.start);
+        let end = self.ends.entry(range.start).or_insert(range.end);
+        *end = (*end).max(range.end);
+    }
+    /// A range handed back to the device ends every completion overlapping it.
+    fn revoke(&mut self, range: Range<u64>) {
+        let overlapping: Vec<u64> = self
+            .ends
+            .range(range.start.saturating_sub(self.longest)..range.end)
+            .filter(|&(_, &end)| end > range.start)
+            .map(|(&start, _)| start)
+            .collect();
+        for start in overlapping {
+            self.ends.remove(&start);
+        }
+    }
+    fn covers(&self, range: Range<u64>) -> bool {
+        self.ends
+            .range(range.start.saturating_sub(self.longest)..=range.start)
+            .any(|(_, &end)| end >= range.end)
+    }
+}
 struct Map {
     cpu: CpuMapping,
     device: Vec<u8>,
@@ -101,7 +132,7 @@ struct Domain {
     maps: Mutex<BTreeMap<u64, Map>>,
     next: AtomicUsize,
     posted: Mutex<Vec<(u64, Vec<u8>)>>,
-    completions: Mutex<Vec<Range<u64>>>,
+    completions: Mutex<Completions>,
     fail_drain: AtomicBool,
     fail_unmap: AtomicBool,
     fail_unmap_id: AtomicUsize,
@@ -118,7 +149,7 @@ impl Domain {
             maps: Mutex::new(BTreeMap::new()),
             next: AtomicUsize::new(0),
             posted: Mutex::new(Vec::new()),
-            completions: Mutex::new(Vec::new()),
+            completions: Mutex::new(Completions::default()),
             fail_drain: AtomicBool::new(false),
             fail_unmap: AtomicBool::new(false),
             fail_unmap_id: AtomicUsize::new(0),
@@ -151,9 +182,8 @@ impl Domain {
         let maps = self.maps.lock().unwrap();
         let (&base, map) = maps.range(..=at).next_back().unwrap();
         let address = map.cpu.address((at - base) as usize, bytes.len()).unwrap();
-        for (i, b) in bytes.iter().enumerate() {
-            unsafe { address.as_ptr().add(i).write_volatile(*b) };
-        }
+        // SAFETY: the CPU mapping covers these bytes, which `bytes` cannot alias.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), address.as_ptr(), bytes.len()) };
     }
     fn write(&self, at: u64, bytes: &[u8]) {
         if self.defer.load(Ordering::Relaxed) {
@@ -163,7 +193,10 @@ impl Domain {
         }
     }
     fn complete(&self, at: u64, bytes: usize) {
-        self.completions.lock().unwrap().push(at..at + bytes as u64);
+        self.completions
+            .lock()
+            .unwrap()
+            .complete(at..at + bytes as u64);
     }
     fn require_stopped(&self) {
         let peer = self.peer.lock().unwrap();
@@ -240,15 +273,18 @@ unsafe impl DmaDomain for Domain {
         let map = maps.get_mut(&mapping.address).unwrap();
         let start = mapping.address + range.start as u64;
         let end = mapping.address + range.end as u64;
-        self.completions
-            .lock()
-            .unwrap()
-            .retain(|r| r.end <= start || r.start >= end);
+        self.completions.lock().unwrap().revoke(start..end);
         let source = map.cpu.address(range.start, range.len()).unwrap();
-        for (i, offset) in range.clone().enumerate() {
-            map.device[offset] = unsafe { source.as_ptr().add(i).read_volatile() };
-            map.visible[offset] = true;
-        }
+        // SAFETY: the CPU mapping covers `range`, and the device copy is a
+        // separate allocation of the mapping's length.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                source.as_ptr(),
+                map.device[range.clone()].as_mut_ptr(),
+                range.len(),
+            )
+        };
+        map.visible[range].fill(true);
         Ok(())
     }
     unsafe fn sync_for_cpu(
@@ -264,11 +300,7 @@ unsafe impl DmaDomain for Domain {
         let at = mapping.address + range.start as u64;
         let end = mapping.address + range.end as u64;
         assert!(
-            self.completions
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|r| r.start <= at && r.end >= end),
+            self.completions.lock().unwrap().covers(at..end),
             "CPU access without device completion"
         );
         assert!(
@@ -972,14 +1004,20 @@ fn actual_nonidentity_rings_transfer_frames_pad_strip_fcs_and_retire() {
 #[test]
 fn wraps_actual_tx_and_rx_producer_return_indices() {
     let (mut packet, _, domain, peer) = attach();
-    for value in 0..4100u32 {
+    // One frame past the 512-entry send ring, then past the 2048-entry
+    // standard and 4096-entry return rings.
+    for value in 0..4097u32 {
         let mut frame = vec![0x2a; 60];
         frame[14..18].copy_from_slice(&value.to_le_bytes());
-        packet.transmit(&frame).unwrap();
+        if value <= 512 {
+            packet.transmit(&frame).unwrap();
+        }
         peer.lock().unwrap().receive(&frame, 0, &domain);
         assert_eq!(packet.receive().unwrap(), Some(frame));
     }
-    assert_eq!(peer.lock().unwrap().sent.len(), 4100);
+    assert_eq!(peer.lock().unwrap().sent.len(), 513);
+    assert_eq!(peer.lock().unwrap().tx, 1);
+    assert_eq!(peer.lock().unwrap().ret, 1);
     assert!(packet.retire().is_ok());
 }
 #[test]
@@ -1394,12 +1432,23 @@ fn reasserted_low_water_remains_visible_and_counter_never_wraps() {
 }
 #[test]
 fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_retained_fault() {
-    for at in [0x3c48, 0x6004, 0x4804, 0x4c04] {
-        for bit in 0..32 {
-            let value = 1u32 << bit;
-            if (at == 0x3c48 && value == 0x40) || (at == 0x6004 && value == 1) {
-                continue;
-            }
+    // Each cause register's lowest and highest fatal bit, the bit above the
+    // flow register's low-water bit 6 (the message register's lowest fatal
+    // bit is the one above its MSI request bit 0), and every fatal flow bit
+    // but the top one, whose all-ones read would mean a removed device.
+    for (at, value) in [
+        (0x3c48, 1),
+        (0x3c48, 0x80),
+        (0x3c48, 1 << 31),
+        (0x3c48, 0x7fff_ffbf),
+        (0x6004, 2),
+        (0x6004, 1 << 31),
+        (0x4804, 1),
+        (0x4804, 1 << 31),
+        (0x4c04, 1),
+        (0x4c04, 1 << 31),
+    ] {
+        {
             let (mut packet, pages, domain, peer) = attach();
             {
                 let mut p = peer.lock().unwrap();
@@ -1532,10 +1581,12 @@ fn peer_refuses_each_deleted_or_disabled_mac_dma_engine_and_workaround() {
         (DmaPath::Rx, &rx[..]),
         (DmaPath::Status, &status[..]),
     ] {
+        // A refusal leaves no DMA effect, so one attachment serves every
+        // control once each is restored.
+        let (packet, _, domain, peer) = attach();
+        packet.memory.as_ref().unwrap().tx(0, &[0x91; 60]).unwrap();
         for &(at, bit) in common.iter().chain(controls) {
             for delete in [false, true] {
-                let (packet, _, domain, peer) = attach();
-                packet.memory.as_ref().unwrap().tx(0, &[0x91; 60]).unwrap();
                 // Guard is acquired outside catch_unwind, so the deliberate
                 // model assertion cannot poison the mutex or hide cleanup.
                 let mut p = peer.lock().unwrap();
@@ -1547,26 +1598,24 @@ fn peer_refuses_each_deleted_or_disabled_mac_dma_engine_and_workaround() {
                 }
                 rejected_dma_effect(&packet, &domain, &mut p, path);
                 p.mac.insert(at, original);
-                drop(p);
-                assert!(packet.retire().is_ok());
             }
         }
+        assert!(packet.retire().is_ok());
     }
 }
 #[test]
 fn peer_refuses_dma_without_actual_pci_and_host_access_controls() {
     for path in [DmaPath::Tx, DmaPath::Rx, DmaPath::Status] {
+        let (packet, _, domain, peer) = attach();
+        packet.memory.as_ref().unwrap().tx(0, &[0x92; 60]).unwrap();
         for (at, bit) in [(4, 2), (4, 4), (0x68, 8), (0x68, 0x10), (0x68, 0x80)] {
-            let (packet, _, domain, peer) = attach();
-            packet.memory.as_ref().unwrap().tx(0, &[0x92; 60]).unwrap();
             let mut p = peer.lock().unwrap();
             let original = p.config[&at];
             p.config.insert(at, original & !bit);
             rejected_dma_effect(&packet, &domain, &mut p, path);
             p.config.insert(at, original);
-            drop(p);
-            assert!(packet.retire().is_ok());
         }
+        assert!(packet.retire().is_ok());
     }
 }
 
