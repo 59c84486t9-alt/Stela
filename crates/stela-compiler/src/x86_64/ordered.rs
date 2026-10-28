@@ -7,7 +7,8 @@
 //! DMB emits nothing: no other agent observes guest memory, and one PE
 //! observes its own accesses in program order.
 use super::atomic::{address_offset, commit_rax, input_rcx, read_rax, store_rcx};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size};
+use crate::x86_64::isa::SimdOpcode;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -24,41 +25,19 @@ const ATOMIC_QUANTITY_BYTES: u8 = 16;
 const BASELINE_ATOMIC_BYTES: u8 = 8;
 const BASELINE_ATOMIC_MASK: u8 = BASELINE_ATOMIC_BYTES - 1;
 const BITS_PER_BYTE_SHIFT: u8 = 3;
-const OPERAND_SIZE_PREFIX: u8 = 0x66;
-const REX_W_PREFIX: u8 = 0x48;
-const TWO_BYTE_OPCODE: u8 = 0x0f;
-const MOVSX_BYTE: u8 = 0xbe;
-const MOVSX_HALFWORD: u8 = 0xbf;
-const MOVSXD: u8 = 0x63;
-const RDX_ADDRESS: u8 = 2;
-const RAX_REGISTER: u8 = 0xc0;
-const XCHG_BYTE: u8 = 0x86;
-const XCHG_WIDER: u8 = 0x87;
-const RCX_RDX_MEMORY: u8 = 0x0a;
-const MFENCE: &[u8] = &[0x0f, 0xae, 0xf0];
-const NOP: u8 = 0x90;
-const MOV_ECX_EDX: &[u8] = &[0x89, 0xd1];
-const AND_ECX_IMM8: &[u8] = &[0x83, 0xe1];
-const CMP_CL_IMM8: &[u8] = &[0x80, 0xf9];
-const JA_REL8: u8 = 0x77;
-const JMP_REL8: u8 = 0xeb;
-const SHL_ECX_IMM8: &[u8] = &[0xc1, 0xe1];
-const AND_RDX_IMM8: &[u8] = &[0x48, 0x83, 0xe2];
-const MOVDQA_XMM0_RDX: &[u8] = &[0x66, 0x0f, 0x6f, 0x02];
-const MOVQ_RAX_XMM0: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc0];
-/// The high quadword to the low one. (MOVHLPS is not on Intel's data operand
-/// independent timing list.)
-const PUNPCKHQDQ_XMM0_XMM0: &[u8] = &[0x66, 0x0f, 0x6d, 0xc0];
-const MOVQ_R8_XMM0: &[u8] = &[0x66, 0x49, 0x0f, 0x7e, 0xc0];
-const SHRD_RAX_R8_CL: &[u8] = &[0x4c, 0x0f, 0xad, 0xc0];
-const SHRD_RAX_R8_IMM8: &[u8] = &[0x4c, 0x0f, 0xac, 0xc0];
-const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
-const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
-const MOV_EAX_EDX: &[u8] = &[0x89, 0xd0];
-const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
-const CMP_AL_IMM8: u8 = 0x3c;
-const JBE_REL8: u8 = 0x76;
 const ATOMIC_QUANTITY_MASK: u8 = ATOMIC_QUANTITY_BYTES - 1;
+/// `[rdx]`, the checked guest address.
+const ADDRESS: Mem = Mem::base(Gpr::Rdx, 0);
+
+/// The operand size of a `bytes`-wide access.
+fn size(bytes: u8) -> Size {
+    match bytes {
+        BYTE_BYTES => Size::Byte,
+        HALFWORD_BYTES => Size::Word,
+        DWORD_BYTES => Size::Dword,
+        _ => Size::Qword,
+    }
+}
 
 /// Whether an ordered access crosses its 16-byte granule, which it may only
 /// with SCTLR_ELx.nAA set (no granule check).
@@ -86,26 +65,22 @@ fn crossing(base: Register, bytes: u8, displacement: i32, checks: super::MemoryC
     }
 }
 
-/// Jump, by a rel8 the caller patches, when the access at RDX lies inside
+/// Jump, by a rel8 the caller binds, when the access at RDX lies inside
 /// its 16-byte granule. EAX is scratch.
-fn branch_within_granule(code: &mut Code, bytes: u8) -> usize {
-    code.extend(MOV_EAX_EDX);
-    code.extend(AND_EAX_IMM8);
-    code.push(ATOMIC_QUANTITY_MASK);
-    code.extend([CMP_AL_IMM8, ATOMIC_QUANTITY_BYTES - bytes, JBE_REL8]);
-    code.push(0);
-    code.len() - 1
+fn branch_within_granule(code: &mut Code, bytes: u8) -> Patch {
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Gpr::Rax, Gpr::Rdx);
+    asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rax, ATOMIC_QUANTITY_MASK as i8);
+    asm.alu_accumulator_imm8(Alu::Cmp, ATOMIC_QUANTITY_BYTES - bytes);
+    asm.jcc8(Cond::Be)
 }
 
-fn jump_over(code: &mut Code) -> usize {
-    code.extend([JMP_REL8, 0]);
-    code.len() - 1
+fn jump_over(code: &mut Code) -> Patch {
+    code.asm().jmp8()
 }
 
-fn patch(code: &mut [u8], at: usize) {
-    code[at] = i8::try_from(code.len() - at - 1)
-        .expect("ordered path fits rel8")
-        .to_le_bytes()[0];
+fn patch(code: &mut Code, branch: Patch) {
+    code.asm().bind(branch);
 }
 
 /// Generic wider loads can cross eight bytes. A checked, so aligned, SP makes
@@ -153,8 +128,8 @@ pub(super) fn emit(
             // and writes→writes. Full barriers additionally close store→load,
             // which only another agent could observe.
             match requirement {
-                Barrier::All if !plain => code.extend(MFENCE),
-                Barrier::All | Barrier::Reads | Barrier::Writes => code.push(NOP),
+                Barrier::All if !plain => code.asm().mfence(),
+                Barrier::All | Barrier::Reads | Barrier::Writes => code.asm().nop(),
             }
         }
         Operand::Transfer {
@@ -221,9 +196,15 @@ pub(super) fn emit(
                     if base == Register::Sp && checks.stack_alignment {
                         let offset =
                             displacement.rem_euclid(i32::from(BASELINE_ATOMIC_BYTES)) as u8;
-                        snapshot_value(code, bytes, extension, Some(offset << BITS_PER_BYTE_SHIFT));
+                        snapshot_value(
+                            code,
+                            bytes,
+                            extension,
+                            Some(offset << BITS_PER_BYTE_SHIFT),
+                            target,
+                        );
                     } else {
-                        acquire_snapshot(code, bytes, extension);
+                        acquire_snapshot(code, bytes, extension, target);
                     }
                 } else {
                     read_extended(code, bytes, extension);
@@ -243,95 +224,81 @@ pub(super) fn emit(
 /// load-acquires after it (RCsc).
 fn crossing_release(code: &mut Code, bytes: u8) {
     store_rcx(code, bytes);
-    code.extend(MFENCE);
+    code.asm().mfence();
 }
 
 fn release(code: &mut Code, bytes: u8) {
-    if bytes == HALFWORD_BYTES {
-        code.push(OPERAND_SIZE_PREFIX);
-    } else if bytes == QWORD_BYTES {
-        code.push(REX_W_PREFIX);
-    }
-    code.extend([
-        if bytes == BYTE_BYTES {
-            XCHG_BYTE
-        } else {
-            XCHG_WIDER
-        },
-        RCX_RDX_MEMORY,
-    ]);
+    code.asm().xchg(size(bytes), ADDRESS, Gpr::Rcx);
 }
 
 fn read_extended(code: &mut Code, bytes: u8, extension: LoadExtension) {
     match extension {
         LoadExtension::Zero => read_rax(code, bytes),
-        LoadExtension::Sign(width) => sign_extend(code, bytes, width, RDX_ADDRESS),
+        LoadExtension::Sign(width) => sign_extend(code, bytes, width, ADDRESS.into()),
     }
 }
 
 /// The memory and register forms share the same extension semantics. A W result
 /// clears upper X bits through its 32-bit destination; an X result sign-fills them.
-fn sign_extend(code: &mut Code, bytes: u8, width: Width, operand: u8) {
-    if width == Width::X64 {
-        code.push(REX_W_PREFIX);
-    }
+fn sign_extend(code: &mut Code, bytes: u8, width: Width, operand: Rm) {
+    let wide = Size::of(width == Width::X64);
+    let mut asm = code.asm();
     match bytes {
-        BYTE_BYTES => code.extend([TWO_BYTE_OPCODE, MOVSX_BYTE, operand]),
-        HALFWORD_BYTES => code.extend([TWO_BYTE_OPCODE, MOVSX_HALFWORD, operand]),
-        DWORD_BYTES if width == Width::X64 => code.extend([MOVSXD, operand]),
+        BYTE_BYTES | HALFWORD_BYTES => asm.movsx(wide, Gpr::Rax, size(bytes), operand),
+        DWORD_BYTES if width == Width::X64 => asm.movsxd(Gpr::Rax, operand),
         _ => unreachable!("decoder validates ordered signed widths"),
     }
 }
 
 /// A legal ordered access is contained inside 16 bytes. Exact reads contained inside eight bytes
 /// use the baseline guarantee; only the crossing path reads the containing 16 bytes.
-fn acquire_snapshot(code: &mut Code, bytes: u8, extension: LoadExtension) {
-    code.extend(MOV_ECX_EDX);
-    code.extend(AND_ECX_IMM8);
-    code.push(BASELINE_ATOMIC_MASK);
-    code.extend(CMP_CL_IMM8);
-    code.push(BASELINE_ATOMIC_BYTES - bytes);
-    code.push(JA_REL8);
-    let snapshot_branch = code.len();
-    code.push(0);
+fn acquire_snapshot(code: &mut Code, bytes: u8, extension: LoadExtension, target: TargetCpu) {
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Gpr::Rcx, Gpr::Rdx);
+    asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rcx, BASELINE_ATOMIC_MASK as i8);
+    asm.alu_byte_imm(Alu::Cmp, Gpr::Rcx, BASELINE_ATOMIC_BYTES - bytes);
+    let snapshot = asm.jcc8(Cond::A);
     read_extended(code, bytes, extension);
-    code.push(JMP_REL8);
-    let done_branch = code.len();
-    code.push(0);
-    code[snapshot_branch] = i8::try_from(code.len() - snapshot_branch - 1)
-        .expect("exact load branch fits rel8")
-        .to_le_bytes()[0];
-
-    snapshot_value(code, bytes, extension, None);
-    code[done_branch] = i8::try_from(code.len() - done_branch - 1)
-        .expect("snapshot branch fits rel8")
-        .to_le_bytes()[0];
+    let done = jump_over(code);
+    patch(code, snapshot);
+    snapshot_value(code, bytes, extension, None, target);
+    patch(code, done);
 }
 
 /// A known SP residue avoids a runtime boundary branch and variable shift setup.
 /// Generic crossings retain their established CL recipe and output bytes.
-fn snapshot_value(code: &mut Code, bytes: u8, extension: LoadExtension, shift: Option<u8>) {
+fn snapshot_value(
+    code: &mut Code,
+    bytes: u8,
+    extension: LoadExtension,
+    shift: Option<u8>,
+    target: TargetCpu,
+) {
+    let mut asm = code.asm();
     if shift.is_none() {
-        code.extend(SHL_ECX_IMM8);
-        code.push(BITS_PER_BYTE_SHIFT);
+        asm.shift_imm(ShiftOp::Shl, Size::Dword, Gpr::Rcx, BITS_PER_BYTE_SHIFT);
     }
-    code.extend(AND_RDX_IMM8);
-    code.push(0u8.wrapping_sub(ATOMIC_QUANTITY_BYTES));
-    code.extend(MOVDQA_XMM0_RDX);
-    code.extend(MOVQ_RAX_XMM0);
-    code.extend(PUNPCKHQDQ_XMM0_XMM0);
-    code.extend(MOVQ_R8_XMM0);
-    if let Some(shift) = shift {
-        code.extend(SHRD_RAX_R8_IMM8);
-        code.push(shift);
-    } else {
-        code.extend(SHRD_RAX_R8_CL);
+    asm.alu_imm8(
+        Alu::And,
+        Size::Qword,
+        Gpr::Rdx,
+        -i8::try_from(ATOMIC_QUANTITY_BYTES).expect("granule fits imm8"),
+    );
+    asm.simd(SimdOpcode::MoveAligned, 0, ADDRESS, target);
+    asm.movq_from_xmm(Gpr::Rax, 0);
+    // The high quadword to the low one. (MOVHLPS is not on Intel's data
+    // operand independent timing list.)
+    asm.simd(SimdOpcode::UnpackHighQword, 0, Rm::Xmm(0), target);
+    asm.movq_from_xmm(Gpr::R8, 0);
+    match shift {
+        Some(shift) => asm.shrd_imm(Size::Qword, Gpr::Rax, Gpr::R8, shift),
+        None => asm.shrd_cl(Size::Qword, Gpr::Rax, Gpr::R8),
     }
     match extension {
-        LoadExtension::Sign(width) => sign_extend(code, bytes, width, RAX_REGISTER),
+        LoadExtension::Sign(width) => sign_extend(code, bytes, width, Gpr::Rax.into()),
         LoadExtension::Zero => match bytes {
-            HALFWORD_BYTES => code.extend(MOVZX_EAX_AX),
-            DWORD_BYTES => code.extend(MOV_EAX_EAX),
+            HALFWORD_BYTES => asm.movzx(Size::Dword, Gpr::Rax, Size::Word, Gpr::Rax),
+            DWORD_BYTES => asm.mov(Size::Dword, Gpr::Rax, Gpr::Rax),
             QWORD_BYTES => {}
             _ => unreachable!("only wider ordered loads can cross eight bytes"),
         },
@@ -343,6 +310,8 @@ mod tests {
     use super::*;
     use crate::x86_64::MemoryChecks;
 
+    const MFENCE: &[u8] = &[0x0f, 0xae, 0xf0];
+    const MOVDQA_XMM0_RDX: &[u8] = &[0x66, 0x0f, 0x6f, 0x02];
     const UNCHECKED: MemoryChecks = MemoryChecks {
         stack_alignment: false,
         ..MemoryChecks::DEFAULT
@@ -447,7 +416,7 @@ mod tests {
             TargetCpu::detect(),
             single,
         );
-        assert_eq!(barrier, [NOP]);
+        assert_eq!(barrier, [0x90]);
         for kind in [Kind::Acquire, Kind::AcquirePc, Kind::Release] {
             let operand = Operand::Transfer {
                 feature: crate::aarch64::ordered::Feature::Base,

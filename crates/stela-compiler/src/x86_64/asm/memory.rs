@@ -1,11 +1,25 @@
 //! Typed memory-access, atomic and fence forms (Intel SDM Vol. 2) on the
 //! generic legacy encoding.
-use super::{Asm, Gpr, Mem, Rm, Size};
+use super::{Alu, Asm, Gpr, Mem, Rm, Size};
 
 impl Asm<'_> {
     /// `ud2` (0F 0B): raise #UD.
     pub(crate) fn ud2(&mut self) {
         self.fixed(&[0x0f, 0x0b]);
+    }
+    /// `mfence` (0F AE F0): order every earlier load and store before every
+    /// later one.
+    pub(crate) fn mfence(&mut self) {
+        self.fixed(&[0x0f, 0xae, 0xf0]);
+    }
+    /// `op al, imm8`, the byte accumulator short form (04 + 8 * op, ib).
+    pub(crate) fn alu_accumulator_imm8(&mut self, op: Alu, value: u8) {
+        self.fixed(&[(op as u8) << 3 | 4]);
+        self.data(&[value]);
+    }
+    /// `shrd r/m, src, cl` (0F AD).
+    pub(crate) fn shrd_cl(&mut self, size: Size, rm: impl Into<Rm>, source: Gpr) {
+        self.legacy(size, None, &[0x0f, 0xad], source as u8, false, rm.into());
     }
     /// `cmpxchg r/m, src` (0F B0, 0F B1): compare the accumulator with
     /// `rm`, storing `source` when equal and loading `rm` otherwise.
@@ -54,6 +68,12 @@ mod tests {
         let rdx = Mem::base(Rdx, 0);
         for (expected, code) in [
             (&[0x0f, 0x0b][..], one(|a| a.ud2())),
+            (&[0x0f, 0xae, 0xf0], one(|a| a.mfence())),
+            (&[0x3c, 12], one(|a| a.alu_accumulator_imm8(Alu::Cmp, 12))),
+            (
+                &[0x4c, 0x0f, 0xad, 0xc0],
+                one(|a| a.shrd_cl(Qword, Rax, R8)),
+            ),
             (&[0x0f, 0xb0, 0x0a], one(|a| a.cmpxchg(Byte, rdx, Rcx))),
             (
                 &[0x66, 0x44, 0x0f, 0xb1, 0x02],
