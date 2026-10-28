@@ -268,10 +268,19 @@ const ATA_SECTOR_BYTES: u32 = 512;
 /// area (256 bytes), and one command table (AHCI 1.3.1 Â§4.2).
 const COMMAND_LIST_BYTES: usize = 1024;
 const RECEIVED_FIS_BYTES: usize = 256;
+/// The received PIO Setup FIS a PIO data command ends with.
+const RECEIVED_PIO: usize = COMMAND_LIST_BYTES + 0x20;
 /// The received D2H Register FIS, set to BSY before a hardreset.
 const RECEIVED_D2H: usize = COMMAND_LIST_BYTES + 0x40;
 /// The Set Device Bits FIS a queued command completes with.
 const RECEIVED_SDB: usize = COMMAND_LIST_BYTES + 0x58;
+/// FIS types (SATA 3.5 §10.5): D2H Register, PIO Setup, Set Device Bits.
+const FIS_REGISTER_DEVICE_TO_HOST: u8 = 0x34;
+const FIS_PIO_SETUP: u8 = 0x5f;
+const FIS_SET_DEVICE_BITS: u8 = 0xa1;
+/// Polls of the received-FIS area between reads of PxIS and PxCI, which a
+/// hypervisor traps, while a command runs: a failure may post no FIS.
+const REGISTER_POLL_INTERVAL: u32 = 64;
 const FIS_BYTES: usize = 20;
 const COMMAND_TABLE_BYTES: usize = 4096;
 const COMMAND_TABLE_ALIGN: usize = 128;
@@ -1517,6 +1526,23 @@ impl AhciDisk {
         self.commands.write(8, table);
         fence(Ordering::SeqCst);
         port.write32(PORT_INTERRUPTS, u32::MAX);
+        // The FIS a command ends with lands in the received-FIS area in RAM:
+        // a queued command's Set Device Bits, another's D2H Register, or for
+        // PIO data a PIO Setup, which precedes the data, from when on the
+        // registers are read every poll. Mark their types with the H2D
+        // Register type, as a hardreset does, to see one arrive.
+        let ending: &[(usize, u8)] = if queued {
+            &[(RECEIVED_SDB, FIS_SET_DEVICE_BITS)]
+        } else {
+            &[
+                (RECEIVED_D2H, FIS_REGISTER_DEVICE_TO_HOST),
+                (RECEIVED_PIO, FIS_PIO_SETUP),
+            ]
+        };
+        for &(at, _) in ending {
+            self.commands.write(at, FIS_REGISTER_HOST_TO_DEVICE);
+        }
+        fence(Ordering::SeqCst);
         // ahci_qc_issue: a queued command is active in PxSACT until the
         // disk's Set Device Bits FIS clears it.
         let active = if queued {
@@ -1527,10 +1553,22 @@ impl AhciDisk {
         };
         port.write32(PORT_ISSUE, 1);
         let mut interrupts = 0;
-        let done = self.clock.wait(self.command_timeout_us, || {
+        let mut finished = || {
             interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
             interrupts != 0 || port.read32(active) & 1 == 0
-        });
+        };
+        let commands = &self.commands;
+        let mut polls = 0u32;
+        let done = self.clock.wait(self.command_timeout_us, || {
+            // The first poll reads the registers too: an emulated port may
+            // finish at the PxCI write.
+            let due = polls.is_multiple_of(REGISTER_POLL_INTERVAL);
+            polls = polls.wrapping_add(1);
+            let posted = ending
+                .iter()
+                .any(|&(at, kind)| commands.read::<u8>(at) == kind);
+            (posted || due) && finished()
+        }) || finished();
         fence(Ordering::SeqCst);
         if done && interrupts == 0 {
             return Ok(());
