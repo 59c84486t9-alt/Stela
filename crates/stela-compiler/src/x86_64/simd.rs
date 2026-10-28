@@ -11,6 +11,7 @@ pub(super) mod arithmetic;
 pub(in crate::x86_64) mod bfloat16;
 mod comparison;
 mod complex;
+pub(in crate::x86_64) mod encode;
 mod estimate;
 pub(in crate::x86_64) mod exponent_scale;
 mod extrema_scale;
