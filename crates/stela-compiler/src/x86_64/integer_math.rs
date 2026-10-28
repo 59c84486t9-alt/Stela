@@ -1,7 +1,7 @@
 //! Integer multiply, divide, shifts and bit operations. Guest NZCV is unchanged.
 use super::{
     Register, Shift, Width,
-    asm::{Alu, Asm, Cond, Gpr, ShiftOp, Size, Unary},
+    asm::{Alu, Asm, Cond, Gpr, Rm, ShiftOp, Size, Unary},
     integer_unary, load_with, right_operand_with, store_with,
 };
 use crate::{
@@ -55,6 +55,23 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
                     asm.alu_imm8(Alu::Sub, Size::Dword, Rax, 1);
                 }
             }
+            store_with(asm, operand.destination);
+            return;
+        }
+        Kind::ReverseBits { width }
+            if target.supports(TargetCpu::Gfni) && !target.data_independent_timing() =>
+        {
+            // The affine transform by the anti-diagonal bit matrix reverses
+            // each byte's bits. XMM0 and XMM1 are scratch: no guest vector
+            // stays in them across an integer instruction. The DIT
+            // lowering keeps to the audited shifts and masks.
+            const REVERSE_EACH_BYTE: u64 = 0x8040_2010_0804_0201;
+            asm.movq_to_xmm(0, Rax);
+            asm.mov_imm64(Rdx, REVERSE_EACH_BYTE);
+            asm.movq_to_xmm(1, Rdx);
+            asm.gf2p8affineqb(0, Rm::Xmm(1), 0);
+            asm.movq_from_xmm(Rax, 0);
+            asm.bswap(size(width), Rax);
             store_with(asm, operand.destination);
             return;
         }
@@ -389,6 +406,48 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// GF2P8AFFINEQB (66 0F 3A CE).
+    fn gfni(code: &[u8]) -> bool {
+        code.windows(3).any(|bytes| bytes == [0x3a, 0xce, 0xc1])
+    }
+
+    #[test]
+    fn bit_reversal_uses_gfni_only_where_the_host_has_it() {
+        for width in [Width::W32, Width::X64] {
+            let kind = Kind::ReverseBits { width };
+            let code = |target| {
+                let mut code = Vec::new();
+                emit(&mut code, &operand(kind), target);
+                code
+            };
+            let (fast, fallback) = (code(TargetCpu::Gfni), code(TargetCpu::X86_64_V2));
+            assert!(gfni(&fast) && !gfni(&fallback), "{kind:?}");
+            assert!(fast.len() < fallback.len());
+        }
+    }
+
+    /// RBIT on the host with and without GFNI, against Rust's reversal.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn bit_reversal_matches_on_the_host() {
+        let host = TargetCpu::detect();
+        for target in [TargetCpu::X86_64_V2, TargetCpu::Gfni] {
+            if !host.supports(target) {
+                continue;
+            }
+            for value in VALUES {
+                let narrow = Kind::ReverseBits { width: Width::W32 };
+                let wide = Kind::ReverseBits { width: Width::X64 };
+                assert_eq!(
+                    run(narrow, target, value, 0),
+                    u64::from((value as u32).reverse_bits()),
+                    "{value:#x} {target:?}"
+                );
+                assert_eq!(run(wide, target, value, 0), value.reverse_bits());
             }
         }
     }
