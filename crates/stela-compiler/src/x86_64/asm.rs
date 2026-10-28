@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 use alloc::vec::Vec;
 
+pub(crate) mod control;
 mod integer;
 mod sse;
 pub(crate) use integer::BitTest;

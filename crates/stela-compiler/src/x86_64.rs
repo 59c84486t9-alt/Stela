@@ -173,6 +173,55 @@ fn offset(register: Register) -> Option<u32> {
     }
 }
 
+/// `[rdi+offset]` with a 32-bit displacement: a field of the guest frame.
+fn frame(offset: u32) -> asm::Mem {
+    asm::Mem::base_disp32(asm::Gpr::Rdi, offset as i32)
+}
+
+/// `[rax]`: the access address the memory emitters compute.
+fn accessed() -> asm::Mem {
+    asm::Mem::base(asm::Gpr::Rax, 0)
+}
+
+fn logical(kind: Logical) -> asm::Alu {
+    match kind {
+        Logical::And => asm::Alu::And,
+        Logical::Or => asm::Alu::Or,
+        Logical::Xor => asm::Alu::Xor,
+    }
+}
+
+/// `add` or `sub (e/r)ax,(e/r)cx`.
+fn add_sub(code: &mut Code, width: Width, subtract: bool) {
+    let op = if subtract {
+        asm::Alu::Sub
+    } else {
+        asm::Alu::Add
+    };
+    code.asm().alu(
+        op,
+        asm::Size::of(width == Width::X64),
+        asm::Gpr::Rax,
+        asm::Gpr::Rcx,
+    );
+}
+
+/// `test (e/r)ax,(e/r)ax`: the condition under which RAX at `width` is
+/// nonzero, or zero.
+pub(super) fn test_zero(code: &mut Code, width: Width, nonzero: bool) -> asm::Cond {
+    use asm::Gpr::Rax;
+    code.asm()
+        .test(asm::Size::of(width == Width::X64), Rax, Rax);
+    if nonzero { asm::Cond::Ne } else { asm::Cond::E }
+}
+
+/// `bt rax,bit`: the condition under which the bit is set, or clear.
+pub(super) fn test_bit(code: &mut Code, bit: u8, nonzero: bool) -> asm::Cond {
+    code.asm()
+        .bit_imm(asm::BitTest::Bt, asm::Size::Qword, asm::Gpr::Rax, bit);
+    if nonzero { asm::Cond::B } else { asm::Cond::Ae }
+}
+
 /// Backend policy shared by block parsing and emission. Terminal numerical
 /// mappings consume only their own word; conditional mappings retain a suffix.
 pub(crate) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOperation) -> bool {
@@ -240,22 +289,25 @@ fn memory(
             );
         }
         MemoryTransfer::Load { signed, width } => {
-            if width == Width::X64 {
-                code.push(0x48);
-            }
+            use asm::{Gpr::Rcx, Size};
+            let size = Size::of(width == Width::X64);
+            let source = accessed();
+            let mut asm = code.asm();
             match (bytes, signed) {
-                (1, false) => code.extend([0x0f, 0xb6, 0x08]),
-                (2, false) => code.extend([0x0f, 0xb7, 0x08]),
-                (1, true) => code.extend([0x0f, 0xbe, 0x08]),
-                (2, true) => code.extend([0x0f, 0xbf, 0x08]),
-                (4, true) => code.extend([0x63, 0x08]), // movsxd rcx,[rax]
-                (4 | 8, false) => code.extend([0x8b, 0x08]),
+                (1, false) => asm.movzx(size, Rcx, Size::Byte, source),
+                (2, false) => asm.movzx(size, Rcx, Size::Word, source),
+                (1, true) => asm.movsx(size, Rcx, Size::Byte, source),
+                (2, true) => asm.movsx(size, Rcx, Size::Word, source),
+                (4, true) => {
+                    debug_assert!(width == Width::X64, "LDRSW writes an X register");
+                    asm.movsxd(Rcx, source);
+                }
+                (4 | 8, false) => asm.mov_load(size, Rcx, source),
                 _ => unreachable!("decoder validates signed scalar size"),
             }
             // Even a discarded load performs the memory access and can fault.
             if let Some(offset) = offset(data) {
-                code.extend([0x48, 0x89, 0x8f]); // mov [rdi+disp32],rcx
-                code.extend(offset.to_le_bytes());
+                asm.mov_store(Size::Qword, frame(offset), Rcx);
             }
         }
     }
@@ -465,30 +517,43 @@ impl RangeCheck {
         self.shift < u64::BITS as u8 && self.bias <= IMM8_MAX && self.bound <= IMM8_MAX
     }
 
-    /// The bytes before the failure: the shift, the bias, the comparison
-    /// and the branch over the failure, of `failure` bytes.
-    fn test(self, code: &mut Code, failure: u8) {
-        code.extend([0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, self.shift]); // mov rcx,rax; sar rcx,shift
+    /// The shift, the bias and the comparison, and the branch past the
+    /// failure, which the caller binds.
+    fn test(self, asm: &mut asm::Asm) -> asm::Patch {
+        use asm::{
+            Alu, Cond,
+            Gpr::{Rax, Rcx},
+            ShiftOp, Size,
+        };
+        asm.mov(Size::Qword, Rcx, Rax);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, Rcx, self.shift);
         if self.bias == OPCODE_INC {
-            code.extend([0xff, 0xc1]); // inc ecx
+            asm.inc(Size::Dword, Rcx);
         } else {
-            code.extend([0x83, 0xc1, self.bias]); // add ecx,bias
+            asm.alu_imm8(Alu::Add, Size::Dword, Rcx, self.bias as i8);
         }
-        code.extend([0x83, 0xf9, self.bound, 0x76, failure]); // cmp ecx,bound; jbe past the failure
+        asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, self.bound as i8);
+        asm.jcc8(Cond::Be)
     }
 
     /// The mask after the check.
-    fn mask(self, code: &mut Code) {
-        code.extend([0x48, 0xb9]); // mov rcx,masked
-        code.extend(self.masked.to_le_bytes());
-        code.extend([0x48, 0x0f, 0x47, 0xc1]); // cmova rax,rcx
+    fn mask(self, asm: &mut asm::Asm) {
+        use asm::{
+            Cond,
+            Gpr::{Rax, Rcx},
+            Size,
+        };
+        asm.mov_imm64(Rcx, self.masked);
+        asm.cmov(Cond::A, Size::Qword, Rax, Rcx);
     }
 
     /// The check with a UD2 failure.
     pub(crate) fn emit(self, code: &mut Code) {
-        self.test(code, UD2.len() as u8);
-        code.extend(UD2);
-        self.mask(code);
+        let mut asm = code.asm();
+        let passed = self.test(&mut asm);
+        asm.ud2();
+        asm.bind(passed);
+        self.mask(&mut asm);
     }
 
     /// The translated variant's check: a failure calls the translation
@@ -497,12 +562,20 @@ impl RangeCheck {
     /// helper returns past them with the host address of the access in RAX,
     /// which skips the mask (docs/design/system.md, "Host placement").
     pub(crate) fn emit_translated(self, code: &mut Code, helper: u64, access: Access) {
-        self.test(code, TRANSLATION_CALL_BYTES);
-        code.extend([0x48, 0x89, 0xc1, 0x48, 0xa1]); // mov rcx,rax; movabs rax,[helper]
-        code.extend(helper.to_le_bytes());
-        code.extend([0xff, 0xd0, access.bytes, access.flags]); // call rax; the access
-        code.extend([0xeb, MASK_BYTES]); // jmp past the mask
-        self.mask(code);
+        use asm::{
+            Gpr::{Rax, Rcx},
+            Size,
+        };
+        let mut asm = code.asm();
+        let passed = self.test(&mut asm);
+        asm.mov(Size::Qword, Rcx, Rax);
+        asm.mov_rax_moffs(helper);
+        asm.call_rm(Rax);
+        asm.data(&[access.bytes, access.flags]);
+        let translated = asm.jmp8();
+        asm.bind(passed);
+        self.mask(&mut asm);
+        asm.bind(translated);
     }
 
     /// [`Self::emit`]'s bytes.
@@ -595,7 +668,6 @@ impl RangeCheck {
     }
 }
 
-const UD2: [u8; 2] = [0x0f, 0x0b];
 /// The translated variant's call, from `mov rcx,rax` through the jump
 /// past the mask.
 const TRANSLATION_CALL_BYTES: u8 = 19;
@@ -646,11 +718,21 @@ impl Access {
 
 /// SCTLR_ELx.SA's check of an SP base in RAX, before the address addition
 /// as Arm checks it ([`MemoryChecks::stack_alignment`]).
-pub(crate) const STACK_ALIGNMENT_CHECK: [u8; 6] = [
-    0xa8, 15, // test al,15
-    0x74, 2, // jz +2
-    0x0f, 0x0b, // ud2
-];
+pub(crate) fn stack_alignment_check(code: &mut Code) {
+    alignment_test(&mut code.asm(), 16);
+}
+
+/// `test al,unit-1; jz +2; ud2`: #UD unless RAX is a multiple of `unit`.
+fn alignment_test(asm: &mut asm::Asm, unit: u8) {
+    asm.test_accumulator_imm(asm::Size::Byte, i32::from(unit - 1));
+    let aligned = asm.jcc8(asm::Cond::E);
+    asm.ud2();
+    asm.bind(aligned);
+}
+
+/// The bytes of [`stack_alignment_check`], which the region cost gates
+/// find it by.
+pub(crate) const STACK_ALIGNMENT_CHECK: [u8; 6] = [0xa8, 15, 0x74, 2, 0x0f, 0x0b];
 
 /// The end of each of the three host instructions of
 /// [`STACK_ALIGNMENT_CHECK`], which the region cost gates count.
@@ -688,7 +770,7 @@ fn address_checks(code: &mut Code, checks: MemoryChecks, unit: u8, access: Acces
 fn alignment_check(code: &mut Code, checks: MemoryChecks, unit: u8) {
     if checks.alignment && unit > 1 {
         debug_assert!(unit.is_power_of_two() && unit <= 16);
-        code.extend([0xa8, unit - 1, 0x74, 2, 0x0f, 0x0b]); // test al,unit-1; jz +2; ud2
+        alignment_test(&mut code.asm(), unit);
     }
 }
 
@@ -710,55 +792,44 @@ fn memory_address(
     if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
         // Arm checks SP alignment before address addition. A native UD2 is a
         // mapped fault boundary, not guest exception delivery.
-        code.extend(STACK_ALIGNMENT_CHECK);
+        stack_alignment_check(code);
     }
     address_add(code, displacement, mode);
     address_checks(code, checks, unit, access);
 }
-
-const LEA_RAX_RAX_DISP8: [u8; 3] = [0x48, 0x8d, 0x40];
-const LEA_RAX_RAX_DISP32: [u8; 3] = [0x48, 0x8d, 0x80];
-const LEA_RDX_RAX_DISP8: [u8; 3] = [0x48, 0x8d, 0x50];
-const LEA_RDX_RAX_DISP32: [u8; 3] = [0x48, 0x8d, 0x90];
-const MOV_RDX_RAX: [u8; 3] = [0x48, 0x89, 0xc2];
-const MOV_RAX_RDX: [u8; 3] = [0x48, 0x89, 0xd0];
 
 /// An immediate offset added to the base in RAX, modulo 2^64 and without
 /// touching host flags: RAX becomes the access address, and pre- and
 /// post-index forms leave the pending writeback in RDX. An Offset access
 /// leaves RDX unspecified and emits nothing for a zero offset.
 pub(crate) fn address_add(code: &mut Code, displacement: i32, mode: AddressMode) {
+    use asm::{
+        Gpr::{Rax, Rdx},
+        Mem, Size,
+    };
     let offset = mode == AddressMode::Offset;
+    let mut asm = code.asm();
     if displacement == 0 {
         if !offset {
-            code.extend(MOV_RDX_RAX);
+            asm.mov(Size::Qword, Rdx, Rax);
         }
         return;
     }
-    let compact = i8::try_from(displacement).ok();
-    code.extend(match (offset, compact.is_some()) {
-        (true, true) => LEA_RAX_RAX_DISP8,
-        (true, false) => LEA_RAX_RAX_DISP32,
-        (false, true) => LEA_RDX_RAX_DISP8,
-        (false, false) => LEA_RDX_RAX_DISP32,
-    });
-    match compact {
-        Some(value) => code.push(value as u8),
-        None => code.extend(displacement.to_le_bytes()),
-    }
+    let sum = match i8::try_from(displacement) {
+        Ok(short) => Mem::base_disp8(Rax, short),
+        Err(_) => Mem::base_disp32(Rax, displacement),
+    };
+    asm.lea(Size::Qword, if offset { Rax } else { Rdx }, sum);
     if mode == AddressMode::PreIndex {
-        code.extend(MOV_RAX_RDX);
+        asm.mov(Size::Qword, Rax, Rdx);
     }
 }
 
 fn memory_writeback(code: &mut Code, base: Register, mode: AddressMode) {
     if mode != AddressMode::Offset {
-        code.extend([0x48, 0x89, 0x97]); // mov [rdi+disp32],rdx
-        code.extend(
-            offset(base)
-                .expect("memory base cannot be ZR")
-                .to_le_bytes(),
-        );
+        let offset = offset(base).expect("memory base cannot be ZR");
+        code.asm()
+            .mov_store(asm::Size::Qword, frame(offset), asm::Gpr::Rdx);
     }
 }
 
@@ -780,12 +851,11 @@ fn memory_pair(
     memory_address(code, checks, base, displacement, mode, bytes, access);
     match transfer {
         MemoryTransfer::Store => {
+            use asm::{Alu, Gpr::R8, Size};
             right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
-            if let Some(offset) = offset(data[1]) {
-                code.extend([0x4c, 0x8b, 0x87]); // mov r8,[rdi+disp32]
-                code.extend(offset.to_le_bytes());
-            } else {
-                code.extend([0x45, 0x31, 0xc0]); // xor r8d,r8d
+            match offset(data[1]) {
+                Some(offset) => code.asm().mov_load(Size::Qword, R8, frame(offset)),
+                None => code.asm().alu(Alu::Xor, Size::Dword, R8, R8),
             }
             let aligned = checks.stack_alignment
                 && memory_store::aligned_immediate(base, displacement, mode, bytes);
@@ -793,22 +863,27 @@ fn memory_pair(
             memory_store::emit(code, bytes, bytes, memory_store::Source::R8, aligned);
         }
         MemoryTransfer::Load { signed, width } => {
-            if width == Width::X64 {
-                code.push(0x48);
+            use asm::{
+                Gpr::{R8, Rax, Rcx},
+                Mem, Size,
+            };
+            let size = Size::of(width == Width::X64);
+            let mut asm = code.asm();
+            for (destination, source) in
+                [(Rcx, accessed()), (R8, Mem::base_disp8(Rax, bytes as i8))]
+            {
+                if signed {
+                    debug_assert!(width == Width::X64, "LDPSW writes X registers");
+                    asm.movsxd(destination, source);
+                } else {
+                    asm.mov_load(size, destination, source);
+                }
             }
-            code.extend([if signed { 0x63 } else { 0x8b }, 0x08]);
-            code.extend([
-                if width == Width::X64 { 0x4c } else { 0x44 },
-                if signed { 0x63 } else { 0x8b },
-                0x40,
-                bytes,
-            ]);
             // Commit only after both loads succeeded, including discarded/ZR
             // destinations. RAX/RDX retain address and potential writeback.
-            for (register, rex, modrm) in [(data[0], 0x48, 0x8f), (data[1], 0x4c, 0x87)] {
+            for (register, staged) in [(data[0], Rcx), (data[1], R8)] {
                 if let Some(offset) = offset(register) {
-                    code.extend([rex, 0x89, modrm]);
-                    code.extend(offset.to_le_bytes());
+                    asm.mov_store(Size::Qword, frame(offset), staged);
                 }
             }
         }
@@ -848,60 +923,74 @@ fn right_operand_with(
     }
 }
 
+/// A rel32 jump to guest `target`, taken under `cond` or always, whose
+/// displacement field `fixups` records for `pc`.
 fn jump(
     code: &mut Code,
-    opcode: Option<u8>,
+    cond: Option<asm::Cond>,
     pc: GuestAddress,
     target: GuestAddress,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
 ) {
-    if let Some(opcode) = opcode {
-        code.extend([0x0f, opcode]);
-    } else {
-        code.push(0xe9);
-    }
-    fixups.push((pc, target, code.len()));
-    code.extend([0; 4]);
+    let mut asm = code.asm();
+    let patch = match cond {
+        Some(cond) => asm.jcc(cond),
+        None => asm.jmp(),
+    };
+    fixups.push((pc, target, patch.offset()));
 }
 
-/// Evaluate ARM conditions from saved NZCV, independent of incidental host flags.
+/// Evaluate ARM conditions from saved NZCV, independent of incidental host
+/// flags: the second opcode byte of the `jcc rel32` taken when it holds.
 fn condition(code: &mut Code, condition: u8) -> Option<u8> {
-    condition_of(code, condition, false)
+    const JCC_REL32: u8 = 0x80;
+    condition_holds(code, condition, false).map(|cond| JCC_REL32 | cond as u8)
 }
 
-/// [`condition`], from the NZCV word already in EAX when `loaded`
-/// ([`Rax::Nzcv`]). Clobbers EAX and ECX.
-fn condition_of(code: &mut Code, condition: u8, loaded: bool) -> Option<u8> {
+/// The host condition under which ARM `condition` holds, from saved NZCV or
+/// from the NZCV word already in EAX when `loaded` ([`Rax::Nzcv`]). Clobbers
+/// EAX and ECX.
+fn condition_holds(code: &mut Code, condition: u8, loaded: bool) -> Option<asm::Cond> {
+    use asm::{
+        Alu, Cond,
+        Gpr::{Rax, Rcx},
+        ShiftOp, Size,
+    };
+    const NZCV: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
     if condition >= 14 {
         return None;
     } // AL and NV both satisfy ConditionHolds.
+    let mut asm = code.asm();
     if !loaded {
-        code.extend([0x8b, 0x87, 0, 1, 0, 0]); // mov eax,[rdi+256]
+        asm.mov_load(Size::Dword, Rax, frame(NZCV));
     }
-    let positive = match condition / 2 {
+    let (positive, negative) = match condition / 2 {
         0..=3 => {
             let bit = [30, 29, 31, 28][usize::from(condition / 2)];
-            code.push(0xa9);
-            code.extend((1u32 << bit).to_le_bytes());
-            0x85 // flag set -> JNZ
+            asm.test_accumulator_imm(Size::Dword, (1u32 << bit) as i32);
+            (Cond::Ne, Cond::E) // flag set
         }
         4 => {
-            code.push(0x25);
-            code.extend(0x60000000u32.to_le_bytes());
-            code.push(0x3d);
-            code.extend(0x20000000u32.to_le_bytes());
-            0x84 // C && !Z
+            asm.alu_accumulator_imm32(Alu::And, Size::Dword, 0x60000000);
+            asm.alu_accumulator_imm32(Alu::Cmp, Size::Dword, 0x20000000);
+            (Cond::E, Cond::Ne) // C && !Z
         }
         group => {
             // EAX ^= EAX >> 3 leaves N ^ V in bit 28 and Z in bit 30, whatever
             // the bits below NZCV hold.
-            code.extend([0x89, 0xc1, 0xc1, 0xe9, 3, 0x31, 0xc8, 0xa9]);
+            asm.mov(Size::Dword, Rcx, Rax);
+            asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, 3);
+            asm.alu(Alu::Xor, Size::Dword, Rax, Rcx);
             let mask: u32 = if group == 5 { 0x10000000 } else { 0x50000000 };
-            code.extend(mask.to_le_bytes());
-            0x84 // N == V, and for GT !Z
+            asm.test_accumulator_imm(Size::Dword, mask as i32);
+            (Cond::E, Cond::Ne) // N == V, and for GT !Z
         }
     };
-    Some(positive ^ (condition & 1))
+    Some(if condition & 1 == 0 {
+        positive
+    } else {
+        negative
+    })
 }
 
 /// What RAX holds after an instruction's emission, for the next one to
@@ -960,35 +1049,30 @@ pub(super) fn frame_store(register: Register) -> Option<[u8; 7]> {
     code.try_into().ok()
 }
 
+/// `movabs rax,value`.
 fn immediate(code: &mut Code, value: u64) {
-    code.extend([0x48, 0xb8]); // movabs rax,imm64
-    code.extend(value.to_le_bytes());
+    code.asm().mov_imm64(asm::Gpr::Rax, value);
 }
 
 fn nzcv(code: &mut Code, subtract: bool) {
-    const STATE_NZCV_OFFSET: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
     capture_nzcv(code, subtract);
-    code.extend([0x89, 0x87]); // mov dword [rdi+GuestState.nzcv],eax
-    code.extend(STATE_NZCV_OFFSET.to_le_bytes());
+    store_nzcv(&mut code.asm());
 }
 
-/// SETcc into AL, AH, DL and DH: N | Z << 8 and C | V << 8.
-const CAPTURE_SIGN_AL: [u8; 3] = [0x0f, 0x98, 0xc0];
-const CAPTURE_ZERO_AH: [u8; 3] = [0x0f, 0x94, 0xc4];
-const CAPTURE_BELOW_DL: [u8; 3] = [0x0f, 0x92, 0xc2];
-const CAPTURE_ABOVE_EQUAL_DL: [u8; 3] = [0x0f, 0x93, 0xc2];
-const CAPTURE_OVERFLOW_DH: [u8; 3] = [0x0f, 0x90, 0xc6];
-const AND_EAX_IMM32: u8 = 0x25;
-/// `lea eax,[rax+rdx*4]`: C and V move above N and Z, giving
-/// N | C << 2 | Z << 8 | V << 10 in the low 16 bits.
+/// `mov dword [rdi+GuestState.nzcv],eax`.
+fn store_nzcv(asm: &mut asm::Asm) {
+    const NZCV: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
+    asm.mov_store(asm::Size::Dword, frame(NZCV), asm::Gpr::Rax);
+}
+
+/// The bytes of the capture's `lea eax,[rax+rdx*4]`, which the region cost
+/// gates find it by.
 pub(crate) const CAPTURE_COMBINE: [u8; 3] = [0x8d, 0x04, 0x90];
-const IMUL_EAX_EAX_IMM32: [u8; 2] = [0x69, 0xc0];
+/// The scale of the capture's LEA: C and V move above N and Z.
+const CAPTURE_CARRY_SHIFT: u8 = 2;
 /// The SETcc bytes' low bits.
 #[cfg(test)]
 const CAPTURED_BITS: u32 = 0x0101;
-/// The scale of [`CAPTURE_COMBINE`].
-#[cfg(test)]
-const CAPTURE_CARRY_SHIFT: u8 = 2;
 /// One product moves N (bit 0) to 31, Z (8) to 30, C (2) to 29 and V (10)
 /// to 28. Every other partial product of the low 16 bits lands below bit 28
 /// or above bit 31, on a bit no other lands on, so nothing carries into
@@ -1003,19 +1087,26 @@ const _: () = assert!(CAPTURE_MULTIPLIER.trailing_zeros() + u16::BITS >= u32::BI
 /// list (SETcc, LEA, IMUL, AND). `borrow` takes C as an Arm subtraction
 /// does, the complement of the host carry. Clobbers RDX; RCX is intact.
 pub(crate) fn capture_nzcv(code: &mut Code, borrow: bool) {
-    code.extend(CAPTURE_SIGN_AL);
-    code.extend(CAPTURE_ZERO_AH);
-    code.extend(if borrow {
-        CAPTURE_ABOVE_EQUAL_DL
-    } else {
-        CAPTURE_BELOW_DL
-    });
-    code.extend(CAPTURE_OVERFLOW_DH);
-    code.extend(CAPTURE_COMBINE);
-    code.extend(IMUL_EAX_EAX_IMM32);
-    code.extend(CAPTURE_MULTIPLIER.to_le_bytes());
-    code.push(AND_EAX_IMM32);
-    code.extend(CAPTURE_NZCV_MASK.to_le_bytes());
+    use asm::{
+        Alu, Cond,
+        Gpr::{Rax, Rdx},
+        Mem, Size,
+        control::HighByte,
+    };
+    let mut asm = code.asm();
+    // N | Z << 8 in AX and C | V << 8 in DX.
+    asm.setcc(Cond::S, Rax);
+    asm.setcc_high(Cond::E, HighByte::Ah);
+    asm.setcc(if borrow { Cond::Ae } else { Cond::B }, Rdx);
+    asm.setcc_high(Cond::O, HighByte::Dh);
+    // N | C << 2 | Z << 8 | V << 10 in the low 16 bits.
+    asm.lea(
+        Size::Dword,
+        Rax,
+        Mem::indexed(Rax, Rdx, 1 << CAPTURE_CARRY_SHIFT, 0),
+    );
+    asm.imul_imm32(Size::Dword, Rax, Rax, CAPTURE_MULTIPLIER as i32);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, CAPTURE_NZCV_MASK as i32);
 }
 
 /// Shared semantic emission. Block compilation handles control transfers itself.
@@ -1026,6 +1117,10 @@ pub(crate) fn emit_instruction(
     target: crate::TargetCpu,
     checks: MemoryChecks,
 ) {
+    use asm::{
+        Alu, BitTest,
+        Gpr::{Rax, Rcx},
+    };
     match instruction.operation {
         Operation::FloatingPoint(_) => {
             unreachable!("numerical instructions require block emission")
@@ -1087,8 +1182,8 @@ pub(crate) fn emit_instruction(
             target,
             condition: cond,
         } => {
-            let opcode = condition(code, cond);
-            jump(code, opcode, instruction.pc, target, fixups);
+            let holds = condition_holds(code, cond, false);
+            jump(code, holds, instruction.pc, target, fixups);
         }
         Operation::BranchZero {
             target,
@@ -1097,17 +1192,8 @@ pub(crate) fn emit_instruction(
             nonzero,
         } => {
             load(code, source);
-            if width == Width::X64 {
-                code.push(0x48);
-            }
-            code.extend([0x85, 0xc0]);
-            jump(
-                code,
-                Some(if nonzero { 0x85 } else { 0x84 }),
-                instruction.pc,
-                target,
-                fixups,
-            );
+            let holds = test_zero(code, width, nonzero);
+            jump(code, Some(holds), instruction.pc, target, fixups);
         }
         Operation::BranchBit {
             target,
@@ -1116,14 +1202,8 @@ pub(crate) fn emit_instruction(
             nonzero,
         } => {
             load(code, source);
-            code.extend([0x48, 0x0f, 0xba, 0xe0, bit]); // bt rax,imm8
-            jump(
-                code,
-                Some(if nonzero { 0x82 } else { 0x83 }),
-                instruction.pc,
-                target,
-                fixups,
-            );
+            let holds = test_bit(code, bit, nonzero);
+            jump(code, Some(holds), instruction.pc, target, fixups);
         }
         Operation::AddSubCarry {
             width,
@@ -1138,19 +1218,17 @@ pub(crate) fn emit_instruction(
             // Arm's SBC is AddWithCarry(left, NOT(right), C): ADC of the
             // complement, whose host CF and OF are Arm's C and V. (CMC is
             // not on Intel's data operand independent timing list.)
+            const NZCV: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
+            const CARRY_BIT: u8 = 29;
+            let size = asm::Size::of(width == Width::X64);
+            let mut asm = code.asm();
             if subtract {
-                if width == Width::X64 {
-                    code.push(0x48);
-                }
-                code.extend([0xf7, 0xd1]); // not (e/r)cx
+                asm.unary(asm::Unary::Not, size, Rcx);
             }
             // Recover guest C after operand loads, including XOR-based
             // ZR loads that clobber host flags.
-            code.extend([0x0f, 0xba, 0xa7, 0, 1, 0, 0, 29]); // bt [rdi+256],29
-            if width == Width::X64 {
-                code.push(0x48);
-            }
-            code.extend([0x11, 0xc8]); // adc (e/r)ax,(e/r)cx
+            asm.bit_imm(BitTest::Bt, asm::Size::Dword, frame(NZCV), CARRY_BIT);
+            asm.alu(Alu::Adc, size, Rax, Rcx);
             store(code, destination);
             if flags {
                 nzcv(code, false);
@@ -1168,10 +1246,7 @@ pub(crate) fn emit_instruction(
         } => {
             load(code, left);
             right_operand(code, right, width, shift, amount);
-            if width == Width::X64 {
-                code.push(0x48);
-            }
-            code.extend([if subtract { 0x29 } else { 0x01 }, 0xc8]);
+            add_sub(code, width, subtract);
             store(code, destination);
             if flags {
                 nzcv(code, subtract);
@@ -1190,23 +1265,22 @@ pub(crate) fn emit_instruction(
             // Read both operands before a possibly overlapping destination/SP write.
             load(code, left);
             right_operand(code, right, Width::X64, Shift::Lsl, 0);
+            use asm::Size::{Byte, Dword, Qword, Word};
+            let mut asm = code.asm();
             match extend {
-                RegisterExtend::Uxtb => code.extend([0x0f, 0xb6, 0xc9]), // movzx ecx,cl
-                RegisterExtend::Uxth => code.extend([0x0f, 0xb7, 0xc9]), // movzx ecx,cx
-                RegisterExtend::Uxtw => code.extend([0x89, 0xc9]),       // mov ecx,ecx
-                RegisterExtend::Sxtb => code.extend([0x48, 0x0f, 0xbe, 0xc9]),
-                RegisterExtend::Sxth => code.extend([0x48, 0x0f, 0xbf, 0xc9]),
-                RegisterExtend::Sxtw => code.extend([0x48, 0x63, 0xc9]),
+                RegisterExtend::Uxtb => asm.movzx(Dword, Rcx, Byte, Rcx),
+                RegisterExtend::Uxth => asm.movzx(Dword, Rcx, Word, Rcx),
+                RegisterExtend::Uxtw => asm.mov(Dword, Rcx, Rcx),
+                RegisterExtend::Sxtb => asm.movsx(Qword, Rcx, Byte, Rcx),
+                RegisterExtend::Sxth => asm.movsx(Qword, Rcx, Word, Rcx),
+                RegisterExtend::Sxtw => asm.movsxd(Rcx, Rcx),
                 RegisterExtend::Uxtx | RegisterExtend::Sxtx => {}
             }
             if amount != 0 {
-                code.extend([0x48, 0xc1, 0xe1, amount]);
-            }
-            if width == Width::X64 {
-                code.push(0x48);
+                asm.shift_imm(asm::ShiftOp::Shl, Qword, Rcx, amount);
             }
             // W32 arithmetic truncates both operands and zero-extends even WSP.
-            code.extend([if subtract { 0x29 } else { 0x01 }, 0xc8]);
+            add_sub(code, width, subtract);
             store(code, destination);
             if flags {
                 nzcv(code, subtract);
@@ -1228,19 +1302,9 @@ pub(crate) fn emit_instruction(
             immediate,
         } => {
             load(code, source);
-            code.extend([0x48, 0xb9]); // movabs rcx,logical bitmask
-            code.extend(immediate.to_le_bytes());
-            if width == Width::X64 {
-                code.push(0x48);
-            }
-            code.extend([
-                match kind {
-                    Logical::And => 0x21,
-                    Logical::Or => 0x09,
-                    Logical::Xor => 0x31,
-                },
-                0xc8,
-            ]);
+            let mut asm = code.asm();
+            asm.mov_imm64(Rcx, immediate);
+            asm.alu(logical(kind), asm::Size::of(width == Width::X64), Rax, Rcx);
             store(code, destination); // MOV preserves the logical result flags.
             if flags {
                 nzcv(code, false); // AND clears CF/OF, matching ARM C/V=0.
@@ -1259,34 +1323,23 @@ pub(crate) fn emit_instruction(
         } => {
             load(code, left);
             right_operand(code, right, width, shift, amount);
+            let size = asm::Size::of(width == Width::X64);
+            let mut asm = code.asm();
             if invert {
-                if width == Width::X64 {
-                    code.push(0x48);
-                }
-                code.extend([0xf7, 0xd1]);
+                asm.unary(asm::Unary::Not, size, Rcx);
             }
-            if width == Width::X64 {
-                code.push(0x48);
-            }
-            code.extend([
-                match kind {
-                    Logical::And => 0x21,
-                    Logical::Or => 0x09,
-                    Logical::Xor => 0x31,
-                },
-                0xc8,
-            ]);
+            asm.alu(logical(kind), size, Rax, Rcx);
             store(code, destination);
             if flags {
                 nzcv(code, false);
             } // AND clears host CF/OF, matching ARM C/V=0.
         }
-        Operation::Return => code.push(0xc3),
+        Operation::Return => code.asm().ret(),
         Operation::Exclusive(_) => unreachable!("exclusive requires checked context emitter"),
         Operation::CheckedPointer(_) => {
             unreachable!("CPA arithmetic requires checked context emitter")
         }
-        Operation::Nop => code.push(NOP),
+        Operation::Nop => code.asm().nop(),
         Operation::MoveWide {
             width,
             kind,
@@ -1294,22 +1347,24 @@ pub(crate) fn emit_instruction(
             immediate: value,
             shift,
         } => {
+            use asm::Size::{Dword, Qword};
             let value = u64::from(value) << shift;
             match kind {
                 WideMove::Zero => immediate(code, value),
                 WideMove::Not => immediate(code, !value),
                 WideMove::Keep => {
                     load(code, destination);
-                    code.extend([0x48, 0xb9]); // movabs rcx,mask
-                    code.extend((!(0xffffu64 << shift)).to_le_bytes());
-                    code.extend([0x48, 0x21, 0xc8, 0x48, 0xb9]); // and rax,rcx; movabs rcx,value
-                    code.extend(value.to_le_bytes());
-                    code.extend([0x48, 0x09, 0xc8]);
+                    let mut asm = code.asm();
+                    asm.mov_imm64(Rcx, !(0xffffu64 << shift));
+                    asm.alu(Alu::And, Qword, Rax, Rcx);
+                    asm.mov_imm64(Rcx, value);
+                    asm.alu(Alu::Or, Qword, Rax, Rcx);
                 }
             }
             if width == Width::W32 {
-                code.extend([0x89, 0xc0]);
-            } // mov eax,eax: zero-extend
+                // Zero-extend.
+                code.asm().mov(Dword, Rax, Rax);
+            }
             store(code, destination);
         }
         Operation::AddSub {
@@ -1321,11 +1376,12 @@ pub(crate) fn emit_instruction(
             immediate,
         } => {
             load(code, source);
-            if width == Width::X64 {
-                code.push(0x48);
-            }
-            code.extend([0x81, if subtract { 0xe8 } else { 0xc0 }]);
-            code.extend(immediate.to_le_bytes());
+            code.asm().alu_imm32(
+                if subtract { Alu::Sub } else { Alu::Add },
+                asm::Size::of(width == Width::X64),
+                Rax,
+                immediate as i32,
+            );
             store(code, destination); // MOV leaves arithmetic flags unchanged.
             if flags {
                 nzcv(code, subtract);
@@ -1501,7 +1557,6 @@ mod tests {
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
         const LOAD_EAX_NZCV: [u8; 6] = [0x8b, 0x87, 0, 1, 0, 0];
-        const SET_FROM_JUMP: u8 = 0x10;
         const MOVZX_EAX_AL_RET: [u8; 4] = [0x0f, 0xb6, 0xc0, 0xc3];
         const LOW_BITS: u32 = 0x0fff_ffff;
         let holds = |condition: u8, nzcv: u32| {
@@ -1524,8 +1579,8 @@ mod tests {
                 } else {
                     vec![]
                 });
-                let jcc = condition_of(&mut code, condition, loaded).unwrap();
-                code.extend([0x0f, jcc + SET_FROM_JUMP, 0xc0]);
+                let host = condition_holds(&mut code, condition, loaded).unwrap();
+                code.asm().setcc(host, asm::Gpr::Rax);
                 code.extend(MOVZX_EAX_AL_RET);
                 // SAFETY: private anonymous memory, RX after the copy and
                 // unmapped after the calls; the code reads only `state`.
@@ -1689,7 +1744,7 @@ mod tests {
             assert_eq!(bytes, full.len());
             let (check, rest) = full.split_at(ends[4]);
             let (trap, mask) = rest.split_at(ends[5] - ends[4]);
-            assert_eq!(trap, UD2);
+            assert_eq!(trap, [0x0f, 0x0b]);
             assert_eq!(full.len(), if range.bias == 1 { 30 } else { 31 });
             // mov rax,rdi; the check with `xor eax,eax` (a failure, also two
             // bytes, whose flags the mask then leaves alone) where its UD2
@@ -1964,9 +2019,33 @@ mod tests {
         capture_nzcv(&mut code, false);
         let mut borrow = Code::new();
         capture_nzcv(&mut borrow, true);
-        // Only the carry's SETcc differs.
+        // Only the carry's SETcc differs: SETB or SETAE DL.
         assert_eq!(code.len(), borrow.len());
-        assert_eq!(code[6..9], CAPTURE_BELOW_DL);
-        assert_eq!(borrow[6..9], CAPTURE_ABOVE_EQUAL_DL);
+        assert_eq!(code[6..9], [0x0f, 0x92, 0xc2]);
+        assert_eq!(borrow[6..9], [0x0f, 0x93, 0xc2]);
+        assert_eq!(code[12..15], CAPTURE_COMBINE);
+        assert_eq!((code.instructions(), borrow.instructions()), (7, 7));
+    }
+
+    /// The checks emit the bytes the region cost gates find them by, one
+    /// counted instruction for each end.
+    #[test]
+    fn checks_emit_the_patterns_the_cost_gates_match() {
+        let mut code = Code::new();
+        stack_alignment_check(&mut code);
+        assert_eq!(code, STACK_ALIGNMENT_CHECK);
+        assert_eq!(code.instructions(), STACK_ALIGNMENT_CHECK_ENDS.len());
+        for range in [RangeCheck::FIVE_LEVEL, RangeCheck::four_level(2)] {
+            let mut code = Code::new();
+            range.emit(&mut code);
+            let (_, ends) = RangeCheck::at(&code).unwrap();
+            assert_eq!(code.instructions(), ends.len());
+            let mut code = Code::new();
+            range.emit_translated(&mut code, 0x1000, Access::read(8));
+            let (bytes, ends) = RangeCheck::at(&code).unwrap();
+            assert_eq!(bytes, code.len());
+            // The access's two bytes after the call are data.
+            assert_eq!(code.instructions(), ends.len() - 1);
+        }
     }
 }

@@ -650,7 +650,8 @@ fn emit_terminal(
             Terminator::Branch(operation) => match *operation {
                 Operation::Branch { target } => direct_exit(code, target, ExitKind::Direct),
                 Operation::BranchCondition { target, condition } => {
-                    let opcode = super::condition_of(code, condition, rax == super::Rax::Nzcv);
+                    let opcode = super::condition_holds(code, condition, rax == super::Rax::Nzcv)
+                        .map(|cond| 0x80 | cond as u8);
                     conditional_exit(code, opcode, target, fallthrough);
                 }
                 Operation::BranchZero {
