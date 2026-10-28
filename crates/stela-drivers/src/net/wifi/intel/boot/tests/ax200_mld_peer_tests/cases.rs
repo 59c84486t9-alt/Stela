@@ -34,6 +34,8 @@ fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
             .copied()
             .unwrap_or(0);
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the original model link/domain and exclusive Source remain
+        // retained while the version or rate refusal is exercised.
         let result = unsafe { peer.advance(&source) };
         if version == 3 {
             assert_eq!(
@@ -87,14 +89,20 @@ fn missing_mld_peer_ack_retains_binding_and_pending_dma() {
         // SAFETY: retained genuine provider and explicit bounded-rate model.
         let mut peer =
             unsafe { link.begin_mld_peer(parameters()) }.unwrap_or_else(|_| panic!("MLD peer"));
+        // SAFETY: the model peer retains its same-device policy and domain;
+        // Source supplies exclusive RAM and no asynchronous hardware runs.
         unsafe { peer.advance(&source) }.unwrap();
         for index in 0..target {
             let command = peer.commands()[index].clone();
             complete_mld_peer(&peer, &native, &command);
+            // SAFETY: the exact command completed synchronously in the same
+            // retained domain; its DMA mappings remain live through reclaim.
             unsafe { peer.advance(&source) }.unwrap();
             peer.replenish_completed_receive().unwrap();
             if index == 2 {
                 peer.begin_remove().unwrap();
+                // SAFETY: ordered removal still owns this peer's source/domain
+                // and pending mappings, with no independent device or worker.
                 unsafe { peer.advance(&source) }.unwrap();
             }
         }
@@ -104,6 +112,8 @@ fn missing_mld_peer_ack_retains_binding_and_pending_dma() {
         }
         .delay(20);
         let error = Ax200LegacyPeerError::Deadline(kind);
+        // SAFETY: only the model clock advanced; the timed-out owner retains
+        // its original source/domain and all unreclaimed DMA allocations.
         assert_eq!(unsafe { peer.advance(&source) }, Err(error.clone()));
         assert_eq!(peer.first_error(), Some(&error));
         peer = match peer.into_binding() {
@@ -112,6 +122,8 @@ fn missing_mld_peer_ack_retains_binding_and_pending_dma() {
         };
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the latched failure still retains those same model mappings
+        // and Source; this repeated entry has no concurrent device user.
         assert_eq!(unsafe { peer.advance(&source) }, Err(error.clone()));
         assert_eq!(peer.replenish_completed_receive(), Err(error));
         assert_eq!(native.state.lock().unwrap().ops.len(), ops);

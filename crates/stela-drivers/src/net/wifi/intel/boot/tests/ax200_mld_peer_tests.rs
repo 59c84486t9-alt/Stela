@@ -32,9 +32,13 @@ fn mld_bound<'a>(
     authorize(policy);
     // SAFETY: original finite response and actual provider/revocation model.
     let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
+    // SAFETY: this Source fixture allocates exclusive model RAM, while Native
+    // retains the matching domain and same-device policy through publication.
     unsafe { link.advance(source) }.unwrap();
     for command in link.commands().to_vec() {
         complete_mld_link(&link, native, &command);
+        // SAFETY: this command completed synchronously in that retained model
+        // domain; no device or worker can race its still-owned DMA buffers.
         unsafe { link.advance(source) }.unwrap();
         link.replenish_completed_receive().unwrap();
     }
@@ -99,6 +103,8 @@ fn exercise(bytes: &[u8]) {
         assert_eq!(sync_policy.held.load(Ordering::SeqCst), 1);
         assert_eq!(sync_policy.transmit_rates.load(Ordering::SeqCst), 0xfff);
     }));
+    // SAFETY: the peer retains its original link/domain and policy guard;
+    // Source supplies exclusive RAM and the synchronous model has no DMA user.
     unsafe { peer.advance(&source) }.unwrap();
     native.domain.records.lock().unwrap().device_sync_hook = None;
     assert_eq!(
@@ -131,6 +137,8 @@ fn exercise(bytes: &[u8]) {
             records.cpu_sync_fail = Some(records.cpu_syncs + 1);
             drop(records);
             assert!(matches!(
+                // SAFETY: the completed command still owns its mappings; the
+                // injected CPU-sync refusal retains them for this same peer.
                 unsafe { peer.advance(&source) },
                 Err(Ax200LegacyPeerError::Boot(Error::CommandReclaim(_)))
             ));
@@ -138,6 +146,8 @@ fn exercise(bytes: &[u8]) {
             assert_eq!(peer.station_id(), None);
             native.domain.records.lock().unwrap().cpu_sync_fail = None;
         }
+        // SAFETY: the synchronous ACK and any failed reclaim keep the same
+        // source/domain mappings live until this successful continuation.
         unsafe { peer.advance(&source) }.unwrap();
         peer.replenish_completed_receive().unwrap();
     }
@@ -145,6 +155,8 @@ fn exercise(bytes: &[u8]) {
     let acquired = policy.acquired.load(Ordering::SeqCst);
     native.revoked.store(true, Ordering::SeqCst);
     peer.begin_remove().unwrap();
+    // SAFETY: revocation changes only the retained model policy; peer removal
+    // keeps the original requester/domain and all pending allocations owned.
     unsafe { peer.advance(&source) }.unwrap();
     let commands = peer.commands()[3..].to_vec();
     assert_eq!(
@@ -166,6 +178,8 @@ fn exercise(bytes: &[u8]) {
         };
         emitted(&peer, &native, &command);
         complete_mld_peer(&peer, &native, &command);
+        // SAFETY: the flush/remove ACK was completed synchronously; its
+        // original peer/domain retain the receive and command mappings.
         unsafe { peer.advance(&source) }.unwrap();
         peer.replenish_completed_receive().unwrap();
     }
@@ -175,10 +189,14 @@ fn exercise(bytes: &[u8]) {
         .into_binding()
         .unwrap_or_else(|_| panic!("same active link"));
     link.begin_remove().unwrap();
+    // SAFETY: completed peer removal returned this same link owner; Source and
+    // Native still own its model RAM/domain with no concurrent device access.
     unsafe { link.advance(&source) }.unwrap();
     for index in 3..link.commands().len() {
         let command = link.commands()[index].clone();
         complete_mld_link(&link, &native, &command);
+        // SAFETY: each link-removal ACK is synchronous and the same retained
+        // model mappings remain owned until its reclaim finishes.
         unsafe { link.advance(&source) }.unwrap();
         link.replenish_completed_receive().unwrap();
     }
