@@ -1885,8 +1885,6 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "stela-boot-core"
 version = "0.1.0"
 dependencies = [
- "chacha20 0.10.2",
- "rand_core 0.10.1",
  "stela-compiler",
  "stela-crypto",
  "stela-drivers",
@@ -1944,8 +1942,10 @@ name = "stela-crypto"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "chacha20 0.10.2",
  "cpufeatures 0.3.1",
  "hex",
+ "rand_core 0.10.1",
  "sha1",
  "sha2",
  "zeroize",

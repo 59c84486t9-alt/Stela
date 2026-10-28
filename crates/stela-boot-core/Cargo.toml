@@ -8,8 +8,6 @@ description = "The UEFI mount's firmware-independent logic: stela.cfg options, A
 
 [dependencies]
 stela-crypto = { path = "../stela-crypto" }
-chacha20 = { version = "0.10.2", default-features = false, features = ["rng", "zeroize"] }
-rand_core = { version = "0.10.1", default-features = false }
 stela-drivers = { path = "../stela-drivers" }
 
 # The freestanding crates for stela.efi; on the host, as `stela setup` and

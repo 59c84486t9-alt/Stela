@@ -10,6 +10,7 @@ extern crate alloc;
 extern crate std;
 
 mod aes;
+pub mod random;
 mod sha1;
 mod sha256;
 #[cfg(target_arch = "x86_64")]
