@@ -21,7 +21,7 @@ pub const BOOT_TARGET: &str = "x86_64-unknown-uefi";
 pub const BOOT_TARGET_DIR: &str = "target/boot";
 /// `.cargo/config.toml`'s flags for [`BOOT_TARGET`]: the soft-float target
 /// takes the `aes` crate's software backend.
-const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft";
+const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft --cfg chacha20_backend=\"soft\"";
 const BOOT: [&str; 2] = ["--manifest-path", BOOT_MANIFEST];
 /// The other hosts Stela ships for, with the packages Clippy checks there
 /// without linking: macOS runs the hosted runtime and `stela-launcher`,

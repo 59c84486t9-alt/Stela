@@ -73,7 +73,7 @@ pub(crate) unsafe fn validate(
     for (slot, snapshot) in capture.snapshots[..cores].iter().enumerate() {
         let processor = capture.processors[capture.selected[slot] as usize];
         crate::output::arguments(format_args!(
-            "NATIVE SOURCE slot={slot} apic={:#x} firmware_cpu={} flags={:#x} topology={} package={} module={} tile={} die={} core={} thread={} cpuid_records={} msr_records={} pat_valid={} pat={:#x} cr0={:#x} cr3={:#x} cr4={:#x} efer={:#x}\n",
+            "NATIVE SOURCE slot={slot} apic={:#x} firmware_cpu={} flags={:#x} topology={} package={} module={} tile={} die={} core={} thread={} core_type={:?} cpuid_records={} msr_records={} pat_valid={} pat={:#x} cr0={:#x} cr3={:#x} cr4={:#x} efer={:#x}\n",
             processor.apic_id,
             processor.processor_number,
             processor.flags,
@@ -84,6 +84,7 @@ pub(crate) unsafe fn validate(
             processor.location.die,
             processor.location.core,
             processor.thread,
+            snapshot.core_class(),
             snapshot.count,
             snapshot.msr_count,
             snapshot.pat_valid,

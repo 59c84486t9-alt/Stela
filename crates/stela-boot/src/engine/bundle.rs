@@ -3,7 +3,7 @@
 //! `stela_runtime::boot_bundle` checks every region's SHA-256, writes the
 //! regions and their zero tails into guest DRAM, and fills the patch slots
 //! only the running machine knows; this supplies the machine's side: guest
-//! RAM through the engine's host, RDSEED or RDRAND entropy and the timebase.
+//! RAM through the engine's host, seeded host entropy and the timebase.
 //! The format is `docs/design/runtime.md#kernel-boot-bundle`.
 //!
 //! [`read`] runs before boot services end and reads the files into their own
@@ -23,10 +23,7 @@ use crate::{
     paging::PAGE,
 };
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
-use core::arch::{
-    asm,
-    x86_64::{__cpuid, __cpuid_count},
-};
+use core::arch::asm;
 use stela_drivers::block::{BlockDevice, BlockError};
 use stela_loader::{
     apple_device_tree::DeviceTree, boot_bundle::Options, boot_selection::BootVolume, boot_trace,
@@ -47,11 +44,6 @@ use uefi::{
 
 /// The counter frequency the machine presents in CNTFRQ_EL0.
 const TIMEBASE_HZ: u64 = 24_000_000;
-/// Attempts per 64-bit word before an entropy instruction counts as failed.
-const ENTROPY_RETRIES: usize = 128;
-const CPUID_RDRAND: u32 = 1 << 30;
-const CPUID_RDSEED: u32 = 1 << 18;
-
 pub struct Entry {
     pub pc: u64,
     pub x0: u64,
@@ -317,27 +309,6 @@ pub fn file_size(root: &mut Directory, path: &str) -> Result<u64, &'static str> 
         .file_size())
 }
 
-/// One 64-bit word from RDSEED or RDRAND, retried while the source is busy.
-fn random_word(seed: bool) -> Option<u64> {
-    for _ in 0..ENTROPY_RETRIES {
-        let (value, ok): (u64, u8);
-        // SAFETY: the caller checked CPUID for the instruction; it writes
-        // only its destination and the flags.
-        unsafe {
-            if seed {
-                asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
-            } else {
-                asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack));
-            }
-        }
-        if ok != 0 {
-            return Some(value);
-        }
-        core::hint::spin_loop();
-    }
-    None
-}
-
 /// The largest transfer [`Bytes`] asks a device for.
 const TRANSFER_BYTES: usize = 1 << 20;
 
@@ -498,23 +469,9 @@ fn upgrade_boot_args(console: &str) -> String {
     args.join(" ")
 }
 
-/// Fill `buffer` from RDSEED, or from RDRAND on a CPU without RDSEED. A CPU
-/// with neither is refused: the kernel's seeds must not be predictable.
+/// Fill from the boot's qualified, seeded cryptographic stream.
 pub(super) fn entropy(buffer: &mut [u8]) -> Result<(), &'static str> {
-    let seed = __cpuid_count(7, 0).ebx & CPUID_RDSEED != 0;
-    let rand = __cpuid(1).ecx & CPUID_RDRAND != 0;
-    if !seed && !rand {
-        return Err("this CPU has neither RDSEED nor RDRAND");
-    }
-    for chunk in buffer.chunks_mut(8) {
-        let word = random_word(seed).ok_or(if seed {
-            "RDSEED returned no entropy"
-        } else {
-            "RDRAND returned no entropy"
-        })?;
-        chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
-    }
-    Ok(())
+    crate::random::fill(buffer).map_err(|_| "host cryptographic entropy is unavailable")
 }
 
 /// The bundle's `bundle.json`, from the files the loader read or a bundle

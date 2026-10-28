@@ -370,10 +370,56 @@ impl<'a> Source<'a> {
             BspSource::t8112_assigned(original, live.bytes(), identity, boot_reg, 0, workers)?;
         Ok(source)
     }
+    #[cfg(test)]
     pub(crate) fn prepare<'s>(
         &'s self,
         roster: &'s dyn RetainedRoster,
         profile: CpuProfile,
+    ) -> Result<Prepared<'s>, String> {
+        self.prepare_with_classes(
+            roster,
+            profile,
+            &alloc::vec![native::CoreClass::Unknown; roster.cores().len()],
+        )
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn prepare_on<'s>(
+        &'s self,
+        roster: &'s dyn RetainedRoster,
+        profile: CpuProfile,
+        capture: &Capture,
+    ) -> Result<Prepared<'s>, String> {
+        let classes = roster
+            .cores()
+            .iter()
+            .map(|core| {
+                let worker = core.worker;
+                let index = *capture
+                    .selected
+                    .get(worker)
+                    .filter(|_| worker < capture.core_count as usize)
+                    .ok_or("assigned worker has no captured core class")?
+                    as usize;
+                let processor = capture
+                    .processors
+                    .get(index)
+                    .ok_or("assigned worker has no captured processor")?;
+                let snapshot = &capture.snapshots[worker];
+                if u64::from(core.apic) != processor.apic_id || !snapshot.matches(*processor) {
+                    return Err("assigned core class differs from its processor identity");
+                }
+                Ok(snapshot.core_class())
+            })
+            .collect::<Result<Vec<_>, &str>>()?;
+        self.prepare_with_classes(roster, profile, &classes)
+    }
+
+    fn prepare_with_classes<'s>(
+        &'s self,
+        roster: &'s dyn RetainedRoster,
+        profile: CpuProfile,
+        host: &[native::CoreClass],
     ) -> Result<Prepared<'s>, String> {
         use sha2::{Digest, Sha256};
         let resources = self.resources.resources();
@@ -387,17 +433,28 @@ impl<'a> Source<'a> {
             .iter()
             .position(|slot| slot.reg == self.boot_reg)
             .ok_or("assigned source omits the original boot PE")?;
+        let guest = resources
+            .slots
+            .iter()
+            .map(|slot| {
+                let kind = resources
+                    .kinds
+                    .iter()
+                    .find(|kind| Some(kind.id) == slot.kind)
+                    .ok_or("assigned source core kind is unknown")?;
+                Ok(match kind.cluster_type {
+                    b'P' => native::CoreClass::Performance,
+                    b'E' => native::CoreClass::Efficiency,
+                    _ => native::CoreClass::Unknown,
+                })
+            })
+            .collect::<Result<Vec<_>, &str>>()?;
+        let placement = native::placement(&guest, host, boot)
+            .map_err(|error| format!("assigned host core placement: {error:?}"))?;
         for (ordinal, slot) in resources.slots.iter().enumerate() {
-            // Native worker0 is the executing BSP. Keeping source PE order
-            // preserves PMGR mode1's kernel cluster ordinal coupling.
-            let worker_index = if ordinal == boot {
-                0
-            } else if ordinal < boot {
-                ordinal + 1
-            } else {
-                ordinal
-            };
-            let worker = &roster.cores()[worker_index];
+            // Source PE order retains PMGR's cluster ordinal coupling; only
+            // the host worker assigned to each source slot changes.
+            let worker = &roster.cores()[placement[ordinal]];
             let kind = resources
                 .kinds
                 .iter()
