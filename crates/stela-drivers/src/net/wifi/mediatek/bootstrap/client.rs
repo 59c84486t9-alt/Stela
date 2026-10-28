@@ -4,6 +4,7 @@
 //! raw-header format to the actual retained peer; generic WMWA facts never do.
 use super::{Controller, Phase as ControllerPhase};
 
+mod action;
 mod ba;
 mod edca;
 mod external;
@@ -208,6 +209,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     receive_ba: [Option<ba::Receive<C>>; 8],
     transmit_ba: [Option<ba::Transmit<C>>; 8],
     ba_actions: VecDeque<station::ba::Action>,
+    /// OS action registrations and the replies mac80211 would send.
+    action: action::State,
     ba_management: Option<Arc<management::Session>>,
     ba_management_pn: Option<PacketNumber>,
     roc_token: u8,
@@ -304,6 +307,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 receive_ba: core::array::from_fn(|_| None),
                 transmit_ba: core::array::from_fn(|_| None),
                 ba_actions: VecDeque::new(),
+                action: action::State::default(),
                 ba_management: None,
                 ba_management_pn: None,
                 roc_token: 0,
@@ -992,6 +996,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             {
                 continue;
             }
+            if modern_data && frame.header().control & 0x00fc == 0x00d0 {
+                match Self::receive_action(s, &frame)? {
+                    action::Receive::BlockAck => {}
+                    action::Receive::Os => {
+                        events.push(Event::Raw(f));
+                        continue;
+                    }
+                    action::Receive::Done => continue,
+                }
+            }
             if modern_data
                 && (frame.header().control & 0x00fc == 0x00d0
                     || frame.header().control & 0x00fc == 0x0084)
@@ -1201,6 +1215,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.receive_ba = core::array::from_fn(|_| None);
         s.transmit_ba = core::array::from_fn(|_| None);
         s.ba_actions.clear();
+        s.action.replies.clear();
         s.ba_management = None;
         s.ba_management_pn = None;
         s.profile = None;

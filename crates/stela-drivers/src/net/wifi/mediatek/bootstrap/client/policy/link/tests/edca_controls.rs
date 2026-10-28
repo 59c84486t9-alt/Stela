@@ -288,6 +288,53 @@ fn power_save_follows_the_authorized_port_like_ieee80211_recalc_ps_vif() {
 }
 
 #[test]
+fn unclaimed_actions_go_back_to_their_sender_like_ieee80211_rx_h_action_return() {
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    secure(&mut link);
+    drop(drain_notices(&mut link));
+    // A WNM action nothing claims returns with its category's 0x80 bit.
+    let frame = response(0xd0, &[10, 26, 1]);
+    incoming(&model, &frame, None, false);
+    link.service().unwrap();
+    let sent = finish_tx(&model);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0][24..], [0x8a, 26, 1]);
+    assert_eq!(
+        (&sent[0][4..10], &sent[0][10..16]),
+        (&frame[10..16], &frame[4..10])
+    );
+    // Registered, the OS receives it instead.
+    link.register_action(&[10]).unwrap();
+    let frame = response(0xd0, &[10, 26, 2]);
+    incoming(&model, &frame, None, false);
+    assert!(drain_notices(&mut link).iter().any(|notice| matches!(
+        &notice.event,
+        LinkEvent::Controller(Event::Raw(raw)) if raw.bytes.ends_with(&frame)
+    )));
+    // A returned frame is never returned again.
+    incoming(&model, &response(0xd0, &[0x85, 0]), None, false);
+    link.service().unwrap();
+    assert!(finish_tx(&model).is_empty());
+    // A 5 GHz measurement request is refused, and an SA Query answered.
+    incoming(
+        &model,
+        &response(0xd0, &[0, 0, 7, 38, 3, 9, 0, 1]),
+        None,
+        false,
+    );
+    link.service().unwrap();
+    assert_eq!(finish_tx(&model)[0][24..], [0, 2, 7, 39, 3, 9, 4, 1]);
+    incoming(&model, &response(0xd0, &[8, 0, 0x12, 0x34]), None, false);
+    // The first service retires the report's TX-free.
+    link.service().unwrap();
+    link.service().unwrap();
+    assert_eq!(finish_tx(&model)[0][24..], [8, 1, 0x12, 0x34]);
+    assert!(link.carrier());
+    stop(&mut link, &model);
+}
+
+#[test]
 fn rssi_monitor_without_firmware_rssi_events_watches_beacons_like_mac80211() {
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);

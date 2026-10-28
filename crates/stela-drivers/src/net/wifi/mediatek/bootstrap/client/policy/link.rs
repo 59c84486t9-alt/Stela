@@ -306,6 +306,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn set_power_save(&mut self, enabled: bool) {
         self.state_mut().client.set_power_save(enabled);
     }
+    /// Offer the OS unprotected action frames whose body starts with
+    /// `prefix`, as `NL80211_CMD_REGISTER_FRAME` does; they arrive as raw
+    /// controller notices instead of going back to their sender.
+    pub fn register_action(&mut self, prefix: &[u8]) -> Result<(), LinkControlError> {
+        let result = self.state_mut().client.client.register_action(prefix);
+        Ok(result.map_err(PolicyError::Client)?)
+    }
+    /// Withdraw a `register_action` registration.
+    pub fn unregister_action(&mut self, prefix: &[u8]) {
+        self.state_mut().client.client.unregister_action(prefix);
+    }
     /// Set or clear the OS's interworking QoS Map, which classifies data
     /// frames' DSCP as `cfg80211_classify8021d` does.
     pub fn set_qos_map(&mut self, map: Option<&[u8]>) -> Result<(), LinkControlError> {
@@ -525,6 +536,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         }
         if s.client.client.pending_block_ack() && !Self::progress(s).backpressured {
             match s.client.progress_block_ack(&s.source, now) {
+                Ok(()) | Err(PolicyError::Client(Error::NeedsDrain | Error::Busy)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if s.client.client.pending_action_reply() && !Self::progress(s).backpressured {
+            match s.client.progress_action_reply(&s.source) {
                 Ok(()) | Err(PolicyError::Client(Error::NeedsDrain | Error::Busy)) => {}
                 Err(error) => return Err(error),
             }
