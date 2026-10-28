@@ -1,5 +1,6 @@
 //! SVE indexed half-precision arithmetic through exact double intermediates.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R9, R10, R11, Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Alu, Code, Rm, Size};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -20,7 +21,7 @@ use crate::{
         },
         simd::{
             half::{self, ResultSign, RoundingPolicy},
-            numerical::{ArithmeticOpcode, Condition, VZEROUPPER, branch, emit_opcode_to, resolve},
+            numerical::{ArithmeticOpcode, Condition, branch, emit_opcode_to, resolve},
         },
         sve::floating::classify::guard_active_exception_enables,
     },
@@ -36,9 +37,6 @@ const ORIGINAL_RIGHT: u8 = 5;
 const RESULT: u8 = 6;
 const ASSEMBLED: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const HALF_BYTES: usize = size_of::<u16>();
 const HALF_LANES: usize = VECTOR_CHUNK_BYTES / HALF_BYTES;
 const FIRST_HALF: u8 = 0;
@@ -50,10 +48,6 @@ const DUPLICATE_REAL_WORDS: u8 = 0xa0;
 const DUPLICATE_IMAGINARY_WORDS: u8 = 0xf5;
 const SWAP_WORD_COMPONENTS: u8 = 0xb1;
 const SIGN_MASK: u8 = ADDEND;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const XOR_R11D_R11D: &[u8] = &[0x45, 0x31, 0xdb];
-const INC_R11D: &[u8] = &[0x41, 0xff, 0xc3];
-const CMP_R11D_IMMEDIATE: &[u8] = &[0x41, 0x83, 0xfb];
 const NORMAL_HALF_EXPONENT_COUNT: u32 =
     (Format::Half.exponent_mask() >> Format::Half.fraction_bits()) as u32 - 1;
 const FIRST_NORMAL_HALF_EXPONENT: u32 = 1 << Format::Half.fraction_bits();
@@ -61,17 +55,6 @@ const HALF_TO_DOUBLE_BIAS: u64 = ((Format::Double.exponent_bias() - Format::Half
     as u64)
     << Format::Double.fraction_bits();
 const MXCSR_STATUS_MASK: u32 = 0x3f;
-const PEXTRW_EAX_XMM: &[u8] = &[0x66, 0x0f, 0xc5];
-const PINSRW_XMM_EAX: &[u8] = &[0x66, 0x0f, 0xc4];
-const MOV_EDX_EAX: &[u8] = &[0x89, 0xc2];
-const AND_EDX_IMMEDIATE: &[u8] = &[0x81, 0xe2];
-const SUB_EDX_IMMEDIATE: &[u8] = &[0x81, 0xea];
-const CMP_EDX_IMMEDIATE: &[u8] = &[0x81, 0xfa];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const XOR_R10D_R10D: &[u8] = &[0x45, 0x31, 0xd2];
-const MOVABS_R9_IMMEDIATE: &[u8] = &[0x49, 0xb9];
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const MOV_EAX_R10D: &[u8] = &[0x44, 0x89, 0xd0];
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::x86_64) enum Recipe {
@@ -159,8 +142,8 @@ fn admitted(operand: Operand) -> Option<Operation> {
 }
 
 fn shuffle(code: &mut Code, opcode: Host, register: u8, order: u8, target: TargetCpu) {
-    opcode.register(code, register, register, target);
-    code.push(order);
+    code.asm()
+        .simd_imm(opcode, register, Rm::Xmm(register), order, target);
 }
 
 /// Materialize the effective eight Half fields once per segment. Real and
@@ -230,10 +213,8 @@ fn select_sources(code: &mut Code, operation: Operation, target: TargetCpu) {
         }
     };
     if sign_pair != 0 {
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend(sign_pair.to_le_bytes());
-        Host::MoveGprQword.append(code, target);
-        code.push(MODRM_REGISTER | (SIGN_MASK << MODRM_REGISTER_SHIFT) | GPR_RAX);
+        code.asm().mov_imm32(Rax, sign_pair);
+        code.asm().simd(Host::MoveGprQword, SIGN_MASK, Rax, target);
         shuffle(
             code,
             Host::ShuffleDword,
@@ -255,16 +236,27 @@ fn widen_input(
     failures: &mut Vec<usize>,
     target: TargetCpu,
 ) {
-    code.extend(PEXTRW_EAX_XMM);
-    code.push(MODRM_REGISTER | (GPR_RAX << MODRM_REGISTER_SHIFT) | original);
-    code.push(FIRST_HALF);
-    code.extend(MOV_EDX_EAX);
-    code.extend(AND_EDX_IMMEDIATE);
-    code.extend((Format::Half.exponent_mask() as u32).to_le_bytes());
-    code.extend(SUB_EDX_IMMEDIATE);
-    code.extend(FIRST_NORMAL_HALF_EXPONENT.to_le_bytes());
-    code.extend(CMP_EDX_IMMEDIATE);
-    code.extend((NORMAL_HALF_EXPONENT_COUNT << Format::Half.fraction_bits()).to_le_bytes());
+    code.asm().pextrw(Rax, original, FIRST_HALF);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rdx, Rax);
+    asm.alu_imm32(
+        Alu::And,
+        Size::Dword,
+        Rdx,
+        Format::Half.exponent_mask() as i32,
+    );
+    asm.alu_imm32(
+        Alu::Sub,
+        Size::Dword,
+        Rdx,
+        FIRST_NORMAL_HALF_EXPONENT as i32,
+    );
+    asm.alu_imm32(
+        Alu::Cmp,
+        Size::Dword,
+        Rdx,
+        (NORMAL_HALF_EXPONENT_COUNT << Format::Half.fraction_bits()) as i32,
+    );
     failures.push(branch(code, Condition::AboveOrEqual));
     half::widen_normal(code, target);
     Host::MoveAligned.register(code, output, RESULT, target);
@@ -298,11 +290,11 @@ pub(in crate::x86_64) fn emit_candidate(
         &[Output::Z(operand.destination)],
         Environment::PrivateMxcsr,
     )?;
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     numerical::install_mxcsr(code, &frame);
-    code.extend(MOVABS_R9_IMMEDIATE);
-    code.extend(HALF_TO_DOUBLE_BIAS.to_le_bytes());
-    code.extend(XOR_R10D_R10D);
+    let mut asm = code.asm();
+    asm.mov_imm64(R9, HALF_TO_DOUBLE_BIAS);
+    asm.alu(Alu::Xor, Size::Dword, R10, R10);
     let mut failures = Vec::new();
     Host::EqualDword.register(code, ASSEMBLED, ASSEMBLED, target);
     guard_active_exception_enables(code, ASSEMBLED, features, &mut failures, target);
@@ -321,7 +313,7 @@ pub(in crate::x86_64) fn emit_candidate(
         }
         Host::Xor.register(code, ASSEMBLED, ASSEMBLED, target);
         select_sources(code, operation, target);
-        code.extend(XOR_R11D_R11D);
+        code.asm().alu(Alu::Xor, Size::Dword, R11, R11);
         let repeat = code.len();
 
         widen_input(code, ORIGINAL_LEFT, LEFT, &mut failures, widening_target);
@@ -358,8 +350,8 @@ pub(in crate::x86_64) fn emit_candidate(
         // single half rounding, so no rounded intermediate or lost exception
         // reaches the packer.
         numerical::capture_status(code, &frame);
-        code.extend(TEST_ECX_IMMEDIATE);
-        code.extend(MXCSR_STATUS_MASK.to_le_bytes());
+        code.asm()
+            .test_imm32(Size::Dword, Rcx, MXCSR_STATUS_MASK as i32);
         failures.push(branch(code, Condition::NotZero));
         Host::MoveAligned.register(code, RESULT, LEFT, target);
         half::pack_normal(
@@ -369,26 +361,24 @@ pub(in crate::x86_64) fn emit_candidate(
             ResultSign::Preserve,
         );
         ShiftOpcode::RightBytes.emit(code, ASSEMBLED, HALF_BYTES as u8);
-        code.extend(PINSRW_XMM_EAX);
-        code.push(MODRM_REGISTER | (ASSEMBLED << MODRM_REGISTER_SHIFT) | GPR_RAX);
-        code.push(LAST_HALF);
+        code.asm().pinsrw(ASSEMBLED, Rax, LAST_HALF);
         for input in [ORIGINAL_LEFT, ORIGINAL_RIGHT] {
             ShiftOpcode::RightBytes.emit(code, input, HALF_BYTES as u8);
         }
         if operation.fused {
             ShiftOpcode::RightBytes.emit(code, ORIGINAL_ADDEND, HALF_BYTES as u8);
         }
-        code.extend(INC_R11D);
-        code.extend(CMP_R11D_IMMEDIATE);
-        code.push(HALF_LANES as u8);
+        let mut asm = code.asm();
+        asm.inc(Size::Dword, R11);
+        asm.alu_imm8(Alu::Cmp, Size::Dword, R11, HALF_LANES as i8);
         let more = branch(code, Condition::Below);
         resolve(code, more, repeat);
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, chunk, ASSEMBLED, target);
     }
     if matches!(recipe, Recipe::CheckedWidening) {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
-    code.extend(MOV_EAX_R10D);
+    code.asm().mov(Size::Dword, Rax, R10);
     numerical::add_fpsr(code, &frame);
     numerical::finish(code, &frame, &failures, pc, target);
     Ok(true)

@@ -1,5 +1,6 @@
 //! SVE FSCALE on normal values through packed integer exponent arithmetic.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Cond, Rm, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -27,14 +28,7 @@ const TEMPORARY: u8 = 4;
 const MAXIMUM_EXPONENT: u8 = 5;
 const ACTIVE: u8 = 6;
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const REPEAT_LOW_DWORD: u8 = 0;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 
 fn packed(
     code: &mut Code,
@@ -55,11 +49,10 @@ fn packed(
 
 fn reject_invalid_active(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
     Host::AndNot.register(code, VALID, ACTIVE, target);
-    Host::ByteSignMask.register(code, GPR_RAX, VALID, target);
-    code.extend(TEST_EAX_EAX);
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    code.asm()
+        .simd_to_gpr(Host::ByteSignMask, Rax, VALID, target);
+    code.asm().test(Size::Dword, Rax, Rax);
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 fn guard_normal_exponent(
@@ -136,17 +129,20 @@ fn guard_bounded_scale(
 fn broadcast_maximum(code: &mut Code, format: Format, target: TargetCpu) {
     let maximum = format.exponent_mask() >> format.fraction_bits();
     if format == Format::Single {
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend((maximum as u32).to_le_bytes());
+        code.asm().mov_imm32(Rax, maximum as u32);
     } else {
-        code.extend(MOV_RAX_IMMEDIATE);
-        code.extend(maximum.to_le_bytes());
+        code.asm().mov_imm64(Rax, maximum);
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (MAXIMUM_EXPONENT << MODRM_REGISTER_SHIFT) | GPR_RAX);
+    code.asm()
+        .simd(Host::MoveGprQword, MAXIMUM_EXPONENT, Rax, target);
     if format == Format::Single {
-        Host::ShuffleDword.register(code, MAXIMUM_EXPONENT, MAXIMUM_EXPONENT, target);
-        code.push(REPEAT_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            MAXIMUM_EXPONENT,
+            Rm::Xmm(MAXIMUM_EXPONENT),
+            REPEAT_LOW_DWORD,
+            target,
+        );
     } else {
         Host::UnpackLowQword.register(code, MAXIMUM_EXPONENT, MAXIMUM_EXPONENT, target);
     }

@@ -1,5 +1,6 @@
 //! SVE half-precision widening of normal values, without host FP controls.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, Size};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -29,14 +30,6 @@ const VALIDITY: u8 = 5;
 const SINGLE_BIAS: u8 = 6;
 const INACTIVE_HALF_ONE: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const GPR_RCX: u8 = 1;
-const GPR_RAX: u8 = 0;
-const MOV_ECX_IMMEDIATE: &[u8] = &[0xb9];
-const CMP_EAX_IMMEDIATE8: &[u8] = &[0x83, 0xf8];
-const JNE_REL32: &[u8] = &[0x0f, 0x85];
-const CVTPS2PD_XMM0_XMM0: &[u8] = &[0x0f, 0x5a, 0xc0];
 const REPEAT_DWORD: u8 = 0;
 const COMPACT_LOW_QWORD_DWORDS: u8 = 0x88;
 const DWORD_SIGN_POSITION: u8 = u32::BITS as u8 - 1;
@@ -53,12 +46,15 @@ const HALF_ONE: u32 = Format::Half.exponent_bias() << Format::Half.fraction_bits
 const ALL_DWORDS_NORMAL: u8 = (1 << (u128::BITS / u32::BITS)) - 1;
 
 fn broadcast(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
-    code.extend(MOV_ECX_IMMEDIATE);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (register << MODRM_REGISTER_SHIFT) | GPR_RCX);
-    Host::ShuffleDword.register(code, register, register, target);
-    code.push(REPEAT_DWORD);
+    code.asm().mov_imm32(Rcx, value);
+    code.asm().simd(Host::MoveGprQword, register, Rcx, target);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        register,
+        Rm::Xmm(register),
+        REPEAT_DWORD,
+        target,
+    );
 }
 
 /// Preserve four dword-low16 inputs and the repeated31 exponent constant;
@@ -86,12 +82,11 @@ pub(in crate::x86_64) fn guard_normal_half_fields(
     Host::Xor.register(code, zero, zero, target);
     Host::GreaterDword.register(code, exponent, zero, target);
     Host::And.register(code, exponent, validity, target);
-    Host::DwordSignMask.register(code, GPR_RAX, exponent, target);
-    code.extend(CMP_EAX_IMMEDIATE8);
-    code.push(ALL_DWORDS_NORMAL);
-    code.extend(JNE_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    code.asm()
+        .simd_to_gpr(Host::DwordSignMask, Rax, exponent, target);
+    code.asm()
+        .alu_imm8(Alu::Cmp, Size::Dword, Rax, ALL_DWORDS_NORMAL as i8);
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 /// Compute-only extraction of the mature SIMD precision widening projection.
@@ -168,8 +163,13 @@ pub(in crate::x86_64) fn emit(
         guard_active_exception_enables(code, ACTIVE, features, &mut failures, target);
         load_z_chunk(code, operand.source, chunk, RESULT, length, target);
         if destination == Format::Double {
-            Host::ShuffleDword.register(code, RESULT, RESULT, target);
-            code.push(COMPACT_LOW_QWORD_DWORDS);
+            code.asm().simd_imm(
+                Host::ShuffleDword,
+                RESULT,
+                Rm::Xmm(RESULT),
+                COMPACT_LOW_QWORD_DWORDS,
+                target,
+            );
         }
         if placement == Placement::UpperSource {
             ShiftOpcode::RightDword.emit(code, RESULT, HALF_BITS);
@@ -179,8 +179,13 @@ pub(in crate::x86_64) fn emit(
         }
         Host::MoveAligned.register(code, SCRATCH, ACTIVE, target);
         if destination == Format::Double {
-            Host::ShuffleDword.register(code, SCRATCH, SCRATCH, target);
-            code.push(COMPACT_LOW_QWORD_DWORDS);
+            code.asm().simd_imm(
+                Host::ShuffleDword,
+                SCRATCH,
+                Rm::Xmm(SCRATCH),
+                COMPACT_LOW_QWORD_DWORDS,
+                target,
+            );
         }
         // Neutralize inactive values before the normal-only guard. Their exact
         // one results are removed again by the architectural destination mask.
@@ -197,7 +202,7 @@ pub(in crate::x86_64) fn emit(
         );
         normal_half_to_single_fields(code, RESULT, SCRATCH, SINGLE_BIAS, target);
         if destination == Format::Double {
-            code.extend(CVTPS2PD_XMM0_XMM0);
+            code.asm().cvtps2pd(0, Rm::Xmm(0));
         }
         load_z_chunk(
             code,

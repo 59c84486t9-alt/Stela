@@ -1,5 +1,6 @@
 //! SVE conversions between single/double and integers.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, R10, Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
 use super::{half_integer, unsigned64};
 use alloc::vec::Vec;
@@ -53,37 +54,7 @@ const SIGNED_DWORD_SIGN_SHIFT: u8 = u32::BITS as u8 - 1;
 const UNSIGNED_HALF_PACK_BIAS: u32 = 1 << (u16::BITS - 1);
 const UNSIGNED_HALF_PACK_SIGN_BITS: u32 =
     UNSIGNED_HALF_PACK_BIAS | (UNSIGNED_HALF_PACK_BIAS << u16::BITS);
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const SINGLE_PREFIX: u8 = 0xf3;
-const DOUBLE_PREFIX: u8 = 0xf2;
-const REX_W: u8 = 0x48;
-const CVTSI_TO_FLOAT: u8 = 0x2a;
-const CVTT_TO_INTEGER: u8 = 0x2c;
-const CVTDQ2PD: &[u8] = &[0xf3, 0x0f, 0xe6];
-const CVTTPS2DQ: &[u8] = &[0xf3, 0x0f, 0x5b];
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const MOVD_EAX_XMM: &[u8] = &[0x66, 0x0f, 0x7e];
-const MOVQ_RAX_XMM: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const MOVSXD_RAX_EAX: &[u8] = &[0x48, 0x63, 0xc0];
-const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
-const SHR_RDX_IMMEDIATE: &[u8] = &[0x48, 0xc1, 0xea];
-const TEST_EDX_EDX: &[u8] = &[0x85, 0xd2];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const MOV_ECX_IMMEDIATE: &[u8] = &[0xb9];
-const MOVQ_R8_XMM0: &[u8] = &[0x66, 0x49, 0x0f, 0x7e, 0xc0];
-const MOVQ_XMM7_R8: &[u8] = &[0x66, 0x49, 0x0f, 0x6e, 0xf8];
-const XOR_R10D_R10D: &[u8] = &[0x45, 0x31, 0xd2];
-const OR_EAX_R10D: &[u8] = &[0x44, 0x09, 0xd0];
-const GPR_RCX: u8 = 1;
-const GPR_RAX: u8 = 0;
 const REPEAT_LOW_DWORD: u8 = 0;
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 const MXCSR_PRECISION: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_PRECISION - 1;
 const MXCSR_TO_FPSR_PRECISION_SHIFT: u8 = 1;
@@ -239,22 +210,37 @@ impl Conversion {
 }
 
 fn reject(code: &mut Code, failures: &mut Vec<usize>) {
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
-fn scalar_opcode(code: &mut Code, conversion: Conversion, opcode: u8) {
-    code.push(match conversion.float {
-        Format::Single => SINGLE_PREFIX,
-        Format::Double => DOUBLE_PREFIX,
-        Format::Half => unreachable!("Half conversion belongs to its compute leaf"),
-    });
+fn host_size(conversion: Conversion) -> Size {
     if conversion.host_wide() {
-        code.push(REX_W);
+        Size::Qword
+    } else {
+        Size::Dword
     }
-    // Both directions use XMM0 and RAX/EAX, with the appropriate ModRM role.
-    code.extend([SSE_ESCAPE, opcode, MODRM_REGISTER]);
+}
+
+/// CVTSI2SS/CVTSI2SD of RAX/EAX into XMM0.
+fn convert_from_integer(code: &mut Code, conversion: Conversion) {
+    let size = host_size(conversion);
+    let mut asm = code.asm();
+    match conversion.float {
+        Format::Single => asm.cvtsi2ss(size, SCALAR, Rax),
+        Format::Double => asm.cvtsi2sd(size, SCALAR, Rax),
+        Format::Half => unreachable!("Half conversion belongs to its compute leaf"),
+    }
+}
+
+/// CVTTSS2SI/CVTTSD2SI of XMM0 into RAX/EAX.
+fn truncate_to_integer(code: &mut Code, conversion: Conversion) {
+    let size = host_size(conversion);
+    let mut asm = code.asm();
+    match conversion.float {
+        Format::Single => asm.cvttss2si(size, Rax, Rm::Xmm(SCALAR)),
+        Format::Double => asm.cvttsd2si(size, Rax, Rm::Xmm(SCALAR)),
+        Format::Half => unreachable!("Half conversion belongs to its compute leaf"),
+    }
 }
 
 fn scalar_chunk(
@@ -273,12 +259,12 @@ fn scalar_chunk(
         }
         match conversion.direction {
             Direction::FromInteger => {
-                code.extend(if conversion.integer.width == IntegerWidth::Bits64 {
-                    MOVQ_RAX_XMM
+                let mut asm = code.asm();
+                if conversion.integer.width == IntegerWidth::Bits64 {
+                    asm.movq_from_xmm(Rax, SCALAR);
                 } else {
-                    MOVD_EAX_XMM
-                });
-                code.push(MODRM_REGISTER | (GPR_RAX << MODRM_REGISTER_SHIFT) | SCALAR);
+                    asm.movd_from_xmm(Rax, SCALAR);
+                }
                 // MOVD writes EAX and zero-extends unsigned W before CVTSI64.
                 // Reset all scalar upper bits so X→S zero-fills its full slot.
                 Host::Xor.register(code, SCALAR, SCALAR, target);
@@ -295,7 +281,7 @@ fn scalar_chunk(
                     if conversion.unsigned_x() {
                         unsigned64::from_integer(code, conversion.float);
                     } else {
-                        scalar_opcode(code, conversion, CVTSI_TO_FLOAT);
+                        convert_from_integer(code, conversion);
                     }
                     Host::MoveAligned.register(code, PACK, SCALAR, target);
                 }
@@ -304,20 +290,20 @@ fn scalar_chunk(
                 if conversion.unsigned_x() {
                     unsigned64::to_integer(code, conversion.float, failures);
                 } else {
-                    scalar_opcode(code, conversion, CVTT_TO_INTEGER);
+                    truncate_to_integer(code, conversion);
                 }
                 if !conversion.integer.signed && !conversion.unsigned_x() {
                     // CVTT64 admits unsigned W only when high32 is zero.
                     // Negative fractions truncating to zero are valid too.
-                    code.extend(MOV_RDX_RAX);
-                    code.extend(SHR_RDX_IMMEDIATE);
-                    code.push(u32::BITS as u8);
-                    code.extend(TEST_EDX_EDX);
+                    let mut asm = code.asm();
+                    asm.mov(Size::Qword, Rdx, Rax);
+                    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, u32::BITS as u8);
+                    asm.test(Size::Dword, Rdx, Rdx);
                     reject(code, failures);
                 } else if slot_bytes == QWORD_BYTES
                     && conversion.integer.width == IntegerWidth::Bits32
                 {
-                    code.extend(MOVSXD_RAX_EAX);
+                    code.asm().movsxd(Rax, Rax);
                 }
                 pack_integer(code, slot_bytes, target);
             }
@@ -333,11 +319,10 @@ fn scalar_chunk(
 /// rest of its H/W/X slot, so the shift/OR assembly cannot contaminate a neighbor.
 fn pack_integer(code: &mut Code, slot_bytes: u8, target: TargetCpu) {
     if slot_bytes == QWORD_BYTES {
-        Host::MoveGprQword.append(code, target);
+        code.asm().simd(Host::MoveGprQword, PACK, Rax, target);
     } else {
-        code.extend(MOVD_XMM_EAX);
+        code.asm().movd_to_xmm(PACK, Rax);
     }
-    code.push(MODRM_REGISTER | (PACK << MODRM_REGISTER_SHIFT) | GPR_RAX);
 }
 
 /// Compile-time access bookkeeping for the single instruction frame. No guest
@@ -378,12 +363,16 @@ impl ChunkAccess {
 }
 
 fn broadcast_dword(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
-    code.extend(MOV_ECX_IMMEDIATE);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (register << MODRM_REGISTER_SHIFT) | GPR_RCX);
-    Host::ShuffleDword.register(code, register, register, target);
-    code.push(REPEAT_LOW_DWORD);
+    let mut asm = code.asm();
+    asm.mov_imm32(Rcx, value);
+    asm.simd(Host::MoveGprQword, register, Rcx, target);
+    asm.simd_imm(
+        Host::ShuffleDword,
+        register,
+        Rm::Xmm(register),
+        REPEAT_LOW_DWORD,
+        target,
+    );
 }
 
 fn half_forward_group(
@@ -417,8 +406,13 @@ fn half_forward_group(
         IntegerWidth::Bits64 => {
             // Half0/Half4 are the only architectural operands. Duplicate them
             // in internal extra dwords rather than reading Half2/Half6 poison.
-            Host::ShuffleDword.register(code, SCALAR, SCALAR, access.target);
-            code.push(LOW_DWORDS_FROM_QWORDS);
+            code.asm().simd_imm(
+                Host::ShuffleDword,
+                SCALAR,
+                Rm::Xmm(SCALAR),
+                LOW_DWORDS_FROM_QWORDS,
+                access.target,
+            );
         }
     }
     half_integer::to_integer_words(code, integer, mapping.half_f16c(), failures, access.target);
@@ -458,11 +452,11 @@ fn half_forward_chunk(
     match integer.width {
         IntegerWidth::Bits16 => {
             pack_half_results(code, integer, mapping, access.target);
-            code.extend(MOVQ_R8_XMM0);
+            code.asm().movq_from_xmm(R8, 0);
             half_forward_group(code, access, chunk, integer, mapping, true, failures);
             pack_half_results(code, integer, mapping, access.target);
             // RDX cannot hold group one: the Z and P reloads clobber it.
-            code.extend(MOVQ_XMM7_R8);
+            code.asm().movq_to_xmm(7, R8);
             Host::UnpackLowQword.register(code, PACK, SCALAR, access.target);
             PACK
         }
@@ -495,10 +489,20 @@ fn packed_signed_half_chunk(code: &mut Code, target: TargetCpu) {
     Host::ConvertPackedDwordToSingle.register(code, RESULT, RESULT, target);
     Host::ConvertPackedDwordToSingle.register(code, SCALAR, SCALAR, target);
     // This instruction's ModRM.reg is the Single source, r/m the Half result.
-    Host::ConvertSingleToHalf.register(code, RESULT, RESULT, target);
-    code.push(half_integer::USE_MXCSR_ROUNDING);
-    Host::ConvertSingleToHalf.register(code, SCALAR, SCALAR, target);
-    code.push(half_integer::USE_MXCSR_ROUNDING);
+    code.asm().simd_imm(
+        Host::ConvertSingleToHalf,
+        RESULT,
+        Rm::Xmm(RESULT),
+        half_integer::USE_MXCSR_ROUNDING,
+        target,
+    );
+    code.asm().simd_imm(
+        Host::ConvertSingleToHalf,
+        SCALAR,
+        Rm::Xmm(SCALAR),
+        half_integer::USE_MXCSR_ROUNDING,
+        target,
+    );
     Host::UnpackLowQword.register(code, RESULT, SCALAR, target);
 }
 
@@ -510,14 +514,17 @@ fn packed_chunk(code: &mut Code, conversion: Conversion, target: TargetCpu) {
         }
         (Direction::FromInteger, Format::Double) => {
             // W→D selects each qword's low dword, not adjacent packed W lanes.
-            Host::ShuffleDword.register(code, RESULT, RESULT, target);
-            code.push(LOW_DWORDS_FROM_QWORDS);
-            code.extend(CVTDQ2PD);
-            code.push(MODRM_REGISTER | (RESULT << MODRM_REGISTER_SHIFT) | RESULT);
+            code.asm().simd_imm(
+                Host::ShuffleDword,
+                RESULT,
+                Rm::Xmm(RESULT),
+                LOW_DWORDS_FROM_QWORDS,
+                target,
+            );
+            code.asm().cvtdq2pd(RESULT, Rm::Xmm(RESULT));
         }
         (Direction::ToInteger, Format::Single) => {
-            code.extend(CVTTPS2DQ);
-            code.push(MODRM_REGISTER | (RESULT << MODRM_REGISTER_SHIFT) | RESULT);
+            code.asm().cvttps2dq(RESULT, Rm::Xmm(RESULT));
         }
         _ => unreachable!("packed mapping was checked before emission"),
     }
@@ -565,12 +572,13 @@ pub(in crate::x86_64) fn emit(
     )?;
     match conversion.direction {
         Direction::FromInteger => rounding_control(code),
-        Direction::ToInteger => code.extend(XOR_EAX_EAX), // CVTT ignores RC.
+        // CVTT ignores RC.
+        Direction::ToInteger => code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax),
     }
     numerical::install_mxcsr(code, &frame);
     if manual_inexact {
         // This is an approved guest-IXC bitmask, not a Boolean or host status.
-        code.extend(XOR_R10D_R10D);
+        code.asm().alu(Alu::Xor, Size::Dword, R10, R10);
     }
     if half_forward {
         half_integer::prepare_to_integer(code, target);
@@ -641,18 +649,22 @@ pub(in crate::x86_64) fn emit(
     // All admitted conversions can raise only guest IXC. Earlier chunks and
     // caller MXCSR remain untouched if any later lane needs exact completion.
     numerical::capture_status(code, &frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, &mut failures);
-    code.extend(MOV_EAX_ECX);
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(MXCSR_PRECISION.to_le_bytes());
-    code.extend(SHR_EAX_IMMEDIATE);
-    code.push(MXCSR_TO_FPSR_PRECISION_SHIFT);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, Rcx);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_PRECISION as i32);
+    asm.shift_imm(
+        ShiftOp::Shr,
+        Size::Dword,
+        Rax,
+        MXCSR_TO_FPSR_PRECISION_SHIFT,
+    );
     if manual_inexact {
-        code.extend(OR_EAX_R10D);
-        code.push(AND_EAX_IMMEDIATE);
-        code.extend(INEXACT.to_le_bytes());
+        let mut asm = code.asm();
+        asm.alu(Alu::Or, Size::Dword, Rax, R10);
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, INEXACT as i32);
     }
     numerical::add_fpsr(code, &frame);
     numerical::finish(code, &frame, &failures, pc, target);

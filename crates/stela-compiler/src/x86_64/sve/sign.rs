@@ -1,5 +1,6 @@
 //! SVE predicated FABS and FNEG by integer masking; no FP exceptions.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rcx, Rdi};
+use crate::x86_64::asm::{Code, Cond, Mem, Rm, Size};
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
@@ -21,16 +22,10 @@ const HIGH_GREATER: u8 = 4;
 const ZERO: u8 = 5;
 const ACTIVE: u8 = 6;
 const PREDICATE_SCRATCH: u8 = 7;
-const XMM_GPR_RCX: u8 = 1;
 const BITS_PER_BYTE: u8 = 8;
 const QWORD_BYTES: u8 = 8;
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_FIELD_SHIFT: u8 = 3;
 const BROADCAST_HIGH_DWORDS: u8 = 0xf5;
 const BROADCAST_LOW_DWORDS: u8 = 0xa0;
-const TEST_STATE_IMM32: &[u8] = &[0xf7, 0x87];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const MOV_RCX_IMM64: &[u8] = &[0x48, 0xb9];
 const HALF_INFINITY: u64 = 0x7c00;
 const SINGLE_INFINITY: u64 = 0x7f80_0000;
 const DOUBLE_INFINITY: u64 = 0x7ff0_0000_0000_0000;
@@ -40,8 +35,13 @@ fn packed(code: &mut Code, opcode: SimdOpcode, destination: u8, source: u8, targ
 }
 
 fn shuffle(code: &mut Code, register: u8, control: u8, target: TargetCpu) {
-    packed(code, SimdOpcode::ShuffleDword, register, register, target);
-    code.push(control);
+    code.asm().simd_imm(
+        SimdOpcode::ShuffleDword,
+        register,
+        Rm::Xmm(register),
+        control,
+        target,
+    );
 }
 
 fn infinity(code: &mut Code, format: Format, target: TargetCpu) {
@@ -54,21 +54,20 @@ fn infinity(code: &mut Code, format: Format, target: TargetCpu) {
     for index in 0..QWORD_BYTES / lane_bytes {
         low |= lane << (index * lane_bytes * BITS_PER_BYTE);
     }
-    code.extend(MOV_RCX_IMM64);
-    code.extend(low.to_le_bytes());
-    // MOVQ's source field denotes a GPR, unlike the other packed helpers.
-    SimdOpcode::MoveGprQword.append(code, target);
-    code.push(REGISTER_DIRECT | (INFINITY << REGISTER_FIELD_SHIFT) | XMM_GPR_RCX);
+    let mut asm = code.asm();
+    asm.mov_imm64(Rcx, low);
+    asm.simd(SimdOpcode::MoveGprQword, INFINITY, Rcx, target);
     packed(code, SimdOpcode::UnpackLowQword, INFINITY, INFINITY, target);
 }
 
 fn suppress_nan_sign(code: &mut Code, format: Format, target: TargetCpu) {
-    code.extend(TEST_STATE_IMM32);
-    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(FPCR_AH.to_le_bytes());
-    code.extend(JZ_REL32);
-    let ordinary_patch = code.len();
-    code.extend(0i32.to_le_bytes());
+    let mut asm = code.asm();
+    asm.test_imm32(
+        Size::Dword,
+        Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
+        FPCR_AH as i32,
+    );
+    let ordinary = asm.jcc(Cond::E);
 
     packed(code, SimdOpcode::MoveAligned, SELECTED_SIGN, SIGN, target);
     packed(code, SimdOpcode::AndNot, SELECTED_SIGN, SOURCE, target);
@@ -131,11 +130,7 @@ fn suppress_nan_sign(code: &mut Code, format: Format, target: TargetCpu) {
         }
     }
     packed(code, SimdOpcode::AndNot, SELECTED_SIGN, SIGN, target);
-    let end = code.len();
-    let distance = i32::try_from(end - ordinary_patch - size_of::<i32>())
-        .expect("bounded sign-classification branch");
-    code[ordinary_patch..ordinary_patch + size_of::<i32>()]
-        .copy_from_slice(&distance.to_le_bytes());
+    code.asm().bind(ordinary);
 }
 
 /// Access and profile checks must precede this total, register-only emitter.

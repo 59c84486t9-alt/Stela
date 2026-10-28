@@ -1,5 +1,6 @@
 //! SVE FP comparisons without exceptions; signaling cases use software completion.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Alu, Code, Rm, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -26,12 +27,6 @@ const PREDICATE_SCRATCH: u8 = CLASSIFICATION_SCRATCH[0];
 const CLASSIFICATION_MASKS: [u8; 2] = [6, 7];
 const MAGNITUDE_MASK: u8 = CLASSIFICATION_SCRATCH[0];
 const EAX_REGISTER: u8 = 0;
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_FIELD_SHIFT: u8 = 3;
-const CMPPS: &[u8] = &[0x0f, 0xc2];
-const CMPPD: &[u8] = &[0x66, 0x0f, 0xc2];
-const AND_EAX_IMMEDIATE: &[u8] = &[0x25];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 const SIGN_BITS: u8 = 1;
 
 #[repr(u8)]
@@ -75,15 +70,12 @@ fn compare_mask(code: &mut Code, kind: Kind, format: Format, target: TargetCpu) 
             return LEFT;
         }
     };
-    code.extend(match format {
-        Format::Single => CMPPS,
-        Format::Double => CMPPD,
+    let mut asm = code.asm();
+    match format {
+        Format::Single => asm.cmpps(destination, Rm::Xmm(source), comparison as u8),
+        Format::Double => asm.cmppd(destination, Rm::Xmm(source), comparison as u8),
         Format::Half => unreachable!("native comparison width validated before emission"),
-    });
-    code.extend([
-        REGISTER_DIRECT | (destination << REGISTER_FIELD_SHIFT) | source,
-        comparison as u8,
-    ]);
+    }
     destination
 }
 
@@ -150,10 +142,13 @@ pub(crate) fn emit(
                 Kind::Equal | Kind::GreaterEqual | Kind::LessEqual | Kind::AbsoluteGreaterEqual
             ) {
                 Host::ByteSignMask.register(code, EAX_REGISTER, ACTIVE, target);
-                code.extend(AND_EAX_IMMEDIATE);
-                code.extend(packed_leading_bits(element).to_le_bytes());
+                code.asm().alu_accumulator_imm32(
+                    Alu::And,
+                    Size::Dword,
+                    (packed_leading_bits(element)) as i32,
+                );
             } else {
-                code.extend(XOR_EAX_EAX);
+                code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
             }
         } else {
             if let Some(right) = operand.right {
@@ -173,8 +168,11 @@ pub(crate) fn emit(
             let result = compare_mask(code, operand.kind, operand.format, target);
             Host::And.register(code, result, ACTIVE, target);
             Host::ByteSignMask.register(code, EAX_REGISTER, result, target);
-            code.extend(AND_EAX_IMMEDIATE);
-            code.extend(packed_leading_bits(element).to_le_bytes());
+            code.asm().alu_accumulator_imm32(
+                Alu::And,
+                Size::Dword,
+                (packed_leading_bits(element)) as i32,
+            );
         }
         numerical::stage_predicate_bits16(code, &frame, 0, chunk);
     }
