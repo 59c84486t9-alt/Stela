@@ -333,8 +333,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Err(Stop::Waiting);
             }
             let deadline = self.next_deadline(now);
-            // In parallel, other machines' PEs can still wake this one.
-            if deadline.is_none() && self.parallel.is_none() && !self.devices.waits_on_host() {
+            // Another parallel PE can send an event or start this PE. A
+            // single-PE hub has the same wake sources as a serialized board.
+            let remote_pe = self.parallel.as_ref().is_some_and(|hub| hub.pes() > 1);
+            if deadline.is_none() && !remote_pe && !self.devices.waits_on_host() {
                 return Err(Stop::Idle);
             }
             if let (Some(deadline), true) = (deadline, self.idle_skip) {
@@ -1662,7 +1664,7 @@ mod tests {
             .unwrap();
         machine.settle_processor_power(plan).unwrap();
         machine.host.now = 20;
-        machine.set_idle_skip(true);
+        machine.set_idle_skip(true).unwrap();
         assert_eq!(machine.next_deadline(20), None);
         assert_eq!(machine.schedule(), Err(Stop::Idle));
         assert_eq!(
@@ -2067,6 +2069,31 @@ mod tests {
     }
 
     #[test]
+    fn single_pe_parallel_waits_match_serial() {
+        struct NoKick;
+        impl super::super::parallel::Kick for NoKick {
+            fn kick(&self, _: usize) {}
+        }
+        for (pes, host_wake, expected) in [
+            (1, false, Stop::Idle),
+            (1, true, Stop::Waiting),
+            (2, false, Stop::Waiting),
+            (2, true, Stop::Waiting),
+        ] {
+            let devices = Board {
+                host_wake,
+                ..Board::default()
+            };
+            let identities = (0..pes).map(|pe| identity(pe as u64)).collect();
+            let mut machine = board(&[], devices, identities);
+            let hub = super::super::parallel::Hub::new(pes, NoKick);
+            machine.enter_parallel(hub).unwrap();
+            machine.system_instruction(WFI).unwrap();
+            assert_eq!(machine.schedule(), Err(expected));
+        }
+    }
+
+    #[test]
     fn a_wait_only_the_host_can_end_that_reaches_the_limit_or_owes_the_host_returns_to_it() {
         let mut machine = board(&[], Board::default(), alloc::vec![identity(0)]);
         machine.system_instruction(WFI).unwrap();
@@ -2080,12 +2107,12 @@ mod tests {
         // With a limit, after waiting that long (the fake host's waits last
         // 1000 ticks), and idle skip has no deadline to leap to.
         machine.set_wait_limit(Some(2500));
-        machine.set_idle_skip(true);
+        machine.set_idle_skip(true).unwrap();
         assert_eq!(machine.schedule(), Err(Stop::Waiting));
         assert_eq!(machine.host.now, 3000);
         // The limit bounds the run's waits in all: a later one in the same
         // run returns at once.
-        machine.set_idle_skip(false);
+        machine.set_idle_skip(false).unwrap();
         machine.devices.host_wake = false;
         machine.devices.dma = Some(10_000);
         assert_eq!(machine.schedule(), Err(Stop::Waiting));

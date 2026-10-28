@@ -182,6 +182,7 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
         7,
         0x15,
         0x16,
+        0x1a,
         0x8000_0000,
         0x8000_0001,
         0x8000_0007,

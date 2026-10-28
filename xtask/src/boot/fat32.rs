@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn a_written_volume_chains_each_file_after_its_directories() {
+    fn fat32_chains_files_after_directories() {
         let work = std::env::temp_dir().join(format!("stela-fat32-{}", std::process::id()));
         let tree = work.join("tree");
         fs::create_dir_all(tree.join("EFI/BOOT")).unwrap();

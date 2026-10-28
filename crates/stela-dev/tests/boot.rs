@@ -291,8 +291,8 @@ fn restore_manifest() -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>ProductVersion</key><string>27.0.fixture</string>
-<key>ProductBuildVersion</key><string>FIXTURE</string>
+<key>ProductVersion</key><string>27.0.1</string>
+<key>ProductBuildVersion</key><string>26A434</string>
 <key>SupportedProductTypes</key><array><string>Mac14,3</string></array>
 <key>BuildIdentities</key><array><dict>
 <key>Ap,ProductType</key><string>Mac14,3</string>

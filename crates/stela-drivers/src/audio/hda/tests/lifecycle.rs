@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Included in the existing real command-ring/register model, not a second mock
-// of the production power helper. All cases require central execution gates.
+//! Codec power acknowledgement and transition tests.
+use super::*;
 #[test]
-fn opt_in_codec_power_model_keeps_requested_and_actual_states_distinct_until_ack() {
+fn codec_power_acknowledgement() {
     let mut fixture = Fixture::new();
     let model = analog_model();
     {
@@ -62,7 +62,7 @@ fn opt_in_codec_power_model_keeps_requested_and_actual_states_distinct_until_ack
     controller.shutdown().unwrap();
 }
 #[test]
-fn direct_converter_effect_reservation_survives_lost_ack_and_failed_full_reset() {
+fn reservation_survives_failed_reset() {
     for lost_reply in [false, true] {
         let mut fixture = Fixture::new();
         let model = graph_model();
@@ -107,7 +107,7 @@ fn direct_converter_effect_reservation_survives_lost_ack_and_failed_full_reset()
     }
 }
 #[test]
-fn distinct_direct_stereo_converters_retain_actual_channel_spans_on_one_stream() {
+fn converter_channel_spans() {
     let mut fixture = Fixture::new();
     let model = graph_model();
     model.borrow_mut().parameters.insert((6, 9), 1);

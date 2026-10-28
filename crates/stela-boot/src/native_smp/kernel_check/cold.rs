@@ -202,23 +202,23 @@ pub(super) unsafe fn check(
     // SAFETY: true one-PE diagnostic interface and same actual BSP allocation.
     // All bytes/providers are closed and synchronous; no original guest/DMA.
     let mut machine = unsafe {
-        super::super::canonical::prepare(
+        super::super::canonical::prepare(super::super::canonical::Preparation {
             handoff,
             capture,
             executors,
             sender,
             owner,
-            Arc::clone(&ram),
+            ram: Arc::clone(&ram),
             cpu,
             devices,
-            profile(1)?,
-            0,
-            &[WorkerBinding {
+            profile: profile(1)?,
+            boot_processor: 0,
+            assignments: &[WorkerBinding {
                 pe: 0,
                 worker: WorkerId(0),
             }],
-            &[],
-        )
+            processor_power: &[],
+        })
     }?;
     crate::output::arguments(format_args!(
         "NATIVE COLD source pc={:#x} bytes={code:02x?} warmup=none profile=system-mode+checked-memory\n",

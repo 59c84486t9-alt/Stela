@@ -1,7 +1,7 @@
 //! The shared memory-service call. Instruction families supply predicates,
 //! addresses and load staging; the service performs translation, splitting,
 //! tag checks and writer tracking.
-use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Patch, Size};
 
 use core::mem::offset_of;
 
@@ -125,18 +125,11 @@ pub(crate) fn call(code: &mut Code, request_offset: u32) {
     asm.pop(Gpr::Rdi);
 }
 
-/// Emit a failure branch; patch the returned displacement to family cleanup.
-pub(crate) fn branch_failed(code: &mut Code) -> usize {
+/// Emit a failure branch, which the family resolves to its cleanup.
+pub(crate) fn branch_failed(code: &mut Code) -> Patch {
     let mut asm = code.asm();
     asm.test(Size::Dword, Gpr::Rax, Gpr::Rax);
-    asm.jcc(Cond::Ne).offset()
-}
-
-pub(crate) fn patch_branch(code: &mut [u8], displacement: usize, destination: usize) {
-    let end = displacement + size_of::<i32>();
-    let relative = i32::try_from(destination as i64 - end as i64)
-        .expect("native memory cleanup branch fits rel32");
-    code[displacement..end].copy_from_slice(&relative.to_le_bytes());
+    asm.jcc(Cond::Ne)
 }
 
 /// Record a fault found in emitted code (such as SP misalignment). RAX is the

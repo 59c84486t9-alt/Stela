@@ -83,10 +83,14 @@ impl Prepared {
         self,
         function: &'a mut Function<C>,
     ) -> Result<PciRegisters<'a, MmioRegisters, C>, AttachError> {
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: the prepared range is the caller's exclusively owned,
+        // identity-mapped uncached BAR. Its mapping and PCI power/decode remain
+        // stable for the lifetime of the returned adapter.
         let inner = unsafe { MmioRegisters::claim(self.base, self.bytes) }
             .map_err(|_| AttachError::InvalidBar)?;
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: inner was just claimed from this prepared BAR. The caller
+        // retains its mapping/DMA lifetime and exclusive platform ownership;
+        // bind_registers rechecks the function identity and BAR association.
         unsafe { self.bind_registers(function, inner) }
     }
 }

@@ -10,7 +10,7 @@
 #
 # CFG-OPTIONS go after `--host-check --nor-file GUID:/stela/STELALOG.BIN`
 # in stela.cfg (default: --key-seconds 120 --deadline 1800). STELA_EFI names
-# the stela.efi to install; the default is `cargo xtask boot build --release`'s.
+# the stela.efi to install; the default is `cargo xtask boot build --release --diagnostics`'s.
 set -euo pipefail
 
 EFI=${STELA_EFI:-${0:A:h:h:h}/target/boot/x86_64-unknown-uefi/release/stela.efi}

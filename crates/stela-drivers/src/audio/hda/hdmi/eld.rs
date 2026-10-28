@@ -142,7 +142,7 @@ mod tests {
         b
     }
     #[test]
-    fn sad_constraints_do_not_combine_compressed_or_unrelated_rates_bits_channels() {
+    fn sad_constraints_are_per_descriptor() {
         let eld = Eld::parse(&bytes()).unwrap();
         assert!(eld.supports(PcmFormat {
             rate: 192000,

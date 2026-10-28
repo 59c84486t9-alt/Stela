@@ -621,7 +621,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_medium_is_the_ipsw_in_pieces_that_the_restore_host_joins() {
+    fn medium_parts_reassemble_into_ipsw() {
         let dir = tempfile::tempdir().unwrap();
         let ipsw = ipsw(dir.path());
         let volume = dir.path().join("STELA");
@@ -703,7 +703,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn an_ipsw_that_differs_from_its_receipt_writes_no_manifest() {
+    fn ipsw_receipt_mismatch_blocks_manifest_publication() {
         let dir = tempfile::tempdir().unwrap();
         let ipsw = ipsw(dir.path());
         let volume = dir.path().join("STELA");
@@ -739,7 +739,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_remote_medium_holds_only_the_inventory_and_names_no_partition() {
+    fn remote_medium_uses_inventory_without_partition() {
         let dir = tempfile::tempdir().unwrap();
         let ipsw = ipsw(dir.path());
         let volume = dir.path().join("STELA");

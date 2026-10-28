@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn an_img4_alone_carries_exactly_one_im4p() {
+    fn img4_requires_one_im4p() {
         let file = tlv(
             SEQUENCE,
             &[
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ticket_covers_the_retyped_im4p_its_digest_names() {
+    fn ticket_digest_binds_retyped_im4p() {
         let payload = [
             tlv(IA5, b"IM4P"),
             tlv(IA5, b"sepi"),

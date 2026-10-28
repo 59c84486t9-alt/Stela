@@ -118,7 +118,7 @@ fn parameters(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<u16> {
 mod tests {
     use super::*;
     #[test]
-    fn elevation_preserves_spaced_quoted_and_trailing_backslash_arguments() {
+    fn elevation_preserves_argument_quoting() {
         let arguments = [
             "setup",
             "--ipsw",

@@ -320,7 +320,8 @@ impl Native {
         ensure!(base != libc::MAP_FAILED, "cannot map native blocks");
         let base = base.cast::<u8>();
         for block in blocks {
-            // SAFETY: inside the mapping, which the layout sized.
+            // SAFETY: offsets and bytes were computed from these block lengths;
+            // each code slice is separate from the new writable mmap allocation.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     block.code.as_ptr(),
@@ -329,7 +330,8 @@ impl Native {
                 );
             }
         }
-        // SAFETY: the mapping just made.
+        // SAFETY: base is the page-aligned mmap result and bytes is its full
+        // length; all code writes are complete before changing it to RX.
         let status =
             unsafe { libc::mprotect(base.cast(), bytes, libc::PROT_READ | libc::PROT_EXEC) };
         let native = Self {

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Included by hda.rs's existing Cirrus register/DMA model. Source-only: UNRUN.
+//! Cirrus codec control tests.
+use super::*;
+// Exercises Cirrus controls through the shared command-ring/DMA model.
 mod cs4213 {
     use super::*;
 
@@ -17,7 +19,7 @@ mod cs4213 {
     }
 
     #[test]
-    fn cs4213_uses_actual_dac_range_and_duplex_dma_without_cs4210_processing() {
+    fn cs4213_dac_range_and_duplex() {
         for inherited in [false, true] {
             for raw_steps in [15, 63] {
                 let mut fixture = Fixture::new();
@@ -88,7 +90,7 @@ mod cs4213 {
     }
 
     #[test]
-    fn cs4213_live_dac_authority_loss_quarantines_and_unknown_profiles_stay_explicit() {
+    fn cs4213_invalid_profile_blocks_routes() {
         let mut fixture = Fixture::new();
         let model = device(false, 63);
         let mut controller = create(&model, &mut fixture, config()).unwrap();
@@ -136,7 +138,7 @@ mod power {
     }
 
     #[test]
-    fn cs421x_d3hot_acknowledges_pin_converter_reference_group_order_and_replays_pcm() {
+    fn cs421x_d3hot_replays_pcm() {
         for cs4210 in [false, true] {
             let mut fixture = Fixture::new();
             let model = device(cs4210);
@@ -342,7 +344,7 @@ mod power {
     }
 
     #[test]
-    fn cs421x_raw_bindings_and_suspended_unreserved_converters_cannot_bypass_power_ownership() {
+    fn cs421x_power_ownership_preflight() {
         for capture_only in [false, true] {
             let mut fixture = Fixture::new();
             let model = device(false);
@@ -389,7 +391,7 @@ mod power {
     }
 
     #[test]
-    fn cs421x_power_timeout_and_late_replay_failure_preserve_all_route_owners_until_reset() {
+    fn cs421x_power_failure_retains_routes() {
         for fail_resume in [false, true] {
             let mut fixture = Fixture::new();
             let model = device(false);
@@ -430,7 +432,7 @@ mod power {
             assert!(controller.routes.is_empty() && controller.cirrus_codecs.is_empty());
         }
     }
-    // New shared composition regression. Source-only: UNRUN.
+    // Shared PCI/codec composition regression.
     #[test]
     fn cs421x_suspended_pcm_owner_survives_failed_controller_reset() {
         for cs4210 in [false, true] {

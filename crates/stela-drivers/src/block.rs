@@ -452,6 +452,162 @@ fn range(identity: &Identity, lba: u64, blocks: u64) -> BlockError {
 /// The bytes Write Zeroes writes at a time on a device without it.
 const ZEROES_BYTES: usize = 1024 * 1024;
 
+/// A validated request, split as commands are consumed. Range operations
+/// keep their remaining extent here instead of allocating one descriptor
+/// for every part of the disk.
+struct Plan {
+    request: Request,
+    features: Features,
+    block: usize,
+    piece: usize,
+    done: u64,
+    written: bool,
+    flushed: bool,
+}
+
+impl Plan {
+    fn new(request: Request, identity: &Identity) -> Result<Self, BlockError> {
+        match &request {
+            Request::Read { lba, bytes } => {
+                identity.check(*lba, *bytes)?;
+            }
+            Request::Write { lba, data, .. } => {
+                identity.check_write(*lba, data.len())?;
+            }
+            Request::Discard { lba, blocks } | Request::WriteZeroes { lba, blocks, .. } => {
+                if matches!(request, Request::Discard { .. }) && identity.features.discard.is_none()
+                {
+                    return Err(BlockError::Unsupported("the device takes no discard"));
+                }
+                if identity.read_only {
+                    return Err(BlockError::ReadOnly);
+                }
+                if lba
+                    .checked_add(*blocks)
+                    .is_none_or(|end| end > identity.blocks)
+                {
+                    return Err(BlockError::OutOfRange {
+                        lba: *lba,
+                        blocks: *blocks,
+                        capacity: identity.blocks,
+                    });
+                }
+            }
+            Request::Flush => {}
+        }
+        let block = identity.block_size as usize;
+        let piece = match identity.features.max_transfer / block * block {
+            0 => usize::MAX,
+            bytes => bytes,
+        };
+        Ok(Self {
+            request,
+            features: identity.features,
+            block,
+            piece,
+            done: 0,
+            written: false,
+            flushed: false,
+        })
+    }
+}
+
+impl Iterator for Plan {
+    type Item = (usize, Command);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let limit = |blocks| if blocks == 0 { u64::MAX } else { blocks };
+        let command = match &mut self.request {
+            Request::Read { lba, bytes } => {
+                let offset = self.done as usize;
+                if offset >= *bytes {
+                    return None;
+                }
+                let bytes = self.piece.min(*bytes - offset);
+                self.done += bytes as u64;
+                return Some((
+                    offset,
+                    Command::Read {
+                        lba: *lba + (offset / self.block) as u64,
+                        bytes,
+                    },
+                ));
+            }
+            Request::Write { lba, data, durable } => {
+                let offset = self.done as usize;
+                if offset < data.len() || !self.written {
+                    let bytes = self.piece.min(data.len() - offset);
+                    let part = if offset == 0 && bytes == data.len() {
+                        core::mem::take(data)
+                    } else {
+                        data[offset..offset + bytes].to_vec()
+                    };
+                    self.done += bytes as u64;
+                    self.written = true;
+                    Command::Write {
+                        lba: *lba + (offset / self.block) as u64,
+                        data: part,
+                        fua: *durable && self.features.write_cache && self.features.fua,
+                    }
+                } else if *durable
+                    && self.features.write_cache
+                    && !self.features.fua
+                    && !self.flushed
+                {
+                    self.flushed = true;
+                    Command::Flush
+                } else {
+                    return None;
+                }
+            }
+            Request::Flush => {
+                if !self.features.write_cache || self.flushed {
+                    return None;
+                }
+                self.flushed = true;
+                Command::Flush
+            }
+            Request::Discard { lba, blocks } => {
+                if self.done >= *blocks {
+                    return None;
+                }
+                let blocks = limit(self.features.discard.expect("validated discard"))
+                    .min(*blocks - self.done);
+                let lba = *lba + self.done;
+                self.done += blocks;
+                Command::Discard { lba, blocks }
+            }
+            Request::WriteZeroes { lba, blocks, unmap } => {
+                if self.done >= *blocks {
+                    return None;
+                }
+                let at = *lba + self.done;
+                if let Some(zeroes) = self.features.write_zeroes {
+                    let blocks = limit(zeroes.blocks).min(*blocks - self.done);
+                    self.done += blocks;
+                    Command::WriteZeroes {
+                        lba: at,
+                        blocks,
+                        unmap: *unmap && zeroes.unmap,
+                    }
+                } else {
+                    let per = (self.piece.min(ZEROES_BYTES) / self.block).max(1) as u64;
+                    let blocks = per.min(*blocks - self.done);
+                    self.done += blocks;
+                    Command::Write {
+                        lba: at,
+                        data: vec![0; blocks as usize * self.block],
+                        fua: false,
+                    }
+                }
+            }
+        };
+        Some((0, command))
+    }
+}
+
+type Commands = core::iter::Peekable<core::iter::Flatten<alloc::vec::IntoIter<Plan>>>;
+
 impl Request {
     /// The commands that carry out `self` on a device with `identity`'s
     /// features, each with its byte offset in a read's data, as Linux's
@@ -462,121 +618,18 @@ impl Request {
     /// sends nothing without a cache. Write Zeroes falls back to writing
     /// zeros, as `blkdev_issue_zeroout` does.
     pub fn plan(self, identity: &Identity) -> Result<Vec<(usize, Command)>, BlockError> {
-        let features = identity.features;
-        let block = identity.block_size as usize;
-        let piece = match features.max_transfer / block * block {
-            0 => usize::MAX,
-            bytes => bytes,
-        };
-        let blocks_per = |limit: u64| if limit == 0 { u64::MAX } else { limit };
-        let mut commands = Vec::new();
-        match self {
-            Self::Read { lba, bytes } => {
-                identity.check(lba, bytes)?;
-                let mut done = 0;
-                while done < bytes {
-                    let part = piece.min(bytes - done);
-                    let at = lba + (done / block) as u64;
-                    commands.push((
-                        done,
-                        Command::Read {
-                            lba: at,
-                            bytes: part,
-                        },
-                    ));
-                    done += part;
-                }
-            }
-            Self::Write { lba, data, durable } => {
-                identity.check_write(lba, data.len())?;
-                let fua = durable && features.write_cache && features.fua;
-                let pieces = data.len().div_ceil(piece);
-                if pieces <= 1 {
-                    commands.push((0, Command::Write { lba, data, fua }));
-                } else {
-                    for (index, part) in data.chunks(piece).enumerate() {
-                        let at = lba + (index * piece / block) as u64;
-                        let data = part.to_vec();
-                        commands.push((0, Command::Write { lba: at, data, fua }));
-                    }
-                }
-                if durable && features.write_cache && !features.fua {
-                    commands.push((0, Command::Flush));
-                }
-            }
-            Self::Flush => {
-                if features.write_cache {
-                    commands.push((0, Command::Flush));
-                }
-            }
-            Self::Discard { lba, blocks } => {
-                let Some(limit) = features.discard else {
-                    return Err(BlockError::Unsupported("the device takes no discard"));
-                };
-                identity.check_write(lba, blocks as usize * block)?;
-                let limit = blocks_per(limit);
-                let mut done = 0;
-                while done < blocks {
-                    let part = limit.min(blocks - done);
-                    commands.push((
-                        0,
-                        Command::Discard {
-                            lba: lba + done,
-                            blocks: part,
-                        },
-                    ));
-                    done += part;
-                }
-            }
-            Self::WriteZeroes { lba, blocks, unmap } => {
-                identity.check_write(lba, blocks as usize * block)?;
-                if let Some(zeroes) = features.write_zeroes {
-                    let limit = blocks_per(zeroes.blocks);
-                    let unmap = unmap && zeroes.unmap;
-                    let mut done = 0;
-                    while done < blocks {
-                        let part = limit.min(blocks - done);
-                        let at = lba + done;
-                        commands.push((
-                            0,
-                            Command::WriteZeroes {
-                                lba: at,
-                                blocks: part,
-                                unmap,
-                            },
-                        ));
-                        done += part;
-                    }
-                } else {
-                    let per = (piece.min(ZEROES_BYTES) / block).max(1) as u64;
-                    let mut done = 0;
-                    while done < blocks {
-                        let part = per.min(blocks - done);
-                        let data = vec![0; part as usize * block];
-                        commands.push((
-                            0,
-                            Command::Write {
-                                lba: lba + done,
-                                data,
-                                fua: false,
-                            },
-                        ));
-                        done += part;
-                    }
-                }
-            }
-        }
-        Ok(commands)
+        Ok(Plan::new(self, identity)?.collect())
     }
 
     /// Run `self` on `device` to completion, the caller waiting.
     pub fn run(self, device: &mut (impl BlockDevice + ?Sized)) -> Finished {
-        let read = match &self {
+        let plan = Plan::new(self, device.identity())?;
+        let read = match &plan.request {
             Self::Read { bytes, .. } => Some(*bytes),
             _ => None,
         };
         let mut data = read.map(|bytes| vec![0; bytes]);
-        for (offset, command) in self.plan(device.identity())? {
+        for (offset, command) in plan {
             if let (Some(data), Command::Read { lba, bytes }) = (data.as_mut(), &command) {
                 device.read(*lba, &mut data[offset..offset + bytes])?;
             } else {
@@ -595,7 +648,7 @@ pub type Finished = Result<Option<Vec<u8>>, BlockError>;
 /// flush alone once they completed, as Linux's flush sequence orders them.
 /// A device that runs no queued commands runs each where it is polled.
 pub struct Submission {
-    commands: VecDeque<(usize, Command)>,
+    commands: Commands,
     /// The started commands: each tag, a read's offset in the data, and
     /// whether it is a flush.
     running: Vec<(u32, usize, bool)>,
@@ -605,12 +658,13 @@ pub struct Submission {
 
 impl Submission {
     pub fn new(request: Request, identity: &Identity) -> Result<Self, BlockError> {
-        let data = match &request {
+        let plan = Plan::new(request, identity)?;
+        let data = match &plan.request {
             Request::Read { bytes, .. } => Some(vec![0; *bytes]),
             _ => None,
         };
         Ok(Self {
-            commands: request.plan(identity)?.into(),
+            commands: vec![plan].into_iter().flatten().peekable(),
             running: Vec::new(),
             data,
             failed: None,
@@ -623,15 +677,15 @@ impl Submission {
         if let [Request::Read { .. }] = requests.as_slice() {
             return Self::new(requests.into_iter().next().unwrap(), identity);
         }
-        let mut commands = VecDeque::new();
+        let mut plans = Vec::with_capacity(requests.len());
         for request in requests {
             if let Request::Read { .. } = request {
                 return Err(BlockError::Protocol("a read in a batch of requests"));
             }
-            commands.extend(request.plan(identity)?);
+            plans.push(Plan::new(request, identity)?);
         }
         Ok(Self {
-            commands,
+            commands: plans.into_iter().flatten().peekable(),
             running: Vec::new(),
             data: None,
             failed: None,
@@ -654,7 +708,7 @@ impl Submission {
             self.completed(offset, result);
         }
         while self.failed.is_none() {
-            let Some((_, command)) = self.commands.front() else {
+            let Some((_, command)) = self.commands.peek() else {
                 break;
             };
             let flush = matches!(command, Command::Flush);
@@ -662,7 +716,7 @@ impl Submission {
                 break;
             }
             if device.depth() == 0 {
-                let (offset, command) = self.commands.pop_front().unwrap();
+                let (offset, command) = self.commands.next().unwrap();
                 let result = device.execute(command);
                 self.completed(offset, result);
                 continue;
@@ -670,13 +724,13 @@ impl Submission {
             if !device.room() {
                 break;
             }
-            let (offset, command) = self.commands.pop_front().unwrap();
+            let (offset, command) = self.commands.next().unwrap();
             match device.start(command) {
                 Ok(tag) => self.running.push((tag, offset, flush)),
                 Err(error) => self.failed = Some(error),
             }
         }
-        if !self.running.is_empty() || (self.failed.is_none() && !self.commands.is_empty()) {
+        if !self.running.is_empty() || (self.failed.is_none() && self.commands.peek().is_some()) {
             return None;
         }
         Some(match self.failed.take() {
@@ -1364,11 +1418,14 @@ impl BlockDevice for Window {
     }
 
     fn room(&self) -> bool {
-        true
+        self.started.len() < WINDOW_DEPTH
     }
 
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
         let command = command.within(&self.identity, self.first)?;
+        if !self.room() {
+            return Err(BlockError::Protocol("the disk window queue is full"));
+        }
         let ticket = self.disk.lock().submit(command);
         self.started.push(ticket);
         Ok(ticket)
@@ -1972,6 +2029,44 @@ mod tests {
     }
 
     #[test]
+    fn bulk_submission_respects_window_capacity() {
+        let blocks = 2 * WINDOW_DEPTH + 3;
+        let data: Vec<u8> = (0..blocks * 512).map(|byte| (byte / 512) as u8).collect();
+        let mut ram = RamDisk::new("bounded", blocks as u64, 512);
+        ram.identity.features.max_transfer = 512;
+        ram.write(0, &data).unwrap();
+        let (delayed, (released, _, given)) = Delayed::new(ram, 1);
+        let disk = Shared::new(Box::new(delayed));
+        let mut window = disk.whole();
+        let mut submission = Submission::new(
+            Request::Read {
+                lba: 0,
+                bytes: data.len(),
+            },
+            window.identity(),
+        )
+        .unwrap();
+        assert_eq!(submission.poll(&mut window), None);
+        assert!(!window.room());
+        assert_eq!(given.borrow().len(), 1);
+        assert_eq!(
+            window.start(Command::Read { lba: 0, bytes: 512 }),
+            Err(BlockError::Protocol("the disk window queue is full"))
+        );
+        released.set(usize::MAX);
+        let mut completed = None;
+        for _ in 0..blocks.div_ceil(WINDOW_DEPTH) {
+            if let Some(result) = submission.poll(&mut window) {
+                completed = Some(result);
+                break;
+            }
+        }
+        assert_eq!(completed, Some(Ok(Some(data))));
+        assert!(window.room());
+        assert_eq!(given.borrow().len(), blocks);
+    }
+
+    #[test]
     fn adjoining_waiting_commands_reach_the_device_as_one() {
         let (delayed, (released, _, given)) = Delayed::new(RamDisk::new("m", 64, 512), 1);
         let disk = Shared::new(Box::new(delayed));
@@ -2142,6 +2237,197 @@ mod tests {
         assert_eq!(submission.poll(&mut delayed), Some(Ok(None)));
         assert_eq!(delayed.disk.flushes, 1);
         assert_eq!(&delayed.disk.bytes[..1536], &[5; 1536]);
+    }
+
+    #[test]
+    fn range_plans_keep_chunk_sizes_and_unmap_permissions() {
+        let mut identity = cached(false, 1024);
+        identity.features.discard = Some(2);
+        identity.features.write_zeroes = Some(WriteZeroes {
+            blocks: 3,
+            unmap: false,
+        });
+        let commands = |request: Request, identity: &Identity| {
+            Plan::new(request, identity)
+                .unwrap()
+                .map(|(_, command)| command)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            commands(Request::Discard { lba: 4, blocks: 7 }, &identity),
+            [(4, 2), (6, 2), (8, 2), (10, 1)].map(|(lba, blocks)| Command::Discard { lba, blocks })
+        );
+        for allowed in [false, true] {
+            identity.features.write_zeroes.as_mut().unwrap().unmap = allowed;
+            for requested in [false, true] {
+                assert_eq!(
+                    commands(
+                        Request::WriteZeroes {
+                            lba: 4,
+                            blocks: 7,
+                            unmap: requested,
+                        },
+                        &identity,
+                    ),
+                    [(4, 3), (7, 3), (10, 1)].map(|(lba, blocks)| Command::WriteZeroes {
+                        lba,
+                        blocks,
+                        unmap: allowed && requested,
+                    })
+                );
+            }
+        }
+        identity.features.discard = Some(0);
+        assert_eq!(
+            commands(Request::Discard { lba: 4, blocks: 7 }, &identity),
+            [Command::Discard { lba: 4, blocks: 7 }]
+        );
+        identity.features.write_zeroes.as_mut().unwrap().blocks = 0;
+        assert_eq!(
+            commands(
+                Request::WriteZeroes {
+                    lba: 4,
+                    blocks: 7,
+                    unmap: true
+                },
+                &identity,
+            ),
+            [Command::WriteZeroes {
+                lba: 4,
+                blocks: 7,
+                unmap: true
+            }]
+        );
+    }
+
+    #[test]
+    fn batch_preflight_rejects_later_invalid_requests() {
+        let mut identity = cached(false, 512);
+        identity.features.discard = Some(2);
+        for invalid in [
+            Request::Write {
+                lba: 0,
+                data: vec![0; 1],
+                durable: false,
+            },
+            Request::Discard { lba: 63, blocks: 2 },
+            Request::WriteZeroes {
+                lba: 1,
+                blocks: u64::MAX,
+                unmap: false,
+            },
+            Request::Read { lba: 0, bytes: 512 },
+        ] {
+            assert!(
+                Submission::batch(
+                    vec![
+                        Request::Write {
+                            lba: 0,
+                            data: vec![5; 512],
+                            durable: true
+                        },
+                        invalid
+                    ],
+                    &identity,
+                )
+                .is_err()
+            );
+        }
+        identity.read_only = true;
+        assert!(matches!(
+            Submission::new(
+                Request::WriteZeroes {
+                    lba: 0,
+                    blocks: 1,
+                    unmap: false
+                },
+                &identity
+            ),
+            Err(BlockError::ReadOnly)
+        ));
+        identity.read_only = false;
+        identity.features.discard = None;
+        assert!(matches!(
+            Submission::new(Request::Discard { lba: 0, blocks: 1 }, &identity),
+            Err(BlockError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn durable_write_flush_waits_across_window_refills() {
+        let blocks = WINDOW_DEPTH + 5;
+        let mut ram = RamDisk::new("flush", blocks as u64, 512);
+        ram.identity.features = cached(false, 512).features;
+        let (delayed, (released, _, given)) = Delayed::new(ram, 2);
+        let mut window = Shared::new(Box::new(delayed)).whole();
+        let data = vec![0x5a; blocks * 512];
+        let mut submission = Submission::new(
+            Request::Write {
+                lba: 0,
+                data: data.clone(),
+                durable: true,
+            },
+            window.identity(),
+        )
+        .unwrap();
+        assert_eq!(submission.poll(&mut window), None);
+        assert!(!window.room());
+        released.set(usize::MAX);
+        assert_eq!(submission.poll(&mut window), None);
+        assert!(!given.borrow().contains(&Command::Flush));
+        assert_eq!(submission.poll(&mut window), None);
+        assert_eq!(given.borrow().last(), Some(&Command::Flush));
+        assert_eq!(submission.poll(&mut window), Some(Ok(None)));
+        assert_eq!(
+            given
+                .borrow()
+                .iter()
+                .filter(|cmd| **cmd == Command::Flush)
+                .count(),
+            1
+        );
+        let mut read = vec![0; data.len()];
+        window.read(0, &mut read).unwrap();
+        assert_eq!(read, data);
+    }
+
+    #[test]
+    fn streamed_zero_fallback_preserves_surrounding_blocks() {
+        let mut ram = RamDisk::new("zero", 8, 512);
+        ram.bytes.fill(0x5a);
+        ram.identity.features.max_transfer = 1024;
+        assert_eq!(
+            (Request::WriteZeroes {
+                lba: 1,
+                blocks: 5,
+                unmap: true
+            })
+            .run(&mut ram),
+            Ok(None)
+        );
+        assert_eq!(&ram.bytes[..512], &[0x5a; 512]);
+        assert!(ram.bytes[512..6 * 512].iter().all(|&byte| byte == 0));
+        assert!(ram.bytes[6 * 512..].iter().all(|&byte| byte == 0x5a));
+        assert_eq!(
+            Request::Write {
+                lba: 0,
+                data: vec![],
+                durable: true
+            }
+            .plan(&cached(false, 512))
+            .unwrap(),
+            [
+                (
+                    0,
+                    Command::Write {
+                        lba: 0,
+                        data: vec![],
+                        fua: false
+                    }
+                ),
+                (0, Command::Flush),
+            ]
+        );
     }
 
     #[test]

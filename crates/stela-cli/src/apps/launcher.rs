@@ -278,7 +278,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_launcher_carries_the_app_s_name_icon_and_types_and_is_signed() -> Result<()> {
+    fn launcher_preserves_app_metadata_and_signs() -> Result<()> {
         let work = tempfile::tempdir()?;
         let original = app(work.path(), "Arm", ARM64)?;
         let before = fs::read(original.join("Contents/Info.plist"))?;

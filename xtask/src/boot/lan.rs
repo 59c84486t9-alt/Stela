@@ -883,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn the_runtime_stack_leases_resolves_and_posts_through_the_peer_to_a_host_server() {
+    fn runtime_stack_leases_resolves_and_posts() {
         let server = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = server.local_addr().unwrap().port();
         let served = thread::spawn(move || {
@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_host_port_resets_the_guest_connection() {
+    fn closed_host_port_resets_guest_connection() {
         let closed = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = closed.local_addr().unwrap().port();
         drop(closed);

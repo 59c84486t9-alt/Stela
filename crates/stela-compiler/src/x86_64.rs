@@ -12,8 +12,6 @@ use alloc::vec::Vec;
 
 pub struct Emitter;
 
-pub(crate) const NOP: u8 = 0x90;
-
 /// Check semantic host requirements before either leaf or block emission.
 pub(crate) fn validate_target(
     instruction: &Instruction,
@@ -940,13 +938,6 @@ fn jump(
     fixups.push((pc, target, patch.offset()));
 }
 
-/// Evaluate ARM conditions from saved NZCV, independent of incidental host
-/// flags: the second opcode byte of the `jcc rel32` taken when it holds.
-fn condition(code: &mut Code, condition: u8) -> Option<u8> {
-    const JCC_REL32: u8 = 0x80;
-    condition_holds(code, condition, false).map(|cond| JCC_REL32 | cond as u8)
-}
-
 /// The host condition under which ARM `condition` holds, from saved NZCV or
 /// from the NZCV word already in EAX when `loaded` ([`Rax::Nzcv`]). Clobbers
 /// EAX and ECX.
@@ -1065,9 +1056,9 @@ fn store_nzcv(asm: &mut asm::Asm) {
     asm.mov_store(asm::Size::Dword, frame(NZCV), asm::Gpr::Rax);
 }
 
-/// The bytes of the capture's `lea eax,[rax+rdx*4]`, which the region cost
-/// gates find it by.
-pub(crate) const CAPTURE_COMBINE: [u8; 3] = [0x8d, 0x04, 0x90];
+/// Expected bytes of the capture's `lea eax,[rax+rdx*4]`.
+#[cfg(test)]
+const CAPTURE_COMBINE: [u8; 3] = [0x8d, 0x04, 0x90];
 /// The scale of the capture's LEA: C and V move above N and Z.
 const CAPTURE_CARRY_SHIFT: u8 = 2;
 /// The SETcc bytes' low bits.

@@ -41,7 +41,7 @@ impl Check {
         arguments: &Run,
         output: &Path,
         serial: &str,
-    ) -> Result<Option<Result<Value, &'static str>>> {
+    ) -> Result<Option<Result<Value, network_check::VerificationError>>> {
         let peer_path = output.join(if arguments.usb_network {
             "usb-network.log"
         } else {

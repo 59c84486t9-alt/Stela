@@ -88,6 +88,7 @@ pub enum Base {
 }
 
 impl Base {
+    /// Parse and check one option line.
     pub fn parse(text: &str) -> Result<Self, &'static str> {
         let Some(register) = text.strip_prefix('x') else {
             return Ok(Self::Address(number(text)?));
@@ -423,7 +424,23 @@ impl System {
         Ok(options)
     }
 
-    /// Parse and check one option line.
+    /// The first authored fixture requested by these typed options. Shared
+    /// parsing remains stable across mounts; production mounts reject a fixture
+    /// before taking over hardware.
+    pub fn diagnostic_option(&self) -> Option<&'static str> {
+        [
+            (self.native_memory_check, "--native-memory-check"),
+            (self.native_mmio_check, "--native-mmio-check"),
+            (self.native_clock_check, "--native-clock-check"),
+            (self.native_bootstrap_check, "--native-bootstrap-check"),
+            (self.native_shared_check, "--native-shared-check"),
+            (self.audio_check.is_some(), "--audio-check"),
+            (self.network_check.is_some(), "--network-check"),
+        ]
+        .into_iter()
+        .find_map(|(enabled, flag)| enabled.then_some(flag))
+    }
+
     pub fn parse(text: &str) -> Result<Self, &'static str> {
         let mut options = Self::default();
         let mut words = text.split_ascii_whitespace();
@@ -1051,6 +1068,31 @@ impl fmt::Display for HostCheck {
 mod tests {
     use super::*;
     use alloc::{format, string::ToString, vec};
+
+    #[test]
+    fn diagnostic_options_are_typed() {
+        for text in ["--system", "--system --wifi --native-memory-check"] {
+            assert_eq!(System::parse(text).unwrap().diagnostic_option(), None);
+        }
+        for (text, flag) in [
+            ("--system --native-memory-check", "--native-memory-check"),
+            (
+                "--system --native-cores 1 --native-clock-check",
+                "--native-clock-check",
+            ),
+            ("--system --native-mmio-check", "--native-mmio-check"),
+            (
+                "--system --native-cores 2 --native-bootstrap-check",
+                "--native-bootstrap-check",
+            ),
+            (
+                "--system --native-cores 2 --native-shared-check",
+                "--native-shared-check",
+            ),
+        ] {
+            assert_eq!(System::parse(text).unwrap().diagnostic_option(), Some(flag));
+        }
+    }
 
     #[test]
     fn host_check_lines_round_trip_and_refuse_combined_fixtures() {

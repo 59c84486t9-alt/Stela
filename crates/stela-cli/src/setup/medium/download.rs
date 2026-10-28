@@ -227,8 +227,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn streamed_download_is_a_verified_local_medium_and_bad_downloads_never_publish() -> Result<()>
-    {
+    fn download_verifies_before_publication() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let ipsw = temp.path().join("source.ipsw");
         crate::efi::synthetic_ipsw(&ipsw)?;

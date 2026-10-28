@@ -243,7 +243,8 @@ impl Arena {
         };
         ensure!(base != libc::MAP_FAILED, "cannot map the bench arena");
         if base as u64 != ARENA {
-            // SAFETY: the mapping just made.
+            // SAFETY: base and bytes identify the complete successful mmap result;
+            // no reference or function pointer into it has been published.
             unsafe { libc::munmap(base, bytes) };
             bail!("the bench arena's address {ARENA:#x} is in use");
         }
@@ -260,7 +261,8 @@ impl Arena {
 
     pub(super) fn write(&mut self, offset: usize, data: &[u8]) {
         assert!(offset + data.len() <= self.bytes);
-        // SAFETY: inside the mapping.
+        // SAFETY: the asserted range fits this value's writable mapping; data
+        // is a separate Rust slice, so the source and destination do not overlap.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.base.add(offset), data.len()) };
     }
 

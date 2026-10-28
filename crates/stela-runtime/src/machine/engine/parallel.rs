@@ -1452,6 +1452,52 @@ mod tests {
     }
 
     #[test]
+    fn parallel_pes_refuse_independent_idle_leaps() {
+        use super::super::tests::{BASE, board};
+        use {crate::machine::engine::NoDevices, stela_contracts::identity::Identity};
+
+        let identities = (0..2)
+            .map(|pe| Identity {
+                midr: 0x611f_0320,
+                mpidr: 0x8000_0000 | pe << 8,
+                clock: None,
+                caches: None,
+            })
+            .collect::<Vec<_>>();
+        let mut home = board(&[], NoDevices, identities.clone());
+        let prepared = board(&[], NoDevices, identities);
+        let mut worker = Machine::new_at(
+            prepared.cpu,
+            prepared.host,
+            prepared.devices,
+            prepared.profile,
+            prepared.target,
+            1,
+        )
+        .unwrap();
+        home.set_idle_skip(true).unwrap();
+        let (hub, _) = hub(2);
+        home.enter_parallel(Arc::clone(&hub)).unwrap();
+        worker
+            .start_parallel(hub, home.cpu.core_locks.clone(), BASE)
+            .unwrap();
+        for machine in [&mut home, &mut worker] {
+            assert!(!machine.idle_skip);
+            assert_eq!(
+                machine.set_idle_skip(true),
+                Err("idle skipping requires all PEs to share one scheduler")
+            );
+            assert!(!machine.idle_skip);
+            machine.set_idle_skip(false).unwrap();
+            machine.host.now = 1000;
+        }
+        assert_eq!(home.now(), worker.now());
+        home.host.now = 2000;
+        worker.host.now = 2000;
+        assert_eq!(home.now(), worker.now());
+    }
+
+    #[test]
     fn mail_reaches_running_pes_and_kicks_only_a_sleeping_one() {
         let (hub, kicks) = hub(3);
         hub.event(0);

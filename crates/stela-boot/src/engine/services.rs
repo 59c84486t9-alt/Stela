@@ -3,10 +3,10 @@
 //! ([`native_mmio::Source`]), DMA pages from the native allocator, DMA
 //! domains, and the firmware's ACPI namespace.
 //!
-//! The firmware's remapping units are off after ExitBootServices
-//! (`native_dma::release_firmware_units`), so every requester's DMA reaches
-//! physical memory untranslated: each domain is the passthrough domain over
-//! the native allocator's pages, reported once.
+//! Remapping units cover each discovered requester with the driver's DMA
+//! window before probe starts devices. A claimed requester receives its own
+//! domain. Hosts without an active remapper use a passthrough domain and
+//! report unrestricted DMA once.
 use super::aml::HostAcpi;
 use crate::{native_memory, native_mmio, output};
 use alloc::sync::Arc;
@@ -229,6 +229,10 @@ impl<'a> Services<'a> {
 // requesters have with the remapping units off. The ACPI namespace is
 // offered only with the i8042's interrupts masked.
 unsafe impl NativeServices for Services<'_> {
+    fn entropy(&self) -> Result<Arc<dyn stela_drivers::entropy::Entropy>, ServiceError> {
+        crate::random::source()
+    }
+
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
         let mut config = self.config(address)?;
         self.stop(&mut config);

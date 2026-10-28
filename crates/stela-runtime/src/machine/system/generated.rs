@@ -19,10 +19,12 @@
     non_camel_case_types,
     reason = "Arm-derived output preserves vendor names, folded branches and helper shapes"
 )]
-use super::{
-    Accessor, AtAccess, Broadcast, CacheOp, CacheScope, CacheType, Chip, Context, Effect,
-    ErrorRecord, Limit, Operation, Pstate, Regime, Restrict, Stage, Tlbi, TlbiAttr, TlbiKind,
-    TlbiLevel, WithheldLayout, helpers::*,
+use {
+    super::Accessor, super::AtAccess, super::Broadcast, super::CacheOp, super::CacheScope,
+    super::CacheType, super::Context, super::Effect, super::ErrorRecord, super::Limit,
+    super::Operation, super::Pstate, super::Regime, super::Restrict, super::Stage, super::Tlbi,
+    super::TlbiAttr, super::TlbiKind, super::TlbiLevel, super::WithheldLayout, super::helpers::*,
+    stela_contracts::Chip,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -26,8 +26,19 @@ pub const BSP: u32 = 1;
 pub const ENABLED: u32 = 1 << 1;
 pub const HEALTHY: u32 = 1 << 2;
 
-/// The coordinates are the original UEFI MP Services Location/Location2
-/// fields. Legacy coordinates flatten the core identity within a package.
+/// Number of guest PEs admitted by both the retained host roster and the
+/// source profile. Extra default workers stay parked; an explicit request
+/// must fit both inventories.
+pub fn guest_assignment_count(
+    requested: Option<usize>,
+    available: usize,
+    source_slots: usize,
+) -> Result<usize, &'static str> {
+    assignment_count(requested, available.min(source_slots))
+}
+
+/// Coordinates copied from UEFI MP Services Location/Location2. Legacy
+/// coordinates flatten the core identity within a package.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
@@ -72,6 +83,109 @@ pub struct Cpuid {
 pub struct Msr {
     pub index: u32,
     pub value: u64,
+}
+
+/// The core class reported by the processor's CPUID interface. Unknown
+/// includes unsupported leaves and reserved class values.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CoreClass {
+    #[default]
+    Unknown,
+    Performance,
+    Efficiency,
+    LowPower,
+}
+
+/// Invalid input to a host/guest core assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementError {
+    Cardinality,
+    Capacity,
+    Bootstrap,
+}
+
+/// Assign guest slots to host indices without changing guest slot order.
+/// Host index zero runs the guest boot slot. Exact class matches are reserved
+/// before an unmatched guest can consume another class's worker. Unknown
+/// workers, then other unused workers, fill any remaining slots in host order.
+/// Homogeneous host classes keep the original BSP-first assignment.
+pub fn placement(
+    guest: &[CoreClass],
+    host: &[CoreClass],
+    boot: usize,
+) -> Result<Vec<usize>, PlacementError> {
+    if guest.is_empty() || guest.len() != host.len() {
+        return Err(PlacementError::Cardinality);
+    }
+    if guest.len() > MAX_CORES {
+        return Err(PlacementError::Capacity);
+    }
+    if boot >= guest.len() {
+        return Err(PlacementError::Bootstrap);
+    }
+    let original: Vec<_> = (0..guest.len())
+        .map(|slot| {
+            if slot == boot {
+                0
+            } else if slot < boot {
+                slot + 1
+            } else {
+                slot
+            }
+        })
+        .collect();
+    if host.windows(2).all(|pair| pair[0] == pair[1]) {
+        return Ok(original);
+    }
+    let mut assigned = alloc::vec![usize::MAX; guest.len()];
+    let mut used = alloc::vec![false; host.len()];
+    assigned[boot] = 0;
+    used[0] = true;
+    for (slot, class) in guest.iter().enumerate() {
+        if assigned[slot] != usize::MAX || *class == CoreClass::Unknown {
+            continue;
+        }
+        if let Some(worker) = host
+            .iter()
+            .enumerate()
+            .position(|(worker, kind)| !used[worker] && kind == class)
+        {
+            assigned[slot] = worker;
+            used[worker] = true;
+        }
+    }
+    // Low-power and efficiency cores can host the other's E-class work once
+    // every exact match has been reserved.
+    for (slot, class) in guest.iter().enumerate() {
+        let alternate = match class {
+            CoreClass::Efficiency => CoreClass::LowPower,
+            CoreClass::LowPower => CoreClass::Efficiency,
+            _ => continue,
+        };
+        if assigned[slot] == usize::MAX
+            && let Some(worker) = host
+                .iter()
+                .enumerate()
+                .position(|(worker, kind)| !used[worker] && *kind == alternate)
+        {
+            assigned[slot] = worker;
+            used[worker] = true;
+        }
+    }
+    for unknown_only in [true, false] {
+        for worker in &mut assigned {
+            if *worker != usize::MAX {
+                continue;
+            }
+            if let Some(index) = host.iter().enumerate().position(|(index, kind)| {
+                !used[index] && (!unknown_only || *kind == CoreClass::Unknown)
+            }) {
+                *worker = index;
+                used[index] = true;
+            }
+        }
+    }
+    Ok(assigned)
 }
 
 #[repr(C)]
@@ -156,6 +270,49 @@ impl Snapshot {
     pub fn matches(&self, processor: Processor) -> bool {
         self.apic_id()
             .is_some_and(|id| u64::from(id) == processor.apic_id)
+    }
+
+    /// Intel SDM CPUID.1AH and AMD CPUID.80000026H, decoded as Linux's
+    /// `get_topology_cpu_type` and `parse_topology_amd` do. Each snapshot
+    /// belongs to one processor; the BSP's class cannot describe an AP.
+    pub fn core_class(&self) -> CoreClass {
+        use stela_compiler::TargetCpu;
+        let Some(identity) = self.get(0, 0) else {
+            return CoreClass::Unknown;
+        };
+        match [identity.ebx, identity.edx, identity.ecx] {
+            TargetCpu::INTEL_VENDOR if identity.eax >= 0x1a => {
+                // Intel permits this leaf on non-hybrid processors too.
+                match self.get(0x1a, 0).map(|record| record.eax >> 24) {
+                    Some(0x20) => CoreClass::Efficiency,
+                    Some(0x40) => CoreClass::Performance,
+                    _ => CoreClass::Unknown,
+                }
+            }
+            TargetCpu::AMD_VENDOR
+                if self
+                    .get(0x8000_0000, 0)
+                    .is_some_and(|record| record.eax >= 0x8000_0026) =>
+            {
+                let Some(record) = self.get(0x8000_0026, 0) else {
+                    return CoreClass::Unknown;
+                };
+                // A valid level with the Heterogeneous Core Topology bit.
+                if record.eax & (1 << 30) == 0
+                    || record.ebx & 0xffff == 0
+                    || record.ecx >> 8 & 0xff == 0
+                {
+                    return CoreClass::Unknown;
+                }
+                match record.ebx >> 28 {
+                    0 => CoreClass::Performance,
+                    1 => CoreClass::Efficiency,
+                    2 => CoreClass::LowPower,
+                    _ => CoreClass::Unknown,
+                }
+            }
+            _ => CoreClass::Unknown,
+        }
     }
 }
 
@@ -437,6 +594,206 @@ mod tests {
             },
             thread,
         }
+    }
+
+    fn classified_snapshot(vendor: [u32; 3], maximum: u32, class: Cpuid) -> Snapshot {
+        let mut snapshot = Snapshot::default();
+        snapshot.records[0] = Cpuid {
+            leaf: 0,
+            eax: maximum,
+            ebx: vendor[0],
+            edx: vendor[1],
+            ecx: vendor[2],
+            ..Cpuid::default()
+        };
+        snapshot.records[1] = Cpuid {
+            leaf: 0x8000_0000,
+            eax: 0x8000_0026,
+            ..Cpuid::default()
+        };
+        snapshot.records[2] = class;
+        snapshot.count = 3;
+        snapshot
+    }
+
+    #[test]
+    fn guest_assignment_fits_source_and_preserves_explicit_requests() {
+        for available in [1, 8, 64, 128] {
+            assert_eq!(
+                guest_assignment_count(None, available, 8),
+                Ok(available.min(8))
+            );
+        }
+        assert_eq!(guest_assignment_count(Some(4), 64, 8), Ok(4));
+        for (request, available, source) in [
+            (Some(9), 64, 8),
+            (Some(4), 2, 8),
+            (Some(0), 64, 8),
+            (None, 64, 0),
+            (None, 0, 8),
+        ] {
+            assert!(guest_assignment_count(request, available, source).is_err());
+        }
+    }
+
+    #[test]
+    fn intel_core_classes_require_a_supported_known_type() {
+        use stela_compiler::TargetCpu;
+        for (kind, expected) in [
+            (0x20, CoreClass::Efficiency),
+            (0x40, CoreClass::Performance),
+            (0, CoreClass::Unknown),
+            (0x30, CoreClass::Unknown),
+        ] {
+            let class = Cpuid {
+                leaf: 0x1a,
+                eax: kind << 24 | 0x1234,
+                ..Cpuid::default()
+            };
+            let mut snapshot = classified_snapshot(TargetCpu::INTEL_VENDOR, 0x1a, class);
+            assert_eq!(snapshot.core_class(), expected);
+            snapshot.records[0].eax = 0x19;
+            assert_eq!(snapshot.core_class(), CoreClass::Unknown);
+            snapshot.records[0].eax = 0x1a;
+            snapshot.count = 2;
+            assert_eq!(snapshot.core_class(), CoreClass::Unknown);
+        }
+    }
+
+    #[test]
+    fn amd_core_classes_require_a_valid_heterogeneous_level() {
+        use stela_compiler::TargetCpu;
+        for (kind, expected) in [
+            (0, CoreClass::Performance),
+            (1, CoreClass::Efficiency),
+            (2, CoreClass::LowPower),
+            (3, CoreClass::Unknown),
+        ] {
+            let class = Cpuid {
+                leaf: 0x8000_0026,
+                eax: 1 << 30,
+                ebx: kind << 28 | 2,
+                ecx: 1 << 8,
+                ..Cpuid::default()
+            };
+            let snapshot = classified_snapshot(TargetCpu::AMD_VENDOR, 7, class);
+            assert_eq!(snapshot.core_class(), expected);
+            for changed in [
+                Cpuid { eax: 0, ..class },
+                Cpuid {
+                    ebx: kind << 28,
+                    ..class
+                },
+                Cpuid { ecx: 0, ..class },
+            ] {
+                let mut invalid = snapshot;
+                invalid.records[2] = changed;
+                assert_eq!(invalid.core_class(), CoreClass::Unknown);
+            }
+            let mut invalid = snapshot;
+            invalid.records[1].eax = 0x8000_0025;
+            assert_eq!(invalid.core_class(), CoreClass::Unknown);
+            invalid = snapshot;
+            invalid.count = 2;
+            assert_eq!(invalid.core_class(), CoreClass::Unknown);
+        }
+    }
+
+    #[test]
+    fn unknown_vendor_or_malformed_snapshot_has_no_core_class() {
+        let class = Cpuid {
+            leaf: 0x1a,
+            eax: 0x40 << 24,
+            ..Cpuid::default()
+        };
+        let snapshot = classified_snapshot([0; 3], 0x1a, class);
+        assert_eq!(snapshot.core_class(), CoreClass::Unknown);
+        let mut malformed = snapshot;
+        malformed.count = MAX_CPUID as u32 + 1;
+        assert_eq!(malformed.core_class(), CoreClass::Unknown);
+        assert_eq!(Snapshot::default().core_class(), CoreClass::Unknown);
+    }
+
+    #[test]
+    fn placement_reserves_matches_before_cross_class_fallback() {
+        use CoreClass::{Efficiency as E, Performance as P, Unknown as U};
+        assert_eq!(
+            placement(&[P, E, E, P], &[P, P, P, E], 0),
+            Ok(vec![0, 3, 2, 1])
+        );
+        assert_eq!(
+            placement(&[E, P, E, P], &[P, E, P, E], 1),
+            Ok(vec![1, 0, 3, 2])
+        );
+        assert_eq!(
+            placement(&[P, E, E, P], &[P, P, U, E], 0),
+            Ok(vec![0, 3, 2, 1])
+        );
+    }
+
+    #[test]
+    fn placement_prefers_efficiency_before_low_power() {
+        use CoreClass::{Efficiency as E, LowPower as L, Performance as P};
+        assert_eq!(
+            placement(&[P, E, E, P], &[P, L, E, P], 0),
+            Ok(vec![0, 2, 1, 3])
+        );
+        assert_eq!(
+            placement(&[P, E, L, P], &[P, L, E, P], 0),
+            Ok(vec![0, 2, 1, 3])
+        );
+    }
+
+    #[test]
+    fn homogeneous_or_unknown_hosts_keep_bsp_first_order() {
+        use CoreClass::{Efficiency as E, Performance as P, Unknown as U};
+        for class in [P, E, U] {
+            for boot in 0..4 {
+                let result = placement(&[E, P, E, P], &[class; 4], boot).unwrap();
+                assert_eq!(result[boot], 0);
+                assert_eq!(
+                    result
+                        .iter()
+                        .copied()
+                        .filter(|&worker| worker != 0)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn placement_is_a_permutation_with_the_boot_worker_fixed() {
+        use CoreClass::{Efficiency, LowPower, Performance, Unknown};
+        let classes = [Unknown, Performance, Efficiency, LowPower];
+        for guest_bits in 0..64 {
+            let guest = core::array::from_fn::<_, 3, _>(|i| classes[guest_bits >> (i * 2) & 3]);
+            for host_bits in 0..64 {
+                let host = core::array::from_fn::<_, 3, _>(|i| classes[host_bits >> (i * 2) & 3]);
+                for boot in 0..3 {
+                    let mut result = placement(&guest, &host, boot).unwrap();
+                    assert_eq!(result[boot], 0);
+                    result.sort_unstable();
+                    assert_eq!(result, vec![0, 1, 2]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn placement_rejects_invalid_rosters() {
+        use CoreClass::Unknown as U;
+        assert_eq!(placement(&[], &[], 0), Err(PlacementError::Cardinality));
+        assert_eq!(
+            placement(&[U], &[U, U], 0),
+            Err(PlacementError::Cardinality)
+        );
+        assert_eq!(placement(&[U], &[U], 1), Err(PlacementError::Bootstrap));
+        assert_eq!(
+            placement(&[U; MAX_CORES + 1], &[U; MAX_CORES + 1], 0),
+            Err(PlacementError::Capacity)
+        );
     }
 
     #[test]

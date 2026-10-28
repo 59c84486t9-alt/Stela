@@ -5,8 +5,7 @@ use super::{
 };
 use crate::aarch64::sme::memory::TileTransfer;
 use crate::context::{SCALABLE_ZA_OFFSET, SCALABLE_ZT0_OFFSET};
-use crate::x86_64::asm::Code;
-use crate::x86_64::asm::{Alu, Cond, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Patch, ShiftOp, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -179,8 +178,8 @@ fn za_copy_tile(
     let mut asm = code.asm();
     asm.alu_imm8(Alu::Add, Size::Qword, STAGING_CURSOR, element as i8);
     asm.dec(Size::Dword, Gpr::Rcx);
-    let displacement = asm.jcc(Cond::Ne).offset();
-    crate::x86_64::scalable::memory::patch_branch(code, displacement, loop_start);
+    let displacement = asm.jcc(Cond::Ne);
+    crate::x86_64::asm::resolve(code, displacement, loop_start);
 }
 
 pub(super) fn access_flags(direction: Direction, tag_checked: bool) -> u32 {
@@ -201,7 +200,7 @@ fn za_tile_body(
     target: TargetCpu,
     pc: u64,
     scratch: &Scratch,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     check_sp(code, transfer.address.base, pc, failures);
     let bytes = length.bytes();
@@ -273,7 +272,7 @@ fn za_whole_body(
     target: TargetCpu,
     pc: u64,
     scratch: &Scratch,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     let (direction, base, vector) = match operand {
         Operand::ZaVector(transfer) => (
@@ -326,7 +325,7 @@ pub(super) fn emit_za_body(
     target: TargetCpu,
     pc: u64,
     scratch: &Scratch,
-    failures: &mut Vec<usize>,
+    failures: &mut Vec<Patch>,
 ) {
     match operand {
         Operand::Tile(transfer) => {

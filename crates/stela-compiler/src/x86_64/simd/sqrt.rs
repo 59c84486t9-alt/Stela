@@ -250,13 +250,15 @@ pub(in crate::x86_64) fn emit(
             clear_scalar(code, Format::Double, RESULT);
         }
         commit(code, operand.destination, RESULT);
+        let inline_end = code.checkpoint();
         let done = jump(code);
+        let cold = code.checkpoint();
         let full_start = code.len();
         for &patch in &crossing {
             resolve(code, patch, full_start);
         }
         crossing.push(rejected);
-        sticky = Some((done, full_start, crossing));
+        sticky = Some((done, full_start, crossing, cold, inline_end));
     }
     source_guard(code, operand, &mut helper);
     if operand.shape == Shape::Scalar && operand.format != Format::Half {
@@ -280,11 +282,12 @@ pub(in crate::x86_64) fn emit(
     helper_section(code, &helper, pc);
     commit_inexact(code);
     commit_result(code, operand);
-    let (done, full, crossing) = sticky?;
+    let (done, full, crossing, cold, inline_end) = sticky?;
     let end = code.len();
     resolve(code, done, end);
     Some(ColdSplit {
-        cold: done + size_of::<i32>(),
+        cold,
+        inline_end,
         full,
         crossing,
         result: operand.destination,

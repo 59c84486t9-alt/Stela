@@ -7,8 +7,10 @@
 //! of that partition with a known pattern, reads it back and reports its
 //! hash. Without either option nothing here touches the hardware.
 mod bluetooth_platform;
+#[cfg(feature = "diagnostics")]
 mod media_check;
 use stela_boot_core::storage as options;
+#[cfg(feature = "diagnostics")]
 mod reset_check;
 pub use options::split;
 
@@ -50,7 +52,9 @@ pub struct Prepared {
     handoff: Handoff,
     open: Vec<Target>,
     check: Vec<Target>,
+    #[cfg(feature = "diagnostics")]
     usb_reset_check: bool,
+    #[cfg(feature = "diagnostics")]
     usb_media_check: bool,
 }
 
@@ -74,6 +78,10 @@ pub fn prepare(
     let (open, check, _) = split(text)?;
     let usb_reset_check = options::reset_requested(text, &open, &check)?;
     let usb_media_check = options::media_requested(text, &open, &check)?;
+    #[cfg(not(feature = "diagnostics"))]
+    if usb_reset_check || usb_media_check {
+        return Err("USB checks require a diagnostics build");
+    }
     if open.is_empty() && check.is_empty() {
         return Ok(None);
     }
@@ -84,7 +92,9 @@ pub fn prepare(
         handoff,
         open,
         check,
+        #[cfg(feature = "diagnostics")]
         usb_reset_check,
+        #[cfg(feature = "diagnostics")]
         usb_media_check,
     }))
 }
@@ -265,6 +275,7 @@ impl Prepared {
     pub fn run(self) {
         // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
         let mut dma = unsafe { RegionAllocator::new(self.handoff.dma.clone()) };
+        #[cfg(feature = "diagnostics")]
         let mut devices = if self.usb_media_check {
             // SAFETY: same exclusive post-EBS grant as probe; this explicit
             // fixture diagnostic attaches native USB and retains every owner.
@@ -284,6 +295,9 @@ impl Prepared {
             // SAFETY: this handoff describes the running machine and its tables.
             unsafe { probe(&self.handoff, &mut dma) }
         };
+        #[cfg(not(feature = "diagnostics"))]
+        // SAFETY: this handoff describes the running machine and its tables.
+        let mut devices = unsafe { probe(&self.handoff, &mut dma) };
         for window in &devices.unmapped {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }

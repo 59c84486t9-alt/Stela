@@ -1,4 +1,4 @@
-//! Link the actual user-space objects against the SDK's public frameworks.
+//! Link user-space objects against the SDK's public frameworks.
 use super::{ABIS, dependencies, mach_o, run, tools};
 use crate::gpu::support::source_binding;
 use anyhow::{Result, ensure};

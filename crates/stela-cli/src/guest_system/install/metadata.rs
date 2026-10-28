@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn a_validated_upgrade_preserves_history_and_is_idempotent() -> Result<()> {
+    fn metadata_upgrade_preserves_history_idempotently() -> Result<()> {
         let fixture = Fixture::new("26A434")?;
         refresh(&fixture.layout, Some(&fixture.source), true)?;
         fixture.unchanged()?;
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sources_require_their_download_hash_and_published_metadata_is_bound() -> Result<()> {
+    fn legacy_metadata_binds_download_hash() -> Result<()> {
         let fixture = Fixture::new("26A434")?;
         let mut receipt: serde_json::Value = serde_json::from_slice(&fixture.original)?;
         let hash = receipt["source"]["sha256"].take();

@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_layout_the_profile_holds_decides_the_reserved_bits() {
+    fn profile_layout_order_sets_reserved_bits() {
         let profile = Profile {
             parameters: ["FEAT_AA32EL1"].map(String::from).into(),
             features: Default::default(),
@@ -837,7 +837,7 @@ mod tests {
     /// A PE that withholds a feature has the layout of its chip's profile
     /// without it: the feature's conditional field takes its reserved type.
     #[test]
-    fn a_layout_without_a_feature_reserves_its_fields() {
+    fn missing_feature_reserves_layout_fields() {
         let chip = Profile {
             parameters: ["FEAT_MTE2"].map(String::from).into(),
             features: ["FEAT_MTE2"].map(String::from).into(),

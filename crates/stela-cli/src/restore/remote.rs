@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn an_image_that_changes_mid_read_fails_instead_of_mixing() -> Result<()> {
+    fn remote_read_rejects_changed_image() -> Result<()> {
         let (url, _) = serve(body(), "\"pinned\"", 2);
         let mut remote = Remote::open(Client::new(), &url)?;
         let mut byte = [0];
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn a_server_without_ranges_or_a_strong_etag_is_refused() {
+    fn remote_server_requires_ranges_and_strong_etag() {
         let (url, _) = serve(body(), "\"pinned\"", 0);
         let error = Remote::open(Client::new(), &url).err().unwrap().to_string();
         assert!(error.contains("does not serve byte ranges"), "{error}");

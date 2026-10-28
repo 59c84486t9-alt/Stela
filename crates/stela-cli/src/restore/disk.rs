@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn the_volume_holding_the_selection_is_chosen_among_several() -> Result<()> {
+    fn volume_selection_follows_preboot_target() -> Result<()> {
         let image = tempfile::tempdir()?;
         let data = image.path().join("Data");
         let system = image.path().join("Macintosh HD");

@@ -254,7 +254,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
 mod tests {
     use super::*;
     #[test]
-    fn source_ioc_is_required_and_frontier_survives_coalescing_and_wraps() {
+    fn ioc_completion_frontier() {
         let mut p = Progress::new(4096, 16384, 132, 192000, 0).unwrap();
         p.observe(8192, false, 45000).unwrap();
         assert!(!p.reusable().unwrap());

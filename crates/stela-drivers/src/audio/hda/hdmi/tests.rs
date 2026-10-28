@@ -327,6 +327,8 @@ impl Hardware {
         if wp == rp {
             return;
         }
+        // SAFETY: the controller programmed this retained fixture CORB; wp is
+        // its in-range producer index. Polling serializes access to the ring.
         let command =
             unsafe { ((self.address(0x40) as *const u32).add(wp as usize)).read_volatile() }
                 .to_le();
@@ -338,6 +340,8 @@ impl Hardware {
         }
         let next = (self.get(0x58, 2) + 1) % 256;
         let address = self.address(0x50);
+        // SAFETY: address names the fixture RIRB. next is modulo 256 and each
+        // retained, aligned entry contains two u32 words.
         unsafe {
             ((address as *mut u32).add(next as usize * 2)).write_volatile(reply.to_le());
             ((address as *mut u32).add(next as usize * 2 + 1))
@@ -418,13 +422,23 @@ impl Hardware {
             let mut found = false;
             for entry in 0..entries {
                 let ptr = (bdl as *const u32).wrapping_add(entry * 4);
+                // SAFETY: bdl names the retained descriptor allocation; entry
+                // is bounded by its programmed LVI. Each descriptor has four
+                // aligned u32 words, read here in device order.
                 let address = u64::from(unsafe { ptr.read_volatile() }.to_le())
                     | (u64::from(unsafe { ptr.add(1).read_volatile() }.to_le()) << 32);
+                // SAFETY: ptr is the same in-range four-word BDL entry.
                 let length = unsafe { ptr.add(2).read_volatile() }.to_le() as usize;
                 if pos < base + length {
+                    // SAFETY: pos-base is within this descriptor's PCM extent;
+                    // the fixture retains that allocation and polling is synchronous.
                     self.playback
                         .push(unsafe { ((address as *const u8).add(pos - base)).read_volatile() });
+                    // SAFETY: ptr still names the retained four-word descriptor;
+                    // word three contains its interrupt-on-completion bit.
                     if pos + 1 == base + length
+                        // SAFETY: ptr names this retained four-word BDL entry;
+                        // word three contains its completion-interrupt flag.
                         && unsafe { ptr.add(3).read_volatile() }.to_le() & 1 != 0
                     {
                         self.bar[0x83] |= 4;
@@ -476,6 +490,10 @@ struct Owner {
     clock: Clock,
     state: Mutex<OwnerState>,
 }
+// SAFETY: Fixture constructs this owner for its sole HDA/GPU pair, and
+// the controller retains the Hardware Arc. The mutex serializes sink generations
+// and callback results; the shared clock supplies deadline failures. No background
+// agent can revoke register access, including when a callback returns an error.
 unsafe impl DisplayAudioPort for Owner {
     fn identity(&self) -> DisplayAudioIdentity {
         DisplayAudioIdentity {
@@ -536,6 +554,8 @@ impl Fixture {
     fn new(dp: bool) -> Self {
         let mut backing = vec![0u64; 256 * 1024];
         let base = backing.as_mut_ptr() as u64;
+        // SAFETY: backing uniquely owns this aligned RAM for the fixture's
+        // lifetime; modeled DMA runs synchronously during controller polling.
         let allocator = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
         let clock = Clock(Arc::new(AtomicU64::new(0)));
         let hardware = Arc::new(Mutex::new(Hardware::new(clock.clone(), dp)));
@@ -562,6 +582,8 @@ impl Fixture {
     }
     fn controller(&mut self) -> Controller<Regs, Clock> {
         assert!(!self.backing.is_empty());
+        // SAFETY: this fixture exclusively owns its register and display peers
+        // and retains all coherent DMA backing through controller execution.
         unsafe {
             Controller::new(
                 Regs(self.hardware.clone()),
@@ -578,6 +600,8 @@ impl Fixture {
     }
     fn attach(&self, c: &mut Controller<Regs, Clock>) -> HdmiPortId {
         let graph = c.enumerate_codec(0).unwrap();
+        // SAFETY: owner and controller share this fixture's locked hardware
+        // and the display grant identifies the enumerated codec/pin.
         unsafe { c.attach_hdmi_port(&graph, 4, 0, self.owner.clone()) }.unwrap()
     }
     fn stream(
@@ -604,493 +628,7 @@ impl Fixture {
         self.hardware.lock().unwrap().dma(bytes);
     }
 }
-#[test]
-fn actual_command_rings_eld_channels_packets_and_24_fresh_periods_without_restart() {
-    for dp in [false, true] {
-        for channels in [2, 4, 6, 8] {
-            let mut f = Fixture::new(dp);
-            let mut c = f.controller();
-            let port = f.attach(&mut c);
-            let (stream, period) = f.stream(&mut c, channels, 24);
-            let map = c.prepare_hdmi(port, stream, 2, None).unwrap();
-            for n in 0..4 {
-                c.write_pcm(stream, n * period, &vec![n as u8; period])
-                    .unwrap();
-            }
-            c.start(stream).unwrap();
-            let format = c.stream_format(stream).unwrap();
-            for n in 0..24 {
-                f.advance(period, format);
-                let next = vec![(n + 4) as u8; period];
-                let done = c.refill_hdmi_period(stream, &next).unwrap().unwrap();
-                assert_eq!(done.sequence, n as u64);
-                assert_eq!(done.ring_offset, n % 4 * period);
-            }
-            {
-                let h = f.hardware.lock().unwrap();
-                assert_eq!(h.starts, 1);
-                assert_eq!(h.stops, 0);
-                for (n, chunk) in h.playback.chunks(period).enumerate() {
-                    assert!(chunk.iter().all(|b| *b == n as u8));
-                }
-                assert_eq!(h.packet[0], 0x84);
-                assert_eq!(&h.packet[1..3], if dp { &[0x1b, 0x44] } else { &[1, 10] });
-                assert_eq!(h.packet[7], map.allocation());
-                assert_eq!(h.digital & 0x21, 1);
-                assert_eq!(h.count, channels - 1);
-                // A legacy codec has no device entries to select.
-                assert!(!h.commands.iter().any(|c| (c >> 8) & 0xfff == 0x735));
-            }
-            c.close_hdmi(port).unwrap();
-            assert_eq!(c.start(stream), Err(Error::SinkUnavailable));
-            c.detach_hdmi_port(port).unwrap();
-            c.shutdown().unwrap();
-            assert_eq!(Arc::strong_count(&f.owner), 1);
-        }
-    }
-}
-#[test]
-fn invalid_eld_or_missing_pin_and_exact_profile_cannot_enable_gpu_or_codec() {
-    for fault in 0..6 {
-        let mut f = Fixture::new(false);
-        let mut c = f.controller();
-        match fault {
-            0 => f.hardware.lock().unwrap().vendor = 0x10de0017,
-            1 => f.hardware.lock().unwrap().vendor = 0x10de00a2,
-            2 => f.hardware.lock().unwrap().pin_caps = 0x10,
-            3 => f.hardware.lock().unwrap().bad_eld = Some(12),
-            4 => f.hardware.lock().unwrap().eld[4] = 31,
-            _ => f.owner.state.lock().unwrap().observe_fault = true,
-        }
-        let graph = c.enumerate_codec(0).unwrap();
-        let attached = unsafe { c.attach_hdmi_port(&graph, 4, 0, f.owner.clone()) };
-        if fault == 3 || fault == 4 {
-            let port = attached.unwrap();
-            let (s, _) = f.stream(&mut c, 2, 16);
-            assert_eq!(c.prepare_hdmi(port, s, 2, None), Err(Error::InvalidEld));
-            c.detach_hdmi_port(port).unwrap();
-        } else {
-            assert!(attached.is_err());
-        }
-        assert_eq!(f.owner.state.lock().unwrap().enable, 0);
-        assert_eq!(f.hardware.lock().unwrap().pin, 0);
-    }
-}
-#[test]
-fn modern_profile_addresses_each_dp_mst_device_entry_like_linux() {
-    let mut f = Fixture::new(true);
-    {
-        let mut h = f.hardware.lock().unwrap();
-        h.vendor = 0x10de00a8;
-        h.device_list = 3;
-        h.device = 2;
-        h.pin_caps |= 2;
-    }
-    let mut c = f.controller();
-    let graph = c.enumerate_codec(0).unwrap();
-    // Four entries: index 4 does not exist, and the owner must agree.
-    f.owner.state.lock().unwrap().device = 4;
-    assert_eq!(
-        unsafe { c.attach_hdmi_port(&graph, 4, 4, f.owner.clone()) },
-        Err(Error::InvalidHdmiPort)
-    );
-    assert_eq!(
-        unsafe { c.attach_hdmi_port(&graph, 4, 2, f.owner.clone()) },
-        Err(Error::InvalidHdmiPort)
-    );
-    f.owner.state.lock().unwrap().device = 2;
-    let port = unsafe { c.attach_hdmi_port(&graph, 4, 2, f.owner.clone()) }.unwrap();
-    let (stream, period) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, stream, 2, None).unwrap();
-    for n in 0..4 {
-        c.write_pcm(stream, n * period, &vec![n as u8; period])
-            .unwrap();
-    }
-    c.start(stream).unwrap();
-    let format = c.stream_format(stream).unwrap();
-    f.advance(period, format);
-    c.refill_hdmi_period(stream, &vec![4; period])
-        .unwrap()
-        .unwrap();
-    c.close_hdmi(port).unwrap();
-    c.detach_hdmi_port(port).unwrap();
-    c.shutdown().unwrap();
-    let h = f.hardware.lock().unwrap();
-    let select = (4 << 20) | (0x735 << 8) | 2;
-    assert!(h.commands.contains(&select));
-    // Sense is triggered, then read for the device entry.
-    assert!(h.commands.contains(&((4 << 20) | (0x709 << 8))));
-    assert!(h.commands.contains(&((4 << 20) | (0xf09 << 8) | 2)));
-    assert_eq!(h.packet[..3], [0x84, 0x1b, 0x44]);
-    assert_eq!((h.pin, h.transmit), (0, 0));
-}
-#[test]
-fn actual_hotplug_stops_then_reprepare_uses_new_sink_and_retains_original_port() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, period) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    {
-        let mut o = f.owner.state.lock().unwrap();
-        o.generation += 1;
-        o.connected = false;
-    }
-    f.hardware.lock().unwrap().sense = 0;
-    assert_eq!(c.status(s).unwrap_err(), Error::SinkChanged);
-    assert_eq!(f.hardware.lock().unwrap().bar[0x80] & 2, 0);
-    assert_eq!(f.hardware.lock().unwrap().pin, 0);
-    assert_eq!(c.start(s), Err(Error::SinkUnavailable));
-    assert_eq!(Arc::strong_count(&f.owner), 2);
-    {
-        let mut o = f.owner.state.lock().unwrap();
-        o.generation += 1;
-        o.connected = true;
-    }
-    f.hardware.lock().unwrap().sense = 0xc0000000;
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.write_pcm(s, 0, &vec![0x7a; period * 4]).unwrap();
-    c.start(s).unwrap();
-    assert_eq!(f.hardware.lock().unwrap().get(0x84, 4), 0);
-    c.close_hdmi(port).unwrap();
-    c.detach_hdmi_port(port).unwrap();
-}
-#[test]
-fn incomplete_ioc_and_coalesced_events_use_retained_completed_frontier() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, p) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    let fmt = c.stream_format(s).unwrap();
-    f.advance(p / 2, fmt);
-    assert!(c.refill_hdmi_period(s, &vec![8; p]).unwrap().is_none());
-    f.advance(p + p / 2, fmt);
-    assert!(c.status(s).unwrap().period_completed);
-    for _ in 0..2 {
-        assert!(c.refill_hdmi_period(s, &vec![9; p]).unwrap().is_some());
-    }
-    assert!(c.refill_hdmi_period(s, &vec![10; p]).unwrap().is_none());
-    c.close_hdmi(port).unwrap();
-    c.detach_hdmi_port(port).unwrap();
-}
-#[test]
-fn elapsed_lap_unfilled_queue_and_late_copy_refuse_success_and_stop() {
-    for fault in 0..3 {
-        let mut f = Fixture::new(false);
-        let mut c = f.controller();
-        let port = f.attach(&mut c);
-        let (s, p) = f.stream(&mut c, 2, 16);
-        c.prepare_hdmi(port, s, 2, None).unwrap();
-        c.start(s).unwrap();
-        let fmt = c.stream_format(s).unwrap();
-        match fault {
-            0 => {
-                f.clock.0.fetch_add(100000, Ordering::SeqCst);
-            }
-            1 => f.advance(p * 4 - 64, fmt),
-            _ => {
-                f.advance(p, fmt);
-                let mut h = f.hardware.lock().unwrap();
-                h.late_position = Some((h.position_reads + 2, (p * 4 - 64) as u32, 32_000));
-            }
-        }
-        assert_eq!(
-            c.refill_hdmi_period(s, &vec![0x39; p]),
-            Err(Error::PlaybackUnderrun)
-        );
-        assert_eq!(f.hardware.lock().unwrap().bar[0x80] & 2, 0);
-        assert_eq!(
-            c.hdmi_first_error(port).unwrap(),
-            Some(Error::PlaybackUnderrun)
-        );
-        assert_eq!(c.start(s), Err(Error::SinkUnavailable));
-        c.detach_hdmi_port(port).unwrap();
-    }
-}
-#[test]
-fn failed_gpu_enable_or_codec_ack_quarantines_then_explicit_reset_recovers() {
-    for fault in 0..3 {
-        let mut f = Fixture::new(false);
-        let mut c = f.controller();
-        let port = f.attach(&mut c);
-        let (s, _) = f.stream(&mut c, 6, 24);
-        match fault {
-            0 => f.owner.state.lock().unwrap().enable_late = true,
-            1 => f.hardware.lock().unwrap().reject = Some(0x72d),
-            _ => f.hardware.lock().unwrap().drop_reply = Some(0x706),
-        }
-        let error = c.prepare_hdmi(port, s, 2, None).unwrap_err();
-        assert_eq!(c.hdmi_first_error(port).unwrap(), Some(error));
-        assert_eq!(Arc::strong_count(&f.owner), 2);
-        assert_eq!(c.start(s), Err(Error::NeedsReset));
-        f.owner.state.lock().unwrap().enable_late = false;
-        {
-            let mut h = f.hardware.lock().unwrap();
-            h.reject = None;
-            h.drop_reply = None;
-        }
-        c.reinitialize().unwrap();
-        assert_eq!(Arc::strong_count(&f.owner), 1);
-        assert_eq!(c.hdmi_first_error(port), Err(Error::InvalidHdmiPort));
-    }
-}
-#[test]
-fn failed_dma_stop_and_gpu_quiet_keep_whole_owner_and_first_cause() {
-    for dma_fault in [false, true] {
-        let mut f = Fixture::new(false);
-        let mut c = f.controller();
-        let port = f.attach(&mut c);
-        let (s, _) = f.stream(&mut c, 2, 16);
-        c.prepare_hdmi(port, s, 2, None).unwrap();
-        c.start(s).unwrap();
-        if dma_fault {
-            f.hardware.lock().unwrap().stop_stuck = true;
-        } else {
-            f.owner.state.lock().unwrap().disable_fault = true;
-        }
-        assert!(c.close_hdmi(port).is_err());
-        let first = c.hdmi_first_error(port).unwrap();
-        assert!(first.is_some());
-        assert_eq!(Arc::strong_count(&f.owner), 2);
-        assert!(c.detach_hdmi_port(port).is_err());
-        assert_eq!(c.hdmi_first_error(port).unwrap(), first);
-        f.hardware.lock().unwrap().stop_stuck = false;
-        f.owner.state.lock().unwrap().disable_fault = false;
-        c.reinitialize().unwrap();
-        assert_eq!(Arc::strong_count(&f.owner), 1);
-    }
-}
-#[test]
-fn active_or_faulted_controller_drop_does_not_release_actual_gpu_hda_owner() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, _) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    drop(c);
-    assert_eq!(Arc::strong_count(&f.owner), 2);
-    assert_eq!(f.hardware.lock().unwrap().bar[0x80] & 2, 2);
-}
-#[test]
-fn one_stream_cannot_own_distinct_analog_and_hdmi_converters_in_either_order() {
-    for analog_first in [false, true] {
-        let mut f = Fixture::new(false);
-        let mut c = f.controller();
-        let port = f.attach(&mut c);
-        let (s, _) = f.stream(&mut c, 2, 16);
-        let analog = c.enumerate_codec(1).unwrap();
-        let route = analog.analog_route(Direction::Playback, 4, 2).unwrap();
-        let options = super::super::PinOptions::Playback {
-            headphone: false,
-            eapd: None,
-        };
-        if analog_first {
-            c.configure_analog_route(&analog, &route, s, 0, options)
-                .unwrap();
-            let before = f.hardware.lock().unwrap().commands.len();
-            assert_eq!(c.prepare_hdmi(port, s, 2, None), Err(Error::RouteInUse));
-            assert_eq!(f.owner.state.lock().unwrap().enable, 0);
-            assert!(
-                f.hardware.lock().unwrap().commands[before..]
-                    .iter()
-                    .all(|command| command & (1 << 19) != 0)
-            );
-        } else {
-            c.prepare_hdmi(port, s, 2, None).unwrap();
-            let before = f.hardware.lock().unwrap().commands.len();
-            assert_eq!(
-                c.configure_analog_route(&analog, &route, s, 0, options),
-                Err(Error::RouteInUse)
-            );
-            let h = f.hardware.lock().unwrap();
-            assert_eq!(h.commands.len(), before);
-            assert_eq!(h.analog.binding, 0);
-            assert_eq!(h.analog.pin, 0);
-        }
-        c.close_hdmi(port).unwrap();
-        c.detach_hdmi_port(port).unwrap();
-        c.shutdown().unwrap();
-    }
-}
-#[test]
-fn acknowledged_stop_can_park_past_ring_duration_and_restart_a_fresh_epoch() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, p) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    let fmt = c.stream_format(s).unwrap();
-    f.advance(p, fmt);
-    c.stop(s).unwrap();
-    f.clock.0.fetch_add(1_000_000, Ordering::SeqCst);
-    assert!(!c.status(s).unwrap().running);
-    assert_eq!(c.hdmi_first_error(port).unwrap(), None);
-    assert_eq!(f.owner.state.lock().unwrap().disable, 0);
-    c.write_pcm(s, 0, &vec![0x6d; p * 4]).unwrap();
-    c.start(s).unwrap();
-    f.hardware.lock().unwrap().playback.clear();
-    f.advance(p, fmt);
-    assert!(c.refill_hdmi_period(s, &vec![0x91; p]).unwrap().is_some());
-    assert!(
-        f.hardware
-            .lock()
-            .unwrap()
-            .playback
-            .iter()
-            .all(|v| *v == 0x6d)
-    );
-    c.close_hdmi(port).unwrap();
-    c.detach_hdmi_port(port).unwrap();
-}
-#[test]
-fn actual_digital_enable_control_preserves_status_and_live_pcm_ownership() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, p) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    for enabled in [false, true, false, true] {
-        c.set_hdmi_enabled(port, enabled).unwrap();
-        assert_eq!(f.hardware.lock().unwrap().digital, 0x10 | u8::from(enabled));
-        assert!(c.status(s).unwrap().running);
-    }
-    let fmt = c.stream_format(s).unwrap();
-    f.advance(p, fmt);
-    assert!(c.refill_hdmi_period(s, &vec![0x53; p]).unwrap().is_some());
-    assert_eq!(f.owner.state.lock().unwrap().enable, 1);
-    c.close_hdmi(port).unwrap();
-    assert_eq!(c.set_hdmi_enabled(port, false), Err(Error::SinkUnavailable));
-    c.detach_hdmi_port(port).unwrap();
-}
-#[test]
-fn rejected_live_digital_control_keeps_effects_owner_and_cause_until_reset() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, _) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    f.hardware.lock().unwrap().reject = Some(0x70d);
-    assert_eq!(c.set_hdmi_enabled(port, false), Err(Error::RouteRejected));
-    assert_eq!(
-        c.hdmi_first_error(port).unwrap(),
-        Some(Error::RouteRejected)
-    );
-    assert_eq!(Arc::strong_count(&f.owner), 2);
-    f.hardware.lock().unwrap().reject = None;
-    c.reinitialize().unwrap();
-    assert_eq!(Arc::strong_count(&f.owner), 1);
-}
-#[test]
-fn polled_observation_cause_survives_simultaneous_dma_stop_failure() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, _) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    f.owner.state.lock().unwrap().observe_fault = true;
-    f.hardware.lock().unwrap().stop_stuck = true;
-    assert_eq!(c.poll_hdmi_sink(port), Err(Error::SinkUnavailable));
-    assert_eq!(
-        c.hdmi_first_error(port).unwrap(),
-        Some(Error::SinkUnavailable)
-    );
-    assert_eq!(Arc::strong_count(&f.owner), 2);
-    assert_eq!(f.hardware.lock().unwrap().bar[0x80] & 2, 2);
-    f.owner.state.lock().unwrap().observe_fault = false;
-    f.hardware.lock().unwrap().stop_stuck = false;
-    c.reinitialize().unwrap();
-    assert_eq!(Arc::strong_count(&f.owner), 1);
-}
-#[test]
-fn pci_suspend_retires_only_after_real_dma_codec_gpu_and_command_quiet() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, _) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    let before = f.hardware.lock().unwrap().commands.len();
-    assert_eq!(c.retire_hdmi_for_pci_suspend(), Err(Error::NeedsReset));
-    assert_eq!(f.hardware.lock().unwrap().commands.len(), before);
-    assert_eq!(Arc::strong_count(&f.owner), 2);
-    c.shutdown().unwrap();
-    assert_eq!(f.hardware.lock().unwrap().pin, 0);
-    assert_eq!(f.hardware.lock().unwrap().transmit, 0);
-    assert_eq!(f.hardware.lock().unwrap().binding, 0);
-    assert_eq!(f.hardware.lock().unwrap().bar[0x80] & 2, 0);
-    assert_eq!(f.hardware.lock().unwrap().bar[0x4c] & 2, 0);
-    assert_eq!(f.hardware.lock().unwrap().bar[0x5c] & 2, 0);
-    assert_eq!(Arc::strong_count(&f.owner), 2);
-    c.retire_hdmi_for_pci_suspend().unwrap();
-    assert_eq!(Arc::strong_count(&f.owner), 1);
-    assert_eq!(c.hdmi_first_error(port), Err(Error::InvalidHdmiPort));
-    c.reinitialize().unwrap();
-    assert_eq!(c.hdmi_first_error(port), Err(Error::InvalidHdmiPort));
-}
-#[test]
-fn pci_d3_grant_is_refused_after_uncertain_gpu_quiet_even_with_stopped_dma() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let port = f.attach(&mut c);
-    let (s, _) = f.stream(&mut c, 2, 16);
-    c.prepare_hdmi(port, s, 2, None).unwrap();
-    c.start(s).unwrap();
-    f.owner.state.lock().unwrap().disable_fault = true;
-    assert_eq!(c.shutdown(), Err(Error::SinkUnavailable));
-    assert_eq!(f.hardware.lock().unwrap().bar[0x80] & 2, 0);
-    assert_eq!(c.retire_hdmi_for_pci_suspend(), Err(Error::NeedsReset));
-    assert_eq!(Arc::strong_count(&f.owner), 2);
-    assert_eq!(
-        c.hdmi_first_error(port).unwrap(),
-        Some(Error::SinkUnavailable)
-    );
-    f.owner.state.lock().unwrap().disable_fault = false;
-    c.reinitialize().unwrap();
-    assert_eq!(Arc::strong_count(&f.owner), 1);
-}
-#[test]
-fn mmio_codec_graph_does_not_fabricate_an_original_pci_subsystem() {
-    let mut f = Fixture::new(false);
-    let mut c = f.controller();
-    let before = f.hardware.lock().unwrap().commands.len();
-    assert_eq!(c.registers.codec_pci_subsystem().unwrap(), None);
-    assert_eq!(f.hardware.lock().unwrap().commands.len(), before);
-    c.shutdown().unwrap();
-}
-#[test]
-fn raw_converter_binding_cannot_share_an_hdmi_stream_in_either_order() {
-    for raw_first in [false, true] {
-        let mut f = Fixture::new(false);
-        let mut c = f.controller();
-        let port = f.attach(&mut c);
-        let (s, _) = f.stream(&mut c, 2, 16);
-        let analog = c.enumerate_codec(1).unwrap();
-        if raw_first {
-            c.bind_converter(&analog, 2, s, 0).unwrap();
-            let before = f.hardware.lock().unwrap().commands.len();
-            assert_eq!(c.prepare_hdmi(port, s, 2, None), Err(Error::RouteInUse));
-            assert_eq!(f.owner.state.lock().unwrap().enable, 0);
-            assert!(
-                f.hardware.lock().unwrap().commands[before..]
-                    .iter()
-                    .all(|v| v & (1 << 19) != 0)
-            );
-        } else {
-            c.prepare_hdmi(port, s, 2, None).unwrap();
-            let before = f.hardware.lock().unwrap().commands.len();
-            assert_eq!(c.bind_converter(&analog, 2, s, 0), Err(Error::RouteInUse));
-            assert_eq!(f.hardware.lock().unwrap().commands.len(), before);
-        }
-        c.close_hdmi(port).unwrap();
-        c.detach_hdmi_port(port).unwrap();
-        c.shutdown().unwrap();
-    }
-}
+
+mod transport;
+
+mod lifecycle;

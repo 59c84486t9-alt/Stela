@@ -1,4 +1,4 @@
-//! Compare actual pre/post-EBS catalog records against every selected package
+//! Compare pre/post-EBS catalog records against every selected package
 //! identity. Disk hashes alone do not prove what survived engine relocation.
 use crate::tools::binding;
 use anyhow::{Result, ensure};
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_catalog_records_include_escaped_identity_and_both_board_forms() {
+    fn catalog_decodes_escaped_identity_and_boards() {
         let mut records = records();
         // Current manifests borrow literal strings and reject JSON escapes.
         // Exercise the record transport separately, so future identities stay
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_verifier_refuses_missing_duplicate_wrong_phase_and_reordered_records() {
+    fn phase_verifier_checks_record_order_and_presence() {
         let expected = records();
         for index in 0..expected.len() {
             let mut changed = expected.clone();
@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_verifier_refuses_changed_hash_identity_provenance_and_length() {
+    fn phase_verifier_checks_package_bindings() {
         let expected = records();
         for index in [0, 3] {
             let mut changed = expected.clone();

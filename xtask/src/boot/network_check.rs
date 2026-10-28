@@ -73,6 +73,47 @@ fn respond(mut socket: TcpStream, body: &[u8]) -> io::Result<()> {
     socket.write_all(body)
 }
 
+/// The missing observation that prevents a network fixture from passing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerificationError {
+    MissingResult,
+    BodyMismatch { expected_sha256: String },
+    WrongDriver { expected: String },
+    IncompleteLease,
+    MissingDnsQuery,
+    MissingConnection { port: u16 },
+}
+
+impl std::fmt::Display for VerificationError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingResult => {
+                output.write_str("the mount did not report a successful network check")
+            }
+            Self::BodyMismatch { expected_sha256 } => write!(
+                output,
+                "the mount did not reproduce the complete network fixture body (bytes={BODY_BYTES} sha256={expected_sha256})"
+            ),
+            Self::WrongDriver { expected } => write!(
+                output,
+                "the mount did not use the requested host network driver ({expected})"
+            ),
+            Self::IncompleteLease => {
+                output.write_str("the network peer did not record a complete DHCP lease")
+            }
+            Self::MissingDnsQuery => {
+                output.write_str("the network peer did not record the fixture DNS query")
+            }
+            Self::MissingConnection { port } => write!(
+                output,
+                "the network peer did not connect to the fixture server (127.0.0.1:{port})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VerificationError {}
+
 /// A successful translation run does not establish that its requested
 /// network check ran. Require the mount's explicit after-EBS result, and
 /// the entire fixture body when running the deterministic driver check.
@@ -81,9 +122,9 @@ pub fn verify(
     fixture: Option<&Fixture>,
     expected_driver: &str,
     peer: &str,
-) -> Result<(), &'static str> {
+) -> Result<(), VerificationError> {
     if !serial.lines().any(|line| line == "NETWORK CHECK passed") {
-        return Err("the mount did not report a successful network check");
+        return Err(VerificationError::MissingResult);
     }
     if let Some(fixture) = fixture {
         let expected = format!(
@@ -91,11 +132,15 @@ pub fn verify(
             fixture.sha256
         );
         if !serial.lines().any(|line| line == expected) {
-            return Err("the mount did not reproduce the complete network fixture body");
+            return Err(VerificationError::BodyMismatch {
+                expected_sha256: fixture.sha256.clone(),
+            });
         }
         let expected = format!("NETWORK driver={expected_driver}");
         if !serial.lines().any(|line| line == expected) {
-            return Err("the mount did not use the requested host network driver");
+            return Err(VerificationError::WrongDriver {
+                expected: expected_driver.into(),
+            });
         }
         // These independent peer observations prevent a serial success marker
         // from crediting DHCP/DNS paths the check did not actually exercise.
@@ -106,20 +151,20 @@ pub fn verify(
                 .lines()
                 .any(|line| line.starts_with("DHCP ACK 10.0.2.15 to "))
         {
-            return Err("the network peer did not record a complete DHCP lease");
+            return Err(VerificationError::IncompleteLease);
         }
         if !peer
             .lines()
             .any(|line| line == "DNS query localhost type 1")
         {
-            return Err("the network peer did not record the fixture DNS query");
+            return Err(VerificationError::MissingDnsQuery);
         }
         let destination = format!(" -> 127.0.0.1:{} open", fixture.port);
         if !peer
             .lines()
             .any(|line| line.starts_with("TCP 10.0.2.15:") && line.ends_with(&destination))
         {
-            return Err("the network peer did not connect to the fixture server");
+            return Err(VerificationError::MissingConnection { port: fixture.port });
         }
     }
     Ok(())
@@ -130,7 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixture_serves_the_entire_known_body_over_a_real_http_connection() {
+    fn http_fixture_serves_complete_body() {
         let fixture = Fixture::start().unwrap();
         let mut socket = TcpStream::connect(("127.0.0.1", fixture.port)).unwrap();
         socket
@@ -189,12 +234,15 @@ mod tests {
             "NETWORK CHECK passed extra\n",
             "GUEST| NETWORK CHECK passed\n",
         ] {
-            assert!(verify(serial, None, "e1000e", "").is_err());
+            assert_eq!(
+                verify(serial, None, "e1000e", ""),
+                Err(VerificationError::MissingResult)
+            );
         }
     }
 
     #[test]
-    fn fixture_checks_reject_a_missing_truncated_or_corrupted_body() {
+    fn network_verification_rejects_incomplete_body() {
         let fixture = Fixture {
             url: "http://localhost/check".into(),
             sha256: "0123456789abcdef".repeat(4),
@@ -209,7 +257,12 @@ mod tests {
                     DNS query localhost type 1\n\
                     TCP 10.0.2.15:50581 -> 127.0.0.1:12345 open\n";
         assert!(verify(&serial, Some(&fixture), "e1000e", peer).is_ok());
-        assert!(verify(&serial, Some(&fixture), "virtio-net", peer).is_err());
+        assert_eq!(
+            verify(&serial, Some(&fixture), "virtio-net", peer),
+            Err(VerificationError::WrongDriver {
+                expected: "virtio-net".into()
+            })
+        );
         for missing in peer.lines() {
             let incomplete = peer.replace(missing, "");
             assert!(verify(&serial, Some(&fixture), "e1000e", &incomplete).is_err());

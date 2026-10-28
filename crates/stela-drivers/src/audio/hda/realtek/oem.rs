@@ -95,7 +95,7 @@ pub(super) fn validate_route(oem: RealtekOem, route: &AnalogRoute) -> Result<(),
 mod tests {
     use super::*;
     #[test]
-    fn original_pci_quirks_do_not_use_codec_subsystem_or_nearby_products() {
+    fn oem_quirks_require_pci_subsystem() {
         assert_eq!(
             select(0x10ec_1220, 0xa0cd_1458),
             Ok(RealtekOem::GigabyteX570)

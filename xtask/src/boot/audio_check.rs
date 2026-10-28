@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_audio_and_qmp_preserve_a_fatal_guest_stop_without_a_scenario_verifier() {
+    fn audio_and_qmp_preserve_guest_fatal_stop() {
         let audio = log(Mode::TransportDuplex);
         serial(Mode::TransportDuplex, &audio).unwrap();
         normal_exit(0, "{\"return\":{},\"id\":\"audio-capabilities\"}\n{\"return\":{},\"id\":\"audio-close\"}\n{\"return\":{},\"id\":\"audio-quit\"}\n").unwrap();

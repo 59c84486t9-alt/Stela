@@ -11,7 +11,13 @@
 //! 2, holding only the volume label.
 // macOS erases a USB with diskutil, so only the other hosts write this
 // layout themselves.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+#![cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "macOS uses diskutil; only ESP_BYTES is used outside the shared FAT32 encoder tests"
+    )
+)]
 use anyhow::{Result, bail, ensure};
 use stela_runtime::pc::gpt::{self, Guid, Partition};
 
@@ -288,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn an_erased_disk_has_an_esp_and_a_named_fat32_volume_that_stela_efi_reads() {
+    fn erase_creates_bootable_fat32_layout() {
         let bytes = 2u64 << 30;
         let layout = layout(bytes, 512, "STELA", &mut counter()).unwrap();
         let mut disk = image(bytes, 512, &layout);

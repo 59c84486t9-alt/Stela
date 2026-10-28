@@ -298,7 +298,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_log_is_read_from_a_gpt_image_by_guid_or_offset() {
+    fn gpt_log_selection_accepts_guid_or_offset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("machine-state.img");
         image(&path, boot_log::PARTITION_BYTES);
@@ -331,7 +331,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_log_is_read_from_an_apple_region_s_tail() {
+    fn boot_log_reads_machine_state_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("region.img");
         // A 20 MiB partition keeps its machine state from 4 MiB.
@@ -375,7 +375,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_partition_too_small_for_the_log_is_named() {
+    fn boot_log_reports_undersized_partition() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("small.img");
         image(&path, 2 * 1024 * 1024);

@@ -369,7 +369,7 @@ pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     let cleanup = code.len();
     for failed in failures {
-        service::patch_branch(code, failed, cleanup);
+        crate::x86_64::asm::resolve(code, failed, cleanup);
     }
     code.asm()
         .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);

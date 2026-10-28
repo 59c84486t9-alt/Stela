@@ -94,6 +94,7 @@ mod tests {
         self, FPCR_AH, FPCR_AHP, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_FZ16,
         FPCR_ROUNDING_SHIFT, UnsupportedControl,
     };
+    use alloc::vec::Vec;
 
     const ROUNDINGS: [IntegerRounding; 5] = [
         IntegerRounding::NearestEven,
@@ -148,14 +149,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_half_encoding_matches_quad_across_integer_formats_rounding_scaling_and_flush() {
+    fn compare_encodings(encodings: impl Iterator<Item = u16> + Clone) {
         for width in WIDTHS {
             for signed in [false, true] {
                 for rounding in ROUNDINGS {
                     for frac_bits in [0, 1, 15, 16, 31, 32, 63, 64, 87, 255] {
                         for fpcr in [0, FPCR_FZ16] {
-                            for bits in 0..=u16::MAX {
+                            for bits in encodings.clone() {
                                 compare(
                                     IntegerFormat { width, signed },
                                     frac_bits,
@@ -169,6 +169,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sampled_half_conversions_match_quad() {
+        let mut samples = Vec::new();
+        for sign in [0u16, 0x8000] {
+            for exponent in 0..32u16 {
+                for fraction in [0, 1, 0x1ff, 0x200, 0x201, 0x3fe, 0x3ff] {
+                    samples.push(sign | (exponent << FRACTION_BITS) | fraction);
+                }
+            }
+        }
+        let mut state = 0x41c6_4e6du32;
+        for _ in 0..512 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            samples.push(state as u16);
+        }
+        samples.sort_unstable();
+        samples.dedup();
+        compare_encodings(samples.iter().copied());
+    }
+
+    #[test]
+    #[ignore = "oracle: exhaustive"]
+    fn all_half_conversions_match_quad() {
+        compare_encodings(0..=u16::MAX);
     }
 
     #[test]

@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_passes_only_where_it_was_expected() {
+    fn compiler_refusal_requires_matching_expectation() {
         let refused = r#"{"kind":"refused","target":"ivb","reason":"fp32"}"#;
         let by_design = r#"{"kind":"expect","target":"ivb","outcome":"refused","reason":"fp32"}"#;
         let unless =
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn air_evidence_names_one_input_and_profile_and_every_compiled_target() {
+    fn air_evidence_binds_inputs_profiles_and_targets() {
         let input = r#"{"kind":"air_input","origin":"raw_input_file","bytes":4,"blake3":"00","entry":"kernel"}"#;
         let profile = r#"{"kind":"air_profile","name":"ieee","fp_profile":0}"#;
         let environment =

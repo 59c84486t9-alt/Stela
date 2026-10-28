@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_inventory_resolves_other_members_and_requires_vendor_exports() {
+    fn archive_inventory_resolves_members_and_exports() {
         let (_directory, archive, exports) = fixture(false);
         let report = inspect(&archive, &exports).unwrap();
         assert_eq!(report.members, 2);

@@ -483,7 +483,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_bundle_json_without_a_revision_is_revision_0() {
+    fn missing_bundle_revision_defaults_to_zero() {
         let dir = tempfile::tempdir().unwrap();
         // As every loader before revisions wrote it.
         let listing = serde_json::json!({"schema_version": 1, "files": []});

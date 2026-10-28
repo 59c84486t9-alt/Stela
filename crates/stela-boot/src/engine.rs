@@ -8,6 +8,7 @@
 //! system's partition that probe opened.
 
 mod aml;
+mod boot_image;
 pub(crate) mod bundle;
 mod display;
 pub(crate) mod fdr;
@@ -646,6 +647,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // SAFETY: this reserved heap is unused and its RW+NX physmap is shared by
     // every native root for the complete engine lifetime.
     unsafe { crate::ALLOCATOR.initialize(heap as *mut u8, handoff.heap.bytes as usize) };
+    // SAFETY: this loader-owned private seed is retained in the shared physmap,
+    // exclusively consumed here before any native service is published.
+    if let Err(error) = unsafe { crate::random::initialize(handoff.random_seed) } {
+        output::arguments(format_args!("HOST entropy unavailable: {error:?}\n"));
+    }
     // SAFETY: this phase owns that exact reserved heap and retained WB mapping.
     unsafe {
         crate::native_memory::initialize(
@@ -716,6 +722,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         output::fatal("native clock fixture requires one exclusive processor and volatile input");
     }
+    #[cfg(feature = "diagnostics")]
     if options.native_memory_check {
         output::arguments(format_args!(
             "CHECK native-memory heap cpu={heap:#x} physical={:#x} bytes={:#x}\n",
@@ -756,6 +763,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .chain(options.restore_source.iter())
         .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
+    #[cfg(feature = "diagnostics")]
     if let Some(mode) = options.audio_check {
         let audio_handoff = handoff
             .storage
@@ -836,6 +844,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             range.guest, range.bytes, range.host
         ));
     }
+    #[cfg(feature = "diagnostics")]
     if let Some(url) = &options.network_check {
         let Some(Ok(network)) = &host_network else {
             output::fatal("the network check failed")
@@ -970,6 +979,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         handoff.apic_base,
         layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
     );
+    #[cfg(feature = "diagnostics")]
     if options.native_bootstrap_check || options.native_shared_check {
         for processor in executors.processors() {
             // SAFETY: BSP owns its ICR, physical AP/private descriptors ready.
@@ -1032,7 +1042,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         output::terminate(0x10);
     }
-    let roster = topology::AssignedRoster::new(
+    let mut roster = topology::AssignedRoster::new(
         native_processors.expect("validated native roster"),
         &executors,
         &host_owner,
@@ -1041,71 +1051,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut bare = host_owner.host();
     let target = target(options.parallel);
     let speculation = speculation::probe();
-    let mut read_only_region = None;
-    let mut core_locks = stela_runtime::machine::ctrr::CoreLocks::default();
-    let mut hidden_devices = Vec::new();
-    let mut loaded_tree = None;
-    let mut loaded_source = None;
-    let mut bundle_boot_processor = None;
-    let mut hidden_clpc = Vec::new();
-    // A bundle's kernel gets a framebuffer the size of the firmware's mode.
-    let framebuffer = handoff
-        .screen
-        .filter(|_| options.bundle)
-        .and_then(|screen| {
-            display::boot_framebuffer(screen.resolution(), options.dram_base + options.ram_bytes)
-        });
-    let (entry, x0) = if options.bundle {
-        crate::status::begin("Loading macOS into memory");
-        let files = &handoff.files[..handoff.file_count];
-        let dram = bundle::Dram {
-            base: options.dram_base,
-            backed: options.ram_bytes,
-            installed: options.dram_bytes,
-        };
-        let loaded = match &built {
-            Some(built) => bundle::load_built(&mut bare, built, dram, framebuffer, nvram),
-            None => bundle::load(&mut bare, files, dram, framebuffer, nvram),
-        };
-        let loaded = match loaded {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                output::arguments(format_args!("bundle refusal: {error}\n"));
-                output::fatal("the boot bundle could not be loaded")
-            }
-        };
-        output::arguments(format_args!(
-            "BUNDLE regions={} patched={} kept={:?} dram_base={:#x}\n",
-            loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
-        ));
-        read_only_region = loaded.read_only_region;
-        core_locks = loaded.core_locks;
-        hidden_devices = loaded.hidden_devices;
-        bundle_boot_processor = loaded.boot_processor;
-        hidden_clpc = loaded.hidden_clpc;
-        loaded_tree = Some(loaded.live_tree);
-        loaded_source = Some(loaded.source);
-        crate::status::done("");
-        (loaded.pc, loaded.x0)
-    } else {
-        // SAFETY: the guest image was left allocated by the loader.
-        let source = unsafe {
-            core::slice::from_raw_parts(
-                layout::physical(handoff.source.physical) as *const u8,
-                handoff.source.bytes as usize,
-            )
-        };
-        if !stela_runtime::machine::Host::write_ram(&mut bare, options.load, source) {
-            output::fatal("guest image does not fit guest DRAM at its load address");
-        }
-        output::arguments(format_args!(
-            "GUEST IMAGE pa={:#x} bytes={} sha256={}\n",
-            options.load,
-            source.len(),
-            stela_formats::sha256(source),
-        ));
-        (options.entry, options.x0)
-    };
+    let boot_image::GuestImage {
+        entry,
+        x0,
+        read_only_region,
+        core_locks,
+        hidden_devices,
+        live_tree: mut loaded_tree,
+        source: loaded_source,
+        boot_processor: bundle_boot_processor,
+        hidden_clpc,
+    } = boot_image::load(&mut bare, handoff, &options, built.as_deref(), nvram);
     let source_tree = loaded_tree.as_ref().map(|tree| tree.bytes());
     if source_tree.is_some() {
         crate::status::begin("Setting up the Mac's hardware");
@@ -1145,6 +1101,20 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Some(board) => board_profile(board, target, speculation),
         None => test_profile(target, speculation),
     };
+    let active_workers = crate::native_smp::topology::guest_assignment_count(
+        options.native_cores,
+        handoff.native_resources.cores as usize,
+        full_profile.processors.len().max(1),
+    )
+    .unwrap_or_else(|error| output::fatal(error));
+    roster
+        .limit(active_workers)
+        .unwrap_or_else(|error| output::fatal(&error));
+    output::arguments(format_args!(
+        "NATIVE ACTIVE workers={active_workers} parked={} source_PEs={}\n",
+        handoff.native_resources.cores as usize - active_workers,
+        full_profile.processors.len().max(1),
+    ));
     let topology_source = match (loaded_source.as_ref(), loaded_tree.as_ref(), board.as_ref()) {
         (Some(intake), Some(live), Some(source_board)) => {
             let boot = source_board
@@ -1160,14 +1130,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                     live,
                     identity,
                     boot.affinity,
-                    handoff.native_resources.cores as usize,
+                    active_workers,
                 ),
                 0x6000 => topology::Source::t6000_assigned(
                     intake.original(),
                     live,
                     identity,
                     boot.affinity,
-                    handoff.native_resources.cores as usize,
+                    active_workers,
                 ),
                 _ => Err(String::from(
                     "native assigned topology for this source family is not qualified",
@@ -1175,7 +1145,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             };
             Some(prepared.unwrap_or_else(|error| output::fatal(&error)))
         }
-        (None, None, None) if handoff.native_resources.cores == 1 => None,
+        (None, None, None) if active_workers == 1 => None,
         (None, None, None) => {
             output::fatal("an authored multi-PE image requires an explicit qualified topology")
         }
@@ -1183,7 +1153,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     let mut assigned = topology_source.as_ref().map(|source| {
         source
-            .prepare(&roster, full_profile.clone())
+            .prepare_on(
+                &roster,
+                full_profile.clone(),
+                native_processors.expect("validated native roster"),
+            )
             .unwrap_or_else(|error| output::fatal(&error))
     });
     if options.development_restore {
@@ -1588,18 +1562,20 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // RAM/device owners remain live for the whole non-returning run below.
     let mut machine = unsafe {
         crate::native_smp::canonical::prepare_with_locks(
-            handoff,
-            native_processors.expect("validated native roster"),
-            &executors,
-            &sender,
-            &mut host_owner,
-            canonical_ram,
-            cpu,
-            devices,
-            profile,
-            boot_processor,
-            &worker_bindings,
-            &processor_power,
+            crate::native_smp::canonical::Preparation {
+                handoff,
+                capture: native_processors.expect("validated native roster"),
+                executors: &executors,
+                sender: &sender,
+                owner: &mut host_owner,
+                ram: canonical_ram,
+                cpu,
+                devices,
+                profile,
+                boot_processor,
+                assignments: &worker_bindings,
+                processor_power: &processor_power,
+            },
             options.native_artifacts,
             Some(core_locks),
         )
@@ -1720,14 +1696,17 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
     // SAFETY: once on the BSP, with interrupts off and owned native resources.
     // Retain the processor-local state through every native call and handler.
     crate::status::begin("Installing the host processor state");
-    let mut host_owner =
-        unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
+    let host_owner = unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
+    #[cfg(feature = "diagnostics")]
+    let mut host_owner = host_owner;
+    #[cfg(feature = "diagnostics")]
     if options.native_bootstrap_check {
         host::fp_diagnostic::check(&mut host_owner.host())
             .unwrap_or_else(|error| output::fatal(error));
     }
     let apic_hz = host::statistics().apic_hz;
     crate::status::done("");
+    #[cfg(feature = "diagnostics")]
     if options.native_clock_check {
         // SAFETY: original loader capture remains pinned in this actual
         // HostOwner's physmap. Parsing never supplies hardware ownership.
@@ -1749,6 +1728,7 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
             });
         stop_here("bounded native clock fixture complete", 0x10);
     }
+    #[cfg(feature = "diagnostics")]
     if options.native_mmio_check {
         // SAFETY: explicit bounded native diagnostic on the original retained
         // handoff/owner. Success stops before guest entry; permanent mapping
@@ -1967,6 +1947,7 @@ fn start_devices(
             let bsp = native_processors.expect("validated native roster");
             storage_handoff.completion =
                 host::completion_signal(bsp.processors[bsp.selected[0] as usize].apic_id);
+            #[cfg(feature = "diagnostics")]
             if options.audio_check.is_some() {
                 // The audio check retains the final slice even after shutdown.
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
@@ -2123,7 +2104,11 @@ fn run_machine<H: Host>(
         ));
         machine.begin_survey();
     }
-    machine.set_idle_skip(options.idle_skip);
+    if let Err(reason) = machine.set_idle_skip(options.idle_skip) {
+        output::arguments(format_args!(
+            "IDLE SKIP unavailable: {reason}; waits use host time\n"
+        ));
+    }
     machine.set_step_timing(options.profile);
     if options.profile {
         output::arguments(format_args!(
@@ -2287,7 +2272,6 @@ const BEAT_SECONDS: u64 = 10;
 /// every [`BEAT_SECONDS`]. The caller supplies
 /// its admitted execution path; reporting and host polling never select a
 /// different memory or native-entry path.
-#[allow(clippy::too_many_arguments)]
 fn run<H: Host>(
     machine: &mut Machine<H, parallel::Board>,
     budget: u64,

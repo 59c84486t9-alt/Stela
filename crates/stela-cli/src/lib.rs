@@ -65,14 +65,26 @@ const ABOUT: &str = "Prepare a USB that boots Stela to install macOS on a PC";
     after_help = EXAMPLES,
     arg_required_else_help = true
 )]
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows runs Installer directly; the shared command grammar remains covered by tests"
+    )
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows runs Installer directly; the shared command grammar remains covered by tests"
+    )
+)]
 pub(crate) enum Command {
     /// Run an arm64 program, #! script or app bundle (the same as `stela
     /// PROGRAM`).
@@ -103,7 +115,13 @@ pub(crate) enum Command {
 }
 
 // Windows ships only the installer; the commands stay for other hosts and tests.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows runs Installer directly; the shared command grammar remains covered by tests"
+    )
+)]
 impl Command {
     fn run(self) -> anyhow::Result<()> {
         match self {
@@ -177,7 +195,7 @@ mod tests {
 
     #[test]
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    fn a_first_word_that_is_no_command_is_the_program_with_its_own_arguments() {
+    fn unknown_command_launches_program_with_arguments() {
         let Command::Program(words) = parse(&["./hello", "--help", "-v"]) else {
             panic!("not a program");
         };
@@ -189,7 +207,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn the_windows_executable_is_the_installer_alone() {
+    fn windows_executable_exposes_installer_commands() {
         // No arguments opens the wizard; setup's own flags and commands stay
         // scriptable.
         Installer::command()
@@ -211,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn the_help_shows_the_simple_usage_and_the_research_commands_are_absent() {
+    fn help_lists_shipped_commands() {
         let help = Cli::command().render_help().to_string();
         if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
             assert!(help.contains("stela PROGRAM [ARGS]..."), "{help}");

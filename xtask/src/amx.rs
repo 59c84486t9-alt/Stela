@@ -1,5 +1,5 @@
-//! AMX model fidelity: run the original corsix/amx C emulator for a selected
-//! source-qualified generation with FPCR.DN, on QEMU's AArch64 `virt` CPU, and compare every
+//! AMX model fidelity: run the corsix/amx C emulator for a selected
+//! semantic generation with FPCR.DN, on QEMU's AArch64 `virt` CPU, and compare every
 //! step with Stela's Rust model.
 //!
 //! QEMU has no AMX, so this checks the port against corsix's hardware-compared
@@ -134,7 +134,7 @@ impl From<ReferenceGeneration> for Generation {
 
 #[derive(Args)]
 pub struct AmxReference {
-    /// The exact semantic generation, independent of the host or profile label.
+    /// Semantic generation implemented by the selected reference source.
     #[arg(long, value_enum, default_value_t = ReferenceGeneration::M2)]
     generation: ReferenceGeneration,
     /// A corsix/amx checkout at the pinned commit.

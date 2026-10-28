@@ -90,6 +90,7 @@ pub(crate) enum StartupError {
     DeliveryTimeout,
 }
 pub const LVT_MASKED: u32 = 1 << 16;
+#[cfg_attr(target_os = "uefi", cfg(feature = "diagnostics"))]
 pub const TIMER_PERIODIC: u32 = 1 << 17;
 const SOFTWARE_ENABLE: u32 = 1 << 8;
 const DIVIDE_BY_ONE: u32 = 0b1011;

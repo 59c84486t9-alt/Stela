@@ -281,19 +281,19 @@ pub(crate) unsafe fn check(
     // all assigned actual BSP/AP Hosts are stopped, and no guest or DMA has
     // executed. This exercises the same cold constructor as original adoption.
     let mut machine = unsafe {
-        super::canonical::prepare(
+        super::canonical::prepare(super::canonical::Preparation {
             handoff,
             capture,
             executors,
             sender,
-            host_owner,
-            Arc::clone(&ram),
+            owner: host_owner,
+            ram: Arc::clone(&ram),
             cpu,
             devices,
-            profile(cores)?,
+            profile: profile(cores)?,
             boot_processor,
-            &bindings,
-            &(0..cores)
+            assignments: &bindings,
+            processor_power: &(0..cores)
                 .map(|pe| engine::ProcessorBinding {
                     domain: 1 + pe as u64,
                     target: engine::ProcessorTarget::Core { pe },
@@ -306,7 +306,7 @@ pub(crate) unsafe fn check(
                     },
                 })
                 .collect::<Vec<_>>(),
-        )
+        })
     }?;
     let started = crate::apic::rdtsc();
     while !ready(&machine, entry) {

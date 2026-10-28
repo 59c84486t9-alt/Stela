@@ -151,7 +151,7 @@ fn scan() -> Option<Vec<String>> {
 
 /// `nmcli -t -f SSID device wifi list`: one name a line, `\:` for a colon,
 /// hidden networks empty.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(test, target_os = "linux"))]
 fn nmcli(text: &str) -> Vec<String> {
     text.lines()
         .map(|line| line.replace("\\:", ":").replace("\\\\", "\\"))
@@ -160,7 +160,7 @@ fn nmcli(text: &str) -> Vec<String> {
 }
 
 /// `netsh wlan show networks`: `SSID 1 : name` lines.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(any(test, windows))]
 fn netsh(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
@@ -174,7 +174,7 @@ fn netsh(text: &str) -> Vec<String> {
 
 /// `networksetup -listallhardwareports`: the device after `Hardware Port:
 /// Wi-Fi`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(any(test, target_os = "macos"))]
 fn wifi_device(text: &str) -> Option<String> {
     let mut lines = text.lines();
     lines.find(|line| line.trim() == "Hardware Port: Wi-Fi")?;
@@ -187,7 +187,7 @@ fn wifi_device(text: &str) -> Option<String> {
 
 /// `networksetup -listpreferredwirelessnetworks`: a heading, then one
 /// tab-indented name a line.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(any(test, target_os = "macos"))]
 fn networksetup(text: &str) -> Vec<String> {
     text.lines()
         .skip(1)

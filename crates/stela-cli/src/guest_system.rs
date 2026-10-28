@@ -387,7 +387,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_layout_keeps_each_build_in_its_own_directory() -> Result<()> {
+    fn layout_separates_builds() -> Result<()> {
         let base = tempfile::tempdir()?;
         let layout = Layout::new(base.path().to_owned(), builds::DEFAULT);
         assert_eq!(layout.root(), base.path().join("26A434/root"));

@@ -416,7 +416,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_manifest_retains_version_and_model_compatibility_without_network() -> Result<()> {
+    fn local_manifest_checks_version_and_model() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("local.ipsw");
         crate::efi::synthetic_ipsw(&path)?;

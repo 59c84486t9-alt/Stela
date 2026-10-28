@@ -542,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn a_register_loaded_x16_or_an_unknown_image_refuses() {
+    fn census_rejects_dynamic_x16_and_unknown_image() {
         let mut calls = Calls::default();
         // MOV X16, X0 (ORR X16, XZR, X0) after the immediate.
         let moved = image(&[("_indirect", &[movz(MOVZ_X16, 3, 0), 0xaa00_03f0, SVC_0X80])]);

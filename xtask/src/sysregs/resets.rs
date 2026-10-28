@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_unconditional_reserved_access_fixes_a_field() {
+    fn unconditional_reserved_access_fixes_field() {
         let field = |id: &str, state: &str| {
             let page = parse(&format!(
                 "<field id=\"{id}\"><field_access><field_access_state>{state}\

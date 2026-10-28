@@ -31,7 +31,13 @@ pub(crate) enum FileSystem {
     Fat,
     ExFat,
     // Windows mounts no HFS+ volumes, and only macOS mounts APFS ones.
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(
+        windows,
+        allow(
+            dead_code,
+            reason = "Windows reports no HFS+ mounts; the shared filesystem enum covers all host backends"
+        )
+    )]
     Hfs,
     #[cfg(any(test, target_os = "macos"))]
     Apfs,
@@ -263,7 +269,7 @@ fn cpu() -> Result<Cpu> {
 
 /// Write `layout` to the whole disk `file`, durably: the bytes setup's
 /// erase lays out, written in their order, zeros in bounded runs.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(not(target_os = "macos"))]
 fn write_layout(file: &mut std::fs::File, layout: &super::format::Layout) -> Result<()> {
     use super::format::Write as Step;
     use std::io::{Seek, SeekFrom, Write};
@@ -315,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_is_confirmed_by_its_model_or_shown_size() {
+    fn disk_confirmation_accepts_model_or_displayed_size() {
         let disk = Disk {
             identifier: "mmcblk0".into(),
             name: "SD Card Reader".into(),

@@ -516,7 +516,7 @@ mod tests {
         assert!(range_total("bytes 5-8/10", 5).is_err());
     }
     #[test]
-    fn a_receipt_must_name_its_image_s_size() -> Result<()> {
+    fn receipt_requires_image_size() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let image = dir.path().join("Restore.ipsw");
         std::fs::write(&image, b"ipsw")?;
