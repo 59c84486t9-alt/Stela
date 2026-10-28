@@ -1364,11 +1364,14 @@ impl BlockDevice for Window {
     }
 
     fn room(&self) -> bool {
-        true
+        self.started.len() < WINDOW_DEPTH
     }
 
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
         let command = command.within(&self.identity, self.first)?;
+        if !self.room() {
+            return Err(BlockError::Protocol("the disk window queue is full"));
+        }
         let ticket = self.disk.lock().submit(command);
         self.started.push(ticket);
         Ok(ticket)
@@ -1969,6 +1972,44 @@ mod tests {
             bytes: 512,
         };
         assert!(a.start(outside).is_err());
+    }
+
+    #[test]
+    fn bulk_submission_respects_window_capacity() {
+        let blocks = 2 * WINDOW_DEPTH + 3;
+        let data: Vec<u8> = (0..blocks * 512).map(|byte| (byte / 512) as u8).collect();
+        let mut ram = RamDisk::new("bounded", blocks as u64, 512);
+        ram.identity.features.max_transfer = 512;
+        ram.write(0, &data).unwrap();
+        let (delayed, (released, _, given)) = Delayed::new(ram, 1);
+        let disk = Shared::new(Box::new(delayed));
+        let mut window = disk.whole();
+        let mut submission = Submission::new(
+            Request::Read {
+                lba: 0,
+                bytes: data.len(),
+            },
+            window.identity(),
+        )
+        .unwrap();
+        assert_eq!(submission.poll(&mut window), None);
+        assert!(!window.room());
+        assert_eq!(given.borrow().len(), 1);
+        assert_eq!(
+            window.start(Command::Read { lba: 0, bytes: 512 }),
+            Err(BlockError::Protocol("the disk window queue is full"))
+        );
+        released.set(usize::MAX);
+        let mut completed = None;
+        for _ in 0..blocks.div_ceil(WINDOW_DEPTH) {
+            if let Some(result) = submission.poll(&mut window) {
+                completed = Some(result);
+                break;
+            }
+        }
+        assert_eq!(completed, Some(Ok(Some(data))));
+        assert!(window.room());
+        assert_eq!(given.borrow().len(), blocks);
     }
 
     #[test]
