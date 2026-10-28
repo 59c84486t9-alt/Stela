@@ -5,7 +5,7 @@
 //!
 //! UEFI's Simple Network Protocol ends with boot services, and the request
 //! is made during the restore, long after ExitBootServices, so the client
-//! runs the runtime's IPv4 stack (`stela_runtime::net`) over the adapter's
+//! runs the runtime's dual-stack client (`stela_runtime::net`) over the adapter's
 //! after-EBS driver (`stela_drivers::net::virtio`, `stela_drivers::net::igc`
 //! for an Intel I225/I226, `stela_drivers::net::e1000e` for an Intel 82574L,
 //! `stela_drivers::net::igb` for supported Intel 82575–I211 copper adapters,
@@ -32,9 +32,7 @@ use stela_runtime::{
 pub const RELAY_BUFFER: usize = 1 << 20;
 
 /// What the screen says when DHCP gives the first adapter no lease.
-const NO_LEASE: &str = "No IPv4 address from DHCP. Connect Ethernet to a network with DHCP, or \
-                        create an Offline installer so macOS comes from the USB; Apple's signing \
-                        may still need a network.";
+const NO_LEASE: &str = "No automatic network address. Connect Ethernet or Wi-Fi to a network with DHCPv4 or IPv6 router advertisements, or use an Offline installer. Stateful DHCPv6 and native TLS are unsupported.";
 
 /// The host's network adapters and the loader root they are reached in.
 pub struct Links {
@@ -97,45 +95,50 @@ pub struct HostNetwork {
 }
 
 impl HostNetwork {
-    /// The first adapter, configured by DHCP now so that a missing network
-    /// is reported at mount start rather than in the middle of a restore.
+    /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
+    /// address. A failed adapter keeps its diagnostic while the next is tried.
     pub fn open(links: Links, clock: Clock) -> Result<Self, String> {
-        let Some(device) = links.devices.into_iter().next() else {
-            return Err(String::from(
-                "no host network adapter: the mount drives virtio-net, Intel I225/I226, Intel 82574L, supported Intel 82575–I211 copper and USB CDC Ethernet adapters after ExitBootServices",
+        let mut failures = Vec::new();
+        for device in links.devices {
+            let location = String::from(device.location());
+            output::arguments(format_args!(
+                "NETWORK candidate driver={} adapter={location} mac={}\n",
+                device.driver(),
+                device.mac()
             ));
-        };
-        output::arguments(format_args!("NETWORK driver={}\n", device.driver()));
-        output::arguments(format_args!(
-            "NETWORK adapter {} mac={}\n",
-            device.location(),
-            device.mac()
-        ));
-        let location = String::from(device.location());
-        crate::status::progress(&format!("adapter {location}"));
-        let mut stack = Stack::new(
-            RootLink {
-                device,
-                root: links.root,
-            },
-            Ticking(clock),
-        );
-        let config = stack.dhcp().map_err(|error| match error {
-            NetError::Dhcp(why) => {
-                output::arguments(format_args!("NETWORK adapter {location} {why}\n"));
-                String::from(NO_LEASE)
+            crate::status::progress(&format!("adapter {location}"));
+            let mut seed = [0u8; 8];
+            crate::random::fill(&mut seed).map_err(|_| {
+                String::from("secure host entropy is unavailable for the network stack")
+            })?;
+            let mut stack = Stack::new(
+                RootLink {
+                    device,
+                    root: links.root,
+                },
+                Ticking(clock),
+                u64::from_le_bytes(seed),
+            );
+            match stack.automatic() {
+                Ok(config) => {
+                    output::arguments(format_args!(
+                        "NETWORK adapter={location} addresses={:?} dns={:?}\n",
+                        config.addresses, config.dns
+                    ));
+                    let description = format!("{:?} on adapter {location}", config.addresses);
+                    return Ok(Self { stack, description });
+                }
+                Err(error) => {
+                    output::arguments(format_args!("NETWORK adapter {location} failed: {error}\n"));
+                    failures.push(format!("{location}: {error}"));
+                }
             }
-            NetError::NoCarrier => format!(
-                "adapter {location} has no link: connect its cable to a network with a DHCP server"
-            ),
-            error => format!("{error}"),
-        })?;
-        output::arguments(format_args!(
-            "NETWORK address={} router={:?} dns={:?}\n",
-            config.address, config.router, config.dns
-        ));
-        let description = format!("{} on adapter {location}", config.address.address());
-        Ok(Self { stack, description })
+        }
+        if failures.is_empty() {
+            Err(String::from("no native host network adapter is available"))
+        } else {
+            Err(format!("{NO_LEASE} {}", failures.join("; ")))
+        }
     }
 
     /// The address and adapter, as the screen names them.

@@ -1,15 +1,20 @@
-//! The interface: smoltcp over a [`Link`], configured by DHCP (renewed as
-//! the lease runs) or statically, with blocking DNS lookups and HTTP
+//! The interface: smoltcp over a [`Link`], configured by DHCPv4 and IPv6
+//! autoconfiguration (or an authored fixture), with blocking DNS lookups and HTTP
 //! requests, and non-blocking [`Transfer`]s that several connections can
 //! run at once.
+mod automatic;
+mod dad;
+mod rdnss;
 use super::{Clock, Ipv4, NetError, http};
 use alloc::{string::String, vec, vec::Vec};
+pub use automatic::Automatic;
+use core::net::Ipv6Addr;
 use smoltcp::{
     iface::{Config as InterfaceConfig, Interface, SocketHandle, SocketSet},
     phy::{self, Device, DeviceCapabilities, Medium},
     socket::{dhcpv4, dns, tcp},
     time::{Duration, Instant},
-    wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Cidr},
+    wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Cidr, Ipv6Cidr},
 };
 use stela_drivers::net::{Link, LinkError, MAX_FRAME};
 
@@ -49,6 +54,11 @@ struct Phy<L> {
     fault: Option<LinkError>,
     /// Whether the last poll took a frame from the link.
     received: bool,
+    probes: Vec<dad::Probe>,
+    local_ipv6: Ipv6Addr,
+    approved_ipv6: Vec<Ipv6Addr>,
+    rdnss: rdnss::Rdnss,
+    manage_ipv6: bool,
 }
 
 struct Rx(Vec<u8>);
@@ -64,6 +74,13 @@ impl<L: Link> phy::TxToken for Tx<'_, L> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, length: usize, f: F) -> R {
         let mut frame = vec![0; length];
         let result = f(&mut frame);
+        // Tentative addresses stay off the wire until their DAD probe ends.
+        if self.0.manage_ipv6 && frame.len() >= 54 && frame[12..14] == [0x86, 0xdd] {
+            let source = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[22..38]).unwrap());
+            if !source.is_unspecified() && !self.0.approved_ipv6.contains(&source) {
+                return result;
+            }
+        }
         if let Err(error) = self.0.link.transmit(&frame) {
             self.0.fault.get_or_insert(error);
         }
@@ -81,10 +98,15 @@ impl<L: Link> Device for Phy<L> {
     where
         Self: 'a;
 
-    fn receive(&mut self, _: Instant) -> Option<(Rx, Tx<'_, L>)> {
+    fn receive(&mut self, now: Instant) -> Option<(Rx, Tx<'_, L>)> {
         match self.link.receive() {
             Ok(Some(frame)) => {
                 self.received = true;
+                for probe in &mut self.probes {
+                    probe.duplicate |= dad::conflicts(&frame, probe.address, probe.nonce);
+                }
+                self.rdnss
+                    .observe(&frame, self.local_ipv6, now.total_micros().max(0) as u64);
                 Some((Rx(frame), Tx(self)))
             }
             Ok(None) => None,
@@ -128,25 +150,33 @@ pub struct Stack<L: Link, C: Clock> {
     config: Option<Config>,
     next_port: u16,
     /// Names looked up, their first address and when it was found.
-    resolved: Vec<(String, Ipv4, u64)>,
+    resolved: Vec<(String, IpAddress, u64)>,
+    dns_servers: Vec<IpAddress>,
+    conflicts: Vec<Ipv6Addr>,
+    probe_nonce: u64,
 }
 
 impl<L: Link, C: Clock> Stack<L, C> {
-    pub fn new(link: L, clock: C) -> Self {
+    /// Seed TCP sequence/port choices from host cryptographic entropy.
+    pub fn new(link: L, clock: C, seed: u64) -> Self {
         let mac = link.mac();
-        let seed = clock.now_us()
-            ^ u64::from_be_bytes([
-                0, 0, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
-            ]);
+        let local_ipv6 = automatic::link_local(mac.0);
         let mut config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(mac.0)));
         config.random_seed = seed;
+        config.slaac = true;
         let mut phy = Phy {
             link,
             fault: None,
             received: false,
+            probes: Vec::new(),
+            local_ipv6,
+            approved_ipv6: Vec::new(),
+            rdnss: Default::default(),
+            manage_ipv6: true,
         };
         let now = Instant::from_micros(clock.now_us() as i64);
-        let iface = Interface::new(config, &mut phy, now);
+        let mut iface = Interface::new(config, &mut phy, now);
+        iface.update_ip_addrs(|a| a.push(IpCidr::Ipv6(Ipv6Cidr::new(local_ipv6, 64))).unwrap());
         let mut sockets = SocketSet::new(Vec::new());
         let dhcp = Some(sockets.add(dhcpv4::Socket::new()));
         let dns = sockets.add(dns::Socket::new(&[], Vec::new()));
@@ -160,6 +190,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
             config: None,
             next_port: FIRST_EPHEMERAL + (seed % 8192) as u16,
             resolved: Vec::new(),
+            dns_servers: Vec::new(),
+            conflicts: Vec::new(),
+            probe_nonce: seed,
         }
     }
 
@@ -172,37 +205,43 @@ impl<L: Link, C: Clock> Stack<L, C> {
     }
 
     /// Configures the interface by hand instead of by DHCP.
-    pub fn set_config(&mut self, config: Config) {
+    pub fn set_config(&mut self, config: Config) -> Result<(), NetError> {
         if let Some(dhcp) = self.dhcp.take() {
             self.sockets.remove(dhcp);
         }
-        self.apply(Some(config));
+        self.apply(Some(config))
     }
 
-    fn apply(&mut self, config: Option<Config>) {
+    fn apply(&mut self, config: Option<Config>) -> Result<(), NetError> {
+        let mut fit = true;
         self.iface.update_ip_addrs(|addresses| {
-            addresses.clear();
+            addresses.retain(|a| matches!(a, IpCidr::Ipv6(_)));
             if let Some(config) = &config {
-                addresses.push(IpCidr::Ipv4(config.address)).unwrap();
+                // Reserve one slot for the lease without disturbing the
+                // first link-local IPv6 address required by router discovery.
+                while addresses.is_full() && addresses.len() > 1 {
+                    addresses.pop();
+                }
+                fit = addresses.push(IpCidr::Ipv4(config.address)).is_ok();
             }
         });
+        if !fit {
+            return Err(NetError::Invalid("interface address capacity"));
+        }
         let routes = self.iface.routes_mut();
         match config.as_ref().and_then(|config| config.router) {
             Some(router) => {
-                routes.add_default_ipv4_route(router).unwrap();
+                routes
+                    .add_default_ipv4_route(router)
+                    .map_err(|_| NetError::Invalid("interface route capacity"))?;
             }
             None => {
                 routes.remove_default_ipv4_route();
             }
         }
-        let servers: Vec<IpAddress> = config
-            .iter()
-            .flat_map(|config| config.dns.iter().copied().map(IpAddress::Ipv4))
-            .collect();
-        self.sockets
-            .get_mut::<dns::Socket>(self.dns)
-            .update_servers(&servers);
         self.config = config;
+        self.update_dns();
+        Ok(())
     }
 
     fn now(&self) -> u64 {
@@ -226,9 +265,11 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 None => None,
             };
             if let Some(config) = news {
-                self.apply(config);
+                self.apply(config)?;
             }
         }
+        self.probe_ipv6()?;
+        self.update_dns();
         match self.phy.fault.take() {
             Some(error) => Err(error.into()),
             None => Ok(()),
@@ -253,7 +294,14 @@ impl<L: Link, C: Clock> Stack<L, C> {
             .iface
             .poll_delay(Instant::from_micros(now as i64), &self.sockets)
             .map_or(u64::MAX, |delay| now.saturating_add(delay.total_micros()));
-        let until = deadline.min(timer);
+        let dad = self
+            .phy
+            .probes
+            .iter()
+            .map(|probe| probe.until)
+            .min()
+            .unwrap_or(u64::MAX);
+        let until = deadline.min(timer).min(dad);
         if until > now {
             self.clock.sleep(until);
         }
@@ -290,13 +338,14 @@ impl<L: Link, C: Clock> Stack<L, C> {
     /// An address found in the last [`RESOLVED_US`] is used again, and a
     /// lookup that fails falls back to the last address the name had, so
     /// one lost reply does not end a long download.
-    fn resolve(&mut self, host: &str) -> Result<Ipv4, NetError> {
+    fn resolve(&mut self, host: &str) -> Result<IpAddress, NetError> {
         if let Ok(address) = host.parse() {
             return Ok(address);
         }
         let now = self.now();
         let known = self.resolved.iter().position(|(name, ..)| name == host);
         if let Some(index) = known
+            && self.address_usable(self.resolved[index].1)
             && now.wrapping_sub(self.resolved[index].2) < RESOLVED_US
         {
             return Ok(self.resolved[index].1);
@@ -310,16 +359,48 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 self.resolved.push((String::from(host), address, now));
                 Ok(address)
             }
-            (Err(_), Some(index)) => Ok(self.resolved[index].1),
+            (Err(error), Some(index)) => {
+                if self.address_usable(self.resolved[index].1) {
+                    Ok(self.resolved[index].1)
+                } else {
+                    Err(error)
+                }
+            }
             (Err(error), None) => Err(error),
         }
     }
 
-    fn lookup(&mut self, host: &str) -> Result<Ipv4, NetError> {
+    fn lookup(&mut self, host: &str) -> Result<IpAddress, NetError> {
+        if self.ipv6_ready()
+            && let Ok(address) = self.lookup_type(host, DnsQueryType::Aaaa)
+        {
+            return Ok(address);
+        }
+        if self.config.is_some() {
+            self.lookup_type(host, DnsQueryType::A)
+        } else {
+            Err(NetError::Dns(alloc::format!(
+                "{host}: no reachable address family"
+            )))
+        }
+    }
+    fn lookup_type(&mut self, host: &str, kind: DnsQueryType) -> Result<IpAddress, NetError> {
+        let dns_deadline = self.now().saturating_add(DNS_WAIT_US);
+        while self.dns_servers.is_empty() {
+            self.poll()?;
+            if self.now() >= dns_deadline {
+                return Err(NetError::Dns(String::from(
+                    "no DNS server from DHCPv4 or IPv6 router advertisements",
+                )));
+            }
+            if self.dns_servers.is_empty() {
+                self.wait_until(dns_deadline);
+            }
+        }
         let query = self
             .sockets
             .get_mut::<dns::Socket>(self.dns)
-            .start_query(self.iface.context(), host, DnsQueryType::A)
+            .start_query(self.iface.context(), host, kind)
             .map_err(|error| NetError::Dns(alloc::format!("{host}: {error:?}")))?;
         let deadline = self.now() + DNS_WAIT_US;
         loop {
@@ -330,7 +411,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 Ok(addresses) => {
                     return addresses
                         .iter()
-                        .map(|&IpAddress::Ipv4(address)| address)
+                        .copied()
                         .next()
                         .ok_or_else(|| NetError::Dns(alloc::format!("{host}: no address")));
                 }
@@ -355,16 +436,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
         request: Vec<u8>,
         buffer: usize,
     ) -> Result<Transfer, NetError> {
-        let (name, port) = match host.rsplit_once(':') {
-            Some((name, port)) => (
-                name,
-                port.parse::<u16>()
-                    .map_err(|_| NetError::Invalid("HTTP port"))?,
-            ),
-            None => (host, 80),
-        };
-        if self.config.is_none() {
-            self.dhcp()?;
+        let (name, port) = automatic::authority(host)?;
+        if self.config.is_none() && !self.ipv6_ready() {
+            self.automatic()?;
         }
         let address = self.resolve(name)?;
         let mut socket = tcp::Socket::new(
@@ -376,11 +450,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         let local = self.next_port;
         self.next_port = local.checked_add(1).unwrap_or(FIRST_EPHEMERAL);
         socket
-            .connect(
-                self.iface.context(),
-                (IpAddress::Ipv4(address), port),
-                local,
-            )
+            .connect(self.iface.context(), (address, port), local)
             .map_err(|_| NetError::Invalid("TCP connect"))?;
         Ok(Transfer {
             socket: self.sockets.add(socket),
@@ -398,7 +468,11 @@ impl<L: Link, C: Clock> Stack<L, C> {
         if port == 0 {
             return Err(NetError::Invalid("TCP destination port zero"));
         }
-        let destination = alloc::format!("{host}:{port}");
+        let destination = if host.parse::<Ipv6Addr>().is_ok() {
+            alloc::format!("[{host}]:{port}")
+        } else {
+            alloc::format!("{host}:{port}")
+        };
         let mut transfer = self.open(&destination, Vec::new(), buffer)?;
         self.sockets
             .get_mut::<tcp::Socket>(transfer.socket)
@@ -460,6 +534,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
         }
         if done {
             return Ok(true);
+        }
+        if now >= transfer.idle_at {
+            return Err(NetError::Timeout("TCP transfer"));
         }
         match socket.state() {
             tcp::State::Closed if !transfer.request.is_empty() && transfer.sent == 0 => {
@@ -612,6 +689,9 @@ pub(crate) mod tests {
         frames: usize,
         drop_every: usize,
         swap_every: usize,
+        ipv6: bool,
+        dns_listener: Option<SocketHandle>,
+        dns_queries: Vec<u16>,
     }
 
     fn pattern(offset: u64) -> u8 {
@@ -634,6 +714,11 @@ pub(crate) mod tests {
                 },
                 fault: None,
                 received: false,
+                probes: Vec::new(),
+                local_ipv6: Ipv6Addr::UNSPECIFIED,
+                approved_ipv6: Vec::new(),
+                rdnss: Default::default(),
+                manage_ipv6: false,
             };
             let config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(SERVER)));
             let mut iface = Interface::new(config, &mut server, Instant::ZERO);
@@ -661,12 +746,63 @@ pub(crate) mod tests {
                 frames: 0,
                 drop_every: 0,
                 swap_every: 0,
+                ipv6: false,
+                dns_listener: None,
+                dns_queries: Vec::new(),
             }
+        }
+
+        fn ipv6(size: u64, clock: TestClock) -> Self {
+            use smoltcp::socket::udp;
+            let mut lan = Self::new(size, clock);
+            lan.ipv6 = true;
+            lan.iface.update_ip_addrs(|addresses| {
+                addresses.clear();
+                for address in ["fe80::1", "2001:db8:1234::53"] {
+                    addresses
+                        .push(IpCidr::new(address.parse::<Ipv6Addr>().unwrap().into(), 64))
+                        .unwrap();
+                }
+            });
+            let mut dns = udp::Socket::new(
+                udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+                udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+            );
+            dns.bind(53).unwrap();
+            lan.dns_listener = Some(lan.sockets.add(dns));
+            lan
         }
 
         fn step(&mut self) {
             let now = Instant::from_micros(self.clock.0.get() as i64);
             self.iface.poll(now, &mut self.server, &mut self.sockets);
+            if let Some(handle) = self.dns_listener {
+                let dns = self.sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
+                while dns.can_recv() {
+                    let (query, endpoint) = dns.recv().unwrap();
+                    assert_eq!(u16::from_be_bytes([query[4], query[5]]), 1);
+                    let mut end = 12;
+                    while query[end] != 0 {
+                        end += usize::from(query[end]) + 1;
+                    }
+                    end += 1;
+                    let kind = u16::from_be_bytes([query[end], query[end + 1]]);
+                    self.dns_queries.push(kind);
+                    let mut reply = query[..end + 4].to_vec();
+                    reply[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+                    reply[6..8].copy_from_slice(&1u16.to_be_bytes());
+                    reply[8..12].fill(0);
+                    reply.extend_from_slice(&[0xc0, 0x0c]);
+                    reply.extend_from_slice(&kind.to_be_bytes());
+                    reply.extend_from_slice(&[0, 1, 0, 0, 0, 60]);
+                    assert_eq!(kind, 28, "IPv6-only link must query AAAA");
+                    reply.extend_from_slice(&16u16.to_be_bytes());
+                    reply.extend_from_slice(
+                        &"2001:db8:1234::53".parse::<Ipv6Addr>().unwrap().octets(),
+                    );
+                    dns.send_slice(&reply, endpoint).unwrap();
+                }
+            }
             let socket = self.sockets.get_mut::<tcp::Socket>(self.listener);
             while socket.can_recv() {
                 socket
@@ -734,6 +870,18 @@ pub(crate) mod tests {
             CLIENT
         }
         fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+            if self.ipv6
+                && frame.len() >= 62
+                && frame[12..14] == [0x86, 0xdd]
+                && frame[20] == 58
+                && frame[54] == 133
+            {
+                self.client
+                    .into
+                    .borrow_mut()
+                    .0
+                    .push_back(automatic::tests::advertisement());
+            }
             self.client.transmit(frame)
         }
         fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
@@ -745,13 +893,88 @@ pub(crate) mod tests {
     }
 
     fn stack(lan: Lan, clock: TestClock) -> Stack<Lan, TestClock> {
-        let mut s = Stack::new(lan, clock);
+        let mut s = Stack::new(lan, clock, 7);
         s.set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),
             router: None,
             dns: Vec::new(),
-        });
+        })
+        .unwrap();
         s
+    }
+
+    #[test]
+    fn slaac_deadline_remains_visible_without_a_socket_deadline() {
+        let clock = TestClock::default();
+        let mut stack = Stack::new(Lan::ipv6(8192, clock.clone()), clock.clone(), 7);
+        stack
+            .set_config(Config {
+                address: Ipv4Cidr::new(CLIENT_IP, 24),
+                router: None,
+                dns: Vec::new(),
+            })
+            .unwrap();
+        stack.poll().unwrap();
+        // The only socket is an idle DNS client. The emitted first RS still
+        // owns a future retry timer even when no socket has a deadline.
+        let delay = stack
+            .iface
+            .poll_delay(Instant::from_micros(clock.now_us() as i64), &stack.sockets)
+            .expect("router discovery retry remains scheduled");
+        assert!(delay > Duration::ZERO && delay <= Duration::from_secs(4));
+    }
+
+    #[test]
+    fn an_existing_ipv4_default_route_does_not_block_ipv6_router_admission() {
+        let clock = TestClock::default();
+        let mut stack = Stack::new(Lan::ipv6(8192, clock.clone()), clock.clone(), 7);
+        // An authored already-configured IPv4 interface must not be erased
+        // by the DHCP socket's legitimate initial Deconfigured event.
+        stack
+            .set_config(Config {
+                address: Ipv4Cidr::new(CLIENT_IP, 24),
+                router: Some(SERVER_IP),
+                dns: Vec::new(),
+            })
+            .unwrap();
+        for _ in 0..1000 {
+            stack.poll().unwrap();
+            if stack.ipv6_ready() {
+                break;
+            }
+            clock.0.set(clock.0.get() + 10_000);
+        }
+        assert!(stack.ipv6_ready());
+        assert!(stack.iface.routes().get_default_ipv4_route().is_some());
+        assert!(stack.iface.routes().get_default_ipv6_route().is_some());
+        assert_eq!(stack.config().unwrap().router, Some(SERVER_IP));
+    }
+
+    #[test]
+    fn ipv6_only_ra_rdnss_aaaa_and_tcp_range_are_usable_without_ipv4() {
+        let clock = TestClock::default();
+        let lan = Lan::ipv6(8192, clock.clone());
+        let mut stack = Stack::new(lan, clock, 7);
+        let configuration = stack.automatic().unwrap();
+        assert!(stack.config().is_none());
+        assert!(!configuration.dns.is_empty());
+        let mut bytes = Vec::new();
+        assert_eq!(
+            stack
+                .get_range("restore.test", "/source", 7, 4102, |chunk| bytes
+                    .extend_from_slice(chunk))
+                .unwrap(),
+            8192
+        );
+        assert_eq!(bytes, (7..4103).map(pattern).collect::<Vec<_>>());
+        assert_eq!(stack.phy.link.dns_queries, vec![28]);
+        assert!(
+            stack
+                .iface
+                .ip_addrs()
+                .iter()
+                .all(|address| matches!(address, IpCidr::Ipv6(_)))
+        );
     }
 
     #[test]
@@ -768,7 +991,15 @@ pub(crate) mod tests {
             .get_range("10.0.2.2", "/a.ipsw", start, start + length - 1, |b| {
                 body.extend_from_slice(b)
             })
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error:?}; received={} server_sent={} frames={} clock={}",
+                    body.len(),
+                    s.phy.link.sent,
+                    s.phy.link.frames,
+                    s.phy.link.clock.0.get()
+                )
+            });
         assert_eq!(size, 1 << 40);
         assert_eq!(body.len() as u64, length);
         assert!(body.iter().zip(start..).all(|(&b, at)| b == pattern(at)));
@@ -791,7 +1022,7 @@ pub(crate) mod tests {
             out: Rc::default(),
             into: Rc::default(),
         };
-        let mut stack = Stack::new(silent, Coarse(Cell::new(0)));
+        let mut stack = Stack::new(silent, Coarse(Cell::new(0)), 7);
         match stack.dhcp() {
             Err(NetError::Dhcp(why)) => assert!(why.starts_with("no IPv4 lease"), "{why}"),
             other => panic!("{other:?}"),
@@ -852,7 +1083,7 @@ pub(crate) mod tests {
             out: Rc::default(),
             into: Rc::default(),
         });
-        let mut stack = Stack::new(silent, clock.clone());
+        let mut stack = Stack::new(silent, clock.clone(), 7);
         match stack.dhcp() {
             Err(NetError::Dhcp(why)) => assert!(why.starts_with("no IPv4 lease"), "{why}"),
             other => panic!("{other:?}"),
@@ -871,11 +1102,11 @@ pub(crate) mod tests {
         assert!(matches!(s.resolve("cdn.example"), Err(NetError::Dns(_))));
         let now = s.now();
         s.resolved
-            .push((String::from("cdn.example"), SERVER_IP, now));
-        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP));
+            .push((String::from("cdn.example"), SERVER_IP.into(), now));
+        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP.into()));
         s.resolved[0].2 = now.wrapping_sub(RESOLVED_US);
-        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP));
-        assert_eq!(s.resolve("10.0.2.2"), Ok(SERVER_IP));
+        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP.into()));
+        assert_eq!(s.resolve("10.0.2.2"), Ok(SERVER_IP.into()));
     }
 
     #[test]

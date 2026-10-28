@@ -44,7 +44,7 @@ stela-compiler = { path = "../stela-compiler", default-features = false }
 stela-drivers = { path = "../stela-drivers" }
 # The client network's protocols (`platform::net`): ARP, IPv4, DHCPv4,
 # DNS and TCP with window scaling, reassembly and Reno (CUBIC needs std floats).
-smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-reno", "socket-dhcpv4", "socket-dns", "assembler-max-segment-count-32"] }
+smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-ipv6-slaac", "iface-max-addr-count-8", "iface-max-route-count-8", "socket-tcp", "socket-tcp-reno", "socket-dhcpv4", "socket-dns", "assembler-max-segment-count-32"] }
 # HTTP/1.1 response heads and chunk sizes.
 httparse = { version = "1.10", default-features = false }
 
@@ -53,6 +53,8 @@ stela-soc-data = { path = "../stela-soc-data", features = ["test-support"] }
 stela-engine = { path = "../stela-engine", features = ["test-support"] }
 stela-formats = { path = "../stela-formats", features = ["test-support"] }
 stela-contracts = { path = "../stela-contracts", features = ["test-support"] }
+# Authored IPv6 DNS peer; production uses the built-in DNS client socket.
+smoltcp = { version = "0.14", default-features = false, features = ["socket-udp"] }
 # The drivers' RAM disk, which the device model tests run on.
 stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
 # The reference LZFSE encoder the no_std decoder is checked against.

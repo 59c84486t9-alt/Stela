@@ -879,6 +879,7 @@ mod tests {
                 frames: VecDeque::new(),
             },
             Wall(Instant::now()),
+            7,
         )
     }
 

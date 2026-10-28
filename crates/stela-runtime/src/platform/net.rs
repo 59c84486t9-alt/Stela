@@ -9,7 +9,8 @@
 //! the host xHCI), or a test peer. Every wait has an explicit deadline from
 //! a [`Clock`]; nothing is retried without bound. [`http`] frames the
 //! requests and responses (RFC 9112), with httparse reading the heads.
-//! Absent, and refused explicitly: IPv6, TLS and HTTP redirects.
+//! Automatic DHCPv4 and IPv6 SLAAC/RDNSS configure the interface. Native TLS,
+//! HTTP redirects and stateful DHCPv6 remain explicit transport boundaries.
 use alloc::string::String;
 use core::fmt;
 use stela_drivers::net::LinkError;
@@ -27,6 +28,8 @@ pub enum NetError {
     Link(String),
     /// The link reports no carrier.
     NoCarrier,
+    /// IPv6 duplicate-address detection found another owner.
+    DuplicateAddress(core::net::Ipv6Addr),
     /// No DHCP server answered.
     Dhcp(&'static str),
     /// The resolver failed: no server, no answer, or an error code.
@@ -48,6 +51,9 @@ impl fmt::Display for NetError {
         match self {
             Self::Link(why) => write!(f, "network link: {why}"),
             Self::NoCarrier => f.write_str("network link has no carrier"),
+            Self::DuplicateAddress(address) => {
+                write!(f, "IPv6 address {address} is already in use")
+            }
             Self::Dhcp(why) => write!(f, "DHCP: {why}"),
             Self::Dns(why) => write!(f, "DNS: {why}"),
             Self::Reset => f.write_str("connection refused or reset by peer"),
