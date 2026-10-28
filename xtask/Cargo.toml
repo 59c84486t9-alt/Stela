@@ -30,10 +30,10 @@ xz2 = { version = "0.1.7", features = ["static"] }
 object = { version = "0.37", features = ["read"] }
 
 [features]
-# Test the boot IRQ resource decoder against the drivers' ACPI types, which
-# build from the Linux ACPICA sources `cargo xtask gpu fetch` checks out;
-# `cargo xtask check` turns it on.
-native-acpi = ["stela-drivers/native-acpi"]
+# The tests that read the sources `cargo xtask gpu fetch` checks out: the
+# boot IRQ resource decoder against the drivers' ACPI types (Linux ACPICA)
+# and the NVIDIA hook layouts; `cargo xtask check` turns it on.
+fetched-sources = ["stela-drivers/native-acpi"]
 
 [lints]
 workspace = true

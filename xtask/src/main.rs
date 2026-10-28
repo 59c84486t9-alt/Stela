@@ -76,7 +76,7 @@ mod boot_xstate;
 #[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]
 #[allow(dead_code)]
 mod boot_ioapic;
-#[cfg(all(test, feature = "native-acpi"))]
+#[cfg(all(test, feature = "fetched-sources"))]
 #[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
 mod boot_irq_crs;
 #[cfg(test)]

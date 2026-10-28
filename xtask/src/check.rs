@@ -49,8 +49,8 @@ pub fn run(fix: bool) -> Result<()> {
             "nvidia-port,intel-port,amd-port",
         ]),
     ];
-    // `--all-features` includes xtask's `native-acpi`, whose tests read the
-    // fetched ACPICA sources.
+    // `--all-features` includes xtask's `fetched-sources`, whose tests read
+    // the fetched sources.
     let test = ["test", "--workspace", "--all-features", "--locked"];
     let host_lane = vec![
         {
