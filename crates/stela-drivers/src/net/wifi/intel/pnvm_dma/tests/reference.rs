@@ -49,6 +49,8 @@ fn actual_pnvm_skus_preserve_payloads_in_both_layouts() {
                 assert_eq!(records.copied[0], expected);
             }
             drop(records);
+            // SAFETY: the source-backed bytes were staged into a synchronous
+            // model domain only; no device or worker can retain DMA access.
             unsafe {
                 table.release_after_stop().unwrap();
             }
@@ -68,7 +70,9 @@ fn pnvm_and_reduced_power_tables_match_linux_for_both_layouts() {
         let r = domain.records.lock().unwrap();
         let id = (address - 0x100000) / 0x10000;
         let p = r.live[&id].address(0, n).unwrap();
-        // Synchronous model has no real device reader/writer or references.
+        // SAFETY: address() checked this range within a live initialized
+        // allocation. The domain lock retains its mapping through the copy,
+        // and this synchronous model has no device or concurrent writer.
         unsafe { core::slice::from_raw_parts(p.as_ptr(), n) }.to_vec()
     }
     fn fnv(bytes: &[u8]) -> u64 {
@@ -139,6 +143,8 @@ fn pnvm_and_reduced_power_tables_match_linux_for_both_layouts() {
             tables.push(table);
         }
         for table in &mut tables {
+            // SAFETY: both tables belong to the same synchronous no-device
+            // model; the oracle comparison finished before either is released.
             unsafe {
                 table.release_after_stop().unwrap();
             }

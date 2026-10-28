@@ -48,11 +48,14 @@ fn payload_order_and_fragment_descriptors_preserve_coherent_mapping() {
             }
             drop(records);
             assert_eq!(table.expose_for_scratch(), Err(Error::State));
-            // No device was submitted in this model, so actual accesses
-            // and workers are already drained; this is not a notification.
+            // SAFETY: Source owns these allocations and Domain only records
+            // synchronous mappings; this fixture has no requester, DMA engine
+            // or IRQ worker that could access the exposed table.
             unsafe {
                 table.release_after_stop().unwrap();
             }
+            // SAFETY: the same no-device fixture remains quiescent after its
+            // first stop; the repeated call exercises only the stopped state.
             assert_eq!(unsafe { table.release_after_stop() }, Err(Error::State));
             assert!(domain.records.lock().unwrap().live.is_empty());
             drop(table);
@@ -94,11 +97,16 @@ fn staging_failures_unwind_and_failed_stop_invalidation_retries() {
         table.expose_for_scratch().unwrap();
         domain.records.lock().unwrap().unmap_fail = Some(fail);
         assert_eq!(
+            // SAFETY: the fixture has no device or asynchronous worker. The
+            // injected IOMMU invalidation failure does not create a DMA user;
+            // its live mappings remain retained for the following retry.
             unsafe { table.release_after_stop() },
             Err(Error::Dma(dma::Error::Dma(DmaError::InvalidationFailed)))
         );
         assert_eq!(table.state, State::Exposed);
         assert!(!domain.records.lock().unwrap().live.is_empty());
+        // SAFETY: the same no-device fixture is still quiescent; the failed
+        // invalidation retained the allocation and domain mapping for retry.
         unsafe {
             table.release_after_stop().unwrap();
         }
@@ -132,6 +140,8 @@ fn invalid_shapes_and_missing_domain_allocate_nothing() {
         assert!(prepare(&chunks(&data), fragmented, &source, &domain).is_err());
     }
     assert!(matches!(
+        // SAFETY: Source would allocate uniquely owned host RAM with no device
+        // aliases; the absent domain is rejected before any allocation or DMA.
         unsafe { MappedTable::prepare(&chunks(&[vec![1], vec![2]]), true, &source, None) },
         Err(Error::Dma(dma::Error::Dma(DmaError::IommuUnavailable)))
     ));
