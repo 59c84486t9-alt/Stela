@@ -1,0 +1,139 @@
+//! Drain behavior when every eligible continuation is blocked.
+use super::*;
+
+unsafe fn sleeper(p: *mut c_void, index: usize) {
+    let f = unsafe { bound(p) };
+    f.bind(index);
+    let binding = &f.bindings[index];
+    binding.enter(1, 0x200);
+    binding.blocked.store(true, Ordering::Release);
+    binding.prepared.store(true, Ordering::Release);
+    f.event(80 + index as u64);
+    assert_eq!(
+        unsafe { f.runtime() }.park_if_blocked(),
+        Ok(ParkOutcome::Resumed)
+    );
+    f.event(82 + index as u64);
+    binding.exit();
+}
+unsafe extern "C" fn first(p: *mut c_void) {
+    unsafe { sleeper(p, 0) };
+}
+unsafe extern "C" fn second(p: *mut c_void) {
+    unsafe { sleeper(p, 1) };
+}
+unsafe extern "C" fn queued(p: *mut c_void) {
+    let f = unsafe { bound(p) };
+    // The same-lane callback starts only after a real wake
+    // releases a retained continuation for its next job.
+    f.event(84);
+    f.data.fetch_add(1, Ordering::Release);
+}
+unsafe extern "C" fn general_origin(p: *mut c_void) {
+    let f = unsafe { bound(p) };
+    let runtime = unsafe { f.runtime() };
+    let origin = runtime.current_context().unwrap();
+    unsafe { runtime.queue().execute(Kind::General, first, p) }.unwrap();
+    unsafe { runtime.queue().execute(Kind::General, second, p) }.unwrap();
+    unsafe { runtime.queue().execute(Kind::General, queued, p) }.unwrap();
+    // Both actual General stacks park. The third General job
+    // remains queued, while the Idle Notify stack is ineligible.
+    assert_eq!(runtime.drain(10000), Err(WorkError::Pending));
+    assert_eq!(f.data.load(Ordering::Acquire), 0);
+    assert_eq!(
+        f.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.0)
+            .collect::<Vec<_>>(),
+        [80, 81]
+    );
+    assert_eq!(
+        runtime.current_context().unwrap().context_id,
+        origin.context_id
+    );
+    f.bindings[0].wake();
+    // One actual wake releases one General stack. The queued
+    // callback completes; the second sleeper still needs wake.
+    assert_eq!(runtime.drain(10000), Err(WorkError::Pending));
+    assert_eq!(f.data.load(Ordering::Acquire), 1);
+    assert_eq!(
+        f.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.0)
+            .collect::<Vec<_>>(),
+        [80, 81, 82, 84]
+    );
+    f.bindings[1].wake();
+    runtime.drain(10000).unwrap();
+    assert_eq!(
+        runtime.current_context().unwrap().context_id,
+        origin.context_id
+    );
+}
+unsafe extern "C" fn notify_origin(p: *mut c_void) {
+    let f = unsafe { bound(p) };
+    let runtime = unsafe { f.runtime() };
+    let origin = runtime.current_context().unwrap();
+    unsafe { runtime.queue().execute(Kind::Notify, first, p) }.unwrap();
+    unsafe { runtime.queue().execute(Kind::Notify, queued, p) }.unwrap();
+    // The serial Notify continuation parks. Both Idle General
+    // stacks are real, but cannot execute the queued Notify job.
+    assert_eq!(runtime.drain(10000), Err(WorkError::Pending));
+    assert_eq!(f.data.load(Ordering::Acquire), 0);
+    assert_eq!(
+        f.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.0)
+            .collect::<Vec<_>>(),
+        [80]
+    );
+    f.bindings[0].wake();
+    runtime.drain(10000).unwrap();
+    assert_eq!(f.data.load(Ordering::Acquire), 1);
+    assert_eq!(
+        f.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.0)
+            .collect::<Vec<_>>(),
+        [80, 82, 84]
+    );
+    assert_eq!(
+        runtime.current_context().unwrap().context_id,
+        origin.context_id
+    );
+}
+fn run(origin: Callback, expected: &[u64]) {
+    let (executor, f, dropped) = bound_setup();
+    let runtime = executor.runtime();
+    unsafe { runtime.call_foreground(origin, Arc::as_ptr(&f) as *mut c_void, 10000) }.unwrap();
+    assert_eq!(
+        f.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.0)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(f.cpu.flags.load(Ordering::Acquire), 0x202);
+    f.detach_all();
+    unsafe { runtime.retire() }.unwrap();
+    drop(executor);
+    assert_eq!(dropped.load(Ordering::Acquire), 4);
+}
+#[test]
+fn queued_general_behind_all_blocked_general_stacks_returns_pending_until_wake() {
+    run(general_origin, &[80, 81, 82, 84, 83]);
+}
+#[test]
+fn queued_notify_behind_blocked_notify_stack_returns_pending_until_wake() {
+    run(notify_origin, &[80, 82, 84]);
+}
