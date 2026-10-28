@@ -2400,7 +2400,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "source_mac_all_cut_register_patterns_widths_io_and_bar_match",
+    "test": "rtl8822c_mac_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/mac.rs",
     "kind": "oracle",
     "inputs": [
@@ -2410,7 +2410,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "source_all_channel_geometries_igi_wrap_and_whole_io_bar_match",
+    "test": "rtl8822c_channel_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/channel_state.rs",
     "kind": "oracle",
     "inputs": [
@@ -2420,7 +2420,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "channel_power_whole_source_calculations_actual_io_and_bar_match",
+    "test": "rtl8822c_power_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/power.rs",
     "kind": "oracle",
     "inputs": [
@@ -2430,7 +2430,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "phy_tail_whole_source_io_tracking_and_bar_match",
+    "test": "rtl8822c_tail_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/tail.rs",
     "kind": "oracle",
     "inputs": [
@@ -2440,7 +2440,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "factory_all_optional_blank_combinations_and_actual_source_io_bar_match",
+    "test": "rtl8822c_factory_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/factory.rs",
     "kind": "oracle",
     "inputs": [
@@ -2450,7 +2450,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "dac_source_complete_initial_sequences_vectors_and_bar_match",
+    "test": "rtl8822c_dac_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/calibration.rs",
     "kind": "oracle",
     "inputs": [
@@ -2460,7 +2460,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "dynamic_all_source_io_tracking_and_bar_match_with_policy_unqualified",
+    "test": "rtl8822c_dynamic_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/dynamic.rs",
     "kind": "oracle",
     "inputs": [
@@ -2470,7 +2470,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "every_igi_and_complete_source_trx_trace_and_bar_matches",
+    "test": "rtl8822c_trx_matches_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/paths.rs",
     "kind": "oracle",
     "inputs": [
@@ -2480,7 +2480,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "every_supported_board_cut_and_crystal_endpoint_matches_complete_source_phase",
+    "test": "rtl8822c_tables_match_linux",
     "source": "crates/stela-drivers/src/net/wifi/realtek/phy/tests/tables.rs",
     "kind": "oracle",
     "inputs": [

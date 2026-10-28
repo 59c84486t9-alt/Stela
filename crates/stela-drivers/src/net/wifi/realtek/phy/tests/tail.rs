@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn phy_tail_disables_mu_validity_keeps_source_widths_and_raw_thermal_reference() {
+fn tail_registers_and_thermal_reference() {
     let (mut bus, factory, report) = tail_setup(3, 255, 255);
     let before = bus.model.lock().unwrap().get(0x14c0, 4);
     let initialized = unsafe { factory.finish_initial_phy(&mut bus, &report) }.unwrap();
@@ -50,7 +50,7 @@ fn phy_tail_disables_mu_validity_keeps_source_widths_and_raw_thermal_reference()
 }
 
 #[test]
-fn phy_tail_every_io_failure_late_reset_and_partial_write_unwind_quarantines() {
+fn tail_failure_quarantines() {
     let (mut bus, factory, report) = tail_setup(0, 5, 6);
     unsafe { factory.finish_initial_phy(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -89,7 +89,7 @@ fn phy_tail_every_io_failure_late_reset_and_partial_write_unwind_quarantines() {
 }
 
 #[test]
-fn phy_tail_rejects_mismatched_profile_layout_and_initial_domain_without_programming() {
+fn tail_profile_preflight() {
     let (mut bus, factory, _) = tail_setup(0, 0, 0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
@@ -119,7 +119,7 @@ fn phy_tail_rejects_mismatched_profile_layout_and_initial_domain_without_program
 
 #[test]
 #[ignore = "requires unchanged source thermal reset/EWMA initialization and complete beamforming IO/BAR oracle"]
-fn phy_tail_whole_source_io_tracking_and_bar_match() {
+fn rtl8822c_tail_matches_linux() {
     let trace =
         std::fs::read(std::env::var("STELA_REALTEK_WIFI_PHY_TAIL_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

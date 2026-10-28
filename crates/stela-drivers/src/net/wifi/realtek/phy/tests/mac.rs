@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn source_mac_executes_real_fifo_protocol_driver_info_interface_and_all_error_retention() {
+fn mac_protocol_and_failure_retention() {
     let (mut bus, report) = source_mac_setup(3);
     let state = unsafe { source_mac::initialize(&mut bus, &report) }.unwrap();
     assert_eq!(state.rx_filter_map1(), 0xffff);
@@ -48,7 +48,7 @@ fn source_mac_executes_real_fifo_protocol_driver_info_interface_and_all_error_re
 }
 
 #[test]
-fn source_mac_rejects_unrecognized_cut_or_foreign_report_before_fifo_io() {
+fn mac_profile_preflight() {
     let (mut bus, report) = source_mac_setup(7);
     assert!(matches!(
         unsafe { source_mac::initialize(&mut bus, &report) },
@@ -66,7 +66,7 @@ fn source_mac_rejects_unrecognized_cut_or_foreign_report_before_fifo_io() {
 
 #[test]
 #[ignore = "requires unchanged whole MAC protocol/driver-info/PCI interface source oracle"]
-fn source_mac_all_cut_register_patterns_widths_io_and_bar_match() {
+fn rtl8822c_mac_matches_linux() {
     let path =
         std::path::PathBuf::from(std::env::var("STELA_REALTEK_WIFI_SOURCE_MAC_ORACLE").unwrap());
     assert_eq!(

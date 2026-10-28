@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn dac_requires_real_complete_samples_ready_and_convergence() {
+fn dac_sampling_and_convergence() {
     for (invalid, unstable, adc_residual, dac_residual, expected) in [
         (Some(0), false, 0, 0, Error::DacSamples { accepted: 0 }),
         (Some(99), false, 0, 0, Error::DacSamples { accepted: 99 }),
@@ -52,7 +52,7 @@ fn dac_requires_real_complete_samples_ready_and_convergence() {
 }
 
 #[test]
-fn dac_accepts_complete_last_bounded_sample_and_last_ready_poll() {
+fn dac_final_poll_bounds() {
     let (mut bus, initial, report) = dac_setup(0);
     {
         let mut m = bus.model.lock().unwrap();
@@ -69,7 +69,7 @@ fn dac_accepts_complete_last_bounded_sample_and_last_ready_poll() {
 }
 
 #[test]
-fn dac_retains_distinct_rf_backups_and_each_actual_b_dck_nibble() {
+fn dac_rf_backup_and_nibbles() {
     let (mut bus, initial, report) = dac_setup(0);
     {
         let mut m = bus.model.lock().unwrap();
@@ -87,7 +87,7 @@ fn dac_retains_distinct_rf_backups_and_each_actual_b_dck_nibble() {
 }
 
 #[test]
-fn dac_rejects_wrong_profiles_layout_and_initial_domain_before_writes() {
+fn dac_profile_preflight() {
     let (mut bus, initial, _) = dac_setup(0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
@@ -116,7 +116,7 @@ fn dac_rejects_wrong_profiles_layout_and_initial_domain_before_writes() {
 }
 
 #[test]
-fn dac_partial_io_failures_late_reset_and_unwind_retain_native_owner() {
+fn dac_failure_quarantines() {
     let (mut bus, initial, report) = dac_setup(0);
     unsafe { initial.calibrate_dac(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -159,7 +159,7 @@ fn dac_partial_io_failures_late_reset_and_unwind_retain_native_owner() {
 
 #[test]
 #[ignore = "requires unchanged pinned initial empty-cache DAC oracle and donor negative evidence"]
-fn dac_source_complete_initial_sequences_vectors_and_bar_match() {
+fn rtl8822c_dac_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_DAC_ORACLE").unwrap()).unwrap();
     let mut offset = 0;
     for case in 0..64 {

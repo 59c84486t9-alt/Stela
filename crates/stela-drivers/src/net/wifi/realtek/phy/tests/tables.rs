@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn all_compiled_streams_are_structurally_preflighted_and_unknown_profiles_do_no_io() {
+fn table_stream_preflight() {
     for cut in 0u32..=6 {
         for rfe in 0u8..=6 {
             let condition = u32::from(rfe)
@@ -39,7 +39,7 @@ fn all_compiled_streams_are_structurally_preflighted_and_unknown_profiles_do_no_
 }
 
 #[test]
-fn flat_branch_semantics_and_malformed_streams_are_explicit() {
+fn table_branch_and_grammar() {
     let condition = 5 | (1 << 8) | (15 << 12) | (4 << 16) | (3 << 24);
     let table = [
         [0x800, 1],
@@ -103,7 +103,7 @@ fn flat_branch_semantics_and_malformed_streams_are_explicit() {
 }
 
 #[test]
-fn representative_io_failure_late_reset_and_unwind_never_publish_loaded_tables() {
+fn table_failure_quarantines() {
     let (mut bus, board, report) = setup(1, 0, 0x7f, 0, false, false);
     unsafe { initialize(&mut bus, &board, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -140,7 +140,7 @@ fn representative_io_failure_late_reset_and_unwind_never_publish_loaded_tables()
 
 #[test]
 #[ignore = "requires unchanged pinned C complete pre-TRX PHY table phase"]
-fn every_supported_board_cut_and_crystal_endpoint_matches_complete_source_phase() {
+fn rtl8822c_tables_match_linux() {
     let trace =
         std::fs::read(std::env::var("STELA_REALTEK_WIFI_PHY_TABLES_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

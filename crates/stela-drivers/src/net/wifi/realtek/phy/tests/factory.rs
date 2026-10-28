@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn factory_retains_real_blank_optional_and_explicit_source_default_effects() {
+fn optional_factory_trim() {
     let (mut bus, calibration, report, physical) = trim_setup(0);
     let factory = unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
     assert!(!factory.x2_busy_observed());
@@ -39,7 +39,7 @@ fn factory_retains_real_blank_optional_and_explicit_source_default_effects() {
 }
 
 #[test]
-fn factory_io_failures_late_reset_and_unwind_retain_actual_owner() {
+fn factory_failure_quarantines() {
     let (mut bus, calibration, report, physical) = trim_setup(511);
     unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -81,7 +81,7 @@ fn factory_io_failures_late_reset_and_unwind_retain_actual_owner() {
 }
 
 #[test]
-fn factory_rejects_a_different_actual_captured_rfe_or_power_calibration_before_io() {
+fn factory_calibration_preflight() {
     for change_rfe in [true, false] {
         let (mut bus, calibration, report, _) = trim_setup(0);
         {
@@ -105,7 +105,7 @@ fn factory_rejects_a_different_actual_captured_rfe_or_power_calibration_before_i
 }
 
 #[test]
-fn factory_report_layout_and_off_domain_reject_before_any_writes() {
+fn factory_profile_preflight() {
     let (mut bus, calibration, _, physical) = trim_setup(0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
@@ -135,7 +135,7 @@ fn factory_report_layout_and_off_domain_reject_before_any_writes() {
 
 #[test]
 #[ignore = "requires unchanged pinned source complete factory RF trim traces and real OTP provenance"]
-fn factory_all_optional_blank_combinations_and_actual_source_io_bar_match() {
+fn rtl8822c_factory_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_TRIM_ORACLE").unwrap()).unwrap();
     let mut offset = 0;
     for case in 0..512 {

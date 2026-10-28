@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn actual_channel_state_binds_next_power_geometry_and_every_uncertain_io_retains_owner() {
+fn channel_geometry_and_failure_retention() {
     let (mut bus, phy, report, g) = channel_setup();
     let state = unsafe { phy.set_channel(&mut bus, &report, g) }.unwrap();
     assert_eq!(state.geometry(), g);
@@ -46,7 +46,7 @@ fn actual_channel_state_binds_next_power_geometry_and_every_uncertain_io_retains
 }
 
 #[test]
-fn channel_late_domain_loss_reset_and_partial_rf_unwind_quarantines() {
+fn channel_domain_loss_quarantines() {
     let (mut bus, phy, report, g) = channel_setup();
     unsafe { phy.set_channel(&mut bus, &report, g) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -77,7 +77,7 @@ fn channel_late_domain_loss_reset_and_partial_rf_unwind_quarantines() {
 
 #[test]
 #[ignore = "requires unchanged complete source BB/MAC/RF channel oracle"]
-fn source_all_channel_geometries_igi_wrap_and_whole_io_bar_match() {
+fn rtl8822c_channel_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_CHANNEL_ORACLE").unwrap()).unwrap();
     let mut offset = 0;
     let mut cases = 0;

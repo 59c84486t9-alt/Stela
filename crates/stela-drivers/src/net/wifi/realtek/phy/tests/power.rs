@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn channel_power_consumes_actual_phy_and_every_io_failure_reset_unwind_retains_owner() {
+fn power_programming_failure_retention() {
     let (mut bus, phy, report, plan) = power_setup();
     let programmed = unsafe { phy.program_channel_power(&mut bus, &report, plan) }.unwrap();
     assert_eq!(programmed.plan().geometry().primary(), 1);
@@ -45,7 +45,7 @@ fn channel_power_consumes_actual_phy_and_every_io_failure_reset_unwind_retains_o
 }
 
 #[test]
-fn channel_power_foreign_board_and_unrepresentable_os_limits_have_zero_register_effects() {
+fn power_limits_preflight() {
     let (mut bus, phy, report, _) = power_setup();
     let g = channel_power::Geometry::new(1, channel_power::Width::Mhz20, None, None).unwrap();
     let other = board_power::channel_fixture(5, [255; 168])
@@ -65,7 +65,7 @@ fn channel_power_foreign_board_and_unrepresentable_os_limits_have_zero_register_
 
 #[test]
 #[ignore = "requires unchanged complete board/channel gain/SAR/TXAGC oracle"]
-fn channel_power_whole_source_calculations_actual_io_and_bar_match() {
+fn rtl8822c_power_matches_linux() {
     let trace =
         std::fs::read(std::env::var("STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

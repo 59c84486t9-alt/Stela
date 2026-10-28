@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn initial_paths_preserve_source_reset_width_and_igi_wrap_latch_effects() {
+fn path_reset_and_igi_wrap() {
     for igi in [0u32, 1, 2, 63, 127] {
         let (mut bus, loaded, report) = paths_setup(3, igi);
         let original = bus.model.lock().unwrap().get(2, 2);
@@ -44,7 +44,7 @@ fn initial_paths_preserve_source_reset_width_and_igi_wrap_latch_effects() {
 }
 
 #[test]
-fn every_path_io_failure_and_late_reset_retains_actual_owner_without_configured_state() {
+fn path_failure_quarantines() {
     let (mut bus, loaded, report) = paths_setup(0, 0);
     unsafe { loaded.configure_paths(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -68,7 +68,7 @@ fn every_path_io_failure_and_late_reset_retains_actual_owner_without_configured_
 }
 
 #[test]
-fn path_profile_report_and_actual_domain_mismatches_do_not_program_bb() {
+fn path_profile_preflight() {
     let (mut bus, loaded, _) = paths_setup(0, 63);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
@@ -98,7 +98,7 @@ fn path_profile_report_and_actual_domain_mismatches_do_not_program_bb() {
 
 #[test]
 #[ignore = "requires unchanged pinned C initial AB/AB/false TRX oracle"]
-fn every_igi_and_complete_source_trx_trace_and_bar_matches() {
+fn rtl8822c_trx_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_TRX_ORACLE").unwrap()).unwrap();
     let mut offset = 0;
     for case in 0..512 {

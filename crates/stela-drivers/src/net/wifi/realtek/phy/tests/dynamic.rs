@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn initial_dynamic_observes_fresh_igi_cck_and_preserves_unrelated_edcca_bits() {
+fn dynamic_igi_and_edcca_bits() {
     let (mut bus, paths, report) = dynamic_setup(3, 127, 0x7f, 63, 0);
     let old = bus.model.lock().unwrap().get(0x84c, 4);
     let state = unsafe { paths.initialize_dynamic(&mut bus, &report) }.unwrap();
@@ -37,7 +37,7 @@ fn initial_dynamic_observes_fresh_igi_cck_and_preserves_unrelated_edcca_bits() {
 }
 
 #[test]
-fn dynamic_every_io_failure_and_late_domain_loss_quarantines_without_state() {
+fn dynamic_domain_loss_quarantines() {
     let (mut bus, paths, report) = dynamic_setup(0, 0, 63, 0, 63);
     unsafe { paths.initialize_dynamic(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
@@ -67,7 +67,7 @@ fn dynamic_every_io_failure_and_late_domain_loss_quarantines_without_state() {
 }
 
 #[test]
-fn dynamic_unwind_after_partial_edcca_setup_retains_actual_owner() {
+fn dynamic_partial_write_unwind() {
     let (mut bus, paths, report) = dynamic_setup(0, 0, 0, 0, 0);
     bus.panic_register = Some(0x524);
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -80,7 +80,7 @@ fn dynamic_unwind_after_partial_edcca_setup_retains_actual_owner() {
 }
 
 #[test]
-fn dynamic_rejects_mismatched_report_and_actual_off_domain_before_programming() {
+fn dynamic_profile_preflight() {
     let (mut bus, paths, _) = dynamic_setup(0, 0, 0, 0, 0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
@@ -110,7 +110,7 @@ fn dynamic_rejects_mismatched_report_and_actual_off_domain_before_programming() 
 
 #[test]
 #[ignore = "requires unchanged pinned C dynamic hardware/tracking oracle; no jurisdiction selection"]
-fn dynamic_all_source_io_tracking_and_bar_match_with_policy_unqualified() {
+fn rtl8822c_dynamic_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_DYNAMIC_ORACLE").unwrap()).unwrap();
     let mut offset = 0;
     for case in 0..512 {
