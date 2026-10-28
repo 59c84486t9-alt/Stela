@@ -1566,7 +1566,8 @@ mod tests {
     #[test]
     fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
         use super::super::tests::{BASE, board};
-        use crate::machine::{engine::NoDevices, registers::Identity};
+        use crate::machine::engine::NoDevices;
+        use stela_contracts::identity::Identity;
 
         let identities = (0..2)
             .map(|pe| Identity {
