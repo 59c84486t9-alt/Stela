@@ -9,7 +9,7 @@
 //! those bytes in that variant, which is what lets the store key it by its
 //! page bytes and context alone.
 use super::{FETCH_PAGE, INSTRUCTION, MAX_BLOCK_BYTES, PROFILE, is_floating_point};
-use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{format, sync::Arc, vec, vec::Vec};
 use stela_compiler::{
     CompileError, GuestAddress, TargetCpu,
     block::{self, CompilationPlan, CompiledBlock},
@@ -80,7 +80,7 @@ pub enum Prepared {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refused {
     pub pc: u64,
-    pub detail: String,
+    pub error: CompileError,
 }
 
 impl Preparation {
@@ -233,15 +233,19 @@ impl Preparation {
                 None => {}
             }
         }
-        let refused = |at: u64, detail: String| Refused { pc: at, detail };
+        let refused = |error: block::BlockAnalysisError| Refused {
+            pc: error.pc.0,
+            error: error.into(),
+        };
         let analyze = |length: usize| {
             block::analyze_and_plan(&source[..length], GuestAddress(pc), &self.options())
         };
         let (analysis, plan) = match analyze(length) {
             Ok(analyzed) => analyzed,
-            Err(error) if error.pc.0 > pc => analyze((error.pc.0 - pc) as usize)
-                .map_err(|error| refused(error.pc.0, error.detail))?,
-            Err(error) => return Err(refused(pc, error.detail)),
+            Err(error) if error.pc.0 > pc => {
+                analyze((error.pc.0 - pc) as usize).map_err(refused)?
+            }
+            Err(error) => return Err(refused(error)),
         };
         let consumed = analysis.source_bytes;
         let (compiled, input) = self.compile_prefix(&source[..consumed], pc, plan)?;
@@ -274,8 +278,8 @@ impl Preparation {
         plan: Result<CompilationPlan, CompileError>,
     ) -> Result<(CompiledBlock, usize), Refused> {
         let refused = |error: CompileError| Refused {
-            pc,
-            detail: error.0,
+            pc: error.instruction.map_or(pc, |source| source.address.0),
+            error,
         };
         match plan.and_then(CompilationPlan::compile) {
             Ok(compiled) => Ok((compiled, source.len())),
@@ -323,6 +327,25 @@ pub(crate) fn test_preparation() -> Preparation {
 mod tests {
     use super::*;
     use stela_contracts::Feature;
+
+    #[test]
+    fn preparation_refusal_preserves_compiler_cause_and_instruction() {
+        let pc = 0x4000;
+        let source = [0x21, 0x43];
+        let Err(expected) =
+            block::analyze_and_plan(&source, GuestAddress(pc), &test_preparation().options())
+        else {
+            panic!("incomplete instruction must be refused");
+        };
+        let refused = test_preparation()
+            .prepare(&source, pc, source.len())
+            .unwrap_err();
+        assert_eq!(refused.pc, pc);
+        assert_eq!(refused.error, CompileError::from(expected));
+        let instruction = refused.error.instruction.unwrap();
+        assert_eq!(instruction.address, GuestAddress(pc));
+        assert_eq!(instruction.encoding, None);
+    }
 
     /// A description makes its preparation again, and one whose withheld set
     /// has no admit table is refused rather than trusted.

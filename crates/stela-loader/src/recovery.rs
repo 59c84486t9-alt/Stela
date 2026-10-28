@@ -714,7 +714,7 @@ mod tests {
     /// `<GROUP>/boot/<hash>/` with `krnl`, `dtre`, `sptm`, `trxm` and `trst`
     /// objects under one synthetic manifest.
     fn fixture() -> Vec<u8> {
-        let compressed = include_bytes!("../../stela-runtime/tests/fixtures/apfs/preboot.img.gz");
+        let compressed = include_bytes!("../../stela-formats/tests/fixtures/apfs/preboot.img.gz");
         assert_eq!(compressed[3], 0, "gzip -n: no optional header fields");
         miniz_oxide::inflate::decompress_to_vec(&compressed[10..compressed.len() - 8])
             .expect("gzip -n deflate stream")

@@ -389,8 +389,7 @@ fn merge(
         predicate,
         chunk,
         operand.element_size,
-        PREDICATE,
-        PREDICATE_SCRATCH,
+        crate::x86_64::scalable::MaskRegisters::new(PREDICATE, PREDICATE_SCRATCH),
         length,
         target,
     );
@@ -547,8 +546,7 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
                         predicate,
                         chunk,
                         operand.element_size,
-                        PREDICATE,
-                        PREDICATE_SCRATCH,
+                        crate::x86_64::scalable::MaskRegisters::new(PREDICATE, PREDICATE_SCRATCH),
                         length,
                         target,
                     );

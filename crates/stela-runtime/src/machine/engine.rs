@@ -54,6 +54,7 @@ mod unprivileged;
 mod watch;
 
 use crate::{pauth, scalable::ScalableState};
+use alloc::string::ToString;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     format,
@@ -4360,7 +4361,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Ok(Some(Fetched::Exception(self.floating_point_exception(pc))));
             }
             Err(refused) => {
-                return Err(self.unsupported_word(&source, pc, refused.pc, refused.detail));
+                return Err(self.unsupported_word(
+                    &source,
+                    pc,
+                    refused.pc,
+                    refused.error.to_string(),
+                ));
             }
         };
         self.statistics.compiled += 1;
@@ -4777,7 +4783,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// BTYPE after a block that a native branch or fallthrough ended: BR and
     /// BLR set it, every other instruction clears it.
-    fn native_branch_type(&mut self, index: usize, kind: Result<ExitKind, ()>) -> Result<u8, Stop> {
+    fn native_branch_type(
+        &mut self,
+        index: usize,
+        kind: Result<ExitKind, stela_compiler::block::InvalidExitKind>,
+    ) -> Result<u8, Stop> {
         const REGISTER_BRANCH: u32 = 0xffff_fc1f;
         const BR: u32 = 0xd61f_0000;
         const BLR: u32 = 0xd63f_0000;

@@ -15,7 +15,6 @@ use crate::{
         },
     },
 };
-use alloc::format;
 use alloc::vec::Vec;
 
 pub(super) const PAIR_INSTRUCTIONS: usize = 2;
@@ -42,47 +41,45 @@ pub(super) fn decode_pair(
 ) -> Result<Option<Pair>, CompileError> {
     let end = offset
         .checked_add(INSTRUCTION_BYTES)
-        .ok_or_else(|| CompileError("MOVPRFX source offset overflow".into()))?;
+        .ok_or_else(|| CompileError::new(crate::CompileErrorKind::SourceOffsetOverflow))?;
     let word = u32::from_le_bytes(
         source
             .get(offset..end)
-            .ok_or_else(|| CompileError("incomplete source instruction".into()))?
+            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::IncompleteSourceInstruction))?
             .try_into()
             .expect("checked instruction size"),
     );
     let Some(operand) = integer_logic::decode_prefix(word) else {
         return Ok(None);
     };
-    let prefix_pc = GuestAddress(
-        base.0
-            .checked_add(
-                u64::try_from(offset)
-                    .map_err(|_| CompileError("MOVPRFX source offset overflow".into()))?,
-            )
-            .ok_or_else(|| CompileError("MOVPRFX source PC overflow".into()))?,
-    );
+    let prefix_pc =
+        GuestAddress(
+            base.0
+                .checked_add(u64::try_from(offset).map_err(|_| {
+                    CompileError::new(crate::CompileErrorKind::SourceOffsetOverflow)
+                })?)
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
+        );
     if !prefix_pc.0.is_multiple_of(INSTRUCTION_BYTES as u64) {
-        return Err(CompileError("MOVPRFX PC must be aligned".into()));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress).at(prefix_pc),
+        );
     }
     if !profile.mode().streaming() {
-        return Err(CompileError(format!(
-            "streaming mode required at {:#x}",
-            prefix_pc.0
-        )));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::StreamingModeRequired).at(prefix_pc),
+        );
     }
     let prefix_features = FeatureRequirement::all(ScalableFeatures::of(ScalableFeature::Sme));
     profile.require_features(prefix_features, prefix_pc)?;
     let pair_end = offset
         .checked_add(PAIR_BYTES)
-        .ok_or_else(|| CompileError("MOVPRFX pair source extent overflow".into()))?;
+        .ok_or_else(|| CompileError::new(crate::CompileErrorKind::SourceExtentOverflow))?;
     let follower_word = u32::from_le_bytes(
         source
             .get(end..pair_end)
             .ok_or_else(|| {
-                CompileError(format!(
-                    "MOVPRFX pair validation: follower missing from source window at {:#x}",
-                    prefix_pc.0
-                ))
+                CompileError::new(crate::CompileErrorKind::MovprfxFollowerMissing).at(prefix_pc)
             })?
             .try_into()
             .expect("checked follower size"),
@@ -91,13 +88,12 @@ pub(super) fn decode_pair(
         prefix_pc
             .0
             .checked_add(INSTRUCTION_BYTES as u64)
-            .ok_or_else(|| CompileError("MOVPRFX follower PC overflow".into()))?,
+            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
     );
     if integer_logic::decode_prefix(follower_word).is_some() {
-        return Err(CompileError(format!(
-            "MOVPRFX pair validation: follower is another prefix at {:#x}",
-            follower_pc.0
-        )));
+        return Err(
+            CompileError::new(crate::CompileErrorKind::MovprfxFollowerIsPrefix).at(follower_pc),
+        );
     }
     // Keep unsupported allocation/features/semantics distinct from a known
     // decoded pairing violation. Existing decode errors stay compiler declines.
@@ -110,20 +106,17 @@ pub(super) fn decode_pair(
         &mut follower_features,
     )
     .map_err(|error| {
-        CompileError(format!(
-            "MOVPRFX pair validation: unsupported follower at {:#x}: {error}",
-            follower_pc.0
+        CompileError::new(crate::CompileErrorKind::MovprfxFollowerUnsupported(
+            alloc::boxed::Box::new(error),
         ))
+        .at(follower_pc)
     })?;
     follower.require_total_inline_prefix(follower_pc)?;
     let requirement = follower
         .prefix_requirement(follower_word)
-        .map_err(|Unsupported| CompileError("MOVPRFX follower source/operand mismatch".into()))?
+        .map_err(|Unsupported| CompileError::new(crate::CompileErrorKind::MovprfxFollowerMismatch))?
         .ok_or_else(|| {
-            CompileError(format!(
-                "MOVPRFX pair validation: follower metadata not reviewed at {:#x}",
-                follower_pc.0
-            ))
+            CompileError::new(crate::CompileErrorKind::MovprfxMetadataUnreviewed).at(follower_pc)
         })?;
     let integer_logic::Kind::Copy(integer_logic::CopySource::Vector(source_register)) =
         operand.kind
@@ -140,10 +133,7 @@ pub(super) fn decode_pair(
         },
     };
     prefix::validate(decoded_prefix, requirement).map_err(|violation| {
-        CompileError(format!(
-            "MOVPRFX pair validation failed: reviewed requirement violation at {:#x}: {violation:?}",
-            prefix_pc.0
-        ))
+        CompileError::new(crate::CompileErrorKind::MovprfxViolation(violation)).at(prefix_pc)
     })?;
     Ok(Some(Pair {
         prefix_pc,

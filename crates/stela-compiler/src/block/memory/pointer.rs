@@ -56,9 +56,7 @@ impl CheckedOperation {
     ) -> Result<Self, CompileError> {
         if let Operation::CheckedPointer(operand) = instruction.operation {
             let requirement = profile.pointer_arithmetic().ok_or_else(|| {
-                CompileError(
-                    "CPA arithmetic requires an explicit feature/mode specialization".into(),
-                )
+                CompileError::new(crate::CompileErrorKind::CpaSpecializationRequired)
             })?;
             return Ok(Self::Pointer {
                 operand,

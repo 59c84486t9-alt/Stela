@@ -195,7 +195,13 @@ pub(in crate::x86_64) fn emit(
     let mut failures = Vec::new();
     for chunk in 0..length.chunks() {
         read_predicate_mask(
-            code, predicate, chunk, element, ACTIVE, TEST_MASK, length, target,
+            code,
+            predicate,
+            chunk,
+            element,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, TEST_MASK),
+            length,
+            target,
         );
         guard_active_exception_enables(code, ACTIVE, features, &mut failures, target);
         load_z_chunk(code, source, chunk, VALUE, length, target);

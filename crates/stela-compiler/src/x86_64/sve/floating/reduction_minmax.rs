@@ -172,8 +172,7 @@ impl Tree {
                 self.predicate,
                 chunk,
                 self.element,
-                TREE_ACTIVE,
-                TREE_PREDICATE_SCRATCH,
+                crate::x86_64::scalable::MaskRegisters::new(TREE_ACTIVE, TREE_PREDICATE_SCRATCH),
                 self.length,
                 self.target,
             );
@@ -277,7 +276,13 @@ pub(in crate::x86_64) fn emit(
         let classification = prepare_classification(code, operand.format, CLASSIFICATION, target);
         for chunk in 0..length.chunks() {
             read_predicate_mask(
-                code, predicate, chunk, element, ACTIVE, SCRATCH[0], length, target,
+                code,
+                predicate,
+                chunk,
+                element,
+                crate::x86_64::scalable::MaskRegisters::new(ACTIVE, SCRATCH[0]),
+                length,
+                target,
             );
             if number(operation) {
                 let mut asm = code.asm();

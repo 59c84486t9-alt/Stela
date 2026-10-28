@@ -165,8 +165,7 @@ fn emit_with_recipe(
                 predicate,
                 chunk,
                 ElementSize::Halfword,
-                ACTIVE,
-                RESULT,
+                crate::x86_64::scalable::MaskRegisters::new(ACTIVE, RESULT),
                 length,
                 target,
             );

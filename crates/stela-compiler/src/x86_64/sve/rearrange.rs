@@ -394,8 +394,7 @@ pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, targ
                     governing,
                     chunk,
                     ElementSize::Quadword,
-                    MASK,
-                    SCRATCH,
+                    crate::x86_64::scalable::MaskRegisters::new(MASK, SCRATCH),
                     length,
                     target,
                 );

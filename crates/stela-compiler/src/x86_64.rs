@@ -118,6 +118,7 @@ mod pointer_checks;
 mod prefetch;
 mod region;
 pub(crate) use region::AllocationStats;
+pub use region::RegionError;
 mod register_offset;
 pub mod register_read;
 mod scalable;
@@ -259,21 +260,31 @@ fn store_with(asm: &mut asm::Asm, register: Register) {
     }
 }
 
+/// A decoded immediate memory address and its writeback mode.
+#[derive(Clone, Copy)]
+struct ImmediateAddress {
+    base: Register,
+    displacement: i32,
+    mode: AddressMode,
+}
+
 /// Direct ordinary-RAM profile. Guest virtual addresses equal native addresses;
 /// the caller keeps code/state separate from guest mappings. Guest NZCV is untouched.
-#[allow(clippy::too_many_arguments)]
 fn memory(
     code: &mut Code,
     checks: MemoryChecks,
     transfer: MemoryTransfer,
     bytes: u8,
     data: Register,
-    base: Register,
-    displacement: i32,
-    mode: AddressMode,
+    address: ImmediateAddress,
 ) {
+    let ImmediateAddress {
+        base,
+        displacement,
+        mode,
+    } = address;
     let access = Access::of(transfer == MemoryTransfer::Store, bytes.into());
-    memory_address(code, checks, base, displacement, mode, bytes, access);
+    memory_address(code, checks, address, bytes, access);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data, Width::X64, Shift::Lsl, 0);
@@ -776,16 +787,18 @@ fn alignment_check(code: &mut Code, checks: MemoryChecks, unit: u8) {
 /// pending writeback ([`address_add`]). `unit` is the bytes of each element
 /// the access transfers, which SCTLR_ELx.A checks, and `access` the whole
 /// access.
-#[allow(clippy::too_many_arguments)]
 fn memory_address(
     code: &mut Code,
     checks: MemoryChecks,
-    base: Register,
-    displacement: i32,
-    mode: AddressMode,
+    address: ImmediateAddress,
     unit: u8,
     access: Access,
 ) {
+    let ImmediateAddress {
+        base,
+        displacement,
+        mode,
+    } = address;
     load(code, base);
     if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
         // Arm checks SP alignment before address addition. A native UD2 is a
@@ -834,19 +847,21 @@ fn memory_writeback(code: &mut Code, base: Register, mode: AddressMode) {
 /// Pair loads stage both values before committing either guest destination.
 /// Pair stores expose completed first-element writes if the second access faults.
 /// Concurrent/128-bit single-copy atomic semantics are outside this RAM profile.
-#[allow(clippy::too_many_arguments)]
 fn memory_pair(
     code: &mut Code,
     checks: MemoryChecks,
     transfer: MemoryTransfer,
     bytes: u8,
     data: [Register; 2],
-    base: Register,
-    displacement: i32,
-    mode: AddressMode,
+    address: ImmediateAddress,
 ) {
+    let ImmediateAddress {
+        base,
+        displacement,
+        mode,
+    } = address;
     let access = Access::of(transfer == MemoryTransfer::Store, 2 * u16::from(bytes));
-    memory_address(code, checks, base, displacement, mode, bytes, access);
+    memory_address(code, checks, address, bytes, access);
     match transfer {
         MemoryTransfer::Store => {
             use asm::{Alu, Gpr::R8, Size};
@@ -1144,9 +1159,11 @@ pub(crate) fn emit_instruction(
                 transfer,
                 bytes,
                 data,
-                base,
-                displacement,
-                mode,
+                crate::x86_64::ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
             );
         }
         Operation::Memory {
@@ -1163,9 +1180,11 @@ pub(crate) fn emit_instruction(
                 transfer,
                 bytes,
                 data,
-                base,
-                displacement,
-                mode,
+                ImmediateAddress {
+                    base,
+                    displacement,
+                    mode,
+                },
             );
         }
         Operation::Branch { target } => jump(code, None, instruction.pc, target, fixups),

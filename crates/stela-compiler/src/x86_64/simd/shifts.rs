@@ -371,6 +371,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             saturating,
             counts,
         } => {
+            if !round && !saturating && avx2_register_shift(code, operand, counts, signed, target) {
+                return;
+            }
             register_shift(
                 code,
                 operand,
@@ -803,7 +806,83 @@ fn register_plain(code: &mut Code, signed: bool) {
     asm.cmov(Cond::Ns, Size::Qword, Rax, R10);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// SSHL/USHL consume only each count lane's signed low byte. AVX2
+/// logical shifts zero over-wide counts; arithmetic right shifts sign-fill.
+fn avx2_register_shift(
+    code: &mut Code,
+    operand: &Operand,
+    counts: u8,
+    signed: bool,
+    target: TargetCpu,
+) -> bool {
+    use crate::x86_64::isa::VexShiftOpcode;
+    if !target.supports(TargetCpu::Avx2)
+        || target.data_independent_timing()
+        || !matches!(operand.lane_bytes, 4 | 8)
+        || !matches!(operand.bytes, 8 | 16)
+    {
+        return false;
+    }
+    crate::x86_64::isa::clear_upper_vector_state(code, target);
+    read_vector(code, operand.source, 0);
+    read_vector(code, counts, 1);
+    Shift::LeftDword.emit(code, 1, 24);
+    Shift::ArithmeticDword.emit(code, 1, 24);
+    let qword = operand.lane_bytes == 8;
+    if qword {
+        // Select the low dword of each qword, then sign-extend to qwords.
+        shuffle(code, 1, 1, LOW_DWORDS_OF_QWORDS);
+        packed(code, Host::Xor, 2, 2);
+        packed(code, Host::GreaterDword, 2, 1);
+        packed(code, Host::UnpackLowDword, 1, 2);
+    }
+    packed(code, Host::Xor, 2, 2);
+    packed(
+        code,
+        if qword {
+            Host::SubQword
+        } else {
+            Host::SubDword
+        },
+        2,
+        1,
+    );
+    let left = if qword {
+        VexShiftOpcode::LeftQword
+    } else {
+        VexShiftOpcode::LeftDword
+    };
+    left.register(code, 3, 0, 1, target);
+    if qword && signed {
+        // (x XOR sign) >> count XOR sign gives arithmetic qword shifts,
+        // including counts of 64 or more, which AVX2 lacks directly.
+        packed(code, Host::MoveAligned, 4, 0);
+        Shift::ArithmeticDword.emit(code, 4, 31);
+        shuffle(code, 4, 4, 0xf5);
+        packed(code, Host::Xor, 0, 4);
+        VexShiftOpcode::RightQword.register(code, 0, 0, 2, target);
+        packed(code, Host::Xor, 0, 4);
+    } else {
+        let right = if qword {
+            VexShiftOpcode::RightQword
+        } else if signed {
+            VexShiftOpcode::ArithmeticDword
+        } else {
+            VexShiftOpcode::RightDword
+        };
+        right.register(code, 0, 0, 2, target);
+    }
+    if signed {
+        // Positive counts use only the left result; a negated positive
+        // count otherwise makes an arithmetic right shift sign-fill.
+        Shift::ArithmeticDword.emit(code, 1, 31);
+        packed(code, Host::And, 0, 1);
+    }
+    packed(code, Host::Or, 0, 3);
+    finish_immediate_vector(code, operand, 0);
+    true
+}
+
 fn register_shift(
     code: &mut Code,
     operand: &Operand,
@@ -1043,6 +1122,161 @@ mod tests {
                     let mut code = Code::new();
                     emit(&mut code, &operand, TargetCpu::Baseline);
                     assert_eq!(code.len(), if bytes == 8 { 20 } else { 16 });
+                }
+            }
+        }
+    }
+    #[test]
+    fn avx2_register_shifts_keep_other_recipes_and_reduce_code() {
+        for lane in [1, 2, 4, 8] {
+            for (round, saturating) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let operand = Operand {
+                    kind: Kind::Register {
+                        signed: true,
+                        round,
+                        saturating,
+                        counts: 1,
+                    },
+                    destination: 2,
+                    source: 0,
+                    lane_bytes: lane,
+                    amount: 0,
+                    bytes: 16,
+                };
+                let mut baseline = Code::new();
+                emit(&mut baseline, &operand, TargetCpu::Baseline);
+                let mut avx2 = Code::new();
+                emit(&mut avx2, &operand, TargetCpu::Avx2);
+                if lane >= 4 && !round && !saturating {
+                    assert!(avx2.len() < baseline.len());
+                    assert!(avx2.windows(3).any(|w| w == [0xc5, 0xf8, 0x77]));
+                } else {
+                    assert_eq!(avx2, baseline);
+                }
+                let mut dit = Code::new();
+                emit(
+                    &mut dit,
+                    &operand,
+                    TargetCpu::Avx2.with_data_independent_timing(),
+                );
+                assert_eq!(dit, baseline);
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn avx2_register_shifts_match_signed_byte_counts_with_aliases() {
+        use crate::x86_64::asm::vector_extensions::execution::Native;
+        use crate::{GuestState, context::ExecutionContext};
+        if !TargetCpu::detect().supports(TargetCpu::Avx2) {
+            return;
+        }
+        fn reference(
+            input: [u64; 2],
+            counts: [u64; 2],
+            lane: usize,
+            bytes: usize,
+            signed: bool,
+        ) -> [u64; 2] {
+            let input: [u8; 16] = core::array::from_fn(|i| input[i / 8].to_le_bytes()[i % 8]);
+            let counts: [u8; 16] = core::array::from_fn(|i| counts[i / 8].to_le_bytes()[i % 8]);
+            let mut out = [0u8; 16];
+            for at in (0..bytes).step_by(lane) {
+                let mut x = [0u8; 8];
+                x[..lane].copy_from_slice(&input[at..at + lane]);
+                let x = u64::from_le_bytes(x);
+                let count = counts[at] as i8 as i32;
+                let bits = (lane * 8) as u32;
+                let result = if count >= 0 {
+                    if count as u32 >= bits {
+                        0
+                    } else {
+                        x << (count as u32)
+                    }
+                } else if signed {
+                    let x = if lane == 4 { x as i32 as i64 } else { x as i64 };
+                    (x >> ((-count as u32).min(bits - 1))) as u64
+                } else if -count as u32 >= bits {
+                    0
+                } else {
+                    x >> (-count as u32)
+                };
+                out[at..at + lane].copy_from_slice(&result.to_le_bytes()[..lane]);
+            }
+            [
+                u64::from_le_bytes(out[..8].try_into().unwrap()),
+                u64::from_le_bytes(out[8..].try_into().unwrap()),
+            ]
+        }
+        for lane in [4u8, 8] {
+            for bytes in [8u8, 16] {
+                for signed in [false, true] {
+                    for (destination, source, counts) in
+                        [(2u8, 0u8, 1u8), (0, 0, 1), (1, 0, 1), (0, 0, 0)]
+                    {
+                        let operand = Operand {
+                            kind: Kind::Register {
+                                signed,
+                                round: false,
+                                saturating: false,
+                                counts,
+                            },
+                            destination,
+                            source,
+                            lane_bytes: lane,
+                            amount: 0,
+                            bytes,
+                        };
+                        let mut code = Code::new();
+                        emit(&mut code, &operand, TargetCpu::Avx2);
+                        code.asm().ret();
+                        let native = Native::new(&code);
+                        for raw in 0..=u8::MAX {
+                            let mut state = GuestState {
+                                fpsr: 0x0800_001f,
+                                nzcv: 0xa000_0000,
+                                ..GuestState::default()
+                            };
+                            let data = match raw % 5 {
+                                0 => 0,
+                                1 => u64::MAX,
+                                2 => 0x8000_0000_8000_0000,
+                                3 => 1,
+                                _ => 0x0123_4567_89ab_cdef,
+                            };
+                            state.v[usize::from(source)] = [data, !data];
+                            if counts != source {
+                                let c: [u8; 16] = core::array::from_fn(|i| {
+                                    if i % usize::from(lane) == 0 {
+                                        raw.wrapping_add((i * 13) as u8)
+                                    } else {
+                                        0xd3
+                                    }
+                                });
+                                state.v[usize::from(counts)] = [
+                                    u64::from_le_bytes(c[..8].try_into().unwrap()),
+                                    u64::from_le_bytes(c[8..].try_into().unwrap()),
+                                ];
+                            }
+                            let expected = reference(
+                                state.v[usize::from(source)],
+                                state.v[usize::from(counts)],
+                                usize::from(lane),
+                                usize::from(bytes),
+                                signed,
+                            );
+                            native.run(&mut state, &mut ExecutionContext::default());
+                            assert_eq!(
+                                state.v[usize::from(destination)],
+                                expected,
+                                "{lane} {bytes} {signed} {destination}/{source}/{counts} {raw}"
+                            );
+                            assert_eq!(state.fpsr, 0x0800_001f);
+                            assert_eq!(state.nzcv, 0xa000_0000);
+                        }
+                    }
                 }
             }
         }

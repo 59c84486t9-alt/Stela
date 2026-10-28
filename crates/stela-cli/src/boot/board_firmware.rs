@@ -122,7 +122,7 @@ mod tests {
     /// `pattern.bin`.
     fn ramdisk() -> Decoded {
         let compressed =
-            include_bytes!("../../../stela-runtime/tests/fixtures/apfs/preboot.img.gz");
+            include_bytes!("../../../stela-formats/tests/fixtures/apfs/preboot.img.gz");
         assert_eq!(compressed[3], 0, "gzip -n: no optional header fields");
         let bytes = miniz_oxide::inflate::decompress_to_vec(&compressed[10..compressed.len() - 8])
             .expect("gzip -n deflate stream");

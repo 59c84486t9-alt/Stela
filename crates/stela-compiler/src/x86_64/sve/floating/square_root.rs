@@ -119,8 +119,7 @@ pub(in crate::x86_64) fn emit(
             predicate,
             chunk,
             element,
-            ACTIVE,
-            OLD_DESTINATION,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, OLD_DESTINATION),
             length,
             target,
         );

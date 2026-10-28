@@ -30,8 +30,9 @@ pub(super) fn emit(
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
     if let Some(core) = guest::decode_core_binary(word) {
-        let core =
-            core.map_err(|Unsupported| CompileError("reserved core binary allocation".into()))?;
+        let core = core.map_err(|Unsupported| {
+            CompileError::new(crate::CompileErrorKind::ReservedCoreBinary)
+        })?;
         assert_eq!(core, operand, "admitted source/operand identity changed");
         return arithmetic::emit_core(code, core, length, features, pc, target);
     }

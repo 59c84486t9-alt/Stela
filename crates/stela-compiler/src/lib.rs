@@ -6,13 +6,16 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
-use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 pub mod aarch64;
 pub mod amx;
 pub mod block;
 pub mod context;
+mod error;
+pub use error::{
+    CompileError, CompileErrorKind, EncodingFamily, InstructionContext, RegionError,
+    SmeMemoryError, SmeMovementError,
+};
 pub mod scalable_context;
 mod state;
 mod target;
@@ -22,7 +25,7 @@ pub mod wkdm;
 pub mod x86_64;
 
 pub use state::GuestState;
-pub use target::TargetCpu;
+pub use target::{TargetCpu, TargetParseError};
 
 use serde::{Deserialize, Serialize};
 
@@ -74,16 +77,6 @@ pub struct NativeBlock {
     pub x86_64_code: Vec<u8>,
     pub source_map: Vec<(GuestAddress, usize)>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompileError(pub String);
-
-impl core::fmt::Display for CompileError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-impl core::error::Error for CompileError {}
 
 /// What [`compile`] translates for: the guest services and memory checks of a
 /// [`block::BlockProfile`], the host's [`TargetCpu`], and the guest's scalable
@@ -168,38 +161,42 @@ impl Options {
         self.profile.validate()?;
         let context = self.profile.has(Features::CONTEXT);
         if context != self.scalable.is_some() {
-            return Err(CompileError(format!(
-                "{:?} {} a scalable specialization",
-                self.profile,
-                if context { "requires" } else { "takes no" }
-            )));
+            return Err(CompileError::new(
+                crate::CompileErrorKind::ProfileRequiresScalable {
+                    profile: self.profile,
+                    required: context,
+                },
+            ));
         }
         let system_mode = self.profile == block::BlockProfile::new(Features::SYSTEM_MODE);
         if self.checks != x86_64::MemoryChecks::DEFAULT && !system_mode {
-            return Err(CompileError(format!(
-                "{:?} makes only the default memory checks",
-                self.profile
-            )));
+            return Err(CompileError::new(
+                crate::CompileErrorKind::MemoryChecksUnsupported {
+                    profile: self.profile,
+                },
+            ));
         }
         if let Some(bytes) = self.native.zero_block {
             use x86_64::zero_block::{MAX_BYTES, MIN_BYTES};
             if !system_mode {
-                return Err(CompileError(format!(
-                    "{:?} keeps DC ZVA's System exit",
-                    self.profile
-                )));
+                return Err(CompileError::new(
+                    crate::CompileErrorKind::NativeZeroBlockUnsupported {
+                        profile: self.profile,
+                    },
+                ));
             }
             if !bytes.is_power_of_two() || !(MIN_BYTES..=MAX_BYTES).contains(&bytes) {
-                return Err(CompileError(format!(
-                    "a {bytes}-byte DC ZVA block is not a DCZID_EL0.BS size"
-                )));
+                return Err(CompileError::new(
+                    crate::CompileErrorKind::InvalidZeroBlockSize { bytes },
+                ));
             }
         }
         if !self.native.cache_clean.is_empty() && !system_mode {
-            return Err(CompileError(format!(
-                "{:?} keeps the DC clean operations' System exit",
-                self.profile
-            )));
+            return Err(CompileError::new(
+                crate::CompileErrorKind::NativeCacheCleanUnsupported {
+                    profile: self.profile,
+                },
+            ));
         }
         Ok(())
     }
@@ -348,17 +345,20 @@ mod tests {
                 .iter()
                 .flat_map(|word| word.to_le_bytes())
                 .collect();
-            assert!(
+            assert!(matches!(
                 crate::testing::leaf(&source, GuestAddress(0))
                     .unwrap_err()
-                    .0
-                    .contains("HostCapabilityRequired")
-            );
+                    .kind,
+                CompileErrorKind::Unsupported(UnsupportedReason::HostCapabilityRequired { .. })
+            ));
             assert!(
                 crate::testing::leaf_for(&source, GuestAddress(0), TargetCpu::AtomicLoad16).is_ok()
             );
             let blocked = crate::testing::block(&source, GuestAddress(0)).unwrap_err();
-            assert!(blocked.0.contains("HostCapabilityRequired"));
+            assert!(matches!(
+                blocked.kind,
+                CompileErrorKind::Unsupported(UnsupportedReason::HostCapabilityRequired { .. })
+            ));
             assert!(
                 crate::testing::block_for(
                     &source,
@@ -405,8 +405,18 @@ mod tests {
                     assert_eq!(leaf.is_ok(), permitted);
                     assert_eq!(block.is_ok(), permitted);
                     if !permitted {
-                        assert!(leaf.unwrap_err().0.contains("HostCapabilityRequired"));
-                        assert!(block.unwrap_err().0.contains("HostCapabilityRequired"));
+                        assert!(matches!(
+                            leaf.unwrap_err().kind,
+                            CompileErrorKind::Unsupported(
+                                UnsupportedReason::HostCapabilityRequired { .. }
+                            )
+                        ));
+                        assert!(matches!(
+                            block.unwrap_err().kind,
+                            CompileErrorKind::Unsupported(
+                                UnsupportedReason::HostCapabilityRequired { .. }
+                            )
+                        ));
                     } else {
                         const LOCK_CMPXCHG8B_R8: &[u8] = &[0xf0, 0x41, 0x0f, 0xc7, 0x08];
                         let uses_cx8 = leaf

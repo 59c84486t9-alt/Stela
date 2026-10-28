@@ -10,11 +10,11 @@ use crate::Prepared;
 use crate::prepare_runtime_block_for_target;
 use alloc::collections::{BTreeSet, VecDeque};
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_compiler::{
-    GuestAddress,
+    CompileErrorKind, GuestAddress,
     block::{
         BlockAnalysis, BlockProfile, DynamicEdge, MAX_BLOCK_INSTRUCTIONS, analyze_with_profile,
     },
@@ -44,7 +44,8 @@ pub enum DiscoveryProblem {
     TruncatedInstruction,
     Unsupported {
         failure_pc: GuestAddress,
-        detail: String,
+        encoding: Option<u32>,
+        cause: CompileErrorKind,
     },
 }
 #[derive(Debug, Serialize)]
@@ -226,7 +227,8 @@ impl BlockRuntime {
                         Ok(_) => None,
                         Err(error) => Some(DiscoveryProblem::Unsupported {
                             failure_pc: error.pc,
-                            detail: error.detail,
+                            encoding: error.encoding,
+                            cause: error.kind,
                         }),
                     }
                 }

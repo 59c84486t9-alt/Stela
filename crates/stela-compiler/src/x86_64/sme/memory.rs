@@ -163,14 +163,40 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     }
 }
 
+/// A host capability needed by an SME memory transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error {
+    pub required: TargetCpu,
+    pub available: TargetCpu,
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "SME memory requires host capability {}, available target {}",
+            self.required.id(),
+            self.available.id()
+        )
+    }
+}
+
+impl core::error::Error for Error {}
+
 /// Capability requirements are checked before any request, prefix reset or store.
-pub(crate) fn validate_target(operand: &Operand, target: TargetCpu) -> Result<(), &'static str> {
+pub(crate) fn validate_target(operand: &Operand, target: TargetCpu) -> Result<(), Error> {
     let required = required_host_caps(operand);
     if required & host_caps::CX16 != 0 && !target.supports(TargetCpu::Cx16) {
-        return Err("SME 16-byte stores require the independent CX16 host capability");
+        return Err(Error {
+            required: TargetCpu::Cx16,
+            available: target,
+        });
     }
     if required & host_caps::ATOMIC_LOAD16 != 0 && !target.supports(TargetCpu::AtomicLoad16) {
-        return Err("SME coherent wide reads require the independent AtomicLoad16 host capability");
+        return Err(Error {
+            required: TargetCpu::AtomicLoad16,
+            available: target,
+        });
     }
     Ok(())
 }
@@ -181,7 +207,7 @@ pub(crate) fn emit(
     length: VectorLength,
     target: TargetCpu,
     pc: u64,
-) -> Result<(), &'static str> {
+) -> Result<(), Error> {
     validate_target(operand, target)?;
     let scratch = Scratch::new(length);
     stack_space(code, scratch.bytes, true);
@@ -482,7 +508,16 @@ mod tests {
             (QUADWORD_TILE_STORE, TargetCpu::AtomicLoad16),
         ] {
             let mut code = Code::from(vec![NOP]);
-            assert!(emit(&mut code, &decode(word).unwrap(), length, target, 0).is_err());
+            let error = emit(&mut code, &decode(word).unwrap(), length, target, 0).unwrap_err();
+            assert_eq!(error.available, target);
+            assert_eq!(
+                error.required,
+                if word == QUADWORD_TILE_STORE {
+                    TargetCpu::Cx16
+                } else {
+                    TargetCpu::AtomicLoad16
+                }
+            );
             assert_eq!(code, [NOP]);
         }
     }

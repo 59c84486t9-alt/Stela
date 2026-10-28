@@ -1,7 +1,7 @@
 //! Decoded instructions and the state, memory and prefix requirements they carry.
 use crate::aarch64::Unsupported;
 use crate::x86_64::asm::Code;
-use alloc::{boxed::Box, format, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -321,10 +321,9 @@ impl Decoded {
             | Self::SmeMovement(_)
             | Self::SmeIntegerVector(_)
             | Self::SmeIntegerDots(_)
-            | Self::SmeIntegerMatrix(_) => Err(CompileError(format!(
-                "MOVPRFX pair validation: follower pair/effect requirements are not reviewed at {:#x}",
-                pc.0
-            ))),
+            | Self::SmeIntegerMatrix(_) => {
+                Err(CompileError::new(crate::CompileErrorKind::MovprfxEffectsUnreviewed).at(pc))
+            }
         }
     }
 }
@@ -378,10 +377,10 @@ impl Decoded {
         if !ordinary_permitted(&instruction.operation)
             && !checked_register_asimd(&instruction.operation)
         {
-            return Err(CompileError(format!(
-                "operation outside checked GPR memory profile at {:#x}",
-                instruction.pc.0
-            )));
+            return Err(
+                CompileError::new(crate::CompileErrorKind::OutsideCheckedMemoryProfile)
+                    .at(instruction.pc),
+            );
         }
         Ok(Self::Ordinary(instruction))
     }
@@ -400,7 +399,9 @@ impl Decoded {
             Self::PrefetchHint => code.asm().nop(),
             Self::Ordinary(instruction) => {
                 if instruction.pc != pc {
-                    return Err(CompileError("checked instruction PC differs".into()));
+                    return Err(CompileError::new(
+                        crate::CompileErrorKind::InstructionAddressMismatch,
+                    ));
                 }
                 x86_64::emit_instruction(
                     code,
@@ -453,8 +454,8 @@ impl Decoded {
             | Self::Length(_)
             | Self::SmeIntegerDots(_)
             | Self::SmeIntegerMatrix(_) => {
-                return Err(CompileError(
-                    "unrequested scalable operation in checked GPR memory profile".into(),
+                return Err(CompileError::new(
+                    crate::CompileErrorKind::UnrequestedScalableOperation,
                 ));
             }
         }

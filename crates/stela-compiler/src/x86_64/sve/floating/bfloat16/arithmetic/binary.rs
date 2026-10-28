@@ -89,8 +89,7 @@ fn active_mask(
             predicate,
             chunk,
             ElementSize::Halfword,
-            ACTIVE,
-            TEMPORARY,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, TEMPORARY),
             length,
             target,
         );
@@ -211,8 +210,7 @@ pub(in crate::x86_64) fn emit(
                 predicate,
                 chunk,
                 ElementSize::Halfword,
-                ACTIVE,
-                TEMPORARY,
+                crate::x86_64::scalable::MaskRegisters::new(ACTIVE, TEMPORARY),
                 length,
                 target,
             );
@@ -298,8 +296,7 @@ pub(in crate::x86_64) fn emit(
                 predicate,
                 chunk,
                 ElementSize::Halfword,
-                ACTIVE,
-                TEMPORARY,
+                crate::x86_64::scalable::MaskRegisters::new(ACTIVE, TEMPORARY),
                 length,
                 target,
             );

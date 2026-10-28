@@ -85,8 +85,7 @@ pub(crate) fn emit(
             operand.governing,
             chunk,
             ElementSize::Doubleword,
-            ACTIVE,
-            PREDICATE_SCRATCH,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, PREDICATE_SCRATCH),
             length,
             target,
         );

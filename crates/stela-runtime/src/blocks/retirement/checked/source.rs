@@ -243,8 +243,7 @@ impl<'code> BoundSource<'code> {
         exit: &BlockExit,
         registers: &GuestState,
     ) -> anyhow::Result<ReturnedTerminal> {
-        let kind = ExitKind::try_from(exit.kind)
-            .map_err(|()| anyhow::anyhow!("unknown native exit carrier"))?;
+        let kind = ExitKind::try_from(exit.kind)?;
         let next = GuestAddress(exit.next_pc);
         let region = &self
             .runtime

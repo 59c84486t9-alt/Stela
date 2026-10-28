@@ -24,7 +24,7 @@ use crate::{
     context::memory::MemoryRequirements,
     x86_64,
 };
-use alloc::{collections::BTreeMap, format, vec, vec::Vec};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 pub const PROFILE_ID: &str = "apple-sme2-streaming-v1";
 pub const DECLARED_PROFILE_ID: &str = "sme-streaming-v2";
@@ -57,18 +57,18 @@ fn emit_decoded(
 ) -> Result<(), CompileError> {
     match instruction {
         Decoded::SharedMemory(_) | Decoded::Exclusive(_) => {
-            return Err(CompileError(
-                "exclusive service was not requested by scalable profile".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::ExclusiveServiceNotRequested,
             ));
         }
         Decoded::MemoryScalar(_) => {
-            return Err(CompileError(
-                "checked scalar service was not requested by scalable profile".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::ScalarMemoryServiceNotRequested,
             ));
         }
         Decoded::MemoryPair(_) | Decoded::MemoryFixed(_) | Decoded::PrefetchHint => {
-            return Err(CompileError(
-                "checked fixed-width memory service was not requested by scalable profile".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::FixedMemoryServiceNotRequested,
             ));
         }
         Decoded::Address(operand) => {
@@ -85,10 +85,9 @@ fn emit_decoded(
         }
         Decoded::IntegerDot(operand) => {
             if !x86_64::sve::dot::emit_integer(code, &operand, profile.vector_length(), target) {
-                return Err(CompileError(format!(
-                    "unsupported streaming integer dot operands at {:#x}",
-                    pc.0
-                )));
+                return Err(
+                    CompileError::new(crate::CompileErrorKind::StreamingDotOperands).at(pc),
+                );
             }
         }
         Decoded::IntegerPredicateMove(operand) => {
@@ -160,7 +159,7 @@ fn emit_decoded(
         }
         Decoded::SmeMovement(operand) => {
             x86_64::sme::movement::emit(code, &operand, profile.vector_length(), target)
-                .map_err(|reason| CompileError(format!("{reason} at {:#x}", pc.0)))?;
+                .map_err(|reason| CompileError::from(reason).at(pc))?;
         }
         Decoded::SmeLutV2(operand) => {
             x86_64::sme::tables::emit_lut_v2(code, &operand, profile.vector_length(), target);
@@ -176,7 +175,7 @@ fn emit_decoded(
         }
         Decoded::SmeMemory(operand) => {
             x86_64::sme::memory::emit(code, &operand, profile.vector_length(), target, pc.0)
-                .map_err(|reason| CompileError(format!("{reason} at {:#x}", pc.0)))?;
+                .map_err(|reason| CompileError::from(reason).at(pc))?;
         }
         Decoded::MemoryLoad(operand) => {
             x86_64::sve::memory_load::emit(code, operand, profile.vector_length(), target, pc.0);
@@ -219,8 +218,8 @@ fn decode_leaf(
         || !source.len().is_multiple_of(INSTRUCTION_BYTES)
         || !base.0.is_multiple_of(INSTRUCTION_BYTES as u64)
     {
-        return Err(CompileError(
-            "input and guest base must be nonempty/aligned to 4 bytes".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::InvalidSourceLayout,
         ));
     }
     let mut instructions = Vec::new();
@@ -243,7 +242,7 @@ fn decode_leaf(
         let pc = GuestAddress(
             base.0
                 .checked_add(offset as u64)
-                .ok_or_else(|| CompileError("guest address overflow".into()))?,
+                .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
         );
         let word = u32::from_le_bytes(
             source[offset..offset + INSTRUCTION_BYTES]
@@ -270,7 +269,9 @@ fn decode_leaf(
             ..
         })
     ) {
-        return Err(CompileError("leaf region must end in RET X30".into()));
+        return Err(CompileError::new(
+            crate::CompileErrorKind::MissingLeafReturn,
+        ));
     }
     for DecodedLeafInstruction {
         pc,
@@ -293,10 +294,10 @@ fn decode_leaf(
                 .binary_search_by_key(&target.0, |instruction| instruction.pc.0)
                 .is_err()
         {
-            return Err(CompileError(format!(
-                "unresolved direct target {:#x} from {:#x}",
-                target.0, pc.0
-            )));
+            return Err(
+                CompileError::new(crate::CompileErrorKind::UnresolvedDirectTarget { target })
+                    .at(*pc),
+            );
         }
     }
     Ok(instructions)
@@ -329,10 +330,8 @@ impl Leaf {
                 requirements
                     .merge(decoded.instruction.memory_requirements())
                     .ok_or_else(|| {
-                        CompileError(format!(
-                            "conflicting memory control requirements at {:#x}",
-                            decoded.pc.0
-                        ))
+                        CompileError::new(crate::CompileErrorKind::ConflictingMemoryRequirements)
+                            .at(decoded.pc)
                     })
             },
         )?;
@@ -396,14 +395,13 @@ impl Leaf {
             .collect();
         for (pc, target, displacement) in fixups {
             let destination = offsets.get(&target.0).ok_or_else(|| {
-                CompileError(format!(
-                    "unresolved direct target {:#x} from {:#x}",
-                    target.0, pc.0
-                ))
+                CompileError::new(crate::CompileErrorKind::UnresolvedDirectTarget { target }).at(pc)
             })?;
             let relative =
                 i32::try_from(*destination as i128 - (displacement + size_of::<i32>()) as i128)
-                    .map_err(|_| CompileError("native branch displacement overflow".into()))?;
+                    .map_err(|_| {
+                        CompileError::new(crate::CompileErrorKind::NativeBranchOverflow)
+                    })?;
             code[displacement..displacement + size_of::<i32>()]
                 .copy_from_slice(&relative.to_le_bytes());
         }
@@ -429,6 +427,7 @@ mod tests {
         },
         context::{ExecutionContext, ScalableStateView},
     };
+    use alloc::string::ToString;
     use alloc::{vec, vec::Vec};
 
     /// x86 `ret`, which ends a context leaf's code.
@@ -480,7 +479,7 @@ mod tests {
                                 TargetCpu::Baseline
                             )
                             .unwrap_err()
-                            .0
+                            .to_string()
                             .contains("streaming mode required")
                         );
                     }
@@ -526,7 +525,7 @@ mod tests {
                             TargetCpu::Baseline
                         )
                         .unwrap_err()
-                        .0
+                        .to_string()
                         .contains("reserved")
                     );
                 }
@@ -562,7 +561,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("FEAT_SME2")
             );
         }
@@ -618,7 +617,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("streaming mode required")
                 );
                 assert!(
@@ -639,7 +638,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("MOVPRFX pair validation")
             );
             for word in [0xf940_0020, 0x4e22_8420, 0x1e22_2820] {
@@ -725,7 +724,10 @@ mod tests {
                             );
                             assert_eq!(native.source_map[1].0, GuestAddress(4));
                         } else {
-                            assert!(result.unwrap_err().0.contains("streaming mode required"));
+                            assert!(matches!(
+                                result.unwrap_err().kind,
+                                crate::CompileErrorKind::StreamingModeRequired
+                            ));
                         }
                     }
                 }
@@ -738,7 +740,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("reserved multi-vector integer")
             );
             let sme_only = ScalableProfile::new_with_features(
@@ -788,7 +790,10 @@ mod tests {
                         assert_eq!(native.source_map[1].0, GuestAddress(4));
                         assert!(native.source_map[1].1 > native.source_map[0].1);
                     } else {
-                        assert!(result.unwrap_err().0.contains("streaming mode required"));
+                        assert!(matches!(
+                            result.unwrap_err().kind,
+                            crate::CompileErrorKind::StreamingModeRequired
+                        ));
                     }
                 }
             }
@@ -804,7 +809,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("reserved streaming floating copy")
             );
         }
@@ -1006,7 +1011,10 @@ mod tests {
                         if streaming {
                             assert!(result.is_ok());
                         } else {
-                            assert!(result.unwrap_err().0.contains("streaming mode required"));
+                            assert!(matches!(
+                                result.unwrap_err().kind,
+                                crate::CompileErrorKind::StreamingModeRequired
+                            ));
                         }
                     }
                 }
@@ -1018,7 +1026,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming integer dot")
                 );
             }
@@ -1060,7 +1068,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("MOVPRFX pair validation")
             );
         }
@@ -1085,7 +1093,7 @@ mod tests {
                                     target,
                                 )
                                 .unwrap_err()
-                                .0
+                                .to_string()
                                 .contains("guest I8MM is outside the streaming profile")
                             );
                         }
@@ -1120,7 +1128,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err();
-                assert!(error.0.contains(reason), "{error:?}");
+                assert!(error.to_string().contains(reason), "{error:?}");
             }
         }
 
@@ -1281,7 +1289,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming integer arithmetic")
                 );
             }
@@ -1294,7 +1302,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("streaming mode required")
                 );
             }
@@ -1306,7 +1314,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("MOVPRFX pair validation")
             );
             assert!(
@@ -1424,7 +1432,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming integer saturation")
                 );
             }
@@ -1437,7 +1445,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("streaming mode required")
                 );
             }
@@ -1450,7 +1458,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("MOVPRFX pair validation")
                 );
             }
@@ -1486,7 +1494,10 @@ mod tests {
                         assert_eq!(native.source_map[1].0, GuestAddress(4));
                         assert!(native.source_map[1].1 > native.source_map[0].1);
                     } else {
-                        assert!(result.unwrap_err().0.contains("streaming mode required"));
+                        assert!(matches!(
+                            result.unwrap_err().kind,
+                            crate::CompileErrorKind::StreamingModeRequired
+                        ));
                     }
                 }
             }
@@ -1499,7 +1510,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("reserved streaming sign")
             );
         }
@@ -1580,7 +1591,10 @@ mod tests {
                         if streaming {
                             assert!(result.is_ok());
                         } else {
-                            assert!(result.unwrap_err().0.contains("streaming mode required"));
+                            assert!(matches!(
+                                result.unwrap_err().kind,
+                                crate::CompileErrorKind::StreamingModeRequired
+                            ));
                         }
                     }
                 }
@@ -1606,7 +1620,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming integer-bit")
                 );
             }
@@ -1639,7 +1653,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("MOVPRFX pair validation")
             );
             assert!(
@@ -1700,7 +1714,7 @@ mod tests {
                                 target,
                             );
                             if requires_declared_dit_zero {
-                                assert!(legacy.unwrap_err().0.contains("declared DIT=0"));
+                                assert!(legacy.unwrap_err().to_string().contains("declared DIT=0"));
                             } else {
                                 assert_eq!(legacy.unwrap().x86_64_code, positive.x86_64_code);
                             }
@@ -1895,7 +1909,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming integer product")
                 );
             }
@@ -1907,7 +1921,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("streaming mode required")
             );
             assert!(
@@ -1918,7 +1932,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("MOVPRFX pair validation")
             );
         }
@@ -2150,7 +2164,7 @@ mod tests {
                 let compile =
                     crate::testing::context_leaf(&source, base, profile, TargetCpu::Baseline)
                         .unwrap_err();
-                assert_eq!(scan.0, compile.0);
+                assert_eq!(scan, compile);
             }
         }
     }
@@ -2398,7 +2412,7 @@ mod tests {
                 let compile =
                     crate::testing::context_leaf(&bytes, GUEST_BASE, profile, TargetCpu::Baseline)
                         .unwrap_err();
-                assert_eq!(scan.0, compile.0);
+                assert_eq!(scan, compile);
             }
         }
     }
@@ -2656,8 +2670,8 @@ mod tests {
                 let compile =
                     crate::testing::context_leaf(&source, GUEST_BASE, profile, TargetCpu::Baseline)
                         .unwrap_err();
-                assert_eq!(scan.0, compile.0);
-                assert!(scan.0.contains(reason), "{}", scan.0);
+                assert_eq!(scan, compile);
+                assert!(scan.to_string().contains(reason), "{}", scan.to_string());
             }
         }
     }
@@ -2831,7 +2845,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err();
-                    assert_eq!(scan.0, compile.0);
+                    assert_eq!(scan, compile);
                 }
             }
         }
@@ -2980,7 +2994,7 @@ mod tests {
                 TargetCpu::Baseline,
             )
             .unwrap_err()
-            .0
+            .to_string()
         }
 
         #[test]
@@ -3344,7 +3358,7 @@ mod tests {
                                 TargetCpu::Baseline
                             )
                             .unwrap_err()
-                            .0
+                            .to_string()
                             .contains("streaming mode required")
                         );
                     }
@@ -3356,7 +3370,7 @@ mod tests {
                             TargetCpu::Baseline,
                         );
                         if operand.requires_sme2() {
-                            assert!(result.unwrap_err().0.contains("FEAT_SME2"));
+                            assert!(result.unwrap_err().to_string().contains("FEAT_SME2"));
                         } else {
                             assert!(result.is_ok());
                         }
@@ -3493,7 +3507,7 @@ mod tests {
                             TargetCpu::Baseline
                         )
                         .unwrap_err()
-                        .0
+                        .to_string()
                         .contains("streaming mode required")
                     );
                 }
@@ -3519,7 +3533,7 @@ mod tests {
                     if permitted {
                         assert!(result.is_ok());
                     } else {
-                        assert!(result.unwrap_err().0.contains(missing));
+                        assert!(result.unwrap_err().to_string().contains(missing));
                     }
                 }
                 let v1 = ScalableProfile::new(
@@ -3533,7 +3547,7 @@ mod tests {
                     TargetCpu::Baseline,
                 );
                 if vector_move {
-                    assert!(result.unwrap_err().0.contains("FEAT_SME2p1"));
+                    assert!(result.unwrap_err().to_string().contains("FEAT_SME2p1"));
                 } else {
                     assert!(result.is_ok());
                 }
@@ -3549,7 +3563,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("reserved streaming predicate logic")
             );
         }
@@ -3657,7 +3671,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err();
-                assert!(error.0.contains("FEAT_SME2p1"));
+                assert!(error.to_string().contains("FEAT_SME2p1"));
                 for za in [false, true] {
                     let error = crate::testing::context_leaf(
                         &source(word),
@@ -3666,7 +3680,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err();
-                    assert!(error.0.contains("streaming mode required"));
+                    assert!(error.to_string().contains("streaming mode required"));
                     assert!(
                         crate::testing::context_leaf(
                             &source(word),
@@ -3688,7 +3702,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("FEAT_SME2p1")
                 );
             }
@@ -3798,7 +3812,7 @@ mod tests {
                 Err(error) => error,
                 Ok(_) => panic!("unreviewed MOVPRFX pair accepted"),
             };
-            assert!(error.0.contains("MOVPRFX pair validation"));
+            assert!(error.to_string().contains("MOVPRFX pair validation"));
         }
     }
     mod profile {
@@ -3823,9 +3837,13 @@ mod tests {
                 .require_features(FeatureRequirement::all_and_any(required, alternatives), pc)
                 .unwrap_err();
             assert_eq!(
-                error.0,
-                "unavailable guest features at 0x1234: requires FEAT_SME2; requires one of FEAT_SME_F16F16, FEAT_SME_F8F16"
+                error.kind,
+                crate::CompileErrorKind::GuestFeaturesUnavailable {
+                    available: features,
+                    required: FeatureRequirement::all_and_any(required, alternatives),
+                }
             );
+            assert_eq!(error.instruction.unwrap().address, pc);
             assert!(
                 profile
                     .require_features(FeatureRequirement::all(features), pc)
@@ -4053,14 +4071,23 @@ mod tests {
                 )
             };
             let missing = compile(TWO_PRODUCT_SDOT, declared(sme)).unwrap_err();
-            assert!(missing.0.contains("0x1234") && missing.0.contains("requires FEAT_SME2"));
+            assert!(
+                missing.to_string().contains("0x1234")
+                    && missing.to_string().contains("requires FEAT_SME2")
+            );
             assert!(compile(TWO_PRODUCT_SDOT, declared(sme.with(ScalableFeature::Sme2))).is_ok());
             assert!(compile(TWO_PRODUCT_SDOT, ScalableProfile::new(length, mode)).is_ok());
             for word in MIXED_DOT_WORDS {
                 let legacy = compile(word, ScalableProfile::new(length, mode)).unwrap_err();
-                assert!(legacy.0.contains("I8MM is outside") && legacy.0.contains("0x1234"));
+                assert!(
+                    legacy.to_string().contains("I8MM is outside")
+                        && legacy.to_string().contains("0x1234")
+                );
                 let missing = compile(word, declared(sme.with(ScalableFeature::Sme2))).unwrap_err();
-                assert!(missing.0.contains("requires FEAT_I8MM") && missing.0.contains("0x1234"));
+                assert!(
+                    missing.to_string().contains("requires FEAT_I8MM")
+                        && missing.to_string().contains("0x1234")
+                );
                 assert!(compile(word, declared(sme.with(ScalableFeature::I8mm))).is_ok());
             }
         }
@@ -4195,7 +4222,7 @@ mod tests {
                                 TargetCpu::Baseline,
                             )
                             .unwrap_err()
-                            .0
+                            .to_string()
                             .contains("streaming mode required")
                         );
                     }
@@ -4209,7 +4236,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("MOVPRFX pair validation")
                 );
             }
@@ -4221,7 +4248,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("reserved streaming rearrangement")
             );
         }
@@ -4246,7 +4273,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("MOVPRFX pair validation")
                 );
             }
@@ -4273,7 +4300,7 @@ mod tests {
                                 target,
                             );
                             if requires {
-                                assert!(legacy.unwrap_err().0.contains(
+                                assert!(legacy.unwrap_err().to_string().contains(
                             "scalar table lookup requires explicitly declared DIT=0 at 0x1000"
                         ));
                                 assert_eq!(profile(bytes, svcr).required_dit(), None);
@@ -4428,7 +4455,7 @@ mod tests {
                                 TargetCpu::Baseline,
                             )
                             .unwrap_err()
-                            .0
+                            .to_string()
                             .contains("streaming mode required")
                         );
                     }
@@ -4442,7 +4469,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("MOVPRFX pair validation")
                 );
             }
@@ -4455,7 +4482,7 @@ mod tests {
                         TargetCpu::Baseline,
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming extraction")
                 );
             }
@@ -4613,7 +4640,7 @@ mod tests {
                                 TargetCpu::Baseline,
                             )
                             .unwrap_err()
-                            .0
+                            .to_string()
                             .contains("streaming mode required")
                         );
                     }
@@ -4628,7 +4655,7 @@ mod tests {
                             TargetCpu::Baseline,
                         )
                         .unwrap_err()
-                        .0
+                        .to_string()
                         .contains("MOVPRFX pair validation")
                     );
                 }
@@ -4645,7 +4672,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("reserved streaming integer reduction")
             );
         }
@@ -4786,11 +4813,19 @@ mod tests {
                         if streaming
                             && x86_64::sve::shifts::requires_declared_dit_zero(operand, length)
                         {
-                            assert!(result.unwrap_err().0.contains("requires declared DIT=0"));
+                            assert!(
+                                result
+                                    .unwrap_err()
+                                    .to_string()
+                                    .contains("requires declared DIT=0")
+                            );
                         } else if streaming {
                             assert!(result.is_ok());
                         } else {
-                            assert!(result.unwrap_err().0.contains("streaming mode required"));
+                            assert!(matches!(
+                                result.unwrap_err().kind,
+                                crate::CompileErrorKind::StreamingModeRequired
+                            ));
                         }
                     }
                 }
@@ -4987,7 +5022,12 @@ mod tests {
                         TargetCpu::Baseline,
                     );
                     if requires_dit_zero {
-                        assert!(legacy.unwrap_err().0.contains("requires declared DIT=0"));
+                        assert!(
+                            legacy
+                                .unwrap_err()
+                                .to_string()
+                                .contains("requires declared DIT=0")
+                        );
                     } else {
                         assert!(legacy.is_ok());
                     }
@@ -5018,7 +5058,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming integer shift")
                 );
             }
@@ -5030,7 +5070,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("MOVPRFX pair validation")
             );
             assert!(
@@ -5125,7 +5165,10 @@ mod tests {
                         if streaming {
                             assert!(result.is_ok());
                         } else {
-                            assert!(result.unwrap_err().0.contains("streaming mode required"));
+                            assert!(matches!(
+                                result.unwrap_err().kind,
+                                crate::CompileErrorKind::StreamingModeRequired
+                            ));
                         }
                     }
                 }
@@ -5146,7 +5189,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("reserved streaming width-conversion")
                 );
             }
@@ -5158,7 +5201,7 @@ mod tests {
                     TargetCpu::Baseline
                 )
                 .unwrap_err()
-                .0
+                .to_string()
                 .contains("MOVPRFX pair validation")
             );
             assert!(
@@ -5406,10 +5449,20 @@ mod tests {
                                 profile,
                                 TargetCpu::Baseline,
                             )
-                            .unwrap_err()
-                            .0;
-                            assert!(error.contains("unavailable guest features at 0x1004"));
-                            assert!(error.contains("FEAT_SME2p1"));
+                            .unwrap_err();
+                            assert_eq!(error.instruction.unwrap().address, GuestAddress(0x1004));
+                            let crate::CompileErrorKind::GuestFeaturesUnavailable {
+                                required, ..
+                            } = error.kind
+                            else {
+                                panic!("{error}")
+                            };
+                            let sme2p1 =
+                                crate::aarch64::scalable::features::ScalableFeature::Sme2p1;
+                            assert!(
+                                required.all_features().contains(sme2p1)
+                                    || required.any_features().contains(sme2p1)
+                            );
                         }
                     }
                     for svcr in [0, 2] {
@@ -5421,7 +5474,7 @@ mod tests {
                                 TargetCpu::Baseline
                             )
                             .unwrap_err()
-                            .0
+                            .to_string()
                             .contains("streaming mode required at 0x1004")
                         );
                     }
@@ -5436,7 +5489,7 @@ mod tests {
                             TargetCpu::Baseline
                         )
                         .unwrap_err()
-                        .0
+                        .to_string()
                         .contains("MOVPRFX pair validation")
                     );
                 }
@@ -5646,7 +5699,8 @@ mod tests {
                     )
                     .unwrap_err();
                     assert!(
-                        error.0.contains(required) && error.0.contains("0x1000"),
+                        error.to_string().contains(required)
+                            && error.to_string().contains("0x1000"),
                         "{error}"
                     );
                 }
@@ -5663,7 +5717,7 @@ mod tests {
                     )
                     .unwrap_err();
                     assert!(
-                        error.0.contains(reason) && error.0.contains("0x1000"),
+                        error.to_string().contains(reason) && error.to_string().contains("0x1000"),
                         "{error}"
                     );
                 }
@@ -5688,7 +5742,7 @@ mod tests {
                         TargetCpu::Baseline
                     )
                     .unwrap_err()
-                    .0
+                    .to_string()
                     .contains("FEAT_SME_I16I64")
                 );
             }
@@ -5720,7 +5774,12 @@ mod tests {
                 );
                 assert_eq!(legacy_result.is_ok(), !operand.requires_i16i64());
                 if operand.requires_i16i64() {
-                    assert!(legacy_result.unwrap_err().0.contains("FEAT_SME_I16I64"));
+                    assert!(
+                        legacy_result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("FEAT_SME_I16I64")
+                    );
                 }
                 for bytes in [16, 32, 64, 128, 256] {
                     let length = VectorLength::from_bytes(bytes).unwrap();
@@ -5909,7 +5968,7 @@ mod tests {
                 .unwrap_err();
             let compile =
                 crate::testing::context_leaf(&bytes, GUEST_BASE, profile, target).unwrap_err();
-            assert_eq!(scan.0, compile.0);
+            assert_eq!(scan, compile);
         }
 
         #[test]
@@ -6321,7 +6380,7 @@ mod tests {
                 TargetCpu::Baseline,
             )
             .unwrap_err();
-            assert!(error.0.contains("scalar SME lookup"));
+            assert!(error.to_string().contains("scalar SME lookup"));
         }
 
         #[test]
@@ -6340,7 +6399,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err();
-                assert!(error.0.contains("ZA and enabled ZT0"));
+                assert!(error.to_string().contains("ZA and enabled ZT0"));
             }
             let profile = table_profile(16, ScalableMode::new(true, true), table_features(), true);
             assert!(
@@ -6369,7 +6428,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err();
-                assert!(error.0.contains("FEAT_SME2p1"));
+                assert!(error.to_string().contains("FEAT_SME2p1"));
                 assert!(
                     crate::testing::context_leaf(
                         &input,
@@ -6401,7 +6460,7 @@ mod tests {
                     TargetCpu::Baseline,
                 )
                 .unwrap_err();
-                assert!(error.0.contains("require SVL"));
+                assert!(error.to_string().contains("require SVL"));
                 let valid = table_profile(
                     minimum,
                     ScalableMode::new(true, false),
@@ -6461,7 +6520,7 @@ mod tests {
                 TargetCpu::Baseline,
             )
             .unwrap_err();
-            assert!(error.0.contains("FEAT_SME2"));
+            assert!(error.to_string().contains("FEAT_SME2"));
             let non_streaming =
                 table_profile(16, ScalableMode::new(false, false), table_features(), false);
             let error = crate::testing::context_leaf(
@@ -6471,7 +6530,7 @@ mod tests {
                 TargetCpu::Baseline,
             )
             .unwrap_err();
-            assert!(error.0.contains("streaming mode required"));
+            assert!(error.to_string().contains("streaming mode required"));
         }
     }
 

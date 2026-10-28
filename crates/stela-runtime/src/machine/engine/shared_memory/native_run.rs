@@ -18,6 +18,7 @@ pub(in crate::machine::engine) use access::{
     RecoveredAccess, RecoveredDeviceAccess, RecoveredRead, RecoveredWrite,
 };
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use stela_compiler::{
     GuestState,
     block::ExitKind,
@@ -936,7 +937,7 @@ fn prepare<'a>(
                     &stela_compiler::Options::new(profile, target),
                 )
                 .map_err(|error| {
-                    at("compilation planning", MemoryStatus::Unsupported).detail(error.0)
+                    at("compilation planning", MemoryStatus::Unsupported).detail(error.to_string())
                 })?;
                 let bytes = plan.source_bytes();
                 input.truncate(bytes);
@@ -962,7 +963,7 @@ fn prepare<'a>(
                     }
                 }
                 .map_err(|error| {
-                    at("native emission", MemoryStatus::Unsupported).detail(error.0)
+                    at("native emission", MemoryStatus::Unsupported).detail(error.to_string())
                 })?;
                 if !compiled.fault_recovery.is_empty() {
                     return Err(at(

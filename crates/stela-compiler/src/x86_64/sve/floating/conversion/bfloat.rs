@@ -78,8 +78,7 @@ pub(in crate::x86_64) fn emit(
             operand.governing,
             chunk,
             ElementSize::Word,
-            ACTIVE,
-            TEMPORARY,
+            crate::x86_64::scalable::MaskRegisters::new(ACTIVE, TEMPORARY),
             length,
             target,
         );

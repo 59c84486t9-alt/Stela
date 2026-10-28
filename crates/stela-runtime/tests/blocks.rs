@@ -900,7 +900,11 @@ fn discovery_reports_exact_unsupported_pc_missing_and_truncated_sources_with_bou
     assert!(report.blocks.is_empty());
     assert_eq!(report.issues.len(), 3);
     assert!(
-        matches!(&report.issues[0].problem,DiscoveryProblem::Unsupported{failure_pc,..} if failure_pc.0==BASE+4)
+        matches!(&report.issues[0].problem, DiscoveryProblem::Unsupported {
+            failure_pc,
+            encoding: Some(0),
+            cause: stela_compiler::CompileErrorKind::Unsupported(_),
+        } if failure_pc.0 == BASE + 4)
     );
     assert_eq!(
         report.issues[1].problem,

@@ -34,7 +34,9 @@ pub(crate) fn emit(
                     break;
                 };
                 if instruction.pc != *pc {
-                    return Err(CompileError("checked instruction PC differs".into()));
+                    return Err(CompileError::new(
+                        crate::CompileErrorKind::InstructionAddressMismatch,
+                    ));
                 }
                 span.push(instruction.clone());
                 if span.len() == crate::x86_64::region::MAX_INSTRUCTIONS {
@@ -63,8 +65,8 @@ pub(crate) fn emit(
         cursor += 1;
     }
     if !fixups.is_empty() {
-        return Err(CompileError(
-            "checked GPR prefix unexpectedly branches".into(),
+        return Err(CompileError::new(
+            crate::CompileErrorKind::UnexpectedMemoryBranch,
         ));
     }
     super::emit_terminal(
@@ -125,8 +127,8 @@ fn emit_register_span(
             );
         }
         if !fixups.is_empty() {
-            return Err(CompileError(
-                "checked register span unexpectedly branches".into(),
+            return Err(CompileError::new(
+                crate::CompileErrorKind::UnexpectedRegisterBranch,
             ));
         }
         let offset = block.x86_64_code.len();
