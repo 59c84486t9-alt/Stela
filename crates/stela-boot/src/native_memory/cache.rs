@@ -132,21 +132,14 @@ pub(crate) fn verify_writeback(
     bytes: usize,
     table_offset: u64,
 ) -> Result<(), MemoryError> {
+    use crate::cpu::msr::{MTRR_CAP, MTRR_DEFAULT, MTRR_PHYS_BASE, Msr, PAT};
     use core::arch::{asm, x86_64::__cpuid};
-    const PAT: u32 = 0x277;
-    const CAP: u32 = 0xfe;
-    const DEFAULT: u32 = 0x2ff;
-    const VARIABLE_BASE: u32 = 0x200;
     const VALID: u64 = 1 << 11;
     const MTRR_ENABLE: u64 = 1 << 11;
-    fn msr(register: u32) -> u64 {
-        let (low, high): (u32, u32);
-        // SAFETY: caller checks CPUID before these architectural MSRs, in CPL0.
-        unsafe {
-            asm!("rdmsr", in("ecx") register, out("eax") low, out("edx") high,
-                options(nomem, nostack, preserves_flags));
-        }
-        u64::from(low) | u64::from(high) << 32
+    fn msr(register: Msr) -> u64 {
+        // SAFETY: caller checks CPUID MTRR and PAT before these registers, in
+        // CPL0.
+        unsafe { register.read() }
     }
     let vendor = __cpuid(0);
     if [vendor.ebx, vendor.edx, vendor.ecx] == [0x6874_7541, 0x6974_6e65, 0x444d_4163] {
@@ -174,7 +167,7 @@ pub(crate) fn verify_writeback(
         return Err(MemoryError::CacheAttributeUnavailable);
     }
     let address_mask = ((1u64 << physical_bits) - 1) & !4095;
-    let default = msr(DEFAULT);
+    let default = msr(MTRR_DEFAULT);
     let cr0: u64;
     // SAFETY: read-only architectural control register access at CPL0.
     unsafe { asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags)) };
@@ -202,13 +195,13 @@ pub(crate) fn verify_writeback(
         },
     )?;
     let mut variables = Vec::new();
-    let count = msr(CAP) as u8;
+    let count = msr(MTRR_CAP) as u8;
     variables
         .try_reserve_exact(usize::from(count))
         .map_err(|_| MemoryError::OutOfMemory)?;
     for index in 0..count {
-        let base = msr(VARIABLE_BASE + 2 * u32::from(index));
-        let mask = msr(VARIABLE_BASE + 2 * u32::from(index) + 1);
+        let base = msr(MTRR_PHYS_BASE.at(2 * u32::from(index)));
+        let mask = msr(MTRR_PHYS_BASE.at(2 * u32::from(index) + 1));
         if mask & VALID == 0 {
             continue;
         }

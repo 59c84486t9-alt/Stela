@@ -1,8 +1,9 @@
 //! Stela's own identity page tables and fatal exception handlers, which
 //! replace the firmware's once boot services end.
+use crate::cpu::msr;
 use core::arch::{asm, naked_asm};
 
-mod controls;
+use stela_boot_core::paging_controls as controls;
 
 pub const PAGE: usize = 4096;
 const ENTRIES: usize = 512;
@@ -22,9 +23,7 @@ const CR4_OSFXSR: u64 = 1 << 9;
 const CR4_OSXMMEXCPT: u64 = 1 << 10;
 const CR4_LA57: u64 = 1 << 12;
 const CR4_PCID: u64 = 1 << 17;
-const EFER_MSR: u32 = 0xc000_0080;
 const EFER_NX_ENABLE: u64 = 1 << 11;
-const IA32_PAT: u32 = 0x277;
 /// The memory type of PAT entry 1, which a page with PWT alone selects
 /// (Intel SDM vol. 3A, "Selecting a Memory Type from the PAT"). Reset makes
 /// it write-through; Stela makes it write-combining for the framebuffer
@@ -245,14 +244,13 @@ pub unsafe fn activate(tables: Tables) -> Result<(), &'static str> {
 pub unsafe fn take_over() -> Result<(), &'static str> {
     let selector: u16;
     let (mut cr0, mut cr4): (u64, u64);
-    let (low, high): (u32, u32);
+    let efer: u64;
     // SAFETY: ring 0 after boot services, with interrupts disabled.
     unsafe {
         asm!("mov {0:x}, cs", out(reg) selector, options(nomem, nostack, preserves_flags));
         asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
         asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
-        asm!("rdmsr", in("ecx") EFER_MSR, out("eax") low, out("edx") high,
-            options(nomem, nostack, preserves_flags));
+        efer = msr::EFER.read();
     }
     if cr4 & CR4_LA57 != 0 {
         return Err("five-level paging firmware is unsupported");
@@ -273,12 +271,11 @@ pub unsafe fn take_over() -> Result<(), &'static str> {
     }
     cr0 = controls::native_cr0(cr0);
     cr4 = (cr4 | CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT) & !(CR4_GLOBAL | CR4_PCID);
-    let efer = (u64::from(low) | (u64::from(high) << 32)) | EFER_NX_ENABLE;
+    let efer = efer | EFER_NX_ENABLE;
     // SAFETY: NX is enabled before tables that use it are loaded; clearing
     // PGE flushes every global firmware translation.
     unsafe {
-        asm!("wrmsr", in("ecx") EFER_MSR, in("eax") efer as u32, in("edx") (efer >> 32) as u32,
-            options(nostack, preserves_flags));
+        msr::EFER.write(efer);
         asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
         asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
     }
@@ -293,13 +290,9 @@ pub unsafe fn take_over() -> Result<(), &'static str> {
     // the PAT" orders.
     // SAFETY: ring 0 with interrupts disabled; IA32_PAT is architectural.
     unsafe {
-        let (low, high): (u32, u32);
-        asm!("rdmsr", in("ecx") IA32_PAT, out("eax") low, out("edx") high,
-            options(nomem, nostack, preserves_flags));
-        let pat = (u64::from(low) | u64::from(high) << 32) & !PAT_ENTRY_1 | PAT_WRITE_COMBINING;
+        let pat = msr::PAT.read() & !PAT_ENTRY_1 | PAT_WRITE_COMBINING;
         asm!("wbinvd", options(nostack, preserves_flags));
-        asm!("wrmsr", in("ecx") IA32_PAT, in("eax") pat as u32, in("edx") (pat >> 32) as u32,
-            options(nostack, preserves_flags));
+        msr::PAT.write(pat);
         asm!("wbinvd", options(nostack, preserves_flags));
     }
     Ok(())

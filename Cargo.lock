@@ -1739,6 +1739,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "stela-boot-core"
+version = "0.1.0"
+dependencies = [
+ "stela-compiler",
+ "stela-drivers",
+ "stela-loader",
+ "stela-runtime",
+]
+
+[[package]]
 name = "stela-cli"
 version = "0.1.0"
 dependencies = [
@@ -1764,6 +1774,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "stela-boot-core",
  "stela-drivers",
  "stela-loader",
  "stela-runtime",
@@ -2391,6 +2402,7 @@ dependencies = [
  "sha1",
  "sha2",
  "smoltcp",
+ "stela-boot-core",
  "stela-cli",
  "stela-compiler",
  "stela-drivers",

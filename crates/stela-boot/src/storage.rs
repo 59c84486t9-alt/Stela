@@ -8,7 +8,7 @@
 //! hash. Without either option nothing here touches the hardware.
 mod bluetooth_platform;
 mod media_check;
-mod options;
+use stela_boot_core::storage as options;
 mod reset_check;
 pub use options::split;
 

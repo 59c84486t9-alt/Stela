@@ -10,8 +10,6 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-const GS_BASE: u32 = 0xc000_0101;
-
 #[repr(C, align(64))]
 pub(crate) struct Local {
     this: *mut Local,
@@ -225,10 +223,7 @@ pub(crate) unsafe fn configure_xstate(
 unsafe fn set_base(base: u64) {
     // SAFETY: the executor owns this processor's GS, and its descriptor/IST
     // setup has already finished. The base remains mapped in every root.
-    unsafe {
-        asm!("wrmsr", in("ecx") GS_BASE, in("eax") base as u32,
-            in("edx") (base >> 32) as u32, options(nostack, preserves_flags));
-    }
+    unsafe { crate::cpu::msr::GS_BASE.write(base) };
 }
 
 /// # Safety

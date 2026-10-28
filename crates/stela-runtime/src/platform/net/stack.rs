@@ -225,7 +225,8 @@ impl<L: Link, C: Clock> Stack<L, C> {
         }
     }
 
-    /// Waits for carrier and a DHCP lease.
+    /// Waits for carrier and, without a configuration by hand, a DHCP
+    /// lease.
     pub fn dhcp(&mut self) -> Result<&Config, NetError> {
         let start = self.now();
         while !self.phy.link.carrier() {
@@ -239,7 +240,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 return Err(NetError::Invalid("DHCP after a configuration by hand"));
             }
             if self.now() >= deadline {
-                return Err(NetError::Dhcp("no server answered"));
+                return Err(NetError::Dhcp(
+                    "no IPv4 lease: no DHCP server answered within 30 seconds",
+                ));
             }
             self.poll()?;
         }
@@ -731,6 +734,28 @@ pub(crate) mod tests {
         assert!(body.iter().zip(start..).all(|(&b, at)| b == pattern(at)));
         let request = core::str::from_utf8(&s.link_mut().request).unwrap();
         assert!(request.starts_with("GET /a.ipsw HTTP/1.1\r\nHost: 10.0.2.2\r\n"));
+    }
+
+    #[test]
+    fn a_network_without_dhcp_reports_no_ipv4_lease() {
+        /// Each reading advances 100 ms.
+        struct Coarse(Cell<u64>);
+        impl Clock for Coarse {
+            fn now_us(&self) -> u64 {
+                self.0.set(self.0.get() + 100_000);
+                self.0.get()
+            }
+        }
+        let silent = End {
+            mac: CLIENT,
+            out: Rc::default(),
+            into: Rc::default(),
+        };
+        let mut stack = Stack::new(silent, Coarse(Cell::new(0)));
+        match stack.dhcp() {
+            Err(NetError::Dhcp(why)) => assert!(why.starts_with("no IPv4 lease"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

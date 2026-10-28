@@ -6,7 +6,7 @@ const CR0_TASK_SWITCHED: u64 = 1 << 3;
 const CR0_NATIVE_EXCEPTIONS: u64 = 1 << 5;
 const CR0_WRITE_PROTECT: u64 = 1 << 16;
 
-pub(super) const fn native_cr0(firmware: u64) -> u64 {
+pub const fn native_cr0(firmware: u64) -> u64 {
     // Intel SDM Vol. 3A, CR0.NE: deliver native x87 exceptions through #MF,
     // not the legacy external FERR#/IGNNE# interface. The canonical runtime
     // requires this on the BSP just as the owned AP bootstrap does.

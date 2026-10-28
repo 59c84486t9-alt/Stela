@@ -36,8 +36,9 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// Revision 8: `--recovery-bundle` is gone; a recoveryOS boot reads the
 /// disk's own recoveryOS or is refused. Revision 9: the data partition's
 /// bundles, install medium and translation store are under `stela/`, not
-/// `EFI/stela/`.
-pub const OPTIONS_REVISION: u32 = 9;
+/// `EFI/stela/`. Revision 10: `--wifi SSID`, `--wifi-key PATH` and
+/// `--wifi-country XX` join a Wi-Fi network for the mount's network.
+pub const OPTIONS_REVISION: u32 = 10;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";

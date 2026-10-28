@@ -65,13 +65,9 @@ unsafe impl Send for Platform {}
 unsafe impl Sync for Platform {}
 
 fn msr(index: u32) -> u64 {
-    let (low, high): (u32, u32);
     // SAFETY: only qualified Intel architectural registers from observe's
     // CPUID-checked memory image are read by this module.
-    unsafe {
-        asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
-    }
-    u64::from(low) | u64::from(high) << 32
+    unsafe { crate::cpu::msr::rdmsr(index) }
 }
 fn memory_register(index: u32) -> bool {
     index == 0xfe
@@ -91,8 +87,8 @@ impl Platform {
         if cr0 != self.snapshot.cr0
             || cr3 != self.snapshot.cr3
             || cr4 != self.snapshot.cr4
-            || msr(0xc000_0080) != self.snapshot.efer
-            || msr(0x277) != self.snapshot.pat
+            || msr(crate::cpu::msr::EFER.index) != self.snapshot.efer
+            || msr(crate::cpu::msr::PAT.index) != self.snapshot.pat
             || self.snapshot.msrs[..self.snapshot.msr_count as usize]
                 .iter()
                 .filter(|m| memory_register(m.index))

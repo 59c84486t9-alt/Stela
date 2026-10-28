@@ -27,35 +27,8 @@ const FORMAT: PcmFormat = PcmFormat {
     channels: 2,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Playback,
-    Duplex,
-    TransportPlayback,
-    TransportDuplex,
-}
+use stela_boot_core::options::AudioCheck;
 
-impl Mode {
-    pub fn parse(value: &str) -> Result<Self, &'static str> {
-        match value {
-            "playback" => Ok(Self::Playback),
-            "duplex" => Ok(Self::Duplex),
-            "transport-playback" => Ok(Self::TransportPlayback),
-            "transport-duplex" => Ok(Self::TransportDuplex),
-            _ => Err(
-                "audio check mode must be playback, duplex, transport-playback or transport-duplex",
-            ),
-        }
-    }
-
-    fn transport(self) -> bool {
-        matches!(self, Self::TransportPlayback | Self::TransportDuplex)
-    }
-
-    fn duplex(self) -> bool {
-        matches!(self, Self::Duplex | Self::TransportDuplex)
-    }
-}
 const POLL_US: u64 = 500;
 const DEADLINE_US: u64 = 5_000_000;
 
@@ -170,7 +143,7 @@ fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
 /// BARs are mapped uncached at identity addresses; its final DMA_BYTES of
 /// coherent identity-mapped RAM are exclusively reserved for this check for the
 /// boot, even on failure. The loader identity root must still be active.
-pub unsafe fn run(handoff: &Handoff, mode: Mode) -> Result<(), String> {
+pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<(), String> {
     let dma_start = handoff
         .dma
         .end

@@ -26,3 +26,9 @@ pub mod ring;
 pub mod router;
 pub mod topology;
 pub mod usb3;
+
+/// `timeout` milliseconds after `now`, no later than `limit`: a stage's
+/// deadline within its job. None when the clock would overflow.
+pub(crate) fn stage_deadline(now: u64, timeout: u64, limit: u64) -> Option<u64> {
+    now.checked_add(timeout).map(|deadline| deadline.min(limit))
+}

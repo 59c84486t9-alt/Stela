@@ -282,69 +282,9 @@ pub(super) fn setup<C: ConfigSpace>(
 // Only complete measured endpoint capability bodies authorize the AER mask.
 // A header embedded in a vendor payload cannot grant configuration access.
 pub(super) fn find_aer<C: ConfigSpace>(config: &C) -> Result<Option<u16>, BlockError> {
-    let invalid = BlockError::Unsupported("GL9750 unqualified extended PCIe capabilities");
-    let mut occupied = [false; 4096];
-    let mut singletons = [false; 32];
-    let mut at = 0x100u16;
-    let mut aer = None;
-    loop {
-        let start = usize::from(at);
-        if !(0x100..=0xffc).contains(&at) || at & 3 != 0 || occupied[start] {
-            return Err(invalid);
-        }
-        let header = config.read32(at);
-        if header == 0 && at == 0x100 {
-            return Ok(None);
-        }
-        let id = header as u16;
-        let version = (header >> 16) & 15;
-        if version != 1 && !(id == 1 && version == 2) {
-            return Err(invalid);
-        }
-        let bytes = match id {
-            1 => {
-                if start + 0x2c > occupied.len()
-                    || config.read32(at + 0x18) & (1 << 11 | 1 << 12 | 1 << 18) != 0
-                {
-                    return Err(invalid);
-                }
-                0x2c
-            }
-            3 => 12,
-            4 => 16,
-            0x0b => {
-                if start + 8 > occupied.len() {
-                    return Err(invalid);
-                }
-                let bytes = (config.read32(at + 4) >> 20) as usize;
-                if bytes < 8 {
-                    return Err(invalid);
-                }
-                bytes
-            }
-            0x18 => 8,
-            0x1e => 16,
-            0x1f => 12,
-            _ => return Err(invalid),
-        };
-        if id != 0x0b {
-            if singletons[usize::from(id)] {
-                return Err(invalid);
-            }
-            singletons[usize::from(id)] = true;
-        }
-        let end = start + bytes;
-        if end > occupied.len() || occupied[start..end].iter().any(|used| *used) {
-            return Err(invalid);
-        }
-        occupied[start..end].fill(true);
-        if id == 1 {
-            aer = Some(at);
-        }
-        let next = (header >> 20) as u16;
-        if next == 0 {
-            return Ok(aer);
-        }
-        at = next;
-    }
+    crate::storage::pci::measured_extended(
+        config,
+        1,
+        BlockError::Unsupported("GL9750 unqualified extended PCIe capabilities"),
+    )
 }

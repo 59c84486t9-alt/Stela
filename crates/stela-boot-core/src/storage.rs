@@ -1,7 +1,6 @@
-//! Pure mount options, also compiled into the hosted xtask verification suite.
-//! `split` separates the `--storage` and `--storage-check` targets from the
-//! rest of `stela.cfg`, and the USB check requests are validated against them.
-extern crate alloc;
+//! The host-storage options of `stela.cfg`: `split` separates the
+//! `--storage` and `--storage-check` targets from the rest of the line, and
+//! the USB check requests are validated against them.
 use alloc::{string::String, vec::Vec};
 use stela_runtime::pc::storage::Target;
 
@@ -29,7 +28,7 @@ pub fn split(options: &str) -> Result<(Vec<Target>, Vec<Target>, String), &'stat
     Ok((open, check, rest))
 }
 
-pub(super) fn reset_requested(
+pub fn reset_requested(
     text: &str,
     open: &[Target],
     check: &[Target],
@@ -44,7 +43,7 @@ pub(super) fn reset_requested(
     Ok(reset_count == 1)
 }
 
-pub(super) fn media_requested(
+pub fn media_requested(
     text: &str,
     open: &[Target],
     check: &[Target],

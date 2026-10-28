@@ -439,12 +439,14 @@ fn prepare_pcie_link<C: ConfigSpace>(
     function: &mut Function<C>,
     disable_aspm: impl FnOnce(&mut Function<C>) -> Result<(), BlockError>,
 ) -> Result<Option<u16>, BlockError> {
+    let invalid = || BlockError::Unsupported("invalid Realtek PCIe capabilities");
     let mut control = None;
-    for (offset, id) in function.capabilities() {
-        if id == 0x10 {
-            let offset = u16::from(offset) + 0x10;
+    for entry in crate::bus::pci::capability::capabilities(function.config()) {
+        let entry = entry.map_err(|_| invalid())?;
+        if entry.id == 0x10 {
+            let offset = entry.offset + 0x10;
             if offset + 2 > 0x100 || control.replace(offset).is_some() {
-                return Err(BlockError::Unsupported("invalid Realtek PCIe capabilities"));
+                return Err(invalid());
             }
         }
     }

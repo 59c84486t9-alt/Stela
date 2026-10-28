@@ -114,20 +114,14 @@ fn discover<R: Registers>(host: &mut Host<R>) -> Result<Layout, Error> {
     if host.io().parent_read(6, 2)? & 0x10 == 0 {
         return Err(Error::Capability);
     }
-    let mut offset = host.io().parent_read(0x34, 1)? as u16;
-    let mut visited = [false; 256];
     let mut layout = None;
-    while offset != 0 {
-        if !(0x40..=0xfc).contains(&offset) || offset & 3 != 0 || visited[usize::from(offset)] {
-            return Err(Error::Capability);
-        }
-        visited[usize::from(offset)] = true;
-        let header = host.io().parent_read(offset, 2)?;
-        if header as u8 == 5 && host.io().parent_read(offset + 2, 2)? & 1 != 0 {
+    for entry in host.parent_capabilities()? {
+        let offset = entry.offset;
+        if entry.id == 5 && host.io().parent_read(offset + 2, 2)? & 1 != 0 {
             return Err(Error::ActiveChild);
         }
-        if header as u8 == 0x11 {
-            if offset > 0xf4 || layout.is_some() {
+        if entry.id == 0x11 {
+            if layout.is_some() {
                 return Err(Error::Capability);
             }
             let control = host.io().parent_read(offset + 2, 2)? as u16;
@@ -167,7 +161,6 @@ fn discover<R: Registers>(host: &mut Host<R>) -> Result<Layout, Error> {
                 pending,
             });
         }
-        offset = (header >> 8) as u16;
     }
     let layout = layout.ok_or(Error::Capability)?;
     if host.remap_layout.is_some_and(|original| original != layout) {

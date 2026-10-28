@@ -7,7 +7,9 @@
 //! ASPM policy through retained original bridge owners, without enumeration.
 //! Link Control layout/order follows the pinned Linux PCI ASPM implementation.
 use super::{BRIDGE_BUSES, PCIE_ASPM, PCIE_FLAGS, PCIE_LINK_CONTROL};
-use crate::bus::pci::{Address, ConfigSpace, Function, msi::MsiConfigSpace};
+use crate::bus::pci::{
+    Address, CapabilityError, ConfigSpace, Function, Layout, msi::MsiConfigSpace,
+};
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,78 +213,40 @@ fn link<C: MsiConfigSpace>(function: &Function<C>) -> Result<(u16, u16), Error> 
     if read(function, 6)? & (1 << 4) == 0 {
         return Err(malformed());
     }
-    let mut offset = u16::from(function.config.read8(0x34));
-    let mut occupied = [false; 256];
     let mut found = None;
-    while offset != 0 {
-        if !(0x40..=0xfc).contains(&offset) || !offset.is_multiple_of(4) {
-            return Err(malformed());
-        }
-        let header = read(function, offset)?;
-        let bytes = if header as u8 == 0x10 {
-            let flags = read(function, offset + PCIE_FLAGS)?;
-            let version = flags & 15;
-            let kind = (flags >> 4) & 15;
-            if !matches!(version, 1 | 2)
-                || !matches!(kind, 0 | 1 | 4 | 5 | 6 | 7 | 8)
-                || found.is_some()
-            {
-                return Err(malformed());
-            }
-            // Complete standard PCIe extent, including conditional slot/root
-            // registers. Never let a later header alias Link Control's body.
-            let bytes = if version == 2 {
-                if kind == 4 || flags & 0x100 != 0 {
-                    0x3c
-                } else {
-                    0x34
+    for entry in function.config.capabilities() {
+        let entry = entry.map_err(|error| match error {
+            CapabilityError::FailedRead { offset } => Error::Read {
+                address: function.address,
+                offset,
+            },
+            _ => malformed(),
+        })?;
+        let offset = entry.offset;
+        match entry.id {
+            0x10 => {
+                let flags = read(function, offset + PCIE_FLAGS)?;
+                let kind = (flags >> 4) & 15;
+                if !matches!(flags & 15, 1 | 2)
+                    || !matches!(kind, 0 | 1 | 4 | 5 | 6 | 7 | 8)
+                    || found.is_some()
+                {
+                    return Err(malformed());
                 }
-            } else if kind == 4 {
-                0x24
-            } else if flags & 0x100 != 0 {
-                0x1c
-            } else {
-                0x14
-            };
-            found = Some(offset + PCIE_LINK_CONTROL);
-            bytes
-        } else {
-            match header as u8 {
-                5 => {
-                    let flags = read(function, offset + 2)?;
-                    if flags & !0x1ff != 0
-                        || (flags >> 1) & 7 > 5
-                        || (flags >> 4) & 7 > (flags >> 1) & 7
-                    {
-                        return Err(malformed());
-                    }
-                    match (flags & 0x80 != 0, flags & 0x100 != 0) {
-                        (false, false) => 10,
-                        (true, false) => 14,
-                        (false, true) => 20,
-                        (true, true) => 24,
-                    }
-                }
-                0x11 => 12,
-                id => crate::bus::pci::msi::other_capability_bytes(
-                    &function.config,
-                    offset,
-                    id,
-                    function.config.read8(0x0e) & 0x7f,
-                )
-                .map_err(|_| malformed())?,
+                found = Some(offset + PCIE_LINK_CONTROL);
             }
-        };
-        let end = offset
-            .checked_add(bytes)
-            .filter(|end| *end <= 256)
-            .ok_or_else(malformed)?;
-        let extent = &mut occupied[usize::from(offset)..usize::from(end)];
-        if extent.iter().any(|occupied| *occupied) {
-            return Err(malformed());
+            5 => {
+                let flags = read(function, offset + 2)?;
+                if flags & !0x1ff != 0
+                    || (flags >> 1) & 7 > 5
+                    || (flags >> 4) & 7 > (flags >> 1) & 7
+                {
+                    return Err(malformed());
+                }
+            }
+            _ if entry.layout == Layout::Unsupported => return Err(malformed()),
+            _ => {}
         }
-        extent.fill(true);
-        offset = header >> 8;
     }
     let offset = found.ok_or_else(malformed)?;
     Ok((offset, read(function, offset)?))

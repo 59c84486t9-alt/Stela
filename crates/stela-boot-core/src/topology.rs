@@ -1,21 +1,20 @@
 //! Copied firmware processor identity and per-processor CPUID observations.
 //! One selected logical processor owns each physical core; SMT siblings never
 //! increase the number of guest PEs admitted by this native executor.
-extern crate alloc;
 
 use alloc::vec::Vec;
 
-pub const MAX_PROCESSORS: usize = 256;
+/// Physical cores the native executor can own. Hosts with more physical
+/// cores run on the first `MAX_CORES` of `select`'s order.
 pub const MAX_CORES: usize = 64;
 
-/// Default ownership covers every discovered physical core. An explicit count
-/// is the only narrowing policy; unavailable cores are never fabricated.
-pub(crate) fn assignment_count(
-    requested: Option<usize>,
-    available: usize,
-) -> Result<usize, &'static str> {
-    let count = requested.unwrap_or(available);
-    if available == 0 || available > MAX_CORES || count == 0 || count > available {
+/// Physical cores the executor owns from `available` discovered cores.
+/// Without a request this is `min(available, MAX_CORES)`; an explicit count
+/// narrows it and refuses when it exceeds either bound.
+pub fn assignment_count(requested: Option<usize>, available: usize) -> Result<usize, &'static str> {
+    let assignable = available.min(MAX_CORES);
+    let count = requested.unwrap_or(assignable);
+    if assignable == 0 || count == 0 || count > assignable {
         return Err("native assignment is outside the actual physical-core roster");
     }
     Ok(count)
@@ -163,7 +162,7 @@ impl Snapshot {
 /// Conservative compiler policy from the assigned workers' actual installed
 /// observations. This cannot grant execution: registration and each native
 /// entry must still validate the destination's current hardware and controls.
-pub(crate) fn common_native_target(
+pub fn common_native_target(
     observations: &[&Snapshot],
 ) -> Result<stela_compiler::TargetCpu, CapabilityRefusal> {
     use stela_compiler::TargetCpu;
@@ -312,7 +311,6 @@ impl Snapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    Capacity,
     NoBootstrapProcessor,
     MultipleBootstrapProcessors,
     BootstrapUnavailable,
@@ -325,9 +323,6 @@ pub enum Refusal {
 }
 
 fn bootstrap_index(processors: &[Processor]) -> Result<usize, Refusal> {
-    if processors.len() > MAX_PROCESSORS {
-        return Err(Refusal::Capacity);
-    }
     let mut bsp = None;
     for (index, processor) in processors.iter().enumerate() {
         if !matches!(processor.topology_version, 1 | 2) {
@@ -359,8 +354,10 @@ fn bootstrap_index(processors: &[Processor]) -> Result<usize, Refusal> {
     bsp.ok_or(Refusal::NoBootstrapProcessor)
 }
 
-/// Return original processor indices, BSP first, without renumbering their
-/// firmware identity. No AP is started and no capability is inferred here.
+/// Return one original processor index per physical core, BSP first, then by
+/// location, without renumbering their firmware identity. The list covers
+/// every physical core; assignment takes a prefix (`assignment_count`). No AP
+/// is started and no capability is inferred here.
 pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
     let bsp = bootstrap_index(processors)?;
     let mut selected = alloc::vec![bsp];
@@ -385,9 +382,6 @@ pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
         {
             continue;
         }
-        if selected.len() == MAX_CORES {
-            return Err(Refusal::Capacity);
-        }
         selected.push(index);
     }
     Ok(selected)
@@ -397,7 +391,7 @@ pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
 /// Unlike admission, this includes enabled unhealthy APs: health does not prove
 /// that their firmware execution has stopped. Disabled processors stay disabled.
 /// No allocation or firmware access is needed at the post-EBS boundary.
-pub(crate) fn enabled_unselected<'a>(
+pub fn enabled_unselected<'a>(
     processors: &'a [Processor],
     selected: &'a [u32],
 ) -> Result<impl Iterator<Item = usize> + Clone + 'a, Refusal> {
@@ -456,7 +450,66 @@ mod tests {
             assert!(assignment_count(Some(available + 1), available).is_err());
         }
         assert!(assignment_count(None, 0).is_err());
-        assert!(assignment_count(None, MAX_CORES + 1).is_err());
+    }
+
+    #[test]
+    fn default_assignment_caps_large_hosts_and_explicit_over_requests_refuse() {
+        for available in [MAX_CORES + 1, 96, 192, 512] {
+            assert_eq!(assignment_count(None, available), Ok(MAX_CORES));
+            assert_eq!(assignment_count(Some(8), available), Ok(8));
+            assert_eq!(assignment_count(Some(MAX_CORES), available), Ok(MAX_CORES));
+            assert!(assignment_count(Some(MAX_CORES + 1), available).is_err());
+        }
+    }
+
+    /// `packages` x `cores` x `threads` logical processors, BSP on the last
+    /// thread of the last core of package 0.
+    fn large_host(packages: u32, cores: u32, threads: u32) -> Vec<Processor> {
+        let mut source = Vec::new();
+        for package in 0..packages {
+            for core in 0..cores {
+                for thread in 0..threads {
+                    let number = source.len() as u32;
+                    source.push(processor(number, package, core, thread));
+                }
+            }
+        }
+        let bsp = (cores * threads - 1) as usize;
+        source[bsp].flags |= BSP;
+        source
+    }
+
+    #[test]
+    fn large_hosts_select_every_physical_core_and_retire_those_past_the_assignment() {
+        // Dual-socket 96-core SMT host: 384 logical processors, 192 cores.
+        let source = large_host(2, 96, 2);
+        let all = select(&source).unwrap();
+        assert_eq!(all.len(), 192);
+        assert_eq!(all[0], 191); // BSP first, even on thread 1
+        assert!(all[1..].iter().all(|&index| source[index].thread == 0));
+        let assigned = assignment_count(None, all.len()).unwrap();
+        assert_eq!(assigned, MAX_CORES);
+        // The assigned prefix stays on package 0 before using package 1.
+        assert!(
+            all[..assigned]
+                .iter()
+                .all(|&index| source[index].location.package == 0)
+        );
+        let selected: Vec<_> = all[..assigned].iter().map(|&index| index as u32).collect();
+        let retired: Vec<_> = enabled_unselected(&source, &selected).unwrap().collect();
+        assert_eq!(retired.len(), source.len() - MAX_CORES);
+        for &index in &all[assigned..] {
+            assert!(retired.contains(&index)); // unassigned physical cores get INIT
+        }
+        assert!(!retired.contains(&191));
+    }
+
+    #[test]
+    fn processor_inventory_has_no_fixed_logical_ceiling() {
+        let source = large_host(4, 80, 2); // 640 logical processors
+        assert_eq!(select(&source).map(|cores| cores.len()), Ok(320));
+        let source = large_host(1, 1, 300); // one core, 300 threads
+        assert_eq!(select(&source), Ok(alloc::vec![299]));
     }
 
     #[test]
@@ -889,14 +942,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_physical_thread_and_excess_core_capacity_refuse() {
+    fn duplicate_physical_thread_refuses() {
         let mut cores = [processor(0, 0, 0, 0), processor(1, 0, 0, 0)];
         cores[0].flags |= BSP;
         assert_eq!(select(&cores), Err(Refusal::DuplicateThreadLocation));
-        let mut cores: Vec<_> = (0..=MAX_CORES)
-            .map(|core| processor(core as u32, 0, core as u32, 0))
-            .collect();
-        cores[0].flags |= BSP;
-        assert_eq!(select(&cores), Err(Refusal::Capacity));
     }
 }

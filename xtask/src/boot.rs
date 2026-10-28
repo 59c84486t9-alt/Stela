@@ -16,10 +16,6 @@
 //! system's APFS Preboot volume; the mount builds the boot bundle from it at
 //! boot and enters it, and the run checks the result against the bundle the
 //! host builds from the same image.
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/storage/options.rs"]
-mod storage_options;
-
 use crate::{
     check::{BOOT_MANIFEST, BOOT_TARGET, BOOT_TARGET_DIR},
     tools::{binding, cargo, exec, qemu, root, stop, wait},

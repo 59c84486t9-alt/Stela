@@ -12,6 +12,16 @@ path = "src/main.rs"
 # supplies its own allocator and panic handler, not a libtest executable.
 test = false
 
+# A workspace of its own: the binary builds only for x86_64-unknown-uefi
+# (no_std, no_main, its own allocator and panic handler), which a root
+# member would be built and linked for the host by `cargo build/test
+# --workspace`, and it aborts on panic in every profile, which a root
+# profile would impose on every host crate. Cargo's per-package
+# `forced-target` would allow membership once stable. Until then the
+# edition, lints and release profile below repeat the root's
+# `[workspace.package]`, `[workspace.lints]` and `[profile.release]`;
+# change both together. Its firmware-independent logic lives in the root
+# member `stela-boot-core`, tested there.
 [workspace]
 
 [features]
@@ -19,6 +29,7 @@ native-profile = ["stela-runtime/native-profile"]
 
 [dependencies]
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
+stela-boot-core = { path = "../stela-boot-core" }
 stela-drivers = { path = "../stela-drivers", features = ["linux-kernel", "native-acpi"] }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
@@ -47,3 +58,6 @@ debug = "line-tables-only"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"

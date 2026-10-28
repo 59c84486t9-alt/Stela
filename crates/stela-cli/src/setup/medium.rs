@@ -32,6 +32,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+use stela_boot_core::options::System;
 use stela_runtime::payload::{
     BLOCK_HASHES_FILE, BlockHashes, HASH_BLOCK_BYTES, Layout, MANIFEST_FILE, MAX_PIECES,
     PIECE_HASHES_FILE, Piece, install_directory, piece_name, piece_sizes,
@@ -85,16 +86,19 @@ impl Medium {
         )
     }
 
-    /// The engine options that restore from it.
-    pub(super) fn options(&self) -> String {
-        match self.remote {
-            true => format!("--install {}", self.firmware_manifest()),
-            false => format!(
-                "--install {} --install-source {}",
-                self.firmware_manifest(),
+    /// The engine options that restore from it, set in `system`.
+    pub(super) fn restore_from(&self, system: &mut System) -> Result<()> {
+        system.install = Some(self.firmware_manifest());
+        system.install_source = match self.remote {
+            true => None,
+            false => Some(
                 self.partition_guid
+                    .parse()
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| format!("install medium partition {}", self.partition_guid))?,
             ),
-        }
+        };
+        Ok(())
     }
 
     /// What is wrong with it: a missing or changed `payload.json`, or a
@@ -764,10 +768,10 @@ pub(super) mod tests {
             .collect();
         names.sort();
         assert_eq!(names, [BLOCK_HASHES_FILE, MANIFEST_FILE]);
-        assert_eq!(
-            medium.options(),
-            format!("--install {}", medium.firmware_manifest())
-        );
+        let mut system = System::default();
+        medium.restore_from(&mut system).unwrap();
+        assert_eq!(system.install, Some(medium.firmware_manifest()));
+        assert_eq!(system.install_source, None);
         fs::remove_file(medium.directory().join(BLOCK_HASHES_FILE)).unwrap();
         assert_eq!(medium.problems().len(), 1);
     }

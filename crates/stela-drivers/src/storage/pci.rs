@@ -2,35 +2,26 @@
 //! Strict native PCI admission shared by polled storage controllers.
 use crate::{
     block::BlockError,
-    bus::pci::{ConfigSpace, Function},
+    bus::pci::{ConfigSpace, Function, Layout, capability},
 };
+use alloc::vec::Vec;
 
 const PCI_COMMAND: u16 = 0x04;
 const PCI_MEMORY: u16 = 1 << 1;
 const PCI_BUS_MASTER: u16 = 1 << 2;
 const PCI_INTX_DISABLE: u16 = 1 << 10;
 const PCI_CAP_CONTROL: u16 = 2;
-const PCI_STATUS: u16 = 0x06;
-const PCI_CAP_PRESENT: u16 = 1 << 4;
-const PCI_CAP_POINTER: u16 = 0x34;
 const PCI_HEADER_TYPE: u16 = 0x0e;
 const PCI_PM: u8 = 0x01;
-const PCI_PM_BYTES: usize = 8;
 const PCI_VPD: u8 = 0x03;
 const PCI_VENDOR: u8 = 0x09;
 const PCI_SSVID: u8 = 0x0d;
 const PCI_EXPRESS: u8 = 0x10;
-const PCI_VENDOR_LENGTH: u16 = 2;
-const PCI_EXP_VERSION: u16 = 0x000f;
 const PCI_EXP_TYPE: u16 = 0x00f0;
 const PCI_EXP_SLOT: u16 = 0x0100;
 const PCI_EXP_ENDPOINT: u16 = 0;
 const PCI_EXP_LEGACY_ENDPOINT: u16 = 1;
 const PCI_EXP_RC_ENDPOINT: u16 = 9;
-const PCI_EXP_ENDPOINT_V1_BYTES: usize = 20;
-const PCI_EXP_ENDPOINT_V2_BYTES: usize = 0x34;
-const PCI_EXP_RC_ENDPOINT_V1_BYTES: usize = 12;
-const PCI_EXP_RC_ENDPOINT_V2_BYTES: usize = 0x2c;
 const PCI_MSI: u8 = 0x05;
 const PCI_MSIX: u8 = 0x11;
 const PCI_MSI_ENABLE: u16 = 1;
@@ -85,22 +76,12 @@ fn checked_capabilities<C: ConfigSpace>(
     let mut controls = [None; 2];
     let mut found = None;
     let mut singletons = [false; 256];
-    if config.read16(PCI_STATUS) & PCI_CAP_PRESENT == 0 {
-        return Ok((controls, found));
-    }
-    let mut at = u16::from(config.read8(PCI_CAP_POINTER));
-    let mut occupied = [false; 256];
-    while at != 0 {
-        if !(0x40..=0xfc).contains(&at) || at & 3 != 0 || occupied[usize::from(at)] {
+    for entry in config.capabilities() {
+        let entry = entry.map_err(|_| malformed.clone())?;
+        let (at, id) = (entry.offset, entry.id);
+        if id == 0 {
             return Err(malformed);
         }
-        let header = config.read16(at);
-        let id = header as u8;
-        if id == 0 || id == 0xff {
-            return Err(malformed);
-        }
-        // Every admitted body must be measured. Otherwise a next pointer can
-        // name PM/MSI controls inside a different capability's real registers.
         if id != PCI_VENDOR {
             if singletons[usize::from(id)] {
                 return Err(malformed);
@@ -110,69 +91,89 @@ fn checked_capabilities<C: ConfigSpace>(
         if target == Some(id) {
             found = Some(at);
         }
-        let bytes = match id {
-            PCI_PM => PCI_PM_BYTES,
-            PCI_VPD | PCI_SSVID => 8,
-            PCI_VENDOR => {
-                let length = usize::from(config.read8(at + PCI_VENDOR_LENGTH));
-                if length < 3 {
-                    return Err(malformed);
-                }
-                length
-            }
+        // Every admitted body must be measured. Otherwise a next pointer can
+        // name PM/MSI controls inside a different capability's real registers.
+        match id {
+            PCI_PM | PCI_VPD | PCI_SSVID | PCI_VENDOR => {}
             PCI_EXPRESS => {
                 let flags = config.read16(at + PCI_CAP_CONTROL);
-                let version = flags & PCI_EXP_VERSION;
                 let kind = (flags & PCI_EXP_TYPE) >> 4;
                 if flags & PCI_EXP_SLOT != 0 {
                     return Err(BlockError::Unsupported(
                         "storage unqualified PCIe slot capability",
                     ));
                 }
-                match (kind, version) {
-                    (PCI_EXP_ENDPOINT | PCI_EXP_LEGACY_ENDPOINT, 1) => PCI_EXP_ENDPOINT_V1_BYTES,
-                    (PCI_EXP_ENDPOINT | PCI_EXP_LEGACY_ENDPOINT, 2) => PCI_EXP_ENDPOINT_V2_BYTES,
-                    (PCI_EXP_RC_ENDPOINT, 1) => PCI_EXP_RC_ENDPOINT_V1_BYTES,
-                    (PCI_EXP_RC_ENDPOINT, 2) => PCI_EXP_RC_ENDPOINT_V2_BYTES,
-                    _ => {
-                        return Err(BlockError::Unsupported(
-                            "storage unqualified PCIe capability extent",
-                        ));
-                    }
+                if !matches!(
+                    kind,
+                    PCI_EXP_ENDPOINT | PCI_EXP_LEGACY_ENDPOINT | PCI_EXP_RC_ENDPOINT
+                ) || entry.layout != Layout::Sized
+                {
+                    return Err(BlockError::Unsupported(
+                        "storage unqualified PCIe capability extent",
+                    ));
                 }
             }
             PCI_MSI | PCI_MSIX => {
-                let index = usize::from(id == PCI_MSIX);
-                controls[index] = Some(at + PCI_CAP_CONTROL);
-                let control = config.read16(at + PCI_CAP_CONTROL);
-                if id == PCI_MSIX {
-                    12
-                } else {
-                    let wide = control & (1 << 7) != 0;
-                    let masking = control & (1 << 8) != 0;
-                    if masking {
-                        if wide { 24 } else { 20 }
-                    } else if wide {
-                        14
-                    } else {
-                        10
-                    }
-                }
+                controls[usize::from(id == PCI_MSIX)] = Some(at + PCI_CAP_CONTROL);
             }
             _ => {
                 return Err(BlockError::Unsupported(
                     "storage unsupported PCI capability extent",
                 ));
             }
-        };
-        let end = usize::from(at) + bytes;
-        if end > occupied.len() || occupied[usize::from(at)..end].iter().any(|used| *used) {
-            return Err(malformed);
         }
-        occupied[usize::from(at)..end].fill(true);
-        at = header >> 8;
     }
     Ok((controls, found))
+}
+
+/// The offset of extended capability `target`, after every entry is
+/// measured: endpoint AER without prefix or completion-timeout logging, serial
+/// number, power budgeting, vendor-specific, LTR, L1 PM substates and PTM, each
+/// once except vendor-specific. A header in another body grants nothing; any
+/// other capability or layout is `invalid`.
+pub(super) fn measured_extended<C: ConfigSpace + ?Sized>(
+    config: &C,
+    target: u16,
+    invalid: BlockError,
+) -> Result<Option<u16>, BlockError> {
+    if config.read32(0x100) == u32::MAX {
+        return Err(invalid);
+    }
+    let entries = capability::extended_capabilities(config)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid.clone())?;
+    let mut singletons = 0u32;
+    let mut found = None;
+    for entry in &entries {
+        let (at, id) = (entry.offset, entry.id);
+        if entry.version != 1 && !(id == 1 && entry.version == 2) {
+            return Err(invalid);
+        }
+        match id {
+            // Conventional (non-Flit) endpoint AER through the four DWORD log.
+            1 => {
+                if at + 0x2c > 0x1000
+                    || capability::overlap(entries.iter().map(|e| e.span()), at, 0x2c).is_some()
+                    || config.read32(at + 0x18) & (1 << 11 | 1 << 12 | 1 << 18) != 0
+                {
+                    return Err(invalid);
+                }
+            }
+            3 | 4 | 0x0b | 0x18 | 0x1e | 0x1f => {}
+            _ => return Err(invalid),
+        }
+        if id != 0x0b {
+            let bit = 1 << id;
+            if singletons & bit != 0 {
+                return Err(invalid);
+            }
+            singletons |= bit;
+        }
+        if id == target {
+            found = Some(at);
+        }
+    }
+    Ok(found)
 }
 
 pub(super) fn set_pio_command<C: ConfigSpace>(

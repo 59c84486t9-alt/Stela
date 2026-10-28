@@ -22,6 +22,7 @@ use core::{
     cell::UnsafeCell,
     ops::{Range, RangeInclusive},
 };
+use stela_boot_core::options::System;
 use stela_runtime::{
     machine::mmu::placement::Placement,
     pc::{self, gpt::Guid},
@@ -298,13 +299,6 @@ pub const RESTORE_INVENTORY_FILE: &str = "restore-payload.json";
 pub const RESTORE_BLOCKS_FILE: &str = "restore-blocks.bin";
 pub const INSTALL_PIECES_FILE: &str = "install-pieces.bin";
 
-/// The value after `name` in the options, as text.
-fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
-    let mut words = options.split_ascii_whitespace();
-    words.find(|word| *word == name)?;
-    words.next()
-}
-
 /// The guest inputs: `source.bin`, or with `--bundle DIR` the directory's
 /// `bundle.json` and every file it lists, read unchanged into their own
 /// pages. The bundle reader opens the volumes itself, so the configured
@@ -314,21 +308,18 @@ fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
 /// opens a host controller: disks, the NOR store, input and the networks.
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let host_devices = [
-        "--storage",
-        "--preboot",
-        "--restore-source",
-        "--install-source",
-        "--nor",
-        "--network-check",
-        "--audio-check",
-        "--usb-storage",
-    ]
-    .iter()
-    .any(|key| option(text, key).is_some())
-        || text
-            .split_ascii_whitespace()
-            .any(|word| matches!(word, "--input" | "--tss" | "--guest-network"));
+    let system = System::parse(text)?;
+    let host_devices = system.storage.is_some()
+        || system.preboot.is_some()
+        || system.restore_source.is_some()
+        || system.install_source.is_some()
+        || system.nor.is_some()
+        || system.network_check.is_some()
+        || system.audio_check.is_some()
+        || !system.usb_storage.is_empty()
+        || system.input
+        || system.tss
+        || system.guest_network;
     let storage = if host_devices {
         crate::status::begin("Finding the PCI devices Stela drives itself");
         let found = storage::discover()?;
@@ -337,10 +328,10 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
     } else {
         None
     };
-    let (source, mut files) = if option(text, "--preboot").is_some() {
+    let (source, mut files) = if system.preboot.is_some() {
         drop(volume);
         (Vec::new(), Vec::new())
-    } else if let Some(directory) = option(text, "--bundle") {
+    } else if let Some(directory) = system.bundle_directory.as_deref() {
         drop(volume);
         (Vec::new(), crate::engine::bundle::read(directory)?)
     } else {
@@ -349,8 +340,8 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         (source, Vec::new())
     };
     let inventory = match (
-        option(text, "--restore-manifest"),
-        option(text, crate::engine::INSTALL_OPTION),
+        system.restore_manifest_path.as_deref(),
+        system.install.as_deref(),
     ) {
         (Some(_), Some(_)) => return Err("--install and --restore-manifest name one inventory"),
         (Some(path), None) => Some(crate::engine::bundle::restore_inventory(path)?),
@@ -657,20 +648,11 @@ fn load(
         layout::image().wrapping_sub(image.start as u64),
     )?;
     let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let native_cores = crate::native_smp::requested(text)?;
-    let (native_processors, cores) = crate::native_smp::firmware::capture_assignment(native_cores)
-        .map_err(crate::native_smp::firmware::Error::message)?;
-    // As the engine decides: every PE on its own core unless serialized.
-    let parallel = !text.split_ascii_whitespace().any(|word| {
-        matches!(
-            word,
-            "--serialized"
-                | "--native-rounds"
-                | "--native-shared-check"
-                | "--native-bootstrap-check"
-        )
-    });
-    let sizes = Sizes::for_host(free_ram()?, cores, parallel);
+    let system = System::parse(text)?;
+    let (native_processors, cores) =
+        crate::native_smp::firmware::capture_assignment(system.native_cores)
+            .map_err(crate::native_smp::firmware::Error::message)?;
+    let sizes = Sizes::for_host(free_ram()?, cores, system.parallel);
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
     // complete firmware reservation is covered before publishing the handoff.
@@ -726,6 +708,11 @@ fn load(
         .ok()
         .and_then(|time| unix_seconds(&time));
     let power = host_power();
+
+    let strict = text
+        .split_ascii_whitespace()
+        .any(|word| word == crate::engine::STRICT_OPTION);
+    let remapping = crate::native_dma::firmware_units(strict)?;
 
     let native_mmio = match crate::native_mmio::Prepared::capture() {
         Ok(prepared) => Some(prepared),
@@ -887,14 +874,18 @@ fn load(
     crate::status::done("");
     // SAFETY: the fresh immutable MP observation is retained LOADER_DATA. Identity
     // mappings and the calibrated local APIC remain valid across EBS.
-    let capture =
-        unsafe { &*(native_processors.physical as *const crate::native_smp::firmware::Capture) };
+    let capture = unsafe {
+        crate::native_smp::firmware::Capture::read(native_processors.physical as *const u8)
+    };
     let sender = crate::apic::Apic::new(apic_base, apic);
     crate::status::begin("Taking control of the other processors");
     crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
     let map = unsafe { boot::exit_boot_services(None) };
+    // SAFETY: the firmware's identity map is still loaded, the APs idle in
+    // firmware code, and no Stela driver or memory reuse has started.
+    unsafe { crate::native_dma::release_firmware_units(&remapping, strict, tsc_hz) };
     let native_mmio_region = match native_mmio {
         Some(prepared) => match prepared.finish(&map) {
             Ok(()) => prepared.region(),

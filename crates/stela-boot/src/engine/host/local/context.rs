@@ -16,14 +16,9 @@ use stela_drivers::{bus::mmio::owned::PhysicalSpan, platform::work::WorkError};
 const IF: u64 = 1 << 9;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
-fn msr(index: u32) -> u64 {
-    let (low, high): (u32, u32);
-    // SAFETY: CPL0 architectural observations qualified at this native entry.
-    unsafe {
-        asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high,
-        options(nomem, nostack, preserves_flags));
-    }
-    u64::from(low) | u64::from(high) << 32
+fn gs_base() -> u64 {
+    // SAFETY: CPL0 architectural observation at this native entry.
+    unsafe { crate::cpu::msr::GS_BASE.read() }
 }
 fn root() -> u64 {
     let value;
@@ -80,7 +75,7 @@ impl RootContext {
     fn affinity(&self) -> Result<(), WorkError> {
         // BEFORE any GS-local dereference: colliding legacy CPUID IDs on a
         // different CPU cannot borrow this processor's removable scope.
-        if msr(0xc000_0101) != self.gs
+        if gs_base() != self.gs
             || processor_id() != self.id
             || crate::apic::base_msr() != self.snapshot.apic_base
         {
@@ -225,7 +220,7 @@ impl Owner {
     /// Admit this exact original Owner/context pair before Clock effects.
     /// The numbers inside an unrelated snapshot cannot satisfy this check.
     pub(crate) fn check_root(&self, execution: &RootExecution) -> Result<(), WorkError> {
-        if msr(0xc000_0101) != self.local.as_ptr() as u64 {
+        if gs_base() != self.local.as_ptr() as u64 {
             return Err(WorkError::WrongCpu);
         }
         execution.check()?;
@@ -241,7 +236,7 @@ impl Owner {
     /// later supplies its own independently qualified interrupt-delivery scope.
     pub(crate) fn enter_root(&mut self) -> Result<RootExecution, WorkError> {
         // Architectural preguard BEFORE current()/state()/local slot access.
-        if msr(0xc000_0101) != self.local.as_ptr() as u64 {
+        if gs_base() != self.local.as_ptr() as u64 {
             return Err(WorkError::WrongCpu);
         }
         let saved = disable();

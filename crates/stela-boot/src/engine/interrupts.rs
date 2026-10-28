@@ -514,22 +514,21 @@ pub(crate) unsafe fn observe() -> Observation {
     let mut gdt = Pointer { limit: 0, base: 0 };
     let mut idt = Pointer { limit: 0, base: 0 };
     let (rsp, task): (u64, u16);
-    let (low, high): (u32, u32);
+    let gs: u64;
     // SAFETY: caller is the owning CPL0 processor with stable private tables.
     unsafe {
         asm!("sgdt [{}]", in(reg) &mut gdt, options(nostack, preserves_flags));
         asm!("sidt [{}]", in(reg) &mut idt, options(nostack, preserves_flags));
         asm!("str {0:x}", out(reg) task, options(nostack, preserves_flags));
         asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags));
-        asm!("rdmsr", in("ecx") 0xc000_0101u32, out("eax") low, out("edx") high,
-            options(nostack, preserves_flags));
+        gs = crate::cpu::msr::GS_BASE.read();
     }
     Observation {
         rsp,
         gdt: gdt.base,
         idt: idt.base,
         task,
-        gs: u64::from(low) | u64::from(high) << 32,
+        gs,
     }
 }
 
