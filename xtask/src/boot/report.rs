@@ -25,7 +25,6 @@ pub(super) struct Outcome {
     pub(super) network: network::Check,
     /// `stela.cfg`.
     pub(super) options: String,
-    pub(super) strict: bool,
     pub(super) command_line: Vec<String>,
     /// The launch-time bindings of QEMU, the application and `source.bin`.
     pub(super) qemu: Value,
@@ -47,7 +46,6 @@ pub(super) fn finish(arguments: &Run, outcome: Outcome) -> Result<ExitCode> {
         attached,
         network,
         options,
-        strict,
         command_line,
         qemu,
         qemu_version,
@@ -210,7 +208,6 @@ pub(super) fn finish(arguments: &Run, outcome: Outcome) -> Result<ExitCode> {
         "directory_volume": arguments.directory_volume,
         "restore_manifest": arguments.restore_manifest,
         "verify_on_read": arguments.verify_on_read,
-        "strict": strict,
         "storage_disks": attached
             .iter()
             .map(|(path, serial)| json!({ "path": path, "serial": serial }))

@@ -182,13 +182,6 @@ pub struct Run {
     /// entry (`stela setup --verify-on-read`).
     #[arg(long, requires = "bundle")]
     verify_on_read: bool,
-    /// Stop a system-mode run at its first unsupported operation: adds the
-    /// mount's `--strict`, as `STELA_STRICT=1` in the environment also does.
-    /// Without it the run answers each degraded and reports it once as
-    /// `UNMODELED`, as a user's boot does (docs/design/runtime.md
-    /// "Unsupported operations").
-    #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
-    strict: bool,
     /// Use QEMU's directory-backed FAT16 for a bundle that fits its
     /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
     #[arg(long, requires = "bundle")]
@@ -668,14 +661,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         options.push_str(" --verify-on-read");
     }
     let system = options.split_whitespace().next() == Some("--system");
-    ensure!(
-        system || !arguments.strict,
-        "--strict applies to system-mode runs"
-    );
-    let strict = system && (arguments.strict || strict_environment());
-    if strict {
-        options.push_str(" --strict");
-    }
     if arguments.audio_check.is_some()
         || arguments.network_self_check
         || arguments.network_check.is_some()
@@ -776,7 +761,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             attached,
             network,
             options,
-            strict,
             command_line,
             qemu: qemu_binding,
             qemu_version,
@@ -844,13 +828,8 @@ fn guest(arguments: &Run, preboot: Option<&preboot::Preboot>) -> Result<(Vec<u8>
     Ok((bytes, options))
 }
 
-/// Whether `STELA_STRICT=1` asks for strict mode, as it does for `stela run`.
-fn strict_environment() -> bool {
-    std::env::var_os("STELA_STRICT").is_some_and(|value| value == "1")
-}
-
-/// The first printed requirement, including graceful-mode diagnostics which
-/// do not terminate the engine. Buffered diagnostics are not a causal clock.
+/// The first printed requirement, including the diagnostics of operations
+/// answered degraded. Buffered diagnostics are not a causal clock.
 fn first_unsupported(serial: &str) -> Option<&str> {
     serial.lines().find_map(|line| {
         line.strip_prefix("UNMODELED ")
@@ -1620,9 +1599,8 @@ mod tests {
     }
 
     #[test]
-    fn run_report_keeps_graceful_requirements_and_the_first_guest_panic() {
+    fn run_report_keeps_degraded_requirements_and_the_first_guest_panic() {
         let serial = concat!(
-            "UNSUPPORTED OPERATIONS mode=graceful\r\n",
             "GUEST| panic handlers ready\r\n",
             "UNMODELED pc=0x1000 device write at PA 0x2000: missing lifecycle\r\n",
             "GUEST| panic(cpu 0 caller 0x3000): first failure\r\n",
@@ -1648,7 +1626,6 @@ mod tests {
             Some("panic: first failure")
         );
         for ordinary in [
-            "UNSUPPORTED OPERATIONS mode=strict\n",
             "GUEST| UNMODELED guest text\n",
             "GUEST| panic flow initialized\n",
             "STOP reset: ordinary restart\n",
@@ -1961,7 +1938,6 @@ mod tests {
             "--storage-serial",
             "ANS-1",
             "--directory-volume",
-            "--strict",
             "--append",
             "--system --storage ANS-1:GUID",
         ])
@@ -1972,7 +1948,6 @@ mod tests {
         assert_eq!(run.storage_serial, ["ANS-1"]);
         assert_eq!(run.storage_disk, [Path::new("/tmp/disk.raw")]);
         assert!(run.directory_volume);
-        assert!(run.strict);
         assert_eq!(run.append.as_deref(), Some("--system --storage ANS-1:GUID"));
         for extra in [
             vec!["--storage-disk", "/tmp/disk", "--storage-check"],
