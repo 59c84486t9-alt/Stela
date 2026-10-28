@@ -532,7 +532,7 @@ fn lost_clock_and_changed_identity_refuse_before_power_writes() {
 
 #[test]
 fn native_pm_timer_uses_canonical_clock_checked_duration() {
-    for rate in [0, u64::MAX, u64::MAX / 2 / READY_TIMEOUT + 1] {
+    for rate in [0, u64::MAX, u64::MAX / 4 / READY_TIMEOUT + 1] {
         let clock = crate::Clock {
             ticks_per_microsecond: rate,
         };
@@ -540,7 +540,7 @@ fn native_pm_timer_uses_canonical_clock_checked_duration() {
         assert_eq!(clock.wait_us(1), Err(Error::Clock));
     }
     let largest = crate::Clock {
-        ticks_per_microsecond: u64::MAX / 2 / READY_TIMEOUT,
+        ticks_per_microsecond: u64::MAX / 4 / READY_TIMEOUT,
     };
     assert_eq!(largest.check(), Ok(()));
     let ordinary = crate::Clock {

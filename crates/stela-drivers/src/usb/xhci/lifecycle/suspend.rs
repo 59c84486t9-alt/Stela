@@ -396,7 +396,7 @@ impl Controller {
         link: u32,
         change: bool,
     ) -> Result<(), BlockError> {
-        let deadline = time::Deadline::new(
+        let deadline = time::deadline(
             self.clock,
             if change {
                 RESUME_LINK_TIMEOUT_US

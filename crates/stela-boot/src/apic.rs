@@ -26,10 +26,36 @@ const ICR_PENDING: u32 = 1 << 12;
 const ICR_LEVEL_ASSERT: u32 = 1 << 14;
 const ICR_INIT: u32 = 5 << 8;
 const ICR_STARTUP: u32 = 6 << 8;
+/// The INIT settling and STARTUP acceptance delays of the MP specification,
+/// for processors that need them.
 const INIT_WAIT_US: u64 = 10_000;
 const SIPI_WAIT_US: u64 = 200;
+/// The STARTUP acceptance delay where no INIT settling is needed.
+const MODERN_SIPI_WAIT_US: u64 = 10;
 const DELIVERY_WAIT_US: u64 = 10_000;
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
+
+/// Whether this processor's family settles INIT at once, as Linux's
+/// `smp_quirk_init_udelay` finds it (Intel family 6 on, AMD 0Fh on, Hygon
+/// 18h on): its INIT then takes no delay and STARTUP 10 us.
+fn settles_at_once() -> bool {
+    use core::arch::x86_64::__cpuid;
+    let vendor = __cpuid(0);
+    let signature = __cpuid(1).eax;
+    let base = signature >> 8 & 0xf;
+    let family = if base == 0xf {
+        base + (signature >> 20 & 0xff)
+    } else {
+        base
+    };
+    match (vendor.ebx, vendor.edx, vendor.ecx) {
+        // "GenuineIntel", "AuthenticAMD", "HygonGenuine".
+        (0x756e_6547, 0x4965_6e69, 0x6c65_746e) => family >= 6,
+        (0x6874_7541, 0x6974_6e65, 0x444d_4163) => family >= 0xf,
+        (0x6f67_7948, 0x6e65_476e, 0x656e_6975) => family >= 0x18,
+        _ => false,
+    }
+}
 
 fn init_destination(destination: u32, bsp: u32, x2: bool, tsc_hz: u64) -> Result<(), StartupError> {
     if tsc_hz == 0
@@ -166,9 +192,12 @@ impl Apic {
         self.wait_delivery(tsc_hz)?;
         if self.x2 {
             // SAFETY: the local x2APIC ICR, with a physical destination and
-            // an explicitly constructed INIT or STARTUP command.
+            // an explicitly constructed command. A WRMSR to an x2APIC
+            // register is not serializing, so without the fences the IPI
+            // could reach its destination before the stores announcing its
+            // work: Linux's `weak_wrmsr_fence` before `x2apic_send_IPI`.
             unsafe {
-                asm!("wrmsr", in("ecx") X2APIC_MSRS + (ICR_LOW >> 4),
+                asm!("mfence", "lfence", "wrmsr", in("ecx") X2APIC_MSRS + (ICR_LOW >> 4),
                     in("eax") command, in("edx") destination,
                     options(nostack, preserves_flags));
             }
@@ -198,8 +227,9 @@ impl Apic {
     /// Directed INIT without SIPI. Intel SDM3A, "Local APIC State After an
     /// INIT Reset (Wait-for-SIPI State)": an AP receiving INIT initializes and
     /// waits for startup. No firmware idle loop or private AP stack is needed.
-    /// ICR completion plus the architectural 10 ms settling interval reports
-    /// delivery only, not an independently observed destination acknowledgement.
+    /// ICR completion plus the architectural 10 ms settling interval, where
+    /// the family needs it, reports delivery only, not an independently
+    /// observed destination acknowledgement.
     ///
     /// # Safety
     /// Post-EBS BSP, exclusive local ICR with IF clear; the caller owns this
@@ -212,13 +242,16 @@ impl Apic {
     ) -> Result<(), StartupError> {
         self.validate_init(destination, tsc_hz)?;
         self.send(destination, ICR_INIT | ICR_LEVEL_ASSERT, tsc_hz)?;
-        self.wait_microseconds(INIT_WAIT_US, tsc_hz);
+        if !settles_at_once() {
+            self.wait_microseconds(INIT_WAIT_US, tsc_hz);
+        }
         Ok(())
     }
 
     /// Start one enabled AP at its owned SIPI page after ExitBootServices.
     /// Intel SDM Vol. 3A, multiprocessor initialization: directed INIT,
-    /// 10 ms, STARTUP, 200 us, second STARTUP for integrated local APICs.
+    /// 10 ms, STARTUP, 200 us, second STARTUP for integrated local APICs;
+    /// no INIT delay and 10 us where the family settles at once.
     /// This reports delivery only; the caller must separately verify the AP's
     /// identity, entry acknowledgement and stopped/executor lifetime.
     ///
@@ -236,10 +269,15 @@ impl Apic {
         if vector == 0 {
             return Err(StartupError::InvalidVector);
         }
+        let (init_us, sipi_us) = if settles_at_once() {
+            (0, MODERN_SIPI_WAIT_US)
+        } else {
+            (INIT_WAIT_US, SIPI_WAIT_US)
+        };
         self.send(destination, ICR_INIT | ICR_LEVEL_ASSERT, tsc_hz)?;
-        self.wait_microseconds(INIT_WAIT_US, tsc_hz);
+        self.wait_microseconds(init_us, tsc_hz);
         self.send(destination, ICR_STARTUP | u32::from(vector), tsc_hz)?;
-        self.wait_microseconds(SIPI_WAIT_US, tsc_hz);
+        self.wait_microseconds(sipi_us, tsc_hz);
         self.send(destination, ICR_STARTUP | u32::from(vector), tsc_hz)
     }
 

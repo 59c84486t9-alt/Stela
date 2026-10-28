@@ -76,7 +76,7 @@ impl Error {
     }
 }
 
-unsafe fn read_msr(index: u32) -> u64 {
+pub(super) unsafe fn read_msr(index: u32) -> u64 {
     let (low, high): (u32, u32);
     // SAFETY: caller checks that this known architectural MSR is implemented.
     unsafe {
@@ -85,7 +85,7 @@ unsafe fn read_msr(index: u32) -> u64 {
     (u64::from(high) << 32) | u64::from(low)
 }
 
-unsafe fn write_msr(index: u32, value: u64) {
+pub(super) unsafe fn write_msr(index: u32, value: u64) {
     // SAFETY: caller has qualified this actual processor/MSR and value.
     unsafe {
         asm!("wrmsr", in("ecx") index, in("eax") value as u32,

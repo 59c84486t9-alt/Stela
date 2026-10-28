@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::{
     ffi::c_void,
     ptr::NonNull,
-    sync::atomic::{AtomicPtr, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering},
     time::Duration,
 };
 use stela_runtime::freestanding::BootArena;
@@ -374,11 +374,88 @@ pub(crate) fn stop_ticker() {
     }
 }
 
-/// The time-stamp counter's rate, measured against the firmware's stall.
+/// The time-stamp counter's rate, once found, and how ([`TscSource`]).
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+static TSC_SOURCE: AtomicU8 = AtomicU8::new(0);
+
+/// How [`tsc_hz`] found the counter's rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TscSource {
+    /// CPUID leaf 15h's crystal ratio, its crystal from 15h or 16h.
+    Cpuid,
+    /// The fastest of [`STALLS`] firmware stalls of [`STALL_MILLIS`].
+    Stall,
+}
+
+/// Stalls measured where the CPU does not enumerate its counter's rate.
+const STALLS: u64 = 5;
+const STALL_MILLIS: u64 = 10;
+
+/// The time-stamp counter's rate, found once for every user, before
+/// ExitBootServices, as Linux's `native_calibrate_tsc` and then its
+/// calibration loop find it: from the CPU where it enumerates the rate,
+/// else measured against the firmware's stall, which only ever runs long,
+/// so the lowest rate of several is the closest.
 pub fn tsc_hz() -> u64 {
-    // SAFETY: RDTSC has no memory effects.
-    let before = unsafe { core::arch::x86_64::_rdtsc() };
-    boot::stall(core::time::Duration::from_millis(10));
-    // SAFETY: as above.
-    (unsafe { core::arch::x86_64::_rdtsc() } - before) * 100
+    let known = TSC_HZ.load(Ordering::Relaxed);
+    if known != 0 {
+        return known;
+    }
+    let rdtsc = || {
+        // SAFETY: RDTSC has no memory effects.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    };
+    let (hz, source) = match enumerated_tsc_hz() {
+        Some(hz) => (hz, TscSource::Cpuid),
+        None => {
+            let hz = (0..STALLS)
+                .map(|_| {
+                    let before = rdtsc();
+                    boot::stall(Duration::from_millis(STALL_MILLIS));
+                    (rdtsc() - before) * (1000 / STALL_MILLIS)
+                })
+                .min()
+                .unwrap_or(0);
+            (hz, TscSource::Stall)
+        }
+    };
+    TSC_SOURCE.store(source as u8, Ordering::Relaxed);
+    TSC_HZ.store(hz, Ordering::Relaxed);
+    hz
+}
+
+/// How [`tsc_hz`] found the rate.
+pub fn tsc_source() -> TscSource {
+    tsc_hz();
+    match TSC_SOURCE.load(Ordering::Relaxed) {
+        0 => TscSource::Cpuid,
+        _ => TscSource::Stall,
+    }
+}
+
+/// The rate CPUID leaf 15h gives: its crystal's, times EBX over EAX. Where
+/// ECX leaves the crystal out, leaf 16h's base frequency stands in for it,
+/// as Linux's `native_calibrate_tsc` derives it. Linux trusts the leaf on
+/// Intel processors only.
+fn enumerated_tsc_hz() -> Option<u64> {
+    use core::arch::x86_64::__cpuid;
+    let vendor = __cpuid(0);
+    let intel = (vendor.ebx, vendor.edx, vendor.ecx) == (0x756e_6547, 0x4965_6e69, 0x6c65_746e);
+    if !intel || vendor.eax < 0x15 {
+        return None;
+    }
+    let ratio = __cpuid(0x15);
+    if ratio.eax == 0 || ratio.ebx == 0 {
+        return None;
+    }
+    let crystal = match ratio.ecx {
+        0 if vendor.eax >= 0x16 => {
+            let base_mhz = u64::from(__cpuid(0x16).eax);
+            base_mhz * 1_000_000 * u64::from(ratio.eax) / u64::from(ratio.ebx)
+        }
+        0 => 0,
+        crystal => u64::from(crystal),
+    };
+    let hz = crystal * u64::from(ratio.ebx) / u64::from(ratio.eax);
+    (hz != 0).then_some(hz)
 }

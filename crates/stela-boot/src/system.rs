@@ -630,9 +630,12 @@ fn load(
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
     let root = low_page(MemoryType::LOADER_DATA)?;
-    let before = rdtsc();
-    boot::stall(core::time::Duration::from_millis(50));
-    let tsc_hz = (rdtsc() - before) * 20;
+    let tsc_hz = crate::firmware::tsc_hz();
+    if !crate::cpu::INVARIANT_TSC.present() {
+        output::arguments(format_args!(
+            "UNSUPPORTED host TSC is not invariant: guest time and every timeout follow the cores' clock changes\n"
+        ));
+    }
     let wall_tsc = rdtsc();
     let wall_seconds = uefi::runtime::get_time()
         .ok()
