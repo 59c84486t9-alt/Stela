@@ -25,11 +25,16 @@ use crate::{
 };
 use alloc::{format, string::String, vec, vec::Vec};
 use sha2::{Digest, Sha256};
-use {stela_formats::payload::gpt, stela_formats::payload::gpt::Found, stela_formats::payload::gpt::Guid, stela_formats::payload::gpt::Role, stela_formats::payload::gpt::Table, stela_runtime::pc::machine_state, stela_runtime::pc::storage::Target};
 use uefi::{
     Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
     proto::{loaded_image::LoadedImage, media::block::BlockIO},
+};
+use {
+    stela_formats::payload::gpt, stela_formats::payload::gpt::Found,
+    stela_formats::payload::gpt::Guid, stela_formats::payload::gpt::Role,
+    stela_formats::payload::gpt::Table, stela_runtime::pc::machine_state,
+    stela_runtime::pc::storage::Target,
 };
 
 const MIB: u64 = 1 << 20;

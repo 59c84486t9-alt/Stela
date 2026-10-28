@@ -29,13 +29,19 @@ use stela_loader::{
     apple_device_tree::DeviceTree, boot_bundle::Options, boot_selection::BootVolume, boot_trace,
     installed, recovery, upgrade,
 };
-use {stela_formats::boot_bundle::Framebuffer, stela_formats::boot_bundle::MANIFEST_FILE, stela_formats::boot_bundle::Machine, stela_formats::boot_bundle::Manifest, stela_formats::boot_bundle::Nvram, stela_runtime::machine::Host, stela_formats::payload, stela_formats::payload::PayloadManifest, stela_formats::payload::ReadAt};
 use uefi::{
     CString16, boot,
     proto::media::{
         file::{Directory, File as _, FileAttribute, FileInfo, FileMode, RegularFile},
         fs::SimpleFileSystem,
     },
+};
+use {
+    stela_formats::boot_bundle::Framebuffer, stela_formats::boot_bundle::MANIFEST_FILE,
+    stela_formats::boot_bundle::Machine, stela_formats::boot_bundle::Manifest,
+    stela_formats::boot_bundle::Nvram, stela_formats::payload,
+    stela_formats::payload::PayloadManifest, stela_formats::payload::ReadAt,
+    stela_runtime::machine::Host,
 };
 
 /// The counter frequency the machine presents in CNTFRQ_EL0.

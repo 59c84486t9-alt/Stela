@@ -6,7 +6,17 @@ use crate::{apic::Apic, engine::host, handoff::Handoff};
 use alloc::{sync::Arc, vec::Vec};
 use stela_compiler::{GuestState, TargetCpu};
 use stela_drivers::bus::dma::memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages};
-use {stela_runtime::machine, stela_contracts::Chip, stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile, stela_runtime::machine::DeviceError, stela_runtime::machine::Devices, stela_runtime::machine::Host, stela_contracts::identity::Identity, stela_runtime::machine::Lines, stela_runtime::machine::Machine, stela_runtime::machine::PeerState, stela_runtime::machine::Stop, stela_runtime::machine::engine, stela_runtime::machine::engine::publication::WorkerBinding, stela_runtime::machine::engine::publication::WorkerId, stela_runtime::machine::exception::Pstate, stela_runtime::memory::RegisteredSystemRam, stela_runtime::memory::ReservedSystemRamRange};
+use {
+    stela_contracts::Chip, stela_contracts::identity::Identity, stela_runtime::machine,
+    stela_runtime::machine::Cpu, stela_runtime::machine::CpuProfile,
+    stela_runtime::machine::DeviceError, stela_runtime::machine::Devices,
+    stela_runtime::machine::Host, stela_runtime::machine::Lines, stela_runtime::machine::Machine,
+    stela_runtime::machine::PeerState, stela_runtime::machine::Stop,
+    stela_runtime::machine::engine, stela_runtime::machine::engine::publication::WorkerBinding,
+    stela_runtime::machine::engine::publication::WorkerId,
+    stela_runtime::machine::exception::Pstate, stela_runtime::memory::RegisteredSystemRam,
+    stela_runtime::memory::ReservedSystemRamRange,
+};
 
 struct Reservation {
     pages: PinnedPages,

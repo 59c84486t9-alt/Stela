@@ -23,7 +23,6 @@ use alloc::{
     vec::Vec,
 };
 use sha2::{Digest, Sha256};
-use {stela_formats::payload::CopyError, stela_formats::payload::Layout, stela_formats::payload::MANIFEST_FILE, stela_formats::payload::MemberRead, stela_formats::payload::PayloadError, stela_formats::payload::PayloadManifest, stela_formats::payload::PayloadSource, stela_formats::payload::ReadAt, stela_formats::payload::copy_verified, stela_formats::payload::gpt, stela_formats::payload::gpt::Disk, stela_formats::payload::gpt::Guid, stela_formats::payload::gpt::Request, stela_formats::payload::gpt::Role, stela_formats::payload::images_directory, stela_formats::payload::slice_count, stela_formats::payload::slice_path, stela_formats::payload::staging, stela_formats::payload::staging::Header, stela_formats::payload::zip::Archive, stela_formats::payload::zip::MemberStream};
 use uefi::{
     CString16, Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
@@ -38,6 +37,19 @@ use uefi::{
             fs::SimpleFileSystem,
         },
     },
+};
+use {
+    stela_formats::payload::CopyError, stela_formats::payload::Layout,
+    stela_formats::payload::MANIFEST_FILE, stela_formats::payload::MemberRead,
+    stela_formats::payload::PayloadError, stela_formats::payload::PayloadManifest,
+    stela_formats::payload::PayloadSource, stela_formats::payload::ReadAt,
+    stela_formats::payload::copy_verified, stela_formats::payload::gpt,
+    stela_formats::payload::gpt::Disk, stela_formats::payload::gpt::Guid,
+    stela_formats::payload::gpt::Request, stela_formats::payload::gpt::Role,
+    stela_formats::payload::images_directory, stela_formats::payload::slice_count,
+    stela_formats::payload::slice_path, stela_formats::payload::staging,
+    stela_formats::payload::staging::Header, stela_formats::payload::zip::Archive,
+    stela_formats::payload::zip::MemberStream,
 };
 
 /// Exit codes after an install-mode run; the mount itself does not start.
