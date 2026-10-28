@@ -66,13 +66,13 @@ impl HostUsb {
         }
         let firmware = HandoffProvider::new(self.firmware.as_deref());
         for host in &mut self.hosts {
-            if !(if host.signals() { host.due() } else { timed }) {
-                continue;
-            }
             let mut changes = {
-                // SAFETY: the loader root `storage::open` captured, which maps
-                // the controller and the DMA pages.
+                // SAFETY: the loader root `storage::open` captured maps the
+                // controller and DMA pages used by both readiness and polling.
                 let _root = unsafe { RestoreRoot::enter(self.root) };
+                if !(if host.signals() { host.due() } else { timed }) {
+                    continue;
+                }
                 host.poll(&mut self.dma, &firmware)
             };
             for device in &changes.removed {
