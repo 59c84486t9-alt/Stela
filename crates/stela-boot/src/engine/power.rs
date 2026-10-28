@@ -139,7 +139,7 @@ impl EfiReset {
 pub struct HostPowerControl {
     power: Option<HostPower>,
     /// The firmware's AML, which prepares S5 and evaluates its sleep types.
-    acpi: Option<super::aml::HostAcpi>,
+    acpi: Option<&'static super::aml::HostAcpi>,
     efi: Option<EfiReset>,
     tsc_hz: u64,
     /// The host disks, told before either transition.
@@ -155,7 +155,7 @@ impl HostPowerControl {
     /// button armed when there is one.
     pub fn new(
         power: Option<HostPower>,
-        acpi: Option<super::aml::HostAcpi>,
+        acpi: Option<&'static super::aml::HostAcpi>,
         efi: Option<EfiReset>,
         tsc_hz: u64,
         disks: super::storage::HostDisks,
@@ -287,10 +287,7 @@ impl HostPowerControl {
         // Linux's acpi_power_off_prepare: `\_PTS(5)`, and S5's sleep types
         // as the firmware's AML evaluates them, over those the mount read
         // from a literal `\_S5`.
-        let evaluated = self
-            .acpi
-            .as_ref()
-            .and_then(super::aml::HostAcpi::prepare_soft_off);
+        let evaluated = self.acpi.and_then(super::aml::HostAcpi::prepare_soft_off);
         let soft_off = self
             .power
             .and_then(|power| Some((power, evaluated.or(power.soft_off)?)));

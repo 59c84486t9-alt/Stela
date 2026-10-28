@@ -2,6 +2,8 @@
 //! appendix E): its identity and features for the host check's report, and
 //! the floor Stela needs, x86-64-v2 (SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT,
 //! CMPXCHG16B, LAHF/SAHF in 64-bit mode) and NX for its page tables.
+pub mod msr;
+
 use Register::{Eax, Ebx, Ecx, Edx};
 use alloc::{format, string::String, vec, vec::Vec};
 use core::arch::x86_64::{__cpuid, __cpuid_count, CpuidResult};

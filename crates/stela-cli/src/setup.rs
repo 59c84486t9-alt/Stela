@@ -82,6 +82,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use stela_boot_core::options::System;
 use stela_loader::mount_interface::{self, Choice, Choices, Interface};
 
 /// The pinned system target.
@@ -101,8 +102,6 @@ const CHOOSER_SECONDS: u32 = 5;
 const INSTALL_CHOICE: &str = "Install macOS";
 /// The startup choice that updates a setup's one install in place.
 const UPDATE_CHOICE: &str = "Update macOS";
-/// The engine option that restores the medium's Update identity.
-const UPDATE_RESTORE: &str = "--update-restore";
 /// The commands `--install-image` goes with.
 const INSTALL_IMAGE_ACTIONS: &str = "--install-image goes with a new setup, or with --target, \
     --update-os or --repair (with --ipsw or --fetch), which write the install medium";
@@ -560,23 +559,24 @@ impl Record {
         }
     }
 
-    fn line(&self, text: String) -> String {
-        let tss = if self.tss { " --tss" } else { "" };
-        let profile = if self.profile { " --profile" } else { "" };
-        format!("{text}{tss}{profile}\n")
+    fn line(&self, mut system: System) -> String {
+        system.tss = self.tss;
+        system.profile = self.profile;
+        format!("{system}\n")
     }
 
     /// The option line that boots `install`.
-    fn boot_line(&self, install: &machines::Install) -> String {
-        self.line(install.disk.options(install.ecid))
+    fn boot_line(&self, install: &machines::Install) -> Result<String> {
+        Ok(self.line(install.disk.options(install.ecid)?))
     }
 
     /// `stela.cfg`: the default install. Every setup this `stela` reads
     /// has one ([`read_record`]).
-    fn options_text(&self) -> String {
+    fn options_text(&self) -> Result<String> {
         self.default()
             .map(|install| self.boot_line(install))
-            .unwrap_or_default()
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     /// The restore bundle of `kind` (erase or update) of `ecid`'s machine
@@ -623,37 +623,24 @@ impl Record {
     /// ([`Kind::Update`]): its restore bundle of that kind, the install
     /// medium and its partitions. None without the active build's medium or
     /// the machine's bundle, or without the signing server opt-in.
-    fn restore_line(&self, kind: Kind, install: &machines::Install) -> Option<String> {
-        let medium = self.active_medium()?;
-        self.restore_bundle(kind, install.ecid)?;
-        if !self.tss {
-            return None;
+    fn restore_line(&self, kind: Kind, install: &machines::Install) -> Result<Option<String>> {
+        let Some(medium) = self.active_medium() else {
+            return Ok(None);
+        };
+        if self.restore_bundle(kind, install.ecid).is_none() || !self.tss {
+            return Ok(None);
         }
         let restore = bundle::firmware_path_of(kind, &self.build, install.ecid, self.generation());
-        let base = install.disk.bundle_options(&restore, install.ecid);
-        let update = if kind == Kind::Update {
-            format!(" {UPDATE_RESTORE}")
-        } else {
-            String::new()
-        };
-        let verify = if self.verify_on_read {
-            " --verify-on-read"
-        } else {
-            ""
-        };
-        let development = if kind == Kind::Restore {
-            " --development-restore"
-        } else {
-            ""
-        };
-        Some(self.line(format!(
-            "{base} {}{update}{verify}{development}",
-            medium.options()
-        )))
+        let mut system = install.disk.bundle_options(&restore, install.ecid)?;
+        medium.restore_from(&mut system)?;
+        system.update_restore = kind == Kind::Update;
+        system.verify_on_read = self.verify_on_read;
+        system.development_restore = kind == Kind::Restore;
+        Ok(Some(self.line(system)))
     }
 
     /// The Install macOS choice's option line.
-    fn install_line(&self, install: &machines::Install) -> Option<String> {
+    fn install_line(&self, install: &machines::Install) -> Result<Option<String>> {
         self.restore_line(Kind::Restore, install)
     }
 
@@ -693,17 +680,19 @@ impl Record {
 
     /// The startup choices: each install, default first, and its Install
     /// macOS. None without an installed disk.
-    fn choices(&self) -> Option<Choices> {
-        let default = self.default()?;
+    fn choices(&self) -> Result<Option<Choices>> {
+        let Some(default) = self.default() else {
+            return Ok(None);
+        };
         let mut entries = Vec::new();
         let others = self.installs.iter().filter(|i| i.name != default.name);
         for install in std::iter::once(default).chain(others) {
             entries.push(Choice {
                 name: install.name.clone(),
-                options: self.boot_line(install).trim().into(),
+                options: self.boot_line(install)?.trim().into(),
             });
             for kind in bundle::RESTORE_KINDS {
-                if let Some(line) = self.restore_line(kind, install) {
+                if let Some(line) = self.restore_line(kind, install)? {
                     entries.push(Choice {
                         name: self.restore_choice(kind, install),
                         options: line.trim().into(),
@@ -713,20 +702,23 @@ impl Record {
         }
         // The list opens on its own with several installs, and while the
         // USB can install macOS.
-        let installing = self.installs.iter().any(|i| self.install_line(i).is_some());
+        let mut installing = false;
+        for install in &self.installs {
+            installing |= self.install_line(install)?.is_some();
+        }
         let seconds = if self.installs.len() > 1 || installing {
             CHOOSER_SECONDS
         } else {
             0
         };
-        Some(Choices {
+        Ok(Some(Choices {
             timeout_seconds: self.chooser_timeout.unwrap_or(seconds),
             entries,
-        })
+        }))
     }
 
     fn choices_text(&self) -> Result<Option<String>> {
-        self.choices()
+        self.choices()?
             .map(|choices| choices.encode().map_err(anyhow::Error::msg))
             .transpose()
     }
@@ -772,7 +764,7 @@ fn remove_bundles(record: &Record, stale: &[bundle::Bundle]) -> Result<()> {
 
 /// Write `stela.cfg`, the startup choices and the entry for the record.
 fn publish(record: &mut Record) -> Result<()> {
-    record.options = record.options_text();
+    record.options = record.options_text()?;
     let choices = record.choices_text()?;
     let tool = record.esp.join(LOADER_PATH);
     efi::add_mount(&record.esp, &tool, None, Some(&record.options))?;
@@ -2115,7 +2107,7 @@ fn plan(
     )?;
     notes.extend(note);
     record.translations = store;
-    record.options = record.options_text();
+    record.options = record.options_text()?;
     record.choices_text()?;
     let source = match install.medium.as_ref().is_some_and(|medium| medium.remote) {
         true => {
@@ -3596,7 +3588,10 @@ mod tests {
             .find(|line| line.starts_with(INSTALL_CHOICE))
             .unwrap();
         assert!(install.contains("--storage @disk --nor @disk"), "{install}");
-        assert!(install.contains(&medium.options()), "{install}");
+        assert!(
+            install.contains(&format!("--install {}", medium.firmware_manifest())),
+            "{install}"
+        );
         assert!(install.contains("--install-source"), "{install}");
         let mut joined = Vec::new();
         for index in 0.. {
@@ -3691,7 +3686,10 @@ mod tests {
             .lines()
             .find(|line| line.starts_with(INSTALL_CHOICE))
             .unwrap();
-        assert!(install.contains(&medium.options()), "{install}");
+        assert!(
+            install.contains(&format!("--install {}", medium.firmware_manifest())),
+            "{install}"
+        );
         assert!(!install.contains("--install-source"), "{install}");
         // The choice is the setup's; other commands do not take it.
         let others: [fn(&mut Setup); 2] = [
@@ -3843,8 +3841,9 @@ mod tests {
                 "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --bundle \
                  \\stela\\boot\\{build}\\{} --ecid {ecid} \
                  --install \\stela\\install\\{build}\\payload.json --install-source \
-                 {STELA_GUID} --development-restore --tss",
-                bundle::leaf_of(Kind::Restore, Some(ecid), current())
+                 {} --development-restore --tss",
+                bundle::leaf_of(Kind::Restore, Some(ecid), current()),
+                STELA_GUID.to_ascii_uppercase()
             )
         );
         let restore_bundle = record.restore_bundle(Kind::Restore, Some(ecid)).unwrap();
@@ -3883,7 +3882,7 @@ mod tests {
         // --verify-on-read is the engine's, on the Install choice alone.
         let mut verify = record.clone();
         verify.verify_on_read = true;
-        let line = verify.install_line(&verify.installs[0]).unwrap();
+        let line = verify.install_line(&verify.installs[0]).unwrap().unwrap();
         assert!(line.contains("--install-source"), "{line}");
         assert!(
             line.trim_end()

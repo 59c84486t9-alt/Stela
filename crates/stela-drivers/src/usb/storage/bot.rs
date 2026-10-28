@@ -51,6 +51,11 @@ pub(super) trait Io {
     fn signals(&self) -> bool {
         false
     }
+    /// Whether a submitted transfer may have completed, for [`Self::reap`];
+    /// a look at memory alone.
+    fn posted(&self) -> bool {
+        false
+    }
     /// Submit a bulk transfer and return; [`Self::reap`] gives its length
     /// once complete. By default it runs at once.
     fn submit(
@@ -127,6 +132,11 @@ impl Io for Native {
         self.controller
             .try_borrow()
             .is_ok_and(|controller| controller.signals())
+    }
+    fn posted(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.posted_for(self.id))
     }
     fn ready(&mut self) -> Result<(), BlockError> {
         let mut controller = self.controller.borrow_mut();

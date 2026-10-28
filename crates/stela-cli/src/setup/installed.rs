@@ -21,6 +21,7 @@ use super::ecid::Ecid;
 use super::host::{Host, PartitionInfo};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use stela_boot_core::options::{self, System};
 use stela_loader::{
     boot_selection::{BOOT_COMMAND, Command, ONE_TIME_BOOT_COMMAND, RECOVERY_BOOT_MODE, lookup},
     mount_interface::CHOSEN_DISK,
@@ -29,7 +30,7 @@ use stela_runtime::{
     machine::apple::nor::{CAPACITY, Image, SECTOR_SIZE, nvram::Partition, nvram::Variables},
     machine::apple::sep_state,
     payload::gpt::DEFAULT_MIN_APPLE_BYTES,
-    pc::{boot_log, machine_state},
+    pc::{boot_log, machine_state, storage::Target},
 };
 
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
@@ -121,54 +122,62 @@ impl InstalledDisk {
     /// the disk's own recoveryOS as NVRAM chooses (`boot_selection::route`).
     /// The bundle `stela.efi` builds from the disk carries the machine's
     /// `ecid`.
-    pub(super) fn options(&self, ecid: Option<Ecid>) -> String {
-        let region = self.region_target();
-        let ecid = ecid
-            .map(|ecid| format!(" --ecid {ecid}"))
-            .unwrap_or_default();
-        format!(
-            "--system --storage {region} --nor {} --preboot {region}{ecid}{}",
-            self.nor_target(),
-            self.external()
-        )
+    pub(super) fn options(&self, ecid: Option<Ecid>) -> Result<System> {
+        let region = self.region_target()?;
+        Ok(System {
+            storage: Some(region.clone()),
+            nor: Some(self.nor_target()?),
+            preboot: Some(region),
+            bundle: true,
+            ecid: ecid.map(|ecid| ecid.0),
+            ..self.external()
+        })
     }
 
     /// The options that boot the USB's bundle `bundle`, such as a restore
     /// bundle, with this disk and its NVRAM.
-    pub(super) fn bundle_options(&self, bundle: &str, ecid: Option<Ecid>) -> String {
-        let ecid = ecid
-            .map(|ecid| format!(" --ecid {ecid}"))
-            .unwrap_or_default();
-        format!(
-            "--system --storage {} --nor {} --bundle {bundle}{ecid}{}",
-            self.region_target(),
-            self.nor_target(),
-            self.external()
-        )
+    pub(super) fn bundle_options(&self, bundle: &str, ecid: Option<Ecid>) -> Result<System> {
+        Ok(System {
+            storage: Some(self.region_target()?),
+            nor: Some(self.nor_target()?),
+            bundle: true,
+            bundle_directory: Some(bundle.into()),
+            ecid: ecid.map(|ecid| ecid.0),
+            ..self.external()
+        })
     }
 
     /// A stick setup's Mac sees the PC's disks as external drives and has
     /// the network, so recoveryOS can install macOS onto one of them.
-    fn external(&self) -> &'static str {
-        if self.external_disks {
-            " --external-disks --guest-network"
-        } else {
-            ""
+    fn external(&self) -> System {
+        System {
+            external_disks: self.external_disks,
+            guest_network: self.external_disks,
+            ..System::default()
         }
     }
 
-    fn region_target(&self) -> String {
-        match self.is_chosen() {
-            true => CHOSEN_DISK.into(),
-            false => format!("{}:{}", self.apple_region_serial, self.apple_region_guid),
-        }
+    fn region_target(&self) -> Result<Target> {
+        self.target(&self.apple_region_serial, &self.apple_region_guid)
     }
 
-    fn nor_target(&self) -> String {
-        match self.is_chosen() {
-            true => CHOSEN_DISK.into(),
-            false => format!("{}:{}", self.nor_serial, self.nor_guid),
+    fn nor_target(&self) -> Result<Target> {
+        self.target(&self.nor_serial, &self.nor_guid)
+    }
+
+    /// The partition `serial`/`guid`, or `@disk` for the chosen disk.
+    fn target(&self, serial: &str, guid: &str) -> Result<Target> {
+        if self.is_chosen() {
+            return Ok(options::chosen_disk());
         }
+        let partition = guid
+            .parse()
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("partition GUID {guid} of disk {serial}"))?;
+        Ok(Target {
+            serial: serial.into(),
+            partition,
+        })
     }
 }
 

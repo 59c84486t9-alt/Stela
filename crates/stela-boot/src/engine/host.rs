@@ -43,7 +43,7 @@ pub(crate) mod fp_diagnostic;
 pub(super) mod local;
 #[cfg(feature = "native-profile")]
 mod profile;
-mod ram;
+use stela_boot_core::ram;
 mod translated;
 pub(crate) use local::context::{RootContext, RootExecution, RootProcessScope};
 use local::state;
@@ -1217,6 +1217,41 @@ pub(crate) fn wake_interrupt() {
 /// which runs the engine's devices and looks for the disk's completions.
 /// `None` where the ID needs more than a compatibility-format MSI address
 /// holds.
+/// Whether this host processor is inside an interrupt or exception handler.
+pub(crate) fn in_interrupt() -> bool {
+    local::irq_active()
+}
+
+/// Sleep until an interrupt, at most `micros`: a completion signal, the
+/// engine's own timer or this one-shot. The engine's armed one-shot count
+/// is put back less the time slept; a periodic or TSC-deadline timer, or a
+/// timer not yet measured, leaves the caller to poll.
+pub(crate) fn sleep_for(micros: u64) {
+    const MASKED: u32 = 1 << 16;
+    const MODE: u32 = 3 << 17;
+    let state = state();
+    let lvt = state.apic.read(apic::LVT_TIMER);
+    if state.apic_hz == 0 || micros == 0 || lvt & MODE != 0 {
+        return;
+    }
+    let remaining = state.apic.read(apic::CURRENT);
+    let armed = lvt & MASKED == 0 && remaining != 0;
+    let ticks = (u128::from(micros) * u128::from(state.apic_hz) / 1_000_000)
+        .clamp(1, u128::from(u32::MAX)) as u32;
+    let ticks = if armed { ticks.min(remaining) } else { ticks };
+    state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
+    state.apic.write(apic::INITIAL, ticks);
+    // SAFETY: STI's interrupt shadow covers HLT, so no wake-up is lost.
+    unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    let slept = ticks - state.apic.read(apic::CURRENT);
+    state.apic.write(apic::LVT_TIMER, lvt);
+    // A count that ran out during the sleep fires at once.
+    state.apic.write(
+        apic::INITIAL,
+        if armed { (remaining - slept).max(1) } else { 0 },
+    );
+}
+
 pub(crate) fn completion_signal(id: u64) -> Option<stela_drivers::bus::irq::MsiMessage> {
     (id < 255).then(|| stela_drivers::bus::irq::MsiMessage {
         address: 0xfee0_0000 | id << 12,
@@ -1252,6 +1287,29 @@ pub(crate) fn undelivered_doorbells() -> u64 {
     UNDELIVERED.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Join this processor to the aperture shootdown at `slot`.
+pub(crate) fn join_shootdown(slot: usize) {
+    local::shootdown()
+        .0
+        .store(slot + 1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// This processor's aperture shootdown slot and the generation it flushed.
+pub(crate) fn shootdown() -> (Option<usize>, &'static core::sync::atomic::AtomicU64) {
+    let (slot, flushed) = local::shootdown();
+    (
+        slot.load(core::sync::atomic::Ordering::Relaxed)
+            .checked_sub(1),
+        flushed,
+    )
+}
+
+/// The aperture shootdown's interrupt: flush, acknowledge, EOI.
+pub(crate) fn shootdown_interrupt() {
+    crate::native_mmio::shootdown::service();
+    state().apic.eoi();
+}
+
 pub(crate) fn doorbell_counter() -> &'static core::sync::atomic::AtomicU64 {
     local::doorbell_counter()
 }
@@ -1264,6 +1322,7 @@ pub fn stray_interrupt(_vector: u8) {
 
 /// Complete one real owner-local native return, retaining exact fault GPRs.
 fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit {
+    crate::native_mmio::shootdown::service();
     let state = state();
     state.native = false;
     state.native_ticks += rdtsc() - entered;
@@ -1763,6 +1822,7 @@ impl Host for BareHost<'_> {
     }
 
     fn wait_for_interrupt(&mut self) {
+        crate::native_mmio::shootdown::service();
         local::clear_interrupt();
         // The wait sends queued serial output until an interrupt comes,
         // opening a window for one after each burst.

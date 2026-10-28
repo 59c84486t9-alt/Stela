@@ -847,6 +847,17 @@ impl Controller {
         self.signalled
     }
 
+    /// Whether a transfer of `slot` may have completed: the event ring holds
+    /// an event software has not taken, or a taken transfer event for the
+    /// slot waits. A look at memory alone.
+    pub(crate) fn posted_for(&self, slot: SlotId) -> bool {
+        self.event_posted()
+            || self
+                .pending
+                .iter()
+                .any(|event| event.kind() == TRANSFER_EVENT && event.slot() == slot.hardware_slot())
+    }
+
     /// Whether the controller posted an event software has not taken, read
     /// from the event ring alone. An unreadable ring counts as posted so
     /// `next_event` fails it.
@@ -1315,6 +1326,26 @@ mod tests {
                 .borrow()
                 .contains(&(operational + USBSTS, USBSTS_EINT))
         );
+    }
+
+    /// A slot's transfer counts as posted while its event sits on the ring
+    /// and once taken until its waiter takes it, and only for that slot.
+    #[test]
+    fn a_slots_transfer_is_posted_from_the_ring_until_its_waiter_takes_it() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all modeled controller DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let (one, two) = (SlotId::fixture(1), SlotId::fixture(2));
+        assert!(!controller.posted_for(one));
+        model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
+        assert!(controller.posted_for(one) && controller.posted_for(two));
+        controller.drain();
+        assert!(controller.posted_for(one));
+        assert!(!controller.posted_for(two));
+        controller.take(|event| event.kind() == TRANSFER_EVENT);
+        assert!(!controller.posted_for(one));
     }
 
     #[test]

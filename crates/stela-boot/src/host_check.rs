@@ -47,6 +47,7 @@ use core::{
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
+use stela_boot_core::options::HostCheck;
 use stela_drivers::{
     Handoff,
     block::{BlockDevice, Shared, Transport},
@@ -62,8 +63,7 @@ use stela_runtime::pc::{
 };
 use uefi::boot;
 
-pub const OPTION: &[u8] = b"--host-check";
-const DEFAULT_KEY_SECONDS: u64 = 60;
+pub const OPTION: &[u8] = stela_boot_core::options::HOST_CHECK.as_bytes();
 const BEAT_SECONDS: u64 = 10;
 /// The stop code at `--deadline`.
 const DEADLINE_CODE: u32 = 0x10;
@@ -100,68 +100,6 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 static STRAY: AtomicU64 = AtomicU64::new(0);
 /// IA32_APIC_BASE, for the handler's EOI; the xAPIC page is identity-mapped.
 static APIC_BASE: AtomicU64 = AtomicU64::new(0);
-
-struct Options {
-    native_dma_check: bool,
-    native_work_check: bool,
-    native_irq_work_check: bool,
-    native_dma_isolation_check: bool,
-    nor_file: Option<(Guid, String)>,
-    deadline: Option<u64>,
-    key_seconds: u64,
-}
-
-fn seconds(value: Option<&str>) -> Result<u64, &'static str> {
-    value
-        .and_then(|value| value.parse().ok())
-        .filter(|&seconds| seconds > 0)
-        .ok_or("host check: a time option takes a positive number of seconds")
-}
-
-impl Options {
-    fn parse(text: &str) -> Result<Self, &'static str> {
-        let mut words = text.split_ascii_whitespace();
-        if words.next().map(str::as_bytes) != Some(OPTION) {
-            return Err("host check: stela.cfg must start with --host-check");
-        }
-        let mut options = Self {
-            native_dma_check: false,
-            native_work_check: false,
-            native_irq_work_check: false,
-            native_dma_isolation_check: false,
-            nor_file: None,
-            deadline: None,
-            key_seconds: DEFAULT_KEY_SECONDS,
-        };
-        while let Some(word) = words.next() {
-            match word {
-                "--native-irq-work-check" => options.native_irq_work_check = true,
-                "--native-work-check" => options.native_work_check = true,
-                "--native-dma-check" => options.native_dma_check = true,
-                "--native-dma-isolation-check" => options.native_dma_isolation_check = true,
-                "--nor-file" => {
-                    let (guid, path) = words
-                        .next()
-                        .and_then(|value| value.split_once(':'))
-                        .ok_or("host check: --nor-file takes GUID:/PATH")?;
-                    options.nor_file = Some((guid.parse()?, String::from(path)));
-                }
-                "--deadline" => options.deadline = Some(seconds(words.next())?),
-                "--key-seconds" => options.key_seconds = seconds(words.next())?,
-                _ => return Err("host check: unknown option"),
-            }
-        }
-        if u8::from(options.native_dma_check)
-            + u8::from(options.native_dma_isolation_check)
-            + u8::from(options.native_work_check)
-            + u8::from(options.native_irq_work_check)
-            > 1
-        {
-            return Err("host check: native diagnostic fixture modes are exclusive");
-        }
-        Ok(options)
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verdict {
@@ -229,7 +167,7 @@ impl Timing {
 struct Machine {
     native_dma: Option<crate::native_dma::diagnostic::Prepared>,
     native_work: Option<crate::native_work_check::Prepared>,
-    options: Options,
+    options: HostCheck,
     timing: Timing,
     screen: Option<Framebuffer>,
     storage: Option<Handoff>,
@@ -280,7 +218,7 @@ pub fn boot(options: Vec<u8>) -> ! {
 /// the rest needs from the firmware; then leave boot services.
 fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let options = Options::parse(text)?;
+    let options = HostCheck::parse(text)?;
     let started = rdtsc();
     output::arguments(format_args!("HOST CHECK {}\n", text.trim()));
     for line in cpu::report() {

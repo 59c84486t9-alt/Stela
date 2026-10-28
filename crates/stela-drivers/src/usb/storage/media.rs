@@ -147,6 +147,9 @@ impl<T: Scsi> Scsi for Owner<T> {
     fn signals(&self) -> bool {
         self.transport.signals()
     }
+    fn posted(&self) -> bool {
+        self.transport.posted()
+    }
     fn write_protect_page(&self) -> Option<u8> {
         self.transport.write_protect_page()
     }

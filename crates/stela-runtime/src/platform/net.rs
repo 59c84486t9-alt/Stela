@@ -72,6 +72,12 @@ impl From<LinkError> for NetError {
 /// Microseconds from an arbitrary origin, monotonic.
 pub trait Clock {
     fn now_us(&self) -> u64;
+    /// Sleep until an interrupt or the clock reads `until_us`, whichever is
+    /// first; the stack calls it only for a link that signals arrivals. A
+    /// clock that cannot sleep returns at once, and the stack polls.
+    fn sleep(&self, until_us: u64) {
+        let _ = until_us;
+    }
 }
 
 impl Clock for stela_drivers::Clock {

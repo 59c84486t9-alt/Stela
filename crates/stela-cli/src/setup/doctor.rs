@@ -207,8 +207,14 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
     }
     report.line("kept versions", record.stela_versions.join(", "));
     let options = fs::read_to_string(record.esp.join("EFI/stela/stela.cfg")).unwrap_or_default();
-    if options != record.options_text() {
-        report.problem("stela.cfg differs from the setup record: `stela setup --repair`".into());
+    match record.options_text() {
+        Ok(expected) if options != expected => {
+            report.problem("stela.cfg differs from the setup record: `stela setup --repair`".into())
+        }
+        Ok(_) => {}
+        Err(error) => report.problem(format!(
+            "stela.cfg cannot be written from the setup record: {error:#}"
+        )),
     }
     let choices = fs::read_to_string(record.esp.join(CHOICES_PATH)).ok();
     match record.choices_text() {

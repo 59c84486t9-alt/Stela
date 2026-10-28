@@ -3,7 +3,7 @@
 //! UEFI allocation; bounds are checked here before every callback.
 use alloc::vec::Vec;
 
-pub(crate) const PAGE: usize = 4096;
+pub const PAGE: usize = 4096;
 const DOS_HEADER: usize = 64;
 const PE_HEADER: usize = 24;
 const OPTIONAL_HEADER: usize = 112;
@@ -13,7 +13,7 @@ const READ: u32 = 0x4000_0000;
 const WRITE: u32 = 0x8000_0000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Extent {
+pub struct Extent {
     pub start: usize,
     /// Exact readable source length, with no rounded source access.
     pub bytes: usize,
@@ -23,7 +23,7 @@ pub(crate) struct Extent {
 }
 
 /// Nonallocating: safe to call before the pristine static-state snapshot.
-pub(crate) fn loaded_extent(start: usize, bytes: u64) -> Result<Extent, &'static str> {
+pub fn loaded_extent(start: usize, bytes: u64) -> Result<Extent, &'static str> {
     let bytes = usize::try_from(bytes).map_err(|_| "loaded image length exceeds usize")?;
     if start == 0 || !start.is_multiple_of(PAGE) || bytes == 0 || bytes > isize::MAX as usize {
         return Err("loaded image has invalid base or length");
@@ -44,7 +44,7 @@ pub(crate) fn loaded_extent(start: usize, bytes: u64) -> Result<Extent, &'static
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Section {
+pub struct Section {
     pub first: usize,
     pub end: usize,
     pub executable: bool,
@@ -82,7 +82,7 @@ impl<F: FnMut(usize, &mut [u8])> Reader<F> {
 
 /// Parse metadata through short bounded copies, avoiding a shared Rust slice
 /// over the live image's writable statics while allocating the inventory.
-pub(crate) fn sections(
+pub fn sections(
     bytes: usize,
     read: impl FnMut(usize, &mut [u8]),
 ) -> Result<Vec<Section>, &'static str> {

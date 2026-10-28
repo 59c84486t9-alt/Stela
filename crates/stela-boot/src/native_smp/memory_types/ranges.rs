@@ -23,8 +23,9 @@ impl Image {
         Ok(u64::from(value.low) | u64::from(value.high) << 32)
     }
 
-    /// Proves WB MTRR type and, on AMD, both read/write DRAM routing for every
-    /// byte. Undefined overlaps and partial coverage refuse. No page/PAT or
+    /// Proves WB MTRR type and, on AMD with routing registers
+    /// ([`amd::State::routes`]), both read/write DRAM routing for every byte.
+    /// Undefined overlaps and partial coverage refuse. No page/PAT or
     /// live-current-control assertion is implied by a captured image query.
     pub(crate) fn writeback_ram(&self, start: u64, bytes: u64) -> Result<(), &'static str> {
         let end = start
@@ -33,6 +34,7 @@ impl Image {
         if bytes == 0 || end > 1u64 << self.physical_bits {
             return Err("native RAM range exceeds physical memory-type geometry");
         }
+        let routing = self.amd.filter(amd::State::routes);
         let mut cursor = start;
         while cursor < end {
             let mut next = end;
@@ -52,7 +54,7 @@ impl Image {
                 let offset = (cursor - base) / width;
                 kind = (self.value(index)? >> (8 * offset)) as u8;
                 next = next.min(base + (offset + 1) * width);
-                if let Some(state) = self.amd
+                if let Some(state) = routing
                     && (state.syscfg & amd::FIXED_DRAM == 0 || kind & 0x18 != 0x18)
                 {
                     return Err("AMD fixed range is not read/write DRAM");
@@ -61,7 +63,7 @@ impl Image {
             } else {
                 if cursor < 1 << 20 {
                     next = next.min(1 << 20);
-                    if self.amd.is_some() {
+                    if routing.is_some() {
                         return Err("AMD low RAM without fixed routing is unqualified");
                     }
                 }
@@ -86,7 +88,7 @@ impl Image {
                         matched = true;
                     }
                 }
-                if let Some(state) = self.amd {
+                if let Some(state) = routing {
                     // Require TOM and any matching IORR to agree on DRAM.
                     // Do not infer a permissive precedence for conflicting
                     // routing descriptions from the common architectural text.
@@ -250,6 +252,30 @@ mod tests {
             assert!(image.writeback_ram(2 << 20, 4096).is_err());
         }
     }
+    #[test]
+    fn without_routing_registers_ram_needs_only_wb_types() {
+        let mut image = image();
+        image.amd = Some(amd::State {
+            syscfg: 0,
+            iorr: [(0, 0); 2],
+            top_mem: 0,
+            top_mem2: 0,
+        });
+        for index in super::super::FIXED {
+            set(&mut image, index, 0x0606_0606_0606_0606);
+        }
+        span(&mut image, 0, 16 << 30, 6);
+        assert!(image.writeback_ram(0, 1 << 20).is_ok());
+        assert!(image.writeback_ram(1 << 20, 8 << 30).is_ok());
+        // An MTRR type still refuses.
+        span(&mut image, 0, 16 << 30, 0);
+        assert!(image.writeback_ram(1 << 20, 4096).is_err());
+        // One routing value present restores every routing check.
+        span(&mut image, 0, 16 << 30, 6);
+        image.amd.as_mut().unwrap().top_mem = 3 << 30;
+        assert!(image.writeback_ram(1 << 20, 4096).is_err());
+    }
+
     #[test]
     fn fixed_entries_use_their_exact_width_and_require_wb_dram() {
         let mut image = image();

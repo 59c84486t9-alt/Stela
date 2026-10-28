@@ -7,10 +7,8 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
-
-const GS_BASE: u32 = 0xc000_0101;
 
 #[repr(C, align(64))]
 pub(crate) struct Local {
@@ -24,6 +22,10 @@ pub(crate) struct Local {
     xstate_active: UnsafeCell<[u64; 2]>,
     helper_rsp: UnsafeCell<u64>,
     doorbells: AtomicU64,
+    /// This processor's aperture shootdown slot plus one, zero when it has
+    /// none, and the latest shootdown generation it has flushed.
+    shootdown_slot: AtomicUsize,
+    shootdown_flushed: AtomicU64,
     worker: UnsafeCell<Option<stela_runtime::machine::engine::publication::WorkerId>>,
     declarations: UnsafeCell<Option<stela_runtime::NativeCpuOwner>>,
 }
@@ -40,6 +42,8 @@ impl Local {
             xstate_active: UnsafeCell::new([0; 2]),
             helper_rsp: UnsafeCell::new(0),
             doorbells: AtomicU64::new(0),
+            shootdown_slot: AtomicUsize::new(0),
+            shootdown_flushed: AtomicU64::new(0),
             worker: UnsafeCell::new(None),
             declarations: UnsafeCell::new(None),
         }
@@ -95,6 +99,22 @@ impl Owner {
             return Err(WorkError::CorruptContext);
         }
         Ok(self.clock_leases.clone())
+    }
+
+    /// Lay the guest RAM out from `base` (`ram::place`), keeping its host
+    /// backing, before a guest regime, frame or registered RAM exists: the
+    /// host drivers that read a bundle's DRAM base run after `install`.
+    /// Root contexts and MMIO views see only the host spans, which stay.
+    pub(crate) fn place_ram(&mut self, base: u64) -> Result<(), &'static str> {
+        if current() != self.local.as_ptr() {
+            return Err("native Host owner migrated");
+        }
+        let state = state();
+        if state.native || state.regime.is_some() || state.registered_ram.is_some() {
+            return Err("guest RAM is placed before the guest's memory is registered");
+        }
+        super::ram::place(&mut state.ram, base);
+        Ok(())
     }
 
     /// Adopt the existing canonical owner before a guest regime or frame is
@@ -225,10 +245,7 @@ pub(crate) unsafe fn configure_xstate(
 unsafe fn set_base(base: u64) {
     // SAFETY: the executor owns this processor's GS, and its descriptor/IST
     // setup has already finished. The base remains mapped in every root.
-    unsafe {
-        asm!("wrmsr", in("ecx") GS_BASE, in("eax") base as u32,
-            in("edx") (base >> 32) as u32, options(nostack, preserves_flags));
-    }
+    unsafe { crate::cpu::msr::GS_BASE.write(base) };
 }
 
 /// # Safety
@@ -337,6 +354,13 @@ pub(super) fn doorbell_counter() -> &'static AtomicU64 {
     // SAFETY: descriptor/local storage is permanently pinned through parked
     // NMI/MCE entry. Only the current physical processor selects this record.
     unsafe { &(*current()).doorbells }
+}
+
+/// This processor's aperture shootdown slot and the generation it flushed.
+pub(super) fn shootdown() -> (&'static AtomicUsize, &'static AtomicU64) {
+    // SAFETY: as in doorbell_counter.
+    let local = unsafe { &*current() };
+    (&local.shootdown_slot, &local.shootdown_flushed)
 }
 
 pub(super) fn doorbell() {

@@ -26,7 +26,7 @@ use stela_drivers::{
     block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
     input::InputDevice,
-    probe::probe,
+    probe::{NativeServices, probe_with_provider},
 };
 use stela_runtime::pc::{
     gpt::{Guid, PartitionDevice},
@@ -329,17 +329,20 @@ pub struct Partitions<'a> {
     pub fdr: Option<Guid>,
 }
 
-/// Open the explicitly selected partitions while the loader's identity root
-/// is still active, before host::install, and bring up every host input
-/// device and network adapter. No guessed disk/partition, no writes at open. Ownership lasts
+/// Open the explicitly selected partitions in the loader's identity root
+/// `root` ([`RestoreRoot`]), and bring up every host input device and
+/// network adapter. No guessed disk/partition, no writes at open. Ownership lasts
 /// with the returned services. Probe once for all consumers;
 /// do not reset a controller or reuse its DMA pages for a second probe.
 ///
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
-/// reserved DMA pages, and the loader root/window remain live for the boot.
+/// reserved DMA pages, `root` is the loader's root, and it and the window
+/// remain live for the boot.
 pub unsafe fn open(
     handoff: &Handoff,
+    root: u64,
+    services: Option<&dyn NativeServices>,
     partitions: &Partitions<'_>,
     usb_disks: &[String],
     external: Option<usize>,
@@ -360,15 +363,16 @@ pub unsafe fn open(
             "host disk {serial} is both a USB storage disk and a partition target"
         ));
     }
-    let root: u64;
-    // SAFETY: engine CPL0, before switching away from the loader root.
-    unsafe {
-        asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
-    }
+    // SAFETY: forwarded caller contract; nothing below enters it again.
+    let _root = unsafe { RestoreRoot::enter(root) };
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
+    let firmware = stela_drivers::firmware::HandoffProvider::new(handoff.firmware.as_deref());
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
-    let mut devices = unsafe { probe(handoff, &mut dma) };
+    let mut devices = unsafe { probe_with_provider(handoff, &mut dma, &firmware, services) };
+    // The owners native attachments keep, and those of failed ones, stay
+    // for the boot: their mappings and DMA domains outlive the devices.
+    Vec::leak(core::mem::take(&mut devices.owners));
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
@@ -414,6 +418,13 @@ pub unsafe fn open(
         devices: core::mem::take(&mut devices.nics),
         root,
     };
+    let usb = super::usb::HostUsb::new(
+        core::mem::take(&mut devices.usb_hosts),
+        dma,
+        handoff.firmware.clone(),
+        root,
+        handoff.clock.ticks_per_microsecond * 1_000_000,
+    );
     // One disk may hold several of them: the stick holds the Mac's internal
     // SSD, the install medium, the translation store and the boot log, and
     // the internal SSD the installed system the Preboot volume names. The
@@ -544,6 +555,7 @@ pub unsafe fn open(
         fdr,
         inputs,
         links,
+        usb,
         usb_disks,
         disks: host_disks,
     })
@@ -580,6 +592,8 @@ pub struct Opened {
     pub fdr: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
+    /// The xHCI controllers' topology owners, polled for hotplug.
+    pub usb: super::usb::HostUsb,
     /// Whole disks for the guest's USB mass storage, in option order.
     pub usb_disks: alloc::vec::Vec<Box<dyn BlockDevice>>,
     /// Every disk taken above, for its shutdown notice.

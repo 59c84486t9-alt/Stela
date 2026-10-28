@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/stela-boot-core",
     "crates/stela-cli",
     "crates/stela-loader",
     "crates/stela-compiler",
@@ -12,6 +13,7 @@ members = [
 # development tasks, whose AArch64 fixtures need clang; `--workspace` includes
 # them, as `cargo xtask check` does.
 default-members = [
+    "crates/stela-boot-core",
     "crates/stela-cli",
     "crates/stela-loader",
     "crates/stela-compiler",
@@ -38,6 +40,7 @@ sha2 = "0.10"
 hex = "0.4"
 libc = "0.2"
 tempfile = "3"
+stela-boot-core = { path = "crates/stela-boot-core" }
 stela-compiler = { path = "crates/stela-compiler" }
 stela-drivers = { path = "crates/stela-drivers" }
 stela-runtime = { path = "crates/stela-runtime" }
