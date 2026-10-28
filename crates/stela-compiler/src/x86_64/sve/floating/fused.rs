@@ -250,7 +250,7 @@ pub(in crate::x86_64) fn emit(
         reject(code, &mut failures);
         numerical::capture_status(code, &frame);
         code.asm()
-            .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
+            .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
         reject(code, &mut failures);
         let mut asm = code.asm();
         asm.mov(Size::Dword, Rax, Rcx);

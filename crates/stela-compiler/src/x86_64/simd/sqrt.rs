@@ -8,8 +8,8 @@ use super::numerical::{
 };
 use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
-use crate::x86_64::simd::encode::BitTest;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{

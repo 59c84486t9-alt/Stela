@@ -93,7 +93,7 @@ fn guard_normal(code: &mut Code, source: u8, failures: &mut Vec<usize>) {
 
 fn guard_status(code: &mut Code, frame: &Frame, mask: u32, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
-    code.asm().test_imm32(Size::Dword, Rcx, mask as i32);
+    code.asm().test_imm(Size::Dword, Rcx, mask as i32);
     failures.push(branch(code, Condition::NotZero));
 }
 

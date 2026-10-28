@@ -1,6 +1,7 @@
 //! Predicate Boolean operations and permutes.
 use super::super::scalable;
 use super::predicate;
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{R8, R11, Rax, Rcx, Rdi, Rdx, Rsp};
 use crate::x86_64::asm::{Alu, Code, Gpr, Mem, ShiftOp, Size, Unary};
 use crate::{
@@ -137,7 +138,7 @@ pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, tar
                 );
             }
             let mut asm = code.asm();
-            asm.bt(Size::Qword, Mem::base(Rsp, 0), Rcx);
+            asm.bit(BitTest::Bt, Size::Qword, Mem::base(Rsp, 0), Rcx);
             asm.alu(Alu::Sbb, Size::Qword, R8, R8);
             for chunk in 0..length.predicate_bytes().div_ceil(CHUNK_BYTES) {
                 scalable::read_predicate_chunk(code, source, chunk, length);

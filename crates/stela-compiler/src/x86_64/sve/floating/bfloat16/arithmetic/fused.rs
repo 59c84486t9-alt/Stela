@@ -1,5 +1,7 @@
 //! BF16 fused multiply-add through exact double arithmetic. Close exponents make
 //! the product and sum exact in double; round-to-odd then feeds BF16 rounding.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
 use crate::x86_64::asm::Gpr::{R10, Rax, Rcx, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size, Unary};
 use crate::{
@@ -108,7 +110,7 @@ fn compress(code: &mut Code, failures: &mut Vec<usize>) {
     asm.alu_imm32(Alu::Sub, Size::Dword, Rcx, MINIMUM_DOUBLE_EXPONENT as i32);
     asm.alu_imm32(Alu::Cmp, Size::Dword, Rcx, NORMAL_EXPONENT_INTERVAL as i32);
     failures.push(asm.jcc(Cond::A).offset());
-    asm.test_eax_imm32(STICKY_MASK);
+    asm.test_accumulator_imm(Size::Dword, STICKY_MASK as i32);
     asm.setcc(Cond::Ne, Rcx);
     asm.movzx(Size::Dword, R10, Size::Byte, Rcx);
     asm.mov(Size::Qword, Rdx, Rax);
@@ -225,8 +227,18 @@ pub(in crate::x86_64) fn emit(
             exact_exponent_guard(code, &mut failures);
             widen(code, DOUBLE_RIGHT);
             let mut asm = code.asm();
-            asm.mulsd(DOUBLE_LEFT, Rm::Xmm(DOUBLE_RIGHT));
-            asm.addsd(DOUBLE_LEFT, Rm::Xmm(DOUBLE_ACCUMULATOR));
+            asm.float(
+                FloatOp::Mul,
+                FloatLanes::ScalarDouble,
+                DOUBLE_LEFT,
+                Rm::Xmm(DOUBLE_RIGHT),
+            );
+            asm.float(
+                FloatOp::Add,
+                FloatLanes::ScalarDouble,
+                DOUBLE_LEFT,
+                Rm::Xmm(DOUBLE_ACCUMULATOR),
+            );
             compress(code, &mut failures);
             quantize(code, &frame, &mut failures);
             let mut asm = code.asm();

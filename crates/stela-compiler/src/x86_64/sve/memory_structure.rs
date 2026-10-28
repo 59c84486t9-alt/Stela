@@ -146,7 +146,11 @@ pub(crate) fn emit(
             .mov_store(Size::Qword, stack(scratch.predicate), Rax);
         let start = code.len();
         let mut asm = code.asm();
-        asm.test_byte_imm(stack(scratch.predicate), PREDICATE_SELECTED);
+        asm.test_imm(
+            Size::Byte,
+            stack(scratch.predicate),
+            i32::from(PREDICATE_SELECTED),
+        );
         let inactive = asm.jcc(Cond::E);
         for tuple_index in 0..operand.registers {
             code.asm()

@@ -1,6 +1,6 @@
 //! FP binary arithmetic: guarded SSE2 values and precise software fallback.
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, Size};
-use crate::x86_64::simd::encode::BitTest;
 use alloc::vec;
 use alloc::vec::Vec;
 mod half;

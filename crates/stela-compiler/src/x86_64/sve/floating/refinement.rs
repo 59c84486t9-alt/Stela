@@ -37,7 +37,7 @@ const RECIPROCAL_ADDEND_EXPONENT: u32 = 1;
 const RECIPROCAL_SQUARE_ROOT_FRACTION_SHIFT: u32 = 1;
 
 fn test_control(code: &mut Code, mask: u32) {
-    code.asm().test_imm32(
+    code.asm().test_imm(
         Size::Dword,
         Mem::base_disp32(Rdi, (core::mem::offset_of!(GuestState, fpcr)) as i32),
         mask as i32,
@@ -45,7 +45,7 @@ fn test_control(code: &mut Code, mask: u32) {
 }
 
 fn reject_status(code: &mut Code, mask: u32, failures: &mut Vec<usize>) {
-    code.asm().test_imm32(Size::Dword, Rcx, mask as i32);
+    code.asm().test_imm(Size::Dword, Rcx, mask as i32);
     failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 

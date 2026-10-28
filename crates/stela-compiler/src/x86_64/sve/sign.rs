@@ -62,7 +62,7 @@ fn infinity(code: &mut Code, format: Format, target: TargetCpu) {
 
 fn suppress_nan_sign(code: &mut Code, format: Format, target: TargetCpu) {
     let mut asm = code.asm();
-    asm.test_imm32(
+    asm.test_imm(
         Size::Dword,
         Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
         FPCR_AH as i32,

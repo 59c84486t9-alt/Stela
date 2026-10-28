@@ -33,7 +33,7 @@ const OUTPUT_SLOT: usize = 0;
 const REPEAT_DWORD: u8 = 0x55;
 
 fn test_control(code: &mut Code, mask: u32) {
-    code.asm().test_imm32(
+    code.asm().test_imm(
         Size::Dword,
         Mem::base_disp32(Rdi, (core::mem::offset_of!(GuestState, fpcr)) as i32),
         mask as i32,

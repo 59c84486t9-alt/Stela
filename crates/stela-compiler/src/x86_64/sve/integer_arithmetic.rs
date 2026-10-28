@@ -2,6 +2,7 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_arithmetic::{Binary, Kind, Operand, Source};
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, Size, Unary};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
@@ -304,7 +305,7 @@ fn carry_qword(code: &mut Code, subtract: bool, top: bool) {
     // BT consumes only the architectural carry-in low bit. Keep ADC and SETC
     // adjacent so intervening host flags cannot alter the published carry.
     let mut asm = code.asm();
-    asm.bt_imm(Size::Dword, Rdx, 0);
+    asm.bit_imm(BitTest::Bt, Size::Dword, Rdx, 0);
     asm.alu(Alu::Adc, Size::Qword, Rax, Rcx);
     asm.setcc(Cond::B, Rdx);
     asm.movzx(Size::Dword, Rdx, Size::Byte, Rdx);

@@ -1,7 +1,8 @@
 //! Half-precision lane unpacking, rounding and packing for normal values.
 use super::numerical::jump;
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Asm, Code, Gpr, Mem, Rm, ShiftOp, Size};
-use crate::x86_64::simd::encode::{BitTest, guest};
+use crate::x86_64::simd::encode::guest;
 use alloc::vec::Vec;
 mod kernel;
 use super::numerical::{Condition, RESULT_MINIMUM_EXPONENT, branch, resolve, test_control};

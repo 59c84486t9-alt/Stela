@@ -351,7 +351,7 @@ pub(in crate::x86_64) fn emit_candidate(
         // reaches the packer.
         numerical::capture_status(code, &frame);
         code.asm()
-            .test_imm32(Size::Dword, Rcx, MXCSR_STATUS_MASK as i32);
+            .test_imm(Size::Dword, Rcx, MXCSR_STATUS_MASK as i32);
         failures.push(branch(code, Condition::NotZero));
         Host::MoveAligned.register(code, RESULT, LEFT, target);
         half::pack_normal(

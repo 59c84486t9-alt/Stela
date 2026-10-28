@@ -105,7 +105,7 @@ fn select(code: &mut Code, minimum: bool, alternative: bool, recipe: Recipe, tar
         Host::Xor.register(code, RESULT, SECOND_TEMPORARY, target);
     }
     if alternative {
-        code.asm().test_imm32(
+        code.asm().test_imm(
             Size::Dword,
             Mem::base_disp32(Rdi, (core::mem::offset_of!(GuestState, fpcr)) as i32),
             FPCR_AH as i32,

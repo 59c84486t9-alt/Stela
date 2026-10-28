@@ -3,6 +3,7 @@ use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, VectorLength};
 use crate::aarch64::sve::integer_comparison::{Operand, Relation, Right};
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdi, Rdx, Rsp};
 use crate::x86_64::asm::{Alu, Code, Cond, Mem, Rm, ShiftOp, Size};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
@@ -225,10 +226,10 @@ fn accumulate_predtest(code: &mut Code) {
     asm.alu(Alu::Or, Size::Qword, R10, Rax);
     asm.test(Size::Qword, Rdx, Rdx);
     let empty = asm.jcc(Cond::E);
-    asm.test_imm32(Size::Dword, R9, FIRST_ACTIVE_SEEN as i32);
+    asm.test_imm(Size::Dword, R9, FIRST_ACTIVE_SEEN as i32);
     let seen = asm.jcc(Cond::Ne);
     asm.bsf(Size::Qword, Rcx, Rdx);
-    asm.bt(Size::Qword, Rax, Rcx);
+    asm.bit(BitTest::Bt, Size::Qword, Rax, Rcx);
     asm.setcc(Cond::B, Rcx);
     asm.movzx(Size::Dword, Rcx, Size::Byte, Rcx);
     asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, NZCV_N_SHIFT);
@@ -236,7 +237,7 @@ fn accumulate_predtest(code: &mut Code) {
     asm.alu_imm8(Alu::Or, Size::Dword, R9, 1);
     asm.bind(seen);
     asm.bsr(Size::Qword, Rcx, Rdx);
-    asm.bt(Size::Qword, Rax, Rcx);
+    asm.bit(BitTest::Bt, Size::Qword, Rax, Rcx);
     asm.setcc(Cond::Ae, R11);
     asm.bind(empty);
 }

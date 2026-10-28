@@ -8,7 +8,6 @@ use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size, Unary};
 
 pub(crate) use super::memory_context as memory;
 
-mod encode;
 pub(crate) mod lut;
 pub(crate) mod numerical;
 pub(crate) mod routing;

@@ -5,8 +5,8 @@ use super::{
     RESULT_MINIMUM_EXPONENT, ResultSign, RoundingPolicy, SIGN_BITS, branch, jump, resolve,
     test_control,
 };
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size};
-use crate::x86_64::simd::encode::BitTest;
 use Gpr::{Rax, Rcx, Rdx};
 use alloc::vec::Vec;
 

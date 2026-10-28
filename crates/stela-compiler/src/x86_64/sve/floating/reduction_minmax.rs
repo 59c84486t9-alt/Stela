@@ -1,5 +1,7 @@
 //! SVE FMAXV/FMINV/FMAXNMV/FMINNMV and their QV forms. Only trees of nonzero
 //! normals and infinities take the native path.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
 use crate::x86_64::asm::Gpr::{Rax, Rdi};
 use crate::x86_64::asm::{Alu, Code, Cond, Mem, Rm, Size};
 use crate::{
@@ -45,7 +47,7 @@ const TREE_BRANCHES: usize = 2;
 const NEXT_TREE_REGISTER: u8 = 1;
 
 fn state_test(code: &mut Code, mask: u32) {
-    code.asm().test_imm32(
+    code.asm().test_imm(
         Size::Dword,
         Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
         mask as i32,
@@ -120,10 +122,10 @@ fn identity(
 fn selection(code: &mut Code, operation: MinMaxOperation, format: Format, lo: u8, hi: u8) {
     let mut asm = code.asm();
     match (format == Format::Double, minimum(operation)) {
-        (true, true) => asm.minpd(lo, Rm::Xmm(hi)),
-        (true, false) => asm.maxpd(lo, Rm::Xmm(hi)),
-        (false, true) => asm.minps(lo, Rm::Xmm(hi)),
-        (false, false) => asm.maxps(lo, Rm::Xmm(hi)),
+        (true, true) => asm.float(FloatOp::Min, FloatLanes::PackedDouble, lo, Rm::Xmm(hi)),
+        (true, false) => asm.float(FloatOp::Max, FloatLanes::PackedDouble, lo, Rm::Xmm(hi)),
+        (false, true) => asm.float(FloatOp::Min, FloatLanes::PackedSingle, lo, Rm::Xmm(hi)),
+        (false, false) => asm.float(FloatOp::Max, FloatLanes::PackedSingle, lo, Rm::Xmm(hi)),
     }
 }
 

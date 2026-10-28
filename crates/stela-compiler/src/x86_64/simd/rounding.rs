@@ -1,7 +1,8 @@
 //! FRINT*: integer baseline, or SSE4.1 ROUND with exceptions masked.
 use super::numerical::{emit_opcode_to, float_lanes, helper_section, jump};
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
-use crate::x86_64::simd::encode::{BitTest, guest};
+use crate::x86_64::simd::encode::guest;
 use Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdx};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod kernel;

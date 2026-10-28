@@ -1,5 +1,6 @@
 //! Classic BFDOT with round-to-odd intermediates.
 use super::{LEFT, RIGHT};
+use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::Gpr::{Rax, Rcx};
 use crate::x86_64::asm::{Alu, Code, Rm, Size};
 use crate::x86_64::simd::numerical::single_vector_arithmetic;
@@ -61,13 +62,17 @@ fn guard_normal_or_zero(code: &mut Code, source: u8, failures: &mut Vec<usize>, 
 fn guard_real_status(code: &mut Code, frame: &Frame, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
     code.asm()
-        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     failures.push(branch(code, Condition::NotZero));
 }
 
 fn compare_equal(code: &mut Code, destination: u8, source: u8) {
-    code.asm()
-        .cmpps(destination, Rm::Xmm(source), EQUAL_PREDICATE);
+    code.asm().float_compare(
+        FloatLanes::PackedSingle,
+        destination,
+        Rm::Xmm(source),
+        EQUAL_PREDICATE,
+    );
 }
 
 fn odd_add(code: &mut Code, frame: &Frame, failures: &mut Vec<usize>, target: TargetCpu) {

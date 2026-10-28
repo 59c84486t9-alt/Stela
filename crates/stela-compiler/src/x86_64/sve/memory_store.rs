@@ -1,6 +1,7 @@
 //! SVE stores through the memory service, one element per request in ascending
 //! order. Sources and loop state live on the stack across calls.
 use super::memory as shared_address;
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{R8, Rax, Rcx, Rsp};
 use crate::x86_64::asm::{Alu, Code, Cond, Disp, Mem, Patch, Size, resolve};
 use crate::{
@@ -191,7 +192,7 @@ fn store_loop(
     let start = code.len();
     load_index(code);
     let mut asm = code.asm();
-    asm.bt(Size::Qword, stack(PREDICATE_OFFSET), Rcx);
+    asm.bit(BitTest::Bt, Size::Qword, stack(PREDICATE_OFFSET), Rcx);
     let inactive = asm.jcc(Cond::Ae);
     let descriptor = descriptor(store.address, store.non_temporal, true);
     for member in 0..store.register_count {

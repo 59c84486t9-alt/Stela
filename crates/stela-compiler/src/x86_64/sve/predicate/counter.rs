@@ -1,6 +1,7 @@
 //! Expanding predicate-as-counter registers into packed predicate chunks.
 use super::CHUNK_BITS;
 use crate::aarch64::scalable::VectorLength;
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, ShiftOp, Size, Unary};
 
@@ -91,7 +92,7 @@ pub(crate) fn emit_prepared_counter_chunk(code: &mut Code, chunk: usize, length:
     code.asm().bind(partial_ready);
     code.asm().bind(empty_ready);
     let mut asm = code.asm();
-    asm.bt_imm(Size::Dword, R8, COUNTER_INVERT_BIT);
+    asm.bit_imm(BitTest::Bt, Size::Dword, R8, COUNTER_INVERT_BIT);
     asm.alu(Alu::Sbb, Size::Qword, R11, R11);
     asm.alu(Alu::Xor, Size::Qword, Rax, R11);
     asm.alu(Alu::And, Size::Qword, Rax, R10);

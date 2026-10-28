@@ -8,7 +8,7 @@ use super::numerical::{
 };
 use super::{Host, commit, packed, packed_imm, read_vector};
 use crate::x86_64::asm::{Code, Gpr, Rm};
-use crate::x86_64::simd::encode::{FloatLanes, FloatOp};
+use crate::x86_64::asm::{FloatLanes, FloatOp};
 use crate::{
     GuestAddress,
     aarch64::{

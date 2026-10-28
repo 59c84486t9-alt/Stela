@@ -8,8 +8,8 @@ use super::numerical::{
     reject_other_status, resolve, restore_environment, test_control, vector_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
-use crate::x86_64::simd::encode::FloatLanes;
 use crate::{
     GuestAddress,
     aarch64::{

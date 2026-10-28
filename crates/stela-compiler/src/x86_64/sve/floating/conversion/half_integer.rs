@@ -1,4 +1,5 @@
 //! SVE conversions between half precision and integers.
+use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
@@ -186,7 +187,7 @@ pub(crate) fn from_integer_lane(
     Host::Xor.register(code, INTEGER_FLOAT, INTEGER_FLOAT, target);
     if f16c {
         let mut asm = code.asm();
-        asm.cvtsi2ss(Size::Qword, 6, Rax);
+        asm.cvtsi2float(FloatLanes::ScalarSingle, Size::Qword, 6, Rax);
         asm.movd_from_xmm(Rcx, 6);
         asm.shift_imm(ShiftOp::Shl, Size::Dword, Rdx, DWORD_SIGN_BIT);
         asm.alu(Alu::Or, Size::Dword, Rcx, Rdx);
@@ -204,7 +205,7 @@ pub(crate) fn from_integer_lane(
         asm.alu_accumulator_imm32(Alu::And, Size::Dword, (u32::from(u16::MAX)) as i32);
     } else {
         let mut asm = code.asm();
-        asm.cvtsi2sd(Size::Qword, 6, Rax);
+        asm.cvtsi2float(FloatLanes::ScalarDouble, Size::Qword, 6, Rax);
         asm.movq_from_xmm(Rcx, 6);
         asm.shift_imm(ShiftOp::Shl, Size::Qword, Rdx, QWORD_SIGN_BIT);
         asm.alu(Alu::Or, Size::Qword, Rcx, Rdx);

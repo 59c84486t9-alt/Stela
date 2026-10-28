@@ -1,4 +1,6 @@
 //! SVE FSQRT: SQRTPS/SQRTPD for positive normals, +0 and +infinity.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
 use crate::x86_64::asm::Gpr::{Rax, Rcx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::{
@@ -51,7 +53,8 @@ fn guard_nonnegative(
     if format == Format::Double {
         // MOVMSKPS sees all four dwords. Only high dwords contain Double signs;
         // the low-dword fraction sign bits must not reject positive operands.
-        code.asm().test_eax_imm32(DOUBLE_SIGN_LANES);
+        code.asm()
+            .test_accumulator_imm(Size::Dword, DOUBLE_SIGN_LANES as i32);
     } else {
         code.asm().test(Size::Dword, Rax, Rax);
     }
@@ -60,9 +63,19 @@ fn guard_nonnegative(
 
 fn square_root(code: &mut Code, format: Format) {
     if format == Format::Double {
-        code.asm().sqrtpd(VALUE, Rm::Xmm(VALUE));
+        code.asm().float(
+            FloatOp::Sqrt,
+            FloatLanes::PackedDouble,
+            VALUE,
+            Rm::Xmm(VALUE),
+        );
     } else {
-        code.asm().sqrtps(VALUE, Rm::Xmm(VALUE));
+        code.asm().float(
+            FloatOp::Sqrt,
+            FloatLanes::PackedSingle,
+            VALUE,
+            Rm::Xmm(VALUE),
+        );
     }
 }
 
@@ -132,7 +145,7 @@ pub(in crate::x86_64) fn emit(
     }
     numerical::capture_status(code, &frame);
     code.asm()
-        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, &mut failures);
     let mut asm = code.asm();
     asm.mov(Size::Dword, Rax, Rcx);

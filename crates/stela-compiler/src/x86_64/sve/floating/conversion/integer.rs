@@ -1,4 +1,5 @@
 //! SVE conversions between single/double and integers.
+use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::Gpr::{R8, R10, Rax, Rcx, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
@@ -226,8 +227,8 @@ fn convert_from_integer(code: &mut Code, conversion: Conversion) {
     let size = host_size(conversion);
     let mut asm = code.asm();
     match conversion.float {
-        Format::Single => asm.cvtsi2ss(size, SCALAR, Rax),
-        Format::Double => asm.cvtsi2sd(size, SCALAR, Rax),
+        Format::Single => asm.cvtsi2float(FloatLanes::ScalarSingle, size, SCALAR, Rax),
+        Format::Double => asm.cvtsi2float(FloatLanes::ScalarDouble, size, SCALAR, Rax),
         Format::Half => unreachable!("Half conversion belongs to its compute leaf"),
     }
 }
@@ -237,8 +238,12 @@ fn truncate_to_integer(code: &mut Code, conversion: Conversion) {
     let size = host_size(conversion);
     let mut asm = code.asm();
     match conversion.float {
-        Format::Single => asm.cvttss2si(size, Rax, Rm::Xmm(SCALAR)),
-        Format::Double => asm.cvttsd2si(size, Rax, Rm::Xmm(SCALAR)),
+        Format::Single => {
+            asm.cvtfloat2si(FloatLanes::ScalarSingle, true, size, Rax, Rm::Xmm(SCALAR))
+        }
+        Format::Double => {
+            asm.cvtfloat2si(FloatLanes::ScalarDouble, true, size, Rax, Rm::Xmm(SCALAR))
+        }
         Format::Half => unreachable!("Half conversion belongs to its compute leaf"),
     }
 }
@@ -650,7 +655,7 @@ pub(in crate::x86_64) fn emit(
     // caller MXCSR remain untouched if any later lane needs exact completion.
     numerical::capture_status(code, &frame);
     code.asm()
-        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, &mut failures);
     let mut asm = code.asm();
     asm.mov(Size::Dword, Rax, Rcx);

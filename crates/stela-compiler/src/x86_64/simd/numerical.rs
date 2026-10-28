@@ -1,6 +1,6 @@
 //! Shared FP emission: integer lane classification and a private MXCSR.
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Vex};
-use crate::x86_64::simd::encode::{FloatLanes, FloatOp};
+use crate::x86_64::asm::{FloatLanes, FloatOp};
 use alloc::vec;
 use alloc::vec::Vec;
 mod control;

@@ -11,6 +11,11 @@
 #![allow(dead_code)]
 use alloc::vec::Vec;
 
+mod integer;
+mod sse;
+pub(crate) use integer::BitTest;
+pub(crate) use sse::{FloatLanes, FloatOp};
+
 /// Emitted bytes and the number of instructions among them.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Code {

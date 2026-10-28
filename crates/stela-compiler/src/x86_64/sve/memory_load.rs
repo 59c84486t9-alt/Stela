@@ -1,6 +1,7 @@
 //! SVE loads through the memory service into a private staging buffer, so a
 //! fault leaves the destination unchanged.
 use super::super::{isa::SimdOpcode as Host, scalable};
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{Rax, Rcx, Rsp};
 use crate::x86_64::asm::{Alu, Code, Cond, Mem, Patch, Rm, Size};
 use crate::{
@@ -84,7 +85,12 @@ fn inactive_branch(code: &mut Code, bit: usize, scratch: Scratch) -> Patch {
         Rax,
         stack(scratch.predicate + word as u32 * QWORD_BYTES),
     );
-    asm.bt_imm(Size::Qword, Rax, (bit % PREDICATE_WORD_BITS) as u8);
+    asm.bit_imm(
+        BitTest::Bt,
+        Size::Qword,
+        Rax,
+        (bit % PREDICATE_WORD_BITS) as u8,
+    );
     asm.jcc(Cond::Ae)
 }
 

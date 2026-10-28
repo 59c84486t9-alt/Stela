@@ -1,4 +1,5 @@
 //! SVE FP comparisons without exceptions; signaling cases use software completion.
+use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::Gpr::Rax;
 use crate::x86_64::asm::{Alu, Code, Rm, Size};
 use crate::{
@@ -72,8 +73,18 @@ fn compare_mask(code: &mut Code, kind: Kind, format: Format, target: TargetCpu) 
     };
     let mut asm = code.asm();
     match format {
-        Format::Single => asm.cmpps(destination, Rm::Xmm(source), comparison as u8),
-        Format::Double => asm.cmppd(destination, Rm::Xmm(source), comparison as u8),
+        Format::Single => asm.float_compare(
+            FloatLanes::PackedSingle,
+            destination,
+            Rm::Xmm(source),
+            comparison as u8,
+        ),
+        Format::Double => asm.float_compare(
+            FloatLanes::PackedDouble,
+            destination,
+            Rm::Xmm(source),
+            comparison as u8,
+        ),
         Format::Half => unreachable!("native comparison width validated before emission"),
     }
     destination

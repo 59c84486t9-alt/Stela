@@ -1,7 +1,8 @@
 //! SME loads and stores through the memory service. Loads commit after every
 //! element succeeds; stores submit one active element at a time.
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size};
-use crate::x86_64::simd::encode::{BitTest, stack};
+use crate::x86_64::simd::encode::stack;
 use alloc::vec::Vec;
 mod za;
 

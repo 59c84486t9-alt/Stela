@@ -5,6 +5,9 @@
 //! hold eight BF16 values, XMM6 four single accumulators. Output: XMM0 holds four
 //! singles. Clobbers XMM2-5, XMM7, RAX, RCX and flags.
 use crate::TargetCpu;
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
 use crate::x86_64::asm::Gpr::{Rax, Rcx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
@@ -96,7 +99,7 @@ fn guard_double(code: &mut Code, register: u8, failures: &mut Vec<usize>) {
     // rounding up to min-normal; exact signed zero is admitted separately.
     let mut asm = code.asm();
     asm.movq_from_xmm(Rax, register);
-    asm.btr_imm(Size::Qword, Rax, DOUBLE_SIGN_BIT);
+    asm.bit_imm(BitTest::Btr, Size::Qword, Rax, DOUBLE_SIGN_BIT);
     asm.test(Size::Qword, Rax, Rax);
     let zero = asm.jcc(Cond::E);
     asm.mov_imm64(Rcx, SINGLE_MINIMUM_NORMAL_AS_DOUBLE);
@@ -131,13 +134,23 @@ fn product_pair(code: &mut Code, upper: bool) {
     let mut asm = code.asm();
     asm.cvtps2pd(WORK_PAIR, Rm::Xmm(WORK_LEFT));
     asm.cvtps2pd(WORK_MASK, Rm::Xmm(WORK_RIGHT));
-    asm.mulpd(WORK_PAIR, Rm::Xmm(WORK_MASK));
+    asm.float(
+        FloatOp::Mul,
+        FloatLanes::PackedDouble,
+        WORK_PAIR,
+        Rm::Xmm(WORK_MASK),
+    );
     shuffle(code, WORK_LEFT, WORK_LEFT, UPPER_TWO_SINGLES);
     shuffle(code, WORK_RIGHT, WORK_RIGHT, UPPER_TWO_SINGLES);
     let mut asm = code.asm();
     asm.cvtps2pd(WORK_LEFT, Rm::Xmm(WORK_LEFT));
     asm.cvtps2pd(WORK_RIGHT, Rm::Xmm(WORK_RIGHT));
-    asm.mulpd(WORK_LEFT, Rm::Xmm(WORK_RIGHT));
+    asm.float(
+        FloatOp::Mul,
+        FloatLanes::PackedDouble,
+        WORK_LEFT,
+        Rm::Xmm(WORK_RIGHT),
+    );
     asm.simd(
         Host::MoveAligned,
         WORK_RIGHT,
@@ -146,7 +159,12 @@ fn product_pair(code: &mut Code, upper: bool) {
     );
     asm.unpcklpd(WORK_RIGHT, Rm::Xmm(WORK_LEFT));
     asm.unpckhpd(WORK_PAIR, Rm::Xmm(WORK_LEFT));
-    asm.addpd(WORK_RIGHT, Rm::Xmm(WORK_PAIR));
+    asm.float(
+        FloatOp::Add,
+        FloatLanes::PackedDouble,
+        WORK_RIGHT,
+        Rm::Xmm(WORK_PAIR),
+    );
 }
 
 /// Shared-frame guarded enhanced branch. Failures target the outer frame's
@@ -167,9 +185,19 @@ pub(super) fn emit_chunk(code: &mut Code, _frame: &numerical::Frame, failures: &
         code.asm().cvtpd2ps(WORK_RIGHT, Rm::Xmm(WORK_RIGHT));
         if upper {
             shuffle(code, WORK_PAIR, ACCUMULATOR, UPPER_TWO_SINGLES);
-            code.asm().addps(WORK_RIGHT, Rm::Xmm(WORK_PAIR));
+            code.asm().float(
+                FloatOp::Add,
+                FloatLanes::PackedSingle,
+                WORK_RIGHT,
+                Rm::Xmm(WORK_PAIR),
+            );
         } else {
-            code.asm().addps(WORK_RIGHT, Rm::Xmm(ACCUMULATOR));
+            code.asm().float(
+                FloatOp::Add,
+                FloatLanes::PackedSingle,
+                WORK_RIGHT,
+                Rm::Xmm(ACCUMULATOR),
+            );
         }
         code.asm().movq_from_xmm(Rax, WORK_RIGHT);
         guard_single(code, failures);

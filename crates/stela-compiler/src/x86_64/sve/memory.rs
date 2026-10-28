@@ -76,7 +76,7 @@ pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize
     }
     load(code, Register::Sp);
     let mut asm = code.asm();
-    asm.test_al_imm8(STACK_ALIGNMENT_MASK);
+    asm.test_accumulator_imm(Size::Byte, i32::from(STACK_ALIGNMENT_MASK));
     let aligned = asm.jcc(Cond::E);
     service::fault(code, MemoryStatus::StackAlignment, pc);
     let mut asm = code.asm();

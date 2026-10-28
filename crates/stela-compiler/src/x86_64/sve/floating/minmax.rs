@@ -1,5 +1,7 @@
 //! SVE single/double min/max. NaNs, subnormals and zero/zero ties use software
 //! completion.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
 use crate::x86_64::asm::Gpr::Rax;
 use crate::x86_64::asm::{Code, Cond, Rm, Size};
 use crate::{
@@ -134,10 +136,10 @@ pub(super) fn selection(code: &mut Code, operation: MinMaxOperation, format: For
     );
     let mut asm = code.asm();
     match (format == Format::Double, minimum) {
-        (true, true) => asm.minpd(LEFT, Rm::Xmm(RIGHT)),
-        (true, false) => asm.maxpd(LEFT, Rm::Xmm(RIGHT)),
-        (false, true) => asm.minps(LEFT, Rm::Xmm(RIGHT)),
-        (false, false) => asm.maxps(LEFT, Rm::Xmm(RIGHT)),
+        (true, true) => asm.float(FloatOp::Min, FloatLanes::PackedDouble, LEFT, Rm::Xmm(RIGHT)),
+        (true, false) => asm.float(FloatOp::Max, FloatLanes::PackedDouble, LEFT, Rm::Xmm(RIGHT)),
+        (false, true) => asm.float(FloatOp::Min, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT)),
+        (false, false) => asm.float(FloatOp::Max, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT)),
     }
 }
 

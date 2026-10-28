@@ -1,6 +1,7 @@
 //! SME integer outer products.
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Size};
-use crate::x86_64::simd::encode::{BitTest, stack};
+use crate::x86_64::simd::encode::stack;
 use crate::{
     TargetCpu,
     aarch64::{

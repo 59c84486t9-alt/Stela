@@ -359,6 +359,7 @@ mod breaks {
     //! Only packed P storage is accessed. RDI/R15 and the host stack survive.
     //! Results use XMM0-3; flag-setting forms other than BRKN keep Pg in
     //! XMM4-7.
+    use crate::x86_64::asm::BitTest;
     use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx};
     use crate::x86_64::asm::{Alu, Code, Cond, Mem, Size, Unary};
 
@@ -398,7 +399,7 @@ mod breaks {
             asm.bsr(Size::Qword, Rcx, Rax);
             read_predicate_chunk(code, source, chunk, length);
             let mut asm = code.asm();
-            asm.bt(Size::Qword, Rax, Rcx);
+            asm.bit(BitTest::Bt, Size::Qword, Rax, Rcx);
             asm.alu(Alu::Sbb, Size::Qword, R10, R10);
             completed.push(asm.jmp());
             asm.bind(absent);

@@ -2,8 +2,9 @@
 use super::super::isa::ShiftOpcode;
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::aarch64::floating::{FPCR_AH, FPCR_NEP};
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Size};
-use crate::x86_64::simd::encode::{BitTest, cond, guest};
+use crate::x86_64::simd::encode::{cond, guest};
 use crate::{
     TargetCpu,
     aarch64::simd::floating::{Operand, SignOperation},

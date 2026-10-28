@@ -1,5 +1,7 @@
 //! SVE FRECPE/FRSQRTE tables on normal values. Host RCP/RSQRT approximations
 //! are never used; integer DIV and a masked SQRTSD compute the exact table values.
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdi, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, Rm, ShiftOp, Size, Unary};
 use crate::{
@@ -46,7 +48,7 @@ enum Operation {
 }
 
 fn test_ah(code: &mut Code) {
-    code.asm().test_imm32(
+    code.asm().test_imm(
         Size::Dword,
         Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
         FPCR_AH as i32,
@@ -118,7 +120,7 @@ fn guard_normal(code: &mut Code, operation: Operation, format: Format, failures:
     asm.alu_imm32(Alu::Cmp, Size::Dword, R8, ceiling as i32);
     failures.push(asm.jcc(Cond::Ae).offset());
     if operation == Operation::ReciprocalSquareRoot {
-        asm.bt_imm(Size::Qword, Rax, (format.bits() - 1) as u8);
+        asm.bit_imm(BitTest::Bt, Size::Qword, Rax, (format.bits() - 1) as u8);
         failures.push(asm.jcc(Cond::B).offset());
     }
 }
@@ -180,7 +182,7 @@ fn midpoint(code: &mut Code, operation: Operation, format: Format, dynamic: bool
         );
     } else {
         let mut asm = code.asm();
-        asm.test_byte_imm(R8, 1);
+        asm.test_imm(Size::Byte, R8, 1);
         let odd = asm.jcc(Cond::Ne);
         asm.alu_imm8(Alu::And, Size::Dword, Rax, -2);
         asm.lea(
@@ -228,9 +230,11 @@ fn estimate(
         // root is below 2^14; for nonsquares distance to either neighboring
         // integer exceeds 2^-15, while RNE error is at most 2^-40. An exact
         // square rounds exactly. Truncating SQRTSD is consequently isqrt(q).
-        code.asm().cvtsi2sd(Size::Qword, 2, Rax);
+        code.asm()
+            .cvtsi2float(FloatLanes::ScalarDouble, Size::Qword, 2, Rax);
         Host::SquareRootScalarDouble.register(code, ROOT, ROOT, target);
-        code.asm().cvttsd2si(Size::Qword, Rax, Rm::Xmm(2));
+        code.asm()
+            .cvtfloat2si(FloatLanes::ScalarDouble, true, Size::Qword, Rax, Rm::Xmm(2));
     }
     let mut asm = code.asm();
     asm.alu_imm8(Alu::Add, Size::Dword, Rax, 1);

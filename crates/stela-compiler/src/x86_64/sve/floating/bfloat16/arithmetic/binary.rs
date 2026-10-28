@@ -154,8 +154,7 @@ fn load_right(
 /// This conservative check also rejects directed/inactive cross-lane ties; it
 /// never accepts an ambiguous nearest-even double rounding.
 fn midpoint_guard(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
-    code.asm()
-        .test_imm32(Size::Dword, Rcx, MXCSR_INEXACT as i32);
+    code.asm().test_imm(Size::Dword, Rcx, MXCSR_INEXACT as i32);
     let exact = branch(code, Condition::Zero);
     Host::MoveAligned.register(code, TEMPORARY, SOURCE, target);
     ShiftOpcode::LeftDword.emit(code, TEMPORARY, u32::BITS as u8 - DISCARDED_BITS);
@@ -260,7 +259,7 @@ pub(in crate::x86_64) fn emit(
             // p8 product has at most sixteen bits and is exact at Single p24.
             numerical::capture_status(code, &frame);
             code.asm()
-                .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
+                .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
             failures.push(branch(code, Condition::NotZero));
             if operation != BinaryOperation::Multiply {
                 let mut asm = code.asm();

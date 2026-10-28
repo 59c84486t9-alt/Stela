@@ -1,5 +1,7 @@
 //! SVE half-precision FDOT and FMLALB/FMLALT. Half products are exact singles, so
 //! the pair add and accumulator add keep their two separate roundings.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
 use crate::x86_64::asm::Gpr::{Rax, Rcx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
@@ -181,15 +183,30 @@ fn dot(code: &mut Code, operand: Operand, recipe: Recipe, target: TargetCpu) {
         widen(code, RIGHT_HIGH, recipe, target);
     }
     let mut asm = code.asm();
-    asm.mulps(LEFT, Rm::Xmm(RIGHT));
-    asm.mulps(LEFT_HIGH, Rm::Xmm(if indexed { RIGHT } else { RIGHT_HIGH }));
+    asm.float(FloatOp::Mul, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT));
+    asm.float(
+        FloatOp::Mul,
+        FloatLanes::PackedSingle,
+        LEFT_HIGH,
+        Rm::Xmm(if indexed { RIGHT } else { RIGHT_HIGH }),
+    );
     asm.simd(Host::MoveAligned, RIGHT_HIGH, Rm::Xmm(LEFT), target);
     asm.shufps(LEFT, Rm::Xmm(LEFT_HIGH), EVEN_PRODUCT_ORDER);
     asm.shufps(RIGHT_HIGH, Rm::Xmm(LEFT_HIGH), ODD_PRODUCT_ORDER);
-    asm.addps(LEFT, Rm::Xmm(RIGHT_HIGH));
+    asm.float(
+        FloatOp::Add,
+        FloatLanes::PackedSingle,
+        LEFT,
+        Rm::Xmm(RIGHT_HIGH),
+    );
     // The preceding ADDPS is the architectural FPDot rounding. This ADDPS is
     // a separate FPAdd; never combine either with an accumulator FMA.
-    asm.addps(LEFT, Rm::Xmm(ADDEND));
+    asm.float(
+        FloatOp::Add,
+        FloatLanes::PackedSingle,
+        LEFT,
+        Rm::Xmm(ADDEND),
+    );
 }
 
 fn multiply_long(code: &mut Code, subtract: bool, recipe: Recipe, target: TargetCpu) {
@@ -213,12 +230,22 @@ fn multiply_long(code: &mut Code, subtract: bool, recipe: Recipe, target: Target
         );
     } else {
         let mut asm = code.asm();
-        asm.mulps(LEFT, Rm::Xmm(RIGHT));
+        asm.float(FloatOp::Mul, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT));
         if subtract {
-            asm.subps(ADDEND, Rm::Xmm(LEFT));
+            asm.float(
+                FloatOp::Sub,
+                FloatLanes::PackedSingle,
+                ADDEND,
+                Rm::Xmm(LEFT),
+            );
             asm.simd(Host::MoveAligned, LEFT, Rm::Xmm(ADDEND), target);
         } else {
-            asm.addps(LEFT, Rm::Xmm(ADDEND));
+            asm.float(
+                FloatOp::Add,
+                FloatLanes::PackedSingle,
+                LEFT,
+                Rm::Xmm(ADDEND),
+            );
         }
     }
 }
@@ -305,7 +332,7 @@ pub(in crate::x86_64) fn emit_candidate(
     }
     numerical::capture_status(code, &frame);
     code.asm()
-        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, &mut failures);
     let mut asm = code.asm();
     asm.mov(Size::Dword, Rax, Rcx);

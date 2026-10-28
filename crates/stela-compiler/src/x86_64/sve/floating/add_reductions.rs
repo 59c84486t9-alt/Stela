@@ -145,7 +145,7 @@ impl Tree {
 fn status(code: &mut Code, frame: &numerical::Frame, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
     code.asm()
-        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     failures.push(branch(code, Condition::NotZero));
     let mut asm = code.asm();
     asm.mov(Size::Dword, Rax, Rcx);
@@ -189,7 +189,7 @@ fn pairwise(
             }
             code.asm()
                 .simd_to_gpr(Host::ByteSignMask, Rax, FIRST_SUBTREE, target);
-            code.asm().test_al_imm8(1);
+            code.asm().test_accumulator_imm(Size::Byte, 1);
             let inactive = branch(code, Condition::Zero);
             guard_active_exception_enables(code, FIRST_SUBTREE, features, failures, target);
             let source = if lane % 2 == 0 { left } else { right };

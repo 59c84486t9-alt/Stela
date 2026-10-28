@@ -9,8 +9,9 @@ use super::numerical::{
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::TargetCpu;
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size};
+use crate::x86_64::asm::{BitTest, FloatLanes};
 use crate::x86_64::isa::ShiftOpcode;
-use crate::x86_64::simd::encode::{BitTest, FloatLanes, guest};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestAddress,
     aarch64::{

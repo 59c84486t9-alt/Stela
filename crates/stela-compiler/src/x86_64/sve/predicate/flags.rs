@@ -1,4 +1,5 @@
 //! Incremental NZCV for predicate-setting instructions (PTEST semantics).
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdi, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Mem, ShiftOp, Size};
 
@@ -38,7 +39,7 @@ pub(crate) fn accumulate_predtest(code: &mut Code, element: crate::aarch64::scal
     let seen = code.asm().jcc(Cond::Ne);
     let mut asm = code.asm();
     asm.bsf(Size::Qword, Rcx, Rdx);
-    asm.bt(Size::Qword, Rax, Rcx);
+    asm.bit(BitTest::Bt, Size::Qword, Rax, Rcx);
     asm.setcc(Cond::B, Rcx);
     asm.movzx(Size::Dword, Rcx, Size::Byte, Rcx);
     asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, NZCV_N_SHIFT);
@@ -46,7 +47,7 @@ pub(crate) fn accumulate_predtest(code: &mut Code, element: crate::aarch64::scal
     code.asm().bind(seen);
     let mut asm = code.asm();
     asm.bsr(Size::Qword, Rcx, Rdx);
-    asm.bt(Size::Qword, Rax, Rcx);
+    asm.bit(BitTest::Bt, Size::Qword, Rax, Rcx);
     asm.setcc(Cond::Ae, Rcx);
     asm.movzx(Size::Dword, Rcx, Size::Byte, Rcx);
     asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, NZCV_C_SHIFT);

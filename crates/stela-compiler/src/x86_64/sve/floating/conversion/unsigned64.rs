@@ -1,5 +1,8 @@
 //! SSE2 conversions between single/double and unsigned 64-bit integers. The
 //! caller owns the MXCSR frame, lane guards and staging.
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
 use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
@@ -23,9 +26,9 @@ fn check(format: Format) {
 fn convert_from_integer(code: &mut Code, format: Format) {
     let mut asm = code.asm();
     if format == Format::Single {
-        asm.cvtsi2ss(Size::Qword, SCALAR, Rax);
+        asm.cvtsi2float(FloatLanes::ScalarSingle, Size::Qword, SCALAR, Rax);
     } else {
-        asm.cvtsi2sd(Size::Qword, SCALAR, Rax);
+        asm.cvtsi2float(FloatLanes::ScalarDouble, Size::Qword, SCALAR, Rax);
     }
 }
 
@@ -33,9 +36,21 @@ fn convert_from_integer(code: &mut Code, format: Format) {
 fn convert_to_integer(code: &mut Code, format: Format) {
     let mut asm = code.asm();
     if format == Format::Single {
-        asm.cvttss2si(Size::Qword, Rax, Rm::Xmm(SCALAR));
+        asm.cvtfloat2si(
+            FloatLanes::ScalarSingle,
+            true,
+            Size::Qword,
+            Rax,
+            Rm::Xmm(SCALAR),
+        );
     } else {
-        asm.cvttsd2si(Size::Qword, Rax, Rm::Xmm(SCALAR));
+        asm.cvtfloat2si(
+            FloatLanes::ScalarDouble,
+            true,
+            Size::Qword,
+            Rax,
+            Rm::Xmm(SCALAR),
+        );
     }
 }
 
@@ -70,9 +85,19 @@ pub(crate) fn from_integer(code: &mut Code, format: Format) {
     // the rounded-up 2^63 quotient. Only the CVTSI can contribute host PE.
     let mut asm = code.asm();
     if format == Format::Single {
-        asm.addss(SCALAR, Rm::Xmm(SCALAR));
+        asm.float(
+            FloatOp::Add,
+            FloatLanes::ScalarSingle,
+            SCALAR,
+            Rm::Xmm(SCALAR),
+        );
     } else {
-        asm.addsd(SCALAR, Rm::Xmm(SCALAR));
+        asm.float(
+            FloatOp::Add,
+            FloatLanes::ScalarDouble,
+            SCALAR,
+            Rm::Xmm(SCALAR),
+        );
     }
     let done = asm.jmp();
     asm.bind(low);
@@ -97,13 +122,23 @@ pub(crate) fn to_integer(code: &mut Code, format: Format, failures: &mut Vec<usi
     // signed X; restoring bit63 reconstructs the unsigned integer exactly.
     // >=2^64 and infinities instead raise private invalid and must roll back.
     if format == Format::Single {
-        asm.subss(SCALAR, Rm::Xmm(TEMPORARY));
+        asm.float(
+            FloatOp::Sub,
+            FloatLanes::ScalarSingle,
+            SCALAR,
+            Rm::Xmm(TEMPORARY),
+        );
     } else {
-        asm.subsd(SCALAR, Rm::Xmm(TEMPORARY));
+        asm.float(
+            FloatOp::Sub,
+            FloatLanes::ScalarDouble,
+            SCALAR,
+            Rm::Xmm(TEMPORARY),
+        );
     }
     convert_to_integer(code, format);
     let mut asm = code.asm();
-    asm.bts_imm(Size::Qword, Rax, INTEGER_HIGH_BIT);
+    asm.bit_imm(BitTest::Bts, Size::Qword, Rax, INTEGER_HIGH_BIT);
     let done = asm.jmp();
     asm.bind(low);
     convert_to_integer(code, format);
@@ -111,7 +146,7 @@ pub(crate) fn to_integer(code: &mut Code, format: Format, failures: &mut Vec<usi
     // negative integer result, not the input sign. Private invalid catches the
     // signed sentinel too; the bit test alone never establishes success.
     let mut asm = code.asm();
-    asm.bt_imm(Size::Qword, Rax, INTEGER_HIGH_BIT);
+    asm.bit_imm(BitTest::Bt, Size::Qword, Rax, INTEGER_HIGH_BIT);
     failures.push(asm.jcc(Cond::B).offset());
     asm.bind(done);
 }

@@ -148,7 +148,7 @@ pub(in crate::x86_64) fn emit(
         code.asm().cvtpd2ps(0, Rm::Xmm(1));
         numerical::capture_status(code, &frame);
         code.asm()
-            .test_imm32(Size::Dword, Rcx, MXCSR_REJECTED_STATUS as i32);
+            .test_imm(Size::Dword, Rcx, MXCSR_REJECTED_STATUS as i32);
         failure(code, &mut failures);
         let mut asm = code.asm();
         asm.mov(Size::Dword, Rax, Rcx);

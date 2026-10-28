@@ -3,6 +3,7 @@
 use super::super::{isa::SimdOpcode as Host, scalable};
 use super::memory as common;
 use super::predicate::{emit_prepared_counter_chunk, prepare_counter};
+use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{Rax, Rcx, Rsp};
 use crate::x86_64::asm::{Alu, Code, Cond, Mem, Size, resolve};
 use crate::{
@@ -205,7 +206,7 @@ pub(crate) fn emit(
     let loop_start = code.len();
     let mut asm = code.asm();
     asm.mov_load(Size::Qword, Rcx, stack(INDEX_OFFSET));
-    asm.bt(Size::Qword, stack(MASK_OFFSET), Rcx);
+    asm.bit(BitTest::Bt, Size::Qword, stack(MASK_OFFSET), Rcx);
     let inactive = asm.jcc(Cond::Ae);
     asm.mov_load(Size::Qword, Rax, stack(ADDRESS_OFFSET));
     asm.alu(Alu::Add, Size::Qword, Rax, Rcx);

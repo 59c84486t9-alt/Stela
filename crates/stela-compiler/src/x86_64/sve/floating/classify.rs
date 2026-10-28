@@ -163,7 +163,7 @@ pub(in crate::x86_64) fn guard_active_exception_enables(
     let mut asm = code.asm();
     asm.test(Size::Dword, Rax, Rax);
     let inactive = asm.jcc(Cond::E);
-    asm.test_imm32(
+    asm.test_imm(
         Size::Dword,
         Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
         FPCR_EXCEPTION_ENABLE_MASK as i32,

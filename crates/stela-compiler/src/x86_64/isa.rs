@@ -1,7 +1,7 @@
 //! x86 SIMD opcodes and their minimum CPU features, emitted through the
 //! typed encoder with the emitter's register, memory and immediate operands.
 use crate::TargetCpu;
-use crate::x86_64::asm::{Code, Gpr, Map, Mem, Pp, Rm, Size, Vex};
+use crate::x86_64::asm::{Asm, Code, Gpr, Map, Mem, Pp, Rm, Size, Vex};
 use crate::x86_64::simd::encode::gpr;
 
 /// How a catalog opcode is encoded.
@@ -259,26 +259,7 @@ impl SimdOpcode {
     }
     /// This opcode with ModRM.reg `register` and r/m `rm`.
     pub(crate) fn emit(self, code: &mut Code, register: u8, rm: impl Into<Rm>, target: TargetCpu) {
-        self.check(target);
-        let mut asm = code.asm();
-        match self.form() {
-            Form::Sse(prefix, opcode) => asm.sse(prefix, opcode, register, rm),
-            Form::Wide(prefix, opcode) => {
-                asm.legacy(Size::Qword, prefix, opcode, register, false, rm.into());
-            }
-            Form::Vex(pp, map, opcode) => asm.vex(
-                Vex {
-                    map,
-                    pp,
-                    w: false,
-                    l: false,
-                },
-                opcode,
-                register,
-                0,
-                rm.into(),
-            ),
-        }
+        code.asm().simd(self, register, rm, target);
     }
     /// [`Self::emit`] with an 8-bit immediate.
     pub(crate) fn emit_imm(
@@ -312,6 +293,61 @@ impl SimdOpcode {
     ) {
         self.register(code, destination, source, target);
         code.asm().data(&[immediate]);
+    }
+}
+
+impl Asm<'_> {
+    /// The catalog instruction `opcode` with ModRM.reg `register` and r/m
+    /// `rm`; the selected CPU must provide its features.
+    pub(crate) fn simd(
+        &mut self,
+        opcode: SimdOpcode,
+        register: u8,
+        rm: impl Into<Rm>,
+        target: TargetCpu,
+    ) {
+        opcode.check(target);
+        match opcode.form() {
+            Form::Sse(prefix, bytes) => self.sse(prefix, bytes, register, rm),
+            Form::Wide(prefix, bytes) => {
+                self.legacy(Size::Qword, prefix, bytes, register, false, rm.into());
+            }
+            Form::Vex(pp, map, byte) => self.vex(
+                Vex {
+                    map,
+                    pp,
+                    w: false,
+                    l: false,
+                },
+                byte,
+                register,
+                0,
+                rm.into(),
+            ),
+        }
+    }
+    /// The catalog instruction `opcode` writing general-purpose
+    /// `destination` from `xmm` (PMOVMSKB, MOVMSKPS).
+    pub(crate) fn simd_to_gpr(
+        &mut self,
+        opcode: SimdOpcode,
+        destination: Gpr,
+        xmm: u8,
+        target: TargetCpu,
+    ) {
+        self.simd(opcode, destination as u8, Rm::Xmm(xmm), target);
+    }
+    /// [`Self::simd`] with an 8-bit immediate.
+    pub(crate) fn simd_imm(
+        &mut self,
+        opcode: SimdOpcode,
+        register: u8,
+        rm: impl Into<Rm>,
+        immediate: u8,
+        target: TargetCpu,
+    ) {
+        self.simd(opcode, register, rm, target);
+        self.data(&[immediate]);
     }
 }
 
@@ -544,5 +580,67 @@ mod tests {
             opcode.register(&mut code, 0, 1, target);
             assert_eq!(code, [&encoding[..], &[0xc1]].concat());
         }
+    }
+
+    #[test]
+    fn catalog_forms_match_their_encodings() {
+        use Gpr::*;
+        let one = |build: &dyn Fn(&mut Asm)| {
+            let mut code = Code::new();
+            build(&mut code.asm());
+            assert_eq!(code.instructions(), 1);
+            code
+        };
+        let v3 = TargetCpu::X86_64_V3;
+        for (expected, code) in [
+            (
+                &[0x66, 0x0f, 0xdb, 0xca][..],
+                one(&|a| a.simd(SimdOpcode::And, 1, Rm::Xmm(2), v3)),
+            ),
+            (
+                &[0x66, 0x48, 0x0f, 0x6e, 0xf8],
+                one(&|a| a.simd(SimdOpcode::MoveGprQword, 7, Rax, v3)),
+            ),
+            (
+                &[0x0f, 0x50, 0xc1],
+                one(&|a| a.simd_to_gpr(SimdOpcode::DwordSignMask, Rax, 1, v3)),
+            ),
+            (
+                &[0x66, 0x0f, 0x70, 0xc1, 0x1b],
+                one(&|a| a.simd_imm(SimdOpcode::ShuffleDword, 0, Rm::Xmm(1), 0x1b, v3)),
+            ),
+            (
+                &[0xf3, 0x0f, 0x6f, 0x87, 8, 1, 0, 0],
+                one(&|a| {
+                    a.simd(
+                        SimdOpcode::LoadUnaligned,
+                        0,
+                        Mem::base_disp32(Rdi, 0x108),
+                        v3,
+                    )
+                }),
+            ),
+            (
+                &[0xc4, 0xe2, 0x79, 0x13, 0xc1],
+                one(&|a| a.simd(SimdOpcode::ConvertHalfToSingle, 0, Rm::Xmm(1), v3)),
+            ),
+            (
+                &[0xc4, 0xe3, 0x79, 0x1d, 0xc8, 4],
+                one(&|a| a.simd_imm(SimdOpcode::ConvertSingleToHalf, 1, Rm::Xmm(0), 4, v3)),
+            ),
+        ] {
+            assert_eq!(code, expected);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "selected CPU requirements cannot emit pmulld")]
+    fn catalog_forms_require_their_features() {
+        Code::new().asm().simd(
+            SimdOpcode::MultiplyLowDword,
+            0,
+            Rm::Xmm(1),
+            TargetCpu::Baseline,
+        );
     }
 }
