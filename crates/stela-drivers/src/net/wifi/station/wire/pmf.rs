@@ -12,6 +12,7 @@ const MFPC: u16 = 1 << 7;
 const EXTENDED_KEY_ID: u16 = 1 << 13;
 const SAE: u8 = 8;
 const SAE_EXT_KEY: u8 = 24;
+const OWE: u8 = 18;
 
 /// Original exact selected RSNE and bounded negotiated policy. Only parsing
 /// the explicit opt-in constructor creates it. Actual OS authentication and
@@ -56,8 +57,14 @@ impl Selection {
         }
         let pairwise = cipher(&profile.pairwise[0])?;
         let akm = profile.akms[0];
-        if akm[..3] != [0, 15, 172] || !matches!(akm[3], 1 | 2 | SAE | SAE_EXT_KEY) {
-            return Err(Error::Unsupported("PMF RSN AKM1/2 or SAE only"));
+        // 802.1X and PSK, their SHA-256 forms, Suite B and OWE authenticate
+        // open-system, the key derivation being the supplicant's, as neither
+        // mac80211 nor mt7925 looks at them; SAE runs in the OS first. FT
+        // (3, 4, 9, 13) needs FT authentication and reassociation.
+        if akm[..3] != [0, 15, 172]
+            || !matches!(akm[3], 1 | 2 | 5 | 6 | 11 | 12 | OWE | SAE | SAE_EXT_KEY)
+        {
+            return Err(Error::Unsupported("PMF RSN AKM"));
         }
         Ok(Self {
             rsn: bytes.to_vec(),
@@ -204,6 +211,15 @@ mod tests {
         selection.validate_peer(&ie(&bytes), &ie(&bytes)).unwrap();
         // An AP whose RSNE omits the suite uses BIP-CMAC-128.
         assert!(selection.validate_peer(&ie(&bytes[..22]), &[]).is_err());
+        let mut akm = bytes.clone();
+        for suite in [5, 6, 11, 12, 18, 3, 4, 9, 13] {
+            akm[17] = suite;
+            let ft = matches!(suite, 3 | 4 | 9 | 13);
+            assert_eq!(
+                Selection::parse(&akm).map(|s| s.sae()).ok(),
+                (!ft).then_some(false)
+            );
+        }
     }
 
     #[test]
