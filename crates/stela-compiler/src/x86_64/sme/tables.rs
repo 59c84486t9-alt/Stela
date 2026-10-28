@@ -1,6 +1,7 @@
 //! SME2 multi-vector permutes, specialized to the streaming vector length.
 //! Sources are staged whole so aliases are preserved across chunks.
 use crate::x86_64::asm::Code;
+use crate::x86_64::simd::encode::stack;
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES, VectorLength};
@@ -13,35 +14,22 @@ mod lookup;
 
 const MAX_SOURCE_REGISTERS: usize = 4;
 const MAX_PRIVATE_FRAME_BYTES: usize = MAX_SOURCE_REGISTERS * MAX_VECTOR_BYTES;
-const MODRM_STACK_DISP32: u8 = 0x84;
-const SIB_STACK: u8 = 0x24;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-
 fn stack_chunk(code: &mut Code, load: bool, offset: usize, xmm: u8, target: TargetCpu) {
     if load {
         Host::LoadUnaligned
     } else {
         Host::StoreUnaligned
     }
-    .append(code, target);
-    code.extend([
-        MODRM_STACK_DISP32 | (xmm << MODRM_REGISTER_SHIFT),
-        SIB_STACK,
-    ]);
-    code.extend((offset as u32).to_le_bytes());
+    .emit(code, xmm, stack(offset), target);
 }
 
 fn allocate_frame(code: &mut Code, bytes: usize) {
     assert!(bytes <= MAX_PRIVATE_FRAME_BYTES && bytes.is_multiple_of(VECTOR_CHUNK_BYTES));
-    code.extend(SUB_RSP_IMM32);
-    code.extend((bytes as u32).to_le_bytes());
+    code.asm().reserve_stack(bytes);
 }
 
 fn release_frame(code: &mut Code, bytes: usize) {
-    code.extend(ADD_RSP_IMM32);
-    code.extend((bytes as u32).to_le_bytes());
+    code.asm().release_stack(bytes);
 }
 
 fn stage(code: &mut Code, sources: &[u8], length: VectorLength, target: TargetCpu) {

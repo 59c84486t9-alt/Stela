@@ -1,5 +1,6 @@
 //! SME integer ZA arithmetic.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 mod long;
 mod outer;
 
@@ -19,11 +20,6 @@ use crate::{
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
 const GPR_BYTES: usize = core::mem::size_of::<u64>();
-const MOV_ECX_STATE_DISP32: &[u8] = &[0x8b, 0x8f];
-const ADD_ECX_IMM8: &[u8] = &[0x83, 0xc1];
-const AND_ECX_IMM8: &[u8] = &[0x83, 0xe1];
-const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
-const ADD_R8_RCX: &[u8] = &[0x49, 0x01, 0xc8];
 
 pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, target: TargetCpu) {
     match operand {
@@ -60,22 +56,28 @@ fn emit_add_sub(
         _ => unreachable!("integer ZA add/sub has 32- or 64-bit elements"),
     };
     load_za_pointer_r8(code);
-    code.extend(MOV_ECX_STATE_DISP32);
-    code.extend(
-        ((core::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES) as u32)
-            .to_le_bytes(),
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Dword,
+        Gpr::Rcx,
+        guest(
+            (core::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES)
+                as u32,
+        ),
     );
     if operand.offset != 0 {
-        code.extend(ADD_ECX_IMM8);
-        code.push(operand.offset);
+        asm.alu_imm8(Alu::Add, Size::Dword, Gpr::Rcx, operand.offset as i8);
     }
     // All accepted SME lengths and group counts are powers of two. Low32
     // addition followed by this mask equals UInt(Wselector)+offset modulo stride.
-    code.extend(AND_ECX_IMM8);
-    code.push((stride - 1) as u8);
-    code.extend(SHL_RCX_IMM8);
-    code.push(length.bytes().trailing_zeros() as u8);
-    code.extend(ADD_R8_RCX);
+    asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rcx, (stride - 1) as i8);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Qword,
+        Gpr::Rcx,
+        length.bytes().trailing_zeros() as u8,
+    );
+    asm.alu(Alu::Add, Size::Qword, Gpr::R8, Gpr::Rcx);
     for group in 0..operand.groups {
         for chunk in 0..length.chunks() {
             let displacement =

@@ -20,6 +20,11 @@ pub(in crate::x86_64) const fn cond(number: u8) -> Cond {
     CONDITIONS[(number & 0xf) as usize]
 }
 
+/// `[rsp + offset]` with a 32-bit displacement: a private stack slot.
+pub(in crate::x86_64) const fn stack(offset: usize) -> Mem {
+    Mem::base_disp32(Gpr::Rsp, offset as i32)
+}
+
 /// `[rdi + offset]` in GuestState, with a 32-bit displacement.
 pub(in crate::x86_64) const fn guest(offset: u32) -> Mem {
     Mem::base_disp32(Gpr::Rdi, offset as i32)
@@ -57,6 +62,8 @@ macro_rules! sse_imm {
 sse! {
     /// `movlhps xmm, xmm`: the low qword of the source to the high qword.
     movlhps => None, [0x0f, 0x16];
+    /// `movhps xmm, m64`: memory to the high qword.
+    movhps => None, [0x0f, 0x16];
     /// `movhlps xmm, xmm`: the high qword of the source to the low qword.
     movhlps => None, [0x0f, 0x12];
     /// `movq m64, xmm` (66 0F D6), named by its register first.
@@ -135,6 +142,24 @@ pub(in crate::x86_64) enum BitTest {
 }
 
 impl Asm<'_> {
+    /// `sub rsp, imm32`: reserve `bytes` of private stack.
+    pub(in crate::x86_64) fn reserve_stack(&mut self, bytes: usize) {
+        self.alu_imm32(
+            crate::x86_64::asm::Alu::Sub,
+            Size::Qword,
+            Gpr::Rsp,
+            bytes as i32,
+        );
+    }
+    /// `add rsp, imm32`: release `bytes` of private stack.
+    pub(in crate::x86_64) fn release_stack(&mut self, bytes: usize) {
+        self.alu_imm32(
+            crate::x86_64::asm::Alu::Add,
+            Size::Qword,
+            Gpr::Rsp,
+            bytes as i32,
+        );
+    }
     /// `op{ps,ss,pd,sd} xmm, xmm/m`.
     pub(in crate::x86_64) fn float(
         &mut self,
@@ -195,6 +220,18 @@ impl Asm<'_> {
             false,
             rm.into(),
         );
+    }
+    /// `pextrq r/m64, xmm, imm8` (66 REX.W 0F 3A 16, SSE4.1).
+    pub(in crate::x86_64) fn pextrq(&mut self, rm: impl Into<Rm>, xmm: u8, lane: u8) {
+        self.legacy(
+            Size::Qword,
+            Some(0x66),
+            &[0x0f, 0x3a, 0x16],
+            xmm,
+            false,
+            rm.into(),
+        );
+        self.data(&[lane]);
     }
     /// `vzeroupper` (AVX).
     pub(in crate::x86_64) fn vzeroupper(&mut self) {
@@ -347,6 +384,18 @@ mod tests {
         assert_eq!(one(|a| a.dec(Size::Dword, R8)), [0x41, 0xff, 0xc8]);
         assert_eq!(one(|a| a.inc(Size::Qword, Rcx)), [0x48, 0xff, 0xc1]);
         assert_eq!(
+            one(|a| a.reserve_stack(0x40)),
+            [0x48, 0x81, 0xec, 0x40, 0, 0, 0]
+        );
+        assert_eq!(
+            one(|a| a.release_stack(0x40)),
+            [0x48, 0x81, 0xc4, 0x40, 0, 0, 0]
+        );
+        assert_eq!(
+            one(|a| a.mov_load(Size::Dword, Rax, stack(8))),
+            [0x8b, 0x84, 0x24, 8, 0, 0, 0]
+        );
+        assert_eq!(
             one(|a| a.bit_imm(BitTest::Btr, Size::Qword, Rax, 63)),
             [0x48, 0x0f, 0xba, 0xf0, 63]
         );
@@ -378,6 +427,14 @@ mod tests {
             [0xf3, 0x0f, 0x2c, 0xc0]
         );
         assert_eq!(one(|a| a.pextrw(Rax, 0, 0)), [0x66, 0x0f, 0xc5, 0xc0, 0]);
+        assert_eq!(
+            one(|a| a.pextrq(Mem::base_disp32(R8, 0x40), 1, 1)),
+            [0x66, 0x49, 0x0f, 0x3a, 0x16, 0x88, 0x40, 0, 0, 0, 1]
+        );
+        assert_eq!(
+            one(|a| a.movhps(2, Mem::base_disp32(R8, 8))),
+            [0x41, 0x0f, 0x16, 0x90, 8, 0, 0, 0]
+        );
         assert_eq!(
             one(|a| a.pextrw(Rcx, 9, 3)),
             [0x66, 0x41, 0x0f, 0xc5, 0xc9, 3]

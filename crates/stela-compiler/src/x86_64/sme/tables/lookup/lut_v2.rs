@@ -1,38 +1,20 @@
 //! SME_LUTv2: LUTI4 with two index vectors, and MOVT to ZT0.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Mem};
 
 use super::super::{allocate_frame, release_frame, stage};
-use super::{MOV_R8_CONTEXT_DISP8, MOV_R8_R8_DISP8, XMM0, load_packed_indexes, prepare_planes};
+use super::{TABLE, XMM0, load_packed_indexes, prepare_planes, table_pointer};
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, LOOKUP_TABLE_BYTES, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sme::lut_v2::Operand;
-use crate::context::{EXECUTION_CONTEXT_SCALABLE_OFFSET, SCALABLE_ZT0_OFFSET};
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{load_z_chunk, lut, store_z_chunk};
 
 const INDEX_BITS: u8 = 4;
 const RESULT_XMM: u8 = 6;
 const ZERO_XMM: u8 = 1;
-const MODRM_DISP32_R8: u8 = 0x80;
-const REGISTER_SHIFT: u8 = 3;
-const REX_R8_BASE: u8 = 0x41;
-
-fn table_pointer(code: &mut Code) {
-    code.extend(MOV_R8_CONTEXT_DISP8);
-    code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
-    code.extend(MOV_R8_R8_DISP8);
-    code.push(SCALABLE_ZT0_OFFSET as u8);
-}
 
 fn store_table_chunk(code: &mut Code, xmm: u8, offset: usize, target: TargetCpu) {
-    assert!(target.supports(Host::StoreUnaligned.requires()));
-    let opcode = Host::StoreUnaligned.encoding();
-    // REX.B selects R8 after the mandatory REP prefix and before the opcode.
-    code.push(opcode[0]);
-    code.push(REX_R8_BASE);
-    code.extend(&opcode[1..]);
-    code.push(MODRM_DISP32_R8 | (xmm << REGISTER_SHIFT));
-    code.extend((offset as u32).to_le_bytes());
+    Host::StoreUnaligned.emit(code, xmm, Mem::base_disp32(TABLE, offset as i32), target);
 }
 
 pub(in crate::x86_64) fn emit(

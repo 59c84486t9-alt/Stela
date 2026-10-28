@@ -1,13 +1,11 @@
 //! LUTI2/LUTI4 from ZT0 with scalar gathers, SSE2 selects and SSSE3 shuffles.
 //! ZT0 entries always have a 32-bit stride. Scratch registers are XMM0-7.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::simd::encode::stack;
 
 pub(super) mod lut_v2;
 
-use super::{
-    MODRM_REGISTER_SHIFT, MODRM_STACK_DISP32, SIB_STACK, allocate_frame, release_frame,
-    stack_chunk, stage,
-};
+use super::{allocate_frame, release_frame, stack_chunk, stage};
 use crate::TargetCpu;
 use crate::aarch64::scalable::{
     BITS_PER_BYTE, ElementSize, LOOKUP_TABLE_BYTES, VECTOR_CHUNK_BYTES, VectorLength,
@@ -29,8 +27,6 @@ const FIRST_INDEX_SPREAD_SHIFT: u8 = 12;
 const SECOND_INDEX_SPREAD_SHIFT: u8 = 6;
 const TABLE_ENTRY_BYTE_SHIFT: u8 = 2;
 const NIBBLE_BITS: u8 = 4;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_DISP8: u8 = 0x40;
 const XMM0: u8 = 0;
 const XMM1: u8 = 1;
 const XMM2: u8 = 2;
@@ -39,24 +35,8 @@ const XMM4: u8 = 4;
 const XMM5: u8 = 5;
 const XMM6: u8 = 6;
 const XMM7: u8 = 7;
-const MOV_R8_CONTEXT_DISP8: &[u8] = &[0x4d, 0x8b, 0x47];
-const MOV_R8_R8_DISP8: &[u8] = &[0x4d, 0x8b, 0x40];
-const MOV_EAX_IMM32: &[u8] = &[0xb8];
-const MOVABS_RAX_IMM64: &[u8] = &[0x48, 0xb8];
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const MOVQ_XMM_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e];
-const MOVDQU_XMM_R8_DISP8: &[u8] = &[0xf3, 0x41, 0x0f, 0x6f];
-const MOVD_XMM_STACK_DISP32: &[u8] = &[0x66, 0x0f, 0x6e];
-const MOVQ_XMM_STACK_DISP32: &[u8] = &[0xf3, 0x0f, 0x7e];
-const MOVZX_EAX_BYTE: &[u8] = &[0x0f, 0xb6];
-const MOVZX_EAX_WORD: &[u8] = &[0x0f, 0xb7];
-const MOVZX_EAX_STACK_BYTE: &[u8] = &[0x0f, 0xb6, 0x84, SIB_STACK];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
-const MOV_EDX_R8_RAX_SCALE4: &[u8] = &[0x41, 0x8b, 0x14, 0x80];
-const MOV_STACK_DL: &[u8] = &[0x88, 0x94, SIB_STACK];
-const MOV_STACK_DX: &[u8] = &[0x66, 0x89, 0x94, SIB_STACK];
-const MOV_STACK_EDX: &[u8] = &[0x89, 0x94, SIB_STACK];
+/// R8 points at ZT0 while a lookup runs.
+const TABLE: Gpr = Gpr::R8;
 
 const INDEX_SPLIT_NIBBLE_MASK: u32 = 0x000f_000f;
 const TWO_BIT_BYTE_MASK: u32 = 0x0303_0303;
@@ -80,10 +60,22 @@ fn stage_source_and_table(
 ) {
     allocate_frame(code, frame_bytes);
     stage(code, &[source], length, target);
-    code.extend(MOV_R8_CONTEXT_DISP8);
-    code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
-    code.extend(MOV_R8_R8_DISP8);
-    code.push(SCALABLE_ZT0_OFFSET as u8);
+    table_pointer(code);
+}
+
+/// `mov r8, [r15 + scalable]; mov r8, [r8 + zt0]`: R8 points at ZT0.
+fn table_pointer(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Qword,
+        TABLE,
+        Mem::base_disp8(Gpr::R15, EXECUTION_CONTEXT_SCALABLE_OFFSET as i8),
+    );
+    asm.mov_load(
+        Size::Qword,
+        TABLE,
+        Mem::base_disp8(TABLE, SCALABLE_ZT0_OFFSET as i8),
+    );
 }
 
 fn lookup_scalar(
@@ -108,24 +100,39 @@ fn lookup_scalar(
             for lane in 0..VECTOR_CHUNK_BYTES / operand.element.bytes() {
                 let global_lane = chunk * (VECTOR_CHUNK_BYTES / operand.element.bytes()) + lane;
                 let index_bit = (base + global_lane) * usize::from(index_bits);
-                code.extend(MOVZX_EAX_STACK_BYTE);
-                code.extend(((index_bit / BITS_PER_BYTE) as u32).to_le_bytes());
+                let mut asm = code.asm();
+                asm.movzx(
+                    Size::Dword,
+                    Gpr::Rax,
+                    Size::Byte,
+                    stack(index_bit / BITS_PER_BYTE),
+                );
                 if !index_bit.is_multiple_of(BITS_PER_BYTE) {
-                    code.extend(SHR_EAX_IMM8);
-                    code.push((index_bit % BITS_PER_BYTE) as u8);
+                    asm.shift_imm(
+                        ShiftOp::Shr,
+                        Size::Dword,
+                        Gpr::Rax,
+                        (index_bit % BITS_PER_BYTE) as u8,
+                    );
                 }
-                code.extend(AND_EAX_IMM8);
-                code.push((1 << index_bits) - 1);
+                asm.alu_imm8(
+                    Alu::And,
+                    Size::Dword,
+                    Gpr::Rax,
+                    ((1 << index_bits) - 1) as i8,
+                );
                 // All ZT0 entries are 32 bits, even for Byte/Halfword outputs.
-                code.extend(MOV_EDX_R8_RAX_SCALE4);
-                code.extend(match operand.element {
-                    ElementSize::Byte => MOV_STACK_DL,
-                    ElementSize::Halfword => MOV_STACK_DX,
-                    ElementSize::Word => MOV_STACK_EDX,
+                asm.mov_load(Size::Dword, Gpr::Rdx, Mem::indexed(TABLE, Gpr::Rax, 4, 0));
+                let size = match operand.element {
+                    ElementSize::Byte => Size::Byte,
+                    ElementSize::Halfword => Size::Word,
+                    ElementSize::Word => Size::Dword,
                     _ => unreachable!("LUTI output is at most Word"),
-                });
-                code.extend(
-                    ((output_offset + lane * operand.element.bytes()) as u32).to_le_bytes(),
+                };
+                asm.mov_store(
+                    size,
+                    stack(output_offset + lane * operand.element.bytes()),
+                    Gpr::Rdx,
                 );
             }
             stack_chunk(code, true, output_offset, XMM0, target);
@@ -143,18 +150,15 @@ fn lookup_scalar(
 }
 
 fn splat_dword(code: &mut Code, xmm: u8, value: u32, target: TargetCpu) {
-    code.extend(MOV_EAX_IMM32);
-    code.extend(value.to_le_bytes());
-    code.extend(MOVD_XMM_EAX);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT));
-    Host::ShuffleDword.register(code, xmm, xmm, target);
-    code.push(REPEAT_FIRST_ELEMENT);
+    let mut asm = code.asm();
+    asm.mov_imm32(Gpr::Rax, value);
+    asm.movd_to_xmm(xmm, Gpr::Rax);
+    Host::ShuffleDword.register_imm(code, xmm, xmm, REPEAT_FIRST_ELEMENT, target);
 }
 fn qword_constant(code: &mut Code, xmm: u8, value: u64) {
-    code.extend(MOVABS_RAX_IMM64);
-    code.extend(value.to_le_bytes());
-    code.extend(MOVQ_XMM_RAX);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.mov_imm64(Gpr::Rax, value);
+    asm.movq_to_xmm(xmm, Gpr::Rax);
 }
 fn transpose_constant(code: &mut Code, target: TargetCpu) {
     qword_constant(code, XMM0, LOCAL_BYTE_TRANSPOSE_LOW);
@@ -162,8 +166,12 @@ fn transpose_constant(code: &mut Code, target: TargetCpu) {
     Host::UnpackLowQword.register(code, XMM0, XMM1, target);
 }
 fn load_table_chunk(code: &mut Code, xmm: u8, offset: u8) {
-    code.extend(MOVDQU_XMM_R8_DISP8);
-    code.extend([MODRM_DISP8 | (xmm << MODRM_REGISTER_SHIFT), offset]);
+    Host::LoadUnaligned.emit(
+        code,
+        xmm,
+        Mem::base_disp8(TABLE, offset as i8),
+        TargetCpu::Baseline,
+    );
 }
 fn prepare_planes(code: &mut Code, element: ElementSize, target: TargetCpu) {
     for i in 0..ZT0_CHUNKS {
@@ -208,25 +216,13 @@ fn prepare_planes(code: &mut Code, element: ElementSize, target: TargetCpu) {
 fn load_packed_indexes(code: &mut Code, bytes: usize, offset: usize) {
     match bytes {
         1 | 2 => {
-            code.extend(if bytes == 1 {
-                MOVZX_EAX_BYTE
-            } else {
-                MOVZX_EAX_WORD
-            });
-            code.extend([MODRM_STACK_DISP32, SIB_STACK]);
-            code.extend((offset as u32).to_le_bytes());
-            code.extend(MOVD_XMM_EAX);
-            code.push(MODRM_REGISTER);
+            let from = if bytes == 1 { Size::Byte } else { Size::Word };
+            let mut asm = code.asm();
+            asm.movzx(Size::Dword, Gpr::Rax, from, stack(offset));
+            asm.movd_to_xmm(XMM0, Gpr::Rax);
         }
-        4 | 8 => {
-            code.extend(if bytes == 4 {
-                MOVD_XMM_STACK_DISP32
-            } else {
-                MOVQ_XMM_STACK_DISP32
-            });
-            code.extend([MODRM_STACK_DISP32, SIB_STACK]);
-            code.extend((offset as u32).to_le_bytes());
-        }
+        4 => code.asm().movd_to_xmm(XMM0, stack(offset)),
+        8 => Host::MoveQword.emit(code, XMM0, stack(offset), TargetCpu::Baseline),
         _ => unreachable!("LUTI packs one, two, four or eight source bytes per output chunk"),
     }
 }
@@ -418,18 +414,33 @@ fn lookup_sse2_poly(
     stage_source_and_table(code, source, length.bytes(), length, target);
     load_table_chunk(code, XMM0, 0);
     for i in 0..LUTI2_TABLE_ENTRIES {
-        Host::ShuffleDword.register(code, XMM4 + i, XMM0, target);
-        code.push(DWORD_REPEAT_SELECTORS[usize::from(i)]);
+        Host::ShuffleDword.register_imm(
+            code,
+            XMM4 + i,
+            XMM0,
+            DWORD_REPEAT_SELECTORS[usize::from(i)],
+            target,
+        );
         match operand.element {
             ElementSize::Byte => {
                 Host::UnpackLowByte.register(code, XMM4 + i, XMM4 + i, target);
                 Host::UnpackLowWord.register(code, XMM4 + i, XMM4 + i, target);
-                Host::ShuffleDword.register(code, XMM4 + i, XMM4 + i, target);
-                code.push(REPEAT_FIRST_ELEMENT);
+                Host::ShuffleDword.register_imm(
+                    code,
+                    XMM4 + i,
+                    XMM4 + i,
+                    REPEAT_FIRST_ELEMENT,
+                    target,
+                );
             }
             ElementSize::Halfword => {
-                Host::ShuffleLowWord.register(code, XMM4 + i, XMM4 + i, target);
-                code.push(REPEAT_FIRST_ELEMENT);
+                Host::ShuffleLowWord.register_imm(
+                    code,
+                    XMM4 + i,
+                    XMM4 + i,
+                    REPEAT_FIRST_ELEMENT,
+                    target,
+                );
                 Host::UnpackLowQword.register(code, XMM4 + i, XMM4 + i, target);
             }
             _ => unreachable!("Polynomial lookup has Byte/Halfword output"),

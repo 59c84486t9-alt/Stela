@@ -1,5 +1,6 @@
 //! Long integer accumulation into ZA rows.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestState, TargetCpu,
     aarch64::{
@@ -29,12 +30,6 @@ const REPEAT_HIGH_QWORD: u8 = 0xee;
 const HALFWORDS_PER_QWORD: u8 = 4;
 const BYTES_PER_DWORD: u8 = core::mem::size_of::<u32>() as u8;
 const GPR_BYTES: usize = core::mem::size_of::<u64>();
-const MOV_ECX_STATE_DISP32: &[u8] = &[0x8b, 0x8f];
-const ADD_ECX_IMM8: &[u8] = &[0x83, 0xc1];
-const AND_ECX_IMM8: &[u8] = &[0x83, 0xe1];
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
-const ADD_R8_RCX: &[u8] = &[0x49, 0x01, 0xc8];
 
 /// Recipe controls; the parent selects the mapping.
 #[derive(Clone, Copy)]
@@ -57,20 +52,22 @@ impl Recipe {
 }
 
 fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, destination, source, target);
-    code.push(control);
+    Host::ShuffleDword.register_imm(code, destination, source, control, target);
 }
 
 fn za_pointer(code: &mut Code, operand: &LongOperation, length: VectorLength) {
     load_za_pointer_r8(code);
-    code.extend(MOV_ECX_STATE_DISP32);
-    code.extend(
-        ((core::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES) as u32)
-            .to_le_bytes(),
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Dword,
+        Gpr::Rcx,
+        guest(
+            (core::mem::offset_of!(GuestState, x) + usize::from(operand.selector) * GPR_BYTES)
+                as u32,
+        ),
     );
     if operand.offset != 0 {
-        code.extend(ADD_ECX_IMM8);
-        code.push(operand.offset);
+        asm.alu_imm8(Alu::Add, Size::Dword, Gpr::Rcx, operand.offset as i8);
     }
     // Accepted SME lengths, group counts and component counts are powers of two.
     // Low32 addition retains the exact mathematical result modulo the partition.
@@ -78,15 +75,17 @@ fn za_pointer(code: &mut Code, operand: &LongOperation, length: VectorLength) {
     let partition_rows = length.bytes() / usize::from(operand.group_size);
     let row_mask = ((partition_rows - 1) & !(usize::from(operand.factor) - 1)) as u32;
     if row_mask <= i8::MAX as u32 {
-        code.extend(AND_ECX_IMM8);
-        code.push(row_mask as u8);
+        asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rcx, row_mask as i8);
     } else {
-        code.extend(AND_ECX_IMM32);
-        code.extend(row_mask.to_le_bytes());
+        asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rcx, row_mask as i32);
     }
-    code.extend(SHL_RCX_IMM8);
-    code.push(length.bytes().trailing_zeros() as u8);
-    code.extend(ADD_R8_RCX);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Qword,
+        Gpr::Rcx,
+        length.bytes().trailing_zeros() as u8,
+    );
+    asm.alu(Alu::Add, Size::Qword, Gpr::R8, Gpr::Rcx);
 }
 
 fn broadcast_word(code: &mut Code, index: u8, target: TargetCpu) {
@@ -96,8 +95,13 @@ fn broadcast_word(code: &mut Code, index: u8, target: TargetCpu) {
     } else {
         Host::ShuffleLowWord
     })
-    .register(code, PRODUCT_RIGHT, PRODUCT_RIGHT, target);
-    code.push((index % HALFWORDS_PER_QWORD) * DWORD_BROADCAST);
+    .register_imm(
+        code,
+        PRODUCT_RIGHT,
+        PRODUCT_RIGHT,
+        (index % HALFWORDS_PER_QWORD) * DWORD_BROADCAST,
+        target,
+    );
     shuffle(
         code,
         PRODUCT_RIGHT,

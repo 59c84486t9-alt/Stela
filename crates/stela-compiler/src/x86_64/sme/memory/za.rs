@@ -1,11 +1,12 @@
 //! ZA and ZT0 staging and slice addressing.
 use super::{
-    ADD_RAX_IMM32, SHL_RAX_IMM8, Scratch, Transfer, VALUE_XMM, ZT_BYTES, check_sp, load_guest,
-    pointer, stack_load, stack_store, stack_vector, transfer_loop,
+    Scratch, Transfer, VALUE_XMM, ZT_BYTES, check_sp, load_guest, pointer, scalar_transfer, slot,
+    stack_load, stack_store, stack_vector, transfer_loop,
 };
 use crate::aarch64::sme::memory::TileTransfer;
 use crate::context::{SCALABLE_ZA_OFFSET, SCALABLE_ZT0_OFFSET};
 use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Cond, Gpr, Mem, ShiftOp, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -18,50 +19,34 @@ use crate::{
 use alloc::vec::Vec;
 
 const ZA_PACKED_PREDICATE_BYTES: usize = size_of::<u64>();
-const ZA_LEA_R9_RSP_DISP32: &[u8] = &[0x4c, 0x8d, 0x8c, 0x24];
-const ZA_ADD_R8_IMM32: &[u8] = &[0x49, 0x81, 0xc0];
-const ZA_ADD_R9_IMM8: &[u8] = &[0x49, 0x83, 0xc1];
-const ZA_MOV_ECX_IMM32: &[u8] = &[0xb9];
-const ZA_DEC_ECX: &[u8] = &[0xff, 0xc9];
-const ZA_JNZ_REL32: &[u8] = &[0x0f, 0x85];
-const ZA_LOAD_BYTE_R9: &[u8] = &[0x41, 0x0f, 0xb6, 0x01];
-const ZA_LOAD_HALFWORD_R9: &[u8] = &[0x41, 0x0f, 0xb7, 0x01];
-const ZA_LOAD_WORD_R9: &[u8] = &[0x41, 0x8b, 0x01];
-const ZA_LOAD_DOUBLEWORD_R9: &[u8] = &[0x49, 0x8b, 0x01];
-const ZA_STORE_BYTE_R9: &[u8] = &[0x41, 0x88, 0x01];
-const ZA_STORE_HALFWORD_R9: &[u8] = &[0x66, 0x41, 0x89, 0x01];
-const ZA_STORE_WORD_R9: &[u8] = &[0x41, 0x89, 0x01];
-const ZA_STORE_DOUBLEWORD_R9: &[u8] = &[0x49, 0x89, 0x01];
-const ZA_LOAD_XMM0_R9: &[u8] = &[0xf3, 0x41, 0x0f, 0x6f, 0x01];
-const ZA_STORE_XMM0_R9: &[u8] = &[0xf3, 0x41, 0x0f, 0x7f, 0x01];
-const ZA_ADD_EAX_IMM32: &[u8] = &[0x05];
-const ZA_AND_EAX_IMM32: &[u8] = &[0x25];
-const ZA_ADD_R8_RAX: &[u8] = &[0x49, 0x01, 0xc0];
-const ZA_ADD_RAX_RSP_DISP32: &[u8] = &[0x48, 0x03, 0x84, 0x24];
-const ZA_LOAD_BYTE_R8_DISP32: &[u8] = &[0x41, 0x0f, 0xb6, 0x80];
-const ZA_LOAD_HALFWORD_R8_DISP32: &[u8] = &[0x41, 0x0f, 0xb7, 0x80];
-const ZA_LOAD_WORD_R8_DISP32: &[u8] = &[0x41, 0x8b, 0x80];
-const ZA_LOAD_DOUBLEWORD_R8_DISP32: &[u8] = &[0x49, 0x8b, 0x80];
-const ZA_STORE_BYTE_R8_DISP32: &[u8] = &[0x41, 0x88, 0x80];
-const ZA_STORE_HALFWORD_R8_DISP32: &[u8] = &[0x66, 0x41, 0x89, 0x80];
-const ZA_STORE_WORD_R8_DISP32: &[u8] = &[0x41, 0x89, 0x80];
-const ZA_STORE_DOUBLEWORD_R8_DISP32: &[u8] = &[0x49, 0x89, 0x80];
+/// R8 walks the selected ZA rows; R9 walks the staged elements.
+const ZA_CURSOR: Gpr = Gpr::R8;
+const STAGING_CURSOR: Gpr = Gpr::R9;
+
+/// `add r8, imm32`.
+fn za_advance(code: &mut Code, bytes: usize) {
+    code.asm().alu_imm32(
+        Alu::Add,
+        Size::Qword,
+        ZA_CURSOR,
+        u32::try_from(bytes).expect("ZA offset fits imm32") as i32,
+    );
+}
 
 fn za_add_rax(code: &mut Code, immediate: usize) {
     if immediate != 0 {
-        code.extend(ADD_RAX_IMM32);
-        code.extend(
-            u32::try_from(immediate)
-                .expect("ZA offset fits imm32")
-                .to_le_bytes(),
+        code.asm().alu_accumulator_imm32(
+            Alu::Add,
+            Size::Qword,
+            u32::try_from(immediate).expect("ZA offset fits imm32") as i32,
         );
     }
 }
 
 fn za_shift_rax(code: &mut Code, shift: u32) {
     if shift != 0 {
-        code.extend(SHL_RAX_IMM8);
-        code.push(shift as u8);
+        code.asm()
+            .shift_imm(ShiftOp::Shl, Size::Qword, Gpr::Rax, shift as u8);
     }
 }
 
@@ -69,15 +54,14 @@ fn za_selector(code: &mut Code, register: u8, offset: u8, count: usize, scale: u
     debug_assert!(count.is_power_of_two() && scale.is_power_of_two());
     load_guest(code, Register::X(register));
     // Addition modulo32 is equivalent before the power-of-two slice modulus.
+    let mut asm = code.asm();
     if offset != 0 {
-        code.extend(ZA_ADD_EAX_IMM32);
-        code.extend(u32::from(offset).to_le_bytes());
+        asm.alu_accumulator_imm32(Alu::Add, Size::Dword, offset.into());
     }
-    code.extend(ZA_AND_EAX_IMM32);
-    code.extend(
-        u32::try_from(count - 1)
-            .expect("ZA selector mask fits u32")
-            .to_le_bytes(),
+    asm.alu_accumulator_imm32(
+        Alu::And,
+        Size::Dword,
+        u32::try_from(count - 1).expect("ZA selector mask fits u32") as i32,
     );
     za_shift_rax(code, scale.trailing_zeros());
 }
@@ -90,24 +74,17 @@ fn za_selected_pointer(code: &mut Code, field: u32, selector: Option<u32>) {
     }
     if let Some(offset) = selector {
         stack_load(code, offset);
-        code.extend(ZA_ADD_R8_RAX);
+        code.asm().alu(Alu::Add, Size::Qword, ZA_CURSOR, Gpr::Rax);
     }
 }
 
 fn za_scalar_memory(code: &mut Code, load: bool, bytes: usize, offset: u32) {
-    let encoding = match (load, bytes) {
-        (true, 1) => ZA_LOAD_BYTE_R8_DISP32,
-        (true, 2) => ZA_LOAD_HALFWORD_R8_DISP32,
-        (true, 4) => ZA_LOAD_WORD_R8_DISP32,
-        (true, 8) => ZA_LOAD_DOUBLEWORD_R8_DISP32,
-        (false, 1) => ZA_STORE_BYTE_R8_DISP32,
-        (false, 2) => ZA_STORE_HALFWORD_R8_DISP32,
-        (false, 4) => ZA_STORE_WORD_R8_DISP32,
-        (false, 8) => ZA_STORE_DOUBLEWORD_R8_DISP32,
-        _ => unreachable!("ZA scalar transfers require 1,2,4 or8 bytes"),
-    };
-    code.extend(encoding);
-    code.extend(offset.to_le_bytes());
+    scalar_transfer(
+        code,
+        load,
+        bytes,
+        Mem::base_disp32(ZA_CURSOR, offset as i32),
+    );
 }
 
 // Copy one internal-state chunk to/from staging; no guest RAM is accessed here.
@@ -144,17 +121,7 @@ fn za_copy_bank(
 }
 
 fn za_staging_pointer_scalar(code: &mut Code, load: bool, bytes: usize) {
-    code.extend(match (load, bytes) {
-        (true, 1) => ZA_LOAD_BYTE_R9,
-        (true, 2) => ZA_LOAD_HALFWORD_R9,
-        (true, 4) => ZA_LOAD_WORD_R9,
-        (true, 8) => ZA_LOAD_DOUBLEWORD_R9,
-        (false, 1) => ZA_STORE_BYTE_R9,
-        (false, 2) => ZA_STORE_HALFWORD_R9,
-        (false, 4) => ZA_STORE_WORD_R9,
-        (false, 8) => ZA_STORE_DOUBLEWORD_R9,
-        _ => unreachable!("ZA scalar transfers require 1,2,4 or8 bytes"),
-    });
+    scalar_transfer(code, load, bytes, Mem::base(STAGING_CURSOR, 0));
 }
 
 fn za_copy_tile(
@@ -183,24 +150,22 @@ fn za_copy_tile(
     // loop makes no callbacks.
     za_selected_pointer(code, SCALABLE_ZA_OFFSET, Some(scratch.selector));
     if transfer.tile != 0 {
-        code.extend(ZA_ADD_R8_IMM32);
-        code.extend((u32::from(transfer.tile) * bytes as u32).to_le_bytes());
+        za_advance(code, usize::from(transfer.tile) * bytes);
     }
-    code.extend(ZA_LEA_R9_RSP_DISP32);
-    code.extend(scratch.data.to_le_bytes());
-    code.extend(ZA_MOV_ECX_IMM32);
-    code.extend(
-        u32::try_from(bytes / element)
-            .expect("ZA lane count fits u32")
-            .to_le_bytes(),
+    let mut asm = code.asm();
+    asm.lea(Size::Qword, STAGING_CURSOR, slot(scratch.data));
+    asm.mov_imm32(
+        Gpr::Rcx,
+        u32::try_from(bytes / element).expect("ZA lane count fits u32"),
     );
     let loop_start = code.len();
+    let staged = Mem::base(STAGING_CURSOR, 0);
     if element == VECTOR_CHUNK_BYTES {
         if to_staging {
             crate::x86_64::scalable_matrix::load_za_chunk_at_r8(code, 0, 0, target);
-            code.extend(ZA_STORE_XMM0_R9);
+            Host::StoreUnaligned.emit(code, 0, staged, TargetCpu::Baseline);
         } else {
-            code.extend(ZA_LOAD_XMM0_R9);
+            Host::LoadUnaligned.emit(code, 0, staged, TargetCpu::Baseline);
             crate::x86_64::scalable_matrix::store_za_chunk_at_r8(code, 0, 0, target);
         }
     } else if to_staging {
@@ -210,18 +175,11 @@ fn za_copy_tile(
         za_staging_pointer_scalar(code, true, element);
         za_scalar_memory(code, false, element, 0);
     }
-    code.extend(ZA_ADD_R8_IMM32);
-    code.extend(
-        u32::try_from(element * bytes)
-            .expect("ZA row stride fits u32")
-            .to_le_bytes(),
-    );
-    code.extend(ZA_ADD_R9_IMM8);
-    code.push(element as u8);
-    code.extend(ZA_DEC_ECX);
-    code.extend(ZA_JNZ_REL32);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
+    za_advance(code, element * bytes);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Add, Size::Qword, STAGING_CURSOR, element as i8);
+    asm.dec(Size::Dword, Gpr::Rcx);
+    let displacement = asm.jcc(Cond::Ne).offset();
     crate::x86_64::scalable::memory::patch_branch(code, displacement, loop_start);
 }
 
@@ -271,8 +229,8 @@ fn za_tile_body(
     za_shift_rax(code, element.trailing_zeros());
     stack_store(code, scratch.address);
     load_guest(code, transfer.address.base);
-    code.extend(ZA_ADD_RAX_RSP_DISP32);
-    code.extend(scratch.address.to_le_bytes());
+    code.asm()
+        .alu_load(Alu::Add, Size::Qword, Gpr::Rax, slot(scratch.address));
     stack_store(code, scratch.address);
     let loading = transfer.direction == Direction::Load;
     if loading {

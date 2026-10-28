@@ -1,5 +1,6 @@
 //! SME2 multi-vector integer arithmetic on the shared SVE kernels.
 use crate::x86_64::asm::Code;
+use crate::x86_64::simd::encode::stack;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -11,7 +12,7 @@ use crate::{
         },
     },
     x86_64::{
-        isa::SimdOpcode as Host,
+        isa::{ShiftOpcode, SimdOpcode as Host},
         scalable::{load_z_chunk, store_z_chunk},
         sve::{
             integer_arithmetic::emit_binary_chunk,
@@ -25,14 +26,6 @@ use crate::{
 const RESULT: u8 = 0;
 const RIGHT: u8 = 1;
 const SAVED: u8 = 7;
-const MOD_REGISTER: u8 = 0xc0;
-const MOD_STACK_DISP32: u8 = 0x84;
-const REGISTER_SHIFT: u8 = 3;
-const STACK_SIB: u8 = 0x24;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const PSLLDQ: &[u8] = &[0x66, 0x0f, 0x73];
-const LEFT_BYTES_GROUP: u8 = 7;
 
 fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
@@ -43,12 +36,11 @@ fn copy(code: &mut Code, destination: u8, source: u8) {
 }
 
 fn stack_space(code: &mut Code, bytes: usize, reserve: bool) {
-    code.extend(if reserve {
-        SUB_RSP_IMM32
+    if reserve {
+        code.asm().reserve_stack(bytes);
     } else {
-        ADD_RSP_IMM32
-    });
-    code.extend((bytes as u32).to_le_bytes());
+        code.asm().release_stack(bytes);
+    }
 }
 
 fn stack_chunk(code: &mut Code, register: u8, offset: usize, store: bool, target: TargetCpu) {
@@ -57,16 +49,13 @@ fn stack_chunk(code: &mut Code, register: u8, offset: usize, store: bool, target
     } else {
         Host::LoadUnaligned
     }
-    .append(code, target);
-    code.push(MOD_STACK_DISP32 | (register << REGISTER_SHIFT));
-    code.push(STACK_SIB);
-    code.extend((offset as u32).to_le_bytes());
+    .emit(code, register, stack(offset), target);
 }
 
-fn byte_shift(code: &mut Code, bytes: usize, group: u8) {
+/// Shift the RESULT chunk left by `bytes`.
+fn byte_shift(code: &mut Code, bytes: usize) {
     if bytes != 0 {
-        code.extend(PSLLDQ);
-        code.extend([MOD_REGISTER | group << REGISTER_SHIFT, bytes as u8]);
+        ShiftOpcode::LeftBytes.emit(code, RESULT, bytes as u8);
     }
 }
 
@@ -275,17 +264,9 @@ fn narrow(code: &mut Code, operand: &Narrow, length: VectorLength, target: Targe
             }
             narrow_source_chunk(code, operand, target);
             if operand.interleaved {
-                byte_shift(
-                    code,
-                    piece * operand.destination_element.bytes(),
-                    LEFT_BYTES_GROUP,
-                );
+                byte_shift(code, piece * operand.destination_element.bytes());
             } else {
-                byte_shift(
-                    code,
-                    piece * (VECTOR_CHUNK_BYTES / register_count),
-                    LEFT_BYTES_GROUP,
-                );
+                byte_shift(code, piece * (VECTOR_CHUNK_BYTES / register_count));
             }
             packed(code, Host::Or, SAVED, RESULT);
         }
