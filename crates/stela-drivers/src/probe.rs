@@ -418,18 +418,21 @@ impl Devices {
 /// with its ranges mapped as it says, and nothing else may drive these
 /// controllers afterwards.
 pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
-    // Attached devices keep borrowing their firmware for as long as they
-    // run, so the handoff's catalog lives for the rest of the boot.
+    // SAFETY: the caller granted the complete machine/controller contract.
+    unsafe { probe_with_provider(handoff, dma, handoff_provider(handoff), None) }
+}
+
+/// The handoff's firmware catalog as the provider [`probe_with_provider`]
+/// takes. Attached devices keep borrowing their firmware for as long as
+/// they run, so the catalog lives for the rest of the boot.
+pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffProvider<'static> {
     let catalog = handoff
         .firmware
         .clone()
         // SAFETY: the reference count is never given back, so the catalog
         // stays allocated for every later borrow.
         .map(|catalog| unsafe { &*Arc::into_raw(catalog) });
-    let firmware: &'static crate::firmware::HandoffProvider<'static> =
-        Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)));
-    // SAFETY: the caller granted the complete machine/controller contract.
-    unsafe { probe_with_provider(handoff, dma, firmware, None) }
+    Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)))
 }
 
 /// Enumerate and attach devices using an explicit exact firmware provider.
