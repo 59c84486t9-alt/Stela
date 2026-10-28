@@ -13,16 +13,12 @@ use std::{
 };
 
 const HDIUTIL: &str = "/usr/bin/hdiutil";
-/// Directory of the dyld shared cache inside an OS volume.
-const SHARED_CACHE_DIRECTORY: &str = "System/Library/dyld";
-const SHARED_CACHE_PREFIX: &str = "dyld_shared_cache_arm64e";
 const MAX_SYMLINKS: usize = 32;
 
 /// Guest files to copy; optional paths may be missing from the image.
 pub struct Selection {
     pub required: Vec<String>,
     pub optional: Vec<String>,
-    pub shared_cache: bool,
     pub volume: Option<String>,
 }
 
@@ -177,13 +173,10 @@ fn select_volume<'a>(mounts: &'a [PathBuf], selection: &Selection) -> Result<&'a
             .required
             .iter()
             .all(|path| resolve(volume, path).is_ok())
-            && (!selection.shared_cache || volume.join(SHARED_CACHE_DIRECTORY).is_dir())
     };
     let mut holding = mounts.iter().filter(|volume| holds(volume));
     match (holding.next(), holding.next()) {
-        (Some(volume), None) if !selection.required.is_empty() || selection.shared_cache => {
-            Ok(volume)
-        }
+        (Some(volume), None) if !selection.required.is_empty() => Ok(volume),
         _ => bail!(
             "image mounts {} volumes; select one with --volume",
             mounts.len()
@@ -198,29 +191,12 @@ pub fn copy_into(image: &Path, root: &Path, selection: &Selection) -> Result<Ext
     let attachment = Attachment::new(image, mount_root.path())?;
     let volume = select_volume(&attachment.mounts, selection)?.to_path_buf();
     let volume = volume.as_path();
-    let mut paths: Vec<(String, bool)> = selection
+    let paths: Vec<(String, bool)> = selection
         .required
         .iter()
         .map(|path| (path.clone(), true))
         .chain(selection.optional.iter().map(|path| (path.clone(), false)))
         .collect();
-    if selection.shared_cache {
-        let directory = volume.join(SHARED_CACHE_DIRECTORY);
-        let mut names = vec![];
-        for entry in fs::read_dir(&directory).context("image has no dyld shared cache directory")? {
-            let name = entry?.file_name().to_string_lossy().into_owned();
-            if name.starts_with(SHARED_CACHE_PREFIX) {
-                names.push(name);
-            }
-        }
-        names.sort();
-        ensure!(!names.is_empty(), "image has no arm64e dyld shared cache");
-        paths.extend(
-            names
-                .into_iter()
-                .map(|name| (format!("/{SHARED_CACHE_DIRECTORY}/{name}"), true)),
-        );
-    }
     let mut files = vec![];
     let mut missing = vec![];
     for (guest, required) in paths {
@@ -317,7 +293,6 @@ mod tests {
         let selection = |required: &[&str], volume: Option<&str>| Selection {
             required: required.iter().map(|path| path.to_string()).collect(),
             optional: vec![],
-            shared_cache: false,
             volume: volume.map(str::to_owned),
         };
         assert_eq!(

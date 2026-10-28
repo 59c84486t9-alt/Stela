@@ -77,8 +77,6 @@ pub(crate) use command::Setup;
 pub(crate) use elevation::hold_window;
 pub(crate) use installed::NextBoot;
 pub(crate) use prepare::download_dir;
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-pub(crate) use prepare::fetch_image;
 
 use crate::{efi, restore};
 use anyhow::{Context, Result, bail, ensure};

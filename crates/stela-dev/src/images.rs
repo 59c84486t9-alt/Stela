@@ -137,9 +137,6 @@ pub(crate) struct ExtractGuestFiles {
     /// A guest file path copied when present.
     #[arg(long)]
     optional_path: Vec<String>,
-    /// Also copy every arm64e dyld shared cache file.
-    #[arg(long)]
-    shared_cache: bool,
     /// The mounted volume to read, when the image has several.
     #[arg(long)]
     volume: Option<String>,
@@ -150,7 +147,6 @@ impl ExtractGuestFiles {
         let selection = restore::disk::Selection {
             required: self.path,
             optional: self.optional_path,
-            shared_cache: self.shared_cache,
             volume: self.volume,
         };
         let receipt = restore::disk::extract(&self.image, &self.output, &selection)?;

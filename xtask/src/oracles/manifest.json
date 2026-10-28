@@ -57,14 +57,6 @@
     ]
   },
   {
-    "package": "stela-cli",
-    "test": "map_jit_toggles_benchmark",
-    "source": "crates/stela-cli/tests/hosted.rs",
-    "kind": "manual",
-    "inputs": [],
-    "reason": "a benchmark, run on request"
-  },
-  {
     "package": "stela-compiler",
     "test": "region_census_of_real_code",
     "source": "crates/stela-compiler/src/x86_64/block.rs",

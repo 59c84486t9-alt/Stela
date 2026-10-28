@@ -8,11 +8,6 @@ license.workspace = true
 name = "stela"
 path = "src/main.rs"
 
-# The native program inside each launcher bundle `stela apps` makes.
-[[bin]]
-name = "stela-launcher"
-path = "src/bin/stela-launcher/main.rs"
-
 [dependencies]
 stela-contracts = { path = "../stela-contracts" }
 stela-formats = { path = "../stela-formats", default-features = false }
