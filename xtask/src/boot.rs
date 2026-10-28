@@ -281,6 +281,12 @@ pub struct Run {
         "gdb", "monitor", "icount"
     ])]
     native_mmio_check: bool,
+    /// Give the PC an IOMMU, which the mount takes over for the requesters
+    /// its policy allows: Intel VT-d or AMD-Vi.
+    #[arg(long, value_enum, conflicts_with_all = [
+        "native_dma_check", "native_dma_isolation_check", "native_irq_work_check"
+    ])]
+    iommu: Option<Iommu>,
     /// Expose QEMU's real HPET to the owned Root/MMIO diagnostic.
     #[arg(long, requires = "native_mmio_check")]
     hpet: bool,
@@ -392,6 +398,14 @@ enum PayloadMode {
     Stage,
     /// The same on a virtio disk named by device path and size.
     StagePath,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Iommu {
+    /// QEMU's `intel-iommu`, without interrupt remapping.
+    Intel,
+    /// QEMU's `amd-iommu`, without interrupt remapping.
+    Amd,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -911,7 +925,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     });
     command
         .arg("-machine")
-        .arg(qemu_machine(keyboard, arguments.hpet))
+        .arg(qemu_machine(keyboard, arguments.hpet));
+    // An IOMMU precedes the PCI devices it translates for.
+    match arguments.iommu {
+        Some(Iommu::Intel) => command.args(["-device", "intel-iommu,intremap=off"]),
+        Some(Iommu::Amd) => command.args(["-device", "amd-iommu,intremap=off"]),
+        None => &mut command,
+    };
+    command
         .args([
             "-accel",
             qemu_accelerator(arguments.icount, arguments.kvm),
