@@ -2132,7 +2132,11 @@ fn run_machine<H: Host>(
         ));
         machine.begin_survey();
     }
-    machine.set_idle_skip(options.idle_skip);
+    if let Err(reason) = machine.set_idle_skip(options.idle_skip) {
+        output::arguments(format_args!(
+            "IDLE SKIP unavailable: {reason}; waits use host time\n"
+        ));
+    }
     machine.set_step_timing(options.profile);
     if options.profile {
         output::arguments(format_args!(

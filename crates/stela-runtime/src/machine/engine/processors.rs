@@ -1663,7 +1663,7 @@ mod tests {
             .unwrap();
         machine.settle_processor_power(plan).unwrap();
         machine.host.now = 20;
-        machine.set_idle_skip(true);
+        machine.set_idle_skip(true).unwrap();
         assert_eq!(machine.next_deadline(20), None);
         assert_eq!(machine.schedule(), Err(Stop::Idle));
         assert_eq!(
@@ -2106,12 +2106,12 @@ mod tests {
         // With a limit, after waiting that long (the fake host's waits last
         // 1000 ticks), and idle skip has no deadline to leap to.
         machine.set_wait_limit(Some(2500));
-        machine.set_idle_skip(true);
+        machine.set_idle_skip(true).unwrap();
         assert_eq!(machine.schedule(), Err(Stop::Waiting));
         assert_eq!(machine.host.now, 3000);
         // The limit bounds the run's waits in all: a later one in the same
         // run returns at once.
-        machine.set_idle_skip(false);
+        machine.set_idle_skip(false).unwrap();
         machine.devices.host_wake = false;
         machine.devices.dma = Some(10_000);
         assert_eq!(machine.schedule(), Err(Stop::Waiting));
