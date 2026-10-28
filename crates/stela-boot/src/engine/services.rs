@@ -15,13 +15,14 @@ use stela_boot_core::passthrough::Passthrough;
 use stela_drivers::{
     bus::{
         dma::{mapping::DmaDomain, memory::PageSource},
-        mmio::owned::{self, CacheAttribute, Mapping, Protection},
+        mmio::owned::{self, CacheAttribute, Mapping, PhysicalSpan, Protection},
         pci::{
             Address, Bar, ConfigSpace, Function,
             owned::OwnedConfig,
             requester::{FunctionRole, RequesterBinding, StoppedRequester},
         },
     },
+    platform::acpi::resources::{self, DeviceResources, MemoryBroker, Resource, Space},
     probe::{NativeServices, ServiceError},
 };
 
@@ -50,6 +51,45 @@ pub(super) struct Services<'a> {
     acpi: Option<&'static HostAcpi>,
     heap: core::ops::Range<u64>,
     tsc_hz: u64,
+    /// A broker for each register window [`NativeServices::acpi_memory`]
+    /// reserved, with the window: one device's `_CRS` memory rounded to
+    /// pages, which only that broker suballocates.
+    brokers: core::cell::RefCell<alloc::vec::Vec<(PhysicalSpan, MemoryBroker)>>,
+}
+
+const PAGE: u64 = 4096;
+
+/// The pages memory descriptor `ordinal` of `device` covers, rounded as
+/// [`MemoryBroker::reserve`] rounds it.
+fn acpi_pages(device: &DeviceResources<'_>, ordinal: usize) -> Option<PhysicalSpan> {
+    let Some(Resource::Address(address)) = device
+        .descriptors()
+        .get(ordinal)
+        .map(|descriptor| &descriptor.resource)
+    else {
+        return None;
+    };
+    if address.space != Space::Memory || address.length == 0 {
+        return None;
+    }
+    let start = address.minimum & !(PAGE - 1);
+    let end = address
+        .minimum
+        .checked_add(address.length)?
+        .checked_add(PAGE - 1)?
+        & !(PAGE - 1);
+    PhysicalSpan::new(start, end - start).ok()
+}
+
+/// A broker refusal as a service refusal.
+fn broker_refusal(error: resources::Error) -> ServiceError {
+    ServiceError::Refused(match error {
+        resources::Error::Conflict => "ACPI memory overlaps a reservation",
+        resources::Error::OutsideReservation => "ACPI memory outside its reserved window",
+        resources::Error::Unassigned => "ACPI memory resource is not a fixed consumer range",
+        resources::Error::ResourceChanged => "ACPI resources changed",
+        _ => "ACPI resources could not be read",
+    })
 }
 
 /// The i8042's interrupts (ISA IRQ 1 and 12), masked while probe owns the
@@ -81,6 +121,7 @@ impl<'a> Services<'a> {
             acpi,
             heap,
             tsc_hz,
+            brokers: core::cell::RefCell::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -253,10 +294,37 @@ unsafe impl NativeServices for Services<'_> {
 
     fn acpi_memory(
         &self,
-        _: &stela_drivers::platform::acpi::resources::DeviceResources<'_>,
-        _: usize,
+        device: &DeviceResources<'_>,
+        ordinal: usize,
     ) -> Result<owned::Resource, ServiceError> {
-        Err(ServiceError::Unavailable)
+        if self.acpi.is_none() {
+            return Err(ServiceError::Unavailable);
+        }
+        let pages = acpi_pages(device, ordinal)
+            .ok_or(ServiceError::Refused("no memory resource at that ordinal"))?;
+        let mut brokers = self.brokers.borrow_mut();
+        let at = match brokers
+            .iter()
+            .position(|(window, _)| window.start() <= pages.start() && pages.end() <= window.end())
+        {
+            Some(at) => at,
+            None => {
+                // SAFETY: probe owns the device whose `_CRS` names the span.
+                let root =
+                    unsafe { self.mmio.claim_platform(pages) }.map_err(ServiceError::Mapping)?;
+                // SAFETY: the broker is the only suballocator of the window,
+                // which the aperture reserved outside RAM after EBS.
+                let broker =
+                    unsafe { MemoryBroker::new(alloc::vec![root]) }.map_err(broker_refusal)?;
+                brokers.push((pages, broker));
+                brokers.len() - 1
+            }
+        };
+        brokers[at]
+            .1
+            .reserve(device, ordinal)
+            .map(|reservation| reservation.resource().clone())
+            .map_err(broker_refusal)
     }
 
     fn acpi(&self) -> Option<&stela_drivers::platform::acpi::Session> {

@@ -562,6 +562,31 @@ impl Source {
     }
 }
 
+impl Source {
+    /// Reserve the registers at `span`, which an ACPI device's `_CRS` names,
+    /// when the final memory map leaves them outside RAM and they avoid the
+    /// local APIC. The authority refuses a span that overlaps another
+    /// reservation.
+    ///
+    /// # Safety
+    /// The caller owns the device that decodes the span.
+    pub(crate) unsafe fn claim_platform(&self, span: PhysicalSpan) -> Result<Resource, Error> {
+        if !span.start().is_multiple_of(PAGE) || !span.bytes().is_multiple_of(PAGE) {
+            return Err(Error::InvalidRange);
+        }
+        let apic = crate::apic::base_msr() & crate::apic::BASE_ADDRESS;
+        if !self
+            .platform
+            .wire()
+            .excludes_memory(span.start(), span.end())
+            || (span.start() < apic + PAGE && apic < span.end())
+        {
+            return Err(Error::OutsideResource);
+        }
+        self.reserve(span, ResourceKind::Registers)
+    }
+}
+
 fn in8(port: u16) -> u8 {
     let value: u8;
     // SAFETY: a port read; the caller owns the port.
