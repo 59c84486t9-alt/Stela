@@ -1593,7 +1593,7 @@
   {
     "package": "stela-drivers",
     "test": "actual_pnvm_all_four_skus_stage_both_source_layouts_without_payload_changes",
-    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm_dma.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm_dma/tests/reference.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
@@ -1603,7 +1603,7 @@
   {
     "package": "stela-drivers",
     "test": "unchanged_linux_pnvm_and_reduced_power_contiguous_fragmented_dma",
-    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm_dma.rs",
+    "source": "crates/stela-drivers/src/net/wifi/intel/pnvm_dma/tests/reference.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_IWLWIFI_IMAGES",
