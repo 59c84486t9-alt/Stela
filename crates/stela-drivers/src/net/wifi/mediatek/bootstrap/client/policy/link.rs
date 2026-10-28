@@ -3,7 +3,8 @@
 //! An owning Ethernet link over the already constructed native policy client.
 //! Discovery uses the retained policy client's programmed bands, including
 //! active/passive 6GHz scans. The data profile remains ordinary single-link
-//! 2.4/5GHz WPA2-CCMP128. This creates no PCI/requester/coherency, supplicant,
+//! 2.4/5GHz WPA2 with CCMP or GCMP, with or without protected management
+//! frames. This creates no PCI/requester/coherency, supplicant,
 //! regulatory or physical-radio grant.
 //! The actual platform still supplies the controller and independent drain fences.
 
@@ -671,9 +672,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         join: Join,
         profile: Profile,
     ) -> Result<(), LinkControlError> {
+        // Every pairwise and group cipher an RSN request parses to is one
+        // the client installs, as mt7925_set_key takes CCMP and GCMP.
         if !matches!(join.channel.band, Band::Ghz2 | Band::Ghz5)
             || join.policy != station::PortPolicy::Controlled
-            || join.request.key_ciphers() != Some((Cipher::Ccmp128, Cipher::Ccmp128))
+            || join.request.key_ciphers().is_none()
         {
             return Err(LinkControlError::UnsupportedProfile);
         }
@@ -862,7 +865,10 @@ mod tests {
     use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageGeometry, PinnedPages};
     use crate::net::wifi::mediatek::{
         bootstrap::{
-            client::{modern::tests::modern_inputs, tests::*},
+            client::{
+                modern::tests::{modern_inputs, modern_inputs_cipher},
+                tests::*,
+            },
             tests::*,
         },
         ring::{rx::tests::device_receive, tests::Source},
@@ -1102,6 +1108,29 @@ mod tests {
         assert_eq!(departed[0][..2], [0xc0, 0]);
         assert_eq!(departed[0][24..], 3u16.to_le_bytes());
         retire(&mut link, &model);
+    }
+    #[test]
+    fn the_link_carries_each_aes_cipher_like_mt7925_set_key() {
+        for (suite, length) in [(10, 32), (8, 16), (9, 32)] {
+            let (client, model) = setup_modern();
+            let (join, bss) = modern_inputs_cipher(&client, suite);
+            let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
+            let provider = Provider(
+                Arc::new(AtomicUsize::new(0)),
+                core::sync::atomic::AtomicBool::new(false),
+            );
+            let mut link = ManagedLink::new(client, provider).unwrap();
+            associate(&mut link, &model, join, bss);
+            for (pairwise, index, value) in [(true, 0, 1), (false, 2, 2)] {
+                link.install_key(pairwise, index, &vec![value; length], ReplaySeed::ZERO)
+                    .unwrap();
+            }
+            link.authorize_port(link.station().association_epoch().unwrap())
+                .unwrap();
+            link.transmit(&eth(0x800)).unwrap();
+            assert_ne!(finish_tx(&model)[0][1] & 0x40, 0);
+            stop(&mut link, &model);
+        }
     }
     #[test]
     fn full_data_and_control_queues_retain_native_batches_in_order() {

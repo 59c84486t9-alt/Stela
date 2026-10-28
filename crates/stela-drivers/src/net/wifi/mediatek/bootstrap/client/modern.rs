@@ -548,7 +548,7 @@ pub(super) mod tests {
     ) -> (Join, scan::result::Bss) {
         modern_inputs_cipher(driver, 4)
     }
-    fn modern_inputs_cipher(
+    pub(in super::super) fn modern_inputs_cipher(
         driver: &Client<Bar, Q, NativeGuard>,
         suite: u8,
     ) -> (Join, scan::result::Bss) {
