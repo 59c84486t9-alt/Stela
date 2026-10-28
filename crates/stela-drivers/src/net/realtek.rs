@@ -6,7 +6,7 @@
 // Copyright (c) 2003-2007 Francois Romieu <romieu@fr.zoreil.com>
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
-//! Realtek copper Ethernet, one polled queue without VLAN/checksum/TSO offloads.
+//! Realtek copper Ethernet, one queue without VLAN/checksum/TSO offloads.
 //!
 //! Native Rust adaptation of Linux r8169 at
 //! `a804c5742bff224d4cb4d25dd383554d598be32b`, including its ordered MAC
@@ -45,9 +45,12 @@
 //! Failed DP command ports require reset/reinitialization, without retries.
 //! RTL9151AS retains the raw extended XID, verifies the larger 0x60b4 aperture,
 //! and binds firmware to the full primary/extended identity; unlisted values fail.
+//! Versions 18 and later with a completion signal in the handoff send it
+//! from one MSI-X or MSI vector when a frame arrives or the link changes,
+//! as rtl_alloc_irq allows; earlier versions are polled.
 //! RTL8139, 100Mbps-only chips, ancient unsupported version 01, external PHY
 //! variants, SFP/TBI, DASH stop/release and power lifecycle, suspend/resume,
-//! interrupts and jumbo frames are
+//! and jumbo frames are
 //! outside this slice. This is not a whole-family hardware qualification.
 //!
 //! DMA buffers live until reboot even on startup/transmit errors. OWN is the
@@ -82,6 +85,9 @@ use registers::*;
 pub use revision::Revision;
 use ring::Ring;
 const NBASE_LINK_POLL_US: u64 = 10_000;
+/// The events that send the completion signal: rtl8169's RTL_EVENT_NAPI_RX
+/// and its link change.
+const SIGNALLED_EVENTS: u16 = RX_OK | RX_ERROR | LINK_CHANGE;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -216,6 +222,8 @@ pub struct Realtek {
     /// The PCI function number, which selects per-function OCP state.
     function: u8,
     pub location: String,
+    /// Whether the function's vector sends the handoff's completion signal.
+    signalled: bool,
 }
 impl Realtek {
     pub fn warning(&self) -> Option<Warning> {
@@ -253,8 +261,8 @@ impl Realtek {
             unsafe { pci::disable_aspm_link(function, handoff) }
         })?;
         function.power_up(&handoff.clock)?;
-        let bar = function
-            .bars()
+        let bars = function.bars();
+        let bar = bars
             .into_iter()
             .flatten()
             .find(|b| matches!(b, pci::Bar::Memory { .. }));
@@ -268,6 +276,13 @@ impl Realtek {
         if !revision.nbase() && device.read8(PHY_STATUS) & 0x80 != 0 {
             return Err(BlockError::Unsupported("Realtek TBI/fiber mode").into());
         }
+        // rtl_alloc_irq keeps versions before 18 on INTx, which stays off.
+        let signalled = match handoff.completion {
+            Some(message) if revision.version >= 18 => {
+                function.enable_message(handoff, &bars, message)?
+            }
+            _ => false,
+        };
         let subsystem = function.config().read32(0x2c);
         let mut hardware =
             Hardware::new(&device, &handoff.clock, revision, function.address.function);
@@ -314,6 +329,7 @@ impl Realtek {
                 "{} {} XID {:03x}",
                 function.address, revision.name, revision.xid
             ),
+            signalled,
         };
         net.receive.initialize(true);
         net.transmit.initialize(false);
@@ -323,6 +339,9 @@ impl Realtek {
             let _ =
                 Hardware::new(&net.device, &net.clock, revision, function.address.function).reset();
             return Err(error.into());
+        }
+        if net.signalled {
+            hardware.interrupts_on(SIGNALLED_EVENTS);
         }
         Ok(net)
     }
@@ -706,8 +725,23 @@ impl Link for Realtek {
         kick_transmit(&self.device, self.revision);
         Ok(())
     }
+    fn signals(&self) -> bool {
+        self.signalled
+    }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         self.update_link()?;
+        let frame = self.receive.receive();
+        if frame.is_some() || !self.signalled {
+            return Ok(frame);
+        }
+        // rtl8169_interrupt acknowledges the events it read, so the next
+        // frame or link change raises the vector again. A frame that
+        // arrived before the acknowledgement is in the ring.
+        let hardware = Hardware::new(&self.device, &self.clock, self.revision, self.function);
+        if hardware.acknowledge(SIGNALLED_EVENTS) & LINK_CHANGE != 0 {
+            self.link.last_phy_poll = None;
+            self.update_link()?;
+        }
         Ok(self.receive.receive())
     }
 }
@@ -723,26 +757,23 @@ mod tests {
     use alloc::{collections::BTreeMap, rc::Rc};
     use core::cell::{Cell, RefCell};
 
-    #[test]
-    fn transmit_without_carrier_is_refused_and_leaves_the_ring_untouched() {
+    /// An RTL8169S over `registers` and `memory`, its rings in `memory`.
+    fn modelled(registers: &mut [u32], memory: &mut [u64], signalled: bool) -> Realtek {
         use crate::bus::dma::RegionAllocator;
-        let mut registers = vec![0u32; 64];
-        let mut memory = vec![0u64; 262_144];
         let start = memory.as_mut_ptr() as u64;
-        // SAFETY: the fixture owns both allocations for the driver's lifetime.
+        // SAFETY: the caller owns both allocations for the driver's lifetime.
         let (device, mut dma) = unsafe {
             (
                 Mmio::new(registers.as_mut_ptr() as u64),
                 RegionAllocator::new(start..start + (memory.len() * 8) as u64),
             )
         };
-        let revision = revision::detect(0x0080_0000).unwrap(); // RTL8169S
-        let mut net = Realtek {
+        let revision = revision::detect(0x0080_0000).unwrap();
+        Realtek {
             device,
             clock: Clock {
                 ticks_per_microsecond: 1,
             },
-            // Host test memory lies above 4 GiB; the ring's width is not under test.
             receive: Ring::new(&mut dma, true).unwrap(),
             transmit: Ring::new(&mut dma, true).unwrap(),
             mac: Mac([2, 0, 0, 0, 0, 1]),
@@ -751,7 +782,38 @@ mod tests {
             warning: None,
             function: 0,
             location: "model".into(),
-        };
+            signalled,
+        }
+    }
+
+    /// An empty receive acknowledges the pending receive and link events,
+    /// leaving the others, so the next one raises the vector again.
+    #[test]
+    fn empty_receive_acknowledges_the_signalled_events() {
+        for signalled in [false, true] {
+            let mut registers = vec![0u32; 64];
+            let mut memory = vec![0u64; 262_144];
+            let pending = RX_OK | LINK_CHANGE | 1 << 2;
+            registers[INTERRUPT_STATUS / 4] = u32::from(pending) << 16;
+            let mut net = modelled(&mut registers, &mut memory, signalled);
+            net.receive.initialize(true);
+            assert_eq!(net.signals(), signalled);
+            assert_eq!(net.receive(), Ok(None));
+            let written = (registers[INTERRUPT_STATUS / 4] >> 16) as u16;
+            let acknowledged = if signalled {
+                RX_OK | LINK_CHANGE
+            } else {
+                pending
+            };
+            assert_eq!(written, acknowledged);
+        }
+    }
+
+    #[test]
+    fn transmit_without_carrier_is_refused_and_leaves_the_ring_untouched() {
+        let mut registers = vec![0u32; 64];
+        let mut memory = vec![0u64; 262_144];
+        let mut net = modelled(&mut registers, &mut memory, false);
         net.transmit.initialize(false);
         let descriptors = net.transmit.descriptors.bytes().to_vec();
         assert_eq!(net.transmit(&[0; 60]), Err(LinkError::NoCarrier));

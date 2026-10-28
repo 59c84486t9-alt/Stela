@@ -37,6 +37,11 @@ const COMMAND_INTX_DISABLE: u16 = 1 << 10;
 /// MSI-X Message Control: enable, and mask every vector.
 const MSIX_ENABLE: u16 = 1 << 15;
 const MSIX_FUNCTION_MASK: u16 = 1 << 14;
+/// MSI Message Control: enable, and Multiple Message Enable.
+const MSI_ENABLE: u16 = 1 << 0;
+const MSI_MULTIPLE_ENABLE: u16 = 0b111 << 4;
+/// An MSI-X table entry's bytes.
+const MSIX_ENTRY_BYTES: u64 = 16;
 /// Memory BAR type field: 64-bit (PCI 3.0 §6.2.5.1).
 const BAR_MEMORY_64: u32 = 2 << 1;
 const BAR_MEMORY_TYPE: u32 = 3 << 1;
@@ -493,7 +498,8 @@ impl<C: ConfigSpace> Function<C> {
         let interrupts = self.interrupts();
         if let Some(msi) = interrupts.msi {
             let control = self.config.read16(u16::from(msi.offset) + 2);
-            self.config.write16(u16::from(msi.offset) + 2, control & !1);
+            self.config
+                .write16(u16::from(msi.offset) + 2, control & !MSI_ENABLE);
         }
         if let Some(msix) = interrupts.msix {
             let control = self.config.read16(u16::from(msix.offset) + 2);
@@ -528,6 +534,64 @@ impl<C: ConfigSpace> Function<C> {
         };
         self.config.write16(control, value);
         programmed
+    }
+
+    /// Turn on MSI for a function [`Self::enable_polled`] set up, with one
+    /// vector sending `message`, as Linux's `msi_capability_init` and
+    /// `pci_write_msg_msi` do: the address and data written while MSI is
+    /// off, then MSI enabled with one message.
+    pub fn enable_msi(&mut self, msi: Msi, message: crate::bus::irq::MsiMessage) {
+        let control = u16::from(msi.offset) + 2;
+        let value = self.config.read16(control);
+        self.config
+            .write16(control, value & !(MSI_ENABLE | MSI_MULTIPLE_ENABLE));
+        self.config
+            .write32(u16::from(msi.offset) + 4, message.address as u32);
+        let data = if msi.wide {
+            self.config
+                .write32(u16::from(msi.offset) + 8, (message.address >> 32) as u32);
+            u16::from(msi.offset) + 12
+        } else {
+            u16::from(msi.offset) + 8
+        };
+        self.config.write16(data, message.data as u16);
+        let value = self.config.read16(control);
+        self.config
+            .write16(control, (value & !MSI_MULTIPLE_ENABLE) | MSI_ENABLE);
+    }
+
+    /// Send `message` from the function's first MSI-X entry when its table
+    /// is mapped in `bars`, otherwise from MSI, as Linux's
+    /// `pci_alloc_irq_vectors` tries them for one vector. Whether the
+    /// function offers either.
+    pub fn enable_message(
+        &mut self,
+        handoff: &crate::Handoff,
+        bars: &[Option<Bar>],
+        message: crate::bus::irq::MsiMessage,
+    ) -> Result<bool, BlockError> {
+        let interrupts = self.interrupts();
+        let table = interrupts.msix.and_then(|msix| {
+            let bar = bars.get(usize::from(msix.table_bar)).copied().flatten();
+            crate::registers(handoff, bar, u64::from(msix.table_offset), MSIX_ENTRY_BYTES)
+                .ok()
+                .map(|table| (msix, table))
+        });
+        if let Some((msix, table)) = table {
+            self.enable_msix(msix, || {
+                table.write32(0, message.address as u32);
+                table.write32(4, (message.address >> 32) as u32);
+                table.write32(8, message.data);
+                table.write32(12, 0);
+                Ok(())
+            })?;
+            return Ok(true);
+        }
+        if let Some(msi) = interrupts.msi {
+            self.enable_msi(msi, message);
+            return Ok(true);
+        }
+        Ok(false)
     }
 }
 
@@ -866,6 +930,59 @@ mod tests {
             Err(BlockError::Timeout)
         );
         assert_eq!(function.config().words[16] >> 31, 0, "left off");
+    }
+
+    /// MSI opens with one message once its address and data are written.
+    #[test]
+    fn msi_opens_one_message_after_its_address_and_data() {
+        let mut config = fake();
+        config.words[20] |= 0b011 << 20;
+        let mut function = Function::new(Address::default_for_tests(), config).unwrap();
+        let msi = function.interrupts().msi.unwrap();
+        function.enable_polled();
+        let message = crate::bus::irq::MsiMessage {
+            address: 0x1_fee0_0000,
+            data: 0x4041,
+        };
+        function.enable_msi(msi, message);
+        let words = &function.config().words;
+        assert_eq!(words[21], 0xfee0_0000);
+        assert_eq!(words[22], 1);
+        assert_eq!(words[23] & 0xffff, 0x4041);
+        assert_eq!(words[20] >> 16 & 1, 1, "enabled");
+        assert_eq!(words[20] >> 20 & 0b111, 0, "one message");
+    }
+
+    /// A function whose MSI-X table is not mapped sends its message from
+    /// MSI, MSI-X left off.
+    #[test]
+    fn an_unmapped_msix_table_falls_back_to_msi() {
+        let mut function = Function::new(Address::default_for_tests(), fake()).unwrap();
+        function.enable_polled();
+        let handoff = crate::Handoff {
+            firmware: None,
+            bluetooth_platform: Default::default(),
+            wifi_platform: Default::default(),
+            completion: None,
+            ecam: Vec::new(),
+            mapped: Vec::new(),
+            dma: 0..0,
+            clock: crate::Clock {
+                ticks_per_microsecond: 1,
+            },
+        };
+        let message = crate::bus::irq::MsiMessage {
+            address: 0xfee0_0000,
+            data: 0x41,
+        };
+        assert_eq!(
+            function.enable_message(&handoff, &[None; 6], message),
+            Ok(true)
+        );
+        let words = &function.config().words;
+        assert_eq!(words[16] >> 31, 0, "MSI-X off");
+        assert_eq!(words[20] >> 16 & 1, 1, "MSI on");
+        assert_eq!(words[21], 0xfee0_0000);
     }
 
     #[test]
