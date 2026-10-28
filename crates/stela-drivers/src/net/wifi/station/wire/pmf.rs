@@ -3,11 +3,10 @@
 // net/mac80211/mlme.c. See wifi/THIRD_PARTY.md for the pinned source.
 //! Bounded explicit OS-selected PMF profile. This is parsed policy input,
 //! never an authenticated handshake, installed key or publication permission.
-use super::{Error, elements, take, word};
+use super::{Error, cipher, elements, take, word};
+use crate::net::wifi::security::{Cipher, management::ManagementCipher};
 use alloc::vec::Vec;
 
-const CCMP128: [u8; 4] = [0, 15, 172, 4];
-const BIP_CMAC128: [u8; 4] = [0, 15, 172, 6];
 const MFPR: u16 = 1 << 6;
 const MFPC: u16 = 1 << 7;
 const EXTENDED_KEY_ID: u16 = 1 << 13;
@@ -22,6 +21,9 @@ pub struct Selection {
     rsn: Vec<u8>,
     akm: u8,
     required: bool,
+    pairwise: Cipher,
+    group: Cipher,
+    management: ManagementCipher,
 }
 impl Selection {
     pub fn rsn(&self) -> &[u8] {
@@ -33,6 +35,15 @@ impl Selection {
     pub const fn required(&self) -> bool {
         self.required
     }
+    pub const fn pairwise(&self) -> Cipher {
+        self.pairwise
+    }
+    pub const fn group(&self) -> Cipher {
+        self.group
+    }
+    pub const fn management(&self) -> ManagementCipher {
+        self.management
+    }
     /// Whether the AKM authenticates with SAE (`WLAN_AKM_SUITE_SAE` or
     /// `WLAN_AKM_SUITE_SAE_EXT_KEY`), which the OS runs before association.
     pub const fn sae(&self) -> bool {
@@ -40,9 +51,10 @@ impl Selection {
     }
     pub(super) fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let profile = Profile::parse(bytes)?;
-        if profile.pairwise != [CCMP128] || profile.akms.len() != 1 {
+        if profile.pairwise.len() != 1 || profile.akms.len() != 1 {
             return Err(Error::Unsupported("PMF requires one selected cipher/AKM"));
         }
+        let pairwise = cipher(&profile.pairwise[0])?;
         let akm = profile.akms[0];
         if akm[..3] != [0, 15, 172] || !matches!(akm[3], 1 | 2 | SAE | SAE_EXT_KEY) {
             return Err(Error::Unsupported("PMF RSN AKM1/2 or SAE only"));
@@ -51,6 +63,9 @@ impl Selection {
             rsn: bytes.to_vec(),
             akm: akm[3],
             required: profile.capabilities & MFPR != 0,
+            pairwise,
+            group: profile.group,
+            management: profile.management,
         })
     }
     /// Bind to the actual retained BSS. A response may omit RSNE, as in Linux;
@@ -62,12 +77,24 @@ impl Selection {
     ) -> Result<(), Error> {
         let advertised = rsne(beacon)?.ok_or(Error::Invalid("AP PMF RSN absent"))?;
         let ap = Profile::parse(advertised)?;
-        if !ap.pairwise.contains(&CCMP128) || !ap.akms.contains(&[0, 15, 172, self.akm]) {
+        if ap.group != self.group
+            || ap.management != self.management
+            || !ap
+                .pairwise
+                .iter()
+                .any(|s| cipher(s).ok() == Some(self.pairwise))
+            || !ap.akms.contains(&[0, 15, 172, self.akm])
+        {
             return Err(Error::Invalid("AP does not offer selected PMF suites"));
         }
         if let Some(bytes) = rsne(response)? {
             let selected = Self::parse(bytes)?;
-            if selected.akm != self.akm || selected.required != self.required {
+            if selected.akm != self.akm
+                || selected.required != self.required
+                || selected.pairwise != self.pairwise
+                || selected.group != self.group
+                || selected.management != self.management
+            {
                 return Err(Error::Invalid("response/request PMF mismatch"));
             }
         }
@@ -93,9 +120,11 @@ fn rsne(bytes: &[u8]) -> Result<Option<&[u8]>, Error> {
     Ok(found)
 }
 struct Profile {
+    group: Cipher,
     pairwise: Vec<[u8; 4]>,
     akms: Vec<[u8; 4]>,
     capabilities: u16,
+    management: ManagementCipher,
 }
 fn suites(bytes: &mut &[u8]) -> Result<Vec<[u8; 4]>, Error> {
     let count = usize::from(word(bytes)?);
@@ -107,9 +136,10 @@ fn suites(bytes: &mut &[u8]) -> Result<Vec<[u8; 4]>, Error> {
 }
 impl Profile {
     fn parse(mut bytes: &[u8]) -> Result<Self, Error> {
-        if word(&mut bytes)? != 1 || take(&mut bytes, 4)? != CCMP128 {
-            return Err(Error::Unsupported("PMF RSN version/group cipher"));
+        if word(&mut bytes)? != 1 {
+            return Err(Error::Unsupported("PMF RSN version"));
         }
+        let group = cipher(take(&mut bytes, 4)?)?;
         let pairwise = suites(&mut bytes)?;
         let akms = suites(&mut bytes)?;
         let capabilities = word(&mut bytes)?;
@@ -121,16 +151,24 @@ impl Profile {
             take(&mut bytes, count.checked_mul(16).ok_or(Error::Truncated)?)?;
         }
         // IEEE RSN default management-group suite is BIP-CMAC128 when omitted.
-        if !bytes.is_empty() && take(&mut bytes, 4)? != BIP_CMAC128 {
-            return Err(Error::Unsupported("PMF BIP-CMAC128 only"));
-        }
+        let management = if bytes.is_empty() {
+            ManagementCipher::Cmac128
+        } else {
+            let suite = take(&mut bytes, 4)?;
+            (suite[..3] == [0, 15, 172])
+                .then(|| ManagementCipher::from_suite(suite[3]))
+                .flatten()
+                .ok_or(Error::Unsupported("PMF group management cipher"))?
+        };
         if !bytes.is_empty() {
             return Err(Error::Unsupported("trailing PMF RSN fields"));
         }
         Ok(Self {
+            group,
             pairwise,
             akms,
             capabilities,
+            management,
         })
     }
 }
@@ -147,6 +185,27 @@ mod tests {
     fn ie(bytes: &[u8]) -> Vec<u8> {
         [vec![48, bytes.len() as u8], bytes.to_vec()].concat()
     }
+    #[test]
+    fn pmf_selection_carries_gcmp256_and_bip_gmac256() {
+        // GCMP-256 group and pairwise, SAE, MFPC|MFPR, no PMKIDs, BIP-GMAC-256.
+        let bytes = vec![
+            1, 0, 0, 15, 172, 9, 1, 0, 0, 15, 172, 9, 1, 0, 0, 15, 172, 8, 0xc0, 0, 0, 0, 0, 15,
+            172, 12,
+        ];
+        let selection = Selection::parse(&bytes).unwrap();
+        assert_eq!(
+            (
+                selection.pairwise(),
+                selection.group(),
+                selection.management()
+            ),
+            (Cipher::Gcmp256, Cipher::Gcmp256, ManagementCipher::Gmac256)
+        );
+        selection.validate_peer(&ie(&bytes), &ie(&bytes)).unwrap();
+        // An AP whose RSNE omits the suite uses BIP-CMAC-128.
+        assert!(selection.validate_peer(&ie(&bytes[..22]), &[]).is_err());
+    }
+
     #[test]
     fn exact_pmf_selection_requires_ap_suites_and_preserves_original_rsn() {
         let bytes = selected();

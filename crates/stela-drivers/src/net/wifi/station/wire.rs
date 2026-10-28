@@ -283,8 +283,9 @@ impl AssociationRequest {
                         return Err(Error::Invalid("duplicate RSN"));
                     }
                     if allow_pmf {
-                        selected_pmf = Some(pmf::Selection::parse(data)?);
-                        selected_rsn = Some((Cipher::Ccmp128, Cipher::Ccmp128));
+                        let selection = pmf::Selection::parse(data)?;
+                        selected_rsn = Some((selection.pairwise(), selection.group()));
+                        selected_pmf = Some(selection);
                     } else {
                         selected_rsn = Some(rsn(data)?);
                     }

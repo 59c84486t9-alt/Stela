@@ -6,7 +6,10 @@
 use super::*;
 use crate::net::wifi::{
     mediatek::{identity::Chip, mcu::key::bip as wire},
-    security::{PacketNumber, management},
+    security::{
+        PacketNumber,
+        management::{self, ManagementCipher},
+    },
 };
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -99,9 +102,20 @@ impl<C: 'static> HardwareKey<C> {
         let bytes = frame.bytes();
         // The full authenticator validates MMIE length/type, peer, MIC and IPN.
         // Selection reads only the complete trailing source key ID; it does not
-        // guess a key from the latest firmware update or copied RX flags.
+        // guess a key from the latest firmware update or copied RX flags. Both
+        // windows share the negotiated suite and so its MMIE length.
+        let mmie = self
+            .owned()
+            .igtk
+            .as_ref()
+            .unwrap()
+            .key
+            .cipher()
+            .mmie_length();
         let index = bytes
-            .get(bytes.len().saturating_sub(16)..bytes.len().saturating_sub(14))
+            .len()
+            .checked_sub(mmie)
+            .and_then(|start| bytes.get(start + 2..start + 4))
             .and_then(|id| <[u8; 2]>::try_from(id).ok())
             .map(u16::from_le_bytes);
         let s = self.owned_mut();
@@ -130,7 +144,9 @@ impl<C: 'static> HardwareKey<C> {
     /// Program the source CCMP128 GTK || BIP-CMAC128 IGTK batch. The firmware
     /// batch repeats the same GTK, while its canonical data identity and replay
     /// floors remain unchanged. Exact identical retries publish no command and
-    /// do not replace the original authenticated management floor.
+    /// do not replace the original authenticated management floor. Every other
+    /// suite, or a GTK that is not CCMP128, is kept in software alone, as
+    /// `mt7925_set_key` leaves it to mac80211.
     ///
     /// # Safety
     /// The caller owns this actual GTK/WCID/BSS namespace and has independently
@@ -142,6 +158,7 @@ impl<C: 'static> HardwareKey<C> {
     pub unsafe fn install_igtk<W: QueueIo, F: QueueIo, R: QueueIo>(
         &mut self,
         mailbox: &mut Mailbox<W, F, R>,
+        cipher: ManagementCipher,
         index: u8,
         material: &[u8],
         receive: PacketNumber,
@@ -157,21 +174,8 @@ impl<C: 'static> HardwareKey<C> {
             return Err(super::Error::Bip(Error::DataKeyRequired));
         }
         let gtk = s.slot.installed().ok_or(super::Error::NoKey)?;
-        let cache = s
-            .gtk
-            .as_ref()
-            .filter(|cache| cache.identity == gtk)
-            .ok_or(super::Error::Bip(Error::DataKeyRequired))?;
         // Complete scope/index/length/codec validation before changing ownership.
-        let request = wire::Request::install(
-            mailbox.identity.chip,
-            s.context,
-            gtk,
-            cache.material.as_ref(),
-            index,
-            material,
-        )
-        .map_err(super::Error::Request)?;
+        let request = hardware_request(mailbox.identity.chip, s, gtk, cipher, index, material)?;
         let digest: [u8; 32] = Sha256::digest(material).into();
         if let Some(old) = &s.igtk {
             let same = old
@@ -180,7 +184,11 @@ impl<C: 'static> HardwareKey<C> {
                 .zip(digest)
                 .fold(0u8, |difference, (a, b)| difference | (*a ^ b))
                 == 0;
-            if old.identity.gtk == gtk && old.identity.index == index && same {
+            if old.identity.gtk == gtk
+                && old.identity.index == index
+                && old.key.cipher() == cipher
+                && same
+            {
                 return Ok(old.identity);
             }
             return Err(super::Error::Bip(Error::AlreadyInstalled));
@@ -196,15 +204,20 @@ impl<C: 'static> HardwareKey<C> {
             generation,
             index,
         };
-        let key = management::BipKey::new(gtk, index, material, receive)
+        let key = management::BipKey::new(gtk, cipher, index, material, receive)
             .map_err(|error| super::Error::Bip(Error::Authentication(error)))?;
         s.igtk_history[history] = Some(digest);
         s.igtk_generation = generation;
-        s.pending_igtk = Some(Installed {
+        let installed = Installed {
             identity,
             digest,
             key,
-        });
+        };
+        let Some(request) = request else {
+            s.igtk = Some(installed);
+            return Ok(identity);
+        };
+        s.pending_igtk = Some(installed);
         s.phase = Phase::Quarantined;
         s.reply = None;
         let outcome = mailbox.unified(Command::StationRecord, request.bytes());
@@ -235,6 +248,43 @@ impl<C: 'static> HardwareKey<C> {
             }
         }
     }
+}
+
+/// The firmware batch `mt7925_mcu_sta_key_tlv` sends for BIP-CMAC-128 beside
+/// the cached CCMP128 GTK; `mt7925_set_key` gives every other suite to
+/// mac80211's software, so it has none.
+fn hardware_request<C>(
+    chip: Chip,
+    s: &Owned<C>,
+    gtk: KeyIdentity,
+    cipher: ManagementCipher,
+    index: u8,
+    material: &[u8],
+) -> Result<Option<wire::Request>, super::Error> {
+    use crate::net::wifi::mediatek::mcu::key::Error as Request;
+    if !matches!(gtk.scope(), KeyScope::Group(_)) {
+        return Err(super::Error::Bip(Error::DataKeyRequired));
+    }
+    if !matches!(index, 4 | 5) {
+        return Err(super::Error::Request(Request::InvalidBipIndex));
+    }
+    if material.len() != cipher.key_length() {
+        return Err(super::Error::Request(Request::InvalidKeyLength));
+    }
+    let cache = s.gtk.as_ref().filter(|cache| cache.identity == gtk);
+    let (ManagementCipher::Cmac128, Some(cache)) = (cipher, cache) else {
+        return Ok(None);
+    };
+    wire::Request::install(
+        chip,
+        s.context,
+        gtk,
+        cache.material.as_ref(),
+        index,
+        material,
+    )
+    .map(Some)
+    .map_err(super::Error::Request)
 }
 
 /// Management-material history survives actual removal/rebind: a new key index
@@ -314,20 +364,8 @@ impl<C: 'static> HardwareKey<C> {
             .ok_or(super::Error::Bip(Error::DataKeyRequired))?;
         let s = self.owned_mut();
         let gtk = s.slot.installed().ok_or(super::Error::NoKey)?;
-        let cache = s
-            .gtk
-            .as_ref()
-            .filter(|cache| cache.identity == gtk)
-            .ok_or(super::Error::Bip(Error::DataKeyRequired))?;
-        let request = wire::Request::install(
-            mailbox.identity.chip,
-            s.context,
-            gtk,
-            cache.material.as_ref(),
-            index,
-            material,
-        )
-        .map_err(super::Error::Request)?;
+        let cipher = s.igtk.as_ref().unwrap().key.cipher();
+        let request = hardware_request(mailbox.identity.chip, s, gtk, cipher, index, material)?;
         let digest: [u8; 32] = Sha256::digest(material).into();
         for old in [&s.igtk, &s.other_igtk].into_iter().flatten() {
             let same = old
@@ -351,7 +389,7 @@ impl<C: 'static> HardwareKey<C> {
             generation,
             index,
         };
-        let key = management::BipKey::new(gtk, index, material, receive)
+        let key = management::BipKey::new(gtk, cipher, index, material, receive)
             .map_err(|e| super::Error::Bip(Error::Authentication(e)))?;
         // Reserve history and every old/new key before publication. Any negative,
         // ambiguous or late reply retains the entire quarantined native owner.
@@ -362,6 +400,10 @@ impl<C: 'static> HardwareKey<C> {
             digest,
             key,
         });
+        let Some(request) = request else {
+            rotated(s, index);
+            return Ok(identity);
+        };
         s.phase = Phase::Quarantined;
         s.reply = None;
         let outcome = mailbox.unified(Command::StationRecord, request.bytes());
@@ -369,13 +411,7 @@ impl<C: 'static> HardwareKey<C> {
             .as_ref()
             .is_ok_and(|r| r.status == 0 && r.dma_released);
         if accepted {
-            let previous = s.igtk.take().unwrap();
-            if previous.identity.index != index {
-                // Replace only the requested index. The previous latest key is
-                // the untouched other window, preserving its MIC/IPN/statistics.
-                s.other_igtk = Some(previous);
-            }
-            s.igtk = s.pending_igtk.take();
+            rotated(s, index);
             s.phase = Phase::Installed;
         } else {
             s.slot.invalidate();
@@ -396,6 +432,16 @@ impl<C: 'static> HardwareKey<C> {
             }
         }
     }
+}
+
+/// The pending key replaces only the requested index. The previous latest key
+/// is the untouched other window, preserving its MIC/IPN/statistics.
+fn rotated<C>(s: &mut Owned<C>, index: u8) {
+    let previous = s.igtk.take().unwrap();
+    if previous.identity.index != index {
+        s.other_igtk = Some(previous);
+    }
+    s.igtk = s.pending_igtk.take();
 }
 
 #[cfg(test)]
@@ -424,6 +470,75 @@ mod tests {
             security::SecurityStatus::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn bip_gmac_igtks_are_kept_in_software_as_mt7925_set_key_leaves_them() {
+        let response = Arc::new(Mutex::new(Response {
+            key_execution: true,
+            ..Response::default()
+        }));
+        let (mut mailbox, wm, _, _) =
+            setup_controlled(Chip::Mt7925, true, false, 0, response.clone());
+        let drops = Arc::new(AtomicUsize::new(0));
+        // SAFETY: exclusive empty source-modeled actual WCID and drained old users.
+        let mut key = unsafe {
+            HardwareKey::claim(
+                &mailbox,
+                7,
+                key_context(),
+                key_scope(true),
+                KeyResource(drops.clone()),
+            )
+        }
+        .unwrap();
+        let gtk = key
+            .install(
+                &mut mailbox,
+                2,
+                Cipher::Ccmp128,
+                &[0x44; 16],
+                ReplaySeed::ZERO,
+            )
+            .unwrap();
+        let commands = wm.lock().unwrap().completed.len();
+        // SAFETY: actual initial modeled GTK request/ACK drained; no other key users exist.
+        let identity = unsafe {
+            key.install_igtk(
+                &mut mailbox,
+                ManagementCipher::Gmac256,
+                4,
+                &[0x55; 32],
+                PacketNumber::new(100).unwrap(),
+            )
+        }
+        .unwrap();
+        assert_eq!(key.installed_igtk(), Some(identity));
+        // The 26-byte MMIE's key ID and an independent AES-GCM tag.
+        let mut bytes = vec![
+            0xc0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 2, 6, 7, 8, 9, 10, 2, 6, 7, 8, 9, 10, 0,
+            0, 7, 0, 76, 24, 4, 0, 101, 0, 0, 0, 0, 0,
+        ];
+        bytes.extend_from_slice(&[
+            0x56, 0xf8, 0x6b, 0x82, 0x6a, 0x7b, 0xc6, 0xc9, 0x69, 0x5d, 0xf6, 0xf6, 0xa0, 0xe0,
+            0x30, 0x9b,
+        ]);
+        let frame = crate::net::wifi::frame::Mpdu::new(
+            bytes,
+            key_packet(gtk, 1).radio,
+            security::SecurityStatus::default(),
+        )
+        .unwrap();
+        let authenticated = key.authenticate_bip(&frame).unwrap();
+        assert_eq!(authenticated.packet_number().value(), 101);
+        // SAFETY: unchanged drained namespace; the authenticated exchange rotates.
+        unsafe { key.rotate_igtk(&mut mailbox, 5, &[0x66; 32], PacketNumber::new(0).unwrap()) }
+            .unwrap();
+        assert!(key.installed_igtks().iter().all(Option::is_some));
+        assert_eq!(wm.lock().unwrap().completed.len(), commands);
+        let removed = key.remove(&mut mailbox).unwrap();
+        // SAFETY: actual removal ACK and complete model key/user drain.
+        unsafe { key.retire_after_drain(removed) }.unwrap();
     }
 
     #[test]
@@ -465,6 +580,7 @@ mod tests {
         let identity = unsafe {
             key.install_igtk(
                 &mut mailbox,
+                ManagementCipher::Cmac128,
                 4,
                 &[0x55; 16],
                 PacketNumber::new(100).unwrap(),
@@ -518,7 +634,13 @@ mod tests {
         // SAFETY: unchanged actual drained namespace; identical retry must preserve advanced management IPN.
         assert_eq!(
             unsafe {
-                key.install_igtk(&mut mailbox, 4, &[0x55; 16], PacketNumber::new(0).unwrap())
+                key.install_igtk(
+                    &mut mailbox,
+                    ManagementCipher::Cmac128,
+                    4,
+                    &[0x55; 16],
+                    PacketNumber::new(0).unwrap(),
+                )
             }
             .unwrap(),
             identity
@@ -574,6 +696,7 @@ mod tests {
         let installed = unsafe {
             key.install_igtk(
                 &mut mailbox,
+                ManagementCipher::Cmac128,
                 5,
                 &[0x55; 16],
                 PacketNumber::new(100).unwrap(),
@@ -601,7 +724,13 @@ mod tests {
         key.authorize(&key_packet(gtk, 10)).unwrap();
         // SAFETY: same actual drained namespace; this exact retry must not publish.
         let retry = unsafe {
-            key.install_igtk(&mut mailbox, 5, &[0x55; 16], PacketNumber::new(0).unwrap())
+            key.install_igtk(
+                &mut mailbox,
+                ManagementCipher::Cmac128,
+                5,
+                &[0x55; 16],
+                PacketNumber::new(0).unwrap(),
+            )
         }
         .unwrap();
         assert_eq!(retry, installed);
@@ -609,7 +738,13 @@ mod tests {
         // SAFETY: no external model key users; different live initial-batch material is refused.
         assert!(matches!(
             unsafe {
-                key.install_igtk(&mut mailbox, 4, &[0x66; 16], PacketNumber::new(0).unwrap())
+                key.install_igtk(
+                    &mut mailbox,
+                    ManagementCipher::Cmac128,
+                    4,
+                    &[0x66; 16],
+                    PacketNumber::new(0).unwrap(),
+                )
             },
             Err(super::super::Error::Bip(Error::AlreadyInstalled))
         ));
@@ -653,7 +788,13 @@ mod tests {
             // SAFETY: no model key users; absence of a GTK must fail before publication.
             assert!(
                 unsafe {
-                    key.install_igtk(&mut mailbox, 4, &[0x55; 16], PacketNumber::new(1).unwrap())
+                    key.install_igtk(
+                        &mut mailbox,
+                        ManagementCipher::Cmac128,
+                        4,
+                        &[0x55; 16],
+                        PacketNumber::new(1).unwrap(),
+                    )
                 }
                 .is_err()
             );
@@ -673,7 +814,7 @@ mod tests {
                     super::super::Error::Request(
                         crate::net::wifi::mediatek::mcu::key::Error::UnsupportedBip,
                     )
-                } else if !group || cipher != Cipher::Ccmp128 {
+                } else if !group {
                     super::super::Error::Bip(Error::DataKeyRequired)
                 } else if !(4..=5).contains(&index) {
                     super::super::Error::Request(
@@ -689,6 +830,7 @@ mod tests {
                     unsafe {
                         key.install_igtk(
                             &mut mailbox,
+                            ManagementCipher::Cmac128,
                             index,
                             &vec![0x55; length],
                             PacketNumber::new(1).unwrap(),
@@ -702,25 +844,33 @@ mod tests {
                 assert!(!key.is_quarantined());
             }
             if chip != Chip::Mt7925 || !group || cipher != Cipher::Ccmp128 {
-                let expected = if chip != Chip::Mt7925 {
-                    super::super::Error::Request(
-                        crate::net::wifi::mediatek::mcu::key::Error::UnsupportedBip,
-                    )
-                } else {
-                    super::super::Error::Bip(Error::DataKeyRequired)
-                };
                 // SAFETY: actual model namespace is drained; unsupported scope/chip stays explicit.
-                assert_eq!(
-                    unsafe {
-                        key.install_igtk(
-                            &mut mailbox,
-                            4,
-                            &[0x55; 16],
-                            PacketNumber::new(1).unwrap(),
-                        )
-                    },
-                    Err(expected)
-                );
+                let result = unsafe {
+                    key.install_igtk(
+                        &mut mailbox,
+                        ManagementCipher::Cmac128,
+                        4,
+                        &[0x55; 16],
+                        PacketNumber::new(1).unwrap(),
+                    )
+                };
+                if chip != Chip::Mt7925 {
+                    assert_eq!(
+                        result,
+                        Err(super::super::Error::Request(
+                            crate::net::wifi::mediatek::mcu::key::Error::UnsupportedBip,
+                        ))
+                    );
+                } else if !group {
+                    assert_eq!(
+                        result,
+                        Err(super::super::Error::Bip(Error::DataKeyRequired))
+                    );
+                } else {
+                    // mt7925_set_key batches BIP only beside a CCMP GTK; this
+                    // one is kept in software.
+                    assert_eq!(key.installed_igtk(), Some(result.unwrap()));
+                }
                 assert_eq!(wm.lock().unwrap().completed.len(), before);
                 assert_eq!(key.slot().installed(), Some(gtk));
             }
@@ -771,7 +921,13 @@ mod tests {
             // SAFETY: actual model initial key request is drained; late/invalid ACK must quarantine.
             assert!(
                 unsafe {
-                    key.install_igtk(&mut mailbox, 4, &[0x55; 16], PacketNumber::new(1).unwrap())
+                    key.install_igtk(
+                        &mut mailbox,
+                        ManagementCipher::Cmac128,
+                        4,
+                        &[0x55; 16],
+                        PacketNumber::new(1).unwrap(),
+                    )
                 }
                 .is_err()
             );

@@ -150,6 +150,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 s.authentication_deadline = Some(native_deadline);
                 s.profile = Some(profile);
                 s.ciphers = None;
+                s.management_cipher = None;
                 s.reserved_wcid = Some(profile.wcid);
                 s.peer_generation = generation;
                 s.format_generation = None;
