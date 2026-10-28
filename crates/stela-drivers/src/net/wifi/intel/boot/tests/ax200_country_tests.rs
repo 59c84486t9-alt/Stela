@@ -31,7 +31,7 @@ unsafe impl CountryIo for Os {
     }
 }
 #[test]
-fn explicit_os_country_uses_original_ax200_mcc_dma_and_preserves_rejections() {
+fn country_application_preserves_dma_lifetimes_and_refusals() {
     for case in 0..10 {
         let bytes = setup_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
