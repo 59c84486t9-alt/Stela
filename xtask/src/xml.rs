@@ -1,5 +1,5 @@
 //! A minimal XML element tree and parser: enough for the well-formed archives
-//! the generators read (Arm's register pages, Mesa's AGX2 ISA description).
+//! `cargo xtask sysregs` reads (Arm's System register pages).
 
 use anyhow::{Context, Result, bail, ensure};
 
