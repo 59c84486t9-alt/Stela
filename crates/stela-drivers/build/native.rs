@@ -282,6 +282,7 @@ impl Linux {
             &archives,
         );
         for (name, source) in [
+            ("linux_compiler_abi", "abi_test.c"),
             ("linux_random", "random_test.c"),
             ("linux_seq_output", "seq_output_test.c"),
             ("linux_drm_mm", "drm_mm_test.c"),
@@ -381,6 +382,8 @@ impl Linux {
             .define("__DISABLE_EXPORTS", None);
         for flag in [
             "-fms-extensions",
+            // Linux KBUILD_CFLAGS: EFI names use 16-bit wide literals on every host.
+            "-fshort-wchar",
             "-fno-strict-aliasing",
             "-fno-common",
             "-fno-strict-overflow",

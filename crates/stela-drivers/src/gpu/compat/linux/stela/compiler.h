@@ -14,3 +14,9 @@
 #ifndef KBUILD_MODNAME
 #define KBUILD_MODNAME "stela-linux"
 #endif
+
+/* Linux's -fshort-wchar contract also applies to hosted ELF builds; without
+ * it, an original L"..." is incompatible with EFI's 16-bit character ABI. */
+#ifndef __ASSEMBLER__
+_Static_assert(sizeof(*L"") == 2, "Linux compiler requires 16-bit wide literals");
+#endif
