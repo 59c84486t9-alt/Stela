@@ -40,8 +40,8 @@ impl UsbInput {
     }
 
     fn control_length(&self, kind: ReportType, id: u8) -> Result<usize, BlockError> {
-        self.descriptor
-            .as_ref()
+        self.translator
+            .descriptor()
             .and_then(|d| d.layout(kind, id))
             .map(|layout| layout.wire_bytes())
             .filter(|length| *length != 0)
@@ -116,54 +116,14 @@ impl UsbInput {
         )
     }
 
-    /// Linux `hidinput_led_worker`. `leds` holds input LED codes as bits
-    /// (LED_NUML is bit 0); each LED-page usage `hidinput_configure_usage`
-    /// maps takes its bit. The output report holding the first such field
-    /// is sent with those fields set and every other field zero, through
+    /// Linux `hidinput_led_worker`: the output report
+    /// [`Translator::led_report`] builds for `leds` goes out through
     /// `output_report`. A device without one has no LEDs to set.
     pub fn set_leds(&mut self, leds: u16) -> Result<(), BlockError> {
-        let Some(descriptor) = &self.descriptor else {
-            return Ok(());
-        };
-        let led = |usage: u32| {
-            (usage >> 16 == LED_PAGE)
-                .then(|| {
-                    LED_USAGES
-                        .iter()
-                        .position(|&led| u32::from(led) == usage & 0xffff)
-                })
-                .flatten()
-        };
-        let Some(layout) = descriptor
-            .reports
-            .iter()
-            .filter(|layout| layout.kind == ReportType::Output)
-            .find(|layout| {
-                layout
-                    .fields
-                    .iter()
-                    .any(|field| field.usages.iter().any(|&usage| led(usage).is_some()))
-            })
-        else {
-            return Ok(());
-        };
-        let id = layout.id;
-        let mut report = alloc::vec![0u8; layout.wire_bytes()];
-        let body = usize::from(id != 0);
-        report[0] |= id;
-        for field in layout.fields.iter().filter(|f| f.flags & VARIABLE != 0) {
-            for element in 0..field.count {
-                let usage = field.usages.get(element).or(field.usages.last());
-                let Some(code) = usage.and_then(|&usage| led(usage)) else {
-                    continue;
-                };
-                if leds & 1 << code != 0 {
-                    let bit = field.offset + element * field.size;
-                    report[body + bit / 8] |= 1 << (bit % 8);
-                }
-            }
+        match self.translator.led_report(leds) {
+            Some((id, report)) => self.output_report(id, &report).map(|_| ()),
+            None => Ok(()),
         }
-        self.output_report(id, &report).map(|_| ())
     }
 
     /// HID duration units are 4 ms; report zero addresses all input reports.

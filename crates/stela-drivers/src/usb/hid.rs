@@ -27,10 +27,12 @@ mod sparse_tests;
 mod touch;
 #[cfg(test)]
 mod touch_tests;
+pub mod translate;
 mod usages;
 
 pub use descriptor::{DecodeError, Descriptor, Frame, ReportType};
 pub use touch::{TouchDiscard, TouchFrame, TouchPoll};
+pub use translate::{Translated, Translator};
 
 use super::xhci::{
     Controller, DEVICE_TO_HOST, Device, Endpoint, GET_DESCRIPTOR, Interface, Plan,
@@ -39,10 +41,10 @@ use super::xhci::{
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
-    input::{Input, POINTER_MAX},
+    input::Input,
 };
 use alloc::{format, string::String, vec::Vec};
-use report::{Field, Keys, Pointer, Reports};
+use report::{Keys, Pointer, Reports};
 
 pub const CLASS: u8 = 3;
 const BOOT: u8 = 1;
@@ -66,13 +68,13 @@ const FIRST_RETRY_MS: u64 = 13;
 const LONGEST_RETRY_MS: u64 = 100;
 const RETRY_WINDOW_US: u64 = 1_000_000;
 const MICROSECONDS_PER_MILLISECOND: u64 = 1_000;
-const LED_PAGE: u32 = 0x08;
+pub(super) const LED_PAGE: u32 = 0x08;
 /// Main item bit 1: a Variable field, one value per usage.
-const VARIABLE: u32 = 2;
+pub(super) const VARIABLE: u32 = 2;
 /// LED-page usages by input LED code, as `hidinput_configure_usage` maps
 /// them: Num Lock, Caps Lock, Scroll Lock, Compose, Kana, Stand-By, System
 /// Suspend, Mute, Generic Indicator, Message Waiting, External Power.
-const LED_USAGES: [u16; 11] = [
+pub(super) const LED_USAGES: [u16; 11] = [
     0x01, 0x02, 0x03, 0x04, 0x05, 0x27, 0x4c, 0x09, 0x4b, 0x19, 0x4d,
 ];
 /// include/linux/usb.h USB_CTRL_SET_TIMEOUT, the `usb_interrupt_msg` bound
@@ -81,8 +83,8 @@ const OUTPUT_TIMEOUT_US: u64 = 5_000_000;
 const BOOT_PROTOCOL: u16 = 0;
 const REPORT_PROTOCOL: u16 = 1;
 /// The Keyboard/Keypad usages the native keyboard reports.
-const KEY_USAGES: core::ops::RangeInclusive<u32> = 0x04..=0xdd;
-const MODIFIER_USAGES: core::ops::RangeInclusive<u32> = 0xe0..=0xe7;
+pub(super) const KEY_USAGES: core::ops::RangeInclusive<u32> = 0x04..=0xdd;
+pub(super) const MODIFIER_USAGES: core::ops::RangeInclusive<u32> = 0xe0..=0xe7;
 
 pub(super) fn plan(interface: &Interface) -> Result<Plan, &'static str> {
     let endpoint =
@@ -240,7 +242,6 @@ pub struct UsbInput {
     controller: Shared,
     id: SlotId,
     interface: u8,
-    descriptor: Option<Descriptor>,
     report_descriptor: Vec<u8>,
     state: State,
     /// The original first transport failure, never replaced by a later error.
@@ -256,21 +257,11 @@ pub struct UsbInput {
     queued: Option<u64>,
     /// Transfer errors being retried.
     retry: Option<Retry>,
-    reports: Reports,
-    events: events::Decoder,
+    translator: Translator,
     touch: Option<touch::Assembler>,
     receiver: Option<receiver::Link>,
-    /// The keyboard usages the last keyboard report held.
-    held: Vec<u32>,
-    buttons: u8,
-    /// The absolute pointer's last position.
-    position: Option<(u16, u16)>,
-    /// Keyboard reports holding usages the native keyboard cannot report.
-    pub dropped: u64,
     /// The first transfer failure, reported once.
     failed: bool,
-    /// The last report received, as it arrived.
-    last_report: Vec<u8>,
     pub name: String,
 }
 
@@ -404,7 +395,6 @@ impl UsbInput {
             controller,
             id: device.id,
             interface: interface.number,
-            descriptor,
             report_descriptor,
             state: State::Running,
             error: None,
@@ -414,16 +404,10 @@ impl UsbInput {
             output,
             queued: None,
             retry: None,
-            reports,
-            events: events::Decoder::default(),
+            translator: Translator::new(descriptor, reports),
             touch: None,
             receiver: None,
-            held: Vec::new(),
-            buttons: 0,
-            position: None,
-            dropped: 0,
             failed: false,
-            last_report: Vec::new(),
             name: format!("{} ({})", device.name(), device.location),
         }))
     }
@@ -494,63 +478,28 @@ impl UsbInput {
                     self.retry = None;
                     let bytes = self.buffer.bytes()[..bytes].to_vec();
                     let events_at = polled.events.len();
-                    let received = match &self.descriptor {
-                        Some(descriptor) => match descriptor.decode(&bytes) {
-                            Ok(frame) => {
-                                polled.events.extend(self.events.update(descriptor, &frame));
-                                if let Some(assembly) = &mut self.touch {
-                                    for event in &polled.events[events_at..] {
-                                        if let events::Event::Touch(packet) = event {
-                                            assembly.update(&frame, packet, &mut touch);
-                                        }
+                    let translated =
+                        self.translator
+                            .translate(&bytes, &mut polled.events, &mut polled.inputs);
+                    let received = match translated {
+                        Translated::Data(frame) => {
+                            if let Some(assembly) = &mut self.touch {
+                                for event in &polled.events[events_at..] {
+                                    if let events::Event::Touch(packet) = event {
+                                        assembly.update(&frame, packet, &mut touch);
                                     }
                                 }
-                                self.receiver_observe(&frame.bytes);
-                                ReceivedReport::Data(frame)
                             }
-                            Err(error) => {
-                                self.invalidate_touch();
-                                self.invalidate_receiver(receiver::Error::RejectedReport);
-                                ReceivedReport::Rejected {
-                                    bytes: bytes.clone(),
-                                    error,
-                                }
-                            }
-                        },
-                        None => ReceivedReport::Boot(bytes.clone()),
-                    };
-                    // Native keys merge every actual report ID; a receiver's
-                    // second keyboard cannot release the first one's keys.
-                    let mut dropped = false;
-                    for event in &polled.events[events_at..] {
-                        if let events::Event::Keyboard { usage, pressed } = event {
-                            if KEY_USAGES.contains(usage) || MODIFIER_USAGES.contains(usage) {
-                                let was = self.held.contains(usage);
-                                if was != *pressed {
-                                    polled.inputs.push(Input::Key {
-                                        usage: *usage as u8,
-                                        pressed: *pressed,
-                                    });
-                                    if *pressed {
-                                        self.held.push(*usage);
-                                    } else {
-                                        self.held.retain(|u| u != usage);
-                                    }
-                                }
-                            } else {
-                                dropped = true;
-                            }
+                            self.receiver_observe(&frame.bytes);
+                            ReceivedReport::Data(frame)
                         }
-                    }
-                    if dropped {
-                        self.dropped += 1;
-                    }
-                    // Never partially mutate legacy state for a malformed report.
-                    if !matches!(received, ReceivedReport::Rejected { .. }) {
-                        self.report(&bytes, &mut polled.inputs);
-                    } else {
-                        self.last_report = bytes;
-                    }
+                        Translated::Rejected(error) => {
+                            self.invalidate_touch();
+                            self.invalidate_receiver(receiver::Error::RejectedReport);
+                            ReceivedReport::Rejected { bytes, error }
+                        }
+                        Translated::Boot => ReceivedReport::Boot(bytes),
+                    };
                     polled.reports.push(received);
                     continue;
                 }
@@ -600,158 +549,24 @@ impl UsbInput {
 
     /// The last report received, as it arrived, for diagnostics.
     pub fn last_report(&self) -> &[u8] {
-        &self.last_report
+        self.translator.last_report()
+    }
+
+    /// Keyboard reports holding usages the native keyboard cannot report.
+    pub fn dropped(&self) -> u64 {
+        self.translator.dropped()
     }
 
     /// Whether polling stopped on a transfer failure.
     pub fn failed(&self) -> bool {
         self.failed
     }
-
-    fn report(&mut self, report: &[u8], inputs: &mut Vec<Input>) {
-        self.last_report = report.to_vec();
-        let (id, body) = if self.reports.numbered() {
-            match report.split_first() {
-                Some((&id, body)) => (Some(id), body),
-                None => return,
-            }
-        } else {
-            (None, report)
-        };
-        if self.descriptor.is_none()
-            && let Some(keys) = &self.reports.keys
-            && keys.report == id
-        {
-            self.keys(body, inputs);
-        }
-        if let Some(pointer) = &self.reports.pointer
-            && pointer.report == id
-        {
-            let pointer = pointer.clone();
-            self.pointer(&pointer, body, inputs);
-        }
-    }
-
-    /// Key presses and releases since the last keyboard report: modifiers,
-    /// then releases, then presses, each in report order.
-    fn keys(&mut self, body: &[u8], inputs: &mut Vec<Input>) {
-        let Some(keys) = &self.reports.keys else {
-            return;
-        };
-        let Some(mut held) = keys.pressed_after(body, &self.held) else {
-            return;
-        };
-        let before = held.len();
-        held.retain(|usage| KEY_USAGES.contains(usage) || MODIFIER_USAGES.contains(usage));
-        // Count each report that holds usages the native keyboard lacks.
-        if held.len() != before {
-            self.dropped += 1;
-        }
-        let key = |usage: u32, pressed| Input::Key {
-            usage: usage as u8,
-            pressed,
-        };
-        for usage in MODIFIER_USAGES {
-            let (was, is) = (self.held.contains(&usage), held.contains(&usage));
-            if was != is {
-                inputs.push(key(usage, is));
-            }
-        }
-        let modifier = |usage: &&u32| MODIFIER_USAGES.contains(*usage);
-        for usage in self.held.iter().filter(|u| !modifier(u)) {
-            if !held.contains(usage) {
-                inputs.push(key(*usage, false));
-            }
-        }
-        for usage in held.iter().filter(|u| !modifier(u)) {
-            if !self.held.contains(usage) {
-                inputs.push(key(*usage, true));
-            }
-        }
-        self.held = held;
-    }
-
-    fn pointer(&mut self, layout: &Pointer, body: &[u8], inputs: &mut Vec<Input>) {
-        let mouse = layout.x.is_some_and(|f| f.relative);
-        let value = |field: Option<Field>| field.and_then(|f| f.read(body));
-        if value(layout.x).is_none() || value(layout.y).is_none() {
-            return;
-        }
-        if mouse {
-            let counts = |v: i32| v.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
-            let (dx, dy) = (value(layout.x), value(layout.y));
-            if let (Some(dx), Some(dy)) = (dx, dy)
-                && (dx, dy) != (0, 0)
-            {
-                inputs.push(Input::Motion {
-                    dx: counts(dx),
-                    dy: counts(dy),
-                });
-            }
-        } else {
-            let axis = |field: Option<Field>| -> Option<u16> {
-                let field = field?;
-                let value = field.read(body)?;
-                let max = i64::from(POINTER_MAX);
-                let span = i64::from(field.maximum) - i64::from(field.minimum);
-                if span <= 0 {
-                    return None;
-                }
-                let scaled = (i64::from(value) - i64::from(field.minimum)) * max / span;
-                Some(scaled.clamp(0, max) as u16)
-            };
-            if let (Some(x), Some(y)) = (axis(layout.x), axis(layout.y))
-                && Some((x, y)) != self.position
-            {
-                self.position = Some((x, y));
-                inputs.push(Input::Move { x, y });
-            }
-        }
-        let mut buttons = 0;
-        for (n, field) in layout.buttons.iter().enumerate() {
-            if value(*field).is_some_and(|v| v != 0) {
-                buttons |= 1 << n;
-            }
-        }
-        // The legacy absolute-pointer frontend has three buttons. Complete
-        // extra-button values remain in poll_hid's descriptor samples.
-        if !mouse {
-            buttons &= 7;
-        }
-        if buttons != self.buttons {
-            self.buttons = buttons;
-            inputs.push(if mouse {
-                Input::MouseButtons(buttons)
-            } else {
-                Input::Buttons(buttons)
-            });
-        }
-        if let Some(wheel) = value(layout.wheel)
-            && wheel != 0
-        {
-            let detents = wheel.clamp(-127, 127) as i8;
-            inputs.push(if mouse {
-                Input::MouseWheel(detents)
-            } else {
-                Input::Wheel(detents)
-            });
-        }
-        if let Some(pan) = value(layout.pan)
-            && pan != 0
-        {
-            let detents = pan.clamp(-127, 127) as i8;
-            inputs.push(if mouse {
-                Input::MouseHWheel(detents)
-            } else {
-                Input::HWheel(detents)
-            });
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::POINTER_MAX;
 
     /// A boot keyboard whose descriptor numbers its 8-byte report 1.
     pub(super) const NUMBERED_KEYBOARD: [u8; 43] = [
