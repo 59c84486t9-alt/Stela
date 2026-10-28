@@ -52,7 +52,7 @@ impl fmt::Display for Error {
             Self::Device(error) => error.fmt(f),
             Self::Realtek(error) => error.fmt(f),
             Self::Native(error) => error.fmt(f),
-            Self::Vmd(error) => write!(f, "VMD: {error:?}"),
+            Self::Vmd(error) => write!(f, "VMD: {error}"),
             Self::Tg3(error) => write!(f, "tg3: {error:?}"),
             Self::Aqtion(error) => write!(f, "atlantic: {error:?}"),
         }
@@ -308,12 +308,10 @@ pub struct Devices {
     /// brought up or handed over, by location, such as
     /// `0000:00:1d.0 EHCI handoff`.
     pub platform_failures: Vec<(String, PlatformError)>,
-    /// Owners a running native attachment hands back when it retires, such
-    /// as an Intel VMD hierarchy behind its NVMe controller.
-    pub native_owners: Vec<Box<dyn core::any::Any>>,
-    /// Native owners of controllers whose attach failed, kept so their
-    /// mappings and DMA domains outlive whatever the device may still do.
-    pub quarantined: Vec<Box<dyn core::any::Any>>,
+    /// Objects that must stay alive while the devices they set up exist,
+    /// including attaches that failed, such as the Intel VMD hierarchy behind
+    /// its NVMe controller and a failed controller's mappings and DMA domain.
+    pub owners: Vec<Box<dyn core::any::Any>>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
     /// Whether the mount supplied [`NativeServices`]. Drivers that attach
@@ -461,11 +459,11 @@ pub unsafe fn probe_with_provider(
                                             .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
                                     );
                                 }
-                                devices.native_owners.push(found.owner);
+                                devices.owners.push(found.owner);
                             }
                             Err((error, kept)) => {
                                 devices.failures.push((address, error));
-                                devices.quarantined.extend(kept);
+                                devices.owners.extend(kept);
                             }
                         }
                         continue;
@@ -486,7 +484,7 @@ pub unsafe fn probe_with_provider(
                     Ok(adapter) => devices.nics.push(adapter),
                     Err((error, kept)) => {
                         devices.failures.push((address, error));
-                        devices.quarantined.extend(kept);
+                        devices.owners.extend(kept);
                     }
                 }
                 continue;
