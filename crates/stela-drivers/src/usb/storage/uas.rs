@@ -2090,7 +2090,7 @@ mod tests {
             // Mirror normal Found/probe retention after typed disks are drained.
             let mut found = xhci::Found::default();
             found.storage.push(storage);
-            let mut probed = crate::probe::Disks::default();
+            let mut probed = crate::probe::Devices::default();
             probed.usb_storage.extend(found.storage);
             let mut storage = probed.usb_storage.remove(0);
             hardware.borrow_mut().empty_media = false;

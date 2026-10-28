@@ -265,45 +265,45 @@ impl Prepared {
     pub fn run(self) {
         // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
         let mut dma = unsafe { RegionAllocator::new(self.handoff.dma.clone()) };
-        let mut disks = if self.usb_media_check {
+        let mut devices = if self.usb_media_check {
             // SAFETY: same exclusive post-EBS grant as probe; this explicit
             // fixture diagnostic attaches native USB and retains every owner.
             match unsafe { media_check::probe_and_rescan(&self.handoff, &mut dma, &self.check[0]) }
             {
-                Ok(disks) => disks,
+                Ok(devices) => devices,
                 Err(error) => output::fatal(error),
             }
         } else if self.usb_reset_check {
             // SAFETY: the same exclusive post-EBS grant as probe, restricted
             // to native USB attachment for this explicit diagnostic.
             match unsafe { reset_check::probe_and_reset(&self.handoff, &mut dma, &self.check[0]) } {
-                Ok(disks) => disks,
+                Ok(devices) => devices,
                 Err(error) => output::fatal(error),
             }
         } else {
             // SAFETY: this handoff describes the running machine and its tables.
             unsafe { probe(&self.handoff, &mut dma) }
         };
-        for window in &disks.unmapped {
+        for window in &devices.unmapped {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }
-        for (address, error) in &disks.failures {
+        for (address, error) in &devices.failures {
             output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
         }
-        for (address, warning) in &disks.warnings {
+        for (address, warning) in &devices.warnings {
             output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
         }
-        for (location, error) in disks.bluetooth_failures() {
+        for (location, error) in devices.bluetooth_failures() {
             output::arguments(format_args!("BLUETOOTH FAILED {location}: {error}\n"));
         }
         output::arguments(format_args!(
             "BLUETOOTH PLATFORM {:?}\n",
-            disks.bluetooth_platform.observation
+            devices.bluetooth_platform.observation
         ));
-        for (location, error) in &disks.usb_vendor_failures {
+        for (location, error) in &devices.usb_vendor_failures {
             output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
         }
-        for device in &disks.devices {
+        for device in &devices.disks {
             let id = device.identity();
             output::arguments(format_args!(
                 "STORAGE DEVICE {:?} at {} serial={:?} model={:?} blocks={} block_size={}\n",
@@ -316,7 +316,7 @@ impl Prepared {
             .map(|target| (target, false))
             .chain(self.check.iter().map(|target| (target, true)));
         for (target, write) in targets {
-            let mut partition = match storage::open(&mut disks.devices, target) {
+            let mut partition = match storage::open(&mut devices.disks, target) {
                 Ok(partition) => partition,
                 Err(error) => {
                     output::arguments(format_args!(

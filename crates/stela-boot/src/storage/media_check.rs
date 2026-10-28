@@ -6,7 +6,7 @@ use stela_drivers::{
     Clock, Handoff,
     block::{BlockDevice, BlockError},
     bus::{dma::DmaAllocator, pci::Function},
-    probe::Disks,
+    probe::Devices,
     usb::{
         storage::{UsbDisk, UsbStorage},
         xhci,
@@ -102,7 +102,7 @@ pub(super) unsafe fn probe_and_rescan(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
     target: &Target,
-) -> Result<Disks, &'static str> {
+) -> Result<Devices, &'static str> {
     let mut owners = Vec::<xhci::Found>::new();
     let mut retained = Vec::<UsbStorage>::new();
     let mut original = Vec::<UsbDisk>::new();
@@ -110,7 +110,7 @@ pub(super) unsafe fn probe_and_rescan(
     let mut observed = Vec::<UsbDisk>::new();
     let mut aliases = Vec::<Box<dyn BlockDevice>>::new();
     let mut partitions = Vec::<PartitionDevice<Box<dyn BlockDevice>>>::new();
-    let mut devices = Disks::default();
+    let mut devices = Devices::default();
     let result = (|| {
         for window in &handoff.ecam {
             if !handoff.is_mapped(&window.range()) {
@@ -235,7 +235,7 @@ pub(super) unsafe fn probe_and_rescan(
             fresh.identity().blocks,
             fresh.identity().block_size
         ));
-        devices.devices.extend(
+        devices.disks.extend(
             replacement
                 .drain(..)
                 .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),

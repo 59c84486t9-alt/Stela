@@ -1,6 +1,6 @@
 //! The PCI scan that brings up every driver: each function of every mapped
 //! ECAM window goes to the driver of its class, and what each driver found
-//! or refused is collected in [`Disks`].
+//! or refused is collected in [`Devices`].
 use crate::{
     Handoff,
     block::{BlockDevice, BlockError},
@@ -201,10 +201,10 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
 /// Every block and input device the drivers brought up, and every
 /// controller they could not.
 #[derive(Default)]
-pub struct Disks {
+pub struct Devices {
     /// Native UAC2 playback/capture owners, awaiting explicit runtime PCM use.
     pub audio: Vec<crate::usb::audio::UsbAudio>,
-    pub devices: Vec<Box<dyn BlockDevice>>,
+    pub disks: Vec<Box<dyn BlockDevice>>,
     /// Display controllers, inventoried without changing firmware scanout.
     /// These are not initialized accelerators; each records its missing port.
     pub gpus: Vec<gpu::Adapter>,
@@ -230,7 +230,7 @@ pub struct Disks {
     /// Exact pre-EBS board-variable observation, including unavailable diagnostics.
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
-    pub links: Vec<Adapter>,
+    pub nics: Vec<Adapter>,
     pub failures: Vec<(Address, Error)>,
     /// Devices behind an attached controller that failed on their own, such
     /// as AHCI ports and NVMe namespaces, by location.
@@ -254,7 +254,7 @@ pub struct Disks {
     pub unsupported: Vec<(Address, [u8; 3], &'static str)>,
 }
 
-impl Disks {
+impl Devices {
     /// Retained failures from attempted native vendor initialization. Unknown
     /// vendors remain raw, unverified transports; they are not failed attempts
     /// of a backend implemented here.
@@ -287,7 +287,7 @@ impl Disks {
 /// `handoff` must describe the running machine after ExitBootServices,
 /// with its ranges mapped as it says, and nothing else may drive these
 /// controllers afterwards.
-pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
+pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
     let firmware = crate::firmware::HandoffProvider::new(handoff.firmware.as_deref());
     // SAFETY: the caller granted the complete machine/controller contract.
     unsafe { probe_with_provider(handoff, dma, &firmware, None) }
@@ -309,22 +309,22 @@ pub unsafe fn probe_with_provider(
     dma: &mut dyn DmaAllocator,
     firmware: &dyn crate::firmware::Provider,
     services: Option<&dyn NativeServices>,
-) -> Disks {
-    let mut disks = Disks {
+) -> Devices {
+    let mut devices = Devices {
         bluetooth_platform: handoff.bluetooth_platform,
         native_services: services.is_some(),
-        ..Disks::default()
+        ..Devices::default()
     };
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
-            disks.unmapped.push(*window);
+            devices.unmapped.push(*window);
             continue;
         }
         // SAFETY: mapped as checked; the caller owns the machine.
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
             if let Some(adapter) = gpu::Adapter::discover(&function) {
-                disks.gpus.push(adapter);
+                devices.gpus.push(adapter);
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
@@ -333,7 +333,7 @@ pub unsafe fn probe_with_provider(
                     .map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
             } else if function.class == nvme::CLASS {
                 nvme::attach(&mut function, handoff, dma).map(|attached| {
-                    disks
+                    devices
                         .device_failures
                         .extend(attached.failures.into_iter().map(|(namespace, error)| {
                             (alloc::format!("{address} namespace {namespace}"), error)
@@ -347,60 +347,60 @@ pub unsafe fn probe_with_provider(
             } else if function.class == xhci::CLASS {
                 match xhci::attach_with_provider(&mut function, handoff, dma, firmware) {
                     Ok(found) => {
-                        disks.devices.extend(
+                        devices.disks.extend(
                             found
                                 .disks
                                 .into_iter()
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
-                        disks.usb_inputs.extend(found.inputs);
-                        disks.usb_devices.extend(found.devices);
-                        disks.usb_hosts.extend(found.hosts);
-                        disks.usb_storage.extend(found.storage);
-                        disks.audio.extend(found.audio);
-                        disks.bluetooth_bootloaders.extend(found.bootloaders);
+                        devices.usb_inputs.extend(found.inputs);
+                        devices.usb_devices.extend(found.devices);
+                        devices.usb_hosts.extend(found.hosts);
+                        devices.usb_storage.extend(found.storage);
+                        devices.audio.extend(found.audio);
+                        devices.bluetooth_bootloaders.extend(found.bootloaders);
                         for mut device in found.bluetooth {
                             // The retained result owns its evidence/errors;
                             // no catalog borrow or firmware bytes escape.
                             let _ = device.initialize_with_provider(
                                 firmware,
-                                disks.bluetooth_platform.platform_inputs(),
+                                devices.bluetooth_platform.platform_inputs(),
                             );
-                            disks.bluetooth.push(device);
+                            devices.bluetooth.push(device);
                         }
-                        disks
-                            .links
+                        devices
+                            .nics
                             .extend(found.links.into_iter().map(Adapter::Usb));
-                        disks
-                            .links
+                        devices
+                            .nics
                             .extend(found.vendor_links.into_iter().map(Adapter::UsbVendor));
-                        disks.usb_failures.extend(found.failures);
-                        disks.usb_vendor_failures.extend(found.vendor_failures);
-                        disks.usb_unused.extend(found.unused);
+                        devices.usb_failures.extend(found.failures);
+                        devices.usb_vendor_failures.extend(found.vendor_failures);
+                        devices.usb_unused.extend(found.unused);
                     }
-                    Err(error) => disks.failures.push((address, error.into())),
+                    Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
             } else if net::virtio::matches(&function) {
                 match VirtioNet::new(&mut function, handoff, dma) {
-                    Ok(device) => disks.links.push(Adapter::Virtio(device)),
-                    Err(error) => disks.failures.push((address, error.into())),
+                    Ok(device) => devices.nics.push(Adapter::Virtio(device)),
+                    Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
             } else if net::igc::matches(&function) {
                 // SAFETY: the caller grants exclusive post-EBS controller,
                 // segment configuration and firmware/ASPM policy ownership.
                 match unsafe { Igc::new(&mut function, handoff, dma) } {
-                    Ok(device) => disks.links.push(Adapter::Igc(device)),
-                    Err(error) => disks.failures.push((address, error.into())),
+                    Ok(device) => devices.nics.push(Adapter::Igc(device)),
+                    Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
             } else if net::e1000e::matches(&function) {
                 // SAFETY: the caller granted exclusive ownership of all mapped PCI
                 // functions and controllers after ExitBootServices.
                 match unsafe { E1000e::new(&mut function, handoff, dma) } {
-                    Ok(device) => disks.links.push(Adapter::E1000e(device)),
-                    Err(error) => disks.failures.push((address, error.into())),
+                    Ok(device) => devices.nics.push(Adapter::E1000e(device)),
+                    Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
             } else if net::igb::matches(&function) {
@@ -409,7 +409,7 @@ pub unsafe fn probe_with_provider(
                 match unsafe { Igb::new(&mut function, handoff, dma) } {
                     Ok(device) => {
                         if device.warnings.nvm_autoload_timeout {
-                            disks.warnings.push((
+                            devices.warnings.push((
                                 address,
                                 Warning::Message(
                                     "igb NVM autoload completion timed out; NVM contents validated",
@@ -417,14 +417,14 @@ pub unsafe fn probe_with_provider(
                             ));
                         }
                         if device.warnings.phy_configuration_timeout {
-                            disks.warnings.push((
+                            devices.warnings.push((
                                 address,
                                 Warning::Message("igb PHY configuration completion timed out; PHY transactions validated"),
                             ));
                         }
-                        disks.links.push(Adapter::Igb(device));
+                        devices.nics.push(Adapter::Igb(device));
                     }
-                    Err(error) => disks.failures.push((address, error.into())),
+                    Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
             } else if realtek::matches(&function) {
@@ -433,24 +433,24 @@ pub unsafe fn probe_with_provider(
                 match unsafe { Realtek::new(&mut function, handoff, dma, firmware) } {
                     Ok(device) => {
                         if let Some(warning) = device.warning() {
-                            disks.warnings.push((address, Warning::Realtek(warning)));
+                            devices.warnings.push((address, Warning::Realtek(warning)));
                         }
-                        disks.links.push(Adapter::Realtek(device));
+                        devices.nics.push(Adapter::Realtek(device));
                     }
-                    Err(error) => disks.failures.push((address, error.into())),
+                    Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
             } else if input::virtio::matches(&function) {
                 match VirtioInput::new(&mut function, handoff, dma) {
-                    Ok(device) => disks.inputs.push(device),
-                    Err(error) => disks.failures.push((address, error.into())),
+                    Ok(device) => devices.inputs.push(device),
+                    Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
             } else if rtsx::matches(&function) {
                 rtsx::attach(function, handoff).map(|attached| {
-                    disks.rtsx_hosts.push(attached.host);
+                    devices.rtsx_hosts.push(attached.host);
                     if let Some(error) = attached.failure {
-                        disks
+                        devices
                             .device_failures
                             .push((alloc::format!("{address} RTSX SD slot"), error));
                     }
@@ -467,8 +467,8 @@ pub unsafe fn probe_with_provider(
                     sdhci::attach(&mut function, handoff, dma)
                 };
                 attached.map(|attached| {
-                    disks.sd_hosts.extend(attached.hosts);
-                    disks.device_failures.extend(
+                    devices.sd_hosts.extend(attached.hosts);
+                    devices.device_failures.extend(
                         attached.failures.into_iter().map(|(slot, error)| {
                             (alloc::format!("{address} SD slot {slot}"), error)
                         }),
@@ -481,7 +481,7 @@ pub unsafe fn probe_with_provider(
                 })
             } else if ahci::matches(&function) {
                 ahci::attach(&mut function, handoff, dma).map(|attached| {
-                    disks.device_failures.extend(
+                    devices.device_failures.extend(
                         attached
                             .failures
                             .into_iter()
@@ -495,17 +495,17 @@ pub unsafe fn probe_with_provider(
                 })
             } else {
                 if let Some(why) = unsupported(function.class) {
-                    disks.unsupported.push((address, function.class, why));
+                    devices.unsupported.push((address, function.class, why));
                 }
                 continue;
             };
             match result {
-                Ok(devices) => disks.devices.extend(devices),
-                Err(error) => disks.failures.push((address, error.into())),
+                Ok(found) => devices.disks.extend(found),
+                Err(error) => devices.failures.push((address, error.into())),
             }
         }
     }
-    disks
+    devices
 }
 
 #[cfg(test)]
@@ -579,11 +579,11 @@ mod tests {
             device: 2,
             function: 0,
         };
-        let mut disks = Disks::default();
+        let mut devices = Devices::default();
         for original in [missing, wrong_target] {
             let error = realtek::Error::Firmware(original.clone());
-            disks.failures.push((address, error.into()));
-            let (location, error) = disks.failures.last().unwrap();
+            devices.failures.push((address, error.into()));
+            let (location, error) = devices.failures.last().unwrap();
             assert_eq!(*location, address);
             assert_eq!(
                 *error,
