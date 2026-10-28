@@ -1,8 +1,11 @@
 //! The host's xHCI controllers after probe: each controller's topology
-//! owner ([`xhci::Host`]), polled between engine slices so hotplug and the
-//! resets class drivers queue (`Controller::queue_reset`) are serviced, as
-//! Linux's `hub_event` services them. A keyboard or pointer that arrives
-//! joins the host input; another new device is reported and its owners kept.
+//! owner ([`xhci::Host`]), looked at between engine slices so hotplug and
+//! the resets class drivers queue (`Controller::queue_reset`) are serviced,
+//! as Linux's `hub_event` services them. A controller that signals its
+//! events wakes the engine and is polled once it has work
+//! ([`xhci::Host::due`]); another is polled on a timer. A keyboard or
+//! pointer that arrives joins the host input; another new device is
+//! reported and its owners kept.
 //!
 //! The controllers' registers and DMA pages are reached through the
 //! loader's identity root, so each poll runs in it (`storage::RestoreRoot`).
@@ -16,8 +19,9 @@ use stela_drivers::{
     usb::xhci::{self, Found},
 };
 
-/// How often the controllers are looked at: Linux's root hub status timer
-/// runs every 250 ms; a hub's status endpoint interval is at most 255 ms.
+/// How often controllers without a signal are polled: Linux's root hub
+/// status timer runs every 250 ms; a hub's status endpoint interval is at
+/// most 255 ms.
 const POLL_HZ: u64 = 16;
 
 pub struct HostUsb {
@@ -51,17 +55,20 @@ impl HostUsb {
         }
     }
 
-    /// Poll every controller when the interval has passed; the keyboards
-    /// and pointers that arrived.
+    /// Poll each signalling controller that has work, and the others when
+    /// the interval has passed; the keyboards and pointers that arrived.
     pub fn poll(&mut self) -> Vec<InputDevice> {
         let mut inputs = Vec::new();
         let now = super::host::rdtsc();
-        if self.hosts.is_empty() || now.wrapping_sub(self.last) < self.interval {
-            return inputs;
+        let timed = now.wrapping_sub(self.last) >= self.interval;
+        if timed {
+            self.last = now;
         }
-        self.last = now;
         let firmware = HandoffProvider::new(self.firmware.as_deref());
         for host in &mut self.hosts {
+            if !(if host.signals() { host.due() } else { timed }) {
+                continue;
+            }
             let mut changes = {
                 // SAFETY: the loader root `storage::open` captured, which maps
                 // the controller and the DMA pages.
