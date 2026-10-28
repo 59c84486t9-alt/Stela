@@ -217,7 +217,7 @@ fn random() -> [u8; 32] {
 
 #[test]
 fn four_way_and_group_handshakes_install_the_authenticators_keys() {
-    for akm in [Akm::Psk, Akm::PskSha256] {
+    for akm in [Akm::Psk, Akm::PskSha256, Akm::Sae] {
         let (mut ap, mut station) = begun(suites(akm));
         assert!(!station.established());
         let step = station.receive(&ap.message_3(&RSN), &mut random).unwrap();
