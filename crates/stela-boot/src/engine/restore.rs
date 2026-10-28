@@ -741,6 +741,15 @@ impl Experiment {
         }
     }
 
+    /// Answer the guest's last request, without the guest's devices: the
+    /// answers sign with Apple's TSS and read the image over the network,
+    /// which every PE's device access would otherwise wait out.
+    pub fn work(&mut self) {
+        if !self.terminal {
+            self.driver.work();
+        }
+    }
+
     /// The image sent so far and the share of polls the host was behind
     /// (no chunk read ahead) or the guest was (its window full), while the
     /// restore sends one.
@@ -756,7 +765,8 @@ impl Experiment {
         ))
     }
 
-    /// Serve the guest's restore client; [`Self::pump`] read ahead first.
+    /// Serve the guest's restore client; [`Self::pump`] read ahead and
+    /// [`Self::work`] answered its last request first.
     pub fn poll(&mut self, devices: &mut AppleDevices) {
         if let Some((message, at)) = &self.failure
             && output::millis_since(*at) >= FAILURE_GRACE_MS
@@ -773,7 +783,7 @@ impl Experiment {
         if let Some(proxy) = &mut self.proxy {
             proxy.poll(&mut client);
         }
-        let result = self.driver.poll(&mut client);
+        let result = self.driver.poll_ports(&mut client);
         for message in &self.driver.session.ledger()[self.ledger..] {
             output::arguments(format_args!("{label} ledger={message:?}\n"));
         }

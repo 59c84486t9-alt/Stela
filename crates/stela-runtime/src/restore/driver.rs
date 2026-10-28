@@ -5,6 +5,7 @@ use super::{
     Error, Result,
     answers::Answers,
     plist::Limits,
+    plist::Value,
     route::Route,
     session::{Action, Job, PORT, Phase, Session},
     stream::{ByteStream, Endian, Framed},
@@ -56,6 +57,8 @@ pub struct Driver<R, H> {
     frame: Framed,
     handshake: Handshake,
     jobs: Vec<Transfer<H>>,
+    /// A control message received and not yet answered ([`Self::work`]).
+    received: Option<Value>,
     failure: Option<Error>,
     complete: bool,
 }
@@ -73,14 +76,25 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
             frame: Framed::new(Endian::Big, Limits::default()),
             handshake: Handshake::Type,
             jobs: Vec::new(),
+            received: None,
             failure: None,
             complete: false,
         })
     }
     /// One bounded framing operation and at most one operation per scheduled
-    /// job. There is no polling loop waiting for guest execution or mux I/O.
-    /// Failures are terminal and preserve the session ledger and full request.
+    /// job, answering a control message as it arrives. There is no polling
+    /// loop waiting for guest execution or mux I/O. Failures are terminal and
+    /// preserve the session ledger and full request.
     pub fn poll(&mut self, ports: &mut impl Ports<Handle = H>) -> Poll<Result<()>> {
+        let result = self.poll_ports(ports);
+        self.work();
+        result
+    }
+
+    /// [`Self::poll`] without answering: a control message received waits
+    /// for [`Self::work`], for a caller that must not hold the ports while
+    /// the answers sign with Apple's TSS or read the image.
+    pub fn poll_ports(&mut self, ports: &mut impl Ports<Handle = H>) -> Poll<Result<()>> {
         if let Some(error) = &self.failure {
             return Poll::Ready(Err(error.clone()));
         }
@@ -92,6 +106,49 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
             self.failure = Some(error.clone());
         }
         result
+    }
+
+    /// Answer the control message the last poll received, queueing the
+    /// reply for the next one. A failure fails the session at its next poll.
+    pub fn work(&mut self) {
+        if self.failure.is_some() || self.complete {
+            return;
+        }
+        if let Some(message) = self.received.take()
+            && let Err(error) = self.answer(message)
+        {
+            self.failure = Some(error);
+        }
+    }
+
+    fn answer(&mut self, message: Value) -> Result<()> {
+        match self.session.receive(message, &mut self.answers)? {
+            Action::None | Action::Event(_) => {}
+            Action::Transfer(job) => self.jobs.push(Transfer {
+                job,
+                handle: None,
+                closing: false,
+            }),
+            Action::FinalAck(value) => self.frame.queue(&value, false)?,
+        }
+        if self.session.phase() == Phase::Ready {
+            let message = match self.handshake {
+                Handshake::Type => {
+                    self.handshake = Handshake::Hardware;
+                    self.session.query_value("HardwareInfo")?
+                }
+                Handshake::Hardware => {
+                    self.handshake = Handshake::Started;
+                    self.answers.store.prepare()?;
+                    self.session.start_for(&self.answers, self.route)?
+                }
+                Handshake::Started => {
+                    return Err(Error::Invalid("unexpected ready session"));
+                }
+            };
+            self.frame.queue(&message, false)?;
+        }
+        Ok(())
     }
     fn step(&mut self, ports: &mut impl Ports<Handle = H>) -> Poll<Result<()>> {
         if self.control.is_none() {
@@ -126,40 +183,17 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
                 Poll::Pending => {}
             }
         }
-        // Read control even while an ASR/DataPort write is backpressured.
+        // Read control even while an ASR/DataPort write is backpressured;
+        // one message at a time, answered by `work`.
         if !self.frame.sending()
+            && self.received.is_none()
             && self.session.phase() != Phase::Complete
             && let Poll::Ready(message) = self.frame.poll_receive(&mut Stream {
                 ports,
                 handle: control,
             })
         {
-            match self.session.receive(message?, &mut self.answers)? {
-                Action::None | Action::Event(_) => {}
-                Action::Transfer(job) => self.jobs.push(Transfer {
-                    job,
-                    handle: None,
-                    closing: false,
-                }),
-                Action::FinalAck(value) => self.frame.queue(&value, false)?,
-            }
-            if self.session.phase() == Phase::Ready {
-                let message = match self.handshake {
-                    Handshake::Type => {
-                        self.handshake = Handshake::Hardware;
-                        self.session.query_value("HardwareInfo")?
-                    }
-                    Handshake::Hardware => {
-                        self.handshake = Handshake::Started;
-                        self.answers.store.prepare()?;
-                        self.session.start_for(&self.answers, self.route)?
-                    }
-                    Handshake::Started => {
-                        return Poll::Ready(Err(Error::Invalid("unexpected ready session")));
-                    }
-                };
-                self.frame.queue(&message, false)?;
-            }
+            self.received = Some(message?);
         }
         let mut active = self.jobs.iter().filter(|j| j.handle.is_some()).count();
         let mut control_used = self.frame.sending();

@@ -2460,6 +2460,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         )
         .unwrap_or_else(|error| output::fatal(error));
     }
+    // The run's driver calls keep the engine's TLB entries; the serialized
+    // workers' qualifications require PCIDE clear.
+    let _tagged = options
+        .parallel
+        .then(storage::TaggedRoots::enable)
+        .flatten();
     let boot_progress =
         loaded_source
             .as_ref()
@@ -3020,7 +3026,7 @@ fn run<H: Host>(
                 }
                 // Lock waits since the last beat: the devices', by call, and
                 // the heap's.
-                let waits = (machine.devices.waits(), crate::ALLOCATOR.usage().waits);
+                let waits = (machine.devices.waits(), crate::ALLOCATOR.waits());
                 let mut devices = String::new();
                 for (call, (now, before)) in Call::ALL
                     .iter()

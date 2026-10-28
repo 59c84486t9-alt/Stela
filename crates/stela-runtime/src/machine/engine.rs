@@ -4319,6 +4319,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return Ok(None);
                 }
                 self.statistics.shared += 1;
+                let compiled = Arc::unwrap_or_clone(compiled);
                 return self
                     .install(pc, physical, variant, &source, compiled)
                     .map(Some);

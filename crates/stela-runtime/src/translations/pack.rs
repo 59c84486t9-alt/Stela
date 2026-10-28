@@ -17,7 +17,11 @@
 //! then the others, as long as they fit.
 use super::{Digest, Record};
 use crate::machine::{Offer, Preparation, Translations};
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+    vec::Vec,
+};
 use sha2::{Digest as _, Sha256};
 use stela_compiler::block::CompiledBlock;
 
@@ -348,6 +352,9 @@ struct Pending {
     preparation: Arc<Preparation>,
 }
 
+/// A shared block's page key, PC and context.
+type SharedKey = (Digest, u64, Digest);
+
 /// One boot's store over the pack it read.
 #[derive(Debug)]
 pub struct Store<'a> {
@@ -360,9 +367,10 @@ pub struct Store<'a> {
     pending: Vec<Pending>,
     pending_bytes: usize,
     /// The blocks offered, by page key, PC and context, for the other
-    /// machines sharing the store, and the bytes of their native code
-    /// within `shared_bound` ([`Store::share`]).
-    shared: BTreeMap<(Digest, u64, Digest), CompiledBlock>,
+    /// machines sharing the store, oldest first, and the bytes of their
+    /// native code within `shared_bound` ([`Store::share`]).
+    shared: BTreeMap<SharedKey, Arc<CompiledBlock>>,
+    shared_order: VecDeque<SharedKey>,
     shared_bytes: usize,
     shared_bound: usize,
     pub counters: Counters,
@@ -396,6 +404,7 @@ impl<'a> Store<'a> {
             pending: Vec::new(),
             pending_bytes: 0,
             shared: BTreeMap::new(),
+            shared_order: VecDeque::new(),
             shared_bytes: 0,
             shared_bound: 0,
             counters: Counters::default(),
@@ -408,9 +417,38 @@ impl<'a> Store<'a> {
 
     /// Keep the native code of offered blocks, up to `bound` bytes, for
     /// [`Translations::prepared`]: for machines that share the store. Full,
-    /// it forgets them all and starts again.
+    /// it forgets the oldest until a new one fits.
     pub fn share(&mut self, bound: usize) {
         self.shared_bound = bound;
+    }
+
+    /// The translator whose records the store keeps.
+    pub fn translator(&self) -> &Digest {
+        &self.translator
+    }
+
+    /// The pack's bytes for `key`, unless an earlier lookup found them
+    /// invalid: for a caller to decode ([`Record::decode`]) without holding
+    /// the store, then report with [`Self::looked_up`].
+    pub fn stored(&self, key: &Digest) -> Option<&'a [u8]> {
+        if self.loaded.get(key) == Some(&false) {
+            return None;
+        }
+        self.pack.and_then(|pack| pack.get(key))
+    }
+
+    /// Count `key`'s first lookup: whether the pack held bytes for it, and
+    /// whether they decoded.
+    pub fn looked_up(&mut self, key: &Digest, found: bool, valid: bool) {
+        if self.loaded.contains_key(key) {
+            return;
+        }
+        match (found, valid) {
+            (true, true) => self.counters.loaded += 1,
+            (true, false) => self.counters.invalid += 1,
+            (false, _) => self.counters.absent += 1,
+        }
+        self.loaded.insert(*key, valid);
     }
 
     /// The pack read, if valid.
@@ -522,41 +560,47 @@ impl<'a> Store<'a> {
 
 impl Translations for Store<'_> {
     fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
-        let looked_up = self.loaded.get(key).copied();
-        if looked_up == Some(false) {
-            return None;
-        }
-        let bytes = self.pack.and_then(|pack| pack.get(key));
+        let bytes = self.stored(key);
         let record = bytes.and_then(|bytes| Record::decode(bytes, &self.translator, key).ok());
-        if looked_up.is_none() {
-            match (bytes, &record) {
-                (Some(_), Some(_)) => self.counters.loaded += 1,
-                (Some(_), None) => self.counters.invalid += 1,
-                (None, _) => self.counters.absent += 1,
-            }
-            self.loaded.insert(*key, record.is_some());
-        }
+        self.looked_up(key, bytes.is_some(), record.is_some());
         record.map(Arc::new)
     }
 
-    fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<CompiledBlock> {
+    fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<Arc<CompiledBlock>> {
         self.shared.get(&(*key, pc, *context)).cloned()
     }
 
     fn offer(&mut self, offer: Offer) {
-        let code = offer.block.native.x86_64_code.len();
-        if code <= self.shared_bound {
-            // Full, it forgets every block and keeps what the PEs run next.
-            if self.shared_bytes + code > self.shared_bound {
-                self.shared.clear();
-                self.shared_bytes = 0;
+        let Offer {
+            key,
+            page,
+            pc,
+            context,
+            input,
+            preparation,
+            block,
+            ..
+        } = offer;
+        let code = block.native.x86_64_code.len();
+        let at = (key, pc, context);
+        if let Some(present) = self.shared.get_mut(&at) {
+            // Offered again, a block keeps its place.
+            self.shared_bytes = self.shared_bytes - present.native.x86_64_code.len() + code;
+            *present = Arc::new(block);
+        } else if code <= self.shared_bound {
+            // Full, it forgets the oldest blocks until this one fits.
+            while self.shared_bytes + code > self.shared_bound
+                && let Some(oldest) = self.shared_order.pop_front()
+            {
+                if let Some(evicted) = self.shared.remove(&oldest) {
+                    self.shared_bytes -= evicted.native.x86_64_code.len();
+                }
             }
-            let key = (offer.key, offer.pc, offer.context);
-            if self.shared.insert(key, offer.block.clone()).is_none() {
-                self.shared_bytes += code;
-            }
+            self.shared.insert(at, Arc::new(block));
+            self.shared_bytes += code;
+            self.shared_order.push_back(at);
         }
-        let bytes = core::mem::size_of::<Pending>() + offer.input.len();
+        let bytes = core::mem::size_of::<Pending>() + input.len();
         if self.pending_bytes + bytes > MAX_PENDING_BYTES {
             self.counters.dropped += 1;
             return;
@@ -564,12 +608,12 @@ impl Translations for Store<'_> {
         self.pending_bytes += bytes;
         self.counters.offered += 1;
         self.pending.push(Pending {
-            key: offer.key,
-            page: offer.page,
-            pc: offer.pc,
-            context: offer.context,
-            input: offer.input,
-            preparation: offer.preparation,
+            key,
+            page,
+            pc,
+            context,
+            input,
+            preparation,
         });
     }
 }
@@ -603,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_store_hands_offered_blocks_to_other_machines_and_starts_again_when_full() {
+    fn a_shared_store_hands_offered_blocks_to_other_machines_and_forgets_the_oldest_when_full() {
         let translator = Digest::of(b"translator");
         let key = Digest::of(b"page");
         let (first, second) = (offer(0x1000, key), offer(0x1008, key));
@@ -628,11 +672,27 @@ mod tests {
         assert_eq!(
             store
                 .prepared(&key, 0x1000, &first.context)
-                .map(|block| block.native.x86_64_code),
+                .map(|block| block.native.x86_64_code.clone()),
             Some(first.block.native.x86_64_code.clone())
         );
+        // Offered again, a block keeps its one place and its bytes.
+        store.offer(first.clone());
+        assert_eq!(store.shared_bytes, 2 * code);
+        // Full, the oldest goes first: the second, offered before the first
+        // came back.
+        let third = offer(0x1010, key);
+        let fourth = offer(0x1018, key);
+        store.offer(third.clone());
+        store.offer(fourth.clone());
+        let mut fifth = offer(0x1020, key);
+        fifth.block.native.x86_64_code.truncate(code / 2);
+        store.offer(fifth.clone());
+        assert!(store.prepared(&key, 0x1008, &second.context).is_none());
+        assert!(store.prepared(&key, 0x1000, &first.context).is_some());
+        assert!(store.prepared(&key, 0x1020, &fifth.context).is_some());
+        assert!(store.shared_bytes <= 4 * code);
         // Every offer still waits for proof.
-        assert_eq!(store.pending(), 5);
+        assert_eq!(store.pending(), 9);
     }
 
     #[test]

@@ -135,7 +135,7 @@ struct State {
     loaded: BTreeMap<Digest, Option<Arc<Record>>>,
     /// Blocks this process prepared, by page key, PC and context, for its
     /// other threads, whose engines compile separately.
-    prepared: HashMap<(Digest, u64, Digest), CompiledBlock>,
+    prepared: HashMap<(Digest, u64, Digest), Arc<CompiledBlock>>,
     /// The native bytes `prepared` holds.
     prepared_bytes: usize,
     queue: VecDeque<Offer>,
@@ -161,7 +161,7 @@ impl State {
             .checked_sub(old)
             .and_then(|bytes| bytes.checked_add(offer.block.native.x86_64_code.len()));
         if let Some(total) = total.filter(|&bytes| bytes <= bound) {
-            self.prepared.insert(key, offer.block.clone());
+            self.prepared.insert(key, Arc::new(offer.block.clone()));
             self.prepared_bytes = total;
         }
     }
@@ -297,7 +297,7 @@ impl Translations for Store {
         shared()?.record(key)
     }
 
-    fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<CompiledBlock> {
+    fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<Arc<CompiledBlock>> {
         let shared = shared()?;
         lock(&shared.state)
             .prepared

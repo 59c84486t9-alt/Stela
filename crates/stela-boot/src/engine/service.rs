@@ -126,11 +126,13 @@ impl Service {
         lap.part(Part::Nor);
         let interrupted = || !boot && host::interrupted();
         if let Some(experiment) = restore {
-            // The source is read outside the devices' lock, which every
-            // PE's device accesses take.
+            // The source is read, and the guest's requests answered,
+            // outside the devices' lock, which every PE's device accesses
+            // take.
             experiment.pump();
             if !interrupted() {
                 experiment.prefetch();
+                experiment.work();
             }
             lap.part(Part::Read);
             if !interrupted() {

@@ -89,9 +89,6 @@ pub struct Usage {
     pub peak: usize,
     /// The largest free extent: the most one allocation can get.
     pub largest: usize,
-    /// Acquisitions of the heap's lock that found it held: with every PE on
-    /// a core of its own, the cores' allocations meet there.
-    pub waits: u64,
 }
 pub struct Heap {
     held: AtomicBool,
@@ -100,6 +97,10 @@ pub struct Heap {
     /// Each core's bytes allocated from its cache less those freed to it,
     /// which [`State::live`] does not count; written by that core alone.
     cached: [AtomicIsize; CPUS],
+    /// Each core's bytes allocated less those it freed, by every route:
+    /// what its own work holds, which other cores' allocations leave
+    /// alone; written by that core alone.
+    own: [AtomicIsize; CPUS],
     /// Cores tagged so far, and whether any is.
     tagged: AtomicUsize,
     any_tagged: AtomicBool,
@@ -119,6 +120,7 @@ impl Heap {
             held: AtomicBool::new(false),
             caches: [const { UnsafeCell::new(Cache::EMPTY) }; CPUS],
             cached: [const { AtomicIsize::new(0) }; CPUS],
+            own: [const { AtomicIsize::new(0) }; CPUS],
             tagged: AtomicUsize::new(0),
             any_tagged: AtomicBool::new(false),
             live: AtomicUsize::new(0),
@@ -435,6 +437,26 @@ impl Heap {
         count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
     }
 
+    /// Acquisitions of the heap's lock that found it held: with every PE
+    /// on a core of its own, the cores' allocations meet there.
+    pub fn waits(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
+    }
+
+    /// The calling core's bytes allocated less those it freed, once it is
+    /// tagged.
+    pub fn own(&self) -> Option<isize> {
+        self.cpu().map(|cpu| self.own[cpu].load(Ordering::Relaxed))
+    }
+
+    /// Add `bytes` to the calling core's own count, which only it writes.
+    fn count_own(&self, bytes: isize) {
+        if let Some(cpu) = self.cpu() {
+            let count = &self.own[cpu];
+            count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+        }
+    }
+
     /// The heap's usage, walking the free list for its largest extent.
     pub fn usage(&self) -> Usage {
         let _guard = self.lock();
@@ -455,7 +477,6 @@ impl Heap {
             carved: state.carved,
             peak: state.peak,
             largest,
-            waits: self.waits.load(Ordering::Relaxed),
         }
     }
 }
@@ -555,14 +576,24 @@ unsafe impl GlobalAlloc for Heap {
             // SAFETY: on this core, with interrupts disabled.
             let block = unsafe { self.take_cached(cpu, class) };
             restore_interrupts(flags);
+            if !block.is_null() {
+                self.count_own((SMALLEST << class) as isize);
+            }
             return block;
         }
-        let _guard = self.lock();
-        let state = unsafe { &mut *self.state.get() };
-        // SAFETY: the actual guard owns this state for the entire operation.
-        unsafe { allocate_locked(state, layout) }
+        let block = {
+            let _guard = self.lock();
+            let state = unsafe { &mut *self.state.get() };
+            // SAFETY: the actual guard owns this state for the entire operation.
+            unsafe { allocate_locked(state, layout) }
+        };
+        if !block.is_null() {
+            self.count_own(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize);
+        }
+        block
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        self.count_own(-(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize));
         if let Some(class) = class(layout)
             && let Some(cpu) = self.cpu()
         {

@@ -1001,7 +1001,9 @@ impl<D: Devices> Board<D> {
 
     /// Record what the machines ask of `devices` at every step: the home
     /// machine its resets, DMA and host inputs, and any its starts and the
-    /// host's service.
+    /// host's service. Every call's release runs it, so it writes only what
+    /// changed: the machines read these without the lock, and an unchanged
+    /// store would still take each one's cache line from every reader.
     fn publish(&self, devices: &mut D) {
         if let Some(reset) = devices.take_reset() {
             self.reset
@@ -1019,14 +1021,23 @@ impl<D: Devices> Board<D> {
         // A deadline earlier than the last, such as a host transfer that
         // completed on another core, wakes the home machine if it sleeps.
         let dma = devices.dma_deadline().unwrap_or(u64::MAX);
-        if self.dma.swap(dma, Ordering::AcqRel) > dma {
-            self.hub.wake(self.hub.home.load(Ordering::Acquire));
+        let published = self.dma.load(Ordering::Acquire);
+        if published != dma {
+            self.dma.store(dma, Ordering::Release);
+            if published > dma {
+                self.hub.wake(self.hub.home.load(Ordering::Acquire));
+            }
         }
         for (pe, pins) in self.pins.iter().enumerate() {
-            pins.store(pack(devices.pins(pe)), Ordering::Release);
+            let packed = pack(devices.pins(pe));
+            if pins.load(Ordering::Relaxed) != packed {
+                pins.store(packed, Ordering::Release);
+            }
         }
-        self.asleep
-            .store(devices.waits_on_host(), Ordering::Release);
+        let asleep = devices.waits_on_host();
+        if self.asleep.load(Ordering::Relaxed) != asleep {
+            self.asleep.store(asleep, Ordering::Release);
+        }
         if devices.take_host_service() {
             self.hub.request_service();
         }

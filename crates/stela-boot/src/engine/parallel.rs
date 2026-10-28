@@ -123,18 +123,22 @@ impl Pe {
             profile,
             target,
         } = self;
+        // This core's driver calls keep the engine's TLB entries.
+        let _tagged = super::storage::TaggedRoots::enable();
         let hub = Arc::clone(devices.hub());
         let address = {
             let mut host = owner.host();
             hub.first_start(pe, || host.wait_for_interrupt())
         };
         let cpu = Cpu::of(profile.chip, address, Pstate::reset(2));
-        let live = crate::ALLOCATOR.usage().live;
+        // This core's own allocations, which other PEs' leave alone.
+        let own = || crate::ALLOCATOR.own().unwrap_or(0);
+        let before = own();
         let mut machine = Machine::new_at(cpu, owner.host(), devices, profile, target, pe)
             .unwrap_or_else(|error| output::fatal(error));
         output::arguments(format_args!(
             "PARALLEL PE {pe} machine takes {} KiB of heap\n",
-            crate::ALLOCATOR.usage().live.saturating_sub(live) >> 10
+            own().saturating_sub(before).max(0) >> 10
         ));
         machine.set_strict(strict);
         // Waits return to this loop, which publishes the counts.

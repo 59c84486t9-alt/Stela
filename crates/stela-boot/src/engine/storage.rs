@@ -12,6 +12,9 @@
 //! service reads share one xHCI controller. [`RestoreRoot`] is the only way
 //! into a driver, so it also holds the host drivers' lock, which serializes
 //! them and orders each holder's writes before the next holder's reads.
+//!
+//! While the engine runs ([`TaggedRoots`]), the loader's root has a TLB
+//! context of its own, so a driver call keeps the engine's translations.
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
@@ -30,6 +33,54 @@ use stela_runtime::pc::{
     gpt::{Guid, PartitionDevice},
     storage::{self, Named, Target},
 };
+
+/// CR4.PCIDE: TLB entries tagged by their root's context.
+const PCIDE: u64 = 1 << 17;
+/// CR3's context, which holds PWT and PCD without PCIDE.
+const CONTEXT: u64 = 0xfff;
+/// The loader root's context while tagged; every engine root keeps 0.
+const LOADER_CONTEXT: u64 = 1;
+/// A CR3 write that keeps the entering context's TLB entries.
+const KEEP_ENTRIES: u64 = 1 << 63;
+
+/// Tags this core's TLB entries by root while the engine runs. Entering the
+/// loader's root ([`RestoreRoot`]) then flushes only its own context and
+/// leaving it flushes nothing, so the engine's translations survive a call
+/// into the host drivers. Every engine root keeps context 0, whose CR3
+/// writes still flush, so INVLPG and root reloads keep their meaning; no
+/// engine mapping changes inside a driver call. Dropped, CR4 is restored
+/// for the native qualifications, which require PCIDE clear.
+pub(super) struct TaggedRoots {
+    cr4: u64,
+}
+impl TaggedRoots {
+    /// None without PCIDs, or with cache controls in the current root's
+    /// context bits.
+    pub(super) fn enable() -> Option<Self> {
+        if core::arch::x86_64::__cpuid(1).ecx & 1 << 17 == 0 {
+            return None;
+        }
+        let (cr3, cr4): (u64, u64);
+        // SAFETY: CPL0 control register reads.
+        unsafe {
+            asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+            asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        }
+        if cr4 & PCIDE != 0 || cr3 & CONTEXT != 0 {
+            return None;
+        }
+        // SAFETY: the processor has PCIDs and the current root context 0.
+        unsafe { asm!("mov cr4, {}", in(reg) cr4 | PCIDE, options(nostack, preserves_flags)) };
+        Some(Self { cr4 })
+    }
+}
+impl Drop for TaggedRoots {
+    fn drop(&mut self) {
+        // SAFETY: outside a driver call the current root has context 0;
+        // clearing PCIDE flushes every context.
+        unsafe { asm!("mov cr4, {}", in(reg) self.cr4, options(nostack, preserves_flags)) };
+    }
+}
 
 /// Held while a core is inside the host drivers ([`RestoreRoot`]).
 static HOST_DRIVERS: AtomicBool = AtomicBool::new(false);
@@ -74,6 +125,7 @@ pub(super) fn host_drivers_waited(tsc_hz: u64) -> (u128, u128) {
 pub(super) struct RestoreRoot {
     root: u64,
     flags: u64,
+    tagged: bool,
 }
 impl RestoreRoot {
     /// Wait for the host drivers' lock, which no holder takes again: a
@@ -83,24 +135,41 @@ impl RestoreRoot {
     /// `root` is the live loader root, retaining the engine window.
     pub(super) unsafe fn enter(root: u64) -> Self {
         lock_host_drivers();
-        let (previous, flags): (u64, u64);
-        // SAFETY: CPL0, live roots with the same engine code/stack/window.
-        // Interrupts remain off until the original root has been restored.
+        let (previous, flags, cr4): (u64, u64, u64);
+        // SAFETY: CPL0 control register reads; interrupts remain off until
+        // the original root has been restored.
         unsafe {
-            asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov cr3, {root}",flags=out(reg)flags,previous=out(reg)previous,root=in(reg)root);
+            asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov {cr4}, cr4",flags=out(reg)flags,previous=out(reg)previous,cr4=out(reg)cr4);
         }
+        let tagged = cr4 & PCIDE != 0;
+        // Tagged, entering flushes the loader's context alone.
+        let root = if tagged {
+            root & !CONTEXT | LOADER_CONTEXT
+        } else {
+            root
+        };
+        // SAFETY: live roots with the same engine code/stack/window.
+        unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
         Self {
             root: previous,
             flags,
+            tagged,
         }
     }
 }
 impl Drop for RestoreRoot {
     fn drop(&mut self) {
+        // Tagged, the engine root's entries are still its own: nothing in
+        // a driver call changes an engine mapping.
+        let root = if self.tagged {
+            self.root | KEEP_ENTRIES
+        } else {
+            self.root
+        };
         // SAFETY: the original live root; no borrowed identity address
         // survives a BlockDevice call.
         unsafe {
-            asm!("mov cr3, {}",in(reg)self.root,options(nostack,preserves_flags));
+            asm!("mov cr3, {}",in(reg)root,options(nostack,preserves_flags));
         }
         HOST_DRIVERS.store(false, Ordering::Release);
         // SAFETY: only IF was changed by enter().

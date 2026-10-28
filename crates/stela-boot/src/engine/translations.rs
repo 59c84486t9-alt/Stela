@@ -311,8 +311,20 @@ fn with_boot<R>(f: impl FnOnce(&mut Option<Boot>) -> R) -> R {
 pub struct Shared;
 
 impl Translations for Shared {
+    /// The record, decoded while the other PEs reach the store: the pack's
+    /// bytes outlive the lock.
     fn record(&mut self, key: &Digest) -> Option<alloc::sync::Arc<Record>> {
-        with_boot(|boot| boot.as_mut()?.store.record(key))
+        let (bytes, translator) = with_boot(|boot| {
+            let store = &boot.as_ref()?.store;
+            Some((store.stored(key), *store.translator()))
+        })?;
+        let record = bytes.and_then(|bytes| Record::decode(bytes, &translator, key).ok());
+        with_boot(|boot| {
+            if let Some(boot) = boot {
+                boot.store.looked_up(key, bytes.is_some(), record.is_some());
+            }
+        });
+        record.map(alloc::sync::Arc::new)
     }
 
     fn prepared(
@@ -320,7 +332,7 @@ impl Translations for Shared {
         key: &Digest,
         pc: u64,
         context: &Digest,
-    ) -> Option<stela_compiler::block::CompiledBlock> {
+    ) -> Option<alloc::sync::Arc<stela_compiler::block::CompiledBlock>> {
         with_boot(|boot| boot.as_mut()?.store.prepared(key, pc, context))
     }
 
