@@ -206,4 +206,5 @@ fn exercise(bytes: &[u8]) {
     assert!(native.domain.records.lock().unwrap().live.is_empty());
 }
 
+#[path = "ax200_mld_peer_tests/cases.rs"]
 mod cases;
