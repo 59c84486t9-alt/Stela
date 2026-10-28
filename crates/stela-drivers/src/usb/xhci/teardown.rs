@@ -16,8 +16,12 @@ impl Controller {
     /// A replacement starts at its acknowledged producer pointer/cycle, without
     /// resetting the allocator, zeroing a live ring or replaying a ticket.
     /// Streams retain their separate allocation/retirement policy.
-    pub fn deconfigure(&mut self, slot: u8, endpoints: &[Endpoint]) -> Result<(), BlockError> {
-        self.legacy_slot(slot)?;
+    pub fn deconfigure(
+        &mut self,
+        id: impl DeviceRef,
+        endpoints: &[Endpoint],
+    ) -> Result<(), BlockError> {
+        let slot = id.current_slot(self)?;
         self.deconfigure_owned(slot, endpoints)
     }
 

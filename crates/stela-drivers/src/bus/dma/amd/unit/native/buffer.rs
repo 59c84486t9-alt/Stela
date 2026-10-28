@@ -1,3 +1,4 @@
+//! Pinned buffers for AMD IOMMU tables and queues.
 use super::*;
 use crate::bus::dma::memory::CpuMapping;
 

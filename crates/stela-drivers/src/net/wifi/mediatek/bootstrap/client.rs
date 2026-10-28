@@ -57,6 +57,7 @@ use crate::{
         scan,
         security::{
             Cipher, Integrity, KeyIdentity, KeyScope, PacketNumber, ReplaySeed, SecurityStatus,
+            management::ManagementCipher,
         },
         station::{
             self, Action, Completion, Join, Station, Ticket,
@@ -201,6 +202,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     phase: Phase,
     profile: Option<Profile>,
     ciphers: Option<(Cipher, Cipher)>,
+    /// The PMF selection's group management suite.
+    management_cipher: Option<ManagementCipher>,
     peer_generation: u64,
     reserved_wcid: Option<u16>,
     format_generation: Option<u64>,
@@ -304,6 +307,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 phase: Phase::Idle,
                 profile: None,
                 ciphers: None,
+                management_cipher: None,
                 peer_generation: 0,
                 reserved_wcid: None,
                 format_generation: None,
@@ -498,6 +502,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let peer = profile.peer_request(true, false).map_err(Error::Codec)?;
         let broadcast = profile.broadcast_request().map_err(Error::Codec)?;
         let ciphers = join.request.key_ciphers();
+        let management_cipher = join.request.pmf().map(|pmf| pmf.management());
         let action = match beacon {
             Some(_) if join.request.pmf().is_some() => s.station.begin_modern_pmf(
                 join,
@@ -535,6 +540,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // plain STA_REC(NONE). Neither creates an authorized OS port.
         s.profile = Some(profile);
         s.ciphers = ciphers;
+        s.management_cipher = management_cipher;
         s.reserved_wcid = Some(profile.wcid);
         s.peer_generation = generation;
         s.format_generation = None;
@@ -956,6 +962,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     return Err(error);
                 }
             };
+            // ieee80211_rx_h_michael_mic_verify: with the MIC stripped, a
+            // Michael failure the hardware reports goes to the OS, as
+            // cfg80211_michael_mic_failure, and the frame is dropped.
+            if modern_data && frame.security.tkip_mic_error && frame.header().data_present() {
+                let header = frame.header();
+                events.push(Event::MichaelMicFailure {
+                    transmitter: header.transmitter.ok_or(Error::WrongProfile)?,
+                    group: header.receiver.is_multicast(),
+                    key_index: frame.security.key.map(|key| key.index()),
+                });
+                continue;
+            }
             if s.phase == Phase::Scanning {
                 let bss = s
                     .scanner
@@ -1104,6 +1122,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 continue;
             }
             if frame.header().control & 12 == 0 {
+                // The 6 GHz association response arrives under the held
+                // transport's providers, as the exchange's frames did.
+                if s.phase == Phase::Joining
+                    && let Some(guard) = six.as_deref_mut()
+                {
+                    Self::qualify_six(s, guard, six_ghz::Use::Receive(&frame), now)?;
+                }
                 let action = s
                     .station
                     .receive(epoch, &frame, now, policy)
@@ -1336,6 +1361,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // incomplete host-only parents can release their retained old owners.
         s.receive_groups.clear();
         s.ciphers = None;
+        s.management_cipher = None;
         s.receive_ba = core::array::from_fn(|_| None);
         s.transmit_ba = core::array::from_fn(|_| None);
         s.ba_actions.clear();
@@ -1412,6 +1438,13 @@ pub enum Event {
         failure: Option<station::Failure>,
     },
     ConnectionLost(crate::net::wifi::mediatek::ring::rx::Frame),
+    /// `cfg80211_michael_mic_failure`: a TKIP frame from `transmitter` failed
+    /// its Michael MIC under the group or pairwise key `key_index`.
+    MichaelMicFailure {
+        transmitter: crate::net::Mac,
+        group: bool,
+        key_index: Option<u8>,
+    },
     /// The firmware's TX status for a frame that asked for it.
     TxStatus(TxStatus),
     /// `ieee80211_cqm_rssi_notify`: the signal crossed the monitor's

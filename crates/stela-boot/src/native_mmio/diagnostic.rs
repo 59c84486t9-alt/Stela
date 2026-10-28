@@ -31,7 +31,7 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
     let wire = stage("capture", unsafe { captured(handoff) })?;
     let root = owner.enter_root().map_err(failed)?;
     let (source, session) = stage("authority-activate", unsafe {
-        Source::activate(wire, &root)
+        ScopedSource::activate(wire, &root)
     })?;
     // SAFETY: actual diagnostic's complete post-EBS wholeblock handoff excludes
     // firmware/SMM/native comparator/counter/decode/route owners. Original SDT

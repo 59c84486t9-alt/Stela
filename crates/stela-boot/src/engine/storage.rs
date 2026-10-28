@@ -25,9 +25,8 @@ use stela_drivers::{
     Handoff,
     block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
-    input::virtio::VirtioInput,
-    probe::probe,
-    usb::hid::UsbInput,
+    input::InputDevice,
+    probe::{NativeServices, probe_with_provider},
 };
 use stela_runtime::pc::{
     gpt::{Guid, PartitionDevice},
@@ -330,17 +329,20 @@ pub struct Partitions<'a> {
     pub fdr: Option<Guid>,
 }
 
-/// Open the explicitly selected partitions while the loader's identity root
-/// is still active, before host::install, and bring up every host input
-/// device and network adapter. No guessed disk/partition, no writes at open. Ownership lasts
+/// Open the explicitly selected partitions in the loader's identity root
+/// `root` ([`RestoreRoot`]), and bring up every host input device and
+/// network adapter. No guessed disk/partition, no writes at open. Ownership lasts
 /// with the returned services. Probe once for all consumers;
 /// do not reset a controller or reuse its DMA pages for a second probe.
 ///
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
-/// reserved DMA pages, and the loader root/window remain live for the boot.
+/// reserved DMA pages, `root` is the loader's root, and it and the window
+/// remain live for the boot.
 pub unsafe fn open(
     handoff: &Handoff,
+    root: u64,
+    services: Option<&dyn NativeServices>,
     partitions: &Partitions<'_>,
     usb_disks: &[String],
     external: Option<usize>,
@@ -361,58 +363,68 @@ pub unsafe fn open(
             "host disk {serial} is both a USB storage disk and a partition target"
         ));
     }
-    let root: u64;
-    // SAFETY: engine CPL0, before switching away from the loader root.
-    unsafe {
-        asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
-    }
+    // SAFETY: forwarded caller contract; nothing below enters it again.
+    let _root = unsafe { RestoreRoot::enter(root) };
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
+    let firmware = stela_drivers::probe::handoff_provider(handoff);
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
-    let mut disks = unsafe { probe(handoff, &mut dma) };
-    for (address, error) in &disks.failures {
+    let mut devices = unsafe { probe_with_provider(handoff, &mut dma, firmware, services, None) };
+    // The owners native attachments keep, and those of failed ones, stay
+    // for the boot: their mappings and DMA domains outlive the devices.
+    Vec::leak(core::mem::take(&mut devices.owners));
+    for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
-    for (address, warning) in &disks.warnings {
+    for (location, error) in &devices.platform_failures {
+        output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
+    }
+    for (address, warning) in &devices.warnings {
         output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
     }
-    for (location, error) in disks.bluetooth_failures() {
+    for (location, error) in devices.bluetooth_failures() {
         output::arguments(format_args!("BLUETOOTH FAILED {location}: {error}\n"));
     }
     output::arguments(format_args!(
         "BLUETOOTH PLATFORM {:?}\n",
-        disks.bluetooth_platform.observation
+        devices.bluetooth_platform.observation
     ));
-    for (location, error) in &disks.usb_vendor_failures {
+    for (location, error) in &devices.usb_vendor_failures {
         output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
     }
-    for (address, class, why) in &disks.unsupported {
+    for (address, class, why) in &devices.unsupported {
         output::arguments(format_args!(
             "HOST UNSUPPORTED pci={address} class={:02x}{:02x}{:02x}: {why}\n",
             class[0], class[1], class[2]
         ));
     }
-    for (location, error) in &disks.device_failures {
+    for (location, error) in &devices.device_failures {
         output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
     }
-    for (location, error) in &disks.usb_failures {
+    for (location, error) in &devices.usb_failures {
         output::arguments(format_args!(
             "USB FAILED {location}: {}\n",
             stela_drivers::usb::xhci::explain(error)
         ));
     }
-    for (location, why) in &disks.usb_unused {
+    for (location, why) in &devices.usb_unused {
         output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
     }
     let inputs = Inputs {
-        devices: core::mem::take(&mut disks.inputs),
-        usb: core::mem::take(&mut disks.usb_inputs),
+        devices: core::mem::take(&mut devices.inputs),
         root,
     };
     let links = super::network::Links {
-        devices: core::mem::take(&mut disks.links),
+        devices: core::mem::take(&mut devices.nics),
         root,
     };
+    let usb = super::usb::HostUsb::new(
+        core::mem::take(&mut devices.usb_hosts),
+        dma,
+        handoff.firmware.clone(),
+        root,
+        handoff.clock.ticks_per_microsecond * 1_000_000,
+    );
     // One disk may hold several of them: the stick holds the Mac's internal
     // SSD, the install medium, the translation store and the boot log, and
     // the internal SSD the installed system the Preboot volume names. The
@@ -438,7 +450,7 @@ pub unsafe fn open(
     let mut opened = loop {
         named.truncate(required);
         named.extend(optional.iter().map(|(named, _)| named.clone()));
-        match storage::open_shared(&mut disks.devices, &named) {
+        match storage::open_shared(&mut devices.disks, &named) {
             Ok(opened) => break opened,
             Err((at, error)) if at >= required => {
                 let (named, which) = optional.remove(at - required);
@@ -495,14 +507,14 @@ pub unsafe fn open(
     let mut taken = usb_disks
         .iter()
         .map(|serial| {
-            storage::take(&mut disks.devices, serial)
+            storage::take(&mut devices.disks, serial)
                 .map_err(|error| format!("USB storage {serial}: {error}"))
         })
         .collect::<Result<Vec<_>, String>>()?;
     // With `--external-disks`, every disk left, in probe order, up to the
     // hub's free ports; the rest are reported.
     if let Some(ports) = external {
-        let rest = core::mem::take(&mut disks.devices);
+        let rest = core::mem::take(&mut devices.disks);
         for (index, disk) in rest.into_iter().enumerate() {
             if index < ports {
                 taken.push(disk);
@@ -543,6 +555,7 @@ pub unsafe fn open(
         fdr,
         inputs,
         links,
+        usb,
         usb_disks,
         disks: host_disks,
     })
@@ -579,6 +592,8 @@ pub struct Opened {
     pub fdr: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
+    /// The xHCI controllers' topology owners, polled for hotplug.
+    pub usb: super::usb::HostUsb,
     /// Whole disks for the guest's USB mass storage, in option order.
     pub usb_disks: alloc::vec::Vec<Box<dyn BlockDevice>>,
     /// Every disk taken above, for its shutdown notice.
@@ -588,7 +603,6 @@ pub struct Opened {
 /// The host's input devices and the loader root their registers and DMA
 /// pages are reached through.
 pub struct Inputs {
-    pub devices: alloc::vec::Vec<VirtioInput>,
-    pub usb: alloc::vec::Vec<UsbInput>,
+    pub devices: alloc::vec::Vec<InputDevice>,
     pub root: u64,
 }

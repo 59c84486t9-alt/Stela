@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2014-2019 aQuantia Corporation
 // Copyright (C) 2019-2020 Marvell International Ltd.
+//! AQtion MAC register programming: interrupts, rings and filters.
 use super::{
     Error, Generation, Hardware, Profile, Registers, Result, Timer,
     firmware::Firmware,

@@ -74,7 +74,10 @@ impl Station {
                     {
                         return Err(Error::WrongKey.into());
                     }
-                    if matches!(expected, KeyScope::Pairwise(_)) && key.index() != 0 {
+                    if matches!(expected, KeyScope::Pairwise(_))
+                        && key.index() != 0
+                        && !key.cipher().is_wep()
+                    {
                         return Err(Error::Unsupported("extended pairwise key ID").into());
                     }
                 }

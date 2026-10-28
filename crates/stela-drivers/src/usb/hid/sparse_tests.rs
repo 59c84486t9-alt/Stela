@@ -145,9 +145,18 @@ fn actual_mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder()
             input.descriptor().is_some(),
             "valid full descriptor remains canonical"
         );
-        assert_eq!(input.reports.keys.as_ref().unwrap().report, Some(1));
         assert_eq!(
-            input.reports.keys.as_ref().unwrap().pressed(&[1, 0]),
+            input.translator.reports.keys.as_ref().unwrap().report,
+            Some(1)
+        );
+        assert_eq!(
+            input
+                .translator
+                .reports
+                .keys
+                .as_ref()
+                .unwrap()
+                .pressed(&[1, 0]),
             Some(vec![4])
         );
         assert!(
@@ -200,7 +209,7 @@ fn actual_mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder()
             assert!(
                 matches!(&polled.reports[0],ReceivedReport::Rejected {bytes,error:DecodeError::KeyboardError(0x0007_0001)} if bytes==raw)
             );
-            assert_eq!(rich.held, [4, 5]);
+            assert_eq!(rich.translator.held, [4, 5]);
             assert!(polled.events.is_empty());
         } else {
             let ReceivedReport::Data(frame) = &polled.reports[0] else {
@@ -213,7 +222,7 @@ fn actual_mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder()
             assert_eq!(&rich.buffer.bytes()[..raw.len()], raw);
         }
     }
-    assert!(rich.held.is_empty() && legacy.held.is_empty());
+    assert!(rich.translator.held.is_empty() && legacy.translator.held.is_empty());
     rich.stop_hid().unwrap();
     legacy.stop_hid().unwrap();
 }
@@ -240,7 +249,13 @@ fn actual_unsigned32_selector_retains_canonical_report_protocol_and_complete_val
     );
     let raw = [1, 0, 0, 0, 0x80];
     assert_eq!(
-        input.reports.keys.as_ref().unwrap().pressed(&raw[1..]),
+        input
+            .translator
+            .reports
+            .keys
+            .as_ref()
+            .unwrap()
+            .pressed(&raw[1..]),
         Some(vec![6])
     );
     let actual = feed(&mut input, &peer, &raw);
@@ -273,13 +288,19 @@ fn actual_stall_retirement_keeps_sparse_binding_and_original_dma_until_ack() {
     assert_eq!(input.buffer.physical(), physical);
     assert!(peer.borrow().seen.contains(&RESET_ENDPOINT_COMMAND));
     assert!(peer.borrow().seen.contains(&SET_DEQUEUE_COMMAND));
-    assert_eq!(input.held, [4]);
+    assert_eq!(input.translator.held, [4]);
     peer.borrow_mut().halt_transfer = None;
     assert_eq!(input.stop_hid().unwrap().inputs, [key(4, false)]);
     input.restart().unwrap();
     assert_eq!(feed(&mut input, &peer, &[1, 1, 0]).inputs, [key(4, true)]);
     assert_eq!(
-        input.reports.keys.as_ref().unwrap().pressed(&[1, 0]),
+        input
+            .translator
+            .reports
+            .keys
+            .as_ref()
+            .unwrap()
+            .pressed(&[1, 0]),
         Some(vec![4])
     );
     assert_eq!(input.buffer.physical(), physical);
@@ -303,14 +324,14 @@ fn stale_sparse_binding_cannot_touch_current_native_dma_or_consume_its_completio
     old.controller = current.controller.clone();
     let before = ram.clone();
     let commands = peer.borrow().seen.clone();
-    let last = old.last_report.clone();
+    let last = old.last_report().to_vec();
     trap.set(true);
     assert!(old.poll_hid().inputs.is_empty());
     assert!(old.stop_hid().is_err());
     assert!(old.restart().is_err());
     assert_eq!(ram, before);
     assert_eq!(peer.borrow().seen, commands);
-    assert_eq!(old.last_report, last);
+    assert_eq!(old.last_report(), last);
     trap.set(false);
     assert_eq!(current.poll_hid().inputs, [key(4, true)]);
     old.controller = original;
@@ -342,7 +363,13 @@ fn actual_rejected_boot_descriptor_retains_original_bytes_and_standard_boot_tabl
     assert_eq!(actual.inputs, [key(0xe1, true), key(4, true)]);
     assert!(matches!(&actual.reports[0],ReceivedReport::Boot(bytes) if bytes==&raw));
     assert_eq!(
-        input.reports.keys.as_ref().unwrap().pressed(&raw),
+        input
+            .translator
+            .reports
+            .keys
+            .as_ref()
+            .unwrap()
+            .pressed(&raw),
         Some(vec![0xe1, 4])
     );
     input.stop_hid().unwrap();

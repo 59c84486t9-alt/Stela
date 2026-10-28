@@ -10,7 +10,7 @@
 //! such lock, and a device that leaves bytes for the host wakes one that
 //! sleeps (`Hub::request_service`). The boot PE serves only once no PE has
 //! for [`STARVED_MILLIS`], or always when the PEs run serialized.
-use super::{host, input, network, nor, output, parallel, power, restore};
+use super::{host, input, network, nor, output, parallel, power, restore, usb};
 use alloc::{format, string::String};
 use core::{
     cell::UnsafeCell,
@@ -33,6 +33,7 @@ pub(super) struct Service {
     devices: parallel::Board,
     restore: Option<restore::Experiment>,
     input: Option<input::HostInput>,
+    usb: Option<usb::HostUsb>,
     network: Option<network::GuestNetwork>,
     nor: Option<nor::HostNor>,
     power: power::HostPowerControl,
@@ -41,11 +42,18 @@ pub(super) struct Service {
     reported: u64,
 }
 
+/// The host's keyboards and pointers, and the USB controllers new ones
+/// arrive on.
+pub(super) struct Peripherals {
+    pub input: Option<input::HostInput>,
+    pub usb: Option<usb::HostUsb>,
+}
+
 impl Service {
     pub(super) fn new(
         devices: parallel::Board,
         restore: Option<restore::Experiment>,
-        input: Option<input::HostInput>,
+        Peripherals { input, usb }: Peripherals,
         network: Option<network::GuestNetwork>,
         nor: Option<nor::HostNor>,
         power: power::HostPowerControl,
@@ -56,6 +64,7 @@ impl Service {
             devices,
             restore,
             input,
+            usb,
             network,
             nor,
             power,
@@ -87,6 +96,7 @@ impl Service {
             devices,
             restore,
             input,
+            usb,
             network,
             nor,
             power,
@@ -103,6 +113,12 @@ impl Service {
             output::advance_logs();
         }
         lap.part(Part::Log);
+        if let Some(usb) = usb {
+            let arrived = usb.poll();
+            if let Some(input) = input.as_mut() {
+                input.add(arrived);
+            }
+        }
         if let Some(input) = input {
             let inputs = input.read();
             if !inputs.is_empty() {

@@ -66,10 +66,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let cipher = if pairwise { ciphers.0 } else { ciphers.1 };
         let bss = if profile.cipher == 0 {
             profile.cipher = match cipher {
+                Cipher::Wep40 => 1,
+                Cipher::Tkip => 2,
                 Cipher::Ccmp128 => 4,
                 Cipher::Ccmp256 => 10,
                 Cipher::Gcmp128 => 11,
                 Cipher::Gcmp256 => 12,
+                Cipher::Wep104 => 5,
             };
             Some(
                 modern
@@ -320,12 +323,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         } else {
             64
         };
-        s.station
-            .configure_rx_block_ack(window, true)
-            .map_err(Error::BlockAck)?;
-        s.station
-            .configure_tx_block_ack(window)
-            .map_err(Error::BlockAck)?;
+        if n.aggregates() {
+            s.station
+                .configure_rx_block_ack(window, true)
+                .map_err(Error::BlockAck)?;
+            s.station
+                .configure_tx_block_ack(window)
+                .map_err(Error::BlockAck)?;
+        }
         let m = s.modern.as_mut().unwrap();
         m.applied_edca = Some(super::edca::AppliedEdca {
             parameter_set_count: m
@@ -333,8 +338,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 .negotiated()
                 .wmm
                 .as_ref()
-                .unwrap()
-                .parameter_set_count,
+                .map_or(0, |wmm| wmm.parameter_set_count),
             access_categories: m.prepared_edca,
         });
         s.phase = Phase::Associated;
@@ -445,7 +449,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         commands.push((Command::BssInfo, p.awake().map_err(Error::Codec)?));
         s.profile = Some(p);
         let filter = p.filter_request(true).map_err(Error::Codec)?;
-        let prepared_edca = context.negotiated().wmm.as_ref().unwrap().access_categories;
+        let prepared_edca = context.negotiated().edca();
         s.modern = Some(Configuration {
             context,
             wire,

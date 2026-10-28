@@ -116,13 +116,13 @@ impl Preauthentication {
             .peer_request_validated(enable, false, None, true)
     }
     pub fn broadcast_request(&self) -> Result<Vec<u8>, Error> {
-        self.profile.broadcast_request_validated(true)
+        self.profile.broadcast_request()
     }
     pub fn disable_beacon_pm(&self) -> Result<Vec<u8>, Error> {
-        self.profile.disable_beacon_pm_validated(true)
+        self.profile.disable_beacon_pm()
     }
     pub fn filter_request(&self, enable: bool) -> Result<super::super::init::Request, Error> {
-        self.profile.filter_request_validated(enable, true)
+        self.profile.filter_request(enable)
     }
     pub fn roc(&self, token: u8, duration: u32) -> Result<super::super::init::Request, Error> {
         self.profile.roc_validated(token, duration, true)

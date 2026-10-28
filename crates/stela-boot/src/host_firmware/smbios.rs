@@ -316,7 +316,7 @@ pub(super) fn record(
         }
     };
     let identity = identity.unwrap_or_default();
-    serde_json::json!({"phase":phase,"source_guid":capture.format.map(Format::guid),"source_entry_address":capture.source_address,"resource":if capture.state==State::Present {Some(serde_json::json!({"name":smbios::NAME,"target":{"driver":smbios::TARGET.driver,"hardware":smbios::TARGET.hardware,"revision":smbios::TARGET.revision,"board":smbios::TARGET.board},"source":capture.format.map(Format::source)}))}else{None},"observation":state,"system_vendor":field(identity.system_vendor),"product_name":field(identity.product_name),"product_version":field(identity.product_version)})
+    serde_json::json!({"phase":phase,"source_guid":capture.format.map(Format::guid),"source_entry_address":capture.source_address,"resource":if capture.state==State::Present {Some(serde_json::json!({"name":smbios::NAME,"target":{"driver":smbios::TARGET.driver,"hardware":smbios::TARGET.hardware,"revision":smbios::TARGET.revision,"board":smbios::TARGET.board},"source":capture.format.map(Format::source)}))}else{None},"observation":state,"system_vendor":field(identity.system_vendor),"product_name":field(identity.product_name),"product_version":field(identity.product_version),"board_vendor":field(identity.board_vendor)})
 }
 
 #[cfg(test)]

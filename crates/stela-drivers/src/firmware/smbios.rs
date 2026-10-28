@@ -87,6 +87,9 @@ pub struct SystemIdentity<'a> {
     pub system_vendor: Observation<'a>,
     pub product_name: Observation<'a>,
     pub product_version: Observation<'a>,
+    /// The first type-2 baseboard's manufacturer, the structure Linux's
+    /// `dmi_decode` saves as DMI_BOARD_VENDOR. Not observed without one.
+    pub board_vendor: Observation<'a>,
 }
 impl Default for SystemIdentity<'_> {
     fn default() -> Self {
@@ -94,6 +97,7 @@ impl Default for SystemIdentity<'_> {
             system_vendor: Observation::NotObserved,
             product_name: Observation::NotObserved,
             product_version: Observation::NotObserved,
+            board_vendor: Observation::NotObserved,
         }
     }
 }
@@ -226,6 +230,7 @@ pub fn identity(entry: Entry, table: &[u8]) -> Result<SystemIdentity<'_>, Error>
     let mut at = 0usize;
     let mut count = 0usize;
     let mut found = None;
+    let mut board = None;
     let mut ended = false;
     let mut handles = [0u8; 8192];
     while at < table.len() {
@@ -274,6 +279,15 @@ pub fn identity(entry: Entry, table: &[u8]) -> Result<SystemIdentity<'_>, Error>
                 system_vendor: field(table[at + 4], strings)?,
                 product_name: field(table[at + 5], strings)?,
                 product_version: field(table[at + 6], strings)?,
+                board_vendor: Observation::NotObserved,
+            });
+        }
+        if head[0] == 2 && board.is_none() {
+            // dmi_save_ident skips a field past the structure's length.
+            board = Some(if length > 4 {
+                field(table[at + 4], &table[at + length..next])?
+            } else {
+                Observation::NotObserved
             });
         }
         at = next;
@@ -291,7 +305,12 @@ pub fn identity(entry: Entry, table: &[u8]) -> Result<SystemIdentity<'_>, Error>
     if !ended {
         return Err(Error::MissingEnd);
     }
-    found.ok_or(Error::MissingType1)
+    found
+        .map(|identity| SystemIdentity {
+            board_vendor: board.unwrap_or(Observation::NotObserved),
+            ..identity
+        })
+        .ok_or(Error::MissingType1)
 }
 fn split(bytes: &[u8]) -> Result<(Entry, &[u8]), Error> {
     let format = if bytes.starts_with(b"_SM3_") {
@@ -450,7 +469,8 @@ mod tests {
                 SystemIdentity {
                     system_vendor: Observation::Absent,
                     product_name: Observation::Absent,
-                    product_version: Observation::Absent
+                    product_version: Observation::Absent,
+                    board_vendor: Observation::NotObserved,
                 }
             );
             assert_eq!(
@@ -458,6 +478,31 @@ mod tests {
                 Observation::NotObserved
             );
         }
+    }
+    #[test]
+    fn the_first_baseboard_names_the_board_vendor() {
+        let (raw, table) = fixture(Format::Smbios3);
+        let end = table.len() - 6;
+        let mut boards = table[..end].to_vec();
+        boards.extend_from_slice(&[2, 8, 2, 0, 1, 0, 0, 0]);
+        boards.extend_from_slice(b"Board Co\0\0");
+        boards.extend_from_slice(&[2, 8, 3, 0, 1, 0, 0, 0]);
+        boards.extend_from_slice(b"Second\0\0");
+        boards.extend_from_slice(&table[end..]);
+        let mut entry = entry(&raw, Format::Smbios3).unwrap();
+        entry.table_bytes = boards.len();
+        assert_eq!(
+            identity(entry, &boards).unwrap().board_vendor,
+            Observation::Value(&b"Board Co\0"[..])
+        );
+        let mut short = table[..end].to_vec();
+        short.extend_from_slice(&[2, 4, 2, 0, 0, 0]);
+        short.extend_from_slice(&table[end..]);
+        entry.table_bytes = short.len();
+        assert_eq!(
+            identity(entry, &short).unwrap().board_vendor,
+            Observation::NotObserved
+        );
     }
     #[test]
     fn checked_entry_lengths_checksums_versions_and_native_bounds_refuse() {

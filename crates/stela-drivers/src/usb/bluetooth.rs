@@ -134,6 +134,18 @@ pub trait Io {
     /// Cancel/acknowledge a posted bulk IN before changing its framing mode.
     fn quiesce_bulk(&mut self) -> Result<(), BlockError>;
     fn close(&mut self) -> Result<(), BlockError>;
+    /// `btusb_open` after `btusb_close`: post the receives again. Only a
+    /// close that retired every transfer can reopen.
+    fn reopen(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported("USB Bluetooth transport reopen"))
+    }
+    /// `usb_queue_reset_device`: ask the USB topology owner to reset this
+    /// device and bind it again. Every later access through this owner fails.
+    fn queue_reset(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::Unsupported(
+            "USB Bluetooth device reset request",
+        ))
+    }
     fn now_us(&self) -> u64;
 }
 
@@ -393,6 +405,29 @@ impl<B: Io> Hci<B> {
         Ok(())
     }
 
+    /// Open a cleanly closed transport again with empty assemblers, as power-on
+    /// does after power-off. A failed close stays terminal.
+    pub(in crate::usb::bluetooth) fn reopen(&mut self) -> Result<(), Error> {
+        self.io.validate().map_err(|e| error(ErrorKind::Usb(e)))?;
+        match self.state {
+            State::Closed => {}
+            State::Failed => return Err(error(ErrorKind::Failed)),
+            State::Open => {
+                return Err(error(ErrorKind::Usb(BlockError::Unsupported(
+                    "USB Bluetooth transport is open",
+                ))));
+            }
+        }
+        if let Err(e) = self.io.reopen() {
+            self.state = State::Failed;
+            return Err(error(ErrorKind::Usb(e)));
+        }
+        self.events = Assembler::new(Pipe::Event);
+        self.acl = Assembler::new(Pipe::Acl);
+        self.state = State::Open;
+        Ok(())
+    }
+
     /// Stop outstanding USB receives. Idempotent success still requires the same
     /// live device generation; a failed close is terminal and cannot be used as
     /// a reopen/reset shortcut.
@@ -412,6 +447,23 @@ impl<B: Io> Hci<B> {
                 Err(error(ErrorKind::Usb(failure)))
             }
         }
+    }
+}
+
+impl<B: Io> Hci<B> {
+    /// `usb_queue_reset_device`: close this transport, then ask the USB
+    /// topology owner to reset the device and bind a fresh transport, even
+    /// when the close failed.
+    pub fn queue_reset(&mut self) -> Result<(), Error> {
+        let closed = if self.state == State::Open {
+            self.close()
+        } else {
+            Ok(())
+        };
+        self.io
+            .queue_reset()
+            .map_err(|e| error(ErrorKind::Usb(e)))?;
+        closed
     }
 }
 

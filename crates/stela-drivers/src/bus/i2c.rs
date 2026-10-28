@@ -20,6 +20,7 @@ use core::fmt;
 
 pub mod amd_mp2;
 mod designware;
+pub mod timing;
 
 pub use designware::{Config, DesignWare, MmioRegisters, Registers, Speed, Timing};
 #[cfg(test)]
@@ -66,6 +67,16 @@ pub trait Bus {
         address: Address,
         operations: &mut [Operation<'_>],
     ) -> Result<(), Error>;
+}
+
+impl<B: Bus + ?Sized> Bus for alloc::boxed::Box<B> {
+    fn transaction(
+        &mut self,
+        address: Address,
+        operations: &mut [Operation<'_>],
+    ) -> Result<(), Error> {
+        (**self).transaction(address, operations)
+    }
 }
 
 /// A progressing timer. Interval users must preflight their maximum duration,

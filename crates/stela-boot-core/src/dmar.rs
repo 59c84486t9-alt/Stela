@@ -2,10 +2,12 @@
 //! include-all unit or a completely matched set of direct endpoint scopes can
 //! identify its remapper; neither proves device quiescence. Bridges, aliases,
 //! multi-hop scopes, reserved regions, ATS and unknown structures are refused.
+use crate::remapping::Scope;
 use alloc::vec::Vec;
 
 const HEADER: usize = 48;
 const DRHD: u16 = 0;
+const RMRR: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DmarError {
@@ -32,6 +34,163 @@ pub struct HardwareUnit {
 
 fn word(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn quad(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+/// A remapping hardware unit (DRHD): its registers, segment and the PCI
+/// requesters it translates, or every requester on the segment no other
+/// unit lists when `include_all`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Drhd {
+    pub base: u64,
+    pub bytes: usize,
+    pub segment: u16,
+    pub include_all: bool,
+    pub scopes: Vec<Scope>,
+}
+
+/// A reserved memory region (RMRR): memory the firmware keeps DMA-ing to
+/// for the requesters in its scopes, which a translating unit must map one
+/// to one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Rmrr {
+    pub segment: u16,
+    pub base: u64,
+    pub limit: u64,
+    pub scopes: Vec<Scope>,
+}
+
+/// A parsed DMAR table: the host address width and the units and reserved
+/// regions. ATSR, RHSA, ANDD, SATC and later structures describe ATS,
+/// proximity and namespace devices, none of which the mount enables, and
+/// are skipped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Remapping {
+    pub physical_bits: u8,
+    pub units: Vec<Drhd>,
+    pub reserved: Vec<Rmrr>,
+}
+
+/// The PCI scopes of a structure starting at `from`. IOAPIC, HPET and ACPI
+/// namespace scopes name interrupt sources, which matter only to interrupt
+/// remapping.
+fn scopes(entry: &[u8], from: usize) -> Result<Vec<Scope>, DmarError> {
+    let mut found = Vec::new();
+    let mut scope = from;
+    while scope < entry.len() {
+        let header = entry
+            .get(scope..scope + 6)
+            .ok_or(DmarError::InvalidStructure)?;
+        let bytes = usize::from(header[1]);
+        if bytes < 6 || !bytes.is_multiple_of(2) {
+            return Err(DmarError::InvalidStructure);
+        }
+        let end = scope
+            .checked_add(bytes)
+            .ok_or(DmarError::InvalidStructure)?;
+        let path = entry
+            .get(scope + 6..end)
+            .ok_or(DmarError::InvalidStructure)?
+            .as_chunks::<2>()
+            .0;
+        if path.iter().any(|hop| hop[0] > 31 || hop[1] > 7) {
+            return Err(DmarError::InvalidStructure);
+        }
+        if matches!(header[0], 1 | 2) {
+            if path.is_empty() {
+                return Err(DmarError::InvalidStructure);
+            }
+            found.push(Scope {
+                bridge: header[0] == 2,
+                bus: header[5],
+                path: path.iter().map(|hop| (hop[0], hop[1])).collect(),
+            });
+        }
+        scope = end;
+    }
+    Ok(found)
+}
+
+/// Parse a DMAR table, validating its checksum, width and every DRHD and
+/// RMRR it holds.
+pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
+    if table.len() < HEADER
+        || &table[..4] != b"DMAR"
+        || u32::from_le_bytes(table[4..8].try_into().unwrap()) as usize != table.len()
+        || table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)) != 0
+    {
+        return Err(DmarError::InvalidTable);
+    }
+    let physical_bits = table[36]
+        .checked_add(1)
+        .filter(|bits| (32..=64).contains(bits))
+        .ok_or(DmarError::UnsupportedWidth)?;
+    let mut remapping = Remapping {
+        physical_bits,
+        units: Vec::new(),
+        reserved: Vec::new(),
+    };
+    let mut offset = HEADER;
+    while offset < table.len() {
+        let header = table
+            .get(offset..offset + 4)
+            .ok_or(DmarError::InvalidStructure)?;
+        let kind = word(header, 0);
+        let length = usize::from(word(header, 2));
+        let end = offset
+            .checked_add(length)
+            .filter(|_| length >= 4)
+            .ok_or(DmarError::InvalidStructure)?;
+        let entry = table.get(offset..end).ok_or(DmarError::InvalidStructure)?;
+        match kind {
+            DRHD => {
+                if length < 16 {
+                    return Err(DmarError::InvalidStructure);
+                }
+                let base = quad(entry, 8);
+                let bytes = 1usize
+                    .checked_shl(12 + u32::from(entry[5] & 0xf))
+                    .ok_or(DmarError::InvalidStructure)?;
+                if base == 0
+                    || !base.is_multiple_of(4096)
+                    || base.checked_add(bytes as u64).is_none()
+                {
+                    return Err(DmarError::InvalidStructure);
+                }
+                remapping.units.push(Drhd {
+                    base,
+                    bytes,
+                    segment: word(entry, 6),
+                    include_all: entry[4] & 1 != 0,
+                    scopes: scopes(entry, 16)?,
+                });
+            }
+            RMRR => {
+                if length < 24 {
+                    return Err(DmarError::InvalidStructure);
+                }
+                let (base, limit) = (quad(entry, 8), quad(entry, 16));
+                if !base.is_multiple_of(4096) || limit < base || limit & 0xfff != 0xfff {
+                    return Err(DmarError::InvalidStructure);
+                }
+                remapping.reserved.push(Rmrr {
+                    segment: word(entry, 6),
+                    base,
+                    limit,
+                    scopes: scopes(entry, 24)?,
+                });
+            }
+            _ => {}
+        }
+        offset = end;
+    }
+    if remapping.units.is_empty() {
+        return Err(DmarError::MissingUnit);
+    }
+    Ok(remapping)
 }
 
 /// Validate the complete table before returning one owner of the live flat bus. No
@@ -199,6 +358,52 @@ mod tests {
         table[50..52].copy_from_slice(&length.to_le_bytes());
         seal(table)
     }
+    #[test]
+    fn parses_units_reserved_regions_and_bridge_paths() {
+        let mut table = fixture();
+        // A second unit with an endpoint behind a bridge and a bridge scope.
+        let mut unit = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        unit.extend(0xfed91000u64.to_le_bytes());
+        unit.extend([1, 10, 0, 0, 0, 0, 0x1c, 0, 0, 0]);
+        unit.extend([2, 8, 0, 0, 0, 0, 0x1d, 0]);
+        unit.extend([3, 8, 0, 0, 2, 0xf0, 0x1f, 0]);
+        let length = unit.len() as u16;
+        unit[2..4].copy_from_slice(&length.to_le_bytes());
+        table.extend(unit);
+        let mut rmrr = vec![1, 0, 32, 0, 0, 0, 0, 0];
+        rmrr.extend(0x7d000000u64.to_le_bytes());
+        rmrr.extend(0x7d01ffffu64.to_le_bytes());
+        rmrr.extend([1, 8, 0, 0, 0, 0, 0x14, 0]);
+        table.extend(rmrr);
+        table.extend([3, 0, 4, 0]);
+        let parsed = parse(&seal(table)).unwrap();
+        assert_eq!(parsed.physical_bits, 48);
+        assert_eq!(parsed.units.len(), 2);
+        assert!(parsed.units[0].include_all);
+        assert_eq!(
+            parsed.units[1].scopes,
+            [
+                Scope {
+                    bridge: false,
+                    bus: 0,
+                    path: vec![(0x1c, 0), (0, 0)]
+                },
+                Scope {
+                    bridge: true,
+                    bus: 0,
+                    path: vec![(0x1d, 0)]
+                }
+            ]
+        );
+        assert_eq!(parsed.reserved[0].limit, 0x7d01ffff);
+        assert_eq!(parsed.reserved[0].scopes[0].path, [(0x14, 0)]);
+        let mut broken = fixture();
+        broken.extend([1, 0, 24, 0, 0, 0, 0, 0]);
+        broken.extend(0x1000u64.to_le_bytes());
+        broken.extend(0x1000u64.to_le_bytes());
+        assert_eq!(parse(&seal(broken)), Err(DmarError::InvalidStructure));
+    }
+
     #[test]
     fn requires_exact_live_endpoint_coverage_and_valid_direct_paths() {
         let one = [1, 8, 0, 0, 0, 0, 1, 0];

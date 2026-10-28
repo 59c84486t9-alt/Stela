@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2019 Intel Corporation
+//! Tearing down a Thunderbolt DisplayPort tunnel: stopping its paths and releasing its adapters.
 use super::*;
 use crate::bus::thunderbolt::{
     channel,

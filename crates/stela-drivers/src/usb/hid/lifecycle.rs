@@ -12,7 +12,7 @@ impl UsbInput {
         self.error.clone()
     }
     pub fn descriptor(&self) -> Option<&Descriptor> {
-        self.descriptor.as_ref()
+        self.translator.descriptor()
     }
     /// Actual descriptor bytes, even when boot fallback was selected.
     pub fn report_descriptor(&self) -> &[u8] {
@@ -48,32 +48,10 @@ impl UsbInput {
         self.queued = None;
         self.retry = None;
         self.state = State::Stopped;
-        let mut releases = Vec::new();
-        for usage in self.held.drain(..) {
-            releases.push(Input::Key {
-                usage: usage as u8,
-                pressed: false,
-            });
-        }
-        if self.buttons != 0 {
-            releases.push(
-                if self
-                    .reports
-                    .pointer
-                    .as_ref()
-                    .is_some_and(|p| p.x.is_some_and(|f| f.relative))
-                {
-                    Input::MouseButtons(0)
-                } else {
-                    Input::Buttons(0)
-                },
-            );
-        }
-        self.buttons = 0;
-        self.position = None;
+        let (releases, events) = self.translator.release();
         Ok(Poll {
             inputs: releases,
-            events: self.events.stop(),
+            events,
             reports: Vec::new(),
         })
     }
@@ -256,12 +234,12 @@ mod tests {
                 previous.error.clone(),
                 previous.queued,
                 previous.retry,
-                previous.held.clone(),
-                previous.buttons,
-                previous.position,
+                previous.translator.held.clone(),
+                previous.translator.buttons,
+                previous.translator.position,
                 previous.failed,
-                previous.dropped,
-                previous.last_report.clone(),
+                previous.translator.dropped,
+                previous.translator.last_report.clone(),
             );
             let before = ram.clone();
             trap.set(true);
@@ -274,12 +252,12 @@ mod tests {
                     previous.error.clone(),
                     previous.queued,
                     previous.retry,
-                    previous.held.clone(),
-                    previous.buttons,
-                    previous.position,
+                    previous.translator.held.clone(),
+                    previous.translator.buttons,
+                    previous.translator.position,
                     previous.failed,
-                    previous.dropped,
-                    previous.last_report.clone()
+                    previous.translator.dropped,
+                    previous.translator.last_report.clone()
                 ),
                 before_state
             );
@@ -410,12 +388,12 @@ mod tests {
                         previous.error.clone(),
                         previous.queued,
                         previous.retry,
-                        previous.held.clone(),
-                        previous.buttons,
-                        previous.position,
+                        previous.translator.held.clone(),
+                        previous.translator.buttons,
+                        previous.translator.position,
                         previous.failed,
-                        previous.dropped,
-                        previous.last_report.clone(),
+                        previous.translator.dropped,
+                        previous.translator.last_report.clone(),
                     );
                     let current_ticket = current.queued;
                     let accesses = hardware.borrow().accesses;
@@ -433,12 +411,12 @@ mod tests {
                             previous.error.clone(),
                             previous.queued,
                             previous.retry,
-                            previous.held.clone(),
-                            previous.buttons,
-                            previous.position,
+                            previous.translator.held.clone(),
+                            previous.translator.buttons,
+                            previous.translator.position,
                             previous.failed,
-                            previous.dropped,
-                            previous.last_report.clone()
+                            previous.translator.dropped,
+                            previous.translator.last_report.clone()
                         ),
                         previous_state
                     );

@@ -47,6 +47,8 @@ const SEND_BUFFER: usize = 64 * 1024;
 struct Phy<L> {
     link: L,
     fault: Option<LinkError>,
+    /// Whether the last poll took a frame from the link.
+    received: bool,
 }
 
 struct Rx(Vec<u8>);
@@ -81,7 +83,10 @@ impl<L: Link> Device for Phy<L> {
 
     fn receive(&mut self, _: Instant) -> Option<(Rx, Tx<'_, L>)> {
         match self.link.receive() {
-            Ok(Some(frame)) => Some((Rx(frame), Tx(self))),
+            Ok(Some(frame)) => {
+                self.received = true;
+                Some((Rx(frame), Tx(self)))
+            }
             Ok(None) => None,
             Err(error) => {
                 self.fault.get_or_insert(error);
@@ -135,7 +140,11 @@ impl<L: Link, C: Clock> Stack<L, C> {
             ]);
         let mut config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(mac.0)));
         config.random_seed = seed;
-        let mut phy = Phy { link, fault: None };
+        let mut phy = Phy {
+            link,
+            fault: None,
+            received: false,
+        };
         let now = Instant::from_micros(clock.now_us() as i64);
         let iface = Interface::new(config, &mut phy, now);
         let mut sockets = SocketSet::new(Vec::new());
@@ -204,6 +213,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
     /// DHCP's news. A link refusal since the last poll is the error.
     pub fn poll(&mut self) -> Result<(), NetError> {
         let now = Instant::from_micros(self.now() as i64);
+        self.phy.received = false;
         self.iface.poll(now, &mut self.phy, &mut self.sockets);
         if let Some(dhcp) = self.dhcp {
             let news = match self.sockets.get_mut::<dhcpv4::Socket>(dhcp).poll() {
@@ -222,6 +232,30 @@ impl<L: Link, C: Clock> Stack<L, C> {
         match self.phy.fault.take() {
             Some(error) => Err(error.into()),
             None => Ok(()),
+        }
+    }
+
+    /// Waits up to `micros` for the link's next frame, when the link signals
+    /// arrivals and the last poll took none: until its signal, smoltcp's next
+    /// timer or the bound, whichever is first. A link that does not signal
+    /// returns at once, and its caller polls.
+    pub fn wait(&mut self, micros: u64) {
+        let deadline = self.now().saturating_add(micros);
+        self.wait_until(deadline);
+    }
+
+    fn wait_until(&mut self, deadline: u64) {
+        if !self.phy.link.signals() || self.phy.received {
+            return;
+        }
+        let now = self.now();
+        let timer = self
+            .iface
+            .poll_delay(Instant::from_micros(now as i64), &self.sockets)
+            .map_or(u64::MAX, |delay| now.saturating_add(delay.total_micros()));
+        let until = deadline.min(timer);
+        if until > now {
+            self.clock.sleep(until);
         }
     }
 
@@ -245,6 +279,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 ));
             }
             self.poll()?;
+            if self.config.is_none() {
+                self.wait_until(deadline);
+            }
         }
         Ok(self.config.as_ref().unwrap())
     }
@@ -297,7 +334,9 @@ impl<L: Link, C: Clock> Stack<L, C> {
                         .next()
                         .ok_or_else(|| NetError::Dns(alloc::format!("{host}: no address")));
                 }
-                Err(dns::GetQueryResultError::Pending) if now < deadline => {}
+                Err(dns::GetQueryResultError::Pending) if now < deadline => {
+                    self.wait_until(deadline)
+                }
                 Err(dns::GetQueryResultError::Pending) => {
                     socket.cancel_query(query);
                     return Err(NetError::Timeout("DNS"));
@@ -458,7 +497,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
             match self.read(&mut transfer, &mut take) {
                 Ok(true) => break Ok(()),
                 Ok(false) if self.now() >= deadline => break Err(NetError::Timeout("HTTP")),
-                Ok(false) => {}
+                Ok(false) => self.wait_until(deadline.min(transfer.idle_at)),
                 Err(error) => break Err(error),
             }
         };
@@ -594,6 +633,7 @@ pub(crate) mod tests {
                     into: a,
                 },
                 fault: None,
+                received: false,
             };
             let config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(SERVER)));
             let mut iface = Interface::new(config, &mut server, Instant::ZERO);
@@ -775,6 +815,52 @@ pub(crate) mod tests {
             s.get_range("10.0.2.2:81", "/", 0, 9, |_| ()),
             Err(NetError::Reset)
         );
+    }
+
+    #[test]
+    fn a_signalling_link_sleeps_until_the_deadline_when_nothing_arrives() {
+        /// A clock whose sleeps jump to the time asked for.
+        #[derive(Clone, Default)]
+        struct Sleeping(Rc<Cell<u64>>, Rc<Cell<usize>>);
+        impl Clock for Sleeping {
+            fn now_us(&self) -> u64 {
+                self.0.get()
+            }
+            fn sleep(&self, until_us: u64) {
+                self.1.set(self.1.get() + 1);
+                self.0.set(until_us.max(self.0.get()));
+            }
+        }
+        struct Signalling(End);
+        impl Link for Signalling {
+            fn mac(&self) -> Mac {
+                self.0.mac
+            }
+            fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+                self.0.transmit(frame)
+            }
+            fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+                self.0.receive()
+            }
+            fn signals(&self) -> bool {
+                true
+            }
+        }
+        let clock = Sleeping::default();
+        let silent = Signalling(End {
+            mac: CLIENT,
+            out: Rc::default(),
+            into: Rc::default(),
+        });
+        let mut stack = Stack::new(silent, clock.clone());
+        match stack.dhcp() {
+            Err(NetError::Dhcp(why)) => assert!(why.starts_with("no IPv4 lease"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        // DHCP's retransmissions bound each sleep, so the 30 s wait takes a
+        // handful of sleeps rather than a poll per clock reading.
+        assert!((1..64).contains(&clock.1.get()), "{}", clock.1.get());
+        assert!(clock.0.get() >= DHCP_WAIT_US);
     }
 
     #[test]

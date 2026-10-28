@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2024 Intel Corporation
+//! Intel PCIe Bluetooth MMIO register offsets.
 pub(super) const FUNC: usize = 0x24;
 pub(super) const HW_REV: usize = 0x28;
 pub(super) const RF_ID: usize = 0x9c;

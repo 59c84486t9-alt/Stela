@@ -1,6 +1,7 @@
 //! Native resource services the mount supplies to [`probe`](super::probe_with_provider)
 //! for drivers that attach through owned configuration space, owned register
 //! mappings, per-requester DMA domains and the ACPI namespace.
+use crate::bus::irq::IrqController;
 use crate::bus::{
     dma::{mapping::DmaDomain, memory::PageSource},
     mmio::owned::{self, Mapping},
@@ -35,16 +36,17 @@ impl fmt::Display for ServiceError {
 }
 
 /// The mount's native owners: configuration and BAR mappings from its native
-/// MMIO platform, requester DMA domains from its IOMMU (or its passthrough
-/// domain where none exists), retained DMA pages and the ACPI namespace.
+/// MMIO platform, requester DMA domains from its IOMMU or the passthrough
+/// domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)), retained DMA
+/// pages and the ACPI namespace.
 ///
 /// # Safety
 /// Implementations transfer ownership: each claimed requester is the unique
 /// owner of its function's configuration space, with its engines, DMA and
 /// interrupts stopped and drained, as [`StoppedRequester::from_stopped_pci`]
 /// requires. Each mapping covers exactly the requested BAR, uncached and
-/// read/write, with no other accessor. Each domain translates (or passes
-/// through) only that requester's DMA and performs real invalidation. Every
+/// read/write, with no other accessor. Each domain meets the [`DmaDomain`]
+/// contract for its kind. Every
 /// returned owner stays valid in every access context `probe`'s drivers use.
 /// A mount that supplies the ACPI namespace also grants `probe` port I/O to
 /// the i8042 at ports 0x60 and 0x64 when the namespace lists one, with IRQ1
@@ -58,6 +60,14 @@ pub unsafe trait NativeServices {
     /// Map memory BAR `bar` of the function at `address` for its driver.
     fn map_bar(&self, address: Address, bar: Bar) -> Result<Mapping, ServiceError>;
 
+    /// The mount's reservation of memory BAR `bar` of the function at
+    /// `address`, for drivers that map parts of it or route child resources
+    /// inside it, as Intel VMD does.
+    fn bar_resource(&self, address: Address, bar: Bar) -> Result<owned::Resource, ServiceError>;
+
+    /// The mapping authority that issues [`Self::map_bar`]'s mappings.
+    fn authority(&self) -> Result<owned::Authority, ServiceError>;
+
     /// The DMA domain for the requester `binding` names. The domain keeps the
     /// binding, and with it the configuration epoch it retains.
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError>;
@@ -65,13 +75,35 @@ pub unsafe trait NativeServices {
     /// Pages for driver DMA rings and buffers.
     fn pages(&self) -> &dyn PageSource;
 
+    /// The interrupt controller that routes MSIs to the probing CPU, for
+    /// drivers that need a delivered interrupt, such as Intel's ISH.
+    fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError>;
+
     /// The ACPI namespace, for devices described there rather than on PCI:
     /// i8042 keyboards and mice, embedded controllers, I²C-HID devices and
     /// batteries ([`platform::acpi::Session::devices`](crate::platform::acpi::Session::devices)
     /// matches `_HID`/`_CID` and filters by `_STA`; `_CRS` decodes through
     /// [`platform::acpi::resources`](crate::platform::acpi::resources)).
+    ///
+    /// The session is the mount's one ACPICA instance, alive for the
+    /// program. Its provider serves the ports, decode, power and global lock
+    /// of the first embedded controller the ECDT or namespace names, and no
+    /// other owner reaches that controller, as
+    /// [`Binding::install`](crate::platform::ec::binding::Binding::install)
+    /// requires.
     #[cfg(feature = "native-acpi")]
-    fn acpi(&self) -> Option<&crate::platform::acpi::Session>;
+    fn acpi(&self) -> Option<&'static crate::platform::acpi::Session>;
+
+    /// Reserve memory resource `ordinal` of `device`'s `_CRS` from the
+    /// mount's native broker, for a controller the namespace describes, as
+    /// [`MemoryBroker::reserve`](crate::platform::acpi::resources::MemoryBroker::reserve)
+    /// reserves it.
+    #[cfg(feature = "native-acpi")]
+    fn acpi_memory(
+        &self,
+        device: &crate::platform::acpi::resources::DeviceResources<'_>,
+        ordinal: usize,
+    ) -> Result<owned::Resource, ServiceError>;
 }
 
 /// ACPI hardware IDs of the classes attached through [`NativeServices`].
@@ -136,14 +168,32 @@ pub(crate) mod tests {
             self.requests.borrow_mut().push(address);
             Err(ServiceError::Unavailable)
         }
+        fn bar_resource(&self, address: Address, _: Bar) -> Result<owned::Resource, ServiceError> {
+            self.requests.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
+        fn authority(&self) -> Result<owned::Authority, ServiceError> {
+            Err(ServiceError::Unavailable)
+        }
         fn domain(&self, _: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError> {
             Err(ServiceError::Refused("requester shares an IOMMU group"))
+        }
+        fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError> {
+            Err(ServiceError::Unavailable)
         }
         fn pages(&self) -> &dyn PageSource {
             &NoPages
         }
         #[cfg(feature = "native-acpi")]
-        fn acpi(&self) -> Option<&crate::platform::acpi::Session> {
+        fn acpi_memory(
+            &self,
+            _: &crate::platform::acpi::resources::DeviceResources<'_>,
+            _: usize,
+        ) -> Result<owned::Resource, ServiceError> {
+            Err(ServiceError::Unavailable)
+        }
+        #[cfg(feature = "native-acpi")]
+        fn acpi(&self) -> Option<&'static crate::platform::acpi::Session> {
             None
         }
     }

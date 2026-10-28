@@ -1,3 +1,4 @@
+//! The registry of owned MMIO mappings: installation, leases, quarantine and retirement.
 use super::*;
 use alloc::{sync::Arc, vec::Vec};
 use core::{
@@ -651,7 +652,8 @@ struct Lease {
 }
 // SAFETY: addresses remain raw only; provider establishes the same mapping in
 // every participating context. Mutation is consumer-unsafe; lease metadata is
-// immutable and phases atomic. All teardown is process/deferred and explicit.
+// immutable and phases atomic, so access takes no lock and may run in an
+// interrupt handler. Teardown is process/deferred and explicit.
 unsafe impl Send for Lease {}
 // SAFETY: same raw-only provider and immutable/atomic lifetime invariants.
 unsafe impl Sync for Lease {}

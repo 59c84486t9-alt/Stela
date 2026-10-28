@@ -51,6 +51,25 @@ pub enum Error {
     Clock,
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::UnsupportedDevice => "not a supported VMD controller",
+            Self::InvalidResource => "a BAR, window or bus range VMD cannot use",
+            Self::Mapping => "a register window its mapping does not cover",
+            Self::ReadFailed => "a configuration read failed",
+            Self::Readback => "a register did not read back as written",
+            Self::Address => "a child address outside the VMD buses",
+            Self::Capability => "a malformed capability list",
+            Self::Exhausted => "no PCI domain number left",
+            Self::Suspended => "the VMD hierarchy is suspended",
+            Self::Quarantined => "the VMD hierarchy is quarantined after a fault",
+            Self::ActiveChild => "a child may not enable DMA behind VMD",
+            Self::Clock => "the clock cannot time the VMD wait",
+        })
+    }
+}
+
 impl From<CapabilityError> for Error {
     fn from(error: CapabilityError) -> Self {
         match error {
@@ -75,6 +94,16 @@ enum Shadow {
     Bios,
 }
 impl Profile {
+    /// The page-aligned MEMBAR2 window holding the shadow registers this
+    /// profile reads, or none when its shadow comes from vendor capability
+    /// space.
+    pub fn shadow_window(self) -> Option<core::ops::Range<u64>> {
+        match self.shadow {
+            Shadow::Bios | Shadow::Native => Some(0x2000..0x3000),
+            Shadow::Vendor => None,
+        }
+    }
+
     pub fn identify(vendor: u16, device: u16) -> Result<Self, Error> {
         if vendor != 0x8086 {
             return Err(Error::UnsupportedDevice);

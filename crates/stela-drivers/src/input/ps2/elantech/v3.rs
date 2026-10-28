@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Original notices are retained in ../elantech.rs and input/THIRD_PARTY.md.
+//! Elantech v3 touchpad packet decoding.
 use super::*;
 
 impl Engine {

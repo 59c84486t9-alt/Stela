@@ -67,6 +67,9 @@ impl Link for RootLink {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.device.receive()
     }
+    fn signals(&self) -> bool {
+        self.device.signals()
+    }
 }
 
 /// The PC's clock, moving the screen's running step as the stack waits.
@@ -76,6 +79,14 @@ impl stela_runtime::net::Clock for Ticking {
     fn now_us(&self) -> u64 {
         crate::status::tick();
         self.0.now_us()
+    }
+    /// The adapter's completion signal wakes the boot processor, which runs
+    /// the stack.
+    fn sleep(&self, until_us: u64) {
+        let now = self.0.now_us();
+        if until_us > now {
+            super::host::sleep_for(until_us - now);
+        }
     }
 }
 
@@ -172,6 +183,11 @@ impl HostNetwork {
 
     pub fn close(&mut self, transfer: Transfer) {
         self.stack.close(transfer);
+    }
+
+    /// Waits up to `micros` for the adapter's next frame (`Stack::wait`).
+    pub fn wait(&mut self, micros: u64) {
+        self.stack.wait(micros);
     }
 
     /// Opens one opaque TCP stream for the restore reverse proxy.

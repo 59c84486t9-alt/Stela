@@ -512,6 +512,27 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_bss_without_wmm_takes_ieee80211_set_wmm_default() {
+        for (band, rates, ecw_min) in [
+            (Band::Ghz2, &[0x82, 0x84, 0x8b, 0x96][..], 5),
+            (Band::Ghz2, &[0x82, 0x84, 0x8b, 0x96, 24, 108][..], 4),
+            (Band::Ghz5, &[0x8c, 18, 0x98, 36, 0xb0, 72, 96, 108][..], 4),
+        ] {
+            let mut ies = Vec::new();
+            ie(&mut ies, 1, rates);
+            let local = Capabilities::parse(band, Role::Station, &ies).unwrap();
+            let peer = Capabilities::parse(band, Role::AccessPoint, &ies).unwrap();
+            let n = Negotiated::between(&local, &peer, Mode::Legacy, Width::Mhz20).unwrap();
+            assert!(n.wmm.is_none() && !n.aggregates());
+            for (aci, ac) in n.edca().into_iter().enumerate() {
+                assert_eq!(
+                    (ac.aci, ac.aifsn, ac.ecw_min, ac.ecw_max, ac.txop_32us),
+                    (aci as u8, 2, ecw_min, 10, 0)
+                );
+            }
+        }
+    }
+    #[test]
     fn real_selected_family_width_nss_aggregation_and_edca_reach_typed_output() {
         let (local, peer) = pair(Band::Ghz5, 12, false);
         for (mode, width) in [

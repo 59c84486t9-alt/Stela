@@ -650,8 +650,11 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "cc",
+ "hmac",
  "libc",
  "object",
+ "p256",
+ "sha1",
  "sha2",
  "subtle",
  "triomphe",

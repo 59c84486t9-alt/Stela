@@ -1,5 +1,9 @@
-//! Device-domain DMA leases. A physical page list is never an identity-DMA
-//! fallback. The platform supplies a real attached VT-d/AMD-Vi domain.
+//! Device-domain DMA leases. Every lease goes through a [`DmaDomain`] the
+//! platform supplies: either an IOMMU domain (VT-d or AMD-Vi) that isolates
+//! one requester, or the named passthrough domain, which maps the handoff's
+//! DMA region at identity and leaves the device's DMA unrestricted, and which
+//! the platform reports once when it hands one out. Drivers work with either;
+//! code that needs isolation asks [`DmaDomain::kind`].
 use super::pages::DmaPages;
 use alloc::sync::Arc;
 use core::{
@@ -52,6 +56,16 @@ pub enum DmaError {
     Unmapped,
 }
 
+/// Whether a domain isolates its requester's DMA.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DomainKind {
+    /// An IOMMU domain: the requester reaches only the pages mapped into it.
+    Isolated,
+    /// Identity over the handoff's DMA region: a mapping's IOVA is its
+    /// physical address, and the device can reach any memory.
+    Passthrough,
+}
+
 /// An opaque unique mapping identifier plus its contiguous device IOVA span.
 /// The identifier is interpreted only by the attached platform domain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,14 +75,17 @@ pub struct DomainMapping {
     pub bytes: usize,
 }
 
-/// Real platform IOMMU ownership and cache visibility operations.
+/// A requester's DMA domain and its cache visibility operations.
 ///
 /// # Safety
-/// Implementors must bind the actual device/requester to an isolated domain,
-/// map this exact ordered page sequence (including repeated-page aliases)
-/// with the direction's access permissions, and
-/// finish page-table visibility and required IOTLB invalidation before `map`
-/// returns. `Err` must leave no live translation, or quarantine the real pins,
+/// An [`Isolated`](DomainKind::Isolated) implementor binds the device's
+/// requester to an IOMMU domain, maps this ordered page sequence (including
+/// repeated-page aliases) with the direction's access permissions, and
+/// finishes page-table visibility and required IOTLB invalidation before `map`
+/// returns. A [`Passthrough`](DomainKind::Passthrough) implementor reports
+/// that kind, maps only pages inside the handoff's DMA region, returns their
+/// physical addresses as IOVAs and has no translation to invalidate; it
+/// grants no isolation, and every other requirement here still holds. `Err` must leave no live translation, or quarantine the real pins,
 /// hardware tables and domain reservation until acknowledged removal/reset;
 /// the backend's own Drop must preserve such uncertain mappings. IOVAs must
 /// fit `address_limit`. Mapping identifiers must be
@@ -81,6 +98,11 @@ pub struct DomainMapping {
 /// Implementations may require process/deferred context for every operation
 /// and final release; Send/Sync does not imply hard-IRQ-safe release.
 pub unsafe trait DmaDomain: Send + Sync {
+    /// Whether this domain isolates its requester. The passthrough domain
+    /// overrides this; code that needs isolation checks it.
+    fn kind(&self) -> DomainKind {
+        DomainKind::Isolated
+    }
     /// # Safety
     /// Retain the supplied page pin and this domain until successful quiescent
     /// unmap; uncertain teardown must quarantine both. Prefer `DmaMapping`.
@@ -406,6 +428,11 @@ mod tests {
         assert!(after.mappings > before.mappings);
         assert!(after.bytes >= before.bytes + 4096);
         // Deliberate retained allocation: no fake completion/reset is supplied.
+    }
+
+    #[test]
+    fn a_domain_is_isolated_unless_it_reports_passthrough() {
+        assert_eq!(ModelDomain.kind(), DomainKind::Isolated);
     }
 
     #[test]

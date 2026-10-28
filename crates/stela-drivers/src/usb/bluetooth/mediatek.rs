@@ -6,14 +6,15 @@
 //! authenticity, physical/radio qualification and guest services remain separate.
 //! Normal USB initialization is separate from the source WLAN restart path;
 //! the pinned source establishes no mandatory cross-function probe order.
-//! Each function retains its genuine resource owner. Neither USB IDs nor an
-//! initializer/media close grants shared CONNV3 reset authority;
-//! automatic shared recovery/retry remains unsupported while siblings may live.
+//! Each function retains its genuine resource owner. A failed firmware setup,
+//! a command timeout and a completed dump run btusb_mtk_reset as Linux does:
+//! the btmtk subsystem reset, then a queued USB reset that rebinds the device.
 pub mod coredump;
 mod firmware;
 mod identity;
 mod initialize;
 pub(super) mod packet;
+pub mod reset;
 mod wmt;
 pub use firmware::{FirmwareMetadata, Fragment, Patch, Section, SectionMetadata};
 pub use identity::{Chip, Identity, UsbIdentity};
@@ -61,9 +62,9 @@ pub struct Attempt {
     pub reset_completion: Option<Vec<u8>>,
     pub local_version: Option<[u8; 9]>,
     pub address: Option<[u8; 6]>,
+    /// The btusb_mtk_reset that followed a failed firmware setup or command.
+    pub reset: Option<reset::Reset>,
 }
-/// No shared combo power/reset service has granted authority to retry a failed
-/// firmware upload. Failure is terminal for this attachment and requires rebind.
 /// What Linux btusb/btmtk tell the host stack about a MediaTek controller
 /// (btusb_probe's BTUSB_MEDIATEK branch and btmtk_usb_setup for MT79xx).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +109,8 @@ pub struct OwnedReport {
     pub reset_completion: Vec<u8>,
     pub local_version: [u8; 9],
     pub address: [u8; 6],
+    /// The HCI command allowance setup's last Command Complete returned.
+    pub command_credits: u8,
     pub recovery: RecoveryPolicy,
     pub policy: HostPolicy,
 }
@@ -227,13 +230,20 @@ mod tests {
         WrongManufacturer,
         ZeroAddress,
         TrailingEvent,
+        VersionSilent,
     }
     #[derive(Default)]
     struct Trace {
         commands: Vec<Vec<u8>>,
         closed: usize,
+        reopened: usize,
+        iso_starts: usize,
         option_writes: usize,
         reads: usize,
+        /// Writes once btusb_mtk_reset's first uhw read arrived.
+        uhw: Vec<(u32, u32)>,
+        resetting: bool,
+        usb_resets: usize,
     }
     struct Model {
         registers: [u32; 4],
@@ -258,6 +268,13 @@ mod tests {
         }
         fn control(&mut self, setup: [u8; 8], p: &[u8]) -> core::result::Result<(), BlockError> {
             assert_eq!(self.trace.borrow().closed, 0);
+            if setup[0] == 0x5e && self.trace.borrow().resetting {
+                let address = u32::from(u16::from_le_bytes([setup[2], setup[3]])) << 16
+                    | u32::from(u16::from_le_bytes([setup[4], setup[5]]));
+                let value = u32::from_le_bytes(p.try_into().unwrap());
+                self.trace.borrow_mut().uhw.push((address, value));
+                return Ok(());
+            }
             if setup[0] == 0x5e {
                 assert_eq!(setup, [0x5e, 2, 1, 0x74, 0x90, 0x18, 4, 0]);
                 assert_eq!(p, [1, 0, 1, 0]);
@@ -308,6 +325,9 @@ mod tests {
                 ));
                 return Ok(());
             }
+            if op == 0x1001 && self.fault == Fault::VersionSilent {
+                return Ok(());
+            }
             let mut response = match op {
                 0x0c03 => match self.fault {
                     Fault::ResetStatusOnly => vec![15, 4, 0, 1, 3, 0x0c],
@@ -344,6 +364,8 @@ mod tests {
                         cc(op, &[0, 1, 2, 3, 4, 5, 6])
                     }
                 }
+                // btmtk_usb_isointf_init's vendor command.
+                0xfd98 => cc(op, &[0]),
                 _ => panic!("unexpected HCI command {op:x}"),
             };
             if op == 0x1009 && self.fault == Fault::TrailingEvent {
@@ -358,6 +380,11 @@ mod tests {
             self.trace.borrow_mut().reads += 1;
             if self.fail_read == Some(self.trace.borrow().reads) {
                 return Err(BlockError::Device { status: 0x55 });
+            }
+            if setup[0] == 0xde {
+                // Every uhw register reads as MTK_BT_RST_DONE.
+                self.trace.borrow_mut().resetting = true;
+                return Ok(0x100u32.to_le_bytes().to_vec());
             }
             if setup[1] == 0x63 {
                 assert_eq!(setup[0], 0xc0);
@@ -400,6 +427,16 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+        fn reopen(&mut self) -> core::result::Result<(), BlockError> {
+            let mut trace = self.trace.borrow_mut();
+            trace.closed = 0;
+            trace.reopened += 1;
+            Ok(())
+        }
+        fn queue_reset(&mut self) -> core::result::Result<(), BlockError> {
+            self.trace.borrow_mut().usb_resets += 1;
+            Ok(())
         }
         fn now_us(&self) -> u64 {
             let t = self.time.get();
@@ -468,6 +505,15 @@ mod tests {
             product: pid,
             revision: 0x100,
         };
+        let trace = Rc::new(RefCell::new(Trace::default()));
+        let binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
+        (
+            Hci::from_io(binding, model(device, rom, fault, &trace)),
+            catalog(usb, device, rom),
+            trace,
+        )
+    }
+    fn catalog(usb: UsbIdentity, device: u32, rom: u32) -> Catalog {
         let identity = Identity::select(usb, 0, device, rom, 0).unwrap();
         let hardware = usb.hardware_label();
         let revision = identity.revision_label();
@@ -478,7 +524,7 @@ mod tests {
             board: None,
         };
         let bytes = firmware();
-        let catalog = Catalog::from_handoff(vec![Resource {
+        Catalog::from_handoff(vec![Resource {
             name: identity.firmware_name(),
             target,
             provenance: Provenance {
@@ -491,27 +537,63 @@ mod tests {
             expected_sha256: Sha256::digest(&bytes).into(),
             bytes,
         }])
-        .unwrap();
-        let trace = Rc::new(RefCell::new(Trace::default()));
-        let binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
-        (
-            Hci::from_io(
-                binding,
-                Model {
-                    registers: [0, device, rom, 0],
-                    events: VecDeque::new(),
-                    vendor: None,
-                    trace: trace.clone(),
-                    fault,
-                    time: Cell::new(0),
-                    queries: 0,
-                    fail_read: None,
-                    close_failure: false,
-                },
-            ),
-            catalog,
-            trace,
-        )
+        .unwrap()
+    }
+    fn model(device: u32, rom: u32, fault: Fault, trace: &Rc<RefCell<Trace>>) -> Model {
+        Model {
+            registers: [0, device, rom, 0],
+            events: VecDeque::new(),
+            vendor: None,
+            trace: trace.clone(),
+            fault,
+            time: Cell::new(0),
+            queries: 0,
+            fail_read: None,
+            close_failure: false,
+        }
+    }
+    /// The interrupt-interface media owner; this model carries no SCO.
+    impl media::MediaIo for Model {
+        fn start_iso(
+            &mut self,
+            _: media::Pair,
+            _: &mut dyn crate::bus::dma::DmaAllocator,
+        ) -> core::result::Result<(), BlockError> {
+            self.trace.borrow_mut().iso_starts += 1;
+            Ok(())
+        }
+        fn replace_sco(
+            &mut self,
+            _: Option<media::Pair>,
+            _: Option<media::Pair>,
+            _: &mut dyn crate::bus::dma::DmaAllocator,
+        ) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn read_media(
+            &mut self,
+            _: media::Kind,
+        ) -> core::result::Result<Option<media::Read>, BlockError> {
+            Ok(None)
+        }
+        fn write_media(&mut self, _: media::Kind, _: &[u8]) -> media::Result<()> {
+            unreachable!()
+        }
+        fn quiesce_media(&mut self) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn reset_media_epoch(&mut self) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn resume_media(&mut self) -> core::result::Result<(), BlockError> {
+            unreachable!()
+        }
+        fn close_media(&mut self) -> core::result::Result<(), BlockError> {
+            Ok(())
+        }
+        fn reopen_media(&mut self) -> core::result::Result<(), BlockError> {
+            Ok(())
+        }
     }
     type Requests = Vec<(String, String, String, String)>;
     struct Recording<'a> {
@@ -532,6 +614,64 @@ mod tests {
             ));
             self.catalog.load(r)
         }
+    }
+    #[test]
+    fn power_on_after_shutdown_runs_setup_again_like_non_persistent_setup() {
+        struct NoDma;
+        impl crate::bus::dma::DmaAllocator for NoDma {
+            fn allocate(
+                &mut self,
+                _: usize,
+                _: usize,
+            ) -> core::result::Result<crate::bus::dma::DmaBuffer, BlockError> {
+                panic!("the model allocates no DMA")
+            }
+        }
+        // This PC's MT7925, bound with its media interfaces.
+        let usb = UsbIdentity {
+            vendor: 0x13d3,
+            product: 0x3602,
+            revision: 0x100,
+        };
+        let trace = Rc::new(RefCell::new(Trace::default()));
+        let catalog = catalog(usb, 0x7925, 0);
+        let mut hci = Hci::from_io(
+            media::tests::binding(),
+            model(0x7925, 0, Fault::None, &trace),
+        );
+        hci.initialize_with_provider(&catalog, PlatformInputs::default())
+            .unwrap();
+        let credits = match hci.initialization() {
+            Some(Ok(InitializationReport::MediaTek(r))) => r.command_credits,
+            _ => panic!("MediaTek report expected"),
+        };
+        assert_eq!(credits, 1);
+        let mut s = media::Session::start(hci, &mut NoDma, credits).unwrap();
+        assert!(matches!(
+            s.power_on(&catalog, &mut NoDma),
+            Err(media::PowerOnError::Media(_))
+        ));
+        assert_eq!(s.lifecycle(), media::Lifecycle::Running);
+        s.shutdown(1).unwrap();
+        assert_eq!(s.lifecycle(), media::Lifecycle::Off);
+        let resets = |trace: &Trace| {
+            trace
+                .commands
+                .iter()
+                .filter(|c| c[..2] == [3, 0x0c])
+                .count()
+        };
+        assert_eq!(resets(&trace.borrow()), 1);
+        // The function keeps its patch across power-off.
+        s.hci.io.fault = Fault::Present;
+        s.power_on(&catalog, &mut NoDma).unwrap();
+        assert_eq!(s.lifecycle(), media::Lifecycle::Running);
+        let trace = trace.borrow();
+        assert_eq!((trace.reopened, trace.iso_starts), (1, 2));
+        // Setup ran again through HCI Reset, then the ISO interface init.
+        assert_eq!(resets(&trace), 2);
+        assert_eq!(trace.commands.last().unwrap(), &[0x98, 0xfd, 2, 8, 1]);
+        assert_eq!(s.setup_report().completion, cc(0xfd98, &[0]));
     }
     fn attempt(e: &Error) -> (&Error, &Attempt) {
         match e {
@@ -659,6 +799,8 @@ mod tests {
             )]
         );
         assert!(trace.borrow().commands.is_empty());
+        // request_firmware's failure is a failed firmware setup.
+        assert_eq!(trace.borrow().usb_resets, 1);
         assert_eq!(hci.state(), State::Closed);
         assert!(
             hci.initialize_with_provider(&provider, PlatformInputs::default())
@@ -685,6 +827,7 @@ mod tests {
             Fault::WrongManufacturer,
             Fault::ZeroAddress,
             Fault::TrailingEvent,
+            Fault::VersionSilent,
         ] {
             let (mut hci, catalog, trace) = fixture(Chip::Mt7925, fault);
             let e = initialize(&mut hci, &catalog).unwrap_err();
@@ -693,6 +836,25 @@ mod tests {
             assert!(a.firmware.is_some());
             assert_eq!(hci.state(), State::Closed);
             assert_eq!(trace.borrow().closed, 1);
+            // A failed firmware setup and a timed-out command other than HCI
+            // Reset run btusb_mtk_reset; later failures do not.
+            let reset = matches!(
+                fault,
+                Fault::ProgressForever
+                    | Fault::FragmentProgress
+                    | Fault::InterruptOnly
+                    | Fault::AuxiliaryFailure
+                    | Fault::LateVendor
+                    | Fault::WrongVendorOp
+                    | Fault::VendorFragment
+                    | Fault::VendorLength
+                    | Fault::VersionSilent
+            );
+            assert_eq!(trace.borrow().usb_resets, usize::from(reset), "{fault:?}");
+            if let Some(r) = &a.reset {
+                assert_eq!((&r.subsystem, &r.usb), (&Ok(()), &Ok(())));
+                assert_eq!(trace.borrow().uhw[0], (0x7002_8610, 0x120));
+            }
             assert!(hci.submit_acl(&[1, 0, 0, 0]).is_err());
             if fault == Fault::ProgressForever {
                 assert_eq!(a.sections[0].queries.len(), 20);

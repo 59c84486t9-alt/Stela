@@ -10,6 +10,11 @@ pub const LINUX_FIRMWARE: &str = "https://gitlab.com/kernel-firmware/linux-firmw
 pub const REALTEK_RELEASE: &str = "20250917";
 pub const REALTEK_REVISION: &str = "add225168d0d1ba4c174d5eb15272b53de01ad5a";
 pub const INTEL_RSA_REVISION: &str = "711d3297bac870af42088a467459a0634c1970ca";
+/// wireless-regdb, the source of the regulatory database every Wi-Fi
+/// adapter's scans and transmissions answer to.
+pub const WIRELESS_REGDB: &str =
+    "https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git";
+const KERNEL_ORG_GIT: &str = "https://git.kernel.org/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Artifact {
@@ -21,8 +26,14 @@ pub struct Artifact {
 }
 
 impl Artifact {
+    /// The member at the pinned revision: cgit's `plain` form on
+    /// git.kernel.org, GitLab's `raw` form elsewhere.
     pub fn url(&self) -> alloc::string::String {
-        format!("{}/-/raw/{}/{}", self.source, self.revision, self.member)
+        if self.source.starts_with(KERNEL_ORG_GIT) {
+            format!("{}/plain/{}?h={}", self.source, self.member, self.revision)
+        } else {
+            format!("{}/-/raw/{}/{}", self.source, self.revision, self.member)
+        }
     }
     pub fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
         use sha2::{Digest, Sha256};
@@ -174,6 +185,21 @@ pub const INTEL_RSA: &[Recipe] = &[
     },
 ];
 
+/// Pinned wireless-regdb releases of `regulatory.db`, each with its ISC
+/// LICENSE, from [`WIRELESS_REGDB`].
+pub const REGULATORY: &[Recipe] = &[];
+
+/// The drivers' request for the version-20 database
+/// (`stela_drivers::net::wifi::regulatory::database::REQUIREMENT`).
+fn select_regulatory(request: &Request) -> Option<&'static Recipe> {
+    if request.target.hardware != "wireless-regdb" || request.target.revision != "v20" {
+        return None;
+    }
+    REGULATORY
+        .iter()
+        .find(|recipe| recipe.image.member == request.name)
+}
+
 fn hex_field(value: &str, digits: usize) -> bool {
     value.len() == digits
         && value
@@ -255,9 +281,15 @@ impl Plan {
                     "no pinned recipe for the exact observed host firmware target",
                 ));
             }
+            if target.driver == "wifi-regulatory" && select_regulatory(request).is_none() {
+                return Err(fail(
+                    "--wifi needs wireless-regdb's regulatory.db, and this build pins no release of it",
+                ));
+            }
             let recipe = match target.driver.as_str() {
                 "realtek" => select_realtek(request),
                 "intel-bluetooth-usb-rsa" => select_intel_rsa(request),
+                "wifi-regulatory" => select_regulatory(request),
                 _ => None,
             }.ok_or_else(|| fail("no pinned recipe for the exact observed firmware driver/hardware/revision/name"))?;
             if request.minimum_bytes > recipe.image.length {
@@ -390,6 +422,35 @@ mod tests {
             assert!(Plan::select(&inventory(name, hardware, revision, board)).is_err());
         }
         assert!(LICENSE.verify(b"changed license").is_err());
+    }
+
+    #[test]
+    fn kernel_org_artifacts_use_cgit_plain_urls_and_an_unpinned_regdb_is_refused() {
+        let artifact = Artifact {
+            source: WIRELESS_REGDB,
+            revision: "master-2025-01-01",
+            member: "regulatory.db",
+            length: 1,
+            sha256: "00",
+        };
+        assert_eq!(
+            artifact.url(),
+            "https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git/plain/regulatory.db?h=master-2025-01-01"
+        );
+        assert_eq!(
+            LICENSE.url(),
+            format!("{LINUX_FIRMWARE}/-/raw/{REALTEK_REVISION}/LICENSE.r8169")
+        );
+        let value = serde_json::json!({"schema":1,"complete":true,"requirements":[{
+            "name":"regulatory.db", "target":{"driver":"wifi-regulatory","hardware":"wireless-regdb","revision":"v20","board":null},"minimum_bytes":8
+        }]});
+        let inventory = Inventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            Plan::select(&inventory).is_ok(),
+            REGULATORY
+                .iter()
+                .any(|recipe| recipe.image.member == "regulatory.db")
+        );
     }
 
     #[test]

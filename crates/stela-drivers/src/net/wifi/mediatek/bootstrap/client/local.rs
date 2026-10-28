@@ -97,7 +97,8 @@ impl Advertisement {
             || requested
                 .he_6ghz()
                 .is_some_and(|h| Some(h) != actual.he_6ghz())
-            || requested.wmm() != actual.wmm()
+            // A legacy request to an AP without WMM omits it, as mac80211 does.
+            || requested.wmm().is_some_and(|w| Some(w) != actual.wmm())
             || (requested.he().is_some()
                 && requested.local_he_source_maps() != Some(&self.he_source_maps))
             || !family(rates.selectors & 1 != 0, requested.ht().is_some())
@@ -238,7 +239,9 @@ fn make(
     if band == Band::Ghz2 {
         ie(&mut elements, 1, &[2, 4, 11, 22, 12, 18, 24, 36]);
         ie(&mut elements, 50, &[48, 72, 96, 108]);
-    } else if band == Band::Ghz5 {
+    } else {
+        // mt76_init_sband_6g takes the OFDM rates mt76_init_sband_5g does,
+        // and mac80211 puts them in each 6 GHz request.
         ie(&mut elements, 1, &[12, 18, 24, 36, 48, 72, 96, 108]);
     }
     if band != Band::Ghz6 {
@@ -373,6 +376,12 @@ mod tests {
                 if band == Band::Ghz6 {
                     assert!(a.capabilities().ht().is_none());
                     assert_eq!(a.capabilities().he_6ghz(), Some(0x30b8));
+                }
+                if band != Band::Ghz2 {
+                    assert!(
+                        a.elements()
+                            .starts_with(&[1, 8, 12, 18, 24, 36, 48, 72, 96, 108])
+                    );
                 }
                 if band == Band::Ghz5 {
                     assert_eq!(a.capabilities().vht().unwrap().capability & 12, 4);

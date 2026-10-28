@@ -9,6 +9,16 @@ pub struct RamRange {
     pub bytes: u64,
 }
 
+/// Lay `ram` out end to end in guest physical memory from `base`, in order,
+/// keeping each range's host backing.
+pub fn place(ram: &mut [RamRange], base: u64) {
+    let mut guest = base;
+    for range in ram {
+        range.guest = guest;
+        guest += range.bytes;
+    }
+}
+
 /// The longest RAM run starting at `guest`, as (host physical, bytes).
 pub fn run(ram: &[RamRange], guest: u64) -> Option<(u64, u64)> {
     let index = ram.partition_point(|range| range.guest <= guest);
@@ -155,6 +165,26 @@ mod tests {
             .push((host, done, bytes))));
         assert_eq!(chunks, [(0x1004, 0, 4), (0x9000, 4, 8), (0x4000, 12, 4)]);
         assert_eq!(run(&ram, 32), None);
+    }
+
+    #[test]
+    fn placing_moves_guest_addresses_and_keeps_host_backing() {
+        let mut ram = [
+            RamRange {
+                guest: 0,
+                host: 0x9000,
+                bytes: 0x2000,
+            },
+            RamRange {
+                guest: 0x2000,
+                host: 0x1000,
+                bytes: 0x1000,
+            },
+        ];
+        place(&mut ram, 0x8_0000_0000);
+        assert_eq!(run(&ram, 0x8_0000_0000), Some((0x9000, 0x2000)));
+        assert_eq!(run(&ram, 0x8_0000_2800), Some((0x1800, 0x800)));
+        assert_eq!(run(&ram, 0x2000), None);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 // RTL8822C register-initialization values from the licensed driver source.
 // Source: Linux a804c5742bff224d4cb4d25dd383554d598be32b rtw88/rtw8822c_table.c.
 // Full donor SHA256 ec3f4d9eed016932b9100e4e2332c12f67bd0824a3f3b4b05cc515e7916a2247.
+//! RTL8822C register-initialization tables from rtw8822c_table.c.
 
 // rtw8822c_mac: 0 complete pairs; source declaration SHA256 67b875948f203fa1cc40addf16beac1f878b2b0f1c7c7bf01f653528e3a07d29.
 pub(super) static MAC: &[[u32; 2]] = &[];

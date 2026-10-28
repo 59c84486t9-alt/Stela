@@ -74,6 +74,32 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             self.registers.write16(INTERRUPT_STATUS, u16::MAX);
         }
     }
+    /// rtl_irq_enable: `events` send the function's interrupt.
+    pub fn interrupts_on(&self, events: u16) {
+        if self.revision.nbase() {
+            self.registers
+                .write32(NBASE_INTERRUPT_MASK, u32::from(events));
+        } else {
+            self.registers.write16(INTERRUPT_MASK, events);
+        }
+    }
+    /// rtl_get_events and rtl_ack_events for `events`: those pending,
+    /// cleared. A later event raises the interrupt again.
+    pub fn acknowledge(&self, events: u16) -> u16 {
+        if self.revision.nbase() {
+            let pending = self.registers.read32(NBASE_INTERRUPT_STATUS) & u32::from(events);
+            if pending != 0 {
+                self.registers.write32(NBASE_INTERRUPT_STATUS, pending);
+            }
+            pending as u16
+        } else {
+            let pending = self.registers.read16(INTERRUPT_STATUS) & events;
+            if pending != 0 {
+                self.registers.write16(INTERRUPT_STATUS, pending);
+            }
+            pending
+        }
+    }
     pub fn efuse_read(&self, address: u16) -> Result<u8, BlockError> {
         if address > 0x03ff {
             return Err(BlockError::Unsupported(

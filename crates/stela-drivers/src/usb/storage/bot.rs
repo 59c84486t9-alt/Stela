@@ -47,6 +47,15 @@ pub(super) trait Io {
     fn delay(&self, micros: u64);
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
+    /// Whether the host controller sends the handoff's completion signal.
+    fn signals(&self) -> bool {
+        false
+    }
+    /// Whether a submitted transfer may have completed, for [`Self::reap`];
+    /// a look at memory alone.
+    fn posted(&self) -> bool {
+        false
+    }
     /// Submit a bulk transfer and return; [`Self::reap`] gives its length
     /// once complete. By default it runs at once.
     fn submit(
@@ -119,6 +128,16 @@ pub(super) struct Native {
     pub endpoints: [Endpoint; 2],
 }
 impl Io for Native {
+    fn signals(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.signals())
+    }
+    fn posted(&self) -> bool {
+        self.controller
+            .try_borrow()
+            .is_ok_and(|controller| controller.posted_for(self.id))
+    }
     fn ready(&mut self) -> Result<(), BlockError> {
         let mut controller = self.controller.borrow_mut();
         let mut device = controller.device(self.id)?;
