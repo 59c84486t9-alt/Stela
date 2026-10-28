@@ -8,7 +8,7 @@ use super::super::numerical::{
     ArithmeticOpcode, Condition, branch, emit_opcode_to, prepare_vector_input_range,
     read_numerical_right, read_numerical_vector, test_control, vector_exponent_range,
 };
-use super::super::{Host, commit, half as lanes, packed, read_vector};
+use super::super::{Host, commit, half as lanes, packed, packed_imm, read_vector};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -23,8 +23,7 @@ const EVEN_HALF_WORDS: u8 = 0x88;
 const SECOND_HALF_WORD: u8 = 0x55;
 
 fn compact_even_words(code: &mut Code, source: u8) {
-    packed(code, Host::ShuffleLowWord, source, source);
-    code.push(EVEN_HALF_WORDS);
+    packed_imm(code, Host::ShuffleLowWord, source, source, EVEN_HALF_WORDS);
 }
 
 /// Normalize adjacent Vn pairs followed by Vm pairs into two Half vectors.
@@ -79,8 +78,13 @@ fn prepare_inputs(code: &mut Code, operand: &Operand) {
         }
         Inputs::PairwiseScalar { source } => {
             read_vector(code, source, lanes::LEFT);
-            packed(code, Host::ShuffleLowWord, lanes::RIGHT, lanes::LEFT);
-            code.push(SECOND_HALF_WORD);
+            packed_imm(
+                code,
+                Host::ShuffleLowWord,
+                lanes::RIGHT,
+                lanes::LEFT,
+                SECOND_HALF_WORD,
+            );
         }
     }
     if operand.shape == Shape::Scalar && !matches!(operand.inputs, Inputs::PairwiseScalar { .. }) {

@@ -1,15 +1,15 @@
 //! FSQRT: SSE2 for positive normals, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, branch,
-    clear_scalar, commit_inexact, environment_round, positive_exponent_range,
-    prepare_vector_input_range, read_inputs, read_numerical_vector, reject_other_status, resolve,
-    restore_environment, sticky_inexact, sticky_result_check, test_control,
-    vector_positive_exponent_range,
+    ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, branch, clear_scalar,
+    commit_inexact, environment_round, positive_exponent_range, prepare_vector_input_range,
+    read_inputs, read_numerical_vector, reject_other_status, resolve, restore_environment,
+    sticky_inexact, sticky_result_check, test_control, vector_positive_exponent_range,
 };
 use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
+use crate::x86_64::simd::encode::BitTest;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -17,6 +17,7 @@ use crate::{
         simd::{arithmetic::Shape, sqrt::Operand},
     },
 };
+use Gpr::Rax;
 use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
@@ -28,18 +29,6 @@ const ROUNDING_BIAS: u8 = 5;
 const SAVED_HALF: u8 = 6;
 const ROUNDING_PARITY: u8 = 7;
 const FIRST_LANE: u8 = 0;
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
-const MOVD_XMM_EAX_PREFIX: &[u8] = &[0x66, 0x0f, 0x6e];
-const PINSRW_XMM_EAX_PREFIX: &[u8] = &[0x66, 0x0f, 0xc4];
-const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
-const SHL_EAX_IMM8: &[u8] = &[0xc1, 0xe0];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const BT_EAX_IMM8: &[u8] = &[0x0f, 0xba, 0xe0];
-const ADD_EAX_IMM32: u8 = 0x05;
-const ADC_EAX_IMM32: u8 = 0x15;
-const SUB_EAX_IMM32: u8 = 0x2d;
 const CONVERT_USING_MXCSR: u8 = 1 << 2;
 const FPCR_LOW_ROUNDING_BIT: u32 = 1 << FPCR_ROUNDING_SHIFT;
 const FPCR_HIGH_ROUNDING_BIT: u32 = 1 << (FPCR_ROUNDING_SHIFT + 1);
@@ -130,41 +119,35 @@ fn half_fields(code: &mut Code) {
 /// The scalar integer recipe avoids vector constant preparation and packing.
 /// BT captures retained parity before ADC adds half-minus-one plus that bit.
 fn scalar_half_root(code: &mut Code) {
-    code.extend(MOVD_EAX_XMM_PREFIX);
-    code.push(REGISTER_DIRECT | (SOURCE << MODRM_REGISTER_SHIFT));
-    code.extend(MOVZX_EAX_AX);
-    code.extend(SHL_EAX_IMM8);
-    code.push(HALF_FRACTION_SHIFT);
-    code.push(ADD_EAX_IMM32);
-    code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
-    code.extend(MOVD_XMM_EAX_PREFIX);
-    code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Rax, SOURCE);
+    asm.movzx(Size::Dword, Rax, Size::Word, Rax);
+    asm.shift_imm(ShiftOp::Shl, Size::Dword, Rax, HALF_FRACTION_SHIFT);
+    asm.alu_accumulator_imm32(Alu::Add, Size::Dword, HALF_TO_SINGLE_BIAS as i32);
+    asm.movd_to_xmm(RESULT, Rax);
     square_root(code, Format::Single, Shape::Scalar, RESULT);
-    code.extend(MOVD_EAX_XMM_PREFIX);
-    code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
-    code.push(SUB_EAX_IMM32);
-    code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Rax, RESULT);
+    asm.alu_accumulator_imm32(Alu::Sub, Size::Dword, HALF_TO_SINGLE_BIAS as i32);
     test_control(code, FPCR_HIGH_ROUNDING_BIT);
     let truncating = branch(code, Condition::NotZero);
     test_control(code, FPCR_LOW_ROUNDING_BIT);
     let positive = branch(code, Condition::NotZero);
-    code.extend(BT_EAX_IMM8);
-    code.push(HALF_FRACTION_SHIFT);
-    code.push(ADC_EAX_IMM32);
-    code.extend((HALF_DISCARDED_MASK >> 1).to_le_bytes());
+    let mut asm = code.asm();
+    asm.bit_imm(BitTest::Bt, Size::Dword, Rax, HALF_FRACTION_SHIFT);
+    asm.alu_accumulator_imm32(Alu::Adc, Size::Dword, (HALF_DISCARDED_MASK >> 1) as i32);
     let nearest_done = jump(code);
     let positive_start = code.len();
     resolve(code, positive, positive_start);
-    code.push(ADD_EAX_IMM32);
-    code.extend(HALF_DISCARDED_MASK.to_le_bytes());
+    code.asm()
+        .alu_accumulator_imm32(Alu::Add, Size::Dword, HALF_DISCARDED_MASK as i32);
     let shift_start = code.len();
     for patch in [truncating, nearest_done] {
         resolve(code, patch, shift_start);
     }
-    code.extend(SHR_EAX_IMM8);
-    code.push(HALF_FRACTION_SHIFT);
-    code.extend(MOVD_XMM_EAX_PREFIX);
-    code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, HALF_FRACTION_SHIFT);
+    asm.movd_to_xmm(RESULT, Rax);
 }
 
 fn vector_half_root(code: &mut Code, shape: Shape) {
@@ -187,8 +170,7 @@ fn vector_half_root(code: &mut Code, shape: Shape) {
 fn narrow_half(code: &mut Code, destination: u8, source: u8, target: TargetCpu) {
     // VCVTPS2PH encodes source in ModRM.reg and destination in ModRM.r/m,
     // reversing the register field roles of ordinary two-operand SIMD ops.
-    Host::ConvertSingleToHalf.register(code, source, destination, target);
-    code.push(CONVERT_USING_MXCSR);
+    Host::ConvertSingleToHalf.register_imm(code, source, destination, CONVERT_USING_MXCSR, target);
 }
 
 fn checked_half_root(code: &mut Code, shape: Shape, target: TargetCpu) {
@@ -217,12 +199,9 @@ fn commit_result(code: &mut Code, operand: &Operand) {
         if operand.format == Format::Half {
             // Rebuild the half-precision scalar result in Vd after the
             // arithmetic and packing, which handles source aliases and V31.
-            code.extend(MOVD_EAX_XMM_PREFIX);
-            code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
+            code.asm().movd_from_xmm(Rax, RESULT);
             read_vector(code, operand.destination, RESULT);
-            code.extend(PINSRW_XMM_EAX_PREFIX);
-            code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
-            code.push(FIRST_LANE);
+            code.asm().pinsrw(RESULT, Rax, FIRST_LANE);
         }
         test_control(code, FPCR_NEP);
         let merging = branch(code, Condition::NotZero);

@@ -15,7 +15,9 @@ use alloc::vec::Vec;
 
 use super::{
     commit,
-    numerical::{Condition, clear_high_qword, branch, read_numerical_vector, resolve, test_control},
+    numerical::{
+        Condition, branch, clear_high_qword, jump, read_numerical_vector, resolve, test_control,
+    },
 };
 
 const LEFT: u8 = 0;
@@ -69,9 +71,8 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
         clear_high_qword(code, 0);
     }
     commit(code, operand.destination, LEFT);
-    code.push(0xe9); // JMP rel32 skips the cold numerical exit.
-    let success = code.len();
-    code.extend([0; size_of::<i32>()]);
+    // Skip the cold numerical exit.
+    let success = jump(code);
     let fallback = code.len();
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
     let end = code.len();

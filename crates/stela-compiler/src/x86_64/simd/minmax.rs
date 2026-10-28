@@ -2,12 +2,13 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::helper_section;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, clear_high_qword, branch, clear_scalar, exponent_range, jump,
-    prepare_vector_input_range, read_numerical_vector, resolve, test_control,
+    Condition, INPUT_MINIMUM_EXPONENT, branch, clear_high_qword, clear_scalar, exponent_range,
+    jump, prepare_vector_input_range, read_numerical_vector, resolve, test_control,
     vector_exponent_range, vector_normal_or_zero_range, zero_scalar,
 };
-use super::{Host, commit, packed, read_vector};
-use crate::x86_64::asm::Code;
+use super::{Host, commit, packed, packed_imm, read_vector};
+use crate::x86_64::asm::{Code, Gpr, Rm};
+use crate::x86_64::simd::encode::{FloatLanes, FloatOp};
 use crate::{
     GuestAddress,
     aarch64::{
@@ -33,31 +34,12 @@ const SELECTION_SCRATCH: u8 = 3;
 const HALF_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
 const SIGN_MASK_TO_MAGNITUDE_SHIFT: u8 = 1;
 const BITS_PER_BYTE: u32 = u8::BITS;
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const SINGLE_SCALAR_PREFIX: u8 = 0xf3;
-const DOUBLE_SCALAR_PREFIX: u8 = 0xf2;
-const DOUBLE_PACKED_PREFIX: u8 = 0x66;
-const SHUFFLE_SINGLE: u8 = 0xc6;
-const UNPACK_LOW_SINGLE: u8 = 0x14;
-const MOVE_HIGH_TO_LOW_SINGLE: u8 = 0x12;
-const UNPACK_LOW_DOUBLE: u8 = 0x14;
-const UNPACK_HIGH_DOUBLE: u8 = 0x15;
 const EVEN_DWORDS: u8 = 0x88;
 const ODD_DWORDS: u8 = 0xdd;
 const SWAP_ADJACENT_WORDS: u8 = 0xb1;
 const EVEN_WORDS: u8 = 0x88;
 const TWO_HALF_BYTES: u8 = 2 * (u16::BITS / BITS_PER_BYTE) as u8;
 const FOUR_HALF_BYTES: u8 = 4 * (u16::BITS / BITS_PER_BYTE) as u8;
-const MOVD_EAX_XMM0: &[u8] = &[0x66, 0x0f, 0x7e, 0xc0];
-const PINSRW_XMM7_EAX_LOW: &[u8] = &[0x66, 0x0f, 0xc4, 0xf8, 0];
-
-#[repr(u8)]
-enum SelectionOpcode {
-    Minimum = 0x5d,
-    Maximum = 0x5f,
-}
 
 fn is_minimum(operation: MinMaxOperation) -> bool {
     matches!(
@@ -87,23 +69,19 @@ fn raw_selection(
         );
         return;
     }
-    match (format, shape) {
-        (Format::Single, Shape::Scalar) => code.push(SINGLE_SCALAR_PREFIX),
-        (Format::Double, Shape::Scalar) => code.push(DOUBLE_SCALAR_PREFIX),
-        (Format::Double, _) => code.push(DOUBLE_PACKED_PREFIX),
-        (Format::Single, _) => (),
+    let lanes = match (format, shape) {
+        (Format::Single, Shape::Scalar) => FloatLanes::ScalarSingle,
+        (Format::Double, Shape::Scalar) => FloatLanes::ScalarDouble,
+        (Format::Double, _) => FloatLanes::PackedDouble,
+        (Format::Single, _) => FloatLanes::PackedSingle,
         (Format::Half, _) => unreachable!("half selection is integer-only"),
-    }
-    let opcode = if is_minimum(operation) {
-        SelectionOpcode::Minimum
-    } else {
-        SelectionOpcode::Maximum
     };
-    code.extend([
-        SSE_ESCAPE,
-        opcode as u8,
-        REGISTER_DIRECT | (destination << REGISTER_SHIFT) | right,
-    ]);
+    let op = if is_minimum(operation) {
+        FloatOp::Min
+    } else {
+        FloatOp::Max
+    };
+    code.asm().float(op, lanes, destination, Rm::Xmm(right));
 }
 
 /// Legacy SSE selects operand2 on a zero tie. Symmetric selection followed by
@@ -214,30 +192,19 @@ fn input_guard(code: &mut Code, format: Format, shape: Shape, source: u8, helper
 }
 
 fn shuffle(code: &mut Code, opcode: Host, destination: u8, source: u8, control: u8) {
-    packed(code, opcode, destination, source);
-    code.push(control);
+    packed_imm(code, opcode, destination, source, control);
 }
 
 fn shuffle_single(code: &mut Code, destination: u8, right: u8, control: u8) {
-    code.extend([
-        SSE_ESCAPE,
-        SHUFFLE_SINGLE,
-        REGISTER_DIRECT | (destination << REGISTER_SHIFT) | right,
-        control,
-    ]);
+    code.asm().shufps(destination, Rm::Xmm(right), control);
 }
 
 fn unpack_double(code: &mut Code, destination: u8, right: u8, high: bool) {
-    code.extend([
-        DOUBLE_PACKED_PREFIX,
-        SSE_ESCAPE,
-        if high {
-            UNPACK_HIGH_DOUBLE
-        } else {
-            UNPACK_LOW_DOUBLE
-        },
-        REGISTER_DIRECT | (destination << REGISTER_SHIFT) | right,
-    ]);
+    if high {
+        code.asm().unpckhpd(destination, Rm::Xmm(right));
+    } else {
+        code.asm().unpcklpd(destination, Rm::Xmm(right));
+    }
 }
 
 /// Pairwise results fill both words of each pair. Only integer operations run,
@@ -296,16 +263,9 @@ fn vector_pairs(code: &mut Code, operation: MinMaxOperation, format: Format, sha
         Format::Single if shape == Shape::Vector64 => {
             // Q0 loads zero both upper qwords. Gather [n0,m0,n1,m1], then
             // compare against [n1,m1,0,0]; only the low two results survive.
-            code.extend([
-                SSE_ESCAPE,
-                UNPACK_LOW_SINGLE,
-                REGISTER_DIRECT | (RESULT_VECTOR << REGISTER_SHIFT) | RIGHT_VECTOR,
-            ]);
-            code.extend([
-                SSE_ESCAPE,
-                MOVE_HIGH_TO_LOW_SINGLE,
-                REGISTER_DIRECT | (RIGHT_VECTOR << REGISTER_SHIFT) | RESULT_VECTOR,
-            ]);
+            let mut asm = code.asm();
+            asm.unpcklps(RESULT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
+            asm.movhlps(RIGHT_VECTOR, Rm::Xmm(RESULT_VECTOR));
             selection(code, operation, format, shape, RESULT_VECTOR, RIGHT_VECTOR);
         }
         Format::Single => {
@@ -335,8 +295,9 @@ fn finish_binary(code: &mut Code, format: Format, shape: Shape, destination: u8)
         let merge_target = code.len();
         resolve(code, merge, merge_target);
         if format == Format::Half {
-            code.extend(MOVD_EAX_XMM0);
-            code.extend(PINSRW_XMM7_EAX_LOW);
+            let mut asm = code.asm();
+            asm.movd_from_xmm(Gpr::Rax, RESULT_VECTOR);
+            asm.pinsrw(ORIGINAL_LEFT_VECTOR, Gpr::Rax, 0);
             packed(code, Host::MoveAligned, RESULT_VECTOR, ORIGINAL_LEFT_VECTOR);
         }
     } else if shape == Shape::Vector64 {

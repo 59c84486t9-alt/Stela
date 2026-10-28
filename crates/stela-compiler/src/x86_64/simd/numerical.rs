@@ -1,16 +1,17 @@
 //! Shared FP emission: integer lane classification and a private MXCSR.
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Map, Mem, Pp, Rm, ShiftOp, Size, Vex};
+use crate::x86_64::simd::encode::{FloatLanes, FloatOp};
 use alloc::vec;
 use alloc::vec::Vec;
 mod control;
 
 use super::super::isa::ShiftOpcode;
 use super::{Host, packed, packed_imm, read_vector, vector_offset};
-use Gpr::{Rax, Rcx, Rdi, Rsp};
 use crate::{
     GuestState,
     aarch64::{floating::Format, simd::arithmetic::Shape},
 };
+use Gpr::{Rax, Rcx, Rdi, Rsp};
 pub(in crate::x86_64) use control::rounding_control;
 
 const MXCSR_EXCEPTION_MASKS: u32 = 0x3f << 7;
@@ -25,9 +26,6 @@ const FPCR_NEGATIVE_TO_MXCSR_SHIFT: u8 = 10;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 pub(super) const INPUT_MINIMUM_EXPONENT: u8 = 1;
 pub(super) const RESULT_MINIMUM_EXPONENT: u8 = 2;
-const SCALAR_SINGLE_PREFIX: u8 = 0xf3;
-const SCALAR_DOUBLE_PREFIX: u8 = 0xf2;
-const PACKED_DOUBLE_PREFIX: u8 = 0x66;
 pub(super) const LEFT_VECTOR: u8 = 0;
 pub(super) const RIGHT_VECTOR: u8 = 1;
 pub(super) const EXPONENT_VECTOR: u8 = 2;
@@ -92,6 +90,28 @@ pub(in crate::x86_64) enum ArithmeticOpcode {
     Subtract = 0x5c,
     Multiply = 0x59,
     Divide = 0x5e,
+}
+
+impl ArithmeticOpcode {
+    const fn float_op(self) -> FloatOp {
+        match self {
+            Self::Add => FloatOp::Add,
+            Self::Subtract => FloatOp::Sub,
+            Self::Multiply => FloatOp::Mul,
+            Self::Divide => FloatOp::Div,
+        }
+    }
+}
+
+/// The SSE lane form of a `format` operation over `shape`: scalar Half
+/// operates on its exact Double widening.
+pub(in crate::x86_64) const fn float_lanes(format: Format, shape: Shape) -> FloatLanes {
+    match (shape, format) {
+        (Shape::Scalar, Format::Single) => FloatLanes::ScalarSingle,
+        (Shape::Scalar, _) => FloatLanes::ScalarDouble,
+        (_, Format::Double) => FloatLanes::PackedDouble,
+        _ => FloatLanes::PackedSingle,
+    }
 }
 
 #[repr(u8)]
@@ -686,25 +706,10 @@ pub(super) fn environment_round(code: &mut Code, rounding: Rounding) {
             state(core::mem::offset_of!(GuestState, fpcr)),
         );
         asm.mov(Size::Dword, Rax, Rcx);
-        asm.shift_imm(
-            ShiftOp::Shr,
-            Size::Dword,
-            Rax,
-            FPCR_POSITIVE_TO_MXCSR_SHIFT,
-        );
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, FPCR_POSITIVE_TO_MXCSR_SHIFT);
         asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_POSITIVE_ROUNDING as i32);
-        asm.shift_imm(
-            ShiftOp::Shr,
-            Size::Dword,
-            Rcx,
-            FPCR_NEGATIVE_TO_MXCSR_SHIFT,
-        );
-        asm.alu_imm32(
-            Alu::And,
-            Size::Dword,
-            Rcx,
-            MXCSR_NEGATIVE_ROUNDING as i32,
-        );
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, FPCR_NEGATIVE_TO_MXCSR_SHIFT);
+        asm.alu_imm32(Alu::And, Size::Dword, Rcx, MXCSR_NEGATIVE_ROUNDING as i32);
         asm.alu(Alu::Or, Size::Dword, Rax, Rcx);
         asm.alu_accumulator_imm32(Alu::Or, Size::Dword, MXCSR_EXCEPTION_MASKS as i32);
     } else {
@@ -745,12 +750,7 @@ pub(super) fn clear_environment_status(code: &mut Code) {
 pub(super) fn commit_inexact(code: &mut Code) {
     let mut asm = code.asm();
     asm.alu_imm32(Alu::And, Size::Dword, Rcx, MXCSR_INEXACT as i32);
-    asm.shift_imm(
-        ShiftOp::Shr,
-        Size::Dword,
-        Rcx,
-        MXCSR_TO_FPSR_INEXACT_SHIFT,
-    );
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, MXCSR_TO_FPSR_INEXACT_SHIFT);
     asm.alu(
         Alu::Or,
         Size::Dword,
@@ -1178,19 +1178,12 @@ pub(in crate::x86_64) fn emit_opcode_to(
     destination: u8,
     source: u8,
 ) {
-    let prefix = if shape == Shape::Scalar {
-        Some(if format == Format::Single {
-            SCALAR_SINGLE_PREFIX
-        } else {
-            SCALAR_DOUBLE_PREFIX
-        })
-    } else if format == Format::Double {
-        Some(PACKED_DOUBLE_PREFIX)
-    } else {
-        None
-    };
-    code.asm()
-        .sse(prefix, &[0x0f, opcode as u8], destination, Rm::Xmm(source));
+    code.asm().float(
+        opcode.float_op(),
+        float_lanes(format, shape),
+        destination,
+        Rm::Xmm(source),
+    );
 }
 pub(super) fn reject_other_status(code: &mut Code) -> usize {
     code.asm()
@@ -1209,7 +1202,8 @@ pub(super) fn restore_environment_with_product(code: &mut Code) {
     asm.alu_imm8(Alu::Add, Size::Qword, Rsp, ENVIRONMENT_STACK_BYTES as i8);
 }
 pub(super) fn reject_product_status(code: &mut Code) -> usize {
-    code.asm().test_al_imm8(MXCSR_STATUS_FLAGS);
+    code.asm()
+        .test_accumulator_imm(Size::Byte, MXCSR_STATUS_FLAGS.into());
     branch(code, Condition::NotZero)
 }
 /// `movq xmm, xmm`: clear the high qword of `xmm`.

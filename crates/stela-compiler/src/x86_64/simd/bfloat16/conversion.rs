@@ -7,7 +7,8 @@ use super::super::numerical::{
     quantize_bfloat_scalar_bits, resolve, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, packed, read_vector};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestAddress, GuestState,
     aarch64::{
@@ -34,18 +35,7 @@ const SINGLE_EXPONENT_BITS: u8 =
 const EXPONENT_TO_LOW_SHIFT: u8 = SINGLE_BITS - SINGLE_EXPONENT_BITS;
 const VECTOR_LANES: u32 = 4;
 const VECTOR_LANE_MASK: u32 = (1 << VECTOR_LANES) - 1;
-const TEST_EAX_IMM32: u8 = 0xa9;
-const TEST_R10D_R10D: &[u8] = &[0x45, 0x85, 0xd2];
-const MOVD_EAX_XMM1: &[u8] = &[0x66, 0x0f, 0x7e, 0xc8];
-const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const CMP_ECX_IMM32: &[u8] = &[0x81, 0xf9];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const OR_STATE_IMM32: &[u8] = &[0x81, 0x8f];
-const PEXTRW_EAX_XMM0_LOW: &[u8] = &[0x66, 0x0f, 0xc5, 0xc0, 0];
-const MOVD_XMM0_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc0];
-const PINSRW_XMM0_EAX_LOW: &[u8] = &[0x66, 0x0f, 0xc4, 0xc0, 0];
-const MOVLHPS_XMM1_XMM0: &[u8] = &[0x0f, 0x16, 0xc8];
+const LOW_WORD: u8 = 0;
 
 fn input_guard(code: &mut Code, mode: ConversionMode, helper: &mut Vec<usize>) {
     if mode == ConversionMode::Scalar {
@@ -62,18 +52,17 @@ fn input_guard(code: &mut Code, mode: ConversionMode, helper: &mut Vec<usize>) {
 /// Shared selectors remain in R8D/R9D/R11D; R10D records only discarded bits.
 fn quantize_scalar(code: &mut Code, helper: &mut Vec<usize>) {
     packed(code, Host::Xor, RESULT, RESULT);
-    code.extend(MOVD_EAX_XMM1);
+    code.asm().movd_from_xmm(Gpr::Rax, SOURCE);
     quantize_bfloat_scalar_bits(code);
     // Rounded infinity takes the same precise cold OFC/IXC path as narrowing.
-    code.extend(MOV_ECX_EAX);
-    code.extend(AND_ECX_IMM32);
-    code.extend(SINGLE_EXPONENT_MASK.to_le_bytes());
-    code.extend(CMP_ECX_IMM32);
-    code.extend(SINGLE_EXPONENT_MASK.to_le_bytes());
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Gpr::Rcx, Gpr::Rax);
+    asm.alu_imm32(Alu::And, Size::Dword, Gpr::Rcx, SINGLE_EXPONENT_MASK as i32);
+    asm.alu_imm32(Alu::Cmp, Size::Dword, Gpr::Rcx, SINGLE_EXPONENT_MASK as i32);
     helper.push(branch(code, Condition::Zero));
-    code.extend(SHR_EAX_IMM8);
-    code.push(DISCARDED_BITS);
-    code.extend(PINSRW_XMM0_EAX_LOW);
+    let mut asm = code.asm();
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Gpr::Rax, DISCARDED_BITS);
+    asm.pinsrw(RESULT, Gpr::Rax, LOW_WORD);
 }
 
 /// Rounding can carry a finite Single into BF16 infinity. The cold core owns
@@ -86,19 +75,22 @@ fn packed_overflow_guard(code: &mut Code, helper: &mut Vec<usize>) {
     ShiftOpcode::RightDword.emit(code, CONSTANT, EXPONENT_TO_LOW_SHIFT);
     packed(code, Host::EqualDword, TEMPORARY, CONSTANT);
     packed(code, Host::DwordSignMask, GPR_RAX, TEMPORARY);
-    code.push(TEST_EAX_IMM32);
-    code.extend(VECTOR_LANE_MASK.to_le_bytes());
+    code.asm()
+        .test_accumulator_imm(Size::Dword, VECTOR_LANE_MASK as i32);
     helper.push(branch(code, Condition::NotZero));
 }
 
 fn commit_inexact(code: &mut Code) {
     test_control(code, FPCR_AH);
     let suppressed = branch(code, Condition::NotZero);
-    code.extend(TEST_R10D_R10D);
+    code.asm().test(Size::Dword, Gpr::R10, Gpr::R10);
     let exact = branch(code, Condition::Zero);
-    code.extend(OR_STATE_IMM32);
-    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
-    code.extend(INEXACT.to_le_bytes());
+    code.asm().alu_imm32(
+        Alu::Or,
+        Size::Dword,
+        guest(core::mem::offset_of!(GuestState, fpsr) as u32),
+        INEXACT as i32,
+    );
     let ready = code.len();
     resolve(code, exact, ready);
     resolve(code, suppressed, ready);
@@ -106,12 +98,13 @@ fn commit_inexact(code: &mut Code) {
 
 fn scalar_commit(code: &mut Code, destination: u8) {
     // PEXTRW zero-extends the low BF16 encoding before MOVD clears all upper bits.
-    code.extend(PEXTRW_EAX_XMM0_LOW);
-    code.extend(MOVD_XMM0_EAX);
+    let mut asm = code.asm();
+    asm.pextrw(Gpr::Rax, RESULT, LOW_WORD);
+    asm.movd_to_xmm(RESULT, Gpr::Rax);
     test_control(code, FPCR_NEP);
     let clearing = branch(code, Condition::Zero);
     read_vector(code, destination, RESULT);
-    code.extend(PINSRW_XMM0_EAX_LOW);
+    code.asm().pinsrw(RESULT, Gpr::Rax, LOW_WORD);
     let ready = code.len();
     resolve(code, clearing, ready);
     commit(code, destination, RESULT);
@@ -144,7 +137,7 @@ pub(in crate::x86_64) fn emit(code: &mut Code, operand: &ConversionOperand, pc: 
         ConversionMode::Narrow { upper: true } => {
             // Original Vd is still available, including when Vd aliases Vn.
             read_vector(code, operand.destination, SOURCE);
-            code.extend(MOVLHPS_XMM1_XMM0);
+            code.asm().movlhps(SOURCE, Rm::Xmm(RESULT));
             commit(code, operand.destination, SOURCE);
         }
     }
@@ -174,15 +167,12 @@ pub(in crate::x86_64) fn guard_conversion_enables(code: &mut Code, failures: &mu
 /// Return approved fresh BF IXC in EAX without committing guest state. AH1
 /// suppresses all numerical exceptions; accepted normal lanes can only add IXC.
 pub(in crate::x86_64) fn conversion_inexact(code: &mut Code) {
-    const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-    const MOV_EAX_IMM32: u8 = 0xb8;
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     test_control(code, FPCR_AH);
     let suppressed = branch(code, Condition::NotZero);
-    code.extend(TEST_R10D_R10D);
+    code.asm().test(Size::Dword, Gpr::R10, Gpr::R10);
     let exact = branch(code, Condition::Zero);
-    code.push(MOV_EAX_IMM32);
-    code.extend(INEXACT.to_le_bytes());
+    code.asm().mov_imm32(Gpr::Rax, INEXACT);
     let end = code.len();
     resolve(code, exact, end);
     resolve(code, suppressed, end);

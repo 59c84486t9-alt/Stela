@@ -5,13 +5,12 @@ mod half;
 
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, Condition, FusedOpcode, branch, commit_inexact, emit_fma,
-    emit_opcode, environment, prepare_vector_input_range, prepare_vector_result_range,
-    read_numerical_vector, reject_other_status, reject_product_status, resolve,
-    restore_environment, restore_environment_with_product, save_product_status, test_control,
-    vector_exponent_range,
+    ArithmeticOpcode, Condition, FusedOpcode, branch, commit_inexact, emit_fma, emit_opcode,
+    environment, prepare_vector_input_range, prepare_vector_result_range, read_numerical_vector,
+    reject_other_status, reject_product_status, resolve, restore_environment,
+    restore_environment_with_product, save_product_status, test_control, vector_exponent_range,
 };
-use super::{Host, commit, packed, read_vector, shuffle};
+use super::{Host, commit, packed, packed_imm, read_vector, shuffle};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -42,11 +41,9 @@ const BROADCAST_HIGH_SINGLE_PAIR: u8 = 0xee; // Dwords [2, 3, 2, 3].
 const BROADCAST_HALF_PAIR_STRIDE: u8 = 0x55; // Repeat one selected dword in all positions.
 
 fn half_shuffle(code: &mut Code, shape: Shape, vector: u8, control: u8) {
-    packed(code, Host::ShuffleLowWord, vector, vector);
-    code.push(control);
+    packed_imm(code, Host::ShuffleLowWord, vector, vector, control);
     if shape == Shape::Vector128 {
-        packed(code, Host::ShuffleHighWord, vector, vector);
-        code.push(control);
+        packed_imm(code, Host::ShuffleHighWord, vector, vector, control);
     }
 }
 

@@ -79,7 +79,12 @@ pub(in crate::x86_64) fn emit_checked_current_direction(
         source: UNUSED_ARCHITECTURAL_REGISTER,
     };
     super::checked_source(code, &operand, failures);
-    opcode.register(code, RESULT_XMM, SOURCE_XMM, target);
-    code.push(ROUND_CURRENT_MXCSR_DIRECTION | super::PRECISION_SUPPRESSED);
+    opcode.register_imm(
+        code,
+        RESULT_XMM,
+        SOURCE_XMM,
+        ROUND_CURRENT_MXCSR_DIRECTION | super::PRECISION_SUPPRESSED,
+        target,
+    );
     super::checked_inexact(code, &operand);
 }

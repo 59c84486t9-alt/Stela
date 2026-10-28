@@ -28,12 +28,6 @@ const RIGHT: u8 = 1;
 const SIGN_MASK: u8 = 2;
 const ADDEND: u8 = 6;
 const ORIGINAL_ADDEND: u8 = 7;
-const SSE_ESCAPE: u8 = 0x0f;
-const MOV_SCALAR: u8 = 0x10;
-const SINGLE_PREFIX: u8 = 0xf3;
-const DOUBLE_PREFIX: u8 = 0xf2;
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 
 fn emit_checked_fma(code: &mut Code, operand: &Operand, target: TargetCpu) {
     emit_fma(
@@ -171,16 +165,12 @@ pub(in crate::x86_64) fn emit(
     commit_inexact(code);
     if operand.shape == Shape::Scalar {
         // Register MOVSS/MOVSD replaces only the result lane of A.
-        code.extend([
-            if operand.format == Format::Single {
-                SINGLE_PREFIX
-            } else {
-                DOUBLE_PREFIX
-            },
-            SSE_ESCAPE,
-            MOV_SCALAR,
-            REGISTER_DIRECT | (merge << MODRM_REGISTER_SHIFT) | LEFT,
-        ]);
+        if operand.format == Format::Single {
+            Host::MoveScalarSingle
+        } else {
+            Host::MoveScalarDouble
+        }
+        .register(code, merge, LEFT, crate::TargetCpu::Baseline);
         test_control(code, FPCR_NEP);
         let merging = branch(code, Condition::NotZero);
         clear_scalar(code, operand.format, merge);

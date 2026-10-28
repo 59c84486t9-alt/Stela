@@ -125,12 +125,8 @@ fn ordered(code: &mut Code, operand: &Operand, aligned_sp: bool) {
     for (ordinal, access) in operand.accesses().enumerate() {
         transfer_access(code, operand, access, 0, false, aligned_sp);
         if ordinal + 1 != usize::from(count) {
-            code.asm().alu_imm8(
-                Alu::Add,
-                Size::Qword,
-                Gpr::Rax,
-                operand.element_bytes as i8,
-            );
+            code.asm()
+                .alu_imm8(Alu::Add, Size::Qword, Gpr::Rax, operand.element_bytes as i8);
         }
     }
 }

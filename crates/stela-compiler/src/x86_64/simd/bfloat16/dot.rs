@@ -3,12 +3,13 @@ use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::single_vector_arithmetic;
 use super::super::numerical::{
     ArithmeticOpcode, Condition, ENVIRONMENT_STACK_BYTES, MXCSR_INEXACT, Rounding, branch,
-    capture_environment_status, clear_environment_status, environment_round,
+    capture_environment_status, clear_environment_status, environment_round, jump,
     prepare_vector_input_range, read_numerical_vector, reject_other_status, resolve,
     restore_environment, vector_exponent_range,
 };
 use super::super::{Host, commit, packed, read_vector, shuffle};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, Size};
+use crate::x86_64::simd::encode::FloatLanes;
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -44,24 +45,22 @@ const MATRIX_LEFT_PAIRS: u8 = 0xa0; // Dwords [0, 0, 2, 2].
 const MATRIX_RIGHT_PAIRS: u8 = 0x88; // Dwords [0, 2, 0, 2].
 const MATRIX_STAGES: u8 = 2;
 const PAIR_BYTES: u8 = (2 * BFLOAT16_BITS / u8::BITS) as u8;
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const FLOAT_COMPARE_OPCODE: u8 = 0xc2;
 const EQUAL_PREDICATE: u8 = 0;
-const JMP_REL32: u8 = 0xe9;
-const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
-const CMP_EAX_IMM8: &[u8] = &[0x83, 0xf8];
-const TEST_ECX_IMM32: &[u8] = &[0xf7, 0xc1];
 const MATRIX_FRAME_BYTES: u8 = 16;
-const SUB_RSP_MATRIX_FRAME: &[u8] = &[0x48, 0x83, 0xec, MATRIX_FRAME_BYTES];
-const ADD_RSP_MATRIX_FRAME: &[u8] = &[0x48, 0x83, 0xc4, MATRIX_FRAME_BYTES];
-const RSP_DISPLACEMENT_MODRM: u8 = 0x44;
-const RSP_SIB: u8 = 0x24;
-const ZERO_MATRIX_COUNTER: &[u8] = &[0x45, 0x31, 0xc0]; // XOR R8D,R8D.
-const TEST_MATRIX_COUNTER: &[u8] = &[0x45, 0x85, 0xc0]; // TEST R8D,R8D.
-const INCREMENT_MATRIX_COUNTER: &[u8] = &[0x41, 0xff, 0xc0];
-const CMP_MATRIX_COUNTER_IMM8: &[u8] = &[0x41, 0x83, 0xf8];
+/// R8D counts completed matrix stages.
+const MATRIX_COUNTER: Gpr = Gpr::R8;
+
+/// Reserve (`Alu::Sub`) or release (`Alu::Add`) the matrix accumulator frame.
+fn matrix_frame(code: &mut Code, op: Alu) {
+    code.asm()
+        .alu_imm8(op, Size::Qword, Gpr::Rsp, MATRIX_FRAME_BYTES as i8);
+}
+
+/// The matrix's private accumulator, above the numerical environment's
+/// sixteen-byte save area.
+fn accumulator_slot() -> Mem {
+    Mem::base_disp8(Gpr::Rsp, ENVIRONMENT_STACK_BYTES as i8)
+}
 
 #[derive(Clone, Copy)]
 enum SumCheck {
@@ -70,12 +69,12 @@ enum SumCheck {
 }
 
 fn compare_equal(code: &mut Code, destination: u8, source: u8) {
-    code.extend([
-        SSE_ESCAPE,
-        FLOAT_COMPARE_OPCODE,
-        REGISTER_DIRECT | destination << MODRM_REGISTER_SHIFT | source,
+    code.asm().float_compare(
+        FloatLanes::PackedSingle,
+        destination,
+        Rm::Xmm(source),
         EQUAL_PREDICATE,
-    ]);
+    );
 }
 
 fn guard_normal(code: &mut Code, shape: Shape, source: u8, rollback: &mut Vec<usize>) {
@@ -97,12 +96,11 @@ fn guard_normal_or_zero(code: &mut Code, shape: Shape, source: u8, rollback: &mu
         Shape::Vector128 => ALL_SINGLE_LANE_MASK,
         Shape::Scalar => unreachable!("BF16 dot requires vector lanes"),
     };
+    let mut asm = code.asm();
     if shape == Shape::Vector64 {
-        code.extend(AND_EAX_IMM8);
-        code.push(mask);
+        asm.alu_imm8(Alu::And, Size::Dword, Gpr::Rax, mask as i8);
     }
-    code.extend(CMP_EAX_IMM8);
-    code.push(mask);
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Gpr::Rax, mask as i8);
     rollback.push(branch(code, Condition::NotZero));
 }
 
@@ -139,8 +137,8 @@ fn odd_add(code: &mut Code, shape: Shape, rollback: &mut Vec<usize>, check: SumC
     // inexact vectors retain the per-lane residual check. Keep the preceding
     // result guard: exact subnormal cancellation must still use BF flushing.
     let exact = if matches!(check, SumCheck::ExactVector) {
-        code.extend(TEST_ECX_IMM32);
-        code.extend(MXCSR_INEXACT.to_le_bytes());
+        code.asm()
+            .test_imm(Size::Dword, Gpr::Rcx, MXCSR_INEXACT as i32);
         Some(branch(code, Condition::Zero))
     } else {
         None
@@ -200,8 +198,7 @@ fn add_accumulator(code: &mut Code, shape: Shape, rollback: &mut Vec<usize>, che
 fn matrix_accumulator(code: &mut Code, opcode: Host) {
     // The matrix's private accumulator is above the numerical environment's
     // sixteen-byte save area; no guest destination is written between stages.
-    opcode.append(code, TargetCpu::Baseline);
-    code.extend([RSP_DISPLACEMENT_MODRM, RSP_SIB, ENVIRONMENT_STACK_BYTES]);
+    opcode.emit(code, LEFT, accumulator_slot(), TargetCpu::Baseline);
 }
 
 fn finish(
@@ -214,16 +211,14 @@ fn finish(
 ) {
     restore_environment(code);
     if matrix {
-        code.extend(ADD_RSP_MATRIX_FRAME);
+        matrix_frame(code, Alu::Add);
     }
     // A successful path must skip the cold helper regardless of arithmetic flags.
-    code.push(JMP_REL32);
-    let completed = code.len();
-    code.extend(0_i32.to_le_bytes());
+    let completed = jump(code);
     let rollback_start = code.len();
     restore_environment(code);
     if matrix {
-        code.extend(ADD_RSP_MATRIX_FRAME);
+        matrix_frame(code, Alu::Add);
     }
     super::super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
     let commit_start = code.len();
@@ -265,17 +260,18 @@ pub(in crate::x86_64) fn emit_dot(code: &mut Code, operand: &DotOperand, pc: Gue
 
 pub(in crate::x86_64) fn emit_matrix(code: &mut Code, operand: &MatrixOperand, pc: GuestAddress) {
     let mut rollback = Vec::new();
-    code.extend(SUB_RSP_MATRIX_FRAME);
+    matrix_frame(code, Alu::Sub);
     environment_round(code, Rounding::Zero);
     read_vector(code, operand.destination, LEFT);
     matrix_accumulator(code, Host::StoreUnaligned);
-    code.extend(ZERO_MATRIX_COUNTER);
+    code.asm()
+        .alu(Alu::Xor, Size::Dword, MATRIX_COUNTER, MATRIX_COUNTER);
     let next_stage = code.len();
     // Reloads see the original inputs until the single final commit, including
     // Vd=Vn, Vd=Vm and full aliasing.
     read_vector(code, operand.left, LEFT);
     read_vector(code, operand.right, RIGHT);
-    code.extend(TEST_MATRIX_COUNTER);
+    code.asm().test(Size::Dword, MATRIX_COUNTER, MATRIX_COUNTER);
     let first_stage = branch(code, Condition::Zero);
     for source in [LEFT, RIGHT] {
         ShiftOpcode::RightBytes.emit(code, source, PAIR_BYTES);
@@ -286,17 +282,12 @@ pub(in crate::x86_64) fn emit_matrix(code: &mut Code, operand: &MatrixOperand, p
     shuffle(code, RIGHT, RIGHT, MATRIX_RIGHT_PAIRS);
     pair_sum(code, Shape::Vector128, &mut rollback, SumCheck::ExactVector);
     // Load the previous accumulator into XMM1, then save the new XMM0 value.
-    Host::LoadUnaligned.append(code, TargetCpu::Baseline);
-    code.extend([
-        RSP_DISPLACEMENT_MODRM | RIGHT << MODRM_REGISTER_SHIFT,
-        RSP_SIB,
-        ENVIRONMENT_STACK_BYTES,
-    ]);
+    Host::LoadUnaligned.emit(code, RIGHT, accumulator_slot(), TargetCpu::Baseline);
     add_accumulator(code, Shape::Vector128, &mut rollback, SumCheck::ExactVector);
     matrix_accumulator(code, Host::StoreUnaligned);
-    code.extend(INCREMENT_MATRIX_COUNTER);
-    code.extend(CMP_MATRIX_COUNTER_IMM8);
-    code.push(MATRIX_STAGES);
+    let mut asm = code.asm();
+    asm.inc(Size::Dword, MATRIX_COUNTER);
+    asm.alu_imm8(Alu::Cmp, Size::Dword, MATRIX_COUNTER, MATRIX_STAGES as i8);
     let repeat = branch(code, Condition::Below);
     resolve(code, repeat, next_stage);
     finish(
