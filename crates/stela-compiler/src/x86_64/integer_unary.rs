@@ -1,39 +1,17 @@
 //! FEAT_CSSC ABS, CNT and CTZ.
-use super::{Register, Width, load, offset, store};
+use super::{
+    Register, Width,
+    asm::{Alu, Asm, Cond, Gpr, Mem, ShiftOp, Size, Unary},
+    load_with, offset, store_with,
+};
+use crate::x86_64::asm::Code;
 use crate::{
     TargetCpu,
     aarch64::integer_unary::{Kind, Operand},
 };
-use alloc::vec::Vec;
 
-const REX_W: u8 = 0x48;
-const NOP: u8 = 0x90; // NOP keeps the source-map interval nonempty.
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const MOV_EAX_IMM32: u8 = 0xb8;
-const NEG_EAX: &[u8] = &[0xf7, 0xd8];
-const CMOVS_EAX_ECX: &[u8] = &[0x0f, 0x48, 0xc1];
-const BSF_EAX_RDI_DISP32: &[u8] = &[0x0f, 0xbc, 0x87];
-const TZCNT_EAX_RDI_DISP32: &[u8] = &[0x0f, 0xbc, 0x87];
-const POPCNT_EAX_RDI_DISP32: &[u8] = &[0x0f, 0xb8, 0x87];
-const PREFIX_F3: u8 = 0xf3;
-const MOV_ECX_IMM32: u8 = 0xb9;
-const CMOVZ_EAX_ECX: &[u8] = &[0x0f, 0x44, 0xc1];
-const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const NEG_ECX: &[u8] = &[0xf7, 0xd9];
-const AND_EAX_ECX: &[u8] = &[0x21, 0xc8];
-const SUB_EAX_ONE: &[u8] = &[0x83, 0xe8, 0x01];
-const SHR_ECX_ONE: &[u8] = &[0xd1, 0xe9];
-const SHR_ECX_IMM8: &[u8] = &[0xc1, 0xe9];
-const SUB_EAX_ECX: &[u8] = &[0x29, 0xc8];
-const ADD_EAX_ECX: &[u8] = &[0x01, 0xc8];
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const AND_EAX_IMM32: u8 = 0x25;
-const MOV_RDX_IMM64: &[u8] = &[REX_W, 0xba]; // MOV RDX,imm64
-const AND_ECX_EDX: &[u8] = &[0x21, 0xd1];
-const AND_EAX_EDX: &[u8] = &[0x21, 0xd0];
-const IMUL_EAX_EAX_IMM32: &[u8] = &[0x69, 0xc0];
-const IMUL_EAX_EDX: &[u8] = &[0x0f, 0xaf, 0xc2];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
+use Gpr::{Rax, Rcx, Rdi, Rdx};
+
 const PAIR_MASK: u64 = 0x5555_5555_5555_5555;
 const TWO_BIT_MASK: u64 = 0x3333_3333_3333_3333;
 const NIBBLE_MASK: u64 = 0x0f0f_0f0f_0f0f_0f0f;
@@ -41,164 +19,148 @@ const BYTE_SUM_MULTIPLIER: u64 = 0x0101_0101_0101_0101;
 const TWO_BIT_SHIFT: u8 = 2;
 const NIBBLE_SHIFT: u8 = 4;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
+    emit_with(&mut code.asm(), operand, target);
+}
+
+fn size(width: Width) -> Size {
+    Size::of(width == Width::X64)
+}
+
+pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
+    let size = size(operand.width);
     if operand.destination == Register::Zero {
-        code.push(NOP);
+        // NOP keeps the source-map interval nonempty.
+        asm.nop();
         return;
     }
     if operand.source == Register::Zero {
         match operand.kind {
-            Kind::Absolute | Kind::PopulationCount => code.extend(XOR_EAX_EAX),
-            Kind::TrailingZeros => {
-                code.push(MOV_EAX_IMM32);
-                code.extend(bits(operand.width).to_le_bytes());
-            }
+            Kind::Absolute | Kind::PopulationCount => asm.alu(Alu::Xor, Size::Dword, Rax, Rax),
+            Kind::TrailingZeros => asm.mov_imm32(Rax, size.bits()),
         }
-        store(code, operand.destination);
+        store_with(asm, operand.destination);
         return;
     }
     match operand.kind {
         Kind::Absolute => {
-            load(code, operand.source);
-            instruction(code, operand.width, MOV_ECX_EAX);
-            instruction(code, operand.width, NEG_EAX);
-            instruction(code, operand.width, CMOVS_EAX_ECX);
+            load_with(asm, operand.source);
+            asm.mov(size, Rcx, Rax);
+            asm.unary(Unary::Neg, size, Rax);
+            asm.cmov(Cond::S, size, Rax, Rcx);
         }
         // POPCNT, TZCNT and BSF are not on Intel's data operand
         // independent timing list.
         Kind::PopulationCount | Kind::TrailingZeros if target.data_independent_timing() => {
-            load(code, operand.source);
+            load_with(asm, operand.source);
             if operand.kind == Kind::TrailingZeros {
                 // (x & -x) - 1 sets exactly the trailing zeros (all bits for 0).
-                instruction(code, operand.width, MOV_ECX_EAX);
-                instruction(code, operand.width, NEG_ECX);
-                instruction(code, operand.width, AND_EAX_ECX);
-                instruction(code, operand.width, SUB_EAX_ONE);
+                asm.mov(size, Rcx, Rax);
+                asm.unary(Unary::Neg, size, Rcx);
+                asm.alu(Alu::And, size, Rax, Rcx);
+                asm.alu_imm8(Alu::Sub, size, Rax, 1);
             }
-            population_count(code, operand.width);
+            population_count(asm, operand.width == Width::X64);
         }
         Kind::PopulationCount if target.supports(TargetCpu::Popcnt) => {
-            memory_count(code, operand, POPCNT_EAX_RDI_DISP32, Some(PREFIX_F3));
+            memory_count(asm, operand, |asm, size, to, from| {
+                asm.popcnt(size, to, from)
+            });
         }
         Kind::PopulationCount => {
-            load(code, operand.source);
-            population_count(code, operand.width);
+            load_with(asm, operand.source);
+            population_count(asm, operand.width == Width::X64);
         }
         Kind::TrailingZeros if target.supports(TargetCpu::Bmi1) => {
-            memory_count(code, operand, TZCNT_EAX_RDI_DISP32, Some(PREFIX_F3));
+            memory_count(asm, operand, |asm, size, to, from| {
+                asm.tzcnt(size, to, from)
+            });
         }
         Kind::TrailingZeros => {
-            memory_count(code, operand, BSF_EAX_RDI_DISP32, None);
+            memory_count(asm, operand, |asm, size, to, from| asm.bsf(size, to, from));
             // MOV preserves BSF's ZF. Replace its undefined zero-input result
             // before use; a 32-bit CMOV is sufficient for either count width.
-            code.push(MOV_ECX_IMM32);
-            code.extend(bits(operand.width).to_le_bytes());
-            code.extend(CMOVZ_EAX_ECX);
+            asm.mov_imm32(Rcx, size.bits());
+            asm.cmov(Cond::E, Size::Dword, Rax, Rcx);
         }
     }
-    store(code, operand.destination);
+    store_with(asm, operand.destination);
 }
 
-fn memory_count(code: &mut Vec<u8>, operand: &Operand, opcode: &[u8], prefix: Option<u8>) {
+/// A count of the guest source read straight from the frame.
+fn memory_count(asm: &mut Asm, operand: &Operand, count: fn(&mut Asm, Size, Gpr, Mem)) {
     // Break the count destination dependency before its folded memory read.
     // The memory read precedes the guest destination write, including aliases.
-    code.extend(XOR_EAX_EAX);
-    if let Some(prefix) = prefix {
-        code.push(prefix);
-    }
-    instruction(code, operand.width, opcode);
+    asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
     let source = offset(operand.source).expect("nonzero scalar count source");
-    code.extend(source.to_le_bytes());
+    count(
+        asm,
+        size(operand.width),
+        Rax,
+        Mem::base_disp32(Rdi, source as i32),
+    );
 }
 
-// REX.W widens the named 32-bit GPR operands.
-fn instruction(code: &mut Vec<u8>, width: Width, opcode: &[u8]) {
-    if width == Width::X64 {
-        code.push(REX_W);
-    }
-    code.extend(opcode);
-}
-
-fn bits(width: Width) -> u32 {
-    match width {
-        Width::W32 => u32::BITS,
-        Width::X64 => u64::BITS,
-    }
-}
-
-fn load_mask(code: &mut Vec<u8>, width: Width, value: u64) {
-    if width == Width::X64 {
-        code.extend(MOV_RDX_IMM64);
-        code.extend(value.to_le_bytes());
-    }
-}
-
-fn mask_copy(code: &mut Vec<u8>, width: Width, value: u64) {
-    match width {
-        Width::W32 => {
-            code.extend(AND_ECX_IMM32);
-            code.extend((value as u32).to_le_bytes());
-        }
-        Width::X64 => instruction(code, width, AND_ECX_EDX),
-    }
-}
-
-fn mask_accumulator(code: &mut Vec<u8>, width: Width, value: u64) {
-    match width {
-        Width::W32 => {
-            code.push(AND_EAX_IMM32);
-            code.extend((value as u32).to_le_bytes());
-        }
-        Width::X64 => instruction(code, width, AND_EAX_EDX),
-    }
-}
-
-/// The population count of RAX (EAX for W32) in EAX, from integer
+/// The population count of RAX (EAX unless `wide`) in EAX, from integer
 /// operations only. Clobbers RCX and RDX.
-pub(super) fn population_count(code: &mut Vec<u8>, width: Width) {
+pub(super) fn population_count(asm: &mut Asm, wide: bool) {
+    let size = Size::of(wide);
+    // A wide mask goes through RDX; a narrow one is an imm32.
+    let mask_copy = |asm: &mut Asm, value: u64| {
+        if wide {
+            asm.mov_imm64(Rdx, value);
+            asm.alu(Alu::And, size, Rcx, Rdx);
+        } else {
+            asm.alu_imm32(Alu::And, size, Rcx, value as u32 as i32);
+        }
+    };
+    let mask_accumulator = |asm: &mut Asm, value: u64, loaded: bool| {
+        if wide {
+            if !loaded {
+                asm.mov_imm64(Rdx, value);
+            }
+            asm.alu(Alu::And, size, Rax, Rdx);
+        } else {
+            asm.alu_accumulator_imm32(Alu::And, size, value as u32 as i32);
+        }
+    };
     // Each subtraction produces a two-bit count without borrowing across pairs.
-    instruction(code, width, MOV_ECX_EAX);
-    instruction(code, width, SHR_ECX_ONE);
-    load_mask(code, width, PAIR_MASK);
-    mask_copy(code, width, PAIR_MASK);
-    instruction(code, width, SUB_EAX_ECX);
+    asm.mov(size, Rcx, Rax);
+    asm.shift_one(ShiftOp::Shr, size, Rcx);
+    mask_copy(asm, PAIR_MASK);
+    asm.alu(Alu::Sub, size, Rax, Rcx);
 
-    instruction(code, width, MOV_ECX_EAX);
-    instruction(code, width, SHR_ECX_IMM8);
-    code.push(TWO_BIT_SHIFT);
-    load_mask(code, width, TWO_BIT_MASK);
-    mask_copy(code, width, TWO_BIT_MASK);
-    mask_accumulator(code, width, TWO_BIT_MASK);
-    instruction(code, width, ADD_EAX_ECX);
+    asm.mov(size, Rcx, Rax);
+    asm.shift_imm(ShiftOp::Shr, size, Rcx, TWO_BIT_SHIFT);
+    mask_copy(asm, TWO_BIT_MASK);
+    mask_accumulator(asm, TWO_BIT_MASK, true);
+    asm.alu(Alu::Add, size, Rax, Rcx);
 
-    instruction(code, width, MOV_ECX_EAX);
-    instruction(code, width, SHR_ECX_IMM8);
-    code.push(NIBBLE_SHIFT);
-    instruction(code, width, ADD_EAX_ECX);
-    load_mask(code, width, NIBBLE_MASK);
-    mask_accumulator(code, width, NIBBLE_MASK);
+    asm.mov(size, Rcx, Rax);
+    asm.shift_imm(ShiftOp::Shr, size, Rcx, NIBBLE_SHIFT);
+    asm.alu(Alu::Add, size, Rax, Rcx);
+    mask_accumulator(asm, NIBBLE_MASK, false);
 
-    match width {
-        Width::W32 => {
-            code.extend(IMUL_EAX_EAX_IMM32);
-            code.extend((BYTE_SUM_MULTIPLIER as u32).to_le_bytes());
-        }
-        Width::X64 => {
-            load_mask(code, width, BYTE_SUM_MULTIPLIER);
-            instruction(code, width, IMUL_EAX_EDX);
-        }
+    if wide {
+        asm.mov_imm64(Rdx, BYTE_SUM_MULTIPLIER);
+        asm.imul(size, Rax, Rdx);
+    } else {
+        asm.imul_imm32(size, Rax, Rax, BYTE_SUM_MULTIPLIER as u32 as i32);
     }
-    instruction(code, width, SHR_EAX_IMM8);
-    code.push((bits(width) - u8::BITS) as u8);
+    asm.shift_imm(ShiftOp::Shr, size, Rax, (size.bits() - u8::BITS) as u8);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOP: u8 = 0x90;
+    const BSF_EAX_RDI_DISP32: &[u8] = &[0x0f, 0xbc, 0x87];
+    const POPCNT_EAX_RDI_DISP32: &[u8] = &[0x0f, 0xb8, 0x87];
     use alloc::vec::Vec;
 
     fn emitted(kind: Kind, width: Width, source: Register, target: TargetCpu) -> Vec<u8> {
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(
             &mut code,
             &Operand {
@@ -209,7 +171,7 @@ mod tests {
             },
             target,
         );
-        code
+        code.into_bytes()
     }
 
     #[test]
@@ -284,7 +246,7 @@ mod tests {
                     TargetCpu::Baseline,
                     TargetCpu::Baseline.with_popcnt().with_bmi1(),
                 ] {
-                    let mut code = Vec::new();
+                    let mut code = Code::new();
                     emit(
                         &mut code,
                         &Operand {

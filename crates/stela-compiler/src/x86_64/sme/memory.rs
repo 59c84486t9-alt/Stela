@@ -1,5 +1,8 @@
 //! SME loads and stores through the memory service. Loads commit after every
 //! element succeeds; stores submit one active element at a time.
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::simd::encode::stack;
 use alloc::vec::Vec;
 mod za;
 
@@ -39,32 +42,7 @@ const PREDICATE_GROUP_BITS_PER_BYTE: usize = 8;
 const MIN_PREDICATE_SCRATCH_BYTES: usize = 32;
 const ZT_BYTES: usize = 64;
 const VALUE_XMM: u8 = 0;
-const MODRM_STACK_DISP32: u8 = 0x84;
-const STACK_SIB: u8 = 0x24;
-const REGISTER_SHIFT: u8 = 3;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const MOV_RAX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
-const MOV_RSP_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x84, 0x24];
-const MOV_RCX_RAX: &[u8] = &[0x48, 0x89, 0xc1];
-const ADD_RAX_RCX: &[u8] = &[0x48, 0x01, 0xc8];
-const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];
-const SHL_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe0];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const TEST_AL_IMM8: &[u8] = &[0xa8];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JNC_REL32: &[u8] = &[0x0f, 0x83];
-const JB_REL32: &[u8] = &[0x0f, 0x82];
-const JMP_REL32: &[u8] = &[0xe9];
-const RET: u8 = 0xc3;
-const MOV_RCX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x8c, 0x24];
-const BT_RSP_DISP32_IMM8: &[u8] = &[0x48, 0x0f, 0xba, 0xa4, 0x24];
 const FIRST_PREDICATE_BIT: u8 = 0;
-const BT_RSP_DISP32_RCX: &[u8] = &[0x48, 0x0f, 0xa3, 0x8c, 0x24];
-const ADD_RSP_DISP32_IMM8: &[u8] = &[0x48, 0x83, 0x84, 0x24];
-const CMP_RSP_DISP32_IMM32: &[u8] = &[0x48, 0x81, 0xbc, 0x24];
-const MOV_R8_CONTEXT_DISP8: &[u8] = &[0x4d, 0x8b, 0x47];
-const MOV_R8_R8_DISP8: &[u8] = &[0x4d, 0x8b, 0x40];
 
 struct Scratch {
     request: u32,
@@ -198,7 +176,7 @@ pub(crate) fn validate_target(operand: &Operand, target: TargetCpu) -> Result<()
 }
 
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     length: VectorLength,
     target: TargetCpu,
@@ -216,10 +194,10 @@ pub(crate) fn emit(
         _ => emit_za_body(code, operand, length, target, pc, &scratch, &mut failures),
     }
     stack_space(code, scratch.bytes, false);
-    let success = jump(code, JMP_REL32);
+    let success = jump(code, None);
     let failure = code.len();
     stack_space(code, scratch.bytes, false);
-    code.push(RET);
+    code.asm().ret();
     let done = code.len();
     service::patch_branch(code, success, done);
     for displacement in failures {
@@ -228,71 +206,104 @@ pub(crate) fn emit(
     Ok(())
 }
 
-fn stack_space(code: &mut Vec<u8>, bytes: u32, reserve: bool) {
-    code.extend(if reserve {
-        SUB_RSP_IMM32
+fn stack_space(code: &mut Code, bytes: u32, reserve: bool) {
+    if reserve {
+        code.asm().reserve_stack(bytes as usize);
     } else {
-        ADD_RSP_IMM32
-    });
-    code.extend(bytes.to_le_bytes());
+        code.asm().release_stack(bytes as usize);
+    }
 }
 
-fn load_guest(code: &mut Vec<u8>, register: Register) {
+/// `[rsp + offset]` in the private scratch frame.
+fn slot(offset: u32) -> Mem {
+    stack(offset as usize)
+}
+
+/// The operand size of a `bytes`-byte scalar element.
+fn scalar_size(bytes: usize) -> Size {
+    match bytes {
+        1 => Size::Byte,
+        2 => Size::Word,
+        4 => Size::Dword,
+        8 => Size::Qword,
+        _ => unreachable!("ZA scalar transfers require 1,2,4 or8 bytes"),
+    }
+}
+
+/// Load a `bytes`-byte element from `memory` into RAX, zero-extended, or
+/// store RAX's low `bytes` to it.
+fn scalar_transfer(code: &mut Code, load: bool, bytes: usize, memory: Mem) {
+    let size = scalar_size(bytes);
+    let mut asm = code.asm();
+    if !load {
+        asm.mov_store(size, memory, Gpr::Rax);
+    } else if bytes <= 2 {
+        asm.movzx(Size::Dword, Gpr::Rax, size, memory);
+    } else {
+        asm.mov_load(size, Gpr::Rax, memory);
+    }
+}
+
+fn load_guest(code: &mut Code, register: Register) {
     crate::x86_64::load(code, register);
 }
 
-fn stack_load(code: &mut Vec<u8>, offset: u32) {
-    code.extend(MOV_RAX_RSP_DISP32);
-    code.extend(offset.to_le_bytes());
+fn stack_load(code: &mut Code, offset: u32) {
+    code.asm().mov_load(Size::Qword, Gpr::Rax, slot(offset));
 }
 
-fn stack_store(code: &mut Vec<u8>, offset: u32) {
-    code.extend(MOV_RSP_DISP32_RAX);
-    code.extend(offset.to_le_bytes());
+fn stack_store(code: &mut Code, offset: u32) {
+    code.asm().mov_store(Size::Qword, slot(offset), Gpr::Rax);
 }
 
-fn stack_vector(code: &mut Vec<u8>, load: bool, xmm: u8, offset: u32, target: TargetCpu) {
+fn stack_vector(code: &mut Code, load: bool, xmm: u8, offset: u32, target: TargetCpu) {
     if load {
         Host::LoadUnaligned
     } else {
         Host::StoreUnaligned
     }
-    .append(code, target);
-    code.push(MODRM_STACK_DISP32 | (xmm << REGISTER_SHIFT));
-    code.push(STACK_SIB);
-    code.extend(offset.to_le_bytes());
+    .emit(code, xmm, slot(offset), target);
 }
 
-fn pointer(code: &mut Vec<u8>, field: u32) {
-    code.extend(MOV_R8_CONTEXT_DISP8);
-    code.push(EXECUTION_CONTEXT_SCALABLE_OFFSET as u8);
-    code.extend(MOV_R8_R8_DISP8);
-    code.push(field as u8);
+/// `mov r8, [r15 + scalable]; mov r8, [r8 + field]`: R8 points at the
+/// scalable context `field`.
+fn pointer(code: &mut Code, field: u32) {
+    let mut asm = code.asm();
+    asm.mov_load(
+        Size::Qword,
+        Gpr::R8,
+        Mem::base_disp8(Gpr::R15, EXECUTION_CONTEXT_SCALABLE_OFFSET as i8),
+    );
+    asm.mov_load(Size::Qword, Gpr::R8, Mem::base_disp8(Gpr::R8, field as i8));
 }
 
-fn jump(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+/// A rel32 `jcc` on `condition`, or a `jmp` without one; returns the
+/// displacement offset.
+fn jump(code: &mut Code, condition: Option<Cond>) -> usize {
+    let mut asm = code.asm();
+    match condition {
+        Some(condition) => asm.jcc(condition),
+        None => asm.jmp(),
+    }
+    .offset()
 }
 
-fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64, failures: &mut Vec<usize>) {
+fn check_sp(code: &mut Code, base: Register, pc: u64, failures: &mut Vec<usize>) {
     if base != Register::Sp {
         return;
     }
     load_guest(code, base);
-    code.extend(TEST_AL_IMM8);
-    code.push((STACK_ALIGNMENT - 1) as u8);
-    let aligned = jump(code, JZ_REL32);
+    code.asm()
+        .test_accumulator_imm(Size::Byte, (STACK_ALIGNMENT - 1) as i32);
+    let aligned = jump(code, Some(Cond::E));
     service::fault(code, MemoryStatus::StackAlignment, pc);
-    failures.push(jump(code, JMP_REL32));
+    failures.push(jump(code, None));
     let destination = code.len();
     service::patch_branch(code, aligned, destination);
 }
 
 fn transfer_loop(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     transfer: Transfer,
     pc: u64,
     scratch: &Scratch,
@@ -308,10 +319,13 @@ fn transfer_loop(
     );
     if transfer.bytes == transfer.element_bytes {
         let inactive = if transfer.predicated {
-            code.extend(BT_RSP_DISP32_IMM8);
-            code.extend(scratch.predicate.to_le_bytes());
-            code.push(FIRST_PREDICATE_BIT);
-            Some(jump(code, JNC_REL32))
+            code.asm().bit_imm(
+                BitTest::Bt,
+                Size::Qword,
+                slot(scratch.predicate),
+                FIRST_PREDICATE_BIT,
+            );
+            Some(jump(code, Some(Cond::Ae)))
         } else {
             None
         };
@@ -325,17 +339,16 @@ fn transfer_loop(
         // the supported no-CPA profile. No later access consumes those values.
         return;
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     stack_store(code, scratch.iteration);
     let head = code.len();
     let inactive = if transfer.predicated {
-        code.extend(MOV_RCX_RSP_DISP32);
-        code.extend(scratch.iteration.to_le_bytes());
+        let mut asm = code.asm();
+        asm.mov_load(Size::Qword, Gpr::Rcx, slot(scratch.iteration));
         // Memory BT uses the complete nonnegative register bit index, advancing
         // its qword address for mask bits above63.
-        code.extend(BT_RSP_DISP32_RCX);
-        code.extend(scratch.predicate.to_le_bytes());
-        Some(jump(code, JNC_REL32))
+        asm.bit(BitTest::Bt, Size::Qword, slot(scratch.predicate), Gpr::Rcx);
+        Some(jump(code, Some(Cond::Ae)))
     } else {
         None
     };
@@ -350,19 +363,25 @@ fn transfer_loop(
         scratch.request + MEMORY_REQUEST_DATA_OFFSET,
         scratch.iteration,
     ] {
-        code.extend(ADD_RSP_DISP32_IMM8);
-        code.extend(offset.to_le_bytes());
-        code.push(transfer.element_bytes as u8);
+        code.asm().alu_imm8(
+            Alu::Add,
+            Size::Qword,
+            slot(offset),
+            transfer.element_bytes as i8,
+        );
     }
-    code.extend(CMP_RSP_DISP32_IMM32);
-    code.extend(scratch.iteration.to_le_bytes());
-    code.extend(transfer.bytes.to_le_bytes());
-    let repeat = jump(code, JB_REL32);
+    code.asm().alu_imm32(
+        Alu::Cmp,
+        Size::Qword,
+        slot(scratch.iteration),
+        transfer.bytes as i32,
+    );
+    let repeat = jump(code, Some(Cond::B));
     service::patch_branch(code, repeat, head);
 }
 
 fn emit_vectors(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &VectorTransfer,
     length: VectorLength,
     target: TargetCpu,
@@ -400,8 +419,8 @@ fn emit_vectors(
             let bytes =
                 i32::from(offset) * i32::from(operand.registers.count) * length.bytes() as i32;
             if bytes != 0 {
-                code.extend(ADD_RAX_IMM32);
-                code.extend(bytes.to_le_bytes());
+                code.asm()
+                    .alu_accumulator_imm32(Alu::Add, Size::Qword, bytes);
             }
         }
         Offset::Register(register) => {
@@ -409,12 +428,12 @@ fn emit_vectors(
             load_guest(code, register);
             let scale = operand.element.bytes().trailing_zeros() as u8;
             if scale != 0 {
-                code.extend(SHL_RAX_IMM8);
-                code.push(scale);
+                code.asm()
+                    .shift_imm(ShiftOp::Shl, Size::Qword, Gpr::Rax, scale);
             }
-            code.extend(MOV_RCX_RAX);
+            code.asm().mov(Size::Qword, Gpr::Rcx, Gpr::Rax);
             stack_load(code, scratch.address);
-            code.extend(ADD_RAX_RCX);
+            code.asm().alu(Alu::Add, Size::Qword, Gpr::Rax, Gpr::Rcx);
         }
     }
     transfer_loop(
@@ -464,7 +483,7 @@ mod tests {
             (QUADWORD_TILE_LOAD, TargetCpu::Cx16),
             (QUADWORD_TILE_STORE, TargetCpu::AtomicLoad16),
         ] {
-            let mut code = vec![NOP];
+            let mut code = Code::from(vec![NOP]);
             assert!(emit(&mut code, &decode(word).unwrap(), length, target, 0).is_err());
             assert_eq!(code, [NOP]);
         }

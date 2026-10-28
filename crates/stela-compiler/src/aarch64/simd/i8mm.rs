@@ -1,5 +1,6 @@
 //! FEAT_I8MM: SMMLA, UMMLA, USMMLA, USDOT and SUDOT.
 use super::arithmetic::Shape;
+use crate::aarch64::Unsupported;
 
 const REGISTER_MASK: u32 = 31;
 const DESTINATION_SHIFT: u32 = 0;
@@ -115,8 +116,7 @@ impl Encoding {
     }
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (_, _, kind, indexed) = Encoding::ALL
         .iter()
         .map(|encoding| encoding.facts())

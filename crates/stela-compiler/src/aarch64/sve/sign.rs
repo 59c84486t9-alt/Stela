@@ -1,4 +1,5 @@
 //! SVE predicated FABS and FNEG.
+use crate::aarch64::Unsupported;
 
 use crate::aarch64::floating::Format;
 
@@ -30,8 +31,7 @@ pub struct Operand {
     pub predicate: u8,
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let kind = match word & OPCODE_MASK {
         ABSOLUTE_OPCODE => Kind::Absolute,
         NEGATE_OPCODE => Kind::Negate,
@@ -41,7 +41,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         HALF_SIZE => Format::Half,
         SINGLE_SIZE => Format::Single,
         DOUBLE_SIZE => Format::Double,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         kind,
@@ -76,7 +76,7 @@ mod tests {
                     (31, 31, 7)
                 );
             }
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
         }
         assert_eq!(decode(0x6580_8000), None);
     }

@@ -1,4 +1,5 @@
 //! SVE predicated FRINT*.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, rounding::RoundingOperation};
 
 const OPCODE_MASK: u32 = 0xff3f_e000;
@@ -27,8 +28,7 @@ pub struct Operand {
 
 /// Merging forms only. The FEAT_SVE2p2 zeroing forms and the bounded FRINT
 /// forms are not decoded.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let operation = match word & OPCODE_MASK {
         FRINTN => RoundingOperation::NearestEven,
         FRINTP => RoundingOperation::TowardPositive,
@@ -43,7 +43,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         1 => Format::Half,
         2 => Format::Single,
         3 => Format::Double,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         operation,
@@ -61,7 +61,7 @@ mod tests {
     #[test]
     fn all_operations_widths_predicates_and_vector_aliases() {
         for opcode in [FRINTN, FRINTP, FRINTM, FRINTZ, FRINTA, FRINTX, FRINTI] {
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
             for (size, format) in [(1, Format::Half), (2, Format::Single), (3, Format::Double)] {
                 for governing in 0..=GOVERNING_MASK {
                     for register in 0..=REGISTER_MASK {

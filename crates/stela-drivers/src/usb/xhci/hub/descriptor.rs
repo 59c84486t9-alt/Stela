@@ -50,8 +50,8 @@ impl Descriptor {
     }
 }
 
-/// USB2's two variable bitmaps include the hub's bit zero. Never accept a
-/// nine-byte prefix of a descriptor for an eight-or-more-port hub.
+/// `get_hub_descriptor` for USB2: the reply needs only DeviceRemovable,
+/// whose bit zero is the hub's. PortPwrCtrlMask and bLength are not checked.
 pub(in crate::usb::xhci) struct Usb2Descriptor {
     pub ports: u8,
     pub power_good_us: u64,
@@ -59,22 +59,21 @@ pub(in crate::usb::xhci) struct Usb2Descriptor {
     pub tt_think: u8,
 }
 impl Usb2Descriptor {
-    pub fn length(header: &[u8]) -> Result<usize, BlockError> {
-        if header.len() < 7
-            || header[1] != HUB_DESCRIPTOR
-            || !(1..=MAX_HUB_PORTS).contains(&header[2])
+    /// sizeof(struct usb_hub_descriptor), the length Linux requests.
+    pub const REQUEST: u16 = 15;
+    /// USB_DT_HUB_NONVAR_SIZE + 2: a shorter reply is read again.
+    pub const MINIMUM: usize = 9;
+    pub fn new(bytes: &[u8], endpoint: &Endpoint) -> Result<Self, BlockError> {
+        if bytes.len() < Self::MINIMUM
+            || bytes[1] != HUB_DESCRIPTOR
+            || !(1..=MAX_HUB_PORTS).contains(&bytes[2])
         {
             return Err(BlockError::Unsupported("invalid USB2 hub descriptor"));
         }
-        let length = 7 + 2 * usize::from(header[2] + 1).div_ceil(8);
-        if usize::from(header[0]) != length {
-            return Err(BlockError::Unsupported("invalid USB2 hub bitmap length"));
-        }
-        Ok(length)
-    }
-    pub fn new(bytes: &[u8], endpoint: &Endpoint) -> Result<Self, BlockError> {
-        if bytes.len() != Self::length(bytes)? {
-            return Err(BlockError::Unsupported("short USB2 hub descriptor"));
+        if bytes.len() < 7 + usize::from(bytes[2]) / 8 + 1 {
+            return Err(BlockError::Unsupported(
+                "USB2 hub descriptor lacks DeviceRemovable",
+            ));
         }
         let characteristics = u16::from_le_bytes([bytes[3], bytes[4]]);
         if characteristics & !0xff != 0

@@ -46,7 +46,7 @@ use core::{
 use host::{Config, RamRange};
 use stela_boot_core::{
     console_lines,
-    options::{self, Base, System},
+    options::{Base, System},
     ram,
 };
 use stela_compiler::TargetCpu;
@@ -66,9 +66,6 @@ use stela_runtime::machine::{
 use stela_runtime::pc::{gpt::Guid, storage::Target};
 use stela_runtime::restore::store::Verify;
 
-/// Stop at the first unsupported operation instead of answering it degraded
-/// and reporting it (docs/design/runtime.md "Unsupported operations").
-pub const STRICT_OPTION: &str = options::STRICT;
 /// The most of the engine heap (at least 512 MiB) `--storage-ram` may
 /// take for written blocks; a restore or recovery boot writes far less.
 const RAM_STORAGE_LIMIT: usize = 64 << 20;
@@ -1265,24 +1262,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .as_ref()
         .and_then(|board| board.boot_processor.as_ref())
         .map_or(0, |boot| boot.cpu);
-    mount::clpc_absence(&hidden_clpc, options.strict, &mut |arguments| {
-        output::arguments(arguments)
-    })
-    .unwrap_or_else(|error| {
-        output::arguments(format_args!("board qualification refusal: {error}\n"));
-        output::fatal("strict mode requires qualified CLPC controllers")
-    });
-    if options.strict
-        && let Some(board) = board.as_ref()
-    {
-        mount::pmgr_qualifications(&board.pmgr_refusals, true, &mut |arguments| {
-            output::arguments(arguments)
-        })
-        .unwrap_or_else(|error| {
-            output::arguments(format_args!("board qualification refusal: {error}\n"));
-            output::fatal("strict mode requires qualified PMGR register families")
-        });
-    }
+    mount::clpc_absence(&hidden_clpc, &mut |arguments| output::arguments(arguments));
     if let (Some(board), Some(tree)) = (board.as_mut(), tree)
         && let Some(states) = board.power_states.as_mut()
     {
@@ -1427,9 +1407,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .unwrap_or_else(|error| output::fatal(&error));
         if let Some(reason) = refusal {
             output::arguments(format_args!("UNMODELED {reason}\n"));
-            if options.strict {
-                output::fatal(reason);
-            }
         } else {
             use stela_runtime::machine::apple::{
                 ExplicitRuntimeConfiguration, NativePmpClock, SourceProvenance,
@@ -1611,7 +1588,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     );
     let devices = parallel::Board::new(devices, hub.clone());
     let settings = parallel::Settings {
-        strict: options.strict,
         profile: profile.clone(),
         target: canonical_ram.target(),
     };
@@ -2163,14 +2139,6 @@ fn run_machine<H: Host>(
             "PROFILE on: each heartbeat reports the engine's time by phase and exit kind\n"
         ));
     }
-    machine.set_strict(options.strict);
-    machine
-        .devices
-        .with(|devices| devices.set_strict(options.strict));
-    output::arguments(format_args!(
-        "UNSUPPORTED OPERATIONS {}\n",
-        unsupported_mode(options.strict)
-    ));
     if options.tss {
         output::arguments(format_args!(
             "TSS OPT-IN: the restore host sends this machine's ECID, the restore's nonces and \
@@ -3351,8 +3319,8 @@ fn text_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
 
 /// What the devices left for the boot PE's reports since the last slice:
 /// the guest's console lines, the unsupported requests they answered, the
-/// SEP's `--sep-observe` journal (a graceful run keeps going past each
-/// observed request and may end at the host timeout) and their logs.
+/// SEP's `--sep-observe` journal (a run keeps going past each observed
+/// request and may end at the host timeout) and their logs.
 struct Drained {
     lines: Vec<String>,
     unmodeled: Vec<String>,
@@ -3384,20 +3352,11 @@ impl Drained {
     }
 }
 
-/// The boot log's account of the unsupported-operation policy.
-fn unsupported_mode(strict: bool) -> &'static str {
-    if strict {
-        "mode=strict response=stop"
-    } else {
-        "mode=graceful response=degraded diagnostics=once"
-    }
-}
-
 /// The distinct unsupported operations `UNMODELED` lines have reported.
 static UNMODELED_REPORTED: AtomicU64 = AtomicU64::new(0);
 
-/// Each unsupported operation answered outside strict mode for the first
-/// time since the last report: machine operations and device accesses, then
+/// Each unsupported operation answered degraded for the first time since
+/// the last report: machine operations and device accesses, then
 /// coprocessor requests answered with their firmware's error reply or left
 /// unanswered.
 fn unmodeled_report<H: Host>(machine: &mut Machine<H, parallel::Board>, requests: Vec<String>) {

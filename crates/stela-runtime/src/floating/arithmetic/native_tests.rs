@@ -4,7 +4,7 @@ use crate::execution::platform::Mapping;
 use stela_compiler::{
     GuestAddress, TargetCpu,
     aarch64::{floating::*, simd::arithmetic::decode},
-    block::{BlockProfile, CompilationPlan, ExitKind},
+    block::{BlockProfile, CompilationPlan, ExitKind, Features},
 };
 
 const PC: u64 = 0x1000;
@@ -258,8 +258,7 @@ fn full_path_zeros_rounding_aliases_and_host_environment_match_completion() {
                 let block = CompilationPlan::new(
                     &source,
                     GuestAddress(PC),
-                    BlockProfile::SystemModeV1,
-                    target,
+                    &stela_compiler::Options::new(BlockProfile::new(Features::SYSTEM_MODE), target),
                 )
                 .unwrap()
                 .compile()
@@ -337,8 +336,10 @@ fn full_path_enabled_exceptions_keep_the_prefix_and_original_state() {
         let block = CompilationPlan::new(
             &source,
             GuestAddress(PC),
-            BlockProfile::SystemModeV1,
-            TargetCpu::Baseline,
+            &stela_compiler::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap()
         .compile()
@@ -372,8 +373,10 @@ fn full_path_mixed_lanes_preserve_distinct_pairs_and_reject_late_bad_inputs() {
         let block = CompilationPlan::new(
             &source,
             GuestAddress(PC),
-            BlockProfile::SystemModeV1,
-            TargetCpu::Baseline,
+            &stela_compiler::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap()
         .compile()

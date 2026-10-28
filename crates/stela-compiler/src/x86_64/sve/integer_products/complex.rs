@@ -1,8 +1,10 @@
 //! SVE integer complex multiplies with rounding (SQRDCMLAH, ...).
 use crate::TargetCpu;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES};
 use crate::aarch64::sve::integer_products::Kind;
-use alloc::vec::Vec;
+use crate::x86_64::asm::Gpr::{Rax, Rsp};
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Size};
 
 use super::complex_wrapping::{blend_directions, prepare_products};
 use super::emit_saturating_chunk;
@@ -15,47 +17,20 @@ const SNAPSHOT_BYTES: u8 = (3 * VECTOR_CHUNK_BYTES) as u8;
 const PLUS_RESULT_OFFSET: u8 = SNAPSHOT_BYTES;
 const DUAL_RESULT_SNAPSHOT_BYTES: u8 = (4 * VECTOR_CHUNK_BYTES) as u8;
 const HALF_TURN_DEGREES: u16 = 180;
-const SUB_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xec];
-const ADD_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xc4];
-const MOVDQU_RSP_DISP8_XMM0: [u8; 5] = [0xf3, 0x0f, 0x7f, 0x44, 0x24];
-const MOVDQU_XMM0_RSP: [u8; 5] = [0xf3, 0x0f, 0x6f, 0x04, 0x24];
-const MOVDQU_XMM1_RSP_DISP8: [u8; 5] = [0xf3, 0x0f, 0x6f, 0x4c, 0x24];
-const MOVDQU_XMM4_RSP_DISP8: [u8; 5] = [0xf3, 0x0f, 0x6f, 0x64, 0x24];
-const MOVDQU_XMM2_RSP_DISP8: [u8; 5] = [0xf3, 0x0f, 0x6f, 0x54, 0x24];
-const MOVDQU_RSP_XMM0: [u8; 5] = [0xf3, 0x0f, 0x7f, 0x04, 0x24];
-const MOVDQU_RSP_DISP8_XMM1: [u8; 5] = [0xf3, 0x0f, 0x7f, 0x4c, 0x24];
-const MOVDQU_RSP_DISP8_XMM4: [u8; 5] = [0xf3, 0x0f, 0x7f, 0x64, 0x24];
-const MOVDQU_XMM0_RSP_DISP8: [u8; 5] = [0xf3, 0x0f, 0x6f, 0x44, 0x24];
-const REX_W: u8 = 0x48;
-const REX_REGISTER_HIGH: u8 = 0x04;
-const MODRM_DISP8_RSP: u8 = 0x44;
-const SIB_RSP: u8 = 0x24;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MODRM_REGISTER_MASK: u8 = 7;
-const MOVSXD: u8 = 0x63;
-const MOV_QWORD: u8 = 0x8b;
-const MOV_STORE: u8 = 0x89;
 const COMPLEX_COMPONENTS: usize = 2;
 const QUARTER_TURN_DEGREES: u16 = 90;
-
-#[derive(Clone, Copy)]
-enum Gpr {
-    Rax = 0,
-    Rcx = 1,
-    R9 = 9,
-}
 
 /// Inputs: XMM0=Zn, XMM1=Zm, XMM4=accumulator. Output XMM0; preserve XMM7.
 /// Clobbers caller-saved RAX/RCX/RDX/R8/R9/R10/R11 and restores RSP exactly.
 pub(super) fn emit_chunk(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     element: ElementSize,
     rounded: bool,
     rotation_degrees: u16,
     target: TargetCpu,
-) -> Result<(), ()> {
+) -> Result<(), Unsupported> {
     if element == ElementSize::Quadword || ![0, 90, 180, 270].contains(&rotation_degrees) {
-        return Err(());
+        return Err(Unsupported);
     }
     if !rounded {
         return super::complex_wrapping::emit_chunk(code, element, rotation_degrees, target);
@@ -64,13 +39,11 @@ pub(super) fn emit_chunk(
         emit_rounded_packed(code, element, rotation_degrees);
         return Ok(());
     }
-    code.extend_from_slice(&SUB_RSP_IMM8);
-    code.push(SNAPSHOT_BYTES);
-    code.extend_from_slice(&MOVDQU_RSP_XMM0);
-    code.extend_from_slice(&MOVDQU_RSP_DISP8_XMM1);
-    code.push(SOURCE_M_OFFSET);
-    code.extend_from_slice(&MOVDQU_RSP_DISP8_XMM4);
-    code.push(ACCUMULATOR_OFFSET);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Sub, Size::Qword, Rsp, SNAPSHOT_BYTES as i8);
+    asm.movdqu_store(Mem::base(Rsp, 0), 0);
+    asm.movdqu_store(Mem::base_disp8(Rsp, SOURCE_M_OFFSET as i8), 1);
+    asm.movdqu_store(Mem::base_disp8(Rsp, ACCUMULATOR_OFFSET as i8), 4);
     let rotation = usize::from(rotation_degrees / QUARTER_TURN_DEGREES);
     let select_a = rotation & 1;
     let select_b = select_a ^ 1;
@@ -100,47 +73,34 @@ pub(super) fn emit_chunk(
             store_result(code, element, accumulator_offset);
         }
     }
-    code.extend_from_slice(&MOVDQU_XMM0_RSP_DISP8);
-    code.push(ACCUMULATOR_OFFSET);
-    code.extend_from_slice(&ADD_RSP_IMM8);
-    code.push(SNAPSHOT_BYTES);
+    let mut asm = code.asm();
+    asm.movdqu_load(0, Mem::base_disp8(Rsp, ACCUMULATOR_OFFSET as i8));
+    asm.alu_imm8(Alu::Add, Size::Qword, Rsp, SNAPSHOT_BYTES as i8);
     Ok(())
 }
 
-fn load_signed(code: &mut Vec<u8>, register: Gpr, element: ElementSize, offset: u8) {
-    let register = register as u8;
-    code.push(
-        REX_W
-            | if register > MODRM_REGISTER_MASK {
-                REX_REGISTER_HIGH
-            } else {
-                0
-            },
-    );
+fn load_signed(code: &mut Code, register: Gpr, element: ElementSize, offset: u8) {
+    let slot = Mem::base_disp8(Rsp, offset as i8);
     match element {
-        ElementSize::Word => code.push(MOVSXD),
-        ElementSize::Doubleword => code.push(MOV_QWORD),
+        ElementSize::Word => code.asm().movsxd(register, slot),
+        ElementSize::Doubleword => code.asm().mov_load(Size::Qword, register, slot),
         _ => unreachable!("scalar complex components are word or doubleword"),
     }
-    code.extend_from_slice(&[
-        MODRM_DISP8_RSP | ((register & MODRM_REGISTER_MASK) << MODRM_REGISTER_SHIFT),
-        SIB_RSP,
-        offset,
-    ]);
 }
 
-fn store_result(code: &mut Vec<u8>, element: ElementSize, offset: u8) {
-    match element {
-        ElementSize::Word => {}
-        ElementSize::Doubleword => code.push(REX_W),
+fn store_result(code: &mut Code, element: ElementSize, offset: u8) {
+    let size = match element {
+        ElementSize::Word => Size::Dword,
+        ElementSize::Doubleword => Size::Qword,
         _ => unreachable!("scalar complex components are word or doubleword"),
-    }
-    code.extend_from_slice(&[MOV_STORE, MODRM_DISP8_RSP, SIB_RSP, offset]);
+    };
+    code.asm()
+        .mov_store(size, Mem::base_disp8(Rsp, offset as i8), Rax);
 }
 
 /// Mixed component signs operate on wide products, preserving min*min. Running
 /// both exact packed directions and blending avoids negating a narrow operand.
-fn emit_rounded_packed(code: &mut Vec<u8>, element: ElementSize, rotation: u16) {
+fn emit_rounded_packed(code: &mut Code, element: ElementSize, rotation: u16) {
     prepare_products(code, element, rotation);
     if rotation == 0 || rotation == HALF_TURN_DEGREES {
         emit_saturating_chunk(
@@ -152,33 +112,28 @@ fn emit_rounded_packed(code: &mut Vec<u8>, element: ElementSize, rotation: u16) 
         );
         return;
     }
-    code.extend_from_slice(&SUB_RSP_IMM8);
-    code.push(DUAL_RESULT_SNAPSHOT_BYTES);
-    code.extend_from_slice(&MOVDQU_RSP_XMM0);
-    code.extend_from_slice(&MOVDQU_RSP_DISP8_XMM1);
-    code.push(SOURCE_M_OFFSET);
-    code.extend_from_slice(&MOVDQU_RSP_DISP8_XMM4);
-    code.push(ACCUMULATOR_OFFSET);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Sub, Size::Qword, Rsp, DUAL_RESULT_SNAPSHOT_BYTES as i8);
+    asm.movdqu_store(Mem::base(Rsp, 0), 0);
+    asm.movdqu_store(Mem::base_disp8(Rsp, SOURCE_M_OFFSET as i8), 1);
+    asm.movdqu_store(Mem::base_disp8(Rsp, ACCUMULATOR_OFFSET as i8), 4);
     emit_saturating_chunk(
         code,
         Kind::RoundedHighAccumulate { subtract: false },
         element,
     );
-    code.extend_from_slice(&MOVDQU_RSP_DISP8_XMM0);
-    code.push(PLUS_RESULT_OFFSET);
-    code.extend_from_slice(&MOVDQU_XMM0_RSP);
-    code.extend_from_slice(&MOVDQU_XMM1_RSP_DISP8);
-    code.push(SOURCE_M_OFFSET);
-    code.extend_from_slice(&MOVDQU_XMM4_RSP_DISP8);
-    code.push(ACCUMULATOR_OFFSET);
+    let mut asm = code.asm();
+    asm.movdqu_store(Mem::base_disp8(Rsp, PLUS_RESULT_OFFSET as i8), 0);
+    asm.movdqu_load(0, Mem::base(Rsp, 0));
+    asm.movdqu_load(1, Mem::base_disp8(Rsp, SOURCE_M_OFFSET as i8));
+    asm.movdqu_load(4, Mem::base_disp8(Rsp, ACCUMULATOR_OFFSET as i8));
     emit_saturating_chunk(
         code,
         Kind::RoundedHighAccumulate { subtract: true },
         element,
     );
-    code.extend_from_slice(&MOVDQU_XMM2_RSP_DISP8);
-    code.push(PLUS_RESULT_OFFSET);
-    code.extend_from_slice(&ADD_RSP_IMM8);
-    code.push(DUAL_RESULT_SNAPSHOT_BYTES);
+    let mut asm = code.asm();
+    asm.movdqu_load(2, Mem::base_disp8(Rsp, PLUS_RESULT_OFFSET as i8));
+    asm.alu_imm8(Alu::Add, Size::Qword, Rsp, DUAL_RESULT_SNAPSHOT_BYTES as i8);
     blend_directions(code, element, rotation);
 }

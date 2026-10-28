@@ -159,8 +159,10 @@ mod tests {
                 let legacy = CompilationPlan::new(
                     &bytes,
                     SOURCE_PC,
-                    BlockProfile::CheckedMemory(original),
-                    TargetCpu::Baseline,
+                    &crate::Options::new(
+                        BlockProfile::ORDINARY.with_checked_memory(original),
+                        TargetCpu::Baseline,
+                    ),
                 )
                 .unwrap();
                 assert!(
@@ -175,8 +177,10 @@ mod tests {
                 let specialized = CompilationPlan::new(
                     &bytes,
                     SOURCE_PC,
-                    BlockProfile::CheckedMemory(selected),
-                    TargetCpu::Baseline,
+                    &crate::Options::new(
+                        BlockProfile::ORDINARY.with_checked_memory(selected),
+                        TargetCpu::Baseline,
+                    ),
                 )
                 .unwrap();
                 let required = specialized
@@ -208,8 +212,10 @@ mod tests {
         let plan = CompilationPlan::new(
             &bytes,
             SOURCE_PC,
-            BlockProfile::CheckedMemory(profile),
-            TargetCpu::Baseline,
+            &crate::Options::new(
+                BlockProfile::ORDINARY.with_checked_memory(profile),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap();
         let required = plan.memory_requirements().unwrap().required_address_checks;

@@ -1,8 +1,10 @@
 //! SIMD loads and stores through the memory service. One request covers the whole
 //! access, including both pair elements; destinations and base writeback are
 //! written only after it succeeds.
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Size};
+use crate::x86_64::simd::encode::guest;
 
-use super::{commit, read_vector, vector_offset};
+use super::{Host, commit, read_vector, vector_offset};
 use crate::aarch64::{
     AddressMode, Operation, Register, literal, non_temporal, register_offset::IndexExtend,
     simd::Operand,
@@ -29,20 +31,10 @@ const WRITEBACK_OFFSET: u8 = STAGING_BYTES + MEMORY_REQUEST_BYTES as u8;
 const STACK_ALIGNMENT: u8 = VECTOR_BYTES;
 const SCRATCH_BYTES: u8 = WRITEBACK_OFFSET + STACK_ALIGNMENT;
 
-const SUB_RSP_IMM8: &[u8] = &[0x48, 0x83, 0xec];
-const ADD_RSP_IMM8: &[u8] = &[0x48, 0x83, 0xc4];
-const MOV_RSP_DISP8_RDX: &[u8] = &[0x48, 0x89, 0x54, 0x24];
-const MOV_RAX_RSP_DISP8: &[u8] = &[0x48, 0x8b, 0x44, 0x24];
-const MOV_RCX_STATE_DISP32: &[u8] = &[0x48, 0x8b, 0x8f];
-const MOV_RSP_DISP8_RCX: &[u8] = &[0x48, 0x89, 0x4c, 0x24];
-const MOVDQU_RSP_DISP8_XMM0: &[u8] = &[0xf3, 0x0f, 0x7f, 0x44, 0x24];
-const MOVDQU_XMM0_RSP_DISP8: &[u8] = &[0xf3, 0x0f, 0x6f, 0x44, 0x24];
-const MOVQ_XMM0_RSP_DISP8: &[u8] = &[0xf3, 0x0f, 0x7e, 0x44, 0x24];
-const MOVD_XMM0_RSP_DISP8: &[u8] = &[0x66, 0x0f, 0x6e, 0x44, 0x24];
-const MOVZX_ECX_BYTE_RSP_DISP8: &[u8] = &[0x0f, 0xb6, 0x4c, 0x24];
-const MOVZX_ECX_WORD_RSP_DISP8: &[u8] = &[0x0f, 0xb7, 0x4c, 0x24];
-const MOVD_XMM0_ECX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc1];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
+/// `[rsp + offset]` in the scratch frame, with an 8-bit displacement.
+fn scratch(offset: u8) -> Mem {
+    Mem::base_disp8(Gpr::Rsp, offset as i8)
+}
 
 #[derive(Clone, Copy)]
 enum Address {
@@ -272,7 +264,7 @@ impl CheckedOperand {
         transfer_requirements(self.transfer, self.non_temporal, self.profile)
     }
 
-    pub(crate) fn emit_context(&self, code: &mut Vec<u8>, pc: u64) {
+    pub(crate) fn emit_context(&self, code: &mut Code, pc: u64) {
         emit_transfer(code, self.transfer, pc, self.non_temporal, self.profile);
     }
 }
@@ -339,7 +331,7 @@ fn transfer_requirements(
     }
 }
 
-fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile) {
+fn address(code: &mut Code, transfer: Transfer, profile: CheckedMemoryProfile) {
     match transfer.address {
         Address::Literal { address } => crate::x86_64::immediate(code, address),
         Address::Immediate { displacement, mode } => {
@@ -351,8 +343,8 @@ fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile
                 profile.address_checks(false),
             );
             if transfer.writeback() {
-                code.extend(MOV_RSP_DISP8_RDX);
-                code.push(WRITEBACK_OFFSET);
+                code.asm()
+                    .mov_store(Size::Qword, scratch(WRITEBACK_OFFSET), Gpr::Rdx);
             }
         }
         Address::Register {
@@ -372,39 +364,38 @@ fn address(code: &mut Vec<u8>, transfer: Transfer, profile: CheckedMemoryProfile
     }
 }
 
-fn stage_sources(code: &mut Vec<u8>, transfer: Transfer) {
+fn stage_sources(code: &mut Code, transfer: Transfer) {
     for element in 0..transfer.elements {
         let vector = transfer.vectors[usize::from(element)];
         let displacement = element * transfer.bytes;
         if transfer.bytes == VECTOR_BYTES {
             read_vector(code, vector, 0);
-            code.extend(MOVDQU_RSP_DISP8_XMM0);
+            Host::StoreUnaligned.emit(code, 0, scratch(displacement), crate::TargetCpu::Baseline);
         } else {
             // Reading full64 from independently live State is safe. The service
             // sees only the exact quantity; S-pair's second stage overwrites the
             // first stage's unused high32 before the callback can see it.
-            code.extend(MOV_RCX_STATE_DISP32);
-            code.extend(vector_offset(vector).to_le_bytes());
-            code.extend(MOV_RSP_DISP8_RCX);
+            let mut asm = code.asm();
+            asm.mov_load(Size::Qword, Gpr::Rcx, guest(vector_offset(vector)));
+            asm.mov_store(Size::Qword, scratch(displacement), Gpr::Rcx);
         }
-        code.push(displacement);
     }
 }
 
-fn commit_loads(code: &mut Vec<u8>, transfer: Transfer) {
+fn commit_loads(code: &mut Code, transfer: Transfer) {
     for element in 0..transfer.elements {
-        let displacement = element * transfer.bytes;
-        code.extend(match transfer.bytes {
-            BYTE_BYTES => MOVZX_ECX_BYTE_RSP_DISP8,
-            HALFWORD_BYTES => MOVZX_ECX_WORD_RSP_DISP8,
-            DWORD_BYTES => MOVD_XMM0_RSP_DISP8,
-            QWORD_BYTES => MOVQ_XMM0_RSP_DISP8,
-            VECTOR_BYTES => MOVDQU_XMM0_RSP_DISP8,
+        let staged = scratch(element * transfer.bytes);
+        let baseline = crate::TargetCpu::Baseline;
+        match transfer.bytes {
+            BYTE_BYTES => code.asm().movzx(Size::Dword, Gpr::Rcx, Size::Byte, staged),
+            HALFWORD_BYTES => code.asm().movzx(Size::Dword, Gpr::Rcx, Size::Word, staged),
+            DWORD_BYTES => code.asm().movd_to_xmm(0, staged),
+            QWORD_BYTES => Host::MoveQword.emit(code, 0, staged, baseline),
+            VECTOR_BYTES => Host::LoadUnaligned.emit(code, 0, staged, baseline),
             _ => unreachable!("decoder validates fixed SIMD memory width"),
-        });
-        code.push(displacement);
+        }
         if transfer.bytes <= HALFWORD_BYTES {
-            code.extend(MOVD_XMM0_ECX);
+            code.asm().movd_to_xmm(0, Gpr::Rcx);
         }
         commit(code, transfer.vectors[usize::from(element)], 0);
     }
@@ -414,7 +405,7 @@ fn commit_loads(code: &mut Vec<u8>, transfer: Transfer) {
 /// validates CPU/profile requirements; failure returns through its inner-body
 /// epilogue after releasing scratch. RDI/R15 and full host MXCSR survive calls.
 #[cfg(test)]
-pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
+pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     emit_transfer(
         code,
         Transfer::from_operand(operand).expect("checked fixed SIMD memory operand"),
@@ -425,11 +416,7 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
 }
 
 #[cfg(test)]
-pub(crate) fn emit_non_temporal_context(
-    code: &mut Vec<u8>,
-    operand: &non_temporal::Operand,
-    pc: u64,
-) {
+pub(crate) fn emit_non_temporal_context(code: &mut Code, operand: &non_temporal::Operand, pc: u64) {
     emit_transfer(
         code,
         Transfer::from_non_temporal(operand),
@@ -440,15 +427,15 @@ pub(crate) fn emit_non_temporal_context(
 }
 
 fn emit_transfer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     transfer: Transfer,
     pc: u64,
     non_temporal: bool,
     profile: CheckedMemoryProfile,
 ) {
     debug_assert!(transfer.base.is_none_or(|base| offset(base).is_some()));
-    code.extend(SUB_RSP_IMM8);
-    code.push(SCRATCH_BYTES);
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     service::begin(code);
     let mut failed = Vec::new();
     if profile.sp_requirement() == SpAlignmentRequirement::Enabled
@@ -475,20 +462,20 @@ fn emit_transfer(
         commit_loads(code, transfer);
     }
     if transfer.writeback() {
-        code.extend(MOV_RAX_RSP_DISP8);
-        code.push(WRITEBACK_OFFSET);
+        code.asm()
+            .mov_load(Size::Qword, Gpr::Rax, scratch(WRITEBACK_OFFSET));
         store(
             code,
             transfer.base.expect("writeback requires a register base"),
         );
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     let cleanup = code.len();
     for failure in failed {
         service::patch_branch(code, failure, cleanup);
     }
-    code.extend(ADD_RSP_IMM8);
-    code.push(SCRATCH_BYTES);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     service::address::return_if_failed(code);
 }
 
@@ -894,7 +881,7 @@ mod tests {
             }
         }
         let operation = operand(true, 8, false, Register::X(2), 0, AddressMode::Offset);
-        let mut body = vec![];
+        let mut body = Code::new();
         emit_context(&mut body, &operation, GUEST_PC);
         let code = NativeCode::new(&body);
         for caller in [0x1fa1, 0x3fa5, 0x5f85, 0x7fa1] {
@@ -950,7 +937,7 @@ mod tests {
                         for residue in [0, 1, 4, 7, 8, 12, 15] {
                             let operation =
                                 operand(load, bytes, pair, Register::X(2), residue, mode);
-                            let mut body = vec![];
+                            let mut body = Code::new();
                             emit_context(&mut body, &operation, GUEST_PC);
                             let code = NativeCode::new(&body);
                             for fail_part in [None, Some(1)] {
@@ -1081,7 +1068,7 @@ mod tests {
                         CheckedMemoryProfile::SpAlignmentEnabled,
                     )
                     .unwrap();
-                    let mut body = vec![];
+                    let mut body = Code::new();
                     checked.emit_context(&mut body, GUEST_PC);
                     let code = NativeCode::new(&body);
                     for fail_part in [None, Some(0), Some(1)] {
@@ -1147,7 +1134,7 @@ mod tests {
     #[test]
     fn original_sp_fault_precedes_offset_and_callback() {
         let operation = operand(false, 16, true, Register::Sp, -1, AddressMode::PreIndex);
-        let mut body = vec![];
+        let mut body = Code::new();
         emit_context(&mut body, &operation, GUEST_PC);
         let code = NativeCode::new(&body);
         let mut actual = state();
@@ -1198,7 +1185,7 @@ mod tests {
                             extend,
                             shift,
                         });
-                        let mut body = vec![];
+                        let mut body = Code::new();
                         emit_context(&mut body, &operation, GUEST_PC);
                         let code = NativeCode::new(&body);
                         let mut harness = Harness {
@@ -1259,7 +1246,7 @@ mod tests {
                 extend: IndexExtend::Lsl,
                 shift: 0,
             });
-            let mut body = vec![];
+            let mut body = Code::new();
             emit_context(&mut body, &operation, GUEST_PC);
             let code = NativeCode::new(&body);
             let mut actual = state();
@@ -1293,7 +1280,7 @@ mod tests {
                     base: Register::Sp,
                     displacement: 8,
                 };
-                let mut body = vec![];
+                let mut body = Code::new();
                 emit_non_temporal_context(&mut body, &operation, GUEST_PC);
                 let code = NativeCode::new(&body);
                 let mut actual = state();
@@ -1376,8 +1363,8 @@ mod tests {
             disabled.requirements().required_host_caps,
             host_caps::ATOMIC_LOAD16
         );
-        let mut enabled_code = Vec::new();
-        let mut disabled_code = Vec::new();
+        let mut enabled_code = Code::new();
+        let mut disabled_code = Code::new();
         enabled.emit_context(&mut enabled_code, GUEST_PC);
         disabled.emit_context(&mut disabled_code, GUEST_PC);
         assert!(enabled_code.len() > disabled_code.len());

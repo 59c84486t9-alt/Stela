@@ -1,6 +1,7 @@
 //! SVE FAMIN/FAMAX by integer magnitude comparison. Active NaNs use software
 //! completion.
 use super::classify::guard_active_exception_enables;
+use crate::x86_64::asm::Code;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -36,7 +37,7 @@ fn element(format: Format) -> ElementSize {
 /// Reviewed static scopes use checked SSE4.1/SSE4.2 tiers for Single/Double.
 /// Complete output staging preserves sources/aliases on any guard failure.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,

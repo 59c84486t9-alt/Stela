@@ -1,4 +1,9 @@
 //! FRINT*: integer baseline, or SSE4.1 ROUND with exceptions masked.
+use super::numerical::{emit_opcode_to, float_lanes, helper_section, jump};
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
+use crate::x86_64::simd::encode::guest;
+use Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdx};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod kernel;
 use super::super::isa::ShiftOpcode;
@@ -16,7 +21,6 @@ use crate::{
         },
         simd::{arithmetic::Shape, rounding::Operand},
     },
-    block::ExitKind,
 };
 
 const RESULT: u8 = 0;
@@ -35,67 +39,6 @@ const SINGLE_LOW_MASK: u32 = 0x03;
 const SINGLE_FULL_MASK: u32 = 0x0f;
 const DOUBLE_FULL_MASK: u32 = 0x05;
 const BITS_PER_BYTE: u32 = u8::BITS;
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const JMP_RELATIVE: u8 = 0xe9;
-const MOVD_TO_EAX: &[u8] = &[0x66, 0x0f, 0x7e];
-const MOVD_FROM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const MOVQ_TO_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const PINSRW_FROM_EAX: &[u8] = &[0x66, 0x0f, 0xc4];
-const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
-const MOV_RCX_RAX: &[u8] = &[0x48, 0x89, 0xc1];
-const SHR_RCX: &[u8] = &[0x48, 0xc1, 0xe9];
-const AND_ECX: &[u8] = &[0x81, 0xe1];
-const CMP_ECX: &[u8] = &[0x81, 0xf9];
-const MOV_R8D_ECX: &[u8] = &[0x41, 0x89, 0xc8];
-const DEC_R8D: &[u8] = &[0x41, 0xff, 0xc8];
-const CMP_R8D: &[u8] = &[0x41, 0x81, 0xf8];
-const MOV_R9_RDX: &[u8] = &[0x49, 0x89, 0xd1];
-const MOV_R9_RAX: &[u8] = &[0x49, 0x89, 0xc1];
-const SHL_R9: &[u8] = &[0x49, 0xc1, 0xe1];
-const MOV_R8D: &[u8] = &[0x41, 0xb8];
-const MOVABS_R8: &[u8] = &[0x49, 0xb8];
-const SUB_R8D_ECX: &[u8] = &[0x41, 0x29, 0xc8];
-const MOV_ECX_R8D: &[u8] = &[0x44, 0x89, 0xc1];
-const SHL_R8_CL: &[u8] = &[0x49, 0xd3, 0xe0];
-const MOV_R9_R8: &[u8] = &[0x4d, 0x89, 0xc1];
-const DEC_R9: &[u8] = &[0x49, 0xff, 0xc9];
-const SHR_R8_1: &[u8] = &[0x49, 0xd1, 0xe8];
-const DEC_R8: &[u8] = &[0x49, 0xff, 0xc8];
-const BT_RAX_RCX: &[u8] = &[0x48, 0x0f, 0xa3, 0xc8];
-const ADC_R8_ZERO: &[u8] = &[0x49, 0x83, 0xd0, 0];
-const XOR_R8D_R8D: &[u8] = &[0x45, 0x31, 0xc0];
-const BT_RDX: &[u8] = &[0x48, 0x0f, 0xba, 0xe2];
-const BT_RAX: &[u8] = &[0x48, 0x0f, 0xba, 0xe0];
-const BTR_R9: &[u8] = &[0x49, 0x0f, 0xba, 0xf1];
-const CMOVB_R8_R9: &[u8] = &[0x4d, 0x0f, 0x42, 0xc1];
-const CMOVAE_R8_R9: &[u8] = &[0x4d, 0x0f, 0x43, 0xc1];
-const ADD_RAX_R8: &[u8] = &[0x4c, 0x01, 0xc0];
-const OR_RAX_R8: &[u8] = &[0x4c, 0x09, 0xc0];
-const OR_RAX_R9: &[u8] = &[0x4c, 0x09, 0xc8];
-const XOR_RAX_R9: &[u8] = &[0x4c, 0x31, 0xc8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const OR_EAX_IMMEDIATE: u8 = 0x0d;
-const SHR_RAX: &[u8] = &[0x48, 0xc1, 0xe8];
-const SHL_RAX: &[u8] = &[0x48, 0xc1, 0xe0];
-const CMP_R9_R8: &[u8] = &[0x4d, 0x39, 0xc1];
-const CMP_RAX_RDX: &[u8] = &[0x48, 0x39, 0xd0];
-const SETNE_R8B: &[u8] = &[0x41, 0x0f, 0x95, 0xc0];
-const MOVZX_R8D_R8B: &[u8] = &[0x45, 0x0f, 0xb6, 0xc0];
-const OR_R10D_R8D: &[u8] = &[0x45, 0x09, 0xc2];
-const XOR_R10D_R10D: &[u8] = &[0x45, 0x31, 0xd2];
-const SETNE_R10B: &[u8] = &[0x41, 0x0f, 0x95, 0xc2];
-const SHL_R10D: &[u8] = &[0x41, 0xc1, 0xe2];
-const OR_STATE_R10D: &[u8] = &[0x44, 0x09, 0x97];
-const MOV_R11D: &[u8] = &[0x41, 0xbb];
-const DEC_R11D: &[u8] = &[0x41, 0xff, 0xcb];
-const PSLLDQ_XMM2: &[u8] = &[0x66, 0x0f, 0x73, 0xfa];
-const MOVLHPS_XMM0_XMM2: &[u8] = &[0x0f, 0x16, 0xc2];
-const MOVSS_XMM6_XMM0: &[u8] = &[0xf3, 0x0f, 0x10, 0xf0];
-const MOVSD_XMM6_XMM0: &[u8] = &[0xf2, 0x0f, 0x10, 0xf0];
-const MOVABS_RAX: &[u8] = &[0x48, 0xb8];
-const CMP_EAX_IMMEDIATE: u8 = 0x3d;
 const PRECISION_SUPPRESSED: u8 = 1 << 3;
 const ROUND_NEAREST: u8 = 0;
 const ROUND_NEGATIVE: u8 = 1;
@@ -105,10 +48,6 @@ const FPCR_LOW_ROUNDING_BIT: u32 = 1 << FPCR_ROUNDING_SHIFT;
 const FPCR_HIGH_ROUNDING_BIT: u32 = 1 << (FPCR_ROUNDING_SHIFT + 1);
 const INEXACT_SHIFT: u8 = INEXACT.trailing_zeros() as u8;
 const COMPARE_LESS_EQUAL: u8 = 2;
-const COMPARE_OPCODE: u8 = 0xc2;
-const SCALAR_SINGLE_PREFIX: u8 = 0xf3;
-const SCALAR_DOUBLE_PREFIX: u8 = 0xf2;
-const PACKED_DOUBLE_PREFIX: u8 = 0x66;
 const ADJACENT_DWORDS: u8 = 0xb1;
 
 #[derive(Clone, Copy)]
@@ -120,16 +59,11 @@ enum Direction {
     Zero,
 }
 
-fn jump(code: &mut Vec<u8>) -> usize {
-    code.push(JMP_RELATIVE);
-    let patch = code.len();
-    code.extend(0i32.to_le_bytes());
-    patch
-}
-
-fn immediate(code: &mut Vec<u8>, instruction: &[u8], value: u32) {
-    code.extend(instruction);
-    code.extend(value.to_le_bytes());
+/// `and eax, value; cmp eax, value`: ZF is set when every `value` bit is set.
+fn all_bits(code: &mut Code, value: u32) {
+    let mut asm = code.asm();
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, value as i32);
+    asm.alu_accumulator_imm32(Alu::Cmp, Size::Dword, value as i32);
 }
 
 fn exponent_mask(format: Format) -> u32 {
@@ -166,7 +100,7 @@ fn fixed_direction(operation: RoundingOperation) -> Option<Direction> {
 }
 
 /// Dynamic FPCR is read at execution time, without installing host control.
-fn current_direction(code: &mut Vec<u8>, mut emit: impl FnMut(&mut Vec<u8>, Direction)) {
+fn current_direction(code: &mut Code, mut emit: impl FnMut(&mut Code, Direction)) {
     test_control(code, FPCR_HIGH_ROUNDING_BIT);
     let high = branch(code, Condition::NotZero);
     test_control(code, FPCR_LOW_ROUNDING_BIT);
@@ -193,9 +127,9 @@ fn current_direction(code: &mut Vec<u8>, mut emit: impl FnMut(&mut Vec<u8>, Dire
 }
 
 fn direction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: RoundingOperation,
-    mut emit: impl FnMut(&mut Vec<u8>, Direction),
+    mut emit: impl FnMut(&mut Code, Direction),
 ) {
     if let Some(fixed) = fixed_direction(operation) {
         emit(code, fixed);
@@ -204,88 +138,107 @@ fn direction(
     }
 }
 
-fn read_lane(code: &mut Vec<u8>, format: Format, xmm: u8) {
-    code.extend(if format == Format::Double {
-        MOVQ_TO_RAX
+fn read_lane(code: &mut Code, format: Format, xmm: u8) {
+    let mut asm = code.asm();
+    if format == Format::Double {
+        asm.movq_from_xmm(Rax, xmm);
     } else {
-        MOVD_TO_EAX
-    });
-    code.push(REGISTER_DIRECT | (xmm << REGISTER_SHIFT));
+        asm.movd_from_xmm(Rax, xmm);
+    }
     if format == Format::Half {
-        code.push(AND_EAX_IMMEDIATE);
-        code.extend(u32::from(u16::MAX).to_le_bytes());
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, u16::MAX.into());
     }
 }
 
-fn source_class(code: &mut Vec<u8>, format: Format, helper: &mut Vec<usize>) {
-    code.extend(MOV_RDX_RAX);
-    code.extend(MOV_RCX_RAX);
-    code.extend(SHR_RCX);
-    code.push(format.fraction_bits() as u8);
-    immediate(code, AND_ECX, exponent_mask(format));
-    code.extend(MOV_R8D_ECX);
-    code.extend(DEC_R8D);
-    immediate(code, CMP_R8D, exponent_mask(format) - 1);
+fn source_class(code: &mut Code, format: Format, helper: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, Rdx, Rax);
+    asm.mov(Size::Qword, Rcx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rcx, format.fraction_bits() as u8);
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, exponent_mask(format) as i32);
+    asm.mov(Size::Dword, R8, Rcx);
+    asm.dec(Size::Dword, R8);
+    asm.alu_imm32(
+        Alu::Cmp,
+        Size::Dword,
+        R8,
+        (exponent_mask(format) - 1) as i32,
+    );
     let normal = branch(code, Condition::Below);
-    code.extend(MOV_R9_RDX);
-    code.extend(SHL_R9);
-    code.push((u64::BITS - (format.bits() - SIGN_BITS)) as u8);
+    shifted_out(code, (u64::BITS - (format.bits() - SIGN_BITS)) as u8);
     helper.push(branch(code, Condition::NotZero)); // only signed zero survives the nonnormal case
     let accepted = code.len();
     resolve(code, normal, accepted);
 }
 
-fn fractional_bias(code: &mut Vec<u8>, format: Format, rounding: Direction) {
+/// `mov r9, rdx; shl r9, amount`: ZF reports whether the source's low
+/// `64 - amount` bits are all zero.
+fn shifted_out(code: &mut Code, amount: u8) {
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, R9, Rdx);
+    asm.shift_imm(ShiftOp::Shl, Size::Qword, R9, amount);
+}
+
+/// `xor r8d, r8d`.
+fn clear_bias(code: &mut Code) {
+    code.asm().alu(Alu::Xor, Size::Dword, R8, R8);
+}
+
+/// `bt rdx, sign`: CF is the source sign.
+fn test_sign(code: &mut Code, format: Format) {
+    code.asm()
+        .bit_imm(BitTest::Bt, Size::Qword, Rdx, sign_bit(format));
+}
+
+fn fractional_bias(code: &mut Code, format: Format, rounding: Direction) {
     match rounding {
         Direction::NearestEven => {
-            code.extend(SHR_R8_1);
-            code.extend(DEC_R8);
-            code.extend(BT_RAX_RCX);
-            code.extend(ADC_R8_ZERO);
+            let mut asm = code.asm();
+            asm.shift_one(ShiftOp::Shr, Size::Qword, R8);
+            asm.dec(Size::Qword, R8);
+            asm.bit(BitTest::Bt, Size::Qword, Rax, Rcx);
+            asm.alu_imm8(Alu::Adc, Size::Qword, R8, 0);
         }
-        Direction::NearestAway => code.extend(SHR_R8_1),
+        Direction::NearestAway => code.asm().shift_one(ShiftOp::Shr, Size::Qword, R8),
         Direction::Positive | Direction::Negative => {
-            code.extend(XOR_R8D_R8D);
-            code.extend(BT_RDX);
-            code.push(sign_bit(format));
-            code.extend(if matches!(rounding, Direction::Positive) {
-                CMOVAE_R8_R9
+            clear_bias(code);
+            test_sign(code, format);
+            let condition = if matches!(rounding, Direction::Positive) {
+                Cond::Ae
             } else {
-                CMOVB_R8_R9
-            });
+                Cond::B
+            };
+            code.asm().cmov(condition, Size::Qword, R8, R9);
         }
-        Direction::Zero => code.extend(XOR_R8D_R8D),
+        Direction::Zero => clear_bias(code),
     }
 }
 
-fn or_one(code: &mut Vec<u8>, format: Format) {
+fn or_one(code: &mut Code, format: Format) {
     let one = u64::from(bias(format)) << format.fraction_bits();
+    let mut asm = code.asm();
     if format == Format::Double {
-        code.extend(MOVABS_R8);
-        code.extend(one.to_le_bytes());
-        code.extend(OR_RAX_R8);
+        asm.mov_imm64(R8, one);
+        asm.alu(Alu::Or, Size::Qword, Rax, R8);
     } else {
-        code.push(OR_EAX_IMMEDIATE);
-        code.extend((one as u32).to_le_bytes());
+        asm.alu_accumulator_imm32(Alu::Or, Size::Dword, one as i32);
     }
 }
 
-fn small_increment(code: &mut Vec<u8>, format: Format, rounding: Direction, done: &mut Vec<usize>) {
+fn small_increment(code: &mut Code, format: Format, rounding: Direction, done: &mut Vec<usize>) {
     match rounding {
         Direction::NearestEven | Direction::NearestAway => {
-            immediate(code, CMP_ECX, bias(format) - 1);
+            code.asm()
+                .alu_imm32(Alu::Cmp, Size::Dword, Rcx, (bias(format) - 1) as i32);
             done.push(branch(code, Condition::Below));
             if matches!(rounding, Direction::NearestEven) {
-                code.extend(MOV_R9_RDX);
-                code.extend(SHL_R9);
-                code.push((u64::BITS - format.fraction_bits()) as u8);
+                shifted_out(code, (u64::BITS - format.fraction_bits()) as u8);
                 done.push(branch(code, Condition::Zero));
             }
             or_one(code, format);
         }
         Direction::Positive | Direction::Negative => {
-            code.extend(BT_RDX);
-            code.push(sign_bit(format));
+            test_sign(code, format);
             done.push(branch(
                 code,
                 if matches!(rounding, Direction::Positive) {
@@ -300,59 +253,62 @@ fn small_increment(code: &mut Vec<u8>, format: Format, rounding: Direction, done
     }
 }
 
-fn bounded(code: &mut Vec<u8>, format: Format, width: u32, helper: &mut Vec<usize>) {
-    code.extend(MOV_R9_RAX);
-    code.extend(BTR_R9);
-    code.push(sign_bit(format));
-    code.extend(MOVABS_R8);
-    code.extend((u64::from(bias(format) + width - 1) << format.fraction_bits()).to_le_bytes());
-    code.extend(CMP_R9_R8);
+fn bounded(code: &mut Code, format: Format, width: u32, helper: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, R9, Rax);
+    asm.bit_imm(BitTest::Btr, Size::Qword, R9, sign_bit(format));
+    asm.mov_imm64(
+        R8,
+        u64::from(bias(format) + width - 1) << format.fraction_bits(),
+    );
+    asm.alu(Alu::Cmp, Size::Qword, R9, R8);
     helper.push(branch(code, Condition::Above));
     let smaller = branch(code, Condition::Below);
-    code.extend(BT_RAX);
-    code.push(sign_bit(format));
+    code.asm()
+        .bit_imm(BitTest::Bt, Size::Qword, Rax, sign_bit(format));
     helper.push(branch(code, Condition::AboveOrEqual)); // equality is valid only at the negative limit
     let accepted = code.len();
     resolve(code, smaller, accepted);
 }
 
-fn integer_lane(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn integer_lane(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let format = operand.format;
     read_lane(code, format, SOURCE);
     source_class(code, format, helper);
     let mut done = Vec::new();
-    immediate(code, CMP_ECX, bias(format));
+    let integral = bias(format) + format.fraction_bits();
+    code.asm()
+        .alu_imm32(Alu::Cmp, Size::Dword, Rcx, bias(format) as i32);
     let small = branch(code, Condition::Below);
-    immediate(code, CMP_ECX, bias(format) + format.fraction_bits());
+    code.asm()
+        .alu_imm32(Alu::Cmp, Size::Dword, Rcx, integral as i32);
     done.push(branch(code, Condition::AboveOrEqual));
-    immediate(code, MOV_R8D, bias(format) + format.fraction_bits());
-    code.extend(SUB_R8D_ECX);
-    code.extend(MOV_ECX_R8D);
-    immediate(code, MOV_R8D, 1);
-    code.extend(SHL_R8_CL);
-    code.extend(MOV_R9_R8);
-    code.extend(DEC_R9);
+    let mut asm = code.asm();
+    asm.mov_imm32(R8, integral);
+    asm.alu(Alu::Sub, Size::Dword, R8, Rcx);
+    asm.mov(Size::Dword, Rcx, R8);
+    asm.mov_imm32(R8, 1);
+    asm.shift_cl(ShiftOp::Shl, Size::Qword, R8);
+    asm.mov(Size::Qword, R9, R8);
+    asm.dec(Size::Qword, R9);
     direction(code, operand.operation, |code, rounding| {
         fractional_bias(code, format, rounding)
     });
-    code.extend(ADD_RAX_R8);
-    code.extend(OR_RAX_R9);
-    code.extend(XOR_RAX_R9);
+    let mut asm = code.asm();
+    asm.alu(Alu::Add, Size::Qword, Rax, R8);
+    asm.alu(Alu::Or, Size::Qword, Rax, R9);
+    asm.alu(Alu::Xor, Size::Qword, Rax, R9);
     done.push(jump(code));
     let small_start = code.len();
     resolve(code, small, small_start);
+    let mut asm = code.asm();
     if format == Format::Double {
-        code.extend(SHR_RAX);
-        code.push(sign_bit(format));
-        code.extend(SHL_RAX);
-        code.push(sign_bit(format));
+        asm.shift_imm(ShiftOp::Shr, Size::Qword, Rax, sign_bit(format));
+        asm.shift_imm(ShiftOp::Shl, Size::Qword, Rax, sign_bit(format));
     } else {
-        code.push(AND_EAX_IMMEDIATE);
-        code.extend((1u32 << sign_bit(format)).to_le_bytes());
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, (1u32 << sign_bit(format)) as i32);
     }
-    code.extend(MOV_R9_RDX);
-    code.extend(SHL_R9);
-    code.push((u64::BITS - (format.bits() - SIGN_BITS)) as u8);
+    shifted_out(code, (u64::BITS - (format.bits() - SIGN_BITS)) as u8);
     done.push(branch(code, Condition::Zero));
     direction(code, operand.operation, |code, rounding| {
         small_increment(code, format, rounding, &mut done)
@@ -365,56 +321,61 @@ fn integer_lane(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) 
         bounded(code, format, width, helper);
     }
     if operand.operation.exact() {
-        code.extend(CMP_RAX_RDX);
-        code.extend(SETNE_R8B);
-        code.extend(MOVZX_R8D_R8B);
-        code.extend(OR_R10D_R8D);
+        let mut asm = code.asm();
+        asm.alu(Alu::Cmp, Size::Qword, Rax, Rdx);
+        asm.setcc(Cond::Ne, R8);
+        asm.movzx(Size::Dword, R8, Size::Byte, R8);
+        asm.alu(Alu::Or, Size::Dword, R10, R8);
     }
 }
 
-fn insert_lane(code: &mut Vec<u8>, operand: &Operand) {
+fn insert_lane(code: &mut Code, operand: &Operand) {
     match operand.format {
         Format::Half => {
-            code.extend(PINSRW_FROM_EAX);
-            code.push(REGISTER_DIRECT);
-            code.push((lanes(operand) - 1) as u8);
+            code.asm().pinsrw(RESULT, Rax, (lanes(operand) - 1) as u8);
         }
         Format::Single => {
-            code.extend(MOVD_FROM_EAX);
-            code.push(REGISTER_DIRECT | (TEMP << REGISTER_SHIFT));
-            code.extend(PSLLDQ_XMM2);
-            code.push(((lanes(operand) - 1) * (Format::Single.bits() / BITS_PER_BYTE)) as u8);
+            code.asm().movd_to_xmm(TEMP, Rax);
+            ShiftOpcode::LeftBytes.emit(
+                code,
+                TEMP,
+                ((lanes(operand) - 1) * (Format::Single.bits() / BITS_PER_BYTE)) as u8,
+            );
             packed(code, Host::Or, RESULT, TEMP);
         }
         Format::Double => {
             packed(code, Host::MoveGprQword, TEMP, ACCUMULATOR_GPR);
-            code.extend(MOVLHPS_XMM0_XMM2);
+            code.asm().movlhps(RESULT, Rm::Xmm(TEMP));
         }
     }
 }
 
-fn integer_rounding(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+/// `xor r10d, r10d`: R10D accumulates whether any lane was inexact.
+fn clear_inexact(code: &mut Code) {
+    code.asm().alu(Alu::Xor, Size::Dword, R10, R10);
+}
+
+fn integer_rounding(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     if operand.operation.exact() {
-        code.extend(XOR_R10D_R10D);
+        clear_inexact(code);
     }
     if operand.shape == Shape::Scalar {
         integer_lane(code, operand, helper);
         if operand.format == Format::Double {
             packed(code, Host::MoveGprQword, RESULT, ACCUMULATOR_GPR);
         } else {
-            code.extend(MOVD_FROM_EAX);
-            code.push(REGISTER_DIRECT);
+            code.asm().movd_to_xmm(RESULT, Rax);
         }
     } else {
         packed(code, Host::Xor, RESULT, RESULT);
-        immediate(code, MOV_R11D, lanes(operand));
+        code.asm().mov_imm32(R11, lanes(operand));
         let repeat = code.len();
         integer_lane(code, operand, helper);
         let lane_bytes = (operand.format.bits() / BITS_PER_BYTE) as u8;
         ShiftOpcode::RightBytes.emit(code, SOURCE, lane_bytes);
         ShiftOpcode::RightBytes.emit(code, RESULT, lane_bytes);
         insert_lane(code, operand);
-        code.extend(DEC_R11D);
+        code.asm().dec(Size::Dword, R11);
         let repeat_branch = branch(code, Condition::NotZero);
         resolve(code, repeat_branch, repeat);
     }
@@ -436,7 +397,7 @@ fn packed_right(format: Format) -> ShiftOpcode {
     }
 }
 
-fn checked_source(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn checked_source(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let format = operand.format;
     prepare_vector_input_range(code, format);
     vector_exponent_range(code, format, operand.shape, SOURCE);
@@ -472,15 +433,12 @@ fn checked_source(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>
             _ => unreachable!("decoded checked round arrangement"),
         }
     };
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(mask.to_le_bytes());
-    code.push(CMP_EAX_IMMEDIATE);
-    code.extend(mask.to_le_bytes());
+    all_bits(code, mask);
     helper.push(branch(code, Condition::NotZero));
 }
 
 fn round_instruction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     shape: Shape,
     rounding: Direction,
@@ -500,41 +458,11 @@ fn round_instruction(
         Direction::Zero => ROUND_ZERO,
         Direction::NearestAway => unreachable!("ties-away uses an exact residual"),
     };
-    opcode.register(code, RESULT, SOURCE, target);
-    code.push(PRECISION_SUPPRESSED | mode);
+    opcode.register_imm(code, RESULT, SOURCE, PRECISION_SUPPRESSED | mode, target);
 }
 
-fn fp_prefix(code: &mut Vec<u8>, format: Format, shape: Shape) {
-    if shape == Shape::Scalar {
-        code.push(if format == Format::Double {
-            SCALAR_DOUBLE_PREFIX
-        } else {
-            SCALAR_SINGLE_PREFIX
-        });
-    } else if format == Format::Double {
-        code.push(PACKED_DOUBLE_PREFIX);
-    }
-}
-
-fn fp_arithmetic(
-    code: &mut Vec<u8>,
-    format: Format,
-    shape: Shape,
-    opcode: ArithmeticOpcode,
-    destination: u8,
-    source: u8,
-) {
-    fp_prefix(code, format, shape);
-    code.extend([
-        SSE_ESCAPE,
-        opcode as u8,
-        REGISTER_DIRECT | (destination << REGISTER_SHIFT) | source,
-    ]);
-}
-
-fn splat(code: &mut Vec<u8>, format: Format, vector: u8, bits: u64) {
-    code.extend(MOVABS_RAX);
-    code.extend(bits.to_le_bytes());
+fn splat(code: &mut Code, format: Format, vector: u8, bits: u64) {
+    code.asm().mov_imm64(Rax, bits);
     packed(code, Host::MoveGprQword, vector, ACCUMULATOR_GPR);
     if format == Format::Single {
         super::shuffle(code, vector, vector, BROADCAST_LOW_DWORD);
@@ -543,15 +471,15 @@ fn splat(code: &mut Vec<u8>, format: Format, vector: u8, bits: u64) {
     }
 }
 
-fn magnitude_mask(code: &mut Vec<u8>, format: Format, vector: u8) {
+fn magnitude_mask(code: &mut Code, format: Format, vector: u8) {
     packed(code, Host::EqualDword, vector, vector);
     packed_right(format).emit(code, vector, SIGN_BITS as u8);
 }
 
-fn ties_away(code: &mut Vec<u8>, format: Format, shape: Shape, target: TargetCpu) {
+fn ties_away(code: &mut Code, format: Format, shape: Shape, target: TargetCpu) {
     round_instruction(code, format, shape, Direction::Zero, target);
     packed(code, Host::MoveAligned, RESIDUAL, SOURCE);
-    fp_arithmetic(
+    emit_opcode_to(
         code,
         format,
         shape,
@@ -568,13 +496,12 @@ fn ties_away(code: &mut Vec<u8>, format: Format, shape: Shape, target: TargetCpu
         u64::from(bias(format) - 1) << format.fraction_bits(),
     );
     // 0.5 <= abs(x-trunc(x)), with an ordered predicate and guarded finite data.
-    fp_prefix(code, format, shape);
-    code.extend([
-        SSE_ESCAPE,
-        COMPARE_OPCODE,
-        REGISTER_DIRECT | (CONSTANT << REGISTER_SHIFT) | RESIDUAL,
+    code.asm().float_compare(
+        float_lanes(format, shape),
+        CONSTANT,
+        Rm::Xmm(RESIDUAL),
         COMPARE_LESS_EQUAL,
-    ]);
+    );
     packed(code, Host::EqualDword, MASK, MASK);
     packed_left(format).emit(code, MASK, sign_bit(format));
     packed(code, Host::And, MASK, SOURCE);
@@ -586,7 +513,7 @@ fn ties_away(code: &mut Vec<u8>, format: Format, shape: Shape, target: TargetCpu
     );
     packed(code, Host::Or, RESIDUAL, MASK);
     packed(code, Host::And, RESIDUAL, CONSTANT);
-    fp_arithmetic(code, format, shape, ArithmeticOpcode::Add, RESULT, RESIDUAL);
+    emit_opcode_to(code, format, shape, ArithmeticOpcode::Add, RESULT, RESIDUAL);
     // An exact zero sum can take the host rounding mode's sign, so force the
     // architectural sign on every result, including signed zero.
     magnitude_mask(code, format, MASK);
@@ -598,7 +525,7 @@ fn ties_away(code: &mut Vec<u8>, format: Format, shape: Shape, target: TargetCpu
 }
 
 fn checked_compute(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: RoundingOperation,
     format: Format,
     shape: Shape,
@@ -613,7 +540,7 @@ fn checked_compute(
     }
 }
 
-fn half_bias(code: &mut Vec<u8>, vector: u8) {
+fn half_bias(code: &mut Code, vector: u8) {
     let adjustment = (bias(Format::Single) - bias(Format::Half)) << Format::Single.fraction_bits();
     let position = adjustment.trailing_zeros();
     let digits = (adjustment >> position).ilog2() + 1;
@@ -622,7 +549,7 @@ fn half_bias(code: &mut Vec<u8>, vector: u8) {
     ShiftOpcode::LeftDword.emit(code, vector, position as u8);
 }
 
-fn widen_half(code: &mut Vec<u8>, upper: bool) {
+fn widen_half(code: &mut Code, upper: bool) {
     let sign_shift = (Format::Single.bits() - Format::Half.bits()) as u8;
     let strip_sign = sign_shift + SIGN_BITS as u8;
     let fraction_shift = (Format::Single.fraction_bits() - Format::Half.fraction_bits()) as u8;
@@ -649,7 +576,7 @@ fn widen_half(code: &mut Vec<u8>, upper: bool) {
     packed(code, Host::MoveAligned, SOURCE, RESIDUAL);
 }
 
-fn pack_half(code: &mut Vec<u8>, target: TargetCpu) {
+fn pack_half(code: &mut Code, target: TargetCpu) {
     packed(code, Host::MoveAligned, TEMP, RESULT);
     ShiftOpcode::RightDword.emit(code, TEMP, sign_bit(Format::Single));
     ShiftOpcode::LeftDword.emit(code, TEMP, sign_bit(Format::Half));
@@ -671,7 +598,7 @@ fn pack_half(code: &mut Vec<u8>, target: TargetCpu) {
     Host::PackUnsignedDwordToWord.register(code, MASK, MASK, target);
 }
 
-fn checked_half(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn checked_half(code: &mut Code, operand: &Operand, target: TargetCpu) {
     packed(code, Host::MoveAligned, ORIGINAL_HALF, SOURCE);
     widen_half(code, false);
     checked_compute(
@@ -701,7 +628,7 @@ fn checked_half(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     packed(code, Host::MoveAligned, SOURCE, ORIGINAL_HALF);
 }
 
-fn checked_bounds(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>) {
+fn checked_bounds(code: &mut Code, operand: &Operand, helper: &mut Vec<usize>) {
     let Some(width) = operand.operation.signed_width() else {
         return;
     };
@@ -713,24 +640,21 @@ fn checked_bounds(code: &mut Vec<u8>, operand: &Operand, helper: &mut Vec<usize>
     }
 }
 
-fn checked_inexact(code: &mut Vec<u8>, operand: &Operand) {
+fn checked_inexact(code: &mut Code, operand: &Operand) {
     if !operand.operation.exact() {
         return;
     }
-    code.extend(XOR_R10D_R10D);
+    clear_inexact(code);
     packed(code, Host::MoveAligned, TEMP, RESULT);
     packed(code, Host::EqualByte, TEMP, SOURCE);
     Host::ByteSignMask.register(code, 0, TEMP, TargetCpu::Baseline);
     let mask = (1u32 << (lanes(operand) * (operand.format.bits() / BITS_PER_BYTE))) - 1;
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(mask.to_le_bytes());
-    code.push(CMP_EAX_IMMEDIATE);
-    code.extend(mask.to_le_bytes());
-    code.extend(SETNE_R10B);
+    all_bits(code, mask);
+    code.asm().setcc(Cond::Ne, R10);
 }
 
 fn checked_rounding(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     helper: &mut Vec<usize>,
     target: TargetCpu,
@@ -751,35 +675,30 @@ fn checked_rounding(
     checked_inexact(code, operand);
 }
 
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    let completed = jump(code);
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success);
-}
-
-fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
+fn commit_result(code: &mut Code, operand: &Operand) {
     if operand.operation.exact() {
-        code.extend(SHL_R10D);
-        code.push(INEXACT_SHIFT);
-        code.extend(OR_STATE_R10D);
-        code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+        let mut asm = code.asm();
+        asm.shift_imm(ShiftOp::Shl, Size::Dword, R10, INEXACT_SHIFT);
+        asm.alu(
+            Alu::Or,
+            Size::Dword,
+            guest(core::mem::offset_of!(GuestState, fpsr) as u32),
+            R10,
+        );
     }
     let result = if operand.shape == Shape::Scalar {
         read_vector(code, operand.destination, SAVED_HALF);
         match operand.format {
             Format::Half => {
                 read_lane(code, Format::Half, RESULT);
-                code.extend(PINSRW_FROM_EAX);
-                code.push(REGISTER_DIRECT | (SAVED_HALF << REGISTER_SHIFT));
-                code.push(FIRST_LANE);
+                code.asm().pinsrw(SAVED_HALF, Rax, FIRST_LANE);
             }
-            Format::Single => code.extend(MOVSS_XMM6_XMM0),
-            Format::Double => code.extend(MOVSD_XMM6_XMM0),
+            Format::Single => {
+                Host::MoveScalarSingle.register(code, SAVED_HALF, RESULT, TargetCpu::Baseline)
+            }
+            Format::Double => {
+                Host::MoveScalarDouble.register(code, SAVED_HALF, RESULT, TargetCpu::Baseline)
+            }
         }
         test_control(code, FPCR_NEP);
         let merging = branch(code, Condition::NotZero);
@@ -797,7 +716,7 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,

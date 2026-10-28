@@ -1,28 +1,28 @@
 //! ADR and ADRP as MOV of the computed guest address.
 use super::store;
 use crate::aarch64::{Register, pc_relative::Operand};
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero {
         // Keep each guest instruction's native source-map interval nonempty.
-        code.push(0x90);
+        code.asm().nop();
         return;
     }
-    code.extend([0x48, 0xb8]); // movabs rax,imm64; leaves guest NZCV untouched
-    code.extend(operand.address.to_le_bytes());
+    // MOVABS leaves guest NZCV untouched.
+    super::immediate(code, operand.address);
     store(code, operand.destination);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+
     use alloc::vec::Vec;
 
     #[test]
     fn address_is_full_width_and_discarded_destination_keeps_map_interval() {
-        let mut code = vec![];
+        let mut code = Code::new();
         emit(
             &mut code,
             &Operand {
@@ -46,8 +46,8 @@ mod tests {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        let leaf = crate::compile(&source, crate::GuestAddress(0x100ffc)).unwrap();
-        let block = crate::block::compile(&source, crate::GuestAddress(0x100ffc)).unwrap();
+        let leaf = crate::testing::leaf(&source, crate::GuestAddress(0x100ffc)).unwrap();
+        let block = crate::testing::block(&source, crate::GuestAddress(0x100ffc)).unwrap();
         for native in [&leaf, &block.native] {
             assert_eq!(
                 native.source_map,

@@ -1,5 +1,6 @@
 //! FCVT between FP formats: SSE2 or integer paths, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
+use super::numerical::helper_section;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR, RESULT_MINIMUM_EXPONENT, Rounding,
     branch, clear_scalar, commit_inexact, environment_round, exponent_range,
@@ -7,6 +8,8 @@ use super::numerical::{
     reject_other_status, resolve, restore_environment, test_control, vector_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
 use crate::{
     GuestAddress,
     aarch64::{
@@ -18,37 +21,14 @@ use crate::{
     },
     block::ExitKind,
 };
+use Gpr::{Rax, Rcx};
 use alloc::vec::Vec;
 
 const RESULT_VECTOR: u8 = 0;
 const SOURCE_VECTOR: u8 = 1;
 const JAM_VECTOR: u8 = 6;
-const CVTSS2SD_XMM0_XMM1: &[u8] = &[0xf3, 0x0f, 0x5a, 0xc1];
-const CVTSD2SS_XMM0_XMM1: &[u8] = &[0xf2, 0x0f, 0x5a, 0xc1];
-const CVTPS2PD_XMM0_XMM1: &[u8] = &[0x0f, 0x5a, 0xc1];
-const CVTPS2PD_XMM6_XMM0: &[u8] = &[0x0f, 0x5a, 0xf0];
-const CMPEQPD_XMM6_XMM1: &[u8] = &[0x66, 0x0f, 0xc2, 0xf1, 0];
-const CVTPD2PS_XMM0_XMM1: &[u8] = &[0x66, 0x0f, 0x5a, 0xc1];
-const PSRLDQ_XMM1_8: &[u8] = &[0x66, 0x0f, 0x73, 0xd9, 8];
-const MOVLHPS_XMM1_XMM0: &[u8] = &[0x0f, 0x16, 0xc8];
-const MOVSS_XMM0_XMM1: &[u8] = &[0xf3, 0x0f, 0x10, 0xc1];
-const MOVD_EAX_XMM1: &[u8] = &[0x66, 0x0f, 0x7e, 0xc8];
-const MOVD_XMM1_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc8];
-const MOVQ_RAX_XMM1: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc8];
-const MOVD_XMM6_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xf0];
-const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const AND_EAX_IMM32: u8 = 0x25;
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const ADD_EAX_IMM32: u8 = 0x05;
-const OR_EAX_ECX: &[u8] = &[0x09, 0xc8];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const SHL_EAX_IMM8: &[u8] = &[0xc1, 0xe0];
-const SHL_ECX_IMM8: &[u8] = &[0xc1, 0xe1];
-const SUB_EAX_1: &[u8] = &[0x83, 0xe8, 1];
-const CMP_EAX_IMM8: &[u8] = &[0x83, 0xf8];
-const SETNE_AL: &[u8] = &[0x0f, 0x95, 0xc0];
-const MOVZX_EAX_AL: &[u8] = &[0x0f, 0xb6, 0xc0];
-const JMP_REL32: u8 = 0xe9;
+const COMPARE_EQUAL: u8 = 0;
+const UPPER_QWORD_BYTES: u8 = 8;
 const HALF_EXPONENT_BITS: u8 = 5;
 const HALF_EXPONENT_MASK: u32 = (1 << HALF_EXPONENT_BITS) - 1;
 const HALF_NORMAL_EXPONENT_COUNT: u8 = HALF_EXPONENT_MASK as u8 - 1;
@@ -74,27 +54,12 @@ const DOUBLE_TO_SINGLE_DISCARDED_MASK: u32 = (1 << DOUBLE_TO_SINGLE_DISCARDED_BI
 const COMPACT_QWORD_LOW_DWORDS: u8 = 0x88;
 const DWORD_SIGN_TO_LSB_SHIFT: u8 = u32::BITS as u8 - 1;
 
-fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn exception_guard(code: &mut Code, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
 }
 
-/// Keep all failure branches ahead of guest-state commit. No private host
-/// environment may remain installed when this common helper section is emitted.
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    code.push(JMP_REL32);
-    let completed = code.len();
-    code.extend(0i32.to_le_bytes());
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
-    }
-    resolve(code, completed, success_start);
-}
-
-fn scalar_commit(code: &mut Vec<u8>, destination: u8, format: Format) {
+fn scalar_commit(code: &mut Code, destination: u8, format: Format) {
     test_control(code, FPCR_NEP);
     let merging = branch(code, Condition::NotZero);
     clear_scalar(code, format, RESULT_VECTOR);
@@ -103,56 +68,70 @@ fn scalar_commit(code: &mut Vec<u8>, destination: u8, format: Format) {
     commit(code, destination, RESULT_VECTOR);
 }
 
-fn half_normal_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
-    code.extend(MOVD_EAX_XMM1);
-    code.extend(SHR_EAX_IMM8);
-    code.push(Format::Half.fraction_bits() as u8);
-    code.push(AND_EAX_IMM32);
-    code.extend(HALF_EXPONENT_MASK.to_le_bytes());
-    code.extend(SUB_EAX_1);
-    code.extend(CMP_EAX_IMM8);
-    code.push(HALF_NORMAL_EXPONENT_COUNT);
+fn half_normal_guard(code: &mut Code, helper: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Rax, SOURCE_VECTOR);
+    asm.shift_imm(
+        ShiftOp::Shr,
+        Size::Dword,
+        Rax,
+        Format::Half.fraction_bits() as u8,
+    );
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, HALF_EXPONENT_MASK as i32);
+    asm.alu_imm8(Alu::Sub, Size::Dword, Rax, 1);
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Rax, HALF_NORMAL_EXPONENT_COUNT as i8);
     helper.push(branch(code, Condition::AboveOrEqual));
 }
 
 /// Exact normal half widening uses only field construction. In particular,
 /// conversion ignores FZ16, and no host numerical half extension is assumed.
-fn half_to_single(code: &mut Vec<u8>) {
-    code.extend(MOVD_EAX_XMM1);
-    code.extend(MOV_ECX_EAX);
-    code.push(AND_EAX_IMM32);
-    code.extend(HALF_MAGNITUDE.to_le_bytes());
-    code.extend(SHL_EAX_IMM8);
-    code.push(HALF_TO_SINGLE_FRACTION_SHIFT);
-    code.push(ADD_EAX_IMM32);
-    code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
-    code.extend(AND_ECX_IMM32);
-    code.extend(HALF_SIGN.to_le_bytes());
-    code.extend(SHL_ECX_IMM8);
-    code.push(HALF_TO_SINGLE_SIGN_SHIFT);
-    code.extend(OR_EAX_ECX);
-    code.extend(MOVD_XMM1_EAX);
+fn half_to_single(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.movd_from_xmm(Rax, SOURCE_VECTOR);
+    asm.mov(Size::Dword, Rcx, Rax);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, HALF_MAGNITUDE as i32);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Dword,
+        Rax,
+        HALF_TO_SINGLE_FRACTION_SHIFT,
+    );
+    asm.alu_accumulator_imm32(Alu::Add, Size::Dword, HALF_TO_SINGLE_BIAS as i32);
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, HALF_SIGN as i32);
+    asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, HALF_TO_SINGLE_SIGN_SHIFT);
+    asm.alu(Alu::Or, Size::Dword, Rax, Rcx);
+    asm.movd_to_xmm(SOURCE_VECTOR, Rax);
 }
 
-fn scalar_odd_jam(code: &mut Vec<u8>) {
+fn scalar_odd_jam(code: &mut Code) {
     // The source is a normal double and the result a normal single, so exactly
     // the low 29 fraction bits are discarded.
-    code.extend(MOVQ_RAX_XMM1);
-    code.push(AND_EAX_IMM32);
-    code.extend(DOUBLE_TO_SINGLE_DISCARDED_MASK.to_le_bytes());
-    code.extend(SETNE_AL);
-    code.extend(MOVZX_EAX_AL);
-    code.extend(MOVD_XMM6_EAX);
+    let mut asm = code.asm();
+    asm.movq_from_xmm(Rax, SOURCE_VECTOR);
+    asm.alu_accumulator_imm32(
+        Alu::And,
+        Size::Dword,
+        DOUBLE_TO_SINGLE_DISCARDED_MASK as i32,
+    );
+    asm.setcc(Cond::Ne, Rax);
+    asm.movzx(Size::Dword, Rax, Size::Byte, Rax);
+    asm.movd_to_xmm(JAM_VECTOR, Rax);
     packed(code, Host::Or, RESULT_VECTOR, JAM_VECTOR);
 }
 
-pub(in crate::x86_64) fn jam_odd_pair(code: &mut Vec<u8>, one_vector: u8) {
+pub(in crate::x86_64) fn jam_odd_pair(code: &mut Code, one_vector: u8) {
     // The normal single widens exactly and is compared with its source double
     // lane without raising host status. A lane's sticky bit never comes from
     // the aggregate PE flag. The range preparation leaves 1 in every dword of
     // MINIMUM_EXPONENT_VECTOR.
-    code.extend(CVTPS2PD_XMM6_XMM0);
-    code.extend(CMPEQPD_XMM6_XMM1);
+    let mut asm = code.asm();
+    asm.cvtps2pd(JAM_VECTOR, Rm::Xmm(RESULT_VECTOR));
+    asm.float_compare(
+        FloatLanes::PackedDouble,
+        JAM_VECTOR,
+        Rm::Xmm(SOURCE_VECTOR),
+        COMPARE_EQUAL,
+    );
     super::shuffle(code, JAM_VECTOR, JAM_VECTOR, COMPACT_QWORD_LOW_DWORDS);
     packed(code, Host::AndNot, JAM_VECTOR, one_vector);
     // PSHUFD duplicates masks into inactive upper lanes. Clear those masks so
@@ -161,12 +140,12 @@ pub(in crate::x86_64) fn jam_odd_pair(code: &mut Vec<u8>, one_vector: u8) {
     packed(code, Host::Or, RESULT_VECTOR, JAM_VECTOR);
 }
 
-fn vector_odd_jam(code: &mut Vec<u8>) {
+fn vector_odd_jam(code: &mut Code) {
     jam_odd_pair(code, MINIMUM_EXPONENT_VECTOR);
 }
 
 fn emit_scalar(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &PrecisionOperand,
     source: Format,
     destination: Format,
@@ -182,9 +161,14 @@ fn emit_scalar(
         half_normal_guard(code, &mut helper);
         half_to_single(code);
         if destination == Format::Double {
-            code.extend(CVTSS2SD_XMM0_XMM1);
+            code.asm().cvtss2sd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
         } else {
-            code.extend(MOVSS_XMM0_XMM1);
+            Host::MoveScalarSingle.register(
+                code,
+                RESULT_VECTOR,
+                SOURCE_VECTOR,
+                crate::TargetCpu::Baseline,
+            );
         }
     } else {
         exponent_range(code, source, SOURCE_VECTOR, INPUT_MINIMUM_EXPONENT);
@@ -192,7 +176,7 @@ fn emit_scalar(
         if destination == Format::Double {
             // Normal S→D is exact, unaffected by ambient RC/DAZ/FTZ/masks,
             // and raises neither Intel Invalid nor Denormal. Preserve MXCSR.
-            code.extend(CVTSS2SD_XMM0_XMM1);
+            code.asm().cvtss2sd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
         } else {
             environment_round(
                 code,
@@ -202,7 +186,7 @@ fn emit_scalar(
                     Rounding::Fpcr
                 },
             );
-            code.extend(CVTSD2SS_XMM0_XMM1);
+            code.asm().cvtsd2ss(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
             restore_environment(code);
             helper.push(reject_other_status(code));
             exponent_range(code, destination, RESULT_VECTOR, RESULT_MINIMUM_EXPONENT);
@@ -219,7 +203,7 @@ fn emit_scalar(
     scalar_commit(code, operand.destination, destination);
 }
 
-fn half_vector_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn half_vector_guard(code: &mut Code, helper: &mut Vec<usize>) {
     packed(
         code,
         Host::EqualDword,
@@ -251,17 +235,17 @@ fn half_vector_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
     );
     packed(code, Host::And, HALF_EXPONENT_VECTOR, HALF_VALIDITY_VECTOR);
     Host::DwordSignMask.register(code, 0, HALF_EXPONENT_VECTOR, crate::TargetCpu::Baseline);
-    code.extend(CMP_EAX_IMM8);
-    code.push(HALF_VALIDITY_MASK);
+    code.asm()
+        .alu_imm8(Alu::Cmp, Size::Dword, Rax, HALF_VALIDITY_MASK as i8);
     helper.push(branch(code, Condition::NotZero));
 }
 
-fn emit_widen_half(code: &mut Vec<u8>, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
+fn emit_widen_half(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     read_vector(code, operand.source, SOURCE_VECTOR);
     if upper {
-        code.extend(PSRLDQ_XMM1_8);
+        ShiftOpcode::RightBytes.emit(code, SOURCE_VECTOR, UPPER_QWORD_BYTES);
     }
     packed(code, Host::Xor, RESULT_VECTOR, RESULT_VECTOR);
     packed(code, Host::UnpackLowWord, SOURCE_VECTOR, RESULT_VECTOR);
@@ -287,23 +271,23 @@ fn emit_widen_half(code: &mut Vec<u8>, operand: &PrecisionOperand, upper: bool, 
     commit(code, operand.destination, RESULT_VECTOR);
 }
 
-fn emit_widen(code: &mut Vec<u8>, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
+fn emit_widen(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     read_vector(code, operand.source, SOURCE_VECTOR);
     if upper {
-        code.extend(PSRLDQ_XMM1_8);
+        ShiftOpcode::RightBytes.emit(code, SOURCE_VECTOR, UPPER_QWORD_BYTES);
     }
     prepare_vector_input_range(code, Format::Single);
     vector_exponent_range(code, Format::Single, Shape::Vector64, SOURCE_VECTOR);
     helper.push(branch(code, Condition::NotZero));
-    code.extend(CVTPS2PD_XMM0_XMM1);
+    code.asm().cvtps2pd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
     helper_section(code, &helper, pc);
     commit(code, operand.destination, RESULT_VECTOR);
 }
 
 fn emit_narrow(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &PrecisionOperand,
     upper: bool,
     rounding: PrecisionRounding,
@@ -323,7 +307,7 @@ fn emit_narrow(
             Rounding::Fpcr
         },
     );
-    code.extend(CVTPD2PS_XMM0_XMM1);
+    code.asm().cvtpd2ps(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
     restore_environment(code);
     helper.push(reject_other_status(code));
     // Conversion changes both element size and lane count. Rebuild the bounds
@@ -339,14 +323,14 @@ fn emit_narrow(
     commit_inexact(code);
     if upper {
         read_vector(code, operand.destination, SOURCE_VECTOR);
-        code.extend(MOVLHPS_XMM1_XMM0);
+        code.asm().movlhps(SOURCE_VECTOR, Rm::Xmm(RESULT_VECTOR));
         commit(code, operand.destination, SOURCE_VECTOR);
     } else {
         commit(code, operand.destination, RESULT_VECTOR);
     }
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &PrecisionOperand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit(code: &mut Code, operand: &PrecisionOperand, pc: GuestAddress) {
     match operand.mode {
         PrecisionMode::Scalar {
             source,

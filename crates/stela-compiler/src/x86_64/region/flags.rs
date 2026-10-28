@@ -10,7 +10,7 @@ use crate::aarch64::{
     conditional_select::{Operand, Otherwise},
     flags::{NZCV_C, NZCV_N, NZCV_V, NZCV_Z},
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 use encoding::{NativeCondition, RESULT, RIGHT};
 
 const ARM_CS: u8 = 0b0010;
@@ -239,7 +239,7 @@ const _: () = assert!(matches!(RIGHT, encoding::HostGpr::Rdx));
 
 /// The two-scratch SETcc capture into RESULT (EAX), clobbering RIGHT (RDX).
 /// RCX (a live value or budget) is intact.
-fn pack_native(code: &mut Vec<u8>, carry: Carry) {
+fn pack_native(code: &mut Code, carry: Carry) {
     crate::x86_64::capture_nzcv(code, matches!(carry, Carry::Inverted));
 }
 
@@ -467,7 +467,7 @@ fn packed_predicate(emitter: &mut Emitter<'_>, condition: u8) -> Predicate {
 }
 
 /// Complete exit capture after all native-resident GPR outputs have been stored.
-pub(super) fn settle_native_exit(code: &mut Vec<u8>, carry: Carry) {
+pub(super) fn settle_native_exit(code: &mut Code, carry: Carry) {
     pack_native(code, carry);
     encoding::store_nzcv(code, RESULT);
 }

@@ -1,4 +1,5 @@
 //! FRECPS and FRSQRTS.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::Format;
 
 use super::arithmetic::Shape;
@@ -43,8 +44,7 @@ fn kind(opcode: u32) -> Option<Kind> {
 
 /// None denotes another family; Err denotes reserved vector1D. Every register
 /// field is ordinary V data, including V31 and all source/destination aliases.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     for (mask, adjustment, scalar, half) in [
         (SCALAR_MASK, SCALAR_PREFIX, true, false),
         (VECTOR_MASK, 0, false, false),
@@ -74,7 +74,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             Shape::Vector128
         };
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand {
             kind,
@@ -111,7 +111,7 @@ mod tests {
                 ] {
                     let word = (opcode ^ size) | prefix;
                     if format == Format::Double && shape == Shape::Vector64 {
-                        assert_eq!(decode(word), Some(Err(())));
+                        assert_eq!(decode(word), Some(Err(Unsupported)));
                         continue;
                     }
                     for destination in 0..=REGISTER_MASK {
@@ -157,7 +157,7 @@ mod tests {
                                     | (left << LEFT_SHIFT)
                                     | (right << RIGHT_SHIFT)
                             ),
-                            Some(Err(()))
+                            Some(Err(Unsupported))
                         );
                     }
                 }

@@ -1,13 +1,14 @@
 //! Half-precision arithmetic through exact widened intermediates.
+use crate::x86_64::asm::Code;
 use alloc::vec::Vec;
 mod product;
 
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    ArithmeticOpcode, Condition, VZEROUPPER, branch, emit_opcode_to, prepare_vector_input_range,
+    ArithmeticOpcode, Condition, branch, emit_opcode_to, prepare_vector_input_range,
     read_numerical_right, read_numerical_vector, test_control, vector_exponent_range,
 };
-use super::super::{Host, commit, half as lanes, packed, read_vector};
+use super::super::{Host, commit, half as lanes, packed, packed_imm, read_vector};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -21,14 +22,13 @@ const RIGHT_ODD: u8 = 3;
 const EVEN_HALF_WORDS: u8 = 0x88;
 const SECOND_HALF_WORD: u8 = 0x55;
 
-fn compact_even_words(code: &mut Vec<u8>, source: u8) {
-    packed(code, Host::ShuffleLowWord, source, source);
-    code.push(EVEN_HALF_WORDS);
+fn compact_even_words(code: &mut Code, source: u8) {
+    packed_imm(code, Host::ShuffleLowWord, source, source, EVEN_HALF_WORDS);
 }
 
 /// Normalize adjacent Vn pairs followed by Vm pairs into two Half vectors.
 /// Q0 inputs were loaded with MOVQ; only the assembled active words are guarded.
-fn prepare_pairs(code: &mut Vec<u8>, shape: Shape) {
+fn prepare_pairs(code: &mut Code, shape: Shape) {
     packed(code, Host::MoveAligned, LEFT_ODD, lanes::LEFT);
     if shape == Shape::Vector128 {
         packed(code, Host::MoveAligned, RIGHT_ODD, lanes::RIGHT);
@@ -56,7 +56,7 @@ fn prepare_pairs(code: &mut Vec<u8>, shape: Shape) {
     packed(code, Host::MoveAligned, lanes::RIGHT, LEFT_ODD);
 }
 
-fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) {
+fn prepare_inputs(code: &mut Code, operand: &Operand) {
     match operand.inputs {
         Inputs::Elementwise { left, right } => {
             read_numerical_vector(code, operand.shape, left, lanes::LEFT);
@@ -78,8 +78,13 @@ fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) {
         }
         Inputs::PairwiseScalar { source } => {
             read_vector(code, source, lanes::LEFT);
-            packed(code, Host::ShuffleLowWord, lanes::RIGHT, lanes::LEFT);
-            code.push(SECOND_HALF_WORD);
+            packed_imm(
+                code,
+                Host::ShuffleLowWord,
+                lanes::RIGHT,
+                lanes::LEFT,
+                SECOND_HALF_WORD,
+            );
         }
     }
     if operand.shape == Shape::Scalar && !matches!(operand.inputs, Inputs::PairwiseScalar { .. }) {
@@ -102,7 +107,7 @@ fn operation(operation: BinaryOperation) -> (ArithmeticOpcode, lanes::ResultSign
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     debug_assert_eq!(operand.format, Format::Half);
     let mut helper = Vec::new();
     let mut rollback = Vec::new();
@@ -110,7 +115,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, targ
     let checked_widening =
         !packed_product && operand.shape != Shape::Scalar && target.supports(TargetCpu::F16c);
     if checked_widening {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     // Ordinary binary keeps retained enables and fresh status under every AH.
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);

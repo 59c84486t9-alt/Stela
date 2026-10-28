@@ -1,4 +1,6 @@
 //! Address computation and fault exits shared by the SVE memory families.
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, ShiftOp, Size};
 
 use super::super::{load, scalable::memory as service};
 use crate::aarch64::{
@@ -7,20 +9,7 @@ use crate::aarch64::{
     sve::memory::{Address, Offset, Scale},
 };
 use crate::context::memory::MemoryStatus;
-use alloc::vec::Vec;
 
-const ADD_RAX_IMM8: &[u8] = &[0x48, 0x83, 0xc0];
-const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];
-const SHIFT_RAX_LEFT_IMM8: &[u8] = &[0x48, 0xc1, 0xe0];
-const MOV_RCX_RAX: &[u8] = &[0x48, 0x89, 0xc1];
-const ADD_RAX_RCX: &[u8] = &[0x48, 0x01, 0xc8];
-const TEST_AL_IMM8: u8 = 0xa8;
-const JE_REL32: &[u8] = &[0x0f, 0x84];
-const JMP_REL32: u8 = 0xe9;
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const JE_REL8: u8 = 0x74;
-const RET: u8 = 0xc3;
-const RET_BYTES: u8 = 1;
 const STACK_ALIGNMENT_BYTES: u8 = 16;
 const STACK_ALIGNMENT_MASK: u8 = STACK_ALIGNMENT_BYTES - 1;
 
@@ -46,7 +35,7 @@ fn scale_bytes(scale: Scale, length: VectorLength) -> usize {
 
 /// Return the effective guest address in RAX, with 64-bit wrapping arithmetic.
 /// CPA2 is disabled; translation owns TBI handling. Clobbers RCX; RDI/R15 survive.
-pub(crate) fn address(code: &mut Vec<u8>, operand: Address, length: VectorLength) {
+pub(crate) fn address(code: &mut Code, operand: Address, length: VectorLength) {
     match operand.offset {
         Offset::Immediate { value, scale } => {
             load(code, operand.base);
@@ -56,11 +45,10 @@ pub(crate) fn address(code: &mut Vec<u8>, operand: Address, length: VectorLength
                 return;
             }
             if let Ok(short) = i8::try_from(displacement) {
-                code.extend(ADD_RAX_IMM8);
-                code.push(short as u8);
+                code.asm().alu_imm8(Alu::Add, Size::Qword, Rax, short);
             } else {
-                code.extend(ADD_RAX_IMM32);
-                code.extend(displacement.to_le_bytes());
+                code.asm()
+                    .alu_accumulator_imm32(Alu::Add, Size::Qword, displacement);
             }
         }
         Offset::Register {
@@ -70,12 +58,11 @@ pub(crate) fn address(code: &mut Vec<u8>, operand: Address, length: VectorLength
         Offset::Register { index, shift } => {
             load(code, index);
             if shift != 0 {
-                code.extend(SHIFT_RAX_LEFT_IMM8);
-                code.push(shift);
+                code.asm().shift_imm(ShiftOp::Shl, Size::Qword, Rax, shift);
             }
-            code.extend(MOV_RCX_RAX);
+            code.asm().mov(Size::Qword, Rcx, Rax);
             load(code, operand.base);
-            code.extend(ADD_RAX_RCX);
+            code.asm().alu(Alu::Add, Size::Qword, Rax, Rcx);
         }
     }
 }
@@ -83,33 +70,30 @@ pub(crate) fn address(code: &mut Vec<u8>, operand: Address, length: VectorLength
 /// Check SP before applying the displacement. Requires SA/SA0 enabled, with
 /// CHECKSPNONEACTIVE true. Prefetches must not call this. The caller patches
 /// the fault site to its cleanup.
-pub(crate) fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64) -> Option<usize> {
+pub(crate) fn check_sp(code: &mut Code, base: Register, pc: u64) -> Option<usize> {
     if base != Register::Sp {
         return None;
     }
     load(code, Register::Sp);
-    code.push(TEST_AL_IMM8);
-    code.push(STACK_ALIGNMENT_MASK);
-    code.extend(JE_REL32);
-    let aligned = code.len();
-    code.extend(0_i32.to_le_bytes());
+    let mut asm = code.asm();
+    asm.test_accumulator_imm(Size::Byte, i32::from(STACK_ALIGNMENT_MASK));
+    let aligned = asm.jcc(Cond::E);
     service::fault(code, MemoryStatus::StackAlignment, pc);
-    code.push(JMP_REL32);
-    let failed = code.len();
-    code.extend(0_i32.to_le_bytes());
-    let destination = code.len();
-    service::patch_branch(code, aligned, destination);
-    Some(failed)
+    let mut asm = code.asm();
+    let failed = asm.jmp();
+    asm.bind(aligned);
+    Some(failed.offset())
 }
 
 /// After family scratch cleanup, return a failed inner body to its outer entry.
 /// The outer entry CALLs the body and owns POP_R15; this RET cannot bypass it.
 /// Success (EAX=0) falls through to the next translated guest instruction.
-pub(crate) fn return_if_failed(code: &mut Vec<u8>) {
-    code.extend(TEST_EAX_EAX);
-    code.push(JE_REL8);
-    code.push(RET_BYTES);
-    code.push(RET);
+pub(crate) fn return_if_failed(code: &mut Code) {
+    let mut asm = code.asm();
+    asm.test(Size::Dword, Rax, Rax);
+    let succeeded = asm.jcc8(Cond::E);
+    asm.ret();
+    asm.bind(succeeded);
 }
 
 #[cfg(test)]

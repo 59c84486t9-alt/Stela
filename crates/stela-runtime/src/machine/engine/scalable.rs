@@ -1,6 +1,6 @@
 //! SVE and SME instructions that passed their access checks
 //! (`machine::streaming`), run one at a time as context leaves of the shared
-//! compiler (`stela_compiler::extended::prepare_leaf`) on the PE's scalable
+//! compiler (a `Features::LEAF | Features::CONTEXT` plan) on the PE's scalable
 //! state (`crate::scalable`) at the streaming vector length. The leaf's
 //! profile is the PE's mode (PSTATE.SM and ZA) and the chip's scalable
 //! features the engine implements; leaves are cached by PC, word and profile
@@ -30,7 +30,7 @@ use crate::machine::{
 use crate::scalable::ScalableState;
 use alloc::{format, string::String, vec::Vec};
 use stela_compiler::{
-    GuestAddress, GuestState,
+    GuestAddress, GuestState, Options, TargetCpu,
     aarch64::{
         floating::features::NumericalFeatures,
         scalable::{
@@ -40,9 +40,12 @@ use stela_compiler::{
         },
         sme::movement,
     },
-    block::scalable::{
-        AdmittedScalableNumericalInstruction, admit_scalable_numerical_instruction,
-        decode_scalable_numerical_instruction,
+    block::{
+        BlockProfile, CompilationPlan, Features,
+        scalable::{
+            AdmittedScalableNumericalInstruction, admit_scalable_numerical_instruction,
+            decode_scalable_numerical_instruction,
+        },
     },
     context::{
         ExecutionContext,
@@ -51,7 +54,7 @@ use stela_compiler::{
             MemoryRequirements, MemoryStatus, SpAlignmentRequirement, flags, profile_requirements,
         },
     },
-    extended::{self, ScalableProfile},
+    scalable_context::ScalableProfile,
 };
 
 /// The numerical features of every Apple chip's identification: no
@@ -168,7 +171,16 @@ impl Movprfx {
     }
 }
 
-/// A context leaf's entry: `extended::prepare_leaf`'s two-argument ABI.
+/// What a PE's context leaf of `profile` compiles for.
+fn leaf_options(profile: ScalableProfile, target: TargetCpu) -> Options {
+    Options::new(
+        BlockProfile::new(Features::LEAF | Features::CONTEXT),
+        target,
+    )
+    .with_scalable(profile)
+}
+
+/// A context leaf's entry: the two-argument context ABI.
 type Entry = unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext);
 
 /// An installed leaf and what its memory accesses require of the PE.
@@ -732,7 +744,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         .iter()
                         .flat_map(|word| word.to_le_bytes())
                         .collect();
-                    extended::prepare_leaf(&source, GuestAddress(pc), profile, self.target).is_ok()
+                    let options = leaf_options(profile, self.target);
+                    stela_compiler::compile(&source, GuestAddress(pc), &options).is_ok()
                 }
                 Err(_) => false,
             }
@@ -773,9 +786,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .iter()
             .flat_map(|word| word.to_le_bytes())
             .collect();
-        let prepared = extended::prepare_leaf(&source, GuestAddress(pc), profile, self.target)
-            .map_err(|error| error.0)?;
-        let native = &prepared.native.x86_64_code;
+        let plan = CompilationPlan::new(
+            &source,
+            GuestAddress(pc),
+            &leaf_options(profile, self.target),
+        )
+        .map_err(|error| error.0)?;
+        let memory = plan
+            .memory_requirements()
+            .ok_or_else(|| String::from("a context leaf without memory requirements"))?;
+        let compiled = plan.compile().map_err(|error| error.0)?;
+        let native = &compiled.native.x86_64_code;
         let code = match self.host.install(native) {
             Ok(code) => code,
             Err(InstallError::Full) => {
@@ -786,10 +807,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         };
         self.statistics.compiled += 1;
-        let leaf = Leaf {
-            code,
-            memory: prepared.memory_requirements,
-        };
+        let leaf = Leaf { code, memory };
         self.scalable_leaves.insert((pc, word, profile), leaf);
         Ok(leaf)
     }

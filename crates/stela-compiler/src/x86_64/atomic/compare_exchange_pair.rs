@@ -1,9 +1,10 @@
 //! CASP through same-width atomic updates (CMPXCHG8B/CMPXCHG16B), or for a
 //! single agent a plain load, compare, CMOVNE and store.
 use super::{
-    DWORD_BYTES, QWORD_BYTES, ValueRegister, XOR_EAX_EAX, XOR_ECX_ECX, commit_rax, input_rax,
-    input_rax_keeping_flags, input_rcx, input_rcx_keeping_flags, locked_compare_exchange,
+    ADDRESS, DWORD_BYTES, QWORD_BYTES, commit_rax, input_rax, input_rax_keeping_flags, input_rcx,
+    input_rcx_keeping_flags, locked_compare_exchange,
 };
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -11,50 +12,16 @@ use crate::{
         atomic::{Kind, Operand},
     },
 };
-use alloc::vec::Vec;
+use Gpr::{R8, R9, Rax, Rbx, Rcx, Rdx};
+use Size::{Dword, Qword};
 
 const WORD_PAIR_BYTES: u8 = 2 * DWORD_BYTES;
 const DOUBLEWORD_PAIR_BYTES: u8 = 2 * QWORD_BYTES;
 const WORD_BITS: u8 = 32;
-const SHL_RCX_WORD_BITS: &[u8] = &[0x48, 0xc1, 0xe1, WORD_BITS];
-const SHR_RCX_WORD_BITS: &[u8] = &[0x48, 0xc1, 0xe9, WORD_BITS];
-const OR_RAX_RCX: &[u8] = &[0x48, 0x09, 0xc8];
-const OR_RCX_R8: &[u8] = &[0x4c, 0x09, 0xc1];
-const MOV_R8_RCX: &[u8] = &[0x49, 0x89, 0xc8];
-const MOV_RCX_RAX: &[u8] = &[0x48, 0x89, 0xc1];
-const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
-const MOV_RAX_RCX: &[u8] = &[0x48, 0x89, 0xc8];
-const MOV_R8_RDX: &[u8] = &[0x49, 0x89, 0xd0];
-const MOV_R9_RBX: &[u8] = &[0x49, 0x89, 0xd9];
-const MOV_RDX_RCX: &[u8] = &[0x48, 0x89, 0xca];
-const MOV_RBX_RCX: &[u8] = &[0x48, 0x89, 0xcb];
-const MOV_EDX_ECX: &[u8] = &[0x89, 0xca];
-const MOV_EBX_ECX: &[u8] = &[0x89, 0xcb];
-const MOV_EAX_EDX: &[u8] = &[0x89, 0xd0];
-const MOV_RBX_R9: &[u8] = &[0x4c, 0x89, 0xcb];
-const MOV_RAX_RDX: &[u8] = &[0x48, 0x89, 0xd0];
-const XOR_EDX_EDX: &[u8] = &[0x31, 0xd2];
-const XOR_EBX_EBX: &[u8] = &[0x31, 0xdb];
-const LOCK_XADD_RDX_RAX: &[u8] = &[0xf0, 0x48, 0x0f, 0xc1, 0x02];
-const LOCK_CMPXCHG8B_R8: &[u8] = &[0xf0, 0x41, 0x0f, 0xc7, 0x08];
-const LOCK_CMPXCHG16B_R8: &[u8] = &[0xf0, 0x49, 0x0f, 0xc7, 0x08];
-const MOV_R8_RDX_MEMORY: &[u8] = &[0x4c, 0x8b, 0x02];
-const MOV_R9_RDX_MEMORY: &[u8] = &[0x4c, 0x8b, 0x0a];
-/// `mov r9, [rdx+8]`: the high doubleword.
-const MOV_R9_RDX_HIGH_MEMORY: &[u8] = &[0x4c, 0x8b, 0x4a, QWORD_BYTES];
-const MOV_RDX_MEMORY_RAX: &[u8] = &[0x48, 0x89, 0x02];
-const MOV_RDX_MEMORY_RCX: &[u8] = &[0x48, 0x89, 0x0a];
-/// `mov [rdx+8], rcx`.
-const MOV_RDX_HIGH_MEMORY_RCX: &[u8] = &[0x48, 0x89, 0x4a, QWORD_BYTES];
-const MOV_RAX_R8: &[u8] = &[0x4c, 0x89, 0xc0];
-const MOV_RAX_R9: &[u8] = &[0x4c, 0x89, 0xc8];
-const CMP_RAX_R9: &[u8] = &[0x4c, 0x39, 0xc8];
-const XOR_RAX_R8: &[u8] = &[0x4c, 0x31, 0xc0];
-const XOR_RCX_R9: &[u8] = &[0x4c, 0x31, 0xc9];
-const CMOVNE_RAX_R8: &[u8] = &[0x49, 0x0f, 0x45, 0xc0];
-const CMOVNE_RCX_R9: &[u8] = &[0x49, 0x0f, 0x45, 0xc9];
+/// `[rdx+8]`: the high doubleword.
+const HIGH_ADDRESS: Mem = Mem::base(Rdx, QWORD_BYTES as i32);
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, plain: bool) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu, plain: bool) {
     let Kind::CompareExchangePair { compare, source } = operand.kind else {
         unreachable!("pair compare-exchange emitter receives a CASP operand");
     };
@@ -69,24 +36,26 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu, pla
 }
 
 /// Pack the compare pair into RAX and the new pair into RCX, low word first.
-fn pack_word_pairs(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
+fn pack_word_pairs(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
     input_rax(code, DWORD_BYTES, compare[0]);
     if compare[1] != Register::Zero {
         input_rcx(code, DWORD_BYTES, compare[1]);
-        code.extend(SHL_RCX_WORD_BITS);
-        code.extend(OR_RAX_RCX);
+        let mut asm = code.asm();
+        asm.shift_imm(ShiftOp::Shl, Qword, Rcx, WORD_BITS);
+        asm.alu(Alu::Or, Qword, Rax, Rcx);
     }
     input_rcx(code, DWORD_BYTES, source[0]);
     if source[1] != Register::Zero {
-        code.extend(MOV_R8_RCX);
+        code.asm().mov(Qword, R8, Rcx);
         input_rcx(code, DWORD_BYTES, source[1]);
-        code.extend(SHL_RCX_WORD_BITS);
-        code.extend(OR_RCX_R8);
+        let mut asm = code.asm();
+        asm.shift_imm(ShiftOp::Shl, Qword, Rcx, WORD_BITS);
+        asm.alu(Alu::Or, Qword, Rcx, R8);
     }
 }
 
 fn word_pair(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     compare: [Register; 2],
     source: [Register; 2],
     target: TargetCpu,
@@ -98,16 +67,19 @@ fn word_pair(
         // (Arm `Unpredictable_WRITEFAILEDCAS`). The load comes first, so a
         // read that would fault reports WnR 0.
         pack_word_pairs(code, compare, source);
-        code.extend(MOV_R9_RDX_MEMORY);
-        code.extend(CMP_RAX_R9);
-        code.extend(CMOVNE_RCX_R9);
-        code.extend(MOV_RDX_MEMORY_RCX);
-        code.extend(MOV_RAX_R9);
+        let mut asm = code.asm();
+        asm.mov_load(Qword, R9, ADDRESS);
+        asm.alu(Alu::Cmp, Qword, Rax, R9);
+        asm.cmov(Cond::Ne, Qword, Rcx, R9);
+        asm.mov_store(Qword, ADDRESS, Rcx);
+        asm.mov(Qword, Rax, R9);
     } else if source == compare {
         // Equal compare/new pairs always leave RAM unchanged. XADD of zero still
         // checks write permission and atomically returns the complete old pair.
-        code.extend(XOR_EAX_EAX);
-        code.extend(LOCK_XADD_RDX_RAX);
+        let mut asm = code.asm();
+        asm.alu(Alu::Xor, Dword, Rax, Rax);
+        asm.lock();
+        asm.xadd(Qword, ADDRESS, Rax);
     } else if target.supports(TargetCpu::Cx8)
         && compare[1] != Register::Zero
         && source[1] != Register::Zero
@@ -116,41 +88,45 @@ fn word_pair(
         return;
     } else {
         pack_word_pairs(code, compare, source);
-        locked_compare_exchange(code, QWORD_BYTES, ValueRegister::Rcx);
+        locked_compare_exchange(code, QWORD_BYTES, Rcx);
     }
     commit_word_pair(code, compare);
 }
 
-fn commit_word_pair(code: &mut Vec<u8>, compare: [Register; 2]) {
+fn commit_word_pair(code: &mut Code, compare: [Register; 2]) {
     // Preserve the upper old word before normalizing and committing the lower
     // word. Both returned W values independently zero-extend into their X slots.
+    let mut asm = code.asm();
     if compare[1] != Register::Zero {
-        code.extend(MOV_RCX_RAX);
-        code.extend(SHR_RCX_WORD_BITS);
+        asm.mov(Qword, Rcx, Rax);
+        asm.shift_imm(ShiftOp::Shr, Qword, Rcx, WORD_BITS);
     }
-    code.extend(MOV_EAX_EAX);
+    asm.mov(Dword, Rax, Rax);
     commit_rax(code, DWORD_BYTES, compare[0]);
     if compare[1] != Register::Zero {
-        code.extend(MOV_RAX_RCX);
+        code.asm().mov(Qword, Rax, Rcx);
         commit_rax(code, DWORD_BYTES, compare[1]);
     }
 }
 
-fn word_pair_cx8(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
-    code.extend(MOV_R8_RDX);
+fn word_pair_cx8(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
+    code.asm().mov(Qword, R8, Rdx);
     input_rax(code, DWORD_BYTES, compare[0]);
     input_rcx(code, DWORD_BYTES, compare[1]);
-    code.extend(MOV_EDX_ECX);
-    code.extend(MOV_R9_RBX);
+    let mut asm = code.asm();
+    asm.mov(Dword, Rdx, Rcx);
+    asm.mov(Qword, R9, Rbx);
     input_rcx(code, DWORD_BYTES, source[0]);
-    code.extend(MOV_EBX_ECX);
+    code.asm().mov(Dword, Rbx, Rcx);
     input_rcx(code, DWORD_BYTES, source[1]);
-    code.extend(LOCK_CMPXCHG8B_R8);
-    code.extend(MOV_RBX_R9);
+    let mut asm = code.asm();
+    asm.lock();
+    asm.cmpxchg8b(Mem::base(R8, 0));
+    asm.mov(Qword, Rbx, R9);
     // Every input half is zero-extended. Failed CX8 writes EAX/EDX, while success
     // retains those staged halves, so both paths return complete W results.
     commit_rax(code, DWORD_BYTES, compare[0]);
-    code.extend(MOV_EAX_EDX);
+    code.asm().mov(Dword, Rax, Rdx);
     commit_rax(code, DWORD_BYTES, compare[1]);
 }
 
@@ -161,54 +137,60 @@ fn word_pair_cx8(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 
 /// failed comparison's old value (Arm `Unpredictable_WRITEFAILEDCAS`). The
 /// pair is 16-byte aligned, so both halves are in one page. No CMPXCHG16B,
 /// and RBX stays the host's.
-fn plain_doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
-    code.extend(MOV_R8_RDX_MEMORY);
-    code.extend(MOV_R9_RDX_HIGH_MEMORY);
+fn plain_doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
+    let mut asm = code.asm();
+    asm.mov_load(Qword, R8, ADDRESS);
+    asm.mov_load(Qword, R9, HIGH_ADDRESS);
     input_rax(code, QWORD_BYTES, compare[0]);
     input_rcx(code, QWORD_BYTES, compare[1]);
-    code.extend(XOR_RAX_R8);
-    code.extend(XOR_RCX_R9);
-    code.extend(OR_RAX_RCX);
+    let mut asm = code.asm();
+    asm.alu(Alu::Xor, Qword, Rax, R8);
+    asm.alu(Alu::Xor, Qword, Rcx, R9);
+    asm.alu(Alu::Or, Qword, Rax, Rcx);
     input_rax_keeping_flags(code, QWORD_BYTES, source[0]);
     input_rcx_keeping_flags(code, QWORD_BYTES, source[1]);
-    code.extend(CMOVNE_RAX_R8);
-    code.extend(CMOVNE_RCX_R9);
-    code.extend(MOV_RDX_MEMORY_RAX);
-    code.extend(MOV_RDX_HIGH_MEMORY_RCX);
-    code.extend(MOV_RAX_R8);
+    let mut asm = code.asm();
+    asm.cmov(Cond::Ne, Qword, Rax, R8);
+    asm.cmov(Cond::Ne, Qword, Rcx, R9);
+    asm.mov_store(Qword, ADDRESS, Rax);
+    asm.mov_store(Qword, HIGH_ADDRESS, Rcx);
+    asm.mov(Qword, Rax, R8);
     commit_rax(code, QWORD_BYTES, compare[0]);
     if compare[1] != Register::Zero {
-        code.extend(MOV_RAX_R9);
+        code.asm().mov(Qword, Rax, R9);
         commit_rax(code, QWORD_BYTES, compare[1]);
     }
 }
 
-fn doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Register; 2]) {
-    code.extend(MOV_R8_RDX);
+fn doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Register; 2]) {
+    code.asm().mov(Qword, R8, Rdx);
     if source == compare {
-        code.extend(MOV_R9_RBX);
+        let mut asm = code.asm();
+        asm.mov(Qword, R9, Rbx);
         // CAS128(0, 0) never changes RAM and always returns the old 128 bits,
         // even when the pair comparison would have succeeded.
-        code.extend(XOR_EAX_EAX);
-        code.extend(XOR_EDX_EDX);
-        code.extend(XOR_EBX_EBX);
-        code.extend(XOR_ECX_ECX);
+        for register in [Rax, Rdx, Rbx, Rcx] {
+            asm.alu(Alu::Xor, Dword, register, register);
+        }
     } else {
         input_rax(code, QWORD_BYTES, compare[0]);
         input_rcx(code, QWORD_BYTES, compare[1]);
-        code.extend(MOV_RDX_RCX);
-        code.extend(MOV_R9_RBX);
+        let mut asm = code.asm();
+        asm.mov(Qword, Rdx, Rcx);
+        asm.mov(Qword, R9, Rbx);
         input_rcx(code, QWORD_BYTES, source[0]);
-        code.extend(MOV_RBX_RCX);
+        code.asm().mov(Qword, Rbx, Rcx);
         input_rcx(code, QWORD_BYTES, source[1]);
     }
-    code.extend(LOCK_CMPXCHG16B_R8);
+    let mut asm = code.asm();
+    asm.lock();
+    asm.cmpxchg16b(Mem::base(R8, 0));
     // Restore the host callee-saved register immediately after the only guest
     // memory access. Target faults occur before either compare-pair commit.
-    code.extend(MOV_RBX_R9);
+    asm.mov(Qword, Rbx, R9);
     commit_rax(code, QWORD_BYTES, compare[0]);
     if compare[1] != Register::Zero {
-        code.extend(MOV_RAX_RDX);
+        code.asm().mov(Qword, Rax, Rdx);
         commit_rax(code, QWORD_BYTES, compare[1]);
     }
 }
@@ -217,6 +199,25 @@ fn doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Register
 mod tests {
     use super::*;
     use crate::aarch64::atomic::Order;
+    use alloc::vec::Vec;
+
+    const OR_RAX_RCX: &[u8] = &[0x48, 0x09, 0xc8];
+    const MOV_R9_RBX: &[u8] = &[0x49, 0x89, 0xd9];
+    const MOV_RBX_R9: &[u8] = &[0x4c, 0x89, 0xcb];
+    const LOCK_CMPXCHG16B_R8: &[u8] = &[0xf0, 0x49, 0x0f, 0xc7, 0x08];
+    const MOV_R8_RDX_MEMORY: &[u8] = &[0x4c, 0x8b, 0x02];
+    const MOV_R9_RDX_MEMORY: &[u8] = &[0x4c, 0x8b, 0x0a];
+    const MOV_R9_RDX_HIGH_MEMORY: &[u8] = &[0x4c, 0x8b, 0x4a, 8];
+    const MOV_RDX_MEMORY_RAX: &[u8] = &[0x48, 0x89, 0x02];
+    const MOV_RDX_MEMORY_RCX: &[u8] = &[0x48, 0x89, 0x0a];
+    const MOV_RDX_HIGH_MEMORY_RCX: &[u8] = &[0x48, 0x89, 0x4a, 8];
+    const MOV_RAX_R8: &[u8] = &[0x4c, 0x89, 0xc0];
+    const MOV_RAX_R9: &[u8] = &[0x4c, 0x89, 0xc8];
+    const CMP_RAX_R9: &[u8] = &[0x4c, 0x39, 0xc8];
+    const XOR_RAX_R8: &[u8] = &[0x4c, 0x31, 0xc0];
+    const XOR_RCX_R9: &[u8] = &[0x4c, 0x31, 0xc9];
+    const CMOVNE_RAX_R8: &[u8] = &[0x49, 0x0f, 0x45, 0xc0];
+    const CMOVNE_RCX_R9: &[u8] = &[0x49, 0x0f, 0x45, 0xc9];
 
     fn pair(bytes: u8, compare: [Register; 2], source: [Register; 2], plain: bool) -> Vec<u8> {
         let operand = Operand {
@@ -225,9 +226,9 @@ mod tests {
             order: Order::AcquireRelease,
             kind: Kind::CompareExchangePair { compare, source },
         };
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit(&mut code, &operand, TargetCpu::detect(), plain);
-        code
+        code.into_bytes()
     }
 
     fn has(code: &[u8], bytes: &[u8]) -> bool {
@@ -242,7 +243,7 @@ mod tests {
         let word_recipe = [
             MOV_R9_RDX_MEMORY,
             CMP_RAX_R9,
-            CMOVNE_RCX_R9,
+            &[0x49, 0x0f, 0x45, 0xc9],
             MOV_RDX_MEMORY_RCX,
             MOV_RAX_R9,
         ]

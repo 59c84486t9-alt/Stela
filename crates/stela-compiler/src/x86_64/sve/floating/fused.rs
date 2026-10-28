@@ -1,4 +1,6 @@
 //! SVE fused multiply-add: FMA3, or an exact-product SSE2 path.
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -15,9 +17,8 @@ use crate::{
             read_predicate_mask,
         },
         simd::numerical::{
-            ArithmeticOpcode, FusedOpcode, VZEROUPPER, emit_fma, emit_opcode_to,
-            prepare_vector_input_range, prepare_vector_result_range, rounding_control,
-            vector_exponent_range,
+            ArithmeticOpcode, FusedOpcode, emit_fma, emit_opcode_to, prepare_vector_input_range,
+            prepare_vector_result_range, rounding_control, vector_exponent_range,
         },
         sve::floating::classify::guard_active_exception_enables,
     },
@@ -31,9 +32,6 @@ const CONSTANT_SCRATCH: u8 = 3;
 const ADDEND: u8 = 6;
 const ACTIVE: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const SINGLE_BROADCAST_STRIDE: u8 = 0x55;
 const DOUBLE_LOW_BROADCAST: u8 = 0x44;
 const DOUBLE_HIGH_BROADCAST: u8 = 0xee;
@@ -42,41 +40,34 @@ const BENIGN_ADDEND_INCREMENT: u32 = 1;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const TEST_ECX_ECX: &[u8] = &[0x85, 0xc9];
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
-fn broadcast(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
     if format == Format::Single {
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend((bits as u32).to_le_bytes());
+        code.asm().mov_imm32(Rax, bits as u32);
     } else {
-        code.extend(MOV_RAX_IMMEDIATE);
-        code.extend(bits.to_le_bytes());
+        code.asm().mov_imm64(Rax, bits);
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (CONSTANT_SCRATCH << MODRM_REGISTER_SHIFT) | GPR_RAX);
+    code.asm()
+        .simd(Host::MoveGprQword, CONSTANT_SCRATCH, Rax, target);
     if format == Format::Single {
-        Host::ShuffleDword.register(code, CONSTANT_SCRATCH, CONSTANT_SCRATCH, target);
-        code.push(REPEAT_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            CONSTANT_SCRATCH,
+            Rm::Xmm(CONSTANT_SCRATCH),
+            REPEAT_LOW_DWORD,
+            target,
+        );
     } else {
         Host::UnpackLowQword.register(code, CONSTANT_SCRATCH, CONSTANT_SCRATCH, target);
     }
 }
 
 /// Inactive 2 + 1*1 and every signed variant are exact normal results.
-fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: TargetCpu) {
+fn benign_inactive(code: &mut Code, format: Format, input: u8, target: TargetCpu) {
     let increment = if input == ADDEND {
         BENIGN_ADDEND_INCREMENT
     } else {
@@ -91,7 +82,7 @@ fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: Target
 }
 
 fn load_right(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     source: Source,
     format: Format,
     chunk: usize,
@@ -115,17 +106,12 @@ fn load_right(
             }
             Format::Half => unreachable!("Half uses exact completion"),
         };
-        Host::ShuffleDword.register(code, RIGHT, RIGHT, target);
-        code.push(order);
+        code.asm()
+            .simd_imm(Host::ShuffleDword, RIGHT, Rm::Xmm(RIGHT), order, target);
     }
 }
 
-fn negate_baseline(
-    code: &mut Vec<u8>,
-    operation: FusedOperation,
-    format: Format,
-    target: TargetCpu,
-) {
+fn negate_baseline(code: &mut Code, operation: FusedOperation, format: Format, target: TargetCpu) {
     if !operation.negate_left() && !operation.negate_addend() {
         return;
     }
@@ -144,21 +130,12 @@ fn negate_baseline(
     }
 }
 
-fn fused_opcode(operation: FusedOperation) -> FusedOpcode {
-    match operation {
-        FusedOperation::Add => FusedOpcode::MultiplyAdd,
-        FusedOperation::Subtract => FusedOpcode::NegativeMultiplyAdd,
-        FusedOperation::NegatedAdd => FusedOpcode::NegativeMultiplySubtract,
-        FusedOperation::NegatedSubtract => FusedOpcode::MultiplySubtract,
-    }
-}
-
 /// Emit the fourteen fused forms, natively only for normal single and double
 /// values; software completion handles the rest. RDI/R15 and the guest sources
 /// survive; RAX/RCX/RDX, flags and XMM0-7 are clobbered. `TargetCpu::Fma`
 /// implies OS-enabled AVX state; the baseline target never emits VEX.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -234,12 +211,12 @@ pub(in crate::x86_64) fn emit(
                 code,
                 operand.format,
                 Shape::Vector128,
-                fused_opcode(operation),
+                FusedOpcode::from(operation),
                 target,
             );
             // FMA has completed; clean upper AVX state before legacy guards or any exit.
             // Every host SIMD register is caller-volatile under this backend ABI.
-            code.extend(VZEROUPPER);
+            code.asm().vzeroupper();
         } else {
             negate_baseline(code, operation, operand.format, target);
             emit_opcode_to(
@@ -253,7 +230,7 @@ pub(in crate::x86_64) fn emit(
             // An exact normal product allows a separate ADD with one rounding;
             // any product status rejects the instruction.
             numerical::capture_status(code, &frame);
-            code.extend(TEST_ECX_ECX);
+            code.asm().test(Size::Dword, Rcx, Rcx);
             reject(code, &mut failures);
             prepare_vector_result_range(code);
             vector_exponent_range(code, operand.format, Shape::Vector128, LEFT);
@@ -272,14 +249,13 @@ pub(in crate::x86_64) fn emit(
         vector_exponent_range(code, operand.format, Shape::Vector128, LEFT);
         reject(code, &mut failures);
         numerical::capture_status(code, &frame);
-        code.extend(TEST_ECX_IMMEDIATE);
-        code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+        code.asm()
+            .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
         reject(code, &mut failures);
-        code.extend(MOV_EAX_ECX);
-        code.push(AND_EAX_IMMEDIATE);
-        code.extend(MXCSR_INEXACT.to_le_bytes());
-        code.extend(SHR_EAX_IMMEDIATE);
-        code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Rax, Rcx);
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
         numerical::add_fpsr(code, &frame);
         if operand.predicate.is_some() {
             load_z_chunk(code, operand.destination, chunk, RIGHT, length, target);

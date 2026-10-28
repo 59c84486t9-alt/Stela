@@ -690,7 +690,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     let requirement = self.requirement(RequirementKind::Native(
                         "another PE's CPU power change does not settle on this PE's machine",
                     ));
-                    self.degrade(requirement)?;
+                    self.degrade(requirement);
                 }
             }
         }
@@ -873,7 +873,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.forwards += 1;
         self.statistics.sync_ticks += self.host.counter().wrapping_sub(started);
         // The mail applied meanwhile settles first: its refusal is this
-        // access's in strict mode.
+        // access's.
         applied.map_err(|stop| {
             DeviceError::TransferRefused(alloc::format!("while forwarded: {stop:?}"))
         })?;

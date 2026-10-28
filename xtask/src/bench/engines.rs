@@ -8,7 +8,10 @@ use super::fixtures::{Arena, PADDING, PADDING_SPAN, PADDING_STEP};
 use anyhow::{Result, bail, ensure};
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use std::sync::Arc;
-use stela_compiler::{GuestAddress, GuestState, TargetCpu, block::BlockProfile};
+use stela_compiler::{
+    GuestAddress, GuestState, TargetCpu,
+    block::{BlockProfile, Features},
+};
 use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use stela_runtime::hosted::{hardware::Hardware, host::ProcessHost, pe, tables::Tables};
@@ -63,8 +66,8 @@ pub(super) fn compile_blocks(
     use stela_compiler::x86_64::MemoryChecks;
     let target = TargetCpu::detect();
     let block_profile = match profile {
-        Profile::Ordinary => BlockProfile::Ordinary,
-        Profile::System => BlockProfile::SystemModeV1,
+        Profile::Ordinary => BlockProfile::ORDINARY,
+        Profile::System => BlockProfile::new(Features::SYSTEM_MODE),
     };
     let mut seen = std::collections::BTreeSet::new();
     let mut pending = vec![entry];
@@ -76,15 +79,17 @@ pub(super) fn compile_blocks(
         let source = &code[(pc - entry) as usize..];
         let analysis =
             analyze_with_profile(source, GuestAddress(pc), block_profile).map_err(refused)?;
-        let plan = CompilationPlan::new(source, GuestAddress(pc), block_profile, target)
-            .map_err(refused)?;
+        let options = match profile {
+            Profile::Ordinary => stela_compiler::Options::new(block_profile, target),
+            Profile::System => stela_compiler::Options::new(block_profile, target)
+                .with_memory_checks(MemoryChecks::system(true, false, true, false)),
+        };
+        let plan = CompilationPlan::new(source, GuestAddress(pc), &options).map_err(refused)?;
         let plan = match profile {
             Profile::Ordinary => plan.with_resident_loops(),
-            Profile::System => plan
-                .with_memory_checks(MemoryChecks::system(true, false, true, false))
-                .map_err(refused)?,
+            Profile::System => plan,
         };
-        let resident = plan.profile() == BlockProfile::OrdinaryResidentV1;
+        let resident = plan.profile() == BlockProfile::new(Features::RESIDENT_LOOPS);
         let compiled = plan.compile().map_err(refused)?;
         blocks.push(NativeBlock {
             pc,
@@ -206,7 +211,7 @@ impl Blocks {
         let mut runtime = BlockRuntime::new_for_target(
             ADDRESS_SPACE,
             cache.path().to_owned(),
-            BlockProfile::Ordinary,
+            BlockProfile::ORDINARY,
             TargetCpu::detect(),
         );
         runtime.register_code(GuestAddress(entry), code.to_vec())?;

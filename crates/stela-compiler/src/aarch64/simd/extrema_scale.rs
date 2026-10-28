@@ -1,4 +1,5 @@
 //! AdvSIMD FAMIN/FAMAX (FEAT_FAMINMAX) and FSCALE (FEAT_FP8).
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation};
 
 use super::arithmetic::Shape;
@@ -35,8 +36,7 @@ pub struct Operand {
 
 /// V31 is ordinary data in every position. Q=0 writes clear the upper 64 bits.
 /// The one-double arrangement is reserved; scalar/pairwise neighbors decline.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     for (mask, half) in [(HALF_MASK, true), (ORDINARY_MASK, false)] {
         let kind = match (word & mask, half) {
             (HALF_FAMAX, true) | (FAMAX, false) => Kind::Absolute(AbsoluteMinMaxOperation::Maximum),
@@ -57,7 +57,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             Shape::Vector128
         };
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand {
             kind,
@@ -109,7 +109,7 @@ mod tests {
                         let word =
                             base | q | destination | (left << LEFT_SHIFT) | (right << RIGHT_SHIFT);
                         let expected = if format == Format::Double && shape == Shape::Vector64 {
-                            Err(())
+                            Err(Unsupported)
                         } else {
                             Ok(Operand {
                                 kind,

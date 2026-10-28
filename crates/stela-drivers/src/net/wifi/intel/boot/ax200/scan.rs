@@ -223,6 +223,34 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
     pub fn request(&self) -> Option<&protocol::Request> {
         self.scanner.request()
     }
+    /// The channels a passive scan may cover, in the firmware's MCC order:
+    /// valid in its channel list, enabled by the NVM SKU and covered by the
+    /// selected country's 20 MHz rules, at most one request's worth.
+    pub fn channels(&mut self) -> Vec<Channel> {
+        let native = self.native;
+        let Some(parts) = self.mac.country.scan_policy_parts() else {
+            return Vec::new();
+        };
+        let hardware = policy::Hardware {
+            board: parts.board,
+            selection: parts.selection,
+            channels: parts.channels,
+            native,
+        };
+        hardware
+            .channels
+            .iter()
+            .filter_map(|observation| {
+                let band = match observation.channel.band {
+                    crate::net::wifi::intel::mcc::channel::Band::Ghz2 => Band::Ghz2,
+                    crate::net::wifi::intel::mcc::channel::Band::Ghz5 => Band::Ghz5,
+                    crate::net::wifi::intel::mcc::channel::Band::Ghz6 => return None,
+                };
+                hardware.channel(band, observation.channel.number)
+            })
+            .take(protocol::MAX_CHANNELS)
+            .collect()
+    }
     pub fn command_bytes(&self) -> Option<&[u8]> {
         self.command_bytes.as_deref()
     }

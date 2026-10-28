@@ -1,5 +1,6 @@
 //! LSE atomics: LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN, SWP, CAS and CASP.
 use super::{Register, register};
+use crate::aarch64::Unsupported;
 
 const CAS_MASK: u32 = 0x3fa07c00;
 const CAS_CLASS: u32 = 0x08a07c00;
@@ -92,15 +93,14 @@ pub struct Operand {
 }
 
 /// Reserved RMW operations and odd CASP first registers are errors.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let source = register((word >> SOURCE_SHIFT) & REGISTER_MASK, false);
     let destination = register(word & REGISTER_MASK, false);
     let (kind, order, bytes) = if word & CASP_MASK == CASP_CLASS {
         let first_compare = (word >> SOURCE_SHIFT) & REGISTER_MASK;
         let first_source = word & REGISTER_MASK;
         if (first_compare | first_source) & PAIR_FIRST_ODD_BIT != 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         (
             Kind::CompareExchangePair {
@@ -130,7 +130,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             UNSIGNED_MAX_OPCODE => Rmw::UnsignedMax,
             UNSIGNED_MIN_OPCODE => Rmw::UnsignedMin,
             SWAP_OPCODE => Rmw::Swap,
-            _ => return Some(Err(())),
+            _ => return Some(Err(Unsupported)),
         };
         (
             Kind::ReadModifyWrite {
@@ -228,7 +228,7 @@ mod tests {
                                     | if release { CAS_RELEASE } else { 0 };
                                 let decoded = decode(word).unwrap();
                                 if (compare | source) & PAIR_FIRST_ODD_BIT != 0 {
-                                    assert_eq!(decoded, Err(()));
+                                    assert_eq!(decoded, Err(Unsupported));
                                 } else {
                                     assert_eq!(
                                         decoded,
@@ -264,7 +264,7 @@ mod tests {
         for operation in 9..=RMW_OPERATION_MASK {
             assert_eq!(
                 decode(RMW_CLASS | (operation << RMW_OPERATION_SHIFT)),
-                Some(Err(()))
+                Some(Err(Unsupported))
             );
         }
         for word in [

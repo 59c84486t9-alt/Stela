@@ -1,11 +1,14 @@
 //! FP min/max: normal-or-zero S/D selection and normal H integer ordering.
 use super::super::isa::ShiftOpcode;
+use super::numerical::helper_section;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, MOVQ_XMM0_XMM0, branch, clear_scalar, exponent_range, jump,
-    prepare_vector_input_range, read_numerical_vector, resolve, test_control,
+    Condition, INPUT_MINIMUM_EXPONENT, branch, clear_high_qword, clear_scalar, exponent_range,
+    jump, prepare_vector_input_range, read_numerical_vector, resolve, test_control,
     vector_exponent_range, vector_normal_or_zero_range, zero_scalar,
 };
-use super::{Host, commit, packed, read_vector};
+use super::{Host, commit, packed, packed_imm, read_vector};
+use crate::x86_64::asm::{Code, Gpr, Rm};
+use crate::x86_64::asm::{FloatLanes, FloatOp};
 use crate::{
     GuestAddress,
     aarch64::{
@@ -17,7 +20,6 @@ use crate::{
             minmax::{BinaryMode, Operand},
         },
     },
-    block::ExitKind,
 };
 use alloc::vec::Vec;
 
@@ -32,31 +34,12 @@ const SELECTION_SCRATCH: u8 = 3;
 const HALF_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
 const SIGN_MASK_TO_MAGNITUDE_SHIFT: u8 = 1;
 const BITS_PER_BYTE: u32 = u8::BITS;
-const REGISTER_DIRECT: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const SINGLE_SCALAR_PREFIX: u8 = 0xf3;
-const DOUBLE_SCALAR_PREFIX: u8 = 0xf2;
-const DOUBLE_PACKED_PREFIX: u8 = 0x66;
-const SHUFFLE_SINGLE: u8 = 0xc6;
-const UNPACK_LOW_SINGLE: u8 = 0x14;
-const MOVE_HIGH_TO_LOW_SINGLE: u8 = 0x12;
-const UNPACK_LOW_DOUBLE: u8 = 0x14;
-const UNPACK_HIGH_DOUBLE: u8 = 0x15;
 const EVEN_DWORDS: u8 = 0x88;
 const ODD_DWORDS: u8 = 0xdd;
 const SWAP_ADJACENT_WORDS: u8 = 0xb1;
 const EVEN_WORDS: u8 = 0x88;
 const TWO_HALF_BYTES: u8 = 2 * (u16::BITS / BITS_PER_BYTE) as u8;
 const FOUR_HALF_BYTES: u8 = 4 * (u16::BITS / BITS_PER_BYTE) as u8;
-const MOVD_EAX_XMM0: &[u8] = &[0x66, 0x0f, 0x7e, 0xc0];
-const PINSRW_XMM7_EAX_LOW: &[u8] = &[0x66, 0x0f, 0xc4, 0xf8, 0];
-
-#[repr(u8)]
-enum SelectionOpcode {
-    Minimum = 0x5d,
-    Maximum = 0x5f,
-}
 
 fn is_minimum(operation: MinMaxOperation) -> bool {
     matches!(
@@ -66,7 +49,7 @@ fn is_minimum(operation: MinMaxOperation) -> bool {
 }
 
 fn raw_selection(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     shape: Shape,
@@ -86,30 +69,26 @@ fn raw_selection(
         );
         return;
     }
-    match (format, shape) {
-        (Format::Single, Shape::Scalar) => code.push(SINGLE_SCALAR_PREFIX),
-        (Format::Double, Shape::Scalar) => code.push(DOUBLE_SCALAR_PREFIX),
-        (Format::Double, _) => code.push(DOUBLE_PACKED_PREFIX),
-        (Format::Single, _) => (),
+    let lanes = match (format, shape) {
+        (Format::Single, Shape::Scalar) => FloatLanes::ScalarSingle,
+        (Format::Double, Shape::Scalar) => FloatLanes::ScalarDouble,
+        (Format::Double, _) => FloatLanes::PackedDouble,
+        (Format::Single, _) => FloatLanes::PackedSingle,
         (Format::Half, _) => unreachable!("half selection is integer-only"),
-    }
-    let opcode = if is_minimum(operation) {
-        SelectionOpcode::Minimum
-    } else {
-        SelectionOpcode::Maximum
     };
-    code.extend([
-        SSE_ESCAPE,
-        opcode as u8,
-        REGISTER_DIRECT | (destination << REGISTER_SHIFT) | right,
-    ]);
+    let op = if is_minimum(operation) {
+        FloatOp::Min
+    } else {
+        FloatOp::Max
+    };
+    code.asm().float(op, lanes, destination, Rm::Xmm(right));
 }
 
 /// Legacy SSE selects operand2 on a zero tie. Symmetric selection followed by
 /// sign AND (maximum) or OR (minimum) gives Arm's standard zero sign. Plain
 /// AH=1 retains operand2 instead. No inactive scalar lane undergoes FP work.
 fn selection(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     shape: Shape,
@@ -176,25 +155,19 @@ fn selection(
 
 /// Normal half-precision values map to a signed-word order key, and the same
 /// transform restores the bit pattern after integer min/max.
-fn half_order(code: &mut Vec<u8>, vector: u8) {
+fn half_order(code: &mut Code, vector: u8) {
     packed(code, Host::MoveAligned, SIGN_VECTOR, vector);
     ShiftOpcode::ArithmeticWord.emit(code, SIGN_VECTOR, HALF_SIGN_SHIFT);
     ShiftOpcode::RightWord.emit(code, SIGN_VECTOR, SIGN_MASK_TO_MAGNITUDE_SHIFT);
     packed(code, Host::Xor, vector, SIGN_VECTOR);
 }
 
-fn exception_guard(code: &mut Vec<u8>, helper: &mut Vec<usize>) {
+fn exception_guard(code: &mut Code, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
 }
 
-fn input_guard(
-    code: &mut Vec<u8>,
-    format: Format,
-    shape: Shape,
-    source: u8,
-    helper: &mut Vec<usize>,
-) {
+fn input_guard(code: &mut Code, format: Format, shape: Shape, source: u8, helper: &mut Vec<usize>) {
     if shape == Shape::Scalar {
         let zero = if format != Format::Half {
             zero_scalar(code, format, source);
@@ -218,49 +191,25 @@ fn input_guard(
     }
 }
 
-fn helper_section(code: &mut Vec<u8>, helper: &[usize], pc: GuestAddress) {
-    // Scalar zero and normal success have different flags. Every failed guard
-    // has its own helper patch, so success must not depend on stale flags.
-    let success = jump(code);
-    let helper_start = code.len();
-    super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-    let success_start = code.len();
-    for &patch in helper {
-        resolve(code, patch, helper_start);
+fn shuffle(code: &mut Code, opcode: Host, destination: u8, source: u8, control: u8) {
+    packed_imm(code, opcode, destination, source, control);
+}
+
+fn shuffle_single(code: &mut Code, destination: u8, right: u8, control: u8) {
+    code.asm().shufps(destination, Rm::Xmm(right), control);
+}
+
+fn unpack_double(code: &mut Code, destination: u8, right: u8, high: bool) {
+    if high {
+        code.asm().unpckhpd(destination, Rm::Xmm(right));
+    } else {
+        code.asm().unpcklpd(destination, Rm::Xmm(right));
     }
-    resolve(code, success, success_start);
-}
-
-fn shuffle(code: &mut Vec<u8>, opcode: Host, destination: u8, source: u8, control: u8) {
-    packed(code, opcode, destination, source);
-    code.push(control);
-}
-
-fn shuffle_single(code: &mut Vec<u8>, destination: u8, right: u8, control: u8) {
-    code.extend([
-        SSE_ESCAPE,
-        SHUFFLE_SINGLE,
-        REGISTER_DIRECT | (destination << REGISTER_SHIFT) | right,
-        control,
-    ]);
-}
-
-fn unpack_double(code: &mut Vec<u8>, destination: u8, right: u8, high: bool) {
-    code.extend([
-        DOUBLE_PACKED_PREFIX,
-        SSE_ESCAPE,
-        if high {
-            UNPACK_HIGH_DOUBLE
-        } else {
-            UNPACK_LOW_DOUBLE
-        },
-        REGISTER_DIRECT | (destination << REGISTER_SHIFT) | right,
-    ]);
 }
 
 /// Pairwise results fill both words of each pair. Only integer operations run,
 /// so inactive or duplicated lanes have no effect.
-fn half_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, source: u8) {
+fn half_pairs(code: &mut Code, operation: MinMaxOperation, source: u8) {
     shuffle(
         code,
         Host::ShuffleLowWord,
@@ -285,7 +234,7 @@ fn half_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, source: u8) {
     );
 }
 
-fn compact_half_pairs(code: &mut Vec<u8>, shape: Shape, source: u8) {
+fn compact_half_pairs(code: &mut Code, shape: Shape, source: u8) {
     shuffle(code, Host::ShuffleLowWord, source, source, EVEN_WORDS);
     if shape == Shape::Vector128 {
         shuffle(code, Host::ShuffleHighWord, source, source, EVEN_WORDS);
@@ -293,7 +242,7 @@ fn compact_half_pairs(code: &mut Vec<u8>, shape: Shape, source: u8) {
     }
 }
 
-fn vector_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, shape: Shape) {
+fn vector_pairs(code: &mut Code, operation: MinMaxOperation, format: Format, shape: Shape) {
     match format {
         Format::Half => {
             for source in [RESULT_VECTOR, RIGHT_VECTOR] {
@@ -314,16 +263,9 @@ fn vector_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, 
         Format::Single if shape == Shape::Vector64 => {
             // Q0 loads zero both upper qwords. Gather [n0,m0,n1,m1], then
             // compare against [n1,m1,0,0]; only the low two results survive.
-            code.extend([
-                SSE_ESCAPE,
-                UNPACK_LOW_SINGLE,
-                REGISTER_DIRECT | (RESULT_VECTOR << REGISTER_SHIFT) | RIGHT_VECTOR,
-            ]);
-            code.extend([
-                SSE_ESCAPE,
-                MOVE_HIGH_TO_LOW_SINGLE,
-                REGISTER_DIRECT | (RIGHT_VECTOR << REGISTER_SHIFT) | RESULT_VECTOR,
-            ]);
+            let mut asm = code.asm();
+            asm.unpcklps(RESULT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
+            asm.movhlps(RIGHT_VECTOR, Rm::Xmm(RESULT_VECTOR));
             selection(code, operation, format, shape, RESULT_VECTOR, RIGHT_VECTOR);
         }
         Format::Single => {
@@ -341,7 +283,7 @@ fn vector_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, 
     }
 }
 
-fn finish_binary(code: &mut Vec<u8>, format: Format, shape: Shape, destination: u8) {
+fn finish_binary(code: &mut Code, format: Format, shape: Shape, destination: u8) {
     if shape == Shape::Scalar {
         test_control(code, FPCR_NEP);
         let merge = branch(code, Condition::NotZero);
@@ -353,17 +295,18 @@ fn finish_binary(code: &mut Vec<u8>, format: Format, shape: Shape, destination: 
         let merge_target = code.len();
         resolve(code, merge, merge_target);
         if format == Format::Half {
-            code.extend(MOVD_EAX_XMM0);
-            code.extend(PINSRW_XMM7_EAX_LOW);
+            let mut asm = code.asm();
+            asm.movd_from_xmm(Gpr::Rax, RESULT_VECTOR);
+            asm.pinsrw(ORIGINAL_LEFT_VECTOR, Gpr::Rax, 0);
             packed(code, Host::MoveAligned, RESULT_VECTOR, ORIGINAL_LEFT_VECTOR);
         }
     } else if shape == Shape::Vector64 {
-        code.extend(MOVQ_XMM0_XMM0);
+        clear_high_qword(code, 0);
     }
     commit(code, destination, RESULT_VECTOR);
 }
 
-fn binary(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     let Operand::Binary {
         operation,
         format,
@@ -405,7 +348,7 @@ fn binary(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
 }
 
 fn pairwise_scalar(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     destination: u8,
@@ -440,7 +383,7 @@ fn pairwise_scalar(
 }
 
 fn reduction(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     shape: Shape,
@@ -503,7 +446,7 @@ fn reduction(
     commit(code, destination, RESULT_VECTOR);
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     match *operand {
         Operand::Binary { .. } => binary(code, operand, pc),
         Operand::PairwiseScalar {

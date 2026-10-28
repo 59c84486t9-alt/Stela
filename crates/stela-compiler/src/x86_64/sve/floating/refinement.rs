@@ -1,5 +1,7 @@
 //! SVE FRECPS/FRSQRTS on normal values. A baseline multiply is used only when the
 //! host status shows it was exact.
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdi};
+use crate::x86_64::asm::{Alu, Code, Cond, Mem, Rm, ShiftOp, Size};
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -15,9 +17,8 @@ use crate::{
             numerical::{self, Environment, Output},
         },
         simd::numerical::{
-            ArithmeticOpcode, FusedOpcode, VZEROUPPER, emit_fma, emit_opcode_to,
-            prepare_vector_input_range, prepare_vector_result_range, rounding_control,
-            vector_exponent_range,
+            ArithmeticOpcode, FusedOpcode, emit_fma, emit_opcode_to, prepare_vector_input_range,
+            prepare_vector_result_range, rounding_control, vector_exponent_range,
         },
     },
 };
@@ -27,9 +28,6 @@ const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
 const ADDEND: u8 = 6;
 const OUTPUT_SLOT: usize = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const GPR_RAX: u8 = 0;
 const BROADCAST_LOW_DWORD: u8 = 0;
 const MXCSR_STATUS_MASK: u32 = 0x3f;
 const MXCSR_INEXACT: u32 = 1 << 5;
@@ -37,56 +35,35 @@ const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 const RECIPROCAL_ADDEND_EXPONENT: u32 = 1;
 const RECIPROCAL_SQUARE_ROOT_FRACTION_SHIFT: u32 = 1;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-const REL32_BYTES: usize = size_of::<i32>();
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+fn test_control(code: &mut Code, mask: u32) {
+    code.asm().test_imm(
+        Size::Dword,
+        Mem::base_disp32(Rdi, (core::mem::offset_of!(GuestState, fpcr)) as i32),
+        mask as i32,
+    );
 }
 
-fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
-    let distance = i32::try_from(destination as i64 - (displacement + REL32_BYTES) as i64)
-        .expect("bounded refinement branch");
-    code[displacement..displacement + REL32_BYTES].copy_from_slice(&distance.to_le_bytes());
+fn reject_status(code: &mut Code, mask: u32, failures: &mut Vec<usize>) {
+    code.asm().test_imm(Size::Dword, Rcx, mask as i32);
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
-fn test_control(code: &mut Vec<u8>, mask: u32) {
-    code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(mask.to_le_bytes());
-}
-
-fn reject_status(code: &mut Vec<u8>, mask: u32, failures: &mut Vec<usize>) {
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(mask.to_le_bytes());
-    failures.push(branch(code, JNZ_REL32));
-}
-
-fn broadcast(code: &mut Vec<u8>, format: Format, bits: u64, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
     if format == Format::Single {
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend((bits as u32).to_le_bytes());
+        code.asm().mov_imm32(Rax, bits as u32);
     } else {
-        code.extend(MOV_RAX_IMMEDIATE);
-        code.extend(bits.to_le_bytes());
+        code.asm().mov_imm64(Rax, bits);
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (ADDEND << MODRM_REGISTER_SHIFT) | GPR_RAX);
+    code.asm().simd(Host::MoveGprQword, ADDEND, Rax, target);
     if format == Format::Single {
-        Host::ShuffleDword.register(code, ADDEND, ADDEND, target);
-        code.push(BROADCAST_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            ADDEND,
+            Rm::Xmm(ADDEND),
+            BROADCAST_LOW_DWORD,
+            target,
+        );
     } else {
         Host::UnpackLowQword.register(code, ADDEND, ADDEND, target);
     }
@@ -106,7 +83,7 @@ fn addend_bits(format: Format, kind: RefinementKind) -> u64 {
 
 /// Inputs already passed a normal-domain classifier. For FRSQRTS the left
 /// exponent is >=2, so subtracting one exponent unit is exact and stays normal.
-fn halve_left(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
+fn halve_left(code: &mut Code, format: Format, target: TargetCpu) {
     broadcast(code, format, 1 << format.fraction_bits(), target);
     let opcode = if format == Format::Single {
         Host::SubDword
@@ -116,9 +93,9 @@ fn halve_left(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
     opcode.register(code, LEFT, ADDEND, target);
 }
 
-fn reject_non_normal(code: &mut Vec<u8>, format: Format, register: u8, failures: &mut Vec<usize>) {
+fn reject_non_normal(code: &mut Code, format: Format, register: u8, failures: &mut Vec<usize>) {
     vector_exponent_range(code, format, Shape::Vector128, register);
-    failures.push(branch(code, JNZ_REL32));
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 /// Owns only unpredicated vector FRECPS/FRSQRTS, without registration or feature
@@ -127,7 +104,7 @@ fn reject_non_normal(code: &mut Vec<u8>, format: Format, register: u8, failures:
 /// cancellation, tiny/overflowing results and nonprecision host status decline.
 /// All chunks stage before one guest commit; every refusal restores MXCSR/RSP.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -159,18 +136,16 @@ pub(in crate::x86_64) fn emit(
     let mut failures = Vec::new();
     if features.full_a64() {
         test_control(code, FPCR_AH);
-        let suppressed = branch(code, JNZ_REL32);
+        let suppressed = code.asm().jcc(Cond::Ne);
         test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
-        failures.push(branch(code, JNZ_REL32));
-        let next = code.len();
-        resolve(code, suppressed, next);
+        failures.push(code.asm().jcc(Cond::Ne).offset());
+        code.asm().bind(suppressed);
     }
     rounding_control(code);
     test_control(code, FPCR_AH);
-    let ordinary = branch(code, JZ_REL32);
-    code.extend(XOR_EAX_EAX);
-    let next = code.len();
-    resolve(code, ordinary, next);
+    let ordinary = code.asm().jcc(Cond::E);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
+    code.asm().bind(ordinary);
     numerical::install_mxcsr(code, &frame);
     for chunk in 0..length.chunks() {
         numerical::clear_status(code, &frame);
@@ -199,7 +174,7 @@ pub(in crate::x86_64) fn emit(
                 FusedOpcode::NegativeMultiplyAdd,
                 target,
             );
-            code.extend(VZEROUPPER);
+            code.asm().vzeroupper();
         } else {
             emit_opcode_to(
                 code,
@@ -231,15 +206,13 @@ pub(in crate::x86_64) fn emit(
         numerical::capture_status(code, &frame);
         reject_status(code, MXCSR_OTHER_STATUS, &mut failures);
         test_control(code, FPCR_AH);
-        let suppressed = branch(code, JNZ_REL32);
-        code.extend(MOV_EAX_ECX);
-        code.push(AND_EAX_IMMEDIATE);
-        code.extend(MXCSR_INEXACT.to_le_bytes());
-        code.extend(SHR_EAX_IMMEDIATE);
-        code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+        let suppressed = code.asm().jcc(Cond::Ne);
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Rax, Rcx);
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
         numerical::add_fpsr(code, &frame);
-        let next = code.len();
-        resolve(code, suppressed, next);
+        code.asm().bind(suppressed);
     }
     numerical::finish(code, &frame, &failures, pc, target);
     Ok(true)
@@ -300,7 +273,7 @@ mod tests {
                 ..base
             },
         ] {
-            let mut code = vec![0xaa];
+            let mut code = Code::from(vec![0xaa]);
             assert!(
                 !emit(
                     &mut code,

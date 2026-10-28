@@ -66,7 +66,7 @@ mod tests {
     fn shared_parser_requires_thread_profile_and_stops_before_unknown_successor() {
         use crate::{
             Lifter,
-            block::{self, BlockProfile, SuccessorKind},
+            block::{self, BlockProfile, Features, SuccessorKind},
         };
         use alloc::collections::BTreeSet;
         let base = GuestAddress(0x1000);
@@ -77,12 +77,16 @@ mod tests {
             .flat_map(u32::to_le_bytes)
             .collect();
         let profiles = [
-            BlockProfile::Ordinary,
-            BlockProfile::AppleArm64eSoftwarePauthV1,
-            BlockProfile::AppleArm64eSoftwarePauthClockV1,
-            BlockProfile::DarwinArm64ThreadV1,
-            BlockProfile::AppleArm64eSoftwarePauthThreadV1,
-            BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+            BlockProfile::ORDINARY,
+            BlockProfile::new(Features::POINTER_AUTHENTICATION),
+            BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK)),
+            BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
+            BlockProfile::new(
+                Features::POINTER_AUTHENTICATION
+                    .union(Features::THREAD_REGISTERS)
+                    .union(Features::AMX),
+            ),
+            BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
         ];
         let mut abis = BTreeSet::new();
         for profile in profiles {
@@ -91,8 +95,8 @@ mod tests {
                 "cache ABI identities must be distinct"
             );
             let analyzed = block::analyze_with_profile(&source, base, profile);
-            let compiled = block::compile_with_profile(&source, base, profile);
-            if !profile.supports_thread_registers() {
+            let compiled = crate::testing::block_with(&source, base, profile);
+            if !profile.has(Features::THREAD_REGISTERS) {
                 assert_eq!(analyzed.unwrap_err().pc.0, base.0 + INSTRUCTION_BYTES);
                 assert!(compiled.is_err());
                 continue;

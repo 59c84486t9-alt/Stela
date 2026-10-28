@@ -34,9 +34,9 @@ struct stela_linux_services {
 	void (*log)(void *context, int level, const char *message);
 	/* A WARN that fired, with its condition text when Linux records one. */
 	void (*warn)(void *context, const char *file, int line, const char *condition);
-	/* An operation Stela does not provide yet, reached in graceful mode; the
-	 * caller then continues with that service's documented degraded result.
-	 * Strict owners stop here. Called for every occurrence. */
+	/* An operation Stela does not provide yet; the caller then continues
+	 * with that service's documented degraded result. An owner without this
+	 * service traps instead. Called for every occurrence. */
 	void (*unsupported)(void *context, const char *operation);
 };
 
@@ -65,7 +65,7 @@ const struct stela_linux_owner *stela_linux_owner(void);
 /* Report an operation Stela does not provide yet to the running owner. */
 void stela_linux_unsupported(const char *operation);
 /* Emit an emergency report through the entered owner, then unconditionally
- * trap. No graceful return; this does not implement Linux panic machinery. */
+ * trap without returning; this does not implement Linux panic machinery. */
 __noreturn void stela_linux_fatal(const char *message);
 
 /* Platform memory behind Linux's allocators: Stela's global heap in its

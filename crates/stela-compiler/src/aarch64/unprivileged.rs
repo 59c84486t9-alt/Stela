@@ -1,6 +1,7 @@
 //! Unprivileged loads and stores (LDTR*, STTR*). Native code supports EL0 on
 //! directly mapped RAM only.
 use super::{MemoryTransfer, Register, Width, register};
+use crate::aarch64::Unsupported;
 
 const CLASS_MASK: u32 = 0x3f20_0c00;
 const UNPRIVILEGED_CLASS: u32 = 0x3800_0800;
@@ -31,8 +32,7 @@ pub struct Operand {
 
 /// None denotes another encoding class; Err denotes a reserved size/opcode.
 /// This class has neither writeback nor register-overlap restrictions.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & CLASS_MASK != UNPRIVILEGED_CLASS {
         return None;
     }
@@ -55,7 +55,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             signed: true,
             width: Width::W32,
         },
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     let immediate = ((word >> IMMEDIATE_SHIFT) & IMMEDIATE_MASK) as i32;
     Some(Ok(Operand {

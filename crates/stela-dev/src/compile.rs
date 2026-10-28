@@ -4,8 +4,9 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use std::path::{Path, PathBuf};
 use stela_compiler::{
-    block::BlockProfile,
-    extended::{ScalableProfile, block::ExtendedBlockProfile},
+    GuestAddress, Options,
+    block::{BlockProfile, CompilationPlan, Features},
+    scalable_context::ScalableProfile,
 };
 use stela_runtime::write_json;
 
@@ -22,7 +23,7 @@ pub(crate) struct CompileBlock {
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
     guest_base: u64,
     /// Compile for a guest execution profile.
-    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
+    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::scalable_context::PROFILE_ID, stela_compiler::scalable_context::DECLARED_PROFILE_ID])]
     guest_profile: Option<String>,
     /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
     #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
@@ -98,7 +99,7 @@ pub(crate) struct CompileLeaf {
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
     guest_base: u64,
     /// Compile for a guest execution profile.
-    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
+    #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::scalable_context::PROFILE_ID, stela_compiler::scalable_context::DECLARED_PROFILE_ID])]
     guest_profile: Option<String>,
     /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
     #[arg(long, requires = "guest_profile", value_parser = parse_scalable_vector_length)]
@@ -164,18 +165,20 @@ pub(crate) fn cpu_info() -> Result<()> {
 }
 
 impl CompileBlock {
-    /// The service profile and, for scalable guests, the contextual profile.
-    fn profiles(&self) -> Result<(BlockProfile, Option<ExtendedBlockProfile>)> {
+    /// What the block compiles for: its services, or for a scalable guest
+    /// the context block's specialization.
+    fn options(&self) -> Result<Options> {
         let services = if self.system_mode {
-            BlockProfile::SystemModeV1
+            BlockProfile::new(Features::SYSTEM_MODE)
         } else if self.checked_process_sa0_off {
-            BlockProfile::CheckedMemoryPauthClockThread(checked_process(self.checked_pointer_mode)?)
+            BlockProfile::new(Features::PROCESS_HELPERS)
+                .with_checked_memory(checked_process(self.checked_pointer_mode)?)
         } else if self.checked_memory_sa0_off {
-            BlockProfile::CheckedMemory(
+            BlockProfile::ORDINARY.with_checked_memory(
                 stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
             )
         } else if self.system_boundaries {
-            BlockProfile::SystemV1
+            BlockProfile::new(Features::SYSTEM)
         } else {
             block_profile(
                 self.software_pauth,
@@ -199,55 +202,33 @@ impl CompileBlock {
             self.ebf16,
             self.rpres,
         )?;
-        Ok((services, context))
+        Ok(match context {
+            Some((scalable, numerical)) => {
+                Options::new(BlockProfile::new(Features::CONTEXT), self.cpu_target)
+                    .with_scalable(scalable)
+                    .with_numerical_features(numerical)
+            }
+            None => Options::new(services, self.cpu_target),
+        })
     }
 
     fn compile(self, source: &[u8]) -> Result<Compiled> {
-        let (profile, context_profile) = self.profiles()?;
+        let options = self.options()?;
         let Self {
             cpu_target,
             guest_base,
             fpmr_enabled,
-            checked_memory_sa0_off,
-            checked_process_sa0_off,
             ..
         } = self;
         let window = &source[..source
             .len()
             .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
-        let preparation_plan = if checked_memory_sa0_off || checked_process_sa0_off {
-            Some(stela_compiler::block::CompilationPlan::new(
-                window,
-                stela_compiler::GuestAddress(guest_base),
-                profile,
-                cpu_target,
-            )?)
-        } else {
-            None
-        };
-        let preparation_requirements = preparation_plan
-            .as_ref()
-            .and_then(|plan| plan.memory_requirements());
-        let compiled = if let Some(context_profile) = context_profile {
-            stela_compiler::extended::block::compile_for_profile(
-                window,
-                stela_compiler::GuestAddress(guest_base),
-                context_profile,
-                cpu_target,
-            )?
-        } else if let Some(plan) = preparation_plan {
-            plan.compile()?
-        } else {
-            stela_compiler::block::compile_for_target(
-                window,
-                stela_compiler::GuestAddress(guest_base),
-                profile,
-                cpu_target,
-            )?
-        };
+        let plan = CompilationPlan::new(window, GuestAddress(guest_base), &options)?;
+        let preparation_requirements = plan.memory_requirements();
+        let compiled = plan.compile()?;
         let mut manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot","target_cpu":cpu_target.id(),
             "source_bytes":compiled.source_bytes,"source_sha256":stela_runtime::sha256(&source[..compiled.source_bytes]),
-            "guest_base":guest_base,"abi":profile.abi(),
+            "guest_base":guest_base,"abi":options.profile().abi(),
             "native_sha256":stela_runtime::sha256(&compiled.native.x86_64_code),
             "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
             "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
@@ -255,17 +236,14 @@ impl CompileBlock {
         if preparation_requirements.is_some() {
             manifest["memory_requirements"] = serde_json::to_value(preparation_requirements)?;
         }
-        if let Some(context_profile) = context_profile {
+        if let Some(scalable) = options.scalable() {
             manifest["schema_version"] = serde_json::json!(2);
-            manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_BLOCK_ABI);
-            manifest["execution_profile"] =
-                scalable_execution_manifest(context_profile.scalable(), fpmr_enabled)?;
-            manifest["numerical_features"] =
-                serde_json::to_value(context_profile.numerical_features())?;
+            manifest["execution_profile"] = scalable_execution_manifest(scalable, fpmr_enabled)?;
+            manifest["numerical_features"] = serde_json::to_value(options.numerical_features())?;
             manifest["guest_instructions"] =
                 serde_json::json!(compiled.source_bytes / size_of::<u32>());
             manifest["entry_prefix_bytes"] =
-                serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
+                serde_json::json!(stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES);
         }
         Ok(Compiled {
             native: compiled.native.x86_64_code,
@@ -320,30 +298,17 @@ impl CompileLeaf {
             fpmr_enabled,
             ..
         } = self;
-        let memory_requirements = profile
-            .map(|profile| {
-                stela_compiler::extended::memory_requirements(
-                    source,
-                    stela_compiler::GuestAddress(guest_base),
-                    profile,
-                    cpu_target,
-                )
-            })
-            .transpose()?;
-        let block = if let Some(profile) = profile {
-            stela_compiler::extended::compile_for_profile(
-                source,
-                stela_compiler::GuestAddress(guest_base),
-                profile,
+        let options = match profile {
+            Some(scalable) => Options::new(
+                BlockProfile::new(Features::LEAF | Features::CONTEXT),
                 cpu_target,
-            )?
-        } else {
-            stela_compiler::compile_for_target(
-                source,
-                stela_compiler::GuestAddress(guest_base),
-                cpu_target,
-            )?
+            )
+            .with_scalable(scalable),
+            None => Options::new(BlockProfile::new(Features::LEAF), cpu_target),
         };
+        let plan = CompilationPlan::new(source, GuestAddress(guest_base), &options)?;
+        let memory_requirements = plan.memory_requirements();
+        let block = plan.compile()?.native;
         let mut manifest = serde_json::json!({
             "schema_version": 1,
             "kind": "raw_arm64_leaf_aot",
@@ -354,16 +319,15 @@ impl CompileLeaf {
             "native_sha256": stela_runtime::sha256(&block.x86_64_code),
             "native_bytes": block.x86_64_code.len(),
             "source_map": block.source_map,
-            "abi": stela_compiler::NATIVE_ABI,
+            "abi": options.profile().abi(),
             "compiler_source_sha256": stela_compiler::SOURCE_SHA256,
             "verified": false,
         });
         if let Some(profile) = profile {
             manifest["schema_version"] = serde_json::json!(2);
-            manifest["abi"] = serde_json::json!(stela_compiler::context::CONTEXT_LEAF_ABI);
             manifest["execution_profile"] = scalable_execution_manifest(profile, fpmr_enabled)?;
             manifest["entry_prefix_bytes"] =
-                serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
+                serde_json::json!(stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES);
             let requirements = memory_requirements
                 .context("context leaf requires compiler-derived memory metadata")?;
             use stela_compiler::context::memory::SpAlignmentRequirement;
@@ -428,7 +392,9 @@ mod tests {
     mod scalable {
         use super::*;
 
-        fn resolve(extra: &[&str]) -> Result<Option<stela_compiler::extended::ScalableProfile>> {
+        fn resolve(
+            extra: &[&str],
+        ) -> Result<Option<stela_compiler::scalable_context::ScalableProfile>> {
             let mut args = vec!["stela", "compile-leaf", "input.bin", "--output-dir", "out"];
             args.extend_from_slice(extra);
             let Command::CompileLeaf(crate::compile::CompileLeaf {
@@ -526,9 +492,7 @@ mod tests {
         use super::*;
         use stela_compiler::{aarch64::floating::features::NumericalFeatures, block::BlockProfile};
 
-        fn resolve(
-            extra: &[&str],
-        ) -> Result<Option<stela_compiler::extended::block::ExtendedBlockProfile>> {
+        fn resolve(extra: &[&str]) -> Result<Option<(ScalableProfile, NumericalFeatures)>> {
             let mut args = vec!["stela", "compile-block", "input.bin", "--output-dir", "out"];
             args.extend_from_slice(extra);
             let Command::CompileBlock(crate::compile::CompileBlock {
@@ -563,7 +527,7 @@ mod tests {
             compile_context_block_profile(
                 scalable,
                 if system_boundaries {
-                    BlockProfile::SystemV1
+                    BlockProfile::new(Features::SYSTEM)
                 } else {
                     block_profile(software_pauth, software_clock, thread_registers)
                 },
@@ -608,14 +572,10 @@ mod tests {
             }
             let mut args = guest.to_vec();
             args.extend(numerical);
-            let profile = resolve(&args)?.unwrap();
-            assert_eq!(profile.services(), BlockProfile::Ordinary);
+            let (scalable, numerical) = resolve(&args)?.unwrap();
+            assert_eq!(numerical, NumericalFeatures::new(false, false, false));
             assert_eq!(
-                profile.numerical_features(),
-                NumericalFeatures::new(false, false, false)
-            );
-            assert_eq!(
-                scalable_execution_manifest(profile.scalable(), None)?,
+                scalable_execution_manifest(scalable, None)?,
                 serde_json::json!({
                     "id":"sme-streaming-v2", "svl_bytes":32, "svcr":3, "features":["FEAT_SME"],
                     "max_svl_bytes":256, "zt0_enabled":false, "dit":false
@@ -748,15 +708,17 @@ mod tests {
             );
             assert_eq!(
                 block_profile(true, true, false),
-                stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
+                stela_compiler::block::BlockProfile::new(
+                    Features::POINTER_AUTHENTICATION.union(Features::CLOCK)
+                )
             );
             assert_eq!(
                 block_profile(true, false, false),
-                stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthV1
+                stela_compiler::block::BlockProfile::new(Features::POINTER_AUTHENTICATION)
             );
             assert_eq!(
                 block_profile(false, false, false),
-                stela_compiler::block::BlockProfile::Ordinary
+                stela_compiler::block::BlockProfile::ORDINARY
             );
         }
 
@@ -806,15 +768,19 @@ mod tests {
             );
             assert_eq!(
                 block_profile(false, false, true),
-                BlockProfile::DarwinArm64ThreadV1
+                BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX))
             );
             assert_eq!(
                 block_profile(true, false, true),
-                BlockProfile::AppleArm64eSoftwarePauthThreadV1
+                BlockProfile::new(
+                    Features::POINTER_AUTHENTICATION
+                        .union(Features::THREAD_REGISTERS)
+                        .union(Features::AMX)
+                )
             );
             assert_eq!(
                 block_profile(true, true, true),
-                BlockProfile::AppleArm64eSoftwarePauthClockThreadV1
+                BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX))
             );
         }
     }
@@ -822,7 +788,7 @@ mod tests {
     mod fpmr {
         use super::*;
         use std::hash::{Hash, Hasher};
-        use stela_compiler::extended::ScalableProfile;
+        use stela_compiler::scalable_context::ScalableProfile;
 
         fn resolve(
             command: &str,
@@ -989,7 +955,7 @@ mod tests {
                     );
                     assert!(
                         compile_scalable_profile(
-                            Some(stela_compiler::extended::PROFILE_ID),
+                            Some(stela_compiler::scalable_context::PROFILE_ID),
                             Some(
                                 stela_compiler::aarch64::scalable::VectorLength::from_bytes(32)
                                     .unwrap()

@@ -1,5 +1,9 @@
 //! SVE half-precision FDOT and FMLALB/FMLALT. Half products are exact singles, so
 //! the pair add and accumulator add keep their two separate roundings.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -16,7 +20,7 @@ use crate::{
             numerical::{self, Environment, Output},
         },
         simd::numerical::{
-            Condition, FusedOpcode, branch, emit_fma, prepare_vector_input_range, rounding_control,
+            FusedOpcode, emit_fma, prepare_vector_input_range, rounding_control,
             vector_half_exponent_range, widen_half_to_single,
         },
         sve::floating::classify::{
@@ -37,9 +41,6 @@ const WIDEN_BIAS: u8 = 7;
 const CLASSIFICATION_CONSTANTS: [u8; 2] = [WIDEN_SIGN, ZERO];
 const CLASSIFICATION_SCRATCH: [u8; 3] = [RIGHT_HIGH, LEFT_HIGH, WIDEN_BIAS];
 const OUTPUT_SLOT: usize = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const GPR_RAX: u8 = 0;
 const HALF_BYTES: usize = size_of::<u16>();
 const SINGLE_DWORD_BYTES: usize = size_of::<u32>();
 const SINGLE_LANES_PER_CHUNK: usize = VECTOR_CHUNK_BYTES / SINGLE_DWORD_BYTES;
@@ -59,19 +60,8 @@ const HALF_TO_SINGLE_BIAS: u32 = (Format::Single.exponent_bias() - Format::Half.
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
 const BOTTOM_HALF_BYTES: [u8; 8] = [0, 1, 4, 5, 8, 9, 12, 13];
 const TOP_HALF_BYTES: [u8; 8] = [2, 3, 6, 7, 10, 11, 14, 15];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const MULPS: &[u8] = &[0x0f, 0x59];
-const ADDPS: &[u8] = &[0x0f, 0x58];
-const SUBPS: &[u8] = &[0x0f, 0x5c];
-const SHUFPS: &[u8] = &[0x0f, 0xc6];
-const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 
 /// Which native kernels to use.
 #[derive(Debug, Clone, Copy, Default)]
@@ -81,18 +71,13 @@ pub(in crate::x86_64) struct Recipe {
     pub fused_widening: bool,
 }
 
-fn register(code: &mut Vec<u8>, opcode: &[u8], destination: u8, source: u8) {
-    code.extend(opcode);
-    code.push(MODRM_REGISTER | destination << MODRM_REGISTER_SHIFT | source);
+fn shuffle(code: &mut Code, opcode: Host, vector: u8, order: u8, target: TargetCpu) {
+    code.asm()
+        .simd_imm(opcode, vector, Rm::Xmm(vector), order, target);
 }
 
-fn shuffle(code: &mut Vec<u8>, opcode: Host, vector: u8, order: u8, target: TargetCpu) {
-    opcode.register(code, vector, vector, target);
-    code.push(order);
-}
-
-fn reject(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
-    failures.push(branch(code, Condition::NotZero));
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 fn source_register(right: RightOperand) -> u8 {
@@ -102,7 +87,7 @@ fn source_register(right: RightOperand) -> u8 {
 }
 
 /// Compact H0/H2/H4/H6 or H1/H3/H5/H7 into the low four Half fields.
-fn select_part(code: &mut Vec<u8>, vector: u8, part: VectorPart, target: TargetCpu) {
+fn select_part(code: &mut Code, vector: u8, part: VectorPart, target: TargetCpu) {
     let order = match part {
         VectorPart::Bottom => BOTTOM_WORD_ORDER,
         VectorPart::Top => TOP_WORD_ORDER,
@@ -112,7 +97,7 @@ fn select_part(code: &mut Vec<u8>, vector: u8, part: VectorPart, target: TargetC
     shuffle(code, Host::ShuffleDword, vector, GROUP_DWORD_ORDER, target);
 }
 
-fn select_sources(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: TargetCpu) {
+fn select_sources(code: &mut Code, operand: Operand, recipe: Recipe, target: TargetCpu) {
     match operand.kind {
         Kind::HalfDot => {
             if let RightOperand::Indexed { index, .. } = operand.right {
@@ -132,10 +117,9 @@ fn select_sources(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: 
                     VectorPart::Bottom => BOTTOM_HALF_BYTES,
                     VectorPart::Top => TOP_HALF_BYTES,
                 };
-                code.extend(MOV_RAX_IMMEDIATE);
-                code.extend(u64::from_le_bytes(selector).to_le_bytes());
-                Host::MoveGprQword.append(code, target);
-                code.push(MODRM_REGISTER | RIGHT_HIGH << MODRM_REGISTER_SHIFT | GPR_RAX);
+                let mut asm = code.asm();
+                asm.mov_imm64(Rax, u64::from_le_bytes(selector));
+                asm.simd(Host::MoveGprQword, RIGHT_HIGH, Rax, target);
                 // The upper selector can repeat: widening consumes only low64.
                 Host::UnpackLowQword.register(code, RIGHT_HIGH, RIGHT_HIGH, target);
                 Host::ByteShuffle.register(code, LEFT, RIGHT_HIGH, target);
@@ -159,12 +143,11 @@ fn select_sources(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: 
     }
 }
 
-fn prepare_widening(code: &mut Vec<u8>, target: TargetCpu) {
+fn prepare_widening(code: &mut Code, target: TargetCpu) {
     Host::Xor.register(code, ZERO, ZERO, target);
-    code.push(MOV_EAX_IMMEDIATE);
-    code.extend(HALF_TO_SINGLE_BIAS.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | WIDEN_BIAS << MODRM_REGISTER_SHIFT | GPR_RAX);
+    let mut asm = code.asm();
+    asm.mov_imm32(Rax, HALF_TO_SINGLE_BIAS);
+    asm.simd(Host::MoveGprQword, WIDEN_BIAS, Rax, target);
     shuffle(
         code,
         Host::ShuffleDword,
@@ -174,7 +157,7 @@ fn prepare_widening(code: &mut Vec<u8>, target: TargetCpu) {
     );
 }
 
-fn widen(code: &mut Vec<u8>, vector: u8, recipe: Recipe, target: TargetCpu) {
+fn widen(code: &mut Code, vector: u8, recipe: Recipe, target: TargetCpu) {
     if recipe.half_convert {
         Host::ConvertHalfToSingle.register(code, vector, vector, target);
     } else {
@@ -182,7 +165,7 @@ fn widen(code: &mut Vec<u8>, vector: u8, recipe: Recipe, target: TargetCpu) {
     }
 }
 
-fn dot(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: TargetCpu) {
+fn dot(code: &mut Code, operand: Operand, recipe: Recipe, target: TargetCpu) {
     Host::MoveAligned.register(code, LEFT_HIGH, LEFT, target);
     ShiftOpcode::RightBytes.emit(code, LEFT_HIGH, HALF_GROUP_BYTES);
     let indexed = matches!(operand.right, RightOperand::Indexed { .. });
@@ -199,25 +182,34 @@ fn dot(code: &mut Vec<u8>, operand: Operand, recipe: Recipe, target: TargetCpu) 
     if !indexed {
         widen(code, RIGHT_HIGH, recipe, target);
     }
-    register(code, MULPS, LEFT, RIGHT);
-    register(
-        code,
-        MULPS,
+    let mut asm = code.asm();
+    asm.float(FloatOp::Mul, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT));
+    asm.float(
+        FloatOp::Mul,
+        FloatLanes::PackedSingle,
         LEFT_HIGH,
-        if indexed { RIGHT } else { RIGHT_HIGH },
+        Rm::Xmm(if indexed { RIGHT } else { RIGHT_HIGH }),
     );
-    Host::MoveAligned.register(code, RIGHT_HIGH, LEFT, target);
-    register(code, SHUFPS, LEFT, LEFT_HIGH);
-    code.push(EVEN_PRODUCT_ORDER);
-    register(code, SHUFPS, RIGHT_HIGH, LEFT_HIGH);
-    code.push(ODD_PRODUCT_ORDER);
-    register(code, ADDPS, LEFT, RIGHT_HIGH);
+    asm.simd(Host::MoveAligned, RIGHT_HIGH, Rm::Xmm(LEFT), target);
+    asm.shufps(LEFT, Rm::Xmm(LEFT_HIGH), EVEN_PRODUCT_ORDER);
+    asm.shufps(RIGHT_HIGH, Rm::Xmm(LEFT_HIGH), ODD_PRODUCT_ORDER);
+    asm.float(
+        FloatOp::Add,
+        FloatLanes::PackedSingle,
+        LEFT,
+        Rm::Xmm(RIGHT_HIGH),
+    );
     // The preceding ADDPS is the architectural FPDot rounding. This ADDPS is
     // a separate FPAdd; never combine either with an accumulator FMA.
-    register(code, ADDPS, LEFT, ADDEND);
+    asm.float(
+        FloatOp::Add,
+        FloatLanes::PackedSingle,
+        LEFT,
+        Rm::Xmm(ADDEND),
+    );
 }
 
-fn multiply_long(code: &mut Vec<u8>, subtract: bool, recipe: Recipe, target: TargetCpu) {
+fn multiply_long(code: &mut Code, subtract: bool, recipe: Recipe, target: TargetCpu) {
     if !recipe.half_convert {
         prepare_widening(code, target);
     }
@@ -237,18 +229,29 @@ fn multiply_long(code: &mut Vec<u8>, subtract: bool, recipe: Recipe, target: Tar
             target,
         );
     } else {
-        register(code, MULPS, LEFT, RIGHT);
+        let mut asm = code.asm();
+        asm.float(FloatOp::Mul, FloatLanes::PackedSingle, LEFT, Rm::Xmm(RIGHT));
         if subtract {
-            register(code, SUBPS, ADDEND, LEFT);
-            Host::MoveAligned.register(code, LEFT, ADDEND, target);
+            asm.float(
+                FloatOp::Sub,
+                FloatLanes::PackedSingle,
+                ADDEND,
+                Rm::Xmm(LEFT),
+            );
+            asm.simd(Host::MoveAligned, LEFT, Rm::Xmm(ADDEND), target);
         } else {
-            register(code, ADDPS, LEFT, ADDEND);
+            asm.float(
+                FloatOp::Add,
+                FloatLanes::PackedSingle,
+                LEFT,
+                Rm::Xmm(ADDEND),
+            );
         }
     }
 }
 
 pub(in crate::x86_64) fn emit_candidate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -271,7 +274,7 @@ pub(in crate::x86_64) fn emit_candidate(
         ));
     }
     if recipe.half_convert || recipe.fused_widening {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     let frame = numerical::begin(
         code,
@@ -328,21 +331,20 @@ pub(in crate::x86_64) fn emit_candidate(
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, chunk, LEFT, target);
     }
     numerical::capture_status(code, &frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, &mut failures);
-    code.extend(MOV_EAX_ECX);
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
-    code.extend(SHR_EAX_IMMEDIATE);
-    code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, Rcx);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
     numerical::add_fpsr(code, &frame);
     numerical::finish(code, &frame, &failures, pc, target);
     Ok(true)
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -376,7 +378,6 @@ pub(in crate::x86_64) fn emit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     const DESTINATION: u8 = 0;
     const LEFT_SOURCE: u8 = 1;
@@ -413,15 +414,15 @@ mod tests {
         changes_default: bool,
     ) {
         let length = VectorLength::from_bytes(bytes).unwrap();
-        let mut selected = Vec::new();
+        let mut selected = Code::new();
         assert!(emit(&mut selected, operand, length, FEATURES, PC, target).unwrap());
-        let mut expected = Vec::new();
+        let mut expected = Code::new();
         assert!(
             emit_candidate(&mut expected, operand, length, FEATURES, PC, target, recipe,).unwrap()
         );
         assert_eq!(selected, expected, "{operand:?}, {bytes}, {target:?}");
         if changes_default {
-            let mut baseline = Vec::new();
+            let mut baseline = Code::new();
             assert!(
                 emit_candidate(
                     &mut baseline,
@@ -538,7 +539,7 @@ mod tests {
             ..Recipe::default()
         };
         for target in [TargetCpu::Baseline, TargetCpu::F16c, TargetCpu::Fma] {
-            let mut code = Vec::new();
+            let mut code = Code::new();
             assert!(
                 emit_candidate(
                     &mut code,

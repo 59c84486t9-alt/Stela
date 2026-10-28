@@ -1,6 +1,7 @@
 //! SVE contiguous and whole-register stores, and PRF* hints. Structured source
 //! tuples wrap modulo 32.
 use super::memory::{Address, Offset, Scale};
+use crate::aarch64::Unsupported;
 use crate::aarch64::{
     register,
     scalable::{
@@ -231,7 +232,7 @@ const FORMS: &[Form] = &[
 ];
 
 /// None means another allocation; Err marks a recognized unallocated operand.
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if let Some(form) = grouped_form(word) {
         return Some(decode_store(word, form).map(Operand::Store));
     }
@@ -277,19 +278,19 @@ fn base(word: u32) -> crate::aarch64::Register {
     register((word >> BASE_SHIFT) & REGISTER_MASK, true)
 }
 
-fn decode_store(word: u32, form: Form) -> Result<Store, ()> {
+fn decode_store(word: u32, form: Form) -> Result<Store, Unsupported> {
     let element_bytes = match form.element {
         Element::Encoded => BYTE_BYTES << ((word >> SIZE_SHIFT) & SIZE_MASK),
         Element::Word => WORD_BYTES << ((word >> SIZE_SHIFT) & WORD_SIZE_MASK),
         Element::Fixed(bytes) => bytes,
     };
     if element_bytes < form.memory_bytes {
-        return Err(());
+        return Err(Unsupported);
     }
     let offset = if form.register_offset {
         let index = (word >> OFFSET_SHIFT) & REGISTER_MASK;
         if index == REGISTER_MASK {
-            return Err(());
+            return Err(Unsupported);
         }
         Offset::Register {
             index: register(index, false),
@@ -352,7 +353,7 @@ fn decode_whole(word: u32) -> Option<WholeStore> {
     })
 }
 
-fn decode_prefetch(word: u32) -> Option<Result<Prefetch, ()>> {
+fn decode_prefetch(word: u32) -> Option<Result<Prefetch, Unsupported>> {
     let (offset, size_shift) = if word & PREFETCH_IMMEDIATE_MASK == PREFETCH_IMMEDIATE_CLASS {
         let offset_mask = (1 << PREFETCH_OFFSET_BITS) - 1;
         (
@@ -368,7 +369,7 @@ fn decode_prefetch(word: u32) -> Option<Result<Prefetch, ()>> {
     } else if word & PREFETCH_REGISTER_MASK == PREFETCH_REGISTER_CLASS {
         let index = (word >> OFFSET_SHIFT) & REGISTER_MASK;
         if index == REGISTER_MASK {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let shift = ((word >> REGISTER_SIZE_SHIFT) & SIZE_MASK) as u8;
         (
@@ -452,7 +453,7 @@ mod tests {
                             | (offset << OFFSET_SHIFT);
                         let result = decode(word).expect("owned store class");
                         if form.register_offset && offset == REGISTER_MASK {
-                            assert_eq!(result, Err(()));
+                            assert_eq!(result, Err(Unsupported));
                             continue;
                         }
                         let Operand::Store(store) = result.expect("allocated operands") else {
@@ -489,7 +490,7 @@ mod tests {
     #[test]
     fn narrowing_halfword_rejects_byte_source_elements() {
         for class in [0xe480_e000, 0xe480_4000] {
-            assert_eq!(decode(class), Some(Err(())));
+            assert_eq!(decode(class), Some(Err(Unsupported)));
             assert!(matches!(
                 decode(class | (1 << SIZE_SHIFT)),
                 Some(Ok(Operand::Store(_)))
@@ -571,7 +572,7 @@ mod tests {
                     | hint
                     | (size << REGISTER_SIZE_SHIFT)
                     | (REGISTER_MASK << OFFSET_SHIFT);
-                assert_eq!(decode(reserved), Some(Err(())));
+                assert_eq!(decode(reserved), Some(Err(Unsupported)));
             }
         }
     }

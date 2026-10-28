@@ -319,7 +319,6 @@ pub(crate) unsafe fn check(
                 .collect::<Vec<_>>(),
         )
     }?;
-    machine.set_strict(true);
     let started = crate::apic::rdtsc();
     while !ready(&machine, entry) {
         // SAFETY: actual source-started Cpu loans and owner-local AP Hosts;
@@ -464,6 +463,13 @@ pub(crate) unsafe fn check(
         .map_err(|_| "native scheduler canonical store read refused")?;
     if u64::from_le_bytes(value) != 0x1122334455667788 {
         return Err("native scheduler ordinary translated store did not use canonical RAM");
+    }
+    let unmodeled = machine.take_unmodeled();
+    if !unmodeled.is_empty() {
+        for requirement in unmodeled {
+            crate::output::arguments(format_args!("NATIVE SCHEDULER UNMODELED {requirement}\n"));
+        }
+        return Err("native scheduler answered an unsupported operation degraded");
     }
     crate::output::arguments(format_args!(
         "CHECK native-shared-kernel PASS physical_cores={cores} boot_PE={boot_processor} BSP_worker=0 actual_frames={cores} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared cold_M0_to_M1=checked CPU_starts={} consumed_device_writes={} CPU_controller_commits={} max_pending={max_pending} legacy_warmup=none scheduler_rounds={rounds} source_ERET_STXP=failed source_WFE=completed source_timer_FIQ=delivered source_permission_abort=precise actual_Host_effects=receipted; original macOS SMP unqualified\n",

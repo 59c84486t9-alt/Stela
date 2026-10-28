@@ -7,6 +7,7 @@ pub use epoch::{
 };
 mod preparation;
 use preparation::PreparationFailure;
+use stela_compiler::block::Features;
 pub(super) mod source;
 #[cfg(feature = "native-profile")]
 use super::super::NativeTimingWork as Work;
@@ -34,7 +35,7 @@ pub struct Identity {
     pub native_sha256: alloc::string::String,
     pub controls_sha256: alloc::string::String,
     pub compiler_source_sha256: &'static str,
-    pub abi: &'static str,
+    pub abi: alloc::string::String,
     pub target: stela_compiler::TargetCpu,
     pub requirements: MemoryRequirements,
 }
@@ -76,7 +77,7 @@ struct ArtifactKey {
     admission: AdmissionPolicy,
     controls_sha256: Arc<str>,
     compiler_source_sha256: &'static str,
-    abi: &'static str,
+    abi: alloc::string::String,
     target: stela_compiler::TargetCpu,
     guarded: bool,
 }
@@ -720,7 +721,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the scheduler. The actual Cpu owns the persistent canonical memory/event
     /// service; its inactive legacy fields cannot authorize serial fallback.
     /// Stopped services must use that same owner and held-generation protocol.
-    /// Direct SystemModeV1 data writers remain excluded, including between calls.
+    /// Direct `SYSTEM_MODE` data writers remain excluded, including between calls.
     /// This bounded frame alone is not full machine SMP admission.
     pub unsafe fn shared_native_run<'a>(
         &'a mut self,
@@ -842,7 +843,8 @@ fn prepare<'a>(
         {
             return Err(at("branch target compatibility", MemoryStatus::Unsupported));
         }
-        let profile = stela_compiler::block::BlockProfile::SystemModeSharedV1(controls.sp);
+        let profile = stela_compiler::block::BlockProfile::new(Features::SYSTEM_MODE)
+            .with_checked_memory(controls.sp);
         let target = memory.ram.target();
         let key = ArtifactKey {
             pe,
@@ -931,8 +933,7 @@ fn prepare<'a>(
                 let plan = stela_compiler::block::CompilationPlan::new(
                     &input,
                     stela_compiler::GuestAddress(pc),
-                    profile,
-                    target,
+                    &stela_compiler::Options::new(profile, target),
                 )
                 .map_err(|error| {
                     at("compilation planning", MemoryStatus::Unsupported).detail(error.0)

@@ -1,5 +1,6 @@
 //! Checked scalar loads and stores through the memory service. Guest registers
 //! are written after the access completes.
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Size};
 use crate::x86_64::{
     load,
     memory_context::{self as service, address},
@@ -16,19 +17,17 @@ use crate::{
     },
 };
 use alloc::vec;
-use alloc::vec::Vec;
 
 const DOUBLEWORD_BYTES: u8 = size_of::<u64>() as u8;
 const REQUEST_OFFSET: u32 = 0;
 const DATA_OFFSET: u32 = 32;
 const WRITEBACK_OFFSET: u32 = 40;
 const SCRATCH_BYTES: u8 = 48;
-const SUB_RSP: &[u8] = &[0x48, 0x83, 0xec, SCRATCH_BYTES];
-const ADD_RSP: &[u8] = &[0x48, 0x83, 0xc4, SCRATCH_BYTES];
-const MOV_RSP_RAX: &[u8] = &[0x48, 0x89, 0x84, 0x24];
-const MOV_RSP_RDX: &[u8] = &[0x48, 0x89, 0x94, 0x24];
-const MOV_RAX_RSP: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
+
+/// The private scratch slot at `offset`.
+const fn scratch(offset: u32) -> Mem {
+    Mem::base_disp32(Gpr::Rsp, offset as i32)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Address {
@@ -286,26 +285,28 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     }
 }
 
-fn result(code: &mut Vec<u8>, bytes: u8, signed: bool, width: Width) {
-    if width == Width::X64 {
-        code.push(0x48);
-    }
+fn result(code: &mut Code, bytes: u8, signed: bool, width: Width) {
+    let size = Size::of(width == Width::X64);
+    let data = scratch(DATA_OFFSET);
+    let mut asm = code.asm();
     match (bytes, signed) {
-        (1, false) => code.extend([0x0f, 0xb6]),
-        (2, false) => code.extend([0x0f, 0xb7]),
-        (1, true) => code.extend([0x0f, 0xbe]),
-        (2, true) => code.extend([0x0f, 0xbf]),
-        (4, true) => code.push(0x63),
-        (4 | 8, false) => code.push(0x8b),
+        (1, false) => asm.movzx(size, Gpr::Rax, Size::Byte, data),
+        (2, false) => asm.movzx(size, Gpr::Rax, Size::Word, data),
+        (1, true) => asm.movsx(size, Gpr::Rax, Size::Byte, data),
+        (2, true) => asm.movsx(size, Gpr::Rax, Size::Word, data),
+        (4, true) => {
+            debug_assert!(size == Size::Qword);
+            asm.movsxd(Gpr::Rax, data);
+        }
+        (4 | 8, false) => asm.mov_load(size, Gpr::Rax, data),
         _ => unreachable!("validated scalar result"),
     }
-    code.extend([0x84, 0x24]);
-    code.extend(DATA_OFFSET.to_le_bytes());
 }
 
-pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
+pub(crate) fn emit_context(code: &mut Code, operand: &Operand, pc: u64) {
     let req = requirements(operand);
-    code.extend(SUB_RSP);
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     service::begin(code);
     let mut failures = vec![];
     if operand.profile.sp_requirement() == SpAlignmentRequirement::Enabled
@@ -315,8 +316,8 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
     }
     if matches!(operand.transfer, MemoryTransfer::Store) {
         load(code, operand.data);
-        code.extend(MOV_RSP_RAX);
-        code.extend(DATA_OFFSET.to_le_bytes());
+        code.asm()
+            .mov_store(Size::Qword, scratch(DATA_OFFSET), Gpr::Rax);
     }
     match operand.address {
         Address::Literal { address } => crate::x86_64::immediate(code, address),
@@ -341,8 +342,8 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
         ),
     }
     if operand.writeback() {
-        code.extend(MOV_RSP_RDX);
-        code.extend(WRITEBACK_OFFSET.to_le_bytes());
+        code.asm()
+            .mov_store(Size::Qword, scratch(WRITEBACK_OFFSET), Gpr::Rdx);
     }
     service::request(
         code,
@@ -361,16 +362,17 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
         store(code, operand.data);
     }
     if operand.writeback() {
-        code.extend(MOV_RAX_RSP);
-        code.extend(WRITEBACK_OFFSET.to_le_bytes());
+        code.asm()
+            .mov_load(Size::Qword, Gpr::Rax, scratch(WRITEBACK_OFFSET));
         store(code, operand.base);
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
     let cleanup = code.len();
     for failed in failures {
         service::patch_branch(code, failed, cleanup);
     }
-    code.extend(ADD_RSP);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Gpr::Rsp, SCRATCH_BYTES as i8);
     address::return_if_failed(code);
 }
 
@@ -396,10 +398,10 @@ mod tests {
         .unwrap();
         let traffic = operand.profile_success_traffic();
         assert_eq!((traffic.gpr_frame_loads, traffic.gpr_direct_stores), (4, 0));
-        let mut code = Vec::new();
+        let mut code = Code::new();
         emit_context(&mut code, &operand, 0x4000);
         for (register, count) in [(Register::X(0), 1), (Register::Sp, 2)] {
-            let mut expected = Vec::new();
+            let mut expected = Code::new();
             load(&mut expected, register);
             assert_eq!(
                 code.windows(expected.len())

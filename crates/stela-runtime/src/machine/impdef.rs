@@ -407,7 +407,7 @@ pub struct Entry {
     pub permitted: u64,
     /// Bits the entry holds whose effect this machine does not model, and
     /// what is missing: a write that sets one completes and is reported
-    /// once ([`Entry::unmodeled_effect`]), and stops in strict mode.
+    /// once ([`Entry::unmodeled_effect`]).
     pub unmodeled: Option<(u64, &'static str)>,
     /// What a `Status` entry reads: the enables iBoot hands off, no event.
     pub handoff: u64,
@@ -436,7 +436,7 @@ const fn entry(
 }
 
 /// A `Control` entry that holds every value and reports a nonzero one once
-/// as `missing` (strict mode stops): its effect is not established.
+/// as `missing`: its effect is not established.
 const fn held(
     encoding: Encoding,
     name: &'static str,
@@ -505,7 +505,7 @@ const JIT_BOX_MODE_EVIDENCE: &str = "no public name; 26A434 XNU's JIT box (jitbo
     saves it, clears bit 0 and restores it around its own execution with SCTLR_EL1 and TCR_EL1 \
     (__text+0x2124, __text+0x28ec): bit 0 enables the box (inference). Every value is held. \
     What an enabled box enforces is not documented (docs/research/j473-kernel.md#jit-box), \
-    so a value with bit 0 set is reported once as unmodeled and stops in strict mode";
+    so a value with bit 0 set is reported once as unmodeled";
 
 /// What an enabled JIT box would need: its enforcement.
 const JIT_BOX_UNMODELED: &str = "JIT box enabled; enforcement not modeled: JITs that keep to \

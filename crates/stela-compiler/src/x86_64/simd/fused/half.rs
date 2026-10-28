@@ -1,10 +1,11 @@
 //! Exact finite Half FMA, with one integer rounding to the target format.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
-    ArithmeticOpcode, Condition, VZEROUPPER, branch, emit_fma, emit_opcode_to, jump,
+    ArithmeticOpcode, Condition, branch, emit_fma, emit_opcode_to, jump,
     prepare_vector_input_range, resolve, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed};
+use crate::x86_64::asm::{Alu, Code, Disp, Gpr, Mem, ShiftOp, Size};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -27,30 +28,48 @@ const HALF_EXPONENT_MASK: u8 = 31;
 const EXPONENT_SPAN_BIAS: u8 = 16;
 const MAXIMUM_BIASED_SPAN: u8 = 71;
 
-fn load_half(code: &mut Vec<u8>, slot: u8) {
-    // MOVZX EAX, word [RSP + R11*2 + slot]. R11 is the active lane index.
-    code.extend([0x42, 0x0f, 0xb7, 0x44, 0x5c, slot]);
+use Gpr::{R11, Rax, Rcx, Rsp};
+
+/// `[rsp + r11*2 + slot]`: the active lane, R11, of a frame slot.
+fn lane(slot: u8) -> Mem {
+    Mem::indexed(Rsp, R11, 2, slot.into()).with_width(Disp::Byte)
 }
 
-fn exponent(code: &mut Vec<u8>, slot: u8) {
+/// `[rsp + slot]`, a frame slot.
+fn frame(slot: u8) -> Mem {
+    Mem::base(Rsp, slot.into())
+}
+
+fn load_half(code: &mut Code, slot: u8) {
+    code.asm().movzx(Size::Dword, Rax, Size::Word, lane(slot));
+}
+
+fn exponent(code: &mut Code, slot: u8) {
     load_half(code, slot);
-    code.extend([0xc1, 0xe8, Format::Half.fraction_bits() as u8]); // SHR EAX,10
-    code.extend([0x83, 0xe0, HALF_EXPONENT_MASK]);
+    let mut asm = code.asm();
+    asm.shift_imm(
+        ShiftOp::Shr,
+        Size::Dword,
+        Rax,
+        Format::Half.fraction_bits() as u8,
+    );
+    asm.alu_imm8(Alu::And, Size::Dword, Rax, HALF_EXPONENT_MASK as i8);
 }
 
-fn exact_span(code: &mut Vec<u8>, rollback: &mut Vec<usize>) {
+fn exact_span(code: &mut Code, rollback: &mut Vec<usize>) {
     exponent(code, LEFT_SLOT);
-    code.extend([0x89, 0xc1]); // MOV ECX,EAX
+    code.asm().mov(Size::Dword, Rcx, Rax);
     exponent(code, RIGHT_SLOT);
-    code.extend([0x01, 0xc1]); // ADD ECX,EAX
+    code.asm().alu(Alu::Add, Size::Dword, Rcx, Rax);
     exponent(code, ADDEND_SLOT);
-    code.extend([0x29, 0xc1]); // SUB ECX,EAX
-    code.extend([0x83, 0xc1, EXPONENT_SPAN_BIAS]);
-    code.extend([0x83, 0xf9, MAXIMUM_BIASED_SPAN]);
+    let mut asm = code.asm();
+    asm.alu(Alu::Sub, Size::Dword, Rcx, Rax);
+    asm.alu_imm8(Alu::Add, Size::Dword, Rcx, EXPONENT_SPAN_BIAS as i8);
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, MAXIMUM_BIASED_SPAN as i8);
     rollback.push(branch(code, Condition::Above));
 }
 
-fn widen_sources(code: &mut Vec<u8>, target: TargetCpu) {
+fn widen_sources(code: &mut Code, target: TargetCpu) {
     load_half(code, LEFT_SLOT);
     lanes::widen_normal(code, target);
     packed(code, Host::MoveAligned, lanes::LEFT, lanes::RESULT);
@@ -61,14 +80,14 @@ fn widen_sources(code: &mut Vec<u8>, target: TargetCpu) {
     lanes::widen_normal(code, target);
 }
 
-fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+fn arithmetic(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if target.supports(TargetCpu::Fma) {
         // Original signs: the FMA opcode performs the pre-round sign changes.
         emit_fma(
             code,
             Format::Double,
             Shape::Scalar,
-            super::fused_opcode(operand.operation),
+            super::super::numerical::FusedOpcode::from(operand.operation),
             target,
         );
     } else {
@@ -98,7 +117,7 @@ fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     packed(code, Host::MoveAligned, lanes::RESULT, lanes::LEFT);
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     debug_assert_eq!(operand.format, Format::Half);
     let mut helper = Vec::new();
     let mut rollback = Vec::new();
@@ -110,7 +129,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, targ
         target
     };
     if widening.supports(TargetCpu::F16c) || target.supports(TargetCpu::Fma) {
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     }
     // FPMulAdd retains enabled exceptions under either AH setting.
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
@@ -126,12 +145,14 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, targ
         vector_exponent_range(code, Format::Half, operand.shape, source);
         helper.push(branch(code, Condition::NotZero));
     }
-    code.extend([0x48, 0x83, 0xec, FRAME_BYTES]);
-    code.extend([0xf3, 0x0f, 0x7f, 0x04, 0x24]); // MOVDQU [RSP],XMM0
-    code.extend([0xf3, 0x0f, 0x7f, 0x4c, 0x24, RIGHT_SLOT]);
-    code.extend([0xf3, 0x0f, 0x7f, 0x74, 0x24, ADDEND_SLOT]);
+    let baseline = TargetCpu::Baseline;
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Rsp, FRAME_BYTES as i8);
+    Host::StoreUnaligned.emit(code, lanes::LEFT, frame(LEFT_SLOT), baseline);
+    Host::StoreUnaligned.emit(code, lanes::RIGHT, frame(RIGHT_SLOT), baseline);
+    Host::StoreUnaligned.emit(code, lanes::RESULT, frame(ADDEND_SLOT), baseline);
     packed(code, Host::Xor, SIGN_MASK, SIGN_MASK);
-    code.extend([0xf3, 0x0f, 0x7f, 0x54, 0x24, RESULT_SLOT]);
+    Host::StoreUnaligned.emit(code, SIGN_MASK, frame(RESULT_SLOT), baseline);
     if !target.supports(TargetCpu::Fma)
         && (operand.operation.negate_left() || operand.operation.negate_addend())
     {
@@ -156,21 +177,24 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, targ
         lanes::RoundingPolicy::Fpcr,
         lanes::ResultSign::Preserve,
     );
-    code.extend([0x66, 0x42, 0x89, 0x44, 0x5c, RESULT_SLOT]);
-    code.extend([0x41, 0xff, 0xc3]); // INC R11D
-    code.extend([
-        0x41,
-        0x83,
-        0xfb,
-        operand.shape.lane_count(Format::Half) as u8,
-    ]);
+    let mut asm = code.asm();
+    asm.mov_store(Size::Word, lane(RESULT_SLOT), Rax);
+    asm.inc(Size::Dword, R11);
+    asm.alu_imm8(
+        Alu::Cmp,
+        Size::Dword,
+        R11,
+        operand.shape.lane_count(Format::Half) as i8,
+    );
     let more = branch(code, Condition::Below);
     resolve(code, more, loop_start);
-    code.extend([0xf3, 0x0f, 0x6f, 0x44, 0x24, RESULT_SLOT]);
-    code.extend([0x48, 0x83, 0xc4, FRAME_BYTES]);
+    Host::LoadUnaligned.emit(code, lanes::LEFT, frame(RESULT_SLOT), baseline);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Rsp, FRAME_BYTES as i8);
     let success = jump(code);
     let rollback_start = code.len();
-    code.extend([0x48, 0x83, 0xc4, FRAME_BYTES]);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Rsp, FRAME_BYTES as i8);
     let helper_start = code.len();
     super::super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
     let commit_start = code.len();

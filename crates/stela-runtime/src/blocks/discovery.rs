@@ -140,9 +140,12 @@ impl BlockRuntime {
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
         let analysis = analyze_with_profile(window, pc, self.profile)?;
-        let plan =
-            stela_compiler::block::CompilationPlan::new(window, pc, self.profile, self.target)?
-                .with_resident_loops();
+        let plan = stela_compiler::block::CompilationPlan::new(
+            window,
+            pc,
+            &stela_compiler::Options::new(self.profile, self.target),
+        )?
+        .with_resident_loops();
         let artifact_profile = plan.profile();
         let source_bytes = plan.source_bytes();
         ensure!(

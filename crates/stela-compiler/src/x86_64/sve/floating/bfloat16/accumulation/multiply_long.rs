@@ -1,5 +1,7 @@
 //! BFMLALB/BFMLALT with exact SSE2 products or FMA3.
 use super::{ADDEND, LEFT, RIGHT, shuffle, test_control};
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, ShiftOp, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -31,15 +33,9 @@ const FIRST_DWORD: u8 = 0;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_INEXACT_TO_FPSR_SHIFT: u8 = 1;
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const JMP_REL32: u8 = 0xe9;
-const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 
 pub(super) fn install_environment(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     features: NumericalFeatures,
     failures: &mut Vec<usize>,
@@ -52,19 +48,17 @@ pub(super) fn install_environment(
     }
     // The rounding-control encoder has no frame, MXCSR or guest-state effect.
     rounding_control(code);
-    code.push(JMP_REL32);
-    let installed = code.len();
-    code.extend(0_i32.to_le_bytes());
+    let installed = code.asm().jmp().offset();
     let alternative_start = code.len();
     resolve(code, alternative, alternative_start);
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     let install_start = code.len();
     resolve(code, installed, install_start);
     numerical::install_mxcsr(code, frame);
 }
 
 pub(super) fn prepare_sources(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     part: VectorPart,
     index: Option<u8>,
     subtract: bool,
@@ -92,20 +86,19 @@ pub(super) fn prepare_sources(
     }
 }
 
-fn guard_normal(code: &mut Vec<u8>, source: u8, failures: &mut Vec<usize>) {
+fn guard_normal(code: &mut Code, source: u8, failures: &mut Vec<usize>) {
     vector_exponent_range(code, Format::Single, Shape::Vector128, source);
     failures.push(branch(code, Condition::NotZero));
 }
 
-fn guard_status(code: &mut Vec<u8>, frame: &Frame, mask: u32, failures: &mut Vec<usize>) {
+fn guard_status(code: &mut Code, frame: &Frame, mask: u32, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(mask.to_le_bytes());
+    code.asm().test_imm(Size::Dword, Rcx, mask as i32);
     failures.push(branch(code, Condition::NotZero));
 }
 
 pub(super) fn evaluate(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     frame: &Frame,
     failures: &mut Vec<usize>,
     target: TargetCpu,
@@ -123,7 +116,7 @@ pub(super) fn evaluate(
             FusedOpcode::MultiplyAdd,
             target,
         );
-        code.extend(VZEROUPPER);
+        code.asm().vzeroupper();
     } else {
         emit_opcode_to(
             code,
@@ -152,14 +145,13 @@ pub(super) fn evaluate(
     guard_normal(code, LEFT, failures);
     test_control(code, FPCR_AH);
     let suppressed = branch(code, Condition::NotZero);
-    code.extend(MOV_EAX_ECX);
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, Rcx);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
     // MXCSR status precision bit5 maps to the cumulative FPSR precision bit4.
     // Keep ECX live until capture_status after the next real arithmetic stage.
-    const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
-    code.extend(SHR_EAX_IMMEDIATE);
-    code.push(MXCSR_INEXACT_TO_FPSR_SHIFT);
+    code.asm()
+        .shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_INEXACT_TO_FPSR_SHIFT);
     numerical::add_fpsr(code, frame);
     let status_complete = code.len();
     resolve(code, suppressed, status_complete);

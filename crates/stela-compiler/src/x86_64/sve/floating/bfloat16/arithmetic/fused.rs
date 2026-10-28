@@ -1,5 +1,9 @@
 //! BF16 fused multiply-add through exact double arithmetic. Close exponents make
 //! the product and sum exact in double; round-to-odd then feeds BF16 rounding.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
+use crate::x86_64::asm::Gpr::{R10, Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size, Unary};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -17,16 +21,13 @@ use crate::{
             numerical::{self, Environment, Output},
             read_predicate_mask,
         },
-        simd::numerical::{
-            Condition, branch, integer_rounding_policy, quantize_bfloat_scalar_bits, resolve,
-        },
+        simd::numerical::{integer_rounding_policy, quantize_bfloat_scalar_bits},
         sve::floating::classify::guard_active_exception_enables,
     },
 };
 use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
-const GPR_RAX: u8 = 0;
 const ACCUMULATOR: u8 = 1;
 const LEFT: u8 = 2;
 const RIGHT: u8 = 3;
@@ -50,158 +51,102 @@ const EXPONENT_REBIAS: u64 = (1023 - 127) << 23;
 const MINIMUM_DOUBLE_EXPONENT: u32 = 1023 - 127 + 1;
 const NORMAL_EXPONENT_INTERVAL: u32 = 253;
 const EXACT_EXPONENT_DISTANCE: u8 = 32;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const PEXTRW: &[u8] = &[0x66, 0x0f, 0xc5];
-const PINSRW: &[u8] = &[0x66, 0x0f, 0xc4];
-const MOVD: &[u8] = &[0x66, 0x0f, 0x6e];
-const CVTSS2SD: &[u8] = &[0xf3, 0x0f, 0x5a];
-const MULSD: &[u8] = &[0xf2, 0x0f, 0x59];
-const ADDSD: &[u8] = &[0xf2, 0x0f, 0x58];
-const MOVQ_RAX_XMM6: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xf0];
-const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const MOV_EDX_ECX: &[u8] = &[0x89, 0xca];
-const MOV_R10D_ECX: &[u8] = &[0x41, 0x89, 0xca];
-const NEG_R10D: &[u8] = &[0x41, 0xf7, 0xda];
-const ADD_R10D_ECX: &[u8] = &[0x41, 0x01, 0xca];
-const SUB_R10D_IMM8: &[u8] = &[0x41, 0x83, 0xea];
-const ADD_R10D_IMM8: &[u8] = &[0x41, 0x83, 0xc2];
-const CMP_R10D_IMM8: &[u8] = &[0x41, 0x83, 0xfa];
-const SHR_ECX_IMM8: &[u8] = &[0xc1, 0xe9];
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const SHL_EAX_IMM8: &[u8] = &[0xc1, 0xe0];
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const SUB_EDX_ONE: &[u8] = &[0x83, 0xea, 1];
-const CMP_EDX_IMM32: &[u8] = &[0x81, 0xfa];
-const XOR_EAX_IMM32: u8 = 0x35;
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const TEST_EAX_IMM32: u8 = 0xa9;
-const MOV_RCX_RAX: &[u8] = &[0x48, 0x89, 0xc1];
-const SHR_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe9];
-const SUB_ECX_IMM32: &[u8] = &[0x81, 0xe9];
-const CMP_ECX_IMM32: &[u8] = &[0x81, 0xf9];
-const SETNZ_CL: &[u8] = &[0x0f, 0x95, 0xc1];
-const MOVZX_R10D_CL: &[u8] = &[0x44, 0x0f, 0xb6, 0xd1];
-const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
-const SHR_RDX_IMM8: &[u8] = &[0x48, 0xc1, 0xea];
-const AND_EDX_IMM32: &[u8] = &[0x81, 0xe2];
-const SHR_RAX_IMM8: &[u8] = &[0x48, 0xc1, 0xe8];
-const MOV_RCX_IMM64: &[u8] = &[0x48, 0xb9];
-const SUB_RAX_RCX: &[u8] = &[0x48, 0x29, 0xc8];
-const OR_EAX_R10D: &[u8] = &[0x44, 0x09, 0xd0];
-const OR_EAX_EDX: &[u8] = &[0x09, 0xd0];
-const TEST_R10D_R10D: &[u8] = &[0x45, 0x85, 0xd2];
-const MOV_R10D_EAX: &[u8] = &[0x41, 0x89, 0xc2];
-const MOV_EAX_R10D: &[u8] = &[0x44, 0x89, 0xd0];
-const MOV_EAX_IMM32: u8 = 0xb8;
 
-fn scalar(code: &mut Vec<u8>, opcode: &[u8], destination: u8, source: u8) {
-    code.extend(opcode);
-    code.push(MODRM_REGISTER | destination << MODRM_REGISTER_SHIFT | source);
-}
-
-fn extract(code: &mut Vec<u8>, source: u8, lane: usize) {
-    scalar(code, PEXTRW, GPR_RAX, source);
-    code.push(lane as u8);
+fn extract(code: &mut Code, source: u8, lane: usize) {
+    code.asm().pextrw(Rax, source, lane as u8);
 }
 
 /// Preserve raw BF16 in EAX and its biased exponent in ECX. Reject zeros,
 /// subnormals and nonfinite values before any host floating-point instruction.
-fn normal_input(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
-    code.extend(MOV_ECX_EAX);
-    code.extend(SHR_ECX_IMM8);
-    code.push(BFLOAT_FRACTION_BITS);
-    code.extend(AND_ECX_IMM32);
-    code.extend(BFLOAT_EXPONENT_MASK.to_le_bytes());
-    code.extend(MOV_EDX_ECX);
-    code.extend(SUB_EDX_ONE);
-    code.extend(CMP_EDX_IMM32);
-    code.extend(NORMAL_EXPONENT_INTERVAL.to_le_bytes());
-    failures.push(branch(code, Condition::Above));
+fn normal_input(code: &mut Code, failures: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rcx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, BFLOAT_FRACTION_BITS);
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, BFLOAT_EXPONENT_MASK as i32);
+    asm.mov(Size::Dword, Rdx, Rcx);
+    asm.alu_imm8(Alu::Sub, Size::Dword, Rdx, 1);
+    asm.alu_imm32(Alu::Cmp, Size::Dword, Rdx, NORMAL_EXPONENT_INTERVAL as i32);
+    failures.push(asm.jcc(Cond::A).offset());
 }
 
-fn widen(code: &mut Vec<u8>, destination: u8) {
-    code.extend(SHL_EAX_IMM8);
-    code.push(SINGLE_TO_BFLOAT_SHIFT);
-    scalar(code, MOVD, destination, GPR_RAX);
-    scalar(code, CVTSS2SD, destination, destination);
+fn widen(code: &mut Code, destination: u8) {
+    let mut asm = code.asm();
+    asm.shift_imm(ShiftOp::Shl, Size::Dword, Rax, SINGLE_TO_BFLOAT_SHIFT);
+    asm.movd_to_xmm(destination, Rax);
+    asm.cvtss2sd(destination, Rm::Xmm(destination));
 }
 
 /// Product precision is at most16 bits. With |eL+eR-eA| <=32, aligning the
 /// accumulator and product requires at most48 significant bits plus one carry,
 /// fitting Double53 even before cancellation. Both Double operations are exact.
-fn exact_exponent_guard(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
-    code.extend(SUB_R10D_IMM8);
-    code.push(BFLOAT_EXPONENT_BIAS as u8);
-    code.extend(ADD_R10D_IMM8);
-    code.push(EXACT_EXPONENT_DISTANCE);
-    code.extend(CMP_R10D_IMM8);
-    code.push(EXACT_EXPONENT_DISTANCE * 2);
-    failures.push(branch(code, Condition::Above));
+fn exact_exponent_guard(code: &mut Code, failures: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Sub, Size::Dword, R10, BFLOAT_EXPONENT_BIAS as i8);
+    asm.alu_imm8(Alu::Add, Size::Dword, R10, EXACT_EXPONENT_DISTANCE as i8);
+    asm.alu_imm8(
+        Alu::Cmp,
+        Size::Dword,
+        R10,
+        (EXACT_EXPONENT_DISTANCE * 2) as i8,
+    );
+    failures.push(asm.jcc(Cond::A).offset());
 }
 
 /// Compress an exact Double to a rebased Single-shaped integer representation.
 /// The low29 discarded bits become one sticky bit. Sixteen retained guard bits
 /// remain below BF precision, so every final BF rounding mode sees the same
 /// below-half/equal-half/above-half and nonzero-remainder classification.
-fn compress(code: &mut Vec<u8>, failures: &mut Vec<usize>) {
-    code.extend(MOVQ_RAX_XMM6);
-    code.extend(MOV_RCX_RAX);
-    code.extend(SHR_RCX_IMM8);
-    code.push(Format::Double.fraction_bits() as u8);
-    code.extend(AND_ECX_IMM32);
-    code.extend(0x7ff_u32.to_le_bytes());
-    code.extend(SUB_ECX_IMM32);
-    code.extend(MINIMUM_DOUBLE_EXPONENT.to_le_bytes());
-    code.extend(CMP_ECX_IMM32);
-    code.extend(NORMAL_EXPONENT_INTERVAL.to_le_bytes());
-    failures.push(branch(code, Condition::Above));
-    code.push(TEST_EAX_IMM32);
-    code.extend(STICKY_MASK.to_le_bytes());
-    code.extend(SETNZ_CL);
-    code.extend(MOVZX_R10D_CL);
-    code.extend(MOV_RDX_RAX);
-    code.extend(SHR_RDX_IMM8);
-    code.push(u32::BITS as u8);
-    code.extend(AND_EDX_IMM32);
-    code.extend(SINGLE_SIGN_MASK.to_le_bytes());
-    code.extend(SHR_RAX_IMM8);
-    code.push(DOUBLE_TO_SINGLE_SHIFT);
-    code.extend(MOV_RCX_IMM64);
-    code.extend(EXPONENT_REBIAS.to_le_bytes());
-    code.extend(SUB_RAX_RCX);
-    code.extend(OR_EAX_R10D);
-    code.extend(OR_EAX_EDX);
+fn compress(code: &mut Code, failures: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.movq_from_xmm(Rax, 6);
+    asm.mov(Size::Qword, Rcx, Rax);
+    asm.shift_imm(
+        ShiftOp::Shr,
+        Size::Qword,
+        Rcx,
+        Format::Double.fraction_bits() as u8,
+    );
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, 0x7ff);
+    asm.alu_imm32(Alu::Sub, Size::Dword, Rcx, MINIMUM_DOUBLE_EXPONENT as i32);
+    asm.alu_imm32(Alu::Cmp, Size::Dword, Rcx, NORMAL_EXPONENT_INTERVAL as i32);
+    failures.push(asm.jcc(Cond::A).offset());
+    asm.test_accumulator_imm(Size::Dword, STICKY_MASK as i32);
+    asm.setcc(Cond::Ne, Rcx);
+    asm.movzx(Size::Dword, R10, Size::Byte, Rcx);
+    asm.mov(Size::Qword, Rdx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, u32::BITS as u8);
+    asm.alu_imm32(Alu::And, Size::Dword, Rdx, SINGLE_SIGN_MASK as i32);
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Rax, DOUBLE_TO_SINGLE_SHIFT);
+    asm.mov_imm64(Rcx, EXPONENT_REBIAS);
+    asm.alu(Alu::Sub, Size::Qword, Rax, Rcx);
+    asm.alu(Alu::Or, Size::Dword, Rax, R10);
+    asm.alu(Alu::Or, Size::Dword, Rax, Rdx);
 }
 
 /// Shared R8D/R9D/R11D selectors own RC and nearest-even parity. Every discarded
 /// bit records true-BF IXC, including AH1. Pending status commits only at finish.
-fn quantize(code: &mut Vec<u8>, frame: &numerical::Frame, failures: &mut Vec<usize>) {
+fn quantize(code: &mut Code, frame: &numerical::Frame, failures: &mut Vec<usize>) {
     // R10D holds the compression sticky bit, which is already part of EAX.
     // The shared helper's OR-accumulation therefore records exactly low16.
     quantize_bfloat_scalar_bits(code);
-    code.extend(TEST_R10D_R10D);
-    let exact = branch(code, Condition::Zero);
-    code.extend(MOV_R10D_EAX);
-    code.push(MOV_EAX_IMM32);
-    code.extend(INEXACT.to_le_bytes());
+    let mut asm = code.asm();
+    asm.test(Size::Dword, R10, R10);
+    let exact = asm.jcc(Cond::E);
+    asm.mov(Size::Dword, R10, Rax);
+    asm.mov_imm32(Rax, INEXACT);
     numerical::add_fpsr(code, frame);
-    code.extend(MOV_EAX_R10D);
-    let destination = code.len();
-    resolve(code, exact, destination);
-    code.extend(MOV_ECX_EAX);
-    code.extend(AND_ECX_IMM32);
-    code.extend(SINGLE_EXPONENT_MASK.to_le_bytes());
-    code.extend(CMP_ECX_IMM32);
-    code.extend(SINGLE_EXPONENT_MASK.to_le_bytes());
-    failures.push(branch(code, Condition::Zero));
-    code.extend(SHR_EAX_IMM8);
-    code.push(SINGLE_TO_BFLOAT_SHIFT);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, R10);
+    asm.bind(exact);
+    asm.mov(Size::Dword, Rcx, Rax);
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, SINGLE_EXPONENT_MASK as i32);
+    asm.alu_imm32(Alu::Cmp, Size::Dword, Rcx, SINGLE_EXPONENT_MASK as i32);
+    failures.push(asm.jcc(Cond::E).offset());
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, SINGLE_TO_BFLOAT_SHIFT);
 }
 
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -227,7 +172,7 @@ pub(in crate::x86_64) fn emit(
     let mut failures = Vec::new();
     // Exact admitted arithmetic is independent of host RC. Fixed RN also makes
     // the private environment auditable; final BF RC remains the shared policy.
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     numerical::install_mxcsr(code, &frame);
     integer_rounding_policy(code, SINGLE_TO_BFLOAT_SHIFT, false);
     for chunk in 0..length.chunks() {
@@ -259,34 +204,46 @@ pub(in crate::x86_64) fn emit(
         Host::MoveAligned.register(code, RESULT, ACCUMULATOR, target);
         for lane in 0..CHUNK_LANES {
             extract(code, ACTIVE, lane);
-            code.extend(TEST_EAX_EAX);
-            let inactive = branch(code, Condition::Zero);
+            let mut asm = code.asm();
+            asm.test(Size::Dword, Rax, Rax);
+            let inactive = asm.jcc(Cond::E);
             extract(code, ACCUMULATOR, lane);
             normal_input(code, &mut failures);
-            code.extend(MOV_R10D_ECX);
-            code.extend(NEG_R10D);
+            let mut asm = code.asm();
+            asm.mov(Size::Dword, R10, Rcx);
+            asm.unary(Unary::Neg, Size::Dword, R10);
             widen(code, DOUBLE_ACCUMULATOR);
             extract(code, LEFT, lane);
             normal_input(code, &mut failures);
-            code.extend(ADD_R10D_ECX);
+            code.asm().alu(Alu::Add, Size::Dword, R10, Rcx);
             if subtract {
-                code.push(XOR_EAX_IMM32);
-                code.extend(BFLOAT_SIGN_MASK.to_le_bytes());
+                code.asm()
+                    .alu_accumulator_imm32(Alu::Xor, Size::Dword, BFLOAT_SIGN_MASK as i32);
             }
             widen(code, DOUBLE_LEFT);
             extract(code, RIGHT, index.map_or(lane, usize::from));
             normal_input(code, &mut failures);
-            code.extend(ADD_R10D_ECX);
+            code.asm().alu(Alu::Add, Size::Dword, R10, Rcx);
             exact_exponent_guard(code, &mut failures);
             widen(code, DOUBLE_RIGHT);
-            scalar(code, MULSD, DOUBLE_LEFT, DOUBLE_RIGHT);
-            scalar(code, ADDSD, DOUBLE_LEFT, DOUBLE_ACCUMULATOR);
+            let mut asm = code.asm();
+            asm.float(
+                FloatOp::Mul,
+                FloatLanes::ScalarDouble,
+                DOUBLE_LEFT,
+                Rm::Xmm(DOUBLE_RIGHT),
+            );
+            asm.float(
+                FloatOp::Add,
+                FloatLanes::ScalarDouble,
+                DOUBLE_LEFT,
+                Rm::Xmm(DOUBLE_ACCUMULATOR),
+            );
             compress(code, &mut failures);
             quantize(code, &frame, &mut failures);
-            scalar(code, PINSRW, RESULT, GPR_RAX);
-            code.push(lane as u8);
-            let destination = code.len();
-            resolve(code, inactive, destination);
+            let mut asm = code.asm();
+            asm.pinsrw(RESULT, Rax, lane as u8);
+            asm.bind(inactive);
         }
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, chunk, RESULT, target);
     }

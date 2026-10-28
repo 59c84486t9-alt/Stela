@@ -5,19 +5,11 @@
 //! for the AES constants) carries the caller's RSP into the frame's last slot.
 //! The frame is restored before the destination is written.
 use super::{BYTE_BITS, Host, LEFT, MASK, RESULT, Shift, TargetCpu, byte_constant, packed};
-use alloc::vec::Vec;
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Size};
 
 const VECTOR_BYTES: u32 = 16;
 const INPUT_PLANES: usize = 8;
-const RCX: u8 = 1;
-const RSP: u8 = 4;
-const STACK_MODRM_DISP32: u8 = 0x84;
-const STACK_SIB: u8 = 0x24;
-const MOV_RCX_RSP: [u8; 3] = [0x48, 0x89, 0xe1];
-const SUB_RSP_IMMEDIATE: [u8; 3] = [0x48, 0x81, 0xec];
-const AND_RSP_ALIGN_16: [u8; 4] = [0x48, 0x83, 0xe4, 0xf0];
-const MOV_STORE_QWORD: [u8; 2] = [0x48, 0x89];
-const MOV_LOAD_QWORD: [u8; 2] = [0x48, 0x8b];
+const STACK_ALIGNMENT: i8 = 16;
 
 // Boyar-Peralta 113-gate forward and Calik 121-gate inverse S-box circuits
 // (https://www.cs.yale.edu/homes/peralta/CircuitStuff/{SLP_AES_113.txt,Sinv.txt}),
@@ -273,18 +265,16 @@ const INVERSE_GATES: [Gate; 121] = [
 ];
 const INVERSE_OUTPUTS: [u8; 8] = [118, 123, 125, 116, 128, 120, 117, 113];
 
-fn stack_plane(code: &mut Vec<u8>, register: u8, plane: usize, opcode: Host) {
-    opcode.append(code, TargetCpu::Baseline);
-    stack_slot(code, register, plane);
+fn stack_plane(code: &mut Code, register: u8, plane: usize, opcode: Host) {
+    opcode.emit(code, register, stack_slot(plane), TargetCpu::Baseline);
 }
 
-/// The `[rsp + plane * 16]` operand of `register`, after its opcode.
-fn stack_slot(code: &mut Vec<u8>, register: u8, plane: usize) {
-    code.extend([STACK_MODRM_DISP32 | (register << 3), STACK_SIB]);
-    code.extend((plane as u32 * VECTOR_BYTES).to_le_bytes());
+/// `[rsp + plane * 16]`, with a 32-bit displacement.
+fn stack_slot(plane: usize) -> Mem {
+    Mem::base_disp32(Gpr::Rsp, (plane as u32 * VECTOR_BYTES) as i32)
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, inverse: bool) {
+pub(super) fn emit(code: &mut Code, inverse: bool) {
     let (gates, outputs): (&[Gate], [u8; 8]) = if inverse {
         (&INVERSE_GATES, INVERSE_OUTPUTS)
     } else {
@@ -292,12 +282,16 @@ pub(super) fn emit(code: &mut Vec<u8>, inverse: bool) {
     };
     let planes = INPUT_PLANES + gates.len();
     // The planes, then one aligned slot for the caller's RSP.
-    code.extend(MOV_RCX_RSP);
-    code.extend(SUB_RSP_IMMEDIATE);
-    code.extend((planes as u32 * VECTOR_BYTES + VECTOR_BYTES).to_le_bytes());
-    code.extend(AND_RSP_ALIGN_16);
-    code.extend(MOV_STORE_QWORD);
-    stack_slot(code, RCX, planes);
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, Gpr::Rcx, Gpr::Rsp);
+    asm.alu_imm32(
+        Alu::Sub,
+        Size::Qword,
+        Gpr::Rsp,
+        (planes as u32 * VECTOR_BYTES + VECTOR_BYTES) as i32,
+    );
+    asm.alu_imm8(Alu::And, Size::Qword, Gpr::Rsp, -STACK_ALIGNMENT);
+    asm.mov_store(Size::Qword, stack_slot(planes), Gpr::Rcx);
     byte_constant(code, MASK, 1);
     for input in 0..INPUT_PLANES {
         packed(code, Host::MoveAligned, LEFT, RESULT);
@@ -330,6 +324,6 @@ pub(super) fn emit(code: &mut Vec<u8>, inverse: bool) {
         }
         packed(code, Host::Or, RESULT, LEFT);
     }
-    code.extend(MOV_LOAD_QWORD);
-    stack_slot(code, RSP, planes);
+    code.asm()
+        .mov_load(Size::Qword, Gpr::Rsp, stack_slot(planes));
 }

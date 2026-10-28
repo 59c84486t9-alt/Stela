@@ -735,10 +735,7 @@ fn load(
         .and_then(|time| unix_seconds(&time));
     let power = host_power();
 
-    let strict = text
-        .split_ascii_whitespace()
-        .any(|word| word == crate::engine::STRICT_OPTION);
-    let remapping = crate::native_dma::firmware_units(strict)?;
+    let remapping = crate::native_dma::firmware_units()?;
 
     let native_mmio = match crate::native_mmio::Prepared::capture() {
         Ok(prepared) => Some(prepared),
@@ -911,7 +908,7 @@ fn load(
     let map = unsafe { boot::exit_boot_services(None) };
     // SAFETY: the firmware's identity map is still loaded, the APs idle in
     // firmware code, and no Stela driver or memory reuse has started.
-    unsafe { crate::native_dma::release_firmware_units(&remapping, strict, tsc_hz) };
+    unsafe { crate::native_dma::release_firmware_units(&remapping, tsc_hz) };
     let native_mmio_region = match native_mmio {
         Some(prepared) => match prepared.finish(&map) {
             Ok(()) => prepared.region(),

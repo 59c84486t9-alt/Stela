@@ -1,5 +1,9 @@
 //! SVE FMAXV/FMINV/FMAXNMV/FMINNMV and their QV forms. Only trees of nonzero
 //! normals and infinities take the native path.
+use crate::x86_64::asm::FloatLanes;
+use crate::x86_64::asm::FloatOp;
+use crate::x86_64::asm::Gpr::{Rax, Rdi};
+use crate::x86_64::asm::{Alu, Code, Cond, Mem, Rm, Size};
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -29,21 +33,8 @@ const CLASSIFICATION: [u8; 2] = [6, 7];
 const TREE_SCRATCH: u8 = 5;
 const TREE_ACTIVE: u8 = 6;
 const TREE_PREDICATE_SCRATCH: u8 = 7;
-const GPR_RAX: u8 = 0;
 const OUTPUT_SLOT: usize = 0;
 const OUTPUT_CHUNK: usize = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SSE_ESCAPE: u8 = 0x0f;
-const DOUBLE_PREFIX: u8 = 0x66;
-const MINIMUM_OPCODE: u8 = 0x5d;
-const MAXIMUM_OPCODE: u8 = 0x5f;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const CMP_EAX_ALL_BYTES: &[u8] = &[0x3d, 0xff, 0xff, 0, 0];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 const SWAP_DWORDS: u8 = 0xb1;
 const BROADCAST_DWORD_0: u8 = 0x00;
 const BROADCAST_DWORD_1: u8 = 0x55;
@@ -55,39 +46,30 @@ const REMOVE_SIGN_BIT: u8 = 1;
 const TREE_BRANCHES: usize = 2;
 const NEXT_TREE_REGISTER: u8 = 1;
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+fn state_test(code: &mut Code, mask: u32) {
+    code.asm().test_imm(
+        Size::Dword,
+        Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
+        mask as i32,
+    );
 }
 
-fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
-    let end = displacement + size_of::<i32>();
-    let relative =
-        i32::try_from(destination as i64 - end as i64).expect("bounded reduction branch");
-    code[displacement..end].copy_from_slice(&relative.to_le_bytes());
+fn reject(code: &mut Code, failures: &mut Vec<usize>) {
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
-fn state_test(code: &mut Vec<u8>, mask: u32) {
-    code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(mask.to_le_bytes());
+fn shuffle(code: &mut Code, dst: u8, src: u8, order: u8, target: TargetCpu) {
+    code.asm()
+        .simd_imm(Host::ShuffleDword, dst, Rm::Xmm(src), order, target);
 }
 
-fn shuffle(code: &mut Vec<u8>, dst: u8, src: u8, order: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, dst, src, target);
-    code.push(order);
-}
-
-fn broadcast(code: &mut Vec<u8>, format: Format, mut bits: u64, dst: u8, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, mut bits: u64, dst: u8, target: TargetCpu) {
     if format == Format::Half {
         bits |= bits << Format::Half.bits();
     }
-    code.extend(MOV_RAX_IMMEDIATE);
-    code.extend(bits.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | dst << MODRM_REGISTER_SHIFT | GPR_RAX);
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, bits);
+    asm.simd(Host::MoveGprQword, dst, Rax, target);
     if format == Format::Double {
         Host::UnpackLowQword.register(code, dst, dst, target);
     } else {
@@ -112,7 +94,7 @@ fn minimum(operation: MinMaxOperation) -> bool {
 /// Identity construction is bitwise; no numerical control validation is allowed
 /// in the raw QV base case. DefaultNaN's sign alone depends on stored AH.
 fn identity(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: MinMaxOperation,
     format: Format,
     dst: u8,
@@ -131,30 +113,24 @@ fn identity(
     broadcast(code, format, bits, dst, target);
     if number(operation) {
         state_test(code, FPCR_AH);
-        let positive = branch(code, JZ_REL32);
+        let positive = code.asm().jcc(Cond::E);
         broadcast(code, format, bits | format.sign_mask(), dst, target);
-        let next = code.len();
-        resolve(code, positive, next);
+        code.asm().bind(positive);
     }
 }
 
-fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format, lo: u8, hi: u8) {
-    if format == Format::Double {
-        code.push(DOUBLE_PREFIX);
+fn selection(code: &mut Code, operation: MinMaxOperation, format: Format, lo: u8, hi: u8) {
+    let mut asm = code.asm();
+    match (format == Format::Double, minimum(operation)) {
+        (true, true) => asm.float(FloatOp::Min, FloatLanes::PackedDouble, lo, Rm::Xmm(hi)),
+        (true, false) => asm.float(FloatOp::Max, FloatLanes::PackedDouble, lo, Rm::Xmm(hi)),
+        (false, true) => asm.float(FloatOp::Min, FloatLanes::PackedSingle, lo, Rm::Xmm(hi)),
+        (false, false) => asm.float(FloatOp::Max, FloatLanes::PackedSingle, lo, Rm::Xmm(hi)),
     }
-    code.extend([
-        SSE_ESCAPE,
-        if minimum(operation) {
-            MINIMUM_OPCODE
-        } else {
-            MAXIMUM_OPCODE
-        },
-        MODRM_REGISTER | lo << MODRM_REGISTER_SHIFT | hi,
-    ]);
 }
 
 /// Reject every active zero, deliberately narrower than pairwise zero-tie guards.
-fn guard_nonzero(code: &mut Vec<u8>, format: Format, failures: &mut Vec<usize>, target: TargetCpu) {
+fn guard_nonzero(code: &mut Code, format: Format, failures: &mut Vec<usize>, target: TargetCpu) {
     let [magnitude, zero, other_half] = SCRATCH;
     Host::MoveAligned.register(code, magnitude, RESULT, target);
     match format {
@@ -170,9 +146,10 @@ fn guard_nonzero(code: &mut Vec<u8>, format: Format, failures: &mut Vec<usize>, 
         Host::And.register(code, magnitude, other_half, target);
     }
     Host::And.register(code, magnitude, ACTIVE, target);
-    Host::ByteSignMask.register(code, GPR_RAX, magnitude, target);
-    code.extend(TEST_EAX_EAX);
-    failures.push(branch(code, JNZ_REL32));
+    let mut asm = code.asm();
+    asm.simd_to_gpr(Host::ByteSignMask, Rax, magnitude, target);
+    asm.test(Size::Dword, Rax, Rax);
+    reject(code, failures);
 }
 
 struct Tree {
@@ -188,7 +165,7 @@ struct Tree {
 }
 
 impl Tree {
-    fn leaf(&self, code: &mut Vec<u8>, chunk: usize, dst: u8) {
+    fn leaf(&self, code: &mut Code, chunk: usize, dst: u8) {
         if !self.all_active {
             read_predicate_mask(
                 code,
@@ -229,7 +206,7 @@ impl Tree {
         }
     }
 
-    fn emit(&self, code: &mut Vec<u8>, start: usize, count: usize, dst: u8) {
+    fn emit(&self, code: &mut Code, start: usize, count: usize, dst: u8) {
         if count == 1 {
             self.leaf(code, start, dst);
             return;
@@ -252,7 +229,7 @@ impl Tree {
 /// Uses baseline SSE2 only. Clobbers RAX/RCX/RDX, flags and XMM0..7, preserves
 /// caller MXCSR, guest FPSR/NZCV, source aliases and all unrelated state.
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -295,7 +272,7 @@ pub(in crate::x86_64) fn emit(
         // active-only, unlike ordinary predicated elementwise arithmetic.
         if features.full_a64() {
             state_test(code, FPCR_EXCEPTION_ENABLE_MASK);
-            failures.push(branch(code, JNZ_REL32));
+            reject(code, &mut failures);
         }
         let classification = prepare_classification(code, operand.format, CLASSIFICATION, target);
         for chunk in 0..length.chunks() {
@@ -303,9 +280,10 @@ pub(in crate::x86_64) fn emit(
                 code, predicate, chunk, element, ACTIVE, SCRATCH[0], length, target,
             );
             if number(operation) {
-                Host::ByteSignMask.register(code, GPR_RAX, ACTIVE, target);
-                code.extend(CMP_EAX_ALL_BYTES);
-                failures.push(branch(code, JNZ_REL32));
+                let mut asm = code.asm();
+                asm.simd_to_gpr(Host::ByteSignMask, Rax, ACTIVE, target);
+                asm.alu_accumulator_imm32(Alu::Cmp, Size::Dword, 0xffff);
+                reject(code, &mut failures);
             }
             load_z_chunk(code, source, chunk, RESULT, length, target);
             Host::And.register(code, RESULT, ACTIVE, target);

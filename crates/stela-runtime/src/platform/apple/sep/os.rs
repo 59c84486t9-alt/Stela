@@ -28,9 +28,8 @@
 //! Application-service frames wait for the SEP's DMA step, where the service
 //! reads its request from, and writes its result to, the OOL buffers its AP
 //! client registered; the reply follows only once that has succeeded. A
-//! refused request stops a strict run; a graceful one sends the service
-//! protocol's failure answer, unless the request may already have taken
-//! effect ([`super::transaction`]).
+//! refused request gets the service protocol's failure answer, unless the
+//! request may already have taken effect ([`super::transaction`]).
 use super::super::asc::Message;
 use super::{
     Entropy, SecurityMode,
@@ -73,12 +72,11 @@ pub struct SepOs {
     /// Application-service requests awaiting the DMA step, in arrival order.
     pending: VecDeque<Frame>,
     /// When observing (`--sep-observe`), the recorded `sks`/`pnon`/`scrd`
-    /// traffic; `scrd` is then advertised and its requests never answered.
+    /// traffic; `scrd` is then advertised and its requests never answered,
+    /// so the kernel client takes its own timeout path and the run records
+    /// the requests that follow: a diagnostic exception to the error-reply
+    /// rule (docs/design/runtime.md "Unsupported operations").
     observe: Option<Journal>,
-    /// Strict mode ([`Self::set_strict`]): a refused or observed `scrd`
-    /// request stops the boot. Otherwise a refusal gets its failure answer,
-    /// an observed request none, and the boot goes on.
-    strict: bool,
 }
 
 /// The native application services behind the catalog.
@@ -110,19 +108,7 @@ impl SepOs {
             services: None,
             pending: VecDeque::new(),
             observe: None,
-            strict: true,
         }
-    }
-
-    /// Strict mode (the default) stops at each refused service request, and
-    /// at each observed `scrd` request once it is recorded. Graceful mode
-    /// answers a refusal with its failure answer and leaves an observed
-    /// request unanswered, so the kernel client takes its own timeout path
-    /// and the run records the requests that follow: a diagnostic exception
-    /// to the error-reply rule (docs/design/runtime.md "Unsupported
-    /// operations"), never a reply.
-    pub fn set_strict(&mut self, strict: bool) {
-        self.strict = strict;
     }
 
     /// The SEP's native services, advertised once OS active is reported:
@@ -185,8 +171,8 @@ impl SepOs {
 
     /// Answer the queued application-service requests through `port`. A
     /// refusal or DMA fault returns its reason instead of the reply, after
-    /// queueing its failure answer outside strict mode; an observed `scrd`
-    /// request is recorded and gets none.
+    /// queueing its failure answer; an observed `scrd` request is recorded
+    /// and gets none.
     pub fn dma(
         &mut self,
         port: &mut Port<'_, '_>,
@@ -228,11 +214,7 @@ impl SepOs {
         }
         if frame.service == observe::CREDENTIALS_ID {
             // Observation never answers scrd.
-            return if self.strict {
-                Err(observe::REFUSAL)
-            } else {
-                Ok(())
-            };
+            return Ok(());
         }
         let services = self
             .services
@@ -265,9 +247,8 @@ impl SepOs {
                 Ok(())
             }
             Err(refusal) => {
-                // Graceful: the failure answer, once its bytes are written.
-                if !self.strict
-                    && let Some(answer) = refusal.answer
+                // The failure answer, once its bytes are written.
+                if let Some(answer) = refusal.answer
                     && (answer.output.is_empty() || payload.output(&answer.output).is_ok())
                 {
                     outbox.push(answer.frame.mailbox());
@@ -942,9 +923,8 @@ mod tests {
     }
 
     #[test]
-    fn a_graceful_xart_refusal_is_answered_enotsup_from_the_dma_step() {
+    fn an_xart_refusal_is_answered_enotsup_from_the_dma_step() {
         let mut os = SepOs::new(None).with_services(store(), false).unwrap();
-        os.set_strict(false);
         map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         let commit_hash = xart::XartMessage {
             service: xart::SLAVE_ID,
@@ -1055,7 +1035,6 @@ mod tests {
     #[test]
     fn unsupported_system_key_metadata_drains_without_raw_observation() {
         let mut os = SepOs::new(None).with_services(store(), false).unwrap();
-        os.set_strict(false);
         map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         register(&mut os, keystore::ID, 0x8000, 0x8000);
         let request =
@@ -1155,7 +1134,6 @@ mod tests {
             )
             .unwrap();
         assert!(services.xart.policy_store_mut().is_err());
-        os.set_strict(false);
         ram.bytes[..0x124].fill(0);
         ram.bytes[..4].copy_from_slice(b"hcPB");
         ram.bytes[4..8].copy_from_slice(&8u32.to_le_bytes());
@@ -1218,31 +1196,25 @@ mod tests {
         let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x30000);
         ram.bytes[..4].copy_from_slice(b"hcPB");
         ram.bytes[4] = 0x3e;
-        // Strict: recorded, then refused with no answer.
-        assert!(reply(&mut os, request).unwrap().is_empty());
-        assert_eq!(dma_step(&mut os, &mut ram).1, []);
-        let lines = os.observations();
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("pnon tag=2 op=0"), "{}", lines[0]);
-        assert!(lines[0].contains("686350423e000000"), "{}", lines[0]);
-        // Graceful: the not-supported reply header answers it.
-        os.set_strict(false);
+        // Recorded, then answered with the not-supported reply header.
         assert!(reply(&mut os, request).unwrap().is_empty());
         let (result, answer) = dma_step(&mut os, &mut ram);
         assert!(result.is_err());
         assert_eq!(answer, [request]);
         assert_eq!(ram.bytes[0x1c000..0x1c004], *b"hrPB");
         assert_eq!(ram.bytes[0x1c004..0x1c008], 255u32.to_le_bytes());
-        assert_eq!(os.observations().len(), 1);
+        let lines = os.observations();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("pnon tag=2 op=0"), "{}", lines[0]);
+        assert!(lines[0].contains("686350423e000000"), "{}", lines[0]);
         // Draining empties the journal.
         assert!(os.observations().is_empty());
     }
 
     #[test]
-    fn graceful_runs_answer_refusals_but_never_an_observed_scrd_request() {
+    fn refusals_are_answered_but_never_an_observed_scrd_request() {
         use super::observe;
         let mut os = SepOs::new(None).with_services(store(), true).unwrap();
-        os.set_strict(false);
         map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         let request = |service, tag| Frame {
             service,

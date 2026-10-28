@@ -1,4 +1,7 @@
 //! SME integer outer products.
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Size};
+use crate::x86_64::simd::encode::stack;
 use crate::{
     TargetCpu,
     aarch64::{
@@ -14,7 +17,7 @@ use crate::{
         },
     },
 };
-use alloc::vec::Vec;
+use Gpr::{R8, R9, R11, Rax, Rsp};
 
 const MIXED_CORRECTION: u8 = 5;
 const WORD_SIGN_SHIFT: u8 = 15;
@@ -25,7 +28,7 @@ const WORD_SIGN_SHIFT: u8 = 15;
 /// clobber XMM5. Correcting the unsigned high word by the unsigned other input
 /// for each negative signed input reconstructs the full signed 32-bit product.
 fn word_products_signedness(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     left_signed: bool,
     right_signed: bool,
     target: TargetCpu,
@@ -74,51 +77,29 @@ const SWAR_BYTES: u32 = 0x0f0f_0f0f;
 const BYTE_ONES: u32 = 0x0101_0101;
 const WORD_ONES: u32 = 0x0001_0001;
 const NIBBLE_POPCOUNTS: [u8; VECTOR_CHUNK_BYTES] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const MOV_RSP_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x84, 0x24];
-const LEA_R11_RSP_DISP32: &[u8] = &[0x4c, 0x8d, 0x9c, 0x24];
-const XOR_R9D_R9D: &[u8] = &[0x45, 0x31, 0xc9];
-const BT_WORD_R11_R9W: &[u8] = &[0x66, 0x45, 0x0f, 0xa3, 0x0b];
-const JNC_REL32: &[u8] = &[0x0f, 0x83];
-const JB_REL32: &[u8] = &[0x0f, 0x82];
-const ADD_R9D_IMM8: &[u8] = &[0x41, 0x83, 0xc1];
-const ADD_R8_IMM32: &[u8] = &[0x49, 0x81, 0xc0];
-const CMP_R9D_IMM32: &[u8] = &[0x41, 0x81, 0xf9];
-const MOVD_ROW_RSP_R9: &[u8] = &[0x66, 0x42, 0x0f, 0x6e, 0x14, 0x0c];
-const MOVQ_ROW_RSP_R9: &[u8] = &[0xf3, 0x42, 0x0f, 0x7e, 0x14, 0x0c];
-const MOV_EAX_IMM32: u8 = 0xb8;
-const MOVABS_RAX_IMM64: &[u8] = &[0x48, 0xb8];
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const XMM_MODRM_REGISTER: u8 = 0xc0;
-const XMM_MODRM_RSP_DISP32: u8 = 0x84;
-const RSP_SIB: u8 = 0x24;
-const XMM_REGISTER_SHIFT: u8 = 3;
+/// R9 is the source group byte offset and the row predicate bit index; R11
+/// points at the staged predicate.
+const ROW_OFFSET: Gpr = R9;
+const PREDICATE: Gpr = R11;
 
-fn stack_chunk(code: &mut Vec<u8>, register: u8, offset: usize, store: bool, target: TargetCpu) {
+fn stack_chunk(code: &mut Code, register: u8, offset: usize, store: bool, target: TargetCpu) {
     (if store {
         Host::StoreUnaligned
     } else {
         Host::LoadUnaligned
     })
-    .append(code, target);
-    code.push(XMM_MODRM_RSP_DISP32 | (register << XMM_REGISTER_SHIFT));
-    code.push(RSP_SIB);
-    code.extend((offset as u32).to_le_bytes());
+    .emit(code, register, stack(offset), target);
 }
 
-fn splat_dword(code: &mut Vec<u8>, register: u8, value: u32, target: TargetCpu) {
-    code.push(MOV_EAX_IMM32);
-    code.extend(value.to_le_bytes());
-    code.extend(MOVD_XMM_EAX);
-    code.push(XMM_MODRM_REGISTER | (register << XMM_REGISTER_SHIFT));
-    Host::ShuffleDword.register(code, register, register, target);
-    code.push(REPEAT_LOW_DWORD);
+fn splat_dword(code: &mut Code, register: u8, value: u32, target: TargetCpu) {
+    let mut asm = code.asm();
+    asm.mov_imm32(Rax, value);
+    asm.movd_to_xmm(register, Rax);
+    Host::ShuffleDword.register_imm(code, register, register, REPEAT_LOW_DWORD, target);
 }
 
-fn shuffle(code: &mut Vec<u8>, dst: u8, src: u8, control: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, dst, src, target);
-    code.push(control);
+fn shuffle(code: &mut Code, dst: u8, src: u8, control: u8, target: TargetCpu) {
+    Host::ShuffleDword.register_imm(code, dst, src, control, target);
 }
 
 fn patch_relative(code: &mut [u8], immediate: usize, destination: usize) {
@@ -128,7 +109,7 @@ fn patch_relative(code: &mut [u8], immediate: usize, destination: usize) {
 }
 
 fn stage_vector(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     vector: u8,
     predicate: Option<u8>,
     source: ElementSize,
@@ -154,17 +135,17 @@ fn stage_vector(
     }
 }
 
-fn prepare_popcount(code: &mut Vec<u8>, target: TargetCpu) {
+fn prepare_popcount(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         splat_dword(code, HIGH, SWAR_BYTES, target);
-        code.extend(MOVABS_RAX_IMM64);
-        code.extend(
-            u64::from_le_bytes(NIBBLE_POPCOUNTS[..QWORD_BYTES].try_into().unwrap()).to_le_bytes(),
+        code.asm().mov_imm64(
+            Rax,
+            u64::from_le_bytes(NIBBLE_POPCOUNTS[..QWORD_BYTES].try_into().unwrap()),
         );
         Host::MoveGprQword.register(code, WORK, 0, target);
-        code.extend(MOVABS_RAX_IMM64);
-        code.extend(
-            u64::from_le_bytes(NIBBLE_POPCOUNTS[QWORD_BYTES..].try_into().unwrap()).to_le_bytes(),
+        code.asm().mov_imm64(
+            Rax,
+            u64::from_le_bytes(NIBBLE_POPCOUNTS[QWORD_BYTES..].try_into().unwrap()),
         );
         Host::MoveGprQword.register(code, SCRATCH, 0, target);
         Host::UnpackLowQword.register(code, WORK, SCRATCH, target);
@@ -177,7 +158,7 @@ fn prepare_popcount(code: &mut Vec<u8>, target: TargetCpu) {
     }
 }
 
-fn popcount_dwords(code: &mut Vec<u8>, target: TargetCpu) {
+fn popcount_dwords(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         Host::MoveAligned.register(code, TEMP, RESULT, target);
         Host::And.register(code, RESULT, HIGH, target);
@@ -215,7 +196,7 @@ fn popcount_dwords(code: &mut Vec<u8>, target: TargetCpu) {
     }
 }
 
-fn adjacent_pair_sums(code: &mut Vec<u8>, target: TargetCpu) {
+fn adjacent_pair_sums(code: &mut Code, target: TargetCpu) {
     if target.supports(TargetCpu::Ssse3) {
         Host::HorizontalAddDword.register(code, RESULT, HIGH, target);
     } else {
@@ -229,7 +210,7 @@ fn adjacent_pair_sums(code: &mut Vec<u8>, target: TargetCpu) {
     }
 }
 
-fn extend_row_bytes(code: &mut Vec<u8>, signed: bool, target: TargetCpu) {
+fn extend_row_bytes(code: &mut Code, signed: bool, target: TargetCpu) {
     Host::Xor.register(code, SCRATCH, SCRATCH, target);
     if signed {
         Host::GreaterByte.register(code, SCRATCH, ROW, target);
@@ -237,7 +218,7 @@ fn extend_row_bytes(code: &mut Vec<u8>, signed: bool, target: TargetCpu) {
     Host::UnpackLowByte.register(code, ROW, SCRATCH, target);
 }
 
-fn byte_dot(code: &mut Vec<u8>, right_signed: bool, target: TargetCpu) {
+fn byte_dot(code: &mut Code, right_signed: bool, target: TargetCpu) {
     Host::MoveAligned.register(code, HIGH, RESULT, target);
     Host::Xor.register(code, SCRATCH, SCRATCH, target);
     if right_signed {
@@ -250,7 +231,7 @@ fn byte_dot(code: &mut Vec<u8>, right_signed: bool, target: TargetCpu) {
     adjacent_pair_sums(code, target);
 }
 
-fn sum_four_products_qword(code: &mut Vec<u8>, register: u8, signed: bool, target: TargetCpu) {
+fn sum_four_products_qword(code: &mut Code, register: u8, signed: bool, target: TargetCpu) {
     Host::MoveAligned.register(code, WORK, register, target);
     if signed {
         Host::MoveAligned.register(code, SCRATCH, register, target);
@@ -267,7 +248,7 @@ fn sum_four_products_qword(code: &mut Vec<u8>, register: u8, signed: bool, targe
 }
 
 pub(crate) fn emit_outer(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &OuterOperation,
     length: VectorLength,
     target: TargetCpu,
@@ -290,8 +271,7 @@ pub(crate) fn emit_outer(
         }
         _ => operand.accumulator_size,
     };
-    code.extend(SUB_RSP_IMM32);
-    code.extend((stack_bytes as u32).to_le_bytes());
+    code.asm().reserve_stack(stack_bytes);
     stage_vector(
         code,
         operand.vector_n,
@@ -315,37 +295,44 @@ pub(crate) fn emit_outer(
     if !multiply {
         for chunk in 0..length.predicate_bytes().div_ceil(QWORD_BYTES) {
             read_predicate_chunk(code, operand.predicate_n, chunk, length);
-            code.extend(MOV_RSP_DISP32_RAX);
-            code.extend(((predicate_offset + chunk * QWORD_BYTES) as u32).to_le_bytes());
+            code.asm().mov_store(
+                Size::Qword,
+                stack(predicate_offset + chunk * QWORD_BYTES),
+                Rax,
+            );
         }
-        code.extend(LEA_R11_RSP_DISP32);
-        code.extend((predicate_offset as u32).to_le_bytes());
+        code.asm()
+            .lea(Size::Qword, PREDICATE, stack(predicate_offset));
     }
     load_za_pointer_r8(code);
-    code.extend(ADD_R8_IMM32);
-    code.extend((usize::from(operand.tile) as u32 * length.bytes() as u32).to_le_bytes());
+    code.asm().alu_imm32(
+        Alu::Add,
+        Size::Qword,
+        R8,
+        (usize::from(operand.tile) * length.bytes()) as i32,
+    );
     if operand.kind == OuterKind::BitwiseXnor {
         prepare_popcount(code, target);
     }
-    code.extend(XOR_R9D_R9D);
+    code.asm()
+        .alu(Alu::Xor, Size::Dword, ROW_OFFSET, ROW_OFFSET);
     let row_start = code.len();
     let inactive_row = if multiply {
         None
     } else {
         // R9 is the source group byte offset and therefore the row predicate
         // bit index. Word BT reads at most one staged two-byte predicate block.
-        code.extend(BT_WORD_R11_R9W);
-        code.extend(JNC_REL32);
-        let immediate = code.len();
-        code.extend(0i32.to_le_bytes());
-        Some(immediate)
+        let mut asm = code.asm();
+        asm.bit(BitTest::Bt, Size::Word, Mem::base(PREDICATE, 0), ROW_OFFSET);
+        Some(asm.jcc(Cond::Ae).offset())
     };
     if operand.kind != OuterKind::AddHorizontal {
-        code.extend(if element_bytes == QWORD_BYTES {
-            MOVQ_ROW_RSP_R9
+        let row = Mem::indexed(Rsp, ROW_OFFSET, 1, 0);
+        if element_bytes == QWORD_BYTES {
+            Host::MoveQword.emit(code, ROW, row, target);
         } else {
-            MOVD_ROW_RSP_R9
-        });
+            code.asm().movd_to_xmm(ROW, row);
+        }
         shuffle(
             code,
             ROW,
@@ -433,16 +420,16 @@ pub(crate) fn emit_outer(
     if let Some(immediate) = inactive_row {
         patch_relative(code, immediate, row_advance);
     }
-    code.extend(ADD_R9D_IMM8);
-    code.push(element_bytes as u8);
-    code.extend(ADD_R8_IMM32);
-    code.extend(((element_bytes * length.bytes()) as u32).to_le_bytes());
-    code.extend(CMP_R9D_IMM32);
-    code.extend((length.bytes() as u32).to_le_bytes());
-    code.extend(JB_REL32);
-    let immediate = code.len();
-    code.extend(0i32.to_le_bytes());
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Add, Size::Dword, ROW_OFFSET, element_bytes as i8);
+    asm.alu_imm32(
+        Alu::Add,
+        Size::Qword,
+        R8,
+        (element_bytes * length.bytes()) as i32,
+    );
+    asm.alu_imm32(Alu::Cmp, Size::Dword, ROW_OFFSET, length.bytes() as i32);
+    let immediate = asm.jcc(Cond::B).offset();
     patch_relative(code, immediate, row_start);
-    code.extend(ADD_RSP_IMM32);
-    code.extend((stack_bytes as u32).to_le_bytes());
+    code.asm().release_stack(stack_bytes);
 }

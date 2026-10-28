@@ -1,5 +1,7 @@
 //! Integer guards selecting which lanes may use native FP. Inactive operands are
 //! replaced with +0 before classification.
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdi};
+use crate::x86_64::asm::{Code, Cond, Mem, Rm, Size};
 
 use crate::{
     GuestState, TargetCpu,
@@ -9,53 +11,28 @@ use crate::{
 use alloc::vec::Vec;
 
 const XMM_REGISTER_COUNT: u8 = 8;
-const MODRM_REGISTER: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
-const RCX_REGISTER: u8 = 1;
-const RAX_REGISTER: u8 = 0;
-const MOV_ECX_IMMEDIATE: &[u8] = &[0xb9];
-const MOV_RCX_IMMEDIATE: &[u8] = &[0x48, 0xb9];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 const REPEAT_LOW_DWORD: u8 = 0;
 const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
 const REPEAT_HIGH_DWORDS: u8 = 0xf5;
 
-fn branch(code: &mut Vec<u8>, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
-}
-
-fn resolve(code: &mut [u8], displacement: usize, destination: usize) {
-    let next = displacement + size_of::<i32>();
-    let distance = i64::try_from(destination).expect("guard destination fits i64")
-        - i64::try_from(next).expect("guard source fits i64");
-    code[displacement..next].copy_from_slice(
-        &i32::try_from(distance)
-            .expect("bounded floating guard branch")
-            .to_le_bytes(),
+fn shuffle(code: &mut Code, destination: u8, source: u8, order: u8, target: TargetCpu) {
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(source),
+        order,
+        target,
     );
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, order: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, destination, source, target);
-    code.push(order);
-}
-
-fn broadcast(code: &mut Vec<u8>, format: Format, value: u64, destination: u8, target: TargetCpu) {
+fn broadcast(code: &mut Code, format: Format, value: u64, destination: u8, target: TargetCpu) {
     if format == Format::Single {
-        code.extend(MOV_ECX_IMMEDIATE);
-        code.extend((value as u32).to_le_bytes());
+        code.asm().mov_imm32(Rcx, value as u32);
     } else {
-        code.extend(MOV_RCX_IMMEDIATE);
-        code.extend(value.to_le_bytes());
+        code.asm().mov_imm64(Rcx, value);
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (destination << REGISTER_SHIFT) | RCX_REGISTER);
+    code.asm()
+        .simd(Host::MoveGprQword, destination, Rcx, target);
     if format == Format::Single {
         shuffle(code, destination, destination, REPEAT_LOW_DWORD, target);
     } else {
@@ -63,9 +40,9 @@ fn broadcast(code: &mut Vec<u8>, format: Format, value: u64, destination: u8, ta
     }
 }
 
-fn sign_mask(code: &mut Vec<u8>, source: u8, target: TargetCpu) {
-    Host::ByteSignMask.append(code, target);
-    code.push(MODRM_REGISTER | (RAX_REGISTER << REGISTER_SHIFT) | source);
+fn sign_mask(code: &mut Code, source: u8, target: TargetCpu) {
+    code.asm()
+        .simd_to_gpr(Host::ByteSignMask, Rax, source, target);
 }
 
 /// Masks remain live in these caller-selected XMMs for one whole instruction.
@@ -80,7 +57,7 @@ pub(in crate::x86_64) struct Classification {
 /// Load invariant masks once, rather than rebroadcasting them for every source
 /// in every vector chunk. Callers preserve these XMMs until staging is finished.
 pub(in crate::x86_64) fn prepare_classification(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     format: Format,
     registers: [u8; 2],
     target: TargetCpu,
@@ -104,7 +81,7 @@ pub(in crate::x86_64) fn prepare_classification(
 /// RAX/RCX and host arithmetic flags, without touching MXCSR or guest state.
 /// Failure indices identify rel32 displacements consumed by numerical::finish.
 pub(in crate::x86_64) fn guard_normal_zero_or_infinity(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     classification: Classification,
     input: u8,
     scratch: [u8; 3],
@@ -161,8 +138,9 @@ pub(in crate::x86_64) fn guard_normal_zero_or_infinity(
     Host::Xor.register(code, exponent, maximum_exponent, target);
     Host::Or.register(code, exponent, fraction_zero, target);
     sign_mask(code, exponent, target);
-    code.extend(TEST_EAX_EAX);
-    failures.push(branch(code, JNZ_REL32));
+    let mut asm = code.asm();
+    asm.test(Size::Dword, Rax, Rax);
+    failures.push(asm.jcc(Cond::Ne).offset());
 }
 
 /// Active numerical work with retained guest exception enables takes the whole
@@ -171,7 +149,7 @@ pub(in crate::x86_64) fn guard_normal_zero_or_infinity(
 /// All-inactive work bypasses the raw control read. Preserves every XMM register;
 /// clobbers RAX and host arithmetic flags only.
 pub(in crate::x86_64) fn guard_active_exception_enables(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     active: u8,
     features: NumericalFeatures,
     failures: &mut Vec<usize>,
@@ -182,12 +160,14 @@ pub(in crate::x86_64) fn guard_active_exception_enables(
         return;
     }
     sign_mask(code, active, target);
-    code.extend(TEST_EAX_EAX);
-    let inactive = branch(code, JZ_REL32);
-    code.extend(TEST_STATE_IMMEDIATE);
-    code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-    code.extend(FPCR_EXCEPTION_ENABLE_MASK.to_le_bytes());
-    failures.push(branch(code, JNZ_REL32));
-    let next = code.len();
-    resolve(code, inactive, next);
+    let mut asm = code.asm();
+    asm.test(Size::Dword, Rax, Rax);
+    let inactive = asm.jcc(Cond::E);
+    asm.test_imm(
+        Size::Dword,
+        Mem::base_disp32(Rdi, core::mem::offset_of!(GuestState, fpcr) as i32),
+        FPCR_EXCEPTION_ENABLE_MASK as i32,
+    );
+    failures.push(asm.jcc(Cond::Ne).offset());
+    asm.bind(inactive);
 }

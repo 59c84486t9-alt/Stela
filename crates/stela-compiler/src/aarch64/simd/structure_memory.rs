@@ -1,5 +1,6 @@
 //! Structured AdvSIMD loads and stores (LD1-4, ST1-4, LD1R-4R), in architectural
 //! access order, with post-index writeback.
+use crate::aarch64::Unsupported;
 use crate::aarch64::{Register, register};
 
 mod multiple;
@@ -135,8 +136,7 @@ fn decode_addressing(word: u32) -> (Register, PostIndex) {
     (base, post_index)
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     multiple::decode(word).or_else(|| single::decode(word))
 }
 

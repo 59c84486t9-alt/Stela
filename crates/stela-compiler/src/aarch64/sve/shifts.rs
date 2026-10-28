@@ -1,4 +1,5 @@
 //! SVE shifts, shift-accumulates, shift-inserts and XAR.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
@@ -395,8 +396,7 @@ const ENCODINGS: &[Encoding] = &[
     },
 ];
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = ENCODINGS
         .iter()
         .find(|entry| word & entry.mask == entry.value)?;
@@ -429,7 +429,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         };
         let tsize = (size << 2) | ((word >> size_low_shift) & SIZE_MASK);
         if tsize == 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let element_bits = BYTE_BITS << (u32::BITS - 1 - tsize.leading_zeros());
         let encoded = ((tsize << 3) | ((word >> immediate_shift) & IMMEDIATE_MASK)) as u8;
@@ -453,7 +453,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             Format::PredicatedDoublewords | Format::Doublewords
         );
         if wide && size == SIZE_MASK {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let register_shift = if matches!(encoding.format, Format::Doublewords) {
             WIDE_SOURCE_SHIFT
@@ -477,7 +477,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let second_source = matches!(encoding.format, Format::XorRotate)
         .then_some(((word >> SOURCE_SHIFT) & REGISTER_MASK) as u8);
     let Some(element_size) = ElementSize::from_bytes(usize::from(element_bits / BYTE_BITS)) else {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     };
     let predication = predicate.map_or(Predication::Unpredicated, Predication::Merging);
     Some(Ok(Operand {
@@ -520,7 +520,7 @@ mod tests {
                         | REGISTER_MASK;
                     let result = decode(word).expect("owned immediate encoding");
                     if tsize == 0 {
-                        assert_eq!(result, Err(()));
+                        assert_eq!(result, Err(Unsupported));
                         continue;
                     }
                     let operand = result.unwrap();
@@ -580,7 +580,7 @@ mod tests {
                     };
                 let result = decode(word).expect("owned register encoding");
                 if wide && size == SIZE_MASK {
-                    assert_eq!(result, Err(()));
+                    assert_eq!(result, Err(Unsupported));
                     continue;
                 }
                 let operand = result.unwrap();

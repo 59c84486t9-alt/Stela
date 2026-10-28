@@ -1,5 +1,6 @@
 //! ADDVL/ADDPL/RDVL and predicate counts (CNTP, INC/DEC by element count).
 use super::super::{Register, register, scalable::ElementSize};
+use crate::aarch64::Unsupported;
 
 const LENGTH_MASK: u32 = 0xffe0_f800;
 const READ_LENGTH_MASK: u32 = 0xffff_f800;
@@ -98,8 +99,7 @@ pub struct Operand {
     pub kind: Kind,
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let d = word & REGISTER_MASK;
     let scalar = |bits| Destination::Scalar {
         register: register(d, false),
@@ -160,7 +160,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         ),
         INC_VECTOR | DEC_VECTOR | SQINC_VECTOR | UQINC_VECTOR | SQDEC_VECTOR | UQDEC_VECTOR => {
             if element == ElementSize::Byte {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             let opcode = word & PATTERN_MASK;
             let subtract = matches!(opcode, DEC_VECTOR | SQDEC_VECTOR | UQDEC_VECTOR);
@@ -228,7 +228,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
                     };
                     if matches!(destination, Destination::Vector(_)) && element == ElementSize::Byte
                     {
-                        return Some(Err(()));
+                        return Some(Err(Unsupported));
                     }
                     adjust(destination, predicate, subtract, saturation)
                 }
@@ -304,7 +304,7 @@ mod tests {
             SQDECP_VECTOR,
             UQDECP_VECTOR,
         ] {
-            assert_eq!(decode(word), Some(Err(())));
+            assert_eq!(decode(word), Some(Err(Unsupported)));
         }
     }
 

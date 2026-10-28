@@ -175,23 +175,14 @@ impl Preparation {
     /// Compile the admitted words `input` at `pc` as the engine compiles a
     /// block's consumed prefix.
     pub fn compile_input(&self, input: &[u8], pc: u64) -> Result<CompiledBlock, CompileError> {
-        self.compile_plan(CompilationPlan::new(
-            input,
-            GuestAddress(pc),
-            PROFILE,
-            self.target,
-        ))
+        stela_compiler::compile(input, GuestAddress(pc), &self.options())
     }
 
-    /// Compile a plan of this preparation's target as the engine compiles.
-    fn compile_plan(
-        &self,
-        plan: Result<CompilationPlan, CompileError>,
-    ) -> Result<CompiledBlock, CompileError> {
-        plan.and_then(|plan| plan.with_memory_checks(self.checks))
-            .and_then(|plan| plan.with_zero_block(self.system.zero_block))
-            .and_then(|plan| plan.with_cache_clean(self.system.cache_clean))
-            .and_then(CompilationPlan::compile)
+    /// What the engine compiles this preparation's blocks for.
+    fn options(&self) -> stela_compiler::Options {
+        stela_compiler::Options::new(PROFILE, self.target)
+            .with_memory_checks(self.checks)
+            .with_native_system(self.system)
     }
 
     /// Prepare the block at `pc` from the admitted window `source`, which
@@ -244,7 +235,7 @@ impl Preparation {
         }
         let refused = |at: u64, detail: String| Refused { pc: at, detail };
         let analyze = |length: usize| {
-            block::analyze_and_plan(&source[..length], GuestAddress(pc), PROFILE, self.target)
+            block::analyze_and_plan(&source[..length], GuestAddress(pc), &self.options())
         };
         let (analysis, plan) = match analyze(length) {
             Ok(analyzed) => analyzed,
@@ -286,7 +277,7 @@ impl Preparation {
             pc,
             detail: error.0,
         };
-        match self.compile_plan(plan) {
+        match plan.and_then(CompilationPlan::compile) {
             Ok(compiled) => Ok((compiled, source.len())),
             Err(error) => {
                 // A host-capability refusal names no PC; find the longest

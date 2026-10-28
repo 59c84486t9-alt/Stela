@@ -5,12 +5,12 @@ use crate::aarch64::{
     non_temporal::{Data, Operand},
     simd::Operand as SimdOperand,
 };
-use alloc::vec::Vec;
+use crate::x86_64::asm::Code;
 
 const DWORD_BYTES: u8 = 4;
 const QWORD_BYTES: u8 = 8;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
     match operand.data {
         Data::Integer(data) => {
             let transfer = if operand.load {

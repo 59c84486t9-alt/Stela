@@ -132,7 +132,7 @@ mod tests {
 
     fn check(word: u32, registers: &GuestState, taken: bool) {
         let source = word.to_le_bytes();
-        let analysis = analyze_with_profile(&source, BASE, BlockProfile::Ordinary).unwrap();
+        let analysis = analyze_with_profile(&source, BASE, BlockProfile::ORDINARY).unwrap();
         let target = if taken {
             GuestAddress(0x1008)
         } else {
@@ -212,7 +212,7 @@ mod tests {
         // applies only to the taken branch, so target equality is insufficient.
         const BRANCH_EQUAL_NEXT: u32 = 0x5400_0020;
         let source = BRANCH_EQUAL_NEXT.to_le_bytes();
-        let analysis = analyze_with_profile(&source, BASE, BlockProfile::Ordinary).unwrap();
+        let analysis = analyze_with_profile(&source, BASE, BlockProfile::ORDINARY).unwrap();
         for (nzcv, kind, wrong) in [
             (NZCV_Z, ExitKind::Direct, ExitKind::Fallthrough),
             (0, ExitKind::Fallthrough, ExitKind::Direct),
@@ -243,7 +243,7 @@ mod tests {
         ] {
             // NOP; B +8; BL +8; BR X3; BLR X3; RET X30
             let source = word.to_le_bytes();
-            let analysis = analyze_with_profile(&source, BASE, BlockProfile::Ordinary).unwrap();
+            let analysis = analyze_with_profile(&source, BASE, BlockProfile::ORDINARY).unwrap();
             assert!(
                 validate(
                     &analysis,

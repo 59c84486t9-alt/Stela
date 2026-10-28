@@ -39,8 +39,8 @@ use std::{io::Read, path::PathBuf};
 use stela_compiler::{
     GuestAddress,
     block::{
-        BlockExit, BlockProfile, ExitKind, MAX_BLOCK_INSTRUCTIONS, PointerAuthenticationOperation,
-        analyze_with_profile,
+        BlockExit, BlockProfile, ExitKind, Features, MAX_BLOCK_INSTRUCTIONS,
+        PointerAuthenticationOperation, analyze_with_profile,
     },
 };
 use validate::{
@@ -94,7 +94,7 @@ pub struct BlockRuntime {
 impl BlockRuntime {
     #[cfg(feature = "std")]
     pub fn new(address_space: u64, cache_root: PathBuf) -> Self {
-        Self::new_with_profile(address_space, cache_root, BlockProfile::Ordinary)
+        Self::new_with_profile(address_space, cache_root, BlockProfile::ORDINARY)
     }
 
     /// Explicit helper profile is part of every persistent translation identity.
@@ -317,7 +317,7 @@ impl BlockRuntime {
         context: &pauth::Context,
     ) -> Result<RunOutcome> {
         ensure!(
-            self.profile.supports_pointer_authentication(),
+            self.profile.has(Features::POINTER_AUTHENTICATION),
             "PAuth execution requires the explicit software PAuth block profile"
         );
         ensure!(
@@ -354,7 +354,7 @@ impl BlockRuntime {
         controls: pauth::memory::Controls,
     ) -> Result<RunOutcome> {
         ensure!(
-            self.profile.supports_pointer_authentication(),
+            self.profile.has(Features::POINTER_AUTHENTICATION),
             "PAuth execution requires the explicit software PAuth block profile"
         );
         ensure!(
@@ -396,7 +396,7 @@ impl BlockRuntime {
         clock: &mut clock::Context,
     ) -> Result<RunOutcome> {
         ensure!(
-            self.profile.supports_clock(),
+            self.profile.has(Features::CLOCK),
             "clock execution requires the explicit software clock block profile"
         );
         ensure!(
@@ -432,7 +432,7 @@ impl BlockRuntime {
         clock: Option<&mut clock::Context>,
     ) -> Result<RunOutcome> {
         ensure!(
-            self.profile.supports_thread_registers(),
+            self.profile.has(Features::THREAD_REGISTERS),
             "thread-register execution requires the explicit thread block profile"
         );
         ensure!(
@@ -441,7 +441,7 @@ impl BlockRuntime {
         );
         if let Some(pauth) = pauth {
             ensure!(
-                self.profile.supports_pointer_authentication(),
+                self.profile.has(Features::POINTER_AUTHENTICATION),
                 "PAuth execution requires the explicit software PAuth block profile"
             );
             ensure!(
@@ -451,7 +451,7 @@ impl BlockRuntime {
         }
         if let Some(clock) = clock.as_ref() {
             ensure!(
-                self.profile.supports_clock() && pauth.is_some(),
+                self.profile.has(Features::CLOCK) && pauth.is_some(),
                 "clock execution requires the explicit software clock profile and PAC context"
             );
             ensure!(
@@ -484,7 +484,7 @@ impl BlockRuntime {
         dispatcher: &mut dyn system::execution::Dispatcher,
     ) -> Result<RunOutcome> {
         ensure!(
-            self.profile.supports_system(),
+            self.profile.has(Features::SYSTEM),
             "System execution requires the explicit System block profile"
         );
         ensure!(
@@ -536,14 +536,14 @@ impl BlockRuntime {
         loop {
             let pc = state.pc;
             // A zero budget requests no instruction fetch or execution.
-            if self.profile.supports_pointer_authentication() && block_budget == 0 {
+            if self.profile.has(Features::POINTER_AUTHENTICATION) && block_budget == 0 {
                 break;
             }
             // Instruction TBI is disabled in the fixed VA47 software profile.
             // This also prevents a resumed poisoned RETAB target from becoming
             // executable through a registered snapshot or matching stop sentinel.
             let extension = pc.0 >> 47;
-            if self.profile.supports_pointer_authentication()
+            if self.profile.has(Features::POINTER_AUTHENTICATION)
                 && extension != 0
                 && extension != u64::MAX >> 47
             {
@@ -571,7 +571,7 @@ impl BlockRuntime {
             }
             // Current PSTATE and CPU controls take precedence over decoding an
             // available word. This guard performs no architectural effect.
-            let system_entry = if self.profile.supports_system()
+            let system_entry = if self.profile.has(Features::SYSTEM)
                 || self.profile.checked_memory().is_some()
             {
                 let Some(dispatcher) = system_dispatcher.as_deref_mut() else {
@@ -629,7 +629,7 @@ impl BlockRuntime {
                 "refusing stale block execution"
             );
             let mut completed_blocks = 1;
-            let native_exit = if block.profile.supports_resident_loops() {
+            let native_exit = if block.profile.has(Features::RESIDENT_LOOPS) {
                 let available = block_budget - outcome.blocks_executed;
                 let mut budget = stela_compiler::block::loop_budget::LoopBudget::new(available);
                 // SAFETY: the distinct immutable profile/ABI binds this source
@@ -667,7 +667,7 @@ impl BlockRuntime {
             };
             let pointer_authentication = if exit_kind == ExitKind::PointerAuthentication {
                 ensure!(
-                    self.profile.supports_pointer_authentication(),
+                    self.profile.has(Features::POINTER_AUTHENTICATION),
                     "ordinary block produced an unrequested PAuth helper exit"
                 );
                 Some(validate_pauth_exit(
@@ -682,7 +682,7 @@ impl BlockRuntime {
             };
             let clock_instruction = if exit_kind == ExitKind::Clock {
                 ensure!(
-                    self.profile.supports_clock(),
+                    self.profile.has(Features::CLOCK),
                     "block produced an unrequested clock helper exit"
                 );
                 Some(validate_clock_exit(
@@ -697,7 +697,7 @@ impl BlockRuntime {
             };
             let thread_register_instruction = if exit_kind == ExitKind::ThreadRegister {
                 ensure!(
-                    self.profile.supports_thread_registers(),
+                    self.profile.has(Features::THREAD_REGISTERS),
                     "block produced an unrequested thread-register helper exit"
                 );
                 Some(validate_thread_register_exit(
@@ -712,7 +712,7 @@ impl BlockRuntime {
             };
             let amx_instruction = if exit_kind == ExitKind::Amx {
                 ensure!(
-                    self.profile.supports_amx(),
+                    self.profile.has(Features::AMX),
                     "block produced an unrequested AMX exit"
                 );
                 Some(validate_amx_exit(
@@ -727,7 +727,7 @@ impl BlockRuntime {
             };
             let system_boundary = if exit_kind == ExitKind::System {
                 ensure!(
-                    self.profile.supports_system(),
+                    self.profile.has(Features::SYSTEM),
                     "block produced an unrequested System helper exit"
                 );
                 let instruction = validate_system_exit(
@@ -1025,7 +1025,7 @@ mod tests {
             let mut vm = BlockRuntime::new_with_profile(
                 9,
                 cache.into(),
-                BlockProfile::AppleArm64eSoftwarePauthV1,
+                BlockProfile::new(Features::POINTER_AUTHENTICATION),
             );
             vm.register_code(
                 BASE,
@@ -1365,7 +1365,8 @@ mod tests {
 
         const BASE: GuestAddress = GuestAddress(0x1000);
         const STOP: GuestAddress = GuestAddress(0x1400);
-        const PROFILE: BlockProfile = BlockProfile::AppleArm64eSoftwarePauthClockV1;
+        const PROFILE: BlockProfile =
+            BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK));
 
         fn runtime(path: &std::path::Path, words: &[u32]) -> Result<BlockRuntime> {
             let mut runtime = BlockRuntime::new_with_profile(1, path.to_path_buf(), PROFILE);
@@ -1691,7 +1692,7 @@ mod tests {
             let mut runtime = BlockRuntime::new_with_profile(
                 1,
                 path.to_path_buf(),
-                BlockProfile::OrdinaryResidentV1,
+                BlockProfile::new(Features::RESIDENT_LOOPS),
             );
             runtime.register_code(
                 BASE,
@@ -1765,7 +1766,7 @@ mod tests {
             assert_eq!(outcome.reason, StopReason::StopAddress);
             assert_eq!(
                 runtime.loaded_manifest(BASE).unwrap().identity.abi,
-                stela_compiler::block::loop_budget::RESIDENT_BLOCK_ABI
+                BlockProfile::new(Features::RESIDENT_LOOPS).abi()
             );
             Ok(())
         }
@@ -1817,7 +1818,7 @@ mod tests {
             let mut runtime = BlockRuntime::new_for_target(
                 1,
                 path.to_path_buf(),
-                BlockProfile::Ordinary,
+                BlockProfile::ORDINARY,
                 stela_compiler::TargetCpu::Baseline,
             );
             runtime.register_code(
@@ -1867,11 +1868,11 @@ mod tests {
                 assert_eq!(outcome.memory_cache_hits, if loaded { 2 } else { 0 });
                 assert_eq!(
                     runtime.loaded_manifest(BASE).unwrap().identity.abi,
-                    BlockProfile::OrdinaryResidentV1.abi()
+                    BlockProfile::new(Features::RESIDENT_LOOPS).abi()
                 );
                 assert_eq!(
                     runtime.loaded_manifest(return_pc).unwrap().identity.abi,
-                    BlockProfile::Ordinary.abi()
+                    BlockProfile::ORDINARY.abi()
                 );
             }
             let mut disk_runtime = ordinary(cache.path(), &words)?;
@@ -1896,7 +1897,7 @@ mod tests {
             assert_eq!(state.registers.x[0], 3);
             assert_eq!(
                 runtime.loaded_manifest(BASE).unwrap().identity.abi,
-                BlockProfile::OrdinaryResidentV1.abi()
+                BlockProfile::new(Features::RESIDENT_LOOPS).abi()
             );
             runtime.register_code(
                 BASE,
@@ -1915,7 +1916,7 @@ mod tests {
             assert_eq!(state.registers, expected);
             assert_eq!(
                 runtime.loaded_manifest(BASE).unwrap().identity.abi,
-                BlockProfile::Ordinary.abi()
+                BlockProfile::ORDINARY.abi()
             );
             runtime.register_code(
                 BASE,
@@ -1938,7 +1939,7 @@ mod tests {
             assert_eq!(outcome.reason, StopReason::StopAddress);
             assert_eq!(
                 runtime.loaded_manifest(BASE).unwrap().identity.abi,
-                BlockProfile::OrdinaryResidentV1.abi()
+                BlockProfile::new(Features::RESIDENT_LOOPS).abi()
             );
             Ok(())
         }
@@ -1970,7 +1971,7 @@ mod tests {
             assert_eq!(outcome.blocks_executed, 1);
             assert_eq!(
                 runtime.loaded_manifest(BASE).unwrap().identity.abi,
-                BlockProfile::OrdinaryResidentV1.abi()
+                BlockProfile::new(Features::RESIDENT_LOOPS).abi()
             );
             Ok(())
         }
@@ -2019,7 +2020,7 @@ mod tests {
             assert_eq!(outcome.reason, StopReason::BudgetExhausted);
             assert_eq!(
                 runtime.loaded_manifest(BASE).unwrap().identity.abi,
-                BlockProfile::OrdinaryResidentV1.abi()
+                BlockProfile::new(Features::RESIDENT_LOOPS).abi()
             );
             Ok(())
         }
@@ -2074,7 +2075,7 @@ mod tests {
             let mut runtime = BlockRuntime::new_with_profile(
                 ADDRESS_SPACE,
                 cache.path().into(),
-                BlockProfile::SystemV1,
+                BlockProfile::new(Features::SYSTEM),
             );
             let mut state = ThreadState {
                 registers: GuestState::default(),
@@ -2114,7 +2115,7 @@ mod tests {
             let mut runtime = BlockRuntime::new_with_profile(
                 ADDRESS_SPACE,
                 cache.path().into(),
-                BlockProfile::SystemV1,
+                BlockProfile::new(Features::SYSTEM),
             );
             runtime.register_code(
                 BASE,

@@ -1,4 +1,5 @@
 //! Integer across-lane reductions, pairwise combines and per-lane bit counts.
+use crate::aarch64::Unsupported;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Combine {
     Add,
@@ -62,8 +63,7 @@ encodings! {
     Not => (0xbffffc00,0x2e205800),
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     use Encoding::*;
     let q = word & (1 << 30) != 0;
     let size = ((word >> 22) & 3) as u8;
@@ -97,7 +97,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         if (kind == BitCount::Population && size != 0)
             || (matches!(kind, BitCount::LeadingZeros | BitCount::LeadingSign) && size == 3)
         {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         if matches!(kind, BitCount::Reverse | BitCount::Not) {
             operand.lane_bytes = 1;
@@ -177,7 +177,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     if (size == 3 && !(operation == Combine::Add && shape == Shape::Pairs && q))
         || (shape == Shape::Across && size == 2 && !q)
     {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     operand.kind = Kind::Combine { operation, shape };
     Some(Ok(operand))

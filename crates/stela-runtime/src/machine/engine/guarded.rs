@@ -26,7 +26,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 word,
                 detail: "GENTER at GL0 has no established effect; it is taken as UNDEFINED",
             });
-            self.degrade(requirement)?;
+            self.degrade(requirement);
         }
         let trace = self.monitor_before(MonitorKind::GuardedEnter { immediate });
         let from = super::mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
@@ -49,7 +49,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let from = super::mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
         if self.cpu.pstate.guarded && self.cpu.pstate.el != 0 {
             let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
-            self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0)?;
+            self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0);
         }
         let trace = self.monitor_before(MonitorKind::GuardedExit);
         match self.cpu.guarded_exit() {
@@ -73,8 +73,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use super::super::NoDevices;
     use super::super::tests::{BASE, FakeHost, machine_on};
-    use super::super::{NoDevices, Stop};
     use super::*;
     use crate::machine::{Chip, system::Register as SystemRegister};
 
@@ -181,7 +181,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn genter_at_gl0_stops_strictly_or_is_undefined_once_reported() {
+    fn genter_at_gl0_is_undefined_once_reported() {
         let mut machine = gl1(Chip::AppleM2);
         machine.cpu.state.x[3] = 0x3c0;
         machine.cpu.state.x[4] = BASE + 0xb000;
@@ -196,12 +196,6 @@ pub(super) mod tests {
             (machine.cpu.pstate.el, machine.cpu.pstate.guarded),
             (0, true)
         );
-        machine.set_strict(true);
-        assert!(matches!(
-            machine.system_instruction(GENTER),
-            Err(Stop::Unsupported(_))
-        ));
-        machine.set_strict(false);
         machine.system_instruction(GENTER).unwrap();
         assert_eq!(machine.cpu.pc, VECTORS + 0x400);
         assert_eq!(machine.cpu.apple.guarded[0].esr, UNDEFINED);

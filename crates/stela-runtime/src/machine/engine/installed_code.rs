@@ -349,8 +349,13 @@ mod tests {
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect();
-            stela_compiler::compile(&source, GuestAddress(0x1000))
+            let leaf = stela_compiler::Options::new(
+                stela_compiler::block::BlockProfile::new(stela_compiler::block::Features::LEAF),
+                stela_compiler::TargetCpu::Baseline,
+            );
+            stela_compiler::compile(&source, GuestAddress(0x1000), &leaf)
                 .unwrap()
+                .native
                 .x86_64_code
         };
         let mut arena = ExecutableArena {

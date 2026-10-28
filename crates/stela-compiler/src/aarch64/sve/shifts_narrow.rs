@@ -1,4 +1,5 @@
 //! SVE2 unpredicated widening and narrowing shifts with bottom/top placement.
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,15 +258,14 @@ const ENCODINGS: &[Encoding] = &[
     },
 ];
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = ENCODINGS
         .iter()
         .find(|entry| word & entry.mask == entry.value)?;
     let tsize = (((word >> TSIZE_HIGH_SHIFT) & 1) << TSIZE_HIGH_OFFSET)
         | ((word >> TSIZE_LOW_SHIFT) & TSIZE_LOW_MASK);
     if tsize == 0 || (encoding.kind.is_extract() && !tsize.is_power_of_two()) {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let size_log = u32::BITS - 1 - tsize.leading_zeros();
     let element_bits = BYTE_BITS << size_log;
@@ -304,7 +304,7 @@ mod tests {
                         | (immediate << IMMEDIATE_SHIFT);
                     let result = decode(word).expect("owned encoding");
                     if tsize == 0 || (encoding.kind.is_extract() && !tsize.is_power_of_two()) {
-                        assert_eq!(result, Err(()));
+                        assert_eq!(result, Err(Unsupported));
                         continue;
                     }
                     let operand = result.unwrap();

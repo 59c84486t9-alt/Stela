@@ -1,4 +1,5 @@
 //! Integer multiplies and widening arithmetic (MUL, MLA, SMULL, UADDL, ...).
+use crate::aarch64::Unsupported;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Accumulate {
     None,
@@ -100,8 +101,7 @@ encodings! {
     Uabal => (0x2e205000,Difference {signed:false,widen:true,accumulate:true}),
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if let Some(decoded) = decode_dot(word) {
         return Some(decoded);
     }
@@ -118,7 +118,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         .find(|(value, _)| *value == opcode)?;
     let size = (word >> 22) & 3;
     if size == 3 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let q = word & (1 << 30) != 0;
     let widen = kind.widened();
@@ -181,15 +181,14 @@ impl IndexedProductEncoding {
     }
 }
 
-#[allow(clippy::result_unit_err)]
-fn decode_indexed_product(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_indexed_product(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (_, kind) = IndexedProductEncoding::ALL
         .iter()
         .map(|e| e.facts())
         .find(|(opcode, _)| word & 0xbf00f400 == *opcode)?;
     let size = (word >> 22) & 3;
     if !matches!(size, 1 | 2) {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let q = word & (1 << 30) != 0;
     let h = ((word >> 11) & 1) as u8;
@@ -292,8 +291,7 @@ impl DotEncoding {
     }
 }
 
-#[allow(clippy::result_unit_err)]
-fn decode_dot(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_dot(word: u32) -> Option<Result<Operand, Unsupported>> {
     const REGISTER_MASK: u32 = 0xbf20fc00;
     const INDEXED_MASK: u32 = 0xbf00f400;
     const DWORD_SIZE: u32 = 2;
@@ -304,7 +302,7 @@ fn decode_dot(word: u32) -> Option<Result<Operand, ()>> {
             word & REGISTER_MASK == *register || word & INDEXED_MASK == *indexed
         })?;
     if (word >> 22) & 3 != DWORD_SIZE {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         kind: Kind::Dot { signed },
@@ -318,8 +316,7 @@ fn decode_dot(word: u32) -> Option<Result<Operand, ()>> {
             .then_some((((word >> 11) & 1) << 1 | ((word >> 21) & 1)) as u8),
     }))
 }
-#[allow(clippy::result_unit_err)]
-fn decode_special(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_special(word: u32) -> Option<Result<Operand, Unsupported>> {
     let scalar = word & (1 << 28) != 0;
     let q = word & (1 << 30) != 0;
     let normalized = word & !(1 << 28);
@@ -329,12 +326,12 @@ fn decode_special(word: u32) -> Option<Result<Operand, ()>> {
     let kind =
         if !scalar && word & 0xbf20fc00 == PolynomialEncoding::Multiply.opcode() {
             if size != 0 {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             Kind::Polynomial { widen: false }
         } else if !scalar && word & 0xbf20fc00 == PolynomialEncoding::MultiplyLong.opcode() {
             if size != 0 && size != 3 {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             Kind::Polynomial { widen: true }
         } else {
@@ -344,7 +341,7 @@ fn decode_special(word: u32) -> Option<Result<Operand, ()>> {
                 },
             )?;
             if !matches!(size, 1 | 2) || scalar && !q {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             if normalized & 0xbf00f400 == indexed {
                 let h = ((word >> 11) & 1) as u8;

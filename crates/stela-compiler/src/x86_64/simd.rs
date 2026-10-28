@@ -3,6 +3,7 @@ use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{MemoryChecks, memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
+use crate::x86_64::asm::{Code, Gpr, Mem};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod absolute_selection;
 mod aes;
@@ -10,6 +11,7 @@ pub(super) mod arithmetic;
 pub(in crate::x86_64) mod bfloat16;
 mod comparison;
 mod complex;
+pub(in crate::x86_64) mod encode;
 mod estimate;
 pub(in crate::x86_64) mod exponent_scale;
 mod extrema_scale;
@@ -71,7 +73,7 @@ impl CheckedMemoryOperand {
         }
     }
 
-    pub(crate) fn emit_context(&self, code: &mut Vec<u8>, pc: u64, target: crate::TargetCpu) {
+    pub(crate) fn emit_context(&self, code: &mut Code, pc: u64, target: crate::TargetCpu) {
         match self {
             Self::Fixed(operand) => operand.emit_context(code, pc),
             Self::Structure(operand) => operand.emit_context(code, pc, target),
@@ -83,21 +85,33 @@ fn vector_offset(vector: u8) -> u32 {
     (core::mem::offset_of!(crate::GuestState, v) + usize::from(vector) * 16) as u32
 }
 
-fn commit(code: &mut Vec<u8>, vector: u8, xmm: u8) {
+/// Guest vector `vector` in GuestState, `[rdi+disp32]`.
+fn vector_memory(vector: u8) -> Mem {
+    Mem::base_disp32(Gpr::Rdi, vector_offset(vector) as i32)
+}
+
+fn commit(code: &mut Code, vector: u8, xmm: u8) {
     // GuestState has only 8-byte alignment; V0 begins at byte264.
-    Host::StoreUnaligned.append(code, crate::TargetCpu::Baseline);
-    code.push(0x87 | (xmm << 3)); // [rdi+disp32]
-    code.extend(vector_offset(vector).to_le_bytes());
+    Host::StoreUnaligned.emit(code, xmm, vector_memory(vector), crate::TargetCpu::Baseline);
 }
 
-fn read_vector(code: &mut Vec<u8>, vector: u8, xmm: u8) {
-    Host::LoadUnaligned.append(code, crate::TargetCpu::Baseline);
-    code.push(0x87 | (xmm << 3)); // [rdi+disp32]
-    code.extend(vector_offset(vector).to_le_bytes());
+fn read_vector(code: &mut Code, vector: u8, xmm: u8) {
+    Host::LoadUnaligned.emit(code, xmm, vector_memory(vector), crate::TargetCpu::Baseline);
 }
 
-fn packed(code: &mut Vec<u8>, opcode: SimdOpcode, destination: u8, source: u8) {
+fn packed(code: &mut Code, opcode: SimdOpcode, destination: u8, source: u8) {
     opcode.register(code, destination, source, crate::TargetCpu::Baseline);
+}
+
+/// [`packed`] with an 8-bit immediate.
+fn packed_imm(code: &mut Code, opcode: SimdOpcode, destination: u8, source: u8, immediate: u8) {
+    opcode.emit_imm(
+        code,
+        destination,
+        crate::x86_64::asm::Rm::Xmm(source),
+        immediate,
+        crate::TargetCpu::Baseline,
+    );
 }
 
 fn subtract_opcode(lane_bytes: u8) -> SimdOpcode {
@@ -110,27 +124,31 @@ fn subtract_opcode(lane_bytes: u8) -> SimdOpcode {
     }
 }
 
-fn shuffle(code: &mut Vec<u8>, destination: u8, source: u8, control: u8) {
-    packed(code, Host::ShuffleDword, destination, source);
-    code.push(control);
+fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8) {
+    packed_imm(code, Host::ShuffleDword, destination, source, control);
 }
 
-fn unsigned_bias(code: &mut Vec<u8>, lane_bytes: u8) {
+/// `movabs rcx, value`, then `movq xmm, rcx`, which clears the high qword.
+fn move_constant(code: &mut Code, xmm: u8, value: u64) {
+    let mut asm = code.asm();
+    asm.mov_imm64(Gpr::Rcx, value);
+    asm.movq_to_xmm(xmm, Gpr::Rcx);
+}
+
+fn unsigned_bias(code: &mut Code, lane_bytes: u8) {
     let mask: u64 = match lane_bytes {
         1 => 0x8080808080808080,
         2 => 0x8000800080008000,
         4 | 8 => 0x8000000080000000,
         _ => unreachable!("reviewed comparison lane"),
     };
-    code.extend([0x48, 0xb9]);
-    code.extend(mask.to_le_bytes());
-    code.extend([0x66, 0x48, 0x0f, 0x6e, 0xe1]); // movq xmm4,rcx
+    move_constant(code, 4, mask);
     packed(code, Host::UnpackLowQword, 4, 4);
     packed(code, Host::Xor, 0, 4);
     packed(code, Host::Xor, 1, 4);
 }
 
-fn equal(code: &mut Vec<u8>, lane_bytes: u8, target: crate::TargetCpu) {
+fn equal(code: &mut Code, lane_bytes: u8, target: crate::TargetCpu) {
     if lane_bytes == 8 && target >= crate::TargetCpu::Sse41 {
         Host::EqualQword.register(code, 0, 1, target); // pcmpeqq xmm0,xmm1
         return;
@@ -152,17 +170,10 @@ fn equal(code: &mut Vec<u8>, lane_bytes: u8, target: crate::TargetCpu) {
     }
 }
 
-pub(super) fn greater(
-    code: &mut Vec<u8>,
-    lane_bytes: u8,
-    unsigned: bool,
-    target: crate::TargetCpu,
-) {
+pub(super) fn greater(code: &mut Code, lane_bytes: u8, unsigned: bool, target: crate::TargetCpu) {
     if lane_bytes == 8 && target >= crate::TargetCpu::Sse42 {
         if unsigned {
-            code.extend([0x48, 0xb9]);
-            code.extend(0x8000000000000000u64.to_le_bytes());
-            code.extend([0x66, 0x48, 0x0f, 0x6e, 0xe1]);
+            move_constant(code, 4, 0x8000000000000000);
             packed(code, Host::UnpackLowQword, 4, 4);
             packed(code, Host::Xor, 0, 4);
             packed(code, Host::Xor, 1, 4);
@@ -234,7 +245,7 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
 }
 
 pub(super) fn emit_numerical(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: &crate::aarch64::FloatingPointOperation,
     pc: crate::GuestAddress,
     target: crate::TargetCpu,
@@ -245,7 +256,7 @@ pub(super) fn emit_numerical(
 /// [`emit_numerical`] after what `entry` says, returning the
 /// [`numerical::ColdSplit`] of an emission with a sticky-inexact path.
 pub(super) fn emit_numerical_split(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operation: &crate::aarch64::FloatingPointOperation,
     pc: crate::GuestAddress,
     target: crate::TargetCpu,
@@ -307,7 +318,7 @@ pub(super) fn emit_numerical_split(
 }
 
 #[cfg(test)]
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand) {
     emit_for_target(
         code,
         operand,
@@ -316,7 +327,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
     );
 }
 pub(super) fn emit_for_target(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     target: crate::TargetCpu,
     checks: MemoryChecks,
@@ -327,7 +338,7 @@ pub(super) fn emit_for_target(
 /// [`emit_for_target`] where XMM0 holds guest vector `xmm0` whole: a
 /// store of it takes it from there.
 pub(super) fn emit_after(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     target: crate::TargetCpu,
     checks: MemoryChecks,
@@ -545,15 +556,13 @@ pub(super) fn emit_after(
             two_lanes,
         } => {
             if mask == 0 {
-                code.extend([0x66, 0x0f, 0xef, 0xc0]); // pxor xmm0,xmm0
+                packed(code, Host::Xor, 0, 0);
                 commit(code, vector, 0);
                 return;
             }
-            code.extend([0x48, 0xb9]); // movabs rcx,mask
-            code.extend(mask.to_le_bytes());
-            code.extend([0x66, 0x48, 0x0f, 0x6e, 0xc1]); // movq xmm0,rcx (zeros high64)
+            move_constant(code, 0, mask);
             if two_lanes {
-                code.extend([0x66, 0x0f, 0x6c, 0xc0]); // punpcklqdq xmm0,xmm0
+                packed(code, Host::UnpackLowQword, 0, 0);
             }
             commit(code, vector, 0);
         }
@@ -590,7 +599,7 @@ pub(super) fn emit_after(
 /// alone, what it held.
 pub(super) fn xmm0_after(operand: &Operand, code: &[u8], held: Option<u8>) -> Option<u8> {
     let committed = |vector: u8| {
-        let mut store = Vec::new();
+        let mut store = Code::new();
         commit(&mut store, vector, 0);
         code.ends_with(&store).then_some(vector)
     };
@@ -624,9 +633,9 @@ pub(super) fn xmm0_after(operand: &Operand, code: &[u8], held: Option<u8>) -> Op
 /// [`read_vector`]'s bytes for `vector` into XMM0, which an emission that
 /// begins with them does not need where XMM0 holds the vector already.
 pub(super) fn xmm0_load(vector: u8) -> Vec<u8> {
-    let mut load = Vec::new();
+    let mut load = Code::new();
     read_vector(&mut load, vector, 0);
-    load
+    load.into_bytes()
 }
 
 #[cfg(test)]
@@ -636,7 +645,7 @@ mod tests {
     use alloc::vec;
 
     mod numerical_boundary {
-        use crate::{GuestAddress, block};
+        use crate::GuestAddress;
         use alloc::vec::Vec;
 
         const FCVT_H_S: u32 = 0x1e23c020;
@@ -655,7 +664,7 @@ mod tests {
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
                     .collect();
-                let compiled = block::compile(&bytes, GuestAddress(0x1000)).unwrap();
+                let compiled = crate::testing::block(&bytes, GuestAddress(0x1000)).unwrap();
                 assert_eq!(compiled.source_bytes, size_of::<u32>());
                 assert_eq!(compiled.native.source_map, [(GuestAddress(0x1000), 0)]);
             }
@@ -664,14 +673,14 @@ mod tests {
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
                     .collect();
-                assert!(block::compile(&bytes, GuestAddress(0x1000)).is_err());
+                assert!(crate::testing::block(&bytes, GuestAddress(0x1000)).is_err());
             }
         }
     }
 
     #[test]
     fn q_load_is_unaligned_staged_and_committed_before_writeback() {
-        let mut code = vec![];
+        let mut code = Code::new();
         emit(
             &mut code,
             &Operand::Memory {
@@ -708,7 +717,7 @@ mod tests {
             (8, vec![0xf3, 0x0f, 0x7e, 0], vec![0x66, 0x0f, 0xd6, 0]),
         ] {
             for load in [false, true] {
-                let mut code = vec![];
+                let mut code = Code::new();
                 emit(
                     &mut code,
                     &Operand::Memory {
@@ -733,7 +742,7 @@ mod tests {
     #[test]
     fn movi_d_clears_high_half_and_two_d_replicates_without_new_cpu_features() {
         for two_lanes in [false, true] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand::MoveImmediate {
@@ -755,7 +764,7 @@ mod tests {
     #[test]
     fn zero_byte_masks_share_compact_full_vector_zeroing() {
         for two_lanes in [false, true] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand::MoveImmediate {
@@ -774,7 +783,7 @@ mod tests {
     #[test]
     fn pair_loads_stage_both_exact_width_values_before_guest_commits_and_writeback() {
         for (bytes, prefix, opcode) in [(4, 0x66, 0x6e), (8, 0xf3, 0x7e), (16, 0xf3, 0x6f)] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand::MemoryPair {
@@ -799,7 +808,7 @@ mod tests {
     #[test]
     fn pair_stores_capture_duplicate_sources_before_two_writes_and_delay_writeback() {
         for (bytes, prefix, opcode) in [(4, 0x66, 0x7e), (8, 0x66, 0xd6), (16, 0xf3, 0x7f)] {
-            let mut code = vec![];
+            let mut code = Code::new();
             emit(
                 &mut code,
                 &Operand::MemoryPair {

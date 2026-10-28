@@ -1,5 +1,6 @@
 //! LD1-4 and ST1-4 (single lane) and LD1R-4R (replicate).
 use super::{Direction, Layout, Operand, decode_addressing};
+use crate::aarch64::Unsupported;
 
 const SINGLE_STRUCTURE_MASK: u32 = 0xbf00_0000;
 const SINGLE_STRUCTURE_CLASS: u32 = 0x0d00_0000;
@@ -21,13 +22,12 @@ const DOUBLEWORD_SCALE: u8 = 3;
 const LOW_VECTOR_BYTES: u8 = 8;
 
 /// None denotes a different class; Err denotes a reserved single structure.
-#[allow(clippy::result_unit_err)]
-pub(super) fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub(super) fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & SINGLE_STRUCTURE_MASK != SINGLE_STRUCTURE_CLASS {
         return None;
     }
     if word & POST_INDEX_BIT == 0 && word & OFFSET_REGISTER_MASK != 0 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     let opcode = ((word >> OPCODE_SHIFT) & OPCODE_MASK) as u8;
     let structures = ((opcode & 1) << 1) + ((word >> STRUCTURE_LOW_BIT_SHIFT) & 1) as u8 + 1;
@@ -75,7 +75,7 @@ pub(super) fn decode(word: u32) -> Option<Result<Operand, ()>> {
                 vector_bytes: LOW_VECTOR_BYTES << q,
             },
         ),
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     let (base, post_index) = decode_addressing(word);
     Some(Ok(Operand {

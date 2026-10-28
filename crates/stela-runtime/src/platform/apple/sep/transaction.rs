@@ -1,9 +1,9 @@
 //! One application-service request, as a native service sees it: the OOL
 //! bytes it reads and writes, and how a request it refuses is answered.
 //!
-//! A refusal carries the service protocol's own failure answer. Graceful
-//! mode sends it and strict mode stops instead (docs/design/runtime.md
-//! "Unsupported operations"). Once a request may have taken effect, such as
+//! A refusal carries the service protocol's own failure answer, which the
+//! SEP sends (docs/design/runtime.md "Unsupported operations"). Once a
+//! request may have taken effect, such as
 //! a durable commit whose acknowledgement was lost, a failure answer would
 //! be as untrue as a success, so that refusal carries none and the AP
 //! client's own timeout runs.

@@ -1,16 +1,18 @@
 //! FP binary arithmetic: guarded SSE2 values and precise software fallback.
+use crate::x86_64::asm::BitTest;
+use crate::x86_64::asm::{Alu, Code, Gpr, Rm, Size};
 use alloc::vec;
 use alloc::vec::Vec;
 mod half;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, EXPONENT_VECTOR, Entry, INPUT_MINIMUM_EXPONENT, Input,
-    LEFT_VECTOR, MOVLHPS_XMM1_XMM2, MOVQ_XMM0_XMM0, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
-    SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_scalar, commit_inexact, emit_opcode,
-    environment, exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
-    read_inputs, read_numerical_right, read_numerical_vector, reject_other_status, resolve,
-    restore_environment, scalar_range_or_zero, sticky_inexact, sticky_result_check, test_control,
-    vector_exponent_range, vector_normal_or_zero_range, zero_product_check,
+    LEFT_VECTOR, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR, SINGLE_EXPONENT_BIAS_BITS, ZeroProduct,
+    branch, clear_high_qword, clear_scalar, commit_inexact, emit_opcode, environment,
+    exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range, read_inputs,
+    read_numerical_right, read_numerical_vector, reject_other_status, resolve, restore_environment,
+    scalar_range_or_zero, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
+    vector_normal_or_zero_range, zero_product_check,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
@@ -25,12 +27,6 @@ use crate::{
 const PAIRED_RIGHT: u8 = 6;
 const ZERO_RANGE_SCRATCH: u8 = 7;
 const SIGN_MASK_VECTOR: u8 = 2;
-const SSE_ESCAPE: u8 = 0x0f;
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SHUFPS: u8 = 0xc6;
-const UNPCKLPS_XMM0_XMM1: &[u8] = &[0x0f, 0x14, 0xc1];
-const MOVHLPS_XMM1_XMM0: &[u8] = &[0x0f, 0x12, 0xc8];
 const EVEN_SINGLE_LANES: u8 = 0x88;
 const ODD_SINGLE_LANES: u8 = 0xdd;
 const FIRST_LANE: u8 = 0;
@@ -38,16 +34,6 @@ const REPLICATE_SINGLE_LANE: u8 = 0x55;
 const REPLICATE_LOW_DOUBLE: u8 = 0x44;
 const REPLICATE_HIGH_DOUBLE: u8 = 0xee;
 const SIGN_BITS: u8 = 1;
-const MOVD_EAX_XMM0: &[u8] = &[0x66, 0x0f, 0x7e, 0xc0];
-const MOVQ_RAX_XMM0: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc0];
-const MOVD_XMM2_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xd0];
-const MOVQ_XMM2_RAX: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xd0];
-const MOVSS_XMM0_XMM2: &[u8] = &[0xf3, 0x0f, 0x10, 0xc2];
-const MOVSD_XMM0_XMM2: &[u8] = &[0xf2, 0x0f, 0x10, 0xc2];
-const AND_EAX_IMM32: u8 = 0x25;
-const XOR_EAX_IMM32: u8 = 0x35;
-const BTR_RAX_IMM8: &[u8] = &[0x48, 0x0f, 0xba, 0xf0];
-const BTC_RAX_IMM8: &[u8] = &[0x48, 0x0f, 0xba, 0xf8];
 
 fn arithmetic_opcode(operation: BinaryOperation) -> ArithmeticOpcode {
     match operation {
@@ -62,24 +48,20 @@ fn arithmetic_opcode(operation: BinaryOperation) -> ArithmeticOpcode {
     }
 }
 
-fn shuffle_single(code: &mut Vec<u8>, destination: u8, source: u8, lanes: u8) {
-    code.extend([
-        SSE_ESCAPE,
-        SHUFPS,
-        REGISTER_DIRECT | (destination << MODRM_REGISTER_SHIFT) | source,
-        lanes,
-    ]);
+fn shuffle_single(code: &mut Code, destination: u8, source: u8, lanes: u8) {
+    code.asm().shufps(destination, Rm::Xmm(source), lanes);
 }
 
 /// Stage adjacent Vn pairs before adjacent Vm pairs without numerical work.
 /// Return the right host register; classifier scratch XMM2/3/4/5 must not alias it.
-fn prepare_pairs(code: &mut Vec<u8>, format: Format, shape: Shape) -> u8 {
+fn prepare_pairs(code: &mut Code, format: Format, shape: Shape) -> u8 {
     match (format, shape) {
         (Format::Single, Shape::Vector64) => {
             // Q0 loads zero both high qwords. The extra packed sums are normal
             // values plus zero, so they cannot add exceptions to active lanes.
-            code.extend(UNPCKLPS_XMM0_XMM1);
-            code.extend(MOVHLPS_XMM1_XMM0);
+            let mut asm = code.asm();
+            asm.unpcklps(LEFT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
+            asm.movhlps(RIGHT_VECTOR, Rm::Xmm(LEFT_VECTOR));
             RIGHT_VECTOR
         }
         (Format::Single, Shape::Vector128) => {
@@ -98,7 +80,7 @@ fn prepare_pairs(code: &mut Vec<u8>, format: Format, shape: Shape) -> u8 {
     }
 }
 
-fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) -> u8 {
+fn prepare_inputs(code: &mut Code, operand: &Operand) -> u8 {
     match operand.inputs {
         Inputs::Elementwise { left, right } => {
             read_numerical_vector(code, operand.shape, left, LEFT_VECTOR);
@@ -148,7 +130,7 @@ fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) -> u8 {
 
 /// FNMUL/FABD transform the rounded result. Only finite normal or zero results reach
 /// this point, so AH's NaN sign policy stays on the exact helper path.
-fn result_sign(code: &mut Vec<u8>, operand: &Operand) {
+fn result_sign(code: &mut Code, operand: &Operand) {
     let negate = match operand.operation {
         BinaryOperation::NegatedMultiply => true,
         BinaryOperation::AbsoluteDifference => false,
@@ -157,19 +139,38 @@ fn result_sign(code: &mut Vec<u8>, operand: &Operand) {
     if operand.shape == Shape::Scalar {
         match operand.format {
             Format::Single => {
-                code.extend(MOVD_EAX_XMM0);
-                code.push(if negate { XOR_EAX_IMM32 } else { AND_EAX_IMM32 });
                 let sign = operand.format.sign_mask() as u32;
-                code.extend((if negate { sign } else { !sign }).to_le_bytes());
-                code.extend(MOVD_XMM2_EAX);
-                code.extend(MOVSS_XMM0_XMM2);
+                let mut asm = code.asm();
+                asm.movd_from_xmm(Gpr::Rax, LEFT_VECTOR);
+                if negate {
+                    asm.alu_accumulator_imm32(Alu::Xor, Size::Dword, sign as i32);
+                } else {
+                    asm.alu_accumulator_imm32(Alu::And, Size::Dword, !sign as i32);
+                }
+                asm.movd_to_xmm(SIGN_MASK_VECTOR, Gpr::Rax);
+                Host::MoveScalarSingle.register(
+                    code,
+                    LEFT_VECTOR,
+                    SIGN_MASK_VECTOR,
+                    TargetCpu::Baseline,
+                );
             }
             Format::Double => {
-                code.extend(MOVQ_RAX_XMM0);
-                code.extend(if negate { BTC_RAX_IMM8 } else { BTR_RAX_IMM8 });
-                code.push(operand.format.bits() as u8 - SIGN_BITS);
-                code.extend(MOVQ_XMM2_RAX);
-                code.extend(MOVSD_XMM0_XMM2);
+                let mut asm = code.asm();
+                asm.movq_from_xmm(Gpr::Rax, LEFT_VECTOR);
+                asm.bit_imm(
+                    if negate { BitTest::Btc } else { BitTest::Btr },
+                    Size::Qword,
+                    Gpr::Rax,
+                    operand.format.bits() as u8 - SIGN_BITS,
+                );
+                asm.movq_to_xmm(SIGN_MASK_VECTOR, Gpr::Rax);
+                Host::MoveScalarDouble.register(
+                    code,
+                    LEFT_VECTOR,
+                    SIGN_MASK_VECTOR,
+                    TargetCpu::Baseline,
+                );
             }
             Format::Half => unreachable!("Half has its own mapping policy"),
         }
@@ -253,12 +254,7 @@ fn product_left(operand: &Operand) -> u8 {
 /// ([`zero_product`]). Returns the branches to the full path, to the helper
 /// and past the full path, and those between the sticky path and the
 /// rest ([`ColdSplit`]).
-fn sticky_path(
-    code: &mut Vec<u8>,
-    operand: &Operand,
-    entry: Entry,
-    target: TargetCpu,
-) -> StickyPath {
+fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetCpu) -> StickyPath {
     let full = sticky_inexact(code, entry);
     // Zeroing loads leave a scalar result's upper bits clear.
     let zeroed =
@@ -297,7 +293,7 @@ fn sticky_path(
     result_sign(code, operand);
     match operand.shape {
         Shape::Scalar if !zeroed => clear_scalar(code, operand.format, LEFT_VECTOR),
-        Shape::Vector64 => code.extend(MOVQ_XMM0_XMM0),
+        Shape::Vector64 => clear_high_qword(code, 0),
         Shape::Scalar | Shape::Vector128 => {}
     }
     commit(code, operand.destination, LEFT_VECTOR);
@@ -352,7 +348,7 @@ fn enter_full(code: &mut [u8], sticky: &mut StickyPath) -> usize {
 }
 
 fn emit_scalar(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     entry: Entry,
@@ -436,7 +432,7 @@ fn finish(code: &mut [u8], sticky: StickyPath, full: usize, operand: &Operand) -
 }
 
 fn emit_vector(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     entry: Entry,
@@ -473,7 +469,7 @@ fn emit_vector(
             u32::BITS as u8 - SINGLE_EXPONENT_BIAS_BITS,
         );
         ShiftOpcode::LeftDword.emit(code, EXPONENT_VECTOR, Format::Single.fraction_bits() as u8);
-        code.extend(MOVLHPS_XMM1_XMM2);
+        code.asm().movlhps(1, crate::x86_64::asm::Rm::Xmm(2));
     }
     environment(code);
     emit_opcode(
@@ -508,7 +504,7 @@ fn emit_vector(
     commit_inexact(code);
     result_sign(code, operand);
     if operand.shape == Shape::Vector64 {
-        code.extend(MOVQ_XMM0_XMM0);
+        clear_high_qword(code, 0);
     }
     commit(code, operand.destination, LEFT_VECTOR);
     finish(code, sticky, full, operand)
@@ -520,7 +516,7 @@ pub(super) fn always_exits(operand: &Operand) -> bool {
 
 /// The S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
@@ -567,12 +563,12 @@ mod tests {
                 .flat_map(|value| value.to_le_bytes())
                 .collect();
             assert!(
-                crate::compile(&bytes, GuestAddress(0x1000))
+                crate::testing::leaf(&bytes, GuestAddress(0x1000))
                     .unwrap_err()
                     .0
                     .contains("NumericalRuntimeRequired")
             );
-            let block = crate::block::compile(&bytes, GuestAddress(0x1000)).unwrap();
+            let block = crate::testing::block(&bytes, GuestAddress(0x1000)).unwrap();
             assert_eq!(block.source_bytes, bytes.len());
             assert_eq!(block.native.source_map.len(), 2);
             assert_eq!(block.native.source_map[1].0, GuestAddress(0x1004));
@@ -582,7 +578,7 @@ mod tests {
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
                 .collect();
-            let block = crate::block::compile(&bytes, GuestAddress(0x1000)).unwrap();
+            let block = crate::testing::block(&bytes, GuestAddress(0x1000)).unwrap();
             assert_eq!(block.source_bytes, size_of::<u32>());
             assert_eq!(block.native.source_map, [(GuestAddress(0x1000), 0)]);
         }

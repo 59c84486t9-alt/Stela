@@ -1618,14 +1618,17 @@ mod tests {
                 profile,
                 target,
             );
-            machine.set_strict(true);
             machine.set_watches(&[(APERTURE, APERTURE + GUARD_BYTES as u64 - 1)]);
             let mut watch = vec![];
             let mut exceptions = vec![];
             let stop = (1..=32768).find_map(|budget| {
                 let old_pc = machine.cpu.pc;
                 let old_exceptions = machine.statistics.exceptions;
-                let stop = machine.run(budget);
+                // The entry ends at the first operation answered degraded.
+                let mut stop = machine.run(budget);
+                if let Some(first) = machine.take_unmodeled().into_iter().next() {
+                    stop = Stop::Unsupported(first);
+                }
                 if machine.statistics.exceptions != old_exceptions {
                     use crate::machine::system::Register;
                     exceptions.push(serde_json::json!({"previous_pc":old_pc,"vector_pc":machine.cpu.pc,

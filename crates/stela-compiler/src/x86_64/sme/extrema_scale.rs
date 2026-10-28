@@ -1,4 +1,6 @@
 //! SME2 FAMIN/FAMAX and FSCALE over whole staged groups.
+use crate::x86_64::asm::{Code, Cond, Size};
+use crate::x86_64::simd::encode::guest;
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -20,8 +22,6 @@ use alloc::vec::Vec;
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
 const SCRATCH: [u8; 4] = [2, 3, 4, 5];
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const JNZ: &[u8] = &[0x0f, 0x85];
 
 /// Absolute extrema admit every numeric lane. FSCALE admits normal inputs and
 /// normal results using the shared exact exponent-adjustment kernel. All other
@@ -29,7 +29,7 @@ const JNZ: &[u8] = &[0x0f, 0x85];
 /// Integer operations preserve complete caller MXCSR.
 /// Clobbers RAX/RCX/RDX, host flags, XMM0..5; preserves RDI/R15 and guest NZCV.
 pub(crate) fn emit(
-    code: &mut Vec<u8>,
+    code: &mut Code,
     operand: Operand,
     length: VectorLength,
     features: NumericalFeatures,
@@ -56,12 +56,13 @@ pub(crate) fn emit(
     let frame = numerical::begin(code, length, &outputs, Environment::Exact)?;
     let mut failures = Vec::new();
     if features.full_a64() {
-        code.extend(TEST_STATE_IMMEDIATE);
-        code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-        code.extend(FPCR_EXCEPTION_ENABLE_MASK.to_le_bytes());
-        code.extend(JNZ);
-        failures.push(code.len());
-        code.extend(0_i32.to_le_bytes());
+        let mut asm = code.asm();
+        asm.test_imm(
+            Size::Dword,
+            guest(core::mem::offset_of!(GuestState, fpcr) as u32),
+            FPCR_EXCEPTION_ENABLE_MASK as i32,
+        );
+        failures.push(asm.jcc(Cond::Ne).offset());
     }
     for index in 0..count {
         for chunk in 0..length.chunks() {

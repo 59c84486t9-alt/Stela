@@ -28,6 +28,21 @@ pub mod tag_arithmetic;
 pub mod tag_memory;
 pub mod unprivileged;
 
+/// A word in a decoder's class that the compiler does not translate: a
+/// reserved encoding, or an allocated form the lifter reports as an
+/// unsupported instruction. A decoder returns `None` for a word outside its
+/// class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unsupported;
+
+impl core::fmt::Display for Unsupported {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("untranslated A64 encoding")
+    }
+}
+
+impl core::error::Error for Unsupported {}
+
 const CONDITIONAL_BRANCH_MASK: u32 = 0xff00_0000;
 const CONDITIONAL_BRANCH_CLASS: u32 = 0x5400_0000;
 
@@ -111,8 +126,7 @@ pub enum FloatingPointOperation {
 }
 
 impl FloatingPointOperation {
-    #[allow(clippy::result_unit_err)]
-    pub fn decode(word: u32) -> Option<Result<Self, ()>> {
+    pub fn decode(word: u32) -> Option<Result<Self, Unsupported>> {
         if let Some(result) = simd::arithmetic::decode(word) {
             Some(result.map(Self::Binary))
         } else if let Some(result) = simd::fused::decode(word) {
@@ -448,7 +462,7 @@ impl Lifter for Decoder {
         } else if let Some(decoded) = conditional_select::decode_compare(word) {
             Operation::ConditionalCompare(decoded)
         } else if let Some(decoded) = crc::decode(word) {
-            Operation::Crc(decoded.map_err(|()| unsupported())?)
+            Operation::Crc(decoded.map_err(|Unsupported| unsupported())?)
         } else if let Some(decoded) = checked_pointer::decode(word) {
             Operation::CheckedPointer(decoded)
         } else if let Some(decoded) = flags::decode(word) {
@@ -462,25 +476,25 @@ impl Lifter for Decoder {
         } else if let Some(decoded) = tag_arithmetic::decode(word) {
             Operation::TagArithmetic(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
-            Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
+            Operation::IntegerMath(decoded.map_err(|Unsupported| unsupported())?)
         } else if simd_fp && let Some(decoded) = FloatingPointOperation::decode(word) {
-            Operation::FloatingPoint(decoded.map_err(|()| unsupported())?)
+            Operation::FloatingPoint(decoded.map_err(|Unsupported| unsupported())?)
         } else if let Some(decoded) = ordered::decode(word) {
             Operation::Ordered(decoded)
         } else if let Some(decoded) = atomic::decode(word) {
-            Operation::Atomic(decoded.map_err(|()| unsupported())?)
+            Operation::Atomic(decoded.map_err(|Unsupported| unsupported())?)
         } else if let Some(decoded) = non_temporal::decode(word) {
-            Operation::MemoryNonTemporal(decoded.map_err(|()| unsupported())?)
+            Operation::MemoryNonTemporal(decoded.map_err(|Unsupported| unsupported())?)
         } else if let Some(decoded) = unprivileged::decode(word) {
-            Operation::MemoryUnprivileged(decoded.map_err(|()| unsupported())?)
+            Operation::MemoryUnprivileged(decoded.map_err(|Unsupported| unsupported())?)
         } else if let Some(decoded) = prefetch::decode(pc, word) {
-            Operation::Prefetch(decoded.map_err(|()| unsupported())?)
+            Operation::Prefetch(decoded.map_err(|Unsupported| unsupported())?)
         } else if let Some(decoded) = literal::decode(pc, word) {
-            Operation::Literal(decoded.map_err(|()| unsupported())?)
+            Operation::Literal(decoded.map_err(|Unsupported| unsupported())?)
         } else if simd_fp && let Some(decoded) = simd::decode(word) {
-            Operation::Simd(decoded.map_err(|()| unsupported())?)
+            Operation::Simd(decoded.map_err(|Unsupported| unsupported())?)
         } else if let Some(decoded) = register_offset::decode(word) {
-            Operation::MemoryRegisterOffset(decoded.map_err(|()| unsupported())?)
+            Operation::MemoryRegisterOffset(decoded.map_err(|Unsupported| unsupported())?)
         } else if word & 0x3e000000 == 0x28000000 {
             // Integer LDP/STP/LDPSW. SIMD, non-temporal pairs, tagged
             // stores and reserved opcodes are not interchangeable with these accesses.

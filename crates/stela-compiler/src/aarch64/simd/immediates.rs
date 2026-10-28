@@ -1,6 +1,7 @@
 //! Modified immediates (MOVI, MVNI, ORR, BIC, FMOV) and FP register moves.
 use super::super::register;
 use super::rearrange::{LaneSource, Operand as LaneMove};
+use crate::aarch64::Unsupported;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstantOperation {
@@ -58,8 +59,7 @@ fn float_immediate(imm: u8, bytes: u8) -> u64 {
         | (u64::from(imm & 15) << (fraction_bits - 4))
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let d = (word & 31) as u8;
     let n = ((word >> 5) & 31) as u8;
     let scalar_float = match word & SCALAR_FLOAT_MASK {
@@ -145,7 +145,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let bytes = if q { 16 } else { 8 };
     if half {
         if op || cmode != 15 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Constant {
             destination: d,
@@ -159,7 +159,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     } // Existing D/2D MOVI byte-mask lowering.
     if cmode == 15 {
         if op && !q {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let lane = if op { 8 } else { 4 };
         return Some(Ok(Operand::Constant {
@@ -219,7 +219,7 @@ mod tests {
                 }))
             );
         }
-        assert_eq!(decode(0x2f00f400), Some(Err(()))); // vector double requires Q=1
+        assert_eq!(decode(0x2f00f400), Some(Err(Unsupported))); // vector double requires Q=1
         assert!(decode(0x1ea01000).is_none()); // reserved scalar ftype
         assert!(decode(0x9e260000).is_none()); // numerical conversion is not a bit move
     }
@@ -231,7 +231,7 @@ mod tests {
                 if cmode == 14 && op == 1 {
                     assert!(decode(word).is_none());
                 } else if cmode == 15 && op == 1 {
-                    assert_eq!(decode(word), Some(Err(())));
+                    assert_eq!(decode(word), Some(Err(Unsupported)));
                 } else {
                     assert!(decode(word).unwrap().is_ok());
                 }
