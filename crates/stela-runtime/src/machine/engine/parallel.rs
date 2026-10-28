@@ -47,6 +47,9 @@ use alloc::{
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use stela_compiler::aarch64::system::registers::Encoding;
 
+mod observation;
+pub use observation::{MaterializedSource, SourceObservation, SourcePhase};
+
 /// Brings the host core that runs a PE out of native code, or out of a wait,
 /// to read its mail. Delivery is a host interrupt; a kick of a core already
 /// in the engine costs it one return through its interrupt handler.
@@ -99,6 +102,7 @@ struct Inbox {
     lines: AtomicU64,
     /// Its machine's counts, as it last published them ([`Hub::publish`]).
     counts: Mutex<Counts>,
+    source: observation::Slot,
     mail: Mutex<Mail>,
 }
 
@@ -152,6 +156,7 @@ pub struct Hub {
     /// A device left bytes for the host to feed or drain
     /// ([`Hub::request_service`]).
     service: AtomicBool,
+    source_observations: AtomicBool,
 }
 
 /// A device access that only the home machine's canonical memory serves.
@@ -195,6 +200,7 @@ impl Hub {
                     applied: AtomicU64::new(0),
                     lines: AtomicU64::new(0),
                     counts: Mutex::new(Counts::default()),
+                    source: observation::Slot::default(),
                     mail: Mutex::new(Mail::default()),
                 })
                 .collect(),
@@ -207,11 +213,32 @@ impl Hub {
             request: Mutex::new(None),
             stopped: AtomicBool::new(false),
             service: AtomicBool::new(false),
+            source_observations: AtomicBool::new(false),
         })
     }
 
     pub fn pes(&self) -> usize {
         self.inboxes.len()
+    }
+
+    /// Enable optional owner observations. This changes no guest, mailbox,
+    /// retirement or worker-admission state; ordinary boots leave it off.
+    pub fn set_source_observations(&self, enabled: bool) {
+        self.source_observations.store(enabled, Ordering::Release);
+    }
+
+    pub fn source_observations_enabled(&self) -> bool {
+        self.source_observations.load(Ordering::Acquire)
+    }
+
+    /// Last materialized state copied by this PE's own Machine. None means
+    /// disabled, unpublished, out of range, or no stable copy in three tries.
+    /// A returned copy can already be stale and is no quiescence receipt.
+    pub fn source_observation(&self, pe: usize) -> Option<SourceObservation> {
+        if !self.source_observations_enabled() {
+            return None;
+        }
+        self.inboxes.get(pe)?.source.read()
     }
 
     fn post(&self, pe: usize, write: impl FnOnce(&mut Mail)) {
@@ -522,6 +549,39 @@ impl Drop for Attached {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// Copy this owner's last materialized Cpu image at an engine boundary.
+    /// No executing native GuestState or another PE's frame is inspected.
+    /// This is optional stale diagnostic data, never a retirement receipt.
+    pub fn observe_parallel_source(&mut self, phase: SourcePhase) {
+        let Some(hub) = self.parallel.as_ref() else {
+            return;
+        };
+        if !hub.source_observations_enabled() {
+            return;
+        }
+        let Some(owner) = self.attached.as_ref() else {
+            return;
+        };
+        if owner.pe != self.current
+            || !Arc::ptr_eq(&owner.hub, hub)
+            || !matches!(self.peers.get(self.current), Some(Peer::Running))
+        {
+            return;
+        }
+        let Some(inbox) = hub.inboxes.get(owner.pe) else {
+            return;
+        };
+        inbox.source.publish(MaterializedSource {
+            host_counter: self.host.counter(),
+            phase,
+            pc: self.cpu.pc,
+            sp: self.cpu.state.sp,
+            lr: self.cpu.state.x[30],
+            el: self.cpu.pstate.el,
+            daif: self.cpu.pstate.daif,
+        });
+    }
+
     /// Become the home machine of a board whose PEs each run on their own
     /// host core: the running PE stays here, and every PE held in reset will
     /// start on its own machine ([`Self::start_parallel`]). The counter
@@ -714,6 +774,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Ok(());
         };
         let started = self.host.counter();
+        self.observe_parallel_source(SourcePhase::BroadcastEnter);
         let mut posted = hub.broadcast(self.current, maintenance);
         // A PE stopping the others need not wait for this one meanwhile.
         hub.set_parked(self.current, true);
@@ -725,6 +786,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         hub.set_parked(self.current, false);
         self.statistics.broadcasts += 1;
         self.statistics.sync_ticks += self.host.counter().wrapping_sub(started);
+        self.observe_parallel_source(SourcePhase::BroadcastExit);
         applied
     }
 
@@ -778,6 +840,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Run no guest code while the home machine has stopped the others.
     fn park(&mut self, hub: &Arc<Hub>) -> Step {
         let started = self.host.counter();
+        self.observe_parallel_source(SourcePhase::ParkEnter);
         hub.set_parked(self.current, true);
         let mut applied = Ok(());
         while hub.stopped.load(Ordering::SeqCst) {
@@ -786,6 +849,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         hub.set_parked(self.current, false);
         self.statistics.sync_ticks += self.host.counter().wrapping_sub(started);
+        self.observe_parallel_source(SourcePhase::ParkExit);
         applied
     }
 
@@ -850,6 +914,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn forward(&mut self, access: Forwarded) -> Result<Answer, DeviceError> {
         let hub = Arc::clone(self.parallel.as_ref().expect("forwarded in parallel"));
         let started = self.host.counter();
+        self.observe_parallel_source(SourcePhase::ForwardEnter);
         hub.set_parked(self.current, true);
         let mut applied = Ok(());
         while hub
@@ -872,6 +937,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         hub.set_parked(self.current, false);
         self.statistics.forwards += 1;
         self.statistics.sync_ticks += self.host.counter().wrapping_sub(started);
+        self.observe_parallel_source(SourcePhase::ForwardExit);
         // The mail applied meanwhile settles first: its refusal is this
         // access's.
         applied.map_err(|stop| {
@@ -1495,6 +1561,112 @@ mod tests {
         home.host.now = 2000;
         worker.host.now = 2000;
         assert_eq!(home.now(), worker.now());
+    }
+
+    #[test]
+    fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
+        use super::super::tests::{BASE, board};
+        use crate::machine::{engine::NoDevices, registers::Identity};
+
+        let identities = (0..2)
+            .map(|pe| Identity {
+                midr: 0x611f_0320,
+                mpidr: 0x8000_0000 | pe << 8,
+                clock: None,
+                caches: None,
+            })
+            .collect::<Vec<_>>();
+        let mut home = board(&[], NoDevices, identities.clone());
+        let prepared = board(&[], NoDevices, identities);
+        let mut worker = Machine::new_at(
+            prepared.cpu,
+            prepared.host,
+            prepared.devices,
+            prepared.profile,
+            prepared.target,
+            1,
+        )
+        .unwrap();
+        let (hub, kicks) = hub(2);
+        home.enter_parallel(Arc::clone(&hub)).unwrap();
+        worker
+            .start_parallel(Arc::clone(&hub), home.cpu.core_locks.clone(), BASE)
+            .unwrap();
+        let reads = worker.host.counter_reads;
+        worker.observe_parallel_source(SourcePhase::SliceEnter);
+        assert_eq!(
+            worker.host.counter_reads, reads,
+            "disabled path reads no counter"
+        );
+        assert_eq!(hub.source_observation(1), None, "default off");
+        hub.set_source_observations(true);
+        worker.cpu.pc = BASE + 4;
+        worker.cpu.state.sp = 0x8000;
+        worker.cpu.state.x[30] = BASE + 8;
+        worker.cpu.pstate.daif = 3;
+        worker.host.now = 1000;
+        let before = worker.cpu.state.clone();
+        let counts = worker.counts();
+        let sent = kicks.load(Ordering::Relaxed);
+        worker.observe_parallel_source(SourcePhase::BroadcastEnter);
+        let first = hub.source_observation(1).unwrap();
+        assert_eq!(first.sequence, 2);
+        assert_eq!(
+            first.source,
+            MaterializedSource {
+                host_counter: 1000,
+                phase: SourcePhase::BroadcastEnter,
+                pc: BASE + 4,
+                sp: 0x8000,
+                lr: BASE + 8,
+                el: 2,
+                daif: 3,
+            }
+        );
+        assert_eq!(worker.cpu.state, before);
+        assert_eq!(worker.counts(), counts);
+        assert_eq!(kicks.load(Ordering::Relaxed), sent);
+        assert_eq!(hub.source_observation(0), None);
+        assert_eq!(hub.source_observation(2), None);
+        assert_eq!(hub.source_observation(usize::MAX), None);
+
+        // A caller cannot select another slot: attachment is private and
+        // publication refuses a mismatched current-PE image.
+        worker.current = 0;
+        worker.observe_parallel_source(SourcePhase::SliceExit);
+        assert_eq!(hub.source_observation(0), None);
+        assert_eq!(hub.source_observation(1), Some(first));
+        worker.current = 1;
+        worker.cpu.pc = BASE + 16;
+        worker.host.now = 2000;
+        assert_eq!(
+            hub.source_observation(1),
+            Some(first),
+            "no implicit refresh"
+        );
+        worker.observe_parallel_source(SourcePhase::SliceExit);
+        let second = hub.source_observation(1).unwrap();
+        assert_eq!(second.sequence, 4);
+        assert_eq!(second.source.pc, BASE + 16);
+        assert_eq!(second.source.host_counter, 2000);
+        hub.set_source_observations(false);
+        worker.observe_parallel_source(SourcePhase::ParkEnter);
+        assert_eq!(hub.source_observation(1), None);
+        hub.set_source_observations(true);
+        assert_eq!(hub.source_observation(1), Some(second));
+
+        // Real boundary hooks publish once at entry and once on return, not
+        // on each wait-loop spin. No other live PE needs to acknowledge here.
+        hub.set_live(1, false);
+        home.broadcast(Maintenance::Code(None)).unwrap();
+        let broadcast = hub.source_observation(0).unwrap();
+        assert_eq!(broadcast.sequence, 4);
+        assert_eq!(broadcast.source.phase, SourcePhase::BroadcastExit);
+        home.device_transfer(0).unwrap();
+        let dma = hub.source_observation(0).unwrap();
+        assert_eq!(dma.sequence, 8);
+        assert_eq!(dma.source.phase, SourcePhase::DeviceAdvanceExit);
+        assert_eq!(hub.source_observation(1), Some(second));
     }
 
     #[test]

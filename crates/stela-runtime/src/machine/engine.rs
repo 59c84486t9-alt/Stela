@@ -34,8 +34,10 @@ mod native_timing;
 mod parallel;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
-pub use parallel::{Call, Counts, Hub, Kick, SharedDevices};
-pub use {stela_contracts::dma::DmaError, stela_contracts::dma::TransferFault};
+pub use parallel::{
+    Call, Counts, Hub, Kick, MaterializedSource, SharedDevices, SourceObservation, SourcePhase,
+};
+pub use stela_contracts::dma::{DmaError, TransferFault};
 mod pointer;
 mod prepare;
 pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
@@ -2672,13 +2674,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// substitutions. Enforce that boundary even
     /// when a provider returns an ordinary register error from its service.
     fn device_transfer(&mut self, now: u64) -> Result<(), DeviceError> {
+        self.observe_parallel_source(SourcePhase::DeviceAdvanceEnter);
         // A just-accepted lock write precedes follow_memory_lock(), so query
         // its actual device owner rather than the CPU's previous snapshot.
         let mut memory = HostMemory {
             host: &mut self.host,
             lock: self.devices.memory_lock(),
         };
-        match self.devices.transfer(self.current, &mut memory, now) {
+        let result = match self.devices.transfer(self.current, &mut memory, now) {
             Ok(()) => Ok(()),
             Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
                 Err(DeviceError::TransferRefused(reason))
@@ -2686,7 +2689,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(DeviceError::NoDevice) => Err(DeviceError::TransferRefused(
                 "device DMA has no service model".into(),
             )),
-        }
+        };
+        self.observe_parallel_source(SourcePhase::DeviceAdvanceExit);
+        result
     }
 
     /// The trace hits since the last call, oldest first, at most
@@ -3417,6 +3422,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The serial scheduler and chained native blocks, until a stop.
     pub(super) fn run_blocks(&mut self, budget: u64) -> Stop {
+        self.observe_parallel_source(SourcePhase::SliceEnter);
         self.block_limit = if budget == 0 { u64::MAX } else { budget };
         self.waited = 0;
         // The host may have changed the devices between runs (`devices` is
@@ -3424,6 +3430,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.device_lines = None;
         loop {
             if self.statistics.blocks >= self.block_limit {
+                self.observe_parallel_source(SourcePhase::SliceExit);
                 return Stop::Budget;
             }
             let started = self.timing_start();
@@ -3433,6 +3440,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .and_then(|()| self.step())
                 .or_else(|stop| self.undefined_instead(stop))
             {
+                self.observe_parallel_source(SourcePhase::SliceExit);
                 return stop;
             }
         }

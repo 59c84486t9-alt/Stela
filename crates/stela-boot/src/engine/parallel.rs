@@ -9,7 +9,7 @@ use super::{SLICE, WAIT_POLLS_PER_SECOND, host, output};
 use crate::{apic::Apic, native_smp::executor::Executors};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::TargetCpu;
-pub(crate) use stela_runtime::machine::engine::Counts;
+pub(crate) use stela_runtime::machine::engine::{Counts, SourcePhase};
 use stela_runtime::machine::{
     Cpu, CpuProfile, Host, Machine, Stop,
     apple::AppleDevices,
@@ -209,6 +209,39 @@ pub(super) fn report_diagnostics<H: Host>(machine: &mut Machine<H, Board>) {
             if hit.completed { "" } else { " refused" },
             hit.dropped
         ));
+    }
+}
+
+/// Bounded, explicitly stale observations copied by each owning Machine.
+/// Neither the report time nor another PE's publication makes them current.
+pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
+    let hub = home.devices.hub();
+    if !hub.source_observations_enabled() {
+        return;
+    }
+    output::arguments(format_args!(
+        "PE SOURCE last-materialized=true coherent=false\n"
+    ));
+    for pe in 0..hub.pes() {
+        match hub.source_observation(pe) {
+            Some(observed) => {
+                let source = observed.source;
+                output::arguments(format_args!(
+                    "PE SOURCE pe={pe} sequence={} observed_host_counter={:#x} phase={:?} pc={:#x} el={} daif={:#x} sp={:#x} lr={:#x}\n",
+                    observed.sequence,
+                    source.host_counter,
+                    source.phase,
+                    source.pc,
+                    source.el,
+                    source.daif,
+                    source.sp,
+                    source.lr
+                ));
+            }
+            None => output::arguments(format_args!(
+                "PE SOURCE pe={pe} unavailable=no-stable-owner-observation\n"
+            )),
+        }
     }
 }
 

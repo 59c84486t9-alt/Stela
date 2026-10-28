@@ -1571,6 +1571,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             u32::try_from(capture.processors.get(selected)?.apic_id).ok()
         }),
     );
+    // Profile observations copy only the owners' last materialized images;
+    // they are stale diagnostics, not coherent source-state receipts.
+    hub.set_source_observations(options.profile);
     let devices = parallel::Board::new(devices, hub.clone());
     let settings = parallel::Settings {
         profile: profile.clone(),
@@ -2357,7 +2360,9 @@ fn run<H: Host>(
         let slice_started = host::rdtsc();
         service_longest = service_longest.max(slice_started.wrapping_sub(serviced));
         service_parts.lap(ServiceParts::BEAT, slice_started);
+        machine.observe_parallel_source(parallel::SourcePhase::SliceEnter);
         let stop = execute(machine, limit);
+        machine.observe_parallel_source(parallel::SourcePhase::SliceExit);
         let service_now = host::rdtsc();
         service_parts.start(service_now);
         sliced_ticks += service_now.wrapping_sub(slice_started);
@@ -2562,6 +2567,7 @@ fn run<H: Host>(
                 service::report(tsc_hz),
             ));
             // Each PE on its own host core counts for itself.
+            parallel::report_source_observations(machine);
             let per_pe = parallel::counts(machine);
             let retired = per_pe
                 .iter()
@@ -3535,6 +3541,7 @@ fn finish<H: Host>(
     dumps: &[(Base, u64)],
     host_power: &power::HostPowerControl,
 ) -> ! {
+    parallel::report_source_observations(machine);
     survey_report(machine);
     let drained = machine.devices.with(Drained::take);
     unmodeled_report(machine, drained.unmodeled);
