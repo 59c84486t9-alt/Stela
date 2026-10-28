@@ -35,6 +35,8 @@ use uefi::{
 };
 
 use crate::native_smp::resources::{Resources as NativeResources, STACK_BYTES, STACK_STRIDE};
+mod handoff_phase;
+mod memory;
 const MIB: u64 = 1024 * 1024;
 /// The bounds of the parts of Stela's memory sized from host RAM
 /// ([`Sizes::for_host`]).
@@ -638,91 +640,13 @@ fn load(
     host_firmware: crate::host_firmware::Resources,
 ) -> Result<core::convert::Infallible, &'static str> {
     crate::status::begin("Setting up Stela's memory");
-    // SAFETY: written once at entry, read here.
-    let snapshot = unsafe { *PRISTINE.0.get() }.ok_or("no pristine image copy")?;
-    let image = firmware::Image::loaded()?;
-    if image.start != snapshot.start || image.end - image.start != snapshot.bytes {
-        return Err("image layout changed after the snapshot");
-    }
-    let engine = allocate(snapshot.bytes as u64)?;
-    // SAFETY: two distinct live allocations of `bytes`.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            snapshot.copy as *const u8,
-            engine.physical as *mut u8,
-            snapshot.bytes,
-        );
-    }
-    let ram = firmware::ram()?;
-    let screen = Framebuffer::from_firmware();
-    let apic_base = crate::apic::base_msr();
-    // The physmap reaches RAM, the framebuffer and the local APIC.
-    let apic = apic_base & crate::apic::BASE_ADDRESS;
-    let top = ram
-        .iter()
-        .map(|r| r.1 as u64)
-        .chain(screen.iter().map(|s| (s.base + s.bytes) as u64))
-        .chain(core::iter::once(apic + PAGE))
-        .max()
-        .unwrap_or(0);
-    let placement = layout::choose(crate::cpu::LA57.present(), top)
-        .ok_or("host physical addresses lie beyond what any placement's physmap reaches")?;
-    layout::set(placement);
-    relocate(
-        engine.physical as usize,
-        snapshot.bytes,
-        layout::image().wrapping_sub(image.start as u64),
-    )?;
+    let image = memory::prepare_image()?;
     let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
     let system = System::parse(text)?;
     let (native_processors, cores) =
         crate::native_smp::firmware::capture_assignment(system.native_cores)
             .map_err(crate::native_smp::firmware::Error::message)?;
-    let sizes = Sizes::for_host(free_ram()?, cores, system.parallel);
-    let heap = allocate(sizes.heap)?;
-    // The engine allocator uses this existing physmap directly. Prove the
-    // complete firmware reservation is covered before publishing the handoff.
-    if !ram.iter().any(|&(start, end)| {
-        start as u64 <= heap.physical
-            && heap
-                .physical
-                .checked_add(heap.bytes)
-                .is_some_and(|top| top <= end as u64)
-    }) {
-        return Err("engine heap is outside the retained RAM physmap");
-    }
-    let mut native_resources = NativeResources {
-        cores: cores as u32,
-        stacks: allocate(STACK_BYTES * cores as u64)?,
-        ..NativeResources::default()
-    };
-    if cores > 1 {
-        let page = boot::allocate_pages(
-            AllocateType::MaxAddress(0x9f000),
-            MemoryType::LOADER_CODE,
-            1,
-        )
-        .map_err(|_| "no owned SIPI page below 1 MiB")?;
-        let physical = page.as_ptr() as u64;
-        if physical < PAGE {
-            return Err("SIPI page overlaps real-mode vector table");
-        }
-        // SAFETY: the allocation is owned by Stela through every AP's lifetime.
-        unsafe {
-            page.as_ptr().write_bytes(0, PAGE as usize);
-        }
-        native_resources.sipi = physical;
-    }
-    let stack = Region {
-        physical: native_resources.stacks.physical,
-        bytes: STACK_BYTES,
-    };
-    let code = allocate(sizes.code)?;
-    let pool = allocate(sizes.pool)?;
-    crate::native_smp::resources::partition(cores, cores - 1, code.bytes, pool.bytes, false)?;
-    let handoff_page = allocate(size_of::<Handoff>() as u64)?;
-    let trampoline = low_page(MemoryType::LOADER_CODE)?;
-    let root = low_page(MemoryType::LOADER_DATA)?;
+    let mut memory = memory::reserve(&system, cores, &image.ram)?;
     let tsc_hz = crate::firmware::tsc_hz();
     if !crate::cpu::INVARIANT_TSC.present() {
         output::arguments(format_args!(
@@ -756,150 +680,38 @@ fn load(
     };
 
     let runtime = Runtime::capture()?;
-    let mut frames = FirmwareFrames;
-    let mut image_rights: Vec<(u64, u64, u64)> = image
-        .sections
-        .iter()
-        .map(|&(start, end, rights)| (start as u64, end as u64, rights))
-        .chain(core::iter::once((trampoline, trampoline + PAGE, PRESENT)))
-        .chain(runtime.code())
-        .collect();
-    if native_resources.sipi != 0 {
-        image_rights.push((native_resources.sipi, native_resources.sipi + PAGE, PRESENT));
-    }
-    identity(&mut frames, root, &ram, &image_rights)?;
-    if let Some(storage) = &storage {
-        map_devices(&mut frames, root, &ram, &storage.mapped)?;
-    }
-    let mapped = storage
-        .as_ref()
-        .map_or(&[][..], |storage| &storage.mapped[..]);
-    runtime.map(&mut frames, root, &ram, mapped)?;
-    let mut storage = match &storage {
-        Some(storage) => Storage::new(storage)?,
-        None => Storage::absent(),
-    };
-    storage.wifi_platform = host_firmware.wifi_observations();
-    // The framebuffer is written, never read back, so its writes combine.
-    let video = PRESENT | WRITABLE | NX | WRITE_COMBINING;
-    if let Some(screen) = &screen {
-        let start = screen.base as u64 & !(PAGE - 1);
-        let end = (screen.base + screen.bytes) as u64;
-        tables::map_range(
-            &mut frames,
-            root,
-            start,
-            start,
-            end.next_multiple_of(PAGE) - start,
-            video,
-        )?;
-    }
-    // The window: the engine image with section rights, heap, stack, code.
-    for page in (0..snapshot.bytes as u64).step_by(PAGE as usize) {
-        let rights = image.rights(image.start + page as usize);
-        tables::map_page(
-            &mut frames,
-            root,
-            layout::image() + page,
-            engine.physical + page,
-            rights,
-        )?;
-    }
-    let data = PRESENT | WRITABLE | NX;
-    for slot in 0..cores {
-        tables::map_range(
-            &mut frames,
-            root,
-            layout::stack() + slot as u64 * STACK_STRIDE + PAGE,
-            native_resources.stacks.physical + slot as u64 * STACK_BYTES,
-            STACK_BYTES,
-            data,
-        )?;
-    }
-    tables::map_range(
-        &mut frames,
-        root,
-        layout::code(),
-        code.physical,
-        code.bytes,
-        PRESENT,
+    let storage = memory::map(
+        &image,
+        &mut memory,
+        &runtime,
+        storage.as_ref(),
+        native_mmio.as_ref(),
+        &host_firmware,
     )?;
-    // The physmap: all RAM, the framebuffer and the local APIC.
-    for &(start, end) in &ram {
-        let (start, end) = (start as u64, end as u64);
-        tables::map_range(
-            &mut frames,
-            root,
-            layout::physical(start),
-            start,
-            end - start,
-            data,
-        )?;
-    }
-    if let Some(screen) = &screen {
-        let start = screen.base as u64 & !(PAGE - 1);
-        let end = ((screen.base + screen.bytes) as u64).next_multiple_of(PAGE);
-        if !ram.iter().any(|r| r.0 as u64 <= start && end <= r.1 as u64) {
-            tables::map_range(
-                &mut frames,
-                root,
-                layout::physical(start),
-                start,
-                end - start,
-                video,
-            )?;
-        }
-    }
-    // The xAPIC page must be strong uncacheable (Intel SDM Vol. 3A 11.4.1);
-    // the entry says so rather than relying on the firmware's MTRRs.
-    if !ram.iter().any(|r| r.0 as u64 <= apic && apic < r.1 as u64) {
-        tables::map_page(
-            &mut frames,
-            root,
-            layout::physical(apic),
-            apic,
-            data | UNCACHED,
-        )?;
-    }
-    // The bounce slot's leaf entries, which the translation helper points
-    // at guest frames; until then they map a scratch page.
-    for slot in 0..cores {
-        for index in 0..2 {
-            let scratch = allocate(PAGE)?.physical;
-            let address = layout::bounce() + (slot * 2 + index) as u64 * PAGE;
-            tables::map_page(&mut frames, root, address, scratch, data)?;
-            let entry = tables::entry(&mut frames, root, address, 0, false)?;
-            native_resources.bounce[slot][index] = entry.ok_or("bounce slot unmapped")? as u64;
-        }
-    }
+    let memory::EngineImage {
+        image,
+        placement,
+        screen,
+        apic_base,
+        ..
+    } = image;
+    let memory::EngineMemory {
+        heap,
+        native_resources,
+        stack,
+        code,
+        pool,
+        handoff_page,
+        trampoline,
+        root,
+    } = memory;
     let bounce = native_resources.bounce[0];
-
-    if let Some(prepared) = &native_mmio {
-        prepared.aperture(&mut frames, root, cores)?;
-    }
-
-    let options_region = Region {
-        physical: options.as_ptr() as u64,
-        bytes: options.len() as u64,
-    };
-    let source_region = Region {
-        physical: source.as_ptr() as u64,
-        bytes: source.len() as u64,
-    };
-    let mut files = [File::default(); MAX_FILES];
-    for (slot, (name, contents)) in files.iter_mut().zip(&bundle) {
-        if name.len() > MAX_NAME {
-            return Err("bundle file name too long");
-        }
-        slot.name[..name.len()].copy_from_slice(name.as_bytes());
-        slot.name_bytes = name.len();
-        slot.contents = *contents;
-    }
-    let file_count = bundle.len();
-    // All stay allocated: the engine reads them through the physmap.
-    core::mem::forget(options);
-    core::mem::forget(source);
-    core::mem::forget(bundle);
+    let handoff_phase::RetainedFiles {
+        options: options_region,
+        source: source_region,
+        files,
+        file_count,
+    } = handoff_phase::retain_files(options, source, bundle)?;
     let handoff = handoff_page.physical as *mut Handoff;
     let engine_entry =
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
@@ -910,7 +722,7 @@ fn load(
     let capture = unsafe {
         crate::native_smp::firmware::Capture::read(native_processors.physical as *const u8)
     };
-    let sender = crate::apic::Apic::new(apic_base, apic);
+    let sender = crate::apic::Apic::new(apic_base, apic_base & crate::apic::BASE_ADDRESS);
     crate::status::begin("Taking control of the other processors");
     crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; every page
@@ -949,37 +761,11 @@ fn load(
     // Keep this post-EBS boundary when the relocated engine replays status.
     let mut history = [0; crate::status::HISTORY_BYTES];
     let history_bytes = crate::status::history(&mut history);
-    let mut guest = [Region::default(); MAX_GUEST_RANGES];
-    let mut count = 0;
-    let mut installed = 0;
-    for entry in map.entries() {
-        if is_ram(entry.ty) {
-            installed += entry.page_count * PAGE;
-        }
-        if !matches!(
-            entry.ty,
-            MemoryType::CONVENTIONAL
-                | MemoryType::BOOT_SERVICES_CODE
-                | MemoryType::BOOT_SERVICES_DATA
-        ) {
-            continue;
-        }
-        let start = entry.phys_start.next_multiple_of(LARGE);
-        let end = (entry.phys_start + entry.page_count * PAGE) & !(LARGE - 1);
-        if end <= start || count == MAX_GUEST_RANGES {
-            continue;
-        }
-        // Adjacent firmware entries merge into one range.
-        if count > 0 && guest[count - 1].physical + guest[count - 1].bytes == start {
-            guest[count - 1].bytes += end - start;
-        } else {
-            guest[count] = Region {
-                physical: start,
-                bytes: end - start,
-            };
-            count += 1;
-        }
-    }
+    let handoff_phase::GuestMemory {
+        ranges: guest,
+        count,
+        installed,
+    } = handoff_phase::guest_memory(&map);
     core::mem::forget(map);
     // SAFETY: fresh LOADER_DATA pages sized for the handoff.
     unsafe {
@@ -1022,26 +808,17 @@ fn load(
             },
         });
     }
-    // SAFETY: boot services are over, interrupts go off now, and the new
-    // tables identity-map this code, its stack and the trampoline.
+    // SAFETY: boot services ended; the completed root maps this code and
+    // trampoline, and all engine-window reservations remain allocated.
     unsafe {
-        asm!("cli", options(nomem, nostack));
-        paging::take_over()?;
-        match placement {
-            Placement::FiveLevel => la57::enable(root, trampoline),
-            Placement::FourLevel { .. } => {
-                asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags))
-            }
+        handoff_phase::Transfer {
+            placement,
+            root,
+            trampoline,
+            engine_entry,
+            handoff,
         }
-        asm!(
-            "mov rsp, {stack}",
-            "call {entry}",
-            "ud2",
-            stack = in(reg) layout::stack() + PAGE + STACK_BYTES,
-            entry = in(reg) engine_entry,
-            in("rdi") layout::physical(handoff as u64),
-            options(noreturn),
-        )
+        .enter()
     }
 }
 

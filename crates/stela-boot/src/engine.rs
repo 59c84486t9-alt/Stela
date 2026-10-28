@@ -8,6 +8,7 @@
 //! system's partition that probe opened.
 
 mod aml;
+mod boot_image;
 pub(crate) mod bundle;
 mod display;
 pub(crate) mod fdr;
@@ -1055,71 +1056,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut bare = host_owner.host();
     let target = target(options.parallel);
     let speculation = speculation::probe();
-    let mut read_only_region = None;
-    let mut core_locks = stela_runtime::machine::ctrr::CoreLocks::default();
-    let mut hidden_devices = Vec::new();
-    let mut loaded_tree = None;
-    let mut loaded_source = None;
-    let mut bundle_boot_processor = None;
-    let mut hidden_clpc = Vec::new();
-    // A bundle's kernel gets a framebuffer the size of the firmware's mode.
-    let framebuffer = handoff
-        .screen
-        .filter(|_| options.bundle)
-        .and_then(|screen| {
-            display::boot_framebuffer(screen.resolution(), options.dram_base + options.ram_bytes)
-        });
-    let (entry, x0) = if options.bundle {
-        crate::status::begin("Loading macOS into memory");
-        let files = &handoff.files[..handoff.file_count];
-        let dram = bundle::Dram {
-            base: options.dram_base,
-            backed: options.ram_bytes,
-            installed: options.dram_bytes,
-        };
-        let loaded = match &built {
-            Some(built) => bundle::load_built(&mut bare, built, dram, framebuffer, nvram),
-            None => bundle::load(&mut bare, files, dram, framebuffer, nvram),
-        };
-        let loaded = match loaded {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                output::arguments(format_args!("bundle refusal: {error}\n"));
-                output::fatal("the boot bundle could not be loaded")
-            }
-        };
-        output::arguments(format_args!(
-            "BUNDLE regions={} patched={} kept={:?} dram_base={:#x}\n",
-            loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
-        ));
-        read_only_region = loaded.read_only_region;
-        core_locks = loaded.core_locks;
-        hidden_devices = loaded.hidden_devices;
-        bundle_boot_processor = loaded.boot_processor;
-        hidden_clpc = loaded.hidden_clpc;
-        loaded_tree = Some(loaded.live_tree);
-        loaded_source = Some(loaded.source);
-        crate::status::done("");
-        (loaded.pc, loaded.x0)
-    } else {
-        // SAFETY: the guest image was left allocated by the loader.
-        let source = unsafe {
-            core::slice::from_raw_parts(
-                layout::physical(handoff.source.physical) as *const u8,
-                handoff.source.bytes as usize,
-            )
-        };
-        if !stela_runtime::machine::Host::write_ram(&mut bare, options.load, source) {
-            output::fatal("guest image does not fit guest DRAM at its load address");
-        }
-        output::arguments(format_args!(
-            "GUEST IMAGE pa={:#x} bytes={} sha256={}\n",
-            options.load,
-            source.len(),
-            stela_runtime::sha256(source),
-        ));
-        (options.entry, options.x0)
-    };
+    let boot_image::GuestImage {
+        entry,
+        x0,
+        read_only_region,
+        core_locks,
+        hidden_devices,
+        live_tree: mut loaded_tree,
+        source: loaded_source,
+        boot_processor: bundle_boot_processor,
+        hidden_clpc,
+    } = boot_image::load(&mut bare, handoff, &options, built.as_deref(), nvram);
     let source_tree = loaded_tree.as_ref().map(|tree| tree.bytes());
     if source_tree.is_some() {
         crate::status::begin("Setting up the Mac's hardware");
@@ -1606,18 +1553,20 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // RAM/device owners remain live for the whole non-returning run below.
     let mut machine = unsafe {
         crate::native_smp::canonical::prepare_with_locks(
-            handoff,
-            native_processors.expect("validated native roster"),
-            &executors,
-            &sender,
-            &mut host_owner,
-            canonical_ram,
-            cpu,
-            devices,
-            profile,
-            boot_processor,
-            &worker_bindings,
-            &processor_power,
+            crate::native_smp::canonical::Preparation {
+                handoff,
+                capture: native_processors.expect("validated native roster"),
+                executors: &executors,
+                sender: &sender,
+                owner: &mut host_owner,
+                ram: canonical_ram,
+                cpu,
+                devices,
+                profile,
+                boot_processor,
+                assignments: &worker_bindings,
+                processor_power: &processor_power,
+            },
             options.native_artifacts,
             Some(core_locks),
         )
@@ -2305,7 +2254,6 @@ const BEAT_SECONDS: u64 = 10;
 /// every [`BEAT_SECONDS`]. The caller supplies
 /// its admitted execution path; reporting and host polling never select a
 /// different memory or native-entry path.
-#[allow(clippy::too_many_arguments)]
 fn run<H: Host>(
     machine: &mut Machine<H, parallel::Board>,
     budget: u64,
