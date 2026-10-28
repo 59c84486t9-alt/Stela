@@ -35,76 +35,9 @@ use stela_runtime::machine::{ctrr, identification, soc, tag_storage};
 use stela_runtime::sha256;
 
 /// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
-/// Schema 4 requires the selected boot CPU and its original ADT identity;
-/// older mounts always started PE 0. Schema 3 requires target/source/original
-/// ADT provenance intake; schema 2 never qualified those fields.
 pub const SCHEMA_VERSION: u32 = 4;
-/// The revision of what [`prepare`] writes within its schema: bump it in the
-/// commit that changes the content of a prepared bundle (a DeviceTree
-/// property, a region, a patch, a boot argument) without changing its
-/// format, and name the change here. `stela setup --update-stela` prepares a
-/// setup's bundles again when theirs are of another revision. Revision 0:
-/// the bundles of every loader before revisions were recorded; a
-/// `bundle.json` without `revision` is one. Revision 1: `/pram` `reg` and
-/// `/chosen` `embedded-panic-log-size` give XNU its panic buffer
-/// (`carveouts`). Revision 2: retain the original boot IM4M in the
-/// read-only boot run and publish its object range and secure hash.
-/// Revision 3: publish the explicit previous-stage boot command in `/chosen`
-/// and `/chosen/handoff`, independently of the OS environment.
-/// Revision 4: restrict name-matched peripherals with unavailable required
-/// platform-function providers through `AAPL,ignore`.
-/// Revision 5: keep retained manifests before SPTM's contiguous image run
-/// and validate the complete image-adjacency contract before output.
-/// Revision 6: close required service dependencies for AMFM-managed WLAN.
-/// Revision 7: retire unavailable physical display service identities.
-/// Revision 8: preserve qualified native legacy DART families and their
-/// mapper/client dependencies with generation-aware admission and mounting.
-/// Revision 9: reserve and publish T6000's source-qualified ordinary fixed
-/// carveouts, including the four SGX bootstrap ranges.
-/// Revision 10: publish independently numbered ECPU/PCPU domain tables;
-/// validate the complete carveout reservation against supplied guest DRAM.
-/// Revision 11: publish original T6000 AMCC and IOA lockdown maps.
-/// Revision 12: retain the qualified T6000 AP GPIO/SPI chip-select owner;
-/// auxiliary GPIO wake/restoration ownership remains unqualified.
-/// Revision 13: bind selected external-pipe framebuffer geometry to the
-/// actual GOP framebuffer at load. Schema 2 adds these required named fields.
-/// Revision 14: retain the unchanged input ADT beside its prepared output so
-/// runtime resource qualification can compare both complete source graphs.
-/// Schema3 consumes this provenance at the reader; revision14 is unchanged.
-/// Revision 15: on the M4 and later, place `CL4-dummypage` and state the
-/// core lock registers iBoot leaves (`core_locks`, which `stela.efi` reads
-/// when present).
-/// Revision 16: on the chips with memory tagging, state TAG_OFFSET_EL2 in
-/// `core_locks`.
-/// Revision 17: give a CPU node whose template carries per-variant L2 sizes
-/// its SoC's own `l2-cache-size` (J700AP's P cores).
-/// Revision 18: reserve and publish every SoC's ordinary fixed carveouts from
-/// its iBoot table, and name each table's special-attribute carveouts.
-/// Revision 19: publish every SoC's iBoot AMCC and IOA lock-register maps,
-/// into the template's nodes only.
-/// Revision 20: select the T6050 variant the board's fuses give, merge its
-/// template overlays, keep its dies' CPUs and size its lock maps by it.
-/// Revision 21: publish `/arm-io` `die-count` on every SoC whose iBoot
-/// writes it, with that iBoot's value.
-/// Revision 22: truncate oversized syscfg fill-in values to the recipe's
-/// requested length, as iBoot does, while zero-padding shorter values.
-/// Revision 23: retire unused SPMI bus compatibles after target and
-/// platform-function admission, preserving their original metadata.
-/// Revision 24: publish T6000's original AMCC broadcast/cache-status and
-/// IOA master-lock labels, matching the jointly routed memory owner.
-/// Revision 25: keep common PMGR power-state interfaces independently of
-/// optional register-family qualification, including T8152's physical child.
-/// Revision 26: admit qualified early-family USB DRD, I2C and ATC PHY
-/// compatibles while preserving their distinct original alias geometry.
-/// Revision 27: default to the first original performance CPU, preserve
-/// explicit overrides and publish one running node with source identity.
-/// Revision 28: retain the modeled direct MCC frontend independently of
-/// unsupported PMP DMA, requiring actual native memory resources at mount.
-/// Revision 29: normalize the observed one-MiB NOR template to the qualified
-/// eight-MiB firmware, syscfg and NVRAM regions derived from mBoot.
-/// Revision 30: publish a tethered restore's ticket digest as
-/// `/chosen/secure-boot-hashes sfr-manifest-hash`, which restored's iBoot
-/// staging requires once EAN holds an earlier install's `ifw2`.
+/// The revision of the content [`prepare`] writes within its schema; a
+/// bundle of another revision is prepared again (`stela setup --update-stela`).
 pub const REVISION: u32 = 30;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
@@ -2400,6 +2333,19 @@ mod tests {
         Ok(())
     }
 
+    /// SHA-256 over every prepared file, by name, and the manifest.
+    fn prepared_digest(bundle: &Bundle) -> Result<String> {
+        let mut bytes = Vec::new();
+        for (name, data) in &bundle.files {
+            bytes.extend((name.len() as u64).to_le_bytes());
+            bytes.extend(name.as_bytes());
+            bytes.extend((data.len() as u64).to_le_bytes());
+            bytes.extend(data);
+        }
+        bytes.extend(serde_json::to_vec(&bundle.manifest)?);
+        Ok(sha256(&bytes))
+    }
+
     fn source(component: &str) -> Source {
         Source {
             component: component.into(),
@@ -2944,6 +2890,15 @@ mod tests {
             options.dram_base
         );
         let bundle = prepare(&inputs, &options)?;
+        // A change to the prepared content fails here until REVISION is bumped
+        // and the new digest pinned with it.
+        assert_eq!(
+            (REVISION, prepared_digest(&bundle)?),
+            (
+                30,
+                "6bf7a18074e0effa2b858063098ba3f5d98d651eadeb15fcd5eb16b760d8b87c".to_owned()
+            )
+        );
         let original = bundle
             .files
             .iter()
