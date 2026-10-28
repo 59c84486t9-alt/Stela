@@ -1,4 +1,4 @@
-//! Hosted harness for the native restore client. No sockets or Apple servers.
+//! Host-side harness for the native restore client. No sockets or Apple servers.
 //! See docs/research/restore-client.md for transcript layout and provenance.
 use anyhow::{Context, Result, bail, ensure};
 use std::{

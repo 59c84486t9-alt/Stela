@@ -2425,6 +2425,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// Resume a stopped architectural exception after a validation fixture has
+    /// repaired its backing. Apply the retained ELR/SPSR and synchronize all
+    /// native controls, without retiring a guest instruction or supplying OS
+    /// services. Production guest kernels return through their own ERET.
+    #[cfg(feature = "test-support")]
+    pub fn resume_exception(
+        &mut self,
+    ) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
+        let target = self.cpu.exception_link();
+        self.cpu.exception_return(target)?;
+        self.pacm_written = true;
+        self.sync_regime();
+        Ok(())
+    }
+
     /// The architectural system count and each generic timer's `(CTL, CVAL)`
     /// in [`timer::CHANNELS`] order, sampled at that count, of the bank that
     /// counts it: the Apple generic timer's from the M3 on, where the kernel

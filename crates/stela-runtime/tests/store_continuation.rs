@@ -1,69 +1,22 @@
 //! Native ordinary-memory sequences preserve cached inputs over every split.
-#![cfg(all(target_arch = "x86_64", target_os = "macos"))]
+#![cfg(all(
+    feature = "test-support",
+    feature = "std",
+    target_arch = "x86_64",
+    target_os = "linux"
+))]
 use anyhow::Result;
-use std::sync::Arc;
 use stela_compiler::{GuestState, TargetCpu};
-use stela_runtime::{
-    hosted::{hardware, host::ProcessHost, memory, pe, tables::Tables},
-    machine::{Machine, NoDevices, Stop, system::Register},
-};
+use stela_runtime::machine::{Stop, system::Register};
+#[path = "support/store_host.rs"]
+mod store_host;
+use store_host::{Mapping, machine};
 
 const HOST_PAGE: u64 = 4096;
 const MAPPING_BYTES: u64 = 4 * HOST_PAGE;
 const PREFIX: u32 = 0x9100_04a5; // add x5,x5,#1
 const SUFFIX: u32 = 0x9100_04c6; // add x6,x6,#1
 const VECTOR: [u64; 2] = [0xfedc_ba98_7654_3210, 0x0123_4567_89ab_cdef];
-
-struct Mapping(u64);
-impl Mapping {
-    fn new() -> Result<Self> {
-        Ok(Self(memory::allocate(
-            0,
-            MAPPING_BYTES,
-            true,
-            memory::Protection::READ_WRITE,
-        )?))
-    }
-}
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        memory::deallocate(self.0, MAPPING_BYTES).unwrap();
-    }
-}
-
-fn machine(
-    code: &Mapping,
-    words: &[u32],
-    target: TargetCpu,
-) -> Result<Machine<ProcessHost, NoDevices>> {
-    assert!(memory::write(
-        code.0,
-        &words
-            .iter()
-            .flat_map(|word| word.to_le_bytes())
-            .collect::<Vec<_>>()
-    ));
-    let tables = Arc::new(Tables::new()?);
-    let hardware = hardware::Hardware::of_model(hardware::DEFAULT_MODEL, 8 << 30)?;
-    let cpu = pe::user_thread(
-        hardware.chip,
-        code.0,
-        &tables,
-        &pe::Keys::random()?,
-        pe::UserJop::Disabled,
-    );
-    let mut machine = Machine::new(
-        cpu,
-        ProcessHost::new(tables)?,
-        NoDevices,
-        pe::profile(&hardware, target)?,
-        target,
-    );
-    let mut points = pe::vectors().to_vec();
-    points.push(code.0 + words.len() as u64 * 4);
-    machine.set_breakpoints(&points);
-    Ok(machine)
-}
 
 /// First transfer and a later transfer that reuses the same input. Pairs
 /// exercise both XMM sources; scalar cases control the byte-prefix path.
@@ -153,7 +106,7 @@ fn assert_memory(data: &Mapping, writes: &[(u64, &[u8])], context: &str) {
         expected[start..start + bytes.len()].copy_from_slice(bytes);
     }
     assert_eq!(
-        memory::read(data.0, MAPPING_BYTES as usize).unwrap(),
+        data.read(data.0, MAPPING_BYTES as usize).unwrap(),
         expected,
         "{context}"
     );
@@ -166,13 +119,13 @@ fn every_store_split_preserves_sources_and_later_in_block_effects() -> Result<()
     for target in [TargetCpu::Baseline, TargetCpu::detect()] {
         for (name, stores, first, writeback) in cases() {
             let words = [vec![PREFIX], stores, vec![SUFFIX]].concat();
-            let mut machine = machine(&code, &words, target)?;
+            let mut machine = machine(&code, &data, &words, target)?;
             let mut compiled = None;
             for split in 0..first.len() {
                 // Split 0 is aligned; every other value is the accessible
                 // prefix before a 4 KiB boundary, with both pages writable.
                 let address = data.0 + HOST_PAGE - split as u64;
-                assert!(memory::write(data.0, &vec![0xa5; MAPPING_BYTES as usize]));
+                assert!(data.write(data.0, &vec![0xa5; MAPPING_BYTES as usize]));
                 let initial = initial_state(address, data.0 + 2 * HOST_PAGE + 64, name);
                 machine.cpu.state = initial.clone();
                 machine.cpu.pc = code.0;
@@ -193,7 +146,7 @@ fn every_store_split_preserves_sources_and_later_in_block_effects() -> Result<()
                     "{name} split {split}"
                 );
                 assert_eq!(
-                    memory::read(address, first.len()).unwrap(),
+                    data.read(address, first.len()).unwrap(),
                     first,
                     "first {name} split {split}"
                 );
@@ -211,7 +164,7 @@ fn every_store_split_preserves_sources_and_later_in_block_effects() -> Result<()
                     first.clone()
                 };
                 assert_eq!(
-                    memory::read(later, output.len()).unwrap(),
+                    data.read(later, output.len()).unwrap(),
                     output,
                     "later {name} split {split}"
                 );
@@ -234,27 +187,23 @@ fn fault_prefix_and_repaired_continuation_keep_exact_pc_and_writeback() -> Resul
     for target in [TargetCpu::Baseline, TargetCpu::detect()] {
         for (name, stores, first, writeback) in cases() {
             let words = [vec![PREFIX], stores, vec![SUFFIX]].concat();
-            let mut machine = machine(&code, &words, target)?;
+            let mut machine = machine(&code, &data, &words, target)?;
             let mut compiled = None;
             for split in 1..first.len() {
                 let address = data.0 + HOST_PAGE - split as u64;
-                assert!(memory::write(data.0, &vec![0xa5; MAPPING_BYTES as usize]));
+                assert!(data.write(data.0, &vec![0xa5; MAPPING_BYTES as usize]));
                 let initial = initial_state(address, data.0 + 2 * HOST_PAGE + 64, name);
                 machine.cpu.state = initial.clone();
                 machine.cpu.pc = code.0;
                 let retired = machine.cpu.retired;
-                memory::protect(data.0 + HOST_PAGE, HOST_PAGE, memory::Protection::NONE)?;
+                data.protect(HOST_PAGE as usize, HOST_PAGE as usize, false)?;
                 let stopped = machine.run(machine.statistics.blocks + 64);
                 // Restore permissions before any assertion can unwind and
                 // before observing the page's exact untouched suffix.
-                memory::protect(
-                    data.0 + HOST_PAGE,
-                    HOST_PAGE,
-                    memory::Protection::READ_WRITE,
-                )?;
+                data.protect(HOST_PAGE as usize, HOST_PAGE as usize, true)?;
                 assert_eq!(
                     stopped,
-                    Stop::Breakpoint(pe::LOWER_SYNCHRONOUS),
+                    Stop::Breakpoint(machine.host.lower_synchronous()),
                     "{name} split {split}"
                 );
                 assert_eq!(
@@ -281,12 +230,15 @@ fn fault_prefix_and_repaired_continuation_keep_exact_pc_and_writeback() -> Resul
                 let mut partial = vec![0xa5; first.len()];
                 partial[..split].copy_from_slice(&first[..split]);
                 assert_eq!(
-                    memory::read(address, first.len()).unwrap(),
+                    data.read(address, first.len()).unwrap(),
                     partial,
                     "fault prefix {name} split {split}"
                 );
                 assert_memory(&data, &[(address, &first[..split])], name);
-                machine.return_from_exception().unwrap();
+                // Repair changes only this fixture's backing. Resume through
+                // the shared CPU ELR/SPSR primitive without adding a guest
+                // handler instruction to the sequence under test.
+                machine.resume_exception().unwrap();
                 assert_eq!(machine.cpu.pc, code.0 + 4);
                 assert_eq!(
                     machine.run(machine.statistics.blocks + 64),
@@ -307,7 +259,7 @@ fn fault_prefix_and_repaired_continuation_keep_exact_pc_and_writeback() -> Resul
                     "resumed retirement {name} split {split}"
                 );
                 assert_eq!(
-                    memory::read(address, first.len()).unwrap(),
+                    data.read(address, first.len()).unwrap(),
                     first,
                     "resumed {name} split {split}"
                 );
@@ -325,7 +277,7 @@ fn fault_prefix_and_repaired_continuation_keep_exact_pc_and_writeback() -> Resul
                     first.clone()
                 };
                 assert_eq!(
-                    memory::read(later, output.len()).unwrap(),
+                    data.read(later, output.len()).unwrap(),
                     output,
                     "resumed later {name} split {split}"
                 );
