@@ -1884,12 +1884,28 @@ mod tests {
                 unsafe { unit.shut_down() }.unwrap();
             }
         }
-        for invalid in [&[][..], &[8, 8][..], &[0x100][..]] {
+        for invalid in [&[][..], &[8, 8][..]] {
             assert!(matches!(
                 unsafe { Unit::take_over(ModelRegisters::new(), source(), invalid, 48) },
                 Err(VtdError::Unsupported)
             ));
         }
+        // Requesters on two buses: a context table under each root entry.
+        let unit =
+            unsafe { Unit::take_over(ModelRegisters::new(), source(), &[8, 0x308], 48) }.unwrap();
+        {
+            let mut guard = unit.lock();
+            let state = guard.state();
+            assert_eq!(state.contexts.len(), 2);
+            for bus in [0, 3] {
+                assert_eq!(
+                    state.root.read(bus),
+                    state.contexts[&(bus as u8)].physical() | 1
+                );
+            }
+            assert_eq!(state.root.read(1), 0);
+        }
+        unsafe { unit.shut_down() }.unwrap();
         let registers = ModelRegisters::new();
         let inventory: Vec<u16> = (0..16).collect();
         let unit = unsafe { Unit::take_over(registers, source(), &inventory, 48) }.unwrap();
@@ -2096,25 +2112,37 @@ mod tests {
         let pin = pages(PAGE, 12, 0xa000000, Arc::new(AtomicU64::new(0)));
         let mut mapping =
             DmaMapping::map(domain.clone(), pin, Direction::Bidirectional, u64::MAX).unwrap();
-        let check = || {
-            let count = {
-                let mut guard = unit.lock();
-                guard.state().domains[&8].tables.len() + 2
-            };
+        // Every table the mapping touched, and no other, is flushed before
+        // the publication: here the write-buffer flush, then the IOTLB's.
+        let check = |publication: usize, count: usize| {
             let events = &registers.0.lock().unwrap().cache_events;
-            let invalidation = events
+            let published = events
                 .iter()
-                .position(|event| *event == (false, unit.iotlb))
+                .position(|event| *event == (false, publication))
                 .unwrap();
-            let flushed: alloc::collections::BTreeSet<_> = events[..invalidation]
+            let flushed: alloc::collections::BTreeSet<_> = events[..published]
                 .iter()
                 .filter(|event| event.0)
                 .map(|event| event.1)
                 .collect();
             assert_eq!(flushed.len(), count);
-            assert!(!events[invalidation..].iter().any(|event| event.0));
+            assert!(!events[published..].iter().any(|event| event.0));
         };
-        check();
+        // A fresh domain's mapping builds a path through every one of its
+        // tables; the unit's root and context tables stay as they were.
+        let tables = {
+            let mut guard = unit.lock();
+            guard.state().domains[&8].tables.len()
+        };
+        check(GCMD, tables);
+        assert!(
+            !registers
+                .0
+                .lock()
+                .unwrap()
+                .cache_events
+                .contains(&(false, unit.iotlb))
+        );
         registers.0.lock().unwrap().cache_events.clear();
         registers.0.lock().unwrap().block_iotlb = true;
         // SAFETY: stopped synchronous model; unmap flush must precede IOTLB.
@@ -2122,12 +2150,13 @@ mod tests {
             unsafe { mapping.unmap() },
             Err(DmaError::InvalidationFailed)
         );
-        check();
+        // Only the leaf table changes.
+        check(unit.iotlb, 1);
         registers.0.lock().unwrap().cache_events.clear();
         registers.0.lock().unwrap().block_iotlb = false;
         // SAFETY: same stopped requester; retained retry must flush again.
         unsafe { mapping.unmap() }.unwrap();
-        check();
+        check(unit.iotlb, 1);
         // SAFETY: all mappings removed and no model DMA can restart.
         unsafe { domain.detach() }.unwrap();
         drop(domain);
@@ -2271,7 +2300,9 @@ mod tests {
                 .unwrap();
         let released = Arc::new(AtomicU64::new(0));
         let pin = pages(4096, 12, 0x9000000, released.clone());
-        registers.0.lock().unwrap().block_iotlb = true;
+        // Without Caching Mode a new mapping needs only the write-buffer
+        // flush, which fails here.
+        registers.0.lock().unwrap().fail_gsts_after = Some(TRANSLATION | WRITE_BUFFER);
         assert!(matches!(
             DmaMapping::map(domain.clone(), pin, Direction::Bidirectional, u64::MAX),
             Err(DmaError::InvalidationFailed)
