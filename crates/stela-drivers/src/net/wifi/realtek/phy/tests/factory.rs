@@ -5,6 +5,8 @@ use super::*;
 #[test]
 fn optional_factory_trim() {
     let (mut bus, calibration, report, physical) = trim_setup(0);
+    // SAFETY: The calibration, report and decoded OTP objects remain live through the
+    // call. Bus serializes their register model, including intentional provenance/profile failures.
     let factory = unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
     assert!(!factory.x2_busy_observed());
     assert_eq!(factory.thermal_written(), [None; 2]);
@@ -17,6 +19,8 @@ fn optional_factory_trim() {
     assert_eq!(writes[0][1], 0xa70);
     drop(m);
     let (mut bus, calibration, report, physical) = trim_setup(320);
+    // SAFETY: The calibration, report and decoded OTP objects remain live through the
+    // call. Bus serializes their register model, including intentional provenance/profile failures.
     let factory = unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
     assert_eq!(factory.raw().pa[0][1], 255);
     assert_eq!(factory.raw().pa[1][1], 255);
@@ -27,6 +31,8 @@ fn optional_factory_trim() {
     assert_eq!(m.get(0x4d80, 4) & 0xf0000, 0xf0000);
     drop(m);
     let (mut bus, calibration, report, physical) = trim_setup(1);
+    // SAFETY: The calibration, report and decoded OTP objects remain live through the
+    // call. Bus serializes their register model, including intentional provenance/profile failures.
     let factory = unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
     assert!(factory.x2_busy_observed());
     assert!(factory.thermal_written()[0].is_some());
@@ -41,6 +47,8 @@ fn optional_factory_trim() {
 #[test]
 fn factory_failure_quarantines() {
     let (mut bus, calibration, report, physical) = trim_setup(511);
+    // SAFETY: The calibration, report and decoded OTP objects remain live through the
+    // call. Bus serializes their register model, including intentional provenance/profile failures.
     unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
     let mut points: Vec<_> = (1..=48).collect();
@@ -52,6 +60,8 @@ fn factory_failure_quarantines() {
         let (mut bus, calibration, report, physical) = trim_setup(511);
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
+            // SAFETY: The calibration, report and decoded OTP objects remain live through the
+            // call. Bus serializes their register model, including intentional provenance/profile failures.
             unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.is_err(),
             "{at}"
         );
@@ -66,12 +76,16 @@ fn factory_failure_quarantines() {
     ] {
         let (mut bus, calibration, report, physical) = trim_setup(511);
         bus.model.lock().unwrap().mutate = Some((at, r, w, v));
+        // SAFETY: The calibration, report and decoded OTP objects remain live through the
+        // call. Bus serializes their register model, including intentional provenance/profile failures.
         assert!(unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.is_err());
         assert!(bus.model.lock().unwrap().quarantined >= 1);
     }
     let (mut bus, calibration, report, physical) = trim_setup(511);
     bus.panic_delay = true;
     assert!(
+        // SAFETY: The calibration, report and decoded OTP objects remain live through the
+        // call. Bus serializes their register model, including intentional provenance/profile failures.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             calibration.initialize_factory(&mut bus, &report, &physical)
         }))
@@ -93,10 +107,14 @@ fn factory_calibration_preflight() {
                 m.physical[16..21].copy_from_slice(&[0x2e, 1, 2, 0xff, 0xff]);
             }
         }
+        // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+        // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
         let other = unsafe { crate::net::wifi::realtek::efuse::read(&mut bus) }.unwrap();
         bus.model.lock().unwrap().calls = 0;
         bus.model.lock().unwrap().events.clear();
         assert!(matches!(
+            // SAFETY: The calibration, report and decoded OTP objects remain live through the
+            // call. Bus serializes their register model, including intentional provenance/profile failures.
             unsafe { calibration.initialize_factory(&mut bus, &report, &other) },
             Err(Error::WrongProfile)
         ));
@@ -109,6 +127,8 @@ fn factory_profile_preflight() {
     let (mut bus, calibration, _, physical) = trim_setup(0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
+        // SAFETY: The calibration, report and decoded OTP objects remain live through the
+        // call. Bus serializes their register model, including intentional provenance/profile failures.
         unsafe { calibration.initialize_factory(&mut bus, &other, &physical) },
         Err(Error::WrongProfile)
     ));
@@ -116,6 +136,8 @@ fn factory_profile_preflight() {
     let (mut bus, calibration, _, physical) = trim_setup(0);
     let (_, _, one) = setup(1, 0, 0, 0, true, false);
     assert!(matches!(
+        // SAFETY: The calibration, report and decoded OTP objects remain live through the
+        // call. Bus serializes their register model, including intentional provenance/profile failures.
         unsafe { calibration.initialize_factory(&mut bus, &one, &physical) },
         Err(Error::UnsupportedRfLayout)
     ));
@@ -124,6 +146,8 @@ fn factory_profile_preflight() {
         let (mut bus, calibration, report, physical) = trim_setup(0);
         bus.model.lock().unwrap().set(r, w, 0);
         assert!(matches!(
+            // SAFETY: The calibration, report and decoded OTP objects remain live through the
+            // call. Bus serializes their register model, including intentional provenance/profile failures.
             unsafe { calibration.initialize_factory(&mut bus, &report, &physical) },
             Err(Error::DomainOff)
         ));
@@ -153,6 +177,8 @@ fn rtl8822c_factory_matches_linux() {
         assert_eq!(&physical.bytes()[388..], &trace[offset + 388..offset + 512]);
         offset += 512;
         let factory =
+            // SAFETY: The calibration, report and decoded OTP objects remain live through the
+            // call. Bus serializes their register model, including intentional provenance/profile failures.
             unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
         assert_eq!(u32::from(factory.x2_busy_observed()), busy);
         let m = bus.model.lock().unwrap();

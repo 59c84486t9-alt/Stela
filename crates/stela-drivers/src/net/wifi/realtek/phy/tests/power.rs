@@ -5,6 +5,8 @@ use super::*;
 #[test]
 fn power_programming_failure_retention() {
     let (mut bus, phy, report, plan) = power_setup();
+    // SAFETY: Bus retains the register/TXAGC model and the live plan/phase values.
+    // The fixture has no concurrent transmit or power-control client, including rejected-plan cases.
     let programmed = unsafe { phy.program_channel_power(&mut bus, &report, plan) }.unwrap();
     assert_eq!(programmed.plan().geometry().primary(), 1);
     assert_eq!(programmed.phy().factory_power().rfe(), 0);
@@ -14,6 +16,8 @@ fn power_programming_failure_retention() {
         let (mut bus, phy, report, plan) = power_setup();
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
+            // SAFETY: Bus retains the register/TXAGC model and the live plan/phase values.
+            // The fixture has no concurrent transmit or power-control client, including rejected-plan cases.
             unsafe { phy.program_channel_power(&mut bus, &report, plan) }.is_err(),
             "{at}"
         );
@@ -28,12 +32,16 @@ fn power_programming_failure_retention() {
     ] {
         let (mut bus, phy, report, plan) = power_setup();
         bus.model.lock().unwrap().mutate = Some((at, r, w, v));
+        // SAFETY: Bus retains the register/TXAGC model and the live plan/phase values.
+        // The fixture has no concurrent transmit or power-control client, including rejected-plan cases.
         assert!(unsafe { phy.program_channel_power(&mut bus, &report, plan) }.is_err());
         assert_eq!(bus.model.lock().unwrap().quarantined, 1);
     }
     let (mut bus, phy, report, plan) = power_setup();
     bus.panic_register = Some(0x3a00);
     assert!(
+        // SAFETY: Bus retains the register/TXAGC model and the live plan/phase values.
+        // The fixture has no concurrent transmit or power-control client, including rejected-plan cases.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             phy.program_channel_power(&mut bus, &report, plan)
         }))
@@ -52,6 +60,8 @@ fn power_limits_preflight() {
         .plan_channel_power(g, power_limits())
         .unwrap();
     assert!(matches!(
+        // SAFETY: Bus retains the register/TXAGC model and the live plan/phase values.
+        // The fixture has no concurrent transmit or power-control client, including rejected-plan cases.
         unsafe { phy.program_channel_power(&mut bus, &report, other) },
         Err(Error::ChannelPower(channel_power::Error::WrongBoard))
     ));

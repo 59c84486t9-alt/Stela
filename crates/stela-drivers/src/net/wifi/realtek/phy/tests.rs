@@ -168,8 +168,9 @@ struct Bus {
     panic_delay: bool,
     panic_register: Option<u32>,
 }
-// SAFETY: exclusively serialized physical register/OTP/RF effects model,
-// never an actual device, DMA/calibration or firmware-execution claim.
+// SAFETY: the Arc keeps all register/OTP/RF storage live and each access locks
+// the same model before applying its width-specific effect. Delays and responses
+// are scripted fixture events; beacon DMA methods panic before publication.
 unsafe impl Io for Bus {
     fn profile(&self) -> Profile {
         self.model.lock().unwrap().profile
@@ -289,8 +290,7 @@ fn setup(
         dac: None,
         fifo_ready: false,
     };
-    // Actual read-only OTP transport creates Board provenance, not a
-    // public diagnostic constructor or substituted board/RFE token.
+    // Decode the board through the same OTP protocol exercised by efuse::read.
     let mac = if invalid_mac {
         [0; 6]
     } else {
@@ -308,6 +308,8 @@ fn setup(
         panic_delay: false,
         panic_register: None,
     };
+    // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+    // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
     let board = unsafe { super::super::efuse::read(&mut bus) }
         .unwrap()
         .logical()
@@ -361,6 +363,8 @@ fn source_events(events: &[[u32; 4]]) -> Vec<u8> {
 }
 fn paths_setup(pattern: usize, igi: u32) -> (Bus, Loaded, Report) {
     let (mut bus, board, report) = setup(1, 0, 0x3f, 0, false, false);
+    // SAFETY: Bus exclusively serializes its Arc-held register and OTP model.
+    // Board/report values stay live, including mismatch cases; no DMA or other client runs.
     let loaded = unsafe { initialize(&mut bus, &board, &report) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
@@ -388,7 +392,11 @@ fn dynamic_setup(
     lower: u32,
 ) -> (Bus, PathsConfigured, Report) {
     let (mut bus, board, report) = setup(1, 0, crystal, 0, false, false);
+    // SAFETY: Bus exclusively serializes its Arc-held register and OTP model.
+    // Board/report values stay live, including mismatch cases; no DMA or other client runs.
     let loaded = unsafe { initialize(&mut bus, &board, &report) }.unwrap();
+    // SAFETY: The phase value and report remain live while Bus retains its register/RF
+    // model. No other RF client runs; any domain drift is injected by the serialized model.
     let paths = unsafe { loaded.configure_paths(&mut bus, &report) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
@@ -439,6 +447,8 @@ fn dynamic_words(state: &InitialPhy) -> Vec<u32> {
 }
 fn dac_setup(seed: u32) -> (Bus, InitialPhy, Report) {
     let (mut bus, paths, report) = dynamic_setup(0, 0, 63, 0, 0);
+    // SAFETY: Bus retains the modeled IGI/CCK/EDCCA registers and phase arguments.
+    // Reads, writes and injected failures occur sequentially without another RF client.
     let initial = unsafe { paths.initialize_dynamic(&mut bus, &report) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
@@ -464,6 +474,8 @@ fn dac_setup(seed: u32) -> (Bus, InitialPhy, Report) {
 }
 fn trim_setup(case: u32) -> (Bus, DacCalibrated, Report, super::super::efuse::Physical) {
     let (mut bus, initial, report) = dac_setup(case % 64);
+    // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+    // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
     let calibration = unsafe { initial.calibrate_dac(&mut bus, &report) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
@@ -484,6 +496,8 @@ fn trim_setup(case: u32) -> (Bus, DacCalibrated, Report, super::super::efuse::Ph
     }
     // This is the real private-provenance 512-byte native OTP transport,
     // not a publicly constructed Physical or copied diagnostic byte token.
+    // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+    // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
     let physical = unsafe { super::super::efuse::read(&mut bus) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
@@ -507,11 +521,15 @@ fn tail_setup(pattern: usize, a: u8, b: u8) -> (Bus, FactoryInitialized, Report)
         let mut m = bus.model.lock().unwrap();
         m.physical[16..21].copy_from_slice(&[0x4f, 0x3e, a, b, 255]);
     }
+    // SAFETY: Bus retains the register buffer and 512-byte OTP array behind its mutex.
+    // The modeled OTP command/response runs synchronously, with no other reader or reset worker.
     let physical = unsafe { super::super::efuse::read(&mut bus) }.unwrap();
     assert_eq!(
         physical.logical().unwrap().board().raw().thermal_raw,
         [a, b]
     );
+    // SAFETY: The calibration, report and decoded OTP objects remain live through the
+    // call. Bus serializes their register model, including intentional provenance/profile failures.
     let factory = unsafe { calibration.initialize_factory(&mut bus, &report, &physical) }.unwrap();
     {
         let mut m = bus.model.lock().unwrap();
@@ -561,6 +579,8 @@ pub(super) fn control_fixture() -> (PhyInitialized, Report) {
 }
 fn power_setup() -> (Bus, PhyInitialized, Report, channel_power::Plan) {
     let (mut bus, factory, report) = tail_setup(0, 5, 6);
+    // SAFETY: Bus retains the thermal/beamforming register model and all phase inputs.
+    // There is no concurrent RF, packet or reset producer during these serialized effects.
     let phy = unsafe { factory.finish_initial_phy(&mut bus, &report) }.unwrap();
     let g = channel_power::Geometry::new(1, channel_power::Width::Mhz20, None, None).unwrap();
     let plan = phy

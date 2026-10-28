@@ -7,6 +7,8 @@ fn path_reset_and_igi_wrap() {
     for igi in [0u32, 1, 2, 63, 127] {
         let (mut bus, loaded, report) = paths_setup(3, igi);
         let original = bus.model.lock().unwrap().get(2, 2);
+        // SAFETY: The phase value and report remain live while Bus retains its register/RF
+        // model. No other RF client runs; any domain drift is injected by the serialized model.
         let configured = unsafe { loaded.configure_paths(&mut bus, &report) }.unwrap();
         assert_eq!(configured.profile(), bus.profile());
         assert_eq!(u32::from(configured.initial_igi()), igi);
@@ -46,12 +48,16 @@ fn path_reset_and_igi_wrap() {
 #[test]
 fn path_failure_quarantines() {
     let (mut bus, loaded, report) = paths_setup(0, 0);
+    // SAFETY: The phase value and report remain live while Bus retains its register/RF
+    // model. No other RF client runs; any domain drift is injected by the serialized model.
     unsafe { loaded.configure_paths(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
     for at in 1..=total {
         let (mut bus, loaded, report) = paths_setup(0, 0);
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
+            // SAFETY: The phase value and report remain live while Bus retains its register/RF
+            // model. No other RF client runs; any domain drift is injected by the serialized model.
             unsafe { loaded.configure_paths(&mut bus, &report) }.is_err(),
             "operation {at}"
         );
@@ -60,6 +66,8 @@ fn path_failure_quarantines() {
     for (r, w, value, at) in [(0xf0, 4, 0, total - 4), (0x80, 2, 0xffff, total - 3)] {
         let (mut bus, loaded, report) = paths_setup(0, 0);
         bus.model.lock().unwrap().mutate = Some((at, r, w, value));
+        // SAFETY: The phase value and report remain live while Bus retains its register/RF
+        // model. No other RF client runs; any domain drift is injected by the serialized model.
         assert!(unsafe { loaded.configure_paths(&mut bus, &report) }.is_err());
         let m = bus.model.lock().unwrap();
         assert!(m.events.iter().any(|e| e[0] == 1 && e[1] == 2 && e[2] == 2));
@@ -72,6 +80,8 @@ fn path_profile_preflight() {
     let (mut bus, loaded, _) = paths_setup(0, 63);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
+        // SAFETY: The phase value and report remain live while Bus retains its register/RF
+        // model. No other RF client runs; any domain drift is injected by the serialized model.
         unsafe { loaded.configure_paths(&mut bus, &other) },
         Err(Error::WrongProfile)
     ));
@@ -79,6 +89,8 @@ fn path_profile_preflight() {
     let (mut bus, loaded, _) = paths_setup(0, 63);
     let (_, _, one) = setup(1, 0, 0, 0, true, false);
     assert!(matches!(
+        // SAFETY: The phase value and report remain live while Bus retains its register/RF
+        // model. No other RF client runs; any domain drift is injected by the serialized model.
         unsafe { loaded.configure_paths(&mut bus, &one) },
         Err(Error::UnsupportedRfLayout)
     ));
@@ -87,6 +99,8 @@ fn path_profile_preflight() {
         let (mut bus, loaded, report) = paths_setup(0, 63);
         bus.model.lock().unwrap().set(r, w, 0);
         assert!(matches!(
+            // SAFETY: The phase value and report remain live while Bus retains its register/RF
+            // model. No other RF client runs; any domain drift is injected by the serialized model.
             unsafe { loaded.configure_paths(&mut bus, &report) },
             Err(Error::DomainOff)
         ));
@@ -113,6 +127,8 @@ fn rtl8822c_trx_matches_linux() {
         offset += 12;
         let [pattern, igi, events] = header;
         let (mut bus, loaded, report) = paths_setup(pattern as usize, igi);
+        // SAFETY: The phase value and report remain live while Bus retains its register/RF
+        // model. No other RF client runs; any domain drift is injected by the serialized model.
         let configured = unsafe { loaded.configure_paths(&mut bus, &report) }.unwrap();
         assert_eq!(u32::from(configured.initial_igi()), igi);
         let m = bus.model.lock().unwrap();

@@ -26,6 +26,8 @@ fn dac_sampling_and_convergence() {
             d.adc_residual = adc_residual;
             d.dac_residual = dac_residual;
         }
+        // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+        // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
         assert!(matches!(unsafe {initial.calibrate_dac(&mut bus,&report)},Err(e)if e==expected));
         assert!(bus.model.lock().unwrap().quarantined >= 1);
     }
@@ -46,6 +48,8 @@ fn dac_sampling_and_convergence() {
             .as_mut()
             .unwrap()
             .ready_override = Some((reg, raw));
+        // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+        // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
         assert!(matches!(unsafe {initial.calibrate_dac(&mut bus,&report)},Err(e)if e==expected));
         assert!(bus.model.lock().unwrap().quarantined >= 1);
     }
@@ -60,6 +64,8 @@ fn dac_final_poll_bounds() {
         d.invalid_prefix = 9900;
         d.ready_delay = Some((0x2808, 999));
     }
+    // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+    // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
     let calibrated = unsafe { initial.calibrate_dac(&mut bus, &report) }.unwrap();
     assert_eq!(calibrated.residual(), [[0; 2]; 2]);
     let m = bus.model.lock().unwrap();
@@ -77,6 +83,8 @@ fn dac_rf_backup_and_nibbles() {
         m.set(0x4e3c, 4, 0x6789a);
         m.dac.as_mut().unwrap().distinct_cache = true;
     }
+    // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+    // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
     let calibrated = unsafe { initial.calibrate_dac(&mut bus, &report) }.unwrap();
     assert_eq!(calibrated.dck()[1], [[1, 2], [3, 4]]);
     let m = bus.model.lock().unwrap();
@@ -91,6 +99,8 @@ fn dac_profile_preflight() {
     let (mut bus, initial, _) = dac_setup(0);
     let (_, _, other) = setup(2, 0, 0, 0, false, false);
     assert!(matches!(
+        // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+        // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
         unsafe { initial.calibrate_dac(&mut bus, &other) },
         Err(Error::WrongProfile)
     ));
@@ -98,6 +108,8 @@ fn dac_profile_preflight() {
     let (mut bus, initial, _) = dac_setup(0);
     let (_, _, one) = setup(1, 0, 0, 0, true, false);
     assert!(matches!(
+        // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+        // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
         unsafe { initial.calibrate_dac(&mut bus, &one) },
         Err(Error::UnsupportedRfLayout)
     ));
@@ -106,6 +118,8 @@ fn dac_profile_preflight() {
         let (mut bus, initial, report) = dac_setup(0);
         bus.model.lock().unwrap().set(r, w, 0);
         assert!(matches!(
+            // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+            // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
             unsafe { initial.calibrate_dac(&mut bus, &report) },
             Err(Error::DomainOff)
         ));
@@ -118,6 +132,8 @@ fn dac_profile_preflight() {
 #[test]
 fn dac_failure_quarantines() {
     let (mut bus, initial, report) = dac_setup(0);
+    // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+    // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
     unsafe { initial.calibrate_dac(&mut bus, &report) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
     let mut points: Vec<_> = (1..=48).collect();
@@ -129,6 +145,8 @@ fn dac_failure_quarantines() {
         let (mut bus, initial, report) = dac_setup(0);
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
+            // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+            // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
             unsafe { initial.calibrate_dac(&mut bus, &report) }.is_err(),
             "{at}"
         );
@@ -143,12 +161,16 @@ fn dac_failure_quarantines() {
     ] {
         let (mut bus, initial, report) = dac_setup(0);
         bus.model.lock().unwrap().mutate = Some((at, r, w, v));
+        // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+        // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
         assert!(unsafe { initial.calibrate_dac(&mut bus, &report) }.is_err());
         assert!(bus.model.lock().unwrap().quarantined >= 1);
     }
     let (mut bus, initial, report) = dac_setup(0);
     bus.panic_delay = true;
     assert!(
+        // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+        // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             initial.calibrate_dac(&mut bus, &report)
         }))
@@ -174,6 +196,8 @@ fn rtl8822c_dac_matches_linux() {
         let [seed, input, events] = header;
         assert_eq!(input as i32, seed as i32 - 32);
         let (mut bus, initial, report) = dac_setup(seed);
+        // SAFETY: The Bus Arc retains register and scripted ADC/DAC sample storage.
+        // Sampling and fault injection are synchronous; no other RF or calibration user can race them.
         let calibrated = unsafe { initial.calibrate_dac(&mut bus, &report) }.unwrap();
         let m = bus.model.lock().unwrap();
         let native = source_events(&m.events);

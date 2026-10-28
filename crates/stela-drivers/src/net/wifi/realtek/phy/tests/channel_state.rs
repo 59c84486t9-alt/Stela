@@ -5,6 +5,8 @@ use super::*;
 #[test]
 fn channel_geometry_and_failure_retention() {
     let (mut bus, phy, report, g) = channel_setup();
+    // SAFETY: Bus retains its BB/MAC/RF model while the channel geometry and phase
+    // inputs are borrowed. No packet or other channel-control client runs concurrently.
     let state = unsafe { phy.set_channel(&mut bus, &report, g) }.unwrap();
     assert_eq!(state.geometry(), g);
     assert_eq!(state.primary_index(), 4);
@@ -19,17 +21,23 @@ fn channel_geometry_and_failure_retention() {
         .factory_power()
         .plan_channel_power(g, power_limits())
         .unwrap();
+    // SAFETY: Bus retains the register/TXAGC model and the live plan/phase values.
+    // The fixture has no concurrent transmit or power-control client, including rejected-plan cases.
     unsafe { state.program_channel_power(&mut bus, &report, plan) }.unwrap();
     for at in 1..=total {
         let (mut bus, phy, report, g) = channel_setup();
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
+            // SAFETY: Bus retains its BB/MAC/RF model while the channel geometry and phase
+            // inputs are borrowed. No packet or other channel-control client runs concurrently.
             unsafe { phy.set_channel(&mut bus, &report, g) }.is_err(),
             "{at}"
         );
         assert!(bus.model.lock().unwrap().quarantined >= 1, "{at}");
     }
     let (mut bus, phy, report, g) = channel_setup();
+    // SAFETY: Bus retains its BB/MAC/RF model while the channel geometry and phase
+    // inputs are borrowed. No packet or other channel-control client runs concurrently.
     let state = unsafe { phy.set_channel(&mut bus, &report, g) }.unwrap();
     let bad = channel_power::Geometry::new(1, channel_power::Width::Mhz20, None, None).unwrap();
     let plan = state
@@ -39,6 +47,8 @@ fn channel_geometry_and_failure_retention() {
         .unwrap();
     bus.model.lock().unwrap().calls = 0;
     assert!(matches!(
+        // SAFETY: Bus retains the register/TXAGC model and the live plan/phase values.
+        // The fixture has no concurrent transmit or power-control client, including rejected-plan cases.
         unsafe { state.program_channel_power(&mut bus, &report, plan) },
         Err(Error::ChannelPower(channel_power::Error::Geometry))
     ));
@@ -48,6 +58,8 @@ fn channel_geometry_and_failure_retention() {
 #[test]
 fn channel_domain_loss_quarantines() {
     let (mut bus, phy, report, g) = channel_setup();
+    // SAFETY: Bus retains its BB/MAC/RF model while the channel geometry and phase
+    // inputs are borrowed. No packet or other channel-control client runs concurrently.
     unsafe { phy.set_channel(&mut bus, &report, g) }.unwrap();
     let total = bus.model.lock().unwrap().calls;
     for (r, w, v, at) in [
@@ -59,12 +71,16 @@ fn channel_domain_loss_quarantines() {
     ] {
         let (mut bus, phy, report, g) = channel_setup();
         bus.model.lock().unwrap().mutate = Some((at, r, w, v));
+        // SAFETY: Bus retains its BB/MAC/RF model while the channel geometry and phase
+        // inputs are borrowed. No packet or other channel-control client runs concurrently.
         assert!(unsafe { phy.set_channel(&mut bus, &report, g) }.is_err());
         assert!(bus.model.lock().unwrap().quarantined >= 1);
     }
     let (mut bus, phy, report, g) = channel_setup();
     bus.panic_register = Some(0x3fb8);
     assert!(
+        // SAFETY: Bus retains its BB/MAC/RF model while the channel geometry and phase
+        // inputs are borrowed. No packet or other channel-control client runs concurrently.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             phy.set_channel(&mut bus, &report, g)
         }))

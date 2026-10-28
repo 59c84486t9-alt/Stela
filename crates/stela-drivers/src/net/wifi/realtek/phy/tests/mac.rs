@@ -5,6 +5,8 @@ use super::*;
 #[test]
 fn mac_protocol_and_failure_retention() {
     let (mut bus, report) = source_mac_setup(3);
+    // SAFETY: Bus retains the profile and register/FIFO model for this entire call.
+    // All effects are mutex-serialized; no packet DMA or external firmware worker exists.
     let state = unsafe { source_mac::initialize(&mut bus, &report) }.unwrap();
     assert_eq!(state.rx_filter_map1(), 0xffff);
     assert_eq!(state.fifo().profile(), bus.profile());
@@ -25,6 +27,8 @@ fn mac_protocol_and_failure_retention() {
         let (mut bus, report) = source_mac_setup(3);
         bus.model.lock().unwrap().fail = Some(at);
         assert!(
+            // SAFETY: Bus retains the profile and register/FIFO model for this entire call.
+            // All effects are mutex-serialized; no packet DMA or external firmware worker exists.
             unsafe { source_mac::initialize(&mut bus, &report) }.is_err(),
             "{at}"
         );
@@ -33,12 +37,16 @@ fn mac_protocol_and_failure_retention() {
     for (r, w, v, at) in [(0xf0, 4, 0, total - 1), (0x80, 2, 0xffff, total)] {
         let (mut bus, report) = source_mac_setup(3);
         bus.model.lock().unwrap().mutate = Some((at, r, w, v));
+        // SAFETY: Bus retains the profile and register/FIFO model for this entire call.
+        // All effects are mutex-serialized; no packet DMA or external firmware worker exists.
         assert!(unsafe { source_mac::initialize(&mut bus, &report) }.is_err());
         assert!(bus.model.lock().unwrap().quarantined >= 1);
     }
     let (mut bus, report) = source_mac_setup(3);
     bus.panic_register = Some(0x1664);
     assert!(
+        // SAFETY: Bus retains the profile and register/FIFO model for this entire call.
+        // All effects are mutex-serialized; no packet DMA or external firmware worker exists.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             source_mac::initialize(&mut bus, &report)
         }))
@@ -51,6 +59,8 @@ fn mac_protocol_and_failure_retention() {
 fn mac_profile_preflight() {
     let (mut bus, report) = source_mac_setup(7);
     assert!(matches!(
+        // SAFETY: Bus retains the profile and register/FIFO model for this entire call.
+        // All effects are mutex-serialized; no packet DMA or external firmware worker exists.
         unsafe { source_mac::initialize(&mut bus, &report) },
         Err(Error::UnsupportedCut(7))
     ));
@@ -58,6 +68,8 @@ fn mac_profile_preflight() {
     let (mut bus, _) = source_mac_setup(1);
     let (_, other) = source_mac_setup(2);
     assert!(matches!(
+        // SAFETY: Bus retains the profile and register/FIFO model for this entire call.
+        // All effects are mutex-serialized; no packet DMA or external firmware worker exists.
         unsafe { source_mac::initialize(&mut bus, &other) },
         Err(Error::WrongProfile)
     ));
