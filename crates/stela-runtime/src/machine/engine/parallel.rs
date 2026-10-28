@@ -253,13 +253,14 @@ impl Hub {
         let inbox = &self.inboxes[pe];
         write(&mut inbox.mail.lock().unwrap_or_else(|e| e.into_inner()));
         inbox.pending.store(true, Ordering::SeqCst);
+        self.interrupt(pe);
     }
 
-    /// Make PE `pe`'s machine leave native code at its next chained
-    /// transfer, by spending its chain budget, and so read its mail. A
-    /// machine that sets a new budget meanwhile runs one chain more.
+    /// Publish interruption after its source; every next chain gate compares
+    /// it with the owner's pre-drain snapshot, independently of budget resets.
+    /// An already-passed gate can perform at most one further transfer.
     fn interrupt(&self, pe: usize) {
-        self.inboxes[pe].chain.budget().store(0, Ordering::Relaxed);
+        self.inboxes[pe].chain.notify();
     }
 
     /// Kick PE `pe`'s core if it halts. Ordered after the store that tells
@@ -433,8 +434,8 @@ impl Hub {
 
     fn lines_changed(&self, pe: usize) {
         self.inboxes[pe].lines.fetch_add(1, Ordering::SeqCst);
-        self.wake(pe);
         self.interrupt(pe);
+        self.wake(pe);
     }
 
     /// The state of the physical cluster `key`, made by `make` if no PE of
@@ -460,7 +461,6 @@ impl Hub {
         let home = self.home.load(Ordering::Relaxed);
         self.post(home, |_| {});
         self.wake(home);
-        self.interrupt(home);
     }
 
     /// The forwarded access waiting for the home machine, and its PE.
@@ -781,39 +781,51 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Ok(());
         };
         let hub = Arc::clone(hub);
-        if hub.home.load(Ordering::Relaxed) == self.current {
-            self.serve_forwarded(&hub)?;
-        } else if hub.stopped.load(Ordering::SeqCst) {
-            self.park(&hub)?;
+        // Acquire BEFORE looking at any source. A later notification must
+        // remain different even if this drain happens to consume its data.
+        let observed = hub.inboxes[self.current]
+            .chain
+            .interrupt_epoch()
+            .load(Ordering::Acquire);
+        let result = (|| {
+            if hub.home.load(Ordering::Relaxed) == self.current {
+                self.serve_forwarded(&hub)?;
+            } else if hub.stopped.load(Ordering::SeqCst) {
+                self.park(&hub)?;
+            }
+            for page in core::mem::take(&mut self.deferred_code) {
+                self.maintain(Maintenance::Code(page))?;
+            }
+            let epoch = hub.lines_epoch(self.current);
+            if epoch != self.lines_epoch {
+                self.lines_epoch = epoch;
+                self.device_lines = None;
+            }
+            if !hub.pending(self.current) {
+                return Ok(());
+            }
+            let Some(mail) = hub.take(self.current) else {
+                return Ok(());
+            };
+            if mail.event && !self.waiting.is_some_and(|wait| wait.down) {
+                self.cpu.signal_event();
+            }
+            for maintenance in &mail.maintenance {
+                self.maintain(*maintenance)?;
+            }
+            hub.acknowledge(self.current, mail.serial);
+            if let Some(address) = mail.start {
+                self.start(Start {
+                    cpu: self.current,
+                    address,
+                })?;
+            }
+            Ok(())
+        })();
+        if result.is_ok() {
+            self.chain.acknowledge_interrupt(observed);
         }
-        for page in core::mem::take(&mut self.deferred_code) {
-            self.maintain(Maintenance::Code(page))?;
-        }
-        let epoch = hub.lines_epoch(self.current);
-        if epoch != self.lines_epoch {
-            self.lines_epoch = epoch;
-            self.device_lines = None;
-        }
-        if !hub.pending(self.current) {
-            return Ok(());
-        }
-        let Some(mail) = hub.take(self.current) else {
-            return Ok(());
-        };
-        if mail.event && !self.waiting.is_some_and(|wait| wait.down) {
-            self.cpu.signal_event();
-        }
-        for maintenance in &mail.maintenance {
-            self.maintain(*maintenance)?;
-        }
-        hub.acknowledge(self.current, mail.serial);
-        if let Some(address) = mail.start {
-            self.start(Start {
-                cpu: self.current,
-                address,
-            })?;
-        }
-        Ok(())
+        result
     }
 
     /// Whether the running PE waits in WFE on an armed monitor while other
@@ -1660,7 +1672,9 @@ mod tests {
         );
         first.chain.budget().store(17, Ordering::Relaxed);
         hub.interrupt(0);
-        assert_eq!(first.chain.budget().load(Ordering::Relaxed), 0);
+        assert_eq!(first.chain.budget().load(Ordering::Relaxed), 17);
+        let pending = first.chain.snapshot();
+        assert_ne!(pending.interrupt_epoch, pending.observed_interrupt_epoch);
         drop(first);
         second.enter_parallel(Arc::clone(&hub)).unwrap();
         assert!(second.attached.as_ref().unwrap().epoch > epoch);
@@ -1679,10 +1693,10 @@ mod tests {
         let (resume_tx, resume_rx) = mpsc::channel();
         let foreign = Arc::clone(&hub);
         let reader = std::thread::spawn(move || {
-            let budget = foreign.inboxes[0].chain.budget();
+            let epoch = foreign.inboxes[0].chain.interrupt_epoch();
             ready_tx.send(()).unwrap();
             resume_rx.recv().unwrap();
-            budget.store(0, Ordering::Relaxed);
+            epoch.fetch_add(1, Ordering::Release);
         });
         ready_rx.recv().unwrap();
         drop(attached);
@@ -1710,12 +1724,13 @@ mod tests {
                 snapshot.hits,
                 snapshot.linked
             ),
-            (0, 0, 0, 0)
+            (77, 0, 0, 0)
         );
         assert_eq!(
             (snapshot.block, snapshot.table, snapshot.contexts),
             (2, 21, [22, 23])
         );
+        assert_ne!(snapshot.interrupt_epoch, snapshot.observed_interrupt_epoch);
         assert_eq!(hub.inboxes[0].owner.load(Ordering::Acquire), next.epoch);
         drop(control);
         drop(next);
@@ -1781,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_owner_reuse_keeps_remote_budget_writes_disjoint() {
+    fn repeated_owner_reuse_keeps_remote_epoch_writes_disjoint() {
         use core::sync::atomic::AtomicBool;
         use std::sync::Barrier;
         let (hub, _) = hub(1);
@@ -1971,6 +1986,55 @@ mod tests {
     }
 
     #[test]
+    fn notification_after_drain_survives_native_budget_reset() {
+        use super::super::tests::machine;
+        let mut machine = machine(&[0xd503_201f]);
+        let (hub, _) = hub(1);
+        machine.enter_parallel(Arc::clone(&hub)).unwrap();
+        hub.post(0, |mail| mail.event = true);
+        machine.read_mail().unwrap();
+        let drained = machine.chain.snapshot();
+        assert_eq!(drained.interrupt_epoch, drained.observed_interrupt_epoch);
+        // This is the old lost-notification window: the owner has drained,
+        // then a peer posts before the owner initializes its next budget.
+        hub.post(0, |mail| mail.event = true);
+        machine.chain.begin(0, 4096);
+        let entered = machine.chain.snapshot();
+        assert_eq!(entered.budget, 4096);
+        assert_ne!(entered.interrupt_epoch, entered.observed_interrupt_epoch);
+        assert_eq!(entered.observed_interrupt_epoch, drained.interrupt_epoch);
+        machine.read_mail().unwrap();
+        let next = machine.chain.snapshot();
+        assert_eq!(next.interrupt_epoch, next.observed_interrupt_epoch);
+    }
+
+    #[test]
+    fn epoch_exhaustion_is_sticky_across_drain_detach_and_reuse() {
+        use super::super::tests::machine;
+        let mut machine = machine(&[0xd503_201f]);
+        let (hub, _) = hub(1);
+        machine.enter_parallel(Arc::clone(&hub)).unwrap();
+        hub.inboxes[0]
+            .chain
+            .interrupt_epoch()
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        hub.post(0, |mail| mail.event = true);
+        machine.read_mail().unwrap();
+        hub.interrupt(0);
+        let exhausted = machine.chain.snapshot();
+        assert_eq!(exhausted.interrupt_epoch, u64::MAX);
+        assert_eq!(exhausted.observed_interrupt_epoch, u64::MAX - 1);
+        drop(machine);
+        let (_, mut next) = Attached::new(&hub, 0, false).unwrap();
+        next.initialize(11, [12, 13]);
+        next.acknowledge_interrupt(u64::MAX);
+        next.begin(0, 4096);
+        let reused = next.snapshot();
+        assert_eq!(reused.interrupt_epoch, u64::MAX);
+        assert_eq!(reused.observed_interrupt_epoch, u64::MAX - 1);
+    }
+
+    #[test]
     fn mail_reaches_running_pes_and_kicks_only_a_sleeping_one() {
         let (hub, kicks) = hub(3);
         hub.event(0);
@@ -1998,7 +2062,12 @@ mod tests {
         assert!(!hub.applied(&mut posted));
         // The running PE leaves native code at its next chained transfer.
         drop(attached);
-        assert_eq!(control.budget().load(Ordering::Relaxed), 0);
+        assert_eq!(control.budget().load(Ordering::Relaxed), 4096);
+        let interrupted = control.snapshot();
+        assert_ne!(
+            interrupted.interrupt_epoch,
+            interrupted.observed_interrupt_epoch
+        );
         let mail = hub.take(1).unwrap();
         assert_eq!((mail.maintenance.len(), mail.serial), (1, 1));
         hub.acknowledge(1, mail.serial);

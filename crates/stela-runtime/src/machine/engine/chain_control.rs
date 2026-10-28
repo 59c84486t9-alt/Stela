@@ -1,4 +1,4 @@
-//! Stable chaining storage with one local writer and an atomic remote budget.
+//! Stable chaining storage with one local writer and atomic interruption epochs.
 use alloc::sync::Arc;
 use core::{
     cell::{Cell, UnsafeCell},
@@ -8,14 +8,15 @@ use core::{
 use stela_compiler::x86_64::chain::ChainControl;
 
 /// Retained by its hub inbox even when no Machine owns the PE. The hub exposes
-/// only the budget; all other fields belong to its one admitted Machine.
+/// only the interruption epoch; all other fields belong to its admitted Machine.
+#[repr(C, align(64))]
 pub(super) struct Storage {
     control: UnsafeCell<ChainControl>,
 }
-// SAFETY: shared storage exposes only an aligned atomic budget. Non-budget
-// fields are accessed only through the unique Owner admitted by the inbox.
+// SAFETY: shared storage exposes only an aligned atomic epoch. Other fields
+// are accessed only through the unique Owner admitted by the inbox.
 unsafe impl Send for Storage {}
-// SAFETY: the same single-writer/atomic-budget contract applies to shared access.
+// SAFETY: the same single-writer/atomic-epoch contract applies to shared access.
 unsafe impl Sync for Storage {}
 impl Storage {
     pub(super) fn new() -> Arc<Self> {
@@ -23,15 +24,33 @@ impl Storage {
             control: UnsafeCell::new(ChainControl::default()),
         })
     }
-    pub(super) fn budget(&self) -> &AtomicU64 {
+    fn budget(&self) -> &AtomicU64 {
         // SAFETY: the live allocation has ChainControl's aligned u64 budget.
         // Rust never reads/writes this field non-atomically after publication;
         // native chaining uses its aligned architectural accesses at this ABI.
         unsafe { AtomicU64::from_ptr(core::ptr::addr_of_mut!((*self.control.get()).budget)) }
     }
+    pub(super) fn interrupt_epoch(&self) -> &AtomicU64 {
+        // SAFETY: the retained control has a naturally aligned epoch field.
+        // Every Rust access is atomic; native thunks perform aligned loads.
+        unsafe {
+            AtomicU64::from_ptr(core::ptr::addr_of_mut!(
+                (*self.control.get()).interrupt_epoch
+            ))
+        }
+    }
+    pub(super) fn notify(&self) {
+        // Publish every source write before making the corresponding epoch
+        // visible. Exhaustion stays permanently interrupted rather than wraps.
+        let _ = self
+            .interrupt_epoch()
+            .try_update(Ordering::Release, Ordering::Relaxed, |epoch| {
+                Some(epoch.saturating_add(1))
+            });
+    }
 }
 
-/// The sole non-budget writer. It can move between threads with its Machine,
+/// The sole local-control writer. It can move between threads with its Machine,
 /// but cannot be shared; a hub retains Storage without granting this role.
 pub(super) struct Owner {
     storage: Arc<Storage>,
@@ -69,12 +88,11 @@ impl Owner {
         self.storage.control.get() as u64
     }
 
-    /// Reset every non-budget field before entry by a new admitted owner.
+    /// Reset every local field, retaining the inbox's monotonic notification epoch.
     pub(super) fn initialize(&mut self, table: u64, contexts: [u64; 2]) {
         let control = self.storage.control.get();
-        // SAFETY: this Owner is the sole non-budget writer, with no native
-        // invocation in progress. Field-specific raw writes never create a
-        // shared mutable reference covering the remotely accessed budget.
+        // SAFETY: this Owner is the sole local writer, with no native call
+        // in progress. Disjoint raw writes never borrow the shared epoch.
         unsafe {
             core::ptr::addr_of_mut!((*control).retired).write(0);
             core::ptr::addr_of_mut!((*control).block).write(0);
@@ -82,8 +100,19 @@ impl Owner {
             core::ptr::addr_of_mut!((*control).table).write(table);
             core::ptr::addr_of_mut!((*control).hits).write(0);
             core::ptr::addr_of_mut!((*control).linked).write(0);
+            core::ptr::addr_of_mut!((*control).observed_interrupt_epoch).write(0);
         }
         self.budget().store(0, Ordering::Relaxed);
+    }
+    /// Acknowledge only the Acquire snapshot taken before a successful drain.
+    /// MAX is never acknowledged, so exhausted notification state stays sticky.
+    pub(super) fn acknowledge_interrupt(&mut self, epoch: u64) {
+        // SAFETY: only the unique owner writes the observed field outside its
+        // synchronous native invocation; notifiers touch the separate epoch.
+        unsafe {
+            core::ptr::addr_of_mut!((*self.storage.control.get()).observed_interrupt_epoch)
+                .write(epoch.min(u64::MAX - 1));
+        }
     }
     pub(super) fn set_table(&mut self, table: u64) {
         // SAFETY: the sole owner writes this non-budget field outside native execution.
@@ -100,7 +129,7 @@ impl Owner {
     pub(super) fn begin(&mut self, block: usize, budget: u64) {
         let control = self.storage.control.get();
         // SAFETY: the sole owner prepares these disjoint fields before its
-        // synchronous native call; remote writers touch only the budget.
+        // synchronous native call; remote writers touch only the epoch.
         unsafe {
             core::ptr::addr_of_mut!((*control).retired).write(0);
             core::ptr::addr_of_mut!((*control).block).write(block as u64);
@@ -112,7 +141,7 @@ impl Owner {
     pub(super) fn completed(&self) -> (u64, u64, u64, u64) {
         let control = self.storage.control.get();
         // SAFETY: the synchronous native call has returned; no other owner
-        // touches these fields, including while a peer spends the budget.
+        // touches these fields, including while a peer posts an interruption.
         unsafe {
             (
                 core::ptr::addr_of!((*control).block).read(),
@@ -139,6 +168,11 @@ impl Owner {
             contexts: self.contexts(),
             // SAFETY: the sole owner observes a non-budget field outside entry.
             table: unsafe { core::ptr::addr_of!((*control).table).read() },
+            interrupt_epoch: self.storage.interrupt_epoch().load(Ordering::Acquire),
+            // SAFETY: only the unique owner writes the observed epoch.
+            observed_interrupt_epoch: unsafe {
+                core::ptr::addr_of!((*control).observed_interrupt_epoch).read()
+            },
         }
     }
 }
