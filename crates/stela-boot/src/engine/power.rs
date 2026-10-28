@@ -9,18 +9,23 @@
 //! - Restart: the FADT's reset register, then the 8042 keyboard
 //!   controller's reset pulse (command 0xfe, the PC/AT reset line), then a
 //!   triple fault, each given half a second.
-//! - Power-off: the S5 soft-off sequence. When it does not take effect, the
+//! - Power-off: the S5 soft-off sequence, with every GPE disabled and
+//!   every wake status cleared first. When it does not take effect, the
 //!   mount says so and halts; it never reports a power-off it did not make.
 //! - Power button: the fixed-feature button's PWRBTN_STS, polled between
-//!   engine slices. The mount takes the fixed events from the firmware as
-//!   any ACPI OS does (ACPI_ENABLE to SMI_CMD, then SCI_EN), enables
-//!   PWRBTN_EN and clears the status it reads. The status records a press
-//!   only, so the guest gets a press and a release.
+//!   engine slices, where the firmware already runs in ACPI mode (SCI_EN):
+//!   the mount enables PWRBTN_EN and clears the status it reads. The status
+//!   records a press only, so the guest gets a press and a release. Firmware
+//!   in legacy mode keeps the button, and the thermal, fan and battery
+//!   events its SMM handles, which an OS that took them would have to
+//!   service.
 use super::host;
 use crate::output;
 use core::arch::asm;
 use stela_runtime::machine::apple::AppleDevices;
-use stela_runtime::pc::power::{self, HostPower, POWER_BUTTON, ResetRegister, SCI_ENABLE};
+use stela_runtime::pc::power::{
+    self, ALL_FIXED_STATUS, HostPower, POWER_BUTTON, ResetRegister, SCI_ENABLE, SLEEP_WAKE_STATUS,
+};
 
 /// The stop codes `isa-debug-exit` reports.
 pub const RESTART_CODE: u32 = 0x15;
@@ -124,22 +129,11 @@ impl HostPowerControl {
         };
         let pm1a = power.pm1[0].expect("a fixed button has PM1a");
         // SAFETY: the FADT's PM1a control block.
-        let acpi = || unsafe { in16(pm1a.control) } & SCI_ENABLE != 0;
-        if !acpi() {
-            let Some((command, enable)) = power.acpi_enable else {
-                output::arguments(format_args!(
-                    "POWER host button: legacy mode with no SMI_CMD; the firmware keeps the button\n"
-                ));
-                return false;
-            };
-            // SAFETY: the FADT's SMI command port and its ACPI_ENABLE value.
-            unsafe { out8(command, enable) };
-            if !wait(self.tsc_hz, 1000, acpi) {
-                output::arguments(format_args!(
-                    "POWER host button: the firmware did not set SCI_EN; it keeps the button\n"
-                ));
-                return false;
-            }
+        if unsafe { in16(pm1a.control) } & SCI_ENABLE == 0 {
+            output::arguments(format_args!(
+                "POWER host button: the firmware runs in legacy mode and keeps the button\n"
+            ));
+            return false;
         }
         for block in power.blocks() {
             let enable = power.enable_port(block);
@@ -237,14 +231,38 @@ impl HostPowerControl {
         let Some((power, (a, b))) = soft_off else {
             output::fatal("the host has no ACPI S5 soft-off sequence to power off with")
         };
-        for (block, sleep_type) in power.blocks().zip([a, b]) {
-            // SAFETY: the FADT's PM1 control blocks; the machine powers off.
-            unsafe {
-                out16(
-                    block.control,
-                    power::sleep_control(in16(block.control), sleep_type),
-                )
-            };
+        // SAFETY: the FADT's GPE, PM1 and sleep registers, as Linux's
+        // `acpi_hw_legacy_sleep` and `acpi_hw_extended_sleep` write them;
+        // the machine powers off.
+        unsafe {
+            // No GPE may wake the machine, and no status left from before
+            // may turn it straight back on.
+            for (status, enable) in power.gpe.iter().flatten().flat_map(|gpe| gpe.registers()) {
+                out8(enable, 0);
+                out8(status, 0xff);
+            }
+            for block in power.blocks() {
+                out16(block.event, ALL_FIXED_STATUS);
+            }
+            if let Some(registers) = power.sleep_registers {
+                out8(registers.status, SLEEP_WAKE_STATUS);
+                asm!("wbinvd", options(nostack, preserves_flags));
+                out8(registers.control, power::sleep_register_control(a));
+            } else {
+                for (block, sleep_type) in power.blocks().zip([a, b]) {
+                    out16(
+                        block.control,
+                        power::sleep_type_control(in16(block.control), sleep_type),
+                    );
+                }
+                asm!("wbinvd", options(nostack, preserves_flags));
+                for (block, sleep_type) in power.blocks().zip([a, b]) {
+                    out16(
+                        block.control,
+                        power::sleep_control(in16(block.control), sleep_type),
+                    );
+                }
+            }
         }
         wait(self.tsc_hz, 1000, || false);
         output::fatal("the host did not power off at S5; its firmware may need _PTS")
