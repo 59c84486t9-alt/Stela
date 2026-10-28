@@ -390,6 +390,7 @@ impl Controller {
                     self.pending.push(event);
                 }
             }
+            self.publish_events();
             let portsc = self.registers.read32(at);
             if acknowledged_event && portsc & PRC != 0 && portsc & PR == 0 {
                 if portsc & (CCS | PED) != CCS | PED
@@ -1358,6 +1359,7 @@ pub(crate) mod tests {
             error: None,
             command_poisoned: false,
             command_ring_stopped: false,
+            unpublished: 0,
             location: "reset model".into(),
         };
         let mut device = controller

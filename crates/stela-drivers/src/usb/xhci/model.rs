@@ -297,6 +297,7 @@ fn address_controller_with_capabilities(
         error: None,
         command_poisoned: false,
         command_ring_stopped: false,
+        unpublished: 0,
         location: String::from("test xhci"),
     };
     model.borrow_mut().dcbaa = controller.dcbaa.physical();

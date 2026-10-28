@@ -133,6 +133,8 @@ const CRCR_RUNNING: u32 = 1 << 3;
 const HCRST: u32 = 1 << 1;
 const HCH: u32 = 1;
 const HSE: u32 = 1 << 2;
+/// Events taken before ERDP moves within one batch (Linux `xhci_handle_events`).
+const EVENTS_PER_DEQUEUE: usize = 128;
 const CNR: u32 = 1 << 11;
 const HCE: u32 = 1 << 12;
 const EHB: u64 = 1 << 3;
@@ -464,6 +466,8 @@ pub struct Controller {
     /// Linux CMD_RING_STATE_ABORTED: an abort got no Command Ring Stopped
     /// event, so the ring is not rung until a command times out.
     command_ring_stopped: bool,
+    /// Events taken since ERDP last moved past them.
+    unpublished: usize,
     pub location: String,
 }
 
@@ -713,6 +717,7 @@ impl Controller {
             error: None,
             command_poisoned: false,
             command_ring_stopped: false,
+            unpublished: 0,
             location,
         })
     }
@@ -785,9 +790,23 @@ impl Controller {
             self.event_index = 0;
             self.event_cycle = !self.event_cycle;
         }
+        // Linux xhci_handle_events moves ERDP once per batch, and every 128
+        // events of a long one so the controller can go on posting.
+        self.unpublished += 1;
+        if self.unpublished == EVENTS_PER_DEQUEUE {
+            self.publish_events();
+        }
+        Some(event)
+    }
+
+    /// Move ERDP past the events taken, clearing Event Handler Busy.
+    fn publish_events(&mut self) {
+        if self.unpublished == 0 {
+            return;
+        }
+        self.unpublished = 0;
         let dequeue = self.events.device_address() + (self.event_index * TRB) as u64;
         self.registers.write64(self.runtime + ERDP, dequeue | EHB);
-        Some(event)
     }
 
     /// Takes every posted event: transfer events wait in `pending`. A host
@@ -826,6 +845,7 @@ impl Controller {
                 self.pending.push(event);
             }
         }
+        self.publish_events();
     }
 
     fn take(&mut self, wanted: impl Fn(&Event) -> bool) -> Option<Event> {
