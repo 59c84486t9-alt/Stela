@@ -27,6 +27,49 @@ fn host(
 }
 
 #[test]
+fn started_transfers_finish_at_later_looks_like_waited_ones() {
+    for pio in [false, true] {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing retains every native DMA descriptor and payload.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut host, model) = host(&mut dma, Kind::Sd, true, pio);
+        let mut card = host.poll().unwrap().unwrap();
+        let finish = |card: &mut Card, tag| loop {
+            if let Some(finished) = card.finish(tag) {
+                return finished;
+            }
+        };
+        // Past one bounce buffer: two parts, each with STOP_TRANSMISSION.
+        let bytes = 2 * TRANSFER_BYTES;
+        let data = vec![0x3c; bytes];
+        let tag = card
+            .start(Command::Write {
+                lba: 16,
+                data: data.clone(),
+                fua: false,
+            })
+            .unwrap();
+        assert!(!card.room());
+        assert_eq!(finish(&mut card, tag), Ok(None));
+        assert!(card.room());
+        assert_eq!(model.borrow().disk[16 * 512..16 * 512 + bytes], data[..]);
+        let tag = card.start(Command::Read { lba: 15, bytes }).unwrap();
+        let read = finish(&mut card, tag).unwrap().unwrap();
+        assert_eq!(read, model.borrow().disk[15 * 512..15 * 512 + bytes]);
+        assert_eq!(
+            model
+                .borrow()
+                .commands
+                .iter()
+                .filter(|(cmd, _, _)| *cmd == 12)
+                .count(),
+            4
+        );
+    }
+}
+
+#[test]
 fn native_sd_and_mmc_initialize_actual_registers_and_complete_pio_and_adma_io() {
     for kind in [Kind::Sd, Kind::Mmc] {
         for sector in [false, true] {

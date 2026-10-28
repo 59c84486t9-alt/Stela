@@ -1,8 +1,11 @@
 //! virtio-blk block devices with one polled split virtqueue, as QEMU's
 //! `virtio-blk-pci` presents them.
 use crate::{
-    Clock, Handoff,
-    block::{BlockDevice, BlockError, Features, Identity, Transport, WriteZeroes, ascii},
+    Clock, Deadline, Handoff,
+    block::{
+        BlockDevice, BlockError, Command, Features, Finished, Identity, Transport, WriteZeroes,
+        ascii,
+    },
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
@@ -10,7 +13,7 @@ use crate::{
         virtio::{AVAIL, DESCRIPTOR_NEXT, DESCRIPTOR_WRITE, Modern, TIMEOUT_US, USED, VENDOR},
     },
 };
-use alloc::format;
+use alloc::{format, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 
 const MODERN_BLOCK: u16 = 0x1042;
@@ -77,6 +80,29 @@ pub struct VirtioBlk {
     /// A request timed out and the device may still own its buffers; none
     /// is reused until a reset this driver does not perform.
     fault: Option<BlockError>,
+    /// The block command started on the queue, and the next one's tag.
+    running: Option<Running>,
+    next_tag: u32,
+}
+
+/// A request offered to the device, until the used index reaches
+/// `expected`.
+#[derive(Clone, Copy)]
+struct Posted {
+    expected: u16,
+    deadline: Deadline,
+}
+
+/// A started block command, run a bounce buffer's worth at a time.
+struct Running {
+    tag: u32,
+    command: Command,
+    /// Bytes done; a flush counts one once complete.
+    done: usize,
+    data: Vec<u8>,
+    /// The posted request, and its data bytes.
+    posted: Option<(Posted, usize)>,
+    result: Option<Finished>,
 }
 
 impl VirtioBlk {
@@ -149,6 +175,8 @@ impl VirtioBlk {
             },
             clock: handoff.clock,
             fault: None,
+            running: None,
+            next_tag: 0,
         };
         driver.identity.blocks = driver.device.read64(CONFIG_CAPACITY) / sectors_per_block;
         driver.identity.serial = match driver.submit(REQUEST_GET_ID, 0, ID_BYTES, true) {
@@ -160,7 +188,7 @@ impl VirtioBlk {
     }
 
     /// Run one request of `bytes` data bytes through the bounce buffer and
-    /// wait for the device to return it.
+    /// wait for the device to return it, after the started block command.
     fn submit(
         &mut self,
         kind: u32,
@@ -168,9 +196,40 @@ impl VirtioBlk {
         bytes: usize,
         device_writes: bool,
     ) -> Result<(), BlockError> {
+        while self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.result.is_none())
+        {
+            self.run();
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+        let posted = self.post(kind, sector, bytes, device_writes)?;
+        loop {
+            if let Some(result) = self.poll(posted) {
+                return result;
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Offer one request of `bytes` data bytes through the bounce buffer.
+    fn post(
+        &mut self,
+        kind: u32,
+        sector: u64,
+        bytes: usize,
+        device_writes: bool,
+    ) -> Result<Posted, BlockError> {
         if let Some(fault) = &self.fault {
             return Err(fault.clone());
         }
+        let deadline = self
+            .clock
+            .try_deadline(TIMEOUT_US)
+            .map_err(|_| BlockError::Timeout)?;
         let request = self.request.physical();
         self.request.write(REQUEST_TYPE, kind);
         self.request.write(REQUEST_RESERVED, 0u32);
@@ -199,40 +258,137 @@ impl VirtioBlk {
         self.queue.write(AVAIL + 2, self.next);
         fence(Ordering::SeqCst);
         self.notify.write16(0, 0);
-        let expected = self.next;
-        let queue = &self.queue;
-        if !self
-            .clock
-            .wait(TIMEOUT_US, || queue.read::<u16>(USED + 2) == expected)
-        {
-            self.fault = Some(BlockError::Timeout);
-            return Err(BlockError::Timeout);
+        Ok(Posted {
+            expected: self.next,
+            deadline,
+        })
+    }
+
+    /// Whether the device has returned the posted request: memory alone.
+    fn returned(&self, posted: Posted) -> bool {
+        self.queue.read::<u16>(USED + 2) == posted.expected
+    }
+
+    /// The posted request's result once the device returned it or its time
+    /// ran out; never waits.
+    fn poll(&mut self, posted: Posted) -> Option<Result<(), BlockError>> {
+        if !self.returned(posted) {
+            if !posted.deadline.passed() {
+                return None;
+            }
+            if !self.returned(posted) {
+                self.fault = Some(BlockError::Timeout);
+                return Some(Err(BlockError::Timeout));
+            }
         }
         fence(Ordering::SeqCst);
         // The chain always starts at descriptor 0; any other head was never
         // offered (Linux `virtqueue_get_buf` marks the queue broken).
-        let used = USED + 4 + 8 * usize::from(expected.wrapping_sub(1) % self.entries);
+        let used = USED + 4 + 8 * usize::from(posted.expected.wrapping_sub(1) % self.entries);
         if self.queue.read::<u32>(used) != 0 {
             let error = BlockError::Device { status: u32::MAX };
             self.fault = Some(error.clone());
-            return Err(error);
+            return Some(Err(error));
         }
-        match self.request.read::<u8>(REQUEST_STATUS) {
+        Some(match self.request.read::<u8>(REQUEST_STATUS) {
             0 => Ok(()),
             status => Err(BlockError::Device {
                 status: u32::from(status),
             }),
+        })
+    }
+
+    /// Move the started block command on as far as it goes without waiting.
+    fn run(&mut self) {
+        let Some(mut running) = self.running.take() else {
+            return;
+        };
+        while running.result.is_none() {
+            let Some((posted, bytes)) = running.posted else {
+                match self.next_request(&running) {
+                    Ok(Some(posted)) => running.posted = Some(posted),
+                    Ok(None) => {
+                        let data = core::mem::take(&mut running.data);
+                        let read = matches!(running.command, Command::Read { .. });
+                        running.result = Some(Ok(read.then_some(data)));
+                    }
+                    Err(error) => running.result = Some(Err(error)),
+                }
+                continue;
+            };
+            match self.poll(posted) {
+                None => break,
+                Some(Err(error)) => running.result = Some(Err(error)),
+                Some(Ok(())) => {
+                    if let Command::Read { .. } = running.command {
+                        running
+                            .data
+                            .extend_from_slice(&self.bounce.bytes()[..bytes]);
+                    }
+                    running.done += bytes.max(1);
+                    running.posted = None;
+                }
+            }
         }
+        self.running = Some(running);
+    }
+
+    /// Post the next part of `running`'s command, or `None` once all of it
+    /// is done.
+    fn next_request(&mut self, running: &Running) -> Result<Option<(Posted, usize)>, BlockError> {
+        let block = self.identity.block_size as usize;
+        let chunk = self.chunk_blocks() as usize * block;
+        let (done, sectors_per_block) = (running.done, self.sectors_per_block);
+        let first = |lba: u64| (lba + (done / block) as u64) * sectors_per_block;
+        let (kind, sector, bytes, device_writes) = match &running.command {
+            Command::Read { lba, bytes } if done < *bytes => {
+                (REQUEST_IN, first(*lba), (bytes - done).min(chunk), true)
+            }
+            Command::Write {
+                lba,
+                data,
+                fua: false,
+            } if done < data.len() => {
+                let part = (data.len() - done).min(chunk);
+                let sector = first(*lba);
+                self.bounce.bytes_mut()[..part].copy_from_slice(&data[done..done + part]);
+                (REQUEST_OUT, sector, part, false)
+            }
+            Command::Flush if done == 0 => (REQUEST_FLUSH, 0, 0, false),
+            Command::Discard { lba, blocks } if done == 0 => {
+                self.stage(*lba, *blocks, 0)?;
+                (REQUEST_DISCARD, 0, SEGMENT_BYTES, false)
+            }
+            Command::WriteZeroes { lba, blocks, unmap } if done == 0 => {
+                let flags = if *unmap { SEGMENT_UNMAP } else { 0 };
+                self.stage(*lba, *blocks, flags)?;
+                (REQUEST_WRITE_ZEROES, 0, SEGMENT_BYTES, false)
+            }
+            Command::Write { fua: true, .. } => {
+                return Err(BlockError::Unsupported(
+                    "the device takes no Force Unit Access",
+                ));
+            }
+            _ => return Ok(None),
+        };
+        let posted = self.post(kind, sector, bytes, device_writes)?;
+        Ok(Some((posted, bytes)))
     }
 
     /// Discard or Write Zeroes `blocks` blocks from `lba`: one segment.
     fn segment(&mut self, kind: u32, lba: u64, blocks: u64, flags: u32) -> Result<(), BlockError> {
+        self.stage(lba, blocks, flags)?;
+        self.submit(kind, 0, SEGMENT_BYTES, false)
+    }
+
+    /// Stage the segment for `blocks` blocks from `lba` in the bounce buffer.
+    fn stage(&mut self, lba: u64, blocks: u64, flags: u32) -> Result<(), BlockError> {
         let sectors = u32::try_from(blocks * self.sectors_per_block)
             .map_err(|_| BlockError::Unsupported("a virtio segment past 2^32 sectors"))?;
         self.bounce.write(0, lba * self.sectors_per_block);
         self.bounce.write(8, sectors);
         self.bounce.write(12, flags);
-        self.submit(kind, 0, SEGMENT_BYTES, false)
+        Ok(())
     }
 
     fn chunk_blocks(&self) -> u64 {
@@ -285,5 +441,58 @@ impl BlockDevice for VirtioBlk {
     fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
         let flags = if unmap { SEGMENT_UNMAP } else { 0 };
         self.segment(REQUEST_WRITE_ZEROES, lba, blocks, flags)
+    }
+
+    /// One request at a time, started under the caller's lock and returned
+    /// at a later look ([`Self::finish`]).
+    fn depth(&self) -> usize {
+        1
+    }
+
+    fn room(&self) -> bool {
+        self.running.is_none()
+    }
+
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        if let Some(fault) = &self.fault {
+            return Err(fault.clone());
+        }
+        let command = command.within(&self.identity, 0)?;
+        if self.running.is_some() {
+            return Err(BlockError::Protocol(
+                "a virtio-blk queue runs one command at a time",
+            ));
+        }
+        let tag = self.next_tag;
+        self.next_tag = tag.wrapping_add(1);
+        self.running = Some(Running {
+            tag,
+            command,
+            done: 0,
+            data: Vec::new(),
+            posted: None,
+            result: None,
+        });
+        self.run();
+        Ok(tag)
+    }
+
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        if self.running.as_ref()?.tag != tag {
+            return None;
+        }
+        self.run();
+        let result = self.running.as_mut()?.result.take()?;
+        self.running = None;
+        Some(result)
+    }
+
+    fn posted(&self) -> bool {
+        self.running.as_ref().is_some_and(|running| {
+            running.result.is_some()
+                || running
+                    .posted
+                    .is_some_and(|(posted, _)| self.returned(posted))
+        })
     }
 }

@@ -51,7 +51,12 @@ const CONTEXT_GLOBAL: u64 = 1 << 61;
 const IOTLB_INVALIDATE: u64 = 1 << 63;
 const IOTLB_GLOBAL: u64 = 1 << 60;
 const IOTLB_DOMAIN: u64 = 2 << 60;
+const IOTLB_PAGE: u64 = 3 << 60;
 const IOTLB_DOMAIN_SHIFT: u32 = 32;
+/// Page-selective invalidation (PSI), and the largest address mask it
+/// takes (MAMV).
+const CAP_PAGE_SELECTIVE: u64 = 1 << 39;
+const CAP_MAX_ADDRESS_MASK_SHIFT: u32 = 48;
 const IOTLB_WRITE_DRAIN: u64 = 1 << 48;
 const IOTLB_READ_DRAIN: u64 = 1 << 49;
 const CAP_WRITE_DRAIN: u64 = 1 << 54;
@@ -608,11 +613,48 @@ impl<R: Registers> Unit<R> {
     /// Make entries that were not present visible to the walker. Without
     /// Caching Mode the unit caches no not-present entry, so VT-d 6.1 needs
     /// only the write-buffer flush, as Linux's `__mapping_notify_one` does.
-    fn publish_new_entries(&self, did: u16) -> Result<(), VtdError> {
+    fn publish_new_entries(&self, did: u16, address: u64, bytes: usize) -> Result<(), VtdError> {
         if self.cap & CAP_CACHING_MODE != 0 {
-            return self.invalidate_domain(did);
+            return self.invalidate_pages(did, address, bytes);
         }
         self.flush_write_buffer()
+    }
+    /// Invalidate the IOTLB entries for `bytes` from `address` in one
+    /// domain, as Linux `iommu_flush_iotlb_psi` does: the naturally aligned
+    /// power-of-two block of pages covering them, or the whole domain when
+    /// the unit has no page-selective invalidation or that block exceeds its
+    /// largest address mask.
+    fn invalidate_pages(&self, did: u16, address: u64, bytes: usize) -> Result<(), VtdError> {
+        let first = address >> 12;
+        let last = (address + bytes.max(1) as u64 - 1) >> 12;
+        // The smallest mask whose aligned block holds both ends.
+        let mask = u64::BITS - (first ^ last).leading_zeros();
+        let largest = (self.cap >> CAP_MAX_ADDRESS_MASK_SHIFT) & 0x3f;
+        if self.cap & CAP_PAGE_SELECTIVE == 0 || u64::from(mask) > largest {
+            return self.invalidate_domain(did);
+        }
+        publish();
+        self.flush_write_buffer()?;
+        let mut request = IOTLB_INVALIDATE | IOTLB_PAGE | u64::from(did) << IOTLB_DOMAIN_SHIFT;
+        if self.cap & CAP_WRITE_DRAIN != 0 {
+            request |= IOTLB_WRITE_DRAIN;
+        }
+        if self.cap & CAP_READ_DRAIN != 0 {
+            request |= IOTLB_READ_DRAIN;
+        }
+        self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
+        // IVA, just below the IOTLB register: the block's address and mask.
+        self.registers.write64(
+            self.iotlb - 8,
+            (first >> mask << mask << 12) | u64::from(mask),
+        );
+        self.registers.write64(self.iotlb, request);
+        let value = self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
+        // The unit may grant a page, domain or global invalidation.
+        if (value >> 57) & 3 == 0 {
+            return Err(VtdError::Invalidation);
+        }
+        Ok(())
     }
     fn flush_write_buffer(&self) -> Result<(), VtdError> {
         if self.cap & CAP_WRITE_BUFFER != 0 {
@@ -1055,7 +1097,11 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
             domain.tables[table].write(index, physical | rights);
         }
         self.unit.publish_leaves(domain, &live.leaves);
-        if self.unit.publish_new_entries(self.did).is_err() {
+        if self
+            .unit
+            .publish_new_entries(self.did, info.address, info.bytes)
+            .is_err()
+        {
             // An unacknowledged translation is never returned as a live lease;
             // retain its pin/table inventory and poison further submissions.
             state.poisoned = true;
@@ -1080,7 +1126,11 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
             domain.tables[table].write(index, 0);
         }
         self.unit.publish_leaves(domain, &live.leaves);
-        if self.unit.invalidate_domain(self.did).is_err() {
+        if self
+            .unit
+            .invalidate_pages(self.did, info.address, info.bytes)
+            .is_err()
+        {
             state.poisoned = true;
             return Err(DmaError::InvalidationFailed);
         }
@@ -2081,6 +2131,55 @@ mod tests {
             );
         }
         assert_eq!(qualified_flush_line(1 << 19, 8 << 8), Ok(64));
+    }
+
+    #[test]
+    fn unmap_invalidates_the_aligned_page_block_when_the_unit_takes_psi() {
+        for (largest, page_selective) in [(9u64, true), (1, false)] {
+            let registers = ModelRegisters::new();
+            *registers.0.lock().unwrap().values.get_mut(&CAP).unwrap() |=
+                CAP_PAGE_SELECTIVE | largest << CAP_MAX_ADDRESS_MASK_SHIFT;
+            // SAFETY: exclusive stopped model.
+            let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48) }.unwrap();
+            let domain = unsafe {
+                unit.attach_requester(RequesterClaim::model(8, Arc::new(AtomicU64::new(0))))
+            }
+            .unwrap();
+            let pin = pages(3 * PAGE, 12, 0xa000000, Arc::new(AtomicU64::new(0)));
+            let mut mapping =
+                DmaMapping::map(domain.clone(), pin, Direction::Bidirectional, u64::MAX).unwrap();
+            let (first, last) = {
+                let address = mapping.address().unwrap();
+                (address >> 12, (address + 3 * PAGE as u64 - 1) >> 12)
+            };
+            registers.0.lock().unwrap().writes.clear();
+            // SAFETY: stopped synchronous model.
+            unsafe { mapping.unmap() }.unwrap();
+            let writes = registers.0.lock().unwrap().writes.clone();
+            let request = writes
+                .iter()
+                .find(|(offset, _)| *offset == unit.iotlb)
+                .unwrap()
+                .1;
+            let address = writes.iter().find(|(offset, _)| *offset == unit.iotlb - 8);
+            if page_selective {
+                assert_eq!(request & (3 << 60), IOTLB_PAGE);
+                assert_eq!((request >> IOTLB_DOMAIN_SHIFT) & 0xffff, 1);
+                // The smallest aligned block holding all three pages.
+                let mask = u64::from(u64::BITS - (first ^ last).leading_zeros());
+                assert!((2..=3).contains(&mask));
+                assert_eq!(address.unwrap().1, (first >> mask << mask << 12) | mask);
+            } else {
+                // Past the unit's largest mask: the whole domain.
+                assert_eq!(request & (3 << 60), IOTLB_DOMAIN);
+                assert!(address.is_none());
+            }
+            // SAFETY: all mappings removed and no model DMA can restart.
+            unsafe { domain.detach() }.unwrap();
+            drop(domain);
+            // SAFETY: every requester is detached.
+            unsafe { unit.shut_down() }.unwrap();
+        }
     }
 
     #[test]

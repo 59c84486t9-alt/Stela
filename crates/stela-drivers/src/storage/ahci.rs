@@ -7,9 +7,10 @@
 //! `ahci_error_intr` and `ata_eh_link_autopsy` do, the engine restarts or the
 //! link is hard reset and the disk revalidated, and sd's retries apply.
 use crate::{
-    Clock, Handoff,
+    Clock, Deadline, Handoff,
     block::{
-        BlockDevice, BlockError, Features, Identity, Sense, SenseCompletion, Transport, ascii,
+        BlockDevice, BlockError, Command, Features, Finished, Identity, Sense, SenseCompletion,
+        Transport, ascii,
     },
     bus::{
         dma::{DmaAllocator, DmaBuffer},
@@ -457,6 +458,61 @@ pub struct AhciDisk {
     quirks: u32,
     /// `ATA_DFLAG_DEVSLP`: the disk has DevSleep and its SATA Settings page.
     devslp: bool,
+    /// The block command started on the port, and the next one's tag.
+    running: Option<Running>,
+    next_tag: u32,
+}
+
+/// A command issued in slot 0, awaiting its ending FIS or an error.
+struct Launched {
+    queued: bool,
+    deadline: Deadline,
+    polls: u32,
+}
+
+/// One command through libata's error handling ([`AhciDisk::issue_with`]),
+/// a step at a time.
+struct Issue {
+    command: u8,
+    feature: u16,
+    lba: u64,
+    count: u16,
+    bytes: usize,
+    write: bool,
+    /// Only reads and writes carry ATA_QCFLAG_IO.
+    io: bool,
+    /// When the command was first prepared, for sd's runtime limit.
+    prepared: u64,
+    retries: u32,
+    launched: Option<Launched>,
+    /// The delay sense data asked for before the command runs again.
+    resume: Option<Deadline>,
+}
+
+/// A started block command, run a bounce buffer's worth at a time.
+struct Running {
+    tag: u32,
+    command: Command,
+    /// Bytes done; a flush counts one once complete.
+    done: usize,
+    data: Vec<u8>,
+    issue: Option<Issue>,
+    result: Option<Finished>,
+}
+
+/// The received FIS types a command ends with, and where they land: a
+/// queued command's Set Device Bits, another's D2H Register, or for PIO
+/// data a PIO Setup, which precedes the data, from when on the registers
+/// are read every look.
+fn ending(queued: bool) -> &'static [(usize, u8)] {
+    if queued {
+        &[(RECEIVED_SDB, FIS_SET_DEVICE_BITS)]
+    } else {
+        &[
+            (RECEIVED_D2H, FIS_REGISTER_DEVICE_TO_HOST),
+            (RECEIVED_PIO, FIS_PIO_SETUP),
+        ]
+    }
 }
 
 /// NCQ as Linux `ata_dev_config_ncq` configures it. The block interface
@@ -1290,6 +1346,8 @@ impl AhciDisk {
             no_dma_log: false,
             quirks: 0,
             devslp: false,
+            running: None,
+            next_tag: 0,
         };
         let port = disk.port;
         let buffer = disk.bounce.physical();
@@ -1370,67 +1428,148 @@ impl AhciDisk {
     fn issue_with(
         &mut self,
         port: &impl CommandPort,
-        (command, feature): (u8, u16),
+        command: (u8, u16),
         lba: u64,
         count: u16,
         bytes: usize,
         write: bool,
     ) -> Result<(), BlockError> {
-        self.ready()?;
-        // Only reads and writes carry ATA_QCFLAG_IO.
-        let io = matches!(
-            command,
-            ATA_READ_DMA_EXT | ATA_WRITE_DMA_EXT | ATA_READ_FPDMA_QUEUED | ATA_WRITE_FPDMA_QUEUED
-        );
-        let buffer = self.bounce.physical();
-        // scsi_cmd_runtime_exceeced: sd requeues end (allowed + 1) timeouts
-        // after the command was first prepared.
-        let prepared = self.clock.try_start().map_err(|_| BlockError::Timeout)?;
-        let runtime_us = (u64::from(COMMAND_RETRIES) + 1) * self.command_timeout_us;
-        let mut retries = 0;
+        let issue = self.prepare(command, lba, count, bytes, write)?;
+        self.complete(port, issue)
+    }
+
+    /// Run `issue` to its result, after the started block command's.
+    fn complete(&mut self, port: &impl CommandPort, mut issue: Issue) -> Result<(), BlockError> {
+        while self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.result.is_none())
+        {
+            self.run(port);
+            crate::waiting();
+            core::hint::spin_loop();
+        }
         loop {
-            let command = self.rw_command(command);
-            let Err(mut failure) =
-                self.attempt(port, command, feature, lba, count, bytes, write, buffer)
-            else {
+            if let Some(result) = self.step(port, &mut issue) {
+                return result;
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+
+    fn prepare(
+        &self,
+        (command, feature): (u8, u16),
+        lba: u64,
+        count: u16,
+        bytes: usize,
+        write: bool,
+    ) -> Result<Issue, BlockError> {
+        self.ready()?;
+        Ok(Issue {
+            command,
+            feature,
+            lba,
+            count,
+            bytes,
+            write,
+            io: matches!(
+                command,
+                ATA_READ_DMA_EXT
+                    | ATA_WRITE_DMA_EXT
+                    | ATA_READ_FPDMA_QUEUED
+                    | ATA_WRITE_FPDMA_QUEUED
+            ),
+            prepared: self.clock.try_start().map_err(|_| BlockError::Timeout)?,
+            retries: 0,
+            launched: None,
+            resume: None,
+        })
+    }
+
+    /// Move `issue` on without waiting: launch it, look for its completion,
+    /// or recover the port from its failure and retry it as `ata_eh_finish`
+    /// decides. A failed command completes by its fetched or generated
+    /// sense data, as sd does. Its result once it has one.
+    fn step(
+        &mut self,
+        port: &impl CommandPort,
+        issue: &mut Issue,
+    ) -> Option<Result<(), BlockError>> {
+        if issue.resume.is_some_and(|resume| !resume.passed()) {
+            return None;
+        }
+        issue.resume = None;
+        if issue.launched.is_none() {
+            if let Err(error) = self.ready() {
+                return Some(Err(error));
+            }
+            let command = self.rw_command(issue.command);
+            let buffer = self.bounce.physical();
+            match self.launch(
+                port,
+                command,
+                issue.feature,
+                issue.lba,
+                issue.count,
+                issue.bytes,
+                issue.write,
+                buffer,
+            ) {
+                Ok(launched) => issue.launched = Some(launched),
+                Err(failure) => return Some(Err(failure.error)),
+            }
+        }
+        let result = self.check(port, issue.launched.as_mut()?)?;
+        issue.launched = None;
+        let mut failure = match result {
+            Ok(()) => {
                 // ata_verify_xfer: a completed DMA transfer verifies it.
-                if io {
+                if issue.io {
                     self.dubious = false;
                 }
-                return Ok(());
-            };
-            if let Err(error) = self.recover(port, &mut failure, io) {
-                self.fault = Some(error.clone());
-                return Err(error);
+                return Some(Ok(()));
             }
-            // With valid sense, only a NEEDS_RETRY disposition with an error
-            // left besides the device's is retried.
-            let retry = match failure.sense {
-                Some(sense) => failure.mask != 0 && sense.needs_retry(),
-                None => worth_retry(failure.mask, io),
-            };
-            if retry && retries < COMMAND_RETRIES {
-                retries += 1;
-                continue;
-            }
-            let sense = match failure.sense {
-                Some(sense) => sense,
-                None => self.generated_sense(&mut failure),
-            };
-            // A fixed disk: no media change.
-            match sense.completion(false) {
-                SenseCompletion::Done => return Ok(()),
-                SenseCompletion::Fail | SenseCompletion::MediaChanged => return Err(failure.error),
-                SenseCompletion::Retry(delay_us) => {
-                    let elapsed = self
-                        .clock
-                        .try_elapsed_us(prepared)
-                        .map_err(|_| BlockError::Timeout)?;
-                    if elapsed > runtime_us {
-                        return Err(failure.error);
-                    }
-                    self.clock.delay(delay_us);
+            Err(failure) => failure,
+        };
+        if let Err(error) = self.recover(port, &mut failure, issue.io) {
+            self.fault = Some(error.clone());
+            return Some(Err(error));
+        }
+        // With valid sense, only a NEEDS_RETRY disposition with an error
+        // left besides the device's is retried.
+        let retry = match failure.sense {
+            Some(sense) => failure.mask != 0 && sense.needs_retry(),
+            None => worth_retry(failure.mask, issue.io),
+        };
+        if retry && issue.retries < COMMAND_RETRIES {
+            issue.retries += 1;
+            return None;
+        }
+        let sense = match failure.sense {
+            Some(sense) => sense,
+            None => self.generated_sense(&mut failure),
+        };
+        // A fixed disk: no media change.
+        match sense.completion(false) {
+            SenseCompletion::Done => Some(Ok(())),
+            SenseCompletion::Fail | SenseCompletion::MediaChanged => Some(Err(failure.error)),
+            SenseCompletion::Retry(delay_us) => {
+                // scsi_cmd_runtime_exceeced: sd requeues end (allowed + 1)
+                // timeouts after the command was first prepared.
+                let runtime_us = (u64::from(COMMAND_RETRIES) + 1) * self.command_timeout_us;
+                let Ok(elapsed) = self.clock.try_elapsed_us(issue.prepared) else {
+                    return Some(Err(BlockError::Timeout));
+                };
+                if elapsed > runtime_us {
+                    return Some(Err(failure.error));
                 }
+                match self.clock.try_deadline(delay_us) {
+                    Ok(resume) => issue.resume = Some(resume),
+                    Err(_) => return Some(Err(BlockError::Timeout)),
+                }
+                None
             }
         }
     }
@@ -1486,6 +1625,29 @@ impl AhciDisk {
         write: bool,
         buffer: u64,
     ) -> Result<(), Failure> {
+        let mut launched = self.launch(port, command, feature, lba, count, bytes, write, buffer)?;
+        loop {
+            if let Some(result) = self.check(port, &mut launched) {
+                return result;
+            }
+            crate::waiting();
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Issue the command once in slot 0.
+    #[allow(clippy::too_many_arguments)]
+    fn launch(
+        &mut self,
+        port: &impl CommandPort,
+        command: u8,
+        feature: u16,
+        lba: u64,
+        count: u16,
+        bytes: usize,
+        write: bool,
+        buffer: u64,
+    ) -> Result<Launched, Failure> {
         let table = self.table.physical();
         self.table.bytes_mut()[..TABLE_HEADER_BYTES].fill(0);
         // A queued command's sector count moves to the features registers;
@@ -1526,52 +1688,63 @@ impl AhciDisk {
         self.commands.write(8, table);
         fence(Ordering::SeqCst);
         port.write32(PORT_INTERRUPTS, u32::MAX);
-        // The FIS a command ends with lands in the received-FIS area in RAM:
-        // a queued command's Set Device Bits, another's D2H Register, or for
-        // PIO data a PIO Setup, which precedes the data, from when on the
-        // registers are read every poll. Mark their types with the H2D
-        // Register type, as a hardreset does, to see one arrive.
-        let ending: &[(usize, u8)] = if queued {
-            &[(RECEIVED_SDB, FIS_SET_DEVICE_BITS)]
-        } else {
-            &[
-                (RECEIVED_D2H, FIS_REGISTER_DEVICE_TO_HOST),
-                (RECEIVED_PIO, FIS_PIO_SETUP),
-            ]
-        };
-        for &(at, _) in ending {
+        // The FIS a command ends with lands in the received-FIS area in RAM.
+        // Mark its types with the H2D Register type, as a hardreset does, to
+        // see one arrive.
+        for &(at, _) in ending(queued) {
             self.commands.write(at, FIS_REGISTER_HOST_TO_DEVICE);
         }
         fence(Ordering::SeqCst);
+        let deadline = self
+            .clock
+            .try_deadline(self.command_timeout_us)
+            .map_err(|_| Failure::new(BlockError::Timeout))?;
         // ahci_qc_issue: a queued command is active in PxSACT until the
         // disk's Set Device Bits FIS clears it.
-        let active = if queued {
+        if queued {
             port.write32(PORT_SATA_ACTIVE, 1);
-            PORT_SATA_ACTIVE
-        } else {
-            PORT_ISSUE
-        };
+        }
         port.write32(PORT_ISSUE, 1);
+        Ok(Launched {
+            queued,
+            deadline,
+            polls: 0,
+        })
+    }
+
+    /// The launched command's result once it completed, failed or timed
+    /// out; never waits. PxIS and PxCI, which a hypervisor traps, are read
+    /// when an ending FIS arrived, every few looks since a failure may post
+    /// none, and at the deadline.
+    fn check(
+        &mut self,
+        port: &impl CommandPort,
+        launched: &mut Launched,
+    ) -> Option<Result<(), Failure>> {
+        let queued = launched.queued;
+        let active = if queued { PORT_SATA_ACTIVE } else { PORT_ISSUE };
         let mut interrupts = 0;
         let mut finished = || {
             interrupts = port.read32(PORT_INTERRUPTS) & INTERRUPT_ERROR;
             interrupts != 0 || port.read32(active) & 1 == 0
         };
-        let commands = &self.commands;
-        let mut polls = 0u32;
-        let done = self.clock.wait(self.command_timeout_us, || {
-            // The first poll reads the registers too: an emulated port may
-            // finish at the PxCI write.
-            let due = polls.is_multiple_of(REGISTER_POLL_INTERVAL);
-            polls = polls.wrapping_add(1);
-            let posted = ending
-                .iter()
-                .any(|&(at, kind)| commands.read::<u8>(at) == kind);
-            (posted || due) && finished()
-        }) || finished();
+        // The first look reads the registers too: an emulated port may
+        // finish at the PxCI write.
+        let due = launched.polls.is_multiple_of(REGISTER_POLL_INTERVAL);
+        launched.polls = launched.polls.wrapping_add(1);
+        let posted = ending(queued)
+            .iter()
+            .any(|&(at, kind)| self.commands.read::<u8>(at) == kind);
+        let done = if (posted || due) && finished() {
+            true
+        } else if launched.deadline.passed() {
+            finished()
+        } else {
+            return None;
+        };
         fence(Ordering::SeqCst);
         if done && interrupts == 0 {
-            return Ok(());
+            return Some(Ok(()));
         }
         // AHCI needs SError cleared; otherwise it might lock up.
         let serror = port.read32(PORT_SATA_ERROR);
@@ -1584,7 +1757,138 @@ impl AhciDisk {
         let fis = &self.commands.bytes()[fis..fis + FIS_BYTES];
         failure.result = [fis[2], fis[3]];
         failure.queued = queued;
-        Err(failure)
+        Some(Err(failure))
+    }
+
+    /// Take `command` as the started block command.
+    fn begin(&mut self, command: Command) -> Result<u32, BlockError> {
+        self.ready()?;
+        let command = command.within(&self.identity, 0)?;
+        if self.running.is_some() {
+            return Err(BlockError::Protocol(
+                "an AHCI port runs one command at a time",
+            ));
+        }
+        let tag = self.next_tag;
+        self.next_tag = tag.wrapping_add(1);
+        self.running = Some(Running {
+            tag,
+            command,
+            done: 0,
+            data: Vec::new(),
+            issue: None,
+            result: None,
+        });
+        Ok(tag)
+    }
+
+    /// Move the started block command on as far as it goes without waiting.
+    fn run(&mut self, port: &impl CommandPort) {
+        let Some(mut running) = self.running.take() else {
+            return;
+        };
+        while running.result.is_none() {
+            let Some(issue) = running.issue.as_mut() else {
+                match self.next_issue(&running) {
+                    Ok(Some(issue)) => running.issue = Some(issue),
+                    Ok(None) => {
+                        let data = core::mem::take(&mut running.data);
+                        let read = matches!(running.command, Command::Read { .. });
+                        running.result = Some(Ok(read.then_some(data)));
+                    }
+                    Err(error) => running.result = Some(Err(error)),
+                }
+                continue;
+            };
+            match self.step(port, issue) {
+                None => break,
+                Some(Err(error)) => running.result = Some(Err(error)),
+                Some(Ok(())) => {
+                    let bytes = issue.bytes;
+                    if let Command::Read { .. } = running.command {
+                        running
+                            .data
+                            .extend_from_slice(&self.bounce.bytes()[..bytes]);
+                    }
+                    running.done += bytes.max(1);
+                    running.issue = None;
+                }
+            }
+        }
+        self.running = Some(running);
+    }
+
+    /// The next part of `running`'s command, its data staged in the bounce
+    /// buffer, or `None` once all of it is done.
+    fn next_issue(&mut self, running: &Running) -> Result<Option<Issue>, BlockError> {
+        let block = self.identity.block_size as usize;
+        let done = running.done;
+        match &running.command {
+            Command::Read { lba, bytes } if done < *bytes => {
+                let part = (bytes - done).min(self.chunk_bytes());
+                let first = lba + (done / block) as u64;
+                let count = self.sectors(part);
+                self.prepare((ATA_READ_DMA_EXT, 0), first, count, part, false)
+                    .map(Some)
+            }
+            Command::Write {
+                lba,
+                data,
+                fua: false,
+            } if done < data.len() => {
+                let part = (data.len() - done).min(self.chunk_bytes());
+                self.bounce.bytes_mut()[..part].copy_from_slice(&data[done..done + part]);
+                let first = lba + (done / block) as u64;
+                let count = self.sectors(part);
+                self.prepare((ATA_WRITE_DMA_EXT, 0), first, count, part, true)
+                    .map(Some)
+            }
+            Command::Flush if done == 0 => match self.flush {
+                Some(command) => self.prepare((command, 0), 0, 0, 0, false).map(Some),
+                None => Ok(None),
+            },
+            Command::Discard { lba, blocks } if done == 0 => self.trim(*lba, *blocks).map(Some),
+            Command::Write { fua: true, .. } => Err(BlockError::Unsupported(
+                "the device takes no Force Unit Access",
+            )),
+            Command::WriteZeroes { .. } => {
+                Err(BlockError::Unsupported("the device takes no Write Zeroes"))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// TRIM in one block of ranges, as libata's `ata_format_dsm_trim_descr`
+    /// writes them: each the starting logical sector in bits 47:0 and the
+    /// count in bits 63:48.
+    fn trim(&mut self, lba: u64, blocks: u64) -> Result<Issue, BlockError> {
+        let bytes = usize::try_from(blocks)
+            .ok()
+            .and_then(|blocks| blocks.checked_mul(self.identity.block_size as usize))
+            .ok_or(BlockError::Unsupported("a TRIM past one block of ranges"))?;
+        self.identity.check_write(lba, bytes)?;
+        let (mut sector, mut sectors) = (lba, blocks);
+        if sectors > TRIM_RANGES * TRIM_RANGE_SECTORS {
+            return Err(BlockError::Unsupported("a TRIM past one block of ranges"));
+        }
+        self.ready()?;
+        let ranges = &mut self.bounce.bytes_mut()[..ATA_SECTOR_BYTES as usize];
+        ranges.fill(0);
+        for range in ranges.chunks_mut(8) {
+            if sectors == 0 {
+                break;
+            }
+            let count = sectors.min(TRIM_RANGE_SECTORS);
+            range.copy_from_slice(&(sector | count << 48).to_le_bytes());
+            (sector, sectors) = (sector + count, sectors - count);
+        }
+        self.prepare(
+            (ATA_DATA_SET_MANAGEMENT, TRIM),
+            0,
+            1,
+            ATA_SECTOR_BYTES as usize,
+            true,
+        )
     }
 
     /// Linux `ahci_error_handler` and `ata_eh_recover`: restart an unfrozen
@@ -2372,39 +2676,10 @@ impl BlockDevice for AhciDisk {
         }
     }
 
-    /// TRIM in one block of ranges, as libata's `ata_format_dsm_trim_descr`
-    /// writes them: each the starting logical sector in bits 47:0 and the
-    /// count in bits 63:48.
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
-        let bytes = usize::try_from(blocks)
-            .ok()
-            .and_then(|blocks| blocks.checked_mul(self.identity.block_size as usize))
-            .ok_or(BlockError::Unsupported("a TRIM past one block of ranges"))?;
-        self.identity.check_write(lba, bytes)?;
-        let (mut sector, mut sectors) = (lba, blocks);
-        if sectors > TRIM_RANGES * TRIM_RANGE_SECTORS {
-            return Err(BlockError::Unsupported("a TRIM past one block of ranges"));
-        }
-        self.ready()?;
-        let ranges = &mut self.bounce.bytes_mut()[..ATA_SECTOR_BYTES as usize];
-        ranges.fill(0);
-        for range in ranges.chunks_mut(8) {
-            if sectors == 0 {
-                break;
-            }
-            let count = sectors.min(TRIM_RANGE_SECTORS);
-            range.copy_from_slice(&(sector | count << 48).to_le_bytes());
-            (sector, sectors) = (sector + count, sectors - count);
-        }
+        let issue = self.trim(lba, blocks)?;
         let port = self.port;
-        self.issue_with(
-            &port,
-            (ATA_DATA_SET_MANAGEMENT, TRIM),
-            0,
-            1,
-            ATA_SECTOR_BYTES as usize,
-            true,
-        )
+        self.complete(&port, issue)
     }
 
     /// Flush, and before power-off spin the disk down, as Linux libata's
@@ -2418,6 +2693,51 @@ impl BlockDevice for AhciDisk {
                 .map_err(|failure| failure.error)?;
         }
         Ok(())
+    }
+
+    /// One command at a time in slot 0, started under the caller's lock and
+    /// completed by a later look ([`Self::finish`]).
+    fn depth(&self) -> usize {
+        1
+    }
+
+    fn room(&self) -> bool {
+        self.running.is_none()
+    }
+
+    fn start(&mut self, command: Command) -> Result<u32, BlockError> {
+        let tag = self.begin(command)?;
+        let port = self.port;
+        self.run(&port);
+        Ok(tag)
+    }
+
+    fn finish(&mut self, tag: u32) -> Option<Finished> {
+        if self.running.as_ref()?.tag != tag {
+            return None;
+        }
+        let port = self.port;
+        self.run(&port);
+        let result = self.running.as_mut()?.result.take()?;
+        self.running = None;
+        Some(result)
+    }
+
+    /// The running command's ending FIS has arrived: memory alone. A
+    /// failure that posts none is seen at a later look.
+    fn posted(&self) -> bool {
+        self.running.as_ref().is_some_and(|running| {
+            running.result.is_some()
+                || running
+                    .issue
+                    .as_ref()
+                    .and_then(|issue| issue.launched.as_ref())
+                    .is_some_and(|launched| {
+                        ending(launched.queued)
+                            .iter()
+                            .any(|&(at, kind)| self.commands.read::<u8>(at) == kind)
+                    })
+        })
     }
 }
 
@@ -2673,6 +2993,8 @@ mod tests {
                     no_dma_log: false,
                     quirks: 0,
                     devslp: false,
+                    running: None,
+                    next_tag: 0,
                 },
                 _registers: registers,
                 _memory: memory,
@@ -2786,6 +3108,53 @@ mod tests {
             );
             assert!(fixture.disk.fault.is_none());
         }
+    }
+
+    #[test]
+    fn started_commands_complete_at_a_later_look_without_waiting() {
+        let (mut fixture, _clock) = recovering(identify_page("S1", 1024));
+        // A write is staged in the bounce buffer and completes at once.
+        let link = Link::new(&[]);
+        let data: Vec<u8> = (0..1024).map(|byte| byte as u8).collect();
+        let disk = &mut fixture.disk;
+        let tag = disk
+            .begin(Command::Write {
+                lba: 8,
+                data: data.clone(),
+                fua: false,
+            })
+            .unwrap();
+        disk.run(&link);
+        assert_eq!(disk.running.as_ref().unwrap().tag, tag);
+        assert_eq!(disk.running.as_mut().unwrap().result.take(), Some(Ok(None)));
+        assert_eq!(&disk.bounce.bytes()[..1024], &data[..]);
+        assert_eq!(disk.table.bytes()[2], ATA_WRITE_DMA_EXT);
+        disk.running = None;
+
+        // A read the disk has not finished leaves the port running.
+        let link = Link::new(&[Fault::Timeout]);
+        let tag = disk.begin(Command::Read { lba: 0, bytes: 512 }).unwrap();
+        assert!(!disk.room());
+        assert_eq!(
+            disk.begin(Command::Flush),
+            Err(BlockError::Protocol(
+                "an AHCI port runs one command at a time"
+            ))
+        );
+        disk.run(&link);
+        assert!(disk.running.as_ref().unwrap().result.is_none());
+        assert_eq!(link.issued.get(), 1);
+        // Its D2H Register FIS arrives with PxCI clear: the next look ends it.
+        disk.bounce.bytes_mut()[..512].fill(0x5a);
+        link.registers.borrow_mut()[PORT_ISSUE / 4] = 0;
+        link.registers.borrow_mut()[PORT_TASK_FILE / 4] = READY;
+        disk.commands
+            .write(RECEIVED_D2H, FIS_REGISTER_DEVICE_TO_HOST);
+        disk.run(&link);
+        let running = disk.running.as_mut().unwrap();
+        assert_eq!(running.tag, tag);
+        assert_eq!(running.result.take(), Some(Ok(Some(vec![0x5a; 512]))));
+        assert_eq!(link.issued.get(), 1);
     }
 
     #[test]
