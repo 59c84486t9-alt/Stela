@@ -1459,7 +1459,7 @@
   },
   {
     "package": "stela-drivers",
-    "test": "unchanged_linux_command_id_normalization_header_layout_and_tfh_descriptors",
+    "test": "command_headers_and_tfh_descriptors_match_linux",
     "source": "crates/stela-drivers/src/net/wifi/intel/command/tests.rs",
     "kind": "oracle",
     "inputs": [

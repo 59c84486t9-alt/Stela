@@ -1,6 +1,6 @@
 use super::*;
 #[test]
-fn exact_wide_header_legacy_conversion_sequence_and_real_twenty_byte_split() {
+fn wide_headers_normalize_legacy_ids_and_split_at_twenty_bytes() {
     for len in (0..=129).chain([316, 317, MAX_PAYLOAD_BYTES]) {
         let payload: Vec<_> = (0..len).map(|n| n as u8).collect();
         let command = Command::encode(
@@ -134,7 +134,7 @@ fn exact_wide_header_legacy_conversion_sequence_and_real_twenty_byte_split() {
     );
 }
 #[test]
-fn packed_tfh_entries_full_width_unaligned_iovas_reserved_zero_and_refusals() {
+fn tfh_descriptors_preserve_full_iovas_and_reject_invalid_regions() {
     for count in 1..=25 {
         let regions: Vec<_> = (0..count)
             .map(|i| Region {
@@ -214,7 +214,7 @@ fn hex(bytes: &[u8]) -> alloc::string::String {
 }
 #[test]
 #[ignore = "requires pinned unchanged Linux command helper oracle; see THIRD_PARTY.md"]
-fn unchanged_linux_command_id_normalization_header_layout_and_tfh_descriptors() {
+fn command_headers_and_tfh_descriptors_match_linux() {
     extern crate std;
     use sha2::{Digest, Sha256};
     let trace = std::fs::read(std::env::var("STELA_IWLWIFI_COMMAND_ORACLE").unwrap()).unwrap();
