@@ -95,7 +95,7 @@
   {
     "package": "stela-drivers",
     "test": "realtek_capture_gain_matches_original_linux_path_and_amp_verbs",
-    "source": "crates/stela-drivers/src/audio/hda/realtek/capture_tests.rs",
+    "source": "crates/stela-drivers/src/audio/hda/tests/realtek_owned_models/capture_gain.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_HDA_CAPTURE_GAIN_ORACLE"
@@ -105,7 +105,7 @@
   {
     "package": "stela-drivers",
     "test": "hda_unsolicited_matches_original_linux_admission_and_queue_dispatch",
-    "source": "crates/stela-drivers/src/audio/hda/unsolicited/tests.rs",
+    "source": "crates/stela-drivers/src/audio/hda/tests/unsolicited_models.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_HDA_UNSOLICITED_ORACLE"

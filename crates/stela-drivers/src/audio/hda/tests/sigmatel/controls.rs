@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+//! Sigmatel codec control tests.
+use super::*;
 // Included by the existing SigmaTel native register/DMA model. UNRUN.
 mod idt95 {
     use super::*;

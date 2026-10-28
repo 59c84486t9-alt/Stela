@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
+//! Cirrus codec control tests.
+use super::*;
 // Included by hda.rs's existing Cirrus register/DMA model. Source-only: UNRUN.
 mod cs4213 {
     use super::*;

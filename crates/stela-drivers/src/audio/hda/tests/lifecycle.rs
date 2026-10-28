@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Included in the existing real command-ring/register model, not a second mock
-// of the production power helper. All cases require central execution gates.
+//! Codec power acknowledgement and transition tests.
+use super::*;
 #[test]
 fn opt_in_codec_power_model_keeps_requested_and_actual_states_distinct_until_ack() {
     let mut fixture = Fixture::new();
