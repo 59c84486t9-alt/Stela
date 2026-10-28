@@ -850,6 +850,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         );
         stop_here("native MMIO root qualification complete", 0x10);
     }
+    // The firmware's ACPI namespace, loaded before the host devices start so
+    // their services can consult it; the host's power transitions run it.
+    let host_acpi = aml::HostAcpi::start(
+        handoff.rsdp,
+        handoff.root,
+        handoff
+            .storage
+            .handoff()
+            .map(|storage| storage.ecam)
+            .unwrap_or_default(),
+        handoff.tsc_hz,
+    );
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
@@ -1834,6 +1846,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             guest_network,
             host_nor,
             host_disks,
+            host_acpi,
             boot_progress,
         },
         |machine, limit| {
@@ -1862,6 +1875,7 @@ struct RunIo {
     guest_network: Option<network::GuestNetwork>,
     host_nor: Option<nor::HostNor>,
     host_disks: storage::HostDisks,
+    host_acpi: Option<aml::HostAcpi>,
     boot_progress: progress::BootProgress,
 }
 
@@ -1925,6 +1939,7 @@ fn run_machine<H: Host>(
         guest_network,
         host_nor,
         host_disks,
+        host_acpi,
         mut boot_progress,
     } = io;
     crate::status::begin(match restore {
@@ -1939,16 +1954,7 @@ fn run_machine<H: Host>(
         host_nor,
         power::HostPowerControl::new(
             handoff.power,
-            aml::HostAcpi::start(
-                handoff.rsdp,
-                handoff.root,
-                handoff
-                    .storage
-                    .handoff()
-                    .map(|storage| storage.ecam)
-                    .unwrap_or_default(),
-                handoff.tsc_hz,
-            ),
+            host_acpi,
             power::EfiReset::new(handoff.efi_reset, handoff.root),
             handoff.tsc_hz,
             host_disks,
