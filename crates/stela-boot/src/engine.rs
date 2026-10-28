@@ -1615,7 +1615,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         machine
             .enter_parallel(hub)
-            .unwrap_or_else(|error| output::fatal(error));
+            .unwrap_or_else(|error| output::fatal(&alloc::format!("{error}")));
         translations::share(parallel::SHARED_CODE_BYTES);
         parallel::spawn(
             &machine,

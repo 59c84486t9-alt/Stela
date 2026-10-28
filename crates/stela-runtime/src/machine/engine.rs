@@ -2,6 +2,7 @@
 //! every exit back from native code.
 mod amx;
 mod apple_maintenance;
+mod chain_control;
 mod clock;
 mod compression;
 mod device_access;
@@ -35,7 +36,8 @@ mod parallel;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 pub use parallel::{
-    Call, Counts, Hub, Kick, MaterializedSource, SharedDevices, SourceObservation, SourcePhase,
+    Call, Counts, Hub, Kick, MaterializedSource, ParallelAdmissionError, SharedDevices,
+    SourceObservation, SourcePhase,
 };
 pub use stela_contracts::dma::{DmaError, TransferFault};
 mod pointer;
@@ -66,7 +68,9 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering;
 use pointer::{PointerInputs, PointerOperation, PointerResult};
 #[cfg(test)]
 pub(crate) use prepare::test_preparation;
@@ -84,6 +88,8 @@ pub use shared_memory::{
 };
 #[cfg(feature = "native-profile")]
 pub use shared_memory::{NativeDataTlbStatistics, NativeSourceStatistics};
+#[cfg(test)]
+use stela_compiler::x86_64::chain::ChainControl;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{
@@ -103,9 +109,8 @@ use stela_compiler::{
         system::SystemOperation,
     },
     x86_64::{
-        MemoryChecks, NativeSystem, cache_clean,
-        chain::{self, ChainControl},
-        pointer as x86_64_pointer, register_read, zero_block,
+        MemoryChecks, NativeSystem, cache_clean, chain, pointer as x86_64_pointer, register_read,
+        zero_block,
     },
 };
 pub use stela_contracts::bus::Transition;
@@ -999,6 +1004,7 @@ pub enum RequirementKind {
     /// apply to a guest.
     VmState(&'static str),
     Native(&'static str),
+    ParallelAdmission(ParallelAdmissionError),
     /// Register residency cannot be recovered from the retained host capture.
     FaultRecovery(stela_compiler::block::FaultRecoveryError),
     /// Detailed refusal before an actual checked native frame was executed.
@@ -1068,6 +1074,7 @@ impl fmt::Display for Requirement {
                 "entering an EL1&0 guest with nonzero Apple VM state in {register}"
             )?,
             RequirementKind::Native(detail) => write!(f, "native execution: {detail}")?,
+            RequirementKind::ParallelAdmission(error) => write!(f, "parallel admission: {error}")?,
             RequirementKind::FaultRecovery(cause) => write!(f, "native fault recovery: {cause}")?,
             RequirementKind::NativePreparation(detail) => {
                 write!(f, "native preparation: {detail}")?
@@ -1443,14 +1450,6 @@ fn dynamic_branch(word: u32) -> Option<(ExitKind, Option<u8>)> {
         2 => (ExitKind::Return, Some(0)),
         _ => return None,
     })
-}
-
-/// The chained transfers native code may still make, which in parallel
-/// another PE's machine spends to bring this one back to the engine
-/// (`parallel::Hub::interrupt`).
-fn chain_budget(chain: &mut ChainControl) -> &AtomicU64 {
-    // SAFETY: a valid, aligned u64 that this borrow reaches only atomically.
-    unsafe { AtomicU64::from_ptr(&raw mut chain.budget) }
 }
 
 /// The compiled blocks one [`Machine::stale_code`] call checks: about a
@@ -1904,8 +1903,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// The other PEs' machines, when each PE runs on its own host core
     /// (`parallel`), and the count of device line changes last seen.
     parallel: Option<Arc<parallel::Hub>>,
-    /// `chain`'s budget as the hub reaches it; declared before `chain`.
-    attached: Option<parallel::Attached>,
+    /// The unique admitted hub/PE epoch. The chain owner also retains this
+    /// claim, so field drop order cannot release it before control use ends.
+    attached: Option<Arc<parallel::Attached>>,
     /// CPU power changes for the other PEs' machines, not yet sent.
     forwarded_power: Vec<ProcessorChange>,
     /// Instruction-cache maintenance other PEs broadcast while this one
@@ -1954,7 +1954,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// (`Machine::completing`).
     completing: Option<u64>,
     /// The chaining state native code updates (`x86_64::chain`).
-    chain: alloc::boxed::Box<ChainControl>,
+    chain: chain_control::Owner,
     /// The block count at which `run` stops.
     block_limit: u64,
     /// Suspended guest threads by thread pointer (see [`Suspension`]).
@@ -2116,7 +2116,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             waited: 0,
             pacm_written: false,
             completing: None,
-            chain: alloc::boxed::Box::default(),
+            chain: chain_control::Owner::default(),
             block_limit: u64::MAX,
             suspended: BTreeMap::new(),
             translated_pages: BTreeSet::new(),
@@ -2128,7 +2128,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             tag_checks: [false; 2],
             tags_checked_at: None,
         };
-        machine.chain.table = machine.targets.as_ptr() as u64;
+        machine.chain.set_table(machine.targets.as_ptr() as u64);
         machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();
         machine.sync_regime();
@@ -3664,21 +3664,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `budget` of them, and complete the last one's exit or fault.
     fn execute(&mut self, index: usize, budget: u64) -> Step {
         let entry = self.blocks[index].code;
-        let chain = &mut *self.chain;
-        chain.retired = 0;
-        chain.block = index as u64;
-        chain.hits = 0;
-        chain.linked = 0;
-        // In parallel another PE's machine may spend the budget meanwhile.
-        chain_budget(chain).store(budget, Ordering::Relaxed);
+        self.chain.begin(index, budget);
         // SAFETY: installed by this machine since the last discard, for the
         // system-mode block ABI; chained blocks and thunks too.
         let entered = self.timing_start();
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
-        let remaining = chain_budget(&mut self.chain).load(Ordering::Relaxed);
-        let (block, retired, hits) = (self.chain.block, self.chain.retired, self.chain.hits);
-        let chained = self.chain.linked + hits;
+        let remaining = self.chain.budget().load(Ordering::Relaxed);
+        let (block, retired, hits, linked) = self.chain.completed();
+        let chained = linked + hits;
         let last = (block & u64::from(u32::MAX)) as usize;
         self.cpu.retired += retired;
         self.statistics.blocks += 1 + chained;
@@ -3754,7 +3748,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             0
         } else if entry.pc != next_pc {
             1
-        } else if entry.context != self.chain.contexts[chain::half(next_pc)] {
+        } else if entry.context != self.chain.contexts()[chain::half(next_pc)] {
             2
         } else if spent {
             3
@@ -3798,7 +3792,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let site = exit.site;
         let retired = block.source_map.len() as u32;
         let entry = self.blocks[target].code.0 as u64;
-        let control = &*self.chain as *const ChainControl as u64;
+        let control = self.chain.address();
         let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
             return;
         };
@@ -3863,7 +3857,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         kind: ExitKind,
         btype: u8,
     ) -> bool {
-        let control = &*self.chain as *const ChainControl as u64;
+        let control = self.chain.address();
         let Some(code) = chain::lookup_thunk(control, retired, target, kind, btype) else {
             return false;
         };
@@ -4194,7 +4188,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             guarded_page: false,
             ..current
         };
-        self.chain.contexts = self.contexts(el, context);
+        let contexts = self.contexts(el, context);
+        self.chain.set_contexts(contexts);
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
@@ -4214,7 +4209,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // the old context still names: the thunks look up in a new
                 // one.
                 if self.code_generation != generation {
-                    self.chain.contexts = self.contexts(el, context);
+                    let contexts = self.contexts(el, context);
+                    self.chain.set_contexts(contexts);
                 }
                 match compiled {
                     Fetched::Block(index) => index,
@@ -4251,7 +4247,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .fold(0, |targets, btype| targets | 1 << btype);
         self.targets[chain::lookup_slot(pc)] = chain::LookupEntry {
             pc,
-            context: self.chain.contexts[chain::half(pc)],
+            context: self.chain.contexts()[chain::half(pc)],
             entry,
             block: index as u32,
             targets,
@@ -7088,7 +7084,7 @@ mod tests {
         pub(super) installed: Vec<Vec<u8>>,
         /// Executable copies of the context leaves the engine called.
         executables: Vec<crate::execution::platform::Mapping>,
-        patches: Vec<(usize, Vec<u8>)>,
+        pub(super) patches: Vec<(usize, Vec<u8>)>,
         /// The chaining state the next native run leaves, as thunks would.
         chained: Option<(*mut ChainControl, ChainControl)>,
         /// What the next native blocks return, in order: unit tests do not
@@ -7191,8 +7187,19 @@ mod tests {
         unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
             assert!(!self.exits.is_empty(), "unit tests do not run native code");
             if let Some((control, chained)) = self.chained.take() {
-                // SAFETY: the test points at the machine's boxed control.
-                unsafe { *control = chained };
+                // SAFETY: this fixture names the retained owner's live control
+                // outside native execution. Match native disjoint field writes;
+                // the budget is always accessed atomically, even in fixtures.
+                unsafe {
+                    AtomicU64::from_ptr(core::ptr::addr_of_mut!((*control).budget))
+                        .store(chained.budget, Ordering::Relaxed);
+                    core::ptr::addr_of_mut!((*control).retired).write(chained.retired);
+                    core::ptr::addr_of_mut!((*control).block).write(chained.block);
+                    core::ptr::addr_of_mut!((*control).contexts).write(chained.contexts);
+                    core::ptr::addr_of_mut!((*control).table).write(chained.table);
+                    core::ptr::addr_of_mut!((*control).hits).write(chained.hits);
+                    core::ptr::addr_of_mut!((*control).linked).write(chained.linked);
+                }
             }
             self.exits.remove(0)
         }
@@ -8787,18 +8794,18 @@ mod tests {
         machine.host.ring = Some(1);
         let base = machine.cpu.pc;
         assert!(machine.fetch_block(base, false).is_ok());
-        let first = machine.chain.contexts;
+        let first = machine.chain.contexts();
         assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-        assert_eq!(machine.chain.contexts, first);
+        assert_eq!(machine.chain.contexts(), first);
         // The third part reclaims the first, whose block a lookup entry of
         // the first context names.
         let pc = base + 2 * FETCH_PAGE;
         assert!(machine.fetch_block(pc, false).is_ok());
         assert_eq!(machine.statistics.code_evictions, 1);
-        assert_ne!(machine.chain.contexts, first);
+        assert_ne!(machine.chain.contexts(), first);
         assert_eq!(
             machine.targets[chain::lookup_slot(pc)].context,
-            machine.chain.contexts[chain::half(pc)]
+            machine.chain.contexts()[chain::half(pc)]
         );
     }
 
@@ -8880,7 +8887,7 @@ mod tests {
         machine.step().unwrap();
         machine.step().unwrap();
         assert_eq!(machine.statistics.links, 2);
-        let control = &*machine.chain as *const ChainControl as u64;
+        let control = machine.chain.address();
         let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
         // The second block's exit to the first, then the first's to it.
         for (patches, from, to, target, index) in [
@@ -8907,9 +8914,9 @@ mod tests {
         }
         // The first block chains into the second, which exits to the first.
         let (blocks, retired) = (machine.statistics.blocks, machine.cpu.retired);
-        let current = *machine.chain;
+        let current = machine.chain.snapshot();
         machine.host.chained = Some((
-            &mut *machine.chain,
+            machine.chain.address() as *mut ChainControl,
             ChainControl {
                 budget: CHAIN_LIMIT - 1,
                 retired: 2,
@@ -8928,9 +8935,9 @@ mod tests {
         // budget, chained the whole budget.
         let budget = machine.chain_budget();
         let (blocks, chained) = (machine.statistics.blocks, machine.statistics.chained);
-        let current = *machine.chain;
+        let current = machine.chain.snapshot();
         machine.host.chained = Some((
-            &mut *machine.chain,
+            machine.chain.address() as *mut ChainControl,
             ChainControl {
                 budget: u64::MAX,
                 retired: 2 * budget,
@@ -8948,9 +8955,9 @@ mod tests {
         // transfer left, in SPSR_EL1.
         machine.cpu.pc = base;
         machine.cpu.pstate.btype = 0b01;
-        let current = *machine.chain;
+        let current = machine.chain.snapshot();
         machine.host.chained = Some((
-            &mut *machine.chain,
+            machine.chain.address() as *mut ChainControl,
             ChainControl {
                 budget: CHAIN_LIMIT - 1,
                 retired: 2,
@@ -9008,7 +9015,7 @@ mod tests {
         assert_eq!(machine.statistics.exit_kinds, kinds);
         // Neither exit had a thunk yet.
         assert_eq!(machine.statistics.lookup_misses, [2, 0, 0, 0, 0]);
-        let control = &*machine.chain as *const ChainControl as u64;
+        let control = machine.chain.address();
         let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
         assert!(first.successors.is_empty() && first.dynamic_site.is_none());
         assert!(second.dynamic_site.is_none());
@@ -9035,7 +9042,7 @@ mod tests {
             assert_eq!(machine.host.patches[index], (site, jump));
         }
         let half = chain::half(base);
-        let context = machine.chain.contexts[half];
+        let context = machine.chain.contexts()[half];
         assert_ne!(context, 0);
         for (pc, block) in [(base, 0), (far, 1)] {
             let entry = machine.targets[chain::lookup_slot(pc)];
@@ -9053,7 +9060,7 @@ mod tests {
         machine.translations_changed();
         machine.host.exits = vec![exit(far, ExitKind::Direct)];
         machine.step().unwrap();
-        let renewed = machine.chain.contexts[half];
+        let renewed = machine.chain.contexts()[half];
         assert!(renewed > context);
         // The thunk's entry for `far` names the old context.
         assert_eq!(machine.statistics.lookup_misses, [2, 0, 1, 0, 0]);
@@ -9258,7 +9265,7 @@ mod tests {
         machine.step().unwrap();
         assert_eq!(machine.blocks.len(), 4);
         assert!(!machine.blocks[2].variant.guarded_page && machine.blocks[3].variant.guarded_page);
-        let control = &*machine.chain as *const ChainControl as u64;
+        let control = machine.chain.address();
         for (index, kind, btype) in [
             (0, ExitKind::Call, 0b10),
             (1, ExitKind::Indirect, 0b01),
@@ -9287,9 +9294,9 @@ mod tests {
         machine.remember_target(far, target);
         assert_eq!(machine.targets[chain::lookup_slot(far)].targets, 0b0111);
         // A run whose last transfer was the BLR's resumes with its BTYPE.
-        let current = *machine.chain;
+        let current = machine.chain.snapshot();
         machine.host.chained = Some((
-            &mut *machine.chain,
+            machine.chain.address() as *mut ChainControl,
             ChainControl {
                 budget: CHAIN_LIMIT - 1,
                 retired: 1,
@@ -11410,7 +11417,7 @@ mod tests {
             .unwrap()
             + 1;
         let site = (at + thunk.dynamic.unwrap()) as u64;
-        let control = &*machine.chain as *const ChainControl as u64;
+        let control = machine.chain.address();
         let lookup = chain::lookup_thunk(control, 1, None, ExitKind::Return, 0).unwrap();
         assert_eq!(machine.host.installed.last(), Some(&lookup));
         let jump = chain::jump(site, machine.host.installed.len() as u64).unwrap();

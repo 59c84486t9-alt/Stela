@@ -25,6 +25,7 @@
 //! holds what the exclusive load read, compared and stored in one host
 //! compare-and-exchange ([`super::Host::compare_exchange_ram`]). A write of
 //! the same value by another PE between them goes unseen, as with LSE CAS.
+use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
     DeviceError, DeviceReadShape, Devices, Host, Machine, RequirementKind, Reset, Start, Step,
@@ -44,7 +45,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use stela_compiler::aarch64::system::registers::Encoding;
 
 mod observation;
@@ -90,8 +91,10 @@ struct Inbox {
     /// A running core reads its mail at its next return to the engine,
     /// which [`Hub::interrupt`] brings forward to its next chained transfer.
     sleeping: AtomicBool,
-    /// Its machine's chain budget (`ChainControl::budget`), while attached.
-    budget: AtomicPtr<u64>,
+    /// Stable native chaining allocation, retained even between PE owners.
+    chain: Arc<chain_control::Storage>,
+    /// Unique owner epoch; zero is free and u64::MAX is detaching.
+    owner: AtomicU64,
     /// It runs no guest code until the world it was stopped for restarts,
     /// or while it waits in the engine for other PEs.
     parked: AtomicBool,
@@ -147,6 +150,8 @@ pub struct Hub {
     clock: Mutex<Option<Clock>>,
     /// The home machine's PE.
     home: AtomicUsize,
+    home_owner: AtomicU64,
+    next_owner: AtomicU64,
     /// One PE's forwarded device access at a time, and that one.
     forwarding: AtomicBool,
     requested: AtomicBool,
@@ -194,7 +199,8 @@ impl Hub {
                     pending: AtomicBool::new(false),
                     live: AtomicBool::new(false),
                     sleeping: AtomicBool::new(false),
-                    budget: AtomicPtr::new(core::ptr::null_mut()),
+                    chain: chain_control::Storage::new(),
+                    owner: AtomicU64::new(0),
                     parked: AtomicBool::new(false),
                     posted: AtomicU64::new(0),
                     applied: AtomicU64::new(0),
@@ -208,6 +214,8 @@ impl Hub {
             clusters: Mutex::new(BTreeMap::new()),
             clock: Mutex::new(None),
             home: AtomicUsize::new(0),
+            home_owner: AtomicU64::new(0),
+            next_owner: AtomicU64::new(1),
             forwarding: AtomicBool::new(false),
             requested: AtomicBool::new(false),
             request: Mutex::new(None),
@@ -251,12 +259,7 @@ impl Hub {
     /// transfer, by spending its chain budget, and so read its mail. A
     /// machine that sets a new budget meanwhile runs one chain more.
     fn interrupt(&self, pe: usize) {
-        let budget = self.inboxes[pe].budget.load(Ordering::Acquire);
-        if !budget.is_null() {
-            // SAFETY: the machine that attached it keeps it until its
-            // `Attached` detaches it, and reaches it atomically too.
-            unsafe { AtomicU64::from_ptr(budget) }.store(0, Ordering::Relaxed);
-        }
+        self.inboxes[pe].chain.budget().store(0, Ordering::Relaxed);
     }
 
     /// Kick PE `pe`'s core if it halts. Ordered after the store that tells
@@ -523,28 +526,104 @@ impl Hub {
     }
 }
 
-/// A machine's chain budget, as the hub reaches it, until the machine
-/// drops it: declared before the machine's `chain`, it drops first.
-pub(super) struct Attached {
-    hub: Arc<Hub>,
-    pe: usize,
+/// Why a parallel PE cannot acquire its actual hub ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelAdmissionError {
+    MachineAttached,
+    PeOutOfBounds { pe: usize, pes: usize },
+    PeOwned { pe: usize },
+    HomeOwned,
+    HomeUnavailable,
+    OwnerEpochExhausted,
+    PeersNotHeldInReset,
 }
-
-impl Attached {
-    fn new(hub: &Arc<Hub>, pe: usize, budget: *mut u64) -> Self {
-        hub.inboxes[pe].budget.store(budget, Ordering::Release);
-        Self {
-            hub: Arc::clone(hub),
-            pe,
+impl core::fmt::Display for ParallelAdmissionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MachineAttached => f.write_str("machine already owns a parallel PE"),
+            Self::PeOutOfBounds { pe, pes } => {
+                write!(f, "parallel PE {pe} is outside the hub's {pes} slots")
+            }
+            Self::PeOwned { pe } => write!(f, "parallel PE {pe} already has a live owner"),
+            Self::HomeOwned => f.write_str("parallel hub already has a home owner"),
+            Self::HomeUnavailable => f.write_str("parallel hub has no admitted home owner"),
+            Self::OwnerEpochExhausted => f.write_str("parallel ownership epochs exhausted"),
+            Self::PeersNotHeldInReset => {
+                f.write_str("only PEs held in reset can move to their own machines")
+            }
         }
     }
 }
+impl core::error::Error for ParallelAdmissionError {}
 
+/// One unique PE claim retained by its control owner through all native
+/// invocations. The inbox independently retains the budget allocation.
+pub(super) struct Attached {
+    hub: Arc<Hub>,
+    pe: usize,
+    epoch: u64,
+    home: bool,
+}
+impl Attached {
+    fn new(
+        hub: &Arc<Hub>,
+        pe: usize,
+        home: bool,
+    ) -> Result<(Arc<Self>, chain_control::Owner), ParallelAdmissionError> {
+        let inbox = hub
+            .inboxes
+            .get(pe)
+            .ok_or(ParallelAdmissionError::PeOutOfBounds { pe, pes: hub.pes() })?;
+        let epoch = hub
+            .next_owner
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1).filter(|value| *value < u64::MAX)
+            })
+            .map_err(|_| ParallelAdmissionError::OwnerEpochExhausted)?;
+        inbox
+            .owner
+            .compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ParallelAdmissionError::PeOwned { pe })?;
+        let mut attached = Self {
+            hub: Arc::clone(hub),
+            pe,
+            epoch,
+            home: false,
+        };
+        if home {
+            hub.home_owner
+                .compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| ParallelAdmissionError::HomeOwned)?;
+            attached.home = true;
+        }
+        let attached = Arc::new(attached);
+        // SAFETY: this is the only writer minted for the newly acquired
+        // epoch. The Owner retains its claim independently of field drop order.
+        let control = unsafe {
+            chain_control::Owner::from_claimed(Arc::clone(&inbox.chain), Arc::clone(&attached))
+        };
+        Ok((attached, control))
+    }
+}
 impl Drop for Attached {
     fn drop(&mut self) {
-        self.hub.inboxes[self.pe]
-            .budget
-            .store(core::ptr::null_mut(), Ordering::Release);
+        let inbox = &self.hub.inboxes[self.pe];
+        if inbox
+            .owner
+            .compare_exchange(self.epoch, u64::MAX, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            inbox.live.store(false, Ordering::Release);
+            if self.home {
+                let _ = self.hub.home_owner.compare_exchange(
+                    self.epoch,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            inbox.owner.store(0, Ordering::Release);
+        }
     }
 }
 
@@ -587,13 +666,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// start on its own machine ([`Self::start_parallel`]). The counter
     /// follows the host's from now on, as no machine can charge another's
     /// slices, and waits no longer leap it.
-    pub fn enter_parallel(&mut self, hub: Arc<Hub>) -> Result<(), &'static str> {
+    pub fn enter_parallel(&mut self, hub: Arc<Hub>) -> Result<(), ParallelAdmissionError> {
+        if self.attached.is_some() || self.parallel.is_some() {
+            return Err(ParallelAdmissionError::MachineAttached);
+        }
+        if self
+            .peers
+            .iter()
+            .any(|peer| !matches!(peer, Peer::Running | Peer::Off))
+        {
+            return Err(ParallelAdmissionError::PeersNotHeldInReset);
+        }
+        let (attached, control) = Attached::new(&hub, self.current, true)?;
+        self.adopt_parallel_control(control);
         for peer in &mut self.peers {
             match peer {
                 Peer::Running => {}
                 Peer::Off => *peer = Peer::Remote,
                 Peer::Parked(_) | Peer::Remote => {
-                    return Err("only PEs held in reset can move to their own machines");
+                    unreachable!("peer states checked before claiming the hub");
                 }
             }
         }
@@ -615,13 +706,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.share_kept_pages(hub.pes());
         self.idle_skip = false;
         hub.set_live(self.current, true);
-        self.attached = Some(Attached::new(
-            &hub,
-            self.current,
-            &raw mut self.chain.budget,
-        ));
+        self.attached = Some(attached);
         self.parallel = Some(hub);
         Ok(())
+    }
+
+    fn adopt_parallel_control(&mut self, control: chain_control::Owner) {
+        let contexts = self.chain.contexts();
+        // Every installed thunk embeds the old control address. Retire the
+        // whole local arena and lookup table before dropping that allocation.
+        self.discard_code();
+        self.targets
+            .fill(stela_compiler::x86_64::chain::LookupEntry::default());
+        self.chain = control;
+        self.chain
+            .initialize(self.targets.as_ptr() as u64, contexts);
     }
 
     /// Whether this machine runs one PE of a board whose PEs each run on
@@ -638,24 +737,39 @@ impl<H: Host, D: Devices> Machine<H, D> {
         core_locks: Arc<ctrr::CoreLocks>,
         address: u64,
     ) -> Step {
+        if self.attached.is_some() || self.parallel.is_some() {
+            return Err(self.unsupported(RequirementKind::ParallelAdmission(
+                ParallelAdmissionError::MachineAttached,
+            )));
+        }
+        let clock = {
+            let retained = hub.clock.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(clock) = retained
+                .as_ref()
+                .copied()
+                .filter(|_| hub.home_owner.load(Ordering::Acquire) != 0)
+            else {
+                return Err(self.unsupported(RequirementKind::ParallelAdmission(
+                    ParallelAdmissionError::HomeUnavailable,
+                )));
+            };
+            clock
+        };
+        let (attached, control) = Attached::new(&hub, self.current, false)
+            .map_err(|error| self.unsupported(RequirementKind::ParallelAdmission(error)))?;
+        self.adopt_parallel_control(control);
         for (pe, peer) in self.peers.iter_mut().enumerate() {
             if pe != self.current {
                 *peer = Peer::Remote;
             }
         }
-        let clock = hub.clock.lock().unwrap_or_else(|e| e.into_inner());
-        *self.clock = clock.expect("the home machine enters parallel before any start");
-        drop(clock);
+        *self.clock = clock;
         self.idle_skip = false;
         self.cpu.core_locks = core_locks;
         self.cpu.memory_lock = self.devices.memory_lock();
         self.share_kept_pages(hub.pes());
         hub.set_live(self.current, true);
-        self.attached = Some(Attached::new(
-            &hub,
-            self.current,
-            &raw mut self.chain.budget,
-        ));
+        self.attached = Some(attached);
         self.parallel = Some(hub);
         self.restart(self.current, address)
     }
@@ -1518,6 +1632,192 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_safe_attachment_refuses_without_replacing_the_live_owner() {
+        use super::super::tests::{BASE, board};
+        use crate::machine::NoDevices;
+        use stela_contracts::identity::Identity;
+        let identities = vec![Identity {
+            midr: 0x611f_0320,
+            mpidr: 0x8000_0000,
+            clock: None,
+            caches: None,
+        }];
+        let mut first = board(&[], NoDevices, identities.clone());
+        let mut second = board(&[], NoDevices, identities);
+        let (hub, _) = hub(1);
+        first.enter_parallel(Arc::clone(&hub)).unwrap();
+        let epoch = first.attached.as_ref().unwrap().epoch;
+        let untouched = second.chain.snapshot();
+        assert_eq!(
+            second.enter_parallel(Arc::clone(&hub)),
+            Err(ParallelAdmissionError::PeOwned { pe: 0 })
+        );
+        assert!(second.parallel.is_none() && second.attached.is_none());
+        assert_eq!(second.chain.snapshot(), untouched);
+        assert_eq!(
+            first.enter_parallel(Arc::clone(&hub)),
+            Err(ParallelAdmissionError::MachineAttached)
+        );
+        first.chain.budget().store(17, Ordering::Relaxed);
+        hub.interrupt(0);
+        assert_eq!(first.chain.budget().load(Ordering::Relaxed), 0);
+        drop(first);
+        second.enter_parallel(Arc::clone(&hub)).unwrap();
+        assert!(second.attached.as_ref().unwrap().epoch > epoch);
+        assert_eq!(second.cpu.pc, BASE);
+    }
+
+    #[test]
+    fn an_interrupt_borrow_survives_detach_and_reuse_without_a_raw_pointer_lease() {
+        use std::sync::mpsc;
+        let (hub, _) = hub(1);
+        let weak = Arc::downgrade(&hub.inboxes[0].chain);
+        let (attached, mut control) = Attached::new(&hub, 0, false).unwrap();
+        control.initialize(11, [12, 13]);
+        control.begin(9, 99);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let foreign = Arc::clone(&hub);
+        let reader = std::thread::spawn(move || {
+            let budget = foreign.inboxes[0].chain.budget();
+            ready_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+            budget.store(0, Ordering::Relaxed);
+        });
+        ready_rx.recv().unwrap();
+        drop(attached);
+        assert_ne!(
+            hub.inboxes[0].owner.load(Ordering::Acquire),
+            0,
+            "the control owner retains the claim"
+        );
+        drop(control);
+        assert_eq!(hub.inboxes[0].owner.load(Ordering::Acquire), 0);
+        assert!(
+            weak.upgrade().is_some(),
+            "hub retains the physical allocation"
+        );
+        let (next, mut control) = Attached::new(&hub, 0, false).unwrap();
+        control.initialize(21, [22, 23]);
+        control.begin(2, 77);
+        resume_tx.send(()).unwrap();
+        reader.join().unwrap();
+        let snapshot = control.snapshot();
+        assert_eq!(
+            (
+                snapshot.budget,
+                snapshot.retired,
+                snapshot.hits,
+                snapshot.linked
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            (snapshot.block, snapshot.table, snapshot.contexts),
+            (2, 21, [22, 23])
+        );
+        assert_eq!(hub.inboxes[0].owner.load(Ordering::Acquire), next.epoch);
+        drop(control);
+        drop(next);
+        drop(hub);
+        assert!(
+            weak.upgrade().is_none(),
+            "last hub/owner releases the allocation"
+        );
+    }
+
+    #[test]
+    fn populated_machine_discards_thunks_before_adopting_a_hub_control() {
+        use super::super::tests::{BASE, machine};
+        use stela_compiler::block::ExitKind;
+        let mut machine = machine(&[0x9100_0400, 0x1400_0002, 0, 0x9100_0400, 0x17ff_fffc]);
+        let direct = |next_pc| super::super::NativeExit::Exit {
+            next_pc,
+            kind: ExitKind::Direct as u64,
+        };
+        machine.host.exits = vec![direct(BASE + 12), direct(BASE), direct(BASE + 12)];
+        machine.step().unwrap();
+        machine.step().unwrap();
+        machine.step().unwrap();
+        assert_eq!(machine.statistics.links, 2);
+        assert!(!machine.host.installed.is_empty() && !machine.host.patches.is_empty());
+        let old_address = machine.chain.address();
+        let old_storage = machine.chain.weak_storage();
+        let old_patches = machine.host.patches.len();
+        let (hub, _) = hub(1);
+        machine.enter_parallel(Arc::clone(&hub)).unwrap();
+        assert_ne!(machine.chain.address(), old_address);
+        assert!(old_storage.upgrade().is_none());
+        assert!(
+            machine.blocks.is_empty()
+                && machine.index.is_empty()
+                && machine.fault_recovery.is_empty()
+        );
+        assert!(machine.host.installed.is_empty());
+        assert!(
+            machine
+                .targets
+                .iter()
+                .all(|entry| *entry == stela_compiler::x86_64::chain::LookupEntry::default())
+        );
+        machine.cpu.pc = BASE;
+        machine.host.exits = vec![direct(BASE + 12), direct(BASE), direct(BASE + 12)];
+        machine.step().unwrap();
+        machine.step().unwrap();
+        machine.step().unwrap();
+        let current = machine.chain.address().to_le_bytes();
+        let previous = old_address.to_le_bytes();
+        let rebuilt = &machine.host.patches[old_patches..];
+        assert!(
+            rebuilt
+                .iter()
+                .any(|(_, bytes)| bytes.windows(8).any(|word| word == current))
+        );
+        assert!(
+            rebuilt
+                .iter()
+                .all(|(_, bytes)| bytes.windows(8).all(|word| word != previous))
+        );
+    }
+
+    #[test]
+    fn repeated_owner_reuse_keeps_remote_budget_writes_disjoint() {
+        use core::sync::atomic::AtomicBool;
+        use std::sync::Barrier;
+        let (hub, _) = hub(1);
+        let started = Arc::new(Barrier::new(2));
+        let done = Arc::new(AtomicBool::new(false));
+        let foreign = Arc::clone(&hub);
+        let worker_started = Arc::clone(&started);
+        let worker_done = Arc::clone(&done);
+        let interrupt = std::thread::spawn(move || {
+            worker_started.wait();
+            while !worker_done.load(Ordering::Acquire) {
+                foreign.interrupt(0);
+            }
+        });
+        started.wait();
+        let mut last = 0;
+        for index in 0..1000 {
+            let (attached, mut control) = Attached::new(&hub, 0, false).unwrap();
+            assert!(attached.epoch > last);
+            last = attached.epoch;
+            control.initialize(index, [index + 1, index + 2]);
+            control.begin(index as usize, 31);
+            let state = control.snapshot();
+            assert_eq!(
+                (state.block, state.table, state.contexts),
+                (index, index, [index + 1, index + 2])
+            );
+            drop(attached);
+            drop(control);
+        }
+        done.store(true, Ordering::Release);
+        interrupt.join().unwrap();
+        assert_eq!(hub.inboxes[0].owner.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn parallel_pes_refuse_independent_idle_leaps() {
         use super::super::tests::{BASE, board};
         use {crate::machine::engine::NoDevices, stela_contracts::identity::Identity};
@@ -1691,14 +1991,14 @@ mod tests {
     #[test]
     fn a_broadcast_is_applied_once_every_running_pe_acknowledged_it() {
         let (hub, kicks) = hub(3);
-        let mut budget = 4096u64;
-        let attached = Attached::new(&hub, 1, &raw mut budget);
+        let (attached, control) = Attached::new(&hub, 1, false).unwrap();
+        control.budget().store(4096, Ordering::Relaxed);
         let mut posted = hub.broadcast(0, Maintenance::Code(None));
         assert_eq!(posted, [(1, 1), (2, 1)]);
         assert!(!hub.applied(&mut posted));
         // The running PE leaves native code at its next chained transfer.
         drop(attached);
-        assert_eq!(budget, 0);
+        assert_eq!(control.budget().load(Ordering::Relaxed), 0);
         let mail = hub.take(1).unwrap();
         assert_eq!((mail.maintenance.len(), mail.serial), (1, 1));
         hub.acknowledge(1, mail.serial);
