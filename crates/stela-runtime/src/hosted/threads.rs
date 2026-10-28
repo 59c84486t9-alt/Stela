@@ -30,7 +30,12 @@ use super::{
 };
 use crate::hosted::darwin::THREAD_SELF_TRAP;
 use crate::hosted::unsupported::{self, Failure, Kind};
+use crate::machine::CpuProfile;
+use crate::machine::Machine;
+use crate::machine::NoDevices;
+use crate::machine::Stop;
 use crate::machine::engine::RequirementKind;
+use crate::machine::system::Register;
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::{
     collections::BTreeMap,
@@ -41,10 +46,7 @@ use std::{
     },
 };
 use stela_compiler::TargetCpu;
-use {
-    crate::machine::CpuProfile, crate::machine::Machine, crate::machine::NoDevices,
-    crate::machine::Stop, crate::machine::system::Register, stela_contracts::Chip,
-};
+use stela_contracts::Chip;
 
 #[cfg(feature = "native-profile")]
 mod profile_output;
@@ -130,6 +132,8 @@ pub(super) struct ExecutionLock {
     state: Mutex<LockState>,
     turn: Condvar,
     waiting: AtomicU32,
+    #[cfg(test)]
+    entered: Condvar,
 }
 
 impl ExecutionLock {
@@ -140,6 +144,8 @@ impl ExecutionLock {
         let mut state = lock(&self.state);
         let ticket = state.next_ticket;
         state.next_ticket += 1;
+        #[cfg(test)]
+        self.entered.notify_all();
         while state.closed || state.serving != ticket {
             state = self
                 .turn
@@ -1044,17 +1050,29 @@ mod tests {
     #[test]
     fn closing_the_lock_stops_every_later_holder() {
         let lock = Arc::new(ExecutionLock::default());
-        lock.close(1);
+        assert!(lock.close(1));
+        lock.release(1);
         let blocked = {
             let lock = lock.clone();
             std::thread::spawn(move || {
-                lock.acquire(2);
-                unreachable!("a closed lock is never granted");
+                assert!(lock.acquire(2));
+                lock.release(2);
             })
         };
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        assert!(!blocked.is_finished());
+        let mut state = super::lock(&lock.state);
+        while state.next_ticket != 2 {
+            state = lock.entered.wait(state).unwrap();
+        }
+        assert!(state.closed);
+        assert_eq!(state.serving, 1);
+        assert_eq!(state.holder, None);
         assert!(lock.contended());
+        assert!(!blocked.is_finished());
+        // Reopen only this fixture so the waiting host thread can be joined.
+        state.closed = false;
+        drop(state);
+        lock.turn.notify_all();
+        blocked.join().unwrap();
     }
 
     #[test]

@@ -1060,7 +1060,6 @@ mod tests {
     const ARM_DEBUG_STATE32: u32 = 14;
     const ARM_NEON_STATE: u32 = 16;
     use std::sync::Arc;
-    use std::time::Duration;
 
     fn state(x0: u64) -> UserState {
         let mut state = UserState::default();
@@ -1083,6 +1082,13 @@ mod tests {
         inner.place = Place::Running;
         inner.published = None;
         control.update(&inner);
+    }
+
+    fn wait_for(control: &Control, predicate: impl Fn(&Inner) -> bool) {
+        let mut inner = control.lock();
+        while !predicate(&inner) {
+            inner = control.wait(inner);
+        }
     }
 
     /// Park as `leave` does without a PE: publish `state`, wait while
@@ -1114,9 +1120,7 @@ mod tests {
         let target = control.clone();
         // The target runs until its slice check sees the stop.
         let thread = std::thread::spawn(move || {
-            while !target.pending() {
-                std::thread::yield_now();
-            }
+            wait_for(&target, Inner::stopping);
             park(&target, state(7));
         });
         assert_eq!(control.suspend(false), KERN_SUCCESS);
@@ -1146,9 +1150,7 @@ mod tests {
         running(&control);
         let target = control.clone();
         let thread = std::thread::spawn(move || {
-            while !target.pending() {
-                std::thread::yield_now();
-            }
+            wait_for(&target, Inner::stopping);
             park(&target, state(42))
         });
         // While the thread runs no state is published.
@@ -1168,9 +1170,7 @@ mod tests {
         let target = control.clone();
         let thread = std::thread::spawn(move || park(&target, state(1)));
         // Wait for the park.
-        while control.stopped() != Some(Stopped::State) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_for(&control, |inner| inner.place == Place::Parked);
         let set = control.with_state(false, |current| {
             let mut set = *current;
             set.x[0] = 99;
@@ -1256,9 +1256,7 @@ mod tests {
             }
             inner.terminated
         });
-        while control.stopped() != Some(Stopped::State) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_for(&control, |inner| inner.place == Place::Parked);
         assert!(control.active());
         assert_eq!(control.terminate(0), KERN_SUCCESS);
         assert!(thread.join().unwrap());
@@ -1287,9 +1285,7 @@ mod tests {
             }
             inner.closed
         });
-        while control.stopped() != Some(Stopped::State) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_for(&control, |inner| inner.place == Place::Parked);
         control.close();
         assert!(thread.join().unwrap());
         // A caller waiting for a thread that never stops returns too.
@@ -1297,9 +1293,7 @@ mod tests {
         running(&control);
         let waiter = control.clone();
         let thread = std::thread::spawn(move || waiter.with_state(false, |_| ((), None)));
-        while !control.pending() {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_for(&control, Inner::stopping);
         control.close();
         assert_eq!(thread.join().unwrap(), Err(KERN_ABORTED));
     }
