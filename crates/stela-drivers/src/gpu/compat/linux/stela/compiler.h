@@ -20,3 +20,5 @@
 #ifndef __ASSEMBLER__
 _Static_assert(sizeof(*L"") == 2, "Linux compiler requires 16-bit wide literals");
 #endif
+/* Client calls cannot bypass the single boot-owned namespace authority. */
+#include <stela/acpi_client.h>
