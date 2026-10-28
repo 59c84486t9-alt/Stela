@@ -87,8 +87,12 @@ pub(crate) unsafe fn validate(
         stela_runtime::machine::mmu::placement::Placement::FiveLevel
     );
     crate::output::arguments(format_args!(
-        "NATIVE INVENTORY firmware_processors={} enabled={} physical_cores={} requested={cores}\n",
-        capture.processor_count, capture.enabled_count, capture.core_count,
+        "NATIVE INVENTORY firmware_processors={} enabled={} physical_cores={} assignable={} retired_cores={} requested={cores}\n",
+        capture.processor_count,
+        capture.enabled_count,
+        capture.physical_count,
+        capture.core_count,
+        capture.physical_count - capture.core_count,
     ));
     let memory_types = memory_types::Image::from_snapshot(&capture.snapshots[0])?;
     for (slot, snapshot) in capture.snapshots[..cores].iter().enumerate() {

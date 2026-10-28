@@ -59,7 +59,7 @@ pub(crate) unsafe fn reserve_for_workers(
     if cores == 0
         || cores > capture.core_count as usize
         || cores > super::topology::MAX_CORES
-        || count > super::topology::MAX_PROCESSORS
+        || count != capture.processors.len()
         || executors.processors().len() + 1 != cores
     {
         return Err("canonical target has an invalid assigned physical roster");

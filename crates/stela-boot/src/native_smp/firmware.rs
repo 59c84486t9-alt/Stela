@@ -26,7 +26,7 @@ use uefi::{
 };
 
 const MAGIC: u64 = 0x5354_4c53_4d50_3031;
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 pub(super) const EFER: u32 = 0xc000_0080;
 const PAT: u32 = 0x277;
 const APIC_BASE: u32 = 0x1b;
@@ -57,8 +57,10 @@ impl Error {
         match self {
             Self::NoMpServices => "native cores need UEFI MP Services source identity",
             Self::ProcessorInventory => "native processor inventory is invalid",
-            Self::Topology(_) => "native physical-core topology is ambiguous or exceeds capacity",
-            Self::CoreCount => "requested native count exceeds available physical cores",
+            Self::Topology(_) => "native physical-core topology is ambiguous",
+            Self::CoreCount => {
+                "requested native count exceeds the available physical cores or the executor's core capacity"
+            }
             Self::WrongBootstrapProcessor => {
                 "native BSP differs from the firmware processor identity"
             }
@@ -329,15 +331,16 @@ extern "efiapi" fn observe_ap(argument: *mut c_void) {
     }
 }
 
-/// Observe all available physical cores even when no explicit assignment was
-/// given. The default assignment is the actual selected physical-core roster;
+/// Observe the assignable physical cores (`min(physical, MAX_CORES)`) even when
+/// no explicit assignment was given. The default assignment is that roster;
 /// --native-cores narrows ownership explicitly, never supplies invented PEs.
 pub(crate) fn capture_assignment(requested: Option<usize>) -> Result<(Region, usize), Error> {
     let region = capture(requested.unwrap_or(1))?;
     // SAFETY: capture just allocated and initialized this exact retained UEFI
     // allocation; before EBS its physical address is directly accessible.
-    let count = unsafe { (&*(region.physical as *const Capture)).core_count as usize };
-    let assigned = topology::assignment_count(requested, count).map_err(|_| Error::CoreCount)?;
+    let physical = unsafe { Capture::from_raw(region.physical as *const u8, 0).physical_count };
+    let assigned =
+        topology::assignment_count(requested, physical as usize).map_err(|_| Error::CoreCount)?;
     Ok((region, assigned))
 }
 
@@ -348,7 +351,7 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
     let count = mp
         .get_number_of_processors()
         .map_err(|_| Error::ProcessorInventory)?;
-    if count.total == 0 || count.total > topology::MAX_PROCESSORS || count.enabled > count.total {
+    if count.total == 0 || count.total > u32::MAX as usize || count.enabled > count.total {
         return Err(Error::ProcessorInventory);
     }
     let mut processors = Vec::with_capacity(count.total);
@@ -408,10 +411,13 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
             thread,
         });
     }
-    let selected = topology::select(&processors).map_err(Error::Topology)?;
-    if requested == 0 || requested > selected.len() {
+    let physical = topology::select(&processors).map_err(Error::Topology)?;
+    let assignable =
+        topology::assignment_count(None, physical.len()).map_err(|_| Error::CoreCount)?;
+    if requested == 0 || requested > assignable {
         return Err(Error::CoreCount);
     }
+    let selected = &physical[..assignable];
     if mp.who_am_i().map_err(|_| Error::WrongBootstrapProcessor)?
         != processors[selected[0]].processor_number as usize
     {
@@ -448,22 +454,22 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
         }
         snapshots.push(snapshot);
     }
-    let pages = size_of::<Capture>().div_ceil(PAGE as usize);
+    let pages = record_pages(processors.len()).ok_or(Error::Memory)?;
     let memory = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
         .map_err(|_| Error::Memory)?;
-    let raw = memory.as_ptr().cast::<Capture>();
     // SAFETY: fresh owned firmware pages; all-zero is valid for this closed
     // record of integers/booleans/arrays. No large intermediate sits on a UEFI
     // stack. All protocol/callback/Vec borrows end before ExitBootServices.
     unsafe {
         memory.as_ptr().write_bytes(0, pages * PAGE as usize);
-        let capture = &mut *raw;
+        let capture = Capture::from_raw_mut(memory.as_ptr(), processors.len());
         capture.magic = MAGIC;
         capture.version = VERSION;
         capture.processor_count = processors.len() as u32;
         capture.enabled_count = count.enabled as u32;
         capture.core_count = selected.len() as u32;
-        capture.processors[..processors.len()].copy_from_slice(&processors);
+        capture.physical_count = physical.len() as u32;
+        capture.processors.copy_from_slice(&processors);
         for (slot, &index) in selected.iter().enumerate() {
             capture.selected[slot] = index as u32;
             capture.snapshots[slot] = snapshots[slot];
@@ -475,28 +481,42 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
     })
 }
 
+/// Whole pages holding a record of `processors` inventory entries.
+fn record_pages(processors: usize) -> Option<usize> {
+    Some(Capture::layout(processors)?.size().div_ceil(PAGE as usize))
+}
+
 /// # Safety
 /// This is the loader's immutable owned record, mapped in the engine physmap.
 pub(crate) unsafe fn captured(region: Region) -> Result<&'static Capture, Error> {
-    if region.bytes != (size_of::<Capture>() as u64).next_multiple_of(PAGE)
+    let header_pages = record_pages(0).ok_or(Error::Memory)?;
+    if region.bytes < (header_pages as u64) * PAGE
         || region.physical == 0
         || !region.physical.is_multiple_of(PAGE)
     {
         return Err(Error::Memory);
     }
-    // SAFETY: caller retains the exact loader allocation and its physmap.
-    let capture = unsafe { &*(crate::layout::physical(region.physical) as *const Capture) };
+    let base = crate::layout::physical(region.physical) as *const u8;
+    // SAFETY: caller retains the exact loader allocation and its physmap; the
+    // header-only view lies within the checked region.
+    let count = unsafe { Capture::from_raw(base, 0) }.processor_count as usize;
+    if record_pages(count).map(|pages| pages as u64 * PAGE) != Some(region.bytes) {
+        return Err(Error::Memory);
+    }
+    // SAFETY: the region holds exactly the record for `count` entries.
+    let capture = unsafe { Capture::from_raw(base, count) };
+    let physical = capture.physical_count as usize;
     if capture.magic != MAGIC
         || capture.version != VERSION
-        || capture.processor_count as usize > topology::MAX_PROCESSORS
         || capture.core_count == 0
-        || capture.core_count as usize > topology::MAX_CORES
+        || topology::assignment_count(None, physical) != Ok(capture.core_count as usize)
     {
         return Err(Error::ProcessorInventory);
     }
-    let processors = &capture.processors[..capture.processor_count as usize];
-    let selected = topology::select(processors).map_err(Error::Topology)?;
-    if selected.len() != capture.core_count as usize
+    let processors = &capture.processors;
+    let all = topology::select(processors).map_err(Error::Topology)?;
+    let selected = &all[..all.len().min(topology::MAX_CORES)];
+    if all.len() != physical
         || capture.enabled_count as usize
             != processors
                 .iter()

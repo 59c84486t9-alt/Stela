@@ -84,9 +84,12 @@ impl<'a> BspRoster<'a> {
             .processors
             .get(..capture.processor_count as usize)
             .ok_or("assigned topology has an invalid captured processor count")?;
-        let selected =
+        let physical =
             native::select(processors).map_err(|e| format!("assigned BSP source roster: {e:?}"))?;
-        if selected.len() != capture.core_count as usize
+        let selected = physical
+            .get(..capture.core_count as usize)
+            .ok_or("assigned topology has more captured cores than physical cores")?;
+        if physical.len() != capture.physical_count as usize
             || selected
                 .iter()
                 .enumerate()
@@ -857,19 +860,11 @@ mod tests {
             bytes: 0x9008,
         }
     }
-    fn capture() -> Capture {
-        let mut capture = Capture {
-            magic: 0,
-            version: 0,
-            processor_count: 0,
-            core_count: 0,
-            enabled_count: 0,
-            processors: [native::Processor::default(); native::MAX_PROCESSORS],
-            selected: [0; native::MAX_CORES],
-            snapshots: [native::Snapshot::default(); native::MAX_CORES],
-        };
+    fn capture() -> alloc::boxed::Box<Capture> {
+        let mut capture = Capture::boxed(2);
         capture.processor_count = 2;
         capture.core_count = 2;
+        capture.physical_count = 2;
         capture.enabled_count = 2;
         for index in 0..2 {
             capture.processors[index] = native::Processor {

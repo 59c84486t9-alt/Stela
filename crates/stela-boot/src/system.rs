@@ -887,8 +887,9 @@ fn load(
     crate::status::done("");
     // SAFETY: the fresh immutable MP observation is retained LOADER_DATA. Identity
     // mappings and the calibrated local APIC remain valid across EBS.
-    let capture =
-        unsafe { &*(native_processors.physical as *const crate::native_smp::firmware::Capture) };
+    let capture = unsafe {
+        crate::native_smp::firmware::Capture::read(native_processors.physical as *const u8)
+    };
     let sender = crate::apic::Apic::new(apic_base, apic);
     crate::status::begin("Taking control of the other processors");
     crate::output::leave_boot_services();
