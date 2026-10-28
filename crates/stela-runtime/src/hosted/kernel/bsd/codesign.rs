@@ -115,9 +115,10 @@ const ALLOW_JIT: &str = "com.apple.security.cs.allow-jit";
 const DYNAMIC_CODESIGNING: &str = "dynamic-codesigning";
 const SINGLE_JIT: &str = "com.apple.security.cs.single-jit";
 /// `process_is_plugin_host`'s entitlements (`bsd/kern/mach_loader.c`,
-/// `OVERRIDE_PLUGIN_HOST_ENTITLEMENT`, `CLEAR_LV_ENTITLEMENT`) and the
-/// identities of `/System/Library/Security/HardeningExceptions.plist`,
-/// matched as prefixes.
+/// `OVERRIDE_PLUGIN_HOST_ENTITLEMENT`, `CLEAR_LV_ENTITLEMENT`) and its
+/// `hardening_exceptions` identities, matched as prefixes. XNU compiles
+/// that list in, taken from `/System/Library/Security/HardeningExceptions.plist`,
+/// and never reads the file: the kernel's copy is the one modeled.
 const OVERRIDE_PLUGIN_HOST: &str = "com.apple.private.security.override-plugin-host-detection";
 const DISABLE_LIBRARY_VALIDATION: [&str; 3] = [
     "com.apple.security.cs.disable-library-validation",
