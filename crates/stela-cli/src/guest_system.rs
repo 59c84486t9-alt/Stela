@@ -1,12 +1,12 @@
-//! The guest system files hosted programs run against: the target build's
+//! The guest system files hosted programs run against: a supported build's
 //! arm64e dyld and dyld shared cache, which the x86 host lacks, installed
 //! once per user and build under `~/Library/Application Support/Stela`
 //! (`stela install-system`) and found by `stela run` without any option.
 //! See `docs/design/hosted-cli.md`.
 mod install;
 
+use crate::setup::download_dir;
 use crate::setup::host::{Host, System};
-use crate::setup::{PINNED_BUILD, download_dir};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
@@ -14,9 +14,8 @@ use std::collections::BTreeMap;
 #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use stela_runtime::builds::{self, Build};
 
-/// The product version of [`PINNED_BUILD`], the guest system's version.
-pub(crate) const PINNED_VERSION: &str = "27.0.1";
 /// Development override: a colon-separated list of guest roots.
 #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 pub(crate) const ROOT_VARIABLE: &str = "STELA_GUEST_ROOT";
@@ -45,30 +44,36 @@ pub(crate) fn support_directory() -> Result<PathBuf> {
     Ok(home()?.join(SUPPORT_DIRECTORY))
 }
 
-/// Where one build's guest system lives.
+/// Where one supported build's guest system lives. Its receipt records
+/// the build and version it holds.
 #[derive(Debug, Clone)]
 pub(crate) struct Layout {
     /// `~/Library/Application Support/Stela`.
     base: PathBuf,
-    build: String,
+    build: &'static Build,
 }
 
 impl Layout {
-    pub(crate) fn new(base: PathBuf, build: &str) -> Self {
-        Self {
-            base,
-            build: build.to_owned(),
-        }
+    pub(crate) fn new(base: PathBuf, build: &'static Build) -> Self {
+        Self { base, build }
     }
 
-    /// The pinned build's layout under the user's home.
-    pub(crate) fn pinned() -> Result<Self> {
-        Ok(Self::new(support_directory()?, PINNED_BUILD))
+    /// `build`'s layout under the user's home.
+    pub(crate) fn of(build: &'static Build) -> Result<Self> {
+        Ok(Self::new(support_directory()?, build))
+    }
+
+    /// The installed layout of the newest supported build that has one.
+    pub(crate) fn installed_any(base: &Path) -> Option<Self> {
+        builds::SUPPORTED
+            .iter()
+            .map(|build| Self::new(base.to_owned(), build))
+            .find(|layout| layout.receipt().is_file())
     }
 
     /// The build's directory.
     pub(crate) fn directory(&self) -> PathBuf {
-        self.base.join(&self.build)
+        self.base.join(self.build.build)
     }
 
     /// The guest root `stela run` uses.
@@ -83,7 +88,12 @@ impl Layout {
     /// The staging directory an install is written into before it is
     /// renamed into place.
     fn partial(&self) -> PathBuf {
-        self.base.join(format!(".{}.partial", self.build))
+        self.base.join(format!(".{}.partial", self.build.build))
+    }
+
+    /// `macOS 27.0.1 (26A434)`.
+    fn name(&self) -> String {
+        format!("macOS {} ({})", self.build.version, self.build.build)
     }
 
     /// The guest root when the install is complete.
@@ -94,9 +104,9 @@ impl Layout {
         let root = self.root();
         ensure!(
             root.join(DYLD).is_file(),
-            "the macOS {} system files in {} are damaged; reinstall them with \
+            "the {} system files in {} are damaged; reinstall them with \
              `stela install-system --remove` and then `stela install-system`",
-            self.build,
+            self.name(),
             self.directory().display()
         );
         Ok(Some(root))
@@ -104,7 +114,8 @@ impl Layout {
 }
 
 /// The guest roots for a run: `explicit` (`--root`) when given, else
-/// `STELA_GUEST_ROOT`, else the installed system of the pinned build. Each
+/// `STELA_GUEST_ROOT`, else the installed system of the newest supported
+/// build that has one. Each
 /// is the canonical path of its directory: the host kernel reports rooted
 /// files by their real paths, and the guest's `O_NOFOLLOW_ANY` lookups
 /// must meet no symbolic link above a root (such as `/var` or a linked
@@ -116,10 +127,10 @@ pub(crate) fn roots(explicit: &[PathBuf]) -> Result<Vec<PathBuf>> {
     } else if let Some(list) = std::env::var_os(ROOT_VARIABLE).filter(|list| !list.is_empty()) {
         environment_roots(&list)?
     } else {
-        let layout = Layout::pinned()?;
-        match layout.installed()? {
-            Some(root) => vec![root],
-            None => return Err(not_installed(&layout)),
+        let base = support_directory()?;
+        match Layout::installed_any(&base) {
+            Some(layout) => vec![layout.installed()?.context("no guest root")?],
+            None => return Err(not_installed(&Layout::new(base, builds::DEFAULT))),
         }
     };
     roots
@@ -189,31 +200,35 @@ pub(crate) fn kernel_versions(roots: &[PathBuf]) -> Result<BTreeMap<String, Stri
 /// and the one command that installs it.
 #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
 fn not_installed(layout: &Layout) -> anyhow::Error {
+    let Build { build, version, .. } = layout.build;
     let command = match find_ipsw() {
         Some(ipsw) => format!(
-            "    stela install-system\n\n(it reads the macOS {PINNED_VERSION} restore image \
-             {})",
+            "    stela install-system\n\n(it reads the restore image {})",
             ipsw.display()
         ),
         None => format!(
-            "    stela install-system --ipsw PATH/TO/UniversalMac_{PINNED_VERSION}_{PINNED_BUILD}_Restore.ipsw\n\n\
-             (with the macOS {PINNED_VERSION} restore image you have; add --fetch instead of \
+            "    stela install-system --ipsw PATH/TO/UniversalMac_{version}_{build}_Restore.ipsw\n\n\
+             (with the macOS {version} restore image you have; add --fetch instead of \
              --ipsw to download it from Apple)"
         ),
     };
     anyhow::anyhow!(
-        "the macOS {PINNED_VERSION} ({PINNED_BUILD}) system files that arm64 programs run \
-         against are not installed in {}. Install them once with:\n\n{command}",
+        "the {} system files that arm64 programs run against are not installed in {}. Install \
+         them once with:\n\n{command}",
+        layout.name(),
         layout.directory().display()
     )
 }
 
-/// Whether `name` is a restore image file name of the pinned build.
-fn pinned_ipsw_name(name: &str) -> bool {
-    name.starts_with("UniversalMac_") && name.ends_with(&format!("_{PINNED_BUILD}_Restore.ipsw"))
+/// Whether `name` is a restore image file name of a supported build.
+fn supported_ipsw_name(name: &str) -> bool {
+    name.starts_with("UniversalMac_")
+        && builds::SUPPORTED
+            .iter()
+            .any(|build| name.ends_with(&format!("_{}_Restore.ipsw", build.build)))
 }
 
-/// The first pinned-build IPSW in setup's download directory or
+/// The first supported-build IPSW in setup's download directory or
 /// [`DOWNLOADS`].
 pub(crate) fn find_ipsw() -> Option<PathBuf> {
     let home = home().ok()?;
@@ -229,7 +244,7 @@ pub(crate) fn find_ipsw() -> Option<PathBuf> {
                         && path
                             .file_name()
                             .and_then(|name| name.to_str())
-                            .is_some_and(pinned_ipsw_name)
+                            .is_some_and(supported_ipsw_name)
                 })
                 .collect();
             found.sort();
@@ -237,13 +252,21 @@ pub(crate) fn find_ipsw() -> Option<PathBuf> {
         })
 }
 
+/// The supported build `ipsw` holds.
+fn ipsw_build(ipsw: &Path) -> Result<&'static Build> {
+    let manifest = crate::restore::archive::manifest(ipsw, None, false)
+        .with_context(|| format!("{} is not a macOS restore image", ipsw.display()))?;
+    builds::find(&manifest.product_build).with_context(|| ipsw.display().to_string())
+}
+
 #[derive(Args)]
 pub(crate) struct InstallSystem {
-    /// The macOS 27 restore image (IPSW) to read; found in
+    /// The macOS restore image (IPSW) of a supported build to read; found in
     /// ~/Library/Caches/Stela/images or ~/Downloads by default.
     #[arg(long, conflicts_with_all = ["fetch", "import"])]
     ipsw: Option<PathBuf>,
-    /// Download the restore image from Apple first (about 27 GB).
+    /// Download the newest supported build's restore image from Apple first
+    /// (about 27 GB).
     #[arg(long, conflicts_with = "import")]
     fetch: bool,
     /// A directory of the IPSW's recipient AEA keys, named
@@ -258,7 +281,7 @@ pub(crate) struct InstallSystem {
     #[arg(long)]
     dry_run: bool,
     /// Development: copy guest roots `stela extract-guest-files` made from
-    /// the pinned build's images instead of reading an IPSW.
+    /// the newest supported build's images instead of reading an IPSW.
     #[arg(long, hide = true, value_name = "DIR")]
     import: Vec<PathBuf>,
 }
@@ -266,12 +289,16 @@ pub(crate) struct InstallSystem {
 impl InstallSystem {
     pub(crate) fn run(self) -> Result<()> {
         crate::require_hosted("stela install-system")?;
-        let layout = Layout::pinned()?;
+        let base = support_directory()?;
         if self.remove {
-            remove(&layout, self.dry_run)?;
+            for build in builds::SUPPORTED {
+                remove(&Layout::new(base.clone(), build), self.dry_run)?;
+            }
             return crate::apps::remove_service(self.dry_run);
         }
-        if let Some(root) = layout.installed()? {
+        if let Some(layout) = Layout::installed_any(&base)
+            && let Some(root) = layout.installed()?
+        {
             let found = find_ipsw();
             install::metadata::refresh(
                 &layout,
@@ -279,12 +306,14 @@ impl InstallSystem {
                 self.dry_run,
             )?;
             println!(
-                "The macOS {PINNED_VERSION} ({PINNED_BUILD}) system files are installed in {}.",
+                "The {} system files are installed in {}.",
+                layout.name(),
                 root.display()
             );
             return crate::apps::install_service(self.dry_run);
         }
         if !self.import.is_empty() {
+            let layout = Layout::new(base, builds::DEFAULT);
             install::from_roots(&layout, &self.import, self.dry_run)?;
             return crate::apps::install_service(self.dry_run);
         }
@@ -295,18 +324,23 @@ impl InstallSystem {
             }
             (None, true) => crate::setup::fetch_image(
                 &download_dir(),
-                PINNED_BUILD,
+                builds::DEFAULT.build,
                 crate::setup::PINNED_MODEL,
             )?,
             (None, false) => find_ipsw().with_context(|| {
                 format!(
-                    "no macOS {PINNED_VERSION} ({PINNED_BUILD}) restore image found in {} or \
-                     ~/Downloads; pass it with --ipsw PATH, or add --fetch to download it from \
-                     Apple (about 27 GB)",
+                    "no restore image of a supported build ({}) found in {} or ~/Downloads; pass \
+                     it with --ipsw PATH, or add --fetch to download it from Apple (about 27 GB)",
+                    builds::SUPPORTED
+                        .iter()
+                        .map(|build| build.build)
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     download_dir().display()
                 )
             })?,
         };
+        let layout = Layout::new(base, ipsw_build(&ipsw)?);
         install::from_ipsw(&layout, &ipsw, self.aea_keys.as_deref(), self.dry_run)?;
         crate::apps::install_service(self.dry_run)
     }
@@ -319,7 +353,7 @@ fn remove(layout: &Layout, dry_run: bool) -> Result<()> {
         .filter(|directory| directory.exists())
         .collect();
     if directories.is_empty() {
-        println!("No macOS {} system files are installed.", layout.build);
+        println!("No {} system files are installed.", layout.name());
         return Ok(());
     }
     for directory in directories {
@@ -332,6 +366,16 @@ fn remove(layout: &Layout, dry_run: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The product version of the guest system the receipt beside the first of
+/// `roots` that has one records; `None` for roots without one.
+pub(crate) fn system_version(roots: &[PathBuf]) -> Option<String> {
+    roots.iter().find_map(|root| {
+        let bytes = std::fs::read(root.parent()?.join(RECEIPT)).ok()?;
+        let receipt: install::Receipt = serde_json::from_slice(&bytes).ok()?;
+        (receipt.kind == install::KIND).then(|| receipt.product_version)
+    })
 }
 
 /// The free bytes of the file system holding `path`.
@@ -351,7 +395,7 @@ mod tests {
     #[test]
     fn the_layout_keeps_each_build_in_its_own_directory() -> Result<()> {
         let base = tempfile::tempdir()?;
-        let layout = Layout::new(base.path().to_owned(), "26A434");
+        let layout = Layout::new(base.path().to_owned(), builds::DEFAULT);
         assert_eq!(layout.root(), base.path().join("26A434/root"));
         assert_eq!(layout.receipt(), base.path().join("26A434/receipt.json"));
         assert_eq!(layout.partial(), base.path().join(".26A434.partial"));
@@ -371,7 +415,7 @@ mod tests {
     #[test]
     fn kernel_versions_come_from_the_receipt_beside_the_root() -> Result<()> {
         let base = tempfile::tempdir()?;
-        let layout = Layout::new(base.path().to_owned(), "26A434");
+        let layout = Layout::new(base.path().to_owned(), builds::DEFAULT);
         let roots = [layout.root()];
         assert!(kernel_versions(&roots)?.is_empty());
         let version = "Darwin Kernel Version 1.2.3: synthetic; root:test~1/RELEASE_TEST";
@@ -422,10 +466,14 @@ mod tests {
     }
 
     #[test]
-    fn only_the_pinned_build_s_restore_images_are_found() {
-        assert!(pinned_ipsw_name("UniversalMac_27.0.1_26A434_Restore.ipsw"));
-        assert!(!pinned_ipsw_name("UniversalMac_26.0_25A354_Restore.ipsw"));
-        assert!(!pinned_ipsw_name(
+    fn only_supported_builds_restore_images_are_found() {
+        assert!(supported_ipsw_name(
+            "UniversalMac_27.0.1_26A434_Restore.ipsw"
+        ));
+        assert!(!supported_ipsw_name(
+            "UniversalMac_26.0_25A354_Restore.ipsw"
+        ));
+        assert!(!supported_ipsw_name(
             "UniversalMac_27.0.1_26A434_Restore.ipsw.part"
         ));
     }

@@ -1,7 +1,7 @@
 //! The `stela` command line: prepare a USB that boots Stela to install macOS
 //! on a PC, compile, run and inspect original ARM code, and, on an Intel Mac,
 //! run arm64 macOS programs and apps.
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -241,15 +241,7 @@ pub fn main() -> ExitCode {
 
 #[cfg(not(windows))]
 fn commands() -> anyhow::Result<()> {
-    let matches = Cli::command().get_matches();
-    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    if let Command::Setup(setup) = &mut cli.command {
-        setup.build_explicit = matches
-            .subcommand_matches("setup")
-            .and_then(|m| m.value_source("build"))
-            == Some(clap::parser::ValueSource::CommandLine);
-    }
-    cli.command.run()
+    Cli::parse().command.run()
 }
 
 /// `stela.exe` is the installer alone: running it opens the setup wizard, and
@@ -265,11 +257,7 @@ struct Installer {
 
 #[cfg(windows)]
 fn installer() -> anyhow::Result<()> {
-    let matches = Installer::command().get_matches();
-    let mut installer = Installer::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    installer.setup.build_explicit =
-        matches.value_source("build") == Some(clap::parser::ValueSource::CommandLine);
-    installer.setup.run()
+    Installer::parse().setup.run()
 }
 
 #[cfg(test)]

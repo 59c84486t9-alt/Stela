@@ -83,9 +83,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use stela_loader::mount_interface::{self, Choice, Choices, Interface};
+use stela_runtime::builds;
 
-/// The pinned system target.
-pub(crate) const PINNED_BUILD: &str = "26A434";
+/// The Mac model Stela presents by default.
 pub(crate) const PINNED_MODEL: &str = "MacBookPro18,3";
 const RECORD: &str = "EFI/stela/setup.json";
 /// A margin so no volume is filled to its last byte.
@@ -149,8 +149,6 @@ fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
 
 #[derive(Args)]
 pub(crate) struct Setup {
-    #[arg(skip)]
-    pub(crate) build_explicit: bool,
     /// The USB's EFI partition, another mounted volume of the same USB, or
     /// the whole USB disk (such as disk5 on macOS, /dev/sdb on Linux or
     /// PhysicalDrive2 on Windows), which setup erases first into an EFI
@@ -184,8 +182,8 @@ pub(crate) struct Setup {
     /// refuses unsupported ones. Every install of a setup presents the same model.
     #[arg(long)]
     model: Option<String>,
-    /// The build `--fetch` downloads.
-    #[arg(long, default_value = PINNED_BUILD, hide = true)]
+    /// The build `--fetch` downloads: the newest supported one by default.
+    #[arg(long, default_value = builds::DEFAULT.build, hide = true)]
     build: String,
     /// Show what would change, and change nothing.
     #[arg(long)]
@@ -910,6 +908,9 @@ struct Environment<'a> {
     /// The revision of the bundles this `stela` prepares
     /// (`stela_loader::boot_bundle::REVISION`).
     bundle_revision: u32,
+    /// The macOS builds setup prepares (`stela_runtime::builds::SUPPORTED`);
+    /// tests add their synthetic images' builds.
+    builds: &'a [builds::Build],
 }
 
 impl Environment<'_> {
@@ -1044,6 +1045,13 @@ fn prepare_restore_bundles(
 /// Prepare `ipsw`'s bundles of `kind` for each machine of `ecids`, under
 /// Apple's personalized ticket with the TSS opt-in `tss`; the image must be
 /// `build`, when given. Returns the image's version and build too.
+/// Refuse `ipsw`, of macOS `build`, unless setup supports that build.
+fn supported(environment: &Environment<'_>, ipsw: &Path, build: &str) -> Result<()> {
+    builds::find_in(environment.builds, build)
+        .map(drop)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", ipsw.display()))
+}
+
 fn prepare_kind(
     environment: &Environment<'_>,
     kind: Kind,
@@ -1061,6 +1069,7 @@ fn prepare_kind(
             ipsw.display()
         );
     }
+    supported(environment, ipsw, &found)?;
     let mut prepared = Vec::new();
     for &ecid in ecids {
         let directory = tempfile::tempdir()?;
@@ -1177,6 +1186,7 @@ impl Setup {
             piece_bytes: stela_runtime::payload::PIECE_BYTES,
             interface: mount_interface::CURRENT,
             bundle_revision: stela_loader::boot_bundle::REVISION,
+            builds: builds::SUPPORTED,
         };
         let interactive = self.usb.as_os_str().is_empty();
         if interactive && !wizard::configure(&mut self, environment.host)? {
@@ -1538,7 +1548,7 @@ pub(crate) fn download_dir() -> PathBuf {
     std::env::temp_dir().join("Stela/images")
 }
 
-/// Download the pinned image, or reuse a complete earlier download: the
+/// Download `--build`'s image, or reuse a complete earlier download: the
 /// whole IPSW for an offline install medium, else its recovery members,
 /// which prepare the boot bundles.
 fn fetch(command: &Setup) -> Result<PathBuf> {
@@ -2262,6 +2272,9 @@ fn state_line(disk: &installed::InstalledDisk) -> String {
 fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
     let host = environment.host;
     ensure!(command.tss, TSS_REQUIRED);
+    if command.fetch {
+        builds::find_in(environment.builds, &command.build)?;
+    }
     let mut erase = None;
     if let Some(disk) = host.whole_disk(&command.usb)? {
         let found = host.disks()?.into_iter().find(|d| d.identifier == disk);
@@ -2321,6 +2334,10 @@ fn setup(environment: &Environment<'_>, mut command: Setup) -> Result<String> {
         }
         command.image()?
     };
+    if ipsw.is_file() {
+        let (_, build) = restore::payload::identity(&ipsw, command.model())?;
+        supported(environment, &ipsw, &build)?;
+    }
     let environment = &Environment {
         download: download.as_ref(),
         ..*environment
@@ -2801,7 +2818,6 @@ mod tests {
 
     fn command(f: &Fixture, usb: &Path) -> Setup {
         Setup {
-            build_explicit: false,
             usb: usb.to_path_buf(),
             ipsw: Some(f.ipsw.clone()),
             fetch: false,
@@ -2809,7 +2825,7 @@ mod tests {
             download_dir: None,
             efi: Some(f.efi.clone()),
             model: Some(restore::payload::SYNTHETIC_MODEL.into()),
-            build: PINNED_BUILD.into(),
+            build: restore::payload::SYNTHETIC_BUILD.into(),
             dry_run: false,
             uninstall: false,
             target: None,
@@ -2911,7 +2927,43 @@ mod tests {
             piece_bytes: medium::tests::PIECE_BYTES,
             interface: mount_interface::CURRENT,
             bundle_revision: stela_loader::boot_bundle::REVISION,
+            builds: SYNTHETIC_BUILDS,
         }
+    }
+
+    /// The synthetic images' builds, as supported ones.
+    const SYNTHETIC_BUILDS: &[builds::Build] = &[
+        synthetic_build(restore::payload::SYNTHETIC_BUILD),
+        synthetic_build("STELA2"),
+        synthetic_build("STELA3"),
+    ];
+
+    const fn synthetic_build(build: &'static str) -> builds::Build {
+        builds::Build {
+            build,
+            version: "27.0",
+            dcp_link_version: builds::DEFAULT.dcp_link_version,
+        }
+    }
+
+    #[test]
+    fn a_build_outside_the_table_is_not_prepared() {
+        let f = fixture(64 * GIB, true);
+        let environment = Environment {
+            builds: builds::SUPPORTED,
+            ..environment(&f.host)
+        };
+        let error = setup(&environment, command(&f, &f.esp))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "macOS build {} is not supported",
+                restore::payload::SYNTHETIC_BUILD
+            )),
+            "{error}"
+        );
+        assert!(error.contains(builds::DEFAULT.build), "{error}");
     }
 
     /// Stand-ins for the restore and update restore `boot prepare` of a

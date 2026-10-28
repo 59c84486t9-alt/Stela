@@ -4,7 +4,7 @@
 //! install is either complete, with its receipt, or absent.
 pub(super) mod metadata;
 
-use super::{Layout, PINNED_VERSION, available_bytes, gigabytes};
+use super::{Layout, available_bytes, gigabytes};
 use crate::restore::{self, aea, components, disk, payload::file_sha256};
 use crate::setup::PINNED_MODEL;
 use anyhow::{Context, Result, ensure};
@@ -107,7 +107,7 @@ pub(super) struct Kernel {
 pub(super) struct Receipt {
     pub(super) kind: String,
     schema_version: u32,
-    product_version: String,
+    pub(super) product_version: String,
     product_build: String,
     source: Source,
     members: Vec<Member>,
@@ -137,12 +137,12 @@ pub(super) fn from_ipsw(
     let manifest = restore::archive::manifest(ipsw, None, false)
         .with_context(|| format!("{} is not a macOS restore image", ipsw.display()))?;
     ensure!(
-        manifest.product_build == layout.build,
-        "{} is macOS {} ({}), but this stela runs programs against macOS {PINNED_VERSION} ({})",
+        manifest.product_build == layout.build.build,
+        "{} is macOS {} ({}), not {}",
         ipsw.display(),
         manifest.product_version,
         manifest.product_build,
-        layout.build
+        layout.name()
     );
     let profile = components::Profile::of(PINNED_MODEL)?;
     let identity = components::identity(&manifest, &profile, Purpose::Erase)?;
@@ -399,8 +399,8 @@ pub(super) fn from_roots(layout: &Layout, roots: &[PathBuf], dry_run: bool) -> R
         super::DYLD
     );
     println!(
-        "Importing the macOS {PINNED_VERSION} ({}) system files into {}",
-        layout.build,
+        "Importing the {} system files into {}",
+        layout.name(),
         layout.root().display()
     );
     if dry_run {
@@ -439,8 +439,8 @@ pub(super) fn from_roots(layout: &Layout, roots: &[PathBuf], dry_run: bool) -> R
         let receipt = Receipt {
             kind: KIND.into(),
             schema_version: SCHEMA,
-            product_version: PINNED_VERSION.into(),
-            product_build: layout.build.clone(),
+            product_version: layout.build.version.into(),
+            product_build: layout.build.build.into(),
             source: Source::Imported {
                 roots: sources.iter().map(|(root, _)| root.clone()).collect(),
             },
@@ -589,7 +589,7 @@ mod tests {
             &cache,
             &[("/System/Library/dyld/dyld_shared_cache_arm64e", b"cache")],
         )?;
-        let layout = Layout::new(work.path().join("Stela"), "26A434");
+        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
         from_roots(&layout, &[files.clone(), cache.clone()], true)?;
         assert!(!layout.directory().exists(), "a dry run changes nothing");
         from_roots(&layout, &[files.clone(), cache.clone()], false)?;
@@ -618,7 +618,7 @@ mod tests {
             ],
         )?;
         fs::write(files.join("usr/lib/dyld"), b"changed")?;
-        let layout = Layout::new(work.path().join("Stela"), "26A434");
+        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
         let error = from_roots(&layout, &[files], false)
             .unwrap_err()
             .to_string();
@@ -632,7 +632,7 @@ mod tests {
         let work = tempfile::tempdir()?;
         let files = work.path().join("guest-files");
         extraction(&files, &[("/usr/lib/dyld", b"dyld")])?;
-        let layout = Layout::new(work.path().join("Stela"), "26A434");
+        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
         assert!(from_roots(&layout, &[files], false).is_err());
         Ok(())
     }
@@ -642,7 +642,7 @@ mod tests {
         let work = tempfile::tempdir()?;
         let ipsw = work.path().join("other.ipsw");
         restore::payload::synthetic_ipsw_of(&ipsw, "99Z999")?;
-        let layout = Layout::new(work.path().join("Stela"), "26A434");
+        let layout = Layout::new(work.path().join("Stela"), stela_runtime::builds::DEFAULT);
         let error = from_ipsw(&layout, &ipsw, None, false)
             .unwrap_err()
             .to_string();

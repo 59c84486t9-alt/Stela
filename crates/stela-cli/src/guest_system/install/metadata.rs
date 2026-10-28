@@ -60,11 +60,10 @@ pub(in crate::guest_system) fn refresh(
     ensure!(
         receipt.kind == super::KIND
             && receipt.schema_version == SCHEMA
-            && receipt.product_build == layout.build
-            && receipt.product_version == PINNED_VERSION,
-        "the installed receipt does not match macOS {} ({})",
-        PINNED_VERSION,
-        layout.build
+            && receipt.product_build == layout.build.build
+            && receipt.product_version == layout.build.version,
+        "the installed receipt does not match {}",
+        layout.name()
     );
     if !receipt.kernels.is_empty() || read(&layout.directory(), &original)?.is_some() {
         return Ok(());
@@ -102,7 +101,7 @@ pub(in crate::guest_system) fn refresh(
                 .context("the legacy install needs its original IPSW download receipt")?;
             ensure!(
                 download["bytes"].as_u64() == Some(*bytes)
-                    && download["image"]["build"].as_str() == Some(layout.build.as_str()),
+                    && download["image"]["build"].as_str() == Some(layout.build.build),
                 "the IPSW download receipt does not match the installed build and size"
             );
             download["sha256"]
@@ -183,7 +182,7 @@ pub(in crate::guest_system) fn refresh(
     let versions = Versions {
         kind: KIND.into(),
         schema_version: SCHEMA,
-        product_build: layout.build.clone(),
+        product_build: layout.build.build.into(),
         receipt_sha256: stela_runtime::sha256(&original),
         source_sha256,
         manifest_sha256: stela_runtime::sha256(&manifest_bytes),
@@ -233,7 +232,10 @@ mod tests {
     impl Fixture {
         fn new(build: &str) -> Result<Self> {
             let work = tempfile::tempdir()?;
-            let layout = Layout::new(work.path().join("installed"), "26A434");
+            let layout = Layout::new(
+                work.path().join("installed"),
+                stela_runtime::builds::DEFAULT,
+            );
             fs::create_dir_all(layout.root().join("usr/lib"))?;
             fs::write(layout.root().join("usr/lib/dyld"), b"original dyld")?;
             let source = work.path().join("original.ipsw");
@@ -287,8 +289,8 @@ mod tests {
             let receipt = Receipt {
                 kind: super::super::KIND.into(),
                 schema_version: SCHEMA,
-                product_version: PINNED_VERSION.into(),
-                product_build: layout.build.clone(),
+                product_version: layout.build.version.into(),
+                product_build: layout.build.build.into(),
                 source: Source::Ipsw {
                     file_name: "original.ipsw".into(),
                     bytes,

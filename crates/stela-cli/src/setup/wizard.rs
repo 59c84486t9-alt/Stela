@@ -171,7 +171,8 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
     let mut images = None;
     let mut names = catalog::cached_names();
     let mut first = true;
-    let mut preferred_build = command.build_explicit.then(|| command.build.clone());
+    // `--build`, or the newest supported build.
+    let mut preferred_build = Some(command.build.clone());
     loop {
         let rows: Vec<_> = choices
             .iter()
@@ -262,6 +263,8 @@ fn configure_inner(command: &mut Setup, host: &dyn Host) -> Result<bool> {
             let manifest =
                 local_image(&path).with_context(|| format!("reading {}", path.display()))?;
             progress.finish();
+            stela_runtime::builds::find(&manifest.product_build)
+                .with_context(|| path.display().to_string())?;
             command.ipsw = Some(path);
             command.fetch = false;
             command.build = manifest.product_build.clone();

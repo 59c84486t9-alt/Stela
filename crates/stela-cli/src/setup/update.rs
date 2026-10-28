@@ -459,6 +459,7 @@ pub(super) fn update_os(
 ) -> Result<String> {
     check_bundle_revision(environment, &record)?;
     let (product_version, build) = crate::restore::payload::identity(ipsw, &record.model)?;
+    super::supported(environment, ipsw, &build)?;
     ready(
         &record,
         |pending| matches!(pending, Change::Os { to, .. } if *to == build),
