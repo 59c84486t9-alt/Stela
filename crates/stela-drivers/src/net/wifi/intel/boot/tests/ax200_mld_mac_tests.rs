@@ -93,6 +93,8 @@ fn exercise(bytes: &[u8]) {
     assert!(mac.mac_id_and_color().is_none());
     assert!(mac.inactive_link_id().is_none());
     mac.replenish_completed_receive().unwrap();
+    // SAFETY: Source allocates exclusive model RAM for this same retained
+    // requester/domain; Native keeps the policy owner and no real device runs.
     unsafe { mac.advance(&source) }.unwrap();
     let commands = mac.commands().to_vec();
     assert_eq!(
@@ -135,11 +137,15 @@ fn exercise(bytes: &[u8]) {
         records.cpu_sync_fail = Some(records.cpu_syncs + 1);
         drop(records);
         assert!(matches!(
+            // SAFETY: this synchronous ACK retains the command/receive maps;
+            // injected CPU-sync failure cannot release or race those allocations.
             unsafe { mac.advance(&source) },
             Err(Ax200MacError::Boot(Error::CommandReclaim(_)))
         ));
         assert!(mac.first_error().is_none());
         native.domain.records.lock().unwrap().cpu_sync_fail = None;
+        // SAFETY: failed reclamation kept the same source/domain mappings live;
+        // clearing its injection adds no DMA user before this retry.
         unsafe { mac.advance(&source) }.unwrap();
         mac.replenish_completed_receive().unwrap();
     }
@@ -148,6 +154,8 @@ fn exercise(bytes: &[u8]) {
     assert_eq!(mac.inactive_link_id(), Some(0));
     native.revoked.store(true, Ordering::SeqCst);
     mac.begin_remove().unwrap();
+    // SAFETY: revocation starts ordered removal while the same model MAC owner
+    // retains Source and every pending mapping, without asynchronous hardware.
     unsafe { mac.advance(&source) }.unwrap();
     let commands = mac.commands()[4..].to_vec();
     assert_eq!(
@@ -161,6 +169,8 @@ fn exercise(bytes: &[u8]) {
     for command in commands {
         emitted(&mac, &native, &command);
         complete_mld(&mac, &native, &command);
+        // SAFETY: this removal ACK completed synchronously; its original MAC
+        // and domain retain the receive/command mappings until reclaim finishes.
         unsafe { mac.advance(&source) }.unwrap();
         mac.replenish_completed_receive().unwrap();
     }

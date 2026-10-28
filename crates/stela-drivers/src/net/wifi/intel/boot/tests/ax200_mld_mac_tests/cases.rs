@@ -53,6 +53,8 @@ fn unsupported_mld_versions_and_partial_publication_retain_owner() {
         let syncs = native.domain.records.lock().unwrap().syncs;
         if case < 2 {
             assert!(matches!(
+                // SAFETY: the unchanged same-epoch model source/domain remain
+                // retained while an unqualified command version is refused.
                 unsafe { mac.advance(&source) },
                 Err(Ax200MacError::Version { .. })
             ));
@@ -61,6 +63,8 @@ fn unsupported_mld_versions_and_partial_publication_retain_owner() {
             assert_eq!(native.domain.records.lock().unwrap().syncs, syncs);
         } else {
             mac.replenish_completed_receive().unwrap();
+            // SAFETY: the fixture Source supplies exclusive RAM and Native
+            // retains the matching domain; no device or worker runs in parallel.
             unsafe { mac.advance(&source) }.unwrap();
             for index in 0..2 {
                 let command = mac.commands()[index].clone();
@@ -69,6 +73,8 @@ fn unsupported_mld_versions_and_partial_publication_retain_owner() {
                     let mut r = native.domain.records.lock().unwrap();
                     r.sync_fail = Some(r.syncs + 2);
                 }
+                // SAFETY: the synchronous model ACK and injected visibility
+                // refusal keep the same owner and all uncertain mappings live.
                 let result = unsafe { mac.advance(&source) };
                 if index == 0 {
                     result.unwrap();
@@ -82,6 +88,8 @@ fn unsupported_mld_versions_and_partial_publication_retain_owner() {
         let error = mac.first_error().unwrap().clone();
         let ops = native.state.lock().unwrap().ops.len();
         let syncs = native.domain.records.lock().unwrap().syncs;
+        // SAFETY: the latched failure still retains its original source/domain
+        // and pending DMA; this repeated entry has no concurrent model user.
         assert_eq!(unsafe { mac.advance(&source) }, Err(error.clone()));
         assert_eq!(
             mac.replenish_completed_receive(),
@@ -133,6 +141,8 @@ fn receive_rearm_failure_latches_error_and_quarantines_uncertain_dma() {
     let operations = native.state.lock().unwrap().ops.len();
     let syncs = native.domain.records.lock().unwrap().syncs;
     assert_eq!(
+        // SAFETY: failed receive rearm kept the original model allocations and
+        // same source/domain retained; the failure adds no hardware access.
         unsafe { mac.advance(&source) },
         Err(Ax200MacError::Boot(error.clone()))
     );
