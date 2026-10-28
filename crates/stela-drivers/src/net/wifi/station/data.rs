@@ -922,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires fresh pinned full A-MSDU helper trace via STELA_WIFI_AMSDU_ORACLE"]
+    #[ignore = "oracle: STELA_WIFI_AMSDU_ORACLE"]
     fn full_source_amsdu_station_conversion_matches_all_bytes() {
         extern crate std;
         let path =

@@ -851,7 +851,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged source PHYDM/IQK packet and IQK polling oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_FIRMWARE_CONTROL_ORACLE"]
     fn full_phydm_iqk_packets_and_iqk_ready_deadlines_match_unchanged_source() {
         use super::super::firmware_control::{Control, Error as FwError, tests::bus};
         let dir = std::path::PathBuf::from(
@@ -1096,7 +1096,7 @@ mod tests {
         assert!(h2c_descriptors(u32::MAX - 79).is_ok());
     }
     #[test]
-    #[ignore = "requires unchanged pinned C H2C firmware packet oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_TRANSMIT_ORACLE"]
     fn every_sequence_full_packet_and_descriptors_match_unchanged_c() {
         let trace =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_TRANSMIT_ORACLE").unwrap()).unwrap();

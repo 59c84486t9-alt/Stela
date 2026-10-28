@@ -111,7 +111,7 @@ fn path_profile_preflight() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned C initial AB/AB/false TRX oracle"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_TRX_ORACLE"]
 fn rtl8822c_trx_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_TRX_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

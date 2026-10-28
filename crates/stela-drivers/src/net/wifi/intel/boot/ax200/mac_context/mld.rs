@@ -141,7 +141,7 @@ mod tests {
     extern crate std;
     use super::*;
     #[test]
-    #[ignore = "requires unchanged pinned Linux cold MLD MAC/link trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_MLD_MAC_TRACE"]
     fn pinned_linux_cold_mld_mac_and_inactive_link_bytes() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_MLD_MAC_TRACE").unwrap()).unwrap();

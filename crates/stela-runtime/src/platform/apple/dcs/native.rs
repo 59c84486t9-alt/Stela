@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original 26A434 J473 KC via STELA_TEST_MCC_J473_KERNELCACHE"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_KERNELCACHE"]
     fn original_drain_and_gating_consumers_keep_their_pinned_source_contract() {
         use sha2::{Digest, Sha256};
         let data =

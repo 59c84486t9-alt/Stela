@@ -319,7 +319,7 @@ fn missing_ci_ack_does_not_apply_cache_or_release_original_queue_through_failed_
     assert_eq!(native.os_drops.load(Ordering::Relaxed), 0);
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_bt_config6_ci2_and_fixed_old_profile_source_owner() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

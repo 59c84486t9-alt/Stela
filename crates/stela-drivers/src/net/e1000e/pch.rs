@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned Linux PCH PHY oracle trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_ORACLE"]
     fn unchanged_linux_pch_phy_register_effects() {
         let path = std::env::var("STELA_E1000E_PCH_ORACLE").expect("oracle trace");
         let bytes = std::fs::read(path).unwrap();

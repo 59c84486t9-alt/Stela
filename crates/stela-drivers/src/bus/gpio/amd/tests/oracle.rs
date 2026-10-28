@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-#[ignore = "requires freshly executed pinned Linux AMD GPIO debounce oracle"]
+#[ignore = "oracle: STELA_AMD_GPIO_ORACLE"]
 fn unchanged_linux_debounce_bins_pin_zero_and_preserved_controls() {
     let path = std::env::var("STELA_AMD_GPIO_ORACLE").unwrap();
     let bytes = std::fs::read(path).unwrap();

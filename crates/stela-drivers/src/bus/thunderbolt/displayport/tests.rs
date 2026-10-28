@@ -845,7 +845,7 @@ fn display_capability_budget_preserves_bits_and_never_invents_rate_or_lanes() {
 }
 
 #[test]
-#[ignore = "requires pinned unchanged Linux DP activation/stop transcript"]
+#[ignore = "oracle: STELA_THUNDERBOLT_DP_ORACLE"]
 fn unchanged_linux_dp_complete_write_transcript_matches_actual_native_dma() {
     extern crate std;
     let trace = std::fs::read_to_string(

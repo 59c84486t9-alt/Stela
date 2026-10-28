@@ -322,7 +322,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned MCU encoder oracle traces"]
+    #[ignore = "oracle: STELA_MT792X_MCU_ORACLE"]
     fn unchanged_pinned_mcu_encoders_match_all_bytes_over_repeated_sequence_wraps() {
         extern crate std;
         use sha2::{Digest, Sha256};

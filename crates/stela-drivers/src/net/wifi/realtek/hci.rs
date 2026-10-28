@@ -480,7 +480,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned C HCI reset/base oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_HCI_ORACLE"]
     fn full_source_reset_sequence_and_widths_match_unchanged_c() {
         let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_HCI_ORACLE").unwrap()).unwrap();
         let mut actual = Vec::new();

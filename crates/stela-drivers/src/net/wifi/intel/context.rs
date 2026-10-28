@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned Linux context trace and AX200 firmware; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_CONTEXT_ORACLE, STELA_IWLWIFI_IMAGES"]
     fn unchanged_linux_context_and_payload_copy_oracle() {
         extern crate std;
         use sha2::{Digest, Sha256};

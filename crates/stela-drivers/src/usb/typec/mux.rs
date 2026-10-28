@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(retimer.applied(), None);
     }
     #[test]
-    #[ignore = "requires pinned unchanged Linux mux/retimer C oracle trace"]
+    #[ignore = "oracle: STELA_TYPEC_MUX_ORACLE"]
     fn unchanged_linux_mux_and_retimer_programming_oracle() {
         let path =
             std::env::var("STELA_TYPEC_MUX_ORACLE").expect("STELA_TYPEC_MUX_ORACLE trace path");

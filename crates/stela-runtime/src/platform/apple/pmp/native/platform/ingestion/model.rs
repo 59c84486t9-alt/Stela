@@ -438,7 +438,7 @@ const fn r(w: [u32; 6]) -> CounterReference {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_PMP_T8112"]
     fn original_t8112_ingestion_descriptor_facts_match_inputs() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();

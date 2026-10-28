@@ -856,7 +856,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged Linux RTL8152 revision trace"]
+    #[ignore = "oracle: STELA_RTL8152_REVISION_ORACLE"]
     fn unchanged_linux_rtl8152_revision_init_and_station_effects() {
         extern crate std;
         use sha2::{Digest, Sha256};
@@ -975,7 +975,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned Linux source oracle; see tests/reference/rtl8152_oracle.py"]
+    #[ignore = "oracle: STELA_RTL8152_ORACLE"]
     fn unchanged_linux_ocp_request_trace_matches_native_helpers() {
         extern crate std;
         use core::fmt::Write;

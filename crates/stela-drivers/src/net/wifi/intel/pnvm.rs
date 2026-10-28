@@ -495,7 +495,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged Linux UEFI helper trace; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_UEFI_ORACLE"]
     fn unchanged_linux_inline_descriptor_and_reduced_power_oracle() {
         extern crate std;
         use core::fmt::Write;
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned PNVM asset and unchanged Linux selector trace; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES, STELA_IWLWIFI_PNVM_ORACLE"]
     fn actual_ax210_skus_match_unchanged_linux_selector() {
         extern crate std;
         use sha2::{Digest, Sha256};

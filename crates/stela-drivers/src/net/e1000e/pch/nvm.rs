@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned Linux PCH NVM oracle trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_NVM_ORACLE"]
     fn unchanged_linux_pch_nvm_register_effects_and_payloads() {
         let path = std::env::var("STELA_E1000E_PCH_NVM_ORACLE").expect("NVM oracle trace");
         let bytes = std::fs::read(path).unwrap();

@@ -537,7 +537,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged original26A434 J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_j473_first_p_binds_only_actual_core_and_complex_from_placed_state() {
         use crate::machine::soc::{
             self,

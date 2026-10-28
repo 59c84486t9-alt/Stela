@@ -507,7 +507,7 @@ pub(super) mod tests {
         assert_eq!(AxImage::parse(&f).unwrap_err(), ParseError::DynamicHeader);
     }
     #[test]
-    #[ignore = "requires STELA_REALTEK_WIFI_IMAGES from pinned linux-firmware"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_IMAGES"]
     fn actual_vendor_layouts_are_borrowed_complete_and_versioned() {
         extern crate std;
         let root = std::path::PathBuf::from(std::env::var("STELA_REALTEK_WIFI_IMAGES").unwrap());
@@ -535,7 +535,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires actual images and STELA_REALTEK_WIFI_ORACLE from the pinned C script"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_IMAGES, STELA_REALTEK_WIFI_ORACLE"]
     fn unchanged_linux_selection_and_complete_payloads_agree() {
         extern crate std;
         fn word(trace: &[u8], at: &mut usize) -> u32 {

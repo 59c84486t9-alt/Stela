@@ -2136,7 +2136,7 @@ mod tests {
         exercise_cold_radio(false);
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn cold_radio_actual_images_run_source_prefix_with_distinct_offload_and_latencies() {
         exercise_cold_radio(true);
     }
@@ -2646,7 +2646,7 @@ mod tests {
         exercise_unified_nvm(false);
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn unified_actual_images_drive_real_command_and_notification_epoch() {
         exercise_unified_nvm(true);
     }
@@ -3252,7 +3252,7 @@ mod tests {
         exercise_rx_recycling(None);
     }
     #[test]
-    #[ignore = "requires freshly built unchanged Intel RX restock oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_RX_RECYCLE_ORACLE"]
     fn rx_recycling_unchanged_source_free_producer_and_vid_oracle() {
         use sha2::{Digest, Sha256};
         let bytes =
@@ -4436,7 +4436,7 @@ mod tests {
         assert!(domain.records.lock().unwrap().live.is_empty());
     }
     #[test]
-    #[ignore = "requires actual AX210 firmware and PNVM assets; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_ax210_ucode_external_pnvm_source_dma_doorbell_and_notification() {
         use super::super::platform::{Observation, Stage};
         use sha2::{Digest, Sha256};
@@ -4597,7 +4597,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned actual AX210 firmware; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_ax210_image_iml_rom_rx_alive_preserves_pnvm_allocations() {
         use sha2::{Digest, Sha256};
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
@@ -5034,7 +5034,7 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
     #[test]
-    #[ignore = "requires pinned actual AX200 firmware; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_ax200_image_publishes_owned_context_and_consumes_completed_alive() {
         use sha2::{Digest, Sha256};
         let directory = std::env::var("STELA_IWLWIFI_IMAGES").expect("image directory");
@@ -5290,7 +5290,7 @@ mod tests {
         exercise_lari_bios(false);
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn lari_actual_images_drive_lari6_without_extension_and_lari8_with_extension() {
         exercise_lari_bios(true);
     }

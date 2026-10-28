@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires STELA_MT76_REORDER_ORACLE from complete unchanged pinned C implementation"]
+    #[ignore = "oracle: STELA_MT76_REORDER_ORACLE"]
     fn complete_unchanged_source_matches_each_release_and_retained_queue() {
         use sha2::{Digest, Sha256};
         let path = std::env::var_os("STELA_MT76_REORDER_ORACLE").expect("unchanged C output");

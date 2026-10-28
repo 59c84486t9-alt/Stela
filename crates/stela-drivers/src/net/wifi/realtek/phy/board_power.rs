@@ -534,7 +534,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged full source factory PG/by-rate/limit oracle and exact data export"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_BOARD_POWER_ORACLE"]
     fn whole_factory_and_sparse_source_tables_match_every_prepared_byte() {
         let path = std::path::PathBuf::from(
             std::env::var("STELA_REALTEK_WIFI_BOARD_POWER_ORACLE").unwrap(),

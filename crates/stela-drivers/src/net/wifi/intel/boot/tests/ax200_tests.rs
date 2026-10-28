@@ -161,7 +161,7 @@ fn thermal_power_use_original_ax200_epoch_and_reclaimed_completions() {
     exercise_setup(false);
 }
 #[test]
-#[ignore = "requires pinned unchanged AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_thermal_power_versions_and_capability_branches() {
     exercise_setup(true);
 }
@@ -519,7 +519,7 @@ fn mcc_actual_query_bios_selection_and_response_never_echo_requested_country() {
     exercise_mcc(false);
 }
 #[test]
-#[ignore = "requires pinned unchanged AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn mcc_actual_ax200_v5_response_is_retained_with_original_dma_epoch() {
     exercise_mcc(true);
 }

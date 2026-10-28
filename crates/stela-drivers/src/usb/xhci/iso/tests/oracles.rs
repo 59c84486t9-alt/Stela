@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-#[ignore = "requires immutable pinned Linux isochronous helper trace"]
+#[ignore = "oracle: STELA_XHCI_ISO_ORACLE"]
 fn xhci_iso_contexts_match_linux() {
     use sha2::{Digest, Sha256};
     let trace = std::fs::read_to_string(
@@ -109,7 +109,7 @@ fn xhci_iso_contexts_match_linux() {
 }
 
 #[test]
-#[ignore = "requires immutable pinned Linux AMD PCI quirk and PLL trace"]
+#[ignore = "oracle: STELA_XHCI_AMD_PCI_ORACLE"]
 fn xhci_amd_quirks_match_linux() {
     use sha2::{Digest, Sha256};
     let trace = std::fs::read_to_string(

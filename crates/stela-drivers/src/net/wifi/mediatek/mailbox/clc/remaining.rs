@@ -789,7 +789,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    #[ignore = "requires full unchanged source rate/SAR/batch/MCU oracle"]
+    #[ignore = "oracle: STELA_MT792X_POWER_ORACLE"]
     fn all_source_rate_plans_cross_coherent_native_clc_domain_power_and_pse_dma() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_POWER_ORACLE").unwrap());
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
@@ -834,7 +834,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires six exact redistributable firmware images"]
+    #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
     fn actual_images_execute_retained_clc_domain_power_chain_past_provider_lifetime() {
         let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {

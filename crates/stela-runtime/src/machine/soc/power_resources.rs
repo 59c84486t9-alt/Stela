@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original 26A434 board DeviceTrees; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_PMGR_ADTS"]
     fn original_v2_board_graphs_preserve_all_parents_and_physical_locations() {
         use sha2::{Digest, Sha256};
         let directory =
@@ -1393,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the pinned prepared r8 J473 bundle; no Apple input is committed"]
+    #[ignore = "oracle: STELA_TEST_PMGR_BUNDLE"]
     fn prepared_j473_admission_keeps_complete_graph_and_names_all_remaining_sinks() {
         use sha2::{Digest, Sha256};
         let directory = std::path::PathBuf::from(
@@ -1666,7 +1666,7 @@ mod tests {
     /// Immutable original fixture stays local. Run with STELA_TEST_PMGR_ADT
     /// pointing at decoded UniversalMac 26A434 DeviceTree.j473ap.adt.
     #[test]
-    #[ignore = "requires the pinned original J473AP ADT; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_PMGR_ADT"]
     fn original_j473_resource_graph_keeps_shared_hardware_and_clock_only_usb_darts() {
         use sha2::{Digest, Sha256};
         let path = std::env::var("STELA_TEST_PMGR_ADT").expect("original ADT path");

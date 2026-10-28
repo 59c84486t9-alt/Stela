@@ -577,7 +577,7 @@ pub(crate) mod tests {
         assert!(matches!(Ram::parse(&r), Err(FormatError::RamFormat(3))));
     }
     #[test]
-    #[ignore = "requires exact redistributable images identified by STELA_MT792X_FIRMWARE"]
+    #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
     fn actual_pinned_images_preserve_all_regions_and_release_information() {
         extern crate std;
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());

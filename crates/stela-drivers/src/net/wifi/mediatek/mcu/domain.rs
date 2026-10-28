@@ -298,7 +298,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged full channel-domain helpers and MCU-writer oracle"]
+    #[ignore = "oracle: STELA_MT792X_DOMAIN_ORACLE"]
     fn complete_linux_domain_helpers_and_writers_match_all_channels_flags_and_bytes() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_DOMAIN_ORACLE").unwrap());
         for (chip, number) in [

@@ -685,7 +685,7 @@ mod tests {
     /// stela-runtime --lib qarma::tests::timing -- --ignored --nocapture`.
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "timing, not a check"]
+    #[ignore = "manual: opt-in"]
     fn timing() {
         extern crate std;
         use std::{hint::black_box, println, time::Instant};

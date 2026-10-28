@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original J473 26A434 SIO firmware; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_SIO_FIRMWARE"]
     fn original_firmware_proves_typed_tunable_rows_and_conditional_physical_writes() {
         use sha2::{Digest, Sha256};
         let path =

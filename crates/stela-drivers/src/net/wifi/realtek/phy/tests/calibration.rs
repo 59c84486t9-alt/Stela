@@ -180,7 +180,7 @@ fn dac_failure_quarantines() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned initial empty-cache DAC oracle and donor negative evidence"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_DAC_ORACLE"]
 fn rtl8822c_dac_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_DAC_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

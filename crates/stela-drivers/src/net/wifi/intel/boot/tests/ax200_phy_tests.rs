@@ -226,7 +226,7 @@ fn phy_add_rlc_and_remove_require_original_dma_ack_reclaim_and_held_policy() {
     }
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_phy4_rlc2_schema_does_not_bypass_mld_mac_requirement() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

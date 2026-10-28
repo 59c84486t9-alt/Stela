@@ -270,7 +270,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned C hardware-feature mailbox and decoder"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_FEATURES_ORACLE"]
     fn every_capability_combination_and_complete_mailbox_trace_matches_unchanged_c() {
         let trace =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_FEATURES_ORACLE").unwrap()).unwrap();

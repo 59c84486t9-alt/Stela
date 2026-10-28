@@ -413,7 +413,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_preserve_capability_skips_and_real_control_schemas() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
@@ -448,7 +448,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux complete control-helper oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_CONTROL_ORACLE"]
     fn unchanged_linux_control_helpers_match_every_complete_wire_command() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_CONTROL_ORACLE").unwrap()).unwrap();

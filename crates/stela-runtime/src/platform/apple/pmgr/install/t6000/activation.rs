@@ -281,7 +281,7 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires matching original J314s LLB"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
     fn original_activation_single_indirect_row_and_barriers_are_pinned() {
         use sha2::{Digest, Sha256};
         let llb =

@@ -494,7 +494,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned AX88772 reset/control C corpus"]
+    #[ignore = "oracle: STELA_AX88772_RESET_ORACLE"]
     fn unchanged_linux_ax88772_reset_register_sequences() {
         let text =
             std::fs::read_to_string(std::env::var("STELA_AX88772_RESET_ORACLE").unwrap()).unwrap();
@@ -544,7 +544,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned ASIX legacy ID and driver_info C initializers"]
+    #[ignore = "oracle: STELA_AX88772_IDS_ORACLE"]
     fn unchanged_linux_ax88772_candidates_preserve_flags_and_eeprom_selection() {
         use crate::usb::ethernet::asix::identity::{Identity, LEGACY_IDS};
         let text =

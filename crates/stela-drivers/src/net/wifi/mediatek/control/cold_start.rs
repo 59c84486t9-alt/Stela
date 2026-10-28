@@ -231,7 +231,7 @@ mod tests {
         assert!(c.is_poisoned());
     }
     #[test]
-    #[ignore = "requires STELA_MT7925_WFSYS_ORACLE unchanged pinned C helper output"]
+    #[ignore = "oracle: STELA_MT7925_WFSYS_ORACLE"]
     fn unchanged_donor_reset_helper_matches_native_register_trace_and_minimum_waits() {
         let path = std::env::var("STELA_MT7925_WFSYS_ORACLE").unwrap();
         let input = std::fs::read_to_string(path).unwrap();

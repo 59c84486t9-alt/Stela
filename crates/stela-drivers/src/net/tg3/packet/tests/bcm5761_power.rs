@@ -110,7 +110,7 @@ fn actual_5761_low_power_refuses_undrained_epoch_and_live_board_keep_link_policy
 }
 
 #[test]
-#[ignore = "set STELA_TG3_BCM5761_PHY_POWER_ORACLE from original tg3_phy_power_oracle.py bcm5761 mode"]
+#[ignore = "oracle: STELA_TG3_BCM5761_PHY_POWER_ORACLE"]
 fn unchanged_linux_5761_phy_power_writes_match_actual_clock_and_retained_owner() {
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_BCM5761_PHY_POWER_ORACLE")

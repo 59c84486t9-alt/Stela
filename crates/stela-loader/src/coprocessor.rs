@@ -565,7 +565,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires immutable original fixture directory; does not execute firmware"]
+    #[ignore = "oracle: STELA_COPROCESSOR_FIXTURE_DIR"]
     #[cfg(feature = "std")]
     fn original_t6000_restore_firmware() -> Result<()> {
         let dir = std::env::var("STELA_COPROCESSOR_FIXTURE_DIR")

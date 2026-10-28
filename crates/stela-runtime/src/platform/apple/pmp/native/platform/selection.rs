@@ -180,7 +180,7 @@ mod tests {
 #[cfg(all(test, feature = "std"))]
 mod original_tests {
     #[test]
-    #[ignore = "requires original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_t8112_platform_control_and_evaluation_operands_match_native_contract() {
         use sha2::{Digest, Sha256};
         let pmp = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();

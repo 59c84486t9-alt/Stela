@@ -802,7 +802,7 @@ pub(super) mod tests {
         );
     }
     #[test]
-    #[ignore = "requires unchanged pinned C beacon descriptor oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_BEACON_ORACLE"]
     fn every_length_band_and_multicast_descriptor_matches_unchanged_c_helpers() {
         let trace =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_BEACON_ORACLE").unwrap()).unwrap();

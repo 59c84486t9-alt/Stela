@@ -77,7 +77,7 @@ fn mac_profile_preflight() {
 }
 
 #[test]
-#[ignore = "requires unchanged whole MAC protocol/driver-info/PCI interface source oracle"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_SOURCE_MAC_ORACLE"]
 fn rtl8822c_mac_matches_linux() {
     let path =
         std::path::PathBuf::from(std::env::var("STELA_REALTEK_WIFI_SOURCE_MAC_ORACLE").unwrap());

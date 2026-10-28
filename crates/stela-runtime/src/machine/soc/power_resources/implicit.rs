@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original J473 ADT; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_PMGR_ADT"]
     fn original_j473_supplies_match_all_three_physical_owners() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMGR_ADT").expect("original J473 ADT"))

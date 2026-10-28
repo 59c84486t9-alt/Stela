@@ -101,7 +101,7 @@ impl Host for Recorded {
 }
 
 #[test]
-#[ignore = "requires integrity-checked original MMC fast-mode procedure records"]
+#[ignore = "oracle: STELA_MMC_FAST_ORACLE"]
 fn unchanged_linux_hs200_hs400_and_strobe_procedure_order_matches_native() {
     extern crate std;
     let trace = std::fs::read_to_string(
@@ -153,7 +153,7 @@ fn unchanged_linux_hs200_hs400_and_strobe_procedure_order_matches_native() {
 }
 
 #[test]
-#[ignore = "requires integrity-checked original MMC DDR52 procedure records"]
+#[ignore = "oracle: STELA_MMC_DDR52_ORACLE"]
 fn unchanged_linux_ddr52_hardware_busy_switch_order_matches_native() {
     extern crate std;
     let trace = std::fs::read_to_string(

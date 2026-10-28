@@ -1447,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_j473_first_p_projection_keeps_source_fields_and_absent_coordinates() {
         use stela_runtime::machine::soc::assigned::{BspSource, SourceIdentity};
         let file = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
@@ -1597,7 +1597,7 @@ mod tests {
         assert_eq!(owner.source(), original);
     }
     #[test]
-    #[ignore = "requires immutable original 26A434 J314s DT via STELA_TEST_ASSIGNED_DT"]
+    #[ignore = "oracle: STELA_TEST_ASSIGNED_DT"]
     fn original_j314s_subsets_roundtrip_without_firmware_id_or_resource_extrapolation() {
         use stela_runtime::machine::soc;
         let path = std::env::var("STELA_TEST_ASSIGNED_DT").unwrap();

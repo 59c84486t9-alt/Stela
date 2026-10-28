@@ -440,7 +440,7 @@ impl UsbDisk {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires pinned unchanged Linux media/readiness helper trace"]
+    #[ignore = "oracle: STELA_USB_MEDIA_ORACLE"]
     fn unchanged_linux_media_helpers_match_all_normalized_sense_profiles() {
         extern crate std;
         let trace = std::fs::read(

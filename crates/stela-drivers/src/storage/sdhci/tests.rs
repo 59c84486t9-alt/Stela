@@ -309,7 +309,7 @@ fn empty_socket_is_retained_and_generation_overflow_never_wraps() {
 }
 
 #[test]
-#[ignore = "requires pinned unchanged Linux SDHCI clock/CSD oracle"]
+#[ignore = "oracle: STELA_SDHCI_ORACLE"]
 fn unchanged_linux_clock_divisors_and_card_capacity_match_native_decoders() {
     extern crate std;
     let trace = std::fs::read_to_string(

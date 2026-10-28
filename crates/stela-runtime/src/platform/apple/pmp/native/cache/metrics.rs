@@ -1617,7 +1617,7 @@ mod original_tests {
         u64::from_le_bytes(b[a - 0xfff000..a - 0xfff000 + 8].try_into().unwrap())
     }
     #[test]
-    #[ignore = "requires original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_t8112_metrics_registration_and_queue_operands() {
         let b = source();
         for (a, v) in [
@@ -1656,7 +1656,7 @@ mod original_tests {
         assert_eq!(0x1004330i64 + offset * 4, 0x10302bc);
     }
     #[test]
-    #[ignore = "requires original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_t8112_metric_callback_fields_scale_and_trace_operands() {
         let b = source();
         let c = Configuration::t8112();

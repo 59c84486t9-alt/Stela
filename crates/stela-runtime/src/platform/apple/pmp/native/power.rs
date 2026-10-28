@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original J473 DT and KC via STELA_TEST_MCC_J473_DT and STELA_TEST_MCC_J473_KERNELCACHE"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_MCC_J473_KERNELCACHE"]
     fn original_j473_power_vector_uses_source_ordinals_and_distinct_domain_ids() {
         use sha2::{Digest, Sha256};
         use stela_contracts::adt::Node;

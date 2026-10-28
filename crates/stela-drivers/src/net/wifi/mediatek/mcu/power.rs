@@ -620,7 +620,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    #[ignore = "requires full unchanged SAR/SKU/rate-band/MCU source oracle"]
+    #[ignore = "oracle: STELA_MT792X_POWER_ORACLE"]
     fn complete_source_sar_arithmetic_and_all_rate_batches_match_defined_bytes() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_POWER_ORACLE").unwrap());
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {

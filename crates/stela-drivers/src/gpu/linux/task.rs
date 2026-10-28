@@ -955,7 +955,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    #[ignore = "isolated exact child of gpu::c_tests::linux_trees; no global registry sharing"]
+    #[ignore = "isolation: child"]
     fn trees_child() {
         // SAFETY: isolated single test child; same canonical GlobalAlloc owns this
         // real raw span and ordinary System storage until exact-layout free.
@@ -1749,7 +1749,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "isolated exact child of gpu::c_tests::linux_mutex_wait"]
+    #[ignore = "isolation: child"]
     fn mutex_child() {
         // SAFETY: isolated canonical allocator registry, same real GlobalAlloc
         // owns ordinary and raw-span allocations and their exact-layout frees.
@@ -1848,7 +1848,7 @@ pub(crate) mod tests {
         assert_eq!(Arc::strong_count(&binding), baseline + 2);
     }
     #[test]
-    #[ignore = "isolated exact child; intentional quarantine cannot share normal teardown proof"]
+    #[ignore = "isolation: child"]
     fn mutex_quarantine_child() {
         let dropped = Arc::new(AtomicU64::new(0));
         let cpu = CpuModel::new();

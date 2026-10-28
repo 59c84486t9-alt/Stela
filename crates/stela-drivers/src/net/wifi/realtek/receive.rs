@@ -744,7 +744,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned C RX descriptor/ring oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_RECEIVE_ORACLE"]
     fn raw_parser_rearm_tags_and_all_ring_indices_match_unchanged_c() {
         let trace =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_RECEIVE_ORACLE").unwrap()).unwrap();

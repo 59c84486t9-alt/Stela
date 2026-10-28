@@ -339,7 +339,7 @@ fn v4_geometry_and_signature_refusals_precede_mode_or_preserve_exact_bad_packet(
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_V4_CONTROLS_ORACLE from complete pinned configuration bodies"]
+#[ignore = "oracle: STELA_ELANTECH_V4_CONTROLS_ORACLE"]
 fn unchanged_linux_v4_configuration_matches_actual_mode_rate_and_register_transactions() {
     extern crate std;
     let records =
@@ -427,7 +427,7 @@ fn unchanged_linux_v4_configuration_matches_actual_mode_rate_and_register_transa
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_V4_REPORTS_ORACLE from complete pinned report and input-MT bodies"]
+#[ignore = "oracle: STELA_ELANTECH_V4_REPORTS_ORACLE"]
 fn unchanged_linux_v4_reports_and_mt_policy_match_actual_configured_i8042_device() {
     extern crate std;
     let records =

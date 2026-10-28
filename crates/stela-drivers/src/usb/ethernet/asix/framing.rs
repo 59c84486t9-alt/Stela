@@ -158,7 +158,7 @@ mod tests {
         assert!(encode(&[0; 60], &mut [0; 2048], 0).is_err());
     }
     #[test]
-    #[ignore = "requires unchanged pinned ASIX RX/TX C fixup corpus"]
+    #[ignore = "oracle: STELA_ASIX_FRAMING_ORACLE"]
     fn unchanged_linux_asix_packet_fixup_bytes() {
         extern crate std;
         use sha2::{Digest, Sha256};

@@ -132,7 +132,7 @@ fn unacknowledged_or_unstable_v4_pll_never_enables_card_clock() {
 }
 
 #[test]
-#[ignore = "requires integrity-checked unchanged Linux sdhci_enable_clk records"]
+#[ignore = "oracle: STELA_SDHCI_CLOCK_ORACLE"]
 fn unchanged_linux_clock_enable_v4_pll_phases_and_independent_deadlines_match_native() {
     extern crate std;
     let records = std::fs::read_to_string(

@@ -775,7 +775,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires hash-pinned unchanged Linux topology helper trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_TOPOLOGY_ORACLE"]
     fn unchanged_linux_router_adapter_bitfields_and_helpers_match() {
         extern crate std;
         use std::{env, fs};

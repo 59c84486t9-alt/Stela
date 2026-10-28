@@ -793,7 +793,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires pinned original J473 26A434 kernelcache; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHE"]
     fn original_drivers_keep_wake_claim_and_timestamp_disarm_explicit() {
         use sha2::{Digest, Sha256};
         let path = std::env::var("STELA_TEST_PMGR_KERNELCACHE")

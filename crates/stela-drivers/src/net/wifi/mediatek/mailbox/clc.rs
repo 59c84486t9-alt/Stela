@@ -762,7 +762,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged full CLC country-helper and MCU-writer oracle"]
+    #[ignore = "oracle: STELA_MT792X_CLC_WIRE_ORACLE"]
     fn full_source_clc_plans_execute_through_one_native_requester_and_exact_wire_bytes() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_CLC_WIRE_ORACLE").unwrap());
         for (chip, number) in [
@@ -863,7 +863,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires the exact six actual redistributable firmware images"]
+    #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
     fn actual_downloaded_images_and_owned_reports_execute_clc_past_provider_lifetime() {
         let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {

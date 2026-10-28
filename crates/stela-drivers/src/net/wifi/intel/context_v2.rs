@@ -505,7 +505,7 @@ mod tests {
         })
     }
     #[test]
-    #[ignore = "requires pinned actual AX210 image and unchanged context-v2 oracle; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_CONTEXT_V2_ORACLE, STELA_IWLWIFI_IMAGES"]
     fn unchanged_linux_ax210_context_scratch_iml_and_payload_copies() {
         extern crate std;
         let trace =

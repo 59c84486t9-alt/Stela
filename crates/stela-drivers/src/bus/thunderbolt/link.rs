@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires hash-pinned unchanged Gen2/3 Linux link trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_LINK_ORACLE"]
     fn unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_actual_dma() {
         use super::super::link::Activate;
         use std::{env, fs};

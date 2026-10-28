@@ -171,7 +171,7 @@ fn failed_crc_cleanup_or_kill_retains_original_request_and_configuration_owners(
 }
 
 #[test]
-#[ignore = "requires a fresh unchanged Linux E32B block-process trace"]
+#[ignore = "oracle: STELA_I801_BLOCK_PROCESS_ORACLE"]
 fn unchanged_linux_combined_blocks_fifo_resets_and_optional_pec_policy() {
     extern crate std;
     let trace = std::fs::read_to_string(

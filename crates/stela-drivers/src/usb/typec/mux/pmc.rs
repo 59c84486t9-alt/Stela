@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged Linux PMC helper trace"]
+    #[ignore = "oracle: STELA_INTEL_PMC_MUX_ORACLE"]
     fn unchanged_linux_intel_pmc_packet_oracle() {
         let path = std::env::var("STELA_INTEL_PMC_MUX_ORACLE").unwrap();
         let trace = std::fs::read_to_string(path).unwrap();

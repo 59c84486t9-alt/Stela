@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original 26A434 T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_t8112_native_geometry_and_local_route_keep_the_same_bank() {
         use sha2::{Digest, Sha256};
         let data = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();

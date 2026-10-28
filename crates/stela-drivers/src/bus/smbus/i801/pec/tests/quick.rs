@@ -110,7 +110,7 @@ fn quick_does_not_steal_a_busy_host_and_retains_failed_kill_or_mode_owners() {
 }
 
 #[test]
-#[ignore = "requires a fresh unchanged Linux Quick/PEC exclusion trace"]
+#[ignore = "oracle: STELA_I801_QUICK_ORACLE"]
 fn unchanged_linux_quick_target_error_policy_and_absence_of_data_or_pec_match_native() {
     extern crate std;
     let trace = std::fs::read_to_string(

@@ -605,7 +605,7 @@ fn owned_native_config_is_the_same_original_mapping_through_d0_release() {
 }
 
 #[test]
-#[ignore = "requires integrity-checked unchanged Linux PCI PM oracle trace"]
+#[ignore = "oracle: STELA_PCI_POWER_TRACE"]
 fn unchanged_linux_pm_functions_match_3072_source_cases() {
     extern crate std;
     let path = std::env::var("STELA_PCI_POWER_TRACE").expect("pinned PCI PM oracle trace path");

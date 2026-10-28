@@ -944,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original 26A434 J473 DeviceTree and kernelcache"]
+    #[ignore = "oracle: STELA_TEST_CPU_PMGR_ADT, STELA_TEST_PMGR_KERNEL"]
     fn original_j473_views_resolve_all_ten_source_constructed_owners() {
         use sha2::{Digest, Sha256};
         let tree = std::fs::read(std::env::var("STELA_TEST_CPU_PMGR_ADT").unwrap()).unwrap();

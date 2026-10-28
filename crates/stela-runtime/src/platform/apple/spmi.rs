@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged original 26A434 mac15g kernelcache via STELA_TEST_SPMI_SCALAR_KC"]
+    #[ignore = "oracle: STELA_TEST_SPMI_SCALAR_KC"]
     fn original_ap_scalar_command_encoding_is_source_pinned() {
         use sha2::Digest;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_SCALAR_KC").unwrap()).unwrap();
@@ -1578,7 +1578,7 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires STELA_TEST_PMGR_KERNELCACHE naming the pinned original 26A434 Mach-O"]
+    #[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHE"]
     fn original_gen2_fifo_reset_is_separate_from_physical_controller_lifecycle() {
         use sha2::{Digest, Sha256};
         let path =
@@ -1607,7 +1607,7 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires STELA_TEST_PMGR_M1_KERNELCACHE naming the pinned original mac13j 26A434 Mach-O"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_m1_gen2_queue_reset_preserves_separate_controller_control() {
         use sha2::{Digest, Sha256};
         let path = std::env::var_os("STELA_TEST_PMGR_M1_KERNELCACHE")
@@ -1769,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original26A434 J314s DT through STELA_TEST_SPMI_DT"]
+    #[ignore = "oracle: STELA_TEST_SPMI_DT"]
     fn original_j314s_all_seven_gen1_resource_views_match_the_qualified_contract() {
         use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
@@ -1860,7 +1860,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires original mac13j26A434 via STELA_TEST_PMGR_M1_KERNELCACHE"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_gen1_layout_vector_depth_and_counter_tables_are_source_pinned() {
         let bytes =
             std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();

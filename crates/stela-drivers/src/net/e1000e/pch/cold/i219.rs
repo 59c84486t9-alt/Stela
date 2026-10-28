@@ -110,7 +110,7 @@ pub(super) mod tests {
         unsafe { Controller::new_i219(device, io, timer) }
     }
     #[test]
-    #[ignore = "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_I219_ADP_ORACLE, STELA_E1000E_PCH_I219_CNP_ORACLE, STELA_E1000E_PCH_I219_SPT_ORACLE, STELA_E1000E_PCH_I219_TGP_ORACLE"]
     fn unchanged_source_pci_board_mac_join_is_exact_and_exhaustive() {
         let mut seen = Vec::new();
         for (code, family) in families().into_iter().enumerate() {
@@ -135,7 +135,7 @@ pub(super) mod tests {
         assert_eq!(Family::from_device(0x0d4e), Some(Family::Cnp));
     }
     #[test]
-    #[ignore = "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_I219_ADP_ORACLE, STELA_E1000E_PCH_I219_CNP_ORACLE, STELA_E1000E_PCH_I219_SPT_ORACLE, STELA_E1000E_PCH_I219_TGP_ORACLE"]
     fn unchanged_family_nvm_policies_keep_repair_checksum_and_tgp_exemptions_distinct() {
         for family in families() {
             let cases = oracle_cases(family, 9);
@@ -242,7 +242,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_I219_ADP_ORACLE, STELA_E1000E_PCH_I219_CNP_ORACLE, STELA_E1000E_PCH_I219_SPT_ORACLE, STELA_E1000E_PCH_I219_TGP_ORACLE"]
     fn unchanged_family_reset_post_phy_ulp_and_platform_effects() {
         for family in families() {
             super::super::lpt::tests::replay_post_family(family);

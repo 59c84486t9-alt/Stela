@@ -540,7 +540,7 @@ pub(in crate::machine::apple) mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original J473 DeviceTree and iBoot via STELA_TEST_MCC_J473_DT and STELA_TEST_IBOOT_J473"]
+    #[ignore = "oracle: STELA_TEST_IBOOT_J473, STELA_TEST_MCC_J473_DT"]
     fn original_j473_iboot_lock_map_and_mcc_views_qualify_the_independent_owner() {
         use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();

@@ -317,7 +317,7 @@ pub(super) mod tests {
         super::super::lpt::tests::oracle_cases_for(mode, "STELA_E1000E_PCH_SPT_ORACLE")
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_SPT_ORACLE"]
     fn unchanged_linux_spt_post_reset_ltr_and_global_reset_effects() {
         super::super::lpt::tests::replay_post(true);
         super::super::lpt::tests::replay_ltr(true);
@@ -396,7 +396,7 @@ pub(super) mod tests {
         result
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_SPT_ORACLE"]
     fn unchanged_linux_spt_forced_ulp_exit_ordered_effects() {
         replay_ulp(0x156f, oracle_cases(5));
     }

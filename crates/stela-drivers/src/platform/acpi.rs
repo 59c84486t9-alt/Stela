@@ -2142,7 +2142,7 @@ pub(crate) mod tests {
     /// Actual captured QEMU/firmware inputs remain ignored; this generic evaluator
     /// records their hash and real method results without production path exceptions.
     #[test]
-    #[ignore = "requires STELA_ACPI_DSDT, optional STELA_ACPI_METHOD and STELA_ACPI_QUERIES"]
+    #[ignore = "oracle: STELA_ACPI_DSDT, STELA_ACPI_QUERIES"]
     fn evaluate_captured_firmware_with_real_acpica() {
         let _serial = TEST_SERIAL.lock().unwrap();
         use sha2::{Digest, Sha256};

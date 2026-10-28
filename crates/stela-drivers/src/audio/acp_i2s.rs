@@ -1109,7 +1109,7 @@ mod tests {
         controller.shutdown().unwrap();
     }
     #[test]
-    #[ignore = "requires unchanged Linux trace in STELA_ACP_I2S_ORACLE"]
+    #[ignore = "oracle: STELA_ACP_I2S_ORACLE"]
     fn unchanged_linux_acp3x_acp5x_dma_configuration() {
         extern crate std;
         use std::fmt::Write;

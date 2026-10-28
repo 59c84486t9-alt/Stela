@@ -450,7 +450,7 @@ mod tests {
         assert!(weak.upgrade().is_none());
     }
     #[test]
-    #[ignore = "requires STELA_MT792X_REGISTER_ORACLE from the pinned unchanged C register mapper"]
+    #[ignore = "oracle: STELA_MT792X_REGISTER_ORACLE"]
     fn unchanged_pinned_register_mapper_matches_valid_windows_and_mmio_operations() {
         let root =
             std::env::var_os("STELA_MT792X_REGISTER_ORACLE").expect("reference trace directory");

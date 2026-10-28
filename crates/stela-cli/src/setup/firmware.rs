@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "downloads pinned vendor data; set STELA_FIRMWARE_TEST_OUTPUT to a fresh evidence directory"]
+    #[ignore = "oracle: STELA_FIRMWARE_TEST_OUTPUT"]
     fn vendor_provisioning_binds_pins_and_notices() {
         let output = std::path::PathBuf::from(
             std::env::var_os("STELA_FIRMWARE_TEST_OUTPUT")

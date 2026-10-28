@@ -1468,7 +1468,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires STELA_PCIE_KERNELCACHE naming the pinned original 26A434 Mach-O"]
+    #[ignore = "oracle: STELA_PCIE_KERNELCACHE"]
     fn original_msi_vector_delegation_and_port_decoder_are_pinned() {
         let bytes = std::fs::read(
             std::env::var_os("STELA_PCIE_KERNELCACHE").expect("original KernelCache path"),

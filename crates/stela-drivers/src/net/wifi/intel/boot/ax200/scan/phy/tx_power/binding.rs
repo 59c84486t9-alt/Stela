@@ -545,7 +545,7 @@ mod tests {
         bytes
     }
     #[test]
-    #[ignore = "requires unchanged pinned Linux cold quota/cache trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_QUOTA_TRACE"]
     fn pinned_linux_cold_quota_layout_offload_and_acknowledged_cache() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_QUOTA_TRACE").unwrap()).unwrap();
@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(keys.len(), 16);
     }
     #[test]
-    #[ignore = "requires unchanged pinned Linux cold binding/SF/MAC-power trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_BINDING_TRACE"]
     fn pinned_linux_cold_binding_sf_and_mac_power_bytes() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_BINDING_TRACE").unwrap()).unwrap();

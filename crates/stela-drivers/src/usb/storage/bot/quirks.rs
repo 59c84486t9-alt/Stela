@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(Flags(MAX_SECTORS_MIN, true).max_transfer_bytes(), 4096);
     }
     #[test]
-    #[ignore = "requires pinned unchanged Linux USB BOT unusual-device table trace"]
+    #[ignore = "oracle: STELA_USB_BOT_QUIRKS_ORACLE"]
     fn unchanged_linux_tables_match_every_exact_alias_and_flag() {
         extern crate std;
         let bytes = std::fs::read(

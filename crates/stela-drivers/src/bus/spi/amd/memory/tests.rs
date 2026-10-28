@@ -586,7 +586,7 @@ fn initial_busy_is_bounded_and_a_counter_wrap_does_not_shorten_the_operation() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned AMD and SPI memory-core source records"]
+#[ignore = "oracle: STELA_AMD_SPI_MEMORY_TRACE"]
 fn unchanged_linux_memory_wire_effects_and_frontend_frequency_limits_match_native() {
     extern crate std;
     let records = std::fs::read_to_string(

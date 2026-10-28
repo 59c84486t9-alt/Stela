@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a fresh unchanged Linux source oracle trace"]
+    #[ignore = "oracle: STELA_AMD_MP2_ORACLE"]
     fn unchanged_linux_source_commands_and_events() {
         extern crate std;
         let path = std::env::var("STELA_AMD_MP2_ORACLE").expect("STELA_AMD_MP2_ORACLE trace path");

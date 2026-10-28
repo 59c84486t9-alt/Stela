@@ -5,7 +5,7 @@
     "source": "crates/stela-compiler/src/x86_64/chain/tests/budget.rs",
     "kind": "manual",
     "inputs": [],
-    "reason": "native CPU comparison of emitted legacy, LOCK, flag and epoch chain gates; run on request"
+    "reason": "native CPU comparison of emitted legacy, LOCK, flag and epoch chain gates; run on request; manual: native chain interruption gate CPU comparison"
   },
   {
     "package": "xtask",
@@ -2554,7 +2554,8 @@
     "source": "crates/stela-drivers/src/platform/acpi/resources/gpio/tests.rs",
     "kind": "oracle",
     "inputs": [],
-    "reason": "requires a fresh process for the production native MMIO authority singleton"
+    "reason": "requires a fresh process for the production native MMIO authority singleton",
+    "precondition": "fresh-process"
   },
   {
     "package": "stela-drivers",
@@ -4686,7 +4687,7 @@
     "inputs": [
       "STELA_TEST_PMGR_LLB"
     ],
-    "reason": "requires original J473 LLB; executes bounded original entry on x86 macOS"
+    "reason": "requires original J473 LLB; executes bounded original entry on x86 Linux"
   },
   {
     "package": "stela-runtime",
@@ -4696,7 +4697,7 @@
     "inputs": [
       "STELA_TEST_PMGR_M1_LLB"
     ],
-    "reason": "requires original J314s LLB; executes bounded original entry on x86 macOS"
+    "reason": "requires original J314s LLB; executes bounded original entry on x86 Linux"
   },
   {
     "package": "stela-runtime",
@@ -4778,6 +4779,7 @@
     "source": "crates/stela-compiler/src/aarch64/floating/integer/half.rs",
     "kind": "oracle",
     "inputs": [],
-    "reason": "oracle: exhaustive"
+    "reason": "oracle: exhaustive",
+    "precondition": "exhaustive"
   }
 ]

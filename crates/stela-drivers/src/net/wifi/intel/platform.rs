@@ -1064,7 +1064,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires pinned unchanged Linux STEP helper trace; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_STEP_ORACLE"]
     fn unchanged_linux_step_mailboxes_and_every_revision() {
         extern crate std;
         use core::fmt::Write;

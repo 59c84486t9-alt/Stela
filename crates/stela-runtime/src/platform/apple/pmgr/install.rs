@@ -1317,7 +1317,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_PMGR_LLB"]
     fn original_llb_matches_every_installed_group_slot_and_dmb_boundary() {
         use sha2::{Digest, Sha256};
         let bytes =

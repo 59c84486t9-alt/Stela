@@ -231,7 +231,7 @@ fn v3_debounce_invalid_signatures_stop_and_requery_retain_source_cached_head_pro
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_V3_CONTROLS_ORACLE from complete pinned configuration bodies"]
+#[ignore = "oracle: STELA_ELANTECH_V3_CONTROLS_ORACLE"]
 fn unchanged_linux_v3_configuration_matches_actual_fast_query_and_register_transactions() {
     extern crate std;
     let records =
@@ -241,7 +241,7 @@ fn unchanged_linux_v3_configuration_matches_actual_fast_query_and_register_trans
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_V3_REPORTS_ORACLE from complete pinned sequential report bodies"]
+#[ignore = "oracle: STELA_ELANTECH_V3_REPORTS_ORACLE"]
 fn unchanged_linux_v3_head_tail_reports_match_actual_configured_i8042_device() {
     extern crate std;
     let records =

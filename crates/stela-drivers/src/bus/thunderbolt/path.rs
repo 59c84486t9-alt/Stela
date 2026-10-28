@@ -1378,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged Linux two-hop path oracle trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_PATH_ORACLE"]
     fn unchanged_linux_path_usb3_complete_write_trace_matches_actual_dma() {
         use super::super::path::{Activate, Direction, LaneCredits};
         let text = std::fs::read_to_string(

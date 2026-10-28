@@ -759,7 +759,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned real RTL8153/8156 firmware fixtures; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_RTL815X_FIRMWARE"]
     fn real_firmware_uploads_preserve_payloads_order_and_final_version() {
         extern crate std;
         use sha2::{Digest, Sha256};

@@ -597,7 +597,7 @@ mod tests {
         assert!(p.plan_channel_power(g, l).is_err());
     }
     #[test]
-    #[ignore = "requires unchanged channel gain/SAR/packed calibration source oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE"]
     fn packed_nvm_all_rate_width_samples_and_real_signed_wrap_negatives_match_source() {
         let bytes =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE").unwrap())

@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original T6000 LLB through STELA_TEST_PAUTH_LLB"]
+    #[ignore = "oracle: STELA_TEST_PAUTH_LLB"]
     fn original_t6000_llb_writes_all_five_typed_pairs_with_ordering() {
         let bytes = std::fs::read(std::env::var("STELA_TEST_PAUTH_LLB").unwrap()).unwrap();
         assert_eq!(

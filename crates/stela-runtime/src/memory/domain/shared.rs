@@ -358,7 +358,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "bounded recipe timing; run explicitly with release native evidence"]
+    #[ignore = "manual: opt-in"]
     fn benchmark_locked_recipes_with_identical_writer_gates() {
         const ITERATIONS: usize = 100_000;
         for operation in [

@@ -501,7 +501,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires hash-pinned unchanged Linux adapter control trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_ADAPTER_ORACLE"]
     fn unchanged_linux_adapter_controls_and_nfc_register_effects_match() {
         extern crate std;
         use std::{env, fs};

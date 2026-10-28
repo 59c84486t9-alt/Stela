@@ -691,7 +691,7 @@ fn invalid_route_and_retired_or_foreign_hub_owner_refuse_before_transport_effect
 }
 
 #[test]
-#[ignore = "requires pinned unchanged-source SuperSpeed hub oracle"]
+#[ignore = "oracle: STELA_XHCI_HUB_ORACLE"]
 fn unchanged_linux_hub_requests_power_warm_reset_and_sublink_rates() {
     use descriptor::{Descriptor, Ssp};
     use sha2::{Digest, Sha256};

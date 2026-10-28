@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(parse(Chip::Mt7925, &bytes).unwrap().version, Some(15));
     }
     #[test]
-    #[ignore = "requires STELA_MT792X_TX_FREE_ORACLE from unchanged pinned TX-free helpers"]
+    #[ignore = "oracle: STELA_MT792X_TX_FREE_ORACLE"]
     fn unchanged_pinned_free_helpers_match_token_order_wcid_and_accounting() {
         let root =
             std::env::var_os("STELA_MT792X_TX_FREE_ORACLE").expect("reference trace directory");

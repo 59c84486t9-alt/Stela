@@ -382,7 +382,7 @@ fn native_original_function_mapping_prepare_and_acknowledged_retirement() {
 }
 
 #[test]
-#[ignore = "requires integrity-checked unchanged Linux LPSS SPI clock/reset/profile trace"]
+#[ignore = "oracle: STELA_LPSS_SPI_TRACE"]
 fn unchanged_linux_spi_pci_inventory_reset_remap_and_clock_functions_match_native_owner() {
     extern crate std;
     let trace = std::fs::read_to_string(

@@ -487,7 +487,7 @@ mod original {
         bytes
     }
     #[test]
-    #[ignore = "requires pinned original ADT and iBootData"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_IBOOTDATA"]
     fn original_shared_native_bytes_and_sparse_unknown_owners() {
         let prepared = Prepared::new(&adt(), inputs()).unwrap();
         assert_eq!(prepared.program().revision, 0x20);
@@ -595,7 +595,7 @@ mod original {
         );
     }
     #[test]
-    #[ignore = "requires pinned original ADT and iBootData"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_IBOOTDATA"]
     fn original_complete_preflight_keeps_existing_owner_and_publishes_nothing() {
         let prepared = Prepared::new(&adt(), inputs()).unwrap();
         let mut devices = AppleDevices::new();
@@ -620,7 +620,7 @@ mod original {
         assert!(devices.read(0, SRAM_BASE, 4, 0).is_err());
     }
     #[test]
-    #[ignore = "requires pinned original ADT and iBootData"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_IBOOTDATA"]
     fn original_authority_provenance_cache_and_full_family_refusals() {
         let bytes = adt();
         let mut input = inputs();

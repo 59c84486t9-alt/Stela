@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned Linux power-helper trace; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_POWER_ORACLE"]
     fn unchanged_linux_ownership_reset_and_clock_effects() {
         extern crate std;
         use sha2::{Digest, Sha256};

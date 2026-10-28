@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_pmp_retains_its_dart_mapper_instead_of_assuming_physical_buffers() {
         let path = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
             .join("DeviceTree.j473ap.adt");

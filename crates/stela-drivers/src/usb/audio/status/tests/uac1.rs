@@ -217,7 +217,7 @@ fn actual_uac1_cached_event_refuses_retired_device_before_any_mmio() {
 }
 
 #[test]
-#[ignore = "requires unchanged-source Linux USB audio status oracle trace"]
+#[ignore = "oracle: STELA_USB_AUDIO_STATUS_ORACLE"]
 fn uac1_unchanged_linux_irq_callback_oracle() {
     use sha2::{Digest, Sha256};
     let path = std::env::var("STELA_USB_AUDIO_STATUS_ORACLE")

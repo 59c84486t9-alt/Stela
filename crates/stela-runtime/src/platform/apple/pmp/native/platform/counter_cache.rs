@@ -444,7 +444,7 @@ fn map<T, U>(c: Completion<T>, f: impl FnOnce(T) -> U) -> Completion<U> {
 #[cfg(all(test, feature = "std"))]
 mod source_tests {
     #[test]
-    #[ignore = "requires original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_shared_provider_cache_windows_and_operands() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();

@@ -330,7 +330,7 @@ mod original {
     }
 
     #[test]
-    #[ignore = "requires original J314s ADT/kernelcache; full T6000 PMGR routing is not initial state"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_t6000_layout_routes_all_bindings_three_complexes_and_193_bridges() {
         use super as t6000;
         let bytes = kernelcache();

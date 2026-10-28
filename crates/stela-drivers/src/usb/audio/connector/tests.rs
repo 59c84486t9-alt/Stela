@@ -218,7 +218,7 @@ fn actual_connector_interrupt_invalidates_but_never_replaces_a_status_query() {
 }
 
 #[test]
-#[ignore = "requires unchanged-source UAC2 connector oracle trace"]
+#[ignore = "oracle: STELA_USB_AUDIO_CONNECTOR_ORACLE"]
 fn native_connectors_match_original_linux_complete_control_observations() {
     extern crate std;
     use sha2::{Digest, Sha256};

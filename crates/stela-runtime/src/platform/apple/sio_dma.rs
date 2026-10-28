@@ -892,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original J473 26A434 kernelcache; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_SIO_KERNELCACHE"]
     fn original_controller_proves_pool_header_segments_and_terminal_report_layout() {
         use sha2::{Digest, Sha256};
         let path =
@@ -926,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original J473 26A434 SIO firmware; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_SIO_FIRMWARE"]
     fn original_firmware_excludes_undelivered_fifo_bytes_from_tx_stop_report() {
         use sha2::{Digest, Sha256};
         let path =

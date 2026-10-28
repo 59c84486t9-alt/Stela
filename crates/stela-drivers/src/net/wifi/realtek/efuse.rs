@@ -592,7 +592,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned C efuse physical/logical/board oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_EFUSE_ORACLE"]
     fn physical_transport_logical_maps_and_all_board_fields_match_unchanged_c() {
         let trace =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_EFUSE_ORACLE").unwrap()).unwrap();

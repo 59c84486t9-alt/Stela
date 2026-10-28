@@ -2547,7 +2547,7 @@ mod original {
         &[],
     ];
     #[test]
-    #[ignore = "requires original J314s ADT/kernelcache; all guarded native bridge fields"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_all_193_bridge_programs_keep_masks_order_and_actual_dt_bounds() {
         let bytes = original(
             "STELA_TEST_PMGR_M1_KERNELCACHE",

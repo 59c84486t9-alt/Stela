@@ -1524,7 +1524,7 @@ mod tests {
         assert_eq!(aux.advance(0), None);
     }
     #[test]
-    #[ignore = "requires pinned original mac13j26A434 via STELA_TEST_PMGR_M1_KERNELCACHE"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_primary_service_rtc_registers_alarm_and_edge_contract_are_source_pinned() {
         let data = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();
         assert_eq!(
@@ -1698,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original J314s26A434 DT via STELA_TEST_SPMI_DT"]
+    #[ignore = "oracle: STELA_TEST_SPMI_DT"]
     fn original_j314s_two_rtc_resources_have_one_primary_service_and_local_output() {
         use stela_contracts::adt::Node;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();

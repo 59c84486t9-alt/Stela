@@ -466,7 +466,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires pinned unchanged Linux RTL815x USB ID table"]
+    #[ignore = "oracle: STELA_RTL815X_IDS_ORACLE"]
     fn unchanged_linux_rtl815x_exact_usb_candidates_and_flags() {
         extern crate std;
         use sha2::{Digest, Sha256};

@@ -1950,13 +1950,13 @@ mod tests {
     /// Opt-in actual native execution benchmark, never an acceptance throughput
     /// claim. Run with --release --ignored --nocapture and record host/load/source.
     #[test]
-    #[ignore = "bounded native timing; run explicitly on an otherwise measured host"]
+    #[ignore = "manual: opt-in"]
     fn benchmark_native_llsc_serialized_and_parallel() {
         benchmark_native_counters(false);
     }
 
     #[test]
-    #[ignore = "bounded native timing; run explicitly with source/load evidence"]
+    #[ignore = "manual: opt-in"]
     fn benchmark_native_lse_serialized_and_parallel() {
         benchmark_native_counters(true);
     }

@@ -146,7 +146,7 @@ mod tests {
     extern crate std;
     use super::*;
     #[test]
-    #[ignore = "requires unchanged pinned Linux MLD active-link and full unassign trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_MLD_LINK_TRACE"]
     fn pinned_linux_mld_link_activation_unassign_reset_and_phy_reference_bytes() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_MLD_LINK_TRACE").unwrap()).unwrap();

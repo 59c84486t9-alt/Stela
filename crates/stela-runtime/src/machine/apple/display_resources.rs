@@ -636,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged original 26A434 J314s DeviceTree"]
+    #[ignore = "oracle: STELA_T6000_MCC_DEVICE_TREE"]
     fn original_j314s_display_ptd_view_is_the_actual_pmgr_pmp_update_bank() {
         use stela_contracts::adt::Node;
         let input =

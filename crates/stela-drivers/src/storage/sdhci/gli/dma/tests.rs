@@ -48,7 +48,7 @@ impl Registers for Controls {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned SDHCI v4 DMA/ADMA source oracle"]
+#[ignore = "oracle: STELA_SDHCI_ADMA_ORACLE"]
 fn unchanged_linux_v4_capability_controls_and_adma_descriptors_match_native() {
     extern crate std;
     let records = std::fs::read_to_string(

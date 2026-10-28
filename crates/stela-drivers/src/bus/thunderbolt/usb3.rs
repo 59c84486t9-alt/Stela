@@ -2403,7 +2403,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged Linux root USB3 bandwidth oracle"]
+    #[ignore = "oracle: STELA_USB3_BANDWIDTH_ORACLE"]
     fn unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_actual_dma() {
         use super::super::usb3::{Allocate, Rates};
         let text = std::fs::read_to_string(
@@ -2941,7 +2941,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged Linux full root USB3 activation oracle"]
+    #[ignore = "oracle: STELA_USB3_TUNNEL_ORACLE"]
     fn unchanged_linux_usb3_tunnel_full_bandwidth_paths_and_endpoint_writes_match_dma() {
         use super::super::{path::LaneCredits, usb3::ActivateTunnel};
         let text = std::fs::read_to_string(
@@ -3573,7 +3573,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged Linux complete USB3 stop/release oracle"]
+    #[ignore = "oracle: STELA_USB3_STOP_ORACLE"]
     fn unchanged_linux_usb3_complete_activation_optional_release_and_stop_match_dma() {
         use super::super::{
             path::LaneCredits,

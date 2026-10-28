@@ -1476,7 +1476,7 @@ mod original_tests {
         u32::from_le_bytes(b[va - 0xfff000..va - 0xfff000 + 4].try_into().unwrap())
     }
     #[test]
-    #[ignore = "requires original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_t8112_trace_configuration_join_and_final_threshold() {
         let b = image();
         window(
@@ -1500,7 +1500,7 @@ mod original_tests {
         assert_eq!(super::Configuration::t8112().threshold(), 0x4000);
     }
     #[test]
-    #[ignore = "requires original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_t8112_trace_low32_timestamp_last_and_endpoint3_commands() {
         let b = image();
         window(

@@ -22,7 +22,7 @@ impl Write for Sink {
 }
 
 #[test]
-#[ignore = "requires STELA_AEA_BENCH_IPSW, STELA_AEA_BENCH_INVENTORY and STELA_AEA_BENCH_MEMBER"]
+#[ignore = "oracle: STELA_AEA_BENCH_INVENTORY, STELA_AEA_BENCH_IPSW, STELA_AEA_BENCH_MEMBER"]
 fn native_stream_authentication_benchmark() -> Result<()> {
     let image = PathBuf::from(std::env::var("STELA_AEA_BENCH_IPSW")?);
     let inventory = PathBuf::from(std::env::var("STELA_AEA_BENCH_INVENTORY")?);

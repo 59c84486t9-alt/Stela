@@ -2189,7 +2189,7 @@ mod registers_oracle {
     }
 
     #[test]
-    #[ignore = "UNRUN: set STELA_AQTION_REGISTERS_ORACLE to the unchanged Linux trace.txt"]
+    #[ignore = "oracle: STELA_AQTION_REGISTERS_ORACLE"]
     fn unchanged_linux_aqtion_registers() {
         let path = std::env::var_os("STELA_AQTION_REGISTERS_ORACLE")
             .expect("set STELA_AQTION_REGISTERS_ORACLE");

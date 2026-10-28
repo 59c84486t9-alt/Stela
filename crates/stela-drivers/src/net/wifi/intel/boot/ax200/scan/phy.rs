@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned Linux PHY/RLC trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_PHY_TRACE"]
     fn pinned_linux_phy_context_and_rlc_bytes() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_PHY_TRACE").unwrap()).unwrap();

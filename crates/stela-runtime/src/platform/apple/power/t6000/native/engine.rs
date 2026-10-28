@@ -1328,7 +1328,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires original J314s LLB/iBootData and mac13j kernelcache"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_IBOOTDATA, STELA_TEST_PMGR_M1_KERNELCACHE, STELA_TEST_PMGR_M1_LLB"]
     fn original_cio_request_wait_bindings_actions_and_counted_finalization_are_pinned() {
         use sha2::{Digest, Sha256};
         let llb = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_LLB").unwrap()).unwrap();

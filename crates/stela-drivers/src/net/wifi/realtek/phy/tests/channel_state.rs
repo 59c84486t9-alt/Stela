@@ -92,7 +92,7 @@ fn channel_domain_loss_quarantines() {
 }
 
 #[test]
-#[ignore = "requires unchanged complete source BB/MAC/RF channel oracle"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_CHANNEL_ORACLE"]
 fn rtl8822c_channel_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_CHANNEL_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

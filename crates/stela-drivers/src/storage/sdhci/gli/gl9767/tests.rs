@@ -636,7 +636,7 @@ fn native_gl9767_ocp_primary_survives_secondary_power_authority_loss_without_sta
 }
 
 #[test]
-#[ignore = "requires integrity-checked GL9767 source and exact atomic-poll macro records"]
+#[ignore = "oracle: STELA_SDHCI_GLI67_ORACLE"]
 fn unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_native() {
     extern crate std;
     let records = std::fs::read_to_string(

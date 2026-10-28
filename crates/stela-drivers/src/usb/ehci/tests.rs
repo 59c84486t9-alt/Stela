@@ -1320,7 +1320,7 @@ fn impossible_residual_is_never_copied_as_completed_dma() {
 }
 
 #[test]
-#[ignore = "requires fresh unchanged pinned Linux qtd_fill C trace"]
+#[ignore = "oracle: STELA_EHCI_QTD_ORACLE"]
 fn actual_production_qtd_encoder_matches_unchanged_linux_qtd_fill_trace() {
     // This compares pure descriptor arithmetic, including54 cases whose
     // payload arithmetic crosses4GiB. It manufactures no DMA authority:

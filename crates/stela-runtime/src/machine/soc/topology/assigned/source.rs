@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged original26A434J314sDeviceTree"]
+    #[ignore = "oracle: STELA_TEST_ASSIGNED_DT, STELA_TEST_ASSIGNED_PREPARED_DT"]
     fn original_mode1_bsp_uses_canonical_dynamic_domain_ids_without_granting_ps_state() {
         let input = std::env::var("STELA_TEST_ASSIGNED_DT").unwrap();
         let bytes = std::fs::read(input).unwrap();

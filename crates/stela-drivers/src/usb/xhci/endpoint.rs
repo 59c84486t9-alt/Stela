@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires immutable generated pinned Linux trace"]
+    #[ignore = "oracle: STELA_XHCI_ENDPOINT_ORACLE"]
     fn unchanged_linux_endpoint_interval_and_burst_helpers() {
         use sha2::{Digest, Sha256};
         let path =

@@ -528,7 +528,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_PMP_T8112"]
     fn original_table_and_configuration_publish_through_actual_component_owners() {
         use stela_contracts::adt::Node;
         let pmp = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();

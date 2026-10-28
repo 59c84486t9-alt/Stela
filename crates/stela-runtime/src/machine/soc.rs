@@ -2402,7 +2402,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    #[ignore = "oracle: STELA_TEST_DART_DT"]
     fn original_j314s_watchdog_mounts_one_shared_panic_flags_word() {
         use crate::machine::{
             Devices,
@@ -2455,7 +2455,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original26A434J314sDT throughSTELA_TEST_GPIO_DT"]
+    #[ignore = "oracle: STELA_TEST_GPIO_DT"]
     fn original_j314s_ap_gpio_qualifies_without_auxiliary_or_lifecycle_claims() {
         let data = std::fs::read(std::env::var("STELA_TEST_GPIO_DT").unwrap()).unwrap();
         assert_eq!(
@@ -2593,7 +2593,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_SPMI_DT"]
+    #[ignore = "oracle: STELA_TEST_SPMI_DT"]
     fn original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners() {
         use crate::machine::Devices;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
@@ -3970,7 +3970,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    #[ignore = "oracle: STELA_TEST_DART_DT"]
     fn original_j314s_sep_preserves_sole_trad_with_sixteen_sid_capacity() {
         let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
@@ -4005,7 +4005,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    #[ignore = "oracle: STELA_TEST_DART_DT"]
     fn original_j314s_external_output_preserves_native_routes_and_identity() {
         let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
@@ -4268,7 +4268,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_ANS_DT"]
+    #[ignore = "oracle: STELA_TEST_ANS_DT"]
     fn original_j314s_ans_geometry_and_handoff_qualify_independently_of_whole_board() {
         let data = std::fs::read(std::env::var("STELA_TEST_ANS_DT").unwrap()).unwrap();
         assert_eq!(

@@ -941,7 +941,7 @@ fn byte_done_malformed_counts_and_failed_kill_bound_recovery_and_retain_owners()
 }
 
 #[test]
-#[ignore = "requires a fresh unchanged Linux BYTE_DONE PEC trace"]
+#[ignore = "oracle: STELA_I801_BYTE_PEC_ORACLE"]
 fn unchanged_linux_byte_done_payload_ack_last_byte_and_pec_policy() {
     extern crate std;
     let trace = std::fs::read_to_string(
@@ -1072,7 +1072,7 @@ fn process_call_crc_cleanup_or_kill_failure_retains_both_original_owners() {
 }
 
 #[test]
-#[ignore = "requires a fresh unchanged Linux process-call PEC trace"]
+#[ignore = "oracle: STELA_I801_PROCESS_PEC_ORACLE"]
 fn unchanged_linux_process_call_registers_and_pec_error_policy() {
     extern crate std;
     let trace = std::fs::read_to_string(
@@ -1528,7 +1528,7 @@ fn ordinary_successor_uses_original_no_pec_engine_after_real_crc_mode_cleanup() 
 }
 
 #[test]
-#[ignore = "requires a fresh unchanged Linux PEC access/error trace"]
+#[ignore = "oracle: STELA_I801_PEC_ORACLE"]
 fn unchanged_linux_access_crc_modes_and_error_precedence() {
     extern crate std;
     let trace = std::fs::read_to_string(

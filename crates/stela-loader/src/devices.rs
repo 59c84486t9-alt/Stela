@@ -1296,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original 26A434 templates through STELA_TEST_LOADER_DT_DIR"]
+    #[ignore = "oracle: STELA_TEST_LOADER_DT_DIR"]
     fn original_m4_imac_unused_spmi_alternatives_are_all_retired() {
         let directory = std::env::var("STELA_TEST_LOADER_DT_DIR").unwrap();
         for (board, digest) in [
@@ -1789,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    #[ignore = "oracle: STELA_TEST_DART_DT"]
     fn original_j314s_preparation_keeps_the_complete_external_display_graph() {
         let bytes = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
         assert_eq!(
@@ -2036,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged original J314s ADT via STELA_T6000_MCC_DEVICE_TREE"]
+    #[ignore = "oracle: STELA_T6000_MCC_DEVICE_TREE"]
     fn original_direct_memory_preserves_source_while_pmp_dma_stays_hidden() {
         let bytes = std::fs::read(std::env::var("STELA_T6000_MCC_DEVICE_TREE").unwrap()).unwrap();
         assert_eq!(

@@ -148,7 +148,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged 26A434 AppleKeyStore __TEXT via STELA_TEST_AKS_TEXT"]
+    #[ignore = "oracle: STELA_TEST_AKS_TEXT"]
     fn original_libaks_builders_bind_public_selectors_and_uuid_capacity() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_TEST_AKS_TEXT").unwrap()).unwrap();
@@ -171,7 +171,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged 26A434 kernel via STELA_TEST_AKS_KERNEL"]
+    #[ignore = "oracle: STELA_TEST_AKS_KERNEL"]
     fn original_keybag_builders_bind_commands_variants_and_field_helpers() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_TEST_AKS_KERNEL").unwrap()).unwrap();

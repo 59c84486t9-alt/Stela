@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(state.activity(), Err(CoexistenceError::Activity(5)));
     }
     #[test]
-    #[ignore = "requires unchanged original coexistence/SMPS/antenna source trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_COEX_TRACE"]
     fn pinned_linux_cold_coexistence_ci_and_management_antenna() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_COEX_TRACE").unwrap()).unwrap();

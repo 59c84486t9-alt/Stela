@@ -154,7 +154,7 @@ fn independent_tx_peer_rejects_clkreq_corruption_before_descriptor_or_payload_dm
 }
 
 #[test]
-#[ignore = "set STELA_TG3_CLKREQ_ORACLE from unchanged original tg3_clkreq_oracle.py"]
+#[ignore = "oracle: STELA_TG3_CLKREQ_ORACLE"]
 fn unchanged_linux_clkreq_flag_and_complete_word_policy_match_actual_packet_owner() {
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_CLKREQ_ORACLE").expect("fresh original source trace required"),

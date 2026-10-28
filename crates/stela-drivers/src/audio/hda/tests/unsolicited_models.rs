@@ -272,7 +272,7 @@ fn corb_fault_blocks_cached_events() {
 }
 
 #[test]
-#[ignore = "requires unchanged-source HDA unsolicited oracle trace"]
+#[ignore = "oracle: STELA_HDA_UNSOLICITED_ORACLE"]
 fn hda_unsolicited_matches_linux_admission_and_dispatch() {
     use sha2::{Digest, Sha256};
     let path = std::env::var("STELA_HDA_UNSOLICITED_ORACLE")

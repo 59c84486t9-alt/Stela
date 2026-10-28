@@ -283,7 +283,7 @@ fn foreign_epoch_interrupts_the_actual_native_backedge_with_at_most_one_more_tra
 #[repr(align(64))]
 struct Aligned(ChainControl);
 #[test]
-#[ignore = "manual: native chain interruption gate CPU comparison"]
+#[ignore = "manual: opt-in"]
 fn native_interruption_gate_costs() {
     const ITERATIONS: u64 = 500_000;
     let output = std::env::var_os("STELA_TEST_CHAIN_BENCH_DIR")

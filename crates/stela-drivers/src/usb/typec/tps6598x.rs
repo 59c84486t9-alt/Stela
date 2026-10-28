@@ -1105,7 +1105,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned unchanged Linux discrete Type-C C oracle trace"]
+    #[ignore = "oracle: STELA_TYPEC_DISCRETE_ORACLE"]
     fn unchanged_linux_tps_block_and_task_oracle() {
         let path = std::env::var("STELA_TYPEC_DISCRETE_ORACLE")
             .expect("STELA_TYPEC_DISCRETE_ORACLE trace path");

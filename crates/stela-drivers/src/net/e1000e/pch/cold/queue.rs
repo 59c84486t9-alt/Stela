@@ -879,7 +879,7 @@ pub(super) mod tests {
         net.receive.descriptors.write(base + 8, status);
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_LPT_ORACLE"]
     fn unchanged_linux_lpt_shared_address_ownership_and_register_effects() {
         replay_shared(false);
     }
@@ -935,7 +935,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_LPT_ORACLE"]
     fn unchanged_linux_lpt_eee_disabled_phy_and_emi_effects() {
         replay_eee(false);
     }
@@ -1641,13 +1641,13 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_SPT_ORACLE"]
     fn unchanged_linux_spt_shared_address_and_eee_disabled_effects() {
         replay_shared(true);
         replay_eee(true);
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_SPT_ORACLE"]
     fn unchanged_linux_spt_link_phy_mac_and_platform_workarounds() {
         replay_i219_link(0x156f, spt::tests::oracle_cases(6));
     }
@@ -1689,7 +1689,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_SPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_SPT_ORACLE"]
     fn unchanged_linux_spt_owned_descriptor_flush_effects_and_exact_dma_bytes() {
         replay_i219_flush(0x156f, spt::tests::oracle_cases(7));
     }
@@ -1825,7 +1825,7 @@ pub(super) mod tests {
         (state, released, controller)
     }
     #[test]
-    #[ignore = "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_I219_ADP_ORACLE, STELA_E1000E_PCH_I219_CNP_ORACLE, STELA_E1000E_PCH_I219_SPT_ORACLE, STELA_E1000E_PCH_I219_TGP_ORACLE"]
     fn unchanged_family_shra_eee_link_flush_and_dma_clock_effects() {
         for family in i219::tests::families() {
             replay_shared_family(family);
@@ -2043,7 +2043,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set all four STELA_E1000E_PCH_I219_*_ORACLE paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_I219_ADP_ORACLE, STELA_E1000E_PCH_I219_CNP_ORACLE, STELA_E1000E_PCH_I219_SPT_ORACLE, STELA_E1000E_PCH_I219_TGP_ORACLE"]
     fn source_nvm_outcomes_compose_through_every_cold_reset_packet_and_stop() {
         for family in i219::tests::families() {
             for ([marker, check, expected, _], _) in i219::tests::oracle_cases(family, 9) {
@@ -2166,7 +2166,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set MTP/PTP source oracle paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_MTP_ORACLE, STELA_E1000E_PCH_PTP_ORACLE"]
     fn mandatory_mtp_nvm_source_outcomes_and_clock_policy_compose_through_packet_stop() {
         use super::super::mtp;
         for (family, device) in [(mtp::Family::Mtp, 0x550a), (mtp::Family::Ptp, 0x57b3)] {

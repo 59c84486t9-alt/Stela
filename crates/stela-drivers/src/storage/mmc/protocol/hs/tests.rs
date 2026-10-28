@@ -73,7 +73,7 @@ impl Host for Recorded {
 }
 
 #[test]
-#[ignore = "requires integrity-checked ordinary MMC HS original procedure records"]
+#[ignore = "oracle: STELA_MMC_HS_ORACLE"]
 fn unchanged_linux_ordinary_mmc_hs_status_clock_and_power_class_order_matches_native() {
     extern crate std;
     let trace = std::fs::read_to_string(

@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original pinned J314s LLB via STELA_TEST_CRAM_J314S_LLB"]
+    #[ignore = "oracle: STELA_TEST_CRAM_J314S_LLB"]
     fn original_reload_branch_fields_and_first_arm_have_immutable_source_identity() {
         let llb = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(

@@ -549,7 +549,7 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires matching original J314s LLB"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
     fn original_complete_descriptors_and_binding_allocator_are_pinned() {
         use sha2::{Digest, Sha256};
         let llb =

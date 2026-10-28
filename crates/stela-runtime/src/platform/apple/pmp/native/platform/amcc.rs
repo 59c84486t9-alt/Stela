@@ -1199,7 +1199,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original26A434 PMP and J473DT via STELA_TEST_PMP_T8112/STELA_TEST_MCC_J473_DT"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_PMP_T8112"]
     fn original_t8112_amcc_specialized_descriptors_query_and_histogram_operands() {
         use sha2::{Digest, Sha256};
         let p = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();

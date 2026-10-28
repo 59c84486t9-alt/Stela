@@ -293,7 +293,7 @@ fn exercise(bytes: &[u8]) {
     assert!(native.domain.records.lock().unwrap().live.is_empty());
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_mld_default_link1_activation_and_full_unassign_are_selected_commands() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

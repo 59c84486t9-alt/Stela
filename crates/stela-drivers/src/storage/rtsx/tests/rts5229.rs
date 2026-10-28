@@ -107,7 +107,7 @@ fn native_rts5229_failed_revision_or_voltage_phy_ack_never_publishes_commands() 
 }
 
 #[test]
-#[ignore = "requires pinned original RTS5229 setup/voltage/power effect records"]
+#[ignore = "oracle: STELA_RTSX5229_ORACLE"]
 fn unchanged_linux_rts5229_setup_drive_pull_and_power_effects_match_native() {
     let records = std::fs::read_to_string(
         std::env::var_os("STELA_RTSX5229_ORACLE").expect("set STELA_RTSX5229_ORACLE"),

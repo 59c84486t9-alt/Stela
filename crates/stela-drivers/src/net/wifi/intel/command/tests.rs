@@ -213,7 +213,7 @@ fn hex(bytes: &[u8]) -> alloc::string::String {
     bytes.iter().map(|b| alloc::format!("{b:02x}")).collect()
 }
 #[test]
-#[ignore = "requires pinned unchanged Linux command helper oracle; see THIRD_PARTY.md"]
+#[ignore = "oracle: STELA_IWLWIFI_COMMAND_ORACLE"]
 fn command_headers_and_tfh_descriptors_match_linux() {
     extern crate std;
     use sha2::{Digest, Sha256};

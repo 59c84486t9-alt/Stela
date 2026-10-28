@@ -3,7 +3,7 @@ extern crate std;
 use super::*;
 
 #[test]
-#[ignore = "requires pinned original AMD SoundWire command/polling records"]
+#[ignore = "oracle: STELA_AMD_SOUNDWIRE_ORACLE"]
 fn unchanged_linux_amd_immediate_words_page_ack_and_timeout_effects_match_native() {
     let records = std::fs::read_to_string(
         std::env::var_os("STELA_AMD_SOUNDWIRE_ORACLE").expect("set STELA_AMD_SOUNDWIRE_ORACLE"),

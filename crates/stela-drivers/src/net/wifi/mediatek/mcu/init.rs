@@ -394,7 +394,7 @@ mod tests {
     use super::*;
     extern crate std;
     #[test]
-    #[ignore = "requires unchanged full bootstrap helpers/writers in STELA_MT792X_BOOTSTRAP_ORACLE"]
+    #[ignore = "oracle: STELA_MT792X_BOOTSTRAP_ORACLE"]
     fn complete_unchanged_initial_helpers_and_full_writers_match() {
         let root =
             std::path::PathBuf::from(std::env::var("STELA_MT792X_BOOTSTRAP_ORACLE").unwrap());
@@ -453,7 +453,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged raw header helpers and full source parser discriminator"]
+    #[ignore = "oracle: STELA_MT792X_BOOTSTRAP_ORACLE"]
     fn raw_commands_and_asymmetric_parser_paths_match_source() {
         let root =
             std::path::PathBuf::from(std::env::var("STELA_MT792X_BOOTSTRAP_ORACLE").unwrap());

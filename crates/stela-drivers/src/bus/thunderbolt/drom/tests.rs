@@ -610,7 +610,7 @@ fn native_drom_clock_admission_precedes_uid_or_any_router_operation() {
 }
 
 #[test]
-#[ignore = "requires pinned unchanged Linux DROM acquisition/CRC/parser transcript"]
+#[ignore = "oracle: STELA_THUNDERBOLT_DROM_ORACLE"]
 fn unchanged_linux_drom_acquisition_crc_and_port_metadata_match_actual_native_frames() {
     extern crate std;
     let trace = std::fs::read_to_string(

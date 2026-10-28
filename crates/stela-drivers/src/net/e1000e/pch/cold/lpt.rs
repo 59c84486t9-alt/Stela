@@ -285,7 +285,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_LPT_ORACLE"]
     fn unchanged_linux_lpt_post_reset_lcd_smbus_and_oem_effects() {
         replay_post(false);
     }
@@ -368,7 +368,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_LPT_ORACLE"]
     fn unchanged_linux_lpt_platform_ltr_effects() {
         replay_ltr(false);
     }
@@ -447,7 +447,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_LPT_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_LPT_ORACLE"]
     fn unchanged_linux_lpt_global_reset_prefix_and_forbidden_flush_boundary() {
         replay_reset(false);
     }

@@ -1372,7 +1372,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires the pinned unchanged Linux C advertisement oracle"]
+    #[ignore = "oracle: STELA_IGC_AUTONEG_ORACLE"]
     fn unchanged_linux_advertisement_matches_real_mdio_and_mmd_operations() {
         extern crate std;
         let path = std::env::var("STELA_IGC_AUTONEG_ORACLE").unwrap();

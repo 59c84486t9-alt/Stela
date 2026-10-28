@@ -749,7 +749,7 @@ fn post_publication_native_revocation_or_actual_hotplug_never_releases_partial_p
 }
 
 #[test]
-#[ignore = "requires pinned unchanged Linux PCIe activation/stop transcript"]
+#[ignore = "oracle: STELA_THUNDERBOLT_PCIE_ORACLE"]
 fn unchanged_linux_pcie_complete_write_transcript_matches_actual_native_dma() {
     extern crate std;
     let trace = std::fs::read_to_string(

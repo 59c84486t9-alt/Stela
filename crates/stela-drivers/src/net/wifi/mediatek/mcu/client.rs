@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires fresh unchanged full MT7925 client source helpers"]
+    #[ignore = "oracle: STELA_MT7925_CLIENT_ORACLE"]
     fn unchanged_full_client_helpers_match_selected_legacy_requests_and_wcid() {
         let root = std::path::PathBuf::from(
             std::env::var_os("STELA_MT7925_CLIENT_ORACLE").expect("client source oracle"),

@@ -452,7 +452,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires full unchanged loaders/country helpers and actual firmware oracle"]
+    #[ignore = "oracle: STELA_MT792X_CLC_COUNTRY_ORACLE"]
     fn complete_linux_country_helpers_match_every_request_and_fallback_fact() {
         let root =
             std::path::PathBuf::from(std::env::var("STELA_MT792X_CLC_COUNTRY_ORACLE").unwrap());
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires full country-helper/MCU-writer composed source oracle"]
+    #[ignore = "oracle: STELA_MT792X_CLC_WIRE_ORACLE"]
     fn exact_country_requests_cross_complete_source_mcu_writers() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_CLC_WIRE_ORACLE").unwrap());
         for (chip, number) in [

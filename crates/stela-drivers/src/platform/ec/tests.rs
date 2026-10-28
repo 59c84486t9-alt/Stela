@@ -343,7 +343,7 @@ fn consumed_event_identity_survives_late_response_and_unlock_failure() {
 }
 
 #[test]
-#[ignore = "requires a fresh unchanged Linux EC query/resource oracle trace"]
+#[ignore = "oracle: STELA_EC_ORACLE"]
 fn unchanged_linux_query_dispatch_identity_and_io_resource_order() {
     extern crate std;
     let trace = std::fs::read_to_string(

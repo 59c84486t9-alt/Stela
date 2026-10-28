@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires pinned original 26A434 J473 DeviceTree via STELA_TEST_MCC_J473_DT"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT"]
     fn original_j473_uses_its_actual_2048_slot_update_alias() {
         use sha2::{Digest, Sha256};
         let path = std::env::var("STELA_TEST_MCC_J473_DT").unwrap();

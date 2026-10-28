@@ -368,7 +368,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires full unchanged loaders and pinned actual RAM images"]
+    #[ignore = "oracle: STELA_MT792X_CLC_ORACLE"]
     fn full_linux_clc_loaders_match_selected_bytes_and_owned_auxiliary_resources() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_CLC_ORACLE").unwrap());
         for (chip, number) in [

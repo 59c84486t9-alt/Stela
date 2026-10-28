@@ -446,7 +446,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned actual Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_select_queue_command3_reply2_and_stage_canonical_native_maps() {
         for family in [Family::Ax200, Family::Ax210] {
             let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
@@ -462,7 +462,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned Linux TX queue/response helper oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_TX_QUEUE_ORACLE"]
     fn unchanged_linux_queue_allocation_and_reply_helpers_match_exact_wire_bytes() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_TX_QUEUE_ORACLE").unwrap()).unwrap();

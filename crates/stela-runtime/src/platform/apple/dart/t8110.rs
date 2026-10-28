@@ -1792,7 +1792,7 @@ mod tests {
     /// Original programming inputs are qualified independently of active APF
     /// transfer semantics. This fixture intentionally preserves that refusal.
     #[test]
-    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_pmp_apf_programming_retains_all_slices_without_granting_dma() {
         let bytes = std::fs::read(
             std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())

@@ -314,7 +314,7 @@ fn mld_partial_cfg_tlc_flush_or_remove_missing_ack_retains_original_link_and_fai
     }
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_mld_station_default_v1_and_tlc4_require_selected_owner_ack_lifetime() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

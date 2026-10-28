@@ -74,7 +74,7 @@ fn power_limits_preflight() {
 }
 
 #[test]
-#[ignore = "requires unchanged complete board/channel gain/SAR/TXAGC oracle"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE"]
 fn rtl8822c_power_matches_linux() {
     let trace =
         std::fs::read(std::env::var("STELA_REALTEK_WIFI_CHANNEL_POWER_ORACLE").unwrap()).unwrap();

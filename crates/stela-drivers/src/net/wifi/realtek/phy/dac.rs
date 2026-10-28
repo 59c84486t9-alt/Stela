@@ -479,7 +479,7 @@ mod tests {
     extern crate std;
     use super::*;
     #[test]
-    #[ignore = "requires actual unchanged step2 source results for every accepted signed constant sample"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_DAC_ORACLE"]
     fn compensation_matches_all_accepted_source_constant_samples() {
         let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_DAC_ORACLE").unwrap()).unwrap();
         let offset = trace.len() - 2048 * 828 - 24 - 201 * 12;
@@ -497,7 +497,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged source signed min/max/sort/trimmed-offset vectors"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_DAC_ORACLE"]
     fn signed_sample_algorithms_match_whole_source_vectors() {
         let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_DAC_ORACLE").unwrap()).unwrap();
         let mut at = trace.len() - 2048 * 828;

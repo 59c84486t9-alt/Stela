@@ -489,7 +489,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned Linux RX crypto/create-SKB oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_RX_CRYPTO_ORACLE"]
     fn unchanged_linux_crypto_and_logical_skb_bytes_match() {
         let path = std::env::var("STELA_IWLWIFI_RX_CRYPTO_ORACLE").unwrap();
         let trace = std::fs::read_to_string(path).unwrap();

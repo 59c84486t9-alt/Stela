@@ -1,7 +1,9 @@
 //! Run input-backed ignored tests and record each result with its inputs.
 use crate::tools;
+mod selector;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use selector::{Precondition, canonical_reason};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -46,6 +48,8 @@ struct Entry {
     programs: Vec<PathBuf>,
     #[serde(default)]
     reason: String,
+    #[serde(default)]
+    precondition: Option<Precondition>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
@@ -246,21 +250,26 @@ fn validate(entries: &[Entry]) -> Result<()> {
             !entry.package.is_empty() && !entry.test.is_empty(),
             "empty oracle selector"
         );
-        if entry.kind == Kind::Oracle {
-            ensure!(
-                entry
-                    .inputs
-                    .iter()
-                    .chain(&entry.values)
-                    .chain(&entry.outputs)
-                    .all(|name| name.starts_with("STELA_")
-                        && name.bytes().all(|byte| byte.is_ascii_uppercase()
-                            || byte.is_ascii_digit()
-                            || byte == b'_')),
-                "invalid oracle input name in {}",
-                entry.test
-            );
-        }
+        let variables: Vec<_> = entry
+            .inputs
+            .iter()
+            .chain(&entry.values)
+            .chain(&entry.outputs)
+            .collect();
+        ensure!(
+            variables.iter().all(|name| name.starts_with("STELA_")
+                && name.bytes().all(|byte| byte.is_ascii_uppercase()
+                    || byte.is_ascii_digit()
+                    || byte == b'_')),
+            "invalid oracle input name in {}",
+            entry.test
+        );
+        ensure!(
+            variables.iter().copied().collect::<BTreeSet<_>>().len() == variables.len(),
+            "repeated prerequisite variable in {}",
+            entry.test
+        );
+        canonical_reason(entry)?;
     }
     Ok(())
 }
@@ -569,6 +578,7 @@ mod tests {
             outputs: Vec::new(),
             programs: Vec::new(),
             reason: "child process".into(),
+            precondition: None,
         }
     }
 
@@ -688,7 +698,27 @@ mod tests {
                 let start = function.find("fn ").expect("ignored test function") + 3;
                 let function = &function[start..];
                 let end = function.find('(').expect("test parameters");
-                observed.insert((package.to_owned(), function[..end].trim().to_owned()));
+                let name = function[..end].trim();
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.package == package && entry.test == name)
+                    .unwrap_or_else(|| panic!("{file}: unbound ignored test {name}"));
+                let tail = &text[offset..];
+                let attribute = &tail[..=tail.find(']').expect("ignore attribute terminator")];
+                let literal = attribute
+                    .strip_suffix(']')
+                    .unwrap()
+                    .trim_end()
+                    .strip_prefix(concat!("#[", "ignore"))
+                    .and_then(|tail| tail.trim_start().strip_prefix('='))
+                    .map(str::trim);
+                let expected = format!("{:?}", canonical_reason(entry).unwrap());
+                assert_eq!(
+                    literal,
+                    Some(expected.as_str()),
+                    "{file}: {name} ignore reason must match declared prerequisites"
+                );
+                observed.insert((package.to_owned(), name.to_owned()));
             }
         }
         assert_eq!(

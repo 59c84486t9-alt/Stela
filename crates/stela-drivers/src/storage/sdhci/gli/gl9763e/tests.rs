@@ -392,7 +392,7 @@ fn native_gl9763e_revoked_pci_or_reenabled_queue_fences_published_mmc_before_com
 }
 
 #[test]
-#[ignore = "requires integrity-checked original GL9763E PHY/signaling records"]
+#[ignore = "oracle: STELA_SDHCI_GLI63E_ORACLE"]
 fn unchanged_linux_gl9763e_phy_lpn_and_mmc_hs_signaling_match_native() {
     extern crate std;
     let path =

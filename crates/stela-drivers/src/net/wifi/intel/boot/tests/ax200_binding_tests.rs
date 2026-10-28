@@ -328,7 +328,7 @@ fn cold_binding_checks_every_rate_and_actual_limit_through_real_ack_power_and_un
     }
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_binding_schema_does_not_bypass_mld_mac_link_requirement() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

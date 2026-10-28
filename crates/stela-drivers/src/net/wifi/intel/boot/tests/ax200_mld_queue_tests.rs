@@ -436,7 +436,7 @@ fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_fail
     }
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_mld_scheduler3_reply2_allocates_and_removes_original_queue_dma() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

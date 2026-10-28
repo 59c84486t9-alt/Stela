@@ -66,7 +66,7 @@ fn independent_peer_rejects_deleted_source_lso_mode_before_any_dma_effect() {
 }
 
 #[test]
-#[ignore = "set STELA_TG3_RDMA_MODE_ORACLE from unchanged original tg3_rdma_mode_oracle.py"]
+#[ignore = "oracle: STELA_TG3_RDMA_MODE_ORACLE"]
 fn unchanged_linux_complete_rdma_mode_matches_actual_register_and_raw_traffic() {
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_RDMA_MODE_ORACLE").expect("fresh original-source trace required"),

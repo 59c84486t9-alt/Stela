@@ -656,7 +656,7 @@ fn initialization_failures_before_and_after_each_effect_retain_the_original_devi
 }
 
 #[test]
-#[ignore = "requires integrity-checked unchanged Linux LPSS/PXA2xx source trace"]
+#[ignore = "oracle: STELA_PXA2XX_SPI_TRACE"]
 fn unchanged_linux_lpss_profiles_cs_clock_and_all_word_helpers_match_native_io() {
     extern crate std;
     let trace = std::fs::read_to_string(

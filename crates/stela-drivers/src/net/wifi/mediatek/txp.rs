@@ -226,7 +226,7 @@ mod tests {
         ));
     }
     #[test]
-    #[ignore = "requires STELA_MT792X_TXP_ORACLE from the unchanged pinned TXP encoder"]
+    #[ignore = "oracle: STELA_MT792X_TXP_ORACLE"]
     fn unchanged_pinned_hw_txp_matches_every_scatter_byte_and_txwi_size() {
         let root = std::env::var_os("STELA_MT792X_TXP_ORACLE").expect("reference trace directory");
         for chip in [7921, 7922, 7925] {

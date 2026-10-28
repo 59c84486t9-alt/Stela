@@ -3112,7 +3112,7 @@ mod tests {
         assert_eq!(engine.tag, 0);
     }
     #[test]
-    #[ignore = "requires STELA_USB_UAS_RECOVERY_ORACLE from pinned uas.c and sd.c"]
+    #[ignore = "oracle: STELA_USB_UAS_RECOVERY_ORACLE"]
     fn unchanged_linux_uas_reset_order_and_block_zero_cdb_match() {
         extern crate std;
         let trace = std::fs::read(
@@ -3177,7 +3177,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged UAS builders and enclosure table"]
+    #[ignore = "oracle: STELA_USB_UAS_ORACLE"]
     fn unchanged_linux_uas_builders_and_enclosure_rows_match() {
         extern crate std;
         fn take<'a>(bytes: &'a [u8], at: &mut usize, n: usize) -> &'a [u8] {

@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires the immutable original 26A434 mac13j kernelcache"]
+    #[ignore = "oracle: STELA_TEST_MCC_KERNELCACHE"]
     fn original_t6000_opaque_control_save_and_restore_consumers() {
         use sha2::{Digest, Sha256};
         let path =

@@ -549,7 +549,7 @@ fn wraparound_clock_and_explicit_release_drop_each_original_owner_once() {
 }
 
 #[test]
-#[ignore = "requires integrity-checked unchanged Linux AMD SPI oracle trace"]
+#[ignore = "oracle: STELA_AMD_SPI_TRACE"]
 fn unchanged_linux_fifo_commands_match_all_4970_bounded_partitions() {
     extern crate std;
     let path = std::env::var("STELA_AMD_SPI_TRACE").expect("pinned oracle trace path");

@@ -791,7 +791,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires unchanged original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_native_quota_seed_and_publisher_share_the_broadcast_full_word() {
         let code = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         assert_eq!(
@@ -833,7 +833,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires unchanged original J473 KC via STELA_TEST_MCC_J473_KERNELCACHE"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_KERNELCACHE"]
     fn original_j473_zero_mode_way_flush_quota_and_occupancy_windows_match() {
         let code =
             std::fs::read(std::env::var("STELA_TEST_MCC_J473_KERNELCACHE").unwrap()).unwrap();

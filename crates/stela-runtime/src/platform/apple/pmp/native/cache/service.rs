@@ -1726,7 +1726,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original26A434 PMP and J473 DT via STELA_TEST_PMP_T8112/STELA_TEST_MCC_J473_DT"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_PMP_T8112"]
     fn original_t8112_mc_command_housekeeping_ack_and_initialized_geometry_match() {
         let b = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();
         assert_eq!(

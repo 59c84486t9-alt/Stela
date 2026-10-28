@@ -455,7 +455,7 @@ fn wake_tx_backpressure_has_fixed_publication_deadline_without_fake_writes() {
 }
 
 #[test]
-#[ignore = "requires pinned unchanged Linux USB4 wake/sleep trace"]
+#[ignore = "oracle: STELA_THUNDERBOLT_POWER_ORACLE"]
 fn unchanged_linux_usb4_power_register_effects_match() {
     extern crate std;
     let trace = std::fs::read_to_string(

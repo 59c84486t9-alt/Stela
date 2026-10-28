@@ -341,7 +341,7 @@ mod tests {
         assert!(Capabilities::decode(6, 1 << 3).unwrap().allow_160mhz);
     }
     #[test]
-    #[ignore = "requires freshly built unchanged MCC capability/layout oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_MCC_ORACLE"]
     fn unchanged_linux_mcc_layouts_and_capability_semantics_oracle() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_MCC_ORACLE").unwrap()).unwrap();
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(r.raw, raw);
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_select_same_v4_layout_but_different_capability_semantics() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for (family, version) in [(Family::Ax200, 5), (Family::Ax210, 6)] {

@@ -953,7 +953,7 @@ fn seeded_registers(seed: u32) -> PortModel {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned GL9750 PHY/clock/tuning source oracle"]
+#[ignore = "oracle: STELA_SDHCI_GLI_ORACLE"]
 fn unchanged_linux_gl9750_phy_clocks_and_two_polarity_tuning_match_native() {
     extern crate std;
     let records = std::fs::read_to_string(

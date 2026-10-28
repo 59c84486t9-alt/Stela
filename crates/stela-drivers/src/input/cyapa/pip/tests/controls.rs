@@ -362,7 +362,7 @@ fn every_low_power_late_failure_retains_owner_and_refuses_replay() {
 }
 
 #[test]
-#[ignore = "requires STELA_CYAPA_CONTROL_ORACLE from the pinned unchanged-source harness"]
+#[ignore = "oracle: STELA_CYAPA_CONTROL_ORACLE"]
 fn retained_linux_control_commands_match_actual_native_device_operations() {
     extern crate std;
     let path = std::env::var("STELA_CYAPA_CONTROL_ORACLE").expect("source records path");

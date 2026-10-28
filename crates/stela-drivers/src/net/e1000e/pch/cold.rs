@@ -1098,7 +1098,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_RESET_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_RESET_ORACLE"]
     fn unchanged_linux_global_reset_prefix_register_effects() {
         let path = std::env::var_os("STELA_E1000E_PCH_RESET_ORACLE").expect("reset trace path");
         let bytes = std::fs::read(path).expect("read reset trace");
@@ -1184,7 +1184,7 @@ mod tests {
         actual
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_POST_ORACLE to an unchanged helper trace"]
+    #[ignore = "oracle: STELA_E1000E_PCH_POST_ORACLE"]
     fn unchanged_linux_post_reset_lcd_and_oem_effects() {
         let path = std::env::var_os("STELA_E1000E_PCH_POST_ORACLE").expect("post-reset trace path");
         let bytes = std::fs::read(path).expect("read post-reset trace");

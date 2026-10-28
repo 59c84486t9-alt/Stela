@@ -406,7 +406,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires unchanged pinned Linux SET_LINK transmit-power trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_TRANSMIT_POWER_TRACE"]
     fn pinned_linux_transmit_power_bytes_and_explicit_limit_boundary() {
         use sha2::{Digest, Sha256};
         let bytes =

@@ -97,7 +97,7 @@ fn unsupported_gigabit_half_and_reserved_phy_results_cannot_create_carrier() {
 }
 
 #[test]
-#[ignore = "requires original Linux tg3_phy_link_oracle.py trace"]
+#[ignore = "oracle: STELA_TG3_PHY_LINK_ORACLE"]
 fn unchanged_linux_aux_decode_and_mac_duplex_match_actual_driver() {
     let path = std::env::var("STELA_TG3_PHY_LINK_ORACLE").expect("set original AUX/MAC trace");
     let trace = std::fs::read_to_string(path).unwrap();

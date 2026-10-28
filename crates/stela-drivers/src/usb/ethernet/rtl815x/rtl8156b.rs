@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged Linux RTL8156 enable trace"]
+    #[ignore = "oracle: STELA_RTL8156B_ENABLE_ORACLE"]
     fn unchanged_linux_rtl8156b_enable_register_effects() {
         extern crate std;
         use sha2::{Digest, Sha256};
@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires immutable real RTL8156B firmware fixture"]
+    #[ignore = "oracle: STELA_RTL815X_FIRMWARE"]
     fn real_firmware_8156b_full_startup_link_and_stop() {
         extern crate std;
         use sha2::{Digest, Sha256};

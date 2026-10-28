@@ -2250,7 +2250,7 @@ fn failed_child_write_and_passthrough_backpressure_retain_real_effects_and_owner
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_CLEANUP_ORACLE from original reset/mode/sliced bodies"]
+#[ignore = "oracle: STELA_SYNAPTICS_CLEANUP_ORACLE"]
 fn unchanged_linux_cleanup_mode_matches_actual_quiesced_i8042_owner() {
     extern crate std;
     let records =
@@ -2305,7 +2305,7 @@ fn unchanged_linux_cleanup_mode_matches_actual_quiesced_i8042_owner() {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_BOARD_ORACLE from complete original PnP/coordinate policy"]
+#[ignore = "oracle: STELA_SYNAPTICS_BOARD_ORACLE"]
 fn unchanged_linux_board_coordinates_match_actual_pnp_queried_device() {
     extern crate std;
     let records =
@@ -2345,7 +2345,7 @@ fn unchanged_linux_board_coordinates_match_actual_pnp_queried_device() {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_CHILD_ORACLE from original psmouse report/OOB bodies"]
+#[ignore = "oracle: STELA_SYNAPTICS_CHILD_ORACLE"]
 fn unchanged_linux_child_packets_and_oob_match_actual_bound_i8042_mouse() {
     extern crate std;
     let records =
@@ -2353,7 +2353,7 @@ fn unchanged_linux_child_packets_and_oob_match_actual_bound_i8042_mouse() {
     compare_linux_child_records(&records, false);
 }
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_EXPLORER_ORACLE from original enhanced packet/OOB bodies"]
+#[ignore = "oracle: STELA_SYNAPTICS_EXPLORER_ORACLE"]
 fn unchanged_linux_explorer_scroll_matches_actual_acknowledged_child_mode() {
     extern crate std;
     let records =
@@ -2453,7 +2453,7 @@ fn compare_linux_child_records(records: &str, enhanced: bool) {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_RATE_ORACLE from original rate/mode/sliced functions"]
+#[ignore = "oracle: STELA_SYNAPTICS_RATE_ORACLE"]
 fn unchanged_linux_rate_commands_match_actual_i8042_controls() {
     extern crate std;
     let records =
@@ -2506,7 +2506,7 @@ fn unchanged_linux_rate_commands_match_actual_i8042_controls() {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_FORCEPAD_ORACLE from original temporal packet processing"]
+#[ignore = "oracle: STELA_SYNAPTICS_FORCEPAD_ORACLE"]
 fn unchanged_linux_forcepad_temporal_records_match_actual_i8042_reports() {
     extern crate std;
     let records =
@@ -2557,7 +2557,7 @@ fn unchanged_linux_forcepad_temporal_records_match_actual_i8042_reports() {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_PT_ORACLE from original sliced/parent/receive helpers"]
+#[ignore = "oracle: STELA_SYNAPTICS_PT_ORACLE"]
 fn unchanged_linux_passthrough_commands_and_fields_match_actual_i8042_transport() {
     extern crate std;
     let records =
@@ -2642,7 +2642,7 @@ fn unchanged_linux_passthrough_commands_and_fields_match_actual_i8042_transport(
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_BUTTONS_ORACLE from original parse/report helpers"]
+#[ignore = "oracle: STELA_SYNAPTICS_BUTTONS_ORACLE"]
 fn unchanged_linux_button_reports_match_actual_i8042_extended_updates() {
     extern crate std;
     let records =
@@ -2690,7 +2690,7 @@ fn unchanged_linux_button_reports_match_actual_i8042_extended_updates() {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_IMAGE_ORACLE from original image-sensor count processing"]
+#[ignore = "oracle: STELA_SYNAPTICS_IMAGE_ORACLE"]
 fn unchanged_linux_image_count_policy_matches_actual_i8042_reports() {
     extern crate std;
     let records =
@@ -2731,7 +2731,7 @@ fn unchanged_linux_image_count_policy_matches_actual_i8042_reports() {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_AGM_ORACLE from unchanged pinned Linux helpers"]
+#[ignore = "oracle: STELA_SYNAPTICS_AGM_ORACLE"]
 fn unchanged_linux_agm_records_match_actual_advanced_mode_input() {
     extern crate std;
     let records =
@@ -2781,7 +2781,7 @@ fn unchanged_linux_agm_records_match_actual_advanced_mode_input() {
 }
 
 #[test]
-#[ignore = "requires STELA_SYNAPTICS_ORACLE from unchanged pinned Linux packet helpers"]
+#[ignore = "oracle: STELA_SYNAPTICS_ORACLE"]
 fn unchanged_linux_absolute_records_match_actual_i8042_input() {
     extern crate std;
     let records =

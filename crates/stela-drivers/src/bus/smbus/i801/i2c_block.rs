@@ -1329,7 +1329,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux fixed-block oracle trace"]
+    #[ignore = "oracle: STELA_I801_I2C_BLOCK_ORACLE"]
     fn unchanged_linux_fixed_block_wire_and_return_classes() {
         extern crate std;
         let trace = std::fs::read_to_string(

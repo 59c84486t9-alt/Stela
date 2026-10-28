@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires immutable original DCP/iBoot inputs; does not execute firmware"]
+    #[ignore = "oracle: STELA_COPROCESSOR_FIXTURE_DIR, STELA_COPROCESSOR_IBOOT_FIXTURE"]
     #[cfg(feature = "std")]
     fn original_t6000_tuning_tables_prepare_complete_bounded_mutation() -> Result<()> {
         use crate::{

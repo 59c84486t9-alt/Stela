@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-#[ignore = "requires a fresh pinned original Intel GPIO oracle trace"]
+#[ignore = "oracle: STELA_INTEL_GPIO_ORACLE"]
 fn original_linux_gpio_encodings_and_pad_ownership() {
     let path = std::env::var("STELA_INTEL_GPIO_ORACLE").unwrap();
     let bytes = std::fs::read(path).unwrap();

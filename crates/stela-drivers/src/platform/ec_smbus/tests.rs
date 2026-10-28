@@ -838,7 +838,7 @@ fn lost_firmware_lock_before_any_command_retains_owner_without_claiming_publicat
 }
 
 #[test]
-#[ignore = "requires fresh exact-source ASan/UBSan trace from ec_smbus_oracle.py"]
+#[ignore = "oracle: STELA_EC_SMBUS_ORACLE"]
 fn unchanged_linux_protocol_trace_matches_native_effects_with_explicit_oracle_limits() {
     let path = std::env::var("STELA_EC_SMBUS_ORACLE").expect("set absolute fresh trace.csv path");
     let trace = std::fs::read_to_string(path).unwrap();

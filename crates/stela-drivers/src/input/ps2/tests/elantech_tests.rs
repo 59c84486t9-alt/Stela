@@ -548,7 +548,7 @@ fn late_register_ack_keeps_effects_and_source_readback_admission_remains_version
     }
 }
 #[test]
-#[ignore = "requires STELA_ELANTECH_REJECTED_ORACLE from original single-byte service retry helper"]
+#[ignore = "oracle: STELA_ELANTECH_REJECTED_ORACLE"]
 fn unchanged_linux_known_rejection_service_budget_and_delay_match_actual_native_retry() {
     extern crate std;
     let records =
@@ -595,7 +595,7 @@ fn unchanged_linux_known_rejection_service_budget_and_delay_match_actual_native_
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_CONTROLS_ORACLE from complete pinned detection/query/register/init bodies"]
+#[ignore = "oracle: STELA_ELANTECH_CONTROLS_ORACLE"]
 fn unchanged_linux_elantech_configuration_matches_actual_i8042_transactions() {
     extern crate std;
     let records =
@@ -672,7 +672,7 @@ fn compare_control_records(records: &str, expected: usize) {
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_REPORTS_ORACLE from complete pinned report/property/validation bodies"]
+#[ignore = "oracle: STELA_ELANTECH_REPORTS_ORACLE"]
 fn unchanged_linux_elantech_reports_match_actual_configured_i8042_device() {
     extern crate std;
     let records =

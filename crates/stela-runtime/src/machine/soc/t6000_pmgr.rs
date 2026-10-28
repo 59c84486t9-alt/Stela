@@ -148,7 +148,7 @@ mod original {
         power::t6000::native,
     };
     #[test]
-    #[ignore = "requires pinned original J314s ADT through STELA_TEST_PMGR_M1_ADT"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
     fn original_complete_descriptor_and_sparse_ownership_have_no_fabricated_state() {
         let data = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_ADT").unwrap()).unwrap();
         assert_eq!(
@@ -215,7 +215,7 @@ mod original {
         );
     }
     #[test]
-    #[ignore = "requires pinned original J314s ADT through STELA_TEST_PMGR_M1_ADT"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
     fn original_descriptor_rejects_incomplete_or_crossed_resource_owners() {
         let original = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_ADT").unwrap()).unwrap();
         assert_eq!(

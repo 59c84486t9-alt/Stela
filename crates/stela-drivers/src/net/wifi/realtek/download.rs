@@ -798,7 +798,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned actual RTL8822C image and C transport oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_IMAGES, STELA_REALTEK_WIFI_TRANSPORT_ORACLE"]
     fn actual_firmware_download_register_and_packet_trace_matches_unchanged_c() {
         let root = std::env::var("STELA_REALTEK_WIFI_IMAGES").unwrap();
         let c = catalog(
@@ -815,7 +815,7 @@ mod tests {
         assert_eq!(m.borrow().submitted.len(), 51);
     }
     #[test]
-    #[ignore = "requires actual RTL8822C image and unchanged C transport oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_IMAGES, STELA_REALTEK_WIFI_TRANSPORT_ORACLE"]
     fn actual_download_uses_native_pinned_beacon_dma_with_each_new_completion() {
         use super::super::beacon::tests::Harness;
         struct Combined {

@@ -350,7 +350,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires matching original J314s LLB; source coordinates supply no hardware values"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
     fn original_identity_address_producers_and_revision_branches_are_pinned() {
         use sha2::{Digest, Sha256};
         let llb =

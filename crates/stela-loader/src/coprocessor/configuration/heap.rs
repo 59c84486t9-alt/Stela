@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires immutable original iBoot input; does not allocate/map/execute"]
+    #[ignore = "oracle: STELA_TEST_J314S_IBOOT"]
     #[cfg(feature = "std")]
     fn original_t6000_heap_policy_coordinates() -> Result<()> {
         let b = std::fs::read(std::env::var("STELA_TEST_J314S_IBOOT")?)?;

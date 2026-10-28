@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-#[ignore = "requires fresh pinned Linux STELA_XHCI_SS_ISO_ORACLE directory; authored UNRUN"]
+#[ignore = "oracle: STELA_XHCI_SS_ISO_ORACLE"]
 fn xhci_superspeed_bursts_match_linux() {
     use sha2::{Digest, Sha256};
     let directory = std::path::PathBuf::from(std::env::var("STELA_XHCI_SS_ISO_ORACLE").unwrap());

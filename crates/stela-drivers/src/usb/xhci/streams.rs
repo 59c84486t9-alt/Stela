@@ -1735,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged Linux stream helper trace"]
+    #[ignore = "oracle: STELA_XHCI_STREAMS_ORACLE"]
     fn unchanged_linux_primary_size_context_and_wire_encodings() {
         use sha2::{Digest, Sha256};
         let path = std::env::var("STELA_XHCI_STREAMS_ORACLE")

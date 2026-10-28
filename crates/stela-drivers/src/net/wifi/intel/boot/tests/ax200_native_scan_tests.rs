@@ -254,7 +254,7 @@ fn passive_umac15_holds_original_os_lease_at_real_dma_handoff_and_requires_actua
     exercise_completion(false);
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_umac15_schema_does_not_bypass_mld_mac_requirement() {
     exercise_completion(true);
 }

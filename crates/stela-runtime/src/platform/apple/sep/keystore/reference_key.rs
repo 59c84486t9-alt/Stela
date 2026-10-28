@@ -252,7 +252,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged 26A434 ramdisk libFDR arm64e via STELA_TEST_LIBFDR_ARM64E"]
+    #[ignore = "oracle: STELA_TEST_LIBFDR_ARM64E"]
     fn original_libfdr_reference_contract_binds_builder_reader_and_attestation_order() {
         use sha2::Digest;
         let path = std::env::var("STELA_TEST_LIBFDR_ARM64E").unwrap();
@@ -418,7 +418,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    #[ignore = "requires /usr/bin/openssl 3 for independent ECDSA verification"]
+    #[ignore = "oracle: program:/usr/bin/openssl"]
     fn reference_signature_verifies_with_openssl() {
         use sha2::Digest;
         let root = [1; 32];

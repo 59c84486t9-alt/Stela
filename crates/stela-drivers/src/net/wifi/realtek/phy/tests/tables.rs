@@ -151,7 +151,7 @@ fn table_failure_quarantines() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned C complete pre-TRX PHY table phase"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_PHY_TABLES_ORACLE"]
 fn rtl8822c_tables_match_linux() {
     let trace =
         std::fs::read(std::env::var("STELA_REALTEK_WIFI_PHY_TABLES_ORACLE").unwrap()).unwrap();

@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires fresh complete unchanged modern MT7925 firmware writers"]
+    #[ignore = "oracle: STELA_MT7925_MODERN_ORACLE"]
     fn full_source_modern_peer_bss_edca_ba_and_puncture_match_exact_requests() {
         extern crate std;
         use std::{

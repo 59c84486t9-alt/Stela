@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original 26A434 t8112pmp through STELA_TEST_PMGR_PMP"]
+    #[ignore = "oracle: STELA_TEST_PMGR_PMP"]
     fn original_native_protocol_keeps_hardware_identity_and_request_settlement_distinct() {
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMGR_PMP").unwrap()).unwrap();
         assert_eq!(

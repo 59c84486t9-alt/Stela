@@ -61,7 +61,7 @@ fn request(cmd: u8, device: u8, id: Option<u8>, body: &[u8]) -> Vec<u8> {
         .collect()
 }
 #[test]
-#[ignore = "requires externally qualified sixty-case original Intel ISH C trace; no compiler/test lease implied"]
+#[ignore = "oracle: STELA_ISH_ORACLE_60_V1, STELA_ISH_ORACLE_TRACE"]
 fn original_linux_whole_helpers_match_sixty_wire_fragment_credit_and_refusal_cases() {
     let path =
         std::env::var("STELA_ISH_ORACLE_TRACE").expect("external qualified original-C trace");

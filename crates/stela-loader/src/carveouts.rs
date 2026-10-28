@@ -736,7 +736,7 @@ mod tests {
     ];
 
     #[test]
-    #[ignore = "requires the decoded 26A434 iBoot.<board>.bin files in STELA_TEST_IBOOT_DIR"]
+    #[ignore = "oracle: STELA_TEST_IBOOT_DIR"]
     fn every_table_matches_every_original_iboot_of_its_chips() {
         let directory = std::path::PathBuf::from(std::env::var_os("STELA_TEST_IBOOT_DIR").unwrap());
         for (chip_id, file, sha256, offset, stride, count) in ORIGINAL_TABLES {

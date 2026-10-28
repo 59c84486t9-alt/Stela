@@ -458,7 +458,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned C interrupt mask/W1C oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_INTERRUPT_ORACLE"]
     fn masks_w1c_widths_order_and_rx_exclusion_match_unchanged_c() {
         let trace =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_INTERRUPT_ORACLE").unwrap()).unwrap();

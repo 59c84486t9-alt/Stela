@@ -558,7 +558,7 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires matching original J314s LLB and iBootData"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_IBOOTDATA, STELA_TEST_PMGR_M1_LLB"]
     fn original_poll_emitter_and_actual_source_operands_are_pinned() {
         use sha2::{Digest, Sha256};
         let llb =

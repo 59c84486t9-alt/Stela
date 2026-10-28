@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-#[ignore = "requires pinned actual PNVM asset; see THIRD_PARTY.md"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_pnvm_skus_preserve_payloads_in_both_layouts() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
@@ -60,7 +60,7 @@ fn actual_pnvm_skus_preserve_payloads_in_both_layouts() {
     }
 }
 #[test]
-#[ignore = "requires actual PNVM and unchanged Linux payload/setter helper oracle; see THIRD_PARTY.md"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES, STELA_IWLWIFI_PNVM_DMA_ORACLE"]
 fn pnvm_and_reduced_power_tables_match_linux_for_both_layouts() {
     use sha2::{Digest, Sha256};
     fn hex(bytes: &[u8]) -> alloc::string::String {

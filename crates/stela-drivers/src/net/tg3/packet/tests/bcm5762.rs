@@ -395,7 +395,7 @@ fn actual_5762_transfers_and_fatal_dma_attention_preserve_ownership() {
 }
 
 #[test]
-#[ignore = "UNRUN: set STELA_TG3_PACKET_ORACLE from unchanged pinned tg3_bcm5762_packet_oracle.py"]
+#[ignore = "oracle: STELA_TG3_PACKET_ORACLE"]
 fn unchanged_linux_5720_5762_selected_packet_setup_matches_actual_registers() {
     let path = std::env::var("STELA_TG3_PACKET_ORACLE").expect("fresh original C trace required");
     let trace = std::fs::read_to_string(path).unwrap();

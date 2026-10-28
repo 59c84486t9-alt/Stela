@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires pinned original 26A434 kernelcache; no Apple image is committed"]
+    #[ignore = "oracle: STELA_TEST_PMGR_KERNEL"]
     fn original_kernel_proves_id_parent_group_and_index_selection() {
         use sha2::{Digest, Sha256};
         let path = std::env::var("STELA_TEST_PMGR_KERNEL").expect("original kernelcache path");
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned original 26A434 mac18g kernel through STELA_TEST_PMGR_M6_KERNELCACHE"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M6_KERNELCACHE"]
     fn original_m6_device_configs_keep_the_shared_record_envelope() {
         let bytes =
             std::fs::read(std::env::var("STELA_TEST_PMGR_M6_KERNELCACHE").unwrap()).unwrap();

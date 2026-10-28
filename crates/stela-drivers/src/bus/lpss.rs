@@ -991,7 +991,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged pinned LPSS PCI/property trace"]
+    #[ignore = "oracle: STELA_LPSS_PROFILE_ORACLE"]
     fn unchanged_source_all_pci_i2c_profiles_and_property_groups() {
         extern crate std;
         let trace = std::fs::read_to_string(
@@ -1049,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires fresh unchanged pinned LPSS source trace"]
+    #[ignore = "oracle: STELA_LPSS_ORACLE"]
     fn unchanged_source_reset_remap_effects() {
         extern crate std;
         let trace =

@@ -701,7 +701,7 @@ mod tests {
         assert!(coherence.ram.domain().generation().is_err());
     }
     #[test]
-    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_j473_static_dma_configuration_retains_source_identity() {
         let bytes = std::fs::read(
             std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())

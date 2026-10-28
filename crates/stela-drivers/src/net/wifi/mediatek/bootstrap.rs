@@ -1471,7 +1471,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged bootstrap helpers/writers and complete MAC oracle"]
+    #[ignore = "oracle: STELA_MT792X_BOOTSTRAP_ORACLE"]
     fn composed_bootstrap_matches_source_mac_effects_and_all_initial_packet_bytes() {
         let root =
             std::path::PathBuf::from(std::env::var("STELA_MT792X_BOOTSTRAP_ORACLE").unwrap());
@@ -1575,7 +1575,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    #[ignore = "requires the exact six redistributable source firmware images"]
+    #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
     fn all_actual_images_boot_the_full_native_layout_before_source_initialization() {
         let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {

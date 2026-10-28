@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned Linux receive/duplex trace"]
+    #[ignore = "oracle: STELA_RTL8153A_LINK_ORACLE"]
     fn unchanged_linux_8153a_link_register_effects() {
         extern crate std;
         use sha2::{Digest, Sha256};
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned real RTL8153A firmware fixtures; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_RTL815X_FIRMWARE"]
     fn real_firmware_8153a_full_startup_and_link() {
         extern crate std;
         use sha2::{Digest, Sha256};

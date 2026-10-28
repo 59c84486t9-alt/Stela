@@ -443,7 +443,7 @@ fn source_policy(case: u32) -> ReceiveFilter {
 }
 
 #[test]
-#[ignore = "set STELA_TG3_FILTER_ORACLE from unchanged original tg3_filter_oracle.py"]
+#[ignore = "oracle: STELA_TG3_FILTER_ORACLE"]
 fn unchanged_linux_complete_receive_policy_crc_hash_slots_writes_and_settling_match_native() {
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_FILTER_ORACLE").expect("fresh original filter trace required"),

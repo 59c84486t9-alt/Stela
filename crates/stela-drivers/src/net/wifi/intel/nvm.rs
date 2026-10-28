@@ -338,7 +338,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires freshly built unchanged Intel NVM layout oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_NVM_ORACLE"]
     fn exact_linux_structures_and_unchanged_mac_permutation_oracle() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_NVM_ORACLE").unwrap()).unwrap();
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!((infos, addresses), (3, 5));
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_advertise_nvm_v4_with_correct_api_stride() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {

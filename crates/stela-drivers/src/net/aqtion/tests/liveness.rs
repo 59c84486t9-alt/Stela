@@ -110,7 +110,7 @@ unsafe impl Timer for NoWait {
     }
 }
 #[test]
-#[ignore = "requires pinned unchanged Linux live-read transcript"]
+#[ignore = "oracle: STELA_AQTION_LIVENESS_ORACLE"]
 fn unchanged_linux_live_read_data_flags_and_exact_independent_alive_access_match_native() {
     let text =
         std::fs::read_to_string(std::env::var("STELA_AQTION_LIVENESS_ORACLE").unwrap()).unwrap();

@@ -1798,7 +1798,7 @@ mod tests {
     /// accesses; it does not execute Apple code or qualify hardware effects.
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires original 26A434 OS files via STELA_TEST_EL0_OS_FILES"]
+    #[ignore = "oracle: STELA_TEST_EL0_OS_FILES"]
     fn el0_apple_control_original_runtime_pins_the_user_afpcr_accesses() {
         let root = std::path::PathBuf::from(
             std::env::var_os("STELA_TEST_EL0_OS_FILES").expect("original OS-file extraction"),

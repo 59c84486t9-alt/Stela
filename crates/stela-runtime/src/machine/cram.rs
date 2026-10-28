@@ -1503,17 +1503,17 @@ mod tests {
             InitializedWithSep,
         }
         #[test]
-        #[ignore = "requires pinned J314s LLB; declared live CRAM is an emulated entry handoff, not Apple reset state"]
+        #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
         fn unchanged_j314s_entry_fetches_from_live_canonical_aperture_before_original_consumers() {
             live_entry(EntryPolicy::ImageOnly);
         }
         #[test]
-        #[ignore = "requires pinned J314s LLB; whole-aperture zeroing is explicit Stela entry policy, not Apple BootROM state"]
+        #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
         fn unchanged_j314s_entry_uses_actual_whole_reservation_initialization_before_image_copy() {
             live_entry(EntryPolicy::Initialized);
         }
         #[test]
-        #[ignore = "requires pinned J314s LLB/ADT and actual host entropy; declared Stela ROM handoff, not Apple cold state"]
+        #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
         fn unchanged_j314s_entry_exchanges_full_mailbox_frames_with_native_sep_rom() {
             live_entry(EntryPolicy::InitializedWithSep);
         }
@@ -1779,22 +1779,22 @@ mod tests {
             }
         }
         #[test]
-        #[ignore = "requires pinned J473 LLB; synthetic resource is not an Apple handoff observation"]
+        #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
         fn unchanged_original_allocation_and_release_execute_against_actual_view_owner() {
             allocation_and_release(J473);
         }
         #[test]
-        #[ignore = "requires pinned J473 LLB; source capacity and already-complete branches"]
+        #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
         fn unchanged_original_capacity_and_initial_completion_branches_remain_distinct() {
             capacity_and_initial_completion(J473);
         }
         #[test]
-        #[ignore = "requires pinned J314s LLB; synthetic resource is not an Apple handoff observation"]
+        #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
         fn unchanged_j314s_allocation_and_release_execute_against_actual_view_owner() {
             allocation_and_release(J314S);
         }
         #[test]
-        #[ignore = "requires pinned J314s LLB; source capacity and already-complete branches"]
+        #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
         fn unchanged_j314s_capacity_and_initial_completion_branches_remain_distinct() {
             capacity_and_initial_completion(J314S);
         }

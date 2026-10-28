@@ -224,7 +224,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged pinned Linux device registration oracle"]
+    #[ignore = "oracle: STELA_MT792X_DEVICE_ORACLE"]
     fn unchanged_initial_device_helper_matches_both_full_requests_in_source_order() {
         let root = std::path::PathBuf::from(
             std::env::var_os("STELA_MT792X_DEVICE_ORACLE").expect("device oracle directory"),

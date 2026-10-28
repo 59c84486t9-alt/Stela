@@ -482,7 +482,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned actual firmware; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn both_actual_firmware_images_negotiate_alive_six() {
         extern crate std;
         use sha2::{Digest, Sha256};
@@ -523,7 +523,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned unchanged donor struct layout trace; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_RECEIVE_ORACLE"]
     fn unchanged_donor_structs_match_every_alive_field_and_ax210_descriptor_lane() {
         extern crate std;
         use core::fmt::Write;

@@ -914,7 +914,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original J314s ADT and mac13j KC via STELA_T6000_MCC_DEVICE_TREE/STELA_TEST_MCC_KERNELCACHE"]
+    #[ignore = "oracle: STELA_T6000_MCC_DEVICE_TREE, STELA_TEST_MCC_KERNELCACHE"]
     fn original_j314s_input_free_frontend_and_opaque_control_consumers_are_pinned() {
         use stela_contracts::adt::Node;
         let tree = std::fs::read(std::env::var("STELA_T6000_MCC_DEVICE_TREE").unwrap()).unwrap();

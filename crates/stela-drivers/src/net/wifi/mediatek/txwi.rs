@@ -761,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires STELA_MT792X_TXWI_ORACLE from unchanged pinned raw80211 descriptor writers"]
+    #[ignore = "oracle: STELA_MT792X_TXWI_ORACLE"]
     fn unchanged_pinned_raw80211_writers_match_every_descriptor_word() {
         extern crate std;
         let root = std::env::var_os("STELA_MT792X_TXWI_ORACLE").expect("reference trace directory");
@@ -938,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires STELA_MT7925_PROTECTED_ACTION_TXWI_ORACLE from unchanged pinned Linux writers"]
+    #[ignore = "oracle: STELA_MT7925_PROTECTED_ACTION_TXWI_ORACLE"]
     fn unchanged_pinned_mt7925_writers_match_protected_block_ack_and_sa_query_words() {
         extern crate std;
         let root = std::env::var_os("STELA_MT7925_PROTECTED_ACTION_TXWI_ORACLE")

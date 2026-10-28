@@ -191,7 +191,7 @@ fn independent_peer_refuses_power_writes_with_live_dma_or_missing_drain() {
 }
 
 #[test]
-#[ignore = "requires original Linux tg3_phy_power_oracle.py trace"]
+#[ignore = "oracle: STELA_TG3_PHY_POWER_ORACLE"]
 fn unchanged_linux_phy_power_writes_match_actual_retained_driver() {
     let path = std::env::var("STELA_TG3_PHY_POWER_ORACLE").expect("set original PHY power trace");
     let trace = std::fs::read_to_string(path).unwrap();

@@ -504,7 +504,7 @@ fn actual_native_ep0_short_range_and_stalled_set_propagate_failures() {
 }
 
 #[test]
-#[ignore = "requires unchanged-source Linux scalar feature oracle trace"]
+#[ignore = "oracle: STELA_USB_AUDIO_FEATURE_ORACLE"]
 fn scalar_features_match_unchanged_linux_type_and_conversion_helpers() {
     use sha2::{Digest, Sha256};
     let path = std::env::var("STELA_USB_AUDIO_FEATURE_ORACLE")

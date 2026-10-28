@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires hash-pinned unchanged Linux NHI preparation trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_CONTROLLER_ORACLE"]
     fn unchanged_linux_controller_preparation_effects_and_match_table_agree() {
         use std::{env, fs};
         let trace = fs::read_to_string(

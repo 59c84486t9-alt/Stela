@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(model.borrow().operations.len(), 5);
     }
     #[test]
-    #[ignore = "requires pinned actual firmware and unchanged C oracle traces"]
+    #[ignore = "oracle: STELA_MT792X_FIRMWARE, STELA_MT792X_ORACLE"]
     fn actual_pinned_download_matches_every_unchanged_donor_command_byte() {
         extern crate std;
         use super::super::firmware::tests::{catalog, requests};

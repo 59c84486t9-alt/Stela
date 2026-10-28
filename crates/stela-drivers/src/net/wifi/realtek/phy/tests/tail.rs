@@ -134,7 +134,7 @@ fn tail_profile_preflight() {
 }
 
 #[test]
-#[ignore = "requires unchanged source thermal reset/EWMA initialization and complete beamforming IO/BAR oracle"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_PHY_TAIL_ORACLE"]
 fn rtl8822c_tail_matches_linux() {
     let trace =
         std::fs::read(std::env::var("STELA_REALTEK_WIFI_PHY_TAIL_ORACLE").unwrap()).unwrap();

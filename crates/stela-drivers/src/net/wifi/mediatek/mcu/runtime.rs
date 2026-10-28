@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned UNI encoder oracle traces"]
+    #[ignore = "oracle: STELA_MT792X_UNI_ORACLE"]
     fn unchanged_unified_writers_match_all_bytes_across_sequence_wraps() {
         extern crate std;
         let directory = std::path::PathBuf::from(

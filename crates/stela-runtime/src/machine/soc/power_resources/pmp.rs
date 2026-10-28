@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original 26A434 kernelcaches through STELA_TEST_PMGR_KERNELCACHES"]
+    #[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHES"]
     fn original_family_helpers_use_raw_source_die_offset_and_ordinal() {
         let directory = std::env::var("STELA_TEST_PMGR_KERNELCACHES").unwrap();
         for (family, offset, expected) in [

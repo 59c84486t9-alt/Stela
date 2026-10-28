@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "set STELA_XHCI_HUB_POWER_ORACLE to the unchanged pinned helper trace"]
+    #[ignore = "oracle: STELA_XHCI_HUB_POWER_ORACLE"]
     fn unchanged_linux_hub_suspend_status_and_link_requests() {
         extern crate std;
         let path = std::env::var("STELA_XHCI_HUB_POWER_ORACLE").unwrap();

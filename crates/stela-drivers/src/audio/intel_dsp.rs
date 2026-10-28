@@ -1547,7 +1547,7 @@ mod tests {
         assert!(ipc::firmware_payload(&image).is_err());
     }
     #[test]
-    #[ignore = "STELA_INTEL_SOF_ORACLE: run intel_dsp/reference.py against unchanged pinned Linux first"]
+    #[ignore = "oracle: STELA_INTEL_SOF_ORACLE"]
     fn unchanged_linux_cnl_host_done_notification_acknowledgement() {
         let (mut controller, model, _, _) = fixture();
         let trace = std::fs::read_to_string(

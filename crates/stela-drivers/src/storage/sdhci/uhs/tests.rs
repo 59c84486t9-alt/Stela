@@ -268,7 +268,7 @@ fn native_uhs_timing_write_without_acknowledgment_never_publishes_a_card() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned Linux UHS signaling/tuning oracle"]
+#[ignore = "oracle: STELA_SDHCI_UHS_ORACLE"]
 fn unchanged_linux_uhs_signaling_and_tuning_decisions_match_native_operations() {
     extern crate std;
     let records = std::fs::read_to_string(

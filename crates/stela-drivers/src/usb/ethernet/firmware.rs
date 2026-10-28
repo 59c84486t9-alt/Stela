@@ -926,7 +926,7 @@ pub(crate) mod tests {
     ];
 
     #[test]
-    #[ignore = "requires seven immutable linux-firmware fixtures; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_RTL815X_FIRMWARE"]
     fn pinned_real_firmware_files_parse_all_observed_block_effects() {
         extern crate std;
         let directory =
@@ -940,7 +940,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned Linux validator cases; see tests/reference/rtl815x_firmware_oracle.py"]
+    #[ignore = "oracle: STELA_RTL815X_FIRMWARE_ORACLE"]
     fn unchanged_linux_firmware_validators_match_real_and_mutated_fields() {
         extern crate std;
         let path = std::env::var("STELA_RTL815X_FIRMWARE_ORACLE")

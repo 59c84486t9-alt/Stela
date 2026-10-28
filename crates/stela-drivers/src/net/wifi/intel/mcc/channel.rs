@@ -306,7 +306,7 @@ mod tests {
         assert!(!decode(51, (1 << 13) | (1 << 15), 15).allow_6ghz_vlp_ap);
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux full channel restriction oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_CHANNEL_ORACLE"]
     fn unchanged_linux_channel_inventory_and_full_restriction_oracle() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_CHANNEL_ORACLE").unwrap()).unwrap();

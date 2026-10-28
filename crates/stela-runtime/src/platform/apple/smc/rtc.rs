@@ -47,7 +47,7 @@ impl RtcBinding {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires original26A434 KC and J314s DT via STELA_TEST_PMGR_M1_KERNELCACHE/STELA_TEST_SPMI_DT"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE, STELA_TEST_SPMI_DT"]
     fn original_rtc_helper_uses_raw_keyr_with_actual_interface_dispatch() {
         use stela_contracts::adt::Node;
         let bytes =

@@ -1285,7 +1285,7 @@ mod tests {
         LiveTree::capture(&mut input, &regions, ARGS).unwrap()
     }
     #[test]
-    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
     fn original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources() {
         use stela_runtime::machine::soc;
         let file = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
@@ -1417,7 +1417,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires retained original26A434J314s and prepared bundle DT"]
+    #[ignore = "oracle: STELA_TEST_ASSIGNED_DT, STELA_TEST_ASSIGNED_PREPARED_DT"]
     fn original_mode1_factory_projects_actual_live_tree_without_public_pmgr_admission() {
         use {stela_contracts::adt, stela_runtime::machine::soc};
         let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
@@ -1549,7 +1549,7 @@ mod tests {
         assert!(Source::t6000(&original, &changed.serialize(), identity, 0).is_err());
     }
     #[test]
-    #[ignore = "requires original J314s and a fresh default-first-P prepared DT"]
+    #[ignore = "oracle: STELA_TEST_ASSIGNED_DT, STELA_TEST_ASSIGNED_PREPARED_DT"]
     fn original_mode1_keeps_discovery_order_with_nonzero_logical_boot_pe() {
         use stela_runtime::machine::soc;
         let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();

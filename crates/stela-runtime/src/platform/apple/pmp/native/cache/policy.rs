@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires original T8112 PMP and J473 DT via STELA_TEST_PMP_T8112 and STELA_TEST_MCC_J473_DT"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT, STELA_TEST_PMP_T8112"]
     fn original_t8112_cache_rows_seeds_defaults_and_allocator_match_source_windows() {
         use sha2::{Digest, Sha256};
         use stela_contracts::adt::Node;

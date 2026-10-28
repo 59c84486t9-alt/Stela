@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(plan.commands().next().unwrap().1, [0; 4]);
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_select_source_lari6_and_lari8_with_frozen_extension() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
@@ -420,7 +420,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux LARI preparation/ordered-send oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_LARI_ORACLE"]
     fn unchanged_linux_lari_full_preparation_and_ordered_send_oracle() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_LARI_ORACLE").unwrap()).unwrap();

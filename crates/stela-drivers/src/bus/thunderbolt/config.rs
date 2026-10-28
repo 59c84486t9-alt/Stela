@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires hash-pinned unchanged Linux C helper trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_CONFIG_ORACLE"]
     fn unchanged_linux_config_frames_match_rust_wire_bytes() {
         extern crate std;
         use std::{env, fs};

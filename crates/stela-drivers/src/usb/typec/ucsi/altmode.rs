@@ -1307,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged Linux DP helper and CAM macro trace"]
+    #[ignore = "oracle: STELA_UCSI_DP_ORACLE"]
     fn unchanged_linux_dp_source_and_cam_oracle() {
         let trace =
             std::fs::read_to_string(std::env::var("STELA_UCSI_DP_ORACLE").unwrap()).unwrap();

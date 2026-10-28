@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(m.quarantines, 1);
     }
     #[test]
-    #[ignore = "requires pinned unchanged C MAC power and table oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_POWER_ORACLE"]
     fn complete_power_trace_matches_unchanged_c_for_every_source_cut_and_entry_state() {
         let path = std::env::var("STELA_REALTEK_WIFI_POWER_ORACLE").unwrap();
         let trace = std::fs::read(&path).unwrap();

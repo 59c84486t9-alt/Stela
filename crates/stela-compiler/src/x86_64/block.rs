@@ -1179,7 +1179,7 @@ mod tests {
     /// `STELA_CENSUS_SYSTEM=1` replays system mode, whose accesses check
     /// the guest range (`guest_range`), instead of the process profiles.
     #[test]
-    #[ignore = "measurement over a local image"]
+    #[ignore = "manual: opt-in"]
     fn region_census_of_real_code() {
         use crate::Lifter;
         use std::collections::BTreeMap;

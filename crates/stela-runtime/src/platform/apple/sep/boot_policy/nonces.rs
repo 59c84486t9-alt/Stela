@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged 26A434 libbootpolicy __TEXT via STELA_TEST_BOOTPOLICY_TEXT"]
+    #[ignore = "oracle: STELA_TEST_BOOTPOLICY_TEXT"]
     fn original_recovery_nonce_builders_select_the_recovered_commands_and_buffer_sizes() {
         use sha2::{Digest, Sha256};
         let text = std::fs::read(std::env::var("STELA_TEST_BOOTPOLICY_TEXT").unwrap()).unwrap();

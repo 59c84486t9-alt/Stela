@@ -563,7 +563,7 @@ mod tests {
         ));
     }
     #[test]
-    #[ignore = "requires STELA_MT792X_CONTROL_ORACLE from unchanged pinned ownership/DMA helpers"]
+    #[ignore = "oracle: STELA_MT792X_CONTROL_ORACLE"]
     fn unchanged_pinned_ownership_and_disable_helpers_match_actual_register_effects() {
         let root =
             std::env::var_os("STELA_MT792X_CONTROL_ORACLE").expect("reference trace directory");
@@ -748,7 +748,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires STELA_MT792X_START_ORACLE from unchanged pinned WFDMA helpers"]
+    #[ignore = "oracle: STELA_MT792X_START_ORACLE"]
     fn unchanged_pinned_prefetch_and_enable_match_except_explicit_polling_irq_policy() {
         let root =
             std::env::var_os("STELA_MT792X_START_ORACLE").expect("reference trace directory");

@@ -744,7 +744,7 @@ pub(in crate::net::wifi::intel) mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned actual Intel firmware; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_preserve_every_mapped_payload_and_paging_lifetime() {
         use super::super::firmware::{Family, Firmware};
         use sha2::{Digest, Sha256};

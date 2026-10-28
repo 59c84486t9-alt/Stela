@@ -495,7 +495,7 @@ mod tests {
     extern crate std;
     use super::*;
     #[test]
-    #[ignore = "requires unchanged pinned Linux MLD queue removal trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_MLD_QUEUE_TRACE"]
     fn pinned_linux_mld_scheduler_remove_and_original_free_call_bytes() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_MLD_QUEUE_TRACE").unwrap()).unwrap();

@@ -353,7 +353,7 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires STELA_TEST_PMGR_KERNELCACHE naming the pinned original 26A434 Mach-O"]
+    #[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHE"]
     fn original_dpe_map_controls_and_samples_do_not_encode_physical_reset() {
         use sha2::{Digest, Sha256};
         let path =
@@ -389,7 +389,7 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires STELA_TEST_PMGR_M1_KERNELCACHE naming the pinned original mac13j 26A434 Mach-O"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_m1_dpe_geometry_does_not_qualify_the_t8112_bank() {
         use sha2::{Digest, Sha256};
         let path = std::env::var_os("STELA_TEST_PMGR_M1_KERNELCACHE")

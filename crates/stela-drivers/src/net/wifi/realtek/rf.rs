@@ -563,7 +563,7 @@ mod tests {
         assert!(weak.upgrade().is_some()); // Actual BAR owner quarantined.
     }
     #[test]
-    #[ignore = "requires unchanged pinned C RF direct/mixed access oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_RF_ORACLE"]
     fn all_registers_masks_paths_and_full_io_traces_match_unchanged_c() {
         let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_RF_ORACLE").unwrap()).unwrap();
         let mut offset = 0;

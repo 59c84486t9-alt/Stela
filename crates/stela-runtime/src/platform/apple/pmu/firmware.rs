@@ -787,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned J314s26A434 LLB and mac13j KC via STELA_TEST_CRAM_J314S_LLB and STELA_TEST_PMGR_M1_KERNELCACHE"]
+    #[ignore = "oracle: STELA_TEST_CRAM_J314S_LLB, STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_images_full_producers_and_ap_sram_read_write_contract_are_pinned() {
         let data = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(

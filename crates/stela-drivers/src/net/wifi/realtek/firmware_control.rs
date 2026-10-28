@@ -668,7 +668,7 @@ pub(super) mod tests {
             .collect()
     }
     #[test]
-    #[ignore = "requires unchanged register-mailbox and RFK polling source oracle"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_FIRMWARE_CONTROL_ORACLE"]
     fn every_mailbox_busy_boundary_and_complete_source_rfk_traces_match() {
         let dir = std::path::PathBuf::from(
             std::env::var("STELA_REALTEK_WIFI_FIRMWARE_CONTROL_ORACLE").unwrap(),

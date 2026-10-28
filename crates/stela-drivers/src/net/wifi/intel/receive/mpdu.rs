@@ -501,7 +501,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_admit_only_source_family_descriptor_versions() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
@@ -529,7 +529,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged packed RX-MPDU source ABI oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_MPDU_ORACLE"]
     fn unchanged_packed_source_fields_and_masks_match_all_metadata_vectors() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_MPDU_ORACLE").unwrap()).unwrap();

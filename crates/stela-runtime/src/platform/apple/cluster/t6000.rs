@@ -446,7 +446,7 @@ mod original {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
     #[test]
-    #[ignore = "requires original J314s ADT/kernelcache; actual three-bank ACC/CPM mount"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_three_complexes_mount_actual_views_and_preserve_a_committed_prefix() {
         let bytes = original(
             "STELA_TEST_PMGR_M1_KERNELCACHE",

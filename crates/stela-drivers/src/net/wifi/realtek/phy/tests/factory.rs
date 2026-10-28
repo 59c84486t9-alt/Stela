@@ -158,7 +158,7 @@ fn factory_profile_preflight() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned source complete factory RF trim traces and real OTP provenance"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_TRIM_ORACLE"]
 fn rtl8822c_factory_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_TRIM_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

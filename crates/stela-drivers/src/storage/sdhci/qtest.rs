@@ -83,7 +83,7 @@ impl Drop for Process {
 }
 
 #[test]
-#[ignore = "requires a caller-authorized paused64MiB QEMU SDHCI fixture"]
+#[ignore = "oracle: STELA_SDHCI_QEMU, STELA_SDHCI_QTEST_OUTPUT"]
 fn real_paused_qemu_sd_card_runs_native_initialization_pio_and_durable_io() {
     let binary = std::env::var_os("STELA_SDHCI_QEMU").expect("set STELA_SDHCI_QEMU");
     let output = PathBuf::from(

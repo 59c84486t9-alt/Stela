@@ -332,7 +332,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_use_source_cold_prefix_schemas_and_distinct_smart_fifo_policy() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
@@ -350,7 +350,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires freshly built unchanged Linux radio-prefix helper oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_RADIO_ORACLE"]
     fn unchanged_linux_cold_prefix_command_helpers_oracle() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_RADIO_ORACLE").unwrap()).unwrap();

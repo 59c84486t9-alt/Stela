@@ -644,7 +644,7 @@ unsafe impl crate::bus::mmio::owned::MappingPlatform for NativeMappingModel {
 }
 
 #[test]
-#[ignore = "requires a fresh process for the production native MMIO authority singleton"]
+#[ignore = "oracle: fresh-process"]
 fn actual_native_amd_factory_opregion_retirement_and_fresh_rebind() {
     use crate::bus::gpio::native::Device;
     use crate::bus::mmio::owned::{AddressSpace, Authority, Resource as MmioResource};

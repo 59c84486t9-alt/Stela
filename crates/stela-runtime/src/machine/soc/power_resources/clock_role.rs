@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged original26A434J314sDeviceTree"]
+    #[ignore = "oracle: STELA_T6000_MCC_DEVICE_TREE"]
     fn original_j314s_pmgr_publishes_self_indices_without_activating_a_self_clock() {
         let input =
             std::env::var("STELA_T6000_MCC_DEVICE_TREE").expect("explicit original ADT input");
@@ -454,7 +454,7 @@ mod tests {
     /// treating missing numeric DeviceIDs as evidence of a passive provider.
 
     #[test]
-    #[ignore = "requires pinned 26A434 mac13j and mac14j kernel collections"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE, STELA_TEST_PMGR_M2_KERNELCACHE"]
     fn original_m1_m2_pro_max_provider_start_uses_the_io_service_superclass() {
         for (variable, hash, windows, pointers) in [
             (
@@ -537,7 +537,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged original26A434J314sKernelCollection"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
     fn original_provider_start_and_clock_receiver_source_is_pinned() {
         let input =
             std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").expect("explicit original KC input");

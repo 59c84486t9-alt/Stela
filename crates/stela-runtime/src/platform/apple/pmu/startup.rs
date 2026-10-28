@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires original pinned J314s LLB via STELA_TEST_CRAM_J314S_LLB"]
+    #[ignore = "oracle: STELA_TEST_CRAM_J314S_LLB"]
     fn original_images_and_exact_protected_sequences_replay_without_completion_credit() {
         let source = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(

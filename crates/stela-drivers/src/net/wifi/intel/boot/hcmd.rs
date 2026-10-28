@@ -552,7 +552,7 @@ mod tests {
     extern crate std;
     use super::*;
     #[test]
-    #[ignore = "requires freshly built unchanged Linux HCMD helper oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_HCMD_ORACLE"]
     fn unchanged_linux_sentinel_index_and_reclaim_oracle() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_HCMD_ORACLE").unwrap()).unwrap();

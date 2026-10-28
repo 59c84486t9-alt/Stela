@@ -760,7 +760,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires hash-pinned unchanged Linux ICM parsing/TX trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_ICM_ORACLE"]
     fn unchanged_linux_icm_driver_ready_and_command_wire_agree() {
         use std::{env, fs};
         let trace =

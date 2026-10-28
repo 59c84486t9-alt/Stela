@@ -2346,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged Linux CBW builder trace"]
+    #[ignore = "oracle: STELA_USB_BOT_CBW_ORACLE"]
     fn unchanged_linux_cbw_builder_matches_all_luns_and_transfer_profiles() {
         extern crate std;
         let path = std::env::var("STELA_USB_BOT_CBW_ORACLE").expect("oracle trace path");

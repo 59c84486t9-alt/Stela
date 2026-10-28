@@ -726,7 +726,7 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires unchanged original J473 DeviceTree via STELA_TEST_MCC_J473_DT"]
+    #[ignore = "oracle: STELA_TEST_MCC_J473_DT"]
     fn original_j473_dcs_and_ptd_placement_builds_one_source_profiled_resource() {
         use stela_contracts::adt::Node;
         let bytes = std::fs::read(std::env::var("STELA_TEST_MCC_J473_DT").unwrap()).unwrap();

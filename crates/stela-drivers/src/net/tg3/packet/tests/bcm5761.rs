@@ -408,7 +408,7 @@ fn core_resets(peer: &Arc<Mutex<Device>>) -> usize {
 }
 
 #[test]
-#[ignore = "set STELA_TG3_BCM5761_ORACLE from unchanged original tg3_bcm5761_oracle.py"]
+#[ignore = "oracle: STELA_TG3_BCM5761_ORACLE"]
 fn unchanged_linux_5761_initialization_selections_match_actual_retained_packet_owner() {
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_BCM5761_ORACLE").expect("fresh original-source trace required"),

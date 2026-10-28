@@ -1907,7 +1907,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned firmware and unchanged donor download trace fixtures"]
+    #[ignore = "oracle: STELA_MT792X_FIRMWARE, STELA_MT792X_ORACLE"]
     fn actual_pinned_download_crosses_owned_dma_and_actual_mcu_event_path() {
         use super::super::download::Downloader;
         use sha2::{Digest, Sha256};
@@ -2766,7 +2766,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    #[ignore = "requires pinned firmware and unchanged NIC parser reports"]
+    #[ignore = "oracle: STELA_MT792X_CAPABILITIES_ORACLE, STELA_MT792X_FIRMWARE"]
     fn actual_pinned_firmware_and_linux_capability_reports_cross_native_dma_query() {
         use super::super::download::Downloader;
         let images = std::path::PathBuf::from(
@@ -2836,7 +2836,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires freshly generated unchanged PCI send-callback oracle"]
+    #[ignore = "oracle: STELA_MT792X_PCI_MCU_ORACLE"]
     fn actual_pci_callbacks_select_three_second_deadline_and_exact_queue() {
         let oracle =
             std::path::PathBuf::from(std::env::var("STELA_MT792X_PCI_MCU_ORACLE").unwrap());
@@ -3024,7 +3024,7 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    #[ignore = "requires exact actual images and full unchanged EEPROM source oracle"]
+    #[ignore = "oracle: STELA_MT792X_EEPROM_ORACLE, STELA_MT792X_FIRMWARE"]
     fn actual_images_and_eeprom_source_reports_cross_native_dma_with_retained_clc_owner() {
         use super::super::download::Downloader;
         let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
@@ -3229,7 +3229,7 @@ pub(crate) mod tests {
         unsafe { mailbox.release_after_quiesce() }.unwrap();
     }
     #[test]
-    #[ignore = "requires exact actual firmware images"]
+    #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
     fn actual_pinned_downloads_bind_same_owned_clc_input_past_provider_lifetime() {
         let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
         for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {

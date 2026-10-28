@@ -647,7 +647,7 @@ mod tests {
 #[cfg(all(test, feature = "std"))]
 mod original_tests {
     #[test]
-    #[ignore = "requires original T8112 PMP via STELA_TEST_PMP_T8112"]
+    #[ignore = "oracle: STELA_TEST_PMP_T8112"]
     fn original_t8112_scheduler_pending_callback_wait_and_queue_operands() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_TEST_PMP_T8112").unwrap()).unwrap();

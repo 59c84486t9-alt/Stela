@@ -291,7 +291,7 @@ fn exercise(bytes: &[u8], tlc: u8, flush: u8) {
     assert!(native.domain.records.lock().unwrap().live.is_empty());
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_mld_peer_schema_requires_distinct_mac_link_owner() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();

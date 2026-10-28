@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged 26A434 mac15g/mac15j/mac16g/mac17g KCs via STELA_TEST_HPM_SPMI_KC_ROOT"]
+    #[ignore = "oracle: STELA_TEST_HPM_SPMI_KC_ROOT"]
     fn original_ap_mailbox_and_rtpc_producers_are_source_pinned() {
         use sha2::Digest;
         let root = std::path::PathBuf::from(std::env::var("STELA_TEST_HPM_SPMI_KC_ROOT").unwrap());

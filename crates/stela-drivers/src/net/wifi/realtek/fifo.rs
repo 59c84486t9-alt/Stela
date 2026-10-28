@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(m.quarantines, 1);
     }
     #[test]
-    #[ignore = "requires unchanged pinned C FIFO/H2C functions and geometry"]
+    #[ignore = "oracle: STELA_REALTEK_WIFI_FIFO_ORACLE"]
     fn all_access_widths_bits_and_geometry_match_unchanged_c_helpers() {
         let trace =
             std::fs::read(std::env::var("STELA_REALTEK_WIFI_FIFO_ORACLE").unwrap()).unwrap();

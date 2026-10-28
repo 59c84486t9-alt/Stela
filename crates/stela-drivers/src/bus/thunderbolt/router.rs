@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires hash-pinned unchanged full Linux USB4 router trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_ROUTER_ORACLE"]
     fn unchanged_linux_router_full_write_trace_matches_actual_dma_engine() {
         use super::super::router::Setup;
         use std::{env, fs};

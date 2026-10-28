@@ -474,7 +474,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged MCU capability request writer oracle"]
+    #[ignore = "oracle: STELA_MT792X_CAP_WIRE_ORACLE"]
     fn unchanged_full_mcu_writers_match_all_capability_command_bytes() {
         let root = std::path::PathBuf::from(
             std::env::var_os("STELA_MT792X_CAP_WIRE_ORACLE").expect("capability wire oracle"),
@@ -501,7 +501,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged NIC/PHY/EML parser sanitizer oracle"]
+    #[ignore = "oracle: STELA_MT792X_CAPABILITIES_ORACLE"]
     fn unchanged_full_capability_helpers_match_actual_report_observations() {
         let root = std::path::PathBuf::from(
             std::env::var_os("STELA_MT792X_CAPABILITIES_ORACLE").expect("capability parser oracle"),

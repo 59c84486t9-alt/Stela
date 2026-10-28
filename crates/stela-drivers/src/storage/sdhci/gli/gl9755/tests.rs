@@ -591,7 +591,7 @@ fn native_gl9755_engine_lost_pci_identity_power_decode_or_requester_authority_fe
 }
 
 #[test]
-#[ignore = "requires integrity-checked unchanged Linux GL9755 PCI PHY/PLL/power/reset records"]
+#[ignore = "oracle: STELA_SDHCI_GLI55_ORACLE"]
 fn unchanged_linux_gl9755_phy_pll_dual_rail_and_reset_functions_match_native() {
     extern crate std;
     let records = std::fs::read_to_string(

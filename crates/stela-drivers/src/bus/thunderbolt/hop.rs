@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(target.validate(), Err(Error::Target));
     }
     #[test]
-    #[ignore = "requires hash-pinned unchanged Linux hop-deactivation trace"]
+    #[ignore = "oracle: STELA_THUNDERBOLT_HOP_ORACLE"]
     fn unchanged_linux_hop_deactivation_register_effects_match() {
         extern crate std;
         use std::{env, fs};

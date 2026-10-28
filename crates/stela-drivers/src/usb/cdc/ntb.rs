@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires STELA_CDC_NCM_ALIGNMENT_ORACLE from the pinned Linux reference script"]
+    #[ignore = "oracle: STELA_CDC_NCM_ALIGNMENT_ORACLE"]
     fn unchanged_linux_ethernet_payload_alignment_agrees() {
         extern crate std;
         let path = std::env::var("STELA_CDC_NCM_ALIGNMENT_ORACLE").unwrap();

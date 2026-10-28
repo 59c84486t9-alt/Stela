@@ -740,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires freshly built unchanged full Linux RX helper oracle"]
+    #[ignore = "oracle: STELA_MT792X_RX_ORACLE"]
     fn unchanged_full_receive_helpers_match_flags_pn_groups_rcpi_and_normalized_bytes() {
         extern crate std;
         let oracle = std::path::PathBuf::from(

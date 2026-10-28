@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned ASIX command/EEPROM/LED/MMD C oracle"]
+    #[ignore = "oracle: STELA_ASIX_LED_ORACLE"]
     fn unchanged_linux_asix_led_eeprom_mmd_fields() {
         extern crate std;
         use sha2::{Digest, Sha256};
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned ASIX negotiated-link C oracle"]
+    #[ignore = "oracle: STELA_ASIX_LINK_ORACLE"]
     fn unchanged_linux_asix_negotiated_queue_and_medium_fields() {
         extern crate std;
         use sha2::{Digest, Sha256};
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned ASIX EEPROM/efuse checksum C corpus"]
+    #[ignore = "oracle: STELA_ASIX_CHECKSUM_ORACLE"]
     fn unchanged_linux_asix_eeprom_and_efuse_checksum_mutations() {
         extern crate std;
         use sha2::{Digest, Sha256};
@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged pinned ASIX USB/interface/driver_info initializers"]
+    #[ignore = "oracle: STELA_ASIX_IDS_ORACLE"]
     fn unchanged_linux_asix_exact_ids_and_shared_callback_flags() {
         extern crate std;
         use sha2::{Digest, Sha256};

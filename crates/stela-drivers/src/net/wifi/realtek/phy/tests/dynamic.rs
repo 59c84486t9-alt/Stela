@@ -125,7 +125,7 @@ fn dynamic_profile_preflight() {
 }
 
 #[test]
-#[ignore = "requires unchanged pinned C dynamic hardware/tracking oracle; no jurisdiction selection"]
+#[ignore = "oracle: STELA_REALTEK_WIFI_DYNAMIC_ORACLE"]
 fn rtl8822c_dynamic_matches_linux() {
     let trace = std::fs::read(std::env::var("STELA_REALTEK_WIFI_DYNAMIC_ORACLE").unwrap()).unwrap();
     let mut offset = 0;

@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires freshly built unchanged Linux descriptor oracle"]
+    #[ignore = "oracle: STELA_MT792X_DATA_ORACLE"]
     fn unchanged_dma_add_buf_matches_actual_owned_queue_descriptors() {
         use std::{
             io::Write,

@@ -371,7 +371,7 @@ fn live_amp_drift_rejected() {
 }
 
 #[test]
-#[ignore = "requires unchanged-source HDA capture gain oracle trace"]
+#[ignore = "oracle: STELA_HDA_CAPTURE_GAIN_ORACLE"]
 fn realtek_capture_gain_matches_original_linux_path_and_amp_verbs() {
     extern crate std;
     use sha2::{Digest, Sha256};

@@ -485,7 +485,7 @@ mod tests {
         assert!(matches!(CountryMap::parse(&raw), Err(Error::Bound(4097))));
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux UEFI power-table getter oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_POWER_TABLES_ORACLE"]
     fn unchanged_linux_full_power_table_getters_and_maps_oracle() {
         use sha2::{Digest, Sha256};
         let bytes =

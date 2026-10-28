@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "std")]
-    #[ignore = "requires the pinned original J314s ADT via STELA_T6000_MCC_DEVICE_TREE"]
+    #[ignore = "oracle: STELA_T6000_MCC_DEVICE_TREE"]
     fn original_j314s_descriptor_preserves_all_physical_slots_and_irq_words() {
         let input =
             std::env::var("STELA_T6000_MCC_DEVICE_TREE").expect("explicit original ADT input");

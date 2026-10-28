@@ -523,7 +523,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires actual pinned Intel firmware images"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn actual_images_negotiate_source_rate2_and_family9_10_layouts() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
         for family in [Family::Ax200, Family::Ax210] {
@@ -540,7 +540,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux complete new TX command helper oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_TRANSMIT_ORACLE"]
     fn unchanged_linux_new_tx_helpers_match_complete_commands_and_byte_counts() {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_TRANSMIT_ORACLE").unwrap()).unwrap();

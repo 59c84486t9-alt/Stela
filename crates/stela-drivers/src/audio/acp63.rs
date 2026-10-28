@@ -2673,7 +2673,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires unchanged Linux trace in STELA_ACP70_ORACLE"]
+    #[ignore = "oracle: STELA_ACP70_ORACLE"]
     fn acp70_unchanged_linux_power_and_init_oracle() {
         use std::fmt::Write;
         let path = std::env::var("STELA_ACP70_ORACLE").unwrap();

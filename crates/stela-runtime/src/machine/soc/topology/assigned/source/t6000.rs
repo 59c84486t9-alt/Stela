@@ -267,7 +267,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires unchanged original26A434J314s and source-retaining prepared tree with first P running"]
+    #[ignore = "oracle: STELA_TEST_ASSIGNED_DT, STELA_TEST_ASSIGNED_PREPARED_DT"]
     fn original_t6000_assigned_prefix_preserves_all_source_coordinates_and_full_power_graph() {
         let original = std::fs::read(std::env::var("STELA_TEST_ASSIGNED_DT").unwrap()).unwrap();
         assert_eq!(

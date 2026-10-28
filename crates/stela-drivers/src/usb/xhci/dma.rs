@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned unchanged-source xHCI DMA oracle"]
+    #[ignore = "oracle: STELA_XHCI_DMA_ORACLE"]
     fn unchanged_linux_pci_mask_and_segment_branches_match_every_profile() {
         use sha2::{Digest, Sha256};
         let path = std::env::var("STELA_XHCI_DMA_ORACLE").expect("set STELA_XHCI_DMA_ORACLE");

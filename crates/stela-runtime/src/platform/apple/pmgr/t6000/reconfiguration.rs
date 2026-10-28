@@ -339,7 +339,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires matching original J314s LLB and iBootData"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_IBOOTDATA, STELA_TEST_PMGR_M1_LLB"]
     fn original_all_revision_routes_and_isp_guard_preserve_native_execution_obligation() {
         use sha2::{Digest, Sha256};
         let data = std::fs::read(

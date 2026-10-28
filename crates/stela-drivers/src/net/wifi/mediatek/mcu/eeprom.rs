@@ -268,7 +268,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged full EEPROM helpers and MCU fill writers"]
+    #[ignore = "oracle: STELA_MT792X_EEPROM_ORACLE"]
     fn full_unchanged_eeprom_helpers_match_requests_bytes_and_selected_observations() {
         let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_EEPROM_ORACLE").unwrap());
         for (chip, number) in [

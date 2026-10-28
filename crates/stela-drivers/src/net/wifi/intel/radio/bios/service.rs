@@ -595,7 +595,7 @@ mod tests {
         assert!(session.reads().iter().all(|r| !matches!(r, Read::Uefi(..))));
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux BIOS source-selection/cache oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_BIOS_SELECTION_ORACLE"]
     fn unchanged_linux_bios_selection_cache_and_complete_raw_call_order() {
         use sha2::{Digest, Sha256};
         let bytes =

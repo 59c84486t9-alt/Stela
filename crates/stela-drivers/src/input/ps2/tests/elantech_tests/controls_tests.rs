@@ -171,7 +171,7 @@ fn mutable_register_quiesce_write_and_resume_failures_retain_acknowledged_effect
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_REGISTER_ORACLE from complete original register setter/read/write bodies"]
+#[ignore = "oracle: STELA_ELANTECH_REGISTER_ORACLE"]
 fn unchanged_linux_mutable_register_values_and_transactions_match_actual_native_controls() {
     extern crate std;
     let records =

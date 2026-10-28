@@ -75,7 +75,7 @@ fn board_power_commands_use_actual_bios_and_original_reclaimed_dma() {
     exercise(false);
 }
 #[test]
-#[ignore = "requires unchanged pinned AX200 firmware"]
+#[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn actual_ax200_board_schema_and_native_owner() {
     exercise(true);
 }

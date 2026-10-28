@@ -959,7 +959,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "requires STELA_XHCI_COMPLETION_ORACLE pinned unchanged Linux trace"]
+    #[ignore = "oracle: STELA_XHCI_COMPLETION_ORACLE"]
     fn unchanged_linux_one_trb_completion_accounting() {
         extern crate std;
         let path = std::env::var("STELA_XHCI_COMPLETION_ORACLE").unwrap();
@@ -1285,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires STELA_XHCI_COMPLETION_ORACLE pinned unchanged Linux trace"]
+    #[ignore = "oracle: STELA_XHCI_COMPLETION_ORACLE"]
     fn unchanged_linux_stopped_td_byte_accounting() {
         extern crate std;
         let path = std::env::var("STELA_XHCI_COMPLETION_ORACLE").unwrap();

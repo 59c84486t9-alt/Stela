@@ -3,7 +3,7 @@ extern crate std;
 use super::*;
 
 #[test]
-#[ignore = "requires integrity-checked original Cadence command transcripts"]
+#[ignore = "oracle: STELA_CADENCE_SOUNDWIRE_ORACLE"]
 fn unchanged_linux_command_and_page_batches_match_native_control_word_effects() {
     let text = std::fs::read_to_string(
         std::env::var_os("STELA_CADENCE_SOUNDWIRE_ORACLE")

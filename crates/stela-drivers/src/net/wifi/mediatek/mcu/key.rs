@@ -408,7 +408,7 @@ mod tests {
         ));
     }
     #[test]
-    #[ignore = "requires fresh pinned Linux ASan/UBSan key oracle"]
+    #[ignore = "oracle: STELA_MT792X_KEY_ORACLE"]
     fn unchanged_pinned_key_helpers_match_complete_station_requests() {
         let directory = std::path::PathBuf::from(
             std::env::var_os("STELA_MT792X_KEY_ORACLE").expect("key oracle directory"),

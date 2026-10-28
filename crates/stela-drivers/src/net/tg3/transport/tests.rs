@@ -529,7 +529,7 @@ fn initial_mac_access_follows_observed_config_word_swap_and_sram_arbiter() {
 }
 
 #[test]
-#[ignore = "UNRUN: set STELA_TG3_TRANSPORT_ORACLE from pinned unchanged-Linux tg3_transport_oracle.py"]
+#[ignore = "oracle: STELA_TG3_TRANSPORT_ORACLE"]
 fn unchanged_linux_ape_mdio_sram_transport() {
     extern crate std;
     use alloc::{format, string::String};

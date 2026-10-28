@@ -475,7 +475,7 @@ mod tests {
         assert_eq!(source.validate_capabilities(&narrowed), Ok(()));
     }
     #[test]
-    #[ignore = "requires full unchanged source HT/VHT/HE/EHT/PPE local helpers"]
+    #[ignore = "oracle: STELA_MT7925_LOCAL_ORACLE"]
     fn unchanged_full_source_local_capabilities_match_all_band_stream_width_profiles() {
         extern crate std;
         let root = std::path::PathBuf::from(std::env::var_os("STELA_MT7925_LOCAL_ORACLE").unwrap());

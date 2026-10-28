@@ -82,7 +82,7 @@ fn inventory(bytes: &[u8]) -> (BTreeMap<u16, [u8; 48]>, BTreeMap<u64, u16>) {
 }
 
 #[test]
-#[ignore = "requires original J314s ADT and iBoot; no Apple images are committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_IBOOT"]
 fn original_m1_table_covers_all_196_physical_records_without_initial_state_credit() {
     let (_, physical) = inventory(&adt());
     let bytes = iboot();
@@ -129,7 +129,7 @@ fn original_m1_table_covers_all_196_physical_records_without_initial_state_credi
 }
 
 #[test]
-#[ignore = "requires original J314s ADT; no Apple images are committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
 fn original_isp_has_actual_camera_dart_sensor_and_performance_requirements() {
     let bytes = adt();
     let (records, physical) = inventory(&bytes);
@@ -193,7 +193,7 @@ fn original_isp_has_actual_camera_dart_sensor_and_performance_requirements() {
 }
 
 #[test]
-#[ignore = "requires original M1 Pro kernelcache; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE"]
 fn original_m1_restore_sweep_and_cio_geometry_are_separate_from_t8112() {
     let bytes = kernelcache();
     // IOService's software initial-power ordinal zero is not a physical PS
@@ -249,7 +249,7 @@ fn original_m1_restore_sweep_and_cio_geometry_are_separate_from_t8112() {
 }
 
 #[test]
-#[ignore = "requires original M1 Pro kernelcache and J314s LLB; no Apple images are committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_M1_KERNELCACHE, STELA_TEST_PMGR_M1_LLB"]
 fn complete_t6000_request_routes_preserve_wait_and_provider_boundaries() {
     let bytes = kernelcache();
     for (start, end, digest) in [
@@ -343,7 +343,7 @@ fn complete_t6000_request_routes_preserve_wait_and_provider_boundaries() {
 }
 
 #[test]
-#[ignore = "requires original J314s LLB; original storage and copied-cleanup lifetime guards"]
+#[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
 fn original_j314s_cram_aperture_consumers_and_copied_cleanup_are_exact() {
     let bytes = original(
         "STELA_TEST_PMGR_M1_LLB",
@@ -466,7 +466,7 @@ fn original_j314s_cram_aperture_consumers_and_copied_cleanup_are_exact() {
 }
 
 #[test]
-#[ignore = "requires matching original J314s LLB/iBoot; complete physical alias occurrence and source consumers"]
+#[ignore = "oracle: STELA_TEST_PMGR_M1_ADT, STELA_TEST_PMGR_M1_IBOOT, STELA_TEST_PMGR_M1_LLB"]
 fn original_physical_counter_alias_is_read_only_and_separate_from_siq_tuning() {
     let llb = original(
         "STELA_TEST_PMGR_M1_LLB",
@@ -546,7 +546,7 @@ fn original_physical_counter_alias_is_read_only_and_separate_from_siq_tuning() {
 }
 
 #[test]
-#[ignore = "requires original J314s LLB; complete native SEP command table and mailbox phases"]
+#[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
 fn original_j314s_sep_transport_and_complete_rom_table_are_distinct_from_ready_state() {
     let bytes = original(
         "STELA_TEST_PMGR_M1_LLB",

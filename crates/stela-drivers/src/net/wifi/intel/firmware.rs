@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pinned redistributable Intel firmware; see THIRD_PARTY.md"]
+    #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn real_ax200_ax210_images_keep_every_section_and_paging_byte() {
         extern crate std;
         let root = std::env::var("STELA_IWLWIFI_IMAGES").expect("actual pinned image directory");

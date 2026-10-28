@@ -267,7 +267,7 @@ mod tests {
         ));
     }
     #[test]
-    #[ignore = "requires fresh unchanged Linux UEFI radio scalar/DSM/PHY getter oracle"]
+    #[ignore = "oracle: STELA_IWLWIFI_RADIO_BIOS_ORACLE"]
     fn unchanged_linux_uefi_radio_scalar_dsm_and_phy_getters_oracle() {
         use sha2::{Digest, Sha256};
         let bytes =

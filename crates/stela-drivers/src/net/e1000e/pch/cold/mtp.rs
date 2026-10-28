@@ -362,7 +362,7 @@ pub(super) mod tests {
         );
     }
     #[test]
-    #[ignore = "set STELA_E1000E_PCH_MTP_DMI_ORACLE"]
+    #[ignore = "oracle: STELA_E1000E_PCH_MTP_DMI_ORACLE"]
     fn unchanged_dmi_matches_and_actual_quirk_table_preserve_byte_string_semantics() {
         const V: [Option<&[u8]>; 8] = [
             None,
@@ -418,7 +418,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set MTP/PTP source oracle paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_MTP_ORACLE, STELA_E1000E_PCH_PTP_ORACLE"]
     fn exact_remaining_fourteen_ids_match_source_table_without_broadening_old_constructor() {
         let mut seen = Vec::new();
         for (family, code) in [(Family::Mtp, 4), (Family::Ptp, 5)] {
@@ -443,7 +443,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set MTP/PTP source oracle paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_MTP_ORACLE, STELA_E1000E_PCH_PTP_ORACLE"]
     fn unchanged_mtp_ptp_reset_post_ulp_ltr_shra_eee_link_flush_and_k1() {
         for (family, id) in [(Family::Mtp, 0x550a), (Family::Ptp, 0x57b3)] {
             super::super::lpt::tests::replay_post_cases(Some(id), cases(family, 0));
@@ -480,7 +480,7 @@ pub(super) mod tests {
         }
     }
     #[test]
-    #[ignore = "set MTP/PTP source oracle paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_MTP_ORACLE, STELA_E1000E_PCH_PTP_ORACLE"]
     fn unchanged_reset_dpg_tail_is_ptp_only_and_preserves_other_bits() {
         for (family, id) in [(Family::Mtp, 0x550a), (Family::Ptp, 0x57b3)] {
             let rows = cases(family, 12);
@@ -646,7 +646,7 @@ pub(super) mod tests {
         assert_eq!(released.load(Ordering::SeqCst), 0);
     }
     #[test]
-    #[ignore = "set MTP/PTP source oracle paths"]
+    #[ignore = "oracle: STELA_E1000E_PCH_MTP_ORACLE, STELA_E1000E_PCH_PTP_ORACLE"]
     fn unchanged_mdic_protocol_retry_limit_delays_and_both_directions() {
         for (family, id) in [(Family::Mtp, 0x550a), (Family::Ptp, 0x57b3)] {
             let rows = cases(family, 13);

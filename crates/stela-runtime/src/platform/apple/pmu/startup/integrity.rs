@@ -158,7 +158,7 @@ mod tests {
         assert!(verify(&bytes, CONFIGURATION, VERSION, METADATA as u16).is_err());
     }
     #[test]
-    #[ignore = "requires original pinned J314s LLB via STELA_TEST_CRAM_J314S_LLB"]
+    #[ignore = "oracle: STELA_TEST_CRAM_J314S_LLB"]
     fn original_maverick_tag_matches_all_1132_actual_covered_bytes() {
         let llb = std::fs::read(std::env::var("STELA_TEST_CRAM_J314S_LLB").unwrap()).unwrap();
         assert_eq!(

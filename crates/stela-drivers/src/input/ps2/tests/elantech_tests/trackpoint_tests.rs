@@ -273,7 +273,7 @@ fn report_id_late_write_and_changed_known_identity_never_replay_or_arm_reporting
 }
 
 #[test]
-#[ignore = "requires STELA_ELANTECH_TRACKPOINT_ORACLE from complete original child reports/checks"]
+#[ignore = "oracle: STELA_ELANTECH_TRACKPOINT_ORACLE"]
 fn unchanged_linux_integrated_trackpoint_records_match_actual_native_profiles() {
     extern crate std;
     let records =
@@ -359,7 +359,7 @@ fn unchanged_linux_integrated_trackpoint_records_match_actual_native_profiles() 
     assert_eq!(cases, 8192);
 }
 #[test]
-#[ignore = "requires STELA_ELANTECH_TRACKPOINT_CONTROLS_ORACLE from complete original report-ID/query/init bodies"]
+#[ignore = "oracle: STELA_ELANTECH_TRACKPOINT_CONTROLS_ORACLE"]
 fn unchanged_linux_integrated_report_id_configuration_matches_actual_native_transactions() {
     extern crate std;
     let records = std::fs::read_to_string(

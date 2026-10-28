@@ -68,7 +68,7 @@ fn original_physical_ps() -> std::collections::BTreeSet<u64> {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 iBoot and ADT; no Apple images are committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_ADT, STELA_TEST_PMGR_IBOOT"]
 fn original_policy_covers_every_physical_domain_without_encoding_initial_values() {
     use std::collections::BTreeSet;
     let bytes = iboot();
@@ -97,7 +97,7 @@ fn original_policy_covers_every_physical_domain_without_encoding_initial_values(
 }
 
 #[test]
-#[ignore = "requires pinned original J473 iBoot; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_IBOOT"]
 fn original_eight_fixups_edit_distinct_dt_fields() {
     let bytes = iboot();
     for (index, expected) in [
@@ -147,7 +147,7 @@ fn original_eight_fixups_edit_distinct_dt_fields() {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 iBoot; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_IBOOT"]
 fn original_address_selectors_and_display_fuse_gate_are_exact() {
     let bytes = iboot();
     // The callback receives a selector object, not a physical-state value:
@@ -202,7 +202,7 @@ fn original_address_selectors_and_display_fuse_gate_are_exact() {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 iBoot; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_IBOOT"]
 fn original_active_masks_choose_writes_without_defining_clear_bits_as_off() {
     let bytes = iboot();
     for (offset, opcode) in [
@@ -239,7 +239,7 @@ fn original_active_masks_choose_writes_without_defining_clear_bits_as_off() {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 26A434 iBoot; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_IBOOT"]
 fn original_policy_filters_physical_addresses_by_chip_revision() {
     let bytes = iboot();
     // The row is not an initial PS value: the predicate masks its PA,
@@ -270,7 +270,7 @@ fn original_policy_filters_physical_addresses_by_chip_revision() {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 26A434 iBoot; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_IBOOT"]
 fn original_power_writer_samples_current_state_and_terminal_calls_are_separate() {
     let bytes = iboot();
     for (offset, opcode) in [
@@ -309,7 +309,7 @@ fn llb() -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB and ADT; no Apple images are committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_ADT, STELA_TEST_PMGR_LLB"]
 fn original_llb_reconfiguration_programs_retain_the_complete_physical_inventory() {
     use std::collections::BTreeSet;
     let bytes = llb();
@@ -389,7 +389,7 @@ fn original_llb_reconfiguration_programs_retain_the_complete_physical_inventory(
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_isp_sequence_emission_is_distinct_from_a_physical_write() {
     let bytes = llb();
     // Callback registrations identify opcode 0's emitter and opcode 7's
@@ -489,7 +489,7 @@ fn relative_table(bytes: &[u8], table: usize, base: usize, count: usize) -> Vec<
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_selection_binds_all_thirty_sequences_without_a_revision_default() {
     use std::collections::BTreeSet;
     let bytes = llb();
@@ -570,7 +570,7 @@ fn original_llb_selection_binds_all_thirty_sequences_without_a_revision_default(
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_counts_allocates_emits_and_publishes_before_enable_readback() {
     let bytes = llb();
     for (call, target) in [
@@ -633,7 +633,7 @@ fn original_llb_counts_allocates_emits_and_publishes_before_enable_readback() {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_complete_feature_filter_omits_the_isp_block_without_implying_off() {
     let bytes = llb();
     assert_eq!(
@@ -692,7 +692,7 @@ fn original_llb_complete_feature_filter_omits_the_isp_block_without_implying_off
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_native_emission_retains_packing_fetches_and_termination_limits() {
     let bytes = llb();
     for (start, end, digest) in [
@@ -743,7 +743,7 @@ fn original_llb_native_emission_retains_packing_fetches_and_termination_limits()
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_controller_bindings_cover_every_sequence_and_preserve_field_geometry() {
     let bytes = llb();
     assert_eq!(
@@ -806,7 +806,7 @@ fn kernelcache() -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHE"]
 fn original_kernel_restore_orders_gpce_readiness_before_the_complete_ps_sweep() {
     let bytes = kernelcache();
     for (start, end, digest) in [
@@ -873,7 +873,7 @@ fn original_kernel_restore_orders_gpce_readiness_before_the_complete_ps_sweep() 
 }
 
 #[test]
-#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHE"]
 fn original_kernel_isp_stop_is_a_restore_write_not_an_initial_state_or_admission_oracle() {
     let bytes = kernelcache();
     for (start, end, digest) in [
@@ -953,7 +953,7 @@ fn original_kernel_isp_stop_is_a_restore_write_not_an_initial_state_or_admission
 }
 
 #[test]
-#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHE"]
 fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary() {
     let bytes = kernelcache();
     for (start, end, digest) in [
@@ -1009,7 +1009,7 @@ fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary()
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_gpce_producers_and_live_bindings_exclude_a_low_four_only_retirement_model() {
     let bytes = llb();
     for (start, end, digest) in [
@@ -1086,7 +1086,7 @@ fn original_llb_gpce_producers_and_live_bindings_exclude_a_low_four_only_retirem
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_gpce_finalization_is_two_real_masked_writes_under_original_caller_guards() {
     let bytes = llb();
     for (start, end, digest) in [
@@ -1166,7 +1166,7 @@ fn original_llb_gpce_finalization_is_two_real_masked_writes_under_original_calle
 }
 
 #[test]
-#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_KERNELCACHE"]
 fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
     let bytes = kernelcache();
     for (start, end, digest) in [
@@ -1265,7 +1265,7 @@ fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
 }
 
 #[test]
-#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+#[ignore = "oracle: STELA_TEST_PMGR_LLB"]
 fn original_llb_group_table_publication_retains_actual_metadata_and_pointer_widths() {
     let bytes = llb();
     for (start, end, digest) in [

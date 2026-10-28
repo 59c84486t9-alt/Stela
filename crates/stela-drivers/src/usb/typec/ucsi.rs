@@ -1381,7 +1381,7 @@ mod tests {
     }
     /// Runs only with the immutable generated trace from ucsi_oracle.py.
     #[test]
-    #[ignore = "requires unchanged pinned Linux C source oracle trace"]
+    #[ignore = "oracle: STELA_UCSI_ORACLE"]
     fn unchanged_linux_notifications_and_command_ack_oracle() {
         let path = std::env::var("STELA_UCSI_ORACLE").expect("STELA_UCSI_ORACLE trace path");
         let trace = std::fs::read_to_string(path).unwrap();

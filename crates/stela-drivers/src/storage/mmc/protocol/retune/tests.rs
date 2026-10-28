@@ -101,7 +101,7 @@ impl Host for Recorded {
 }
 
 #[test]
-#[ignore = "requires integrity-checked explicit MMC retuning procedure records"]
+#[ignore = "oracle: STELA_MMC_RETUNE_ORACLE"]
 fn unchanged_linux_explicit_mmc_hs400_downgrade_tune_and_restore_match_native() {
     extern crate std;
     let trace = std::fs::read_to_string(

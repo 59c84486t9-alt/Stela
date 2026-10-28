@@ -518,7 +518,7 @@ fn actual_operation_preflight_idle_header_revocation_and_ranges_refuse_publicati
 }
 
 #[test]
-#[ignore = "requires pinned unchanged Linux native router operation transcript"]
+#[ignore = "oracle: STELA_THUNDERBOLT_OPERATIONS_ORACLE"]
 fn unchanged_linux_router_operation_bytes_and_source_statuses_match_actual_native_dma() {
     extern crate std;
     let trace = std::fs::read_to_string(

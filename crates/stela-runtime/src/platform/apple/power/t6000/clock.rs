@@ -377,7 +377,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore = "requires original J314s LLB; source clock words/phase are independent inputs"]
+    #[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
     fn original_native_delay_clock_routing_full_descriptor_and_pll_rules_are_pinned() {
         use sha2::{Digest, Sha256};
         let llb =

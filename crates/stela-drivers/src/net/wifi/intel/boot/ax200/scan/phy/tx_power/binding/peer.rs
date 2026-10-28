@@ -595,7 +595,7 @@ mod tests {
     extern crate std;
     use super::*;
     #[test]
-    #[ignore = "requires unchanged pinned Linux legacy station/TLC/flush trace"]
+    #[ignore = "oracle: STELA_IWLWIFI_PEER_TRACE"]
     fn pinned_linux_legacy_station_tlc_and_no_queue_flush_bytes() {
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_PEER_TRACE").unwrap()).unwrap();

@@ -203,7 +203,7 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "requires unchanged pinned AX88772 split RX/TX C corpus"]
+    #[ignore = "oracle: STELA_AX88772_FRAMING_ORACLE"]
     fn unchanged_linux_ax88772_split_frames_and_padding_bytes() {
         fn hex(text: &str) -> Vec<u8> {
             if text == "-" {
