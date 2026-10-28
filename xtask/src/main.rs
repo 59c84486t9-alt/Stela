@@ -94,6 +94,7 @@ mod amx;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod bench;
 mod boot;
+mod census;
 mod check;
 mod darwin_catalogs;
 mod gpu;
@@ -142,6 +143,8 @@ enum Task {
     RestoreDryRun(restore_dry_run::RestoreDryRun),
     /// Generate the System register accessors from Arm's AARCHMRS.
     Sysregs(sysregs::Sysregs),
+    /// Generate the hosted call-site census from a macOS restore image.
+    Census(census::Census),
 }
 
 fn main() -> ExitCode {
@@ -156,6 +159,7 @@ fn main() -> ExitCode {
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
         Task::Sysregs(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::Census(task) => task.run().map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");
