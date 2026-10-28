@@ -7,11 +7,11 @@
 pub(crate) use super::memory_context as memory;
 use alloc::vec::Vec;
 
-mod legacy;
 pub(crate) mod lut;
 pub(crate) mod numerical;
 pub(crate) mod routing;
-pub(crate) use legacy::clear_z_upper;
+mod z_upper;
+pub(crate) use z_upper::clear_z_upper;
 
 mod predicate;
 pub(crate) use predicate::{write_predicate_chunk, zero_predicate};

@@ -5,7 +5,6 @@ use alloc::vec::Vec;
 mod add_reductions;
 mod arithmetic;
 mod arithmetic_dispatch;
-mod arithmetic_remaining;
 mod bfloat16;
 mod classify;
 mod comparison;
