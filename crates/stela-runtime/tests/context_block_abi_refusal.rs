@@ -1,7 +1,10 @@
 //! Persistent, image-backed and normal-thread paths refuse the context ABI.
 use anyhow::Result;
 use std::path::Path;
-use stela_compiler::{GuestAddress, GuestState, TargetCpu, context::CONTEXT_BLOCK_ABI};
+use stela_compiler::{
+    GuestAddress, GuestState, TargetCpu,
+    block::{BlockProfile, Features},
+};
 use stela_runtime::{
     Manifest, Prepared,
     blocks::{BlockRuntime, ThreadState},
@@ -25,7 +28,7 @@ fn substitute_context_abi(prepared: &Prepared) -> Result<()> {
     let directory = &prepared.directory;
     let path = directory.join("manifest.json");
     let mut manifest: Manifest = serde_json::from_slice(&std::fs::read(&path)?)?;
-    manifest.identity.abi = CONTEXT_BLOCK_ABI.into();
+    manifest.identity.abi = BlockProfile::new(Features::CONTEXT).abi();
     write_json(&path, &manifest)?;
     write_json(
         &directory.join("manifest.sha256.json"),

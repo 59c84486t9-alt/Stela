@@ -4,7 +4,7 @@ use crate::execution::platform::Mapping;
 use stela_compiler::{
     GuestAddress, TargetCpu,
     aarch64::{floating::*, simd::minmax::decode},
-    block::{BlockProfile, CompilationPlan, ExitKind},
+    block::{BlockProfile, CompilationPlan, ExitKind, Features},
 };
 
 const PC: u64 = 0x1000;
@@ -223,8 +223,7 @@ fn signed_zero_and_normal_selection_match_full_helper_state() {
                 let block = CompilationPlan::new(
                     &source,
                     GuestAddress(PC),
-                    BlockProfile::SystemModeV1,
-                    target,
+                    &stela_compiler::Options::new(BlockProfile::new(Features::SYSTEM_MODE), target),
                 )
                 .unwrap()
                 .compile()
@@ -334,8 +333,10 @@ fn exceptional_active_lanes_and_enables_exit_before_any_effect() {
         let block = CompilationPlan::new(
             &source,
             GuestAddress(PC),
-            BlockProfile::SystemModeV1,
-            TargetCpu::Baseline,
+            &stela_compiler::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE),
+                TargetCpu::Baseline,
+            ),
         )
         .unwrap()
         .compile()

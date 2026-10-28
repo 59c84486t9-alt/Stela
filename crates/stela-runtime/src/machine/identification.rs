@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use stela_compiler::{
     GuestAddress, TargetCpu,
     aarch64::system::registers::Encoding,
-    block::{BlockProfile, CompilationPlan},
+    block::{BlockProfile, CompilationPlan, Features},
 };
 
 /// Why a row's level holds on this engine.
@@ -1377,8 +1377,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Specu
             CompilationPlan::new(
                 &word.to_le_bytes(),
                 GuestAddress(0x1000),
-                BlockProfile::SystemModeV1,
-                target,
+                &stela_compiler::Options::new(BlockProfile::new(Features::SYSTEM_MODE), target),
             )
             .and_then(CompilationPlan::compile)
             .is_ok()
@@ -1876,8 +1875,7 @@ mod tests {
                 CompilationPlan::new(
                     &word.to_le_bytes(),
                     GuestAddress(0x1000),
-                    BlockProfile::SystemModeV1,
-                    target,
+                    &stela_compiler::Options::new(BlockProfile::new(Features::SYSTEM_MODE), target),
                 )
                 .and_then(CompilationPlan::compile)
                 .is_ok()

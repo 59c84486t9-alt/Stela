@@ -1,5 +1,6 @@
 //! Resolve declared guest execution profiles from command-line options.
 use anyhow::{Context, Result, ensure};
+use stela_compiler::block::Features;
 use stela_compiler::{
     CompileError,
     block::CheckedMemoryProfile,
@@ -47,12 +48,18 @@ pub(crate) fn block_profile(
 ) -> stela_compiler::block::BlockProfile {
     use stela_compiler::block::BlockProfile;
     match (software_pauth, software_clock, thread_registers) {
-        (_, true, true) => BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
-        (_, true, false) => BlockProfile::AppleArm64eSoftwarePauthClockV1,
-        (true, false, true) => BlockProfile::AppleArm64eSoftwarePauthThreadV1,
-        (true, false, false) => BlockProfile::AppleArm64eSoftwarePauthV1,
-        (false, false, true) => BlockProfile::DarwinArm64ThreadV1,
-        (false, false, false) => BlockProfile::Ordinary,
+        (_, true, true) => BlockProfile::new(Features::PROCESS_HELPERS.union(Features::AMX)),
+        (_, true, false) => {
+            BlockProfile::new(Features::POINTER_AUTHENTICATION.union(Features::CLOCK))
+        }
+        (true, false, true) => BlockProfile::new(
+            Features::POINTER_AUTHENTICATION
+                .union(Features::THREAD_REGISTERS)
+                .union(Features::AMX),
+        ),
+        (true, false, false) => BlockProfile::new(Features::POINTER_AUTHENTICATION),
+        (false, false, true) => BlockProfile::new(Features::THREAD_REGISTERS.union(Features::AMX)),
+        (false, false, false) => BlockProfile::ORDINARY,
     }
 }
 
@@ -120,11 +127,13 @@ pub(crate) fn compile_context_block_profile(
     full_a64: Option<bool>,
     ebf16: Option<bool>,
     rpres: Option<bool>,
-) -> Result<Option<stela_compiler::scalable_context::block::ExtendedBlockProfile>> {
-    use stela_compiler::{
-        aarch64::floating::features::NumericalFeatures, block::BlockProfile,
-        scalable_context::block::ExtendedBlockProfile,
-    };
+) -> Result<
+    Option<(
+        stela_compiler::scalable_context::ScalableProfile,
+        stela_compiler::aarch64::floating::features::NumericalFeatures,
+    )>,
+> {
+    use stela_compiler::{aarch64::floating::features::NumericalFeatures, block::BlockProfile};
     let Some(scalable) = scalable else {
         ensure!(
             full_a64.is_none() && ebf16.is_none() && rpres.is_none(),
@@ -133,7 +142,7 @@ pub(crate) fn compile_context_block_profile(
         return Ok(None);
     };
     ensure!(
-        services == BlockProfile::Ordinary,
+        services == BlockProfile::ORDINARY,
         "context block services are not integrated"
     );
     let numerical = NumericalFeatures::new(
@@ -141,9 +150,7 @@ pub(crate) fn compile_context_block_profile(
         ebf16.context("context block requires explicit extended BF16 availability")?,
         rpres.context("context block requires explicit reciprocal precision availability")?,
     );
-    Ok(Some(ExtendedBlockProfile::new(
-        scalable, services, numerical,
-    )))
+    Ok(Some((scalable, numerical)))
 }
 
 pub(crate) fn scalable_execution_manifest(

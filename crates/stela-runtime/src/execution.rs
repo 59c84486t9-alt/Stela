@@ -25,7 +25,7 @@ use core::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::io::Read;
 #[cfg(feature = "std")]
-use stela_compiler::{GuestState, NATIVE_ABI};
+use stela_compiler::GuestState;
 
 // Bounds a cached artifact so it cannot force an unbounded allocation or
 // mapping.
@@ -67,7 +67,12 @@ impl ExecutableLeaf {
             identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "generated code uses a different compiler"
         );
-        ensure!(identity.abi == NATIVE_ABI, "unsupported generated-code ABI");
+        ensure!(
+            identity.abi
+                == stela_compiler::block::BlockProfile::new(stela_compiler::block::Features::LEAF)
+                    .abi(),
+            "unsupported generated-code ABI"
+        );
         let target = identity
             .target_cpu
             .parse::<stela_compiler::TargetCpu>()

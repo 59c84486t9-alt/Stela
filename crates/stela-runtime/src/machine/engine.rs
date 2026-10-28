@@ -114,7 +114,7 @@ use stela_compiler::{
         },
     },
     block::{
-        self, BlockProfile, ExitKind, PointerAuthentication, PointerAuthenticationKey,
+        self, BlockProfile, ExitKind, Features, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation,
         scalar::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::SystemOperation,
@@ -128,7 +128,7 @@ use stela_compiler::{
 pub use stored::{Offer, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 
-const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
+const PROFILE: BlockProfile = BlockProfile::new(Features::SYSTEM_MODE);
 const INSTRUCTION: u64 = 4;
 const FETCH_PAGE: u64 = 4096;
 const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;

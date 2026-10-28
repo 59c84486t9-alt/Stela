@@ -7,18 +7,19 @@ use core::marker::PhantomData;
 use crate::sha256;
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{
-    GuestAddress, GuestState, TargetCpu,
+    GuestAddress, GuestState, Options, TargetCpu,
     aarch64::scalable::execution::{
         SCALABLE_EXECUTION_REQUIREMENTS_VERSION, ScalableExecutionRequirements,
     },
+    block::{BlockProfile, CompilationPlan, Features},
     context::{
-        CONTEXT_LEAF_ABI, ExecutionContext,
+        ExecutionContext,
         memory::{
             MEMORY_IMPLEMENTATION_PROFILE_ID, MemoryRequirements, MemoryStatus,
             profile_requirements,
         },
     },
-    scalable_context::{self, ScalableProfile},
+    scalable_context::ScalableProfile,
 };
 
 use super::{ScalableState, context::ContextLoan};
@@ -34,7 +35,7 @@ pub struct ScalableLeafIdentity {
     pub native_sha256: String,
     pub compiler_source_sha256: String,
     pub guest_base: GuestAddress,
-    pub abi: &'static str,
+    pub abi: String,
     pub target_cpu: String,
     pub profile: ScalableProfile,
     pub memory_requirements: MemoryRequirements,
@@ -103,10 +104,20 @@ impl PreparedScalableLeaf {
             "host lacks context-leaf CPU requirements"
         );
         let source: Box<[u8]> = source.into();
-        let prepared = scalable_context::prepare_leaf(&source, base, profile, target)
+        let options = Options::new(
+            BlockProfile::new(Features::LEAF | Features::CONTEXT),
+            target,
+        )
+        .with_scalable(profile);
+        let plan = CompilationPlan::new(&source, base, &options)
             .context("prepare context leaf and source requirements")?;
-        let native = prepared.native;
-        let requirements = prepared.memory_requirements;
+        let requirements = plan
+            .memory_requirements()
+            .context("context leaf memory requirements absent")?;
+        let execution_requirements = plan
+            .execution_requirements()
+            .context("context leaf execution requirements absent")?;
+        let native = plan.compile().context("compile context leaf")?.native;
         ensure!(
             !native.x86_64_code.is_empty() && native.x86_64_code.len() <= MAX_NATIVE_BYTES,
             "generated context leaf exceeds the native preparation bound"
@@ -116,12 +127,12 @@ impl PreparedScalableLeaf {
             native_sha256: sha256(&native.x86_64_code),
             compiler_source_sha256: stela_compiler::SOURCE_SHA256.into(),
             guest_base: base,
-            abi: CONTEXT_LEAF_ABI,
+            abi: options.profile().abi(),
             target_cpu: target.id(),
             profile,
             memory_requirements: requirements,
             execution_requirements_version: SCALABLE_EXECUTION_REQUIREMENTS_VERSION,
-            execution_requirements: prepared.execution_requirements,
+            execution_requirements,
             memory_implementation_profile: (requirements.required_profile
                 & profile_requirements::NATIVE_ACCESS
                 != 0)
@@ -463,14 +474,17 @@ mod tests {
         input.fill(0);
         assert_eq!(leaf.source(), original);
         assert_eq!(leaf.identity().source_sha256, sha256(&original));
-        assert_eq!(leaf.identity().abi, CONTEXT_LEAF_ABI);
+        assert_eq!(
+            leaf.identity().abi,
+            BlockProfile::new(Features::LEAF | Features::CONTEXT).abi()
+        );
         assert_eq!(
             leaf.identity().memory_implementation_profile,
             Some(MEMORY_IMPLEMENTATION_PROFILE_ID)
         );
         assert_eq!(leaf.identity().memory_requirements.required_host_caps, 0);
         assert_eq!(leaf.source_map()[0].0, GuestAddress(GUEST_BASE));
-        assert!(leaf.native_bytes() > scalable_context::CONTEXT_WRAPPER_BYTES);
+        assert!(leaf.native_bytes() > stela_compiler::scalable_context::CONTEXT_WRAPPER_BYTES);
     }
 
     #[test]

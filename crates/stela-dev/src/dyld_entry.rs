@@ -3,6 +3,7 @@
 //! mapped and owned together.
 use anyhow::{Context, Result, ensure};
 use std::path::{Path, PathBuf};
+use stela_compiler::block::Features;
 use stela_compiler::{GuestAddress, GuestState};
 use stela_loader::{load_plan, mapped_image};
 use stela_runtime::{
@@ -314,9 +315,11 @@ pub fn probe(
         0x534f524544594c44,
         options.cache_dir,
         if options.bootstrap_clock {
-            stela_compiler::block::BlockProfile::AppleArm64eSoftwarePauthClockV1
+            stela_compiler::block::BlockProfile::new(
+                Features::POINTER_AUTHENTICATION.union(Features::CLOCK),
+            )
         } else if context.is_some() {
-            stela_compiler::block::BlockProfile::CheckedMemoryPauthClockThread(
+            stela_compiler::block::BlockProfile::new(Features::PROCESS_HELPERS).with_checked_memory(
                 stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
             )
         } else {

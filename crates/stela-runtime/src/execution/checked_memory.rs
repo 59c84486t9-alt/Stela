@@ -38,7 +38,7 @@ pub struct Identity {
     pub native_bytes: usize,
     pub compiler_source_sha256: &'static str,
     pub target: TargetCpu,
-    pub abi: &'static str,
+    pub abi: String,
     /// Distinguishes this all-writer checked contract from direct-RAM profiles.
     pub memory_model: &'static str,
 }
@@ -125,8 +125,14 @@ impl CheckedMemoryBlock {
             entry.0.checked_add(source.len() as u64).is_some(),
             "source address overflow"
         );
-        let plan =
-            CompilationPlan::new(&source, entry, BlockProfile::CheckedMemory(profile), target)?;
+        let plan = CompilationPlan::new(
+            &source,
+            entry,
+            &stela_compiler::Options::new(
+                BlockProfile::ORDINARY.with_checked_memory(profile),
+                target,
+            ),
+        )?;
         ensure!(
             plan.source_bytes() == source.len(),
             "source contains unconsumed trailing bytes"
@@ -173,7 +179,9 @@ impl CheckedMemoryBlock {
             native_bytes: compiled.native.x86_64_code.len(),
             compiler_source_sha256: stela_compiler::SOURCE_SHA256,
             target,
-            abi: profile.abi(),
+            abi: stela_compiler::block::BlockProfile::ORDINARY
+                .with_checked_memory(profile)
+                .abi(),
             memory_model: "checked-normal-wb-all-writers-reservations-lse-ordered-memory-v2",
         };
         let mapping = platform::Mapping::new(&compiled.native.x86_64_code)?;
@@ -458,6 +466,7 @@ mod tests {
         time::{Duration, Instant},
     };
     use stela_compiler::GuestState;
+    use stela_compiler::block::Features;
     use stela_compiler::context::memory::MemoryStatus;
 
     const ASID: u64 = 7;
@@ -976,8 +985,10 @@ mod tests {
             let emitted = CompilationPlan::new(
                 &body.source,
                 PC,
-                BlockProfile::CheckedMemory(body.profile),
-                body.identity.target,
+                &stela_compiler::Options::new(
+                    BlockProfile::ORDINARY.with_checked_memory(body.profile),
+                    body.identity.target,
+                ),
             )
             .unwrap()
             .compile()
@@ -1259,7 +1270,10 @@ mod tests {
         let original = block(&[LDXR, RET]);
         let other = block(&[STR, RET]);
         assert_ne!(original.identity(), other.identity());
-        assert_ne!(original.identity().abi, BlockProfile::SystemModeV1.abi());
+        assert_ne!(
+            original.identity().abi,
+            BlockProfile::new(Features::SYSTEM_MODE).abi()
+        );
         assert_eq!(
             original.identity().compiler_source_sha256,
             stela_compiler::SOURCE_SHA256
@@ -1962,8 +1976,10 @@ mod tests {
             let emitted = CompilationPlan::new(
                 &body.source,
                 PC,
-                BlockProfile::CheckedMemory(body.profile),
-                body.identity.target,
+                &stela_compiler::Options::new(
+                    BlockProfile::ORDINARY.with_checked_memory(body.profile),
+                    body.identity.target,
+                ),
             )
             .unwrap()
             .compile()

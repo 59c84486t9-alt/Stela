@@ -137,8 +137,12 @@ impl BlockRuntime {
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
         let analysis = analyze_with_profile(window, pc, self.profile)?;
-        let plan =
-            CompilationPlan::new(window, pc, self.profile, self.target)?.with_resident_loops();
+        let plan = CompilationPlan::new(
+            window,
+            pc,
+            &stela_compiler::Options::new(self.profile, self.target),
+        )?
+        .with_resident_loops();
         let profile = plan.profile();
         let source_bytes = plan.source_bytes();
         ensure!(
@@ -212,8 +216,12 @@ mod tests {
     }
 
     fn artifact(source: &[u8], profile: BlockProfile) -> Result<(crate::Manifest, Vec<u8>)> {
-        let plan =
-            CompilationPlan::new(source, BASE, profile, TargetCpu::Baseline)?.with_resident_loops();
+        let plan = CompilationPlan::new(
+            source,
+            BASE,
+            &stela_compiler::Options::new(profile, TargetCpu::Baseline),
+        )?
+        .with_resident_loops();
         let identity = crate::block_plan_identity(source, BASE, TargetCpu::Baseline, &plan)?;
         let memory_requirements = plan.memory_requirements();
         let native = plan.compile()?.native;
@@ -261,9 +269,9 @@ mod tests {
     #[test]
     fn standard_artifact_enters_original_loaded_hit_path_without_disk_or_execution() -> Result<()> {
         let source = source(&[MOVZ_X0_42, B_NEXT]);
-        let (manifest, native) = artifact(&source, BlockProfile::Ordinary)?;
+        let (manifest, native) = artifact(&source, BlockProfile::ORDINARY)?;
         let (bytes, checksum) = serialized(&manifest)?;
-        let mut runtime = runtime(&source, BlockProfile::Ordinary)?;
+        let mut runtime = runtime(&source, BlockProfile::ORDINARY)?;
         runtime.preload_artifact(BASE, &bytes, &checksum, &native)?;
         assert_eq!(
             runtime.loaded_manifest(BASE).unwrap().identity,
@@ -289,7 +297,7 @@ mod tests {
         // Unsupported instruction distinguishes availability refusal from invoking
         // the absent runtime miss compiler. Registered bytes remain unchanged.
         let source = [0; size_of::<u32>()];
-        let mut runtime = runtime(&source, BlockProfile::Ordinary)?;
+        let mut runtime = runtime(&source, BlockProfile::ORDINARY)?;
         let error = runtime.prepare(BASE).unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -308,7 +316,7 @@ mod tests {
     fn stale_source_native_map_and_verification_claim_cannot_publish_loaded_blocks() -> Result<()> {
         let source = source(&[MOVZ_X0_42, B_NEXT]);
         for change in 0..4 {
-            let (mut manifest, native) = artifact(&source, BlockProfile::Ordinary)?;
+            let (mut manifest, native) = artifact(&source, BlockProfile::ORDINARY)?;
             match change {
                 0 => manifest.identity.source_sha256.push('0'),
                 1 => manifest.native_sha256.push('0'),
@@ -317,7 +325,7 @@ mod tests {
                 _ => unreachable!(),
             }
             let (bytes, checksum) = serialized(&manifest)?;
-            let mut runtime = runtime(&source, BlockProfile::Ordinary)?;
+            let mut runtime = runtime(&source, BlockProfile::ORDINARY)?;
             assert!(
                 runtime
                     .preload_artifact(BASE, &bytes, &checksum, &native)
@@ -335,7 +343,7 @@ mod tests {
         let checks =
             EffectiveAddressChecks::new(AddressAddChecks::Disabled, AddressAddChecks::Enabled);
         let profile = |normal, unprivileged| {
-            BlockProfile::CheckedMemory(
+            BlockProfile::ORDINARY.with_checked_memory(
                 CheckedMemoryProfile::SpAlignmentDisabled.with_address_checks(
                     normal,
                     unprivileged,
@@ -371,9 +379,9 @@ mod tests {
     #[test]
     fn replacing_registered_source_retires_preloaded_native_generation() -> Result<()> {
         let source = source(&[MOVZ_X0_42, B_NEXT]);
-        let (manifest, native) = artifact(&source, BlockProfile::Ordinary)?;
+        let (manifest, native) = artifact(&source, BlockProfile::ORDINARY)?;
         let (bytes, checksum) = serialized(&manifest)?;
-        let mut runtime = runtime(&source, BlockProfile::Ordinary)?;
+        let mut runtime = runtime(&source, BlockProfile::ORDINARY)?;
         runtime.preload_artifact(BASE, &bytes, &checksum, &native)?;
         assert!(runtime.unregister_code(BASE));
         assert!(runtime.loaded.is_empty());
