@@ -486,6 +486,9 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
+    for (location, error) in &devices.platform_failures {
+        output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
+    }
     for (address, class, why) in &devices.unsupported {
         output::arguments(format_args!(
             "HOST UNSUPPORTED pci={address} class={:02x}{:02x}{:02x}: {why}\n",

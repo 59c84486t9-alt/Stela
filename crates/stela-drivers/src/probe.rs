@@ -24,6 +24,8 @@ use crate::{
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
+#[cfg(any(test, feature = "native-acpi"))]
+mod platform;
 pub mod services;
 pub mod wifi;
 pub use services::{NativeServices, ServiceError};
@@ -65,12 +67,22 @@ impl From<realtek::Error> for Error {
 pub enum PlatformError {
     /// A USB host controller could not be taken from firmware.
     Handoff(usb::handoff::Error),
+    /// Walking the ACPI namespace or decoding a resource template failed.
+    #[cfg(feature = "native-acpi")]
+    Acpi(crate::platform::acpi::resources::Error),
+    /// The description or the machine state rules attachment out.
+    Refused(&'static str),
+    Ps2(input::ps2::Error),
 }
 
 impl fmt::Display for PlatformError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Handoff(error) => error.fmt(f),
+            #[cfg(feature = "native-acpi")]
+            Self::Acpi(error) => write!(f, "ACPI: {error:?}"),
+            Self::Refused(why) => f.write_str(why),
+            Self::Ps2(error) => error.fmt(f),
         }
     }
 }
@@ -231,6 +243,9 @@ pub struct Devices {
     /// These are not initialized accelerators; each records its missing port.
     pub gpus: Vec<gpu::Adapter>,
     pub inputs: Vec<VirtioInput>,
+    /// i8042 keyboard and mouse ports the ACPI namespace lists, initialized
+    /// and polled through [`Controller::poll`](input::ps2::Controller::poll).
+    pub ps2: Vec<input::ps2::Controller>,
     /// USB keyboards and pointers behind xHCI controllers.
     pub usb_inputs: Vec<UsbInput>,
     /// Complete descriptor inventories, including hubs and unbound devices.
@@ -547,6 +562,16 @@ pub unsafe fn probe_with_provider(
                 Err(error) => devices.failures.push((address, error.into())),
             }
         }
+    }
+    // After every USB host left firmware, as Linux's i8042 probe runs after
+    // its PCI fixups.
+    #[cfg(feature = "native-acpi")]
+    if let Some(session) = services.and_then(|services| services.acpi()) {
+        let usb_released = !devices
+            .platform_failures
+            .iter()
+            .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
+        platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
     }
     devices
 }

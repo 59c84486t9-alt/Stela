@@ -373,6 +373,9 @@ pub unsafe fn open(
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
+    for (location, error) in &devices.platform_failures {
+        output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
+    }
     for (address, warning) in &devices.warnings {
         output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
     }
