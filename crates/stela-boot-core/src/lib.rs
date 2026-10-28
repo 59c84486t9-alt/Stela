@@ -26,6 +26,7 @@ pub mod record;
 pub mod remapping;
 #[cfg(target_arch = "x86_64")]
 pub mod requester;
+pub mod root_transition;
 pub mod storage;
 pub mod topology;
 #[cfg(target_arch = "x86_64")]

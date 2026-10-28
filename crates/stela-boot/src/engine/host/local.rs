@@ -57,6 +57,7 @@ pub(crate) struct Owner {
     local: NonNull<Local>,
     clock_leases: alloc::sync::Arc<()>,
     root_context: alloc::sync::Weak<context::RootContext>,
+    root_identity: Option<alloc::sync::Arc<context::RootIdentity>>,
     _pinned: PhantomData<*mut ()>,
 }
 
@@ -142,14 +143,24 @@ impl Owner {
         {
             return Err("native RAM adoption requires pristine owner-local dispatch");
         }
-        state.ram = ram
-            .placements()
-            .map(|(guest, host, bytes)| super::RamRange {
-                guest,
-                host,
-                bytes: bytes as u64,
-            })
-            .collect();
+        let mut incoming = alloc::vec::Vec::new();
+        incoming
+            .try_reserve_exact(ram.placements().count())
+            .map_err(|_| "canonical RAM placement allocation failed")?;
+        incoming.extend(
+            ram.placements()
+                .map(|(guest, host, bytes)| super::RamRange {
+                    guest,
+                    host,
+                    bytes: bytes as u64,
+                }),
+        );
+        // End the mutable state borrow before checking the same retained root
+        // identity and closing old RAM-absence/publication generations.
+        let _ = state;
+        self.join_ram_identity(&incoming)?;
+        let state = self::state();
+        state.ram = incoming;
         state.registered_ram = Some(ram);
         Ok(())
     }
@@ -293,6 +304,7 @@ pub(super) unsafe fn install(state: State) -> Owner {
         local,
         clock_leases: alloc::sync::Arc::new(()),
         root_context: alloc::sync::Weak::new(),
+        root_identity: None,
         _pinned: PhantomData,
     }
 }
@@ -381,6 +393,12 @@ pub(super) fn clear_interrupt() {
 impl Drop for Owner {
     fn drop(&mut self) {
         assert_eq!(current(), self.local.as_ptr(), "host state owner migrated");
+        if let Some(identity) = self.root_identity.take() {
+            if alloc::sync::Arc::strong_count(&identity) != 1 {
+                crate::output::fatal("native host CPU/root identity retained by live providers");
+            }
+            drop(identity);
+        }
         if alloc::sync::Arc::strong_count(&self.clock_leases) != 1 {
             crate::output::fatal("native host root retained by live clock/CPU providers");
         }

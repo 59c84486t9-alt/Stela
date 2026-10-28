@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use core::{
     arch::asm,
     marker::PhantomData,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use stela_drivers::{bus::mmio::owned::PhysicalSpan, platform::work::WorkError};
 
@@ -58,10 +58,11 @@ fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
 
-/// Canonical immutable witness from the actual private Owner/State allocation.
-/// The permanent MMIO Authority can retain this root for the kernel image's
-/// lifetime. Finite Clock/mapping closure does not release that registration.
-pub(crate) struct RootContext {
+/// Actual immutable CPU/descriptor/fixed-root identity, pinned by HostOwner.
+/// This survives only checked RAM ownership joins. It grants no RAM-absence,
+/// mutable mapping-publication, task switching, or cross-CPU execution authority.
+/// Descriptor/local storage is static or permanently pinned through terminal IRQs.
+pub(crate) struct RootIdentity {
     roots: Arc<MmioRoots>,
     snapshot: Snapshot,
     id: u32,
@@ -69,9 +70,9 @@ pub(crate) struct RootContext {
     gdt: u64,
     idt: u64,
     task: u16,
-    executing: AtomicBool,
+    ram_generation: AtomicU64,
 }
-impl RootContext {
+impl RootIdentity {
     fn affinity(&self) -> Result<(), WorkError> {
         // BEFORE any GS-local dereference: colliding legacy CPUID IDs on a
         // different CPU cannot borrow this processor's removable scope.
@@ -129,12 +130,62 @@ impl RootContext {
         crate::output::arguments(format_args!("NATIVE ROOT FATAL {error:?}\n"));
         crate::output::fatal("native root contract failed")
     }
-    pub(crate) fn roots(&self) -> &Arc<MmioRoots> {
-        &self.roots
+    pub(crate) fn root_pages(&self) -> &[u64] {
+        self.roots.roots()
     }
     pub(crate) fn memory_snapshot(&self) -> Result<Snapshot, WorkError> {
         self.check_current()?;
         Ok(self.snapshot)
+    }
+}
+
+/// One generation's RAM-absence/publication view. Retaining this still prevents
+/// RAM adoption; keeping only immutable RootIdentity does not retain this grant.
+pub(crate) struct RootContext {
+    identity: Arc<RootIdentity>,
+    ram_generation: u64,
+    executing: AtomicBool,
+}
+impl RootContext {
+    fn generation(&self) -> Result<(), WorkError> {
+        if self.ram_generation != self.identity.ram_generation.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        Ok(())
+    }
+    pub(crate) fn check_current(&self) -> Result<(), WorkError> {
+        self.generation()?;
+        self.identity.check_current()
+    }
+    pub(crate) fn check_irq_cpu(&self) -> Result<(), WorkError> {
+        self.generation()?;
+        self.identity.check_irq_cpu()
+    }
+    pub(crate) fn in_interrupt(&self) -> bool {
+        self.generation().is_err() || self.identity.in_interrupt()
+    }
+    pub(crate) fn save_disable(&self) -> Result<u64, WorkError> {
+        self.check_current()?;
+        self.identity.save_disable()
+    }
+    /// # Safety
+    /// Exact enclosing same-CPU save; no switch/migration or active task-frame change.
+    pub(crate) unsafe fn restore(&self, saved: u64) {
+        if self.check_current().is_err() {
+            self.fatal(WorkError::Closed);
+        }
+        // SAFETY: same retained identity and caller's exact enclosing save.
+        unsafe { self.identity.restore(saved) };
+    }
+    pub(crate) fn fatal(&self, error: WorkError) -> ! {
+        self.identity.fatal(error)
+    }
+    pub(crate) fn roots(&self) -> &Arc<MmioRoots> {
+        &self.identity.roots
+    }
+    pub(crate) fn memory_snapshot(&self) -> Result<Snapshot, WorkError> {
+        self.check_current()?;
+        self.identity.memory_snapshot()
     }
 }
 
@@ -217,6 +268,137 @@ impl Drop for RootExecution {
 }
 
 impl Owner {
+    /// Retain actual CPU/root identity without extending a RAM-absence epoch.
+    /// Only pristine same-CPU process dispatch, IF0, may create/borrow it.
+    pub(crate) fn root_identity(&mut self) -> Result<Arc<RootIdentity>, WorkError> {
+        if gs_base() != self.local.as_ptr() as u64 {
+            return Err(WorkError::WrongCpu);
+        }
+        let flags: u64;
+        // SAFETY: CPL0 observation before any local-state borrow.
+        unsafe {
+            asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
+        }
+        if flags & IF != 0 || irq_active() || !native_frames_idle() {
+            return Err(WorkError::Busy);
+        }
+        if let Some(identity) = &self.root_identity {
+            identity.check_current()?;
+            return Ok(identity.clone());
+        }
+        let lease = self.retain_clock_root()?;
+        // SAFETY: original physical Owner, IF0, no native frame or ISR.
+        let snapshot = unsafe { firmware::observe() }.map_err(unavailable)?;
+        let id = snapshot.apic_id().ok_or(WorkError::Unavailable)?;
+        // SAFETY: retained actual processor's installed descriptor set.
+        let observed = unsafe { interrupts::observe() };
+        if observed.gs != self.local.as_ptr() as u64 || snapshot.cr3 & !ADDRESS != 0 {
+            return Err(WorkError::CorruptContext);
+        }
+        let state = state();
+        if state.native || snapshot.cr3 != state.host_root {
+            return Err(WorkError::Busy);
+        }
+        let mut roots = alloc::vec::Vec::new();
+        roots
+            .try_reserve_exact(2 + super::super::ROOTS * (1 + super::super::BANKS))
+            .map_err(unavailable)?;
+        roots.push(state.window_root);
+        roots.push(state.host_root);
+        roots.extend(state.all_roots());
+        roots.sort_unstable();
+        roots.dedup();
+        if roots.iter().any(|r| *r == 0 || r & !ADDRESS != 0) {
+            return Err(WorkError::CorruptContext);
+        }
+        let mut ram = alloc::vec::Vec::new();
+        ram.try_reserve_exact(state.ram.len())
+            .map_err(unavailable)?;
+        for range in &state.ram {
+            ram.push(PhysicalSpan::new(range.host, range.bytes).map_err(unavailable)?);
+        }
+        let identity = Arc::new(RootIdentity {
+            roots: Arc::new(MmioRoots {
+                roots,
+                ram,
+                _lease: lease,
+            }),
+            snapshot,
+            id,
+            gs: observed.gs,
+            gdt: observed.gdt,
+            idt: observed.idt,
+            task: observed.task,
+            ram_generation: AtomicU64::new(0),
+        });
+        identity.check_current()?;
+        self.root_identity = Some(identity.clone());
+        Ok(identity)
+    }
+
+    /// Join the new canonical RAM owner without granting it additional host bytes.
+    /// Old publication/absence views must already be closed; no ISR/native/helper
+    /// frame can overlap. CPU/root identity survives, but its old generation ends.
+    pub(super) fn join_ram_identity(
+        &mut self,
+        incoming: &[super::super::RamRange],
+    ) -> Result<(), &'static str> {
+        if self.root_context.strong_count() != 0 {
+            return Err("RAM absence/publication views are still retained");
+        }
+        let Some(identity) = &self.root_identity else {
+            return Ok(());
+        };
+        identity
+            .check_current()
+            .map_err(|_| "retained CPU/root identity changed before RAM adoption")?;
+        if irq_active() || !native_frames_idle() {
+            return Err("active native/IRQ frame prevents RAM adoption");
+        }
+        let flags: u64;
+        // SAFETY: current physical Owner, read-only IRQ observation.
+        unsafe {
+            asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
+        }
+        if flags & IF != 0 {
+            return Err("RAM adoption requires excluded local interrupts");
+        }
+        let state = state();
+        let mut roots = alloc::vec::Vec::new();
+        roots
+            .try_reserve_exact(2 + super::super::ROOTS * (1 + super::super::BANKS))
+            .map_err(|_| "RAM transition root catalog allocation failed")?;
+        roots.extend([state.window_root, state.host_root]);
+        roots.extend(state.all_roots());
+        roots.sort_unstable();
+        roots.dedup();
+        if roots != identity.root_pages() {
+            return Err("retained native root catalog changed before RAM adoption");
+        }
+        let backing = identity.roots.ram().iter().map(|r| (r.start(), r.bytes()));
+        let existing = state.ram.iter().map(|r| (r.host, r.bytes));
+        let incoming = incoming.iter().map(|r| (r.host, r.bytes));
+        let existing_matches =
+            stela_boot_core::root_transition::same_backing_iter(backing.clone(), existing)
+                .map_err(|_| "malformed old physical backing before RAM adoption")?;
+        let incoming_matches =
+            stela_boot_core::root_transition::same_backing_iter(backing, incoming)
+                .map_err(|_| "malformed canonical physical backing before RAM adoption")?;
+        if !existing_matches || !incoming_matches {
+            return Err("canonical RAM adoption changes retained physical placements");
+        }
+        let next = identity
+            .ram_generation
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or("native RAM ownership generation exhausted")?;
+        // Every old absence view is gone, proven above. There is no callback,
+        // root mutation or IRQ between this invalidation and the caller's join.
+        identity.ram_generation.store(next, Ordering::Release);
+        self.root_context = alloc::sync::Weak::new();
+        Ok(())
+    }
+
     /// Admit this exact original Owner/context pair before Clock effects.
     /// The numbers inside an unrelated snapshot cannot satisfy this check.
     pub(crate) fn check_root(&self, execution: &RootExecution) -> Result<(), WorkError> {
@@ -247,53 +429,17 @@ impl Owner {
             if current() != self.local.as_ptr() || irq_active() || !native_frames_idle() {
                 return Err(WorkError::Busy);
             }
+            let identity = self.root_identity()?;
             let context = if let Some(context) = self.root_context.upgrade() {
                 context.check_current()?;
+                if !Arc::ptr_eq(&context.identity, &identity) {
+                    return Err(WorkError::CorruptContext);
+                }
                 context
             } else {
-                let lease = self.retain_clock_root()?;
-                // SAFETY: original physical Owner, IF0, no native frame or ISR.
-                let snapshot = unsafe { firmware::observe() }.map_err(unavailable)?;
-                let id = snapshot.apic_id().ok_or(WorkError::Unavailable)?;
-                // SAFETY: retained actual processor's installed descriptor set.
-                let observed = unsafe { interrupts::observe() };
-                if observed.gs != self.local.as_ptr() as u64 || snapshot.cr3 & !ADDRESS != 0 {
-                    return Err(WorkError::CorruptContext);
-                }
-                let state = state();
-                if state.native || snapshot.cr3 != state.host_root {
-                    return Err(WorkError::Busy);
-                }
-                let mut roots = alloc::vec::Vec::new();
-                roots
-                    .try_reserve_exact(2 + super::super::ROOTS * (1 + super::super::BANKS))
-                    .map_err(unavailable)?;
-                roots.push(state.window_root);
-                roots.push(state.host_root);
-                roots.extend(state.all_roots());
-                roots.sort_unstable();
-                roots.dedup();
-                if roots.iter().any(|r| *r == 0 || r & !ADDRESS != 0) {
-                    return Err(WorkError::CorruptContext);
-                }
-                let mut ram = alloc::vec::Vec::new();
-                ram.try_reserve_exact(state.ram.len())
-                    .map_err(unavailable)?;
-                for range in &state.ram {
-                    ram.push(PhysicalSpan::new(range.host, range.bytes).map_err(unavailable)?);
-                }
                 let context = Arc::new(RootContext {
-                    roots: Arc::new(MmioRoots {
-                        roots,
-                        ram,
-                        _lease: lease,
-                    }),
-                    snapshot,
-                    id,
-                    gs: observed.gs,
-                    gdt: observed.gdt,
-                    idt: observed.idt,
-                    task: observed.task,
+                    ram_generation: identity.ram_generation.load(Ordering::Acquire),
+                    identity,
                     executing: AtomicBool::new(false),
                 });
                 context.check_current()?;
