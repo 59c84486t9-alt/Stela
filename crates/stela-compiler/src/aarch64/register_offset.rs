@@ -1,5 +1,6 @@
 //! Integer loads and stores with register-offset addressing.
 use super::{MemoryTransfer, Register, Width, register};
+use crate::aarch64::Unsupported;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexExtend {
@@ -38,8 +39,7 @@ pub struct Operand {
 
 /// None means another encoding class; Err means a reserved/unsupported form
 /// within the scalar register-offset class. SIMD and atomics never match.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & 0x3f200c00 != 0x38200800 {
         return None;
     }
@@ -58,10 +58,10 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             signed: true,
             width: Width::W32,
         },
-        _ => return Some(Err(())), // PRFM and reserved signed sizes
+        _ => return Some(Err(Unsupported)), // PRFM and reserved signed sizes
     };
     let Some(extend) = IndexExtend::decode((word >> 13) & 7) else {
-        return Some(Err(())); // sub-word index extensions are undefined
+        return Some(Err(Unsupported)); // sub-word index extensions are undefined
     };
     Some(Ok(Operand {
         transfer,

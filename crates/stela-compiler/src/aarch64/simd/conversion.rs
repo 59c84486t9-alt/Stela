@@ -1,4 +1,5 @@
 //! Scalar and AdvSIMD conversions between H/S/D and integers (FCVT*, SCVTF, UCVTF).
+use crate::aarch64::Unsupported;
 use crate::aarch64::{
     Register,
     floating::{
@@ -199,12 +200,12 @@ fn general_register(value: u8) -> Register {
     }
 }
 
-fn format(field: u32) -> Result<Format, ()> {
+fn format(field: u32) -> Result<Format, Unsupported> {
     match field {
         FORMAT_SINGLE => Ok(Format::Single),
         FORMAT_DOUBLE => Ok(Format::Double),
         FORMAT_HALF => Ok(Format::Half),
-        _ => Err(()),
+        _ => Err(Unsupported),
     }
 }
 
@@ -227,8 +228,7 @@ fn integer_width(format: Format) -> IntegerWidth {
 /// None denotes another family, including FPRCVT/FP8. Err denotes a reserved
 /// field combination in a recognized classic conversion class. All GPR 31
 /// operands are ZR; all SIMD 31 operands are ordinary V31.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     decode_precision(word)
         .or_else(|| decode_general(word))
         .or_else(|| decode_simd(word))
@@ -242,21 +242,21 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         })
 }
 
-fn decode_precision(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_precision(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & SCALAR_EXACT_MASK == BFCVT {
         return None;
     }
     let mode = if word & SCALAR_PRECISION_MASK == SCALAR_FCVT {
         let source = match format((word >> FORMAT_SHIFT) & FORMAT_MASK) {
             Ok(format) => format,
-            Err(()) => return Some(Err(())),
+            Err(Unsupported) => return Some(Err(Unsupported)),
         };
         let destination = match format((word >> DESTINATION_FORMAT_SHIFT) & FORMAT_MASK) {
             Ok(format) => format,
-            Err(()) => return Some(Err(())),
+            Err(Unsupported) => return Some(Err(Unsupported)),
         };
         if source == destination {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         PrecisionMode::Scalar {
             source,
@@ -313,7 +313,7 @@ fn general_direction(opcode: u32) -> Option<Direction> {
     })
 }
 
-fn decode_general(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_general(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (direction, fixed) = if let Some(direction) = general_direction(word & GENERAL_INTEGER_MASK)
     {
         (direction, false)
@@ -326,13 +326,13 @@ fn decode_general(word: u32) -> Option<Result<Operand, ()>> {
     };
     let format = match format((word >> FORMAT_SHIFT) & FORMAT_MASK) {
         Ok(format) => format,
-        Err(()) => return Some(Err(())),
+        Err(Unsupported) => return Some(Err(Unsupported)),
     };
     let wide = word & GENERAL_WIDE != 0;
     let frac_bits = if fixed {
         let scale = (word >> SCALE_SHIFT) & SCALE_MASK;
         if !wide && scale < IMMEDIATE_SINGLE_MINIMUM {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         (SCALE_BIAS - scale) as u8
     } else {
@@ -374,7 +374,7 @@ fn simd_direction(opcode: u32) -> Option<Direction> {
     })
 }
 
-fn decode_simd(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_simd(word: u32) -> Option<Result<Operand, Unsupported>> {
     for (mask, adjustment, scalar, half) in [
         (SIMD_SCALAR_MASK, SIMD_SCALAR_PREFIX, true, false),
         (SIMD_VECTOR_MASK, 0, false, false),
@@ -417,7 +417,7 @@ fn decode_simd(word: u32) -> Option<Result<Operand, ()>> {
             IMMEDIATE_DOUBLE_MINIMUM..=IMMEDIATE_MASK => Format::Double,
             IMMEDIATE_SINGLE_MINIMUM..IMMEDIATE_DOUBLE_MINIMUM => Format::Single,
             IMMEDIATE_HALF_MINIMUM..IMMEDIATE_SINGLE_MINIMUM => Format::Half,
-            _ => return Some(Err(())),
+            _ => return Some(Err(Unsupported)),
         };
         let frac_bits = (2 * format.bits() - immediate) as u8;
         return Some(simd_operand(word, direction, format, scalar, frac_bits));
@@ -431,14 +431,14 @@ fn simd_operand(
     format: Format,
     scalar: bool,
     frac_bits: u8,
-) -> Result<Operand, ()> {
+) -> Result<Operand, Unsupported> {
     let shape = if scalar {
         Shape::Scalar
     } else {
         vector_shape(word)
     };
     if format == Format::Double && shape == Shape::Vector64 {
-        return Err(());
+        return Err(Unsupported);
     }
     let destination = vector_register(word, 0);
     let source = vector_register(word, SOURCE_SHIFT);
@@ -598,7 +598,7 @@ mod tests {
                     | (source_field << FORMAT_SHIFT)
                     | (destination_field << DESTINATION_FORMAT_SHIFT);
                 if source == destination {
-                    assert_eq!(decode(word), Some(Err(())));
+                    assert_eq!(decode(word), Some(Err(Unsupported)));
                 } else {
                     precision(
                         word,
@@ -800,7 +800,7 @@ mod tests {
                 for wide in [0, GENERAL_WIDE] {
                     assert_eq!(
                         decode(opcode | signed | wide | (FORMAT_RESERVED << FORMAT_SHIFT)),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
                 }
             }
@@ -813,21 +813,24 @@ mod tests {
                             decode(
                                 opcode | signed | (field << FORMAT_SHIFT) | (scale << SCALE_SHIFT)
                             ),
-                            Some(Err(()))
+                            Some(Err(Unsupported))
                         );
                     }
                 }
                 for wide in [0, GENERAL_WIDE] {
                     assert_eq!(
                         decode(opcode | signed | wide | (FORMAT_RESERVED << FORMAT_SHIFT)),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
                 }
             }
         }
         for (opcode, _) in SIMD_OPERATIONS {
             for signed in [0, SIMD_UNSIGNED] {
-                assert_eq!(decode(opcode | signed | SIMD_DOUBLE), Some(Err(())));
+                assert_eq!(
+                    decode(opcode | signed | SIMD_DOUBLE),
+                    Some(Err(Unsupported))
+                );
             }
         }
         for opcode in [SIMD_FIXED_SCVTF, SIMD_FIXED_FCVTZS] {
@@ -842,14 +845,14 @@ mod tests {
                     for immediate in IMMEDIATE_SHIFT_CLASS_MINIMUM..IMMEDIATE_HALF_MINIMUM {
                         assert_eq!(
                             decode(opcode | signed | prefix | (immediate << IMMEDIATE_SHIFT)),
-                            Some(Err(()))
+                            Some(Err(Unsupported))
                         );
                     }
                 }
                 for immediate in IMMEDIATE_DOUBLE_MINIMUM..=IMMEDIATE_MASK {
                     assert_eq!(
                         decode(opcode | signed | (immediate << IMMEDIATE_SHIFT)),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
                 }
             }
@@ -861,7 +864,7 @@ mod tests {
                         | (FORMAT_RESERVED << FORMAT_SHIFT)
                         | (destination << DESTINATION_FORMAT_SHIFT)
                 ),
-                Some(Err(()))
+                Some(Err(Unsupported))
             );
         }
     }

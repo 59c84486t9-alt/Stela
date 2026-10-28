@@ -1,4 +1,5 @@
 //! FCADD and FCMLA.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, complex::Rotation};
 
 use super::arithmetic::Shape;
@@ -57,8 +58,7 @@ pub struct Operand {
 
 /// None denotes another family; Err denotes reserved size, width or pair index.
 /// All register fields, including indexed Half Vm, denote ordinary V0..V31.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (kind, rotation, indexed) = if word & ADD_MASK == FCADD {
         (
             Kind::Add,
@@ -93,7 +93,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         SIZE_HALF => Format::Half,
         SIZE_SINGLE => Format::Single,
         SIZE_DOUBLE if !indexed && shape == Shape::Vector128 => Format::Double,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     let right = register(word, RIGHT_SHIFT);
     let right = if indexed {
@@ -103,12 +103,12 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         // size 01; the decoder follows the specification as written.
         let index = if format == Format::Half {
             if shape == Shape::Vector64 && high != 0 {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             (high << HALF_PAIR_INDEX_HIGH_SHIFT) | low
         } else {
             if shape == Shape::Vector64 || low != 0 {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             high
         };
@@ -300,9 +300,15 @@ mod tests {
             for (q, _) in SHAPES {
                 for right in 0..=REGISTER_MASK {
                     let base = encoding | q | (right << RIGHT_SHIFT) | REGISTER_MASK;
-                    assert_eq!(decode(base | (SIZE_RESERVED << SIZE_SHIFT)), Some(Err(())));
+                    assert_eq!(
+                        decode(base | (SIZE_RESERVED << SIZE_SHIFT)),
+                        Some(Err(Unsupported))
+                    );
                     if encoding == INDEXED_FCMLA || q == 0 {
-                        assert_eq!(decode(base | (SIZE_DOUBLE << SIZE_SHIFT)), Some(Err(())));
+                        assert_eq!(
+                            decode(base | (SIZE_DOUBLE << SIZE_SHIFT)),
+                            Some(Err(Unsupported))
+                        );
                     }
                 }
             }
@@ -312,18 +318,18 @@ mod tests {
                 let indexes = (high << INDEX_H_SHIFT) | (low << INDEX_L_SHIFT);
                 assert_eq!(
                     decode(INDEXED_FCMLA | (SIZE_SINGLE << SIZE_SHIFT) | indexes),
-                    Some(Err(()))
+                    Some(Err(Unsupported))
                 );
                 if low != 0 {
                     assert_eq!(
                         decode(INDEXED_FCMLA | (SIZE_SINGLE << SIZE_SHIFT) | VECTOR_Q | indexes),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
                 }
                 if high != 0 {
                     assert_eq!(
                         decode(INDEXED_FCMLA | (SIZE_HALF << SIZE_SHIFT) | indexes),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
                 }
             }

@@ -1,5 +1,6 @@
 //! SVE integer complex multiplies with rounding (SQRDCMLAH, ...).
 use crate::TargetCpu;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES};
 use crate::aarch64::sve::integer_products::Kind;
 use alloc::vec::Vec;
@@ -53,9 +54,9 @@ pub(super) fn emit_chunk(
     rounded: bool,
     rotation_degrees: u16,
     target: TargetCpu,
-) -> Result<(), ()> {
+) -> Result<(), Unsupported> {
     if element == ElementSize::Quadword || ![0, 90, 180, 270].contains(&rotation_degrees) {
-        return Err(());
+        return Err(Unsupported);
     }
     if !rounded {
         return super::complex_wrapping::emit_chunk(code, element, rotation_degrees, target);

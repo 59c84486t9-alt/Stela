@@ -50,7 +50,9 @@ pub(super) fn validate_numerical_exit(
     let word = validate_interior_word(entry, exit, source_bytes, region_base, source)?;
     let operand = stela_compiler::aarch64::FloatingPointOperation::decode(word)
         .context("numerical exit does not identify arithmetic")?
-        .map_err(|()| anyhow::anyhow!("numerical exit identifies reserved arithmetic"))?;
+        .map_err(|stela_compiler::aarch64::Unsupported| {
+            anyhow::anyhow!("numerical exit identifies reserved arithmetic")
+        })?;
     let next = GuestAddress(
         exit.0
             .checked_add(INSTRUCTION_BYTES as u64)

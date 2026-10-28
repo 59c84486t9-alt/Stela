@@ -1,5 +1,6 @@
 //! SVE PMULLB/PMULLT carryless multiplies.
 use crate::TargetCpu;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::Selection;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
@@ -126,9 +127,9 @@ pub(super) fn emit_chunk(
     widening: bool,
     selection: Selection,
     target: TargetCpu,
-) -> Result<(), ()> {
+) -> Result<(), Unsupported> {
     if selection == Selection::Cross {
-        return Err(());
+        return Err(Unsupported);
     }
     let top = selection == Selection::Top;
     if widening && element == ElementSize::Doubleword && target.supports(TargetCpu::Pclmulqdq) {
@@ -139,7 +140,7 @@ pub(super) fn emit_chunk(
         (false, ElementSize::Byte) => low_bytes(code),
         (true, ElementSize::Halfword) => widen_bytes(code, top),
         (true, ElementSize::Doubleword) => widen_dwords(code, top),
-        _ => return Err(()),
+        _ => return Err(Unsupported),
     }
     packed(code, Host::MoveAligned, LEFT, RESULT);
     Ok(())

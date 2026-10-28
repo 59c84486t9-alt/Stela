@@ -1,4 +1,5 @@
 //! Decoded instructions and the state, memory and prefix requirements they carry.
+use crate::aarch64::Unsupported;
 use alloc::{boxed::Box, format, vec::Vec};
 
 use crate::{
@@ -232,7 +233,7 @@ impl Decoded {
     pub(super) fn prefix_requirement(
         &self,
         original_word: u32,
-    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, Unsupported> {
         match self {
             Self::PrefetchHint => Ok(None),
             Self::SharedMemory(_)

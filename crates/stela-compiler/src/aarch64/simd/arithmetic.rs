@@ -1,4 +1,5 @@
 //! FP arithmetic: scalar, vector, indexed and pairwise FADD/FSUB/FMUL/FDIV/FMULX/FABD.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{BinaryOperation, Format};
 
 const SCALAR_MASK: u32 = 0xff20_fc00;
@@ -132,8 +133,7 @@ fn vector_shape(word: u32) -> Shape {
 /// None is another family; Err is reserved scalar ftype, vector1D, Half scalar
 /// pair size or indexed Double/L. All ordinary V0–V31 roles are data; indexed
 /// Half Vm permits only V0–V15 and all eight source indices, including under Q=0.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     decode_scalar(word)
         .or_else(|| decode_vector(word))
         .or_else(|| decode_simd_scalar(word))
@@ -141,7 +141,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         .or_else(|| decode_indexed(word))
 }
 
-fn decode_scalar(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_scalar(word: u32) -> Option<Result<Operand, Unsupported>> {
     let operation = match word & SCALAR_MASK {
         FADD => BinaryOperation::Add,
         FSUB => BinaryOperation::Subtract,
@@ -154,7 +154,7 @@ fn decode_scalar(word: u32) -> Option<Result<Operand, ()>> {
         FORMAT_SINGLE => Format::Single,
         FORMAT_DOUBLE => Format::Double,
         FORMAT_HALF => Format::Half,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         operation,
@@ -165,7 +165,7 @@ fn decode_scalar(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
-fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_vector(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (operation, half, pairwise) = match word & VECTOR_HALF_MASK {
         VECTOR_HALF_FADD => (BinaryOperation::Add, true, false),
         VECTOR_HALF_FSUB => (BinaryOperation::Subtract, true, false),
@@ -194,7 +194,7 @@ fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
         Format::Single
     };
     if format == Format::Double && shape == Shape::Vector64 {
-        return Some(Err(()));
+        return Some(Err(Unsupported));
     }
     Some(Ok(Operand {
         operation,
@@ -212,7 +212,7 @@ fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
-fn decode_simd_scalar(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_simd_scalar(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (operation, half) = match word & SIMD_SCALAR_HALF_MASK {
         SCALAR_HALF_FABD => (BinaryOperation::AbsoluteDifference, true),
         SCALAR_HALF_FMULX => (BinaryOperation::MultiplyExtended, true),
@@ -238,7 +238,7 @@ fn decode_simd_scalar(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
-fn decode_pairwise_scalar(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_pairwise_scalar(word: u32) -> Option<Result<Operand, Unsupported>> {
     let format = match word & PAIR_SCALAR_MASK {
         SCALAR_FADDP => {
             if word & VECTOR_DOUBLE == 0 {
@@ -249,7 +249,7 @@ fn decode_pairwise_scalar(word: u32) -> Option<Result<Operand, ()>> {
         }
         SCALAR_HALF_FADDP => {
             if word & VECTOR_DOUBLE != 0 {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             Format::Half
         }
@@ -266,7 +266,7 @@ fn decode_pairwise_scalar(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
-fn decode_indexed(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_indexed(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (half, shape) = if word & INDEXED_SCALAR_HALF_MASK == INDEXED_SCALAR_HALF {
         (true, Shape::Scalar)
     } else if word & INDEXED_SCALAR_MASK == INDEXED_SCALAR {
@@ -295,7 +295,7 @@ fn decode_indexed(word: u32) -> Option<Result<Operand, ()>> {
         )
     } else {
         if low != 0 || shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         (Format::Double, register(word, RIGHT_SHIFT), high)
     };
@@ -372,7 +372,7 @@ mod tests {
                 for destination in 0..=REGISTER_MASK {
                     for left in 0..=REGISTER_MASK {
                         for right in 0..=REGISTER_MASK {
-                            let expected = format.map_or(Err(()), |format| {
+                            let expected = format.map_or(Err(Unsupported), |format| {
                                 Ok(Operand {
                                     operation,
                                     format,
@@ -424,7 +424,7 @@ mod tests {
                                     | destination;
                                 let expected =
                                     if format == Format::Double && shape == Shape::Vector64 {
-                                        Err(())
+                                        Err(Unsupported)
                                     } else {
                                         let inputs = if ordinary == VECTOR_FADDP {
                                             Inputs::Pairwise {
@@ -530,7 +530,7 @@ mod tests {
                                 | destination
                                 | (source << LEFT_SHIFT)
                         ),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
                 }
             }
@@ -635,9 +635,12 @@ mod tests {
                                     | (right << RIGHT_SHIFT)
                                     | destination
                                     | (left << LEFT_SHIFT);
-                                assert_eq!(decode(word | (1 << INDEX_L_SHIFT)), Some(Err(())));
+                                assert_eq!(
+                                    decode(word | (1 << INDEX_L_SHIFT)),
+                                    Some(Err(Unsupported))
+                                );
                                 if base == INDEXED_VECTOR {
-                                    assert_eq!(decode(word), Some(Err(())));
+                                    assert_eq!(decode(word), Some(Err(Unsupported)));
                                 }
                             }
                         }

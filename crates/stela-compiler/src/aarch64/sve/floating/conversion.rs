@@ -1,4 +1,5 @@
 //! SVE predicated conversions (FCVT, FCVTZS/U, SCVTF/UCVTF, ...).
+use crate::aarch64::Unsupported;
 
 use crate::aarch64::floating::{
     Format,
@@ -155,8 +156,7 @@ pub struct Operand {
 }
 
 /// Decodes exactly 28 integer, 12 precision and 2 BF16 forms.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let kind = match word & CONVERSION_MASK {
         BFCVT_Z_P_Z_S2BF => Kind::Bfloat16 { upper: false },
         BFCVTNT_Z_P_Z_S2BF => Kind::Bfloat16 { upper: true },

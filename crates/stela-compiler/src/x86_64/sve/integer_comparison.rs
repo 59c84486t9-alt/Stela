@@ -1,5 +1,6 @@
 //! SVE integer comparisons into predicates.
 use crate::TargetCpu;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, VectorLength};
 use crate::aarch64::sve::integer_comparison::{Operand, Relation, Right};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
@@ -144,9 +145,9 @@ fn compare_lanes(
     unsigned: bool,
     size: ElementSize,
     target: TargetCpu,
-) -> Result<(u8, bool), ()> {
+) -> Result<(u8, bool), Unsupported> {
     if size == ElementSize::Quadword {
-        return Err(());
+        return Err(Unsupported);
     }
     let equality = matches!(relation, Relation::Equal | Relation::NotEqual);
     let reverse = matches!(relation, Relation::GreaterEqual | Relation::Less);
@@ -202,7 +203,7 @@ pub(crate) fn emit_compare_mask(
     unsigned: bool,
     size: ElementSize,
     target: TargetCpu,
-) -> Result<u8, ()> {
+) -> Result<u8, Unsupported> {
     let (result, invert) = compare_lanes(code, relation, unsigned, size, target)?;
     if invert {
         Host::EqualDword.register(code, XMM_BIAS, XMM_BIAS, TargetCpu::Baseline);
@@ -221,7 +222,7 @@ pub(crate) fn emit_compare_chunk(
     unsigned: bool,
     size: ElementSize,
     target: TargetCpu,
-) -> Result<(), ()> {
+) -> Result<(), Unsupported> {
     let (result, invert) = compare_lanes(code, relation, unsigned, size, target)?;
     Host::ByteSignMask.register(code, 0, result, TargetCpu::Baseline);
     if invert {
@@ -484,7 +485,7 @@ mod tests {
                 ElementSize::Quadword,
                 TargetCpu::Sse42
             ),
-            Err(())
+            Err(Unsupported)
         );
         assert_eq!(code, [0x90]);
     }

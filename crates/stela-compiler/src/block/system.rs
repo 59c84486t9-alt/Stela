@@ -2,6 +2,7 @@
 //!
 //! Native blocks return only the instruction's PC and exit kind; the runtime
 //! re-decodes the source word before applying the effect.
+use crate::aarch64::Unsupported;
 
 use crate::{
     CompileError, GuestAddress,
@@ -345,7 +346,7 @@ pub fn decode_system_mode_instruction(
         // Reserved sizes and opcodes stay with the ordinary decoder.
         match decoded {
             Ok(operand) => SystemOperation::Unprivileged(operand),
-            Err(()) => return Ok(None),
+            Err(Unsupported) => return Ok(None),
         }
     } else if let Some(access) = registers::decode_sys(word) {
         SystemOperation::Maintenance(access)

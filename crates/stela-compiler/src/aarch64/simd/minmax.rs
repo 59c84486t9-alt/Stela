@@ -1,5 +1,6 @@
 //! FP min/max: scalar, vector, pairwise and across-lane forms.
 use super::scalar_format;
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, minmax::MinMaxOperation};
 
 use super::arithmetic::Shape;
@@ -109,15 +110,14 @@ fn vector_shape(word: u32) -> Shape {
 /// None denotes another family; Err denotes reserved scalar ftype, vector1D,
 /// half scalar-pair size or ordinary reduction size/Q. Registers denote V31
 /// normally; pairwise scalar H consumes only the source's first two H lanes.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     decode_scalar(word)
         .or_else(|| decode_vector(word))
         .or_else(|| decode_pairwise_scalar(word))
         .or_else(|| decode_reduction(word))
 }
 
-fn decode_scalar(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_scalar(word: u32) -> Option<Result<Operand, Unsupported>> {
     let operation = match word & SCALAR_MASK {
         SCALAR_FMAX => MinMaxOperation::Maximum,
         SCALAR_FMIN => MinMaxOperation::Minimum,
@@ -146,7 +146,7 @@ fn vector_operation(opcode: u32) -> Option<MinMaxOperation> {
     })
 }
 
-fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_vector(word: u32) -> Option<Result<Operand, Unsupported>> {
     for (mask, adjustment, half) in [
         (VECTOR_MASK, 0, false),
         (VECTOR_HALF_MASK, HALF_REGISTER_ADJUSTMENT, true),
@@ -163,7 +163,7 @@ fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
         };
         let shape = vector_shape(word);
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Binary {
             operation,
@@ -192,13 +192,13 @@ fn pair_operation(opcode: u32) -> Option<MinMaxOperation> {
     })
 }
 
-fn decode_pairwise_scalar(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_pairwise_scalar(word: u32) -> Option<Result<Operand, Unsupported>> {
     for (adjustment, half) in [(0, false), (HALF_PAIR_ADJUSTMENT, true)] {
         let Some(operation) = pair_operation((word & PAIR_SCALAR_MASK) ^ adjustment) else {
             continue;
         };
         if half && word & SIMD_DOUBLE != 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let format = if half {
             Format::Half
@@ -227,7 +227,7 @@ fn reduction_operation(opcode: u32) -> Option<MinMaxOperation> {
     })
 }
 
-fn decode_reduction(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_reduction(word: u32) -> Option<Result<Operand, Unsupported>> {
     for (mask, adjustment, half) in [
         (REDUCTION_MASK, 0, false),
         (REDUCTION_HALF_MASK, HALF_PAIR_ADJUSTMENT, true),
@@ -236,7 +236,7 @@ fn decode_reduction(word: u32) -> Option<Result<Operand, ()>> {
             continue;
         };
         if !half && (word & SIMD_DOUBLE != 0 || word & VECTOR_Q == 0) {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Reduction {
             operation,
@@ -454,24 +454,27 @@ mod tests {
         for (opcode, _) in SCALAR_OPERATIONS {
             assert_eq!(
                 decode(opcode | (RESERVED_FORMAT << FORMAT_SHIFT)),
-                Some(Err(()))
+                Some(Err(Unsupported))
             );
         }
         for (opcode, _) in VECTOR_OPERATIONS {
             for pairwise in [0, VECTOR_PAIRWISE] {
-                assert_eq!(decode(opcode | SIMD_DOUBLE | pairwise), Some(Err(())));
+                assert_eq!(
+                    decode(opcode | SIMD_DOUBLE | pairwise),
+                    Some(Err(Unsupported))
+                );
             }
         }
         for (opcode, _) in PAIR_OPERATIONS {
             assert_eq!(
                 decode((opcode ^ HALF_PAIR_ADJUSTMENT) | SIMD_DOUBLE),
-                Some(Err(()))
+                Some(Err(Unsupported))
             );
         }
         for (opcode, _) in REDUCTION_OPERATIONS {
-            assert_eq!(decode(opcode), Some(Err(())));
+            assert_eq!(decode(opcode), Some(Err(Unsupported)));
             for q in [0, VECTOR_Q] {
-                assert_eq!(decode(opcode | SIMD_DOUBLE | q), Some(Err(())));
+                assert_eq!(decode(opcode | SIMD_DOUBLE | q), Some(Err(Unsupported)));
             }
         }
     }

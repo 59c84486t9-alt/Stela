@@ -1,4 +1,5 @@
 //! Selection between native and software arithmetic paths.
+use crate::aarch64::Unsupported;
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -29,7 +30,8 @@ pub(super) fn emit(
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
     if let Some(core) = guest::decode_core_binary(word) {
-        let core = core.map_err(|()| CompileError("reserved core binary allocation".into()))?;
+        let core =
+            core.map_err(|Unsupported| CompileError("reserved core binary allocation".into()))?;
         assert_eq!(core, operand, "admitted source/operand identity changed");
         return arithmetic::emit_core(code, core, length, features, pc, target);
     }

@@ -1,4 +1,5 @@
 //! Scalar and AdvSIMD FRINT*.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, rounding::RoundingOperation};
 
 use super::arithmetic::Shape;
@@ -86,14 +87,13 @@ fn vector_operation(opcode: u32) -> Option<RoundingOperation> {
 
 /// None denotes another family; Err denotes reserved scalar ftype, bounded H
 /// or vector1D. Every register field denotes ordinary V data, including V31.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (operation, format, shape) = if let Some(operation) = scalar_operation(word & SCALAR_MASK) {
         let format = match (word >> FORMAT_SHIFT) & FORMAT_MASK {
             FORMAT_SINGLE => Format::Single,
             FORMAT_DOUBLE => Format::Double,
             FORMAT_HALF if operation.signed_width().is_none() => Format::Half,
-            _ => return Some(Err(())),
+            _ => return Some(Err(Unsupported)),
         };
         (operation, format, Shape::Scalar)
     } else {
@@ -119,7 +119,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             Shape::Vector128
         };
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         (operation, format, shape)
     };
@@ -207,7 +207,10 @@ mod tests {
                 (FORMAT_HALF, Format::Half),
             ] {
                 if format == Format::Half && operation.signed_width().is_some() {
-                    assert_eq!(decode(scalar | (field << FORMAT_SHIFT)), Some(Err(())));
+                    assert_eq!(
+                        decode(scalar | (field << FORMAT_SHIFT)),
+                        Some(Err(Unsupported))
+                    );
                     continue;
                 }
                 check_registers(
@@ -238,7 +241,7 @@ mod tests {
                         continue;
                     }
                     if format == Format::Double && shape == Shape::Vector64 {
-                        assert_eq!(decode(word), Some(Err(())));
+                        assert_eq!(decode(word), Some(Err(Unsupported)));
                         continue;
                     }
                     check_registers(word, operation, format, shape);
@@ -258,13 +261,16 @@ mod tests {
                     let registers = destination | (source << SOURCE_SHIFT);
                     assert_eq!(
                         decode(scalar | (RESERVED_FORMAT << FORMAT_SHIFT) | registers),
-                        Some(Err(()))
+                        Some(Err(Unsupported))
                     );
-                    assert_eq!(decode(vector | VECTOR_DOUBLE | registers), Some(Err(())));
+                    assert_eq!(
+                        decode(vector | VECTOR_DOUBLE | registers),
+                        Some(Err(Unsupported))
+                    );
                     if operation.signed_width().is_some() {
                         assert_eq!(
                             decode(scalar | (FORMAT_HALF << FORMAT_SHIFT) | registers),
-                            Some(Err(()))
+                            Some(Err(Unsupported))
                         );
                     }
                 }

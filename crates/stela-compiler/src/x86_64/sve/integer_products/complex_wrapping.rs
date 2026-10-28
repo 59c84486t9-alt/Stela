@@ -1,6 +1,7 @@
 //! SVE CMLA (integer, wrapping).
 use super::{multiply_low_for_target, packed};
 use crate::TargetCpu;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 use alloc::vec::Vec;
@@ -174,7 +175,7 @@ pub(super) fn emit_chunk(
     element: ElementSize,
     rotation_degrees: u16,
     target: TargetCpu,
-) -> Result<(), ()> {
+) -> Result<(), Unsupported> {
     if element == ElementSize::Quadword
         || ![
             0,
@@ -184,7 +185,7 @@ pub(super) fn emit_chunk(
         ]
         .contains(&rotation_degrees)
     {
-        return Err(());
+        return Err(Unsupported);
     }
     if element == ElementSize::Doubleword {
         doubleword_products(code, rotation_degrees);

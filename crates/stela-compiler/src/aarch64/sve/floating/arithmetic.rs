@@ -1,4 +1,5 @@
 //! SVE floating-point arithmetic operands.
+use crate::aarch64::Unsupported;
 use crate::aarch64::{
     floating::{
         BinaryOperation, Format, complex::Rotation, fused::FusedOperation, minmax::MinMaxOperation,
@@ -221,16 +222,14 @@ fn core_binary_encoding(encoding: &Encoding) -> bool {
     )
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     decode_encoding(word, matching_encoding(word)?)
 }
 
 /// Supported subset: forward predicated ADD/SUB/MUL/DIV and unpredicated
 /// ADD/SUB/MUL, for H/S/D. The direction comes from the encoding, since
 /// reversed forms with aliased registers decode to identical operands.
-#[allow(clippy::result_unit_err)]
-pub fn decode_core_binary(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode_core_binary(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = matching_encoding(word)?;
     if !core_binary_encoding(encoding) {
         return None;
@@ -240,8 +239,7 @@ pub fn decode_core_binary(word: u32) -> Option<Result<Operand, ()>> {
 
 /// Arithmetic decoding uses the shared encoding table; FABS/FNEG keep their own
 /// decoder and emitter.
-#[allow(clippy::result_unit_err)]
-pub fn decode_numerical(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode_numerical(word: u32) -> Option<Result<Operand, Unsupported>> {
     let encoding = matching_encoding(word)?;
     if matches!(encoding.kind, Kind::Absolute | Kind::Negate) {
         return None;
@@ -249,13 +247,13 @@ pub fn decode_numerical(word: u32) -> Option<Result<Operand, ()>> {
     decode_encoding(word, encoding)
 }
 
-fn decode_encoding(word: u32, encoding: &Encoding) -> Option<Result<Operand, ()>> {
+fn decode_encoding(word: u32, encoding: &Encoding) -> Option<Result<Operand, Unsupported>> {
     let format = match encoding.layout {
         Layout::IndexedBinary(f) | Layout::IndexedFused(f) | Layout::ComplexIndexed(f) => f,
         Layout::Logb => format(word, LOGB_SIZE_SHIFT)?,
         Layout::UnsignedEstimate => {
             if (word >> SIZE_SHIFT) & SIZE_MASK != SINGLE_SIZE_ENCODING {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             Format::Single
         }

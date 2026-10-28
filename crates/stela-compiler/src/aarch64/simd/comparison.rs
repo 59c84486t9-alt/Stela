@@ -1,5 +1,6 @@
 //! FCMP/FCCMP and AdvSIMD FCMEQ/FCMGE/FCMGT/FACGE/FACGT.
 use super::scalar_format;
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, comparison::Predicate};
 
 use super::arithmetic::Shape;
@@ -91,8 +92,7 @@ fn register(word: u32, shift: u32) -> u8 {
 /// None denotes another family; Err denotes reserved scalar ftype or vector1D.
 /// Every register field is an ordinary V register, including V31. The Rm field
 /// remains unconstrained and ignored in FCMP/FCMPE zero encodings.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & FLAGS_MASK == FCMP {
         return Some(scalar_format(word).map(|format| Operand::Flags {
             format,
@@ -131,7 +131,7 @@ fn predicate(opcode: u32, zero: bool) -> Option<Predicate> {
     })
 }
 
-fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, ()>> {
+fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, Unsupported>> {
     let (scalar_mask, vector_mask, scalar_half_mask, vector_half_mask, half_adjustment) = if zero {
         (
             ZERO_SCALAR_MASK,
@@ -178,7 +178,7 @@ fn decode_predicate(word: u32, zero: bool) -> Option<Result<Operand, ()>> {
             Shape::Vector128
         };
         if format == Format::Double && shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         return Some(Ok(Operand::Predicate {
             operation,
@@ -360,12 +360,12 @@ mod tests {
             for signal in [0, SIGNAL_ALL_NANS] {
                 assert_eq!(
                     decode(opcode | signal | (RESERVED_FORMAT << FORMAT_SHIFT)),
-                    Some(Err(()))
+                    Some(Err(Unsupported))
                 );
             }
         }
         for (opcode, _) in REGISTER_OPERATIONS.into_iter().chain(ZERO_OPERATIONS) {
-            assert_eq!(decode(opcode | SIMD_DOUBLE), Some(Err(())));
+            assert_eq!(decode(opcode | SIMD_DOUBLE), Some(Err(Unsupported)));
         }
         for (opcode, _) in ZERO_OPERATIONS {
             for right in 1..=REGISTER_MASK {

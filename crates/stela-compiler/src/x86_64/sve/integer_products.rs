@@ -1,6 +1,7 @@
 //! SVE integer multiplies with SSE2. Indexed multipliers select within the same
 //! 128-bit chunk, so aliases never read an already written chunk.
 use crate::TargetCpu;
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_products::{Kind, Multiplier, Operand, Selection};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
@@ -475,8 +476,12 @@ fn accumulate(code: &mut Vec<u8>, element: ElementSize, subtract: bool) {
 }
 
 /// Validate emitter operand shape before the caller appends instruction bytes.
-pub fn validate(operand: Operand) -> Result<(), ()> {
-    if supported(operand) { Ok(()) } else { Err(()) }
+pub fn validate(operand: Operand) -> Result<(), Unsupported> {
+    if supported(operand) {
+        Ok(())
+    } else {
+        Err(Unsupported)
+    }
 }
 
 /// Emit ordinary vector effects for an operand accepted by `validate`.

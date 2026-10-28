@@ -1,5 +1,6 @@
 //! SVE vector Boolean operations, copies and prefix moves.
 use super::super::{Register, Width, logical_mask, register};
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication};
 
 const REGISTER_MASK: u32 = 31;
@@ -125,8 +126,7 @@ pub struct Operand {
     pub kind: Kind,
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let destination = (word & REGISTER_MASK) as u8;
     let source = ((word >> SOURCE_SHIFT) & REGISTER_MASK) as u8;
     let right = ((word >> RIGHT_SHIFT) & REGISTER_MASK) as u8;
@@ -202,7 +202,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             (encoded >> BITMASK_ROTATION_SHIFT) & BITMASK_FIELD_MASK,
             encoded & BITMASK_FIELD_MASK,
         ) else {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         };
         operand.element_size = ElementSize::Doubleword;
         operand.kind = Kind::Immediate { operation, value };
@@ -240,7 +240,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     ) {
         let shifted = word & COPY_SHIFT_FLAG != 0;
         if element_size == ElementSize::Byte && shifted {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let value = ((word >> SOURCE_SHIFT) & COPY_IMMEDIATE_MASK_BITS) as u8 as i8;
         let predicate = ((word >> COPY_PREDICATE_SHIFT) & WIDE_PREDICATE_MASK) as u8;
@@ -290,15 +290,14 @@ pub fn decode_prefix(word: u32) -> Option<Operand> {
 impl Operand {
     /// MOVPRFX requirements of the follower word. The typed operand is checked
     /// again so that normalized kinds cannot admit another encoding.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         word: u32,
-    ) -> Result<Option<super::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<super::prefix::PrefixRequirement>, Unsupported> {
         use super::prefix::{PredicatedPrefixRequirement, PrefixRequirement};
 
         if decode(word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         let predicated = match self.predication {
             Predication::Merging(predicate) => Some(PredicatedPrefixRequirement {
@@ -543,7 +542,7 @@ mod tests {
                         | if shifted { COPY_SHIFT_FLAG } else { 0 };
                     let result = decode(word).unwrap();
                     if size == 0 && shifted {
-                        assert_eq!(result, Err(()));
+                        assert_eq!(result, Err(Unsupported));
                     } else {
                         let operand = result.unwrap();
                         assert_eq!(operand.predication, Predication::Zeroing(predicate as u8));
@@ -567,7 +566,10 @@ mod tests {
     #[test]
     fn reserved_logical_immediates_decline_and_zeroing_unary_is_outside_inventory() {
         for opcode in [AND_IMMEDIATE, ORR_IMMEDIATE, EOR_IMMEDIATE] {
-            assert_eq!(decode(opcode | (63 << SOURCE_SHIFT)), Some(Err(())));
+            assert_eq!(
+                decode(opcode | (63 << SOURCE_SHIFT)),
+                Some(Err(Unsupported))
+            );
             assert!(decode(opcode).unwrap().is_ok());
         }
         assert_eq!(decode(NOT_PREDICATED ^ (1 << 20)), None);

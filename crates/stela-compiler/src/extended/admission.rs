@@ -1,4 +1,5 @@
 //! Decoding one instruction and admitting it under a scalable profile.
+use crate::aarch64::Unsupported;
 use alloc::{format, vec::Vec};
 
 use super::{Decoded, ScalableProfile, ordinary_permitted};
@@ -69,8 +70,12 @@ impl Admission<'_> {
         }
     }
 
-    fn operand<T>(&self, decoded: Result<T, ()>, encoding: &str) -> Result<T, CompileError> {
-        decoded.map_err(|()| self.error(&format!("reserved {encoding} encoding")))
+    fn operand<T>(
+        &self,
+        decoded: Result<T, Unsupported>,
+        encoding: &str,
+    ) -> Result<T, CompileError> {
+        decoded.map_err(|Unsupported| self.error(&format!("reserved {encoding} encoding")))
     }
 
     fn require(&mut self, features: ScalableFeatures) -> Result<(), CompileError> {
@@ -89,7 +94,7 @@ impl Admission<'_> {
     /// The common streaming SVE admission: a valid operand, streaming mode and SME.
     fn streaming_sme<T>(
         &mut self,
-        decoded: Result<T, ()>,
+        decoded: Result<T, Unsupported>,
         encoding: &str,
     ) -> Result<T, CompileError> {
         let operand = self.operand(decoded, encoding)?;
@@ -273,7 +278,7 @@ pub(super) fn decode_recording_features(
     if let Some(decoded) = integer_products::decode(word) {
         let operand = check.streaming_sme(decoded, "streaming integer product")?;
         x86_64::sve::integer_products::validate(operand)
-            .map_err(|()| check.error("invalid streaming integer product operand"))?;
+            .map_err(|Unsupported| check.error("invalid streaming integer product operand"))?;
         return Ok(Decoded::IntegerProducts(operand));
     }
     if let Some(operand) = integer_dots::decode(word) {

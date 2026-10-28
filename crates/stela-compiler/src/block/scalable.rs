@@ -1,4 +1,5 @@
 //! Scalable numerical instructions that exit to a runtime service.
+use crate::aarch64::Unsupported;
 
 use crate::{
     CompileError, GuestAddress,
@@ -215,8 +216,8 @@ pub fn decode_scalable_numerical_instruction(
     } else if let Some(operand) = extrema_scale::decode(word) {
         ScalableNumericalOperation::SmeExtremaScale(operand)
     } else if let Some(result) = floating::Operation::decode(word) {
-        let operand =
-            result.map_err(|()| CompileError("reserved scalable numerical encoding".into()))?;
+        let operand = result
+            .map_err(|Unsupported| CompileError("reserved scalable numerical encoding".into()))?;
         if !operand.requires_numerical_completion() {
             return Ok(None);
         }

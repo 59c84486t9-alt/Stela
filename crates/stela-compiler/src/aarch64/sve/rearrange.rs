@@ -1,4 +1,5 @@
 //! SVE permutes and vector generation (INDEX, DUP, ZIP, UZP, TRN, REV, TBL, ...).
+use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::{Register, Width, logical_mask};
 
@@ -169,7 +170,7 @@ fn index_register(encoded: u8) -> IndexOperand {
 }
 
 /// None is another allocation; Err is an allocated class with reserved operands.
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let destination = (word & REGISTER_MASK) as u8;
     let source = ((word >> SOURCE_SHIFT) & REGISTER_MASK) as u8;
     let second = ((word >> SECOND_SHIFT) & REGISTER_MASK) as u8;
@@ -183,7 +184,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let operand = if word & DUPQ_Z_ZI_MASK == DUPQ_Z_ZI_CLASS {
         let tsz = (word >> SECOND_SHIFT) & SEGMENT_IMMEDIATE_MASK;
         if tsz == 0 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         let low_bit = tsz.trailing_zeros();
         let element_size = ElementSize::from_bytes(1 << low_bit).expect("nonzero four-bit tsz");
@@ -407,7 +408,7 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
             immediate & LOGICAL_FIELD_MASK,
         ) {
             Some(mask) => mask,
-            None => return Some(Err(())),
+            None => return Some(Err(Unsupported)),
         };
         Operand::DuplicateMask { destination, mask }
     } else if word & INDEX_Z_II_MASK == INDEX_Z_II_CLASS {
@@ -447,15 +448,14 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 impl Operand {
     /// MOVPRFX follower requirements from the specification. Other encodings
     /// are refused even when their typed operand matches.
-    #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
         original_word: u32,
-    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
+    ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, Unsupported> {
         use crate::aarch64::sve::prefix::PrefixRequirement;
 
         if decode(original_word) != Some(Ok(self)) {
-            return Err(());
+            return Err(Unsupported);
         }
         let permitted = match self {
             Self::Extract {
@@ -624,7 +624,7 @@ mod tests {
                 DUPM_Z_I_CLASS | (LOGICAL_IMMEDIATE_MASK << SOURCE_SHIFT),
                 REVD_Z_P_Z_M_CLASS | (1 << SIZE_SHIFT),
             ] {
-                assert_eq!(decoded.prefix_requirement(other), Err(()));
+                assert_eq!(decoded.prefix_requirement(other), Err(Unsupported));
             }
             let forged = Operand::Extract {
                 destination: DESTINATION,
@@ -633,7 +633,7 @@ mod tests {
                 byte_offset: 0,
                 segment: false,
             };
-            assert_eq!(forged.prefix_requirement(word), Err(()));
+            assert_eq!(forged.prefix_requirement(word), Err(Unsupported));
         }
 
         #[test]
@@ -813,7 +813,7 @@ mod tests {
         for encoded in 0..=REGISTER_MASK {
             let decoded = decode(DUPQ_Z_ZI_CLASS | (encoded << SECOND_SHIFT));
             if encoded & SEGMENT_IMMEDIATE_MASK == 0 {
-                assert_eq!(decoded, Some(Err(())));
+                assert_eq!(decoded, Some(Err(Unsupported)));
             } else {
                 let Some(Ok(Operand::DuplicateSegment {
                     element_size,
@@ -843,7 +843,7 @@ mod tests {
                     Operand::DuplicateMask { mask, .. } => mask,
                     _ => panic!("wrong duplicate allocation"),
                 })),
-                Some(expected.ok_or(()))
+                Some(expected.ok_or(Unsupported))
             );
         }
     }

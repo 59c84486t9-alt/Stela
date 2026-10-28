@@ -1,4 +1,5 @@
 //! FMADD/FMSUB/FNMADD/FNMSUB and AdvSIMD FMLA/FMLS.
+use crate::aarch64::Unsupported;
 use crate::aarch64::floating::{Format, fused::FusedOperation};
 
 use super::arithmetic::Shape;
@@ -58,8 +59,7 @@ pub struct Operand {
 
 /// None is another family; Err is reserved scalar ftype, vector 1D or indexed D/L.
 /// Register fields denote ordinary V registers; indexed H permits only V0–V15.
-#[allow(clippy::result_unit_err)]
-pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     decode_scalar(word)
         .or_else(|| decode_vector(word))
         .or_else(|| decode_indexed(word))
@@ -77,7 +77,7 @@ fn vector_shape(word: u32) -> Shape {
     }
 }
 
-fn decode_scalar(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_scalar(word: u32) -> Option<Result<Operand, Unsupported>> {
     let operation = match word & SCALAR_MASK {
         FMADD => FusedOperation::Add,
         FMSUB => FusedOperation::Subtract,
@@ -89,7 +89,7 @@ fn decode_scalar(word: u32) -> Option<Result<Operand, ()>> {
         FORMAT_SINGLE => Format::Single,
         FORMAT_DOUBLE => Format::Double,
         FORMAT_HALF => Format::Half,
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     Some(Ok(Operand {
         operation,
@@ -103,7 +103,7 @@ fn decode_scalar(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
-fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_vector(word: u32) -> Option<Result<Operand, Unsupported>> {
     let half_operation = match word & VECTOR_HALF_MASK {
         VECTOR_HALF_FMLA => Some(FusedOperation::Add),
         VECTOR_HALF_FMLS => Some(FusedOperation::Subtract),
@@ -122,7 +122,7 @@ fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
             Format::Single
         } else {
             if shape == Shape::Vector64 {
-                return Some(Err(()));
+                return Some(Err(Unsupported));
             }
             Format::Double
         };
@@ -141,7 +141,7 @@ fn decode_vector(word: u32) -> Option<Result<Operand, ()>> {
     }))
 }
 
-fn decode_indexed(word: u32) -> Option<Result<Operand, ()>> {
+fn decode_indexed(word: u32) -> Option<Result<Operand, Unsupported>> {
     let (half, shape) = if word & INDEXED_SCALAR_HALF_MASK == INDEXED_SCALAR_HALF {
         (true, Shape::Scalar)
     } else if word & INDEXED_SCALAR_MASK == INDEXED_SCALAR {
@@ -170,7 +170,7 @@ fn decode_indexed(word: u32) -> Option<Result<Operand, ()>> {
         )
     } else {
         if low != 0 || shape == Shape::Vector64 {
-            return Some(Err(()));
+            return Some(Err(Unsupported));
         }
         (Format::Double, register(word, RIGHT_SHIFT), high)
     };
@@ -229,7 +229,7 @@ mod tests {
                                 | (addend << ADDEND_SHIFT)
                                 | (left << LEFT_SHIFT)
                                 | destination;
-                            let expected = format.map_or(Err(()), |format| {
+                            let expected = format.map_or(Err(Unsupported), |format| {
                                 Ok(Operand {
                                     operation,
                                     format,
@@ -272,7 +272,7 @@ mod tests {
                                     | destination;
                                 let expected =
                                     if format == Format::Double && shape == Shape::Vector64 {
-                                        Err(())
+                                        Err(Unsupported)
                                     } else {
                                         Ok(Operand {
                                             operation,
@@ -347,7 +347,7 @@ mod tests {
                                                 let expected = if format == Format::Double
                                                     && (l != 0 || shape == Shape::Vector64)
                                                 {
-                                                    Err(())
+                                                    Err(Unsupported)
                                                 } else {
                                                     Ok(Operand {
                                                         operation,

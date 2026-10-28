@@ -1,6 +1,7 @@
 //! PC-relative literal loads: LDR (literal), LDRSW (literal) and PRFM (literal).
 use super::{Register, Width, register};
 use crate::GuestAddress;
+use crate::aarch64::Unsupported;
 
 const CLASS_MASK: u32 = 0x3b000000;
 const LITERAL_CLASS: u32 = 0x18000000;
@@ -39,8 +40,7 @@ pub struct Operand {
 
 /// PRFM (literal) and reserved SIMD opcode 11 are unsupported. The address
 /// wraps at 64 bits and uses this instruction's guest PC.
-#[allow(clippy::result_unit_err)]
-pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, ()>> {
+pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, Unsupported>> {
     if word & CLASS_MASK != LITERAL_CLASS {
         return None;
     }
@@ -64,7 +64,7 @@ pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, ()>> {
                 _ => unreachable!("literal SIMD form is matched above"),
             },
         },
-        _ => return Some(Err(())),
+        _ => return Some(Err(Unsupported)),
     };
     let immediate = i64::from((word >> IMMEDIATE_SHIFT) & IMMEDIATE_MASK);
     let signed = (immediate << IMMEDIATE_SIGN_SHIFT) >> IMMEDIATE_SIGN_SHIFT;
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn prefetch_reserved_and_neighboring_classes_do_not_become_loads() {
         for unsupported in [0xd8000000, 0xdc000000] {
-            assert_eq!(decode(GuestAddress(0), unsupported), Some(Err(())));
+            assert_eq!(decode(GuestAddress(0), unsupported), Some(Err(Unsupported)));
         }
         for bit in [24, 25, 27, 28, 29] {
             assert!(decode(GuestAddress(0), LDR_W ^ (1 << bit)).is_none());

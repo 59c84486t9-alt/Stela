@@ -4541,7 +4541,7 @@ mod tests {
             }
             assert_eq!(
                 reductions::decode(RESERVED_SIGNED_DOUBLEWORD),
-                Some(Err(()))
+                Some(Err(crate::aarch64::Unsupported))
             );
             assert!(
                 compile_for_profile(
