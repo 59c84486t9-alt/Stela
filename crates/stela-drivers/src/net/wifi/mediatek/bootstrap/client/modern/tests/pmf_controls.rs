@@ -390,6 +390,9 @@ fn awaiting_with(
         )
     }?;
     finish_tx(&model);
+    // SAFETY: The original scan observation, selected request and native-memory owner
+    // stay retained. This synchronous poll reacquires the same hardware-then-OS
+    // guards after the modeled authentication TX completes.
     unsafe {
         driver.poll_pmf_authentication(
             &mut owner,
@@ -401,6 +404,9 @@ fn awaiting_with(
     .unwrap();
     driver.poll_released().unwrap();
     incoming(&model, &response(0xb0, &[0, 0, 2, 0, 0, 0]), None, false);
+    // SAFETY: The injected authentication response belongs to the live fixture RX
+    // queue and original scan owner. Both model guards serialize its handling; no
+    // physical radio or concurrent reset user exists.
     unsafe {
         driver.poll_pmf_authentication(
             &mut owner,
@@ -416,6 +422,9 @@ fn awaiting_with(
             .windows(selected_rsn().len())
             .any(|v| v == selected_rsn())
     );
+    // SAFETY: The original owner and backing remain retained after modeled
+    // association TX completion. This synchronous poll checks the current
+    // authentication ticket under both guards before releasing resources.
     unsafe {
         driver.poll_pmf_authentication(
             &mut owner,
@@ -430,6 +439,9 @@ fn awaiting_with(
     let mut body = vec![0x11, 0, 0, 0, 1, 0xc0];
     body.extend_from_slice(&response_elements);
     incoming(&model, &response(0x10, &body), None, false);
+    // SAFETY: The same scan owner and native backing remain live. Response elements
+    // may be deliberately invalid; their validation occurs under current model guards
+    // before any new association authority escapes.
     unsafe {
         driver.poll_pmf_authentication(
             &mut owner,

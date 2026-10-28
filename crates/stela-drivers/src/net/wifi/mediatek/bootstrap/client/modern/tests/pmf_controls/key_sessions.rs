@@ -13,7 +13,12 @@ fn configuration_and_igtk_failure() {
         } else {
             model.response.lock().unwrap().bss_status = 9;
         }
-        assert!(unsafe { driver.configure_modern(&mut owner, admission, 105) }.is_err());
+        assert!(
+            // SAFETY: The original context and DMA owners remain live under fresh model
+            // guards. Injected loss or failure of the firmware acknowledgement must
+            // quarantine them rather than release uncertain resources.
+            unsafe { driver.configure_modern(&mut owner, admission, 105) }.is_err()
+        );
         assert_eq!(driver.phase(), ClientPhase::Quarantined);
         assert_eq!(driver.completed_modern_requests(), 0);
         assert!(Arc::ptr_eq(driver.modern_context().unwrap(), &context));
@@ -33,6 +38,9 @@ fn configuration_and_igtk_failure() {
         protection.authenticated.set(true);
         for (pairwise, index, material) in [(true, 0, 1), (false, 2, 0x44)] {
             let admission = permit(&mut owner, &driver, AssociationUse::Management);
+            // SAFETY: The authenticated fixture OS supplies this pairwise/group key
+            // material for its current peer. The same retained native context is
+            // serialized by both guards, with no concurrent key or frame user.
             unsafe {
                 driver.install_key_modern(
                     &mut owner,
@@ -53,6 +61,9 @@ fn configuration_and_igtk_failure() {
             model.response.lock().unwrap().status = 9;
         }
         assert!(
+            // SAFETY: No prior management session, key callback or asynchronous IRQ
+            // user exists in this fixture. Its current epoch and native backing
+            // remain owned while a deliberately failed acknowledgement is retained.
             unsafe {
                 driver.install_management_key_modern(
                     &mut owner,
@@ -87,6 +98,9 @@ fn igtk_rotation_revokes_old_session() {
     protection.port.set(true);
     let first = attach(&mut driver, &mut owner);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: The first session belongs to this current retained peer and its key
+    // acknowledgements completed synchronously. The fixture explicitly grants its
+    // authenticated port policy under both leases.
     unsafe { driver.authorize_port_pmf(&mut owner, admission, &first) }.unwrap();
     incoming(
         &model,
@@ -120,9 +134,17 @@ fn igtk_rotation_revokes_old_session() {
     ));
     let before = model.bar.0.lock().unwrap().log.len();
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
-    assert!(unsafe { driver.authorize_port_pmf(&mut owner, admission, &first) }.is_err());
+    assert!(
+        // SAFETY: The old session remains a live Arc, but rotation replaced its
+        // authority. The original requester and current guards must reject that stale
+        // session before any modeled register effect.
+        unsafe { driver.authorize_port_pmf(&mut owner, admission, &first) }.is_err()
+    );
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
     assert!(
+        // SAFETY: The delayed RX envelope is still owned, but its management session
+        // was retired by rotation. Current context validation must reject it before
+        // invoking the callback or exposing a borrowed body.
         unsafe {
             driver.with_management_modern::<_, _, ()>(&mut owner, admission, delayed, |_, _, _| {
                 panic!("retired Session must remain inert")
@@ -132,9 +154,15 @@ fn igtk_rotation_revokes_old_session() {
     );
     assert_eq!(model.bar.0.lock().unwrap().log.len(), before);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: The second session is the current acknowledged rotation result, with
+    // unchanged retained data-key owners. The same fixture OS grants port
+    // authorization under newly acquired hardware/OS leases.
     unsafe { driver.authorize_port_pmf(&mut owner, admission, &second) }.unwrap();
     let admission = permit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();
+    // SAFETY: The data frame is borrowed only for this call; its queued DMA and key
+    // owners remain retained. The current requester and authenticated model OS grant
+    // data submission under both guards.
     unsafe {
         driver.transmit_modern(
             &mut owner,
@@ -158,5 +186,10 @@ fn igtk_rotation_revokes_old_session() {
     ));
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
     driver.disconnect().unwrap();
-    assert!(unsafe { driver.authorize_port_pmf(&mut owner, admission, &second) }.is_err());
+    assert!(
+        // SAFETY: The session Arc and original native backing remain live after
+        // disconnect, but the earlier admission is stale. Current guard/context checks
+        // must reject authorization without restarting the association.
+        unsafe { driver.authorize_port_pmf(&mut owner, admission, &second) }.is_err()
+    );
 }

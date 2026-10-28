@@ -10,9 +10,17 @@ fn port_requires_key_acks_and_os_handshake() {
     let epoch = driver.station().association_epoch().unwrap();
     assert!(driver.authorize_port(epoch).is_err());
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
-    assert!(unsafe { driver.authorize_port_pmf(&mut owner, admission, &session) }.is_err());
+    assert!(
+        // SAFETY: The current session and key acknowledgements remain retained, but the
+        // modeled OS has not granted its port flag. Fresh guards must reject this call
+        // without enabling the port.
+        unsafe { driver.authorize_port_pmf(&mut owner, admission, &session) }.is_err()
+    );
     protection.port.set(true);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: The fixture now grants its authenticated port flag for the current
+    // acknowledged session. Original native memory, key owners and both serialized
+    // model guards remain retained.
     unsafe { driver.authorize_port_pmf(&mut owner, admission, &session) }.unwrap();
     assert!(driver.station().port_open(
         Some(driver.state().ptk.as_ref().unwrap().slot()),
@@ -26,13 +34,21 @@ fn port_requires_key_acks_and_os_handshake() {
     let before = model.response.lock().unwrap().client_commands.len();
     // Revocation after preflight cannot inherit the earlier protected-port grant.
     protection.port.set(false);
-    assert!(unsafe { driver.authorize_port_pmf(&mut owner, admission, &session) }.is_err());
+    assert!(
+        // SAFETY: The receipt still names this live context and session, but its OS port
+        // grant was revoked after preflight. Revalidation must deny authorization before
+        // a new modeled command.
+        unsafe { driver.authorize_port_pmf(&mut owner, admission, &session) }.is_err()
+    );
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
     // Open cached PTK/GTK permission cannot bypass fresh authenticated Data policy.
     let admission = permit(&mut owner, &driver, AssociationUse::Receive);
     protection.authenticated.set(false);
     incoming(&model, &data(false), Some((1, 0, 1)), false);
     assert!(
+        // SAFETY: The queued RX storage and original requester remain retained.
+        // Authentication was revoked after preflight; current hardware/OS guards must
+        // deny data handling without exposing the pending frame.
         unsafe {
             driver.poll_pmf(
                 &mut owner,
@@ -79,7 +95,11 @@ fn port_requires_key_acks_and_os_handshake() {
     };
     assert_eq!(driver.station().phase(), station::Phase::Associated);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
-    let value = unsafe {
+    let value =
+    // SAFETY: received is the retained envelope for this current PMF session and
+    // requester. Both guards scope the callback; it copies body bytes and lets no
+    // borrowed view outlive those guards.
+    unsafe {
         driver.with_management_modern(&mut owner, admission, received, |_, body, _| {
             assert!(state.hardware.get() && state.os.get());
             body.to_vec()
@@ -88,6 +108,9 @@ fn port_requires_key_acks_and_os_handshake() {
     .unwrap();
     assert_eq!(value, [8, 1, 3, 4]);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: The current acknowledged session and native backing remain retained,
+    // and this modeled OS grants management transmission. Both serialized leases
+    // cover source allocation and the retained queued frame.
     unsafe {
         driver.transmit_management_modern(
             &mut owner,

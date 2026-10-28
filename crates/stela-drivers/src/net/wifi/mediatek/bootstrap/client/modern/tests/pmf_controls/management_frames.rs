@@ -114,6 +114,9 @@ fn protected_block_ack_receipts() {
     };
     let mut received = Some(original);
     let admission = permit(&mut owner, &driver, AssociationUse::Management);
+    // SAFETY: received owns the authenticated envelope for the current retained
+    // session. Fresh hardware/OS guards serialize consumption and the pending block-
+    // ack state; no borrowed frame escapes the guarded operation.
     unsafe {
         driver.receive_management_block_ack(
             &mut owner,
@@ -127,6 +130,9 @@ fn protected_block_ack_receipts() {
     assert!(driver.station().active_rx_block_ack(6).is_none());
     for now in [frontend_tick(113), frontend_tick(114)] {
         let admission = permit(&mut owner, &driver, AssociationUse::Management);
+        // SAFETY: The pending block-ack state belongs to this same retained session
+        // and requester. Each synchronous progress step reacquires both leases and
+        // retains command/frame DMA until its modeled acknowledgement.
         unsafe { driver.progress_block_ack(&mut owner, admission, &PmfSource(state.clone()), now) }
             .unwrap();
     }
