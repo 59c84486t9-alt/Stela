@@ -9,7 +9,10 @@ use crate::{
     bus::dma::{DmaAllocator, DmaBuffer},
     usb::xhci::Endpoint,
 };
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 
 const PACKETS: usize = 32;
 const BUFFER_BYTES: usize = 4096;
@@ -111,6 +114,31 @@ pub struct AudioDevice<T: Transport> {
     power_owners: Vec<super::PowerDomain>,
     /// First failure is retained even if cleanup itself fails.
     pub last_fault: Option<Error>,
+    /// The last rate change's (requested, running) rates when the clock
+    /// reported another; 0 running means it could not be read.
+    pub clock_mismatch: Option<(u32, u32)>,
+    /// Linux `chip->sample_rate_read_error`: failed UAC1 rate reads.
+    rate_read_errors: u8,
+    mixer: MixerState,
+}
+
+/// What Linux keeps in each `usb_mixer_elem_info` across a reset-resume:
+/// probed ranges and the values last read or written, by entity, selector
+/// or input, and channel or output. Resume publishes a fresh owner; hand it
+/// the old owner's state with `restore_mixer`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MixerState {
+    ranges: BTreeMap<(u8, u8, u8), super::MixerRange>,
+    values: BTreeMap<(u8, u8, u8), Cached>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cached {
+    Mute(bool),
+    Volume(i16),
+    Feature(super::FeatureControl, super::FeatureValue),
+    MixerCell(i16),
+    Input(u8),
+    Clock(u8),
 }
 
 impl AudioDevice<super::Native> {
@@ -148,6 +176,9 @@ impl<T: Transport> AudioDevice<T> {
             poisoned: false,
             power_owners: Vec::new(),
             last_fault: None,
+            clock_mismatch: None,
+            rate_read_errors: 0,
+            mixer: MixerState::default(),
         })
     }
     #[cfg(test)]
@@ -289,16 +320,29 @@ impl<T: Transport> AudioDevice<T> {
             .map(|p| (p.clock, p.rate))
             .chain(self.capture.iter().map(|c| (c.clock, c.rate)))
         {
+            // Linux shares one clock reference per terminal clock ID.
             if let StreamClock::Entity(other_clock) = other_clock
-                && other_clock.source == clock.source
-                && other_clock.source_rate(other_rate)? != clock.source_rate(rate)?
+                && other_clock.terminal == clock.terminal
+                && other_rate != rate
             {
                 return Err(Error::Busy);
             }
         }
-        self.binding
+        // ALSA constrains hw_params to the format's announced rates.
+        if !self
+            .binding
+            .graph
+            .rates(&mut self.transport, clock)?
+            .contains(rate)
+        {
+            return Err(Error::RateUnsupported);
+        }
+        let running = self
+            .binding
             .graph
             .set_rate(&mut self.transport, clock, rate)?;
+        // Linux notes a different running rate and streams on.
+        self.clock_mismatch = (running != rate).then_some((rate, running));
         Ok(StreamClock::Entity(clock))
     }
     fn format(&self, index: usize, direction: Direction) -> Result<Format, Error> {
@@ -422,8 +466,16 @@ impl<T: Transport> AudioDevice<T> {
             )?;
             let format = &self.playback.as_ref().unwrap().format;
             if let Some(rates) = &format.endpoint_rates {
-                rates.apply(&mut self.transport, format.data.address, rate)?;
+                let running = rates.apply(
+                    &mut self.transport,
+                    format.data.address,
+                    rate,
+                    &mut self.rate_read_errors,
+                )?;
+                // Linux warns of a different rate and streams on.
+                self.clock_mismatch = (running != rate).then_some((rate, running));
             }
+            format.init_pitch(&mut self.transport)?;
             self.transport.configure(Direction::Playback, &endpoints)?;
             self.queue_inputs()?;
             self.queue_output()?;
@@ -526,8 +578,15 @@ impl<T: Transport> AudioDevice<T> {
         self.transport
             .alternate(format.interface, format.alternate)?;
         if let Some(rates) = &format.endpoint_rates {
-            rates.apply(&mut self.transport, format.data.address, rate)?;
+            let running = rates.apply(
+                &mut self.transport,
+                format.data.address,
+                rate,
+                &mut self.rate_read_errors,
+            )?;
+            self.clock_mismatch = (running != rate).then_some((rate, running));
         }
+        format.init_pitch(&mut self.transport)?;
         self.transport
             .configure(Direction::Capture, &self.input.endpoints())?;
         self.queue_inputs()
@@ -581,13 +640,36 @@ impl<T: Transport> AudioDevice<T> {
         self.ready()?;
         self.binding
             .graph
-            .set_mute(&mut self.transport, entity, channel, muted)
+            .set_mute(&mut self.transport, entity, channel, muted)?;
+        self.mixer
+            .values
+            .insert((entity, 1, channel), Cached::Mute(muted));
+        Ok(())
     }
-    pub fn set_volume(&mut self, entity: u8, channel: u8, volume_db256: i16) -> Result<(), Error> {
+    /// The volume's range, probed before its first use.
+    pub fn volume_range(&mut self, entity: u8, channel: u8) -> Result<super::MixerRange, Error> {
         self.ready()?;
+        if let Some(range) = self.mixer.ranges.get(&(entity, 2, channel)) {
+            return Ok(*range);
+        }
+        let range = self
+            .binding
+            .graph
+            .volume_range(&mut self.transport, entity, channel)?;
+        self.mixer.ranges.insert((entity, 2, channel), range);
+        Ok(range)
+    }
+    /// Set the step at or below `volume_db256`, clamped to the range.
+    pub fn set_volume(&mut self, entity: u8, channel: u8, volume_db256: i16) -> Result<(), Error> {
+        let range = self.volume_range(entity, channel)?;
+        let written = range.snap(i64::from(volume_db256)) as i16;
         self.binding
             .graph
-            .set_volume(&mut self.transport, entity, channel, volume_db256)
+            .set_volume(&mut self.transport, entity, channel, range, written)?;
+        self.mixer
+            .values
+            .insert((entity, 2, channel), Cached::Volume(written));
+        Ok(())
     }
     pub fn feature_value(
         &mut self,
@@ -596,20 +678,38 @@ impl<T: Transport> AudioDevice<T> {
         feature: super::FeatureControl,
     ) -> Result<super::FeatureValue, Error> {
         self.ready()?;
-        self.binding
-            .graph
-            .feature_value(&mut self.transport, entity, channel, feature)
+        // Linux probes a control when it creates it, before any read.
+        if feature.has_range() {
+            self.feature_range(entity, channel, feature)?;
+        }
+        let value =
+            self.binding
+                .graph
+                .feature_value(&mut self.transport, entity, channel, feature)?;
+        self.mixer.values.insert(
+            (entity, feature.selector(), channel),
+            Cached::Feature(feature, value),
+        );
+        Ok(value)
     }
-    pub fn feature_ranges(
+    /// A numeric feature control's range, probed before its first use.
+    pub fn feature_range(
         &mut self,
         entity: u8,
         channel: u8,
         feature: super::FeatureControl,
-    ) -> Result<Vec<super::FeatureRange>, Error> {
+    ) -> Result<super::MixerRange, Error> {
         self.ready()?;
-        self.binding
-            .graph
-            .feature_ranges(&mut self.transport, entity, channel, feature)
+        let key = (entity, feature.selector(), channel);
+        if let Some(range) = self.mixer.ranges.get(&key) {
+            return Ok(*range);
+        }
+        let range =
+            self.binding
+                .graph
+                .feature_range(&mut self.transport, entity, channel, feature)?;
+        self.mixer.ranges.insert(key, range);
+        Ok(range)
     }
     pub fn set_feature_value(
         &mut self,
@@ -619,16 +719,55 @@ impl<T: Transport> AudioDevice<T> {
         value: super::FeatureValue,
     ) -> Result<(), Error> {
         self.ready()?;
-        self.binding
-            .graph
-            .set_feature_value(&mut self.transport, entity, channel, feature, value)
+        let range = if feature.has_range() {
+            Some(self.feature_range(entity, channel, feature)?)
+        } else {
+            None
+        };
+        let written = self.binding.graph.set_feature_value(
+            &mut self.transport,
+            entity,
+            channel,
+            feature,
+            range,
+            value,
+        )?;
+        self.mixer.values.insert(
+            (entity, feature.selector(), channel),
+            Cached::Feature(feature, written),
+        );
+        Ok(())
     }
     pub fn mixer_volume(&mut self, entity: u8, input: u8, output: u8) -> Result<i16, Error> {
-        self.ready()?;
-        self.binding
+        self.mixer_volume_range(entity, input, output)?;
+        let value = self
+            .binding
             .graph
-            .mixer_volume(&mut self.transport, entity, input, output)
+            .mixer_volume(&mut self.transport, entity, input, output)?;
+        self.mixer
+            .values
+            .insert((entity, input, output), Cached::MixerCell(value));
+        Ok(value)
     }
+    /// The mixer cell's range, probed before its first use.
+    pub fn mixer_volume_range(
+        &mut self,
+        entity: u8,
+        input: u8,
+        output: u8,
+    ) -> Result<super::MixerRange, Error> {
+        self.ready()?;
+        if let Some(range) = self.mixer.ranges.get(&(entity, input, output)) {
+            return Ok(*range);
+        }
+        let range =
+            self.binding
+                .graph
+                .mixer_volume_range(&mut self.transport, entity, input, output)?;
+        self.mixer.ranges.insert((entity, input, output), range);
+        Ok(range)
+    }
+    /// Set the step at or below `value`, clamped to the range.
     pub fn set_mixer_volume(
         &mut self,
         entity: u8,
@@ -636,10 +775,54 @@ impl<T: Transport> AudioDevice<T> {
         output: u8,
         value: i16,
     ) -> Result<(), Error> {
+        let range = self.mixer_volume_range(entity, input, output)?;
+        let written = range.snap(i64::from(value)) as i16;
+        self.binding.graph.set_mixer_volume(
+            &mut self.transport,
+            entity,
+            input,
+            output,
+            range,
+            written,
+        )?;
+        self.mixer
+            .values
+            .insert((entity, input, output), Cached::MixerCell(written));
+        Ok(())
+    }
+    /// The mixer state to hand a fresh owner after resume.
+    pub fn mixer_state(&self) -> MixerState {
+        self.mixer.clone()
+    }
+    /// Linux `snd_usb_mixer_resume` after a reset-resume: adopt the old
+    /// owner's ranges and write every cached value back. Cached values are
+    /// steps of their ranges, so they are written unchanged. As
+    /// `restore_mixer_value`, a failed write is skipped, not reported.
+    pub fn restore_mixer(&mut self, state: MixerState) -> Result<(), Error> {
         self.ready()?;
-        self.binding
-            .graph
-            .set_mixer_volume(&mut self.transport, entity, input, output, value)
+        let graph = &self.binding.graph;
+        let io = &mut self.transport;
+        for (&(entity, selector, channel), &value) in &state.values {
+            let range = state.ranges.get(&(entity, selector, channel)).copied();
+            let _ = match (value, range) {
+                (Cached::Mute(muted), _) => graph.set_mute(io, entity, channel, muted),
+                (Cached::Volume(volume), Some(range)) => {
+                    graph.set_volume(io, entity, channel, range, volume)
+                }
+                (Cached::Feature(feature, value), range) => graph
+                    .set_feature_value(io, entity, channel, feature, range, value)
+                    .map(|_| ()),
+                (Cached::MixerCell(value), Some(range)) => {
+                    graph.set_mixer_volume(io, entity, selector, channel, range, value)
+                }
+                (Cached::Input(pin), _) => graph.signal_selection(io, entity, pin),
+                (Cached::Clock(pin), _) => graph.clock_selection(io, entity, pin),
+                // Numeric controls are probed before they are cached.
+                (Cached::Volume(_) | Cached::MixerCell(_), None) => Ok(()),
+            };
+        }
+        self.mixer = state;
+        Ok(())
     }
     pub fn select_clock(&mut self, entity: u8, pin: u8) -> Result<(), Error> {
         self.ready()?;
@@ -648,7 +831,9 @@ impl<T: Transport> AudioDevice<T> {
         }
         self.binding
             .graph
-            .clock_selection(&mut self.transport, entity, pin)
+            .clock_selection(&mut self.transport, entity, pin)?;
+        self.mixer.values.insert((entity, 1, 0), Cached::Clock(pin));
+        Ok(())
     }
     pub fn select_input(&mut self, entity: u8, pin: u8) -> Result<(), Error> {
         self.ready()?;
@@ -657,7 +842,9 @@ impl<T: Transport> AudioDevice<T> {
         }
         self.binding
             .graph
-            .signal_selection(&mut self.transport, entity, pin)
+            .signal_selection(&mut self.transport, entity, pin)?;
+        self.mixer.values.insert((entity, 1, 0), Cached::Input(pin));
+        Ok(())
     }
     fn queue_inputs(&mut self) -> Result<(), Error> {
         self.transport.validate()?;
@@ -780,7 +967,7 @@ impl<T: Transport> AudioDevice<T> {
             }
             let p = self.playback.as_mut().ok_or(Error::NotRunning)?;
             p.packetizer
-                .feedback(&packet.buffer.bytes()[..bytes], self.binding.speed)?;
+                .feedback(&packet.buffer.bytes()[..bytes], self.binding.speed);
             p.last_feedback = self.transport.now_us();
             self.progress.feedback_updates += 1;
         }
@@ -1073,8 +1260,6 @@ pub(crate) mod tests {
     struct Model {
         overrides: BTreeMap<[u8; 8], Vec<u8>>,
         selection: u8,
-        numerator: u16,
-        denominator: u16,
         rate: u32,
         time: u64,
         valid: bool,
@@ -1086,6 +1271,7 @@ pub(crate) mod tests {
         output: Vec<u8>,
         submitted: Vec<(u8, usize)>,
         alternates: Vec<(u8, u8)>,
+        pitches: Vec<[u8; 8]>,
         cancel_fail: bool,
         packet_fault: Option<PacketStatus>,
         transport_fault: bool,
@@ -1095,8 +1281,6 @@ pub(crate) mod tests {
         fn new() -> Self {
             Self {
                 selection: 1,
-                numerator: 2,
-                denominator: 1,
                 rate: 48_000,
                 valid: true,
                 ..Self::default()
@@ -1121,11 +1305,16 @@ pub(crate) mod tests {
                 self.alternates.push((r[4], r[2]));
                 return Ok(Vec::new());
             }
+            if r[0] == 0x22 {
+                assert_eq!(out, [1]);
+                self.pitches.push(r);
+                return Ok(Vec::new());
+            }
             assert_eq!(r[4], 0);
             assert_eq!(r[2], 0);
             if r[0] == 0x21 {
                 match (entity, sel) {
-                    (11 | 14, 1) => self.selection = out[0],
+                    (11 | 14 | 16, 1) => self.selection = out[0],
                     (10, 1) => self.rate = u32::from_le_bytes(out.try_into().unwrap()),
                     (2, 1) => self.muted = out[0] != 0,
                     (2, 2) => self.volume = i16::from_le_bytes(out.try_into().unwrap()),
@@ -1135,9 +1324,7 @@ pub(crate) mod tests {
             }
             assert_eq!(r[0], 0xa1);
             let data = match (entity, sel, r[1]) {
-                (11 | 14, 1, 1) => vec![self.selection],
-                (12, 1, 1) => self.numerator.to_le_bytes().to_vec(),
-                (12, 2, 1) => self.denominator.to_le_bytes().to_vec(),
+                (11 | 14 | 16, 1, 1) => vec![self.selection],
                 (10, 1, 1) => self.rate.to_le_bytes().to_vec(),
                 (10, 2, 1) => vec![u8::from(self.valid)],
                 (10, 1, 2) => {
@@ -1224,25 +1411,159 @@ pub(crate) mod tests {
         let mut a = AudioDevice::new(Model::new(), binding(), &mut dma).unwrap();
         f(&mut a);
     }
+    const CURRENT_RATE: [u8; 8] = [0xa1, 1, 0, 1, 0, 10, 4, 0];
+    const SET_RATE: [u8; 8] = [0x21, 1, 0, 1, 0, 10, 4, 0];
+    const VALIDITY: [u8; 8] = [0xa1, 1, 0, 2, 0, 10, 1, 0];
+    /// Answer both halves of the clock-10 range read with these triplets.
+    fn ranges(m: &mut Model, triplets: &[[u32; 3]]) {
+        let mut reply = (triplets.len() as u16).to_le_bytes().to_vec();
+        for value in triplets.iter().flatten() {
+            reply.extend_from_slice(&value.to_le_bytes());
+        }
+        m.overrides
+            .insert(setup(0xa1, 2, 0x100, 0xa00, 2), reply[..2].to_vec());
+        m.overrides
+            .insert(setup(0xa1, 2, 0x100, 0xa00, reply.len() as u16), reply);
+    }
+    fn set_clock_controls(graph: &mut Graph, id: u8, bits: u8) {
+        for entity in &mut graph.entities {
+            if let Entity::ClockSource {
+                id: source,
+                controls,
+                ..
+            } = entity
+                && *source == id
+            {
+                *controls = bits;
+            }
+        }
+    }
     #[test]
-    fn controls_use_ranges_exact_requests_and_actual_readback() {
+    fn rates_are_set_and_validated_as_linux_set_sample_rate_v2v3_does() {
+        let mut g = binding().graph;
+        let mut m = Model::new();
+        let c = g.resolve_clock(&mut m, 10).unwrap();
+        assert_eq!(
+            c,
+            ResolvedClock {
+                terminal: 10,
+                source: 10
+            }
+        );
+        let Rates::Table(table) = g.rates(&mut m, c).unwrap() else {
+            panic!("discrete ranges announce a table");
+        };
+        assert_eq!((table.len(), table[0], table[519]), (520, 44_100, 96_000));
+        assert!(!g.rates(&mut m, c).unwrap().contains(44_101));
+        assert_eq!(g.set_rate(&mut m, c, 44_100), Ok(44_100));
+        assert_eq!(m.rate, 44_100);
+        g.set_mute(&mut m, 2, 0, true).unwrap();
+        let range = g.volume_range(&mut m, 2, 0).unwrap();
+        assert_eq!(
+            range,
+            MixerRange {
+                min: -16384,
+                max: 0,
+                res: 256,
+                db: Some((-6400, 0))
+            }
+        );
+        assert_eq!(m.volume, 0);
+        g.set_volume(&mut m, 2, 0, range, -256).unwrap();
+        assert_eq!(m.volume, -256);
+        // get_abs_value: the step at or below, clamped to the range.
+        g.set_volume(&mut m, 2, 0, range, -257).unwrap();
+        assert_eq!(m.volume, -512);
+        g.set_volume(&mut m, 2, 0, range, i16::MIN).unwrap();
+        assert_eq!(m.volume, -16384);
+        assert_eq!(setup(0xa1, 1, 0x100, 0xa00, 4), CURRENT_RATE);
+
+        // A clock that keeps running elsewhere is reported, not refused.
+        m.overrides
+            .insert(CURRENT_RATE, 48_000u32.to_le_bytes().to_vec());
+        assert_eq!(g.set_rate(&mut m, c, 44_100), Ok(48_000));
+        // An unreadable frequency counts as 0 and the previous rate stands.
+        m.overrides.insert(CURRENT_RATE, vec![0; 3]);
+        assert_eq!(g.current_rate(&mut m, c), 0);
+        assert_eq!(g.set_rate(&mut m, c, 48_000), Ok(0));
+        m.overrides.clear();
+        // A refused write fails the change.
+        m.overrides.insert(SET_RATE, vec![0]);
+        assert_eq!(g.set_rate(&mut m, c, 96_000), Err(Error::ControlLength));
+        m.overrides.clear();
+        // A read-only frequency is left as it runs.
+        set_clock_controls(&mut g, 10, 0b0101);
+        assert_eq!(g.set_rate(&mut m, c, 96_000), Ok(48_000));
+        assert_eq!(m.rate, 48_000);
+        set_clock_controls(&mut g, 10, 0b0111);
+
+        // Validity is one read: no settling wait.
+        m.valid = false;
+        assert_eq!(g.valid_clock(&mut m, c), Err(Error::ClockInvalid));
+        assert_eq!(g.set_rate(&mut m, c, 44_100), Err(Error::ClockInvalid));
+        assert_eq!(m.time, 0);
+        // The UAC2 quirk: an internal single-rate source wired to the terminal.
+        ranges(&mut m, &[[48_000, 48_000, 0]]);
+        assert_eq!(g.rates(&mut m, c), Ok(Rates::Table(vec![48_000])));
+        assert_eq!(g.valid_clock(&mut m, c), Ok(()));
+        m.overrides.clear();
+        // Without a readable validity control the clock is assumed valid.
+        set_clock_controls(&mut g, 10, 0b0011);
+        assert_eq!(g.valid_clock(&mut m, c), Ok(()));
+        set_clock_controls(&mut g, 10, 0b0111);
+        m.valid = true;
+        m.overrides.insert(VALIDITY, vec![]);
+        assert_eq!(g.valid_clock(&mut m, c), Err(Error::ClockInvalid));
+    }
+    #[test]
+    fn sample_rate_ranges_parse_like_linux() {
         let g = binding().graph;
         let mut m = Model::new();
         let c = g.resolve_clock(&mut m, 10).unwrap();
-        g.set_rate(&mut m, c, 44_100).unwrap();
-        assert_eq!(m.rate, 44_100);
-        assert_eq!(g.set_rate(&mut m, c, 44_101), Err(Error::RateUnsupported));
-        g.set_mute(&mut m, 2, 0, true).unwrap();
-        g.set_volume(&mut m, 2, 0, -256).unwrap();
-        assert_eq!(m.volume, -256);
-        assert_eq!(g.set_volume(&mut m, 2, 0, -257), Err(Error::Format));
-        m.valid = false;
-        assert_eq!(g.valid_clock(&mut m, c), Err(Error::ClockInvalid));
-        assert!(m.time >= 100000);
-        assert_eq!(
-            setup(0xa1, 1, 0x100, 0xa00, 4),
-            [0xa1, 1, 0, 1, 0, 10, 4, 0]
+        // Negative as a signed int, then max below min: both skipped.
+        ranges(
+            &mut m,
+            &[
+                [0x8000_0000, 0x8000_0000, 0],
+                [48_000, 44_100, 0],
+                [8_000, 192_000, 1],
+            ],
         );
+        assert_eq!(
+            g.rates(&mut m, c),
+            Ok(Rates::Continuous {
+                min: 8_000,
+                max: 192_000
+            })
+        );
+        assert!(g.rates(&mut m, c).unwrap().contains(12_345));
+        // Linux stops at MAX_NR_RATES.
+        ranges(&mut m, &[[1, 4_000, 2]]);
+        let Rates::Table(table) = g.rates(&mut m, c).unwrap() else {
+            panic!("resolution 2 is discrete");
+        };
+        assert_eq!((table.len(), table[1023]), (1024, 2_047));
+    }
+    #[test]
+    fn a_running_rate_mismatch_is_recorded_and_streaming_continues() {
+        run(|a| {
+            a.transport
+                .overrides
+                .insert(CURRENT_RATE, 44_100u32.to_le_bytes().to_vec());
+            a.start_capture(1, 48000).unwrap();
+            assert_eq!(a.clock_mismatch, Some((48_000, 44_100)));
+            a.poll().unwrap();
+            a.stop_capture().unwrap();
+            a.transport.overrides.clear();
+            a.start_capture(1, 48000).unwrap();
+            assert_eq!(a.clock_mismatch, None);
+            a.stop_capture().unwrap();
+            assert_eq!(
+                a.start_playback(0, 47_950, &[0; 24], true),
+                Err(Error::RateUnsupported)
+            );
+            a.shutdown().unwrap();
+        });
     }
     #[test]
     fn finite_pcm_is_exact_across_many_packet_ring_wraps_and_restart() {
@@ -1365,7 +1686,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn selected_clock_multiplier_and_control_short_or_false_readback_are_not_success() {
+    fn clock_paths_are_found_like_linux_uac_clock_find_source() {
         let mut graph = binding().graph;
         graph.entities.extend([
             Entity::ClockSelector {
@@ -1378,54 +1699,75 @@ pub(crate) mod tests {
                 source: 11,
                 controls: 5,
             },
+            Entity::Selector {
+                id: 14,
+                sources: vec![1, 4],
+                controls: 3,
+            },
+            Entity::ClockSource {
+                id: 15,
+                attributes: 1,
+                controls: 0b0011,
+            },
+            Entity::ClockSelector {
+                id: 16,
+                sources: vec![10, 15],
+                controls: 3,
+            },
         ]);
-        graph.entities.push(Entity::Selector {
-            id: 14,
-            sources: vec![1, 4],
-            controls: 3,
-        });
         let mut m = Model::new();
         graph.signal_selection(&mut m, 14, 2).unwrap();
         assert_eq!(m.selection, 2);
-        m.selection = 1;
+        // Multipliers pass through unread; a one-input selector is not read
+        // but its pin is written.
+        m.selection = 0;
         let c = graph.resolve_clock(&mut m, 12).unwrap();
         assert_eq!(
             c,
             ResolvedClock {
-                source: 10,
-                numerator: 2,
-                denominator: 1
+                terminal: 12,
+                source: 10
             }
         );
-        graph.set_rate(&mut m, c, 88200).unwrap();
-        assert_eq!(m.rate, 44100);
-        graph.clock_selection(&mut m, 11, 1).unwrap();
-        m.selection = 0;
-        assert_eq!(graph.resolve_clock(&mut m, 12), Err(Error::ClockInvalid));
-        m.selection = 1;
-        m.denominator = 0;
-        assert_eq!(graph.resolve_clock(&mut m, 12), Err(Error::ClockInvalid));
-        m.denominator = 1;
-        m.overrides
-            .insert(setup(0xa1, 1, 0x100, 0xa00, 4), vec![0; 3]);
-        assert_eq!(graph.current_rate(&mut m, c), Err(Error::ControlLength));
-        m.overrides.clear();
-        m.overrides.insert(setup(0x21, 1, 0x100, 0xa00, 4), vec![]);
-        assert_eq!(
-            graph.set_rate(&mut m, c, 96000),
-            Err(Error::ControlReadback)
-        );
-        assert_eq!(
-            graph.current_rate(
-                &mut m,
-                ResolvedClock {
-                    source: 10,
-                    numerator: 1,
-                    denominator: 0
-                }
-            ),
-            Err(Error::ClockInvalid)
-        );
+        assert_eq!(m.selection, 1);
+        assert_eq!(graph.set_rate(&mut m, c, 88_200), Ok(88_200));
+        assert_eq!(m.rate, 88_200);
+        // An invalid current input moves a writable selector to a valid one.
+        m.valid = false;
+        assert_eq!(graph.resolve_clock(&mut m, 16).unwrap().source, 15);
+        assert_eq!(m.selection, 2);
+        // An illegal selection is replaced by the first valid input.
+        m.valid = true;
+        m.selection = 7;
+        assert_eq!(graph.resolve_clock(&mut m, 16).unwrap().source, 10);
+        assert_eq!(m.selection, 1);
+        // A read-only selector keeps its invalid input, unvalidated, for the
+        // rate change to validate.
+        if let Some(Entity::ClockSelector { controls, .. }) = graph
+            .entities
+            .iter_mut()
+            .find(|entity| matches!(entity, Entity::ClockSelector { id: 16, .. }))
+        {
+            *controls = 1;
+        }
+        m.valid = false;
+        let c = graph.resolve_clock(&mut m, 16).unwrap();
+        assert_eq!(c.source, 10);
+        assert_eq!(graph.set_rate(&mut m, c, 48_000), Err(Error::ClockInvalid));
+        // A one-input selector's failed write is a firmware bug Linux
+        // ignores; another selector's leaves no usable path.
+        m.valid = true;
+        m.overrides.insert(setup(0xa1, 1, 0x100, 0xb00, 1), vec![]);
+        assert_eq!(graph.resolve_clock(&mut m, 12).unwrap().source, 10);
+        if let Some(Entity::ClockSelector { controls, .. }) = graph
+            .entities
+            .iter_mut()
+            .find(|entity| matches!(entity, Entity::ClockSelector { id: 16, .. }))
+        {
+            *controls = 3;
+        }
+        m.overrides.insert(setup(0xa1, 1, 0x100, 0x1000, 1), vec![]);
+        assert_eq!(graph.resolve_clock(&mut m, 16), Err(Error::ClockInvalid));
     }
     #[test]
     fn raw_endpoint_counts_reserved_usage_and_implicit_association_are_checked() {
@@ -1548,6 +1890,43 @@ pub(crate) mod tests {
                 "audio alternate aliases a foreign interface endpoint"
             ))
         );
+    }
+
+    #[test]
+    fn mixer_values_are_restored_like_snd_usb_mixer_resume() {
+        let mut state = None;
+        run(|a| {
+            a.set_mute(2, 0, true).unwrap();
+            // The step at or below is what is cached and restored.
+            a.set_volume(2, 0, -300).unwrap();
+            assert_eq!(a.transport.volume, -512);
+            state = Some(a.mixer_state());
+        });
+        // The fresh owner resume publishes starts from device defaults.
+        run(|a| {
+            let state = state.unwrap();
+            a.restore_mixer(state.clone()).unwrap();
+            assert!(a.transport.muted);
+            assert_eq!(a.transport.volume, -512);
+            // The old ranges are adopted, not probed again.
+            assert_eq!(a.mixer_state(), state);
+            assert_eq!(a.volume_range(2, 0).unwrap().res, 256);
+        });
+    }
+
+    #[test]
+    fn pitch_control_is_enabled_after_the_rate_like_snd_usb_init_pitch() {
+        let mut c = configuration();
+        let at = c.windows(3).position(|w| w == [8, 0x25, 1]).unwrap();
+        c[at + 4] = 1;
+        let all = interfaces(&c);
+        let binding = Binding::parse(&all[0], &all, &c, 3).unwrap();
+        assert_eq!(binding.formats[0].pitch, Some((0x0100, 0)));
+        run(|a| {
+            a.binding.formats[0].pitch = Some((0x0100, 0));
+            a.start_playback(0, 48000, &[0; 192], true).unwrap();
+            assert_eq!(a.transport.pitches, [[0x22, 1, 0, 1, 0, 0, 1, 0]]);
+        });
     }
 
     #[test]

@@ -11,6 +11,7 @@ use crate::net::{
 use alloc::vec::Vec;
 
 pub mod modern;
+pub(in crate::net::wifi::mediatek) mod six_ghz;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -155,7 +156,16 @@ impl Profile {
         associated: bool,
         modern: Option<&modern::Configuration>,
     ) -> Result<Vec<u8>, Error> {
-        self.validate_inner(modern.is_some())?;
+        self.peer_request_validated(enable, associated, modern, modern.is_some())
+    }
+    fn peer_request_validated(
+        self,
+        enable: bool,
+        associated: bool,
+        modern: Option<&modern::Configuration>,
+        allow_six: bool,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let mut out = vec![0; 8];
         out[0] = self.interface.bss_index;
         out[1] = self.wcid as u8;
@@ -219,7 +229,10 @@ impl Profile {
     /// Broadcast slot uses the source no-link_sta path: only its own header
     /// translation TLV, distinct from a full peer and from WMWA raw updates.
     pub fn broadcast_request(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.broadcast_request_validated(false)
+    }
+    fn broadcast_request_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let mut out = vec![0; 8];
         out[0] = self.interface.bss_index;
         out[1] = self.interface.broadcast_wcid as u8;
@@ -239,6 +252,87 @@ impl Profile {
         t[6] = self.dtim_period;
         Ok(b)
     }
+    /// Linux `mt7925_mcu_uni_bss_ps`: the BSS in dynamic power save, or
+    /// awake.
+    pub fn power_save_request(self, enable: bool) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let t = tlv(&mut b, 21, 8);
+        t[4] = if enable { 2 } else { 0 };
+        Ok(b)
+    }
+    /// Linux `mt7925_mcu_set_rssimonitor`: firmware RSSI events above
+    /// `high` or below `low` dBm while `enable`.
+    pub fn rssi_monitor_request(self, enable: bool, high: i8, low: i8) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let t = tlv(&mut b, 0, 8);
+        t[4] = u8::from(enable);
+        t[5] = high as u8;
+        t[6] = low as u8;
+        Ok(b)
+    }
+    /// Linux `mt7925_mcu_set_chctx`: the RLM TLV for `definition`.
+    pub fn channel_request(
+        self,
+        definition: &crate::net::wifi::station::operations::ChannelDefinition,
+    ) -> Result<Vec<u8>, Error> {
+        use crate::net::wifi::station::phy::Width;
+        self.validate()?;
+        // ieee80211_frequency_to_channel
+        let channel = |mhz: u32| -> u8 {
+            (match self.channel.band {
+                Band::Ghz2 if mhz == 2484 => 14,
+                Band::Ghz2 => (mhz - 2407) / 5,
+                Band::Ghz5 if mhz < 5000 => (mhz - 4000) / 5,
+                Band::Ghz5 => (mhz - 5000) / 5,
+                Band::Ghz6 if mhz == 5935 => 2,
+                Band::Ghz6 => (mhz - 5950) / 5,
+            }) as u8
+        };
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let r = tlv(&mut b, 2, 16);
+        r[4] = self.channel.number as u8;
+        r[5] = channel(definition.center1_mhz);
+        r[7] = match definition.width {
+            Width::Mhz20 => 0,
+            Width::Mhz40 => 1,
+            Width::Mhz80 => 2,
+            Width::Mhz160 => 3,
+            Width::Mhz80P80 => 6,
+            Width::Mhz320 => 7,
+        };
+        if matches!(definition.width, Width::Mhz80P80 | Width::Mhz320) {
+            r[6] = definition.center2_mhz.map_or(0, channel);
+        }
+        r[8] = self.antenna_mask.count_ones() as u8;
+        r[9] = r[8];
+        r[10] = if definition.width == Width::Mhz20 {
+            0
+        } else {
+            4
+        };
+        r[11] = match r[4].cmp(&r[5]) {
+            core::cmp::Ordering::Less => 1,
+            core::cmp::Ordering::Greater => 3,
+            core::cmp::Ordering::Equal => 0,
+        };
+        r[12] = match self.channel.band {
+            Band::Ghz2 => 1,
+            Band::Ghz5 => 2,
+            Band::Ghz6 => 3,
+        };
+        Ok(b)
+    }
+    /// Linux `mt7925_mcu_set_timing`: the IFS TLV with only the slot time.
+    pub fn timing(self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let mut b = vec![self.interface.bss_index, 0, 0, 0];
+        let ifs = tlv(&mut b, 23, 20);
+        ifs[4] = 1;
+        put16(ifs, 8, self.slot_time);
+        Ok(b)
+    }
     /// Source explicit always-awake native profile, without runtime/deep sleep.
     pub fn awake(self) -> Result<Vec<u8>, Error> {
         self.validate()?;
@@ -247,13 +341,23 @@ impl Profile {
         Ok(b)
     }
     pub fn disable_beacon_pm(self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
+        self.disable_beacon_pm_validated(false)
+    }
+    fn disable_beacon_pm_validated(self, allow_six: bool) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let mut b = vec![self.interface.bss_index, 0, 0, 0];
         tlv(&mut b, 27, 4);
         Ok(b)
     }
     pub fn filter_request(self, enable: bool) -> Result<super::init::Request, Error> {
-        self.validate()?;
+        self.filter_request_validated(enable, false)
+    }
+    fn filter_request_validated(
+        self,
+        enable: bool,
+        allow_six: bool,
+    ) -> Result<super::init::Request, Error> {
+        self.validate_inner(allow_six)?;
         let mut b = vec![0; 72];
         // Actual primary PHY band_idx is 0 for this single-PHY profile,
         // distinct from the non-MLO interface's band selector ff.
@@ -264,8 +368,30 @@ impl Profile {
         b[20] = if enable { 1 } else { 2 };
         Ok(super::init::Request::client_filter(b))
     }
+    /// The profile without what the AP changes later, the timing from its
+    /// beacons and the channel within the band through a switch: the fields
+    /// naming one association.
+    pub fn association_identity(self) -> Self {
+        Self {
+            slot_time: 0,
+            channel: Channel {
+                number: 0,
+                frequency_mhz: 0,
+                ..self.channel
+            },
+            ..self
+        }
+    }
     pub fn roc(self, token: u8, duration_ms: u32) -> Result<super::init::Request, Error> {
-        self.validate()?;
+        self.roc_validated(token, duration_ms, false)
+    }
+    fn roc_validated(
+        self,
+        token: u8,
+        duration_ms: u32,
+        allow_six: bool,
+    ) -> Result<super::init::Request, Error> {
+        self.validate_inner(allow_six)?;
         if duration_ms == 0 {
             return Err(Error::InvalidTiming);
         }
@@ -274,10 +400,10 @@ impl Profile {
         b[8] = self.interface.bss_index;
         b[9] = token;
         b[10] = self.channel.number as u8;
-        b[12] = if self.channel.band == Band::Ghz2 {
-            1
-        } else {
-            2
+        b[12] = match self.channel.band {
+            Band::Ghz2 => 1,
+            Band::Ghz5 => 2,
+            Band::Ghz6 => 3,
         };
         b[14] = self.channel.number as u8;
         b[17] = self.channel.number as u8;
@@ -286,7 +412,14 @@ impl Profile {
         Ok(super::init::Request::roc(b))
     }
     pub fn abort_roc(self, token: u8) -> Result<super::init::Request, Error> {
-        self.validate()?;
+        self.abort_roc_validated(token, false)
+    }
+    fn abort_roc_validated(
+        self,
+        token: u8,
+        allow_six: bool,
+    ) -> Result<super::init::Request, Error> {
+        self.validate_inner(allow_six)?;
         let mut b = vec![0; 16];
         put16(&mut b, 4, 1);
         put16(&mut b, 6, 12);
@@ -304,7 +437,15 @@ impl Profile {
         enable: bool,
         modern: Option<&modern::Configuration>,
     ) -> Result<Vec<u8>, Error> {
-        self.validate_inner(modern.is_some())?;
+        self.bss_request_validated(enable, modern, modern.is_some())
+    }
+    fn bss_request_validated(
+        self,
+        enable: bool,
+        modern: Option<&modern::Configuration>,
+        allow_six: bool,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_inner(allow_six)?;
         let c = self.interface;
         let two = self.channel.band == Band::Ghz2;
         let mut out = vec![c.bss_index, 0, 0, 0];
@@ -900,6 +1041,58 @@ mod tests {
             }
         }
         assert_eq!(at, trace.len());
+    }
+
+    #[test]
+    fn bss_updates_encode_like_mt7925_mcu() {
+        use crate::net::wifi::station::{operations::ChannelDefinition, phy::Width};
+        let channel = Channel {
+            band: Band::Ghz5,
+            number: 40,
+            frequency_mhz: 5200,
+        };
+        let p = Profile {
+            wcid: 1,
+            interface: Context {
+                bss_index: 3,
+                omac_index: 0,
+                band_index: 0,
+                wmm_index: 0,
+                link_index: 0,
+                broadcast_wcid: 19,
+                address: Mac([2; 6]),
+            },
+            peer: Mac([4; 6]),
+            channel,
+            aid: 1,
+            basic_rates: 1,
+            supported_rates: 1,
+            beacon_interval: 100,
+            dtim_period: 1,
+            slot_time: 20,
+            antenna_mask: 3,
+            cipher: 0,
+        };
+        // mt7925_mcu_set_rssimonitor
+        assert_eq!(
+            p.rssi_monitor_request(true, -68, -72).unwrap(),
+            [3, 0, 0, 0, 0, 0, 8, 0, 1, (-68i8) as u8, (-72i8) as u8, 0]
+        );
+        // mt7925_mcu_set_timing
+        let timing = p.timing().unwrap();
+        assert_eq!(timing[4..14], [23, 0, 20, 0, 1, 0, 0, 0, 20, 0]);
+        // mt7925_mcu_set_chctx: 40 MHz on 36/40, control above center (SCB).
+        let definition = ChannelDefinition {
+            control: channel,
+            width: Width::Mhz40,
+            center1_mhz: 5190,
+            center2_mhz: None,
+            punctured: 0,
+        };
+        assert_eq!(
+            p.channel_request(&definition).unwrap()[4..17],
+            [2, 0, 16, 0, 40, 38, 0, 1, 2, 2, 4, 3, 2]
+        );
     }
 }
 

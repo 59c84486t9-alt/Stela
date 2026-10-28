@@ -17,6 +17,8 @@ mod registers;
 mod samples;
 use samples::{PERIOD_BYTES, PERIODS, Progress, RING_BYTES, pcm};
 
+/// PCI base class 03h.
+const DISPLAY_CLASS: u8 = 0x03;
 /// Reserved at the end of the host-driver DMA region; storage keeps its prefix.
 pub const DMA_BYTES: u64 = 1024 * 1024;
 const FORMAT: PcmFormat = PcmFormat {
@@ -183,10 +185,26 @@ pub unsafe fn run(handoff: &Handoff, mode: Mode) -> Result<(), String> {
             return Err("audio ECAM window is not mapped".into());
         }
         // SAFETY: mapped and exclusively owned as required by the caller.
+        let all = unsafe { Function::enumerate(window) };
+        // A GPU's display-audio function (Linux `get_bound_vga`: function 0
+        // of the same device is a display controller) has no analog route.
+        let display = |function: &Function| {
+            all.iter().any(|other| {
+                other.address.function == 0
+                    && other.address.segment == function.address.segment
+                    && other.address.bus == function.address.bus
+                    && other.address.device == function.address.device
+                    && other.class[0] == DISPLAY_CLASS
+            })
+        };
+        let analog: Vec<usize> = (0..all.len())
+            .filter(|&index| pci::identify(&all[index]).is_ok() && !display(&all[index]))
+            .collect();
         functions.extend(
-            unsafe { Function::enumerate(window) }
-                .into_iter()
-                .filter(|function| pci::identify(function).is_ok()),
+            all.into_iter()
+                .enumerate()
+                .filter(|(index, _)| analog.contains(index))
+                .map(|(_, function)| function),
         );
     }
     if functions.len() != 1 {

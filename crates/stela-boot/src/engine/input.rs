@@ -18,6 +18,12 @@ pub struct HostInput {
     refused: bool,
     /// The first USB polling failure, reported once.
     failed: bool,
+    /// The guest's keyboard LEDs as last sent to the host keyboards.
+    leds: Option<u8>,
+    /// The guest's keyboard LEDs as the last delivery found them.
+    wanted_leds: Option<u8>,
+    /// The first LED report failure, reported once.
+    led_failed: bool,
 }
 
 impl HostInput {
@@ -37,6 +43,9 @@ impl HostInput {
             inputs,
             refused: false,
             failed: false,
+            leds: None,
+            wanted_leds: None,
+            led_failed: false,
         }
     }
 
@@ -48,16 +57,37 @@ impl HostInput {
         }
     }
 
-    /// Deliver what [`Self::read`] read from the host's devices.
+    /// Deliver what [`Self::read`] read from the host's devices, and note
+    /// the guest's lock-key LEDs for the next read to send.
     pub fn deliver_all(&mut self, devices: &mut AppleDevices, inputs: Vec<Input>) {
         for input in inputs {
             self.deliver(devices, input);
         }
+        self.wanted_leds = devices.keyboard_leds();
     }
 
     /// Read the host's input devices, without the guest's devices: their
-    /// USB devices' first, then the others'.
+    /// USB devices' first, then the others'. The guest's lock-key LEDs
+    /// reach each host keyboard first, as Linux `hidinput_led_worker`
+    /// sends an input device's LED changes.
     pub fn read(&mut self) -> Vec<Input> {
+        if let Some(leds) = self.wanted_leds
+            && self.leds != Some(leds)
+        {
+            self.leds = Some(leds);
+            for device in &mut self.inputs.usb {
+                // SAFETY: as below, for the device's xHCI controller.
+                let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
+                if let Err(error) = device.set_leds(u16::from(leds))
+                    && !core::mem::replace(&mut self.led_failed, true)
+                {
+                    output::arguments(format_args!(
+                        "INPUT USB device {} LEDs: {error:?}\n",
+                        device.name
+                    ));
+                }
+            }
+        }
         let mut usb = Vec::new();
         for device in &mut self.inputs.usb {
             {

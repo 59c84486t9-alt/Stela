@@ -201,6 +201,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         .map_err(PolicyError::Client)
     }
 
+    /// Send the oldest action reply under freshly acquired guards.
+    pub fn progress_action_reply(&mut self, source: &dyn PageSource) -> Result<(), PolicyError> {
+        let admission = self.management_admission()?;
+        // SAFETY: as for progress_block_ack; the reply is the station's own.
+        unsafe {
+            self.client
+                .progress_action_reply(&mut self.authority, admission, source)
+        }
+        .map_err(PolicyError::Client)
+    }
+
     /// Restriction-compatible disable; no new transmit permission or fallback
     /// unprotected DELBA is introduced when current policy has been revoked.
     pub fn progress_block_ack_stop(&mut self) -> Result<(), PolicyError> {

@@ -186,6 +186,10 @@ impl Host {
         firmware: &dyn crate::firmware::Provider,
     ) -> Changes {
         let mut changes = Changes::default();
+        if matches!(self.controller.borrow().hardware, hardware::State::Died) {
+            self.hc_died(&mut changes);
+            return changes;
+        }
         if !self.sleep.awake() {
             return changes;
         }
@@ -310,8 +314,28 @@ impl Host {
             }
             return Err(BlockError::Device { status });
         }
+        // hub.c port_event: an over-current change is cleared, the ports cool
+        // down for 100 ms and hub_power_on repowers every root port, waiting
+        // the root hub's bPwrOn2PwrGood (xHCI's 20 ms). The attachment is
+        // kept unless the port's status changed.
+        let status = if status & OVER_CURRENT_CHANGE != 0 {
+            let mut c = self.controller.borrow_mut();
+            c.write_port(port, OVER_CURRENT_CHANGE);
+            c.clock.delay(OVER_CURRENT_COOLDOWN_US);
+            for root in 1..=c.max_ports {
+                let at = c.port_offset(root);
+                if c.registers.read32(at) & PP == 0 {
+                    c.write_port(root, PP);
+                }
+            }
+            c.clock.delay(PORT_POWER_US);
+            let at = c.port_offset(port);
+            c.registers.read32(at)
+        } else {
+            status
+        };
         let previous = self.roots[usize::from(port - 1)];
-        let authority = CCS | PED | PP | (1 << 3) | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT);
+        let authority = CCS | PED | PP | OVER_CURRENT | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT);
         let old_link = previous >> PLS_SHIFT & PLS_FIELD;
         let new_link = status >> PLS_SHIFT & PLS_FIELD;
         let link_recovery = old_link != new_link
@@ -325,13 +349,12 @@ impl Host {
         if let Some(owner) = owner {
             self.retire(owner, changes)?;
         }
-        if status & (PP | CCS) != PP | CCS || status & (1 << 3) != 0 {
+        if status & (PP | CCS) != PP | CCS || status & OVER_CURRENT != 0 {
             let mut c = self.controller.borrow_mut();
             c.write_port(port, status & PORT_CHANGES);
-            return if status & (1 << 3) != 0 {
-                Err(BlockError::Unsupported(
-                    "USB root over-current requires recovery",
-                ))
+            // Linux reports an over-current condition that persists.
+            return if status & OVER_CURRENT != 0 {
+                Err(BlockError::Device { status })
             } else {
                 Ok(())
             };
@@ -342,10 +365,6 @@ impl Host {
             ));
         }
         let mut c = self.controller.borrow_mut();
-        if previous & (1 << 3) != 0 {
-            // Pinned port_event waits100ms after actual port over-current.
-            c.clock.delay(100_000);
-        }
         // A disabled USB2 port has not completed its speed handshake yet.
         // Its actual Supported Protocol permits reset; reserve_current still
         // requires the enabled port's actual speed before Address Device.
@@ -581,6 +600,24 @@ impl Host {
             &mut changes.added.failures,
         );
         Ok(())
+    }
+
+    /// Linux usb_hc_died: every device below a dead host controller is
+    /// disconnected, suspended ones included. No command can disable their
+    /// slots, so each stays quarantined with every original allocation.
+    fn hc_died(&mut self, changes: &mut Changes) {
+        let mut c = self.controller.borrow_mut();
+        for slot in 1..c.slots.len() {
+            if let Some(state) = c.slots[slot].as_mut() {
+                state.suspended = true;
+            }
+            c.quarantine_slot_owned(slot as u8);
+        }
+        for hub in &mut self.hubs {
+            hub.retired = true;
+            hub.recovery = None;
+        }
+        changes.removed.append(&mut self.devices);
     }
 
     fn retire(&mut self, ancestor: SlotId, changes: &mut Changes) -> Result<(), BlockError> {

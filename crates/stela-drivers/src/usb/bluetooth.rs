@@ -359,6 +359,9 @@ impl<B: Io> Hci<B> {
                     Pipe::Acl if self.intel_bootloader => Packet::Event(frame),
                     Pipe::Acl => Packet::Acl(frame),
                 };
+                let Some(packet) = mediatek::packet::classify(self.binding.device(), packet) else {
+                    continue;
+                };
                 match qca::classify(self.binding.device(), packet) {
                     Ok(packet) => packets.push(packet),
                     Err(packet) => {

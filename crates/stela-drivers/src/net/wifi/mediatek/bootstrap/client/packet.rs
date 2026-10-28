@@ -49,6 +49,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 .map_err(Error::Station)?;
         }
         let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
+        // mac80211 asks status for auth and (re)association requests and
+        // supplicant control-port frames; mt7925 samples the rest.
+        let subtype = ((h.control >> 4) & 15) as u8;
+        let request = if management {
+            matches!(subtype, 0 | 2 | 11)
+        } else {
+            minimum_rate
+        };
+        let now = s.controller.state().control.clock.now_us();
+        let pid = s.txs.pid(h.receiver.is_multicast(), request, now);
         let index = if p.channel.band == wifi::Band::Ghz2 {
             14
         } else {
@@ -73,7 +83,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     }),
                 }
             },
-            pid: 0,
+            pid,
             frame: txwi::Frame {
                 bytes: bytes.len(),
                 header_bytes: h.length as u8,
@@ -82,7 +92,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 } else {
                     txwi::Kind::Data
                 },
-                subtype: ((h.control >> 4) & 15) as u8,
+                subtype,
                 tid: h.tid.unwrap_or(0),
                 multicast: h.receiver.is_multicast(),
                 fragment: txwi::Fragment::None,
@@ -104,6 +114,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             key,
             context: s.modern.as_ref().map(|m| m.context().clone()),
             tid: h.tid,
+            control_port: minimum_rate,
+            pid,
             tx_ba: None,
             authentication: s.station.external_authentication().cloned(),
             management: if s.station.requires_protected_management() {
@@ -287,12 +299,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// returned records do not synthesize an air ACK from DMA release.
     pub fn poll_released(&mut self) -> Result<Vec<Released<PacketOwner<C>>>, Error> {
         let s = self.state_mut();
+        let now = s.controller.state().control.clock.now_us();
         let q = s.controller.state_mut().data_tx.as_mut().unwrap();
         while q.poll_consumed().map_err(Error::Ring)?.is_some() {}
         let mut out = Vec::new();
         while let Some(r) = q.take_released().map_err(Error::Ring)? {
             out.push(r)
         }
+        s.txs.released(&out, now);
         if s.phase == Phase::Removing && q.outstanding_tokens() == 0 && q.pending_descriptors() == 0
         {
             Self::remove(s, s.remove_ticket.ok_or(Error::WrongPhase)?)?;
@@ -309,7 +323,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let band = match d.channel.band {
             rx::Band::Ghz2 => wifi::Band::Ghz2,
             rx::Band::Ghz5 => wifi::Band::Ghz5,
-            rx::Band::Ghz6 if s.phase == Phase::Scanning => wifi::Band::Ghz6,
+            // Outside a scan, only the bound 6 GHz transport receives there;
+            // its poll qualifies each frame under both held providers.
+            rx::Band::Ghz6 if s.phase == Phase::Scanning || s.six_ghz.is_some() => wifi::Band::Ghz6,
             rx::Band::Ghz6 => return Err(Error::Unsupported),
         };
         let channel = policy
@@ -414,6 +430,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     layout: 0x7925,
                     words: d.rxv.unwrap_or([0; 4]),
                 },
+                rx_rate: d.rate,
                 tsf: d.timestamp_low.map(wifi::Timestamp::Low32),
             },
             security,

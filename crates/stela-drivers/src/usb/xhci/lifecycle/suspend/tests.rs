@@ -623,10 +623,11 @@ fn post_fence_suspend_errors_quarantine_raw_consumers_without_fake_retirement() 
         assert!(!removed.added.failures.is_empty());
         assert_eq!(state.borrow().save, 0);
         assert!(matches!(host.sleep, Sleep::Failed));
-        assert!(matches!(
-            host.controller.borrow().hardware,
-            hardware::State::Running
-        ));
+        // An unanswered Stop Endpoint kills the host, as xhci_hc_died does.
+        assert_eq!(
+            matches!(host.controller.borrow().hardware, hardware::State::Died),
+            failure == 3
+        );
         // These failures precede bulk cancellation. Keep its actual TD and
         // original buffers even when EP0/command ownership is unresolved.
         assert_eq!(

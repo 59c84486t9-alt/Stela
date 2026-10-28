@@ -91,7 +91,8 @@ fn descriptor_selected_mixer_controls_and_pcm_share_the_live_native_transport_ow
     let mut a = AudioDevice::new(transport, binding, &mut dma).unwrap();
     a.set_mixer_volume(6, 1, 1, -256).unwrap();
     assert_eq!(a.mixer_volume(6, 1, 1), Ok(-256));
-    assert_eq!(a.transport.writes, 1);
+    // Probing writes the minimum, one step and the saved value first.
+    assert_eq!(a.transport.writes, 4);
     let pcm: Vec<u8> = (0..6144).map(|n| n as u8).collect();
     a.start_playback(0, 48000, &pcm, true).unwrap();
     a.start_capture(1, 48000).unwrap();

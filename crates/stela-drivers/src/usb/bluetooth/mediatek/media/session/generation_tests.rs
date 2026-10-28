@@ -23,6 +23,7 @@ pub(in crate::usb::bluetooth) fn peer(hci: Hci<Host>, dma: &mut dyn DmaAllocator
         // Deliberately no fabricated synchronous completion or command credit.
         setup: None,
         last_reset: None,
+        coredump: None,
         wideband_mtu: None,
     };
     // This already selected voice is admitted while the genuine owner is live.

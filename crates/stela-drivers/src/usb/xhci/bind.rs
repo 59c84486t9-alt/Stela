@@ -116,7 +116,7 @@ pub(crate) fn bind_with_provider(
                 found.storage.push(owner);
                 found.disks.extend(disks);
             }),
-            Plan::Hid(endpoint) => {
+            Plan::Hid(endpoint, _) => {
                 hid::UsbInput::new(shared.clone(), &device, &interface, endpoint, dma).map(
                     |input| match input {
                         Some(input) => hid_inputs.push(input),
@@ -166,8 +166,8 @@ pub enum Plan {
     Audio(audio::Plan),
     /// Bulk IN, bulk OUT.
     Storage(storage::Binding),
-    /// The interrupt IN endpoint.
-    Hid(Endpoint),
+    /// The interrupt IN endpoint and any interrupt OUT endpoint.
+    Hid(Endpoint, Option<Endpoint>),
     /// A CDC Ethernet adapter's interfaces and endpoints.
     Ethernet(cdc::Binding),
     /// A vendor Ethernet candidate whose constructor validates chip startup.
@@ -192,7 +192,7 @@ impl Plan {
         match self {
             Self::Audio(_) => Vec::new(),
             Self::Storage(binding) => binding.endpoints(),
-            Self::Hid(endpoint) => vec![*endpoint],
+            Self::Hid(input, output) => [Some(*input), *output].into_iter().flatten().collect(),
             Self::Ethernet(binding) => binding.endpoints(),
             Self::VendorEthernet(binding) => binding.endpoints(),
             Self::Bluetooth(binding) => binding.endpoints(),

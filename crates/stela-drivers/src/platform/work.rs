@@ -1660,7 +1660,7 @@ impl<const N: usize> Executor<N> {
     /// Genuine hosted continuation mechanism test only. StackBacking must own
     /// real mapped guarded stacks; Cpu is an explicit hosted model. This never
     /// qualifies CPL0/IRQ/native roots or registers a native producer.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn new_hosted_for_test(
         queue: Arc<Queue<N>>,
         stacks: Vec<Stack>,
@@ -1722,7 +1722,7 @@ impl<const N: usize> Drop for Executor<N> {
 mod tests {
     extern crate std;
     use super::*;
-    use std::{sync::Mutex, thread};
+    use std::thread;
     struct CpuModel {
         thread: thread::ThreadId,
         flags: AtomicU64,
@@ -1831,10 +1831,12 @@ mod tests {
         drop((a, b));
     }
 
-    #[cfg(target_arch = "x86_64")]
+    // Guard-paged stacks come from the host's POSIX mmap.
+    #[cfg(all(target_arch = "x86_64", unix))]
     mod switched {
         use super::*;
         use core::arch::asm;
+        use std::sync::Mutex;
         unsafe extern "C" {
             fn mmap(
                 address: *mut c_void,

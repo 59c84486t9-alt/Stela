@@ -5,7 +5,9 @@
 //! work plan: its MPDU is plaintext, and required hardware cipher/MIC work must
 //! be completed by the selected actual vendor path before successful TX.
 
-use super::{AssociationContext, Phase, PortPolicy, RegulatoryPolicy, Station};
+use super::{
+    AssociationContext, Phase, PortPolicy, RegulatoryPolicy, Station, phy::AccessCategory,
+};
 use crate::net::{
     MAX_FRAME, Mac,
     wifi::{
@@ -247,7 +249,8 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        if plan.channel != join.channel {
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
+        if plan.channel != channel {
             return Err(Error::WrongChannel);
         }
         if let Some((tid, context)) = &plan.qos {
@@ -263,7 +266,7 @@ impl Station {
             }
             qos_access(context, *tid)?;
         }
-        if !policy.allow_data_tx(join.channel) {
+        if !policy.allow_data_tx(channel) {
             return Err(Error::Regulatory);
         }
         let key = match plan.protection {
@@ -315,15 +318,13 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
         if (
             frame.radio.band,
             frame.radio.channel,
             frame.radio.frequency_mhz,
-        ) != (
-            join.channel.band,
-            join.channel.number,
-            join.channel.frequency_mhz,
-        ) {
+        ) != (channel.band, channel.number, channel.frequency_mhz)
+        {
             return Err(Error::WrongChannel);
         }
         let header = frame.header();
@@ -490,8 +491,8 @@ impl Station {
 
     /// Single-MSDU QoS with source-backed device sequence assignment. The
     /// exact current acknowledged context supplies WMM; a copied capability or
-    /// TID cannot bypass it. Host per-TID sequences and TSPEC/ACM admission are
-    /// not implemented by this entry point. No BA/A-MSDU permission is implied.
+    /// TID cannot bypass it. The TID is sent as given: `data_tid` chooses it
+    /// as `ieee80211_select_queue` does. No BA/A-MSDU permission is implied.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_qos_msdu_refs<K: BorrowMut<KeySlot>>(
         &mut self,
@@ -561,7 +562,8 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        if !policy.allow_data_tx(join.channel) {
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
+        if !policy.allow_data_tx(channel) {
             return Err(Error::Regulatory);
         }
         let (destination, source, protocol, payload) = msdu(ethernet)?;
@@ -646,7 +648,7 @@ impl Station {
         plaintext.extend_from_slice(&payload);
         Ok(TxPlan {
             epoch,
-            channel: join.channel,
+            channel,
             plaintext,
             protection,
             sequence,
@@ -703,8 +705,10 @@ fn subframes(mut bytes: &[u8], receiver: Mac, split_member: bool) -> Result<Vec<
     }
 }
 
+/// The WMM access category of each 802.1D priority, `ieee802_1d_to_ac`.
+const ACI: [u8; 8] = [0, 1, 1, 0, 2, 2, 3, 3];
+
 fn qos_access(context: &AssociationContext, tid: u8) -> Result<(), Error> {
-    const ACI: [u8; 8] = [0, 1, 1, 0, 2, 2, 3, 3];
     let aci = *ACI
         .get(usize::from(tid))
         .ok_or(Error::Unsupported("QoS TID above7"))?;
@@ -713,20 +717,206 @@ fn qos_access(context: &AssociationContext, tid: u8) -> Result<(), Error> {
         .wmm
         .as_ref()
         .ok_or(Error::Unsupported("missing actual WMM"))?;
-    let ac = wmm
-        .access_categories
+    wmm.access_categories
         .iter()
         .find(|ac| ac.aci == aci)
         .ok_or(Error::Unsupported("missing WMM access category"))?;
-    if ac.admission_control {
-        return Err(Error::Unsupported("unadmitted WMM access category"));
-    }
     Ok(())
+}
+
+/// Linux `ieee80211_downgrade_queue` without an admitted TSPEC: a priority
+/// whose access category requires admission control moves to the next
+/// lower category until one does not; background is used regardless.
+fn downgrade(categories: &[AccessCategory], mut priority: u8) -> u8 {
+    let acm = |priority: u8| {
+        categories
+            .iter()
+            .any(|ac| ac.aci == ACI[usize::from(priority)] && ac.admission_control)
+    };
+    while acm(priority) {
+        // `wme_downgrade_ac`: voice to video, video to best effort, best
+        // effort to background.
+        priority = match priority {
+            6 | 7 => 5,
+            4 | 5 => 3,
+            0 | 3 => 2,
+            _ => break,
+        };
+    }
+    priority
+}
+
+/// Linux `ieee80211_select_queue` for a station: the QoS TID of an outgoing
+/// Ethernet frame, or `None` when the association has no WMM and data goes
+/// without QoS. EAPOL takes priority 7; other frames are classified by
+/// `cfg80211_classify8021d`. A QoS Map comes from the OS's interworking
+/// configuration, and none reaches the station, so the RFC 8325 default
+/// applies. `current` holds the AP's latest access categories, whose
+/// admission-control flags it may change in later beacons.
+pub fn data_tid(
+    context: &AssociationContext,
+    current: Option<&[AccessCategory; 4]>,
+    qos_map: Option<&QosMap>,
+    ethernet: &[u8],
+) -> Option<u8> {
+    let wmm = context.negotiated().wmm.as_ref()?;
+    let categories = current.unwrap_or(&wmm.access_categories);
+    let ethertype = |at: usize| {
+        ethernet
+            .get(at..at + 2)
+            .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]))
+    };
+    let priority = if ethertype(12) == EAPOL {
+        7
+    } else {
+        classify8021d(ethernet, qos_map)
+    };
+    Some(downgrade(categories, priority))
+}
+
+/// An interworking QoS Map the OS sets for the association, as
+/// `cfg80211_qos_map`: DSCP exceptions, then each priority's DSCP range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QosMap {
+    exceptions: [(u8, u8); 21],
+    count: u8,
+    ranges: [(u8, u8); 8],
+}
+
+impl QosMap {
+    /// `nl80211_set_qos_map`'s QoS Map Set field: up to 21 (DSCP, priority)
+    /// exceptions, then eight (low, high) DSCP ranges.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        if !bytes.len().is_multiple_of(2) || !(16..=16 + 2 * 21).contains(&bytes.len()) {
+            return Err(Error::Unsupported("QoS Map length"));
+        }
+        let (exceptions, ranges) = bytes.split_at(bytes.len() - 16);
+        let mut map = Self {
+            exceptions: [(0, 0); 21],
+            count: 0,
+            ranges: [(0, 0); 8],
+        };
+        for (slot, e) in map.exceptions.iter_mut().zip(exceptions.as_chunks::<2>().0) {
+            if e[1] > 7 {
+                return Err(Error::Unsupported("QoS Map priority"));
+            }
+            *slot = (e[0], e[1]);
+            map.count += 1;
+        }
+        for (slot, r) in map.ranges.iter_mut().zip(ranges.as_chunks::<2>().0) {
+            *slot = (r[0], r[1]);
+        }
+        Ok(map)
+    }
+
+    /// The priority the map gives `dscp`: an exception, else the first
+    /// priority whose range holds it.
+    fn priority(&self, dscp: u8) -> Option<u8> {
+        self.exceptions[..usize::from(self.count)]
+            .iter()
+            .find(|&&(exception, _)| exception == dscp)
+            .map(|&(_, priority)| priority)
+            .or_else(|| {
+                (0..8u8).find(|&up| {
+                    let (low, high) = self.ranges[usize::from(up)];
+                    (low..=high).contains(&dscp)
+                })
+            })
+    }
+}
+
+/// Linux `cfg80211_classify8021d`. A VLAN tag's nonzero priority stands, as
+/// for a tag the stack carries beside the frame; otherwise the encapsulated
+/// protocol is classified, through the QoS Map when one is set.
+fn classify8021d(ethernet: &[u8], qos_map: Option<&QosMap>) -> u8 {
+    const VLAN: u16 = 0x8100;
+    let mut at = 12;
+    let field = |at: usize| ethernet.get(at..at + 2).map(|b| [b[0], b[1]]);
+    if field(at).map(u16::from_be_bytes) == Some(VLAN) {
+        let priority = field(at + 2).map_or(0, |tci| tci[0] >> 5);
+        if priority > 0 {
+            return priority;
+        }
+        at += 4;
+    }
+    let body = ethernet.get(at + 2..).unwrap_or_default();
+    let dscp = match field(at).map(u16::from_be_bytes) {
+        // IPv4 and IPv6 DSCP from a whole header.
+        Some(0x0800) if body.len() >= 20 => body[1] & 0xfc,
+        Some(0x86dd) if body.len() >= 40 => (body[0] << 4 | body[1] >> 4) & 0xfc,
+        // MPLS unicast and multicast: the label's traffic class.
+        Some(0x8847 | 0x8848) if body.len() >= 4 => return (body[2] >> 1) & 7,
+        // 802.21 is network control.
+        Some(0x8917) => return 7,
+        _ => return 0,
+    };
+    if let Some(priority) = qos_map.and_then(|map| map.priority(dscp >> 2)) {
+        return priority;
+    }
+    // RFC 8325: the DSCP's three high bits, except the service classes
+    // section 4 maps elsewhere.
+    match dscp >> 2 {
+        // AF11-13 high-throughput data and CS2 OAM.
+        10 | 12 | 14 | 16 => 0,
+        // AF21-23 low-latency data.
+        18 | 20 | 22 => 3,
+        // CS3 broadcast video and AF31-33 multimedia streaming.
+        24 | 26 | 28 | 30 => 4,
+        // VA voice admit and EF telephony.
+        44 | 46 => 6,
+        // CS6 network control.
+        48 => 7,
+        _ => dscp >> 5,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_frames_classify_like_cfg80211_classify8021d() {
+        let frame = |ethertype: u16, body: &[u8]| {
+            let mut frame = vec![0; 12];
+            frame.extend_from_slice(&ethertype.to_be_bytes());
+            frame.extend_from_slice(body);
+            frame
+        };
+        let mut ipv4 = [0u8; 20];
+        ipv4[1] = 46 << 2; // EF, which RFC 8325 maps to 6.
+        assert_eq!(classify8021d(&frame(0x0800, &ipv4), None), 6);
+        assert_eq!(classify8021d(&frame(0x0800, &ipv4[..19]), None), 0);
+        let mut ipv6 = [0u8; 40];
+        ipv6[0] = 0x60 | (56 << 2) >> 4; // CS7
+        assert_eq!(classify8021d(&frame(0x86dd, &ipv6), None), 7);
+        assert_eq!(classify8021d(&frame(0x8847, &[0, 0, 0b1010, 0]), None), 5);
+        assert_eq!(classify8021d(&frame(0x8917, &[]), None), 7);
+        assert_eq!(classify8021d(&frame(0x0806, &[0; 28]), None), 0);
+        let dscp = |value: u8| {
+            let mut ipv4 = [0u8; 20];
+            ipv4[1] = value << 2;
+            frame(0x0800, &ipv4)
+        };
+        let rfc8325 = [10, 16, 18, 24, 30, 40, 44, 48].map(|d| classify8021d(&dscp(d), None));
+        assert_eq!(rfc8325, [0, 0, 3, 4, 4, 5, 6, 7]);
+        // A tagged frame's PCP, or its inner protocol when the PCP is zero.
+        let mut tagged = frame(0x8100, &[0x60, 0, 0x08, 0]);
+        tagged.extend_from_slice(&ipv4);
+        assert_eq!(classify8021d(&tagged, None), 3);
+        tagged[14] = 0;
+        assert_eq!(classify8021d(&tagged, None), 6);
+        // A QoS Map's exception, then its ranges, then RFC 8325.
+        let mut set = vec![46, 5];
+        for up in 0..8u8 {
+            set.extend_from_slice(&[up * 8, up * 8 + 3]);
+        }
+        let map = QosMap::parse(&set).unwrap();
+        let mapped = [46, 18, 7].map(|d| classify8021d(&dscp(d), Some(&map)));
+        assert_eq!(mapped, [5, 2, 0]);
+        assert!(QosMap::parse(&set[1..]).is_err());
+        set[1] = 8;
+        assert!(QosMap::parse(&set).is_err());
+    }
 
     #[test]
     #[ignore = "requires fresh pinned full A-MSDU helper trace via STELA_WIFI_AMSDU_ORACLE"]
@@ -869,6 +1059,7 @@ mod tests {
                     layout: 1,
                     words: [0; 4],
                 },
+                rx_rate: None,
                 tsf: None,
             },
             security,

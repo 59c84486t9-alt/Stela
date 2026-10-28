@@ -16,6 +16,7 @@ pub enum Command {
     BssInfo = 2,
     StationRecord = 3,
     Edca = 4,
+    RssiMonitor = 0x41,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

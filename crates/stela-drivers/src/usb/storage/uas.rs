@@ -275,6 +275,7 @@ impl Host {
                     touched: [false; 4],
                     tag: 0,
                     poisoned: false,
+                    failed_data: None,
                 },
                 flags: binding.flags,
                 device: fresh,
@@ -317,6 +318,9 @@ impl Host {
         let clock = self.engine.io.controller.borrow().clock;
         clock.delay(micros);
     }
+    pub(super) fn now_us(&self) -> u64 {
+        self.engine.io.now()
+    }
     /// Linux `uas_sdev_configure`: an ALWAYS_SYNC enclosure skips both mode
     /// pages and is assumed writable with its write cache on.
     pub(super) fn write_protect_page(&self) -> Option<u8> {
@@ -351,6 +355,10 @@ impl Host {
     }
     pub fn requires_rebind(&self) -> bool {
         self.engine.poisoned
+    }
+    /// What the last command's data phase moved in before it failed.
+    pub(super) fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        self.engine.failed_data.take()
     }
 }
 
@@ -524,6 +532,10 @@ struct Engine<I: Io> {
     touched: [bool; 4],
     tag: u16,
     poisoned: bool,
+    /// Input data that completed before the Sense IU failed its command,
+    /// until the next command: sd keeps it when the sense is RECOVERED
+    /// ERROR.
+    failed_data: Option<Vec<u8>>,
 }
 impl<I: Io> Engine<I> {
     fn new(mut io: I, dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
@@ -540,6 +552,7 @@ impl<I: Io> Engine<I> {
             touched: [false; 4],
             tag: 0,
             poisoned: false,
+            failed_data: None,
         })
     }
     fn buffers_present(&self) -> bool {
@@ -699,6 +712,9 @@ impl<I: Io> Engine<I> {
             }
             if let Some(status) = &terminal {
                 if status.code != 0 {
+                    if input && self.pending[Pipe::Input.index()].is_none() {
+                        self.failed_data = moved.map(|moved| self.data.bytes()[..moved].to_vec());
+                    }
                     // Device-terminal error may precede host data completion.
                     // Drain each actual outstanding contributor before any CPU
                     // buffer access or later command is permitted.
@@ -1324,6 +1340,8 @@ mod tests {
                     assert_eq!(&cdb[..6], &[0x12, 0, 0, 0, 36, 0]);
                     reply.requested = 36;
                     reply.data = vec![0; 36];
+                    // RMB: the target's medium can be removed and replaced.
+                    reply.data[1] = 0x80;
                     reply.data[2] = media.map_or(6, |media| media.version);
                     reply.data[4] = 31;
                     reply.data[8..16].copy_from_slice(b"STELAUSB");
@@ -1462,8 +1480,14 @@ mod tests {
                 .clock
                 .set(self.engine.io.clock.get() + micros);
         }
+        fn now_us(&self) -> u64 {
+            self.engine.io.clock.get()
+        }
         fn poisoned(&self) -> bool {
             self.engine.poisoned
+        }
+        fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+            self.engine.failed_data.take()
         }
         fn write_protect_page(&self) -> Option<u8> {
             (!self.flags.always_sync()).then_some(super::super::scsi::ALL_PAGES)
@@ -2408,6 +2432,7 @@ mod tests {
                     media: unit.media.clone(),
                     running: None,
                     next_tag: 0,
+                    removable: unit.removable,
                 }),
             };
             let commands_before_fault = hardware.borrow().scsi.len();

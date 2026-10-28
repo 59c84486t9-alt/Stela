@@ -159,11 +159,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.roc_deadline.is_none() {
             return Ok(());
         }
-        let req = s
-            .profile
-            .ok_or(Error::WrongProfile)?
-            .abort_roc(s.roc_token)
-            .map_err(Error::Codec)?;
+        let req = match s.six_ghz.as_ref() {
+            Some(six) => six.codec().abort_roc(s.roc_token),
+            None => s.profile.ok_or(Error::WrongProfile)?.abort_roc(s.roc_token),
+        }
+        .map_err(Error::Codec)?;
         s.transport_facts
             .try_reserve(1)
             .map_err(|_| Error::NoMemory)?;
@@ -189,21 +189,43 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let token = s.roc_token.checked_add(1).ok_or(Error::NeedsDrain)?;
         let p = s.profile.ok_or(Error::WrongProfile)?;
         let req = p.roc(token, 1000).map_err(Error::Codec)?;
+        let abort = p.abort_roc(token).map_err(Error::Codec)?;
+        Self::await_grant(s, p, token, &req, &abort)
+    }
+    /// Publish one ROC request and wait for its matching grant, which assigns
+    /// the profile's hardware band.
+    pub(super) fn await_grant(
+        s: &mut Owned<I, Q, C>,
+        p: Profile,
+        token: u8,
+        req: &crate::net::wifi::mediatek::mcu::init::Request,
+        abort: &crate::net::wifi::mediatek::mcu::init::Request,
+    ) -> Result<(), Error> {
+        Self::grant(&mut Roc::of(s), p, token, req, abort)
+    }
+    /// `await_grant` over the state a remain-on-channel request uses.
+    pub(super) fn grant(
+        s: &mut Roc<'_, I, Q, C>,
+        p: Profile,
+        token: u8,
+        req: &crate::net::wifi::mediatek::mcu::init::Request,
+        abort: &crate::net::wifi::mediatek::mcu::init::Request,
+    ) -> Result<(), Error> {
         s.transport_facts
             .try_reserve(1)
             .map_err(|_| Error::NoMemory)?;
         s.asynchronous
             .try_reserve(64)
             .map_err(|_| Error::NoMemory)?;
-        s.phase = Phase::Quarantined;
-        s.roc_token = token;
+        *s.phase = Phase::Quarantined;
+        *s.roc_token = token;
         let fact = s
             .controller
             .state_mut()
             .mailbox
             .as_mut()
             .unwrap()
-            .initial(&req)
+            .initial(req)
             .map_err(Error::Transport)?;
         s.transport_facts.push(fact);
         let clock = s.controller.state().control.clock;
@@ -235,10 +257,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                             && g.center == g.channel
                             && g.center2 == 0
                             && g.band
-                                == if p.channel.band == wifi::Band::Ghz2 {
-                                    1
-                                } else {
-                                    2
+                                == match p.channel.band {
+                                    wifi::Band::Ghz2 => 1,
+                                    wifi::Band::Ghz5 => 2,
+                                    wifi::Band::Ghz6 => 3,
                                 }
                             && g.width == 0
                             && g.sco == 0
@@ -254,21 +276,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if let Some(g) = match_grant {
                 let mut actual = p;
                 actual.interface.band_index = g.hardware_band;
-                s.profile = Some(actual);
-                s.roc_deadline = Some(
+                *s.profile = Some(actual);
+                *s.roc_deadline = Some(
                     clock
                         .now_us()
                         .checked_add(u64::from(g.duration_ms) * 1000)
                         .ok_or(Error::NeedsDrain)?,
                 );
-                s.phase = Phase::Joining;
+                *s.phase = Phase::Joining;
                 return Ok(());
             }
             if deadline.passed() {
                 // Source set_roc's timeout sends the actual matching abort.
                 // Generic abort completion still cannot retire uncertain radio
                 // users or establish a new peer/notification epoch.
-                let abort = p.abort_roc(token).map_err(Error::Codec)?;
                 s.transport_facts
                     .try_reserve(1)
                     .map_err(|_| Error::NoMemory)?;
@@ -278,12 +299,37 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .mailbox
                     .as_mut()
                     .unwrap()
-                    .initial(&abort)
+                    .initial(abort)
                     .map_err(Error::Transport)?;
                 s.transport_facts.push(fact);
                 return Err(Error::GrantTimeout);
             }
             core::hint::spin_loop();
+        }
+    }
+}
+
+/// The owned state a remain-on-channel request uses, borrowed apart from the
+/// station a regulatory publication holds meanwhile.
+pub(super) struct Roc<'a, I: BarIo, Q: QueueIo, C: 'static> {
+    pub(super) controller: &'a mut Controller<I, Q, C>,
+    pub(super) transport_facts: &'a mut Vec<mailbox::init::Fact>,
+    pub(super) asynchronous: &'a mut Vec<crate::net::wifi::mediatek::ring::rx::Frame>,
+    pub(super) phase: &'a mut Phase,
+    pub(super) roc_token: &'a mut u8,
+    pub(super) roc_deadline: &'a mut Option<u64>,
+    pub(super) profile: &'a mut Option<Profile>,
+}
+impl<'a, I: BarIo, Q: QueueIo, C: 'static> Roc<'a, I, Q, C> {
+    pub(super) fn of(s: &'a mut Owned<I, Q, C>) -> Self {
+        Self {
+            controller: &mut s.controller,
+            transport_facts: &mut s.transport_facts,
+            asynchronous: &mut s.asynchronous,
+            phase: &mut s.phase,
+            roc_token: &mut s.roc_token,
+            roc_deadline: &mut s.roc_deadline,
+            profile: &mut s.profile,
         }
     }
 }

@@ -77,10 +77,11 @@ fn actual_native_terminal_queries_preserve_raw_connected_channels_with_pcm_owned
     let mut backing = vec![0u64; 512 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut audio, model, _) = peer(&mut dma, 1);
-    // PCM must consume genuine device RANGE, current-frequency and validity
-    // replies before the native isochronous queue can be owned. The connector
-    // peer has no implicit clock responses or synthetic successful startup.
+    // PCM must consume genuine device validity, RANGE, current-frequency and
+    // validity replies before the native isochronous queue can be owned. The
+    // connector peer has no implicit clock responses or synthetic startup.
     model.borrow_mut().control_replies.extend([
+        (xhci::setup(0xa1, 1, 0x0200, 0x0a00, 1), vec![1]),
         (xhci::setup(0xa1, 2, 0x0100, 0x0a00, 2), vec![1, 0]),
         (
             xhci::setup(0xa1, 2, 0x0100, 0x0a00, 14),

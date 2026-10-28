@@ -150,6 +150,7 @@ fn format(i: &Interface, speed: u8) -> Result<Format, Error> {
         service_microframes: interval,
         max_bytes,
         fill_max: false,
+        pitch: None,
     })
 }
 fn channel_mask(channels: u8) -> u32 {
@@ -181,6 +182,7 @@ fn graph(profile: BasicProfile, control: u8, playback: u8, capture: u8) -> Resul
     }
     let mut entities = vec![Entity::ClockSource {
         id: CLOCK,
+        attributes: 0,
         controls: 0,
     }];
     if playback != 0 {

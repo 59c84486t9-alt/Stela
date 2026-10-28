@@ -791,6 +791,8 @@ pub(super) mod tests {
         mfindex: u32,
         fail: Option<u32>,
         silent: Option<u32>,
+        /// A silenced command, keeping CRCR.CRR set until it is aborted.
+        stuck: Option<u64>,
         fatal: bool,
         output_bytes: Vec<u8>,
         serviced: BTreeMap<u8, u32>,
@@ -824,6 +826,13 @@ pub(super) mod tests {
             }
             self.event_index += 1;
         }
+        /// A command abort: the stuck command completes aborted, then the ring stops.
+        fn abort(&mut self) {
+            if let Some(at) = self.stuck.take() {
+                self.event(at, COMMAND_ABORTED, 0, 0, COMMAND_COMPLETION);
+                self.event(0, COMMAND_RING_STOPPED, 0, 0, COMMAND_COMPLETION);
+            }
+        }
         fn command(&mut self) {
             let at = self.commands + (self.command_index % (RING_TRBS - 1) * TRB) as u64;
             let parameter = Self::long(at);
@@ -838,6 +847,7 @@ pub(super) mod tests {
             self.command_index += 1;
             self.seen.push((kind, dci));
             if self.silent == Some(kind) {
+                self.stuck = Some(at);
                 return;
             }
             let code = if self.fail == Some(kind) { 17 } else { SUCCESS };
@@ -1006,6 +1016,8 @@ pub(super) mod tests {
             let model = self.0.borrow();
             if offset == 0x800 {
                 model.mfindex
+            } else if offset == 0x40 + CRCR && model.stuck.is_some() {
+                CRCR_RUNNING
             } else if offset == 0x40 + USBSTS && model.fatal {
                 HSE
             } else {
@@ -1015,6 +1027,7 @@ pub(super) mod tests {
         fn write32(&mut self, offset: usize, value: u32) {
             let doorbell = 0x1000 + 4 * usize::from(self.0.borrow().slot);
             match offset {
+                0x58 if value & CRCR_ABORT != 0 => self.0.borrow_mut().abort(),
                 0x1000 => self.0.borrow_mut().command(),
                 at if at == doorbell => self.0.borrow_mut().transfer(value as u8),
                 _ => {}
@@ -1058,6 +1071,7 @@ pub(super) mod tests {
             mfindex: 0x3ff0,
             fail: None,
             silent: None,
+            stuck: None,
             fatal: false,
             output_bytes: Vec::new(),
             serviced: BTreeMap::new(),
@@ -1107,6 +1121,7 @@ pub(super) mod tests {
                 max_slots: 1,
                 max_ports: 1,
                 port_major: vec![2],
+                lpm: lpm::Host::default(),
                 dcbaa: dma.allocate(16, 64).unwrap().into(),
                 _scratchpads: Vec::new(),
                 commands,
@@ -1122,6 +1137,7 @@ pub(super) mod tests {
                 pending: Vec::new(),
                 error: None,
                 command_poisoned: false,
+                command_ring_stopped: false,
                 location: String::from("native iso model"),
             },
             model,
@@ -1158,6 +1174,7 @@ pub(super) mod tests {
             mfindex: 0x3ff0,
             fail: None,
             silent: None,
+            stuck: None,
             fatal: false,
             output_bytes: Vec::new(),
             serviced: BTreeMap::new(),
@@ -2620,7 +2637,9 @@ pub(super) mod tests {
             let ticket = controller.submit_iso(1, 3, buffer.physical(), 32).unwrap();
             model.borrow_mut().silent = Some(silent);
             assert!(controller.cancel(1, 3).is_err());
-            assert!(controller.command_poisoned);
+            // Only an unanswered Stop Endpoint kills the host; Set Dequeue
+            // is aborted and the command ring carries on.
+            assert_eq!(controller.command_poisoned, silent == STOP_ENDPOINT);
             assert_eq!(
                 controller.slot(1).unwrap().endpoints[3]
                     .as_ref()

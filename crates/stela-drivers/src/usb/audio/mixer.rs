@@ -158,23 +158,42 @@ impl Graph {
         self.mixer_cell(id, input, output)?;
         super::control::signed_current(io, self.protocol, self.control_interface, id, input, output)
     }
-    pub fn set_mixer_volume<C: Control>(
+    /// Probe a mixer cell's range once, before its first set.
+    pub fn mixer_volume_range<C: Control>(
         &self,
         io: &mut C,
         id: u8,
         input: u8,
         output: u8,
-        value: i16,
-    ) -> Result<(), Error> {
+    ) -> Result<super::MixerRange, Error> {
         self.mixer_cell(id, input, output)?;
-        super::control::set_signed_control(
+        super::control::probe_range(
             io,
             self.protocol,
             self.control_interface,
             id,
             input,
             output,
-            value,
+            super::control::Width::S16,
+        )
+    }
+    pub fn set_mixer_volume<C: Control>(
+        &self,
+        io: &mut C,
+        id: u8,
+        input: u8,
+        output: u8,
+        range: super::MixerRange,
+        value: i16,
+    ) -> Result<(), Error> {
+        self.mixer_cell(id, input, output)?;
+        super::control::set_signed(
+            io,
+            self.control_interface,
+            id,
+            input,
+            output,
+            range.snap(i64::from(value)) as i16,
         )
     }
 }
@@ -197,6 +216,7 @@ mod tests {
             entities: vec![
                 Entity::ClockSource {
                     id: 10,
+                    attributes: 0,
                     controls: 3,
                 },
                 Entity::Input {
@@ -247,6 +267,10 @@ mod tests {
             let key = (r[3], r[2]);
             assert!(matches!(key, (1, 1) | (2, 2) | (4, 2)));
             let request = if self.protocol == UAC1 { 0x81 } else { 1 };
+            if r[0] == 0x21 && r[1] == 4 {
+                // UAC1 SET_RES is refused.
+                return Err(BlockError::Timeout);
+            }
             if r[0] == 0x21 {
                 assert_eq!(
                     r,
@@ -298,43 +322,48 @@ mod tests {
             graph.validate().unwrap();
             assert_eq!(graph.signal_cluster(6), Ok((2, 3)));
             let mut device = Device::new(protocol);
+            // Probing writes the minimum, one step and the saved value back.
+            let range = graph.mixer_volume_range(&mut device, 6, 1, 1).unwrap();
+            assert_eq!(
+                range,
+                crate::usb::audio::MixerRange {
+                    min: -16384,
+                    max: 0,
+                    res: 256,
+                    db: Some((-6400, 0))
+                }
+            );
+            assert_eq!((device.writes, device.gains[&(1, 1)]), (3, 0));
+            device.writes = 0;
             for (input, output) in [(1, 1), (2, 2), (4, 2)] {
                 graph
-                    .set_mixer_volume(&mut device, 6, input, output, -256)
+                    .set_mixer_volume(&mut device, 6, input, output, range, -256)
                     .unwrap();
                 assert_eq!(graph.mixer_volume(&mut device, 6, input, output), Ok(-256));
             }
             assert_eq!(device.writes, 3);
-            assert_eq!(
-                graph.set_mixer_volume(&mut device, 6, 1, 2, 0),
-                Err(Error::Unsupported("fixed mixer crosspoint"))
-            );
-            assert_eq!(
-                graph.set_mixer_volume(&mut device, 6, 3, 1, 0),
-                Err(Error::Unsupported("fixed mixer crosspoint"))
-            );
-            assert_eq!(
-                graph.set_mixer_volume(&mut device, 6, 0, 1, 0),
-                Err(Error::Format)
-            );
-            assert_eq!(
-                graph.set_mixer_volume(&mut device, 6, 4, 3, 0),
-                Err(Error::Format)
-            );
-            assert_eq!(
-                graph.set_mixer_volume(&mut device, 6, 1, 1, -257),
-                Err(Error::Format)
-            );
+            for (input, output, error) in [
+                (1, 2, Error::Unsupported("fixed mixer crosspoint")),
+                (3, 1, Error::Unsupported("fixed mixer crosspoint")),
+                (0, 1, Error::Format),
+                (4, 3, Error::Format),
+            ] {
+                assert_eq!(
+                    graph.set_mixer_volume(&mut device, 6, input, output, range, 0),
+                    Err(error)
+                );
+            }
             assert_eq!(device.writes, 3);
+            // A value between steps snaps down, and nothing is read back.
             device.false_readback = true;
-            assert_eq!(
-                graph.set_mixer_volume(&mut device, 6, 1, 1, 0),
-                Err(Error::ControlReadback)
-            );
+            graph
+                .set_mixer_volume(&mut device, 6, 1, 1, range, -257)
+                .unwrap();
+            assert_eq!(device.gains[&(1, 1)], -512);
             device.false_readback = false;
             device.set_failure = true;
             assert_eq!(
-                graph.set_mixer_volume(&mut device, 6, 1, 1, 0),
+                graph.set_mixer_volume(&mut device, 6, 1, 1, range, 0),
                 Err(Error::Transport(BlockError::Timeout))
             );
             device.set_failure = false;

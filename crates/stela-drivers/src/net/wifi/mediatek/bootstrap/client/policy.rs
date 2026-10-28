@@ -102,6 +102,10 @@ pub struct ManagedClient<I: BarIo, Q: QueueIo, C: 'static> {
     revoked: bool,
     peer: Option<Channel>,
     observed: Vec<Observed>,
+    /// The OS's interworking QoS Map, `sdata->qos_map`.
+    qos_map: Option<station::data::QosMap>,
+    /// The OS's power save setting, `ifmgd->powersave`.
+    power_save: bool,
 }
 fn copy_bss(b: &scan::result::Bss) -> Result<scan::result::Bss, PolicyError> {
     fn copy(v: &[u8]) -> Result<Vec<u8>, PolicyError> {
@@ -299,7 +303,7 @@ impl Snapshot {
     }
     fn association(&self, op: &reg::AssociationOperation<'_>, environment: Environment) -> bool {
         let ctx = op.context();
-        let def = ctx.definition();
+        let def = op.definition();
         let n = ctx.negotiated();
         if def.validate().is_err() || matches!(def.width, Width::Mhz80P80 | Width::Mhz320) {
             return false;
@@ -325,7 +329,7 @@ impl Snapshot {
                 || f & (1 << 9) != 0 && environment != Environment::Indoor
                 || f & (1 << 6) != 0
                     && (n.mode != Mode::Legacy
-                        || ctx.channel().band != Band::Ghz2
+                        || def.control.band != Band::Ghz2
                         || n.legacy.supported & !15 != 0)
                 || matches!(n.mode, Mode::He | Mode::Eht) && f & (1 << 13) != 0
                 || n.mode == Mode::Eht && f & (1 << 20) != 0
@@ -414,7 +418,7 @@ impl Os {
     }
     fn association(&self, op: &reg::AssociationOperation<'_>) -> bool {
         let ctx = op.context();
-        let def = ctx.definition();
+        let def = op.definition();
         let n = ctx.negotiated();
         let bw = match def.width {
             Width::Mhz20 => 20,
@@ -436,7 +440,7 @@ impl Os {
                 || self.country.bandwidth(r).is_none_or(|max| max < bw * 1000)
                 || (r.no_ofdm
                     && (n.mode != Mode::Legacy
-                        || ctx.channel().band != Band::Ghz2
+                        || def.control.band != Band::Ghz2
                         || n.legacy.supported & !15 != 0))
             {
                 return false;
@@ -447,7 +451,7 @@ impl Os {
         };
         let Some(rule) = self
             .country
-            .rule(u32::from(ctx.channel().frequency_mhz) * 1000, 20_000)
+            .rule(u32::from(def.control.frequency_mhz) * 1000, 20_000)
         else {
             return false;
         };
@@ -481,7 +485,7 @@ impl reg::OsLease for OsGuard<'_> {
         self.0.association(op)
     }
     fn allows_edca(&mut self, op: &reg::EdcaOperation<'_>) -> bool {
-        let channel = op.association().context().channel();
+        let channel = op.association().channel();
         self.0.association(op.association())
             && self
                 .0
@@ -614,6 +618,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             revoked: false,
             peer: None,
             observed: Vec::new(),
+            qos_map: None,
+            // CONFIG_CFG80211_DEFAULT_PS
+            power_save: true,
         })
     }
     fn live(&self) -> Result<(), PolicyError> {
@@ -778,6 +785,154 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         }
         .map_err(PolicyError::Client)
     }
+    /// Follow the current AP's announced channel switch: admit the target as
+    /// `mt7925_pre_channel_switch` checks it is usable, switch when due, and
+    /// disconnect as mac80211 does when the target is refused.
+    pub fn channel_switch(&mut self, now: u64) -> Result<(), PolicyError> {
+        self.live()?;
+        // A switch already due runs as soon as its target is admitted.
+        while let Some(step) = self.client.channel_switch_step(now) {
+            let definition = match step {
+                ChannelSwitchStep::Disconnect => return self.disconnect(),
+                ChannelSwitchStep::Prepare(definition) | ChannelSwitchStep::Switch(definition) => {
+                    definition
+                }
+            };
+            let context = self
+                .client
+                .modern_context()
+                .ok_or(PolicyError::Bss)?
+                .clone();
+            let Ok(admission) =
+                self.authority
+                    .admit_channel_switch(self.client.station(), context, definition)
+            else {
+                return self.disconnect();
+            };
+            if matches!(step, ChannelSwitchStep::Prepare(_)) {
+                self.client.channel_switch_prepared();
+                continue;
+            }
+            // SAFETY: as for update_edca, with the target's own admission.
+            unsafe {
+                self.client
+                    .switch_channel_modern(&mut self.authority, admission)
+            }
+            .map_err(PolicyError::Client)?;
+            self.peer = Some(definition.control);
+        }
+        Ok(())
+    }
+    /// Apply a channel the current AP's beacon changed, or disconnect when
+    /// the change leaves the associated channel, as mac80211 does.
+    pub fn update_channel(&mut self) -> Result<(), PolicyError> {
+        self.live()?;
+        if self.client.pending_channel() == Some(false) {
+            return self.disconnect();
+        }
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .update_channel_modern(&mut self.authority, admission)
+        }
+        .map_err(PolicyError::Client)
+    }
+    /// The OS's connection-quality monitor (`cqm_rssi_thold` and
+    /// `cqm_rssi_hyst`), or `None` to stop it.
+    pub fn set_rssi_monitor(&mut self, monitor: Option<(i32, u32)>) -> Result<(), PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .set_rssi_monitor_modern(&mut self.authority, admission, monitor)
+        }
+        .map_err(PolicyError::Client)
+    }
+    /// The OS's power save setting, as `iw set power_save` changes it.
+    pub fn set_power_save(&mut self, enabled: bool) {
+        self.power_save = enabled;
+    }
+    /// `ieee80211_powersave_allowed` once the port is authorized: the OS
+    /// enabled power save and the AP gave a valid AID.
+    pub fn power_save_allowed(&self) -> bool {
+        self.power_save
+            && self
+                .client
+                .modern_context()
+                .is_some_and(|context| context.response().power_save_allowed)
+    }
+    /// `ieee80211_recalc_ps_vif`: tell the firmware whether to save power.
+    pub fn update_power_save(&mut self, enable: bool) -> Result<(), PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .set_power_save_modern(&mut self.authority, admission, enable)
+        }
+        .map_err(PolicyError::Client)
+    }
+    /// Send a slot time the current AP's beacon changed.
+    pub fn update_slot_time(&mut self) -> Result<(), PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: as for update_edca.
+        unsafe {
+            self.client
+                .update_slot_time_modern(&mut self.authority, admission)
+        }
+        .map_err(PolicyError::Client)
+    }
     /// Consume the latest native current-peer observation using this owner's
     /// actual immutable country rule and same association publication authority.
     pub fn update_edca(&mut self) -> Result<(), PolicyError> {
@@ -787,9 +942,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .modern_context()
             .ok_or(PolicyError::Bss)?
             .clone();
+        let channel = self
+            .client
+            .station()
+            .operating_definition()
+            .ok_or(PolicyError::Bss)?
+            .control;
         let rule = self
             .country
-            .rule(u32::from(context.channel().frequency_mhz) * 1000, 20_000)
+            .rule(u32::from(channel.frequency_mhz) * 1000, 20_000)
             .ok_or(PolicyError::RestrictionMismatch)?;
         let admission = self
             .authority
@@ -852,6 +1013,31 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         self.client
             .authorize_port(epoch)
             .map_err(PolicyError::Client)
+    }
+    /// The QoS TID of a data frame on the current association, as
+    /// `ieee80211_select_queue` chooses it; `None` for non-QoS data.
+    pub fn data_tid(&self, ethernet: &[u8]) -> Option<u8> {
+        let current = self.client.applied_edca().map(|e| &e.access_categories);
+        station::data::data_tid(
+            self.client.modern_context()?,
+            current,
+            self.qos_map.as_ref(),
+            ethernet,
+        )
+    }
+    /// `ieee80211_set_qos_map`: the OS's QoS Map Set field for the current
+    /// association, or `None` to stop mapping. As `nl80211_key_allowed`
+    /// requires, the station must be associated.
+    pub fn set_qos_map(&mut self, map: Option<&[u8]>) -> Result<(), PolicyError> {
+        self.live()?;
+        if self.client.station().phase() != station::Phase::Associated {
+            return Err(PolicyError::Client(Error::WrongPhase));
+        }
+        self.qos_map = map
+            .map(station::data::QosMap::parse)
+            .transpose()
+            .map_err(|e| PolicyError::Client(Error::Data(e)))?;
+        Ok(())
     }
     pub fn transmit(
         &mut self,

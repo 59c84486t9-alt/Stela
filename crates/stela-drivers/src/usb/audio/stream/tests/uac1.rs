@@ -42,6 +42,7 @@ struct LegacyModel {
     short_rate: bool,
     wrong_rate: bool,
     fail_rate: bool,
+    fail_read: bool,
 }
 impl LegacyModel {
     fn new() -> Self {
@@ -52,6 +53,7 @@ impl LegacyModel {
             short_rate: false,
             wrong_rate: false,
             fail_rate: false,
+            fail_read: false,
         }
     }
 }
@@ -88,12 +90,19 @@ impl Control for LegacyModel {
                 return Ok(Vec::new());
             }
             assert_eq!(r[1], 0x81);
+            if self.fail_read {
+                return Err(BlockError::Timeout);
+            }
             let rate = if self.wrong_rate {
                 32_000
             } else {
                 self.rates[&r[4]]
             };
             return Ok(rate.to_le_bytes()[..if self.short_rate { 2 } else { 3 }].to_vec());
+        }
+        if r[0] == 0x21 && r[1] == 4 {
+            // SET_RES is refused.
+            return Err(BlockError::Timeout);
         }
         if r[0] == 0xa1 {
             match r[1] {
@@ -213,26 +222,39 @@ fn uac1_collection_and_actual_endpoint_rates_drive_duplex_pcm_and_controls() {
     });
 }
 #[test]
-fn uac1_rate_failure_and_readback_mismatch_never_start_or_release_uncertain_dma() {
-    for fault in 0..3 {
+fn uac1_rate_is_set_and_read_back_like_set_sample_rate_v1() {
+    run(|a| {
+        a.transport.fail_rate = true;
+        let err = a.start_playback(0, 48_000, &[0; 192], true).unwrap_err();
+        assert_eq!(err, Error::Transport(BlockError::Timeout));
+        assert!(a.transport.inner.submitted.is_empty());
+        assert!(a.transport.inner.active.is_empty());
+        assert_eq!(a.transport.inner.alternates.last(), Some(&(3, 0)));
+    });
+    // A different rate is noted and streaming goes on; a short reply keeps
+    // the rest of what was sent.
+    for (short, wrong, mismatch) in [(true, false, None), (false, true, Some((48_000, 32_000)))] {
         run(|a| {
-            a.transport.fail_rate = fault == 0;
-            a.transport.short_rate = fault == 1;
-            a.transport.wrong_rate = fault == 2;
-            let err = a.start_playback(0, 48_000, &[0; 192], true).unwrap_err();
-            assert_eq!(
-                err,
-                match fault {
-                    0 => Error::Transport(BlockError::Timeout),
-                    1 => Error::ControlLength,
-                    _ => Error::ControlReadback,
-                }
-            );
-            assert!(a.transport.inner.submitted.is_empty());
-            assert!(a.transport.inner.active.is_empty());
-            assert_eq!(a.transport.inner.alternates.last(), Some(&(3, 0)));
+            a.transport.short_rate = short;
+            a.transport.wrong_rate = wrong;
+            a.start_playback(0, 48_000, &[0; 192], true).unwrap();
+            assert_eq!(a.clock_mismatch, mismatch);
         });
     }
+    // Three failed reads stop the reads.
+    run(|a| {
+        a.transport.fail_read = true;
+        for _ in 0..4 {
+            a.start_playback(0, 48_000, &[0; 192], true).unwrap();
+            a.stop_playback().unwrap();
+        }
+        let reads = a
+            .transport
+            .endpoint_controls
+            .iter()
+            .filter(|r| r[0] == 0xa2);
+        assert_eq!(reads.count(), 3);
+    });
     run(|a| {
         a.start_capture(1, 48_000).unwrap();
         a.transport.inner.cancel_fail = true;
@@ -259,7 +281,8 @@ fn uac1_unadvertised_rate_foreign_endpoint_and_invalid_controls_have_no_publicat
         assert!(a.start_playback(0, 48_000, &[0; 192], true).is_err());
         assert!(a.transport.inner.alternates.is_empty());
         assert!(a.transport.endpoint_controls.is_empty());
-        assert_eq!(a.set_volume(2, 0, -257), Err(Error::Format));
+        a.set_volume(2, 0, -257).unwrap();
+        assert_eq!(a.transport.inner.volume, -512);
     });
 }
 #[test]
@@ -348,48 +371,32 @@ fn uac1_fixed_frequency_has_no_endpoint_request_and_standard_explicit_feedback_r
 
 #[test]
 fn uac1_pitch_controls_and_shared_collection_aliases_are_checked() {
-    struct Pitch {
-        state: bool,
-        writes: usize,
-        wrong: bool,
-    }
+    struct Pitch(Vec<[u8; 8]>);
     impl Control for Pitch {
         fn now_us(&self) -> u64 {
             0
         }
         fn relax(&mut self) {}
         fn control(&mut self, r: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
-            assert_eq!(&r[2..], &[0, 2, 1, 0, 1, 0]);
-            match (r[0], r[1]) {
-                (0x22, 1) => {
-                    assert_eq!(out, [1]);
-                    self.state = true;
-                    self.writes += 1;
-                    Ok(Vec::new())
-                }
-                (0xa2, 0x81) => Ok(vec![u8::from(self.state && !self.wrong)]),
-                _ => panic!("unexpected endpoint pitch request"),
-            }
+            assert_eq!(out, [1]);
+            self.0.push(r);
+            Ok(Vec::new())
         }
     }
-    let rates = EndpointRates {
-        ranges: vec![RateRange {
-            min: 48000,
-            max: 48000,
-            resolution: 0,
-        }],
-        frequency_control: false,
-        pitch_control: true,
-    };
-    let mut io = Pitch {
-        state: false,
-        writes: 0,
-        wrong: false,
-    };
-    rates.apply(&mut io, 1, 48000).unwrap();
-    assert_eq!(io.writes, 1);
-    io.wrong = true;
-    assert_eq!(rates.apply(&mut io, 1, 48000), Err(Error::ControlReadback));
+    // init_pitch_v1 addresses the data endpoint and reads nothing back.
+    let mut c = configuration();
+    let at = c.windows(4).position(|w| w == [7, 0x25, 1, 1]).unwrap();
+    c[at + 3] = 3;
+    let binding = parse(&c).unwrap();
+    let format = binding
+        .formats
+        .iter()
+        .find(|f| f.data.address == 1)
+        .unwrap();
+    assert_eq!(format.pitch, Some((0x0200, 1)));
+    let mut io = Pitch(Vec::new());
+    format.init_pitch(&mut io).unwrap();
+    assert_eq!(io.0, [[0x22, 1, 0, 2, 1, 0, 1, 0]]);
     let c = configuration();
     let mut all = interfaces(&c);
     let mut sibling = all[0].clone();

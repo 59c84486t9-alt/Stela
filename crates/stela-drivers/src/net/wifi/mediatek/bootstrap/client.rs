@@ -4,15 +4,23 @@
 //! raw-header format to the actual retained peer; generic WMWA facts never do.
 use super::{Controller, Phase as ControllerPhase};
 
+mod action;
 mod ba;
 mod edca;
 mod external;
 pub use edca::AppliedEdca;
+mod cqm;
+mod csa;
+pub use csa::ChannelSwitchStep;
 mod local;
 pub mod management;
 mod modern;
 mod packet;
 mod pmf;
+mod six_ghz;
+mod txs;
+use crate::net::wifi::station::operations::ChannelDefinition;
+pub use txs::TxStatus;
 pub use wifi::station::NativeBssObservation as PmfBssObservation;
 mod policy;
 pub use policy::{
@@ -116,9 +124,30 @@ pub struct PacketOwner<C: 'static> {
     key: Option<KeyIdentity>,
     context: Option<Arc<station::AssociationContext>>,
     tid: Option<u8>,
+    /// Sent at the minimum rate, as control-port frames are.
+    control_port: bool,
+    /// The TXWI packet ID; one of at least 3 asked for TX status.
+    pid: u8,
     tx_ba: Option<Arc<station::ba::tx::Session>>,
     authentication: Option<Arc<station::external::Session>>,
     management: Option<Arc<management::Session>>,
+}
+#[cfg(test)]
+impl PacketOwner<()> {
+    pub(crate) fn for_tests(association: u64, pid: u8) -> Self {
+        Self {
+            resource: Arc::new(()),
+            association,
+            key: None,
+            context: None,
+            tid: None,
+            control_port: false,
+            pid,
+            tx_ba: None,
+            authentication: None,
+            management: None,
+        }
+    }
 }
 impl<C> PacketOwner<C> {
     pub fn association_epoch(&self) -> u64 {
@@ -126,6 +155,9 @@ impl<C> PacketOwner<C> {
     }
     pub const fn tid(&self) -> Option<u8> {
         self.tid
+    }
+    pub const fn control_port(&self) -> bool {
+        self.control_port
     }
     pub fn tx_block_ack(&self) -> Option<&station::ba::tx::Session> {
         self.tx_ba.as_deref()
@@ -151,6 +183,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     interface: Interface<Arc<C>>,
     station: Station,
     pmf_observations: Vec<Arc<PmfBssObservation>>,
+    txs: txs::State,
     pmf_selected: Option<Arc<PmfBssObservation>>,
     pmf_authentication: Option<wifi::regulatory::PmfAuthenticationBinding>,
     scanner: scan::Scanner,
@@ -176,6 +209,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     receive_ba: [Option<ba::Receive<C>>; 8],
     transmit_ba: [Option<ba::Transmit<C>>; 8],
     ba_actions: VecDeque<station::ba::Action>,
+    /// OS action registrations and the replies mac80211 would send.
+    action: action::State,
     ba_management: Option<Arc<management::Session>>,
     ba_management_pn: Option<PacketNumber>,
     roc_token: u8,
@@ -183,8 +218,23 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     modern: Option<modern::Configuration>,
     management: Option<Arc<management::Session>>,
     edca: Option<edca::Observed<C>>,
+    /// A slot time the AP's beacon changed, not yet sent.
+    slot_time: Option<u16>,
+    /// The OS's RSSI monitor and the AP's averaged beacon signal.
+    cqm: cqm::Cqm,
+    /// The AP's announced channel switch.
+    csa: csa::State,
+    /// The firmware holds the BSS in dynamic power save.
+    power_save: bool,
+    /// The channel the firmware operates when a beacon narrowed it.
+    channel: Option<ChannelDefinition>,
+    /// A channel a beacon changed, not yet sent; `None` inside when the
+    /// change leaves the associated channel, which mac80211 disconnects for.
+    channel_change: Option<Option<ChannelDefinition>>,
     authentication_deadline: Option<u64>,
     authentication_end: Option<(Arc<station::external::Session>, Option<station::Failure>)>,
+    /// The bound 6 GHz transport until its peer retires after drain.
+    six_ghz: Option<six_ghz::Bound>,
 }
 /// On uncertain/live Drop retain the entire controller, station, real key
 /// material history and actual resources. No new owner may reset their PN.
@@ -231,6 +281,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 interface,
                 station,
                 pmf_observations: Vec::new(),
+                txs: txs::State::default(),
                 pmf_selected: None,
                 pmf_authentication: None,
                 scanner,
@@ -256,6 +307,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 receive_ba: core::array::from_fn(|_| None),
                 transmit_ba: core::array::from_fn(|_| None),
                 ba_actions: VecDeque::new(),
+                action: action::State::default(),
                 ba_management: None,
                 ba_management_pn: None,
                 roc_token: 0,
@@ -263,8 +315,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 modern: None,
                 management: None,
                 edca: None,
+                slot_time: None,
+                cqm: cqm::Cqm::default(),
+                csa: csa::State::default(),
+                power_save: false,
+                channel: None,
+                channel_change: None,
                 authentication_deadline: None,
                 authentication_end: None,
+                six_ghz: None,
             })),
         })
     }
@@ -728,7 +787,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::ModernAdmissionRequired);
         }
-        self.poll_inner(now, source, policy, None)
+        self.poll_inner(now, source, policy, None, None)
     }
 
     fn poll_inner(
@@ -737,7 +796,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         source: &dyn PageSource,
         policy: &mut (impl station::RegulatoryPolicy + scan::Policy),
         mut guard: Option<&mut wifi::regulatory::PmfAuthenticationGuard<'_>>,
+        mut six: Option<&mut wifi::regulatory::SixGhzAuthenticationGuard<'_>>,
     ) -> Result<Vec<Event>, Error> {
+        // A live 6 GHz transport is serviced only under its held providers;
+        // cleanup after removal needs none.
+        if self.state().six_ghz.is_some() && six.is_none() && self.phase() == Phase::Joining {
+            return Err(Error::WrongPhase);
+        }
         if self.station().phase() == station::Phase::ExternalAuthenticating {
             self.poll_station(now, source, policy)?;
         }
@@ -775,7 +840,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 });
             }
         }
-        let mut events = Vec::new();
+        s.txs.expire(now);
+        let mut events: Vec<_> = s.txs.ready.drain(..).map(Event::TxStatus).collect();
+        events.append(&mut s.cqm.ready);
         while let Some(received) = s.pending_rx.pop_front() {
             let receive::ReceivedFrame { queue, frame: f } = received;
             if f.drop {
@@ -793,6 +860,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 unsafe { q.apply_tx_free(epoch, &f.bytes) }.map_err(Error::Ring)?;
                 continue;
             }
+            if kind == Some(0) {
+                if let Some(p) = s.profile {
+                    let reports = s.txs.receive(&f.bytes, p.wcid, p.channel.band);
+                    events.extend(reports.into_iter().map(Event::TxStatus));
+                }
+                continue;
+            }
             if kind.is_some_and(|k| k != 2 && k != 7) {
                 s.asynchronous.push(f);
                 continue;
@@ -808,6 +882,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .completed(s.scan_ticket.unwrap(), scan::Outcome::Completed)
                         .map_err(Error::Scan)?;
                     s.phase = Phase::ScanCompleted;
+                }
+                // mt7925_mcu_rssi_monitor_event: each INFO TLV reports
+                // the first TLV's RSSI against the threshold.
+                if event.event_id == 0x41
+                    && event.is_unsolicited()
+                    && s.phase == Phase::Associated
+                    && let Some(monitor) = s.cqm.monitor.filter(|m| m.firmware)
+                {
+                    events.extend(rssi_events(event.payload, monitor.threshold));
+                    continue;
                 }
                 if event.event_id == 12
                     && event.is_unsolicited()
@@ -882,6 +966,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     s.asynchronous.push(f);
                     continue;
                 }
+                if let Some(guard) = six.as_deref_mut() {
+                    Self::qualify_six(s, guard, six_ghz::Use::Receive(&frame), now)?;
+                }
                 let received = s
                     .station
                     .receive_external_authentication(&session, frame, now)
@@ -897,12 +984,28 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             if (s.management.is_some() || s.station.requires_protected_management())
                 && wifi::security::management::robust(&frame)
             {
-                events.push(Event::ProtectedManagement(Self::receive_management(
-                    s, frame, &f.bytes,
-                )?));
+                let received = Self::receive_management(s, frame, &f.bytes)?;
+                if !Self::channel_switch_action(s, received.frame(), received.body()) {
+                    events.push(Event::ProtectedManagement(received));
+                }
                 continue;
             }
             let epoch = s.station.association_epoch().ok_or(Error::WrongPhase)?;
+            if modern_data
+                && Self::channel_switch_action(s, &frame, frame.bytes().get(24..).unwrap_or(&[]))
+            {
+                continue;
+            }
+            if modern_data && frame.header().control & 0x00fc == 0x00d0 {
+                match Self::receive_action(s, &frame)? {
+                    action::Receive::BlockAck => {}
+                    action::Receive::Os => {
+                        events.push(Event::Raw(f));
+                        continue;
+                    }
+                    action::Receive::Done => continue,
+                }
+            }
             if modern_data
                 && (frame.header().control & 0x00fc == 0x00d0
                     || frame.header().control & 0x00fc == 0x0084)
@@ -950,6 +1053,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
         }
         events.extend(Self::poll_reorder(s, now)?.into_iter().map(Event::Ingress));
+        events.append(&mut s.csa.ready);
         events.extend(
             core::mem::take(&mut s.asynchronous)
                 .into_iter()
@@ -979,6 +1083,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Ok(());
         }
         Self::abort_channel(s)?;
+        let six = s.six_ghz.as_ref().map(|six| six.codec().clone());
         // Explicit key removal precedes peer destruction. Retain their canonical
         // histories and actual ACKs until independent old-user drain completes.
         for (key, receipt) in [
@@ -997,7 +1102,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Self::command(
             s,
             Command::BssInfo,
-            &p.disable_beacon_pm().map_err(Error::Codec)?,
+            &match &six {
+                Some(codec) => codec.disable_beacon_pm(),
+                None => p.disable_beacon_pm(),
+            }
+            .map_err(Error::Codec)?,
         )?;
         s.transport_facts
             .try_reserve(1)
@@ -1008,20 +1117,34 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .mailbox
             .as_mut()
             .unwrap()
-            .initial(&p.filter_request(false).map_err(Error::Codec)?)
+            .initial(
+                &match &six {
+                    Some(codec) => codec.filter_request(false),
+                    None => p.filter_request(false),
+                }
+                .map_err(Error::Codec)?,
+            )
             .map_err(Error::Transport)?;
         s.transport_facts.push(fact);
         Self::command(
             s,
             Command::StationRecord,
-            &p.peer_request(false, false).map_err(Error::Codec)?,
+            &match &six {
+                Some(codec) => codec.peer_request(false),
+                None => p.peer_request(false, false),
+            }
+            .map_err(Error::Codec)?,
         )?;
         s.controller
             .state_mut()
             .control
             .clear_peer_admission(p.wcid)
             .map_err(|e| Error::Bootstrap(super::Error::Control(e)))?;
-        Self::command(s, Command::BssInfo, &Self::bss_request(s, p, false)?)?;
+        let bss = match &six {
+            Some(codec) => codec.bss_request().map_err(Error::Codec)?,
+            None => Self::bss_request(s, p, false)?,
+        };
+        Self::command(s, Command::BssInfo, &bss)?;
         s.phase = Phase::NeedsDrain;
         Ok(())
     }
@@ -1092,15 +1215,22 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.receive_ba = core::array::from_fn(|_| None);
         s.transmit_ba = core::array::from_fn(|_| None);
         s.ba_actions.clear();
+        s.action.replies.clear();
         s.ba_management = None;
         s.ba_management_pn = None;
         s.profile = None;
         s.modern = None;
         s.edca = None;
+        s.slot_time = None;
+        s.channel = None;
+        s.channel_change = None;
+        s.csa = csa::State::default();
+        s.power_save = false;
         s.management = None;
         s.pmf_selected = None;
         s.pmf_authentication = None;
         s.authentication_deadline = None;
+        s.six_ghz = None;
         Ok(())
     }
     /// Actual interface disable ACKs then WFDMA disable/idle observation. This
@@ -1153,6 +1283,23 @@ pub enum Event {
         failure: Option<station::Failure>,
     },
     ConnectionLost(crate::net::wifi::mediatek::ring::rx::Frame),
+    /// The firmware's TX status for a frame that asked for it.
+    TxStatus(TxStatus),
+    /// `ieee80211_cqm_rssi_notify`: the signal crossed the monitor's
+    /// threshold, upward when `high`.
+    Rssi {
+        rssi: i32,
+        high: bool,
+    },
+    /// `cfg80211_ch_switch_started_notify`: the AP announced a switch to
+    /// `definition` in `count` beacons, asking for silence when `block_tx`.
+    ChannelSwitchStarted {
+        definition: ChannelDefinition,
+        count: u8,
+        block_tx: bool,
+    },
+    /// `cfg80211_ch_switch_notify`: the association now operates there.
+    ChannelSwitched(ChannelDefinition),
     Bss(scan::result::Bss),
     Ingress(Ingress),
     Raw(crate::net::wifi::mediatek::ring::rx::Frame),
@@ -1165,6 +1312,33 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Drop for Client<I, Q, C> {
             core::mem::forget(s)
         }
     }
+}
+/// `mt7925_mcu_rssi_monitor_event` over an event payload: each INFO TLV
+/// after the four-byte header reports the first TLV's RSSI.
+fn rssi_events(payload: &[u8], threshold: i32) -> Vec<Event> {
+    let mut out = Vec::new();
+    let tlvs = payload.get(4..).unwrap_or_default();
+    let Some(rssi) = tlvs
+        .get(4..8)
+        .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+    else {
+        return out;
+    };
+    let mut at = 0;
+    while let Some(tlv) = tlvs.get(at..at + 4) {
+        let len = usize::from(u16::from_le_bytes([tlv[2], tlv[3]]));
+        if len == 0 || len > tlvs.len() - at {
+            break;
+        }
+        if tlv[..2] == [0, 0] {
+            out.push(Event::Rssi {
+                rssi,
+                high: rssi > threshold,
+            });
+        }
+        at += len;
+    }
+    out
 }
 fn rates(elements: &[u8], band: wifi::Band) -> Result<(u16, u16), Error> {
     let table: &[u8] = if band == wifi::Band::Ghz2 {
@@ -1520,6 +1694,31 @@ pub(crate) mod tests {
         b.extend_from_slice(&protocol.to_be_bytes());
         b.extend_from_slice(&[1, 2, 3]);
         b
+    }
+    #[test]
+    fn rssi_events_report_crossings_like_mt7925_mcu_rssi_monitor_event() {
+        let mut payload = vec![3, 0, 0, 0];
+        payload.extend_from_slice(&[0, 0, 8, 0]);
+        payload.extend_from_slice(&(-75i32).to_le_bytes());
+        let events = super::rssi_events(&payload, -70);
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Rssi {
+                rssi: -75,
+                high: false
+            }]
+        ));
+        let events = super::rssi_events(&payload, -80);
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Rssi {
+                rssi: -75,
+                high: true
+            }]
+        ));
+        payload[6] = 0;
+        assert!(super::rssi_events(&payload, -70).is_empty());
+        assert!(super::rssi_events(&payload[..6], -70).is_empty());
     }
     #[test]
     fn actual_late_legacy_configuration_ack_cannot_reuse_cached_poll_time() {
@@ -2240,6 +2439,7 @@ pub(crate) mod tests {
                         layout: 0x7925,
                         words: [0; 4],
                     },
+                    rx_rate: None,
                     tsf: None,
                 },
                 SecurityStatus {

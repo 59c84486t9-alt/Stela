@@ -48,7 +48,10 @@ impl Registers for SleepRegisters {
     }
 }
 
-fn fixture(dma: &mut dyn DmaAllocator, speed: u8) -> (Host, Shared) {
+fn fixture(
+    dma: &mut dyn DmaAllocator,
+    speed: u8,
+) -> (Host, Shared, Rc<RefCell<hub::model::Hardware>>) {
     let leaf = || {
         let mut node = hub::model::Node::leaf(speed);
         node.interface_class = Some(0xff);
@@ -66,14 +69,14 @@ fn fixture(dma: &mut dyn DmaAllocator, speed: u8) -> (Host, Shared) {
     assert_eq!(devices.len(), 3);
     hardware.borrow_mut().root_status = Some(PP | CCS | PED | u32::from(speed) << PORT_SPEED_SHIFT);
     controller.registers = Box::new(SleepRegisters {
-        bus: hub::model::RegistersModel(hardware),
+        bus: hub::model::RegistersModel(hardware.clone()),
         saves: 0,
         restores: 0,
     });
     let shared = Rc::new(RefCell::new(controller));
     let host = Host::new(shared.clone(), &devices, dma, &mut failures);
     assert!(failures.is_empty(), "{failures:?}");
-    (host, shared)
+    (host, shared, hardware)
 }
 
 fn trapped(controller: &Shared, operation: impl FnOnce()) {
@@ -149,6 +152,57 @@ fn trapped(controller: &Shared, operation: impl FnOnce()) {
 }
 
 #[test]
+fn a_root_over_current_change_repowers_the_ports_like_port_event() {
+    let mut memory = vec![0u64; 512 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    // SAFETY: all hardware DMA allocations remain live through the host.
+    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let (mut host, _shared, hardware) = fixture(&mut dma, HIGH_SPEED);
+    let firmware = crate::firmware::HandoffProvider::new(None);
+    assert!(host.poll(&mut dma, &firmware).removed.is_empty());
+    // A transient over-current is acknowledged; the attachment stays.
+    *hardware.borrow_mut().root_status.as_mut().unwrap() |= OVER_CURRENT_CHANGE;
+    let changes = host.poll(&mut dma, &firmware);
+    assert!(changes.removed.is_empty() && changes.added.devices.is_empty());
+    assert_eq!(
+        hardware.borrow().root_status.unwrap() & OVER_CURRENT_CHANGE,
+        0
+    );
+}
+
+#[test]
+fn a_dead_host_controller_disconnects_every_device_like_usb_hc_died() {
+    let mut memory = vec![0u64; 512 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    // SAFETY: all hardware DMA allocations remain live through the host.
+    let mut dma = unsafe { RegionAllocator::new(start..start + memory.len() as u64 * 8) };
+    let (mut host, shared, _) = fixture(&mut dma, HIGH_SPEED);
+    let firmware = crate::firmware::HandoffProvider::new(None);
+    assert!(host.poll(&mut dma, &firmware).removed.is_empty());
+    let devices: Vec<_> = host.devices.iter().map(|d| (d.id, d.slot)).collect();
+    assert_eq!(devices.len(), 3);
+    shared.borrow_mut().died();
+    let changes = host.poll(&mut dma, &firmware);
+    let removed: Vec<_> = changes.removed.iter().map(|d| (d.id, d.slot)).collect();
+    assert_eq!(removed, devices);
+    assert!(changes.added.devices.is_empty());
+    assert!(
+        host.hubs
+            .iter()
+            .all(|hub| hub.retired && hub.recovery.is_none())
+    );
+    // Every slot is fenced and quarantined, as no Disable Slot can run.
+    for (_, slot) in &devices {
+        let c = shared.borrow();
+        let state = c.slots[usize::from(*slot)].as_ref().unwrap();
+        assert!(state.suspended && state.retiring);
+    }
+    // Nothing is reported twice.
+    let changes = host.poll(&mut dma, &firmware);
+    assert!(changes.removed.is_empty() && changes.added.devices.is_empty());
+}
+
+#[test]
 fn retained_hub_parent_and_retirement_authority_refuse_same_number_generation_before_effects() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let mut old_memory = vec![0u64; 512 * 1024];
@@ -161,8 +215,8 @@ fn retained_hub_parent_and_retirement_authority_refuse_same_number_generation_be
         // SAFETY: every replacement ring/context remains inside this allocation.
         let mut new_dma =
             unsafe { RegionAllocator::new(start..start + new_memory.len() as u64 * 8) };
-        let (mut original, _) = fixture(&mut old_dma, speed);
-        let (mut current, shared) = fixture(&mut new_dma, speed);
+        let (mut original, _, _) = fixture(&mut old_dma, speed);
+        let (mut current, shared, _) = fixture(&mut new_dma, speed);
         let old = original.hubs[0].device.id;
         let fresh = current.hubs[0].device.id;
         assert_eq!(old.hardware_slot(), fresh.hardware_slot());
@@ -248,8 +302,8 @@ fn original_child_identity_cannot_release_current_or_retire_parent_after_parent_
     // SAFETY: independent actual enumeration issues a foreign genuine parent ID.
     let mut foreign_dma =
         unsafe { RegionAllocator::new(start..start + foreign_memory.len() as u64 * 8) };
-    let (mut host, shared) = fixture(&mut dma, HIGH_SPEED);
-    let (foreign, _) = fixture(&mut foreign_dma, HIGH_SPEED);
+    let (mut host, shared, _) = fixture(&mut dma, HIGH_SPEED);
+    let (foreign, _, _) = fixture(&mut foreign_dma, HIGH_SPEED);
     let root = host.hubs[0].device.id;
     let leaf = host
         .devices
@@ -316,12 +370,12 @@ fn genuine_recovery_capability_refuses_an_independent_same_slot_hub_without_muta
     let start = new_memory.as_mut_ptr() as u64;
     // SAFETY: current controller DMA has separate live backing.
     let mut new_dma = unsafe { RegionAllocator::new(start..start + new_memory.len() as u64 * 8) };
-    let (mut original, _) = fixture(&mut old_dma, SUPER_SPEED);
+    let (mut original, _, _) = fixture(&mut old_dma, SUPER_SPEED);
     original
         .start_recovery(0, Some(1), &mut Changes::default())
         .unwrap();
     assert!(original.hubs[0].recovery.is_some());
-    let (current, shared) = fixture(&mut new_dma, SUPER_SPEED);
+    let (current, shared, _) = fixture(&mut new_dma, SUPER_SPEED);
     let current_id = current.hubs[0].device.id;
     assert_ne!(original.hubs[0].recovery.as_ref().unwrap().id(), current_id);
     original.controller = shared.clone();
@@ -347,14 +401,14 @@ fn public_resume_rejects_stale_snapshot_before_controller_restore_and_keeps_curr
     let start = new_memory.as_mut_ptr() as u64;
     // SAFETY: current suspended hardware owns independent live DMA backing.
     let mut new_dma = unsafe { RegionAllocator::new(start..start + new_memory.len() as u64 * 8) };
-    let (mut original, _) = fixture(&mut old_dma, SUPER_SPEED);
+    let (mut original, _, _) = fixture(&mut old_dma, SUPER_SPEED);
     let removed = original.suspend();
     assert!(
         removed.added.failures.is_empty(),
         "{:?}",
         removed.added.failures
     );
-    let (mut current, shared) = fixture(&mut new_dma, SUPER_SPEED);
+    let (mut current, shared, _) = fixture(&mut new_dma, SUPER_SPEED);
     let removed = current.suspend();
     assert!(
         removed.added.failures.is_empty(),

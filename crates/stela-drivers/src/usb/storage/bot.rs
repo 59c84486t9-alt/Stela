@@ -229,6 +229,9 @@ pub(super) struct Bot<I: Io> {
     settling: Option<u64>,
     /// The command begun and not yet ended ([`Self::begin`]).
     begun: Option<Begun>,
+    /// The data a failed command's data phase moved in, until the next
+    /// command: sd keeps it when the sense is RECOVERED ERROR.
+    failed_data: Option<Vec<u8>>,
 }
 
 /// A command between its wrapper and its status, one transfer at a time,
@@ -350,6 +353,7 @@ impl<I: Io> Bot<I> {
             reset_generation: 0,
             settling: None,
             begun: None,
+            failed_data: None,
         }
     }
     pub fn max_lun(&self) -> u8 {
@@ -358,8 +362,15 @@ impl<I: Io> Bot<I> {
     pub fn poisoned(&self) -> bool {
         self.poisoned
     }
+    pub fn now_us(&self) -> u64 {
+        self.io.now_us()
+    }
     pub fn delay(&self, micros: u64) {
         self.io.delay(micros);
+    }
+    /// What the last command's data phase moved in before it failed.
+    pub fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        self.failed_data.take()
     }
 
     pub fn generation(&self) -> u64 {
@@ -390,7 +401,7 @@ impl<I: Io> Bot<I> {
             // caller's data command or after an observed media change.
             self.initial_read = false;
             match self.command(lun, &cdb, Data::In(block_size)) {
-                Err(BlockError::Sense(sense)) if super::media::changed(&sense) => {
+                Err(BlockError::Sense(sense)) if super::media::changed(&sense, true) => {
                     return Err(BlockError::Sense(sense));
                 }
                 Err(error) if self.poisoned => return Err(error),
@@ -516,6 +527,7 @@ impl<I: Io> Bot<I> {
                 "invalid USB storage LUN or command",
             ));
         }
+        self.failed_data = None;
         let (length, is_in, out) = match data {
             Data::None => (0, false, None),
             Data::In(n) => (n, true, None),
@@ -604,7 +616,11 @@ impl<I: Io> Bot<I> {
         let Some(sensing) = sensing else {
             return Some(result);
         };
-        if let Err(error) = self.begin(lun, &scsi::request_sense(), Data::In(scsi::SENSE_BYTES)) {
+        // The failed command's data outlives the sense command.
+        let moved = self.failed_data.take();
+        let begun = self.begin(lun, &scsi::request_sense(), Data::In(scsi::SENSE_BYTES));
+        self.failed_data = moved;
+        if let Err(error) = begun {
             return Some(Err(match sensing {
                 Sensing::Failed => BlockError::CheckCondition,
                 Sensing::Synchronized => error,
@@ -748,6 +764,9 @@ impl<I: Io> Bot<I> {
             return self.failed(PROTOCOL_ERROR);
         }
         if status == CSW_FAILED {
+            if is_in && begun.sensing.is_none() {
+                self.failed_data = Some(received);
+            }
             return Err(BlockError::CheckCondition);
         }
         // transport.c detects bogus residue only from completely received,
@@ -1681,7 +1700,7 @@ mod tests {
         let state = io.0.clone();
         let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
         for lun in 0..=bot.max_lun() {
-            let identity = super::super::probe(&mut bot, lun, "slot", "serial").unwrap();
+            let (identity, _) = super::super::probe(&mut bot, lun, "slot", "serial").unwrap();
             assert_eq!(identity.blocks, 16);
             assert_eq!(
                 identity.serial,
@@ -1770,7 +1789,7 @@ mod tests {
             let io = model(start, start + memory.len() as u64 * 8, vec![Some(u)]);
             let state = io.0.clone();
             let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
-            let identity = super::super::probe(&mut bot, 0, "slot", "serial").unwrap();
+            let (identity, _) = super::super::probe(&mut bot, 0, "slot", "serial").unwrap();
             assert_eq!(identity.blocks, (1 << 32) + 8);
             assert_eq!(identity.block_size, 4096);
             assert!(identity.read_only);
@@ -1979,6 +1998,7 @@ mod tests {
                 reset_generation: 0,
                 settling: None,
                 begun: None,
+                failed_data: None,
             };
             assert!(
                 bot.command(1, &[0x2a, 0, 0, 0, 0, 0, 0, 0, 1, 0], Data::Out(&[1, 2, 3]))
@@ -2151,7 +2171,7 @@ mod tests {
         ));
         let mut disks = Vec::new();
         for lun in 0..2 {
-            let identity =
+            let (identity, removable) =
                 super::super::probe(&mut *bot.borrow_mut(), lun, "slot", "serial").unwrap();
             disks.push(super::super::Disk {
                 bot: bot.clone(),
@@ -2164,6 +2184,7 @@ mod tests {
                     ..identity
                 },
                 media: Rc::new(core::cell::Cell::new(true)),
+                removable,
                 running: None,
                 next_tag: 0,
             });
@@ -2503,7 +2524,7 @@ mod tests {
         let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
         // Samsung YP-CP3: 64-sector ceiling and incorrect CSW tags.
         bot.flags = quirks::Flags::from_id(0x04e8, 0x5122, 0x0000, true).unwrap();
-        let identity = super::super::probe(&mut bot, 0, "slot", "serial").unwrap();
+        let (identity, _) = super::super::probe(&mut bot, 0, "slot", "serial").unwrap();
         {
             let state = state.borrow();
             let read = state
@@ -2526,6 +2547,7 @@ mod tests {
             lun: 0,
             identity,
             media: Rc::new(core::cell::Cell::new(true)),
+            removable: false,
             running: None,
             next_tag: 0,
         };

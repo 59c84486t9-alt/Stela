@@ -9,9 +9,11 @@
 //! Each function retains its genuine resource owner. Neither USB IDs nor an
 //! initializer/media close grants shared CONNV3 reset authority;
 //! automatic shared recovery/retry remains unsupported while siblings may live.
+pub mod coredump;
 mod firmware;
 mod identity;
 mod initialize;
+pub(super) mod packet;
 mod wmt;
 pub use firmware::{FirmwareMetadata, Fragment, Patch, Section, SectionMetadata};
 pub use identity::{Chip, Identity, UsbIdentity};
@@ -62,6 +64,33 @@ pub struct Attempt {
 }
 /// No shared combo power/reset service has granted authority to retry a failed
 /// firmware upload. Failure is terminal for this attachment and requires rebind.
+/// What Linux btusb/btmtk tell the host stack about a MediaTek controller
+/// (btusb_probe's BTUSB_MEDIATEK branch and btmtk_usb_setup for MT79xx).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostPolicy {
+    /// The Bluetooth SIG company identifier Linux assigns: MediaTek, 70.
+    pub manufacturer: u16,
+    /// BTUSB_WIDEBAND_SPEECH from the explicit device table entry.
+    pub wideband_speech: bool,
+    pub broken_enhanced_setup_sync_conn: bool,
+    /// HCI_QUIRK_NON_PERSISTENT_SETUP: setup runs again on every power-on.
+    pub non_persistent_setup: bool,
+    pub microsoft_opcode: Option<u16>,
+    pub aosp: bool,
+}
+impl HostPolicy {
+    pub(super) fn for_device(usb: UsbIdentity) -> Self {
+        Self {
+            manufacturer: 70,
+            wideband_speech: usb.wideband_speech(),
+            broken_enhanced_setup_sync_conn: true,
+            non_persistent_setup: true,
+            // btmtk_usb_setup's MT7922/MT7925/MT7961 case.
+            microsoft_opcode: Some(0xfd30),
+            aosp: true,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryPolicy {
     FreshRebindRequired,
@@ -80,6 +109,7 @@ pub struct OwnedReport {
     pub local_version: [u8; 9],
     pub address: [u8; 6],
     pub recovery: RecoveryPolicy,
+    pub policy: HostPolicy,
 }
 #[derive(Debug)]
 pub enum Error {
@@ -533,6 +563,18 @@ mod tests {
                 assert_eq!(r.reset_completion, cc(0x0c03, &[0]));
                 assert_eq!(r.sections.len(), 2);
                 assert_eq!(r.recovery, RecoveryPolicy::FreshRebindRequired);
+                assert_eq!(
+                    r.policy,
+                    HostPolicy {
+                        manufacturer: 70,
+                        wideband_speech: r.identity.usb.vendor != 0x0e8d
+                            || [0x0608, 0x223c, 0x8c38].contains(&r.identity.usb.product),
+                        broken_enhanced_setup_sync_conn: true,
+                        non_persistent_setup: true,
+                        microsoft_opcode: Some(0xfd30),
+                        aosp: true,
+                    }
+                );
                 for s in &r.sections {
                     assert_eq!(
                         s.disposition,

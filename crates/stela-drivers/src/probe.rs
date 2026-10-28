@@ -168,7 +168,7 @@ pub fn claims(function: &Function) -> bool {
         || realtek::matches(function)
         || crate::audio::hda::pci::identify(function).is_ok()
         || function.class == nvme::CLASS
-        || function.class == ahci::CLASS
+        || ahci::matches(function)
         || sdhci::matches(function)
         || rtsx::matches(function)
         || function.class == xhci::CLASS
@@ -469,7 +469,7 @@ pub unsafe fn probe_with_provider(
                         .map(|card| Box::new(card) as Box<dyn BlockDevice>)
                         .collect()
                 })
-            } else if function.class == ahci::CLASS {
+            } else if ahci::matches(&function) {
                 ahci::attach(&mut function, handoff, dma).map(|attached| {
                     disks.device_failures.extend(
                         attached

@@ -176,6 +176,8 @@ impl Controller {
             self.identify_parent(attachment, original_parent, device.location.clone(), dma);
         if let Ok(fresh) = &result {
             self.slot(fresh.slot).unwrap().consumer = consumer;
+            // usb_reset_and_verify_device turns hardware LPM back on.
+            self.initial_usb2_lpm(fresh, attachment);
         }
         if result.is_err() {
             // A failed fresh enumeration may already have acknowledged Address
@@ -355,6 +357,9 @@ impl Controller {
                 "USB reset root device is disconnected or unpowered",
             ));
         }
+        // usb_reset_and_verify_device turns hardware LPM off first; a
+        // failure is ignored, as in Linux.
+        let _ = self.disable_usb2_lpm(port);
         // Clear all prior change bits to establish a fresh PRC/event transition.
         self.write_port(port, before & PORT_CHANGES);
         self.drain();
@@ -486,6 +491,9 @@ pub(crate) mod tests {
         pub reset_writes: usize,
         pub accesses: usize,
         pub trap_mmio: bool,
+        /// An unanswered command keeps CRCR.CRR set; aborts are ignored, so a
+        /// timeout finds the host dead.
+        stuck: Option<u64>,
         pub fault: Fault,
         pub hang_next: bool,
         pub device_task: bool,
@@ -538,6 +546,9 @@ pub(crate) mod tests {
             }
         }
         fn event(&mut self, parameter: u64, status: u32, kind: u32, slot: u8, dci: u8) {
+            if kind == COMMAND_COMPLETION && self.stuck == Some(parameter) {
+                self.stuck = None;
+            }
             let index = self.event_count % RING_TRBS;
             let cycle = if (self.event_count / RING_TRBS) & 1 == 0 {
                 1
@@ -558,6 +569,7 @@ pub(crate) mod tests {
         }
         fn command(&mut self) {
             let (at, parameter, status, control) = Self::take(&mut self.commands);
+            self.stuck = Some(at);
             let kind = control >> 10 & 63;
             let slot = (control >> 24) as u8;
             let dci = (control >> 16 & 31) as u8;
@@ -917,6 +929,8 @@ pub(crate) mod tests {
                     0x12 => {
                         task.requested = 36;
                         task.data = vec![0; 36];
+                        // RMB: the model's medium comes and goes.
+                        task.data[1] = 0x80;
                         task.data[2] = 6;
                         task.data[4] = 31;
                         task.data[8..16].copy_from_slice(b"STELAUSB");
@@ -1097,6 +1111,8 @@ pub(crate) mod tests {
                 } else {
                     0
                 }
+            } else if offset == 0x40 + CRCR {
+                if s.stuck.is_some() { CRCR_RUNNING } else { 0 }
             } else if offset == 0x40 + PORTSC {
                 if s.fault == Fault::ChangeAfterReset
                     && s.resets > 0
@@ -1286,6 +1302,7 @@ pub(crate) mod tests {
             reset_writes: 0,
             accesses: 0,
             trap_mmio: false,
+            stuck: None,
             fault: Fault::None,
             hang_next: false,
             device_task: false,
@@ -1322,6 +1339,7 @@ pub(crate) mod tests {
             max_slots,
             max_ports: 1,
             port_major: vec![if speed >= SUPER_SPEED { 3 } else { 2 }],
+            lpm: lpm::Host::default(),
             dcbaa: dcbaa.into(),
             _scratchpads: Vec::new(),
             commands,
@@ -1339,6 +1357,7 @@ pub(crate) mod tests {
             pending: Vec::new(),
             error: None,
             command_poisoned: false,
+            command_ring_stopped: false,
             location: "reset model".into(),
         };
         let mut device = controller

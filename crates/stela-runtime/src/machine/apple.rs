@@ -1908,6 +1908,15 @@ impl AppleDevices {
         self.usb_network().ok()?.take()
     }
 
+    /// The keyboard LEDs the guest set on the attached peripheral, Num Lock
+    /// in bit 0 as input LED codes number them.
+    pub fn keyboard_leds(&self) -> Option<u8> {
+        self.usb_masters
+            .iter()
+            .find_map(|master| master.peripheral.as_ref())
+            .map(|peripheral| peripheral.ports.input.leds())
+    }
+
     /// One host input change for the attached peripheral.
     pub fn input(&mut self, input: Input) -> Result<(), &'static str> {
         self.usb_masters

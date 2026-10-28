@@ -7,7 +7,10 @@
 // see THIRD_PARTY.md for the pinned sources, notices and implementation scope.
 use super::xhci::{Device, Endpoint, Interface, MAX_TD, Plan, STALL, Shared, setup};
 use crate::{
-    block::{BlockDevice, BlockError, Command, Features, Finished, Identity, Sense, Transport},
+    block::{
+        BlockDevice, BlockError, Command, Features, Finished, Identity, Sense, SenseCompletion,
+        Transport,
+    },
     bus::dma::DmaAllocator,
 };
 use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
@@ -23,6 +26,11 @@ const SCSI: u8 = 6;
 const BULK_ONLY: u8 = 0x50;
 const READY_TRIES: usize = 20;
 const READY_DELAY_US: u64 = 100_000;
+/// sd's `SD_MAX_RETRIES`, and the runtime after which a command is no
+/// longer requeued: (`SD_MAX_RETRIES` + 1) times sd's 30 s timeout
+/// (`scsi_cmd_runtime_exceeced`).
+const SD_MAX_RETRIES: u32 = 5;
+const SD_RUNTIME_US: u64 = (SD_MAX_RETRIES as u64 + 1) * 30_000_000;
 
 mod binding;
 pub use binding::Binding;
@@ -38,6 +46,7 @@ pub(super) fn plan(
 }
 
 /// Which way a command's data goes.
+#[derive(Clone, Copy)]
 pub enum Data<'a> {
     None,
     In(usize),
@@ -65,6 +74,8 @@ trait Scsi {
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError>;
     fn delay(&self, micros: u64);
+    /// The transport's clock, in microseconds.
+    fn now_us(&self) -> u64;
     fn poisoned(&self) -> bool;
     /// Whether [`Self::begin`] runs commands without waiting for them.
     fn queued(&self) -> bool {
@@ -88,7 +99,9 @@ trait Scsi {
     fn busy(&mut self) -> bool {
         false
     }
-    fn media_publication(&mut self, _lun: Self::Lun, _valid: Rc<Cell<bool>>) {}
+    /// What the last command's data phase moved in before it failed.
+    fn take_failed_data(&mut self) -> Option<Vec<u8>>;
+    fn media_publication(&mut self, _lun: Self::Lun, _valid: Rc<Cell<bool>>, _removable: bool) {}
     fn max_lun(&self) -> u8 {
         0
     }
@@ -135,8 +148,14 @@ impl<I: Io> Scsi for Bot<I> {
     fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         Bot::command(self, lun, cdb, data)
     }
+    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        Bot::take_failed_data(self)
+    }
     fn delay(&self, micros: u64) {
         Bot::delay(self, micros);
+    }
+    fn now_us(&self) -> u64 {
+        Bot::now_us(self)
     }
     fn poisoned(&self) -> bool {
         Bot::poisoned(self)
@@ -197,8 +216,14 @@ impl Scsi for uas::Host {
     ) -> Result<Vec<u8>, BlockError> {
         uas::Host::command(self, lun.bytes(), cdb, data)
     }
+    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        uas::Host::take_failed_data(self)
+    }
     fn delay(&self, micros: u64) {
         uas::Host::delay(self, micros);
+    }
+    fn now_us(&self) -> u64 {
+        uas::Host::now_us(self)
     }
     fn poisoned(&self) -> bool {
         self.requires_rebind()
@@ -241,6 +266,8 @@ struct Disk<T: Scsi> {
     lun: T::Lun,
     identity: Identity,
     media: Rc<Cell<bool>>,
+    /// INQUIRY's RMB: a UNIT ATTENTION reports a media change.
+    removable: bool,
     /// The command this unit runs, as SCSI commands one at a time
     /// ([`Disk::start`]).
     running: Option<Running>,
@@ -423,12 +450,14 @@ fn quarantined() -> BlockError {
 fn publication<T: Scsi>(
     owner: &Rc<RefCell<T>>,
     lun: T::Lun,
-    mut identity: Identity,
+    (mut identity, removable): (Identity, bool),
 ) -> Result<Disk<T>, BlockError> {
     let media = Rc::new(Cell::new(true));
     // The cache query is still part of revalidation. Register this publication
     // before it can report a media change, including for the first/only LUN.
-    owner.borrow_mut().media_publication(lun, media.clone());
+    owner
+        .borrow_mut()
+        .media_publication(lun, media.clone(), removable);
     let (write_cache, fua) = caching(&mut *owner.borrow_mut(), lun)?;
     let size = identity.block_size as usize;
     identity.features = Features {
@@ -443,6 +472,7 @@ fn publication<T: Scsi>(
         lun,
         identity,
         media,
+        removable,
         running: None,
         next_tag: 0,
     })
@@ -496,7 +526,7 @@ fn publish_unit<T: Scsi>(
         .and_then(|bytes| {
             probe_identified(&mut *owner.borrow_mut(), lun, &bytes, &location, serial)
         })
-        .and_then(|identity| publication(owner, lun, identity));
+        .and_then(|identified| publication(owner, lun, identified));
     match result {
         Ok(disk) => disks.push(disk),
         Err(error) => failures.push((location, error)),
@@ -582,7 +612,7 @@ fn discover_units<T: Scsi<Lun = u8>>(
     for lun in 0..=max_lun {
         let location = format!("{prefix} LUN {lun}");
         let identified = probe(&mut *bot.borrow_mut(), lun, &location, serial);
-        let result = identified.and_then(|identity| publication(&bot, lun, identity));
+        let result = identified.and_then(|identified| publication(&bot, lun, identified));
         match result {
             Ok(disk) => disks.push(disk),
             Err(error) => {
@@ -600,12 +630,13 @@ fn discover_units<T: Scsi<Lun = u8>>(
     Ok(disks)
 }
 
+/// The unit's identity and whether its medium is removable.
 fn probe<T: Scsi>(
     bot: &mut T,
     lun: T::Lun,
     location: &str,
     serial: &str,
-) -> Result<Identity, BlockError> {
+) -> Result<(Identity, bool), BlockError> {
     let inquiry = inquiry(bot, lun)?;
     probe_identified(bot, lun, &inquiry, location, serial)
 }
@@ -631,7 +662,7 @@ fn probe_identified<T: Scsi>(
     inquiry: &[u8],
     location: &str,
     serial: &str,
-) -> Result<Identity, BlockError> {
+) -> Result<(Identity, bool), BlockError> {
     if inquiry[0] != 0 {
         return Err(BlockError::Unsupported(
             "USB LUN is not an attached direct-access block device",
@@ -730,7 +761,7 @@ fn probe_identified<T: Scsi>(
             }
         }
     };
-    Ok(Identity {
+    let identity = Identity {
         transport: Transport::Usb,
         location: location.into(),
         model: format!("{} {}", text(&inquiry[8..16]), text(&inquiry[16..32]))
@@ -746,7 +777,8 @@ fn probe_identified<T: Scsi>(
         read_only,
         // Read with the Caching page once the disk is published.
         features: Features::default(),
-    })
+    };
+    Ok((identity, inquiry[1] & 0x80 != 0))
 }
 
 fn capacity16<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<(u64, u32), BlockError> {
@@ -769,10 +801,53 @@ impl<T: Scsi> Disk<T> {
     pub fn command(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         self.check_media()?;
         let result = self.bot.borrow_mut().command(self.lun, cdb, data);
-        if matches!(&result, Err(BlockError::Sense(sense)) if media::changed(sense)) {
+        if matches!(&result, Err(BlockError::Sense(sense)) if media::changed(sense, self.removable))
+        {
             self.media.set(false);
         }
         result
+    }
+    /// sd's I/O on this unit: `scsi_check_sense` retries NEEDS_RETRY sense
+    /// up to `SD_MAX_RETRIES` times, and `scsi_io_completion_action`
+    /// completes the rest: a UNIT ATTENTION is retried at once on a fixed
+    /// unit and is a media change on a removable one, a transient NOT READY
+    /// is requeued after its delay, and nothing is retried once the command
+    /// has run past sd's runtime limit.
+    fn io(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        let started = self.bot.borrow().now_us();
+        let mut retries = 0;
+        loop {
+            let sense = match self.command(cdb, data) {
+                Err(BlockError::Sense(sense)) => sense,
+                result => return result,
+            };
+            let failed = Err(BlockError::Sense(sense));
+            let exceeded = self.bot.borrow().now_us().wrapping_sub(started) > SD_RUNTIME_US;
+            if sense.needs_retry() && retries < SD_MAX_RETRIES && !exceeded {
+                retries += 1;
+                continue;
+            }
+            match sense.completion(self.removable) {
+                // sd_done counts the whole buffer good; only data the
+                // transport moved in full is returned.
+                SenseCompletion::Done => {
+                    return match data {
+                        Data::In(length) => match self.bot.borrow_mut().take_failed_data() {
+                            Some(bytes) if bytes.len() == length => Ok(bytes),
+                            _ => failed,
+                        },
+                        _ => Ok(Vec::new()),
+                    };
+                }
+                SenseCompletion::Retry(_) if exceeded => return failed,
+                SenseCompletion::Retry(delay) => {
+                    if delay != 0 {
+                        self.bot.borrow().delay(delay);
+                    }
+                }
+                SenseCompletion::MediaChanged | SenseCompletion::Fail => return failed,
+            }
+        }
     }
     fn check_media(&self) -> Result<(), BlockError> {
         if self.media.get() {
@@ -883,7 +958,7 @@ impl<T: Scsi> Disk<T> {
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
             let cdb = self.cdb(true, fua, lba, blocks);
-            self.command(&cdb, Data::Out(chunk))?;
+            self.io(&cdb, Data::Out(chunk))?;
             lba += u64::from(blocks);
         }
         Ok(())
@@ -929,7 +1004,7 @@ impl<T: Scsi> BlockDevice for Disk<T> {
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
             let cdb = self.cdb(false, false, lba, blocks);
-            let data = self.command(&cdb, Data::In(chunk.len()))?;
+            let data = self.io(&cdb, Data::In(chunk.len()))?;
             if data.len() != chunk.len() {
                 return Err(BlockError::Protocol("short USB storage read"));
             }
@@ -949,8 +1024,7 @@ impl<T: Scsi> BlockDevice for Disk<T> {
 
     fn flush_cache(&mut self) -> Result<(), BlockError> {
         self.check_media()?;
-        self.command(&scsi::synchronize_cache(), Data::None)
-            .map(|_| ())
+        self.io(&scsi::synchronize_cache(), Data::None).map(|_| ())
     }
 
     /// A transport that begins commands without waiting runs one block
@@ -995,7 +1069,9 @@ impl<T: Scsi> BlockDevice for Disk<T> {
             running.begun = None;
             match ended {
                 Err(error) => {
-                    if matches!(&error, BlockError::Sense(sense) if media::changed(sense)) {
+                    if matches!(&error, BlockError::Sense(sense)
+                        if media::changed(sense, self.removable))
+                    {
                         self.media.set(false);
                     }
                     running.result = Some(Err(error));
@@ -1098,5 +1174,120 @@ impl BlockDevice for UsbDisk {
             UsbTransport::Bot(disk) => disk.finish(tag),
             UsbTransport::Uas(disk) => disk.finish(tag),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::collections::VecDeque;
+
+    /// A unit answering each command with the next sense, or success; each
+    /// command takes a second.
+    struct Unit {
+        senses: VecDeque<Option<Sense>>,
+        commands: usize,
+        now: Cell<u64>,
+        delays: RefCell<Vec<u64>>,
+        failed: Option<Vec<u8>>,
+    }
+    impl Scsi for Unit {
+        type Lun = u8;
+        fn command(&mut self, _: u8, _: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+            self.commands += 1;
+            self.now.set(self.now.get() + 1_000_000);
+            match self.senses.pop_front().flatten() {
+                // A failed read still moves its data.
+                Some(sense) => {
+                    if let Data::In(bytes) = data {
+                        self.failed = Some(vec![0x5a; bytes]);
+                    }
+                    Err(BlockError::Sense(sense))
+                }
+                None => Ok(match data {
+                    Data::In(bytes) => vec![0; bytes],
+                    _ => Vec::new(),
+                }),
+            }
+        }
+        fn delay(&self, micros: u64) {
+            self.now.set(self.now.get() + micros);
+            self.delays.borrow_mut().push(micros);
+        }
+        fn now_us(&self) -> u64 {
+            self.now.get()
+        }
+        fn poisoned(&self) -> bool {
+            false
+        }
+        fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+            self.failed.take()
+        }
+    }
+
+    fn disk(removable: bool, senses: &[Option<Sense>]) -> Disk<Unit> {
+        Disk {
+            bot: Rc::new(RefCell::new(Unit {
+                senses: senses.iter().copied().collect(),
+                commands: 0,
+                now: Cell::new(0),
+                delays: RefCell::new(Vec::new()),
+                failed: None,
+            })),
+            lun: 0,
+            identity: Identity {
+                transport: Transport::Usb,
+                location: String::new(),
+                model: String::new(),
+                serial: String::new(),
+                blocks: 8,
+                block_size: 512,
+                read_only: false,
+                features: Features {
+                    write_cache: true,
+                    ..Features::default()
+                },
+            },
+            media: Rc::new(Cell::new(true)),
+            removable,
+            running: None,
+            next_tag: 0,
+        }
+    }
+
+    #[test]
+    fn io_sense_follows_scsi_check_sense_and_sd_completion() {
+        let sense = |key, asc, ascq| Some(Sense { key, asc, ascq });
+        let reset = sense(Sense::UNIT_ATTENTION, Sense::RESET_OCCURRED, 0);
+        // A fixed unit retries a UNIT ATTENTION and keeps its medium.
+        let mut fixed = disk(false, &[reset]);
+        assert_eq!(fixed.flush_cache(), Ok(()));
+        assert_eq!(fixed.bot.borrow().commands, 2);
+        assert!(fixed.media.get());
+        // A removable one reports a media change and refuses access.
+        let mut removable = disk(true, &[reset]);
+        assert!(matches!(removable.flush_cache(), Err(BlockError::Sense(_))));
+        assert!(!removable.media.get());
+        // Becoming ready: five NEEDS_RETRY retries, then a delayed requeue.
+        let becoming = sense(Sense::NOT_READY, Sense::NOT_READY_CAUSE, 0x01);
+        let mut unit = disk(false, &[becoming; 7]);
+        assert_eq!(unit.read(0, &mut [0; 512]), Ok(()));
+        assert_eq!(unit.bot.borrow().commands, 8);
+        assert_eq!(*unit.bot.borrow().delays.borrow(), [9_000, 9_000]);
+        // An aborted command is retried five times, then fails.
+        let aborted = sense(Sense::ABORTED_COMMAND, 0, 0);
+        let mut unit = disk(false, &[aborted; 8]);
+        assert!(unit.write(0, &[0; 512]).is_err());
+        assert_eq!(unit.bot.borrow().commands, 6);
+        // A recovered error completes a write, and a read with its data.
+        let recovered = sense(Sense::RECOVERED_ERROR, 0x17, 0x01);
+        assert_eq!(disk(false, &[recovered]).write(0, &[0; 512]), Ok(()));
+        let mut block = [0; 512];
+        assert_eq!(disk(false, &[recovered]).read(0, &mut block), Ok(()));
+        assert_eq!(block, [0x5a; 512]);
+        // Requeues stop once the command has run for six timeouts.
+        let mut unit = disk(false, &[reset; 400]);
+        assert!(unit.flush_cache().is_err());
+        assert_eq!(unit.bot.borrow().commands, 181);
     }
 }

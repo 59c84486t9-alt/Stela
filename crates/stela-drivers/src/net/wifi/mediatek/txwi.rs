@@ -108,13 +108,17 @@ pub struct Config {
 enum QualifiedAction {
     BlockAck(u8),
     SaQuery,
+    /// Any other unprotected action, ordinary management to
+    /// `mt7925_mac_write_txwi_80211`.
+    Other,
 }
 
 pub fn encode(c: Config) -> Result<[u8; 32], Error> {
     encode_inner(c, None)
 }
 
-/// Body-qualified MT7925 Block Ack and protected unicast SA Query path.
+/// Body-qualified MT7925 Block Ack, protected unicast SA Query and other
+/// unprotected action path.
 /// Metadata-only Action encoding remains refused: the real category/action bytes select the donor
 /// ADDBA-request TID independently of ordinary response/DELBA management.
 /// This constructs no agreement, radio permission, protection or air receipt.
@@ -153,8 +157,10 @@ pub(in crate::net::wifi::mediatek) fn encode_mpdu(
         }
         return encode_inner(c, Some(QualifiedAction::SaQuery));
     }
-    if body.first() != Some(&3) {
-        return Err(Error::UnsupportedFrame);
+    match body.first() {
+        Some(3) => {}
+        Some(_) if !c.protect => return encode_inner(c, Some(QualifiedAction::Other)),
+        _ => return Err(Error::UnsupportedFrame),
     }
     let action = *body.get(1).ok_or(Error::InvalidHeader)?;
     let minimum = match action {
@@ -626,8 +632,10 @@ mod tests {
             assert_eq!(w[2] & 0x3f, 13);
             assert_ne!(w[1] & (1 << 31), 0);
             assert_eq!(encode_mpdu(c, &bytes[..25]), Err(Error::UnsupportedFrame));
+            // Another category is ordinary management.
             bytes[24] = 4;
-            assert_eq!(encode_mpdu(c, &bytes), Err(Error::UnsupportedFrame));
+            let w = words(encode_mpdu(c, &bytes).unwrap());
+            assert_eq!(((w[1] >> 21) & 15, w[2] & 0x3f), (0, 13));
         }
     }
     #[test]

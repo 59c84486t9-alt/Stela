@@ -22,6 +22,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 mod aggregate;
 mod context;
+pub mod csa;
 pub mod external;
 mod sequence;
 pub use context::{AssociationContext, AssociationIntent, NativeBssObservation};
@@ -167,6 +168,8 @@ pub struct Station {
     external: Option<Arc<external::Session>>,
     selected_beacon: Option<super::scan::result::Bss>,
     context: Option<Arc<AssociationContext>>,
+    /// Where a channel switch moved the association of this context ticket.
+    switched: Option<(Ticket, operations::ChannelDefinition)>,
     pmf_observation: Option<Arc<NativeBssObservation>>,
     epoch: u64,
     serial: u32,
@@ -191,6 +194,7 @@ impl Station {
             external: None,
             selected_beacon: None,
             context: None,
+            switched: None,
             pmf_observation: None,
             epoch: 0,
             serial: 0,
@@ -388,6 +392,43 @@ impl Station {
         Ok(())
     }
 
+    /// The channel frames of the current join use: the association's
+    /// operating channel once one exists.
+    pub(crate) fn current_channel(&self) -> Option<super::Channel> {
+        self.operating_definition()
+            .map(|definition| definition.control)
+            .or(self.join.as_ref().map(|join| join.channel))
+    }
+
+    /// The channel the current association operates: its own, or where a
+    /// channel switch moved it.
+    pub fn operating_definition(&self) -> Option<operations::ChannelDefinition> {
+        let context = self.context.as_ref()?;
+        Some(match self.switched {
+            Some((ticket, definition)) if ticket == context.ticket() => definition,
+            _ => context.definition(),
+        })
+    }
+
+    /// mac80211 `ieee80211_chswitch_done`: the associated `context` now
+    /// operates `definition`, on the same band.
+    pub fn switch_channel(
+        &mut self,
+        context: &AssociationContext,
+        definition: operations::ChannelDefinition,
+    ) -> Result<(), Error> {
+        self.validate_association_context(context)?;
+        if self.phase != Phase::Associated {
+            return Err(Error::NotAssociated);
+        }
+        definition.validate().map_err(Error::Phy)?;
+        if definition.control.band != context.channel().band {
+            return Err(Error::Unsupported("channel switch to another band"));
+        }
+        self.switched = Some((context.ticket(), definition));
+        Ok(())
+    }
+
     pub fn association_context(&self) -> Option<&AssociationContext> {
         self.context
             .as_deref()
@@ -469,15 +510,13 @@ impl Station {
             return Err(Error::Stale);
         }
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
         if (
             frame.radio.band,
             frame.radio.channel,
             frame.radio.frequency_mhz,
-        ) != (
-            join.channel.band,
-            join.channel.number,
-            join.channel.frequency_mhz,
-        ) {
+        ) != (channel.band, channel.number, channel.frequency_mhz)
+        {
             return Err(Error::WrongChannel);
         }
         if frame.fcs_error || frame.monitor_only {
@@ -861,6 +900,7 @@ pub(crate) mod tests {
                     layout: 1,
                     words: [0; 4],
                 },
+                rx_rate: None,
                 tsf: None,
             },
             SecurityStatus::default(),
@@ -1644,6 +1684,42 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(configuration(&mut Station::new(LOCAL).unwrap(), j.clone(), beacon(&j)).is_err());
+    }
+
+    #[test]
+    fn admission_controlled_categories_downgrade_like_ieee80211_downgrade_queue() {
+        let j = modern_join();
+        let b = beacon(&j);
+        // Voice and video require admission control.
+        let mut elements = modern_ies(true);
+        let mut at = 0;
+        while at + 2 <= elements.len() {
+            let len = usize::from(elements[at + 1]);
+            if elements[at] == 221 && elements[at + 2..at + 6] == [0, 0x50, 0xf2, 2] {
+                for record in (at + 10..at + 2 + len).step_by(4) {
+                    if (elements[record] >> 5) & 3 >= 2 {
+                        elements[record] |= 0x10;
+                    }
+                }
+            }
+            at += 2 + len;
+        }
+        let ticket = Ticket {
+            epoch: 1,
+            serial: 2,
+        };
+        let context =
+            AssociationContext::build(ticket, &j, &b, &response_metadata(elements)).unwrap();
+        let mut ef = vec![0; 34];
+        ef[12..16].copy_from_slice(&[8, 0, 0x45, 46 << 2]);
+        let mut eapol = vec![0; 14];
+        eapol[12..].copy_from_slice(&[0x88, 0x8e]);
+        let mut cs1 = ef.clone();
+        cs1[15] = 8 << 2;
+        assert_eq!(
+            [&ef, &eapol, &cs1].map(|frame| data::data_tid(&context, None, None, frame)),
+            [Some(3), Some(3), Some(1)]
+        );
     }
 
     #[test]

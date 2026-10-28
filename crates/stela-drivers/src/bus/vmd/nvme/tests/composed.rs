@@ -381,13 +381,11 @@ fn composed_failed_d0_and_posted_bme_readback_never_issue_queue_dma() {
 }
 
 #[test]
-fn composed_bad_or_delayed_cq_and_cache_failures_fence_all_stale_siblings() {
+fn composed_bad_cq_and_cache_failures_fence_all_stale_siblings() {
     for fault in [
         Fault::Cid,
         Fault::Sqid,
         Fault::Head,
-        Fault::Phase,
-        Fault::Delayed,
         Fault::DeviceVisibility,
         Fault::CpuVisibility,
     ] {
@@ -398,16 +396,8 @@ fn composed_bad_or_delayed_cq_and_cache_failures_fence_all_stale_siblings() {
         let before = f.protocol.snapshot();
         f.protocol.fault(fault);
         let mut output = [0xa5; 512];
-        let clock = model_clock();
-        let started = clock.try_start().unwrap();
         assert!(disk.read(0, &mut output).is_err());
-        if matches!(fault, Fault::Phase | Fault::Delayed) {
-            assert!(clock.try_elapsed_us(started).unwrap() >= 1_000);
-        }
         assert_eq!(output, [0xa5; 512]);
-        if matches!(fault, Fault::Delayed) {
-            f.protocol.late_completion();
-        }
         let failed = f.protocol.snapshot();
         assert_eq!(failed.sync_cpu, before.sync_cpu);
         f.assert_retained(&returned, 6);
@@ -417,6 +407,46 @@ fn composed_bad_or_delayed_cq_and_cache_failures_fence_all_stale_siblings() {
         assert_eq!(output, [0xa5; 512]);
         assert_eq!(f.protocol.snapshot().commands, failed.commands);
         f.protocol.fault(Fault::None);
+        disk.retire_owned().unwrap();
+        drop(sibling);
+        drop(attached);
+        drop(f.take_stopped_model(&mut returned));
+        assert_eq!(f.drops.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[test]
+fn composed_timeouts_reset_the_controller_with_dma_contained_like_linux() {
+    for fault in [Fault::Phase, Fault::Delayed] {
+        let mut f = Fixture::new();
+        let (mut attached, mut returned) = f.attached();
+        let disk = &mut attached.namespaces[0];
+        let mut sibling = Protocol::sibling(disk);
+        let before = f.protocol.snapshot();
+        f.protocol.fault(fault);
+        let mut output = [0xa5; 512];
+        let clock = model_clock();
+        let started = clock.try_start().unwrap();
+        assert!(disk.read(0, &mut output).is_err());
+        assert!(clock.try_elapsed_us(started).unwrap() >= 1_000);
+        assert_eq!(output, [0xa5; 512]);
+        // nvme_timeout aborts, then nvme_dev_disable stops the controller
+        // and its DMA before the CPU reads any shared memory.
+        let events = f.protocol.snapshot().events;
+        let events = &events[before.events.len()..];
+        let drained = events.iter().position(|event| *event == "drain").unwrap();
+        assert!(!events[..drained].contains(&"cpu"));
+        f.protocol.fault(Fault::None);
+        if matches!(fault, Fault::Phase) {
+            // No completion was ever visible, so the reset's own commands
+            // failed and the controller was removed as dead.
+            assert!(sibling.flush().is_err());
+            assert!(disk.write(0, &[1; 512]).is_err());
+        } else {
+            // Every reset succeeded; only the held I/O kept timing out.
+            disk.read(0, &mut output).unwrap();
+            sibling.flush().unwrap();
+        }
         disk.retire_owned().unwrap();
         drop(sibling);
         drop(attached);

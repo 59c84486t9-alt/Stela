@@ -82,7 +82,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 admission,
                 self,
                 wifi::regulatory::NativeManagementUse::Receive,
-                |client, _| client.poll_inner(now, source, policy, None),
+                |client, _| client.poll_inner(now, source, policy, None, None),
             )
         }
         .map_err(Error::Regulatory)?

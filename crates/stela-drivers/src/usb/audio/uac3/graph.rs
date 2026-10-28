@@ -159,6 +159,7 @@ pub(super) fn parse<C: Control>(
                 }
                 Entity::ClockSource {
                     id: d[3],
+                    attributes: d[4],
                     controls: access32(le32(d, 5), 2)?,
                 }
             }

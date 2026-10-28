@@ -3,12 +3,43 @@
 //! Shared MT7925 media and Realtek CVSD SCO owner. Stream retirement never authorizes a shared
 //! connectivity reset, power transition or Wi-Fi sibling retirement.
 use super::{Bindings, Error, Kind, Pair, Result, Voice, framing};
+use crate::usb::bluetooth::mediatek::{
+    coredump::Collector,
+    packet::DUMP_HANDLE,
+    wmt::{self, WmtEvent},
+};
 use crate::{
     block::BlockError,
     bus::dma::DmaAllocator,
     usb::bluetooth::{Hci, InitializationReport, Io, Packet, State},
 };
 use alloc::vec::Vec;
+
+/// The MediaTek dump collector for a validated MediaTek initialization.
+fn collector<B: Io>(hci: &Hci<B>) -> Option<Collector> {
+    match hci.initialization() {
+        Some(Ok(InitializationReport::MediaTek(report))) => Some(Collector::new(
+            report.identity.device_id,
+            report.identity.firmware_version,
+        )),
+        _ => None,
+    }
+}
+
+/// HCI_INIT_TIMEOUT, btmtk_usb_hci_wmt_sync's wait for the WMT event.
+const WMT_TIMEOUT_US: u64 = 10_000_000;
+/// btmtk_usb_submit_wmt_recv_urb's vendor EP0 IN for HCI_WMT_MAX_EVENT_SIZE.
+const WMT_EVENT: [u8; 8] = [0xc0, 1, 0x30, 0, 0, 0, 64, 0];
+
+/// What btusb_mtk_shutdown observed before the function retired.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ShutdownReport {
+    /// The WMT function-off event; Linux requires only its operation.
+    pub function_off: WmtEvent,
+    /// Interrupt-pipe observations in wire order while it was awaited,
+    /// including the 0xfc6f command's own flow-control event.
+    pub asynchronous: Vec<Received>,
+}
 
 /// One completed media USB observation. Loss is explicit, never a successful
 /// empty packet; the backend may reuse DMA only after a terminal completion.
@@ -100,6 +131,8 @@ pub struct Session<B: MediaIo> {
     sco_frames: framing::Framer,
     iso_frames: framing::Framer,
     pending: Vec<Received>,
+    /// MediaTek firmware dump assembly; other vendors have none.
+    coredump: Option<Collector>,
     lifecycle: Lifecycle,
     setup: Option<SetupReport>,
     last_reset: Option<SetupReport>,
@@ -115,6 +148,7 @@ impl<B: MediaIo> Session<B> {
         let result = Self::prepare(&mut hci, dma, command_credits);
         match result {
             Ok((bindings, setup, pending)) => Ok(Self {
+                coredump: collector(&hci),
                 hci,
                 bindings,
                 setup: Some(setup),
@@ -176,6 +210,7 @@ impl<B: MediaIo> Session<B> {
         })();
         match result {
             Ok(bindings) => Ok(Self {
+                coredump: None,
                 hci,
                 bindings,
                 sco: None,
@@ -516,6 +551,24 @@ impl<B: MediaIo> Session<B> {
                 .into_iter()
                 .map(Received::Hci),
         );
+        // btmtk_usb_recv_acl forwards each dump frame as a diagnostic and
+        // also feeds btmtk_process_coredump.
+        if let Some(collector) = self.coredump.as_mut() {
+            let now = self.hci.io.now_us();
+            let mut ended = collector.expire(now);
+            for received in &output {
+                if let Received::Hci(Packet::Diagnostic(frame)) = received
+                    && frame.len() >= 2
+                    && u16::from_le_bytes([frame[0], frame[1]]) == DUMP_HANDLE
+                    && ended.is_none()
+                {
+                    ended = collector.feed(frame, now);
+                }
+            }
+            if let Some(dump) = ended {
+                return Err(self.fail(Error::ControllerDump(alloc::boxed::Box::new(dump))));
+            }
+        }
         for kind in [Kind::Iso, Kind::Sco] {
             if kind == Kind::Iso && !self.bindings.has_iso() {
                 continue;
@@ -582,6 +635,65 @@ impl<B: MediaIo> Session<B> {
             .map_err(|e| self.fail(e.into()))?;
         self.lifecycle = Lifecycle::Running;
         Ok(())
+    }
+    /// btusb_mtk_shutdown: WMT function control off, then the ISO interface
+    /// and transport retire. `command_credits` is the caller's actual HCI
+    /// allowance; zero refuses without effects. MediaTek only; any failure
+    /// is terminal.
+    pub fn shutdown(&mut self, command_credits: u8) -> Result<ShutdownReport> {
+        self.hci.io.validate()?;
+        if !matches!(self.lifecycle, Lifecycle::Running | Lifecycle::Quiescent)
+            || self.hci.state() != State::Open
+        {
+            return Err(Error::Unsupported("media session is not open"));
+        }
+        if !matches!(
+            self.hci.initialization(),
+            Some(Ok(InitializationReport::MediaTek(_)))
+        ) {
+            return Err(Error::Unsupported("WMT shutdown is MediaTek-only"));
+        }
+        if command_credits == 0 {
+            return Err(Error::Packet(
+                "actual available shutdown HCI credit required",
+            ));
+        }
+        let report = self.function_off().map_err(|e| self.fail(e))?;
+        self.close()?;
+        Ok(report)
+    }
+    fn function_off(&mut self) -> Result<ShutdownReport> {
+        let command = wmt::command(wmt::FUNCTION, 0, &[0])
+            .map_err(|_| Error::Packet("WMT function control command"))?;
+        self.hci.submit_command(&command).map_err(Error::Hci)?;
+        let deadline = self.hci.io.now_us().saturating_add(WMT_TIMEOUT_US);
+        let mut asynchronous = core::mem::take(&mut self.pending);
+        loop {
+            for packet in self.hci.poll().map_err(Error::Hci)? {
+                if asynchronous.len() >= 64 {
+                    return Err(Error::Packet("bounded shutdown asynchronous packets"));
+                }
+                asynchronous.push(Received::Hci(packet));
+            }
+            let bytes = self.hci.io.control_read(WMT_EVENT)?;
+            if !bytes.is_empty() {
+                let function_off = WmtEvent::parse(bytes, wmt::FUNCTION)
+                    .map_err(|_| Error::Packet("WMT function control event"))?;
+                return Ok(ShutdownReport {
+                    function_off,
+                    asynchronous,
+                });
+            }
+            let now = self.hci.io.now_us();
+            if now >= deadline {
+                return Err(Error::Transport(BlockError::Timeout));
+            }
+            // btmtk_usb_wmt_recv relaxes 500 us before resubmitting an empty IN.
+            while self.hci.io.now_us() < now.saturating_add(500) {
+                crate::waiting();
+                core::hint::spin_loop();
+            }
+        }
     }
     pub fn close(&mut self) -> Result<()> {
         self.hci.io.validate()?;

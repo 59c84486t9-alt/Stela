@@ -3,11 +3,7 @@
 use super::super::descriptors::{capacity, service_interval};
 use super::super::{Control, Error, Format, Sync};
 use super::{Reader, graph::ParsedGraph};
-use crate::{
-    audio::Direction,
-    bytes::{le16, le32},
-    usb::xhci::Interface,
-};
+use crate::{audio::Direction, bytes::le16, usb::xhci::Interface};
 use alloc::vec::Vec;
 
 pub(super) fn parse<C: Control>(
@@ -127,9 +123,6 @@ pub(super) fn parse<C: Control>(
     if endpoint.len() != 1 || endpoint[0].len() != 10 {
         return Err(Error::Descriptor("UAC3 class-specific endpoint extent"));
     }
-    if le32(endpoint[0], 3) != 0 {
-        return Err(Error::Unsupported("UAC3 endpoint pitch/overrun controls"));
-    }
     let power = parsed
         .power
         .iter()
@@ -158,5 +151,6 @@ pub(super) fn parse<C: Control>(
         service_microframes: interval,
         max_bytes: maximum,
         fill_max: false,
+        pitch: None,
     })
 }

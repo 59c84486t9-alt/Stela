@@ -182,6 +182,7 @@ fn radio(metadata: Metadata) -> Result<RadioStatus, Error> {
             layout: 2,
             words: [raw.raw_rate, 0, 0, 0],
         },
+        rx_rate: None,
         tsf: match raw.timestamp {
             super::Timestamp::Counter(value) => Some(Timestamp::Full64(value)),
             super::Timestamp::Overloaded { .. } => None,

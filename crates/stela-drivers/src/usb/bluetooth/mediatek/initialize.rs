@@ -3,8 +3,8 @@
 //! btmtk USB register, WMT patch/status and protocol-enable sequence. Native
 //! synchronization, standard post-enable HCI checks and quarantine are Stela glue.
 use super::{
-    Attempt, Error, Hci, Identity, Io, OwnedReport, Patch, RecoveryPolicy, RegisterObservation,
-    Result, SectionDisposition, SectionReceipt, UsbIdentity, WmtEvent, wmt,
+    Attempt, Error, Hci, HostPolicy, Identity, Io, OwnedReport, Patch, RecoveryPolicy,
+    RegisterObservation, Result, SectionDisposition, SectionReceipt, UsbIdentity, WmtEvent, wmt,
 };
 use crate::{
     firmware::{Provider, Requirement},
@@ -95,7 +95,18 @@ impl<B: Io> Engine<'_, B> {
         for p in self.hci.poll()? {
             match p {
                 Packet::Event(e) => self.pending.push_back(e),
-                Packet::Acl(a) | Packet::Diagnostic(a) => {
+                // Firmware debug logs have no consumer before the session;
+                // a firmware dump means the controller failed.
+                Packet::Diagnostic(d)
+                    if d.len() >= 2
+                        && u16::from_le_bytes([d[0], d[1]]) != super::packet::DUMP_HANDLE => {}
+                Packet::Diagnostic(a) => {
+                    return Err(Error::protocol(
+                        "MT79xx firmware dump while initializing",
+                        &a,
+                    ));
+                }
+                Packet::Acl(a) => {
                     return Err(Error::protocol(
                         "unexpected ACL while initializing MT79xx",
                         &a,
@@ -399,6 +410,7 @@ impl<B: Io> Engine<'_, B> {
         // A coalesced event after the last desired CC must be retained as
         // auxiliary evidence or rejected explicitly, never dropped with Engine.
         self.drain_auxiliary()?;
+        let policy = HostPolicy::for_device(identity.usb);
         Ok(OwnedReport {
             identity,
             firmware: Box::new(self.attempt.firmware.take().unwrap()),
@@ -410,6 +422,7 @@ impl<B: Io> Engine<'_, B> {
             local_version: raw,
             address,
             recovery: RecoveryPolicy::FreshRebindRequired,
+            policy,
         })
     }
 }

@@ -1,6 +1,7 @@
-//! The polled descriptor rings the PCI Ethernet drivers share: 32 sixteen-byte
-//! descriptors with one 2 KiB DMA buffer each, the next descriptor the driver
-//! fills and, for transmit, the oldest one the controller still owns.
+//! The polled descriptor rings the PCI Ethernet drivers share: sixteen-byte
+//! descriptors, 32 unless a driver asks for more, with one 2 KiB DMA buffer
+//! each, the next descriptor the driver fills and, for transmit, the oldest
+//! one the controller still owns.
 use crate::{
     Clock,
     block::BlockError,
@@ -18,6 +19,8 @@ const TRANSMIT_WAIT_US: u64 = 100_000;
 pub(crate) struct Ring {
     pub(crate) descriptors: DmaBuffer,
     buffers: DmaBuffer,
+    /// Descriptors in the ring.
+    pub(crate) count: usize,
     /// The next descriptor the driver fills or reads.
     pub(crate) next: usize,
     /// The oldest transmit descriptor the controller has not written back.
@@ -26,14 +29,23 @@ pub(crate) struct Ring {
 
 impl Ring {
     pub(crate) fn new(dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
-        let descriptors = dma.allocate(DESCRIPTORS * DESCRIPTOR, PAGE)?;
-        let buffers = dma.allocate(DESCRIPTORS * BUFFER, PAGE)?;
+        Self::with(dma, DESCRIPTORS)
+    }
+
+    /// A ring of `count` descriptors, a multiple of eight so its length
+    /// stays a multiple of 128 bytes.
+    pub(crate) fn with(dma: &mut dyn DmaAllocator, count: usize) -> Result<Self, BlockError> {
+        if count == 0 || !count.is_multiple_of(8) {
+            return Err(BlockError::Unsupported("Ethernet ring length"));
+        }
+        let descriptors = dma.allocate(count * DESCRIPTOR, PAGE)?;
+        let buffers = dma.allocate(count * BUFFER, PAGE)?;
         let fits = |buffer: &DmaBuffer, bytes: usize| {
             buffer.len() == bytes
                 && buffer.physical().is_multiple_of(PAGE as u64)
                 && buffer.physical().checked_add(bytes as u64).is_some()
         };
-        if !fits(&descriptors, DESCRIPTORS * DESCRIPTOR) || !fits(&buffers, DESCRIPTORS * BUFFER) {
+        if !fits(&descriptors, count * DESCRIPTOR) || !fits(&buffers, count * BUFFER) {
             return Err(BlockError::Unsupported(
                 "Ethernet ring outside its DMA allocation",
             ));
@@ -41,6 +53,7 @@ impl Ring {
         Ok(Self {
             descriptors,
             buffers,
+            count,
             next: 0,
             clean: 0,
         })
@@ -52,8 +65,8 @@ impl Ring {
         self.descriptors.physical()
     }
 
-    pub(crate) const fn bytes() -> u32 {
-        (DESCRIPTORS * DESCRIPTOR) as u32
+    pub(crate) fn bytes(&self) -> u32 {
+        (self.count * DESCRIPTOR) as u32
     }
 
     /// Point a controller's base and length registers at the descriptors.
@@ -64,7 +77,7 @@ impl Ring {
         high: usize,
         length: usize,
     ) {
-        write(length, Self::bytes());
+        write(length, self.bytes());
         write(high, (self.base() >> 32) as u32);
         write(low, self.base() as u32);
     }
@@ -80,7 +93,7 @@ impl Ring {
     /// Step to the next descriptor, returning the current one.
     pub(crate) fn advance(&mut self) -> usize {
         let index = self.next;
-        self.next = (index + 1) % DESCRIPTORS;
+        self.next = (index + 1) % self.count;
         index
     }
 
@@ -95,9 +108,9 @@ impl Ring {
     pub(crate) fn reclaim(&mut self, done: impl Fn(&DmaBuffer, usize) -> bool) -> bool {
         while self.pending() && done(&self.descriptors, self.clean * DESCRIPTOR) {
             fence(Ordering::Acquire);
-            self.clean = (self.clean + 1) % DESCRIPTORS;
+            self.clean = (self.clean + 1) % self.count;
         }
-        (self.next + 1) % DESCRIPTORS != self.clean
+        (self.next + 1) % self.count != self.clean
     }
 
     /// Wait up to the transmit bound for a free descriptor.

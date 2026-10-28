@@ -59,6 +59,10 @@ struct Hardware {
     reset_stuck: bool,
     late_position: Option<(usize, u32, u64)>,
     position_reads: usize,
+    /// AC_PAR_DEVLIST_LEN of pin 4, the selected entry and the entry under test.
+    device_list: u32,
+    selected: u8,
+    device: u8,
 }
 impl Hardware {
     fn new(clock: Clock, dp: bool) -> Self {
@@ -102,6 +106,9 @@ impl Hardware {
             reset_stuck: false,
             late_position: None,
             position_reads: 0,
+            device_list: 0,
+            selected: 0,
+            device: 0,
         };
         h.set(0, 0x1001, 2);
         h.set(2, 0, 1);
@@ -143,6 +150,7 @@ impl Hardware {
             (4, 9) => self.widget,
             (4, 0x0c) => self.pin_caps,
             (4, 0x0e) => 2,
+            (4, 0x15) => self.device_list,
             (1, 0x12) | (4, 0x12) => 0x80000000,
             _ => 0,
         }
@@ -218,13 +226,32 @@ impl Hardware {
         if self.reject == Some(verb) {
             return 0;
         }
+        // Pin-scoped state belongs to the selected DP-MST device entry.
+        if node == 4
+            && self.device_list > 0
+            && matches!(verb, 0x701 | 0xf01 | 0x707 | 0xf07 | 0xf2e | 0xf2f | 0x730..=0x734 | 0xf30..=0xf34)
+        {
+            assert_eq!(
+                self.selected, self.device,
+                "verb {verb:03x} on another device"
+            );
+        }
         match verb {
+            0x735 => {
+                assert!(u32::from(byte) <= self.device_list);
+                self.selected = byte;
+                0
+            }
+            0x709 => 0,
             0xf00 => self.parameter(node, byte),
             0xf1c => self.pin_default,
             0xf02 => 0x0302,
             0x705 => 0,
             0xf05 => 0,
-            0xf09 => self.sense,
+            0xf09 => {
+                assert_eq!(byte, self.device);
+                self.sense
+            }
             0x701 => {
                 self.mux = byte;
                 0
@@ -443,6 +470,7 @@ struct OwnerState {
     enable_late: bool,
     disable_fault: bool,
     observe_fault: bool,
+    device: u8,
 }
 struct Owner {
     clock: Clock,
@@ -465,6 +493,7 @@ unsafe impl DisplayAudioPort for Owner {
             },
             codec: 0,
             pin: 4,
+            device: self.state.lock().unwrap().device,
             port: 7,
         }
     }
@@ -520,6 +549,7 @@ impl Fixture {
                 enable_late: false,
                 disable_fault: false,
                 observe_fault: false,
+                device: 0,
             }),
         });
         Self {
@@ -548,7 +578,7 @@ impl Fixture {
     }
     fn attach(&self, c: &mut Controller<Regs, Clock>) -> HdmiPortId {
         let graph = c.enumerate_codec(0).unwrap();
-        unsafe { c.attach_hdmi_port(&graph, 4, self.owner.clone()) }.unwrap()
+        unsafe { c.attach_hdmi_port(&graph, 4, 0, self.owner.clone()) }.unwrap()
     }
     fn stream(
         &mut self,
@@ -608,6 +638,8 @@ fn actual_command_rings_eld_channels_packets_and_24_fresh_periods_without_restar
                 assert_eq!(h.packet[7], map.allocation());
                 assert_eq!(h.digital & 0x21, 1);
                 assert_eq!(h.count, channels - 1);
+                // A legacy codec has no device entries to select.
+                assert!(!h.commands.iter().any(|c| (c >> 8) & 0xfff == 0x735));
             }
             c.close_hdmi(port).unwrap();
             assert_eq!(c.start(stream), Err(Error::SinkUnavailable));
@@ -624,14 +656,14 @@ fn invalid_eld_or_missing_pin_and_exact_profile_cannot_enable_gpu_or_codec() {
         let mut c = f.controller();
         match fault {
             0 => f.hardware.lock().unwrap().vendor = 0x10de0017,
-            1 => f.hardware.lock().unwrap().vendor = 0x10de0040,
+            1 => f.hardware.lock().unwrap().vendor = 0x10de00a2,
             2 => f.hardware.lock().unwrap().pin_caps = 0x10,
             3 => f.hardware.lock().unwrap().bad_eld = Some(12),
             4 => f.hardware.lock().unwrap().eld[4] = 31,
             _ => f.owner.state.lock().unwrap().observe_fault = true,
         }
         let graph = c.enumerate_codec(0).unwrap();
-        let attached = unsafe { c.attach_hdmi_port(&graph, 4, f.owner.clone()) };
+        let attached = unsafe { c.attach_hdmi_port(&graph, 4, 0, f.owner.clone()) };
         if fault == 3 || fault == 4 {
             let port = attached.unwrap();
             let (s, _) = f.stream(&mut c, 2, 16);
@@ -643,6 +675,54 @@ fn invalid_eld_or_missing_pin_and_exact_profile_cannot_enable_gpu_or_codec() {
         assert_eq!(f.owner.state.lock().unwrap().enable, 0);
         assert_eq!(f.hardware.lock().unwrap().pin, 0);
     }
+}
+#[test]
+fn modern_profile_addresses_each_dp_mst_device_entry_like_linux() {
+    let mut f = Fixture::new(true);
+    {
+        let mut h = f.hardware.lock().unwrap();
+        h.vendor = 0x10de00a8;
+        h.device_list = 3;
+        h.device = 2;
+        h.pin_caps |= 2;
+    }
+    let mut c = f.controller();
+    let graph = c.enumerate_codec(0).unwrap();
+    // Four entries: index 4 does not exist, and the owner must agree.
+    f.owner.state.lock().unwrap().device = 4;
+    assert_eq!(
+        unsafe { c.attach_hdmi_port(&graph, 4, 4, f.owner.clone()) },
+        Err(Error::InvalidHdmiPort)
+    );
+    assert_eq!(
+        unsafe { c.attach_hdmi_port(&graph, 4, 2, f.owner.clone()) },
+        Err(Error::InvalidHdmiPort)
+    );
+    f.owner.state.lock().unwrap().device = 2;
+    let port = unsafe { c.attach_hdmi_port(&graph, 4, 2, f.owner.clone()) }.unwrap();
+    let (stream, period) = f.stream(&mut c, 2, 16);
+    c.prepare_hdmi(port, stream, 2, None).unwrap();
+    for n in 0..4 {
+        c.write_pcm(stream, n * period, &vec![n as u8; period])
+            .unwrap();
+    }
+    c.start(stream).unwrap();
+    let format = c.stream_format(stream).unwrap();
+    f.advance(period, format);
+    c.refill_hdmi_period(stream, &vec![4; period])
+        .unwrap()
+        .unwrap();
+    c.close_hdmi(port).unwrap();
+    c.detach_hdmi_port(port).unwrap();
+    c.shutdown().unwrap();
+    let h = f.hardware.lock().unwrap();
+    let select = (4 << 20) | (0x735 << 8) | 2;
+    assert!(h.commands.contains(&select));
+    // Sense is triggered, then read for the device entry.
+    assert!(h.commands.contains(&((4 << 20) | (0x709 << 8))));
+    assert!(h.commands.contains(&((4 << 20) | (0xf09 << 8) | 2)));
+    assert_eq!(h.packet[..3], [0x84, 0x1b, 0x44]);
+    assert_eq!((h.pin, h.transmit), (0, 0));
 }
 #[test]
 fn actual_hotplug_stops_then_reprepare_uses_new_sink_and_retains_original_port() {

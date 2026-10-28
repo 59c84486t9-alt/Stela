@@ -28,7 +28,7 @@ mod control;
 pub use connector::ConnectorStatus;
 mod descriptors;
 mod feature;
-pub use feature::{FeatureControl, FeatureRange, FeatureValue};
+pub use feature::{FeatureControl, FeatureValue};
 mod mixer;
 mod native;
 mod packet;
@@ -38,7 +38,7 @@ pub use status::{
     StatusAttribute, StatusEvent, StatusNotice, StatusNotifications, Uac1StatusNotice,
 };
 mod stream;
-pub use control::{Control, RateRange, ResolvedClock};
+pub use control::{Control, MixerRange, RateRange, Rates, ResolvedClock};
 pub use descriptors::{Binding, Entity, Format, Graph, Sync};
 
 pub const CLASS: u8 = 1;
@@ -122,7 +122,7 @@ pub(super) fn plan(
     Plan::parse(interface, all, configuration, speed)
 }
 
-pub use stream::{AudioDevice, Progress};
+pub use stream::{AudioDevice, MixerState, Progress};
 
 #[cfg(test)]
 pub(crate) use stream::tests::configuration as test_configuration;

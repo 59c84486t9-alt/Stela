@@ -87,6 +87,11 @@ impl UsbIdentity {
     pub(super) fn candidate(self) -> bool {
         self.vendor == 0x0e8d || CANDIDATES.contains(&(self.vendor, self.product))
     }
+    /// Every explicit btusb MediaTek entry Stela admits carries
+    /// BTUSB_WIDEBAND_SPEECH; the vendor-wide 0e8d class match does not.
+    pub(super) fn wideband_speech(self) -> bool {
+        CANDIDATES.contains(&(self.vendor, self.product))
+    }
     pub fn hardware_label(self) -> String {
         format!(
             "usb:{:04x}:{:04x}:{:04x}",

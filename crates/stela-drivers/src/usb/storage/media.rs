@@ -8,8 +8,10 @@ pub(super) fn no_media(sense: &Sense) -> bool {
     matches!(sense.key, Sense::NOT_READY | Sense::UNIT_ATTENTION)
         && sense.asc == Sense::MEDIUM_NOT_PRESENT
 }
-pub(super) fn changed(sense: &Sense) -> bool {
-    sense.key == Sense::UNIT_ATTENTION
+/// A change sd acts on: an absent medium or unit, and any UNIT ATTENTION
+/// on a removable unit (`scsi_io_completion_action`'s `sdev->changed`).
+pub(super) fn changed(sense: &Sense, removable: bool) -> bool {
+    sense.key == Sense::UNIT_ATTENTION && removable
         || no_media(sense)
         || sense.key == Sense::ILLEGAL_REQUEST && sense.asc == Sense::UNSUPPORTED_UNIT
 }
@@ -19,12 +21,14 @@ pub(super) struct Owner<T: Scsi> {
     prefix: String,
     serial: String,
     units: Vec<Unit<T::Lun>>,
-    pending: Vec<(T::Lun, Rc<Cell<bool>>)>,
+    /// Provisional publications: unit, validity and removability.
+    pending: Vec<(T::Lun, Rc<Cell<bool>>, bool)>,
 }
 struct Unit<L> {
     lun: L,
     identity: Identity,
     valid: Rc<Cell<bool>>,
+    removable: bool,
 }
 impl<T: Scsi> Owner<T> {
     pub fn new(transport: T, prefix: String, serial: String) -> Self {
@@ -37,15 +41,27 @@ impl<T: Scsi> Owner<T> {
         }
     }
     pub fn invalidate(&mut self) {
-        for (_, valid) in &self.pending {
+        for (_, valid, _) in &self.pending {
             valid.set(false);
         }
         for unit in &self.units {
             unit.valid.set(false);
         }
     }
+    /// Whether `lun` is removable; a unit not yet published is assumed so.
+    fn removable(&self, lun: T::Lun) -> bool {
+        let units = self.units.iter().map(|unit| (unit.lun, unit.removable));
+        let pending = self
+            .pending
+            .iter()
+            .map(|(unit, _, removable)| (*unit, *removable));
+        units
+            .chain(pending)
+            .find(|(unit, _)| *unit == lun)
+            .is_none_or(|(_, removable)| removable)
+    }
     fn changed(&mut self, lun: T::Lun) {
-        for (unit, valid) in &self.pending {
+        for (unit, valid, _) in &self.pending {
             if *unit == lun {
                 valid.set(false);
             }
@@ -74,12 +90,16 @@ impl<T: Scsi> Owner<T> {
                 lun: disk.lun,
                 identity: disk.identity.clone(),
                 valid: disk.media.clone(),
+                removable: disk.removable,
             })
             .collect();
     }
 }
 impl<T: Scsi> Scsi for Owner<T> {
     type Lun = T::Lun;
+    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        self.transport.take_failed_data()
+    }
     fn command(
         &mut self,
         lun: Self::Lun,
@@ -88,9 +108,10 @@ impl<T: Scsi> Scsi for Owner<T> {
     ) -> Result<Vec<u8>, BlockError> {
         let generation = self.transport.generation();
         let result = self.transport.command(lun, cdb, data);
-        // No retry of data commands. UA identifies an invalidated media view,
-        // even when subsequent TUR consumes it and the capacity is unchanged.
-        if matches!(&result, Err(BlockError::Sense(sense)) if changed(sense))
+        // A removable unit's UA identifies an invalidated media view, even
+        // when a later TUR consumes it and the capacity is unchanged.
+        let removable = self.removable(lun);
+        if matches!(&result, Err(BlockError::Sense(sense)) if changed(sense, removable))
             || result.is_ok()
                 && cdb.first() == Some(&scsi::START_STOP_UNIT)
                 && cdb
@@ -116,6 +137,9 @@ impl<T: Scsi> Scsi for Owner<T> {
     }
     fn delay(&self, micros: u64) {
         self.transport.delay(micros);
+    }
+    fn now_us(&self) -> u64 {
+        self.transport.now_us()
     }
     fn poisoned(&self) -> bool {
         self.transport.poisoned()
@@ -151,7 +175,8 @@ impl<T: Scsi> Scsi for Owner<T> {
     ) -> Result<(), BlockError> {
         let generation = self.transport.generation();
         let result = self.transport.read_before_mode_sense(lun, block_size);
-        if matches!(&result, Err(BlockError::Sense(sense)) if changed(sense)) {
+        let removable = self.removable(lun);
+        if matches!(&result, Err(BlockError::Sense(sense)) if changed(sense, removable)) {
             self.changed(lun);
         }
         if self.transport.poisoned()
@@ -169,8 +194,8 @@ impl<T: Scsi> Scsi for Owner<T> {
         }
         result
     }
-    fn media_publication(&mut self, lun: Self::Lun, valid: Rc<Cell<bool>>) {
-        self.pending.push((lun, valid));
+    fn media_publication(&mut self, lun: Self::Lun, valid: Rc<Cell<bool>>, removable: bool) {
+        self.pending.push((lun, valid, removable));
     }
     fn max_lun(&self) -> u8 {
         self.transport.max_lun()
@@ -205,14 +230,18 @@ fn scan<T: Scsi>(
         if result.is_err() {
             return finish(&owner, result);
         }
-        let unstable = owner.borrow().pending.iter().any(|(_, valid)| !valid.get());
+        let unstable = owner
+            .borrow()
+            .pending
+            .iter()
+            .any(|(_, valid, _)| !valid.get());
         if !unstable {
             return finish(&owner, result);
         }
         // A later command invalidated an already-probed view. Discard every
         // provisional disk and repeat only inventory/readiness/metadata probes.
         let mut owner = owner.borrow_mut();
-        for (_, valid) in &owner.pending {
+        for (_, valid, _) in &owner.pending {
             valid.set(false);
         }
         owner.pending.clear();
@@ -433,7 +462,7 @@ mod tests {
             assert_eq!(tur_changed != 0, valid != 0 && removable != 0 && key == 6);
             if valid != 0 && removable != 0 {
                 assert_eq!(
-                    changed(&sense),
+                    changed(&sense, true),
                     absent != 0 || tur_changed != 0 || key == 5 && asc == 0x25
                 );
             }

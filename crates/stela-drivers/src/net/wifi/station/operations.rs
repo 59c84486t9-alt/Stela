@@ -78,7 +78,7 @@ fn mhz(width: Width) -> u32 {
     }
 }
 
-fn frequency(band: Band, channel: u8) -> Result<u32, Error> {
+pub(super) fn frequency(band: Band, channel: u8) -> Result<u32, Error> {
     let n = u32::from(channel);
     match band {
         Band::Ghz2 if (1..=13).contains(&n) => Ok(2407 + 5 * n),
@@ -122,6 +122,68 @@ fn puncture_valid(def: &ChannelDefinition) -> bool {
     def.punctured & (1 << primary) == 0 && values.contains(&def.punctured)
 }
 impl ChannelDefinition {
+    /// Linux `ieee80211_chandef_downgrade`: the next narrower definition
+    /// around the control channel, its center and puncturing as
+    /// `cfg80211_chandef_primary` keeps them; again while the puncturing
+    /// left is invalid. A 20 MHz definition has none.
+    pub fn downgrade(&mut self) -> bool {
+        loop {
+            let primary = match self.width {
+                Width::Mhz20 => return false,
+                Width::Mhz40 => {
+                    self.width = Width::Mhz20;
+                    self.center1_mhz = u32::from(self.control.frequency_mhz);
+                    self.punctured = 0;
+                    return true;
+                }
+                Width::Mhz80P80 => {
+                    self.center2_mhz = None;
+                    self.width = Width::Mhz80;
+                    return true;
+                }
+                Width::Mhz80 => Width::Mhz40,
+                Width::Mhz160 => Width::Mhz80,
+                Width::Mhz320 => Width::Mhz160,
+            };
+            let control = u32::from(self.control.frequency_mhz);
+            let mut width = mhz(self.width);
+            while width > mhz(primary) {
+                let bits = width / 20 / 2;
+                if control > self.center1_mhz {
+                    self.center1_mhz += width / 4;
+                    self.punctured >>= bits;
+                } else {
+                    self.center1_mhz -= width / 4;
+                    self.punctured &= (1 << bits) - 1;
+                }
+                width /= 2;
+            }
+            self.width = primary;
+            self.center2_mhz = None;
+            if self.punctured == 0 || puncture_valid(self) {
+                return true;
+            }
+        }
+    }
+
+    /// Whether this definition's span lies within `outer`'s.
+    pub fn within(&self, outer: &ChannelDefinition) -> bool {
+        let span = |def: &ChannelDefinition| {
+            let half = mhz(def.width) / 2;
+            (def.center1_mhz - half, def.center1_mhz + half)
+        };
+        let ((low, high), (outer_low, outer_high)) = (span(self), span(outer));
+        self.control == outer.control
+            && outer_low <= low
+            && high <= outer_high
+            && (self.center2_mhz.is_none() || self.center2_mhz == outer.center2_mhz)
+    }
+
+    /// The width in MHz, an 80+80 MHz definition counting one segment.
+    pub fn width_mhz(&self) -> u32 {
+        mhz(self.width)
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
         let number =
             u8::try_from(self.control.number).map_err(|_| Error::Invalid("control channel"))?;
@@ -251,7 +313,7 @@ impl Operations {
         self.channel(control, negotiated.mode, caps)
     }
 
-    fn channel(
+    pub(super) fn channel(
         &self,
         control: Channel,
         mode: Mode,
@@ -455,6 +517,36 @@ impl EhtOperation {
 mod tests {
     use super::*;
     use alloc::{format, vec, vec::Vec};
+
+    #[test]
+    fn downgrade_keeps_the_control_channel_like_ieee80211_chandef_downgrade() {
+        let control = Channel {
+            band: Band::Ghz5,
+            number: 40,
+            frequency_mhz: 5200,
+        };
+        // 160 MHz over 36-64 with its top 20 MHz punctured.
+        let outer = ChannelDefinition {
+            control,
+            width: Width::Mhz160,
+            center1_mhz: 5250,
+            center2_mhz: None,
+            punctured: 0x80,
+        };
+        let mut def = outer;
+        assert!(def.downgrade());
+        assert_eq!(
+            (def.width, def.center1_mhz, def.punctured),
+            (Width::Mhz80, 5210, 0)
+        );
+        assert!(def.downgrade());
+        assert_eq!((def.width, def.center1_mhz), (Width::Mhz40, 5190));
+        assert!(def.downgrade());
+        assert_eq!((def.width, def.center1_mhz), (Width::Mhz20, 5200));
+        assert!(!def.downgrade());
+        assert!(def.within(&outer));
+        assert!(!outer.within(&def));
+    }
     fn ext(id: u8, b: &[u8]) -> Vec<u8> {
         let mut v = vec![255, (b.len() + 1) as u8, id];
         v.extend_from_slice(b);

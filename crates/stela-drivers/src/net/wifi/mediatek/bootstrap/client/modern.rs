@@ -462,7 +462,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     }
 }
 
-fn center_channel(band: wifi::Band, mhz: u32) -> Result<u8, Error> {
+pub(super) fn center_channel(band: wifi::Band, mhz: u32) -> Result<u8, Error> {
     if band == wifi::Band::Ghz2 && mhz == 2484 {
         return Ok(14);
     }
@@ -630,6 +630,7 @@ pub(super) mod tests {
                     layout: 0x7925,
                     words: [0; 4],
                 },
+                rx_rate: None,
                 tsf: None,
             },
             signal_dbm: Some(-40),

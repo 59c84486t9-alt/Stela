@@ -43,7 +43,50 @@ pub struct RadioStatus {
     pub chain_signal_dbm: [Option<i8>; 4],
     /// Vendor rate/vector encoding with its negotiated layout version.
     pub rate: RawRate,
+    /// The decoded rate, when the driver decodes this device's vector.
+    pub rx_rate: Option<RxRate>,
     pub tsf: Option<Timestamp>,
+}
+
+/// A received frame's rate as mac80211's `ieee80211_rx_status` holds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RxRate {
+    pub encoding: Encoding,
+    /// `rate_idx`: the band's bitrate index for legacy rates, else the MCS.
+    pub index: u8,
+    /// Spatial streams for VHT, HE and EHT; HT carries them in its MCS.
+    pub nss: u8,
+    pub bandwidth: Bandwidth,
+    /// RX_ENC_FLAG_SHORT_GI, for encodings before HE.
+    pub short_gi: bool,
+    /// Space-time streams, RX_ENC_FLAG_STBC_MASK.
+    pub stbc: u8,
+    /// HE or EHT guard interval: 0.8, 1.6 or 3.2 us as 0 through 2.
+    pub gi: u8,
+    pub he_dcm: bool,
+}
+
+/// mac80211 `mac80211_rx_encoding`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Encoding {
+    #[default]
+    Legacy,
+    Ht,
+    Vht,
+    He,
+    Eht,
+}
+
+/// mac80211 `rate_info_bw`, with an HE 106-tone resource unit as its own width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bandwidth {
+    #[default]
+    Mhz20,
+    Mhz40,
+    Mhz80,
+    Mhz160,
+    Mhz320,
+    HeRu106,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

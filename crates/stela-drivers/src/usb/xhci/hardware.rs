@@ -52,6 +52,8 @@ pub(super) enum State {
     #[cfg(test)]
     Stopped,
     Failed,
+    /// Linux xhci_hc_died.
+    Died,
 }
 impl State {
     pub fn ready(self) -> Result<(), BlockError> {
@@ -63,6 +65,7 @@ impl State {
             Self::Failed => Err(BlockError::Unsupported(
                 "xHCI hardware transition unresolved",
             )),
+            Self::Died => Err(BlockError::Unsupported("xHCI host controller died")),
         }
     }
 }
@@ -76,7 +79,7 @@ fn status(registers: &mut dyn Registers, operational: usize) -> Result<u32, Bloc
         value => Ok(value),
     }
 }
-fn handshake(
+pub(super) fn handshake(
     registers: &mut dyn Registers,
     clock: Clock,
     operational: usize,
@@ -262,6 +265,7 @@ impl Controller {
         self.commands.buffer.write((RING_TRBS - 1) * TRB, base);
         self.commands.index = 0;
         self.commands.cycle = true;
+        self.command_ring_stopped = false;
         self.commands.buffer.sync_dirty()?;
         self.registers
             .write64(self.operational + CRCR, self.commands.dequeue_pointer());

@@ -47,6 +47,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .map_err(Error::Station)?;
         let h = frame.header();
         let subtype = h.control & 0x00fc;
+        let channel = (
+            frame.radio.band,
+            frame.radio.channel,
+            frame.radio.frequency_mhz,
+        );
+        // A frame received before a channel switch is no longer the AP's.
+        if Self::switched_from(s, channel) {
+            return Ok(());
+        }
         if h.transmitter != Some(p.peer)
             || frame.bytes().get(16..22) != Some(p.peer.0.as_slice())
             || (
@@ -55,7 +64,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 frame.radio.frequency_mhz,
             ) != (p.channel.band, p.channel.number, p.channel.frequency_mhz)
             || modern.context().bssid() != p.peer
-            || modern.context().channel() != p.channel
+            || s.station.operating_definition().map(|d| d.control) != Some(p.channel)
         {
             return Err(Error::WrongProfile);
         }
@@ -77,6 +86,33 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongProfile);
         }
         let mut elements = frame.bytes().get(36..).ok_or(Error::WrongProfile)?;
+        // mac80211 processes a beacon's channel switch elements first.
+        if subtype == 0x0080 {
+            Self::process_channel_switch(s, elements, csa::Source::Beacon, None);
+        }
+        let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
+        // mac80211 `ieee80211_handle_bss_capability`: on 2.4 GHz the slot
+        // follows the AP's Short Slot Time capability; elsewhere it is 9 us.
+        if p.channel.band == wifi::Band::Ghz2 {
+            let capabilities = u16::from_le_bytes([frame.bytes()[34], frame.bytes()[35]]);
+            let slot = if capabilities & (1 << 10) != 0 { 9 } else { 20 };
+            s.slot_time = (slot != p.slot_time).then_some(slot);
+        }
+        if let (Some(signal), Some(association)) =
+            (frame.radio.signal_dbm, s.station.association_epoch())
+        {
+            s.cqm.beacon(association, i32::from(signal));
+        }
+        // mac80211 `ieee80211_config_bw`: the AP's operation narrowed to the
+        // association, applied when it differs from the current channel.
+        let context = modern.context().clone();
+        let operating = s.station.operating_definition().ok_or(Error::WrongPhase)?;
+        let current = s.channel.unwrap_or(operating);
+        s.channel_change = match context.beacon_definition(elements, operating.control) {
+            Ok(definition) if definition == current => None,
+            Ok(definition) if definition.within(&operating) => Some(Some(definition)),
+            _ => Some(None),
+        };
         if elements.len() > 2300 {
             return Err(Error::WrongProfile);
         }
@@ -102,16 +138,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         };
         let parameters = observed.parameters.ok_or(Error::Unsupported)?;
         let negotiated = modern.context().negotiated();
-        let original = negotiated.wmm.as_ref().ok_or(Error::Unsupported)?;
+        negotiated.wmm.as_ref().ok_or(Error::Unsupported)?;
         let original_ap = negotiated.peer().wmm().ok_or(Error::Unsupported)?;
-        // Canonical TX ACM and U-APSD continue to use the immutable association.
-        // Never update firmware to a different access/admission contract alone.
+        // U-APSD continues to use the immutable association. Admission
+        // control is host-side: data TIDs follow the applied flags, as
+        // `ieee80211_sta_wmm_params` updates `wmm_acm`.
         if observed.qos_info & 0x80 != original_ap.qos_info & 0x80
-            || parameters.iter().any(|ac| {
-                ac.ecw_min == 0
-                    || original.access_categories[usize::from(ac.aci)].admission_control
-                        != ac.admission_control
-            })
+            || parameters.iter().any(|ac| ac.ecw_min == 0)
         {
             return Err(Error::Unsupported);
         }
@@ -134,6 +167,234 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             parameters,
             _frame: frame,
         });
+        Ok(())
+    }
+
+    /// Whether a beacon changed the channel: `Some(false)` when the change
+    /// leaves the associated channel.
+    pub fn pending_channel(&self) -> Option<bool> {
+        self.state().channel_change.map(|change| change.is_some())
+    }
+
+    /// mac80211 `ieee80211_link_change_chanreq` to `mt7925_change_chanctx`:
+    /// sends the channel a beacon changed through `mt7925_mcu_set_chctx`.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn update_channel_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let Some(Some(definition)) = s.channel_change else {
+            return Err(Error::WrongPhase);
+        };
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let body = profile.channel_request(&definition).map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.channel = Some(definition);
+        s.channel_change = None;
+        Ok(())
+    }
+
+    /// Whether the firmware holds the BSS in dynamic power save.
+    pub fn power_save(&self) -> bool {
+        self.state().power_save
+    }
+
+    /// Linux `mt7925_mcu_uni_bss_ps` for BSS_CHANGED_PS: the firmware saves
+    /// power between beacons while `enable`, waking for traffic itself.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn set_power_save_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        enable: bool,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let body = profile.power_save_request(enable).map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.power_save = enable;
+        Ok(())
+    }
+
+    /// Linux `mt7925_mcu_set_rssimonitor` for BSS_CHANGED_CQM: firmware RSSI
+    /// events past `threshold` dBm with `hysteresis`, or none for `None`.
+    /// Firmware without RSSI_NOTIFY_EVT_EN, for which Linux leaves
+    /// IEEE80211_VIF_SUPPORTS_CQM_RSSI clear, is watched from beacons.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn set_rssi_monitor_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        monitor: Option<(i32, u32)>,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let flags = s
+            .controller
+            .state()
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.capabilities().observed().chip_flags());
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        // Without firmware RSSI events mac80211 watches beacons instead.
+        if flags.unwrap_or(0) & 2 == 0 {
+            s.cqm.set(monitor, false);
+            return Ok(());
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let (threshold, hysteresis) = monitor.unwrap_or_default();
+        let hysteresis = hysteresis as i32;
+        let body = profile
+            .rssi_monitor_request(
+                monitor.is_some(),
+                threshold.wrapping_add(hysteresis) as i8,
+                threshold.wrapping_sub(hysteresis) as i8,
+            )
+            .map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::RssiMonitor, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.cqm.set(monitor, true);
+        Ok(())
+    }
+
+    pub fn pending_slot_time(&self) -> bool {
+        self.state().slot_time.is_some()
+    }
+
+    /// Linux `mt7925_link_info_changed` on BSS_CHANGED_ERP_SLOT: sends the
+    /// slot time a beacon changed through `mt7925_mcu_set_timing`.
+    ///
+    /// # Safety
+    /// The exact-controller, applied-policy and revocation contracts of
+    /// `update_edca_modern` apply.
+    pub unsafe fn update_slot_time_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let slot = s.slot_time.ok_or(Error::WrongPhase)?;
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let mut profile = s.profile.ok_or(Error::WrongPhase)?;
+        profile.slot_time = slot;
+        let body = profile.timing().map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let current = &mut s.profile;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *current = Some(profile);
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.slot_time = None;
+        Ok(())
+    }
+
+    /// No received event waits ahead of a command's reply.
+    pub(super) fn command_ready(s: &Owned<I, Q, C>) -> Result<(), Error> {
+        let controller = s.controller.state();
+        if !s.pending_rx.is_empty() || !controller.mailbox.as_ref().unwrap().receive_idle() {
+            return Err(Error::NeedsDrain);
+        }
         Ok(())
     }
 
@@ -177,9 +438,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// The exact-controller, applied-policy, revocation and retained autonomous
     /// user contracts of `configure_modern` apply. `limit` must belong to that
     /// same current OS country/control-channel rule, not an invented relaxation.
-    /// Active/pending BA sessions, partial aggregation, pending native RX and
-    /// outstanding TX/DMA owners must drain first; this conservative cut does
-    /// not reconfigure an operational BA session. External publication/reset/IRQ
+    /// As Linux `mt7925_mcu_set_tx` does, the command goes beside live
+    /// traffic and block-ack sessions; only received events queued ahead of
+    /// its reply must drain first. External publication/reset/IRQ
     /// paths serialize through this owner and authority; no raw user may publish new work during the checked drain and
     /// actual command. This function preserves keys/context and grants no new
     /// PHY, ACM, U-APSD, PMF or 6 GHz admission.
@@ -195,7 +456,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let s = self.state_mut();
         let observed = s.edca.as_ref().ok_or(Error::WrongPhase)?;
         Self::validate_edca(s, observed)?;
-        Self::management_drained(s)?;
+        Self::command_ready(s)?;
         s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
         let clock = s.controller.state().control.clock;
         let observed = s.edca.as_ref().unwrap();

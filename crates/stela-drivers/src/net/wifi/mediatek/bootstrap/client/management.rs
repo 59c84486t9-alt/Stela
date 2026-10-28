@@ -162,7 +162,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         let (ptk, gtk) = Self::management_keys(s)?;
         if s.station.association_epoch() != Some(session.association)
-            || s.profile != Some(session.profile)
+            || s.profile.map(|p| p.association_identity())
+                != Some(session.profile.association_identity())
             || s.peer_generation != session.peer_generation
             || ptk != session.ptk
             || gtk != session.gtk
@@ -177,7 +178,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .validate_association_context(context)
                     .map_err(Error::Station)?;
                 if context.bssid() != session.profile.peer
-                    || context.channel() != session.profile.channel
+                    || s.station.operating_definition().map(|d| d.control)
+                        != s.profile.map(|p| p.channel)
                 {
                     return Err(Error::WrongProfile);
                 }
@@ -349,7 +351,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.modern.is_some() {
             return Err(Error::ModernAdmissionRequired);
         }
-        if !policy.allow_management_tx(session.profile.channel) {
+        let channel = s.profile.ok_or(Error::WrongProfile)?.channel;
+        if !policy.allow_management_tx(channel) {
             return Err(Error::Station(station::Error::Regulatory));
         }
         let bytes = message.encode(session.profile);
@@ -371,7 +374,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     ) -> Result<Received, Error> {
         let session = s.management.as_ref().ok_or(Error::WrongPhase)?.clone();
         Self::validate_management(s, &session)?;
-        let p = session.profile;
+        let p = s.profile.ok_or(Error::WrongProfile)?;
         let d = rx::decode(Chip::Mt7925, raw).map_err(Error::Rx)?;
         let h = frame.header();
         let group = h.receiver.is_multicast();

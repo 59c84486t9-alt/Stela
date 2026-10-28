@@ -66,6 +66,18 @@ const FIRST_RETRY_MS: u64 = 13;
 const LONGEST_RETRY_MS: u64 = 100;
 const RETRY_WINDOW_US: u64 = 1_000_000;
 const MICROSECONDS_PER_MILLISECOND: u64 = 1_000;
+const LED_PAGE: u32 = 0x08;
+/// Main item bit 1: a Variable field, one value per usage.
+const VARIABLE: u32 = 2;
+/// LED-page usages by input LED code, as `hidinput_configure_usage` maps
+/// them: Num Lock, Caps Lock, Scroll Lock, Compose, Kana, Stand-By, System
+/// Suspend, Mute, Generic Indicator, Message Waiting, External Power.
+const LED_USAGES: [u16; 11] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x27, 0x4c, 0x09, 0x4b, 0x19, 0x4d,
+];
+/// include/linux/usb.h USB_CTRL_SET_TIMEOUT, the `usb_interrupt_msg` bound
+/// `usbhid_output_report` uses.
+const OUTPUT_TIMEOUT_US: u64 = 5_000_000;
 const BOOT_PROTOCOL: u16 = 0;
 const REPORT_PROTOCOL: u16 = 1;
 /// The Keyboard/Keypad usages the native keyboard reports.
@@ -73,13 +85,18 @@ const KEY_USAGES: core::ops::RangeInclusive<u32> = 0x04..=0xdd;
 const MODIFIER_USAGES: core::ops::RangeInclusive<u32> = 0xe0..=0xe7;
 
 pub(super) fn plan(interface: &Interface) -> Result<Plan, &'static str> {
-    let endpoint = interface
+    let endpoint =
+        interrupt(interface, true).ok_or("HID interface without an interrupt IN endpoint")?;
+    Ok(Plan::Hid(endpoint, interrupt(interface, false)))
+}
+
+/// `usbhid_start`: the first interrupt endpoint in each direction.
+fn interrupt(interface: &Interface, input: bool) -> Option<Endpoint> {
+    interface
         .endpoints
         .iter()
         .copied()
-        .find(|e| e.kind() == 3 && e.is_in())
-        .ok_or("HID interface without an interrupt IN endpoint")?;
-    Ok(Plan::Hid(endpoint))
+        .find(|e| e.kind() == 3 && e.is_in() == input)
 }
 
 /// Fetch the exact descriptor named by this interface's HID descriptor.
@@ -232,6 +249,9 @@ pub struct UsbInput {
     buffer: DmaBuffer,
     /// Bytes one interrupt transfer asks for: the longest input report.
     length: usize,
+    /// The interrupt OUT endpoint and a buffer for the longest output
+    /// report, when the interface has both.
+    output: Option<(Endpoint, DmaBuffer)>,
     /// The queued TD, if one is out.
     queued: Option<u64>,
     /// Transfer errors being retried.
@@ -273,7 +293,14 @@ impl UsbInput {
                     index,
                     0,
                 );
-                c.device(device.id)?.control(request, &[])?;
+                // Linux usbhid sends no SET_PROTOCOL: report protocol is the
+                // default after reset, so a device refusing to confirm it
+                // still works. Boot fallback depends on the switch.
+                match c.device(device.id)?.control(request, &[]) {
+                    Ok(_) => {}
+                    Err(BlockError::Device { status: STALL }) if protocol == REPORT_PROTOCOL => {}
+                    Err(error) => return Err(error),
+                }
                 // Reports on change only; a device may refuse.
                 match c.device(device.id)?.control(
                     setup(TYPE_CLASS | RECIPIENT_INTERFACE, SET_IDLE, 0, index, 0),
@@ -358,6 +385,21 @@ impl UsbInput {
             return Err(BlockError::Unsupported("HID input report without data"));
         }
         let buffer = dma.allocate(length, length.next_power_of_two())?;
+        let longest = descriptor.as_ref().map_or(0, |descriptor| {
+            descriptor
+                .reports
+                .iter()
+                .filter(|layout| layout.kind == ReportType::Output)
+                .map(|layout| layout.wire_bytes())
+                .max()
+                .unwrap_or(0)
+        });
+        let output = match interrupt(interface, false) {
+            Some(out) if longest != 0 => {
+                Some((out, dma.allocate(longest, longest.next_power_of_two())?))
+            }
+            _ => None,
+        };
         Ok(Some(Self {
             controller,
             id: device.id,
@@ -369,6 +411,7 @@ impl UsbInput {
             endpoint,
             buffer,
             length,
+            output,
             queued: None,
             retry: None,
             reports,
@@ -595,7 +638,7 @@ impl UsbInput {
         let Some(keys) = &self.reports.keys else {
             return;
         };
-        let Some(mut held) = keys.pressed(body) else {
+        let Some(mut held) = keys.pressed_after(body, &self.held) else {
             return;
         };
         let before = held.len();
@@ -691,6 +734,16 @@ impl UsbInput {
                 Input::MouseWheel(detents)
             } else {
                 Input::Wheel(detents)
+            });
+        }
+        if let Some(pan) = value(layout.pan)
+            && pan != 0
+        {
+            let detents = pan.clamp(-127, 127) as i8;
+            inputs.push(if mouse {
+                Input::MouseHWheel(detents)
+            } else {
+                Input::HWheel(detents)
             });
         }
     }
@@ -809,6 +862,95 @@ mod tests {
         let mut device = model::device(Vec::new());
         device.id = controller.borrow().test_device_id(1).unwrap();
         device
+    }
+
+    /// A keyboard whose output report holds five LEDs and three pad bits.
+    const LED_KEYBOARD: [u8; 55] = [
+        0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, // keyboard
+        0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81,
+        0x02, // modifiers
+        0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02, // LEDs
+        0x95, 0x01, 0x75, 0x03, 0x91, 0x01, // padding
+        0x95, 0x06, 0x75, 0x08, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81,
+        0x00, // keys
+        0xc0,
+    ];
+
+    #[test]
+    fn leds_set_the_first_led_report_like_hidinput_led_worker() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: this allocation outlives all model/controller DMA references.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, hardware) = model::cancellation_controller(&mut dma);
+        hardware
+            .borrow_mut()
+            .descriptors
+            .push((REPORT_DESCRIPTOR, 0, LED_KEYBOARD.to_vec()));
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        let interface = interface(&LED_KEYBOARD, 0, 0);
+        let mut input = UsbInput::new(
+            shared.clone(),
+            &device(&shared),
+            &interface,
+            interface.endpoints[0],
+            &mut dma,
+        )
+        .unwrap()
+        .unwrap();
+        // Num Lock, Caps Lock and Stand-By, which this keyboard lacks.
+        input.set_leds(1 << 0 | 1 << 1 | 1 << 5).unwrap();
+        assert_eq!(
+            hardware.borrow().setup.last().unwrap(),
+            &([0x21, SET_REPORT, 0, 2, 4, 0, 1, 0], vec![3])
+        );
+        input.set_leds(1 << 2).unwrap();
+        assert_eq!(hardware.borrow().setup.last().unwrap().1, [4]);
+    }
+
+    #[test]
+    fn output_reports_take_the_interrupt_out_endpoint_like_usbhid_output_report() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: this allocation outlives all model/controller DMA references.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, hardware) = model::cancellation_controller(&mut dma);
+        hardware
+            .borrow_mut()
+            .descriptors
+            .push((REPORT_DESCRIPTOR, 0, GAMEPAD.to_vec()));
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        let mut interface = interface(GAMEPAD, 0, 0);
+        // The model's slot owns endpoint 2 OUT.
+        interface.endpoints.push(Endpoint {
+            address: 0x02,
+            attributes: 3,
+            max_packet: 16,
+            interval: 1,
+            companion: None,
+        });
+        assert!(matches!(plan(&interface), Ok(Plan::Hid(_, Some(out))) if out.address == 2));
+        let mut input = UsbInput::new(
+            shared.clone(),
+            &device(&shared),
+            &interface,
+            interface.endpoints[0],
+            &mut dma,
+        )
+        .unwrap()
+        .unwrap();
+        let setups = hardware.borrow().setup.len();
+        assert_eq!(input.output_report(2, &[2, 0x41]), Ok(2));
+        assert_eq!(hardware.borrow().outgoing, [vec![2, 0x41]]);
+        assert!(input.output_report(3, &[3, 0x41]).is_err());
+        assert_eq!(hardware.borrow().setup.len(), setups);
+        // Without the endpoint, SET_REPORT carries it.
+        input.output = None;
+        assert_eq!(input.output_report(2, &[2, 0x42]), Ok(2));
+        assert_eq!(
+            hardware.borrow().setup.last().unwrap(),
+            &([0x21, SET_REPORT, 2, 2, 4, 0, 2, 0], vec![2, 0x42])
+        );
     }
 
     #[test]
@@ -942,6 +1084,52 @@ mod tests {
         assert_eq!(hardware.borrow().seen.len(), commands);
         assert_eq!(input.first_error(), error);
         assert!(shared.borrow().endpoint_poisoned(1, 3));
+    }
+
+    #[test]
+    fn a_refused_report_protocol_switch_keeps_the_interface_but_boot_fallback_fails() {
+        let keyboard = super::tests::NUMBERED_KEYBOARD;
+        for described in [true, false] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: live exclusive test allocation bounds every controller DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, hardware) = model::cancellation_controller(&mut dma);
+            if described {
+                hardware
+                    .borrow_mut()
+                    .descriptors
+                    .push((REPORT_DESCRIPTOR, 0, keyboard.to_vec()));
+            }
+            hardware.borrow_mut().stall_control = Some(SET_PROTOCOL);
+            let shared: Shared = Rc::new(RefCell::new(controller));
+            let interface = interface(&keyboard, BOOT, KEYBOARD);
+            let input = UsbInput::new(
+                shared.clone(),
+                &device(&shared),
+                &interface,
+                interface.endpoints[0],
+                &mut dma,
+            );
+            if !described {
+                // Without a usable descriptor only boot reports can be read.
+                assert_eq!(input.err(), Some(BlockError::Device { status: STALL }));
+                continue;
+            }
+            let mut input = input.unwrap().unwrap();
+            hardware.borrow_mut().stall_control = None;
+            hardware
+                .borrow_mut()
+                .incoming_events
+                .push_back(vec![1, 0, 0, 4, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                input.poll(),
+                [Input::Key {
+                    usage: 4,
+                    pressed: true
+                }]
+            );
+        }
     }
 
     #[test]
@@ -1093,6 +1281,13 @@ mod tests {
                 1,
                 0x81,
                 6,
+                5,
+                0x0c,
+                0x0a,
+                0x38,
+                2, // AC Pan
+                0x81,
+                6,
                 0xc0,
                 0xc0,
             ];
@@ -1119,13 +1314,14 @@ mod tests {
             hardware
                 .borrow_mut()
                 .incoming_events
-                .push_back(vec![0x11, 127, 0, 1]);
+                .push_back(vec![0x11, 127, 0, 1, 0xfe]);
             let polled = input.poll_hid();
             let expected = if relative {
                 vec![
                     Input::Motion { dx: 127, dy: 0 },
                     Input::MouseButtons(0x11),
                     Input::MouseWheel(1),
+                    Input::MouseHWheel(-2),
                 ]
             } else {
                 vec![
@@ -1135,6 +1331,7 @@ mod tests {
                     },
                     Input::Buttons(1),
                     Input::Wheel(1),
+                    Input::HWheel(-2),
                 ]
             };
             assert_eq!(polled.inputs, expected);

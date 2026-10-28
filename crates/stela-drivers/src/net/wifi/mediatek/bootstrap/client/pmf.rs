@@ -94,7 +94,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         unsafe {
             authority.with_pmf_authentication(self, |client, guard| {
                 Self::qualify_pmf_authentication(client.state_mut(), guard, None)?;
-                let events = client.poll_inner(now, source, policy, Some(guard))?;
+                let events = client.poll_inner(now, source, policy, Some(guard), None)?;
                 let s = client.state_mut();
                 if s.phase == Phase::Joining
                     && let Some(action) = s.station.poll(now, policy).map_err(Error::Station)?

@@ -12,6 +12,11 @@ const LINEAR_STREAM_ARRAY: u32 = 1 << 15;
 const STREAM_CONTEXT_BYTES: usize = 16;
 const EVENT_DATA: u32 = 1 << 2;
 const INCOMPATIBLE_DEVICE: u32 = 22;
+const INVALID_STREAM_TYPE: u32 = 10;
+const RING_UNDERRUN: u32 = 14;
+const RING_OVERRUN: u32 = 15;
+const STOPPED_LENGTH_INVALID: u32 = 27;
+const INVALID_STREAM_ID: u32 = 34;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 /// Immutable qualification for this controller's current reset/ownership
@@ -183,6 +188,8 @@ pub(super) struct Streams {
     rings: Vec<Stream>,
     recovery: bool,
     cadence: bool,
+    /// Linux `xhci_virt_ep.err_count` for this endpoint's stream TDs.
+    errors: u32,
 }
 
 impl Streams {
@@ -223,6 +230,7 @@ impl Streams {
             rings,
             recovery: false,
             cadence,
+            errors: 0,
         })
     }
 
@@ -523,6 +531,61 @@ impl Controller {
         })
     }
 
+    /// Linux handle_transferless_tx_event: events whose TRB pointer lies in
+    /// none of the endpoint's stream rings reset the endpoint, softly while
+    /// within MAX_SOFT_RETRY. Other such events are dropped.
+    fn transferless(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        let streams = self.slot(slot)?.endpoints[usize::from(dci)]
+            .as_ref()
+            .and_then(|endpoint| endpoint.streams.as_ref())
+            .ok_or(BlockError::Unsupported("endpoint has no streams"))?;
+        let rings: Vec<_> = streams
+            .rings
+            .iter()
+            .map(|stream| {
+                let base = stream.ring.buffer.device_address();
+                base..base + (RING_TRBS * TRB) as u64
+            })
+            .collect();
+        while let Some(event) = self.take(|e| {
+            e.kind() == TRANSFER_EVENT
+                && e.slot() == slot
+                && e.endpoint() == dci
+                && e.code() != INCOMPATIBLE_DEVICE
+                && !rings.iter().any(|ring| ring.contains(&e.parameter))
+        }) {
+            match event.code() {
+                STALL
+                | transfer::USB_TRANSACTION_ERROR
+                | INVALID_STREAM_TYPE
+                | INVALID_STREAM_ID => {
+                    let streams = self.slot(slot)?.endpoints[usize::from(dci)]
+                        .as_mut()
+                        .unwrap()
+                        .streams
+                        .as_mut()
+                        .unwrap();
+                    let previous = streams.errors;
+                    streams.errors = previous.saturating_add(1);
+                    if previous > transfer::MAX_SOFT_RETRY {
+                        // EP_HARD_RESET with no TD: the endpoint stays
+                        // stopped until it is rung again.
+                        self.reset_halted(slot, dci, 0)?;
+                    } else {
+                        let doorbells: Vec<u32> = (1..=streams.rings.len() as u16)
+                            .filter(|id| streams.rings[usize::from(*id) - 1].active.is_some())
+                            .map(|id| doorbell_value(dci, id))
+                            .collect();
+                        self.soft_reset(slot, dci, &doorbells)?;
+                    }
+                }
+                RING_UNDERRUN | RING_OVERRUN | STOPPED_LENGTH_INVALID => {}
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Polls the exact active ticket. Successful completion returns the actual
     /// transferred length; a terminal error remains recorded until cancellation.
     /// Stale, cancelled and foreign tickets cannot consume a current TD's event.
@@ -560,15 +623,19 @@ impl Controller {
             Err(error) | Ok(Some(error)) => return Some(Err(error)),
             Ok(None) => {}
         }
+        if let Err(error) = self.transferless(slot, ticket.dci) {
+            return Some(Err(error));
+        }
         let event = self.take(|e| {
             e.kind() == TRANSFER_EVENT
                 && e.slot() == slot
                 && e.endpoint() == ticket.dci
                 && (e.parameter == ticket.trb || e.code() == INCOMPATIBLE_DEVICE)
         })?;
-        let endpoint = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
-            .as_mut()
-            .unwrap();
+        let no_soft_retry = self.quirks.no_soft_retry;
+        let state = self.slot(slot).unwrap();
+        let tt_info = state.context[2];
+        let endpoint = state.endpoints[usize::from(ticket.dci)].as_mut().unwrap();
         let streams = endpoint.streams.as_mut().unwrap();
         if event.code() == INCOMPATIBLE_DEVICE {
             endpoint.poisoned = true;
@@ -583,9 +650,40 @@ impl Controller {
             )));
         }
         if matches!(event.code(), SUCCESS | SHORT_PACKET) {
+            streams.errors = 0;
             streams.stream(ticket.stream).unwrap().active = None;
             Some(Ok(ticket.length - event.residual()))
         } else {
+            // Linux process_bulk_intr_td handles stream TDs the same way.
+            if event.code() == transfer::USB_TRANSACTION_ERROR
+                && !streams.recovery
+                && transfer::retry_in_place(&mut streams.errors, no_soft_retry, tt_info)
+            {
+                let doorbells: Vec<u32> = (1..=streams.rings.len() as u16)
+                    .filter(|id| streams.rings[usize::from(*id) - 1].active.is_some())
+                    .map(|id| doorbell_value(ticket.dci, id))
+                    .collect();
+                match self.soft_reset(slot, ticket.dci, &doorbells) {
+                    Ok(()) => return None,
+                    Err(error) => {
+                        let streams = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
+                            .as_mut()
+                            .unwrap()
+                            .streams
+                            .as_mut()
+                            .unwrap();
+                        streams.recovery = true;
+                        streams
+                            .stream(ticket.stream)
+                            .unwrap()
+                            .active
+                            .as_mut()
+                            .unwrap()
+                            .error = Some(error.clone());
+                        return Some(Err(error));
+                    }
+                }
+            }
             let error = BlockError::Device {
                 status: event.code(),
             };
@@ -632,8 +730,12 @@ mod tests {
         commands: Vec<(u32, u16, u64)>,
         fail_command: Option<(u32, u16)>,
         silent_command: Option<u32>,
+        /// A silenced command, keeping CRCR.CRR set until it is aborted.
+        stuck: Option<u64>,
         fatal: bool,
         cadence: bool,
+        /// Reset Endpoint commands with Transfer State Preserve.
+        soft_resets: usize,
     }
     impl Hardware {
         fn word(address: u64) -> u32 {
@@ -666,6 +768,13 @@ mod tests {
             }
             self.event_index += 1;
         }
+        /// A command abort: the stuck command completes aborted, then the ring stops.
+        fn abort(&mut self) {
+            if let Some(at) = self.stuck.take() {
+                self.event(at, COMMAND_ABORTED, COMMAND_COMPLETION, 0, 0);
+                self.event(0, COMMAND_RING_STOPPED, COMMAND_COMPLETION, 0, 0);
+            }
+        }
         fn command(&mut self) {
             let address = self.command_base + (self.command_index * TRB) as u64;
             let parameter = Self::long(address);
@@ -677,6 +786,7 @@ mod tests {
             self.commands.push((kind, stream, parameter));
             self.command_index = (self.command_index + 1) % (RING_TRBS - 1);
             if self.silent_command == Some(kind) {
+                self.stuck = Some(address);
                 return;
             }
             let mut code = if self.fail_command == Some((kind, stream)) {
@@ -717,6 +827,7 @@ mod tests {
                         if self.state(dci) != ENDPOINT_HALTED {
                             code = CONTEXT_STATE_ERROR;
                         } else {
+                            self.soft_resets += usize::from(control & transfer::TSP != 0);
                             self.set_state(dci, ENDPOINT_STOPPED);
                         }
                     }
@@ -768,6 +879,12 @@ mod tests {
             self.event(address, code, COMMAND_COMPLETION, 0, 0);
         }
         fn transfer(&mut self, dci: u8, stream: u16) {
+            if self.active.contains_key(&(dci, stream)) {
+                // A preserved TD resumes where it stopped.
+                self.set_state(dci, ENDPOINT_RUNNING);
+                self.doorbells.push((dci, stream));
+                return;
+            }
             let context = self.output + u64::from(dci) * self.context_bytes as u64;
             let info = Self::word(context);
             let initial = if info & LINEAR_STREAM_ARRAY != 0 {
@@ -822,6 +939,21 @@ mod tests {
             self.set_state(dci, ENDPOINT_RUNNING);
             self.doorbells.push((dci, stream));
         }
+        /// Halts on a transaction error, keeping the TD at the dequeue pointer.
+        fn transaction_error(&mut self, dci: u8, stream: u16) {
+            let (trb, bytes) = {
+                let td = &self.active[&(dci, stream)];
+                (td.trb, td.bytes)
+            };
+            self.set_state(dci, ENDPOINT_HALTED);
+            self.event(
+                trb,
+                transfer::USB_TRANSACTION_ERROR,
+                TRANSFER_EVENT,
+                dci,
+                bytes,
+            );
+        }
         fn complete(&mut self, dci: u8, stream: u16, code: u32, residual: usize) {
             let td = self.active.remove(&(dci, stream)).unwrap();
             if matches!(code, SUCCESS | SHORT_PACKET) && residual <= td.bytes {
@@ -843,12 +975,15 @@ mod tests {
         fn read32(&mut self, offset: usize) -> u32 {
             if offset == 0x40 + USBSTS && self.0.borrow().fatal {
                 HSE
+            } else if offset == 0x40 + CRCR && self.0.borrow().stuck.is_some() {
+                CRCR_RUNNING
             } else {
                 0
             }
         }
         fn write32(&mut self, offset: usize, value: u32) {
             match offset {
+                0x58 if value & CRCR_ABORT != 0 => self.0.borrow_mut().abort(),
                 0x1000 => self.0.borrow_mut().command(),
                 0x1004 => self
                     .0
@@ -891,8 +1026,10 @@ mod tests {
             commands: Vec::new(),
             fail_command: None,
             silent_command: None,
+            stuck: None,
             fatal: false,
             cadence: false,
+            soft_resets: 0,
         }));
         let mut slots = vec![None];
         slots.push(Some(Slot {
@@ -939,6 +1076,7 @@ mod tests {
                 max_slots: 1,
                 max_ports: 1,
                 port_major: vec![3],
+                lpm: lpm::Host::default(),
                 dcbaa: dma.allocate(16, 64).unwrap().into(),
                 _scratchpads: Vec::new(),
                 commands,
@@ -954,6 +1092,7 @@ mod tests {
                 pending: Vec::new(),
                 error: None,
                 command_poisoned: false,
+                command_ring_stopped: false,
                 location: String::from("stream model"),
             },
             model,
@@ -981,8 +1120,10 @@ mod tests {
             commands: Vec::new(),
             fail_command: None,
             silent_command: None,
+            stuck: None,
             fatal: false,
             cadence: false,
+            soft_resets: 0,
         }));
         controller.registers = Box::new(Model(model.clone()));
         controller.max_primary_streams = 16;
@@ -1337,6 +1478,115 @@ mod tests {
     }
 
     #[test]
+    fn stream_transaction_errors_soft_retry_every_pending_stream_like_linux() {
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: all actual context/ring/data addresses remain live.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = controller(&mut dma, 32);
+        controller
+            .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 3, &mut dma)
+            .unwrap();
+        let data = dma.allocate(256, 64).unwrap();
+        let one = controller
+            .submit_stream(1, 3, 1, data.physical(), 64)
+            .unwrap();
+        let two = controller
+            .submit_stream(1, 3, 2, data.physical() + 64, 64)
+            .unwrap();
+        model.borrow_mut().doorbells.clear();
+        // Each retry resets with TSP and rings both pending streams again.
+        for _ in 0..4 {
+            model.borrow_mut().transaction_error(3, 2);
+            assert_eq!(controller.completed_stream(&two), None);
+        }
+        assert_eq!(model.borrow().soft_resets, 4);
+        assert_eq!(model.borrow().doorbells, [(3, 1), (3, 2)].repeat(4));
+        model.borrow_mut().complete(3, 2, SUCCESS, 0);
+        assert_eq!(controller.completed_stream(&two), Some(Ok(64)));
+        // The success cleared err_count; the fifth error then fails.
+        for _ in 0..4 {
+            model.borrow_mut().transaction_error(3, 1);
+            assert_eq!(controller.completed_stream(&one), None);
+        }
+        model.borrow_mut().transaction_error(3, 1);
+        let error = BlockError::Device {
+            status: transfer::USB_TRANSACTION_ERROR,
+        };
+        assert_eq!(controller.completed_stream(&one), Some(Err(error)));
+        assert!(
+            controller
+                .submit_stream(1, 3, 2, data.physical(), 64)
+                .is_err()
+        );
+        // The failed TD is retired by a hard reset, without TSP.
+        controller.cancel(1, 3).unwrap();
+        assert_eq!(model.borrow().soft_resets, 8);
+        assert!(model.borrow().active.is_empty());
+    }
+
+    #[test]
+    fn transferless_stream_errors_reset_the_endpoint_like_linux() {
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: all actual context/ring/data addresses remain live.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = controller(&mut dma, 32);
+        controller
+            .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 3, &mut dma)
+            .unwrap();
+        let data = dma.allocate(256, 64).unwrap();
+        let one = controller
+            .submit_stream(1, 3, 1, data.physical(), 64)
+            .unwrap();
+        model.borrow_mut().doorbells.clear();
+        let resets = |model: &Rc<RefCell<Hardware>>| {
+            let model = model.borrow();
+            let all = model
+                .commands
+                .iter()
+                .filter(|c| c.0 == RESET_ENDPOINT)
+                .count();
+            (all - model.soft_resets, model.soft_resets)
+        };
+        // Errors naming no stream ring: four soft resets, each ringing the
+        // pending stream, then hard resets until a success.
+        for (code, hard, soft) in [
+            (transfer::USB_TRANSACTION_ERROR, 0, 1),
+            (STALL, 0, 2),
+            (INVALID_STREAM_ID, 0, 3),
+            (INVALID_STREAM_TYPE, 0, 4),
+            (transfer::USB_TRANSACTION_ERROR, 1, 4),
+            (transfer::USB_TRANSACTION_ERROR, 2, 4),
+        ] {
+            model.borrow_mut().set_state(3, ENDPOINT_HALTED);
+            model.borrow_mut().event(0, code, TRANSFER_EVENT, 3, 0);
+            assert_eq!(controller.completed_stream(&one), None);
+            assert_eq!(resets(&model), (hard, soft));
+        }
+        assert_eq!(model.borrow().doorbells, [(3, 1); 4]);
+        // Underruns and unknown events naming no ring are dropped.
+        model
+            .borrow_mut()
+            .event(0, RING_UNDERRUN, TRANSFER_EVENT, 3, 0);
+        model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
+        assert_eq!(controller.completed_stream(&one), None);
+        assert_eq!(resets(&model), (2, 4));
+        assert!(controller.pending.iter().all(|e| e.endpoint() != 3));
+        // A success clears err_count: the next error is soft again.
+        model.borrow_mut().set_state(3, ENDPOINT_RUNNING);
+        model.borrow_mut().complete(3, 1, SUCCESS, 0);
+        assert_eq!(controller.completed_stream(&one), Some(Ok(64)));
+        let two = controller
+            .submit_stream(1, 3, 2, data.physical() + 64, 64)
+            .unwrap();
+        model.borrow_mut().set_state(3, ENDPOINT_HALTED);
+        model.borrow_mut().event(0, STALL, TRANSFER_EVENT, 3, 0);
+        assert_eq!(controller.completed_stream(&two), None);
+        assert_eq!(resets(&model), (2, 5));
+    }
+
+    #[test]
     fn partial_dequeue_failure_retains_every_stream_and_blocks_all_mutation() {
         for fail_stream in 1..=3 {
             let mut backing = vec![0u64; 256 * 1024];
@@ -1660,7 +1910,8 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(!transfer.enabled && transfer.poisoned && transfer.streams.is_some());
-        assert!(controller.command_poisoned);
+        // The aborted command leaves the command ring usable.
+        assert!(!controller.command_poisoned);
         let data = dma.allocate(64, 64).unwrap();
         assert!(
             controller

@@ -369,7 +369,9 @@ unsafe impl<R: Registers> owned::Lifecycle for Lifecycle<R> {
         Ok(())
     }
     fn enable_dma(&mut self) -> Result<(), BlockError> {
-        if self.phase != Phase::Prepared {
+        // A controller reset re-enables bus mastering after disable_dma, as
+        // nvme_pci_enable does after nvme_dev_disable.
+        if !matches!(self.phase, Phase::Prepared | Phase::Disabled) {
             return Err(block(Error::ActiveChild));
         }
         self.transition(|host, hierarchy, _| hierarchy.enable(host))?;

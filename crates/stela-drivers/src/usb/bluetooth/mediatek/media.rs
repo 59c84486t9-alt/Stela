@@ -13,7 +13,7 @@ use core::fmt;
 pub use framing::Kind;
 pub use session::{
     Lifecycle, Loss, MediaIo, OutputDisposition, OutputReceipt, Read, Received, Session,
-    SetupReport,
+    SetupReport, ShutdownReport,
 };
 pub type Result<T> = core::result::Result<T, Error>;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +37,10 @@ pub enum Error {
         status: u8,
         event: alloc::vec::Vec<u8>,
     },
+    /// The controller crashed and its memory dump ended. Linux resets the
+    /// controller now; without the shared subsystem reset this attachment
+    /// needs a fresh rebind.
+    ControllerDump(alloc::boxed::Box<super::coredump::Coredump>),
     Cleanup {
         cause: alloc::boxed::Box<Error>,
         media: Option<BlockError>,
@@ -135,6 +139,8 @@ pub(in crate::usb::bluetooth) mod tests {
     #[derive(Default)]
     struct Model {
         events: VecDeque<Vec<u8>>,
+        acl: VecDeque<Vec<u8>>,
+        wmt: VecDeque<Vec<u8>>,
         sco: VecDeque<Read>,
         iso: VecDeque<Read>,
         writes: Vec<(Kind, Vec<u8>)>,
@@ -169,6 +175,16 @@ pub(in crate::usb::bluetooth) mod tests {
                 }
                 return Ok(());
             }
+            if p == [0x6f, 0xfc, 6, 1, 6, 2, 0, 0, 0] {
+                self.actions.push("wmt-function-off");
+                if !self.no_complete {
+                    self.events.push_back(vec![0x0f, 4, 0, 1, 0x6f, 0xfc]);
+                    // Two empty EP0 INs precede the event.
+                    self.wmt
+                        .extend([vec![], vec![], vec![0xe4, 5, 2, 6, 1, 0, 0]]);
+                }
+                return Ok(());
+            }
             assert_eq!(p, [0x98, 0xfd, 2, 8, 1]);
             self.actions.push("fd98");
             if !self.no_complete {
@@ -193,11 +209,14 @@ pub(in crate::usb::bluetooth) mod tests {
             Ok(())
         }
         fn receive(&mut self, p: Pipe) -> core::result::Result<Option<Vec<u8>>, BlockError> {
-            Ok(if p == Pipe::Event {
-                self.events.pop_front()
-            } else {
-                None
+            Ok(match p {
+                Pipe::Event => self.events.pop_front(),
+                Pipe::Acl => self.acl.pop_front(),
             })
+        }
+        fn control_read(&mut self, s: [u8; 8]) -> core::result::Result<Vec<u8>, BlockError> {
+            assert_eq!(s, [0xc0, 1, 0x30, 0, 0, 0, 64, 0]);
+            Ok(self.wmt.pop_front().unwrap_or_default())
         }
         fn write_acl(&mut self, _: &[u8]) -> core::result::Result<(), BlockError> {
             Ok(())
@@ -286,7 +305,8 @@ pub(in crate::usb::bluetooth) mod tests {
     }
     fn hci(model: Model) -> Hci<Model> {
         use super::super::{
-            Chip, FirmwareMetadata, Identity, OwnedReport, RecoveryPolicy, UsbIdentity, WmtEvent,
+            Chip, FirmwareMetadata, HostPolicy, Identity, OwnedReport, RecoveryPolicy, UsbIdentity,
+            WmtEvent,
         };
         use crate::usb::bluetooth::FirmwareReceipt;
         let mut h = Hci::from_io(binding(), model);
@@ -330,6 +350,11 @@ pub(in crate::usb::bluetooth) mod tests {
             local_version: [0; 9],
             address: [1; 6],
             recovery: RecoveryPolicy::FreshRebindRequired,
+            policy: HostPolicy::for_device(UsbIdentity {
+                vendor: 0x13d3,
+                product: 0x3602,
+                revision: 0x100,
+            }),
         }))));
         h
     }
@@ -367,6 +392,86 @@ pub(in crate::usb::bluetooth) mod tests {
             r.identity.chip = super::super::Chip::Mt7922;
         }
         assert!(Session::start(wrong, &mut NoDma, 1).is_err());
+    }
+    #[test]
+    fn shutdown_turns_the_wmt_function_off_before_retiring_the_transport() {
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        assert_eq!(
+            s.shutdown(0),
+            Err(Error::Packet(
+                "actual available shutdown HCI credit required"
+            ))
+        );
+        assert_eq!(s.lifecycle(), Lifecycle::Running);
+        let report = s.shutdown(1).unwrap();
+        assert_eq!(report.function_off.bytes(), [0xe4, 5, 2, 6, 1, 0, 0]);
+        // Setup's undelivered events come first, then the WMT command status.
+        assert_eq!(
+            report.asynchronous.last(),
+            Some(&Received::Hci(crate::usb::bluetooth::Packet::Event(vec![
+                0x0f, 4, 0, 1, 0x6f, 0xfc
+            ])))
+        );
+        assert_eq!(report.asynchronous.len(), 3);
+        assert!(
+            s.hci
+                .io
+                .actions
+                .ends_with(&["wmt-function-off", "media-close", "base-close"])
+        );
+        assert_eq!(s.lifecycle(), Lifecycle::Closed);
+        assert!(s.shutdown(1).is_err());
+
+        // A function that never answers fails after HCI_INIT_TIMEOUT.
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        s.hci.io.no_complete = true;
+        let start = s.hci.io.now.get();
+        assert!(matches!(s.shutdown(1), Err(Error::Cleanup { .. })));
+        assert!(s.hci.io.now.get() - start >= 10_000_000);
+        assert_eq!(s.lifecycle(), Lifecycle::Failed);
+    }
+    #[test]
+    fn a_firmware_dump_is_delivered_as_diagnostics_then_ends_the_session() {
+        use super::super::coredump::End;
+        use crate::usb::bluetooth::Packet;
+        let dump = |payload: &[u8]| {
+            let mut frame = vec![0x6f, 0xfc];
+            frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            frame.extend_from_slice(payload);
+            frame
+        };
+        let ended = |error| match error {
+            Error::Cleanup { cause, .. } => match *cause {
+                Error::ControllerDump(dump) => *dump,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        s.poll().unwrap();
+        for index in 0..255u8 {
+            s.hci.io.acl.push_back(dump(&[index; 4]));
+            assert_eq!(
+                s.poll().unwrap(),
+                [Received::Hci(Packet::Diagnostic(dump(&[index; 4])))]
+            );
+        }
+        s.hci.io.acl.push_back(dump(b"coredump end\0"));
+        let dump = ended(s.poll().unwrap_err());
+        assert_eq!((dump.end, dump.frames), (End::Complete, 256));
+        assert_eq!(dump.device_id, 0x7925);
+        assert_eq!(s.lifecycle(), Lifecycle::Failed);
+        assert!(s.hci.io.actions.ends_with(&["media-close", "base-close"]));
+
+        // A dump that stalls ends after five seconds without new frames.
+        let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
+        s.poll().unwrap();
+        s.hci.io.acl.push_back(vec![0x6f, 0xfc, 1, 0, 1]);
+        s.poll().unwrap();
+        s.hci.io.now.set(s.hci.io.now.get() + 5_000_000);
+        let dump = ended(s.poll().unwrap_err());
+        assert_eq!((dump.end, dump.frames), (End::Timeout, 1));
     }
     #[test]
     fn media_loss_alt_transition_and_quiescence_never_reassemble_old_partial() {

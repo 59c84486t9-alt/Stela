@@ -22,7 +22,6 @@ const SET_CUR: u8 = 1;
 pub struct EndpointRates {
     pub ranges: Vec<RateRange>,
     pub frequency_control: bool,
-    pub pitch_control: bool,
 }
 impl EndpointRates {
     pub(super) fn validate_rate(&self, rate: u32) -> Result<(), Error> {
@@ -40,46 +39,46 @@ impl EndpointRates {
         }
         Ok(())
     }
+    /// Linux `set_sample_rate_v1`: SET_CUR must succeed; the GET_CUR after it
+    /// only reports. A failed read counts toward `read_errors`, and after
+    /// three, or once a read returns zero, reads stop. Returns the rate read
+    /// back, or `rate` when none was.
     pub(super) fn apply<C: Control>(
         &self,
         io: &mut C,
         endpoint: u8,
         rate: u32,
-    ) -> Result<(), Error> {
+        read_errors: &mut u8,
+    ) -> Result<u32, Error> {
         self.validate_rate(rate)?;
-        if self.pitch_control {
-            endpoint_control(io, endpoint, PITCH, &[1])?;
+        if !self.frequency_control {
+            return Ok(rate);
         }
-        if self.frequency_control {
-            endpoint_control(io, endpoint, SAMPLE_RATE, &rate.to_le_bytes()[..3])?;
+        let mut data = [rate as u8, (rate >> 8) as u8, (rate >> 16) as u8];
+        let index = u16::from(endpoint);
+        if !io
+            .control(setup(0x22, SET_CUR, SAMPLE_RATE, index, 3), &data)?
+            .is_empty()
+        {
+            return Err(Error::ControlLength);
         }
-        Ok(())
+        if *read_errors > 2 {
+            return Ok(rate);
+        }
+        let Ok(reply) = io.control(setup(0xa2, GET_CUR, SAMPLE_RATE, index, 3), &[]) else {
+            *read_errors += 1;
+            return Ok(rate);
+        };
+        // A short reply leaves the rest of the buffer as it was sent.
+        let n = reply.len().min(3);
+        data[..n].copy_from_slice(&reply[..n]);
+        let current = triple(&data);
+        if current == 0 {
+            *read_errors = 3;
+            return Ok(rate);
+        }
+        Ok(current)
     }
-}
-fn endpoint_control<C: Control>(
-    io: &mut C,
-    endpoint: u8,
-    selector: u16,
-    value: &[u8],
-) -> Result<(), Error> {
-    let n = value.len() as u16;
-    if !io
-        .control(
-            setup(0x22, SET_CUR, selector, u16::from(endpoint), n),
-            value,
-        )?
-        .is_empty()
-    {
-        return Err(Error::ControlLength);
-    }
-    let reply = io.control(setup(0xa2, GET_CUR, selector, u16::from(endpoint), n), &[])?;
-    if reply.len() != value.len() {
-        return Err(Error::ControlLength);
-    }
-    if reply != value {
-        return Err(Error::ControlReadback);
-    }
-    Ok(())
 }
 fn triple(d: &[u8]) -> u32 {
     u32::from_le_bytes([d[0], d[1], d[2], 0])
@@ -384,7 +383,6 @@ fn format(
         endpoint_rates: Some(EndpointRates {
             ranges,
             frequency_control: controls[3] & 1 != 0,
-            pitch_control: controls[3] & 2 != 0,
         }),
         interface: interface.number,
         alternate: interface.alternate,
@@ -400,6 +398,7 @@ fn format(
         service_microframes,
         max_bytes,
         fill_max: controls[3] & 0x80 != 0,
+        pitch: (controls[3] & 2 != 0).then_some((PITCH, u16::from(data.address))),
     })
 }
 

@@ -781,6 +781,7 @@ mod tests {
                 },
                 codec: 0,
                 pin: 3,
+                device: 0,
                 port: 7,
             }
         }
@@ -818,7 +819,7 @@ mod tests {
             });
             let grant_weak = Arc::downgrade(&grant);
             // SAFETY: original symbolic GPU/HDA grant matches this graph/pin.
-            let port = unsafe { c.attach_hdmi_port(&graph, 3, grant) }.unwrap();
+            let port = unsafe { c.attach_hdmi_port(&graph, 3, 0, grant) }.unwrap();
             state.borrow_mut().reject_reset = reject_reset;
             let boundary = state.borrow().events.len();
             let result = c.suspend_pci_d3hot();
