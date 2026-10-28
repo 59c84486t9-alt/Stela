@@ -47,7 +47,7 @@ static PASSTHROUGH_REPORTED: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct Services<'a> {
     mmio: &'a native_mmio::Source,
-    acpi: Option<&'a HostAcpi>,
+    acpi: Option<&'static HostAcpi>,
     heap: core::ops::Range<u64>,
     tsc_hz: u64,
 }
@@ -62,7 +62,7 @@ impl<'a> Services<'a> {
     /// the i8042's interrupts are masked, as its port grant requires.
     pub(super) fn new(
         mmio: &'a native_mmio::Source,
-        acpi: Option<&'a HostAcpi>,
+        acpi: Option<&'static HostAcpi>,
         heap: core::ops::Range<u64>,
         tsc_hz: u64,
     ) -> Self {

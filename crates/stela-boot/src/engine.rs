@@ -816,7 +816,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             fdr: fdr_partition,
             network: wants_network,
         },
-        &host_acpi,
+        host_acpi,
         &native_mmio,
     );
     let built = preboot.map(|partition| from_disk(partition, &options));
@@ -1783,7 +1783,7 @@ fn install_host(handoff: &Handoff, options: &Options, ram: &[RamRange]) -> Insta
 /// The firmware's ACPI namespace and the owned MMIO authority, each `None`
 /// when the host does not qualify, which is reported.
 struct Platform {
-    acpi: Option<aml::HostAcpi>,
+    acpi: Option<&'static aml::HostAcpi>,
     mmio: Option<crate::native_mmio::Source>,
 }
 
@@ -1847,7 +1847,7 @@ fn start_devices(
     handoff: &Handoff,
     options: &Options,
     wanted: &Wanted<'_>,
-    host_acpi: &Option<aml::HostAcpi>,
+    host_acpi: Option<&'static aml::HostAcpi>,
     native_mmio: &Option<crate::native_mmio::Source>,
 ) -> HostDevices {
     let &Wanted {
@@ -1914,7 +1914,7 @@ fn start_devices(
                 let native = native_mmio.as_ref().map(|mmio| {
                     services::Services::new(
                         mmio,
-                        host_acpi.as_ref(),
+                        host_acpi,
                         handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes,
                         handoff.tsc_hz,
                     )
@@ -2024,7 +2024,7 @@ struct RunIo {
     guest_network: Option<network::GuestNetwork>,
     host_nor: Option<nor::HostNor>,
     host_disks: storage::HostDisks,
-    host_acpi: Option<aml::HostAcpi>,
+    host_acpi: Option<&'static aml::HostAcpi>,
     boot_progress: progress::BootProgress,
 }
 
