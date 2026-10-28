@@ -37,6 +37,7 @@ object = { version = "0.37", features = ["read"] }
 fetched-sources = ["stela-drivers/native-acpi"]
 
 [dev-dependencies]
+stela-crypto.workspace = true
 # Hosted tests of boot modules that use its topology and capture record.
 stela-boot-core.workspace = true
 

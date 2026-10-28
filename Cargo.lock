@@ -1888,6 +1888,7 @@ dependencies = [
  "chacha20 0.10.2",
  "rand_core 0.10.1",
  "stela-compiler",
+ "stela-crypto",
  "stela-drivers",
  "stela-loader",
  "stela-runtime",
@@ -1936,6 +1937,18 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "stela-fingerprint",
+]
+
+[[package]]
+name = "stela-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "cpufeatures 0.3.1",
+ "hex",
+ "sha1",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -2023,6 +2036,7 @@ dependencies = [
  "sha2",
  "smoltcp",
  "stela-compiler",
+ "stela-crypto",
  "stela-drivers",
  "stela-fingerprint",
  "tempfile",
@@ -2578,6 +2592,7 @@ dependencies = [
  "stela-boot-core",
  "stela-cli",
  "stela-compiler",
+ "stela-crypto",
  "stela-drivers",
  "stela-loader",
  "stela-runtime",

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/stela-boot-core",
+    "crates/stela-crypto",
     "crates/stela-cli",
     "crates/stela-dev",
     "crates/stela-loader",
@@ -45,6 +46,7 @@ hex = "0.4"
 libc = "0.2"
 tempfile = "3"
 stela-boot-core = { path = "crates/stela-boot-core" }
+stela-crypto = { path = "crates/stela-crypto" }
 stela-compiler = { path = "crates/stela-compiler" }
 stela-fingerprint = { path = "crates/stela-fingerprint" }
 stela-drivers = { path = "crates/stela-drivers" }

@@ -13,6 +13,7 @@ native-profile = []
 std = ["anyhow/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
 
 [dependencies]
+stela-crypto = { path = "../stela-crypto" }
 anyhow = { version = "1", default-features = false }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
