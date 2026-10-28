@@ -59,6 +59,7 @@ struct Argument {
     source: topology::Snapshot,
     effective_pat: u64,
     // An explicit authored diagnostic request, never execution/ISA authority.
+    #[cfg(feature = "diagnostics")]
     fp_qualification: bool,
     stack_bottom: u64,
     stack_top: u64,
@@ -112,6 +113,7 @@ impl Processor {
 
     /// Directed interrupt completion evidence only; this never grants a
     /// stopped generation or returned native frame to the runtime.
+    #[cfg(feature = "diagnostics")]
     pub(crate) unsafe fn check_doorbell(
         &self,
         sender: &Apic,
@@ -207,15 +209,19 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         let loader_root = config.window_root;
         // SAFETY: configured pool/arena/bounce entries belong only to this AP;
         // tables/local record remain pinned through every native call and park.
-        let mut owner =
+        let owner =
             unsafe { host::install(config) }.map_err(|_| "AP private host installation failed")?;
+        #[cfg(feature = "diagnostics")]
+        let mut owner = owner;
         let apic = u32::try_from(argument.processor.apic_id).map_err(|_| "AP APIC ID")?;
         host::join_shootdown(
             crate::native_mmio::PROCESSORS
                 .slot(apic)
                 .ok_or("AP missing from the aperture's processors")?,
         );
+        #[cfg(feature = "diagnostics")]
         super::context_check::check(&mut owner.host())?;
+        #[cfg(feature = "diagnostics")]
         if argument.fp_qualification {
             host::fp_diagnostic::check(&mut owner.host())?;
         }
@@ -373,7 +379,7 @@ pub(crate) unsafe fn start(
     capture: &'static firmware::Capture,
     ram: &[host::RamRange],
     tsc_base: u64,
-    fp_qualification: bool,
+    _fp_qualification: bool,
     serialized: bool,
 ) -> Result<Executors, StartupFailure> {
     let cores = handoff.native_resources.cores as usize;
@@ -453,7 +459,8 @@ pub(crate) unsafe fn start(
             processor,
             source: memory_source,
             effective_pat,
-            fp_qualification,
+            #[cfg(feature = "diagnostics")]
+            fp_qualification: _fp_qualification,
             stack_bottom: layout::stack() + slot as u64 * resources::STACK_STRIDE + PAGE,
             stack_top: layout::stack()
                 + slot as u64 * resources::STACK_STRIDE

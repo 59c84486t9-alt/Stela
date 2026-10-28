@@ -567,6 +567,7 @@ pub fn prepare_owned(inputs: &Inputs, ramdisk: OwnedRamdisk, options: &Options) 
 }
 
 fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> Result<Bundle> {
+    stela_runtime::builds::find(&inputs.target.product_build)?;
     let ramdisk_bytes = owned
         .as_ref()
         .map(|ramdisk| ramdisk.bytes.len())
@@ -2741,6 +2742,60 @@ mod tests {
         module.extend(1u32.to_le_bytes());
         module.extend([0xee; 24]);
         module
+    }
+
+    #[test]
+    fn unsupported_build_is_refused_before_image_parsing() {
+        let input = || Input {
+            bytes: &[],
+            source: source("unparsed"),
+        };
+        let inputs = Inputs {
+            target: Target {
+                product_type: "Mac14,3".into(),
+                device_class: "j473ap".into(),
+                product_version: "unsupported".into(),
+                product_build: "unsupported-build".into(),
+                variant: "Customer Erase Install (IPSW)".into(),
+                chip_id: Some(0x8112),
+                board_id: Some(0x2e),
+            },
+            kernel_collection: input(),
+            sptm: input(),
+            txm: input(),
+            device_tree: input(),
+            static_trust_cache: input(),
+            sep_firmware: None,
+            boot_manifest: None,
+            cryptex1_manifest: None,
+            extra_trust_caches: vec![],
+            board_firmware: vec![],
+            ramdisk: None,
+            root_hash: None,
+        };
+        let options = Options::default();
+        let borrowed = prepare(&inputs, &options).err().unwrap();
+        let owned = prepare_owned(
+            &inputs,
+            OwnedRamdisk {
+                bytes: vec![],
+                source: source("ramdisk"),
+            },
+            &options,
+        )
+        .err()
+        .unwrap();
+        for error in [borrowed, owned] {
+            let error = error
+                .downcast_ref::<stela_runtime::builds::Unsupported>()
+                .unwrap();
+            assert_eq!(error.build, "unsupported-build");
+            assert!(
+                error
+                    .supported
+                    .contains(&stela_runtime::builds::DEFAULT.build)
+            );
+        }
     }
 
     #[test]

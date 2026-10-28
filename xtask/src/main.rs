@@ -10,10 +10,6 @@ extern crate alloc;
 #[path = "../../crates/stela-boot/src/engine/bundle/source.rs"]
 mod boot_bundle_source;
 #[cfg(test)]
-#[path = "../../crates/stela-boot/src/entropy.rs"]
-#[allow(dead_code)] // UEFI-only protocol selection is absent in this hosted harness.
-mod boot_entropy;
-#[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/bundle/live_tree.rs"]
 mod boot_live_tree;
 #[cfg(test)]
@@ -24,10 +20,6 @@ mod boot_msr;
 #[path = "../../crates/stela-boot/src/apic.rs"]
 #[allow(dead_code)] // Only pure directed-INIT admission tests execute hosted.
 mod boot_native_apic;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_smp/bootstrap/early.rs"]
-#[allow(dead_code)] // Record/gate tests run hosted; actual assembly is inspected in UEFI.
-mod boot_native_early;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_memory.rs"]
 mod boot_native_memory;
@@ -51,10 +43,6 @@ mod boot_ioapic;
 #[path = "../../crates/stela-boot/src/native_irq/crs.rs"]
 mod boot_irq_crs;
 #[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_irq/madt.rs"]
-#[allow(dead_code)]
-mod boot_madt;
-#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_clock/pm.rs"]
 #[allow(dead_code)] // Only pure FADT/counter tests run hosted; port I/O is UEFI-only.
 mod boot_native_clock_pm;
@@ -73,6 +61,7 @@ mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_platform;
 mod links;
+mod oracles;
 mod pages;
 mod restore_dry_run;
 mod sysregs;
@@ -98,6 +87,8 @@ enum Task {
     /// Check the Markdown files' links and paths and the `cargo xtask` tasks
     /// the tree names.
     Links,
+    /// Run ignored oracle tests whose declared inputs are present and write a dated report.
+    Oracles(oracles::Oracles),
     /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
@@ -129,6 +120,7 @@ fn main() -> ExitCode {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Dist => dist::run().map(|()| ExitCode::SUCCESS),
         Task::Links => links::run().map(|()| ExitCode::SUCCESS),
+        Task::Oracles(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]

@@ -440,16 +440,23 @@ fn volume_of(path: &Path) -> Result<(String, Vec<u16>)> {
 }
 
 /// The disk number of the volume holding Windows.
-fn system_disk() -> Option<u32> {
+fn system_disk() -> Result<u32> {
     let mut directory = [0u16; 512];
     // SAFETY: a buffer of the length given.
     let length =
         unsafe { GetSystemWindowsDirectoryW(directory.as_mut_ptr(), directory.len() as u32) };
-    if length == 0 || length as usize >= directory.len() {
-        return None;
+    if length == 0 {
+        return Err(last_error()).context("cannot locate the running Windows installation");
     }
-    let (volume, _) = volume_of(Path::new(&narrow(&directory))).ok()?;
-    extent(&volume).map(|extent| extent.DiskNumber)
+    ensure!(
+        (length as usize) < directory.len(),
+        "the running Windows installation path exceeds the directory buffer"
+    );
+    let (volume, _) = volume_of(Path::new(&narrow(&directory)))
+        .context("cannot identify the volume holding the running Windows installation")?;
+    extent(&volume)
+        .map(|extent| extent.DiskNumber)
+        .context("cannot identify one physical disk holding the running Windows installation")
 }
 
 /// Bytes `[offset, offset + length)` of `drive`, read in whole sectors.
@@ -570,7 +577,7 @@ impl Host for System {
 
     fn disks(&self) -> Result<Vec<Disk>> {
         let volumes = volumes()?;
-        let system = system_disk();
+        let system = system_disk()?;
         let mut disks = Vec::new();
         for number in 0..DRIVES {
             let Ok(drive) = open(&drive_path(number), 0) else {
@@ -585,7 +592,7 @@ impl Host for System {
                 bytes: geometry(&drive).map_or(0, |(bytes, _)| bytes),
                 removal: descriptor.facts().removal(),
                 name: descriptor.name,
-                system: system == Some(number),
+                system: system == number,
                 partitions: entries
                     .into_iter()
                     .map(|entry| Partition {

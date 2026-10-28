@@ -36,7 +36,7 @@ use crate::{
     bus::dma::memory::PageSource,
     firmware::Provider,
     net::{
-        Mac,
+        Link, LinkError, Mac,
         wifi::{
             Band,
             regulatory::database::{self, Database},
@@ -45,7 +45,7 @@ use crate::{
     },
     probe::WifiConfig,
 };
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use core::any::Any;
 
 /// iwlwifi's `IWL_MVM_UCODE_ALIVE_TIMEOUT`.
@@ -157,6 +157,8 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     selected: Option<Selected>,
     address: Mac,
     error: Option<Error>,
+    /// Whether the link reported the bring-up failure.
+    reported: bool,
 }
 
 /// The legacy rate bits `LegacyPeer` takes for the 500 kb/s rate units of a
@@ -212,6 +214,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             selected: None,
             address: Mac::default(),
             error: None,
+            reported: false,
         }
     }
 
@@ -699,6 +702,27 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 rates,
             });
         }
+    }
+}
+
+/// Polling the link advances bring-up; frames flow once the port is open.
+impl<Q: BootIo, B: BiosIo> Link for Wifi<Q, B> {
+    fn mac(&self) -> Mac {
+        self.address
+    }
+    fn carrier(&mut self) -> bool {
+        self.poll();
+        false
+    }
+    fn transmit(&mut self, _: &[u8]) -> Result<(), LinkError> {
+        Err(LinkError::NoCarrier)
+    }
+    fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+        if self.poll() == Phase::Failed && !self.reported {
+            self.reported = true;
+            return Err(LinkError::Adapter(format!("iwlwifi: {:?}", self.error)));
+        }
+        Ok(None)
     }
 }
 

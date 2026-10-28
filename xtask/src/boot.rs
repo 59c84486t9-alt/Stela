@@ -124,6 +124,9 @@ pub enum Command {
     Build {
         #[arg(long)]
         release: bool,
+        /// Include authored hardware fixtures in the mount.
+        #[arg(long)]
+        diagnostics: bool,
     },
     /// Boot `stela.efi` with an ARM image in x86 QEMU.
     Run(Box<Run>),
@@ -480,8 +483,14 @@ fn storage_disks(paths: &[PathBuf], serials: &[String]) -> Result<Vec<(PathBuf, 
 
 pub fn run(command: Command) -> Result<ExitCode> {
     match command {
-        Command::Build { release } => {
-            println!("{}", build(release)?.display());
+        Command::Build {
+            release,
+            diagnostics,
+        } => {
+            println!(
+                "{}",
+                build_with_diagnostics(release, diagnostics)?.display()
+            );
             Ok(ExitCode::SUCCESS)
         }
         Command::Run(arguments) => launch(*arguments),
@@ -489,9 +498,16 @@ pub fn run(command: Command) -> Result<ExitCode> {
 }
 
 pub fn build(release: bool) -> Result<PathBuf> {
+    build_with_diagnostics(release, false)
+}
+
+fn build_with_diagnostics(release: bool, diagnostics: bool) -> Result<PathBuf> {
     let mut command = cargo();
     command.args(["build", "--locked", "--manifest-path", BOOT_MANIFEST]);
     command.args(["--target", BOOT_TARGET, "--target-dir", BOOT_TARGET_DIR]);
+    if diagnostics {
+        command.args(["--features", "diagnostics"]);
+    }
     if release {
         command.arg("--release");
     }
@@ -651,7 +667,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let attached = storage_disks(&arguments.storage_disk, &arguments.storage_serial)?;
     let image = match &arguments.image {
         Some(image) => image.clone(),
-        None => build(true)?,
+        None => build_with_diagnostics(true, true)?,
     };
     let paths = storage::Paths::new(arguments.output.clone());
     if paths.output.exists() {

@@ -25,6 +25,8 @@ test = false
 [workspace]
 
 [features]
+default = []
+diagnostics = []
 native-profile = ["stela-runtime/native-profile"]
 
 [dependencies]

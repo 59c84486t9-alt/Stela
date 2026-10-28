@@ -9,13 +9,14 @@ mod ecam;
 mod shared;
 pub(crate) mod shootdown;
 use ecam::RootWindow;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
 mod platform;
 
 pub(crate) use capture::{Prepared, Wire};
-pub(crate) use platform::{
-    ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication, ScopedSource,
-};
+#[cfg(feature = "diagnostics")]
+pub(crate) use platform::ScopedSource;
+pub(crate) use platform::{ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication};
 pub(crate) use shared::{PROCESSORS, Source};
 
 use stela_drivers::bus::mmio::owned::Error;

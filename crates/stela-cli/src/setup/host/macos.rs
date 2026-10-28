@@ -26,18 +26,7 @@ impl Host for System {
 
     fn disks(&self) -> Result<Vec<Disk>> {
         let list = plist(Command::new("diskutil").args(["list", "-plist"]))?;
-        // Physical disks that hold the running system's APFS container.
-        let mut system_disks = Vec::new();
-        for entry in array(&list, "AllDisksAndPartitions") {
-            let mounted_root = array(entry, "APFSVolumes")
-                .iter()
-                .any(|v| matches!(text(v, "MountPoint").as_str(), "/" | "/System/Volumes/Data"));
-            if mounted_root {
-                for store in array(entry, "APFSPhysicalStores") {
-                    system_disks.push(whole_disk(&text(store, "DeviceIdentifier")));
-                }
-            }
-        }
+        let system_disks = system_disks(&list)?;
         let mut disks = Vec::new();
         for entry in array(&list, "AllDisksAndPartitions") {
             let identifier = text(entry, "DeviceIdentifier");
@@ -315,6 +304,40 @@ fn statfs(path: &Path) -> Result<Volume> {
 }
 
 /// `disk5s1` → `disk5`; APFS volumes such as `disk3s1s1` → `disk3`.
+/// Physical stores of the mounted root APFS container.
+fn system_disks(list: &Value) -> Result<Vec<String>> {
+    let mut disks = Vec::new();
+    for entry in array(list, "AllDisksAndPartitions") {
+        let mounted_root = array(entry, "APFSVolumes").iter().any(|volume| {
+            matches!(
+                text(volume, "MountPoint").as_str(),
+                "/" | "/System/Volumes/Data"
+            )
+        });
+        if !mounted_root {
+            continue;
+        }
+        for store in array(entry, "APFSPhysicalStores") {
+            let device = text(store, "DeviceIdentifier");
+            let valid = device.strip_prefix("disk").is_some_and(|suffix| {
+                suffix
+                    .split('s')
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            });
+            ensure!(
+                valid,
+                "the running macOS installation has an invalid physical store identifier: {device:?}"
+            );
+            disks.push(whole_disk(&device));
+        }
+    }
+    ensure!(
+        !disks.is_empty(),
+        "cannot identify the physical disks holding the running macOS installation"
+    );
+    Ok(disks)
+}
+
 fn whole_disk(device: &str) -> String {
     match device.strip_prefix("disk").and_then(|rest| rest.find('s')) {
         Some(at) => device[..4 + at].into(),
@@ -356,6 +379,41 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_store_identifiers_are_validated() {
+        let listing = |identifier: &str| {
+            let dictionary = |entries: Vec<(&str, Value)>| {
+                Value::Dictionary(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key.to_owned(), value))
+                        .collect(),
+                )
+            };
+            dictionary(vec![(
+                "AllDisksAndPartitions",
+                Value::Array(vec![dictionary(vec![
+                    (
+                        "APFSVolumes",
+                        Value::Array(vec![dictionary(vec![("MountPoint", Value::from("/"))])]),
+                    ),
+                    (
+                        "APFSPhysicalStores",
+                        Value::Array(vec![dictionary(vec![(
+                            "DeviceIdentifier",
+                            Value::from(identifier),
+                        )])]),
+                    ),
+                ])]),
+            )])
+        };
+        for malformed in ["", "disk", "disk2s", "disk2s1garbage", "other2"] {
+            assert!(system_disks(&listing(malformed)).is_err(), "{malformed}");
+        }
+        assert_eq!(system_disks(&listing("disk2s1")).unwrap(), ["disk2"]);
+        assert!(system_disks(&Value::Dictionary(Default::default())).is_err());
+    }
 
     #[test]
     fn partition_and_apfs_names_map_to_their_whole_disk() {

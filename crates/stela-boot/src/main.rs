@@ -20,14 +20,17 @@ use uefi::{
     boot::{AllocateType, MemoryType},
 };
 mod apic;
+#[cfg(feature = "diagnostics")]
 mod audio_check;
 mod choice;
 mod console;
 mod cpu;
 mod engine;
+mod entropy;
 mod firmware;
 mod handoff;
 mod heap;
+#[cfg(feature = "diagnostics")]
 mod host_check;
 mod host_firmware;
 mod installer;
@@ -43,13 +46,16 @@ pub mod native_memory;
 pub(crate) mod native_mmio;
 mod native_smp;
 #[allow(dead_code)]
+#[cfg(feature = "diagnostics")]
 mod native_stack_check;
 #[allow(dead_code)]
 mod native_stacks;
+#[cfg(feature = "diagnostics")]
 mod native_work_check;
 mod output;
 mod paging;
 mod payload;
+mod random;
 mod selection;
 mod serial;
 mod status;
@@ -115,9 +121,12 @@ fn main() -> Status {
     if options.starts_with(b"--system") {
         system::boot(options, volume, log, host_firmware);
     }
-    if options.starts_with(host_check::OPTION) {
+    if options.starts_with(stela_boot_core::options::HOST_CHECK.as_bytes()) {
         drop(volume);
+        #[cfg(feature = "diagnostics")]
         host_check::boot(options);
+        #[cfg(not(feature = "diagnostics"))]
+        output::fatal("host checks require a diagnostics build");
     }
     drop(volume);
     let (mut handoff, tables) =

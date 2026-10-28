@@ -2,6 +2,8 @@
 //! a stopped requester, its DMA domain and owned BAR mappings from the mount.
 //! Among them are the AMD and Intel sensor hubs ([`SensorHub`]).
 use super::{Error, NativeServices, ServiceError};
+#[cfg(feature = "native-acpi")]
+use crate::net::wifi;
 use crate::{
     Clock,
     bus::{
@@ -62,6 +64,8 @@ pub(super) enum Kind {
     Sfh,
     /// Intel Integrated Sensor Hub.
     Ish,
+    /// An Intel Wi-Fi function, which `iwl_pci_probe` identifies further.
+    IntelWifi,
 }
 
 impl Kind {
@@ -78,6 +82,8 @@ impl Kind {
             Some(Self::Sfh)
         } else if (function.vendor, function.device) == (0x8086, 0x9d35) {
             Some(Self::Ish)
+        } else if function.vendor == 0x8086 && function.class[..2] == [2, 0x80] {
+            Some(Self::IntelWifi)
         } else {
             None
         }
@@ -219,6 +225,153 @@ pub(super) unsafe fn aqtion(
         }),
         Err((error, link)) => Err((Error::Aqtion(error), Some(Box::new(link)))),
     }
+}
+
+/// An Intel AX200/AX210 adapter over its owned BAR0, reading its ACPI
+/// companion.
+#[cfg(feature = "native-acpi")]
+pub type IntelWifi = wifi::intel::link::Wifi<
+    wifi::intel::boot::NativeBootIo,
+    wifi::intel::radio::bios::service::native::NativeBios,
+>;
+
+/// Attach an Intel Wi-Fi function: BAR0 holds its CSRs.
+///
+/// # Safety
+/// As for [`tg3`]; `inputs.bios` reads this function's own ACPI companion.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+#[cfg(feature = "native-acpi")]
+pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
+    services: &dyn NativeServices,
+    address: Address,
+    inputs: wifi::intel::link::Inputs<B>,
+) -> Result<Located<wifi::intel::link::Wifi<wifi::intel::boot::NativeBootIo, B>>, Failure> {
+    use crate::bus::pci::ConfigSpace;
+    use wifi::intel::attach::{AttachError, Pci, attach};
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let Claimed {
+        mut function,
+        domain,
+        bars,
+    } = claim(services, address).map_err(refused)?;
+    let registers = map(services, address, &bars, 0).map_err(refused)?;
+    let window = registers
+        .address(0, 8192)
+        .map_err(|error| refused(ServiceError::Mapping(error)))?;
+    let vendor = function.vendor;
+    let device = function.device;
+    let config = function.config();
+    let pci = Pci {
+        vendor,
+        device,
+        subsystem_vendor: config.read16(0x2c),
+        subsystem_device: config.read16(0x2e),
+        revision: config.read8(0x08),
+    };
+    // iwl_pci_probe: memory decoding and bus mastering, polled.
+    function.enable_polled();
+    let owner: Arc<dyn Any> = Arc::new((function, registers));
+    let kept = |owner: &Arc<dyn Any>| Some(Box::new(owner.clone()) as Box<dyn Any>);
+    // SAFETY: the mount claimed the stopped function and mapped its BAR0
+    // uncached; `owner` keeps both, and its interrupts are off.
+    let io = unsafe {
+        wifi::intel::boot::NativeBootIo::from_window(window.cast(), owner.clone(), inputs.clock)
+    }
+    .map_err(|error| (Error::IntelWifi(AttachError::Boot(error)), kept(&owner)))?;
+    // SAFETY: the mount's domain isolates this requester, and the caller's
+    // contract covers `inputs`.
+    match unsafe { attach(io, pci, domain, inputs) } {
+        Ok(link) => Ok(Located {
+            location: alloc::format!("{address}"),
+            link,
+        }),
+        Err(error) => Err((Error::IntelWifi(error), kept(&owner))),
+    }
+}
+
+/// The ACPI companion of the function at `address`, as Linux's
+/// `acpi_pci_find_companion` finds it: from the root bridge whose `_SEG` and
+/// `_BBN` name its root bus, the child whose `_ADR` names each bridge on the
+/// way down, then the function. `bridges` lists each PCI bridge with its
+/// secondary bus.
+#[cfg(feature = "native-acpi")]
+pub(super) fn companion(
+    session: &'static crate::platform::acpi::Session,
+    address: Address,
+    bridges: &[(Address, u8)],
+) -> Option<crate::platform::acpi::Handle<'static>> {
+    use crate::platform::acpi::{Handle, Value};
+    let integer = |handle: Handle<'static>, name: &str| -> Option<u64> {
+        handle.child(name).ok()?;
+        match handle.evaluate(Some(name), &[]).ok()? {
+            Some(Value::Integer(value)) => Some(value),
+            _ => None,
+        }
+    };
+    let parent = |handle: Handle<'static>| -> Option<String> {
+        let path = handle.path().ok()?;
+        path.rsplit_once('.')
+            .map(|(parent, _)| String::from(parent))
+    };
+    let mut chain = alloc::vec![(address, false)];
+    let mut bus = address.bus;
+    while let Some(&(bridge, _)) = bridges.iter().find(|(bridge, secondary)| {
+        bridge.segment == address.segment && *secondary == bus && bridge.bus < bus
+    }) {
+        chain.push((bridge, true));
+        bus = bridge.bus;
+    }
+    let devices = session.all_devices().ok()?;
+    let mut roots = session.devices("PNP0A08").ok()?;
+    roots.extend(session.devices("PNP0A03").ok()?);
+    let mut current = roots.into_iter().find(|root| {
+        integer(*root, "_SEG").unwrap_or(0) == u64::from(address.segment)
+            && integer(*root, "_BBN").unwrap_or(0) == u64::from(bus)
+    })?;
+    for (address, bridge) in chain.into_iter().rev() {
+        let path = current.path().ok()?;
+        let adr = (u64::from(address.device) << 16) | u64::from(address.function);
+        // acpi_find_child_device and find_child_checks: an enabled device
+        // without _HID wins; one without _STA or with a _HID only scores
+        // lower; a bridge's companion needs children.
+        let mut best: Option<(u8, Handle<'static>)> = None;
+        for &device in &devices {
+            if parent(device).as_deref() != Some(path.as_str())
+                || integer(device, "_ADR") != Some(adr)
+            {
+                continue;
+            }
+            if bridge {
+                let own = device.path().ok()?;
+                if !devices
+                    .iter()
+                    .any(|child| parent(*child).as_deref() == Some(own.as_str()))
+                {
+                    continue;
+                }
+            }
+            let score = if device.child("_STA").is_err() {
+                1
+            } else if integer(device, "_STA").is_none_or(|status| status & 2 == 0) {
+                continue;
+            } else if device.child("_HID").is_ok() {
+                1
+            } else {
+                3
+            };
+            if best.is_none_or(|(kept, _)| score > kept) {
+                best = Some((score, device));
+            }
+            if score == 3 {
+                break;
+            }
+        }
+        current = best?.1;
+    }
+    Some(current)
 }
 
 /// An Intel VMD host's first NVMe controller, the devices behind it no

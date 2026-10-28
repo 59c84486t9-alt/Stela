@@ -341,6 +341,43 @@ fn device_settings_reach_the_dte_and_later_entries_override_earlier_ones() {
 }
 
 #[test]
+fn each_device_setting_reaches_its_dte_bit() {
+    // INITPass, EIntPass, NMIPass, Lint0Pass, Lint1Pass and SysMgt=10, one
+    // requester each.
+    let (unit, _) = unit_with_entries(&[
+        2, 0x20, 0, 0x01, 2, 0x21, 0, 0x02, 2, 0x22, 0, 0x04, 2, 0x23, 0, 0x40, 2, 0x24, 0, 0x80,
+        2, 0x25, 0, 0x20,
+    ]);
+    let table = unit.table.borrow();
+    for (rid, bit) in [(0x20, 56), (0x21, 57), (0x22, 58), (0x23, 62), (0x24, 63)] {
+        let words = table.snapshot(rid).unwrap();
+        assert_eq!(words[2], 1 << bit, "requester {rid:#x}");
+        assert_eq!(words[1], 0);
+    }
+    let words = table.snapshot(0x25).unwrap();
+    assert_eq!(words[1] >> 40 & 3, 2);
+    assert_eq!(words[0] & 1 << 62, 0);
+    assert_eq!(words[2], 0);
+}
+
+#[test]
+fn an_alias_range_reaches_the_window_under_its_alias_and_shares_one_domain() {
+    // 0x20..=0x22 DMA as 0x30.
+    let (mut unit, peer) = unit_with_entries(&[0x43, 0x20, 0, 0, 0, 0x30, 0, 0, 4, 0x22, 0, 0]);
+    let pages = peer.pages(4096);
+    let physical = pages.physical_pages()[0];
+    unsafe { unit.window(&[0x20, 0x21, 0x22], vec![pages.into()]) }.unwrap();
+    for rid in [0x20, 0x21, 0x22, 0x30] {
+        assert_eq!(peer.walk(rid, physical), Some((physical, true, true)));
+    }
+    assert!(matches!(
+        unsafe { unit.attach(function(0x21)) },
+        Err(Error::Requester)
+    ));
+    unsafe { unit.retire() }.unwrap();
+}
+
+#[test]
 fn window_requesters_reach_its_memory_until_they_attach() {
     let (mut unit, peer) = model::unit();
     let pages = peer.pages(8192);

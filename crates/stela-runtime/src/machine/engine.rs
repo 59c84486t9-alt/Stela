@@ -2361,8 +2361,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// End every wait of all PEs at once by leaping the system counter to
     /// the next deadline instead of waiting on the host: guest sleeps cost no
     /// host time, and time of day runs ahead of the host's (`clock`).
-    pub fn set_idle_skip(&mut self, skip: bool) {
+    /// Parallel machines share host time; advancing just one PE would
+    /// disagree with the counters the other PEs observe.
+    pub fn set_idle_skip(&mut self, skip: bool) -> Result<(), &'static str> {
+        if skip && self.parallel.is_some() {
+            return Err("idle skipping requires all PEs to share one scheduler");
+        }
         self.idle_skip = skip;
+        Ok(())
     }
 
     /// Time the step loop's phases and exits from now on ([`step_timing`]).

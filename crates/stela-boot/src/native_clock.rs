@@ -22,6 +22,7 @@ use stela_drivers::platform::work::{
     service::{Clock, Idle, RaisedWork},
 };
 mod counter;
+#[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
 pub(crate) mod hpet;
 mod pm;

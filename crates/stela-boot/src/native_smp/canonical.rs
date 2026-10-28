@@ -33,6 +33,7 @@ pub(crate) type CanonicalMachine<'a, D> =
 /// its shared-window WB CPU aliases for the entire boot. All earlier input
 /// copies have completed; no raw V1 guest or asynchronous producer can access
 /// these bytes after registration. The physical map and controls stay pinned.
+#[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn reserve(
     handoff: &'static Handoff,
     ranges: &[host::RamRange],
@@ -196,55 +197,39 @@ unsafe fn reserve_with_limit(
     })
 }
 
-/// Cold assigned-physical-core construction, before FIRST guest instruction.
-/// The caller can borrow its actual registered owner for Prepared's MCC join.
+/// The host owners and guest state consumed by cold machine construction.
+/// Host/executor borrows live with the machine; assignment slices are read
+/// only while construction validates and installs their bindings.
+pub(crate) struct Preparation<'host, 'plan, D> {
+    pub handoff: &'static Handoff,
+    pub capture: &'static Capture,
+    pub executors: &'host Executors,
+    pub sender: &'host Apic,
+    pub owner: &'host mut host::HostOwner,
+    pub ram: Arc<RegisteredSystemRam>,
+    pub cpu: Cpu,
+    pub devices: D,
+    pub profile: CpuProfile,
+    pub boot_processor: usize,
+    pub assignments: &'plan [WorkerBinding],
+    pub processor_power: &'plan [stela_runtime::machine::engine::ProcessorBinding],
+}
+
+/// Construct a cold machine with its selected boot PE on the BSP worker.
 ///
 /// # Safety
-/// `reserve`'s closed producer contract holds. Loader::apple_device_tree::assigned
-/// already projected the original source PE/resource/AIC plan to this actual
-/// core roster: exactly the assigned visible PEs, never unassigned stock slots
-/// merely marked Off. All host
-/// interfaces are synchronous through this Machine's Devices/Host; no external
-/// DMA/background producer or legacy raw V1 execution is admitted. The actual
-/// topology capture, executor, HostOwner and mappings remain pinned. The explicit
-/// PE/worker bijection binds the selected boot PE to physical BSP worker0; no
-/// source physical identity is changed by the dense logical projection. Native IRQ,
-/// reset, PMU and other unjoined platform services remain explicit refusals.
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn prepare<'a, D: Devices>(
-    handoff: &'static Handoff,
-    capture: &'static Capture,
-    executors: &'a Executors,
-    sender: &'a Apic,
-    owner: &'a mut host::HostOwner,
-    ram: Arc<RegisteredSystemRam>,
-    cpu: Cpu,
-    devices: D,
-    profile: CpuProfile,
-    boot_processor: usize,
-    assignments: &[WorkerBinding],
-    processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
-) -> Result<CanonicalMachine<'a, D>, &'static str> {
-    // SAFETY: forwarded unchanged cold construction contract; diagnostic
-    // callers retain any already prepared CPU lock state.
-    unsafe {
-        prepare_with_locks(
-            handoff,
-            capture,
-            executors,
-            sender,
-            owner,
-            ram,
-            cpu,
-            devices,
-            profile,
-            boot_processor,
-            assignments,
-            processor_power,
-            false,
-            None,
-        )
-    }
+/// [`reserve`]'s reservation contract holds. The source PE/resource/AIC plan
+/// has been projected to this core roster. The capture, executors, host state,
+/// mappings and synchronous device producers stay pinned for the machine's
+/// lifetime. Guest execution and asynchronous writers begin only after this
+/// constructor returns and their complete platform state has been installed.
+#[cfg(feature = "diagnostics")]
+pub(crate) unsafe fn prepare<'host, D: Devices>(
+    preparation: Preparation<'host, '_, D>,
+) -> Result<CanonicalMachine<'host, D>, &'static str> {
+    // SAFETY: forwarded cold construction contract; diagnostic callers
+    // retain any already prepared CPU lock state.
+    unsafe { prepare_with_locks(preparation, false, None) }
 }
 
 /// Cold construction with the actual iBoot core-lock handoff. Initial CTRR,
@@ -253,30 +238,33 @@ pub(crate) unsafe fn prepare<'a, D: Devices>(
 ///
 /// # Safety
 /// The complete cold ownership and producer contract of `prepare` applies.
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn prepare_with_locks<'a, D: Devices>(
-    handoff: &'static Handoff,
-    capture: &'static Capture,
-    executors: &'a Executors,
-    sender: &'a Apic,
-    owner: &'a mut host::HostOwner,
-    ram: Arc<RegisteredSystemRam>,
-    cpu: Cpu,
-    devices: D,
-    profile: CpuProfile,
-    boot_processor: usize,
-    assignments: &[WorkerBinding],
-    processor_power: &[stela_runtime::machine::engine::ProcessorBinding],
+pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
+    preparation: Preparation<'host, '_, D>,
     trace_artifacts: bool,
     core_locks: Option<stela_runtime::machine::ctrr::CoreLocks>,
-) -> Result<CanonicalMachine<'a, D>, &'static str> {
-    let cores = handoff.native_resources.cores as usize;
+) -> Result<CanonicalMachine<'host, D>, &'static str> {
+    let Preparation {
+        handoff,
+        capture,
+        executors,
+        sender,
+        owner,
+        ram,
+        cpu,
+        devices,
+        profile,
+        boot_processor,
+        assignments,
+        processor_power,
+    } = preparation;
+    let reserved = handoff.native_resources.cores as usize;
+    let cores = profile.processors.len().max(1);
     if cores == 0
-        || cores > capture.core_count as usize
-        || executors.processors().len() + 1 != cores
-        || profile.processors.len().max(1) != cores
+        || cores > reserved
+        || reserved > capture.core_count as usize
+        || executors.processors().len() + 1 != reserved
     {
-        return Err("canonical mount requires the same assigned physical and visible PE roster");
+        return Err("canonical active PE roster exceeds the retained physical workers");
     }
     bindings::validate(cores, boot_processor, assignments)?;
     for slot in 1..cores {
@@ -335,6 +323,7 @@ pub(crate) unsafe fn prepare_with_locks<'a, D: Devices>(
 /// # Safety
 /// `prepare`'s complete closed producer/mount contract remains valid. This is
 /// admitted only after the final platform owner joins its complete graph.
+#[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn run_slice<D: Devices>(
     machine: &mut CanonicalMachine<'_, D>,
     limit: u64,
