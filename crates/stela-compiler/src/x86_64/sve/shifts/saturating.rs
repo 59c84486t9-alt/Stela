@@ -1,6 +1,6 @@
 //! SVE saturating shifts by signed counts.
 use super::{repeated_constant, stack_vector};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Rm};
 use crate::{
     TargetCpu,
     aarch64::{scalable::ElementSize, sve::shifts::Kind},
@@ -53,8 +53,13 @@ fn sign_mask(code: &mut Code, destination: u8, source: u8, element: ElementSize)
             ElementSize::Word => Shift::ArithmeticDword.emit(code, destination, DWORD_SIGN_SHIFT),
             ElementSize::Doubleword => {
                 Shift::ArithmeticDword.emit(code, destination, DWORD_SIGN_SHIFT);
-                packed(code, Host::ShuffleDword, destination, destination);
-                code.push(DUPLICATE_HIGH_DWORDS);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    destination,
+                    Rm::Xmm(destination),
+                    DUPLICATE_HIGH_DWORDS,
+                    TargetCpu::Baseline,
+                );
             }
             _ => unreachable!(),
         }
@@ -69,8 +74,13 @@ fn equal(code: &mut Code, element: ElementSize) {
     };
     packed(code, opcode, 0, 3);
     if element == ElementSize::Doubleword {
-        packed(code, Host::ShuffleDword, 4, 0);
-        code.push(ADJACENT_DWORDS);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            4,
+            Rm::Xmm(0),
+            ADJACENT_DWORDS,
+            TargetCpu::Baseline,
+        );
         packed(code, Host::And, 0, 4);
     }
     packed(code, Host::MoveAligned, 2, 0);

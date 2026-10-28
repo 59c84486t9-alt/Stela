@@ -1,5 +1,6 @@
 //! SVE BFCVT and BFCVTNT through integer rounding.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Cond, Rm, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -27,13 +28,6 @@ const SOURCE: u8 = 1;
 const ACTIVE: u8 = 6;
 const TEMPORARY: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOVD_XMM0_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xc0];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
 const REPEAT_LOW_DWORD: u8 = 0;
 const BFLOAT_SHIFT: u8 = BFLOAT16_TO_SINGLE_SHIFT as u8;
 const SINGLE_ONE: u32 = Format::Single.exponent_bias() << Format::Single.fraction_bits();
@@ -47,18 +41,14 @@ fn guard_enables(
     if !features.full_a64() {
         return;
     }
-    Host::ByteSignMask.append(code, target);
-    code.push(MODRM_REGISTER | (GPR_RAX << MODRM_REGISTER_SHIFT) | ACTIVE);
-    code.extend(TEST_EAX_EAX);
-    code.extend(JZ_REL32);
-    let inactive = code.len();
-    code.extend(0_i32.to_le_bytes());
+    let mut asm = code.asm();
+    asm.simd_to_gpr(Host::ByteSignMask, Rax, ACTIVE, target);
+    asm.test(Size::Dword, Rax, Rax);
+    let inactive = asm.jcc(Cond::E);
     // Unlike precision conversion, BF AH1 suppresses numerical exceptions and
     // retained enables. Reuse the mature BF policy after the active-lane test.
     guard_conversion_enables(code, failures);
-    let next = inactive + size_of::<i32>();
-    let relative = i32::try_from(code.len() - next).expect("bounded BF enable guard");
-    code[inactive..next].copy_from_slice(&relative.to_le_bytes());
+    code.asm().bind(inactive);
 }
 
 pub(in crate::x86_64) fn emit(
@@ -97,11 +87,16 @@ pub(in crate::x86_64) fn emit(
         load_z_chunk(code, operand.source, chunk, SOURCE, length, target);
         Host::And.register(code, SOURCE, ACTIVE, target);
         // Neutralize inactive poison to exactly BF16 1.0 before normal guards.
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend(SINGLE_ONE.to_le_bytes());
-        code.extend(MOVD_XMM0_EAX);
-        Host::ShuffleDword.register(code, RESULT, RESULT, target);
-        code.push(REPEAT_LOW_DWORD);
+        let mut asm = code.asm();
+        asm.mov_imm32(Rax, SINGLE_ONE);
+        asm.movd_to_xmm(0, Rax);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            RESULT,
+            Rm::Xmm(RESULT),
+            REPEAT_LOW_DWORD,
+            target,
+        );
         Host::MoveAligned.register(code, TEMPORARY, ACTIVE, target);
         Host::AndNot.register(code, TEMPORARY, RESULT, target);
         Host::Or.register(code, SOURCE, TEMPORARY, target);

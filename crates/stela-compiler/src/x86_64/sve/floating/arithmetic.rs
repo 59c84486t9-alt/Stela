@@ -4,7 +4,8 @@
 //! Half precision and exceptional values use software completion. With DAZ
 //! clear, a normal output with only inexact status implies no denormal
 //! operand.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -37,9 +38,6 @@ const CONSTANT_SCRATCH: u8 = 3;
 const ACTIVE: u8 = 6;
 const OLD_DESTINATION: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const REPEAT_LOW_DWORD: u8 = 0;
 const REPEAT_SELECTED_DWORD: u8 = 0x55;
 const SINGLE_LANES_PER_CHUNK: u8 = 4;
@@ -50,39 +48,32 @@ const BENIGN_LEFT_EXPONENT_INCREMENT: u32 = 1;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
-const REL32_BYTES: usize = size_of::<i32>();
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 
 fn reject(code: &mut Code, failures: &mut Vec<usize>) {
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend([0; REL32_BYTES]);
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 /// Broadcast `bits` to every lane of `destination`.
 fn broadcast_bits(code: &mut Code, format: Format, bits: u64, destination: u8, target: TargetCpu) {
     match format {
         Format::Single => {
-            code.push(MOV_EAX_IMMEDIATE);
-            code.extend((bits as u32).to_le_bytes());
+            code.asm().mov_imm32(Rax, bits as u32);
         }
         Format::Double => {
-            code.extend(MOV_RAX_IMMEDIATE);
-            code.extend(bits.to_le_bytes());
+            code.asm().mov_imm64(Rax, bits);
         }
         Format::Half => unreachable!("Half remains whole-instruction completion"),
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (destination << MODRM_REGISTER_SHIFT) | GPR_RAX);
+    code.asm()
+        .simd(Host::MoveGprQword, destination, Rax, target);
     if format == Format::Single {
-        Host::ShuffleDword.register(code, destination, destination, target);
-        code.push(REPEAT_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            destination,
+            Rm::Xmm(destination),
+            REPEAT_LOW_DWORD,
+            target,
+        );
     } else {
         Host::UnpackLowQword.register(code, destination, destination, target);
     }
@@ -184,14 +175,13 @@ fn finish_status(
     target: TargetCpu,
 ) {
     numerical::capture_status(code, frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, failures);
-    code.extend(MOV_EAX_ECX);
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
-    code.extend(SHR_EAX_IMMEDIATE);
-    code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, Rcx);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
     numerical::add_fpsr(code, frame);
     numerical::finish(code, frame, failures, pc, target);
 }
@@ -345,8 +335,13 @@ fn load_source(
             load_z_chunk(code, register, chunk, destination, length, target);
             if format == Format::Single {
                 debug_assert!(index < SINGLE_LANES_PER_CHUNK);
-                Host::ShuffleDword.register(code, destination, destination, target);
-                code.push(index * REPEAT_SELECTED_DWORD);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    destination,
+                    Rm::Xmm(destination),
+                    index * REPEAT_SELECTED_DWORD,
+                    target,
+                );
             } else {
                 debug_assert!(format == Format::Double && index < DOUBLE_LANES_PER_CHUNK);
                 let opcode = if index == 0 {

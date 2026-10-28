@@ -4,7 +4,8 @@ use crate::aarch64::{
     scalable::ElementSize,
     sve::shifts::{Count, Kind},
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R10, Rax, Rcx, Rdx, Rsp};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size, Unary};
 use alloc::vec::Vec;
 
 const CHUNK_BYTES: usize = 16;
@@ -14,131 +15,56 @@ const SOURCE_SLOT: u8 = 0;
 const COUNT_SLOT: u8 = 16;
 const RESULT_SLOT: u8 = 32;
 pub(super) const STACK_BYTES: u8 = 48;
-const STACK_SIB: u8 = 0x24;
-const MOVZX_EAX_BYTE_RSP: [u8; 3] = [0x0f, 0xb6, 0x44];
-const MOVSX_RAX_BYTE_RSP: [u8; 4] = [0x48, 0x0f, 0xbe, 0x44];
-const MOVZX_EAX_WORD_RSP: [u8; 3] = [0x0f, 0xb7, 0x44];
-const MOVSX_RAX_WORD_RSP: [u8; 4] = [0x48, 0x0f, 0xbf, 0x44];
-const MOV_EAX_DWORD_RSP: [u8; 2] = [0x8b, 0x44];
-const MOVSXD_RAX_DWORD_RSP: [u8; 3] = [0x48, 0x63, 0x44];
-const MOV_RAX_QWORD_RSP: [u8; 3] = [0x48, 0x8b, 0x44];
-const MOV_ECX_IMM32: u8 = 0xb9;
-const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
-const MOVABS_RDX: [u8; 2] = [0x48, 0xba];
-const MOV_RCX_RAX: [u8; 3] = [0x48, 0x89, 0xc1];
-const MOV_RDX_RAX: [u8; 3] = [0x48, 0x89, 0xc2];
-const MOV_R10_RAX: [u8; 3] = [0x49, 0x89, 0xc2];
-const CMP_R10_RDX: [u8; 3] = [0x49, 0x39, 0xd2];
-const CMP_RCX_RDX: [u8; 3] = [0x48, 0x39, 0xd1];
-const CMOVG_RCX_RDX: [u8; 3] = [0x48, 0x0f, 0x4f];
-const CMOVL_RCX_RDX: [u8; 3] = [0x48, 0x0f, 0x4c];
-const CMP_ECX_IMM8: [u8; 2] = [0x83, 0xf9];
-const TEST_RAX: [u8; 3] = [0x48, 0x85, 0xc0];
-const TEST_RDX: [u8; 3] = [0x48, 0x85, 0xd2];
-const TEST_RCX: [u8; 3] = [0x48, 0x85, 0xc9];
-const NEG_RCX: [u8; 3] = [0x48, 0xf7, 0xd9];
-const XOR_EAX: [u8; 2] = [0x31, 0xc0];
-const ADC_RAX_ZERO: [u8; 4] = [0x48, 0x83, 0xd0, 0];
-const ADD_RAX_RDX: [u8; 3] = [0x48, 0x01, 0xd0];
-const CMOVNS_RDX_RCX: [u8; 4] = [0x48, 0x0f, 0x49, 0xd1];
-const XOR_ECX: [u8; 2] = [0x31, 0xc9];
-const MOV_BYTE_RSP_AL: [u8; 2] = [0x88, 0x44];
-const MOV_WORD_RSP_AX: [u8; 3] = [0x66, 0x89, 0x44];
-const MOV_DWORD_RSP_EAX: [u8; 2] = [0x89, 0x44];
-const MOV_QWORD_RSP_RAX: [u8; 3] = [0x48, 0x89, 0x44];
 
-fn load_lane(code: &mut Code, bytes: usize, signed: bool, slot: u8) {
-    code.extend_from_slice(match (bytes, signed) {
-        (1, false) => &MOVZX_EAX_BYTE_RSP,
-        (1, true) => &MOVSX_RAX_BYTE_RSP,
-        (2, false) => &MOVZX_EAX_WORD_RSP,
-        (2, true) => &MOVSX_RAX_WORD_RSP,
-        (4, false) => &MOV_EAX_DWORD_RSP,
-        (4, true) => &MOVSXD_RAX_DWORD_RSP,
-        (8, _) => &MOV_RAX_QWORD_RSP,
+fn slot(offset: u8) -> Mem {
+    Mem::base_disp8(Rsp, offset as i8)
+}
+
+fn load_lane(code: &mut Code, bytes: usize, signed: bool, offset: u8) {
+    let source = slot(offset);
+    let mut asm = code.asm();
+    match (bytes, signed) {
+        (1, false) => asm.movzx(Size::Dword, Rax, Size::Byte, source),
+        (1, true) => asm.movsx(Size::Qword, Rax, Size::Byte, source),
+        (2, false) => asm.movzx(Size::Dword, Rax, Size::Word, source),
+        (2, true) => asm.movsx(Size::Qword, Rax, Size::Word, source),
+        (4, false) => asm.mov_load(Size::Dword, Rax, source),
+        (4, true) => asm.movsxd(Rax, source),
+        (8, _) => asm.mov_load(Size::Qword, Rax, source),
         _ => unreachable!("integer element width"),
-    });
-    code.extend([STACK_SIB, slot]);
+    }
 }
 
-fn store_lane(code: &mut Code, bytes: usize, slot: u8) {
-    code.extend_from_slice(match bytes {
-        1 => &MOV_BYTE_RSP_AL,
-        2 => &MOV_WORD_RSP_AX,
-        4 => &MOV_DWORD_RSP_EAX,
-        8 => &MOV_QWORD_RSP_RAX,
+fn store_lane(code: &mut Code, bytes: usize, offset: u8) {
+    let size = match bytes {
+        1 => Size::Byte,
+        2 => Size::Word,
+        4 => Size::Dword,
+        8 => Size::Qword,
         _ => unreachable!("integer element width"),
-    });
-    code.extend([STACK_SIB, slot]);
+    };
+    code.asm().mov_store(size, slot(offset), Rax);
 }
 
-#[derive(Clone, Copy)]
-enum Branch {
-    Always,
-    Nonnegative,
-    Equal,
-    Above,
-    AboveOrEqual,
-}
-fn branch(code: &mut Code, condition: Branch) -> usize {
-    match condition {
-        Branch::Always => code.push(0xe9),
-        Branch::Nonnegative => code.extend([0x0f, 0x89]),
-        Branch::Equal => code.extend([0x0f, 0x84]),
-        Branch::Above => code.extend([0x0f, 0x87]),
-        Branch::AboveOrEqual => code.extend([0x0f, 0x83]),
-    }
-    let patch = code.len();
-    code.extend([0; 4]);
-    patch
-}
-fn resolve(code: &mut [u8], patch: usize) {
-    let distance = i32::try_from(code.len() - patch - 4).expect("shift recipe branch span");
-    code[patch..patch + 4].copy_from_slice(&distance.to_le_bytes());
+fn shift_count(code: &mut Code, op: ShiftOp, register: Gpr) {
+    code.asm().shift_cl(op, Size::Qword, register);
 }
 
-#[derive(Clone, Copy)]
-enum Shift {
-    Left,
-    LogicalRight,
-    ArithmeticRight,
-}
-impl Shift {
-    fn count(self, code: &mut Code, temporary: bool) {
-        let group = match self {
-            Self::Left => 4,
-            Self::LogicalRight => 5,
-            Self::ArithmeticRight => 7,
-        };
-        code.extend([
-            if temporary { 0x49 } else { 0x48 },
-            0xd3,
-            0xc0 | group << 3 | if temporary { 2 } else { 0 },
-        ]);
-    }
-    fn immediate(self, code: &mut Code, amount: u8) {
-        let group = match self {
-            Self::Left => 4,
-            Self::LogicalRight => 5,
-            Self::ArithmeticRight => 7,
-        };
-        code.extend([0x48, 0xc1, 0xc0 | group << 3, amount]);
-    }
+fn shift_immediate(code: &mut Code, op: ShiftOp, amount: u8) {
+    code.asm().shift_imm(op, Size::Qword, Rax, amount);
 }
 
 fn bound(code: &mut Code, value: u64, rdx: bool) {
-    code.extend(if rdx { MOVABS_RDX } else { MOVABS_RAX });
-    code.extend(value.to_le_bytes());
+    code.asm().mov_imm64(if rdx { Rdx } else { Rax }, value);
 }
 fn normalize(code: &mut Code, bits: u8, signed: bool) {
     if bits < HOST_BITS {
-        Shift::Left.immediate(code, HOST_BITS - bits);
-        if signed {
-            Shift::ArithmeticRight
-        } else {
-            Shift::LogicalRight
-        }
-        .immediate(code, HOST_BITS - bits);
+        shift_immediate(code, ShiftOp::Shl, HOST_BITS - bits);
+        shift_immediate(
+            code,
+            if signed { ShiftOp::Sar } else { ShiftOp::Shr },
+            HOST_BITS - bits,
+        );
     }
 }
 
@@ -183,8 +109,7 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element_size: ElementSize, coun
                 if kind == Kind::DivideSigned {
                     divide_signed(code, bits, amount);
                 } else {
-                    code.push(MOV_ECX_IMM32);
-                    code.extend(u32::from(amount).to_le_bytes());
+                    code.asm().mov_imm32(Rcx, u32::from(amount));
                     left(code, bits, signed, kind != Kind::SaturatingSigned, true);
                 }
             }
@@ -210,15 +135,16 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element_size: ElementSize, coun
                     bidirectional,
                     COUNT_SLOT + count_offset as u8,
                 );
-                code.extend(MOV_RCX_RAX);
+                code.asm().mov(Size::Qword, Rcx, Rax);
                 if bidirectional {
                     clamp_signed_count(code, bits);
                 }
                 load_lane(code, bytes, signed, SOURCE_SLOT + offset as u8);
                 if bidirectional {
-                    code.extend(TEST_RCX);
-                    let positive = branch(code, Branch::Nonnegative);
-                    code.extend(NEG_RCX);
+                    let mut asm = code.asm();
+                    asm.test(Size::Qword, Rcx, Rcx);
+                    let positive = asm.jcc(Cond::Ns);
+                    asm.unary(Unary::Neg, Size::Qword, Rcx);
                     right(
                         code,
                         signed,
@@ -230,8 +156,9 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element_size: ElementSize, coun
                                 | Kind::SaturatingRoundingUnsigned
                         ),
                     );
-                    let done = branch(code, Branch::Always);
-                    resolve(code, positive);
+                    let mut asm = code.asm();
+                    let done = asm.jmp();
+                    asm.bind(positive);
                     left(
                         code,
                         bits,
@@ -245,7 +172,7 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element_size: ElementSize, coun
                                 | Kind::SaturatingRoundingUnsigned
                         ),
                     );
-                    resolve(code, done);
+                    code.asm().bind(done);
                 } else if kind == Kind::LogicalLeft {
                     // Full unsigned counts must not truncate to ECX/CL first.
                     clamp_unsigned_count(code, bits);
@@ -264,98 +191,102 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element_size: ElementSize, coun
 fn clamp_unsigned_count(code: &mut Code, bits: u8) {
     // Compare the full count before x86 CL masking; source RAX remains intact.
     bound(code, u64::from(bits), true);
-    code.extend(CMP_RCX_RDX);
-    code.extend([0x48, 0x0f, 0x47, 0xca]); // cmova rcx,rdx
+    let mut asm = code.asm();
+    asm.alu(Alu::Cmp, Size::Qword, Rcx, Rdx);
+    asm.cmov(Cond::A, Size::Qword, Rcx, Rdx);
 }
 fn clamp_signed_count(code: &mut Code, bits: u8) {
     let ceiling = i64::from(bits) + 1;
     bound(code, ceiling as u64, true);
-    code.extend(CMP_RCX_RDX);
-    code.extend(CMOVG_RCX_RDX);
-    code.push(0xca);
+    let mut asm = code.asm();
+    asm.alu(Alu::Cmp, Size::Qword, Rcx, Rdx);
+    asm.cmov(Cond::G, Size::Qword, Rcx, Rdx);
     bound(code, (-ceiling) as u64, true);
-    code.extend(CMP_RCX_RDX);
-    code.extend(CMOVL_RCX_RDX);
-    code.push(0xca);
+    let mut asm = code.asm();
+    asm.alu(Alu::Cmp, Size::Qword, Rcx, Rdx);
+    asm.cmov(Cond::L, Size::Qword, Rcx, Rdx);
 }
 
 fn divide_signed(code: &mut Code, bits: u8, amount: u8) {
     if amount == bits {
-        code.extend(XOR_EAX);
+        code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
         return;
     }
     bound(code, (1_u64 << amount) - 1, true);
-    code.extend(XOR_ECX);
-    code.extend(TEST_RAX);
-    code.extend(CMOVNS_RDX_RCX);
-    code.extend(ADD_RAX_RDX);
-    Shift::ArithmeticRight.immediate(code, amount);
+    let mut asm = code.asm();
+    asm.alu(Alu::Xor, Size::Dword, Rcx, Rcx);
+    asm.test(Size::Qword, Rax, Rax);
+    asm.cmov(Cond::Ns, Size::Qword, Rdx, Rcx);
+    asm.alu(Alu::Add, Size::Qword, Rax, Rdx);
+    shift_immediate(code, ShiftOp::Sar, amount);
 }
 
 fn right(code: &mut Code, signed: bool, round: bool) {
-    code.extend(CMP_ECX_IMM8);
-    code.push(HOST_BITS);
-    let large = branch(code, Branch::AboveOrEqual);
-    if signed {
-        Shift::ArithmeticRight
-    } else {
-        Shift::LogicalRight
-    }
-    .count(code, false);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, HOST_BITS as i8);
+    let large = asm.jcc(Cond::Ae);
+    shift_count(code, if signed { ShiftOp::Sar } else { ShiftOp::Shr }, Rax);
+    let mut asm = code.asm();
     if round {
-        code.extend(ADC_RAX_ZERO);
+        asm.alu_imm8(Alu::Adc, Size::Qword, Rax, 0);
     }
-    let done = branch(code, Branch::Always);
-    resolve(code, large);
+    let done = asm.jmp();
+    asm.bind(large);
     if signed && !round {
-        Shift::ArithmeticRight.immediate(code, HOST_BITS - 1);
+        shift_immediate(code, ShiftOp::Sar, HOST_BITS - 1);
     } else if !signed && round {
-        let beyond = branch(code, Branch::Above);
-        Shift::LogicalRight.immediate(code, HOST_BITS - 1);
-        let end = branch(code, Branch::Always);
-        resolve(code, beyond);
-        code.extend(XOR_EAX);
-        resolve(code, end);
+        let beyond = asm.jcc(Cond::A);
+        shift_immediate(code, ShiftOp::Shr, HOST_BITS - 1);
+        let mut asm = code.asm();
+        let end = asm.jmp();
+        asm.bind(beyond);
+        asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
+        asm.bind(end);
     } else {
-        code.extend(XOR_EAX);
+        asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
     }
-    resolve(code, done);
+    code.asm().bind(done);
 }
 
 fn left(code: &mut Code, bits: u8, signed: bool, unsigned_result: bool, saturating: bool) {
     let mut done = Vec::new();
     let mut negative = None;
     if saturating {
-        code.extend(MOV_RDX_RAX);
+        code.asm().mov(Size::Qword, Rdx, Rax);
     }
     if signed && unsigned_result {
-        code.extend(TEST_RAX);
-        let nonnegative = branch(code, Branch::Nonnegative);
-        negative = Some(branch(code, Branch::Always));
-        resolve(code, nonnegative);
+        let mut asm = code.asm();
+        asm.test(Size::Qword, Rax, Rax);
+        let nonnegative = asm.jcc(Cond::Ns);
+        negative = Some(asm.jmp());
+        asm.bind(nonnegative);
     }
-    code.extend(CMP_ECX_IMM8);
-    code.push(bits);
-    let large = branch(code, Branch::AboveOrEqual);
-    Shift::Left.count(code, false);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, bits as i8);
+    let large = asm.jcc(Cond::Ae);
+    shift_count(code, ShiftOp::Shl, Rax);
     if saturating {
         normalize(code, bits, !unsigned_result);
-        code.extend(MOV_R10_RAX);
-        if unsigned_result {
-            Shift::LogicalRight
-        } else {
-            Shift::ArithmeticRight
-        }
-        .count(code, true);
-        code.extend(CMP_R10_RDX);
-        done.push(branch(code, Branch::Equal));
-        let overflow = branch(code, Branch::Always);
-        resolve(code, large);
-        code.extend(TEST_RAX);
-        done.push(branch(code, Branch::Equal));
-        resolve(code, overflow);
+        code.asm().mov(Size::Qword, R10, Rax);
+        shift_count(
+            code,
+            if unsigned_result {
+                ShiftOp::Shr
+            } else {
+                ShiftOp::Sar
+            },
+            R10,
+        );
+        let mut asm = code.asm();
+        asm.alu(Alu::Cmp, Size::Qword, R10, Rdx);
+        done.push(asm.jcc(Cond::E));
+        let overflow = asm.jmp();
+        asm.bind(large);
+        asm.test(Size::Qword, Rax, Rax);
+        done.push(asm.jcc(Cond::E));
+        asm.bind(overflow);
         if let Some(patch) = negative {
-            resolve(code, patch);
+            asm.bind(patch);
         }
         let maximum = if unsigned_result {
             u64::MAX >> (HOST_BITS - bits)
@@ -364,8 +295,9 @@ fn left(code: &mut Code, bits: u8, signed: bool, unsigned_result: bool, saturati
         };
         bound(code, maximum, false);
         if signed {
-            code.extend(TEST_RDX);
-            let nonnegative = branch(code, Branch::Nonnegative);
+            let mut asm = code.asm();
+            asm.test(Size::Qword, Rdx, Rdx);
+            let nonnegative = asm.jcc(Cond::Ns);
             bound(
                 code,
                 if unsigned_result {
@@ -375,14 +307,16 @@ fn left(code: &mut Code, bits: u8, signed: bool, unsigned_result: bool, saturati
                 },
                 false,
             );
-            resolve(code, nonnegative);
+            code.asm().bind(nonnegative);
         }
     } else {
-        done.push(branch(code, Branch::Always));
-        resolve(code, large);
-        code.extend(XOR_EAX);
+        let mut asm = code.asm();
+        done.push(asm.jmp());
+        asm.bind(large);
+        asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
     }
+    let mut asm = code.asm();
     for patch in done {
-        resolve(code, patch);
+        asm.bind(patch);
     }
 }

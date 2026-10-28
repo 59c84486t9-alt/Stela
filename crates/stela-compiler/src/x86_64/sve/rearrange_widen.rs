@@ -6,7 +6,8 @@ use crate::aarch64::sve::integer_arithmetic::Binary;
 use crate::aarch64::sve::rearrange_widen::{
     Arithmetic, Half, Kind, Operand, PairOperation, Signedness,
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Rm};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 use crate::x86_64::sve::integer_arithmetic::emit_binary_chunk;
@@ -23,9 +24,6 @@ const QWORD_BYTES: usize = 8;
 const QWORD_BITS: usize = QWORD_BYTES * 8;
 const DWORD_BITS: u8 = 32;
 const DWORD_SIGN_SHIFT: u8 = DWORD_BITS - 1;
-const MODRM_REGISTER: u8 = 0xc0;
-const REGISTER_SHIFT: u8 = 3;
-const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
 const SELECT_EVEN_DWORDS: u8 = 0x88;
 const SELECT_ODD_DWORDS: u8 = 0xdd;
 const REPEAT_HIGH_DWORDS: u8 = 0xf5;
@@ -45,10 +43,9 @@ fn copy(code: &mut Code, destination: u8, source: u8) {
 }
 
 fn qword_constant(code: &mut Code, destination: u8, value: u64) {
-    code.extend(MOVABS_RAX);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | destination << REGISTER_SHIFT);
+    code.asm().mov_imm64(Rax, value);
+    code.asm()
+        .simd(Host::MoveGprQword, destination, Rax, TargetCpu::Baseline);
 }
 
 fn constant(code: &mut Code, destination: u8, value: u64) {
@@ -111,8 +108,13 @@ fn right_shift(element: ElementSize) -> ShiftOpcode {
 }
 
 fn shuffle(code: &mut Code, destination: u8, source: u8, immediate: u8) {
-    packed(code, Host::ShuffleDword, destination, source);
-    code.push(immediate);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(source),
+        immediate,
+        TargetCpu::Baseline,
+    );
 }
 
 fn signed_qword(code: &mut Code, destination: u8, input_size: ElementSize, target: TargetCpu) {
@@ -296,10 +298,20 @@ fn gather_even_odd(code: &mut Code, register: u8, element: ElementSize, target: 
         // Every input word is 0..255, so PACKUSWB never saturates.
         packed(code, Host::PackUnsignedWordToByte, register, TEMPORARY);
     } else {
-        Host::ShuffleLowWord.register(code, register, register, target);
-        code.push(EVEN_ODD_WORD_GROUPS);
-        Host::ShuffleHighWord.register(code, register, register, target);
-        code.push(EVEN_ODD_WORD_GROUPS);
+        code.asm().simd_imm(
+            Host::ShuffleLowWord,
+            register,
+            Rm::Xmm(register),
+            EVEN_ODD_WORD_GROUPS,
+            target,
+        );
+        code.asm().simd_imm(
+            Host::ShuffleHighWord,
+            register,
+            Rm::Xmm(register),
+            EVEN_ODD_WORD_GROUPS,
+            target,
+        );
         shuffle(code, register, register, EVEN_ODD_WORD_GROUPS);
     }
 }

@@ -1,5 +1,6 @@
 //! SVE FCADD (packed ADD) and FCMLA (FMA3, one rounding per component).
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -16,9 +17,8 @@ use crate::{
             read_predicate_mask,
         },
         simd::numerical::{
-            ArithmeticOpcode, FusedOpcode, VZEROUPPER, emit_fma, emit_opcode_to,
-            prepare_vector_input_range, prepare_vector_result_range, rounding_control,
-            vector_exponent_range,
+            ArithmeticOpcode, FusedOpcode, emit_fma, emit_opcode_to, prepare_vector_input_range,
+            prepare_vector_result_range, rounding_control, vector_exponent_range,
         },
         sve::floating::classify::guard_active_exception_enables,
     },
@@ -32,9 +32,6 @@ const CONSTANT_SCRATCH: u8 = 3;
 const ADDEND: u8 = 6;
 const ACTIVE: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const REPEAT_LOW_DWORD: u8 = 0;
 const SWAP_SINGLE_COMPONENTS: u8 = 0xb1;
 const SWAP_DOUBLE_COMPONENTS: u8 = 0x4e;
@@ -48,13 +45,6 @@ const DOUBLE_COMPONENT_BYTES: u8 = size_of::<u64>() as u8;
 const MXCSR_PRECISION: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_PRECISION - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -113,14 +103,17 @@ fn admitted(operand: Operand, target: TargetCpu) -> Option<Operation> {
 }
 
 fn reject(code: &mut Code, failures: &mut Vec<usize>) {
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 fn shuffle(code: &mut Code, register: u8, order: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, register, register, target);
-    code.push(order);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        register,
+        Rm::Xmm(register),
+        order,
+        target,
+    );
 }
 
 /// Rotate M before active-lane masking; an active output may read an inactive
@@ -215,14 +208,12 @@ fn benign_inactive(code: &mut Code, format: Format, input: u8, target: TargetCpu
     };
     let bits = u64::from(format.exponent_bias() + increment) << format.fraction_bits();
     if format == Format::Single {
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend((bits as u32).to_le_bytes());
+        code.asm().mov_imm32(Rax, bits as u32);
     } else {
-        code.extend(MOV_RAX_IMMEDIATE);
-        code.extend(bits.to_le_bytes());
+        code.asm().mov_imm64(Rax, bits);
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (CONSTANT_SCRATCH << MODRM_REGISTER_SHIFT) | GPR_RAX);
+    code.asm()
+        .simd(Host::MoveGprQword, CONSTANT_SCRATCH, Rax, target);
     if format == Format::Single {
         shuffle(code, CONSTANT_SCRATCH, REPEAT_LOW_DWORD, target);
     } else {
@@ -326,7 +317,7 @@ pub(in crate::x86_64) fn emit(
                 FusedOpcode::MultiplyAdd,
                 target,
             );
-            code.extend(VZEROUPPER);
+            code.asm().vzeroupper();
         } else {
             emit_opcode_to(
                 code,
@@ -349,14 +340,13 @@ pub(in crate::x86_64) fn emit(
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, chunk, LEFT, target);
     }
     numerical::capture_status(code, &frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, &mut failures);
-    code.extend(MOV_EAX_ECX);
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(MXCSR_PRECISION.to_le_bytes());
-    code.extend(SHR_EAX_IMMEDIATE);
-    code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, Rcx);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_PRECISION as i32);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
     numerical::add_fpsr(code, &frame);
     numerical::finish(code, &frame, &failures, pc, target);
     Ok(true)

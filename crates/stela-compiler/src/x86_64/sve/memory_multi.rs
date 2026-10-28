@@ -3,7 +3,8 @@
 use super::super::{isa::SimdOpcode as Host, scalable};
 use super::memory as common;
 use super::predicate::{emit_prepared_counter_chunk, prepare_counter};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rsp};
+use crate::x86_64::asm::{Alu, Code, Cond, Mem, Size, resolve};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -25,22 +26,6 @@ const ADDRESS_OFFSET: u32 = MEMORY_REQUEST_BYTES as u32;
 const INDEX_OFFSET: u32 = ADDRESS_OFFSET + HOST_QWORD_BYTES;
 const MASK_OFFSET: u32 = INDEX_OFFSET + HOST_QWORD_BYTES;
 const VECTOR_TEMPORARY: u8 = 0;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const MOV_RSP_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x84, 0x24];
-const MOV_RAX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
-const MOV_RCX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x8c, 0x24];
-const MOV_RSP_DISP32_IMM32: &[u8] = &[0x48, 0xc7, 0x84, 0x24];
-const ADD_RAX_RCX: &[u8] = &[0x48, 0x01, 0xc8];
-const BT_RSP_DISP32_RCX: &[u8] = &[0x48, 0x0f, 0xa3, 0x8c, 0x24];
-const ADD_RSP_DISP32_RCX: &[u8] = &[0x48, 0x01, 0x8c, 0x24];
-const ADD_RSP_DISP32_IMM8: &[u8] = &[0x48, 0x83, 0x84, 0x24];
-const CMP_RSP_DISP32_IMM32: &[u8] = &[0x48, 0x81, 0xbc, 0x24];
-const JNC_REL32: &[u8] = &[0x0f, 0x83];
-const JB_REL32: &[u8] = &[0x0f, 0x82];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const STACK_MEMORY_MODRM: u8 = 0x84;
-const STACK_SIB: u8 = 0x24;
 
 #[derive(Debug, Clone, Copy)]
 struct Scratch {
@@ -65,25 +50,19 @@ fn stack_vector(code: &mut Code, offset: u32, loading: bool, target: TargetCpu) 
     } else {
         Host::StoreUnaligned
     };
-    opcode.append(code, target);
-    code.extend([STACK_MEMORY_MODRM, STACK_SIB]);
-    code.extend(offset.to_le_bytes());
+    code.asm()
+        .simd(opcode, VECTOR_TEMPORARY, stack(offset), target);
 }
 
-fn branch(code: &mut Code, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+fn stack(offset: u32) -> Mem {
+    Mem::base_disp32(Rsp, offset as i32)
 }
 
 fn prepare_iteration(code: &mut Code, operand: &Operand, length: VectorLength) {
     common::address(code, operand.address, length);
-    code.extend(MOV_RSP_DISP32_RAX);
-    code.extend(ADDRESS_OFFSET.to_le_bytes());
-    code.extend(MOV_RSP_DISP32_IMM32);
-    code.extend(INDEX_OFFSET.to_le_bytes());
-    code.extend(0_u32.to_le_bytes());
+    let mut asm = code.asm();
+    asm.mov_store(Size::Qword, stack(ADDRESS_OFFSET), Rax);
+    asm.mov_rm_imm32(Size::Qword, stack(INDEX_OFFSET), 0);
 }
 
 fn prepare_vector_staging(
@@ -123,8 +102,11 @@ fn prepare_predicate_staging(code: &mut Code, operand: &Operand, length: VectorL
     prepare_counter(code, length);
     for chunk in 0..predicate_bits.div_ceil(PACKED_CHUNK_BITS) {
         emit_prepared_counter_chunk(code, chunk, length);
-        code.extend(MOV_RSP_DISP32_RAX);
-        code.extend((MASK_OFFSET + chunk as u32 * HOST_QWORD_BYTES).to_le_bytes());
+        code.asm().mov_store(
+            Size::Qword,
+            stack(MASK_OFFSET + chunk as u32 * HOST_QWORD_BYTES),
+            Rax,
+        );
     }
 }
 
@@ -213,22 +195,20 @@ pub(crate) fn emit(
     use scalable::memory;
     let tuple_bytes = usize::from(operand.registers) * length.bytes();
     let scratch = Scratch::new(tuple_bytes);
-    code.extend(SUB_RSP_IMM32);
-    code.extend(scratch.bytes.to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Sub, Size::Qword, Rsp, scratch.bytes as i32);
     memory::begin(code);
     let alignment_failure = common::check_sp(code, operand.address.base, pc);
     prepare_iteration(code, operand, length);
     prepare_vector_staging(code, operand, scratch, length, target);
     prepare_predicate_staging(code, operand, length);
     let loop_start = code.len();
-    code.extend(MOV_RCX_RSP_DISP32);
-    code.extend(INDEX_OFFSET.to_le_bytes());
-    code.extend(BT_RSP_DISP32_RCX);
-    code.extend(MASK_OFFSET.to_le_bytes());
-    let inactive = branch(code, JNC_REL32);
-    code.extend(MOV_RAX_RSP_DISP32);
-    code.extend(ADDRESS_OFFSET.to_le_bytes());
-    code.extend(ADD_RAX_RCX);
+    let mut asm = code.asm();
+    asm.mov_load(Size::Qword, Rcx, stack(INDEX_OFFSET));
+    asm.bt(Size::Qword, stack(MASK_OFFSET), Rcx);
+    let inactive = asm.jcc(Cond::Ae);
+    asm.mov_load(Size::Qword, Rax, stack(ADDRESS_OFFSET));
+    asm.alu(Alu::Add, Size::Qword, Rax, Rcx);
     memory::request(
         code,
         REQUEST_OFFSET,
@@ -239,39 +219,52 @@ pub(crate) fn emit(
     );
     // request() clobbers RCX/RDX. Reload the saved linear byte offset before
     // selecting this element's private staging, never an architectural Z slot.
-    code.extend(MOV_RCX_RSP_DISP32);
-    code.extend(INDEX_OFFSET.to_le_bytes());
-    code.extend(ADD_RSP_DISP32_RCX);
-    code.extend((REQUEST_OFFSET + MEMORY_REQUEST_DATA_OFFSET).to_le_bytes());
+    let mut asm = code.asm();
+    asm.mov_load(Size::Qword, Rcx, stack(INDEX_OFFSET));
+    asm.alu(
+        Alu::Add,
+        Size::Qword,
+        stack(REQUEST_OFFSET + MEMORY_REQUEST_DATA_OFFSET),
+        Rcx,
+    );
     memory::call(code, REQUEST_OFFSET);
     let callback_failure = memory::branch_failed(code);
-    let next_element = code.len();
-    memory::patch_branch(code, inactive, next_element);
-    code.extend(ADD_RSP_DISP32_IMM8);
-    code.extend(INDEX_OFFSET.to_le_bytes());
-    code.push(operand.element.bytes() as u8);
-    code.extend(CMP_RSP_DISP32_IMM32);
-    code.extend(INDEX_OFFSET.to_le_bytes());
-    code.extend((tuple_bytes as u32).to_le_bytes());
-    let repeat = branch(code, JB_REL32);
-    memory::patch_branch(code, repeat, loop_start);
+    let mut asm = code.asm();
+    asm.bind(inactive);
+    asm.alu_imm8(
+        Alu::Add,
+        Size::Qword,
+        stack(INDEX_OFFSET),
+        operand.element.bytes() as i8,
+    );
+    asm.alu_imm32(
+        Alu::Cmp,
+        Size::Qword,
+        stack(INDEX_OFFSET),
+        tuple_bytes as i32,
+    );
+    let repeat = asm.jcc(Cond::B);
+    resolve(code, repeat, loop_start);
     if operand.loading {
         commit_load(code, operand, scratch, length, target);
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     let cleanup = code.len();
     memory::patch_branch(code, callback_failure, cleanup);
     if let Some(failure) = alignment_failure {
         memory::patch_branch(code, failure, cleanup);
     }
-    code.extend(ADD_RSP_IMM32);
-    code.extend(scratch.bytes.to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Add, Size::Qword, Rsp, scratch.bytes as i32);
     common::return_if_failed(code);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
+    const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
 
     #[test]
     fn private_scratch_is_bounded_aligned_and_disjoint() {

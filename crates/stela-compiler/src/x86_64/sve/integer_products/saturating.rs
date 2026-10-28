@@ -4,7 +4,8 @@ use super::packed;
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::{Accumulate, Kind, Selection};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdx, Rsp};
+use crate::x86_64::asm::{Alu, Code, Cond, Mem, ShiftOp, Size, Unary};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 const RESULT: u8 = 0;
@@ -25,60 +26,11 @@ const STACK_LEFT: usize = 0;
 const STACK_RIGHT: usize = CHUNK_BYTES;
 const STACK_ACCUMULATOR: usize = CHUNK_BYTES * 2;
 const STACK_BYTES: u8 = (CHUNK_BYTES * 3) as u8;
-const MODRM_STACK_DISP8: u8 = 0x44;
-const MODRM_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const SIB_STACK: u8 = 0x24;
-const REX_W: u8 = 0x48;
-const REX_WR: u8 = 0x4c;
-const WORD_PREFIX: u8 = 0x66;
-const MOVSX_BYTE: [u8; 2] = [0x0f, 0xbe];
-const MOVSX_WORD: [u8; 2] = [0x0f, 0xbf];
-const MOVSXD: u8 = 0x63;
-const MOV_LOAD: u8 = 0x8b;
-const MOV_STORE: u8 = 0x89;
-const MOV_STORE_BYTE: u8 = 0x88;
-const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
-const MOVABS_R10: [u8; 2] = [0x49, 0xba];
-const MOVABS_R11: [u8; 2] = [0x49, 0xbb];
-const SUB_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xec];
-const ADD_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xc4];
-const MOVDQU_STORE: [u8; 3] = [0xf3, 0x0f, 0x7f];
-const MOVDQU_LOAD: [u8; 3] = [0xf3, 0x0f, 0x6f];
-const IMUL_RCX: [u8; 3] = [0x48, 0xf7, 0xe9];
-const NEG_RAX: [u8; 3] = [0x48, 0xf7, 0xd8];
-const ADC_RDX_ZERO: [u8; 4] = [0x48, 0x83, 0xd2, 0x00];
-const NEG_RDX: [u8; 3] = [0x48, 0xf7, 0xda];
-const ADD_RAX_R10: [u8; 3] = [0x4c, 0x01, 0xd0];
-const SHRD_RAX_RDX: [u8; 4] = [0x48, 0x0f, 0xac, 0xd0];
-const SAR_RDX: [u8; 3] = [0x48, 0xc1, 0xfa];
-const MOV_R8_R9: [u8; 3] = [0x4d, 0x89, 0xc8];
-const SAR_R8: [u8; 3] = [0x49, 0xc1, 0xf8];
-const ADD_RAX_R9: [u8; 3] = [0x4c, 0x01, 0xc8];
-const ADC_RDX_R8: [u8; 3] = [0x4c, 0x11, 0xc2];
-const MOV_R8_RAX: [u8; 3] = [0x49, 0x89, 0xc0];
-const MOV_R10_RDX: [u8; 3] = [0x49, 0x89, 0xd2];
-const SAR_R10: [u8; 3] = [0x49, 0xc1, 0xfa];
-const XOR_R10_R11: [u8; 3] = [0x4d, 0x31, 0xda];
-const CMP_RDX_R8: [u8; 3] = [0x4c, 0x39, 0xc2];
-const CMOVNE_RAX_R10: [u8; 4] = [0x49, 0x0f, 0x45, 0xc2];
-const CMP_RAX_R10: [u8; 3] = [0x4c, 0x39, 0xd0];
-const CMOVG_RAX_R10: [u8; 4] = [0x49, 0x0f, 0x4f, 0xc2];
-const CMP_RAX_R11: [u8; 3] = [0x4c, 0x39, 0xd8];
-const CMOVL_RAX_R11: [u8; 4] = [0x49, 0x0f, 0x4c, 0xc3];
-const SHLD_RDX_RAX_ONE: [u8; 5] = [0x48, 0x0f, 0xa4, 0xc2, 0x01];
-const SHL_RAX_ONE: [u8; 3] = [0x48, 0xd1, 0xe0];
-const CQO: [u8; 2] = [0x48, 0x99];
-const MOV_R10_RAX: [u8; 3] = [0x49, 0x89, 0xc2];
-const MOV_RAX_R9: [u8; 3] = [0x4c, 0x89, 0xc8];
-const SUB_RAX_R10: [u8; 3] = [0x4c, 0x29, 0xd0];
-const SBB_RDX_R8: [u8; 3] = [0x4c, 0x19, 0xc2];
 
 fn constant(code: &mut Code, register: u8, value: u64) {
-    code.extend(MOVABS_RAX);
-    code.extend(value.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_DIRECT | (register << MODRM_REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, value);
+    asm.simd(Host::MoveGprQword, register, Rax, TargetCpu::Baseline);
     packed(code, Host::UnpackLowQword, register, register);
 }
 
@@ -253,47 +205,44 @@ fn saturate_scalar(code: &mut Code, bits: u32) {
     if bits == QWORD_BITS {
         // A signed result fits iff the high half equals the sign extension of
         // the low half. The high half's sign chooses the appropriate endpoint.
-        code.extend(MOV_R8_RAX);
-        code.extend(SAR_R8);
-        code.push(SIGN_SHIFT);
-        code.extend(MOV_R10_RDX);
-        code.extend(SAR_R10);
-        code.push(SIGN_SHIFT);
-        code.extend(MOVABS_R11);
-        code.extend(maximum.to_le_bytes());
-        code.extend(XOR_R10_R11);
-        code.extend(CMP_RDX_R8);
-        code.extend(CMOVNE_RAX_R10);
+        let mut asm = code.asm();
+        asm.mov(Size::Qword, R8, Rax);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, R8, SIGN_SHIFT);
+        asm.mov(Size::Qword, R10, Rdx);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, R10, SIGN_SHIFT);
+        asm.mov_imm64(R11, maximum);
+        asm.alu(Alu::Xor, Size::Qword, R10, R11);
+        asm.alu(Alu::Cmp, Size::Qword, Rdx, R8);
+        asm.cmov(Cond::Ne, Size::Qword, Rax, R10);
     } else {
-        code.extend(MOVABS_R10);
-        code.extend(maximum.to_le_bytes());
-        code.extend(MOVABS_R11);
-        code.extend((!maximum).to_le_bytes());
-        code.extend(CMP_RAX_R10);
-        code.extend(CMOVG_RAX_R10);
-        code.extend(CMP_RAX_R11);
-        code.extend(CMOVL_RAX_R11);
+        let mut asm = code.asm();
+        asm.mov_imm64(R10, maximum);
+        asm.mov_imm64(R11, !maximum);
+        asm.alu(Alu::Cmp, Size::Qword, Rax, R10);
+        asm.cmov(Cond::G, Size::Qword, Rax, R10);
+        asm.alu(Alu::Cmp, Size::Qword, Rax, R11);
+        asm.cmov(Cond::L, Size::Qword, Rax, R11);
     }
 }
 
 fn shifted_product(code: &mut Code, bits: u32, rounding: bool, subtract: bool) {
-    code.extend(IMUL_RCX);
+    code.asm().unary(Unary::Imul, Size::Qword, Rcx);
     if subtract {
-        code.extend(NEG_RAX);
-        code.extend(ADC_RDX_ZERO);
-        code.extend(NEG_RDX);
+        let mut asm = code.asm();
+        asm.unary(Unary::Neg, Size::Qword, Rax);
+        asm.alu_imm8(Alu::Adc, Size::Qword, Rdx, 0);
+        asm.unary(Unary::Neg, Size::Qword, Rdx);
     }
     if rounding {
-        code.extend(MOVABS_R10);
-        code.extend((1u64 << (bits - 2)).to_le_bytes());
-        code.extend(ADD_RAX_R10);
-        code.extend(ADC_RDX_ZERO);
+        let mut asm = code.asm();
+        asm.mov_imm64(R10, 1u64 << (bits - 2));
+        asm.alu(Alu::Add, Size::Qword, Rax, R10);
+        asm.alu_imm8(Alu::Adc, Size::Qword, Rdx, 0);
     }
     let shift = (bits - 1) as u8;
-    code.extend(SHRD_RAX_RDX);
-    code.push(shift);
-    code.extend(SAR_RDX);
-    code.push(shift);
+    let mut asm = code.asm();
+    asm.shrd_imm(Size::Qword, Rax, Rdx, shift);
+    asm.shift_imm(ShiftOp::Sar, Size::Qword, Rdx, shift);
 }
 
 /// Exact rounded doubling-high accumulation for a signed lane. Inputs are lhs
@@ -303,38 +252,39 @@ fn shifted_product(code: &mut Code, bits: u32, rounding: bool, subtract: bool) {
 /// adding it after the wide product's arithmetic shift, including subtraction.
 pub(super) fn emit_rounded_scalar(code: &mut Code, bits: u32, subtract: bool) {
     shifted_product(code, bits, true, subtract);
-    code.extend(MOV_R8_R9);
-    code.extend(SAR_R8);
-    code.push(SIGN_SHIFT);
-    code.extend(ADD_RAX_R9);
-    code.extend(ADC_RDX_R8);
+    let mut asm = code.asm();
+    asm.mov(Size::Qword, R8, R9);
+    asm.shift_imm(ShiftOp::Sar, Size::Qword, R8, SIGN_SHIFT);
+    asm.alu(Alu::Add, Size::Qword, Rax, R9);
+    asm.alu(Alu::Adc, Size::Qword, Rdx, R8);
     saturate_scalar(code, bits);
 }
 
 fn scalar_long(code: &mut Code, bits: u32, accumulate: Accumulate) {
-    code.extend(IMUL_RCX);
-    code.extend(SHLD_RDX_RAX_ONE);
-    code.extend(SHL_RAX_ONE);
+    let mut asm = code.asm();
+    asm.unary(Unary::Imul, Size::Qword, Rcx);
+    asm.shld_imm(Size::Qword, Rdx, Rax, 1);
+    asm.shift_one(ShiftOp::Shl, Size::Qword, Rax);
     saturate_scalar(code, bits);
     if accumulate == Accumulate::None {
         return;
     }
     if accumulate == Accumulate::Add {
-        code.extend(CQO);
-        code.extend(MOV_R8_R9);
-        code.extend(SAR_R8);
-        code.push(SIGN_SHIFT);
-        code.extend(ADD_RAX_R9);
-        code.extend(ADC_RDX_R8);
+        let mut asm = code.asm();
+        asm.sign_extend_accumulator(Size::Qword);
+        asm.mov(Size::Qword, R8, R9);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, R8, SIGN_SHIFT);
+        asm.alu(Alu::Add, Size::Qword, Rax, R9);
+        asm.alu(Alu::Adc, Size::Qword, Rdx, R8);
     } else {
-        code.extend(MOV_R10_RAX);
-        code.extend(MOV_R8_RAX);
-        code.extend(SAR_R8);
-        code.push(SIGN_SHIFT);
-        code.extend(MOV_RAX_R9);
-        code.extend(CQO);
-        code.extend(SUB_RAX_R10);
-        code.extend(SBB_RDX_R8);
+        let mut asm = code.asm();
+        asm.mov(Size::Qword, R10, Rax);
+        asm.mov(Size::Qword, R8, Rax);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, R8, SIGN_SHIFT);
+        asm.mov(Size::Qword, Rax, R9);
+        asm.sign_extend_accumulator(Size::Qword);
+        asm.alu(Alu::Sub, Size::Qword, Rax, R10);
+        asm.alu(Alu::Sbb, Size::Qword, Rdx, R8);
     }
     saturate_scalar(code, bits);
 }
@@ -346,50 +296,50 @@ enum ScalarInput {
     Accumulator,
 }
 
+fn stack(offset: usize) -> Mem {
+    Mem::base_disp8(Rsp, offset as i8)
+}
+
 fn load_scalar(code: &mut Code, input: ScalarInput, bytes: usize, offset: usize) {
-    let (rex, register) = match input {
-        ScalarInput::Left => (REX_W, 0),
-        ScalarInput::Right => (REX_W, 1),
-        ScalarInput::Accumulator => (REX_WR, 1),
+    let destination = match input {
+        ScalarInput::Left => Rax,
+        ScalarInput::Right => Rcx,
+        ScalarInput::Accumulator => R9,
     };
-    code.push(rex);
+    let source = stack(offset);
+    let mut asm = code.asm();
     match bytes {
-        1 => code.extend(MOVSX_BYTE),
-        2 => code.extend(MOVSX_WORD),
-        4 => code.push(MOVSXD),
-        8 => code.push(MOV_LOAD),
+        1 => asm.movsx(Size::Qword, destination, Size::Byte, source),
+        2 => asm.movsx(Size::Qword, destination, Size::Word, source),
+        4 => asm.movsxd(destination, source),
+        8 => asm.mov_load(Size::Qword, destination, source),
         _ => unreachable!("allocated signed lane width"),
     }
-    code.extend([
-        MODRM_STACK_DISP8 | (register << MODRM_REGISTER_SHIFT),
-        SIB_STACK,
-        offset as u8,
-    ]);
 }
 
 fn store_scalar(code: &mut Code, bytes: usize, offset: usize) {
-    match bytes {
-        1 => code.push(MOV_STORE_BYTE),
-        2 => code.extend([WORD_PREFIX, MOV_STORE]),
-        4 => code.push(MOV_STORE),
-        8 => code.extend([REX_W, MOV_STORE]),
+    let size = match bytes {
+        1 => Size::Byte,
+        2 => Size::Word,
+        4 => Size::Dword,
+        8 => Size::Qword,
         _ => unreachable!("allocated result lane width"),
-    }
-    code.extend([MODRM_STACK_DISP8, SIB_STACK, offset as u8]);
+    };
+    code.asm().mov_store(size, stack(offset), Rax);
 }
 
 fn stack_chunk(code: &mut Code, register: u8, offset: usize, load: bool) {
-    code.extend(if load { MOVDQU_LOAD } else { MOVDQU_STORE });
-    code.extend([
-        MODRM_STACK_DISP8 | (register << MODRM_REGISTER_SHIFT),
-        SIB_STACK,
-        offset as u8,
-    ]);
+    let mut asm = code.asm();
+    if load {
+        asm.movdqu_load(register, stack(offset));
+    } else {
+        asm.movdqu_store(stack(offset), register);
+    }
 }
 
 fn scalar_chunk(code: &mut Code, kind: Kind, element: ElementSize) {
-    code.extend(SUB_RSP_IMM8);
-    code.push(STACK_BYTES);
+    code.asm()
+        .alu_imm8(Alu::Sub, Size::Qword, Rsp, STACK_BYTES as i8);
     stack_chunk(code, RESULT, STACK_LEFT, false);
     stack_chunk(code, RIGHT, STACK_RIGHT, false);
     stack_chunk(code, ACCUMULATOR, STACK_ACCUMULATOR, false);
@@ -449,8 +399,8 @@ fn scalar_chunk(code: &mut Code, kind: Kind, element: ElementSize) {
         store_scalar(code, bytes, STACK_LEFT + lane * bytes);
     }
     stack_chunk(code, RESULT, STACK_LEFT, true);
-    code.extend(ADD_RSP_IMM8);
-    code.push(STACK_BYTES);
+    code.asm()
+        .alu_imm8(Alu::Add, Size::Qword, Rsp, STACK_BYTES as i8);
 }
 
 /// Chunk ABI: XMM0/1 are staged sources, XMM4 the old accumulator; XMM7 is

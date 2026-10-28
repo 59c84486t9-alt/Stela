@@ -1,7 +1,8 @@
 //! Clearing upper Z bytes after AdvSIMD writes to V registers.
 use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rdx;
 
-use super::{ADDRESS_RDX, Host, storage_pointer, upper_offset, vector_memory, xmm};
+use super::{Host, storage_pointer, upper_offset, vector_memory, xmm};
 use crate::{
     TargetCpu,
     aarch64::scalable::{VectorLength, is_z_register},
@@ -30,7 +31,7 @@ pub(crate) fn clear_z_upper(
             code,
             Host::StoreUnaligned,
             zero,
-            ADDRESS_RDX,
+            Rdx,
             upper_offset(register, chunk, length),
             target,
         );

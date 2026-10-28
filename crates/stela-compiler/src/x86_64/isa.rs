@@ -257,12 +257,6 @@ impl SimdOpcode {
             self.mnemonic()
         );
     }
-    /// The prefix and opcode bytes alone, for an emitter that writes its own
-    /// ModRM, displacement and immediate after them.
-    pub(crate) fn append(self, code: &mut Code, target: TargetCpu) {
-        self.check(target);
-        code.extend(self.encoding());
-    }
     /// This opcode with ModRM.reg `register` and r/m `rm`.
     pub(crate) fn emit(self, code: &mut Code, register: u8, rm: impl Into<Rm>, target: TargetCpu) {
         self.check(target);
@@ -517,15 +511,15 @@ mod tests {
             for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
                 let mut code = Code::new();
                 let declined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    opcode.append(&mut code, target)
+                    opcode.register(&mut code, 0, 1, target)
                 }));
                 assert!(declined.is_err());
                 assert!(code.is_empty());
             }
             for target in [TargetCpu::Sse41, TargetCpu::Sse42] {
                 let mut code = Code::new();
-                opcode.append(&mut code, target);
-                assert_eq!(code, encoding);
+                opcode.register(&mut code, 0, 1, target);
+                assert_eq!(code, [&encoding[..], &[0xc1]].concat());
             }
         }
     }
@@ -540,15 +534,15 @@ mod tests {
         for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
             let mut code = Code::new();
             let declined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                opcode.append(&mut code, target);
+                opcode.register(&mut code, 0, 1, target);
             }));
             assert!(declined.is_err());
             assert!(code.is_empty());
         }
         for target in [TargetCpu::Sse41, TargetCpu::Sse42] {
             let mut code = Code::new();
-            opcode.append(&mut code, target);
-            assert_eq!(code, encoding);
+            opcode.register(&mut code, 0, 1, target);
+            assert_eq!(code, [&encoding[..], &[0xc1]].concat());
         }
     }
 }

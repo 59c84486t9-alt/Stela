@@ -5,7 +5,8 @@ use crate::aarch64::{
     scalable::{ElementSize, Predication, VectorLength},
     sve::integer_saturation::{Arithmetic, Half, Input, Kind, Operand, Signedness},
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Rm};
 
 use super::super::isa::{ShiftOpcode, SimdOpcode as Host};
 
@@ -13,7 +14,6 @@ const REPLICATE_HIGH_DWORDS: u8 = 0xf5;
 const SWAP_DWORD_PAIRS: u8 = 0xb1;
 const SWAP_QWORDS: u8 = 0x4e;
 const SWAP_WORD_PAIRS: u8 = 0xb1;
-const MOV_RAX_IMM64: &[u8] = &[0x48, 0xb8];
 
 #[derive(Clone, Copy)]
 enum ShiftKind {
@@ -60,12 +60,16 @@ fn shift_immediate(
     opcode.emit(code, register, amount as u8);
 }
 fn shuffle(code: &mut Code, opcode: Host, register: u8, order: u8) {
-    opcode.register(code, register, register, TargetCpu::Baseline);
-    code.push(order);
+    code.asm().simd_imm(
+        opcode,
+        register,
+        Rm::Xmm(register),
+        order,
+        TargetCpu::Baseline,
+    );
 }
 fn splat(code: &mut Code, register: u8, pattern: u64) {
-    code.extend(MOV_RAX_IMM64);
-    code.extend(pattern.to_le_bytes());
+    code.asm().mov_imm64(Rax, pattern);
     Host::MoveGprQword.register(code, register, 0, TargetCpu::Baseline);
     binary(code, Host::UnpackLowQword, register, register);
 }

@@ -1,6 +1,7 @@
 //! Classic BFDOT with round-to-odd intermediates.
 use super::{LEFT, RIGHT};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Rm, Size};
 use crate::x86_64::simd::numerical::single_vector_arithmetic;
 use crate::{
     TargetCpu,
@@ -28,22 +29,14 @@ const ORIGINAL_LEFT: u8 = 7;
 const BFLOAT_BITS: u8 = BFLOAT16_BITS as u8;
 const SIGN_BITS: u8 = 1;
 const SINGLE_TOP_BIT: u8 = Format::Single.bits() as u8 - SIGN_BITS;
-const GPR_RAX: u8 = 0;
 const ALL_SINGLE_LANES: u8 = 15;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_ROUND_ZERO: u32 = 3 << 13;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const CMP_EAX_IMMEDIATE: &[u8] = &[0x83, 0xf8];
-const COMPARE_EQUAL_SINGLE: &[u8] = &[0x0f, 0xc2];
-const REGISTER_DIRECT: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const EQUAL_PREDICATE: u8 = 0;
 
 pub(super) fn install_environment(code: &mut Code, frame: &Frame) {
-    code.push(MOV_EAX_IMMEDIATE);
-    code.extend(MXCSR_ROUND_ZERO.to_le_bytes());
+    code.asm().mov_imm32(Rax, MXCSR_ROUND_ZERO);
     numerical::install_mxcsr(code, frame);
 }
 
@@ -58,25 +51,23 @@ fn guard_normal_or_zero(code: &mut Code, source: u8, failures: &mut Vec<usize>, 
     ShiftOpcode::LeftDword.emit(code, SECOND_RESIDUAL, SIGN_BITS);
     Host::EqualDword.register(code, SECOND_RESIDUAL, ZERO, target);
     Host::Or.register(code, FIRST_RESIDUAL, SECOND_RESIDUAL, target);
-    Host::DwordSignMask.register(code, GPR_RAX, FIRST_RESIDUAL, target);
-    code.extend(CMP_EAX_IMMEDIATE);
-    code.push(ALL_SINGLE_LANES);
+    code.asm()
+        .simd_to_gpr(Host::DwordSignMask, Rax, FIRST_RESIDUAL, target);
+    code.asm()
+        .alu_imm8(Alu::Cmp, Size::Dword, Rax, ALL_SINGLE_LANES as i8);
     failures.push(branch(code, Condition::NotZero));
 }
 
 fn guard_real_status(code: &mut Code, frame: &Frame, failures: &mut Vec<usize>) {
     numerical::capture_status(code, frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     failures.push(branch(code, Condition::NotZero));
 }
 
 fn compare_equal(code: &mut Code, destination: u8, source: u8) {
-    code.extend(COMPARE_EQUAL_SINGLE);
-    code.extend([
-        REGISTER_DIRECT | destination << MODRM_REGISTER_SHIFT | source,
-        EQUAL_PREDICATE,
-    ]);
+    code.asm()
+        .cmpps(destination, Rm::Xmm(source), EQUAL_PREDICATE);
 }
 
 fn odd_add(code: &mut Code, frame: &Frame, failures: &mut Vec<usize>, target: TargetCpu) {

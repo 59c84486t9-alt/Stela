@@ -2,7 +2,8 @@
 //!
 //! Scratch: RAX/RCX/RDX, XMM0-7 and a stack frame; large SPLICE copies also use
 //! R8-R11/RSI and REP MOVSB (RDI is restored; SysV guarantees DF=0).
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdi, Rsi, Rsp};
+use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, Rm, ShiftOp, Size, Unary, resolve};
 
 use crate::aarch64::Register;
 use crate::aarch64::scalable::{ElementSize, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES, VectorLength};
@@ -11,47 +12,6 @@ use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, store_z_chunk};
 use crate::{GuestState, TargetCpu};
 
-const RAX: u8 = 0;
-const RCX: u8 = 1;
-const RSP: u8 = 4;
-const NO_INDEX: u8 = RSP;
-const REGISTER_SHIFT: u8 = 3;
-const SCALE_SHIFT: u8 = 6;
-const MODRM_DISP32_SIB: u8 = 0x84;
-const SIB_RSP_NO_INDEX: u8 = 0x24;
-const MODRM_DISP32_RDI: u8 = 0x87;
-const MODRM_REGISTER: u8 = 0xc0;
-const REX_QWORD: u8 = 0x48;
-const WORD_PREFIX: u8 = 0x66;
-const MOVZX_BYTE: &[u8] = &[0x0f, 0xb6];
-const MOVZX_WORD: &[u8] = &[0x0f, 0xb7];
-const MOV_LOAD: u8 = 0x8b;
-const MOV_STORE_BYTE: u8 = 0x88;
-const MOV_STORE: u8 = 0x89;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const CMP_RAX_IMM32: &[u8] = &[0x48, 0x3d];
-const MOV_RAX_IMM32: &[u8] = &[0x48, 0xc7, 0xc0];
-const MOV_RCX_IMM32: &[u8] = &[0x48, 0xc7, 0xc1];
-const MOVABS_RCX_IMM64: &[u8] = &[0x48, 0xb9];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const XOR_ECX_ECX: &[u8] = &[0x31, 0xc9];
-const ADD_RAX_RCX: &[u8] = &[0x48, 0x01, 0xc8];
-const SUB_RAX_RCX: &[u8] = &[0x48, 0x29, 0xc8];
-const ADD_RAX_IMM32: &[u8] = &[0x48, 0x05];
-const ADD_RCX_IMM32: &[u8] = &[0x48, 0x81, 0xc1];
-const NEG_RAX: &[u8] = &[0x48, 0xf7, 0xd8];
-const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
-const AND_RAX_RCX: &[u8] = &[0x48, 0x21, 0xc8];
-const TEST_RAX_RAX: &[u8] = &[0x48, 0x85, 0xc0];
-const BSF_RCX_RAX: &[u8] = &[0x48, 0x0f, 0xbc, 0xc8];
-const BSR_RAX_RAX: &[u8] = &[0x48, 0x0f, 0xbd, 0xc0];
-const JUMP_REL32: &[u8] = &[0xe9];
-const JAE_REL32: &[u8] = &[0x0f, 0x83];
-const JBE_REL32: &[u8] = &[0x0f, 0x86];
-const JE_REL32: &[u8] = &[0x0f, 0x84];
-const JNE_REL32: &[u8] = &[0x0f, 0x85];
-const REL32_BYTES: usize = core::mem::size_of::<i32>();
 const QWORD_BYTES: usize = core::mem::size_of::<u64>();
 const PREDICATE_CHUNK_BITS: usize = u64::BITS as usize;
 const FIRST: u8 = 0;
@@ -63,8 +23,6 @@ const MATCHED: u8 = 5;
 const CHUNK_BASE: u8 = 6;
 const MAX_INDEX: u8 = 7;
 const FIRST_DWORD: u8 = 0;
-const MOV_EAX_IMM32: u8 = 0xb8;
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
 const BYTE_BROADCAST_MULTIPLIER: u32 = 0x0101_0101;
 const TABLE_CHUNK_LAST_INDEX: u8 = VECTOR_CHUNK_BYTES as u8 - 1;
 const BYTE_INDEX_VALUES: usize = u8::MAX as usize + 1;
@@ -72,97 +30,72 @@ const BYTE_INDEX_VALUES: usize = u8::MAX as usize + 1;
 const BYTE_TABLE_SHUFFLE_LIMIT_BYTES: usize = 64;
 const Z_REGISTER_MASK: u8 = 31;
 
-const REX_EXTENDED_BASE: u8 = 0x41;
-const REX_QWORD_EXTENDED_BASE: u8 = 0x49;
-const LEA_R8_STACK_RAX: &[u8] = &[0x4c, 0x8d, 0x04, 0x04];
-const LEA_R9_STACK: &[u8] = &[0x4c, 0x8d, 0x8c, 0x24];
-const LEA_R10_STACK: &[u8] = &[0x4c, 0x8d, 0x94, 0x24];
-const LEA_R11_STACK: &[u8] = &[0x4c, 0x8d, 0x9c, 0x24];
-const LEA_RDI_STACK: &[u8] = &[0x48, 0x8d, 0xbc, 0x24];
-const LEA_RSI_STACK: &[u8] = &[0x48, 0x8d, 0xb4, 0x24];
-const LEA_RSI_STACK_RAX: &[u8] = &[0x48, 0x8d, 0x34, 0x04];
-const MOV_R8_RDI: &[u8] = &[0x49, 0x89, 0xf8];
-const MOV_RDI_R8: &[u8] = &[0x4c, 0x89, 0xc7];
-const REP_MOVSB: &[u8] = &[0xf3, 0xa4];
-const SUB_RCX_RAX: &[u8] = &[0x48, 0x29, 0xc1];
-const TEST_RCX_RCX: &[u8] = &[0x48, 0x85, 0xc9];
-const SUB_RCX_IMM8: &[u8] = &[0x48, 0x83, 0xe9];
-const ADD_R8_IMM8: &[u8] = &[0x49, 0x83, 0xc0];
-const ADD_R9_IMM8: &[u8] = &[0x49, 0x83, 0xc1];
-const ADD_R10_IMM8: &[u8] = &[0x49, 0x83, 0xc2];
-const CMP_R10_R11: &[u8] = &[0x4d, 0x39, 0xda];
-const JB_REL32: &[u8] = &[0x0f, 0x82];
-const R8_BASE: u8 = 0;
-const R9_BASE: u8 = 1;
-const R10_BASE: u8 = 2;
-
 fn stack_adjust(code: &mut Code, bytes: usize, allocate: bool) {
     assert!(bytes.is_multiple_of(VECTOR_CHUNK_BYTES));
-    code.extend(if allocate {
-        SUB_RSP_IMM32
-    } else {
-        ADD_RSP_IMM32
-    });
-    code.extend(i32::try_from(bytes).unwrap().to_le_bytes());
+    let op = if allocate { Alu::Sub } else { Alu::Add };
+    code.asm()
+        .alu_imm32(op, Size::Qword, Rsp, i32::try_from(bytes).unwrap());
 }
 
-fn branch(code: &mut Code, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend([0; REL32_BYTES]);
-    displacement
+/// `[rsp + index * scale + displacement]` with a 32-bit displacement field.
+fn stack_slot(displacement: usize, index: Option<Gpr>, scale: usize) -> Mem {
+    let displacement = i32::try_from(displacement).unwrap();
+    match index {
+        None => Mem::base_disp32(Rsp, displacement),
+        Some(index) => Mem::indexed(Rsp, index, scale as u8, displacement).with_width(Disp::Dword),
+    }
 }
 
-fn bind(code: &mut [u8], displacement: usize) {
-    let target = code.len();
-    let relative = i32::try_from(target as isize - (displacement + REL32_BYTES) as isize).unwrap();
-    code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
+/// The operand size of a B/H/S/D lane.
+fn lane_size(bytes: usize) -> Size {
+    match bytes {
+        1 => Size::Byte,
+        2 => Size::Word,
+        4 => Size::Dword,
+        QWORD_BYTES => Size::Qword,
+        _ => unreachable!("dynamic rearrangement has scalar B/H/S/D lanes"),
+    }
 }
 
-/// Scalar stack load. Index is RAX/RCX or NO_INDEX; scale is element byte size.
+/// Zero-extending lane load into RAX/RCX.
+fn load_lane(code: &mut Code, destination: Gpr, source: Mem, bytes: usize) {
+    let mut asm = code.asm();
+    match lane_size(bytes) {
+        Size::Dword => asm.mov_load(Size::Dword, destination, source),
+        Size::Qword => asm.mov_load(Size::Qword, destination, source),
+        narrow => asm.movzx(Size::Dword, destination, narrow, source),
+    }
+}
+
+/// Scalar stack load. Index is RAX/RCX or none; scale is element byte size.
 fn load_stack(
     code: &mut Code,
-    destination: u8,
+    destination: Gpr,
     displacement: usize,
-    index: u8,
+    index: Option<Gpr>,
     scale: usize,
     bytes: usize,
 ) {
-    assert!(matches!(destination, RAX | RCX));
-    assert!(matches!(index, RAX | RCX | NO_INDEX));
+    assert!(matches!(destination, Rax | Rcx));
+    assert!(matches!(index, Some(Rax | Rcx) | None));
     assert!(matches!(scale, 1 | 2 | 4 | 8));
-    match bytes {
-        1 => code.extend(MOVZX_BYTE),
-        2 => code.extend(MOVZX_WORD),
-        4 => code.push(MOV_LOAD),
-        QWORD_BYTES => code.extend([REX_QWORD, MOV_LOAD]),
-        _ => unreachable!("dynamic rearrangement has scalar B/H/S/D lanes"),
-    }
-    code.push(MODRM_DISP32_SIB | (destination << REGISTER_SHIFT));
-    code.push(((scale.trailing_zeros() as u8) << SCALE_SHIFT) | (index << REGISTER_SHIFT) | RSP);
-    code.extend(i32::try_from(displacement).unwrap().to_le_bytes());
+    load_lane(
+        code,
+        destination,
+        stack_slot(displacement, index, scale),
+        bytes,
+    );
 }
 
-fn store_stack(code: &mut Code, source: u8, displacement: usize, bytes: usize) {
-    assert!(matches!(source, RAX | RCX));
-    match bytes {
-        1 => code.push(MOV_STORE_BYTE),
-        2 => code.extend([WORD_PREFIX, MOV_STORE]),
-        4 => code.push(MOV_STORE),
-        QWORD_BYTES => code.extend([REX_QWORD, MOV_STORE]),
-        _ => unreachable!("dynamic rearrangement has scalar B/H/S/D lanes"),
-    }
-    code.extend([
-        MODRM_DISP32_SIB | (source << REGISTER_SHIFT),
-        SIB_RSP_NO_INDEX,
-    ]);
-    code.extend(i32::try_from(displacement).unwrap().to_le_bytes());
+fn store_stack(code: &mut Code, source: Gpr, displacement: usize, bytes: usize) {
+    assert!(matches!(source, Rax | Rcx));
+    code.asm()
+        .mov_store(lane_size(bytes), stack_slot(displacement, None, 1), source);
 }
 
 fn xmm_stack(code: &mut Code, opcode: Host, xmm: u8, offset: usize, target: TargetCpu) {
-    opcode.append(code, target);
-    code.extend([MODRM_DISP32_SIB | (xmm << REGISTER_SHIFT), SIB_RSP_NO_INDEX]);
-    code.extend(i32::try_from(offset).unwrap().to_le_bytes());
+    code.asm()
+        .simd(opcode, xmm, stack_slot(offset, None, 1), target);
 }
 
 fn snapshot_z(
@@ -314,30 +247,38 @@ fn emit_table_unrolled(code: &mut Code, op: Table, length: VectorLength, target:
         } else {
             0
         };
-        load_stack(code, RAX, frame.indexes + offset, NO_INDEX, 1, width);
-        code.extend(CMP_RAX_IMM32);
-        code.extend(i32::try_from(table_bytes / width).unwrap().to_le_bytes());
-        let out_of_range = branch(code, JAE_REL32);
-        load_stack(code, RCX, base, RAX, width, width);
-        store_stack(code, RCX, frame.output + offset, width);
-        let next = branch(code, JUMP_REL32);
-        bind(code, out_of_range);
+        load_stack(code, Rax, frame.indexes + offset, None, 1, width);
+        let mut asm = code.asm();
+        asm.alu_accumulator_imm32(
+            Alu::Cmp,
+            Size::Qword,
+            i32::try_from(table_bytes / width).unwrap(),
+        );
+        let out_of_range = asm.jcc(Cond::Ae);
+        load_stack(code, Rcx, base, Some(Rax), width, width);
+        store_stack(code, Rcx, frame.output + offset, width);
+        let next = code.asm().jmp();
+        code.asm().bind(out_of_range);
         if !op.extension {
-            code.extend(XOR_ECX_ECX);
-            store_stack(code, RCX, frame.output + offset, width);
+            code.asm().alu(Alu::Xor, Size::Dword, Rcx, Rcx);
+            store_stack(code, Rcx, frame.output + offset, width);
         }
-        bind(code, next);
+        code.asm().bind(next);
     }
     frame.finish(code, op.destination, length, target);
 }
 
 fn broadcast_byte(code: &mut Code, value: u8, destination: u8, target: TargetCpu) {
-    code.push(MOV_EAX_IMM32);
-    code.extend((u32::from(value) * BYTE_BROADCAST_MULTIPLIER).to_le_bytes());
-    code.extend(MOVD_XMM_EAX);
-    code.push(MODRM_REGISTER | (destination << REGISTER_SHIFT));
-    Host::ShuffleDword.register(code, destination, destination, target);
-    code.push(FIRST_DWORD);
+    code.asm()
+        .mov_imm32(Rax, u32::from(value) * BYTE_BROADCAST_MULTIPLIER);
+    code.asm().movd_to_xmm(destination, Rax);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(destination),
+        FIRST_DWORD,
+        target,
+    );
 }
 
 /// PSHUFB with every index masked to below 16, so indices 16-127 cannot wrap
@@ -421,47 +362,23 @@ struct Splice {
     element_size: ElementSize,
 }
 
-fn address(code: &mut Code, opcode: &[u8], displacement: usize) {
-    code.extend(opcode);
-    code.extend(i32::try_from(displacement).unwrap().to_le_bytes());
+fn address(code: &mut Code, destination: Gpr, displacement: usize) {
+    code.asm()
+        .lea(Size::Qword, destination, stack_slot(displacement, None, 1));
 }
 
-fn pointer_load(code: &mut Code, bytes: usize, base: u8) {
-    code.push(if bytes == QWORD_BYTES {
-        REX_QWORD_EXTENDED_BASE
-    } else {
-        REX_EXTENDED_BASE
-    });
-    code.extend(match bytes {
-        1 => MOVZX_BYTE,
-        2 => MOVZX_WORD,
-        4 | QWORD_BYTES => &[MOV_LOAD],
-        _ => unreachable!("SPLICE lane width"),
-    });
-    code.push(base);
+fn pointer_load(code: &mut Code, bytes: usize, base: Gpr) {
+    load_lane(code, Rax, Mem::base(base, 0), bytes);
 }
 
 fn pointer_store(code: &mut Code, bytes: usize) {
-    if bytes == 2 {
-        code.push(WORD_PREFIX);
-    }
-    code.push(if bytes == QWORD_BYTES {
-        REX_QWORD_EXTENDED_BASE
-    } else {
-        REX_EXTENDED_BASE
-    });
-    code.push(if bytes == 1 {
-        MOV_STORE_BYTE
-    } else {
-        MOV_STORE
-    });
-    code.push(R10_BASE);
+    code.asm()
+        .mov_store(lane_size(bytes), Mem::base(R10, 0), Rax);
 }
 
-fn backward(code: &mut Code, opcode: &[u8], target: usize) {
-    let displacement = branch(code, opcode);
-    let relative = i32::try_from(target as isize - (displacement + REL32_BYTES) as isize).unwrap();
-    code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
+fn backward(code: &mut Code, condition: Cond, target: usize) {
+    let branch = code.asm().jcc(condition);
+    resolve(code, branch, target);
 }
 
 fn copy_splice_rep(
@@ -472,19 +389,21 @@ fn copy_splice_rep(
     end: usize,
     bytes: usize,
 ) {
-    code.extend(MOV_R8_RDI);
-    address(code, LEA_RDI_STACK, output);
-    load_stack(code, RAX, first, NO_INDEX, 1, QWORD_BYTES);
-    code.extend(LEA_RSI_STACK_RAX);
-    load_stack(code, RCX, end, NO_INDEX, 1, QWORD_BYTES);
-    code.extend(REP_MOVSB);
-    code.extend(MOV_RCX_IMM32);
-    code.extend(i32::try_from(bytes).unwrap().to_le_bytes());
-    load_stack(code, RAX, end, NO_INDEX, 1, QWORD_BYTES);
-    code.extend(SUB_RCX_RAX);
-    address(code, LEA_RSI_STACK, second);
-    code.extend(REP_MOVSB);
-    code.extend(MOV_RDI_R8);
+    code.asm().mov(Size::Qword, R8, Rdi);
+    address(code, Rdi, output);
+    load_stack(code, Rax, first, None, 1, QWORD_BYTES);
+    code.asm()
+        .lea(Size::Qword, Rsi, Mem::indexed(Rsp, Rax, 1, 0));
+    load_stack(code, Rcx, end, None, 1, QWORD_BYTES);
+    let mut asm = code.asm();
+    asm.rep_movsb();
+    asm.mov_rm_imm32(Size::Qword, Rcx, i32::try_from(bytes).unwrap());
+    load_stack(code, Rax, end, None, 1, QWORD_BYTES);
+    code.asm().alu(Alu::Sub, Size::Qword, Rcx, Rax);
+    address(code, Rsi, second);
+    let mut asm = code.asm();
+    asm.rep_movsb();
+    asm.mov(Size::Qword, Rdi, R8);
 }
 
 fn copy_splice_counted(
@@ -496,37 +415,37 @@ fn copy_splice_counted(
     bytes: usize,
     width: usize,
 ) {
-    load_stack(code, RAX, first, NO_INDEX, 1, QWORD_BYTES);
-    code.extend(LEA_R8_STACK_RAX);
-    address(code, LEA_R9_STACK, second);
-    address(code, LEA_R10_STACK, output);
-    address(code, LEA_R11_STACK, output + bytes);
-    load_stack(code, RCX, end, NO_INDEX, 1, QWORD_BYTES);
-    code.extend(TEST_RCX_RCX);
-    let empty = branch(code, JE_REL32);
+    load_stack(code, Rax, first, None, 1, QWORD_BYTES);
+    code.asm()
+        .lea(Size::Qword, R8, Mem::indexed(Rsp, Rax, 1, 0));
+    address(code, R9, second);
+    address(code, R10, output);
+    address(code, R11, output + bytes);
+    load_stack(code, Rcx, end, None, 1, QWORD_BYTES);
+    let mut asm = code.asm();
+    asm.test(Size::Qword, Rcx, Rcx);
+    let empty = asm.jcc(Cond::E);
     let prefix_loop = code.len();
-    pointer_load(code, width, R8_BASE);
+    pointer_load(code, width, R8);
     pointer_store(code, width);
-    code.extend(ADD_R8_IMM8);
-    code.push(width as u8);
-    code.extend(ADD_R10_IMM8);
-    code.push(width as u8);
-    code.extend(SUB_RCX_IMM8);
-    code.push(width as u8);
-    backward(code, JNE_REL32, prefix_loop);
-    bind(code, empty);
-    code.extend(CMP_R10_R11);
-    let full = branch(code, JE_REL32);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Add, Size::Qword, R8, width as i8);
+    asm.alu_imm8(Alu::Add, Size::Qword, R10, width as i8);
+    asm.alu_imm8(Alu::Sub, Size::Qword, Rcx, width as i8);
+    backward(code, Cond::Ne, prefix_loop);
+    let mut asm = code.asm();
+    asm.bind(empty);
+    asm.alu(Alu::Cmp, Size::Qword, R10, R11);
+    let full = asm.jcc(Cond::E);
     let suffix_loop = code.len();
-    pointer_load(code, width, R9_BASE);
+    pointer_load(code, width, R9);
     pointer_store(code, width);
-    code.extend(ADD_R9_IMM8);
-    code.push(width as u8);
-    code.extend(ADD_R10_IMM8);
-    code.push(width as u8);
-    code.extend(CMP_R10_R11);
-    backward(code, JB_REL32, suffix_loop);
-    bind(code, full);
+    let mut asm = code.asm();
+    asm.alu_imm8(Alu::Add, Size::Qword, R9, width as i8);
+    asm.alu_imm8(Alu::Add, Size::Qword, R10, width as i8);
+    asm.alu(Alu::Cmp, Size::Qword, R10, R11);
+    backward(code, Cond::B, suffix_loop);
+    code.asm().bind(full);
 }
 
 /// SSE2 baseline SPLICE copies the contiguous first..last active hull, including
@@ -542,55 +461,60 @@ fn emit_splice(code: &mut Code, op: Splice, length: VectorLength, target: Target
     stack_adjust(code, frame_bytes, true);
     snapshot_z(code, op.source, 0, length, target);
     snapshot_z(code, op.second, second, length, target);
-    code.extend(MOV_RAX_IMM32);
-    code.extend(i32::try_from(length.bytes()).unwrap().to_le_bytes());
-    store_stack(code, RAX, first, QWORD_BYTES);
-    code.extend(XOR_EAX_EAX);
-    store_stack(code, RAX, end, QWORD_BYTES);
+    code.asm()
+        .mov_rm_imm32(Size::Qword, Rax, i32::try_from(length.bytes()).unwrap());
+    store_stack(code, Rax, first, QWORD_BYTES);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
+    store_stack(code, Rax, end, QWORD_BYTES);
     let mut leading_bits = 0u64;
     for bit in (0..PREDICATE_CHUNK_BITS).step_by(width) {
         leading_bits |= 1u64 << bit;
     }
     for chunk in 0..length.predicate_bytes().div_ceil(QWORD_BYTES) {
         read_predicate_chunk(code, op.governing, chunk, length);
+        let mut asm = code.asm();
         if width != 1 {
-            code.extend(MOVABS_RCX_IMM64);
-            code.extend(leading_bits.to_le_bytes());
-            code.extend(AND_RAX_RCX);
+            asm.mov_imm64(Rcx, leading_bits);
+            asm.alu(Alu::And, Size::Qword, Rax, Rcx);
         }
-        code.extend(TEST_RAX_RAX);
-        let inactive = branch(code, JE_REL32);
-        code.extend(BSF_RCX_RAX);
-        code.extend(BSR_RAX_RAX);
-        code.extend(ADD_RAX_IMM32);
-        code.extend(
-            i32::try_from(chunk * PREDICATE_CHUNK_BITS + width)
-                .unwrap()
-                .to_le_bytes(),
+        asm.test(Size::Qword, Rax, Rax);
+        let inactive = asm.jcc(Cond::E);
+        asm.bsf(Size::Qword, Rcx, Rax);
+        asm.bsr(Size::Qword, Rax, Rax);
+        asm.alu_accumulator_imm32(
+            Alu::Add,
+            Size::Qword,
+            i32::try_from(chunk * PREDICATE_CHUNK_BITS + width).unwrap(),
         );
-        store_stack(code, RAX, end, QWORD_BYTES);
-        load_stack(code, RAX, first, NO_INDEX, 1, QWORD_BYTES);
-        code.extend(CMP_RAX_IMM32);
-        code.extend(i32::try_from(length.bytes()).unwrap().to_le_bytes());
-        let already_found = branch(code, JNE_REL32);
-        code.extend(ADD_RCX_IMM32);
-        code.extend(
-            i32::try_from(chunk * PREDICATE_CHUNK_BITS)
-                .unwrap()
-                .to_le_bytes(),
+        store_stack(code, Rax, end, QWORD_BYTES);
+        load_stack(code, Rax, first, None, 1, QWORD_BYTES);
+        let mut asm = code.asm();
+        asm.alu_accumulator_imm32(
+            Alu::Cmp,
+            Size::Qword,
+            i32::try_from(length.bytes()).unwrap(),
         );
-        store_stack(code, RCX, first, QWORD_BYTES);
-        bind(code, already_found);
-        bind(code, inactive);
+        let already_found = asm.jcc(Cond::Ne);
+        asm.alu_imm32(
+            Alu::Add,
+            Size::Qword,
+            Rcx,
+            i32::try_from(chunk * PREDICATE_CHUNK_BITS).unwrap(),
+        );
+        store_stack(code, Rcx, first, QWORD_BYTES);
+        let mut asm = code.asm();
+        asm.bind(already_found);
+        asm.bind(inactive);
     }
-    load_stack(code, RAX, end, NO_INDEX, 1, QWORD_BYTES);
-    code.extend(TEST_RAX_RAX);
-    let nonempty = branch(code, JNE_REL32);
-    store_stack(code, RAX, first, QWORD_BYTES); // Empty: first=end=0.
-    bind(code, nonempty);
-    load_stack(code, RCX, first, NO_INDEX, 1, QWORD_BYTES);
-    code.extend(SUB_RAX_RCX);
-    store_stack(code, RAX, end, QWORD_BYTES); // End slot now holds hull byte length.
+    load_stack(code, Rax, end, None, 1, QWORD_BYTES);
+    let mut asm = code.asm();
+    asm.test(Size::Qword, Rax, Rax);
+    let nonempty = asm.jcc(Cond::Ne);
+    store_stack(code, Rax, first, QWORD_BYTES); // Empty: first=end=0.
+    code.asm().bind(nonempty);
+    load_stack(code, Rcx, first, None, 1, QWORD_BYTES);
+    code.asm().alu(Alu::Sub, Size::Qword, Rax, Rcx);
+    store_stack(code, Rax, end, QWORD_BYTES); // End slot now holds hull byte length.
     if length.bytes() == MAX_VECTOR_BYTES {
         if width <= ElementSize::Halfword.bytes() {
             copy_splice_rep(code, second, output, first, end, length.bytes());
@@ -599,51 +523,42 @@ fn emit_splice(code: &mut Code, op: Splice, length: VectorLength, target: Target
         }
     } else {
         for offset in (0..length.bytes()).step_by(width) {
-            load_stack(code, RAX, end, NO_INDEX, 1, QWORD_BYTES);
-            code.extend(CMP_RAX_IMM32);
-            code.extend(i32::try_from(offset).unwrap().to_le_bytes());
-            let from_second = branch(code, JBE_REL32);
-            load_stack(code, RCX, first, NO_INDEX, 1, QWORD_BYTES);
-            load_stack(code, RAX, offset, RCX, 1, width);
-            let selected = branch(code, JUMP_REL32);
-            bind(code, from_second);
-            code.extend(NEG_RAX);
-            load_stack(code, RAX, second + offset, RAX, 1, width);
-            bind(code, selected);
-            store_stack(code, RAX, output + offset, width);
+            load_stack(code, Rax, end, None, 1, QWORD_BYTES);
+            let mut asm = code.asm();
+            asm.alu_accumulator_imm32(Alu::Cmp, Size::Qword, i32::try_from(offset).unwrap());
+            let from_second = asm.jcc(Cond::Be);
+            load_stack(code, Rcx, first, None, 1, QWORD_BYTES);
+            load_stack(code, Rax, offset, Some(Rcx), 1, width);
+            let selected = code.asm().jmp();
+            let mut asm = code.asm();
+            asm.bind(from_second);
+            asm.unary(Unary::Neg, Size::Qword, Rax);
+            load_stack(code, Rax, second + offset, Some(Rax), 1, width);
+            code.asm().bind(selected);
+            store_stack(code, Rax, output + offset, width);
         }
     }
     commit_z(code, op.destination, output, length, target);
     stack_adjust(code, frame_bytes, false);
 }
 
-fn read_index_operand(code: &mut Code, operand: IndexOperand, destination: u8) {
-    assert!(matches!(destination, RAX | RCX));
+fn read_index_operand(code: &mut Code, operand: IndexOperand, destination: Gpr) {
+    assert!(matches!(destination, Rax | Rcx));
+    let mut asm = code.asm();
     match operand {
         IndexOperand::Immediate(value) => {
-            code.extend(if destination == RAX {
-                MOV_RAX_IMM32
-            } else {
-                MOV_RCX_IMM32
-            });
-            code.extend(i32::from(value).to_le_bytes());
+            asm.mov_rm_imm32(Size::Qword, destination, i32::from(value));
         }
-        IndexOperand::Register(Register::Zero) => code.extend(if destination == RAX {
-            XOR_EAX_EAX
-        } else {
-            XOR_ECX_ECX
-        }),
+        IndexOperand::Register(Register::Zero) => {
+            asm.alu(Alu::Xor, Size::Dword, destination, destination);
+        }
         IndexOperand::Register(Register::X(register)) => {
             assert!(register < 31);
-            code.extend([
-                REX_QWORD,
-                MOV_LOAD,
-                MODRM_DISP32_RDI | (destination << REGISTER_SHIFT),
-            ]);
-            code.extend(
-                ((core::mem::offset_of!(GuestState, x) + usize::from(register) * QWORD_BYTES)
-                    as u32)
-                    .to_le_bytes(),
+            let offset = core::mem::offset_of!(GuestState, x) + usize::from(register) * QWORD_BYTES;
+            asm.mov_load(
+                Size::Qword,
+                destination,
+                Mem::base_disp32(Rdi, offset as i32),
             );
         }
         IndexOperand::Register(Register::Sp) => unreachable!("INDEX register31 is ZR, never SP"),
@@ -664,34 +579,54 @@ fn emit_index(code: &mut Code, op: Index, length: VectorLength, target: TargetCp
     let width = op.element_size.bytes();
     assert!(width <= QWORD_BYTES);
     stack_adjust(code, VECTOR_CHUNK_BYTES, true);
-    read_index_operand(code, op.start, RAX);
-    read_index_operand(code, op.step, RCX);
+    read_index_operand(code, op.start, Rax);
+    read_index_operand(code, op.step, Rcx);
     for offset in (0..VECTOR_CHUNK_BYTES).step_by(width) {
-        store_stack(code, RAX, offset, width);
+        store_stack(code, Rax, offset, width);
         if offset + width < VECTOR_CHUNK_BYTES {
-            code.extend(ADD_RAX_RCX);
+            code.asm().alu(Alu::Add, Size::Qword, Rax, Rcx);
         }
     }
     xmm_stack(code, Host::LoadUnaligned, FIRST, 0, target);
     if length.chunks() > 1 {
-        code.extend(SHL_RCX_IMM8);
-        code.push((VECTOR_CHUNK_BYTES / width).trailing_zeros() as u8);
-        Host::MoveGprQword.register(code, SECOND, RCX, target);
+        let mut asm = code.asm();
+        asm.shift_imm(
+            ShiftOp::Shl,
+            Size::Qword,
+            Rcx,
+            (VECTOR_CHUNK_BYTES / width).trailing_zeros() as u8,
+        );
+        asm.simd(Host::MoveGprQword, SECOND, Rcx, target);
         match op.element_size {
             ElementSize::Byte => {
                 Host::UnpackLowByte.register(code, SECOND, SECOND, target);
                 Host::UnpackLowWord.register(code, SECOND, SECOND, target);
-                Host::ShuffleDword.register(code, SECOND, SECOND, target);
-                code.push(FIRST_DWORD);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    SECOND,
+                    Rm::Xmm(SECOND),
+                    FIRST_DWORD,
+                    target,
+                );
             }
             ElementSize::Halfword => {
                 Host::UnpackLowWord.register(code, SECOND, SECOND, target);
-                Host::ShuffleDword.register(code, SECOND, SECOND, target);
-                code.push(FIRST_DWORD);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    SECOND,
+                    Rm::Xmm(SECOND),
+                    FIRST_DWORD,
+                    target,
+                );
             }
             ElementSize::Word => {
-                Host::ShuffleDword.register(code, SECOND, SECOND, target);
-                code.push(FIRST_DWORD);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    SECOND,
+                    Rm::Xmm(SECOND),
+                    FIRST_DWORD,
+                    target,
+                );
             }
             ElementSize::Doubleword => Host::UnpackLowQword.register(code, SECOND, SECOND, target),
             ElementSize::Quadword => unreachable!("INDEX has no128-bit element allocation"),

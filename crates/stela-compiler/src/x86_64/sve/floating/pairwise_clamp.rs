@@ -1,6 +1,6 @@
 //! SVE pairwise min/max and FCLAMP.
 use super::minmax::{guard_zero_pairs, selection};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Rm};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -36,8 +36,13 @@ const PREPARED_EVEN: u8 = CLASSIFICATION_SCRATCH[0];
 const PREPARED_RIGHT: u8 = CLASSIFICATION_SCRATCH[1];
 
 fn shuffle(code: &mut Code, destination: u8, source: u8, order: u8, target: TargetCpu) {
-    Host::ShuffleDword.register(code, destination, source, target);
-    code.push(order);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(source),
+        order,
+        target,
+    );
 }
 
 /// Interleave source pairs by output lane; the output predicate is applied only

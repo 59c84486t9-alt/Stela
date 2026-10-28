@@ -1,7 +1,8 @@
 //! BF16 binary arithmetic. Normal inputs widen exactly to single; a nearest-even
 //! double rounding can differ only at a BF16 midpoint, which with host inexact
 //! takes software completion.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R10, Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,
@@ -34,7 +35,6 @@ use crate::{
 use alloc::vec::Vec;
 
 const RESULT: u8 = 0;
-const GPR_RAX: u8 = 0;
 const SOURCE: u8 = 1;
 const TEMPORARY: u8 = 2;
 const CONSTANT: u8 = 3;
@@ -47,38 +47,24 @@ const DISCARDED_BITS: u8 = BFLOAT16_TO_SINGLE_SHIFT as u8;
 const BF_MIDPOINT: u32 = 1 << (DISCARDED_BITS - 1);
 const REPEAT_LOW_LANE: u8 = 0;
 const BF_BYTES: u8 = size_of::<u16>() as u8;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
-const TEST_ECX_IMM32: &[u8] = &[0xf7, 0xc1];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const AND_EAX_IMM32: u8 = 0x25;
-const SHR_EAX_IMM8: &[u8] = &[0xc1, 0xe8];
-const SHL_EAX_IMM8: &[u8] = &[0xc1, 0xe0];
-const MOV_EAX_IMM32: u8 = 0xb8;
-const JMP_REL32: u8 = 0xe9;
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const TEST_R10D_R10D: &[u8] = &[0x45, 0x85, 0xd2];
-const SETNE_AL: &[u8] = &[0x0f, 0x95, 0xc0];
-const MOVZX_EAX_AL: &[u8] = &[0x0f, 0xb6, 0xc0];
 
 fn jump(code: &mut Code) -> usize {
-    code.push(JMP_REL32);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+    code.asm().jmp().offset()
 }
 
 fn constant(code: &mut Code, vector: u8, value: u32, target: TargetCpu) {
-    code.push(MOV_EAX_IMM32);
-    code.extend(value.to_le_bytes());
-    code.extend(MOVD_XMM_EAX);
-    code.push(MODRM_REGISTER | vector << MODRM_REGISTER_SHIFT);
-    Host::ShuffleDword.register(code, vector, vector, target);
-    code.push(REPEAT_LOW_LANE);
+    code.asm().mov_imm32(Rax, value);
+    code.asm().movd_to_xmm(vector, Rax);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        vector,
+        Rm::Xmm(vector),
+        REPEAT_LOW_LANE,
+        target,
+    );
 }
 
 fn half_group(group: usize) -> Host {
@@ -145,10 +131,20 @@ fn load_right(
             if index != 0 {
                 ShiftOpcode::RightBytes.emit(code, SOURCE, index * BF_BYTES);
             }
-            Host::ShuffleLowWord.register(code, SOURCE, SOURCE, target);
-            code.push(REPEAT_LOW_LANE);
-            Host::ShuffleDword.register(code, SOURCE, SOURCE, target);
-            code.push(REPEAT_LOW_LANE);
+            code.asm().simd_imm(
+                Host::ShuffleLowWord,
+                SOURCE,
+                Rm::Xmm(SOURCE),
+                REPEAT_LOW_LANE,
+                target,
+            );
+            code.asm().simd_imm(
+                Host::ShuffleDword,
+                SOURCE,
+                Rm::Xmm(SOURCE),
+                REPEAT_LOW_LANE,
+                target,
+            );
         }
     }
     widen(code, SOURCE, group, target);
@@ -158,16 +154,17 @@ fn load_right(
 /// This conservative check also rejects directed/inactive cross-lane ties; it
 /// never accepts an ambiguous nearest-even double rounding.
 fn midpoint_guard(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
-    code.extend(TEST_ECX_IMM32);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
+    code.asm()
+        .test_imm32(Size::Dword, Rcx, MXCSR_INEXACT as i32);
     let exact = branch(code, Condition::Zero);
     Host::MoveAligned.register(code, TEMPORARY, SOURCE, target);
     ShiftOpcode::LeftDword.emit(code, TEMPORARY, u32::BITS as u8 - DISCARDED_BITS);
     ShiftOpcode::RightDword.emit(code, TEMPORARY, u32::BITS as u8 - DISCARDED_BITS);
     constant(code, CONSTANT, BF_MIDPOINT, target);
     Host::EqualDword.register(code, TEMPORARY, CONSTANT, target);
-    Host::DwordSignMask.register(code, GPR_RAX, TEMPORARY, target);
-    code.extend(TEST_EAX_EAX);
+    code.asm()
+        .simd_to_gpr(Host::DwordSignMask, Rax, TEMPORARY, target);
+    code.asm().test(Size::Dword, Rax, Rax);
     failures.push(branch(code, Condition::NotZero));
     let end = code.len();
     resolve(code, exact, end);
@@ -220,8 +217,9 @@ pub(in crate::x86_64) fn emit(
                 length,
                 target,
             );
-            Host::ByteSignMask.register(code, GPR_RAX, ACTIVE, target);
-            code.extend(TEST_EAX_EAX);
+            code.asm()
+                .simd_to_gpr(Host::ByteSignMask, Rax, ACTIVE, target);
+            code.asm().test(Size::Dword, Rax, Rax);
             branch(code, Condition::Zero)
         });
         for group in 0..HALF_GROUPS {
@@ -261,15 +259,14 @@ pub(in crate::x86_64) fn emit(
             // operation retains the non-IXC status guard. A nonexceptional BF
             // p8 product has at most sixteen bits and is exact at Single p24.
             numerical::capture_status(code, &frame);
-            code.extend(TEST_ECX_IMM32);
-            code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+            code.asm()
+                .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
             failures.push(branch(code, Condition::NotZero));
             if operation != BinaryOperation::Multiply {
-                code.extend(MOV_EAX_ECX);
-                code.push(AND_EAX_IMM32);
-                code.extend(MXCSR_INEXACT.to_le_bytes());
-                code.extend(SHR_EAX_IMM8);
-                code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+                let mut asm = code.asm();
+                asm.mov(Size::Dword, Rax, Rcx);
+                asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
+                asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
                 numerical::add_fpsr(code, &frame);
                 midpoint_guard(code, &mut failures, target);
             }
@@ -277,11 +274,16 @@ pub(in crate::x86_64) fn emit(
             prepare_vector_input_range(code, Format::Single);
             vector_exponent_range(code, Format::Single, Shape::Vector128, RESULT);
             failures.push(branch(code, Condition::NotZero));
-            code.extend(TEST_R10D_R10D);
-            code.extend(SETNE_AL);
-            code.extend(MOVZX_EAX_AL);
-            code.extend(SHL_EAX_IMM8);
-            code.push(INEXACT.trailing_zeros() as u8);
+            let mut asm = code.asm();
+            asm.test(Size::Dword, R10, R10);
+            asm.setcc(Cond::Ne, Rax);
+            asm.movzx(Size::Dword, Rax, Size::Byte, Rax);
+            asm.shift_imm(
+                ShiftOp::Shl,
+                Size::Dword,
+                Rax,
+                INEXACT.trailing_zeros() as u8,
+            );
             numerical::add_fpsr(code, &frame);
             ShiftOpcode::ArithmeticDword.emit(code, RESULT, DISCARDED_BITS);
             Host::PackSignedDwordToWord.register(code, RESULT, RESULT, target);

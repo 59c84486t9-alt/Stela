@@ -4,7 +4,8 @@ use crate::TargetCpu;
 use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_products::{Kind, Multiplier, Operand, Selection};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Code, Rm, Size, Unary};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 
@@ -24,9 +25,6 @@ const ACCUMULATOR_OR_CONSTANT: u8 = 4;
 const PREDICATE: u8 = 5;
 const PREDICATE_SCRATCH: u8 = 6;
 const PREVIOUS: u8 = 7;
-const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 const Z_REGISTERS: u8 = 32;
 const GOVERNING_PREDICATES: u8 = 8;
 const CHUNK_BYTES: usize = 16;
@@ -41,20 +39,19 @@ const SELECT_LOW_PRODUCT_DWORDS: u8 = 0x88;
 const WORDS_PER_HALF_CHUNK: u8 = 4;
 const BYTE_BITS: u8 = 8;
 const DWORD_SIGN_SHIFT: u8 = DWORD_BITS - 1;
-const MOVQ_XMM_TO_GPR: [u8; 4] = [0x66, 0x48, 0x0f, 0x7e];
-const MUL_RCX: [u8; 3] = [0x48, 0xf7, 0xe1];
-const IMUL_RCX: [u8; 3] = [0x48, 0xf7, 0xe9];
-const RAX: u8 = 0;
-const RCX: u8 = 1;
-const RDX: u8 = 2;
 
 fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
 
 fn shuffle(code: &mut Code, opcode: Host, register: u8, control: u8) {
-    packed(code, opcode, register, register);
-    code.push(control);
+    code.asm().simd_imm(
+        opcode,
+        register,
+        Rm::Xmm(register),
+        control,
+        TargetCpu::Baseline,
+    );
 }
 
 fn multiplier_element(operand: Operand) -> ElementSize {
@@ -194,10 +191,14 @@ fn immediate(code: &mut Code, value: i8, element: ElementSize) {
         (0..QWORD_BYTES / element.bytes())
             .fold(0, |result, index| result | (lane << (index * bits)))
     };
-    code.extend(MOVABS_RAX);
-    code.extend(repeated.to_le_bytes());
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | (ACCUMULATOR_OR_CONSTANT << MODRM_REGISTER_SHIFT));
+    let mut asm = code.asm();
+    asm.mov_imm64(Rax, repeated);
+    asm.simd(
+        Host::MoveGprQword,
+        ACCUMULATOR_OR_CONSTANT,
+        Rax,
+        TargetCpu::Baseline,
+    );
     packed(
         code,
         Host::UnpackLowQword,
@@ -411,29 +412,22 @@ fn multiply_high_words(code: &mut Code, signed: bool) {
     }
 }
 
-fn extract_low_qword(code: &mut Code, xmm: u8, gpr: u8) {
-    code.extend(MOVQ_XMM_TO_GPR);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
-}
-
-fn insert_low_qword(code: &mut Code, xmm: u8, gpr: u8) {
-    Host::MoveGprQword.append(code, TargetCpu::Baseline);
-    code.push(MODRM_REGISTER | (xmm << MODRM_REGISTER_SHIFT) | gpr);
-}
-
 fn multiply_high_doublewords(code: &mut Code, signed: bool) {
     packed(code, Host::MoveAligned, SECOND_PARTIAL, RESULT);
     packed(code, Host::MoveAligned, PREDICATE, RIGHT);
     ShiftOpcode::RightBytes.emit(code, SECOND_PARTIAL, QWORD_BYTES as u8);
     ShiftOpcode::RightBytes.emit(code, PREDICATE, QWORD_BYTES as u8);
-    extract_low_qword(code, RESULT, RAX);
-    extract_low_qword(code, RIGHT, RCX);
-    code.extend(if signed { IMUL_RCX } else { MUL_RCX });
-    insert_low_qword(code, FIRST_PARTIAL, RDX);
-    extract_low_qword(code, SECOND_PARTIAL, RAX);
-    extract_low_qword(code, PREDICATE, RCX);
-    code.extend(if signed { IMUL_RCX } else { MUL_RCX });
-    insert_low_qword(code, RESULT, RDX);
+    let multiply = if signed { Unary::Imul } else { Unary::Mul };
+    let mut asm = code.asm();
+    for (left, right, high) in [
+        (RESULT, RIGHT, FIRST_PARTIAL),
+        (SECOND_PARTIAL, PREDICATE, RESULT),
+    ] {
+        asm.movq_from_xmm(Rax, left);
+        asm.movq_from_xmm(Rcx, right);
+        asm.unary(multiply, Size::Qword, Rcx);
+        asm.simd(Host::MoveGprQword, high, Rdx, TargetCpu::Baseline);
+    }
     packed(code, Host::UnpackLowQword, FIRST_PARTIAL, RESULT);
     packed(code, Host::MoveAligned, RESULT, FIRST_PARTIAL);
 }

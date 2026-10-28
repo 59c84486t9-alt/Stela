@@ -5,7 +5,8 @@ use super::super::{
     scalable::{self, memory},
 };
 use super::memory as transfer;
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, Rax, Rsp};
+use crate::x86_64::asm::{Alu, Code, Cond, Mem, ShiftOp, Size, resolve};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -24,24 +25,7 @@ const POINTER_BYTES: u32 = size_of::<u64>() as u32;
 const STACK_ALIGNMENT: u32 = 16;
 const PREDICATE_CHUNK_BITS: usize = u64::BITS as usize;
 const PREDICATE_SELECTED: u8 = 1;
-const STACK_SIB: u8 = 0x24;
-const STACK_DISP32_XMM0: u8 = 0x84;
 const ZERO_XMM: u8 = 0;
-const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
-const MOV_RSP_DISP32_RAX: &[u8] = &[0x48, 0x89, 0x84, STACK_SIB];
-const MOV_RAX_RSP_DISP32: &[u8] = &[0x48, 0x8b, 0x84, STACK_SIB];
-const MOV_R8_RSP_DISP32: &[u8] = &[0x4c, 0x8b, 0x84, STACK_SIB];
-const ADD_RSP_DISP32_R8: &[u8] = &[0x4c, 0x01, 0x84, STACK_SIB];
-const MOV_RSP_DISP32_IMM32: &[u8] = &[0x48, 0xc7, 0x84, STACK_SIB];
-const ADD_RSP_DISP32_IMM32: &[u8] = &[0x48, 0x81, 0x84, STACK_SIB];
-const CMP_RSP_DISP32_IMM32: &[u8] = &[0x48, 0x81, 0xbc, STACK_SIB];
-const SHR_RSP_DISP32_IMM8: &[u8] = &[0x48, 0xc1, 0xac, STACK_SIB];
-const TEST_RSP_DISP32_IMM8: &[u8] = &[0xf6, 0x84, STACK_SIB];
-const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
-const JZ_REL32: &[u8] = &[0x0f, 0x84];
-const JB_REL32: &[u8] = &[0x0f, 0x82];
-const JMP_REL32: &[u8] = &[0xe9];
 
 #[derive(Debug, Clone, Copy)]
 struct Scratch {
@@ -73,28 +57,12 @@ impl Scratch {
     }
 }
 
-fn stack_immediate(code: &mut Code, opcode: &[u8], offset: u32, value: u32) {
-    code.extend(opcode);
-    code.extend(offset.to_le_bytes());
-    code.extend(value.to_le_bytes());
-}
-
-fn stack_operand(code: &mut Code, opcode: &[u8], offset: u32) {
-    code.extend(opcode);
-    code.extend(offset.to_le_bytes());
-}
-
-fn branch(code: &mut Code, opcode: &[u8]) -> usize {
-    code.extend(opcode);
-    let displacement = code.len();
-    code.extend(0_i32.to_le_bytes());
-    displacement
+fn stack(offset: u32) -> Mem {
+    Mem::base_disp32(Rsp, offset as i32)
 }
 
 fn stack_vector(code: &mut Code, opcode: Host, offset: u32, target: TargetCpu) {
-    opcode.append(code, target);
-    code.extend([STACK_DISP32_XMM0, STACK_SIB]);
-    code.extend(offset.to_le_bytes());
+    code.asm().simd(opcode, ZERO_XMM, stack(offset), target);
 }
 
 fn access_flags(operand: Operand) -> u32 {
@@ -154,15 +122,16 @@ pub(crate) fn emit(
     let width = operand.element.bytes() as u32;
     let access_flags = access_flags(*operand);
     let mut failures = Vec::new();
-    code.extend(SUB_RSP_IMM32);
-    code.extend(scratch.bytes.to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Sub, Size::Qword, Rsp, scratch.bytes as i32);
     memory::begin(code);
     if let Some(failure) = transfer::check_sp(code, operand.address.base, pc) {
         failures.push(failure);
     }
     transfer::address(code, operand.address, length);
-    stack_operand(code, MOV_RSP_DISP32_RAX, scratch.address);
-    stack_immediate(code, MOV_RSP_DISP32_IMM32, scratch.lane, 0);
+    let mut asm = code.asm();
+    asm.mov_store(Size::Qword, stack(scratch.address), Rax);
+    asm.mov_rm_imm32(Size::Qword, stack(scratch.lane), 0);
     Host::Xor.register(code, ZERO_XMM, ZERO_XMM, target);
     for offset in (0..scratch.data_bytes).step_by(VECTOR_CHUNK_BYTES) {
         stack_vector(code, Host::StoreUnaligned, offset, target);
@@ -173,13 +142,15 @@ pub(crate) fn emit(
     let predicate_chunks = length.bytes().div_ceil(PREDICATE_CHUNK_BITS);
     for chunk in 0..predicate_chunks {
         scalable::read_predicate_chunk(code, operand.predicate, chunk, length);
-        stack_operand(code, MOV_RSP_DISP32_RAX, scratch.predicate);
+        code.asm()
+            .mov_store(Size::Qword, stack(scratch.predicate), Rax);
         let start = code.len();
-        stack_operand(code, TEST_RSP_DISP32_IMM8, scratch.predicate);
-        code.push(PREDICATE_SELECTED);
-        let inactive = branch(code, JZ_REL32);
+        let mut asm = code.asm();
+        asm.test_byte_imm(stack(scratch.predicate), PREDICATE_SELECTED);
+        let inactive = asm.jcc(Cond::E);
         for tuple_index in 0..operand.registers {
-            stack_operand(code, MOV_RAX_RSP_DISP32, scratch.address);
+            code.asm()
+                .mov_load(Size::Qword, Rax, stack(scratch.address));
             memory::request(
                 code,
                 scratch.request,
@@ -188,34 +159,40 @@ pub(crate) fn emit(
                 access_flags,
                 pc,
             );
-            stack_operand(code, MOV_R8_RSP_DISP32, scratch.lane);
-            stack_operand(
-                code,
-                ADD_RSP_DISP32_R8,
-                scratch.request + MEMORY_REQUEST_DATA_OFFSET,
+            let mut asm = code.asm();
+            asm.mov_load(Size::Qword, R8, stack(scratch.lane));
+            asm.alu(
+                Alu::Add,
+                Size::Qword,
+                stack(scratch.request + MEMORY_REQUEST_DATA_OFFSET),
+                R8,
             );
             memory::call(code, scratch.request);
             failures.push(memory::branch_failed(code));
-            stack_immediate(code, ADD_RSP_DISP32_IMM32, scratch.address, width);
+            code.asm()
+                .alu_imm32(Alu::Add, Size::Qword, stack(scratch.address), width as i32);
         }
-        let active_done = branch(code, JMP_REL32);
-        let inactive_start = code.len();
-        memory::patch_branch(code, inactive, inactive_start);
-        stack_immediate(
-            code,
-            ADD_RSP_DISP32_IMM32,
-            scratch.address,
-            u32::from(operand.registers) * width,
+        let mut asm = code.asm();
+        let active_done = asm.jmp();
+        asm.bind(inactive);
+        asm.alu_imm32(
+            Alu::Add,
+            Size::Qword,
+            stack(scratch.address),
+            (u32::from(operand.registers) * width) as i32,
         );
-        let advance = code.len();
-        memory::patch_branch(code, active_done, advance);
-        stack_operand(code, SHR_RSP_DISP32_IMM8, scratch.predicate);
-        code.push(width as u8);
-        stack_immediate(code, ADD_RSP_DISP32_IMM32, scratch.lane, width);
+        asm.bind(active_done);
+        asm.shift_imm(
+            ShiftOp::Shr,
+            Size::Qword,
+            stack(scratch.predicate),
+            width as u8,
+        );
+        asm.alu_imm32(Alu::Add, Size::Qword, stack(scratch.lane), width as i32);
         let end = ((chunk + 1) * PREDICATE_CHUNK_BITS).min(length.bytes()) as u32;
-        stack_immediate(code, CMP_RSP_DISP32_IMM32, scratch.lane, end);
-        let repeat = branch(code, JB_REL32);
-        memory::patch_branch(code, repeat, start);
+        asm.alu_imm32(Alu::Cmp, Size::Qword, stack(scratch.lane), end as i32);
+        let repeat = asm.jcc(Cond::B);
+        resolve(code, repeat, start);
     }
     // Architectural Z writes begin only after all callbacks have succeeded.
     for tuple_index in 0..operand.registers {
@@ -232,13 +209,13 @@ pub(crate) fn emit(
             );
         }
     }
-    code.extend(XOR_EAX_EAX);
+    code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
     let cleanup = code.len();
     for failure in failures {
         memory::patch_branch(code, failure, cleanup);
     }
-    code.extend(ADD_RSP_IMM32);
-    code.extend(scratch.bytes.to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Add, Size::Qword, Rsp, scratch.bytes as i32);
     transfer::return_if_failed(code);
 }
 
@@ -250,6 +227,8 @@ mod tests {
     const LENGTHS: [usize; 5] = [16, 32, 64, 128, 256];
     const TEST_PC: u64 = 0x1_4000_1000;
     const MAX_REFERENCE_BODY_BYTES: usize = 8 * 1024;
+    const SUB_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xec];
+    const ADD_RSP_IMM32: &[u8] = &[0x48, 0x81, 0xc4];
     const CALL_MEMORY_CALLBACK: &[u8] = &[
         0xff,
         0x57,

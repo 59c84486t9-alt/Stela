@@ -4,7 +4,10 @@
 //! MXCSR and restores it afterwards; host status is discarded. Inputs: XMM0/XMM1
 //! hold eight BF16 values, XMM6 four single accumulators. Output: XMM0 holds four
 //! singles. Clobbers XMM2-5, XMM7, RAX, RCX and flags.
-use crate::x86_64::asm::Code;
+use crate::TargetCpu;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
+use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 use crate::x86_64::scalable::numerical;
 use alloc::vec::Vec;
@@ -17,18 +20,9 @@ const WORK_PAIR: u8 = 4;
 const OUTPUT: u8 = 5;
 const ACCUMULATOR: u8 = 6;
 const WORK_MASK: u8 = 7;
-const EAX: u8 = 0;
 const SIGN_DISCARD_SHIFT: u8 = 1;
 const DOUBLE_SIGN_BIT: u8 = 63;
 const DWORD_BITS: u8 = 32;
-const REGISTER_MODRM: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const REL32_BYTES: usize = core::mem::size_of::<i32>();
-const CONDITIONAL_ESCAPE: u8 = 0x0f;
-const EQUAL: u8 = 0x84;
-const NOT_EQUAL: u8 = 0x85;
-const BELOW: u8 = 0x82;
-const BELOW_OR_EQUAL: u8 = 0x86;
 const BFLOAT_EXPONENT_PAIR: u32 = 0x7f80_7f80;
 const SINGLE_EXPONENT: u32 = 0x7f80_0000;
 const SINGLE_MAGNITUDE: u32 = 0x7fff_ffff;
@@ -39,124 +33,60 @@ const HALF_CHUNK_BYTES: u8 = 8;
 const UPPER_TWO_SINGLES: u8 = 0xee;
 const SPLAT_LOW_DWORD: u8 = 0;
 
-const MOVDQA: &[u8] = &[0x66, 0x0f, 0x6f];
-const MOVQ_XMM: &[u8] = &[0xf3, 0x0f, 0x7e];
-const PXOR: &[u8] = &[0x66, 0x0f, 0xef];
-const PAND: &[u8] = &[0x66, 0x0f, 0xdb];
-const PANDN: &[u8] = &[0x66, 0x0f, 0xdf];
-const POR: &[u8] = &[0x66, 0x0f, 0xeb];
-const PCMPEQW: &[u8] = &[0x66, 0x0f, 0x75];
-const PCMPEQD: &[u8] = &[0x66, 0x0f, 0x76];
-const PUNPCKLWD: &[u8] = &[0x66, 0x0f, 0x61];
-const PSHUFD: &[u8] = &[0x66, 0x0f, 0x70];
-const PSLLW_IMM: &[u8] = &[0x66, 0x0f, 0x71];
-const PSLLD_IMM: &[u8] = &[0x66, 0x0f, 0x72];
-const PSRLDQ_IMM: &[u8] = &[0x66, 0x0f, 0x73];
-const SHIFT_LEFT_GROUP: u8 = 6;
-const SHIFT_RIGHT_BYTES_GROUP: u8 = 3;
-const CVTPS2PD: &[u8] = &[0x0f, 0x5a];
-const CVTPD2PS: &[u8] = &[0x66, 0x0f, 0x5a];
-const MULPD: &[u8] = &[0x66, 0x0f, 0x59];
-const ADDPD: &[u8] = &[0x66, 0x0f, 0x58];
-const ADDPS: &[u8] = &[0x0f, 0x58];
-const UNPCKLPD: &[u8] = &[0x66, 0x0f, 0x14];
-const UNPCKHPD: &[u8] = &[0x66, 0x0f, 0x15];
-const MOVD_XMM_EAX: &[u8] = &[0x66, 0x0f, 0x6e];
-const MOVQ_RAX_XMM: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const PMOVMSKB_EAX_XMM: &[u8] = &[0x66, 0x0f, 0xd7];
-const MOV_EAX_IMM32: u8 = 0xb8;
-const MOV_RCX_IMM64: &[u8] = &[0x48, 0xb9];
-const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
-const CMP_ECX_IMM32: &[u8] = &[0x81, 0xf9];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const TEST_ECX_ECX: &[u8] = &[0x85, 0xc9];
-const TEST_RAX_RAX: &[u8] = &[0x48, 0x85, 0xc0];
-const CMP_RAX_RCX: &[u8] = &[0x48, 0x39, 0xc8];
-const BTR_RAX_SIGN: &[u8] = &[0x48, 0x0f, 0xba, 0xf0, DOUBLE_SIGN_BIT];
-const SHR_RAX_DWORD: &[u8] = &[0x48, 0xc1, 0xe8, DWORD_BITS];
-
-fn vector(code: &mut Code, opcode: &[u8], destination: u8, source: u8) {
-    code.extend(opcode);
-    code.push(REGISTER_MODRM | destination << MODRM_REGISTER_SHIFT | source);
+fn vector(code: &mut Code, opcode: Host, destination: u8, source: u8) {
+    code.asm()
+        .simd(opcode, destination, Rm::Xmm(source), TargetCpu::Baseline);
 }
 
 fn shuffle(code: &mut Code, destination: u8, source: u8, lanes: u8) {
-    vector(code, PSHUFD, destination, source);
-    code.push(lanes);
-}
-
-fn shift(code: &mut Code, opcode: &[u8], group: u8, register: u8, amount: u8) {
-    code.extend(opcode);
-    code.extend([
-        REGISTER_MODRM | group << MODRM_REGISTER_SHIFT | register,
-        amount,
-    ]);
-}
-
-fn branch(code: &mut Code, condition: u8) -> usize {
-    code.extend([CONDITIONAL_ESCAPE, condition]);
-    let displacement = code.len();
-    code.extend([0; REL32_BYTES]);
-    displacement
-}
-
-fn skip_to_here(code: &mut [u8], displacement: usize) {
-    let relative = i32::try_from(code.len() - displacement - REL32_BYTES)
-        .expect("bounded enhanced BFDOT chunk");
-    code[displacement..displacement + REL32_BYTES].copy_from_slice(&relative.to_le_bytes());
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(source),
+        lanes,
+        TargetCpu::Baseline,
+    );
 }
 
 fn mask(code: &mut Code, value: u32) {
-    code.push(MOV_EAX_IMM32);
-    code.extend(value.to_le_bytes());
-    vector(code, MOVD_XMM_EAX, WORK_MASK, EAX);
+    let mut asm = code.asm();
+    asm.mov_imm32(Rax, value);
+    asm.movd_to_xmm(WORK_MASK, Rax);
     shuffle(code, WORK_MASK, WORK_MASK, SPLAT_LOW_DWORD);
 }
 
 fn reject_mask(code: &mut Code, register: u8, failures: &mut Vec<usize>) {
-    vector(code, PMOVMSKB_EAX_XMM, EAX, register);
-    code.extend(TEST_EAX_EAX);
-    failures.push(branch(code, NOT_EQUAL));
+    let mut asm = code.asm();
+    asm.simd_to_gpr(Host::ByteSignMask, Rax, register, TargetCpu::Baseline);
+    asm.test(Size::Dword, Rax, Rax);
+    failures.push(asm.jcc(Cond::Ne).offset());
 }
 
 fn guard_bfloat(code: &mut Code, source: u8, failures: &mut Vec<usize>) {
-    vector(code, MOVDQA, WORK_LEFT, source);
-    vector(code, PAND, WORK_LEFT, WORK_MASK);
-    vector(code, MOVDQA, WORK_RIGHT, WORK_LEFT);
-    vector(code, PCMPEQW, WORK_RIGHT, WORK_MASK);
-    vector(code, PCMPEQW, WORK_LEFT, OUTPUT);
-    vector(code, MOVDQA, WORK_PAIR, source);
-    shift(
-        code,
-        PSLLW_IMM,
-        SHIFT_LEFT_GROUP,
-        WORK_PAIR,
-        SIGN_DISCARD_SHIFT,
-    );
-    vector(code, PCMPEQW, WORK_PAIR, OUTPUT);
-    vector(code, PANDN, WORK_PAIR, WORK_LEFT);
-    vector(code, POR, WORK_RIGHT, WORK_PAIR);
+    vector(code, Host::MoveAligned, WORK_LEFT, source);
+    vector(code, Host::And, WORK_LEFT, WORK_MASK);
+    vector(code, Host::MoveAligned, WORK_RIGHT, WORK_LEFT);
+    vector(code, Host::EqualWord, WORK_RIGHT, WORK_MASK);
+    vector(code, Host::EqualWord, WORK_LEFT, OUTPUT);
+    vector(code, Host::MoveAligned, WORK_PAIR, source);
+    Shift::LeftWord.emit(code, WORK_PAIR, SIGN_DISCARD_SHIFT);
+    vector(code, Host::EqualWord, WORK_PAIR, OUTPUT);
+    vector(code, Host::AndNot, WORK_PAIR, WORK_LEFT);
+    vector(code, Host::Or, WORK_RIGHT, WORK_PAIR);
     reject_mask(code, WORK_RIGHT, failures);
 }
 
 fn guard_accumulator(code: &mut Code, failures: &mut Vec<usize>) {
-    vector(code, MOVDQA, WORK_LEFT, ACCUMULATOR);
-    shift(
-        code,
-        PSLLD_IMM,
-        SHIFT_LEFT_GROUP,
-        WORK_LEFT,
-        SIGN_DISCARD_SHIFT,
-    );
-    vector(code, PCMPEQD, WORK_LEFT, OUTPUT);
-    vector(code, MOVDQA, WORK_RIGHT, ACCUMULATOR);
-    vector(code, PAND, WORK_RIGHT, WORK_MASK);
-    vector(code, MOVDQA, WORK_PAIR, WORK_RIGHT);
-    vector(code, PCMPEQD, WORK_RIGHT, OUTPUT);
-    vector(code, PANDN, WORK_LEFT, WORK_RIGHT);
-    vector(code, PCMPEQD, WORK_PAIR, WORK_MASK);
-    vector(code, POR, WORK_LEFT, WORK_PAIR);
+    vector(code, Host::MoveAligned, WORK_LEFT, ACCUMULATOR);
+    Shift::LeftDword.emit(code, WORK_LEFT, SIGN_DISCARD_SHIFT);
+    vector(code, Host::EqualDword, WORK_LEFT, OUTPUT);
+    vector(code, Host::MoveAligned, WORK_RIGHT, ACCUMULATOR);
+    vector(code, Host::And, WORK_RIGHT, WORK_MASK);
+    vector(code, Host::MoveAligned, WORK_PAIR, WORK_RIGHT);
+    vector(code, Host::EqualDword, WORK_RIGHT, OUTPUT);
+    vector(code, Host::AndNot, WORK_LEFT, WORK_RIGHT);
+    vector(code, Host::EqualDword, WORK_PAIR, WORK_MASK);
+    vector(code, Host::Or, WORK_LEFT, WORK_PAIR);
     reject_mask(code, WORK_LEFT, failures);
 }
 
@@ -164,77 +94,65 @@ fn guard_double(code: &mut Code, register: u8, failures: &mut Vec<usize>) {
     // All inputs/products/sums are finite Double. Unsigned magnitude bits sort
     // numerically. Strict > excludes pre-round tininess obscured by directed
     // rounding up to min-normal; exact signed zero is admitted separately.
-    vector(code, MOVQ_RAX_XMM, register, EAX);
-    code.extend(BTR_RAX_SIGN);
-    code.extend(TEST_RAX_RAX);
-    let zero = branch(code, EQUAL);
-    code.extend(MOV_RCX_IMM64);
-    code.extend(SINGLE_MINIMUM_NORMAL_AS_DOUBLE.to_le_bytes());
-    code.extend(CMP_RAX_RCX);
-    failures.push(branch(code, BELOW_OR_EQUAL));
-    skip_to_here(code, zero);
+    let mut asm = code.asm();
+    asm.movq_from_xmm(Rax, register);
+    asm.btr_imm(Size::Qword, Rax, DOUBLE_SIGN_BIT);
+    asm.test(Size::Qword, Rax, Rax);
+    let zero = asm.jcc(Cond::E);
+    asm.mov_imm64(Rcx, SINGLE_MINIMUM_NORMAL_AS_DOUBLE);
+    asm.alu(Alu::Cmp, Size::Qword, Rax, Rcx);
+    failures.push(asm.jcc(Cond::Be).offset());
+    asm.bind(zero);
 }
 
 fn guard_single(code: &mut Code, failures: &mut Vec<usize>) {
-    code.extend(MOV_ECX_EAX);
-    code.extend(AND_ECX_IMM32);
-    code.extend(SINGLE_MAGNITUDE.to_le_bytes());
-    code.extend(TEST_ECX_ECX);
-    let zero = branch(code, EQUAL);
-    code.extend(CMP_ECX_IMM32);
-    code.extend(SINGLE_MINIMUM_NORMAL.to_le_bytes());
-    failures.push(branch(code, BELOW));
-    skip_to_here(code, zero);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rcx, Rax);
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, SINGLE_MAGNITUDE as i32);
+    asm.test(Size::Dword, Rcx, Rcx);
+    let zero = asm.jcc(Cond::E);
+    asm.alu_imm32(Alu::Cmp, Size::Dword, Rcx, SINGLE_MINIMUM_NORMAL as i32);
+    failures.push(asm.jcc(Cond::B).offset());
+    asm.bind(zero);
 }
 
 fn product_pair(code: &mut Code, upper: bool) {
-    vector(code, PXOR, WORK_MASK, WORK_MASK);
-    vector(code, MOVDQA, WORK_LEFT, LEFT);
-    vector(code, MOVDQA, WORK_RIGHT, RIGHT);
+    vector(code, Host::Xor, WORK_MASK, WORK_MASK);
+    vector(code, Host::MoveAligned, WORK_LEFT, LEFT);
+    vector(code, Host::MoveAligned, WORK_RIGHT, RIGHT);
     if upper {
-        shift(
-            code,
-            PSRLDQ_IMM,
-            SHIFT_RIGHT_BYTES_GROUP,
-            WORK_LEFT,
-            HALF_CHUNK_BYTES,
-        );
-        shift(
-            code,
-            PSRLDQ_IMM,
-            SHIFT_RIGHT_BYTES_GROUP,
-            WORK_RIGHT,
-            HALF_CHUNK_BYTES,
-        );
+        Shift::RightBytes.emit(code, WORK_LEFT, HALF_CHUNK_BYTES);
+        Shift::RightBytes.emit(code, WORK_RIGHT, HALF_CHUNK_BYTES);
     }
     for register in [WORK_LEFT, WORK_RIGHT] {
-        vector(code, PUNPCKLWD, register, WORK_MASK);
-        shift(
-            code,
-            PSLLD_IMM,
-            SHIFT_LEFT_GROUP,
-            register,
-            BFLOAT_TO_SINGLE_SHIFT,
-        );
+        vector(code, Host::UnpackLowWord, register, WORK_MASK);
+        Shift::LeftDword.emit(code, register, BFLOAT_TO_SINGLE_SHIFT);
     }
-    vector(code, CVTPS2PD, WORK_PAIR, WORK_LEFT);
-    vector(code, CVTPS2PD, WORK_MASK, WORK_RIGHT);
-    vector(code, MULPD, WORK_PAIR, WORK_MASK);
+    let mut asm = code.asm();
+    asm.cvtps2pd(WORK_PAIR, Rm::Xmm(WORK_LEFT));
+    asm.cvtps2pd(WORK_MASK, Rm::Xmm(WORK_RIGHT));
+    asm.mulpd(WORK_PAIR, Rm::Xmm(WORK_MASK));
     shuffle(code, WORK_LEFT, WORK_LEFT, UPPER_TWO_SINGLES);
     shuffle(code, WORK_RIGHT, WORK_RIGHT, UPPER_TWO_SINGLES);
-    vector(code, CVTPS2PD, WORK_LEFT, WORK_LEFT);
-    vector(code, CVTPS2PD, WORK_RIGHT, WORK_RIGHT);
-    vector(code, MULPD, WORK_LEFT, WORK_RIGHT);
-    vector(code, MOVDQA, WORK_RIGHT, WORK_PAIR);
-    vector(code, UNPCKLPD, WORK_RIGHT, WORK_LEFT);
-    vector(code, UNPCKHPD, WORK_PAIR, WORK_LEFT);
-    vector(code, ADDPD, WORK_RIGHT, WORK_PAIR);
+    let mut asm = code.asm();
+    asm.cvtps2pd(WORK_LEFT, Rm::Xmm(WORK_LEFT));
+    asm.cvtps2pd(WORK_RIGHT, Rm::Xmm(WORK_RIGHT));
+    asm.mulpd(WORK_LEFT, Rm::Xmm(WORK_RIGHT));
+    asm.simd(
+        Host::MoveAligned,
+        WORK_RIGHT,
+        Rm::Xmm(WORK_PAIR),
+        TargetCpu::Baseline,
+    );
+    asm.unpcklpd(WORK_RIGHT, Rm::Xmm(WORK_LEFT));
+    asm.unpckhpd(WORK_PAIR, Rm::Xmm(WORK_LEFT));
+    asm.addpd(WORK_RIGHT, Rm::Xmm(WORK_PAIR));
 }
 
 /// Shared-frame guarded enhanced branch. Failures target the outer frame's
 /// common cleanup; pending guest FPSR must remain zero throughout this branch.
 pub(super) fn emit_chunk(code: &mut Code, _frame: &numerical::Frame, failures: &mut Vec<usize>) {
-    vector(code, PXOR, OUTPUT, OUTPUT);
+    vector(code, Host::Xor, OUTPUT, OUTPUT);
     mask(code, BFLOAT_EXPONENT_PAIR);
     guard_bfloat(code, LEFT, failures);
     guard_bfloat(code, RIGHT, failures);
@@ -243,25 +161,27 @@ pub(super) fn emit_chunk(code: &mut Code, _frame: &numerical::Frame, failures: &
     for upper in [false, true] {
         product_pair(code, upper);
         guard_double(code, WORK_RIGHT, failures);
-        vector(code, MOVDQA, WORK_PAIR, WORK_RIGHT);
-        vector(code, UNPCKHPD, WORK_PAIR, WORK_PAIR);
+        vector(code, Host::MoveAligned, WORK_PAIR, WORK_RIGHT);
+        code.asm().unpckhpd(WORK_PAIR, Rm::Xmm(WORK_PAIR));
         guard_double(code, WORK_PAIR, failures);
-        vector(code, CVTPD2PS, WORK_RIGHT, WORK_RIGHT);
+        code.asm().cvtpd2ps(WORK_RIGHT, Rm::Xmm(WORK_RIGHT));
         if upper {
             shuffle(code, WORK_PAIR, ACCUMULATOR, UPPER_TWO_SINGLES);
-            vector(code, ADDPS, WORK_RIGHT, WORK_PAIR);
+            code.asm().addps(WORK_RIGHT, Rm::Xmm(WORK_PAIR));
         } else {
-            vector(code, ADDPS, WORK_RIGHT, ACCUMULATOR);
+            code.asm().addps(WORK_RIGHT, Rm::Xmm(ACCUMULATOR));
         }
-        vector(code, MOVQ_RAX_XMM, WORK_RIGHT, EAX);
+        code.asm().movq_from_xmm(Rax, WORK_RIGHT);
         guard_single(code, failures);
-        code.extend(SHR_RAX_DWORD);
+        code.asm()
+            .shift_imm(ShiftOp::Shr, Size::Qword, Rax, DWORD_BITS);
         guard_single(code, failures);
+        let mut asm = code.asm();
         if upper {
-            vector(code, UNPCKLPD, OUTPUT, WORK_RIGHT);
+            asm.unpcklpd(OUTPUT, Rm::Xmm(WORK_RIGHT));
         } else {
-            vector(code, MOVQ_XMM, OUTPUT, WORK_RIGHT);
+            asm.movq_xmm(OUTPUT, Rm::Xmm(WORK_RIGHT));
         }
     }
-    vector(code, MOVDQA, LEFT, OUTPUT);
+    vector(code, Host::MoveAligned, LEFT, OUTPUT);
 }

@@ -41,8 +41,6 @@ const HALF_LOW_BYTE_MASK: u32 = 0xff;
 const HALF_VECTOR_BYTE_MASK: u32 = 0xffff;
 const SIGN_BITS: u8 = 1;
 pub(super) const SINGLE_EXPONENT_BIAS_BITS: u8 = 7;
-/// `vzeroupper`, for emitters that write instruction bytes themselves.
-pub(in crate::x86_64) const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 pub(super) const ENVIRONMENT_STACK_BYTES: u8 = 16;
 /// The environment frame: the saved MXCSR, then the installed control,
 /// then the captured status, then a product's status.

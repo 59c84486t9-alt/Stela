@@ -1,5 +1,6 @@
 //! SVE double-to-single FCVT and round-to-odd FCVTX on normal values.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -31,19 +32,6 @@ const CLASSIFICATION_SCRATCH: [u8; 3] = [SCRATCH, 6, 7];
 const MAXIMUM_EXPONENT: u8 = 6;
 const ONE_VECTOR: u8 = 7;
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const GPR_RCX: u8 = 1;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MOV_RCX_IMMEDIATE: &[u8] = &[0x48, 0xb9];
-const MOV_EAX_IMMEDIATE: &[u8] = &[0xb8];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const AND_EAX_IMMEDIATE: &[u8] = &[0x25];
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const CMP_EAX_IMMEDIATE8: &[u8] = &[0x83, 0xf8];
-const SHR_EAX_IMMEDIATE8: &[u8] = &[0xc1, 0xe8];
-const JNE_REL32: &[u8] = &[0x0f, 0x85];
-const CVTPD2PS_XMM0_XMM1: &[u8] = &[0x66, 0x0f, 0x5a, 0xc1];
 const DOUBLE_ONE: u64 = (Format::Double.exponent_bias() as u64) << Format::Double.fraction_bits();
 const SIGN_BITS: u8 = 1;
 const SINGLE_EXPONENT_BITS: u8 =
@@ -62,16 +50,12 @@ const LOW_SINGLE_IN_QWORDS: u8 = 0xd8; // dword [0,2,1,3], with original upper64
 const TOP_SINGLE_IN_QWORDS: u8 = 0x72; // dword [2,0,3,1].
 
 fn failure(code: &mut Code, failures: &mut Vec<usize>) {
-    code.extend(JNE_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 fn neutralize_inactive(code: &mut Code, target: TargetCpu) {
-    code.extend(MOV_RCX_IMMEDIATE);
-    code.extend(DOUBLE_ONE.to_le_bytes());
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (RESULT << MODRM_REGISTER_SHIFT) | GPR_RCX);
+    code.asm().mov_imm64(Rcx, DOUBLE_ONE);
+    code.asm().simd(Host::MoveGprQword, RESULT, Rcx, target);
     Host::UnpackLowQword.register(code, RESULT, RESULT, target);
     Host::MoveAligned.register(code, SCRATCH, ACTIVE, target);
     Host::AndNot.register(code, SCRATCH, RESULT, target);
@@ -93,12 +77,16 @@ fn guard_result(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
     ShiftOpcode::RightDword.emit(code, ONE_VECTOR, u32::BITS as u8 - SIGN_BITS);
     Host::GreaterDword.register(code, SCRATCH, ONE_VECTOR, target);
     Host::And.register(code, SCRATCH, MAXIMUM_EXPONENT, target);
-    Host::DwordSignMask.register(code, GPR_RAX, SCRATCH, target);
+    code.asm()
+        .simd_to_gpr(Host::DwordSignMask, Rax, SCRATCH, target);
     // CVTPD2PS sets the upper64 bits to zero. Only its two converted lanes count.
-    code.extend(AND_EAX_IMMEDIATE);
-    code.extend(u32::from(LOW_TWO_DWORD_MASK).to_le_bytes());
-    code.extend(CMP_EAX_IMMEDIATE8);
-    code.push(LOW_TWO_DWORD_MASK);
+    let mut asm = code.asm();
+    asm.alu_accumulator_imm32(
+        Alu::And,
+        Size::Dword,
+        (u32::from(LOW_TWO_DWORD_MASK)) as i32,
+    );
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Rax, LOW_TWO_DWORD_MASK as i8);
     failure(code, failures);
 }
 
@@ -126,8 +114,7 @@ pub(in crate::x86_64) fn emit(
         Environment::PrivateMxcsr,
     )?;
     if rounding == PrecisionRounding::ToOdd {
-        code.extend(MOV_EAX_IMMEDIATE);
-        code.extend(MXCSR_TOWARD_ZERO.to_le_bytes());
+        code.asm().mov_imm32(Rax, MXCSR_TOWARD_ZERO);
     } else {
         rounding_control(code);
     }
@@ -158,27 +145,31 @@ pub(in crate::x86_64) fn emit(
             target,
         );
         numerical::clear_status(code, &frame);
-        code.extend(CVTPD2PS_XMM0_XMM1);
+        code.asm().cvtpd2ps(0, Rm::Xmm(1));
         numerical::capture_status(code, &frame);
-        code.extend(TEST_ECX_IMMEDIATE);
-        code.extend(MXCSR_REJECTED_STATUS.to_le_bytes());
+        code.asm()
+            .test_imm32(Size::Dword, Rcx, MXCSR_REJECTED_STATUS as i32);
         failure(code, &mut failures);
-        code.extend(MOV_EAX_ECX);
-        code.extend(AND_EAX_IMMEDIATE);
-        code.extend(MXCSR_PRECISION.to_le_bytes());
-        code.extend(SHR_EAX_IMMEDIATE8);
-        code.push(HOST_TO_GUEST_INEXACT_SHIFT);
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Rax, Rcx);
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_PRECISION as i32);
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, HOST_TO_GUEST_INEXACT_SHIFT);
         numerical::add_fpsr(code, &frame);
         guard_result(code, &mut failures, target);
         if rounding == PrecisionRounding::ToOdd {
             jam_odd_pair(code, ONE_VECTOR);
         }
-        Host::ShuffleDword.register(code, RESULT, RESULT, target);
-        code.push(if placement == Placement::UpperDestination {
-            TOP_SINGLE_IN_QWORDS
-        } else {
-            LOW_SINGLE_IN_QWORDS
-        });
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            RESULT,
+            Rm::Xmm(RESULT),
+            if placement == Placement::UpperDestination {
+                TOP_SINGLE_IN_QWORDS
+            } else {
+                LOW_SINGLE_IN_QWORDS
+            },
+            target,
+        );
         // Neutral inactive one results are removed before top-slot mask shaping.
         Host::And.register(code, RESULT, ACTIVE, target);
         if placement == Placement::UpperDestination {

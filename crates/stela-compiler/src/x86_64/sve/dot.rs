@@ -1,6 +1,6 @@
 //! SVE integer dot products, one 128-bit segment at a time. All sources are
 //! staged before each destination chunk is written.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Rm};
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength, is_z_register};
@@ -33,8 +33,13 @@ fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
 }
 
 fn shuffle(code: &mut Code, destination: u8, source: u8, control: u8) {
-    packed(code, Host::ShuffleDword, destination, source);
-    code.push(control);
+    code.asm().simd_imm(
+        Host::ShuffleDword,
+        destination,
+        Rm::Xmm(source),
+        control,
+        TargetCpu::Baseline,
+    );
 }
 
 fn index_right(code: &mut Code, operand: &Operand) {
@@ -181,8 +186,13 @@ fn complex_byte_dot(code: &mut Code, select_imaginary: bool, subtract: bool) {
 fn complex_halfword_dot(code: &mut Code, select_imaginary: bool, subtract: bool) {
     if select_imaginary {
         for opcode in [Host::ShuffleLowWord, Host::ShuffleHighWord] {
-            packed(code, opcode, RIGHT, RIGHT);
-            code.push(SWAP_ADJACENT_DWORDS);
+            code.asm().simd_imm(
+                opcode,
+                RIGHT,
+                Rm::Xmm(RIGHT),
+                SWAP_ADJACENT_DWORDS,
+                TargetCpu::Baseline,
+            );
         }
     }
     halfword_products(code, true);

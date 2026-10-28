@@ -1,5 +1,6 @@
 //! SVE FSQRT: SQRTPS/SQRTPD for positive normals, +0 and +infinity.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rcx};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -28,18 +29,6 @@ const SCRATCH: [u8; 3] = [3, 4, 5];
 const OLD_DESTINATION: u8 = SCRATCH[0];
 const MASKS: [u8; 2] = [6, 7];
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const PACKED_DOUBLE_PREFIX: u8 = 0x66;
-const SQRT_PACKED: &[u8] = &[0x0f, 0x51];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const TEST_EAX_IMMEDIATE: u8 = 0xa9;
-const TEST_ECX_IMMEDIATE: &[u8] = &[0xf7, 0xc1];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
-const MOV_EAX_ECX: &[u8] = &[0x89, 0xc8];
-const AND_EAX_IMMEDIATE: u8 = 0x25;
-const SHR_EAX_IMMEDIATE: &[u8] = &[0xc1, 0xe8];
 const DOUBLE_LOW_SIGN_DWORD: u32 = 1;
 const DOUBLE_HIGH_SIGN_DWORD: u32 = 3;
 const DOUBLE_SIGN_LANES: u32 = (1 << DOUBLE_LOW_SIGN_DWORD) | (1 << DOUBLE_HIGH_SIGN_DWORD);
@@ -48,9 +37,7 @@ const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
 const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 
 fn reject(code: &mut Code, failures: &mut Vec<usize>) {
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    failures.push(code.asm().jcc(Cond::Ne).offset());
 }
 
 fn guard_nonnegative(
@@ -59,24 +46,24 @@ fn guard_nonnegative(
     failures: &mut Vec<usize>,
     target: TargetCpu,
 ) {
-    Host::DwordSignMask.register(code, GPR_RAX, VALUE, target);
+    code.asm()
+        .simd_to_gpr(Host::DwordSignMask, Rax, VALUE, target);
     if format == Format::Double {
         // MOVMSKPS sees all four dwords. Only high dwords contain Double signs;
         // the low-dword fraction sign bits must not reject positive operands.
-        code.push(TEST_EAX_IMMEDIATE);
-        code.extend(DOUBLE_SIGN_LANES.to_le_bytes());
+        code.asm().test_eax_imm32(DOUBLE_SIGN_LANES);
     } else {
-        code.extend(TEST_EAX_EAX);
+        code.asm().test(Size::Dword, Rax, Rax);
     }
     reject(code, failures);
 }
 
 fn square_root(code: &mut Code, format: Format) {
     if format == Format::Double {
-        code.push(PACKED_DOUBLE_PREFIX);
+        code.asm().sqrtpd(VALUE, Rm::Xmm(VALUE));
+    } else {
+        code.asm().sqrtps(VALUE, Rm::Xmm(VALUE));
     }
-    code.extend(SQRT_PACKED);
-    code.push(MODRM_REGISTER | (VALUE << MODRM_REGISTER_SHIFT) | VALUE);
 }
 
 /// Predicated merging FSQRT over a positive exact/rounded IEEE domain. Shared
@@ -144,14 +131,13 @@ pub(in crate::x86_64) fn emit(
         numerical::stage_vector_chunk(code, &frame, OUTPUT_SLOT, chunk, VALUE, target);
     }
     numerical::capture_status(code, &frame);
-    code.extend(TEST_ECX_IMMEDIATE);
-    code.extend(MXCSR_OTHER_STATUS.to_le_bytes());
+    code.asm()
+        .test_imm32(Size::Dword, Rcx, MXCSR_OTHER_STATUS as i32);
     reject(code, &mut failures);
-    code.extend(MOV_EAX_ECX);
-    code.push(AND_EAX_IMMEDIATE);
-    code.extend(MXCSR_INEXACT.to_le_bytes());
-    code.extend(SHR_EAX_IMMEDIATE);
-    code.push(MXCSR_TO_FPSR_INEXACT_SHIFT);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rax, Rcx);
+    asm.alu_accumulator_imm32(Alu::And, Size::Dword, MXCSR_INEXACT as i32);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, MXCSR_TO_FPSR_INEXACT_SHIFT);
     numerical::add_fpsr(code, &frame);
     numerical::finish(code, &frame, &failures, pc, target);
     Ok(true)

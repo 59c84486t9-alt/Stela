@@ -1,6 +1,7 @@
 //! SVE LUTI2/LUTI4: fixed-load SSE2 selection or SSSE3 PSHUFB. Neither path
 //! branches on or addresses memory with index values.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rsp;
+use crate::x86_64::asm::{Alu, Code, Mem, Size};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -12,24 +13,18 @@ use crate::{
         scalable::{load_z_chunk, store_z_chunk},
     },
 };
-const SUB_RSP: &[u8] = &[0x48, 0x81, 0xec];
-const ADD_RSP: &[u8] = &[0x48, 0x81, 0xc4];
-const STACK_DISP32: u8 = 0x84;
-const STACK_SIB: u8 = 0x24;
-const XMM_SHIFT: u8 = 3;
 const LOW_TABLE: u8 = 4;
 const HIGH_TABLE: u8 = 5;
 const OUTPUT: u8 = 6;
 
 fn stack(code: &mut Code, opcode: Host, xmm: u8, offset: usize, target: TargetCpu) {
-    opcode.append(code, target);
-    code.extend([STACK_DISP32 | (xmm << XMM_SHIFT), STACK_SIB]);
-    code.extend((offset as u32).to_le_bytes());
+    code.asm()
+        .simd(opcode, xmm, Mem::base_disp32(Rsp, offset as i32), target);
 }
 pub(crate) fn emit(code: &mut Code, op: &Operand, length: VectorLength, target: TargetCpu) {
     assert!(length.bits() >= op.minimum_vl_bits());
-    code.extend(SUB_RSP);
-    code.extend((length.bytes() as u32).to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Sub, Size::Qword, Rsp, length.bytes() as i32);
     for chunk in 0..length.chunks() {
         load_z_chunk(code, op.indexes, chunk, 0, length, target);
         stack(
@@ -74,6 +69,6 @@ pub(crate) fn emit(code: &mut Code, op: &Operand, length: VectorLength, target: 
         crate::x86_64::scalable::lut::emit_chunk(code, op.index_bits, op.element, target);
         store_z_chunk(code, op.destination, chunk, OUTPUT, length, target);
     }
-    code.extend(ADD_RSP);
-    code.extend((length.bytes() as u32).to_le_bytes());
+    code.asm()
+        .alu_imm32(Alu::Add, Size::Qword, Rsp, length.bytes() as i32);
 }

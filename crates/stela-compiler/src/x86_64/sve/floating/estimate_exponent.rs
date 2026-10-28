@@ -1,5 +1,6 @@
 //! SVE FRECPX and FLOGB by integer arithmetic.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::Rax;
+use crate::x86_64::asm::{Code, Cond, Rm, Size};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
@@ -32,13 +33,6 @@ const EXPONENT_MASK: u8 = MASKS[1];
 const TEST_MASK: u8 = SCRATCH[0];
 const TEMPORARY: u8 = SCRATCH[1];
 const OUTPUT_SLOT: usize = 0;
-const GPR_RAX: u8 = 0;
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
-const MOV_EAX_IMMEDIATE: u8 = 0xb8;
-const MOV_RAX_IMMEDIATE: &[u8] = &[0x48, 0xb8];
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 const REPEAT_LOW_DWORD: u8 = 0;
 const REPEAT_HIGH_DWORDS: u8 = 0xf5;
 const REMOVE_SIGN_BITS: u8 = 1;
@@ -66,17 +60,19 @@ fn inputs(operand: Operand) -> Option<(Operation, u8, u8)> {
 
 fn broadcast(code: &mut Code, format: Format, value: u64, register: u8, target: TargetCpu) {
     if format == Format::Single {
-        code.push(MOV_EAX_IMMEDIATE);
-        code.extend((value as u32).to_le_bytes());
+        code.asm().mov_imm32(Rax, value as u32);
     } else {
-        code.extend(MOV_RAX_IMMEDIATE);
-        code.extend(value.to_le_bytes());
+        code.asm().mov_imm64(Rax, value);
     }
-    Host::MoveGprQword.append(code, target);
-    code.push(MODRM_REGISTER | (register << MODRM_REGISTER_SHIFT) | GPR_RAX);
+    code.asm().simd(Host::MoveGprQword, register, Rax, target);
     if format == Format::Single {
-        Host::ShuffleDword.register(code, register, register, target);
-        code.push(REPEAT_LOW_DWORD);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            register,
+            Rm::Xmm(register),
+            REPEAT_LOW_DWORD,
+            target,
+        );
     } else {
         Host::UnpackLowQword.register(code, register, register, target);
     }
@@ -85,8 +81,13 @@ fn broadcast(code: &mut Code, format: Format, value: u64, register: u8, target: 
 fn replicate_exponent_comparison(code: &mut Code, format: Format, register: u8, target: TargetCpu) {
     if format == Format::Double {
         // Only the high dword contains exponent bits in a Double lane.
-        Host::ShuffleDword.register(code, register, register, target);
-        code.push(REPEAT_HIGH_DWORDS);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            register,
+            Rm::Xmm(register),
+            REPEAT_HIGH_DWORDS,
+            target,
+        );
     }
 }
 
@@ -135,11 +136,10 @@ fn logarithm_exponent(
     Host::EqualDword.register(code, TEST_MASK, VALUE, target);
     replicate_exponent_comparison(code, format, TEST_MASK, target);
     Host::And.register(code, TEST_MASK, ACTIVE, target);
-    Host::ByteSignMask.register(code, GPR_RAX, TEST_MASK, target);
-    code.extend(TEST_EAX_EAX);
-    code.extend(JNZ_REL32);
-    failures.push(code.len());
-    code.extend(0_i32.to_le_bytes());
+    code.asm()
+        .simd_to_gpr(Host::ByteSignMask, Rax, TEST_MASK, target);
+    code.asm().test(Size::Dword, Rax, Rax);
+    failures.push(code.asm().jcc(Cond::Ne).offset());
     // Zero raises Invalid in FPLogB, so it falls back before staging. Infinity
     // selects signed integer MAX; normals subtract the bias from the field.
     Host::MoveAligned.register(code, TEST_MASK, EXPONENT_MASK, target);

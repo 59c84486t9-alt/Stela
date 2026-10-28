@@ -1,12 +1,12 @@
 //! Wide-element right-hand sides for SVE comparisons.
 use super::{
-    AND_EAX_IMMEDIATE, BYTE_BITS, ElementSize, Host, MOV_EAX_R8D, MOV_EDX_EAX, MOVD_XMM_EAX,
-    MOVQ_XMM_RAX, MOVZX_EAX_AL, MOVZX_ECX_CL, Operand, QWORD_BYTES, REPEAT_BYTE_IN_DWORD,
-    REPEAT_HALFWORD_IN_DWORD, Relation, SHL_EAX, SHL_ECX, SHR_ECX, Shift, TargetCpu, VectorLength,
-    WORD_SIGN_SHIFT, XMM_BIAS, XMM_CHUNK_BYTES, XMM_HIGH_GREATER, XMM_LEFT, XMM_RIGHT,
-    emit_compare_chunk, emit_compare_mask, register_fields, shuffle,
+    BYTE_BITS, ElementSize, Host, Operand, QWORD_BYTES, REPEAT_BYTE_IN_DWORD,
+    REPEAT_HALFWORD_IN_DWORD, Relation, Shift, TargetCpu, VectorLength, WORD_SIGN_SHIFT, XMM_BIAS,
+    XMM_CHUNK_BYTES, XMM_HIGH_GREATER, XMM_LEFT, XMM_RIGHT, emit_compare_chunk, emit_compare_mask,
+    shuffle,
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{R8, Rax, Rcx, Rdx};
+use crate::x86_64::asm::{Alu, Code, Cond, ShiftOp, Size, Unary};
 use crate::x86_64::scalable::load_z_chunk;
 
 const XMM_WIDE_LEFT: u8 = 6;
@@ -14,29 +14,7 @@ const XMM_WIDE_RIGHT: u8 = 7;
 const LOW_ELEMENT_BIT: u32 = 1;
 const REPEAT_LOW_QWORD: u8 = 0x44;
 const REPEAT_HIGH_QWORD: u8 = 0xee;
-const XOR_R8D_R8D: &[u8] = &[0x45, 0x31, 0xc0];
-const OR_R8D_EAX: &[u8] = &[0x41, 0x09, 0xc0];
-const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
-const AND_ECX_IMMEDIATE: &[u8] = &[0x81, 0xe1];
-const OR_EAX_ECX: &[u8] = &[0x09, 0xc8];
 const HALFWORD_BITS: u8 = 16;
-const MOVSX_RDX_AL: &[u8] = &[0x48, 0x0f, 0xbe, 0xd0];
-const MOVSX_RDX_AX: &[u8] = &[0x48, 0x0f, 0xbf, 0xd0];
-const MOVSXD_RDX_EAX: &[u8] = &[0x48, 0x63, 0xd0];
-const MOVZX_EDX_AL: &[u8] = &[0x0f, 0xb6, 0xd0];
-const MOVZX_EDX_AX: &[u8] = &[0x0f, 0xb7, 0xd0];
-const MOVQ_RAX_XMM: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
-const CMP_RAX_RDX: &[u8] = &[0x48, 0x39, 0xd0];
-const SETE_CL: &[u8] = &[0x0f, 0x94, 0xc1];
-const MOVZX_EDX_DL: &[u8] = &[0x0f, 0xb6, 0xd2];
-const NEG_RDX: &[u8] = &[0x48, 0xf7, 0xda];
-const NEG_RCX: &[u8] = &[0x48, 0xf7, 0xd9];
-const CMP_RAX_SIGNED_IMMEDIATE: &[u8] = &[0x48, 0x3d];
-const SETL_DL: &[u8] = &[0x0f, 0x9c, 0xc2];
-const SETG_DL: &[u8] = &[0x0f, 0x9f, 0xc2];
-const SETNE_DL: &[u8] = &[0x0f, 0x95, 0xc2];
-const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
-const IMUL_EAX_EAX_IMMEDIATE: &[u8] = &[0x69, 0xc0];
 const IN_RANGE: u8 = 5;
 const OVERRIDE: u8 = 6;
 const HIGH_IN_RANGE: u8 = 3;
@@ -151,7 +129,7 @@ fn widen_left_pair(
 }
 
 fn pair_chunk(code: &mut Code, operand: Operand, target: TargetCpu, checked: bool) {
-    code.extend_from_slice(XOR_R8D_R8D);
+    code.asm().alu(Alu::Xor, Size::Dword, R8, R8);
     let bytes = operand.element_size.bytes();
     for offset in (0..XMM_CHUNK_BYTES).step_by(bytes * 2) {
         widen_left_pair(
@@ -180,23 +158,19 @@ fn pair_chunk(code: &mut Code, operand: Operand, target: TargetCpu, checked: boo
             target,
         )
         .expect("wide compare stages allocated doubleword operands");
-        code.extend_from_slice(MOV_ECX_EAX);
-        code.push(AND_EAX_IMMEDIATE);
-        code.extend(LOW_ELEMENT_BIT.to_le_bytes());
-        code.extend_from_slice(SHR_ECX);
-        code.push(BYTE_BITS);
-        code.extend_from_slice(AND_ECX_IMMEDIATE);
-        code.extend(LOW_ELEMENT_BIT.to_le_bytes());
-        code.extend_from_slice(SHL_ECX);
-        code.push(bytes as u8);
-        code.extend_from_slice(OR_EAX_ECX);
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Rcx, Rax);
+        asm.alu_accumulator_imm32(Alu::And, Size::Dword, LOW_ELEMENT_BIT as i32);
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rcx, BYTE_BITS);
+        asm.alu_imm32(Alu::And, Size::Dword, Rcx, LOW_ELEMENT_BIT as i32);
+        asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, bytes as u8);
+        asm.alu(Alu::Or, Size::Dword, Rax, Rcx);
         if offset != 0 {
-            code.extend_from_slice(SHL_EAX);
-            code.push(offset as u8);
+            asm.shift_imm(ShiftOp::Shl, Size::Dword, Rax, offset as u8);
         }
-        code.extend_from_slice(OR_R8D_EAX);
+        asm.alu(Alu::Or, Size::Dword, R8, Rax);
     }
-    code.extend_from_slice(MOV_EAX_R8D);
+    code.asm().mov(Size::Dword, Rax, R8);
 }
 
 fn range_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
@@ -210,58 +184,56 @@ fn range_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
         let (right, range, constant) = if high {
             Host::MoveAligned.register(code, XMM_RIGHT + 1, XMM_WIDE_RIGHT, target);
             Shift::RightBytes.emit(code, XMM_RIGHT + 1, QWORD_BYTES as u8);
-            register_fields(code, MOVQ_RAX_XMM, XMM_RIGHT + 1, 0);
+            code.asm().movq_from_xmm(Rax, XMM_RIGHT + 1);
             (XMM_RIGHT + 1, HIGH_IN_RANGE, HIGH_OVERRIDE)
         } else {
-            register_fields(code, MOVQ_RAX_XMM, XMM_WIDE_RIGHT, 0);
+            code.asm().movq_from_xmm(Rax, XMM_WIDE_RIGHT);
             (XMM_RIGHT, IN_RANGE, OVERRIDE)
         };
-        code.extend_from_slice(match (operand.element_size, operand.unsigned) {
-            (ElementSize::Byte, false) => MOVSX_RDX_AL,
-            (ElementSize::Halfword, false) => MOVSX_RDX_AX,
-            (ElementSize::Word, false) => MOVSXD_RDX_EAX,
-            (ElementSize::Byte, true) => MOVZX_EDX_AL,
-            (ElementSize::Halfword, true) => MOVZX_EDX_AX,
-            (ElementSize::Word, true) => MOV_EDX_EAX,
+        let mut asm = code.asm();
+        match (operand.element_size, operand.unsigned) {
+            (ElementSize::Byte, false) => asm.movsx(Size::Qword, Rdx, Size::Byte, Rax),
+            (ElementSize::Halfword, false) => asm.movsx(Size::Qword, Rdx, Size::Word, Rax),
+            (ElementSize::Word, false) => asm.movsxd(Rdx, Rax),
+            (ElementSize::Byte, true) => asm.movzx(Size::Dword, Rdx, Size::Byte, Rax),
+            (ElementSize::Halfword, true) => asm.movzx(Size::Dword, Rdx, Size::Word, Rax),
+            (ElementSize::Word, true) => asm.mov(Size::Dword, Rdx, Rax),
             _ => unreachable!("allocated wide source width"),
-        });
-        code.extend_from_slice(CMP_RAX_RDX);
-        code.extend_from_slice(SETE_CL);
+        }
+        asm.alu(Alu::Cmp, Size::Qword, Rax, Rdx);
+        asm.setcc(Cond::E, Rcx);
         if override_needed {
             if operand.unsigned {
-                code.extend_from_slice(SETNE_DL);
+                asm.setcc(Cond::Ne, Rdx);
             } else {
-                code.extend_from_slice(CMP_RAX_SIGNED_IMMEDIATE);
                 let bound = if less {
                     (1i64 << (bits - 1)) - 1
                 } else {
                     -(1i64 << (bits - 1))
                 };
-                code.extend((bound as i32).to_le_bytes());
-                code.extend_from_slice(if less { SETG_DL } else { SETL_DL });
+                asm.alu_accumulator_imm32(Alu::Cmp, Size::Qword, bound as i32);
+                asm.setcc(if less { Cond::G } else { Cond::L }, Rdx);
             }
-            code.extend_from_slice(MOVZX_EDX_DL);
-            code.extend_from_slice(NEG_RDX);
-            register_fields(code, MOVQ_XMM_RAX, constant, 2);
+            asm.movzx(Size::Dword, Rdx, Size::Byte, Rdx);
+            asm.unary(Unary::Neg, Size::Qword, Rdx);
+            asm.movq_to_xmm(constant, Rdx);
         }
-        code.extend_from_slice(MOVZX_ECX_CL);
-        code.extend_from_slice(NEG_RCX);
-        register_fields(code, MOVQ_XMM_RAX, range, 1);
+        asm.movzx(Size::Dword, Rcx, Size::Byte, Rcx);
+        asm.unary(Unary::Neg, Size::Qword, Rcx);
+        asm.movq_to_xmm(range, Rcx);
         match operand.element_size {
             ElementSize::Byte => {
-                code.extend_from_slice(MOVZX_EAX_AL);
-                code.extend_from_slice(IMUL_EAX_EAX_IMMEDIATE);
-                code.extend(REPEAT_BYTE_IN_DWORD.to_le_bytes());
+                asm.movzx(Size::Dword, Rax, Size::Byte, Rax);
+                asm.imul_imm32(Size::Dword, Rax, Rax, REPEAT_BYTE_IN_DWORD as i32);
             }
             ElementSize::Halfword => {
-                code.extend_from_slice(MOVZX_EAX_AX);
-                code.extend_from_slice(IMUL_EAX_EAX_IMMEDIATE);
-                code.extend(REPEAT_HALFWORD_IN_DWORD.to_le_bytes());
+                asm.movzx(Size::Dword, Rax, Size::Word, Rax);
+                asm.imul_imm32(Size::Dword, Rax, Rax, REPEAT_HALFWORD_IN_DWORD as i32);
             }
             ElementSize::Word => {}
             _ => unreachable!("allocated wide source width"),
         }
-        register_fields(code, MOVD_XMM_EAX, right, 0);
+        asm.movd_to_xmm(right, Rax);
         shuffle(code, right, right, 0);
     }
     Host::UnpackLowQword.register(code, XMM_RIGHT, XMM_RIGHT + 1, target);
@@ -290,7 +262,8 @@ fn range_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
         Host::EqualDword.register(code, XMM_BIAS, XMM_BIAS, target);
         Host::Xor.register(code, result, XMM_BIAS, target);
     }
-    Host::ByteSignMask.register(code, 0, result, target);
+    code.asm()
+        .simd_to_gpr(Host::ByteSignMask, Rax, result, target);
 }
 
 #[cfg(test)]

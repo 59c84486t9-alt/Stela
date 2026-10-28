@@ -1,6 +1,6 @@
 //! Per-lane variable shifts by unsigned counts.
 use super::repeated_constant;
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Rm};
 use crate::x86_64::simd::shifts::{
     logical_shift as shared_logical_shift, right_shift as shared_right_shift,
 };
@@ -99,8 +99,13 @@ fn equal_zero(code: &mut Code, xmm: u8, element: ElementSize) {
     };
     packed(code, op, xmm, 4);
     if element == ElementSize::Doubleword {
-        packed(code, Host::ShuffleDword, 5, xmm);
-        code.push(ADJACENT_DWORDS);
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            5,
+            Rm::Xmm(xmm),
+            ADJACENT_DWORDS,
+            TargetCpu::Baseline,
+        );
         packed(code, Host::And, xmm, 5);
     }
 }
@@ -116,8 +121,13 @@ fn sign_mask(code: &mut Code, element: ElementSize) {
         ElementSize::Word => Shift::ArithmeticDword.emit(code, 3, DWORD_SIGN_SHIFT),
         ElementSize::Doubleword => {
             Shift::ArithmeticDword.emit(code, 3, DWORD_SIGN_SHIFT);
-            packed(code, Host::ShuffleDword, 3, 3);
-            code.push(HIGH_DWORD_SIGN);
+            code.asm().simd_imm(
+                Host::ShuffleDword,
+                3,
+                Rm::Xmm(3),
+                HIGH_DWORD_SIGN,
+                TargetCpu::Baseline,
+            );
         }
         _ => unreachable!(),
     }
@@ -152,8 +162,13 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
             ElementSize::Doubleword => {
                 Shift::LeftQword.emit(code, 2, shift);
                 Shift::ArithmeticDword.emit(code, 2, DWORD_SIGN_SHIFT);
-                packed(code, Host::ShuffleDword, 2, 2);
-                code.push(HIGH_DWORD_SIGN);
+                code.asm().simd_imm(
+                    Host::ShuffleDword,
+                    2,
+                    Rm::Xmm(2),
+                    HIGH_DWORD_SIGN,
+                    TargetCpu::Baseline,
+                );
             }
             _ => unreachable!(),
         }

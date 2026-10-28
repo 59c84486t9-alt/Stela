@@ -1,5 +1,6 @@
 //! BF16 min/max and clamp on finite values and zeros, without FP status.
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::Gpr::{Rax, Rdi};
+use crate::x86_64::asm::{Code, Mem, Rm, Size};
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{
@@ -38,12 +39,6 @@ const BFLOAT_EXPONENT_BITS: u8 = 8;
 const BFLOAT_SIGN_BITS: u8 = 1;
 const SIGN_SHIFT: u8 = BFLOAT_BITS - BFLOAT_SIGN_BITS;
 const FRACTION_TO_SIGN_SHIFT: u8 = BFLOAT_BITS - BFLOAT_FRACTION_BITS;
-const GPR_RAX: u8 = 0;
-const TEST_EAX_EAX: &[u8] = &[0x85, 0xc0];
-const TEST_STATE_IMMEDIATE: &[u8] = &[0xf7, 0x87];
-const PBLENDVB: &[u8] = &[0x66, 0x0f, 0x38, 0x10];
-const MODRM_REGISTER: u8 = 0xc0;
-const MODRM_REGISTER_SHIFT: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Recipe {
@@ -52,9 +47,9 @@ enum Recipe {
 }
 
 fn reject_mask(code: &mut Code, failures: &mut Vec<usize>, target: TargetCpu) {
-    Host::ByteSignMask.append(code, target);
-    code.push(MODRM_REGISTER | (GPR_RAX << MODRM_REGISTER_SHIFT) | TEMPORARY);
-    code.extend(TEST_EAX_EAX);
+    code.asm()
+        .simd_to_gpr(Host::ByteSignMask, Rax, TEMPORARY, target);
+    code.asm().test(Size::Dword, Rax, Rax);
     failures.push(branch(code, Condition::NotZero));
 }
 
@@ -110,9 +105,11 @@ fn select(code: &mut Code, minimum: bool, alternative: bool, recipe: Recipe, tar
         Host::Xor.register(code, RESULT, SECOND_TEMPORARY, target);
     }
     if alternative {
-        code.extend(TEST_STATE_IMMEDIATE);
-        code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
-        code.extend(FPCR_AH.to_le_bytes());
+        code.asm().test_imm32(
+            Size::Dword,
+            Mem::base_disp32(Rdi, (core::mem::offset_of!(GuestState, fpcr)) as i32),
+            FPCR_AH as i32,
+        );
         let ordinary = branch(code, Condition::Zero);
         Host::AndNot.register(code, TEMPORARY, RESULT, target);
         Host::MoveAligned.register(code, RESULT, TEMPORARY, target);
@@ -121,8 +118,7 @@ fn select(code: &mut Code, minimum: bool, alternative: bool, recipe: Recipe, tar
     }
     if recipe == Recipe::CheckedBlend {
         debug_assert!(target.supports(TargetCpu::Sse41));
-        code.extend(PBLENDVB);
-        code.push(MODRM_REGISTER | (RIGHT << MODRM_REGISTER_SHIFT) | LEFT);
+        code.asm().pblendvb(RIGHT, Rm::Xmm(LEFT));
         Host::MoveAligned.register(code, RESULT, RIGHT, target);
     } else {
         Host::And.register(code, LEFT, RESULT, target);
