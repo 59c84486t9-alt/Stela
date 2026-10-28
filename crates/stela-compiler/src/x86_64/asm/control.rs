@@ -27,6 +27,14 @@ impl Asm<'_> {
         self.fixed(&[0x48, 0xa1]);
         self.data(&address.to_le_bytes());
     }
+    /// `cpuid` (0F A2): processor identification for leaf EAX, serializing.
+    pub(crate) fn cpuid(&mut self) {
+        self.fixed(&[0x0f, 0xa2]);
+    }
+    /// `pause` (F3 90): a spin-wait hint.
+    pub(crate) fn pause(&mut self) {
+        self.fixed(&[0xf3, 0x90]);
+    }
 }
 
 #[cfg(test)]
@@ -45,6 +53,8 @@ mod tests {
     fn forms_match_the_sdm_encodings() {
         for (expected, code) in [
             (&[0x0f, 0x0b][..], one(|a| a.ud2())),
+            (&[0x0f, 0xa2], one(|a| a.cpuid())),
+            (&[0xf3, 0x90], one(|a| a.pause())),
             (
                 &[0x0f, 0x94, 0xc4],
                 one(|a| a.setcc_high(Cond::E, HighByte::Ah)),
