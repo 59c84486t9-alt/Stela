@@ -646,11 +646,30 @@ pub fn terminate(code: u32) -> ! {
         "STELA STOPPED code={code:#x}; power off to continue\n"
     ));
     flush_log();
+    halt(code)
+}
+
+/// Stop before allocator initialization. UART/record formatting and UEFI's
+/// stack-buffered text writer need no Rust allocation; neither log flushing nor
+/// the allocating status/panic presentation path is entered here. Call only
+/// while firmware boot services and its system table remain live.
+pub(crate) fn early_fatal(message: &str) -> ! {
+    arguments(format_args!("\nSTELA FATAL {message}\n"));
+    firmware_console("\nStela stopped: ");
+    firmware_console(message);
+    firmware_console("\n");
+    arguments(format_args!(
+        "STELA STOPPED code=0x11; power off to continue\n"
+    ));
+    halt(0x11)
+}
+
+fn halt(code: u32) -> ! {
     debug_exit(code);
     loop {
-        unsafe {
-            asm!("cli", "hlt", options(nostack));
-        }
+        // SAFETY: native mount termination runs at CPL0; after the debug-exit
+        // attempt no task resumes, so maskable interrupts remain disabled.
+        unsafe { asm!("cli", "hlt", options(nostack)) };
     }
 }
 
@@ -662,7 +681,9 @@ fn stopped(message: &str) {
         crate::status::fail(message);
         crate::status::info("Stela stopped. Turn the PC off to try again.");
     } else if FIRMWARE_CONSOLE.load(Ordering::Relaxed) {
-        firmware_console(&alloc::format!("\nStela stopped: {message}\n"));
+        firmware_console("\nStela stopped: ");
+        firmware_console(message);
+        firmware_console("\n");
     }
 }
 

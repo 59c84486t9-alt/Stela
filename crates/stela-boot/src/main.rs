@@ -104,13 +104,13 @@ fn main() -> Status {
     core::hint::black_box(&HOST_FIRMWARE_INTERFACE);
     serial::initialize();
     output::arguments(format_args!("STELA UEFI MOUNT\n"));
-    let heap_bytes = initial_heap_bytes().unwrap_or_else(|error| output::fatal(error));
+    let heap_bytes = initial_heap_bytes().unwrap_or_else(|error| output::early_fatal(error));
     let heap = uefi::boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
         heap_bytes / paging::PAGE,
     )
-    .unwrap_or_else(|_| output::fatal("firmware has no memory for the heap"));
+    .unwrap_or_else(|_| output::early_fatal("firmware has no memory for the heap"));
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), heap_bytes) };
