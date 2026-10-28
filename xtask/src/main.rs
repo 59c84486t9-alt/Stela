@@ -13,6 +13,9 @@ mod boot_bundle_source;
 #[path = "../../crates/stela-boot/src/engine/console_lines.rs"]
 mod boot_console;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_dma/firmware_state.rs"]
+mod boot_dma_firmware_state;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_dma/dmar.rs"]
 mod boot_dmar;
 #[cfg(test)]
