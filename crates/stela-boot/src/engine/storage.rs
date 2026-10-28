@@ -16,7 +16,7 @@
 //! While the engine runs ([`TaggedRoots`]), the loader's root has a TLB
 //! context of its own, so a driver call keeps the engine's translations.
 use crate::output;
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -25,7 +25,6 @@ use stela_drivers::{
     Handoff,
     block::{BlockDevice, BlockError, Command, Direction, Finished, Identity, Shared, Window},
     bus::dma::RegionAllocator,
-    firmware::{Catalog, HandoffProvider},
     input::InputDevice,
     probe::{NativeServices, probe_with_provider},
 };
@@ -368,10 +367,7 @@ pub unsafe fn open(
     let _root = unsafe { RestoreRoot::enter(root) };
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
-    // Attached devices keep borrowing their firmware for the rest of the boot.
-    let catalog: &'static Option<Arc<Catalog>> = Box::leak(Box::new(handoff.firmware.clone()));
-    let firmware: &'static HandoffProvider<'static> =
-        Box::leak(Box::new(HandoffProvider::new(catalog.as_deref())));
+    let firmware = stela_drivers::probe::handoff_provider(handoff);
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
     let mut devices = unsafe { probe_with_provider(handoff, &mut dma, firmware, services) };
     // The owners native attachments keep, and those of failed ones, stay

@@ -9,8 +9,44 @@
 //! The setup/OS source selects the digest and country. Parsing never selects a
 //! country, establishes location, or silently substitutes a world/default rule.
 
-use alloc::{sync::Arc, vec::Vec};
+use crate::firmware::{self, Provider, Requirement, Target};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use sha2::{Digest, Sha256};
+
+/// The catalog name of wireless-regdb's database, which boot places in the
+/// handoff firmware catalog from setup's pinned host firmware.
+pub const NAME: &str = "regulatory.db";
+/// What a Wi-Fi adapter's probe requests: the version-20 database, at least
+/// its magic and version.
+pub const REQUIREMENT: Requirement<'static> = Requirement {
+    name: NAME,
+    target: Target {
+        driver: "wifi-regulatory",
+        hardware: "wireless-regdb",
+        revision: "v20",
+        board: None,
+    },
+    minimum_bytes: 8,
+};
+
+/// Why no database loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadError {
+    /// The catalog has no pinned database.
+    Resource(Box<firmware::Error>),
+    /// The catalog's bytes are no version-20 database.
+    Database(Error),
+}
+
+/// The database the firmware catalog holds, its catalog SHA-256 the digest
+/// it must have. Without one no Wi-Fi adapter scans or transmits: there is
+/// no world-rules fallback.
+pub fn load(provider: &dyn Provider) -> Result<Database, LoadError> {
+    let image = provider
+        .load(REQUIREMENT)
+        .map_err(|error| LoadError::Resource(Box::new(error)))?;
+    Database::parse(Arc::from(image.bytes()), image.sha256()).map_err(LoadError::Database)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -273,6 +309,32 @@ impl Country {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_catalog_database_loads_and_a_missing_one_is_refused() {
+        use crate::firmware::{Catalog, HandoffProvider, Provenance, Resource};
+        let bytes = fixture();
+        let catalog = Catalog::from_handoff(alloc::vec![Resource {
+            name: NAME,
+            target: REQUIREMENT.target,
+            provenance: Provenance {
+                source: "https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git",
+                revision: "synthetic",
+                member: NAME,
+                license: "ISC",
+            },
+            expected_length: bytes.len(),
+            expected_sha256: Sha256::digest(&bytes).into(),
+            bytes: bytes.clone(),
+        }])
+        .unwrap();
+        let database = load(&HandoffProvider::new(Some(&catalog))).unwrap();
+        assert!(database.select(*b"US").is_ok());
+        assert!(matches!(
+            load(&HandoffProvider::new(None)),
+            Err(LoadError::Resource(_))
+        ));
+    }
     /// Deliberate database model, not a shipped regulatory policy/release.
     pub(crate) fn fixture() -> Vec<u8> {
         let mut b = vec![0; 72];

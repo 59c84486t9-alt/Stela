@@ -348,6 +348,15 @@ pub struct Devices {
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
     pub nics: Vec<Adapter>,
+    /// The regulatory database, once probe found a Wi-Fi adapter (a PCI
+    /// network controller of class 02/80): `Err` reports once that it is
+    /// missing, and no Wi-Fi adapter then scans or transmits.
+    pub regulatory: Option<
+        Result<
+            crate::net::wifi::regulatory::database::Database,
+            crate::net::wifi::regulatory::database::LoadError,
+        >,
+    >,
     /// Sensor hubs, their sensors enabled. Nothing reads their reports yet.
     pub sensors: Vec<native::SensorHub>,
     pub failures: Vec<(Address, Error)>,
@@ -418,18 +427,21 @@ impl Devices {
 /// with its ranges mapped as it says, and nothing else may drive these
 /// controllers afterwards.
 pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
-    // Attached devices keep borrowing their firmware for as long as they
-    // run, so the handoff's catalog lives for the rest of the boot.
+    // SAFETY: the caller granted the complete machine/controller contract.
+    unsafe { probe_with_provider(handoff, dma, handoff_provider(handoff), None) }
+}
+
+/// The handoff's firmware catalog as the provider [`probe_with_provider`]
+/// takes. Attached devices keep borrowing their firmware for as long as
+/// they run, so the catalog lives for the rest of the boot.
+pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffProvider<'static> {
     let catalog = handoff
         .firmware
         .clone()
         // SAFETY: the reference count is never given back, so the catalog
         // stays allocated for every later borrow.
         .map(|catalog| unsafe { &*Arc::into_raw(catalog) });
-    let firmware: &'static crate::firmware::HandoffProvider<'static> =
-        Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)));
-    // SAFETY: the caller granted the complete machine/controller contract.
-    unsafe { probe_with_provider(handoff, dma, firmware, None) }
+    Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)))
 }
 
 /// Enumerate and attach devices using an explicit exact firmware provider.
@@ -468,6 +480,9 @@ pub unsafe fn probe_with_provider(
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
             mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
+            if function.class[..2] == [2, 0x80] && devices.regulatory.is_none() {
+                devices.regulatory = Some(crate::net::wifi::regulatory::database::load(firmware));
+            }
             if let Some(adapter) = gpu::Adapter::discover(&function) {
                 devices.gpus.push(adapter);
                 continue;
