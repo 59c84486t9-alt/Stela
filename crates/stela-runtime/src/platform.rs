@@ -4,7 +4,6 @@
 pub(crate) mod apple;
 pub(crate) mod cpu;
 pub(crate) mod dma;
-pub(crate) mod memory;
 pub mod net;
 #[cfg(target_arch = "x86_64")]
 pub mod pc;

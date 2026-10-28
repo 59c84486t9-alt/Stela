@@ -144,13 +144,13 @@ impl SystemEntryFeatures {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryProfileError {
-    UnsupportedSystemFeature(SystemEntryFeature),
+    SystemFeature(SystemEntryFeature),
     /// A nonzero ID field means present or unknown, never absent.
-    UnsupportedScalableState {
+    ScalableState {
         feature: &'static str,
         id_value: u8,
     },
-    UnsupportedControl {
+    Control {
         register: &'static str,
         value: u64,
     },
@@ -171,14 +171,14 @@ impl ScalableEntryAbsence {
     ) -> Result<Self, EntryProfileError> {
         let sve = (id_aa64pfr0_el1 >> PFR0_SVE_SHIFT) & ID_FIELD_MASK;
         if sve != ARCHITECTURAL_STATE_ABSENT {
-            return Err(EntryProfileError::UnsupportedScalableState {
+            return Err(EntryProfileError::ScalableState {
                 feature: "FEAT_SVE",
                 id_value: sve as u8,
             });
         }
         let sme = (id_aa64pfr1_el1 >> PFR1_SME_SHIFT) & ID_FIELD_MASK;
         if sme != ARCHITECTURAL_STATE_ABSENT {
-            return Err(EntryProfileError::UnsupportedScalableState {
+            return Err(EntryProfileError::ScalableState {
                 feature: "FEAT_SME",
                 id_value: sme as u8,
             });
@@ -201,7 +201,7 @@ impl EntryProfile {
     ) -> Result<Self, EntryProfileError> {
         for &feature in SYSTEM_ENTRY_FEATURES {
             if features.contains(feature) {
-                return Err(EntryProfileError::UnsupportedSystemFeature(feature));
+                return Err(EntryProfileError::SystemFeature(feature));
             }
         }
         Ok(Self { features })
@@ -220,13 +220,13 @@ impl EntryProfile {
         mdscr_el1: u64,
     ) -> Result<(), EntryProfileError> {
         if tcr_el1 & TCR_TOP_BYTE_IGNORE_MASK != 0 {
-            return Err(EntryProfileError::UnsupportedControl {
+            return Err(EntryProfileError::Control {
                 register: "TCR_EL1",
                 value: tcr_el1,
             });
         }
         if mdscr_el1 & MDSCR_ACTIVE_DEBUG_MASK != 0 {
-            return Err(EntryProfileError::UnsupportedControl {
+            return Err(EntryProfileError::Control {
                 register: "MDSCR_EL1",
                 value: mdscr_el1,
             });
@@ -275,9 +275,7 @@ mod tests {
             let present_or_unreviewed = absent.with(SystemEntryFeature::Pfar);
             assert_eq!(
                 EntryProfile::base(present_or_unreviewed, scalable()),
-                Err(EntryProfileError::UnsupportedSystemFeature(
-                    SystemEntryFeature::Pfar
-                ))
+                Err(EntryProfileError::SystemFeature(SystemEntryFeature::Pfar))
             );
             // Constructors have no storage argument: absent PFAR storage cannot erase
             // an authoritative present/unreviewed feature declaration. The Snapshot
@@ -333,7 +331,7 @@ mod tests {
         for &feature in SYSTEM_ENTRY_FEATURES {
             assert_eq!(
                 EntryProfile::base(absent.with(feature), no_scalable_state()),
-                Err(EntryProfileError::UnsupportedSystemFeature(feature))
+                Err(EntryProfileError::SystemFeature(feature))
             );
         }
     }
@@ -350,7 +348,7 @@ mod tests {
                 if sve != 0 {
                     assert_eq!(
                         result,
-                        Err(EntryProfileError::UnsupportedScalableState {
+                        Err(EntryProfileError::ScalableState {
                             feature: "FEAT_SVE",
                             id_value: sve as u8,
                         })
@@ -358,7 +356,7 @@ mod tests {
                 } else if sme != 0 {
                     assert_eq!(
                         result,
-                        Err(EntryProfileError::UnsupportedScalableState {
+                        Err(EntryProfileError::ScalableState {
                             feature: "FEAT_SME",
                             id_value: sme as u8,
                         })
@@ -386,7 +384,7 @@ mod tests {
         for tbi in [TCR_TBI0, TCR_TBI1, TCR_TOP_BYTE_IGNORE_MASK] {
             assert_eq!(
                 profile.check_controls(tbi, 0),
-                Err(EntryProfileError::UnsupportedControl {
+                Err(EntryProfileError::Control {
                     register: "TCR_EL1",
                     value: tbi,
                 })
@@ -400,7 +398,7 @@ mod tests {
         ] {
             assert_eq!(
                 profile.check_controls(0, debug),
-                Err(EntryProfileError::UnsupportedControl {
+                Err(EntryProfileError::Control {
                     register: "MDSCR_EL1",
                     value: debug,
                 })

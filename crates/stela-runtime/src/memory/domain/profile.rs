@@ -31,14 +31,6 @@ pub struct MemoryProfile {
     tag_ineligible: Vec<MappingAttributes>,
 }
 
-// Profiles that need their own physical, source and control owners; the generic
-// entry points never accept them.
-const SEPARATELY_OWNED_M0_PROFILES: u32 = profile_requirements::M0_DEVICE_RAM_READ64
-    | profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR
-    | profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
-    | profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD
-    | profile_requirements::M0_DEVICE_RAM_SCALAR_STORE;
-
 impl MemoryProfile {
     pub(super) fn inspect(views: &[(Arc<MemoryView>, MappingAttributes)]) -> Self {
         let mut profile = Self {
@@ -134,11 +126,6 @@ impl MemoryProfile {
             || requirements.required_profile & !profile_requirements::KNOWN != 0
         {
             return Err(MemoryStatus::InvalidRequest);
-        }
-        // The staged M0 profiles are not generic memory permission; their own
-        // owner must admit them.
-        if requirements.required_profile & SEPARATELY_OWNED_M0_PROFILES != 0 {
-            return Err(MemoryStatus::Unsupported);
         }
         // Actual host admission belongs to the domain/prepared entry. This
         // profile checks storage geometry and the retained target's recipes.

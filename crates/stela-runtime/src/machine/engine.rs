@@ -112,7 +112,7 @@ use stela_compiler::{
     block::{
         self, BlockProfile, ExitKind, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation,
-        el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
+        scalar::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::SystemOperation,
     },
     x86_64::{

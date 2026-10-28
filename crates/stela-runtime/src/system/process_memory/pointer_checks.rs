@@ -10,10 +10,9 @@ use crate::system::{
     identification::Register,
     identification_snapshot::{Snapshot, Unsupported},
 };
-use stela_compiler::context::{
-    memory::address::{AccessEl, AddressAddChecks, EffectiveAddressChecks},
-    pointer::EffectivePointerChecks,
-};
+#[cfg(feature = "std")]
+use stela_compiler::context::memory::address::{AddressAddChecks, EffectiveAddressChecks};
+use stela_compiler::context::{memory::address::AccessEl, pointer::EffectivePointerChecks};
 
 const FIELD_MASK: u64 = 0xf;
 const ISAR3_CPA_SHIFT: u32 = 0;
@@ -95,6 +94,7 @@ impl ResolvedPointerChecks {
         }
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn address_checks(self) -> EffectiveAddressChecks {
         let addition = |checks| match checks {
             EffectivePointerChecks::Unchecked => AddressAddChecks::Disabled,

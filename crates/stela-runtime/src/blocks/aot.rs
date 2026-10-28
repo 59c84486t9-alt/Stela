@@ -56,6 +56,7 @@ impl LoadedBlock {
             source_bytes,
             prepared,
             mapping,
+            #[cfg(feature = "std")]
             checked: core::cell::OnceCell::new(),
         })
     }
@@ -69,7 +70,6 @@ impl BlockRuntime {
         preparation: ArtifactPreparation,
     ) -> Self {
         Self {
-            identity: alloc::sync::Arc::new(()),
             address_space,
             profile,
             target,

@@ -222,11 +222,13 @@ impl OwnedMemory {
             .iter()
             .flat_map(|owner| owner.allocations.iter().zip(&owner.regions))
         {
-            match allocation.storage.kind() {
-                #[cfg(host_memory)]
-                StorageKind::PrivateFile => return Err(E::FileCopyOnWrite),
-                StorageKind::Anonymous => {}
-                _ => return Err(E::IncompatibleStorage),
+            let kind = allocation.storage.kind();
+            #[cfg(host_memory)]
+            if kind == StorageKind::PrivateFile {
+                return Err(E::FileCopyOnWrite);
+            }
+            if kind == StorageKind::PublishedAliases {
+                return Err(E::IncompatibleStorage);
             }
             if allocation.shared_backing.is_some() {
                 return Err(E::AlreadyBound);

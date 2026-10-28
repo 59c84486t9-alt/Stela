@@ -1,5 +1,6 @@
 //! Lifetime of native mappings, independent of guest views.
 
+#[cfg(feature = "std")]
 use alloc::sync::Arc;
 use core::ptr::NonNull;
 #[cfg(host_memory)]
@@ -7,6 +8,7 @@ use std::fs::File;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageKind {
+    #[cfg(feature = "std")]
     Anonymous,
     #[cfg(host_memory)]
     PrivateFile,
@@ -16,8 +18,6 @@ pub(super) enum StorageKind {
 /// One complete native mapping with one exclusive unmap obligation.
 #[derive(Debug)]
 pub(super) struct NativeMapping {
-    #[cfg(not(feature = "std"))]
-    _boot: crate::execution::boot_frames::BootRam,
     base: NonNull<u8>,
     bytes: usize,
 }
@@ -95,111 +95,7 @@ impl core::fmt::Debug for NativeStorage {
 }
 
 impl NativeStorage {
-    /// Initialize private loader RAM before publishing any backing/view. Final
-    /// host permissions never include Execute; guest source fetch uses Read.
-    #[cfg(host_memory)]
-    pub(super) fn initialized_ram(
-        initial: &[u8],
-        leading: usize,
-        bytes: usize,
-        readable: bool,
-        writable: bool,
-    ) -> Result<Arc<Self>, crate::platform::memory::Error> {
-        let page =
-            super::host_page_size().map_err(|error| std::io::Error::other(error.to_string()))?;
-        if initial.is_empty()
-            || bytes == 0
-            || !bytes.is_multiple_of(page)
-            || bytes > isize::MAX as usize
-            || leading
-                .checked_add(initial.len())
-                .is_none_or(|end| end > bytes)
-            || writable && !readable
-        {
-            return Err(std::io::Error::other(
-                "invalid private source RAM allocation",
-            ));
-        }
-        // SAFETY: OS-selected fresh private anonymous storage, never MAP_FIXED
-        // or an alias. No reference into this allocation escapes initialization.
-        let raw = unsafe {
-            libc::mmap(
-                core::ptr::null_mut(),
-                bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if raw == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error());
-        }
-        let Some(base) = NonNull::new(raw.cast::<u8>()) else {
-            // SAFETY: mmap succeeded at zero; NonNull cannot represent its owner.
-            unsafe { libc::munmap(raw, bytes) };
-            return Err(std::io::Error::other("source RAM allocation has null base"));
-        };
-        // SAFETY: mmap returned this whole page-aligned extent, and the mapping
-        // owner now unmaps it on every error path.
-        let mapping = unsafe { NativeMapping::adopt(base, bytes) };
-        // SAFETY: validated destination extent, private mapping and independent
-        // input bytes; no native access or source binding has been published.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                initial.as_ptr(),
-                base.as_ptr().add(leading),
-                initial.len(),
-            )
-        };
-        let protection = if readable {
-            libc::PROT_READ
-        } else {
-            libc::PROT_NONE
-        } | if writable { libc::PROT_WRITE } else { 0 };
-        // SAFETY: factory exclusively owns the complete allocation. Final host
-        // RO is established before immutable-code or physical binding publication.
-        if unsafe { libc::mprotect(base.as_ptr().cast(), bytes, protection) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self::anonymous(mapping))
-    }
-
-    /// Hosts without POSIX mappings back no guest memory.
-    #[cfg(all(feature = "std", not(host_memory)))]
-    pub(super) fn initialized_ram(
-        _initial: &[u8],
-        _leading: usize,
-        _bytes: usize,
-        _readable: bool,
-        _writable: bool,
-    ) -> Result<Arc<Self>, crate::platform::memory::Error> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "UNSUPPORTED guest memory: it needs a host with POSIX memory mappings",
-        ))
-    }
-
-    #[cfg(not(feature = "std"))]
-    pub(super) fn initialized_ram(
-        initial: &[u8],
-        leading: usize,
-        bytes: usize,
-        readable: bool,
-        writable: bool,
-    ) -> Result<Arc<Self>, crate::platform::memory::Error> {
-        let owner = crate::platform::boot::ram(initial, leading, bytes, readable, writable)?;
-        owner.revalidate().map_err(|error| {
-            crate::platform::memory::Error::Boot(crate::platform::boot::MountError::Storage(error))
-        })?;
-        let mapping = NativeMapping {
-            base: owner.base(),
-            bytes: owner.bytes(),
-            _boot: owner,
-        };
-        Ok(Self::anonymous(mapping))
-    }
-
+    #[cfg(feature = "std")]
     pub(super) fn anonymous(primary: NativeMapping) -> Arc<Self> {
         Arc::new(Self {
             primary,

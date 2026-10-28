@@ -16,7 +16,6 @@ pub(crate) struct RetainedResources<'pe, B> {
     thread: &'pe mut ThreadState,
     system: &'pe mut SystemState,
     backend: &'pe mut B,
-    debug: &'pe mut Option<crate::system::debug::halted::DebugMachine>,
 }
 
 impl<'pe, B> RetainedResources<'pe, B> {
@@ -26,14 +25,12 @@ impl<'pe, B> RetainedResources<'pe, B> {
         thread: &'pe mut ThreadState,
         system: &'pe mut SystemState,
         backend: &'pe mut B,
-        debug: &'pe mut Option<crate::system::debug::halted::DebugMachine>,
     ) -> Self {
         Self {
             authority,
             thread,
             system,
             backend,
-            debug,
         }
     }
 }
@@ -43,9 +40,7 @@ fn accept_retained_loan<B>(loan: SystemExecutionLoan<'_, B>) -> RetainedResource
 }
 
 pub(crate) mod checked;
-pub(crate) use checked::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
 #[cfg(feature = "std")]
 mod process;
-mod software_async;
 #[cfg(feature = "std")]
 pub(crate) use process::run_protected_services;

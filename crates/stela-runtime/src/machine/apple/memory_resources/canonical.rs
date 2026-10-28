@@ -136,7 +136,7 @@ impl Prepared {
 mod tests {
     use super::*;
     use crate::{
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture},
         platform::apple::interrupt::InterruptLatch,
     };
     use core::{cell::UnsafeCell, ptr::NonNull};
