@@ -171,17 +171,42 @@ fn set_model(environment: &Environment, model: &str, dry_run: bool) -> Result<()
 /// The calling user's home directory in the user database.
 fn launchd_home() -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
-    // SAFETY: getpwuid's result, when not null, points at a record valid
-    // until the next call, read before any other.
-    unsafe {
-        let entry = libc::getpwuid(libc::getuid());
-        if entry.is_null() || (*entry).pw_dir.is_null() {
+    // SAFETY: getuid has no pointer arguments or caller preconditions.
+    let uid = unsafe { libc::getuid() };
+    let mut buffer = vec![0u8; 16 * 1024];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found = std::ptr::null_mut();
+        // SAFETY: entry and found are writable out-parameters, and buffer owns
+        // the supplied writable byte range through this synchronous lookup.
+        // The reentrant API keeps returned strings in this caller-owned buffer.
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < 1024 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || found.is_null() {
             return None;
         }
-        let directory = std::ffi::CStr::from_ptr((*entry).pw_dir);
-        Some(PathBuf::from(std::ffi::OsStr::from_bytes(
+        // SAFETY: a successful lookup with nonnull found initialized entry.
+        let entry = unsafe { entry.assume_init() };
+        if entry.pw_dir.is_null() {
+            return None;
+        }
+        // SAFETY: getpwuid_r placed the NUL-terminated home directory in buffer,
+        // which remains live and unmodified until the path is copied below.
+        let directory = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+        return Some(PathBuf::from(std::ffi::OsStr::from_bytes(
             directory.to_bytes(),
-        )))
+        )));
     }
 }
 
