@@ -181,7 +181,9 @@ fn a_dead_host_controller_disconnects_every_device_like_usb_hc_died() {
     assert!(host.poll(&mut dma, &firmware).removed.is_empty());
     let devices: Vec<_> = host.devices.iter().map(|d| (d.id, d.slot)).collect();
     assert_eq!(devices.len(), 3);
+    assert!(!host.due());
     shared.borrow_mut().died();
+    assert!(host.due());
     let changes = host.poll(&mut dma, &firmware);
     let removed: Vec<_> = changes.removed.iter().map(|d| (d.id, d.slot)).collect();
     assert_eq!(removed, devices);
@@ -198,6 +200,7 @@ fn a_dead_host_controller_disconnects_every_device_like_usb_hc_died() {
         assert!(state.suspended && state.retiring);
     }
     // Nothing is reported twice.
+    assert!(!host.due());
     let changes = host.poll(&mut dma, &firmware);
     assert!(changes.removed.is_empty() && changes.added.devices.is_empty());
 }

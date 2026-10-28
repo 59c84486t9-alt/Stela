@@ -37,10 +37,15 @@ fn a_queued_reset_rebinds_the_class_on_a_fresh_generation_like_usb_queue_reset_d
     let mut original = Found::default();
     bind::bind(&shared, devices[0].clone(), &mut dma, &mut original);
     assert_eq!(original.disks.len(), 1);
-    shared.borrow_mut().queue_reset(old).unwrap();
-    shared.borrow_mut().queue_reset(old).unwrap();
-
     let firmware = crate::firmware::HandoffProvider::new(None);
+    // The first look takes what enumeration left; then nothing is due.
+    let first = host.poll(&mut dma, &firmware);
+    assert!(first.removed.is_empty() && first.added.devices.is_empty());
+    assert!(!host.due());
+    shared.borrow_mut().queue_reset(old).unwrap();
+    shared.borrow_mut().queue_reset(old).unwrap();
+    assert!(host.due());
+
     let changes = host.poll(&mut dma, &firmware);
     assert!(
         changes.added.failures.is_empty(),
@@ -60,6 +65,7 @@ fn a_queued_reset_rebinds_the_class_on_a_fresh_generation_like_usb_queue_reset_d
     fresh.disks[0].read(0, &mut sector).unwrap();
     assert!(shared.borrow_mut().queue_reset(old).is_err());
 
+    assert!(!host.due());
     let quiet = host.poll(&mut dma, &firmware);
     assert!(quiet.removed.is_empty() && quiet.added.devices.is_empty());
     assert!(
