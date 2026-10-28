@@ -471,6 +471,7 @@ unsafe fn attach_with_timeout(
         host_memory_enabled: false,
         events: super::Events::default(),
         aborts: alloc::vec::Vec::new(),
+        limits: super::Limits::default(),
     };
     validate_clock(clock)?;
     controller.teardown = Teardown::Unprepared;
@@ -823,6 +824,11 @@ mod tests {
         /// CSTS.CFS, until the controller is reset.
         fatal: bool,
         aborts: usize,
+        /// ONCS, and the NVM Identify Controller's WZSL and DMRSL; none
+        /// refuses the Identify.
+        oncs: u16,
+        nvm_limits: Option<(u8, u32)>,
+        nvm_identifies: usize,
     }
     impl Model {
         fn new() -> Self {
@@ -892,6 +898,9 @@ mod tests {
                 statuses: Default::default(),
                 fatal: false,
                 aborts: 0,
+                oncs: 0,
+                nvm_limits: None,
+                nvm_identifies: 0,
             }
         }
         fn registers_available(&self) -> bool {
@@ -1030,6 +1039,7 @@ mod tests {
                             data[4..24].fill(b'S');
                             data[24..64].fill(b'M');
                             data[516..520].copy_from_slice(&1u32.to_le_bytes());
+                            data[520..522].copy_from_slice(&self.oncs.to_le_bytes());
                             data[525] = 1; // A volatile write cache.
                             for (index, delay) in self.retry_delays.iter().enumerate() {
                                 data[128 + 2 * index..][..2].copy_from_slice(&delay.to_le_bytes());
@@ -1054,6 +1064,17 @@ mod tests {
                             data[12..17].copy_from_slice(&[4, 1, 0, 0, self.csi]);
                         }
                         8 => data[14] = u8::from(!self.not_ready),
+                        6 => {
+                            assert_eq!(command[11], 0);
+                            self.nvm_identifies += 1;
+                            match self.nvm_limits {
+                                Some((wzsl, dmrsl)) => {
+                                    data[1] = wzsl;
+                                    data[4..8].copy_from_slice(&dmrsl.to_le_bytes());
+                                }
+                                None => status = 2,
+                            }
+                        }
                         0 => {
                             assert_eq!(command[1], 1);
                             data[..8].copy_from_slice(&self.blocks.to_le_bytes());
@@ -1735,6 +1756,45 @@ mod tests {
         let a = f.attach().unwrap();
         assert_eq!(a.namespaces.len(), 1);
         assert_eq!(f.model.lock().unwrap().registers[&0x14] >> 4 & 7, 6);
+    }
+
+    #[test]
+    fn nvm_limits_cap_deallocate_and_write_zeroes_like_nvme_init_non_mdts_limits() {
+        let f = Fixture::new();
+        f.model.lock().unwrap().oncs = 1 << 2 | 1 << 3;
+        // Before NVMe 1.2: UINT_MAX sectors and the largest transfer.
+        let attached = f.attach().unwrap();
+        let features = attached.namespaces[0].identity().features;
+        assert_eq!(features.discard, Some(u64::from(u32::MAX)));
+        let transfer = (features.max_transfer / 512) as u64;
+        assert_eq!(features.write_zeroes.unwrap().blocks, transfer);
+        assert_eq!(f.model.lock().unwrap().nvm_identifies, 0);
+        drop(attached);
+        // DMRSL blocks, and 2^WZSL 4 KiB pages of 512-byte blocks.
+        let f = Fixture::new();
+        {
+            let mut m = f.model.lock().unwrap();
+            m.registers.insert(8, 0x0001_0200);
+            m.oncs = 1 << 2 | 1 << 3;
+            m.nvm_limits = Some((1, 100));
+        }
+        let attached = f.attach().unwrap();
+        let features = attached.namespaces[0].identity().features;
+        assert_eq!(features.discard, Some(100));
+        assert_eq!(features.write_zeroes.unwrap().blocks, 16);
+        drop(attached);
+        // A refused Identify keeps the defaults.
+        let f = Fixture::new();
+        {
+            let mut m = f.model.lock().unwrap();
+            m.registers.insert(8, 0x0001_0200);
+            m.oncs = 1 << 3;
+        }
+        let attached = f.attach().unwrap();
+        let features = attached.namespaces[0].identity().features;
+        assert_eq!(features.discard, None);
+        assert_eq!(features.write_zeroes.unwrap().blocks, transfer);
+        assert!(attached.failures.is_empty());
     }
 
     #[test]
