@@ -1,14 +1,17 @@
-//! The host's DMA remapping units, taken before the host drivers start
+//! The host's DMA remapping units, VT-d's (DMAR) and AMD-Vi's (IVRS, in
+//! [`amd`]), taken before the host drivers start
 //! ([`stela_boot_core::remapping`] decides which). Every requester a taken
 //! unit covers starts in the unit's window domain, which maps the drivers'
-//! DMA region and the reserved regions of the unit's USB host controllers
-//! one to one, so a device reaches that memory and no other RAM. A driver
-//! that asks the native services for a domain gets its own
+//! DMA region and the reserved regions (RMRR, IVMD) of the unit's USB host
+//! controllers one to one, so a device reaches that memory and no other
+//! RAM. A driver that asks the native services for a domain gets its own
 //! ([`Remappers::domain`]).
 //!
 //! The display functions a driver maps the firmware's reserved regions for
 //! are a policy input: none yet, so a unit whose scope holds a display
 //! controller is left untranslated until a display driver claims it.
+mod amd;
+
 use super::storage::RestoreRoot;
 use crate::{
     native_dma::{
@@ -28,6 +31,12 @@ use stela_drivers::bus::{
 };
 use stela_runtime::pc::acpi;
 
+/// The processor's physical address width (CPUID 0x80000008).
+fn physical_bits() -> u8 {
+    let leaf = core::arch::x86_64::__cpuid(0x8000_0008);
+    (leaf.eax & 0xff) as u8
+}
+
 /// The display functions whose driver maps their unit's reserved regions.
 const CLAIMED_DISPLAYS: &[u16] = &[];
 
@@ -40,6 +49,7 @@ struct Taken {
 /// The units the mount translates for.
 pub(super) struct Remappers {
     taken: Vec<Taken>,
+    amd: Vec<amd::Taken>,
 }
 
 /// Every function on `window`'s buses, each bus scanned as a root so a
@@ -63,7 +73,10 @@ unsafe fn inventory(window: &EcamWindow) -> Vec<Present> {
 
 impl Remappers {
     pub(super) const fn none() -> Self {
-        Self { taken: Vec::new() }
+        Self {
+            taken: Vec::new(),
+            amd: Vec::new(),
+        }
     }
 
     /// Take the units of the firmware's DMAR the policy allows, each with a
@@ -87,20 +100,33 @@ impl Remappers {
         if rsdp == 0 {
             return remappers;
         }
-        let (table, inventories) = {
+        let (dmar, ivrs, inventories) = {
             // SAFETY: forwarded; the loader root maps the tables and ECAM.
             let _root = unsafe { RestoreRoot::enter(root) };
             // SAFETY: the firmware's RSDP, whose tables the loader root maps.
-            let table = match unsafe { acpi::find(rsdp, b"DMAR") } {
-                Ok(table) => table.to_vec(),
-                Err(_) => return remappers,
+            let find = |signature| {
+                unsafe { acpi::find(rsdp, signature) }
+                    .ok()
+                    .map(<[u8]>::to_vec)
             };
+            let (dmar, ivrs) = (find(b"DMAR"), find(b"IVRS"));
+            if dmar.is_none() && ivrs.is_none() {
+                return remappers;
+            }
             let inventories: Vec<(u16, Vec<Present>)> = ecam
                 .iter()
                 // SAFETY: the loader root maps each window.
                 .map(|window| (window.segment, unsafe { inventory(window) }))
                 .collect();
-            (table, inventories)
+            (dmar, ivrs, inventories)
+        };
+        if let Some(ivrs) = ivrs {
+            // SAFETY: forwarded.
+            remappers.amd =
+                unsafe { amd::take(&ivrs, &inventories, &drivers, mmio, tsc_hz, physical_bits()) };
+        }
+        let Some(table) = dmar else {
+            return remappers;
         };
         let parsed = match dmar::parse(&table) {
             Ok(parsed) => parsed,
@@ -246,6 +272,14 @@ impl Remappers {
     ) -> Result<Result<Arc<dyn DmaDomain>, VtdError>, RequesterBinding> {
         let segment = binding.address().segment;
         let rid = binding.requester();
+        if let Some(taken) = self.amd.iter().find(|taken| taken.covers(segment, rid)) {
+            return Ok(taken.domain(binding).map_err(|error| {
+                output::arguments(format_args!(
+                    "HOST IOMMU AMD-Vi attach refused: {error:?}\n"
+                ));
+                VtdError::Busy
+            }));
+        }
         let Some(taken) = self
             .taken
             .iter()
