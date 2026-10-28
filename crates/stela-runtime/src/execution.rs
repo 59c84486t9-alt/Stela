@@ -7,9 +7,9 @@ pub mod checked_memory;
 pub(crate) mod context;
 #[cfg(feature = "std")]
 pub(crate) mod floating_environment;
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(all(host_memory, target_arch = "x86_64"))]
 mod native_image;
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(all(host_memory, target_arch = "x86_64"))]
 pub(crate) use native_image::ReachedCall as ObservedNativeCall;
 
 #[cfg(feature = "std")]
