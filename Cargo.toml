@@ -56,6 +56,11 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 all = "warn"
 
+# Backtraces keep their files and lines; full debug information made a
+# test build's target directory 60 % larger and its links slower.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
