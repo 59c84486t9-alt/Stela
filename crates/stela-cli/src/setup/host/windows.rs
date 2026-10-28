@@ -94,16 +94,15 @@ fn open(path: &str, access: u32) -> io::Result<File> {
         .open(path)
 }
 
-/// The bytes of a plain C structure.
-fn bytes_of<T: Copy>(value: &T) -> &[u8] {
-    // SAFETY: `T` is a plain structure of `size_of::<T>()` bytes.
-    unsafe { std::slice::from_raw_parts(ptr::from_ref(value).cast(), size_of::<T>()) }
-}
-
-/// A plain C structure at `offset` of `bytes`, which must hold it.
-fn read<T: Copy>(bytes: &[u8], offset: usize) -> Option<T> {
+/// Read an IOCTL response structure at `offset`, if the complete structure fits.
+///
+/// # Safety
+/// The bytes in this range must encode a valid `T`, including any Boolean
+/// fields. Callers use the structure specified by the successful Windows IOCTL.
+unsafe fn read<T: Copy>(bytes: &[u8], offset: usize) -> Option<T> {
     let end = offset.checked_add(size_of::<T>())?;
-    // SAFETY: the bytes are in bounds; the read tolerates any alignment.
+    // SAFETY: the checked range holds T; the caller guarantees its field values
+    // are valid, and read_unaligned does not require the byte buffer to align T.
     (end <= bytes.len()).then(|| unsafe { ptr::read_unaligned(bytes[offset..].as_ptr().cast()) })
 }
 
@@ -114,7 +113,9 @@ fn control(file: &File, code: u32, input: &[u8], capacity: usize) -> io::Result<
     loop {
         let mut output = vec![0u8; size];
         let mut returned = 0u32;
-        // SAFETY: both buffers are valid for the lengths given.
+        // SAFETY: file keeps the synchronous handle open; input and the initialized
+        // output buffer live through the call and match their supplied lengths.
+        // returned is a writable u32, and a null OVERLAPPED requests synchronous I/O.
         let done = unsafe {
             DeviceIoControl(
                 file.as_raw_handle(),
@@ -208,14 +209,16 @@ impl Descriptor {
 }
 
 fn descriptor(drive: &File) -> io::Result<Descriptor> {
-    let query = STORAGE_PROPERTY_QUERY {
-        PropertyId: StorageDeviceProperty,
-        QueryType: PropertyStandardQuery,
-        AdditionalParameters: [0],
-    };
-    let bytes = control(drive, IOCTL_STORAGE_QUERY_PROPERTY, bytes_of(&query), 1024)?;
+    let mut query = [0u8; size_of::<STORAGE_PROPERTY_QUERY>()];
+    let property = offset_of!(STORAGE_PROPERTY_QUERY, PropertyId);
+    query[property..property + 4].copy_from_slice(&StorageDeviceProperty.to_le_bytes());
+    let kind = offset_of!(STORAGE_PROPERTY_QUERY, QueryType);
+    query[kind..kind + 4].copy_from_slice(&PropertyStandardQuery.to_le_bytes());
+    let bytes = control(drive, IOCTL_STORAGE_QUERY_PROPERTY, &query, 1024)?;
+    // SAFETY: the successful StorageDeviceProperty query returns this SDK
+    // structure, including valid BOOLEAN fields; read checks its complete size.
     let header: STORAGE_DEVICE_DESCRIPTOR =
-        read(&bytes, 0).ok_or_else(|| io::Error::other("short storage descriptor"))?;
+        unsafe { read(&bytes, 0) }.ok_or_else(|| io::Error::other("short storage descriptor"))?;
     let text = |offset: u32| -> Option<String> {
         let tail = bytes.get(usize::try_from(offset).ok().filter(|o| *o != 0)?..)?;
         let end = tail.iter().position(|b| *b == 0).unwrap_or(tail.len());
@@ -244,21 +247,31 @@ fn nvme_serial(drive: &File) -> Option<String> {
     let mut input = vec![0u8; header + data + IDENTIFY_BYTES];
     input[..4].copy_from_slice(&StorageAdapterProtocolSpecificProperty.to_le_bytes());
     input[4..8].copy_from_slice(&PropertyStandardQuery.to_le_bytes());
-    let request = STORAGE_PROTOCOL_SPECIFIC_DATA {
-        ProtocolType: ProtocolTypeNvme,
-        DataType: NVMeDataTypeIdentify as u32,
-        ProtocolDataRequestValue: CONTROLLER,
-        ProtocolDataRequestSubValue: 0,
-        ProtocolDataOffset: data as u32,
-        ProtocolDataLength: IDENTIFY_BYTES as u32,
-        FixedProtocolReturnData: 0,
-        ProtocolDataRequestSubValue2: 0,
-        ProtocolDataRequestSubValue3: 0,
-        ProtocolDataRequestSubValue4: 0,
-    };
-    input[header..header + data].copy_from_slice(bytes_of(&request));
+    // STORAGE_PROTOCOL_SPECIFIC_DATA is ten consecutive 32-bit fields.
+    // Serialize them into initialized bytes rather than exposing C padding.
+    const _: () = assert!(size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>() == 40);
+    let fields = [
+        ProtocolTypeNvme as u32,
+        NVMeDataTypeIdentify as u32,
+        CONTROLLER,
+        0,
+        data as u32,
+        IDENTIFY_BYTES as u32,
+        0,
+        0,
+        0,
+        0,
+    ];
+    for (field, bytes) in fields
+        .iter()
+        .zip(input[header..header + data].chunks_exact_mut(4))
+    {
+        bytes.copy_from_slice(&field.to_le_bytes());
+    }
     let output = control(drive, IOCTL_STORAGE_QUERY_PROPERTY, &input, input.len()).ok()?;
-    let answer: STORAGE_PROTOCOL_DATA_DESCRIPTOR = read(&output, 0)?;
+    // SAFETY: this successful protocol query returns the all-integer SDK
+    // descriptor; read also requires the complete structure to be present.
+    let answer: STORAGE_PROTOCOL_DATA_DESCRIPTOR = unsafe { read(&output, 0) }?;
     let at = offset_of!(STORAGE_PROTOCOL_DATA_DESCRIPTOR, ProtocolSpecificData)
         + answer.ProtocolSpecificData.ProtocolDataOffset as usize;
     let serial = output.get(at + 4..at + 24)?;
@@ -276,15 +289,21 @@ struct Entry {
 
 fn layout(drive: &File) -> io::Result<Vec<Entry>> {
     let bytes = control(drive, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, &[], 8192)?;
+    // SAFETY: this successful IOCTL returns the SDK layout structure, with
+    // valid Boolean fields and a union selected by its partition style.
     let header: DRIVE_LAYOUT_INFORMATION_EX =
-        read(&bytes, 0).ok_or_else(|| io::Error::other("short drive layout"))?;
+        unsafe { read(&bytes, 0) }.ok_or_else(|| io::Error::other("short drive layout"))?;
     let first = offset_of!(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry);
     let mut entries = Vec::new();
     for index in 0..header.PartitionCount as usize {
-        let Some(entry) = read::<PARTITION_INFORMATION_EX>(
-            &bytes,
-            first + index * size_of::<PARTITION_INFORMATION_EX>(),
-        ) else {
+        // SAFETY: PartitionEntry begins the IOCTL's array of SDK partition
+        // records. read checks that this entire record fits in the response.
+        let Some(entry) = (unsafe {
+            read::<PARTITION_INFORMATION_EX>(
+                &bytes,
+                first + index * size_of::<PARTITION_INFORMATION_EX>(),
+            )
+        }) else {
             break;
         };
         if entry.PartitionNumber == 0 || entry.PartitionLength <= 0 {
@@ -328,8 +347,10 @@ fn layout(drive: &File) -> io::Result<Vec<Entry>> {
 /// A drive's size and logical sector size.
 fn geometry(drive: &File) -> io::Result<(u64, u32)> {
     let bytes = control(drive, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, &[], 256)?;
+    // SAFETY: this successful IOCTL returns the all-integer SDK geometry
+    // structure; read checks that the complete response header is present.
     let geometry: DISK_GEOMETRY_EX =
-        read(&bytes, 0).ok_or_else(|| io::Error::other("short drive geometry"))?;
+        unsafe { read(&bytes, 0) }.ok_or_else(|| io::Error::other("short drive geometry"))?;
     Ok((
         geometry.DiskSize as u64,
         geometry.Geometry.BytesPerSector.max(512),
@@ -356,7 +377,9 @@ impl WinVolume {
 fn extent(name: &str) -> Option<DISK_EXTENT> {
     let volume = open(name.trim_end_matches('\\'), 0).ok()?;
     let bytes = control(&volume, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &[], 256).ok()?;
-    let header: VOLUME_DISK_EXTENTS = read(&bytes, 0)?;
+    // SAFETY: the successful extent query returns this all-integer SDK
+    // header and first extent; read checks that both fit in the response.
+    let header: VOLUME_DISK_EXTENTS = unsafe { read(&bytes, 0) }?;
     // A volume spanning disks belongs to none of them.
     (header.NumberOfDiskExtents == 1).then_some(header.Extents[0])
 }
@@ -364,7 +387,8 @@ fn extent(name: &str) -> Option<DISK_EXTENT> {
 fn volumes() -> Result<Vec<WinVolume>> {
     let mut volumes = Vec::new();
     let mut name = [0u16; 64];
-    // SAFETY: the buffer's length is given.
+    // SAFETY: name is a writable UTF-16 buffer of the supplied capacity;
+    // Windows retains no pointer after creating the independent search handle.
     let search = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
     if search == INVALID_HANDLE_VALUE {
         return Err(last_error()).context("cannot list this computer's volumes");
@@ -379,7 +403,8 @@ fn volumes() -> Result<Vec<WinVolume>> {
                 name: volume,
             });
         }
-        // SAFETY: as above.
+        // SAFETY: search is open until enumeration ends, and name remains a
+        // writable UTF-16 buffer of the supplied capacity.
         if unsafe { FindNextVolumeW(search, name.as_mut_ptr(), name.len() as u32) } == 0 {
             let error = last_error();
             // SAFETY: the search handle is open.
@@ -397,7 +422,8 @@ fn mount_paths(name: &str) -> Vec<PathBuf> {
     let volume = wide(name);
     let mut buffer = vec![0u16; 1024];
     let mut needed = 0u32;
-    // SAFETY: the buffer's length is given.
+    // SAFETY: volume is NUL-terminated and both output pointers remain
+    // writable for the duration of this synchronous call.
     let done = unsafe {
         GetVolumePathNamesForVolumeNameW(
             volume.as_ptr(),
@@ -429,7 +455,8 @@ fn volume_of(path: &Path) -> Result<(String, Vec<u16>)> {
     let end = root.iter().position(|c| *c == 0).unwrap_or(root.len());
     let root = root[..=end].to_vec();
     let mut name = [0u16; 64];
-    // SAFETY: as above.
+    // SAFETY: the successful GetVolumePathNameW call NUL-terminated root;
+    // name is a writable UTF-16 buffer with the supplied capacity.
     if unsafe {
         GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), name.len() as u32)
     } == 0
@@ -555,7 +582,8 @@ impl Host for System {
             return Err(last_error()).with_context(|| format!("cannot inspect {}", path.display()));
         }
         let mut free = 0u64;
-        // SAFETY: as above, with one out-value.
+        // SAFETY: root is NUL-terminated and remains live; free is writable
+        // through this synchronous call, and the other outputs may be null.
         if unsafe {
             GetDiskFreeSpaceExW(root.as_ptr(), &mut free, ptr::null_mut(), ptr::null_mut())
         } == 0
