@@ -2370,6 +2370,7 @@ dependencies = [
  "libc",
  "object",
  "plist",
+ "quick-xml",
  "serde",
  "serde_json",
  "sha1",

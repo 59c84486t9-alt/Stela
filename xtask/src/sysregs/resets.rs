@@ -13,7 +13,7 @@
 //! values read 0 (Stela's choice), and IMPLEMENTATION DEFINED ones take the
 //! choices in [`IMPLEMENTATION_DEFINED`].
 use super::expression::Profile;
-use crate::xml::{Element, Node, parse};
+use super::page::{Element, Node, parse};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -438,7 +438,6 @@ pub fn value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xml::unescape;
     use std::collections::BTreeSet;
 
     const PAGE: &str = r#"<?xml version='1.0'?>
@@ -614,13 +613,11 @@ mod tests {
     }
 
     #[test]
-    fn conditions_and_entities() {
+    fn conditions() {
         let profile = profile();
         assert!(holds("the highest implemented Exception level is EL2", &profile).unwrap());
         assert!(!holds("EL3 is implemented", &profile).unwrap());
         assert!(holds("FEAT_BRBEv1p1 is not implemented", &profile).unwrap());
         assert!(holds("the moon is full", &profile).is_err());
-        assert_eq!(unescape("a&lt;b&amp;&#x41;&#66;").unwrap(), "a<b&AB");
-        assert!(parse("<a><b></a>").is_err());
     }
 }

@@ -104,7 +104,6 @@ mod pages;
 mod restore_dry_run;
 mod sysregs;
 mod tools;
-mod xml;
 
 #[derive(Parser)]
 #[command(about = "Stela development tasks")]

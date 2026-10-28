@@ -21,6 +21,7 @@ stela-runtime.workspace = true
 smoltcp = { version = "0.14", default-features = false, features = ["medium-ethernet", "proto-ipv4"] }
 object = { version = "0.37", features = ["read"] }
 plist = "1"
+quick-xml = "0.42"
 sha1 = "0.10"
 sha2.workspace = true
 zip = { version = "4", default-features = false, features = ["deflate"] }

@@ -21,6 +21,7 @@ mod access;
 mod codegen;
 mod expression;
 mod fold;
+mod page;
 mod resets;
 
 const RELEASE: &str = "2026-06";
