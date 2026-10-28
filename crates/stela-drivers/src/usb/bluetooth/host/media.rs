@@ -742,6 +742,32 @@ impl Native {
             Ok(())
         }
     }
+    /// A clean close left both interfaces at alternate 0 and retired every
+    /// TD, so the next power-on may claim them again. The mSBC flow persists,
+    /// as btusb keeps `usb_alt6_packet_flow` for the device's life.
+    fn reopen(&mut self) -> Result<(), BlockError> {
+        if !self.retired
+            || self.poisoned
+            || self.iso_receive.is_some()
+            || self.iso_send
+            || !self.queued_output.is_empty()
+            || self
+                .input
+                .iter()
+                .chain(&self.output)
+                .any(|b| b.queued.is_some())
+        {
+            return Err(BlockError::Unsupported(
+                "MT7925 media did not close cleanly",
+            ));
+        }
+        self.iso = None;
+        self.sco = None;
+        self.next_input = 0;
+        self.running = !self.bindings.has_iso();
+        self.retired = false;
+        Ok(())
+    }
 }
 fn loss(status: IsoStatus) -> Loss {
     match status {
@@ -812,6 +838,13 @@ impl MediaIo for Host {
         let result = media.close(self);
         self.media = Some(media);
         result
+    }
+    fn reopen_media(&mut self) -> Result<(), BlockError> {
+        self.open()?;
+        self.media
+            .as_mut()
+            .ok_or(BlockError::Unsupported("native MT7925 media not prepared"))?
+            .reopen()
     }
 }
 
@@ -927,6 +960,8 @@ mod tests {
             // Base close cannot turn the failed media retirement into success.
             assert!(hci.close().is_err());
             assert_eq!(hci.state(), State::Failed);
+            // A quarantined owner never reopens for a later power-on.
+            assert!(hci.io.reopen_media().is_err());
             assert_eq!(backing, before);
         }
     }
