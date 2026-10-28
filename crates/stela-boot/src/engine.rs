@@ -2382,33 +2382,7 @@ fn run<H: Host>(
         for line in drained.sep {
             output::arguments(format_args!("SEP OBSERVE {line}\n"));
         }
-        for hit in machine.take_trace_hits() {
-            output::arguments(format_args!(
-                "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
-                hit.pc,
-                hit.pe,
-                hit.el,
-                hit.arguments[0],
-                hit.arguments[1],
-                hit.arguments[2],
-                hit.arguments[3],
-                hit.lr,
-                hit.dropped
-            ));
-        }
-        for hit in machine.take_watch_hits() {
-            output::arguments(format_args!(
-                "WATCH pc={:#x} pe={} {} pa={:#x} bytes={} value={:#x}{} dropped={}\n",
-                hit.pc,
-                hit.pe,
-                if hit.write { "write" } else { "read" },
-                hit.physical,
-                hit.bytes,
-                hit.value,
-                if hit.completed { "" } else { " refused" },
-                hit.dropped
-            ));
-        }
+        parallel::report_diagnostics(machine);
         for log in drained.usb {
             use stela_runtime::machine::apple::UsbLog;
             match log {

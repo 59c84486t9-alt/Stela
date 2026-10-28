@@ -179,10 +179,10 @@ impl Pe {
     }
 }
 
-/// The same records as the home PE, including the PE that made each hit.
+/// The home and secondary PEs' records, including the PE that made each hit.
 /// Each machine retains at most TRACE_HITS and WATCH_HITS between drains;
 /// their last records report any overflow rather than hiding lost hits.
-fn report_diagnostics<H: Host>(machine: &mut Machine<H, Board>) {
+pub(super) fn report_diagnostics<H: Host>(machine: &mut Machine<H, Board>) {
     for hit in machine.take_trace_hits() {
         output::arguments(format_args!(
             "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
