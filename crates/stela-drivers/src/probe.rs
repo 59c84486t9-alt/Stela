@@ -19,7 +19,7 @@ use crate::{
         virtio::VirtioNet,
     },
     storage::{ahci, nvme, rtsx, sdhci, virtio},
-    usb::{bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, hid::UsbInput, xhci},
+    usb::{self, bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, hid::UsbInput, xhci},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
@@ -54,6 +54,22 @@ impl From<BlockError> for Error {
 impl From<realtek::Error> for Error {
     fn from(error: realtek::Error) -> Self {
         Self::Realtek(error)
+    }
+}
+
+/// Why a device or controller outside the PCI drivers' attach was not brought
+/// up or handed over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlatformError {
+    /// A USB host controller could not be taken from firmware.
+    Handoff(usb::handoff::Error),
+}
+
+impl fmt::Display for PlatformError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Handoff(error) => error.fmt(f),
+        }
     }
 }
 
@@ -159,8 +175,9 @@ impl Link for Adapter {
     }
 }
 
-/// Whether a driver here may attach `function`, including the HD Audio
-/// check: its memory BARs must be mapped uncached before ExitBootServices.
+/// Whether a driver here may attach `function`, or probe hands it over from
+/// firmware (every USB host controller), including the HD Audio check: its
+/// memory BARs must be mapped uncached before ExitBootServices.
 pub fn claims(function: &Function) -> bool {
     virtio::matches(function)
         || input::virtio::matches(function)
@@ -175,6 +192,7 @@ pub fn claims(function: &Function) -> bool {
         || sdhci::matches(function)
         || rtsx::matches(function)
         || function.class == xhci::CLASS
+        || usb::handoff::Kind::of(function.class).is_some()
 }
 
 /// Why no driver here takes a function of a device class the host needs,
@@ -190,7 +208,9 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x02, 0x80, _] => Some("network controller (Wi-Fi is not attached yet)"),
         [0x02, ..] => Some("network controller"),
         [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
-        [0x0c, 0x03, _] => Some("USB host controller other than xHCI"),
+        [0x0c, 0x03, _] => {
+            Some("USB host controller other than xHCI (taken from firmware, not driven)")
+        }
         [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
         [0x08, 0x05, _] => Some("SD host controller without standard SDHCI interface"),
         [0x0d, 0x11, _] => Some("PCIe Bluetooth controller"),
@@ -243,6 +263,10 @@ pub struct Devices {
     pub usb_vendor_failures: Vec<(String, crate::usb::ethernet::Error)>,
     /// USB interfaces no driver here takes, and why.
     pub usb_unused: Vec<(String, &'static str)>,
+    /// Devices and controllers outside the PCI drivers' attach that were not
+    /// brought up or handed over, by location, such as
+    /// `0000:00:1d.0 EHCI handoff`.
+    pub platform_failures: Vec<(String, PlatformError)>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
     /// Whether the mount supplied [`NativeServices`]. Drivers that attach
@@ -328,6 +352,23 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
+            if let Some(kind) = usb::handoff::Kind::of(function.class) {
+                // SAFETY: the caller owns the machine and no driver has bound
+                // this controller yet, as Linux's early PCI fixup runs.
+                match unsafe { usb::handoff::early(&mut function, handoff) } {
+                    Some(Ok(handed)) if handed.forced => devices.warnings.push((
+                        address,
+                        Warning::Message(
+                            "USB host firmware handoff timed out; ownership taken with its SMIs off",
+                        ),
+                    )),
+                    Some(Err(error)) => devices.platform_failures.push((
+                        alloc::format!("{address} {} handoff", kind.name()),
+                        PlatformError::Handoff(error),
+                    )),
+                    _ => {}
+                }
+            }
             let result = if virtio::matches(&function) {
                 virtio::VirtioBlk::new(&mut function, handoff, dma)
                     .map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
@@ -529,7 +570,7 @@ mod tests {
         );
         assert_eq!(
             unsupported([0x0c, 0x03, 0x20]),
-            Some("USB host controller other than xHCI")
+            Some("USB host controller other than xHCI (taken from firmware, not driven)")
         );
         assert_eq!(
             unsupported([0x08, 0x05, 0x02]),

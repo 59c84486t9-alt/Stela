@@ -11,6 +11,7 @@ pub mod cdc;
 pub mod ehci;
 pub mod ethernet;
 pub mod forwarding;
+pub mod handoff;
 pub mod hid;
 pub mod storage;
 pub mod typec;
