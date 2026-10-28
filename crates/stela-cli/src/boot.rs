@@ -287,6 +287,12 @@ fn mount(
             usb: UsbCables::default(),
             scanout: Some(Box::new(Discard)),
             firmware: &firmware,
+            build: manifest
+                .target
+                .as_ref()
+                .map(|target| stela_runtime::builds::find(&target.product_build))
+                .transpose()
+                .map_err(|error| error.to_string())?,
         },
         &mut |arguments| log.push(arguments.to_string().trim_end().to_owned()),
     )?;

@@ -167,6 +167,9 @@ pub struct Inputs<'f> {
     pub scanout: Option<Box<dyn Scanout>>,
     /// Board device firmware images by guest file name.
     pub firmware: &'f dyn Fn(&str) -> Option<&'f [u8]>,
+    /// The boot bundle's macOS build, whose firmware protocols the
+    /// coprocessor models speak; `None` without a bundle.
+    pub build: Option<&'static crate::builds::Build>,
 }
 
 /// Place `board`'s devices, writing `DEVICES` summaries to `log`, and return
@@ -221,6 +224,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         mut usb,
         scanout,
         firmware,
+        build,
     } = inputs;
     let place = |device: super::soc::Device| {
         (
@@ -456,6 +460,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             )?;
         }
         let scanout = scanout.ok_or("visible external DCP requires one actual scanout")?;
+        let build = build.ok_or("DCP requires the boot bundle's supported macOS build")?;
         let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
         devices.add_dcpext(
             range(dcp.wrapper),
@@ -480,6 +485,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
                 (None, None, None) => None,
                 _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
             },
+            build,
         )?;
         let regions: Vec<(&'static str, Range)> = dcp
             .regions

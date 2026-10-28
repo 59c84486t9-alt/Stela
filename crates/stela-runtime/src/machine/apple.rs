@@ -1267,6 +1267,7 @@ impl AppleDevices {
         (dart, stream): (DartId, usize),
         window: Option<u64>,
         surface: Option<(DartId, usize)>,
+        build: &crate::builds::Build,
     ) -> Result<(), String> {
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
@@ -1275,8 +1276,8 @@ impl AppleDevices {
         if let Some((dart, stream)) = surface {
             self.validate_native_dart("DCP surface", dart, stream)?;
         }
-        let mut coprocessor =
-            dcp::Coprocessor::for_external(scanout, window, identity).map_err(String::from)?;
+        let mut coprocessor = dcp::Coprocessor::for_external(scanout, window, identity, build)
+            .map_err(String::from)?;
         if quiesced {
             coprocessor = coprocessor.quiesced();
         }
@@ -5587,7 +5588,8 @@ mod tests {
                     Box::new(UnusedScreen),
                     (dart, input),
                     None,
-                    None
+                    None,
+                    crate::builds::DEFAULT
                 )
                 .unwrap_err()
                 .contains("DART")
@@ -5647,7 +5649,8 @@ mod tests {
                     Box::new(UnusedScreen),
                     (owner, 1),
                     None,
-                    Some((owner, 2))
+                    Some((owner, 2)),
+                    crate::builds::DEFAULT
                 )
                 .unwrap_err()
                 .contains("DCP surface")
@@ -5787,6 +5790,7 @@ mod tests {
             (dart, 5),
             Some(RAM),
             Some((dart, 5)),
+            crate::builds::DEFAULT,
         )
         .unwrap();
         connect_native_power(&mut d, SUPPLY, &[("/arm-io/dcpext", WRAPPER)], true);
@@ -5896,6 +5900,7 @@ mod tests {
                 (dart, 5),
                 Some(0x8_0000_0000),
                 None,
+                crate::builds::DEFAULT,
             )
             .unwrap();
         devices

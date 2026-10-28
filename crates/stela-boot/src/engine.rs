@@ -2214,6 +2214,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             },
             scanout,
             firmware: &firmware,
+            build: loaded_source.as_ref().map(|source| {
+                stela_runtime::builds::find(&source.selected().product_build)
+                    .unwrap_or_else(|error| output::fatal(&alloc::format!("{error}")))
+            }),
         },
         memory,
     ) {
