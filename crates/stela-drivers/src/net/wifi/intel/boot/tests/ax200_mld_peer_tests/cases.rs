@@ -1,12 +1,12 @@
 use super::*;
 
 #[test]
-fn mld_peer_requires_both_cfg_and_tlc_ack_reclaim_before_identity_and_flush_remove_before_parent() {
+fn mld_peer_identity_waits_for_config_and_rate_ack_reclamation() {
     exercise(&mld_image(1));
 }
 
 #[test]
-fn unsupported_mld_station_body_and_missing_rate_refuse_before_first_station_effect() {
+fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
     for version in [1, 3] {
         let bytes = mld_image(version);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -75,7 +75,7 @@ fn unsupported_mld_station_body_and_missing_rate_refuse_before_first_station_eff
 }
 
 #[test]
-fn mld_partial_cfg_tlc_flush_or_remove_missing_ack_retains_original_link_and_failed_stop_dma() {
+fn missing_mld_peer_ack_retains_binding_and_pending_dma() {
     for target in [1, 2, 3, 4] {
         let bytes = mld_image(2);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -131,7 +131,7 @@ fn mld_partial_cfg_tlc_flush_or_remove_missing_ack_retains_original_link_and_fai
 
 #[test]
 #[ignore = "requires unchanged pinned AX200 firmware"]
-fn actual_ax200_mld_station_default_v1_and_tlc4_require_selected_owner_ack_lifetime() {
+fn pinned_ax200_firmware_selects_mld_station_and_tlc_commands() {
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
