@@ -252,15 +252,25 @@ pub(super) fn ready(record: &Record, allowed: impl Fn(&Change) -> bool) -> Resul
     Ok(())
 }
 
+/// Image sources and write policy for a Stela update.
+pub(super) struct UpdateOptions<'a> {
+    pub(super) image_path: &'a Path,
+    pub(super) ipsw: Option<&'a Path>,
+    pub(super) dry_run: bool,
+}
+
 /// Replace `stela.efi` with `image_path`, preparing bundles of its schema
 /// and this `stela`'s revision from `ipsw` when the setup's are of another.
 pub(super) fn update_stela(
     environment: &Environment<'_>,
     mut record: Record,
-    image_path: &Path,
-    ipsw: Option<&Path>,
-    dry_run: bool,
+    options: UpdateOptions<'_>,
 ) -> Result<String> {
+    let UpdateOptions {
+        image_path,
+        ipsw,
+        dry_run,
+    } = options;
     let image = read_efi(environment, image_path)?;
     check_firmware_support(&record.esp, &image)?;
     let to = version_id(&image);
@@ -481,10 +491,12 @@ pub(super) fn update_os(
     let install = plan_install(
         environment,
         &record,
-        &build,
-        ipsw,
-        &restore_bundles(&record.install_machines()),
-        0,
+        super::create::InstallOptions {
+            build: &build,
+            ipsw,
+            bundles: &restore_bundles(&record.install_machines()),
+            additional_bytes: 0,
+        },
     )?;
     let mut text = String::new();
     writeln!(text, "macOS update to {product_version} ({build}):")?;

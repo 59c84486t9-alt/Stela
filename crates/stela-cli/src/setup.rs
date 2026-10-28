@@ -256,7 +256,15 @@ impl InstallMedium {
         let (_, build) = restore::payload::identity(&self.ipsw, &self.model)?;
         let bytes = fs::metadata(&self.ipsw)?.len();
         let piece_bytes = stela_runtime::payload::PIECE_BYTES;
-        medium::check_space(&host, &self.volume, &build, bytes, piece_bytes)?;
+        medium::check_space(
+            &host,
+            medium::SpaceOptions {
+                volume: &self.volume,
+                build: &build,
+                ipsw_bytes: bytes,
+                piece_bytes,
+            },
+        )?;
         let expected = medium::Expected::of(restore::receipt(&self.ipsw)?.as_ref());
         let inventory = restore::payload::inventory(
             &self.ipsw,
@@ -267,7 +275,13 @@ impl InstallMedium {
                 input: None,
             },
         )?;
-        let written = medium::write(&self.volume, &self.ipsw, inventory, &expected, piece_bytes)?;
+        let written = medium::write(medium::WriteOptions {
+            volume: &self.volume,
+            ipsw: &self.ipsw,
+            inventory,
+            expected: &expected,
+            piece_bytes,
+        })?;
         let directory = medium::directory(&self.volume, &build);
         println!(
             "Install medium {}: {} pieces kept, {} written; payload.json SHA-256 {}",
@@ -496,7 +510,15 @@ impl Request {
                     None => assets::resolve()?,
                 };
                 let ipsw = self.optional_image()?;
-                update::update_stela(environment, record, &image, ipsw.as_deref(), self.dry_run)
+                update::update_stela(
+                    environment,
+                    record,
+                    update::UpdateOptions {
+                        image_path: &image,
+                        ipsw: ipsw.as_deref(),
+                        dry_run: self.dry_run,
+                    },
+                )
             }
             Action::UpdateOs => {
                 check_installed_efi(environment, &record)?;
@@ -536,13 +558,13 @@ impl Request {
                     .host_firmware_cache
                     .clone()
                     .unwrap_or_else(|| download_dir().with_file_name("firmware"));
-                firmware::provision(
-                    &inventory,
-                    &record.esp.join(stela_loader::host_firmware::DIRECTORY),
-                    &cache,
-                    self.dry_run,
-                    &mount_image,
-                )
+                firmware::provision(firmware::ProvisionOptions {
+                    inventory: &inventory,
+                    destination: &record.esp.join(stela_loader::host_firmware::DIRECTORY),
+                    cache: &cache,
+                    dry_run: self.dry_run,
+                    mount_image: &mount_image,
+                })
             }
             Action::Create | Action::Status | Action::Uninstall => {
                 unreachable!("these run without the setup record")

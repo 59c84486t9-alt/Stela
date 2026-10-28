@@ -53,16 +53,24 @@ pub(super) fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Requested and recorded ECIDs with machine-state replacement conditions.
+pub(super) struct EcidOptions {
+    pub(super) given: Option<Ecid>,
+    pub(super) recorded: Option<Ecid>,
+    pub(super) sep_provisioned: bool,
+    pub(super) new_ecid: bool,
+}
+
 /// The ECID of a machine being set up: the one `given`, else the one
 /// `recorded`, else a fresh one, but never a new one for machine state that
 /// belongs to an earlier machine unless `new_ecid` says so.
-pub(super) fn machine_ecid(
-    given: Option<Ecid>,
-    recorded: Option<Ecid>,
-    sep_provisioned: bool,
-    new_ecid: bool,
-    notes: &mut Vec<String>,
-) -> Result<Ecid> {
+pub(super) fn machine_ecid(options: EcidOptions, notes: &mut Vec<String>) -> Result<Ecid> {
+    let EcidOptions {
+        given,
+        recorded,
+        sep_provisioned,
+        new_ecid,
+    } = options;
     match (given, recorded) {
         (Some(given), Some(recorded)) if given != recorded && !new_ecid => bail!(
             "this machine's ECID is {recorded}, not {given}; changing it orphans its LocalPolicy \
@@ -168,10 +176,12 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     );
     let mut notes = checked.notes.clone();
     let ecid = machine_ecid(
-        command.ecid,
-        None,
-        checked.sep_provisioned,
-        command.new_ecid,
+        EcidOptions {
+            given: command.ecid,
+            recorded: None,
+            sep_provisioned: checked.sep_provisioned,
+            new_ecid: command.new_ecid,
+        },
         &mut notes,
     )?;
     ensure!(
@@ -202,7 +212,16 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
             .into_iter()
             .filter(|&(kind, ecid)| next.restore_bundle(kind, ecid).is_none())
             .collect();
-    let install_plan = plan_install(environment, &next, &next.build, &ipsw, &restore, 0)?;
+    let install_plan = plan_install(
+        environment,
+        &next,
+        super::create::InstallOptions {
+            build: &next.build,
+            ipsw: &ipsw,
+            bundles: &restore,
+            additional_bytes: 0,
+        },
+    )?;
     let mut text = String::new();
     writeln!(text, "Add install \"{name}\" to {}:", record.esp.display())?;
     writeln!(text, "  ECID           {ecid}")?;
@@ -372,26 +391,91 @@ mod tests {
         let mut notes = Vec::new();
         let (a, b) = (Ecid(0xa), Ecid(0xb));
         assert_eq!(
-            machine_ecid(None, Some(a), true, false, &mut notes).unwrap(),
+            machine_ecid(
+                EcidOptions {
+                    given: None,
+                    recorded: Some(a),
+                    sep_provisioned: true,
+                    new_ecid: false
+                },
+                &mut notes
+            )
+            .unwrap(),
             a
         );
         assert_eq!(
-            machine_ecid(Some(a), Some(a), true, false, &mut notes).unwrap(),
+            machine_ecid(
+                EcidOptions {
+                    given: Some(a),
+                    recorded: Some(a),
+                    sep_provisioned: true,
+                    new_ecid: false
+                },
+                &mut notes
+            )
+            .unwrap(),
             a
         );
-        assert!(machine_ecid(Some(b), Some(a), false, false, &mut notes).is_err());
+        assert!(
+            machine_ecid(
+                EcidOptions {
+                    given: Some(b),
+                    recorded: Some(a),
+                    sep_provisioned: false,
+                    new_ecid: false
+                },
+                &mut notes
+            )
+            .is_err()
+        );
         assert_eq!(
-            machine_ecid(Some(b), Some(a), false, true, &mut notes).unwrap(),
+            machine_ecid(
+                EcidOptions {
+                    given: Some(b),
+                    recorded: Some(a),
+                    sep_provisioned: false,
+                    new_ecid: true
+                },
+                &mut notes
+            )
+            .unwrap(),
             b
         );
-        let error = machine_ecid(None, None, true, false, &mut notes).unwrap_err();
+        let error = machine_ecid(
+            EcidOptions {
+                given: None,
+                recorded: None,
+                sep_provisioned: true,
+                new_ecid: false,
+            },
+            &mut notes,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("--ecid"), "{error}");
         assert_eq!(
-            machine_ecid(Some(b), None, true, false, &mut notes).unwrap(),
+            machine_ecid(
+                EcidOptions {
+                    given: Some(b),
+                    recorded: None,
+                    sep_provisioned: true,
+                    new_ecid: false
+                },
+                &mut notes
+            )
+            .unwrap(),
             b
         );
         assert!(notes.is_empty());
-        machine_ecid(None, None, true, true, &mut notes).unwrap();
+        machine_ecid(
+            EcidOptions {
+                given: None,
+                recorded: None,
+                sep_provisioned: true,
+                new_ecid: true,
+            },
+            &mut notes,
+        )
+        .unwrap();
         assert!(notes[0].contains("orphaned"));
         assert!(check_name("macOS 2").is_ok());
         assert!(check_name(&"x".repeat(24)).is_ok());

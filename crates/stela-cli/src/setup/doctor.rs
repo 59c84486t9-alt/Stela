@@ -567,10 +567,12 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
             )?;
             let provisioned = state::sep(&area).unwrap_or(false);
             let ecid = machines::machine_ecid(
-                command.ecid,
-                None,
-                provisioned,
-                command.new_ecid,
+                machines::EcidOptions {
+                    given: command.ecid,
+                    recorded: None,
+                    sep_provisioned: provisioned,
+                    new_ecid: command.new_ecid,
+                },
                 &mut notes,
             )?;
             record.installs[index].ecid = Some(ecid);
@@ -627,7 +629,16 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     let install = match (&ipsw, restore.is_empty() && !damaged_medium) {
         (_, true) => None,
         (Some(ipsw), false) => {
-            let plan = plan_install(environment, &record, &record.build, ipsw, &restore, 0)?;
+            let plan = plan_install(
+                environment,
+                &record,
+                super::create::InstallOptions {
+                    build: &record.build,
+                    ipsw,
+                    bundles: &restore,
+                    additional_bytes: 0,
+                },
+            )?;
             describe_install(&record, &plan, &mut text)?;
             Some(plan)
         }

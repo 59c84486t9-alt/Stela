@@ -241,14 +241,22 @@ pub(super) fn needed_bytes(volume: &Path, build: &str, ipsw_bytes: u64, piece_by
     need
 }
 
+/// Volume and piece layout whose required capacity is checked.
+pub(super) struct SpaceOptions<'a> {
+    pub(super) volume: &'a Path,
+    pub(super) build: &'a str,
+    pub(super) ipsw_bytes: u64,
+    pub(super) piece_bytes: u64,
+}
+
 /// Refuse a volume without room for the medium, with the sizes.
-pub(super) fn check_space(
-    host: &dyn Host,
-    volume: &Path,
-    build: &str,
-    ipsw_bytes: u64,
-    piece_bytes: u64,
-) -> Result<u64> {
+pub(super) fn check_space(host: &dyn Host, options: SpaceOptions<'_>) -> Result<u64> {
+    let SpaceOptions {
+        volume,
+        build,
+        ipsw_bytes,
+        piece_bytes,
+    } = options;
     let need = needed_bytes(volume, build, ipsw_bytes, piece_bytes);
     let free = host.volume(volume)?.free_bytes;
     ensure!(
@@ -389,15 +397,25 @@ pub(super) struct Written {
     pub(super) manifest_sha256: String,
 }
 
+/// Source inventory and destination layout for one install medium.
+pub(super) struct WriteOptions<'a> {
+    pub(super) volume: &'a Path,
+    pub(super) ipsw: &'a Path,
+    pub(super) inventory: restore::payload::Inventory,
+    pub(super) expected: &'a Expected,
+    pub(super) piece_bytes: u64,
+}
+
 /// Write the medium for `ipsw` to `volume`, with `inventory`, its restore
 /// inventory, in `piece_bytes` pieces.
-pub(super) fn write(
-    volume: &Path,
-    ipsw: &Path,
-    inventory: restore::payload::Inventory,
-    expected: &Expected,
-    piece_bytes: u64,
-) -> Result<Written> {
+pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
+    let WriteOptions {
+        volume,
+        ipsw,
+        inventory,
+        expected,
+        piece_bytes,
+    } = options;
     let mut manifest = inventory.manifest;
     let build = manifest.product_build.clone();
     let directory = directory(volume, &build);
@@ -627,13 +645,13 @@ pub(super) mod tests {
         let volume = dir.path().join("STELA");
         fs::create_dir_all(&volume).unwrap();
         let bytes = fs::read(&ipsw).unwrap();
-        let first = write(
-            &volume,
-            &ipsw,
-            inventory(&ipsw),
-            &expected(&ipsw),
-            PIECE_BYTES,
-        )
+        let first = write(WriteOptions {
+            volume: &volume,
+            ipsw: &ipsw,
+            inventory: inventory(&ipsw),
+            expected: &expected(&ipsw),
+            piece_bytes: PIECE_BYTES,
+        })
         .unwrap();
         let count = piece_sizes(bytes.len() as u64, PIECE_BYTES).len();
         assert!(count > 1, "the synthetic IPSW takes several pieces");
@@ -684,13 +702,13 @@ pub(super) mod tests {
         let partial = directory.join(format!("{}.partial", piece_name(last)));
         fs::write(&partial, b"interrupted").unwrap();
         fs::write(directory.join(piece_name(count + 3)), b"stale").unwrap();
-        let again = write(
-            &volume,
-            &ipsw,
-            inventory(&ipsw),
-            &expected(&ipsw),
-            PIECE_BYTES,
-        )
+        let again = write(WriteOptions {
+            volume: &volume,
+            ipsw: &ipsw,
+            inventory: inventory(&ipsw),
+            expected: &expected(&ipsw),
+            piece_bytes: PIECE_BYTES,
+        })
         .unwrap();
         assert_eq!((again.kept, again.wrote), (count - 2, 2));
         assert_eq!(again.manifest_sha256, first.manifest_sha256);
@@ -709,9 +727,15 @@ pub(super) mod tests {
         let volume = dir.path().join("STELA");
         let mut wrong = expected(&ipsw);
         wrong.sha1 = Some("0".repeat(40));
-        let error = write(&volume, &ipsw, inventory(&ipsw), &wrong, PIECE_BYTES)
-            .unwrap_err()
-            .to_string();
+        let error = write(WriteOptions {
+            volume: &volume,
+            ipsw: &ipsw,
+            inventory: inventory(&ipsw),
+            expected: &wrong,
+            piece_bytes: PIECE_BYTES,
+        })
+        .unwrap_err()
+        .to_string();
         assert!(
             error.contains("differs from Apple's catalog digest"),
             "{error}"
@@ -720,9 +744,15 @@ pub(super) mod tests {
         assert!(!directory.join(MANIFEST_FILE).exists());
         let mut wrong = expected(&ipsw);
         wrong.sha256 = Some("0".repeat(64));
-        let error = write(&volume, &ipsw, inventory(&ipsw), &wrong, PIECE_BYTES)
-            .unwrap_err()
-            .to_string();
+        let error = write(WriteOptions {
+            volume: &volume,
+            ipsw: &ipsw,
+            inventory: inventory(&ipsw),
+            expected: &wrong,
+            piece_bytes: PIECE_BYTES,
+        })
+        .unwrap_err()
+        .to_string();
         assert!(
             error.contains("differs from its download receipt"),
             "{error}"

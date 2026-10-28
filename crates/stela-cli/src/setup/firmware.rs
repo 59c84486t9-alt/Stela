@@ -94,13 +94,23 @@ fn cached(client: &Client, directory: &Path, artifact: &Artifact) -> Result<Vec<
     read_cached(&path, artifact)
 }
 
-pub(super) fn provision(
-    inventory: &Path,
-    destination: &Path,
-    cache: &Path,
-    dry_run: bool,
-    mount_image: &[u8],
-) -> Result<String> {
+/// Firmware inputs, cache and destination for one provisioning request.
+pub(super) struct ProvisionOptions<'a> {
+    pub(super) inventory: &'a Path,
+    pub(super) destination: &'a Path,
+    pub(super) cache: &'a Path,
+    pub(super) dry_run: bool,
+    pub(super) mount_image: &'a [u8],
+}
+
+pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
+    let ProvisionOptions {
+        inventory,
+        destination,
+        cache,
+        dry_run,
+        mount_image,
+    } = options;
     let inventory = read_inventory(inventory)?;
     let plan = Plan::select(&inventory)?;
     host_firmware::MountLimits::from_image(mount_image)
@@ -202,13 +212,13 @@ mod tests {
         fs::write(&inventory, br#"{"schema":1,"complete":true,"requirements":[{"name":"rtl_nic/rtl8168d-1.fw","target":{"driver":"realtek","hardware":"10ec:8168","revision":"xid-281","board":null},"minimum_bytes":4}]}"#).unwrap();
         let cache = dir.path().join("cache");
         let destination = dir.path().join("destination");
-        let text = provision(
-            &inventory,
-            &destination,
-            &cache,
-            true,
-            &host_firmware::MOUNT_CAPABILITY,
-        )
+        let text = provision(ProvisionOptions {
+            inventory: &inventory,
+            destination: &destination,
+            cache: &cache,
+            dry_run: true,
+            mount_image: &host_firmware::MOUNT_CAPABILITY,
+        })
         .unwrap();
         assert!(text.contains("1492 bytes"));
         assert!(!cache.exists());
@@ -219,13 +229,13 @@ mod tests {
         )
         .unwrap();
         assert!(
-            provision(
-                &inventory,
-                &destination,
-                &cache,
-                true,
-                &host_firmware::MOUNT_CAPABILITY,
-            )
+            provision(ProvisionOptions {
+                inventory: &inventory,
+                destination: &destination,
+                cache: &cache,
+                dry_run: true,
+                mount_image: &host_firmware::MOUNT_CAPABILITY
+            })
             .is_err()
         );
     }
@@ -309,13 +319,13 @@ mod tests {
         .unwrap();
         let destination = output.join("firmware");
         let cache = output.join("cache");
-        let report = provision(
-            &inventory,
-            &destination,
-            &cache,
-            false,
-            &host_firmware::MOUNT_CAPABILITY,
-        )
+        let report = provision(ProvisionOptions {
+            inventory: &inventory,
+            destination: &destination,
+            cache: &cache,
+            dry_run: false,
+            mount_image: &host_firmware::MOUNT_CAPABILITY,
+        })
         .unwrap();
         fs::write(output.join("provisioning.txt"), report).unwrap();
         let manifest_bytes = fs::read(destination.join("manifest.json")).unwrap();
@@ -357,13 +367,13 @@ mod tests {
                 .inventory(),
             (8, 22876)
         );
-        let again = provision(
-            &inventory,
-            &destination,
-            &cache,
-            false,
-            &host_firmware::MOUNT_CAPABILITY,
-        )
+        let again = provision(ProvisionOptions {
+            inventory: &inventory,
+            destination: &destination,
+            cache: &cache,
+            dry_run: false,
+            mount_image: &host_firmware::MOUNT_CAPABILITY,
+        })
         .unwrap();
         assert!(again.contains("Published pinned firmware"));
         assert_eq!(

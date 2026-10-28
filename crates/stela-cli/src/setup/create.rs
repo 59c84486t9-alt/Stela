@@ -83,17 +83,28 @@ pub(super) fn restore_bundles(ecids: &[Option<Ecid>]) -> Vec<(Kind, Option<Ecid>
         .collect()
 }
 
+/// Restore image, selected machine bundles and additional volume bytes.
+pub(super) struct InstallOptions<'a> {
+    pub(super) build: &'a str,
+    pub(super) ipsw: &'a Path,
+    pub(super) bundles: &'a [(Kind, Option<Ecid>)],
+    pub(super) additional_bytes: u64,
+}
+
 /// Plan the install of `build` from `ipsw` for `record`: the restore
 /// bundles `bundles` names and the build's install medium; and check the
 /// data partition's space: `also` is what else setup writes to it.
 pub(super) fn plan_install(
     environment: &Environment<'_>,
     record: &Record,
-    build: &str,
-    ipsw: &Path,
-    bundles: &[(Kind, Option<Ecid>)],
-    also: u64,
+    options: InstallOptions<'_>,
 ) -> Result<InstallPlan> {
+    let InstallOptions {
+        build,
+        ipsw,
+        bundles,
+        additional_bytes: also,
+    } = options;
     let host = environment.host;
     let mut restore = Vec::new();
     for kind in bundle::RESTORE_KINDS {
@@ -306,13 +317,13 @@ pub(super) fn apply_install(
         ipsw.display(),
         inventory.manifest.product_build,
     );
-    let written = medium::write(
-        &plan.volume,
+    let written = medium::write(medium::WriteOptions {
+        volume: &plan.volume,
         ipsw,
         inventory,
-        &plan.expected,
-        environment.piece_bytes,
-    )?;
+        expected: &plan.expected,
+        piece_bytes: environment.piece_bytes,
+    })?;
     if let Some(medium) = record.media.iter_mut().find(|m| m.build == build) {
         medium.manifest_sha256 = written.manifest_sha256;
     }
@@ -416,10 +427,12 @@ pub(super) fn plan(
     };
     let mut notes = Vec::new();
     let ecid = machines::machine_ecid(
-        command.ecid,
-        None,
-        installed.sep_provisioned,
-        command.new_ecid,
+        machines::EcidOptions {
+            given: command.ecid,
+            recorded: None,
+            sep_provisioned: installed.sep_provisioned,
+            new_ecid: command.new_ecid,
+        },
         &mut notes,
     )?;
     let efi_path = match &command.efi {
@@ -488,7 +501,16 @@ pub(super) fn plan(
     };
     // The restore bundles are prepared above: the install plan adds the
     // install medium.
-    let install = plan_install(environment, &record, &record.build, &ipsw, &[], bundles)?;
+    let install = plan_install(
+        environment,
+        &record,
+        InstallOptions {
+            build: &record.build,
+            ipsw: &ipsw,
+            bundles: &[],
+            additional_bytes: bundles,
+        },
+    )?;
     // The translation store takes what the data partition has left after
     // everything above.
     let medium_bytes = install.medium.as_ref().map_or(0, |m| m.need);
