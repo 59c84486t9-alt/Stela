@@ -81,6 +81,7 @@ mod gpu;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod hosted_platform;
 mod links;
+mod oracles;
 mod pages;
 mod restore_dry_run;
 mod tools;
@@ -106,6 +107,8 @@ enum Task {
     /// Check the Markdown files' links and paths and the `cargo xtask` tasks
     /// the tree names.
     Links,
+    /// Run ignored oracle tests whose declared inputs are present and write a dated report.
+    Oracles(oracles::Oracles),
     /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
@@ -135,6 +138,7 @@ fn main() -> ExitCode {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Dist => dist::run().map(|()| ExitCode::SUCCESS),
         Task::Links => links::run().map(|()| ExitCode::SUCCESS),
+        Task::Oracles(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
