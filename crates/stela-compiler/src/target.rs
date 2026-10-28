@@ -11,6 +11,8 @@ const CPUID_OSXSAVE: u32 = 1 << 27;
 const XCR0_AVX_STATE: u64 = 0x6;
 /// XCR0 bits 5 to 7: the OS saves opmask, ZMM_Hi256 and Hi16_ZMM state.
 const XCR0_AVX512_STATE: u64 = 0xe0;
+/// XCR0 bit 19: the OS saves the extended GPRs R16..R31.
+const XCR0_APX_STATE: u64 = 1 << 19;
 
 /// Explicit host requirements bind generated code and persistent cache identity.
 /// SSE tiers are nested; every other capability is independent.
@@ -18,7 +20,7 @@ const XCR0_AVX512_STATE: u64 = 0xe0;
 pub struct TargetCpu {
     tier: SseTier,
     /// One bit per [`Feature`].
-    features: u32,
+    features: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,8 +42,20 @@ pub struct HostCpuid {
     pub leaf1_ecx: u32,
     /// Leaf 1 EDX.
     pub leaf1_edx: u32,
+    /// Leaf 1 EAX: family, model and stepping.
+    pub leaf1_eax: u32,
     /// Leaf 7 subleaf 0 EBX.
     pub leaf7_ebx: u32,
+    /// Leaf 7 subleaf 0 ECX.
+    pub leaf7_ecx: u32,
+    /// Leaf 7 subleaf 0 EDX.
+    pub leaf7_edx: u32,
+    /// Leaf 7 subleaf 1 EAX.
+    pub leaf7_1_eax: u32,
+    /// Leaf 7 subleaf 1 EDX.
+    pub leaf7_1_edx: u32,
+    /// Leaf 8000_0001H ECX.
+    pub extended1_ecx: u32,
     /// XCR0, or zero when the OS has not enabled XSAVE ([`CPUID_OSXSAVE`]).
     pub xcr0: u64,
     /// The OS enables AVX-512 state on a thread's first EVEX instruction, so
@@ -69,6 +83,21 @@ impl HostCpuid {
             }
         };
         let (leaf1, leaf7) = (leaf(1), leaf(7));
+        let leaf7_1 = if identity.eax >= 7 && leaf7.eax >= 1 {
+            __cpuid_count(7, 1)
+        } else {
+            CpuidResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            }
+        };
+        let extended1_ecx = if __cpuid(0x8000_0000).eax >= 0x8000_0001 {
+            __cpuid(0x8000_0001).ecx
+        } else {
+            0
+        };
         let xcr0 = if leaf1.ecx & CPUID_OSXSAVE != 0 {
             // SAFETY: CR4.OSXSAVE is set, so XGETBV with ECX = 0 is defined.
             unsafe { core::arch::x86_64::_xgetbv(0) }
@@ -79,7 +108,13 @@ impl HostCpuid {
             vendor: [identity.ebx, identity.edx, identity.ecx],
             leaf1_ecx: leaf1.ecx,
             leaf1_edx: leaf1.edx,
+            leaf1_eax: leaf1.eax,
             leaf7_ebx: leaf7.ebx,
+            leaf7_ecx: leaf7.ecx,
+            leaf7_edx: leaf7.edx,
+            leaf7_1_eax: leaf7_1.eax,
+            leaf7_1_edx: leaf7_1.edx,
+            extended1_ecx,
             xcr0,
             avx512_on_demand: false,
         }
@@ -91,6 +126,27 @@ impl HostCpuid {
     /// AVX hardware with OS-enabled XMM and YMM state.
     const fn avx(&self) -> bool {
         Self::bit(self.leaf1_ecx, 28) && self.xcr0 & XCR0_AVX_STATE == XCR0_AVX_STATE
+    }
+    /// The display family: the base family plus, for family 0FH, the
+    /// extended family (SDM Vol. 2A, CPUID leaf 1).
+    const fn family(&self) -> u32 {
+        let base = (self.leaf1_eax >> 8) & 0xf;
+        if base == 0xf {
+            base + ((self.leaf1_eax >> 20) & 0xff)
+        } else {
+            base
+        }
+    }
+    /// BMI2. Intel's Pentium and Celeron parts without AVX enumerate BMI1
+    /// and BMI2 but fault on their VEX encodings, so an Intel host needs AVX
+    /// for them (as Rust's `std_detect`).
+    const fn bmi2(&self) -> bool {
+        Self::bit(self.leaf7_ebx, 8)
+            && (!matches!(Vendor::from_cpuid(self.vendor), Vendor::Intel) || self.avx())
+    }
+    /// [`Self::avx512_state`] with AVX-512F.
+    const fn avx512f(&self) -> bool {
+        self.avx512_state() && Self::bit(self.leaf7_ebx, 16)
     }
     /// [`Self::avx`] with OS-enabled opmask and ZMM state.
     const fn avx512_state(&self) -> bool {
@@ -140,8 +196,8 @@ const fn declared(_: &HostCpuid) -> bool {
 /// Declares the optional features, in canonical identity order: each one's
 /// `TargetCpu` constant, `with_*` builder, `+name` in [`TargetCpu::id`] and
 /// CPUID probe. Each feature's bit is its position. The names and their order
-/// are target identities that persistent caches and users spell: append new
-/// features and keep existing names.
+/// spell the target identities that persistent caches and users key on; the
+/// compilation modes stay last.
 macro_rules! features {
     ($($(#[$doc:meta])* $constant:ident, $with:ident, $name:literal, $probe:expr;)*) => {
         /// One optional feature of a [`TargetCpu`], numbered by its bit.
@@ -203,6 +259,72 @@ features! {
     Avx512f, with_avx512f, "+avx512f", |cpu| {
         cpu.avx512_state() && HostCpuid::bit(cpu.leaf7_ebx, 16)
     };
+    /// LZCNT (ABM on AMD).
+    Lzcnt, with_lzcnt, "+lzcnt", |cpu| HostCpuid::bit(cpu.extended1_ecx, 5);
+    /// BMI2: SHLX/SHRX/SARX/RORX, BZHI, MULX and PDEP/PEXT.
+    Bmi2, with_bmi2, "+bmi2", HostCpuid::bmi2;
+    /// BMI2 whose PDEP and PEXT run in hardware: AMD's Zen 1 and Zen 2 (and
+    /// Hygon's Zen-derived cores) microcode them at tens of cycles.
+    FastPdep, with_fast_pdep, "+fast-pdep", |cpu| {
+        let amd = matches!(Vendor::from_cpuid(cpu.vendor), Vendor::Amd);
+        cpu.bmi2() && !(amd && cpu.family() < 0x19)
+    };
+    /// MOVBE: byte-swapping loads and stores.
+    Movbe, with_movbe, "+movbe", |cpu| HostCpuid::bit(cpu.leaf1_ecx, 22);
+    /// GFNI in its legacy SSE encoding (GF2P8AFFINEQB and relatives).
+    Gfni, with_gfni, "+gfni", |cpu| HostCpuid::bit(cpu.leaf7_ecx, 8);
+    /// AVX-512VL: EVEX forms on XMM and YMM registers.
+    Avx512vl, with_avx512vl, "+avx512vl", |cpu| cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ebx, 31);
+    /// AVX-512BW: byte and word elements and 64-bit opmasks.
+    Avx512bw, with_avx512bw, "+avx512bw", |cpu| cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ebx, 30);
+    /// AVX-512CD: VPLZCNTD/Q and VPCONFLICTD/Q.
+    Avx512cd, with_avx512cd, "+avx512cd", |cpu| cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ebx, 28);
+    /// AVX-512DQ: quadword multiplies and FP-integer conversions.
+    Avx512dq, with_avx512dq, "+avx512dq", |cpu| cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ebx, 17);
+    /// AVX-512 VPOPCNTD/Q.
+    Avx512vpopcntdq, with_avx512vpopcntdq, "+avx512vpopcntdq", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 14)
+    };
+    /// AVX-512 BITALG: VPOPCNTB/W and VPSHUFBITQMB.
+    Avx512bitalg, with_avx512bitalg, "+avx512bitalg", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 12)
+    };
+    /// AVX-512 VNNI: VPDPBUSD and VPDPWSSD.
+    Avx512vnni, with_avx512vnni, "+avx512vnni", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 11)
+    };
+    /// AVX-VNNI: the VEX forms of VPDPBUSD and VPDPWSSD.
+    AvxVnni, with_avx_vnni, "+avxvnni", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_1_eax, 4);
+    /// AVX-512 BF16: VDPBF16PS and VCVTNE2PS2BF16.
+    Avx512bf16, with_avx512bf16, "+avx512bf16", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_1_eax, 5)
+    };
+    /// AVX-NE-CONVERT: VEX BF16 and FP16 conversions.
+    AvxNeConvert, with_avx_ne_convert, "+avxneconvert", |cpu| {
+        cpu.avx() && HostCpuid::bit(cpu.leaf7_1_edx, 5)
+    };
+    /// AVX-512 FP16: half-precision arithmetic.
+    Avx512fp16, with_avx512fp16, "+avx512fp16", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_edx, 23)
+    };
+    /// VAES: VEX and EVEX AES rounds on wide vectors.
+    Vaes, with_vaes, "+vaes", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_ecx, 9);
+    /// VPCLMULQDQ: carry-less multiplies on wide vectors.
+    Vpclmulqdq, with_vpclmulqdq, "+vpclmulqdq", |cpu| {
+        cpu.avx() && HostCpuid::bit(cpu.leaf7_ecx, 10)
+    };
+    /// SHA512: VSHA512RNDS2, VSHA512MSG1 and VSHA512MSG2.
+    Sha512, with_sha512, "+sha512", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_1_eax, 0);
+    /// SM3: VSM3RNDS2, VSM3MSG1 and VSM3MSG2.
+    Sm3, with_sm3, "+sm3", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_1_eax, 1);
+    /// SM4: VSM4KEY4 and VSM4RNDS4.
+    Sm4, with_sm4, "+sm4", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_1_eax, 2);
+    /// APX: sixteen more general-purpose registers (R16..R31) and the
+    /// REX2 and extended EVEX encodings, with OS-enabled APX state (XCR0
+    /// bit 19).
+    Apx, with_apx, "+apx", |cpu| {
+        HostCpuid::bit(cpu.leaf7_1_edx, 21) && cpu.xcr0 & XCR0_APX_STATE != 0
+    };
     /// An unaligned load that lies within one cache line is single-copy
     /// atomic: an Intel processor since the P6 family ([`Vendor`]). A 16-byte
     /// granule never crosses a line, so an ordered load inside one is a
@@ -234,7 +356,7 @@ features! {
 
 /// Features that are compilation modes: part of the identity, not host
 /// requirements.
-const MODES: u32 = 1 << Feature::DataIndependentTiming as u32;
+const MODES: u64 = 1 << Feature::DataIndependentTiming as u32;
 
 // Keep the published tier names and their cache identities.
 #[allow(non_upper_case_globals)]
@@ -284,32 +406,43 @@ impl TargetCpu {
             && leaf1_ecx & CPUID_AVX_HARDWARE != 0
     }
 
-    /// x86-64-v2 (SSE4.2, POPCNT, CMPXCHG8B, CMPXCHG16B): the least host
-    /// Stela runs on. Every other feature is optional and has a fallback.
+    /// x86-64-v2 of the x86-64 psABI (SSE4.2, POPCNT, CMPXCHG8B,
+    /// CMPXCHG16B): the least host Stela runs on. Every other feature is
+    /// optional and has a fallback.
     pub const X86_64_V2: Self = Self::Sse42.with_popcnt().with_cx8().with_cx16();
-    /// SSE4.2 with every other feature the compiler uses that needs no
-    /// OS-enabled AVX state: the bare-metal boot's target on a current host.
-    pub const Sse42Complete: Self = Self::Sse42
-        .with_pclmulqdq()
-        .with_popcnt()
+    /// x86-64-v3: x86-64-v2 with AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT and
+    /// MOVBE. The AVX features' probes include OS-enabled XSAVE state.
+    pub const X86_64_V3: Self = Self::X86_64_V2
+        .with_fma()
+        .with_f16c()
         .with_bmi1()
-        .with_aes()
-        .with_sha()
-        .with_cx8()
-        .with_cx16()
-        .with_atomic_load16();
-    /// [`Self::Sse42Complete`] with FMA, F16C and AVX2.
-    pub const Avx2Complete: Self = Self::Sse42Complete.with_fma().with_f16c().with_avx2();
-    /// [`Self::Avx2Complete`] with AVX-512F.
-    pub const Avx512Complete: Self = Self::Avx2Complete.with_avx512f();
+        .with_avx2()
+        .with_lzcnt()
+        .with_bmi2()
+        .with_movbe();
+    /// x86-64-v4: x86-64-v3 with AVX-512F, BW, CD, DQ and VL.
+    pub const X86_64_V4: Self = Self::X86_64_V3
+        .with_avx512f()
+        .with_avx512vl()
+        .with_avx512bw()
+        .with_avx512cd()
+        .with_avx512dq();
     /// The host tiers whose data-independent-timing lowerings the DIT unit
     /// tests check (`x86_64::{integer_math, integer_unary, crc}`), largest
-    /// first.
+    /// first: each psABI level with PCLMULQDQ, AES, SHA and aligned 16-byte
+    /// atomic loads, and x86-64-v2 also with BMI1.
     pub const DATA_INDEPENDENT_TIMING_TIERS: [Self; 3] = [
-        Self::Avx512Complete,
-        Self::Avx2Complete,
-        Self::Sse42Complete,
+        Self::X86_64_V4.with_audited_extras(),
+        Self::X86_64_V3.with_audited_extras(),
+        Self::X86_64_V2.with_bmi1().with_audited_extras(),
     ];
+
+    const fn with_audited_extras(self) -> Self {
+        self.with_pclmulqdq()
+            .with_aes()
+            .with_sha()
+            .with_atomic_load16()
+    }
 
     const fn with_feature(self, feature: Feature) -> Self {
         Self {
@@ -530,18 +663,18 @@ mod tests {
     /// fixed pseudo-random sample of larger feature sets.
     fn profiles() -> impl Iterator<Item = TargetCpu> {
         let count = FEATURES.len() as u32;
-        let all = (1u32 << count) - 1;
+        let all = (1u64 << count) - 1;
         let mut sets = Vec::from([0, all]);
         for first in 0..count {
             for second in first..count {
-                sets.push(1 << first | 1 << second);
+                sets.push(1u64 << first | 1u64 << second);
             }
         }
-        let mut state = 0x9e37_79b9u32;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
         for _ in 0..512 {
             state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
+            state ^= state >> 7;
+            state ^= state << 17;
             sets.push(state & all);
         }
         TIERS.into_iter().flat_map(move |(tier, _, _)| {
@@ -579,7 +712,10 @@ mod tests {
         assert_eq!(
             every.id(),
             "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma+f16c+popcnt+bmi1+aes+sha\
-             +atomic-load16+cx8+cx16+avx2+avx512f+line-atomic+doit+dit"
+             +atomic-load16+cx8+cx16+avx2+avx512f+lzcnt+bmi2+fast-pdep+movbe+gfni\
+             +avx512vl+avx512bw+avx512cd+avx512dq+avx512vpopcntdq+avx512bitalg+avx512vnni\
+             +avxvnni+avx512bf16+avxneconvert+avx512fp16+vaes+vpclmulqdq+sha512+sm3+sm4\
+             +apx+line-atomic+doit+dit"
         );
     }
 
@@ -605,7 +741,7 @@ mod tests {
         fn parse(id: &str) -> Result<TargetCpu, serde::de::value::Error> {
             TargetCpu::deserialize(StrDeserializer::new(id))
         }
-        let target = TargetCpu::Avx2Complete.with_line_atomic();
+        let target = TargetCpu::X86_64_V3.with_line_atomic();
         assert_eq!(parse(&target.id()), Ok(target));
         assert!(parse("baseline+avx").is_err());
     }
@@ -815,29 +951,97 @@ mod tests {
             }
         }
         // The tiers nest, largest first.
-        let [avx512, avx2, sse42] = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS;
-        assert!(avx512 > avx2 && avx2 > sse42 && sse42 > TargetCpu::Sse42);
+        let [v4, v3, v2] = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS;
+        assert!(v4 > v3 && v3 > v2 && v2 > TargetCpu::X86_64_V2);
+        assert!(v4 > TargetCpu::X86_64_V4 && v3 > TargetCpu::X86_64_V3);
         assert_eq!(
-            TargetCpu::Avx2Complete
+            v3.with_avx512f()
                 .with_doit()
                 .data_independent_timing_target(),
-            Some(avx2.with_doit().with_data_independent_timing())
+            Some(v3.with_doit().with_data_independent_timing())
         );
-        assert_eq!(
-            TargetCpu::Avx2Complete.data_independent_timing_target(),
-            None
-        );
+        assert_eq!(v3.data_independent_timing_target(), None);
     }
 
-    /// CPUID values with every feature bit of leaves 1 and 7 set.
+    /// CPUID values of an Intel family 6 host with every feature bit set.
     const RICH: HostCpuid = HostCpuid {
         vendor: TargetCpu::INTEL_VENDOR,
+        leaf1_eax: 6 << 8,
         leaf1_ecx: u32::MAX,
         leaf1_edx: u32::MAX,
         leaf7_ebx: u32::MAX,
-        xcr0: XCR0_AVX_STATE | XCR0_AVX512_STATE,
+        leaf7_ecx: u32::MAX,
+        leaf7_edx: u32::MAX,
+        leaf7_1_eax: u32::MAX,
+        leaf7_1_edx: u32::MAX,
+        extended1_ecx: u32::MAX,
+        xcr0: XCR0_AVX_STATE | XCR0_AVX512_STATE | XCR0_APX_STATE,
         avx512_on_demand: false,
     };
+
+    #[test]
+    fn a_rich_host_has_every_feature_and_the_psabi_levels() {
+        let rich = TargetCpu::from_cpuid(&RICH);
+        assert!(rich.supports(TargetCpu::X86_64_V4));
+        for (feature, required) in host_features() {
+            let declared = matches!(feature, Feature::Doit);
+            assert_eq!(rich.supports(required), !declared, "{feature:?}");
+        }
+        assert!(TargetCpu::X86_64_V4 > TargetCpu::X86_64_V3);
+        assert!(TargetCpu::X86_64_V3 > TargetCpu::X86_64_V2);
+    }
+
+    #[test]
+    fn evex_features_need_zmm_state_and_apx_its_own() {
+        let no_zmm = TargetCpu::from_cpuid(&HostCpuid {
+            xcr0: XCR0_AVX_STATE | XCR0_APX_STATE,
+            ..RICH
+        });
+        for evex in [
+            TargetCpu::Avx512vl,
+            TargetCpu::Avx512bw,
+            TargetCpu::Avx512cd,
+            TargetCpu::Avx512dq,
+            TargetCpu::Avx512vpopcntdq,
+            TargetCpu::Avx512bitalg,
+            TargetCpu::Avx512vnni,
+            TargetCpu::Avx512bf16,
+            TargetCpu::Avx512fp16,
+        ] {
+            assert!(!no_zmm.supports(evex), "{evex:?}");
+        }
+        assert!(no_zmm.supports(TargetCpu::AvxVnni.with_vaes().with_vpclmulqdq()));
+        let no_apx = HostCpuid {
+            xcr0: XCR0_AVX_STATE | XCR0_AVX512_STATE,
+            ..RICH
+        };
+        assert!(!TargetCpu::from_cpuid(&no_apx).supports(TargetCpu::Apx));
+    }
+
+    #[test]
+    fn pdep_is_slow_on_amd_before_family_19h() {
+        for (vendor, family, fast) in [
+            (TargetCpu::INTEL_VENDOR, 6, true),
+            (TargetCpu::AMD_VENDOR, 0x17, false),
+            (TargetCpu::HYGON_VENDOR, 0x18, false),
+            (TargetCpu::AMD_VENDOR, 0x19, true),
+            (TargetCpu::AMD_VENDOR, 0x1a, true),
+        ] {
+            // Families from 10H carry the extended family over base 0FH.
+            let leaf1_eax = if family > 0xf {
+                0xf << 8 | (family - 0xf) << 20
+            } else {
+                family << 8
+            };
+            let target = TargetCpu::from_cpuid(&HostCpuid {
+                vendor,
+                leaf1_eax,
+                ..RICH
+            });
+            assert!(target.supports(TargetCpu::Bmi2));
+            assert_eq!(target.supports(TargetCpu::FastPdep), fast, "{family:#x}");
+        }
+    }
 
     #[test]
     fn sse_tiers_nest_from_cpuid() {
@@ -858,7 +1062,9 @@ mod tests {
     #[test]
     fn vex_features_need_os_enabled_avx_state() {
         let rich = TargetCpu::from_cpuid(&RICH);
-        assert!(rich.supports(TargetCpu::Avx512Complete.with_line_atomic()));
+        for tier in TargetCpu::DATA_INDEPENDENT_TIMING_TIERS {
+            assert!(rich.supports(tier.with_line_atomic()));
+        }
         assert!(!rich.doit() && !rich.data_independent_timing());
         let no_ymm = TargetCpu::from_cpuid(&HostCpuid { xcr0: 0x3, ..RICH });
         for vex in [
@@ -876,12 +1082,14 @@ mod tests {
             xcr0: 0x3,
             ..RICH
         });
-        assert!(amd_no_ymm.supports(TargetCpu::Sse42Complete));
+        let [_, _, v2] = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS;
+        assert!(amd_no_ymm.supports(v2.with_movbe().with_lzcnt().with_gfni()));
+        assert!(!amd_no_ymm.supports(TargetCpu::X86_64_V3));
         let no_zmm = TargetCpu::from_cpuid(&HostCpuid {
             xcr0: XCR0_AVX_STATE,
             ..RICH
         });
-        assert!(no_zmm.supports(TargetCpu::Avx2Complete));
+        assert!(no_zmm.supports(TargetCpu::X86_64_V3));
         assert!(!no_zmm.supports(TargetCpu::Avx512f));
         let on_demand = TargetCpu::from_cpuid(&HostCpuid {
             xcr0: XCR0_AVX_STATE,
@@ -892,14 +1100,17 @@ mod tests {
     }
 
     #[test]
-    fn intel_bmi1_needs_avx() {
+    fn intel_bmi_needs_avx() {
         let no_avx = HostCpuid { xcr0: 0, ..RICH };
-        assert!(!TargetCpu::from_cpuid(&no_avx).supports(TargetCpu::Bmi1));
+        let bmi = TargetCpu::Bmi1.with_bmi2();
+        for required in [TargetCpu::Bmi1, TargetCpu::Bmi2, TargetCpu::FastPdep] {
+            assert!(!TargetCpu::from_cpuid(&no_avx).supports(required));
+        }
         let amd = HostCpuid {
             vendor: TargetCpu::AMD_VENDOR,
             ..no_avx
         };
-        assert!(TargetCpu::from_cpuid(&amd).supports(TargetCpu::Bmi1));
+        assert!(TargetCpu::from_cpuid(&amd).supports(bmi));
     }
 
     #[test]
@@ -944,8 +1155,68 @@ mod tests {
                     TargetCpu::LineAtomic,
                     Vendor::from_cpuid(cpuid.vendor) == Vendor::Intel,
                 ),
+                (TargetCpu::Lzcnt, std::is_x86_feature_detected!("lzcnt")),
+                (TargetCpu::Bmi2, std::is_x86_feature_detected!("bmi2")),
+                (TargetCpu::Movbe, std::is_x86_feature_detected!("movbe")),
+                (TargetCpu::Gfni, std::is_x86_feature_detected!("gfni")),
+                (TargetCpu::Vaes, std::is_x86_feature_detected!("vaes")),
+                (
+                    TargetCpu::Vpclmulqdq,
+                    std::is_x86_feature_detected!("vpclmulqdq"),
+                ),
+                (TargetCpu::AvxVnni, std::is_x86_feature_detected!("avxvnni")),
+                (
+                    TargetCpu::AvxNeConvert,
+                    std::is_x86_feature_detected!("avxneconvert"),
+                ),
+                (TargetCpu::Sha512, std::is_x86_feature_detected!("sha512")),
+                (TargetCpu::Sm3, std::is_x86_feature_detected!("sm3")),
+                (TargetCpu::Sm4, std::is_x86_feature_detected!("sm4")),
             ] {
                 assert_eq!(target.supports(required), detected, "{required:?}");
+            }
+            // xnu enables ZMM state on demand, which std_detect does not see.
+            if !darwin_on_demand_avx512f() {
+                for (required, detected) in [
+                    (
+                        TargetCpu::Avx512vl,
+                        std::is_x86_feature_detected!("avx512vl"),
+                    ),
+                    (
+                        TargetCpu::Avx512bw,
+                        std::is_x86_feature_detected!("avx512bw"),
+                    ),
+                    (
+                        TargetCpu::Avx512cd,
+                        std::is_x86_feature_detected!("avx512cd"),
+                    ),
+                    (
+                        TargetCpu::Avx512dq,
+                        std::is_x86_feature_detected!("avx512dq"),
+                    ),
+                    (
+                        TargetCpu::Avx512vpopcntdq,
+                        std::is_x86_feature_detected!("avx512vpopcntdq"),
+                    ),
+                    (
+                        TargetCpu::Avx512bitalg,
+                        std::is_x86_feature_detected!("avx512bitalg"),
+                    ),
+                    (
+                        TargetCpu::Avx512vnni,
+                        std::is_x86_feature_detected!("avx512vnni"),
+                    ),
+                    (
+                        TargetCpu::Avx512bf16,
+                        std::is_x86_feature_detected!("avx512bf16"),
+                    ),
+                    (
+                        TargetCpu::Avx512fp16,
+                        std::is_x86_feature_detected!("avx512fp16"),
+                    ),
+                ] {
+                    assert_eq!(target.supports(required), detected, "{required:?}");
+                }
             }
             assert!(target.supported());
         }

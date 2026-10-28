@@ -8106,7 +8106,7 @@ mod tests {
         // With one, PSTATE.DIT selects a block of its own, of plain accesses
         // (LOCK has no listed timing), which load first and so report WnR as
         // Arm requires: such a host runs one PE at a time.
-        machine.target = TargetCpu::Sse42Complete.with_doit();
+        machine.target = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS[2].with_doit();
         machine.cpu.pstate.dit = true;
         let Ok(Fetched::Block(timed)) = machine.fetch_block(BASE, false) else {
             panic!("timed block")
