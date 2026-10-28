@@ -335,6 +335,37 @@ fn unclaimed_actions_go_back_to_their_sender_like_ieee80211_rx_h_action_return()
 }
 
 #[test]
+fn frames_ask_for_hardware_amsdu_like_wcid_amsdu() {
+    let (mut link, model, join, bss, _) = setup_link();
+    associate(&mut link, &model, join, bss);
+    secure(&mut link);
+    drop(drain_notices(&mut link));
+    let context = link.state().client.client.modern_context().unwrap().clone();
+    assert_ne!(context.negotiated().max_tx_amsdu, 0);
+    // Each frame takes a new TID, as a TID's next frames wait for its
+    // block-ack session.
+    let hw_amsdu = |link: &mut TestLink, dscp: u8| {
+        let mut frame = eth(0x800);
+        frame.truncate(14);
+        frame.extend_from_slice(&[0x45, dscp << 2]);
+        frame.resize(14 + 20, 0);
+        link.transmit(&frame).unwrap();
+        let word = u32::from_le_bytes(next_txwi(&model)[12..16].try_into().unwrap());
+        finish_tx(&model);
+        link.service().unwrap();
+        word & (1 << 5) != 0
+    };
+    // The quarter-second peer frame asks for TX status, which never
+    // aggregates; the next frame does.
+    assert!(!hw_amsdu(&mut link, 0));
+    assert!(hw_amsdu(&mut link, 8));
+    // mt7925_mcu_uni_tx_ba for an agreement without A-MSDU.
+    link.state_mut().client.client.state_mut().amsdu_off = true;
+    assert!(!hw_amsdu(&mut link, 32));
+    stop(&mut link, &model);
+}
+
+#[test]
 fn rssi_monitor_without_firmware_rssi_events_watches_beacons_like_mac80211() {
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);

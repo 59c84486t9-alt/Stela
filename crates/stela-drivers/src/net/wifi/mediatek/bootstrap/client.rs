@@ -211,6 +211,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     ba_actions: VecDeque<station::ba::Action>,
     /// OS action registrations and the replies mac80211 would send.
     action: action::State,
+    /// A TX block-ack agreement without A-MSDU cleared `wcid->amsdu`.
+    amsdu_off: bool,
     ba_management: Option<Arc<management::Session>>,
     ba_management_pn: Option<PacketNumber>,
     roc_token: u8,
@@ -308,6 +310,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 transmit_ba: core::array::from_fn(|_| None),
                 ba_actions: VecDeque::new(),
                 action: action::State::default(),
+                amsdu_off: false,
                 ba_management: None,
                 ba_management_pn: None,
                 roc_token: 0,
@@ -1216,6 +1219,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.transmit_ba = core::array::from_fn(|_| None);
         s.ba_actions.clear();
         s.action.replies.clear();
+        s.amsdu_off = false;
         s.ba_management = None;
         s.ba_management_pn = None;
         s.profile = None;
@@ -1526,6 +1530,20 @@ pub(crate) mod tests {
     // payload via the same requester's registry. It retains no CPU-address alias.
     pub(crate) fn finish_tx(model: &Model) -> Vec<Vec<u8>> {
         finish_tx_on(model, 36)
+    }
+    /// The TXWI of the oldest descriptor the device has not fetched yet.
+    pub(crate) fn next_txwi(model: &Model) -> Vec<u8> {
+        let queue = model.queues[&0xd4300].lock().unwrap();
+        assert_ne!(queue.index, queue.head);
+        let memory = model.memory.lock().unwrap();
+        let desc = unsafe {
+            core::slice::from_raw_parts(
+                pointer(&memory, queue.base + u64::from(queue.index) * 16, 16),
+                16,
+            )
+        };
+        let address = u32::from_le_bytes(desc[..4].try_into().unwrap()) as u64;
+        unsafe { core::slice::from_raw_parts(pointer(&memory, address, 64), 64) }.to_vec()
     }
     pub(crate) fn finish_tx_on(model: &Model, channel: u8) -> Vec<Vec<u8>> {
         let mut out = Vec::new();

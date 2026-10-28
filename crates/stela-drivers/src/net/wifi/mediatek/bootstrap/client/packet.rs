@@ -101,7 +101,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             },
             protect: key.is_some(),
             no_ack: h.receiver.is_multicast(),
-            hardware_amsdu: false,
+            // wcid->amsdu: the peer record's STA_REC_HW_AMSDU set it
+            // (mt7925_mcu_sta_amsdu_tlv), and mt7925_mcu_uni_tx_ba clears it.
+            hardware_amsdu: !s.amsdu_off
+                && s.modern
+                    .as_ref()
+                    .is_some_and(|m| m.context().negotiated().max_tx_amsdu != 0),
             fixed_rate: if s.modern.is_some() && !management && !minimum_rate {
                 None
             } else {

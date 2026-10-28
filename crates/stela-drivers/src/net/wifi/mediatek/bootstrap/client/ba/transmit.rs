@@ -342,6 +342,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .validate_tx_block_ack_program(ticket, &session, agreement)
                     .map_err(Error::BlockAck)?;
                 let agreement = agreement.unwrap();
+                // mt7925_mcu_uni_tx_ba: an agreement without A-MSDU turns
+                // hardware A-MSDU off for the station.
+                if !agreement.amsdu_in_ampdu() {
+                    s.amsdu_off = true;
+                }
                 // Generic TX_OPERATIONAL's source params.ssn is0; the request
                 // software snapshot is a separate management input, not this.
                 let body = wire::modern::ba_request(
