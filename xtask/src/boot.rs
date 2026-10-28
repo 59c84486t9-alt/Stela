@@ -2,8 +2,10 @@
 //!
 //! The run puts the application on a FAT volume as the removable-media boot
 //! file, beside `\EFI\stela\stela.cfg` (the mount options) and
-//! `\EFI\stela\source.bin` (the unchanged ARM bytes), and boots it with QEMU's
-//! edk2 firmware, as a PC's firmware boots the USB `stela setup` prepares.
+//! `\EFI\stela\source.bin` (the system-mode guest image, when the run has
+//! one), and boots it with QEMU's edk2 firmware, as a PC's firmware boots the
+//! USB `stela setup` prepares. By default the guest is Stela's system-mode
+//! test kernel.
 //!
 //! `--payload` runs install mode on a synthetic IPSW (no Apple bytes) split
 //! onto the boot volume: `verify` checks every Erase member,
@@ -57,10 +59,6 @@ const MAX_LONG_TIMEOUT_SECONDS: f64 = 24.0 * 3600.0;
 const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
 const FIRMWARE_VARIABLES: &str = "edk2-i386-vars.fd";
 
-/// The default ARM image: `movz x0, #0x1234; movz x1, #0x5678;
-/// add x2, x0, x1; b .`, run at EL1 with the MMU off up to the branch.
-const SMOKE: [u32; 4] = [0xd282_4680, 0xd28a_cf01, 0x8b01_0002, 0x1400_0000];
-const SMOKE_OPTIONS: &str = "--entry 0x100000 --stop 0x10000c --budget 16";
 /// The blank target disk of a staging run, sparse on the host.
 const TARGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Its PCI slot, which fixes its UEFI device path.
@@ -115,8 +113,6 @@ const KERNEL_BANNER: &str = "GUEST| STELA TEST KERNEL: MMU ON, UART MMIO";
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Scenario {
-    /// Four instructions on the bounded MMU-off EL1 diagnostic.
-    Smoke,
     /// The system-mode engine running Stela's own test kernel: a VHE host at
     /// EL2, 16 KiB granule, high-half kernel, EL2 abort and SVC, TTBR0
     /// switches, timer FIQ, two EL0 tasks.
@@ -142,11 +138,12 @@ pub struct Run {
     /// Authorized local host-device firmware package, loaded before boot services end.
     #[arg(long, conflicts_with = "usb_image")]
     host_firmware: Option<PathBuf>,
-    /// Original ARM bytes; defaults to the scenario's image.
+    /// A system-mode guest image, run with the test kernel's options unless
+    /// `--append` gives others; defaults to the scenario's image.
     #[arg(long)]
     module: Option<PathBuf>,
     /// The built-in image and options to run when no module is given.
-    #[arg(long, value_enum, default_value_t = Scenario::Smoke)]
+    #[arg(long, value_enum, default_value_t = Scenario::SystemKernel)]
     scenario: Scenario,
     /// QEMU CPU model/properties. System mode defaults to an explicit Intel
     /// model: QEMU's AMD models lack the required AMD routing-control MSRs.
@@ -661,6 +658,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .as_deref()
         .map(preboot::prepare)
         .transpose()?;
+    let host_check = arguments.native_dma_check
+        || arguments.native_dma_isolation_check
+        || arguments.native_work_check
+        || arguments.native_irq_work_check;
+    // Install mode, the storage check and the host checks run no guest.
+    let guestless = host_check || arguments.payload.is_some() || arguments.storage_check;
     let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
         _ if arguments.native_mmio_check => (kernel()?, native_mmio_options()),
         _ if arguments.native_clock_check => (kernel()?, native_clock_options()),
@@ -669,21 +672,17 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             Vec::new(),
             arguments.append.unwrap_or_else(|| BUNDLE_OPTIONS.into()),
         ),
-        (Some(module), _) => (fs::read(module)?, arguments.append.unwrap_or_default()),
-        (None, Scenario::Smoke) => (
-            SMOKE.iter().flat_map(|word| word.to_le_bytes()).collect(),
-            arguments.append.unwrap_or_else(|| SMOKE_OPTIONS.into()),
+        _ if guestless => (Vec::new(), arguments.append.unwrap_or_default()),
+        (Some(module), _) => (
+            fs::read(module)?,
+            arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
         ),
         (None, Scenario::SystemKernel) => (
             kernel()?,
             arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
         ),
     };
-    if arguments.native_dma_check
-        || arguments.native_dma_isolation_check
-        || arguments.native_work_check
-        || arguments.native_irq_work_check
-    {
+    if host_check {
         ensure!(
             matches!(arguments.display, Display::None),
             "native fixture uses a headless single-BSP topology"
@@ -821,7 +820,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         fs::create_dir_all(volume.join("EFI/BOOT"))?;
         fs::create_dir_all(volume.join("EFI/stela"))?;
         fs::copy(&image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
-        fs::write(&source, bytes)?;
+        if !bytes.is_empty() {
+            fs::write(&source, bytes)?;
+        }
         fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
         if let Some(directory) = &arguments.host_firmware {
             let package = stela_loader::host_firmware::Package::read_for_mount(
@@ -1240,13 +1241,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         )
     } else if arguments.bundle.is_none()
         && arguments.module.is_none()
-        && !arguments.native_dma_check
-        && !arguments.native_dma_isolation_check
-        && !arguments.native_work_check
-        && !arguments.native_irq_work_check
+        && !guestless
         && !arguments.native_mmio_check
         && !arguments.native_clock_check
-        && arguments.scenario == Scenario::SystemKernel
     {
         let checked = verify_kernel(&serial_text);
         if checked.is_err() && code == IDLE_EXIT {

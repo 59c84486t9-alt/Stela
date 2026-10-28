@@ -56,8 +56,6 @@ pub(crate) struct Operand {
     /// Whether the source instruction was unprivileged. At EL0 this is the same
     /// as an ordinary access.
     unprivileged: bool,
-    /// An MMU-off staged scalar load or store, never Normal-WB.
-    m0_scalar: bool,
 }
 fn data_register(register: Register) -> bool {
     matches!(register, Register::X(index) if index < 31) || register == Register::Zero
@@ -94,11 +92,8 @@ impl Operand {
     ) -> Option<Self> {
         if matches!(operation, Operation::Literal(_)) {
             // Literal PC arithmetic has no register base, SP check, writeback
-            // or tag check. Keep the legacy staged read64 specialization closed.
-            if profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
-                return None;
-            }
-            return Self::literal_load(operation, profile, false);
+            // or tag check.
+            return Self::literal_load(operation, profile);
         }
         let operand = match *operation {
             Operation::Memory {
@@ -116,7 +111,6 @@ impl Operand {
                 base,
                 address: Address::Immediate { displacement, mode },
                 unprivileged: false,
-                m0_scalar: false,
             },
             Operation::MemoryRegisterOffset(operand) => Self {
                 profile,
@@ -130,7 +124,6 @@ impl Operand {
                     shift: operand.shift,
                 },
                 unprivileged: false,
-                m0_scalar: false,
             },
             Operation::MemoryUnprivileged(operand) => Self {
                 profile,
@@ -143,7 +136,6 @@ impl Operand {
                     mode: AddressMode::Offset,
                 },
                 unprivileged: true,
-                m0_scalar: false,
             },
             _ => return None,
         };
@@ -164,25 +156,6 @@ impl Operand {
             if !valid {
                 return None;
             }
-        }
-        if profile == CheckedMemoryProfile::M0DeviceRamRead64Staged
-            && (operand.bytes != DOUBLEWORD_BYTES
-                || operand.transfer
-                    != (MemoryTransfer::Load {
-                        signed: false,
-                        width: Width::X64,
-                    })
-                || !matches!(operand.base, Register::X(index) if index < 31)
-                || !matches!(
-                    operand.address,
-                    Address::Immediate {
-                        mode: AddressMode::Offset,
-                        ..
-                    }
-                )
-                || operand.unprivileged)
-        {
-            return None;
         }
         if operand.unprivileged && operand.writeback() {
             return None;
@@ -205,27 +178,9 @@ impl Operand {
         }
         Some(operand)
     }
-    /// The checked scalar adapter with the staged M0 capability. Literal
-    /// operands are already lifted by the decoder.
-    pub(crate) fn from_m0_scalar_load(operation: &Operation) -> Option<Self> {
-        if matches!(operation, Operation::Literal(_)) {
-            return Self::literal_load(operation, CheckedMemoryProfile::SpAlignmentDisabled, true);
-        }
-        let mut operand =
-            Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
-        if operand.unprivileged || !matches!(operand.transfer, MemoryTransfer::Load { .. }) {
-            return None;
-        }
-        operand.m0_scalar = true;
-        Some(operand)
-    }
-    /// The one typed integer literal adapter for checked and staged profiles.
-    /// Exact source address/width/extension were lifted by the shared decoder.
-    fn literal_load(
-        operation: &Operation,
-        profile: CheckedMemoryProfile,
-        m0_scalar: bool,
-    ) -> Option<Self> {
+    /// The one typed integer literal adapter for checked profiles. Exact
+    /// source address/width/extension were lifted by the shared decoder.
+    fn literal_load(operation: &Operation, profile: CheckedMemoryProfile) -> Option<Self> {
         let Operation::Literal(operand) = *operation else {
             return None;
         };
@@ -252,18 +207,19 @@ impl Operand {
                 address: operand.address,
             },
             unprivileged: false,
-            m0_scalar,
         })
     }
-    /// The scalar store operand; unprivileged and literal forms are excluded.
-    pub(crate) fn from_m0_scalar_store(operation: &Operation) -> Option<Self> {
-        let mut operand =
-            Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
-        if operand.unprivileged || operand.transfer != MemoryTransfer::Store {
-            return None;
-        }
-        operand.m0_scalar = true;
-        Some(operand)
+    /// An ordinary or literal integer load, without a checked profile's
+    /// SP-alignment specialization.
+    pub(crate) fn scalar_load(operation: &Operation) -> Option<Self> {
+        let operand = Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
+        (!operand.unprivileged && matches!(operand.transfer, MemoryTransfer::Load { .. }))
+            .then_some(operand)
+    }
+    /// An ordinary integer store; unprivileged and literal forms are excluded.
+    pub(crate) fn scalar_store(operation: &Operation) -> Option<Self> {
+        let operand = Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
+        (!operand.unprivileged && operand.transfer == MemoryTransfer::Store).then_some(operand)
     }
     pub(crate) fn bytes(self) -> u8 {
         self.bytes
@@ -296,42 +252,6 @@ impl Operand {
 }
 
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
-    if operand.m0_scalar {
-        let write = operand.transfer == MemoryTransfer::Store;
-        return MemoryRequirements {
-            required_address_checks: Default::default(),
-            required_pointer_arithmetic: None,
-            required_flags: if write { flags::WRITE } else { 0 }
-                | if operand.tag_checked() {
-                    flags::TAG_CHECKED
-                } else {
-                    0
-                },
-            required_host_caps: 0,
-            required_profile: if write {
-                profile_requirements::M0_DEVICE_RAM_SCALAR_STORE
-            } else {
-                profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD
-            },
-            // The EL1 runtime checks SP against SCTLR.SA before address
-            // arithmetic.
-            required_sp_alignment: SpAlignmentRequirement::Any,
-            ..MemoryRequirements::default()
-        };
-    }
-    if operand.profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
-        // The runtime enforces the 8-byte alignment before the Device access;
-        // no wider snapshot, tag plane or 16-byte atomicity is required.
-        return MemoryRequirements {
-            required_address_checks: Default::default(),
-            required_pointer_arithmetic: None,
-            required_flags: flags::TAG_CHECKED,
-            required_host_caps: 0,
-            required_profile: profile_requirements::M0_DEVICE_RAM_READ64,
-            required_sp_alignment: SpAlignmentRequirement::Any,
-            ..MemoryRequirements::default()
-        };
-    }
     let write = matches!(operand.transfer, MemoryTransfer::Store);
     let tag_checked = operand.tag_checked();
     MemoryRequirements {
@@ -539,26 +459,11 @@ mod tests {
                             );
                             assert!(!operand.tag_checked());
                             assert!(!operand.writeback());
-                            assert!(!operand.m0_scalar);
                             let required = requirements(&operand);
                             assert_eq!(required.required_flags, 0);
                             assert_eq!(required.required_sp_alignment, SpAlignmentRequirement::Any);
                             assert_eq!(required.required_host_caps, host_caps::ATOMIC_LOAD16);
-                            let staged =
-                                Operand::from_m0_scalar_load(&instruction.operation).unwrap();
-                            assert!(staged.m0_scalar);
-                            assert_ne!(
-                                requirements(&staged).required_profile,
-                                required.required_profile
-                            );
                         }
-                        assert!(
-                            Operand::from_operation(
-                                &instruction.operation,
-                                CheckedMemoryProfile::M0DeviceRamRead64Staged
-                            )
-                            .is_none()
-                        );
                     }
                 }
             }

@@ -335,14 +335,6 @@ impl Decoded {
         instruction: Instruction,
         profile: crate::block::CheckedMemoryProfile,
     ) -> Result<Self, CompileError> {
-        if profile == crate::block::CheckedMemoryProfile::M0DeviceRamRead64Staged
-            && !matches!(&instruction.operation, Operation::Memory { .. })
-        {
-            return Err(CompileError(format!(
-                "operation outside staged M0 ordinary read64 profile at {:#x}",
-                instruction.pc.0
-            )));
-        }
         if matches!(instruction.operation, Operation::Prefetch(_)) {
             // The ignored hint has no consumer for its address/descriptor.
             // AddressAdd/PointerAddCheckAtEL only change that dead temporary;
@@ -627,13 +619,6 @@ mod checked_register_tests {
             let instruction = Decoder.lift(pc, word).unwrap();
             let admitted = Decoded::checked_ordinary(instruction.clone(), checked).unwrap();
             assert_eq!(admitted.memory_requirements(), Default::default());
-            assert!(
-                Decoded::checked_ordinary(
-                    instruction,
-                    CheckedMemoryProfile::M0DeviceRamRead64Staged
-                )
-                .is_err()
-            );
         }
         let literal =
             Decoded::checked_ordinary(Decoder.lift(pc, 0xd800_0000).unwrap(), checked).unwrap();

@@ -58,7 +58,6 @@ pub mod sio_dma;
 pub mod smc;
 pub mod spi;
 pub mod spmi;
-pub mod timer;
 pub mod typec;
 pub mod uart;
 pub mod wake;

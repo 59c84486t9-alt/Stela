@@ -53,8 +53,7 @@ pub use platform::net;
 pub use platform::pc;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 pub mod freestanding {
-    pub use crate::execution::boot_frames::FrameError as BootStorageError;
-    pub use crate::platform::boot::{BootArena, CpuObservation, MountError, install, verify};
+    pub use crate::platform::boot::BootArena;
 }
 /// Destination-local stable CPU declaration ownership for native system Hosts.
 pub use platform::cpu::system::{NativeCpuError, NativeCpuLease, NativeCpuOwner};

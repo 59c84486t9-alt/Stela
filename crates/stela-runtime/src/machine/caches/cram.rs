@@ -274,13 +274,13 @@ mod tests {
     use crate::memory::{
         backing::{AccessKind, AccessPermissions, MemoryBacking, MemoryView},
         domain::{MappingAttributes, MemoryDomain, MemorySystem},
-        source_ram::{
-            OwnedRamExtent, PhysicalRamRange, SourceRamDeclaration, SourceRamPermissions,
-            SourceRamSystemConfig, materialize_source_ram,
-        },
     };
     use alloc::{sync::Arc, vec};
+    use std::alloc::{Layout, alloc, dealloc};
+    use std::ptr::NonNull;
     use stela_compiler::TargetCpu;
+
+    const PAGE_BYTES: usize = 4096;
 
     const RIGHTS: AccessPermissions = AccessPermissions {
         readable: true,
@@ -312,44 +312,34 @@ mod tests {
         tagged: false,
         shareable: true,
     };
+
+    /// Heap RAM behind a test backing.
+    struct Storage {
+        pointer: NonNull<u8>,
+        layout: Layout,
+    }
+    // SAFETY: storage only owns raw allocation; byte access uses native helpers.
+    unsafe impl Send for Storage {}
+    // SAFETY: storage lends no Rust references and accesses use one writer domain.
+    unsafe impl Sync for Storage {}
+    impl Drop for Storage {
+        fn drop(&mut self) {
+            // SAFETY: this owner keeps its allocation and layout.
+            unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+        }
+    }
     impl Owned {
         fn new(geometry: Geometry, units: u8) -> Self {
-            let ram = materialize_source_ram(
-                SourceRamDeclaration {
-                    address_space: 8,
-                    target: TargetCpu::Baseline,
-                    declared_capacity: vec![PhysicalRamRange {
-                        source_pa: geometry.base(),
-                        bytes: geometry.capacity(),
-                    }],
-                    initialized: vec![OwnedRamExtent {
-                        source_pa: geometry.base(),
-                        bytes: vec![0xa5; geometry.capacity() as usize],
-                        permissions: SourceRamPermissions {
-                            readable: true,
-                            writable: true,
-                            executable: false,
-                        },
-                    }],
-                },
-                SourceRamSystemConfig {
-                    reservation_granule_bytes: 16,
-                    reservation_stripe_count: 16,
-                },
-            )
-            .unwrap();
-            let original = ram.test_view(geometry.base()).unwrap();
-            let backing = original.backing().clone();
-            drop(ram);
+            let bytes = geometry.capacity() as usize;
+            let layout = Layout::from_size_align(bytes, PAGE_BYTES).unwrap();
+            // SAFETY: nonempty valid layout retained by Storage for deallocation.
+            let pointer = NonNull::new(unsafe { alloc(layout) }).unwrap();
+            // SAFETY: the allocation is `bytes` long and nothing else refers to it.
+            unsafe { pointer.as_ptr().write_bytes(0xa5, bytes) };
+            let storage = Arc::new(Storage { pointer, layout });
+            // SAFETY: Storage pins raw coherent RAM with no aliasing Rust references.
+            let backing = unsafe { MemoryBacking::new(pointer, bytes, RIGHTS, storage) }.unwrap();
             let system = MemorySystem::new(16, 16).unwrap();
-            let original_domain = MemoryDomain::new(
-                system.clone(),
-                vec![(original.clone(), ATTRIBUTES)],
-                TargetCpu::Baseline,
-            )
-            .unwrap();
-            original_domain.retire(&original).unwrap();
-            drop(original_domain);
             let view = (units != 0).then(|| {
                 MemoryView::new(
                     backing.clone(),

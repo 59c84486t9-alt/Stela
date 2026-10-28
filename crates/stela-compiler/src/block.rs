@@ -6,8 +6,6 @@
 //! runtime helper when software PAuth is enabled.
 
 mod analysis;
-pub mod el1_m0;
-pub mod el1_platform;
 pub mod loop_budget;
 pub mod memory;
 pub mod pauth_lr;
@@ -15,6 +13,7 @@ pub mod pauth_memory;
 mod pointer_authentication;
 pub mod profile;
 pub mod scalable;
+pub mod scalar;
 pub mod system;
 mod thread;
 
@@ -70,16 +69,6 @@ pub const SYSTEM_REGISTER_BLOCK_ABI: &str =
 /// PEs run concurrently: atomics are locked and barriers fence.
 pub const SYSTEM_MODE_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-system-mode-v2";
-pub const EL1_PLATFORM_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v2";
-
-/// Blocks of exactly one B (immediate) at EL1.
-pub const EL1_DIRECT_BRANCH_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v2-block-exit-el1-direct-branch-v1";
-/// Context ABI for EL1 integer blocks with the MMU off. Literal reads go
-/// through a staged RAM callback.
-pub const EL1_M0_INTEGER_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v3-context-block-exit-el1-m0-integer-v2";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,9 +77,6 @@ pub enum BlockProfile {
     Ordinary,
     /// Direct RAM, with non-faulting self-loops kept resident.
     OrdinaryResidentV1,
-    El1DirectBranchV1,
-    El1M0IntegerV1,
-    El1PlatformV1,
     CheckedMemory(CheckedMemoryProfile),
     /// Checked memory plus the existing serialized PAC/clock/thread helpers.
     /// The immutable ABI keeps every cache entry distinct from direct RAM.
@@ -114,9 +100,6 @@ impl BlockProfile {
         match self {
             Self::Ordinary => BLOCK_ABI,
             Self::OrdinaryResidentV1 => loop_budget::RESIDENT_BLOCK_ABI,
-            Self::El1DirectBranchV1 => EL1_DIRECT_BRANCH_BLOCK_ABI,
-            Self::El1M0IntegerV1 => EL1_M0_INTEGER_BLOCK_ABI,
-            Self::El1PlatformV1 => EL1_PLATFORM_BLOCK_ABI,
             Self::CheckedMemory(profile) => profile.abi(),
             Self::CheckedMemoryPauthClockThread(profile) => profile.process_helpers_abi(),
             Self::SystemV1 => SYSTEM_BLOCK_ABI,
@@ -157,7 +140,6 @@ impl BlockProfile {
             self,
             Self::SystemV1
                 | Self::SystemRegistersV1
-                | Self::El1PlatformV1
                 | Self::SystemModeV1
                 | Self::SystemModeSharedV1(_)
         )
@@ -166,10 +148,7 @@ impl BlockProfile {
     pub const fn supports_system_registers(self) -> bool {
         matches!(
             self,
-            Self::SystemRegistersV1
-                | Self::El1PlatformV1
-                | Self::SystemModeV1
-                | Self::SystemModeSharedV1(_)
+            Self::SystemRegistersV1 | Self::SystemModeV1 | Self::SystemModeSharedV1(_)
         )
     }
 
@@ -505,8 +484,6 @@ pub fn analyze_and_plan(
 pub struct CompilationPlan {
     parsed: ParsedBlock,
     checked: Option<memory::CheckedPlan>,
-    el1_m0: Option<el1_m0::Plan>,
-    el1_platform: Option<el1_platform::Plan>,
     target: crate::TargetCpu,
     profile: BlockProfile,
     resident: Option<crate::x86_64::block::ResidentLoopPlan>,
@@ -560,12 +537,6 @@ impl CompilationPlan {
                 )
             })
             .transpose()?;
-        let el1_m0 = (profile == BlockProfile::El1M0IntegerV1)
-            .then(|| el1_m0::Plan::new(&parsed))
-            .transpose()?;
-        let el1_platform = (profile == BlockProfile::El1PlatformV1)
-            .then(|| el1_platform::Plan::new(&parsed))
-            .transpose()?;
         let resident = if profile.supports_resident_loops() {
             crate::x86_64::block::ResidentLoopPlan::new(
                 &parsed.instructions,
@@ -578,8 +549,6 @@ impl CompilationPlan {
         Ok(Self {
             parsed,
             checked,
-            el1_m0,
-            el1_platform,
             target,
             profile,
             resident,
@@ -681,12 +650,6 @@ impl CompilationPlan {
         self.parsed.source_bytes
     }
     pub fn memory_requirements(&self) -> Option<crate::context::memory::MemoryRequirements> {
-        if let Some(plan) = &self.el1_platform {
-            return plan.requirements();
-        }
-        if let Some(plan) = &self.el1_m0 {
-            return plan.requirements();
-        }
         self.checked.as_ref().map(|plan| {
             let mut requirements = plan.requirements();
             use crate::context::memory::{host_caps, profile_requirements};
@@ -701,13 +664,6 @@ impl CompilationPlan {
             }
             requirements
         })
-    }
-    /// Typed source intent for this profile; other profiles return None.
-    pub fn el1_m0_intent(&self) -> Option<el1_m0::Intent> {
-        self.el1_m0.as_ref().map(el1_m0::Plan::intent)
-    }
-    pub fn el1_platform_intent(&self) -> Option<el1_platform::Intent> {
-        self.el1_platform.as_ref().map(el1_platform::Plan::intent)
     }
     pub fn compile(self) -> Result<CompiledBlock, CompileError> {
         self.compile_impl(None)
@@ -725,11 +681,7 @@ impl CompilationPlan {
         self,
         profile: Option<&mut profile::CompileProfile>,
     ) -> Result<CompiledBlock, CompileError> {
-        let native = if let Some(plan) = self.el1_platform {
-            plan.emit(self.target)?
-        } else if let Some(plan) = self.el1_m0 {
-            plan.emit(self.target)?
-        } else if let Some(checked) = self.checked {
+        let native = if let Some(checked) = self.checked {
             checked.emit(
                 self.parsed.terminal.as_ref(),
                 self.parsed.next_pc,
@@ -843,15 +795,6 @@ mod tests {
             assert_eq!(native.x86_64_code, expected.x86_64_code);
             assert_eq!(native.source_map, expected.source_map);
         }
-        assert!(
-            CompilationPlan::new(
-                &0xf940_0000u32.to_le_bytes(),
-                GuestAddress(0x4000),
-                BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::M0DeviceRamRead64Staged),
-                TargetCpu::Baseline
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -1021,96 +964,6 @@ mod tests {
                 &[],
                 BASE,
                 BlockProfile::Ordinary,
-                crate::TargetCpu::Baseline
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn el1_direct_branch_profile_is_exact_no_memory_and_source_derived() {
-        let profile = BlockProfile::El1DirectBranchV1;
-        assert_ne!(profile.abi(), BlockProfile::Ordinary.abi());
-        assert_ne!(profile.abi(), BlockProfile::SystemV1.abi());
-        assert!(profile.checked_memory().is_none());
-        assert!(!profile.supports_system());
-        for (word, target) in [
-            (0x1400_0000_u32, 0x1000),
-            (0x1400_0002, 0x1008),
-            (0x17ff_ffff, 0x0ffc),
-        ] {
-            let source = word.to_le_bytes();
-            let analysis = analyze_with_profile(&source, GuestAddress(0x1000), profile).unwrap();
-            assert_eq!(analysis.source_bytes, source.len());
-            assert_eq!(analysis.terminator_pc, Some(GuestAddress(0x1000)));
-            assert_eq!(
-                analysis.static_successors,
-                vec![StaticSuccessor {
-                    kind: SuccessorKind::Direct,
-                    target: GuestAddress(target)
-                }]
-            );
-            assert!(
-                analysis.dynamic_edge.is_none()
-                    && analysis.trap.is_none()
-                    && analysis.system_instruction.is_none()
-            );
-            let plan = CompilationPlan::new(
-                &source,
-                GuestAddress(0x1000),
-                profile,
-                crate::TargetCpu::Baseline,
-            )
-            .unwrap();
-            assert_eq!(plan.source_bytes(), source.len());
-            assert!(plan.memory_requirements().is_none());
-            let emitted = plan.compile().unwrap();
-            assert_eq!(emitted.source_bytes, source.len());
-            assert_eq!(emitted.native.source_map, vec![(GuestAddress(0x1000), 0)]);
-        }
-        for word in [
-            0xd503_201f_u32,
-            0x9400_0000,
-            0xd61f_0000,
-            0xd65f_03c0,
-            0x5400_0000,
-            0xf940_0000,
-            0xd400_0001,
-        ] {
-            assert!(
-                CompilationPlan::new(
-                    &word.to_le_bytes(),
-                    GuestAddress(0x1000),
-                    profile,
-                    crate::TargetCpu::Baseline
-                )
-                .is_err()
-            );
-        }
-        for source in [
-            vec![],
-            vec![0],
-            vec![0; 3],
-            [0x1400_0000_u32, 0x1400_0000]
-                .into_iter()
-                .flat_map(u32::to_le_bytes)
-                .collect(),
-        ] {
-            assert!(
-                CompilationPlan::new(
-                    &source,
-                    GuestAddress(0x1000),
-                    profile,
-                    crate::TargetCpu::Baseline
-                )
-                .is_err()
-            );
-        }
-        assert!(
-            CompilationPlan::new(
-                &0x1400_0000_u32.to_le_bytes(),
-                GuestAddress(0x1001),
-                profile,
                 crate::TargetCpu::Baseline
             )
             .is_err()

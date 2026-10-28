@@ -732,19 +732,6 @@ mod tests {
             );
             assert!(instruction.matches_source(pc, word));
             assert!(!instruction.is_el1_context_operation());
-            let analysis = super::super::analyze_with_profile(
-                &word.to_le_bytes(),
-                pc,
-                super::super::BlockProfile::El1PlatformV1,
-            )
-            .unwrap();
-            assert_eq!(
-                analysis.static_successors,
-                alloc::vec![super::super::StaticSuccessor {
-                    kind: super::super::SuccessorKind::Fallthrough,
-                    target: instruction.next_pc,
-                }]
-            );
         }
     }
 

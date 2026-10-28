@@ -445,7 +445,7 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         machine::system::Register,
-        memory::{ReservedSystemRamRange, source_ram::system::fixture as ram_fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture as ram_fixture},
     };
     use core::{cell::UnsafeCell, ptr::NonNull};
     const BASE: u64 = 0x10000;

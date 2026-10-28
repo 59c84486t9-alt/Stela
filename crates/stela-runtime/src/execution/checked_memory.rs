@@ -141,12 +141,10 @@ impl CheckedMemoryBlock {
                 .lift(GuestAddress(entry.0 + (index * 4) as u64), word)
                 .map_err(|error| anyhow::anyhow!("source outside checked baseline: {error:?}"))?;
             ensure!(
-                crate::system::fixed_execution::baseline_register_operation(
-                    word,
-                    &instruction.operation
-                ) || matches!(
-                    instruction.operation,
-                    Operation::Exclusive(_)
+                baseline_register_operation(word, &instruction.operation)
+                    || matches!(
+                        instruction.operation,
+                        Operation::Exclusive(_)
                         // The checked emitter chooses the architecturally
                         // permitted ignored hint, with no guest memory access.
                         | Operation::Prefetch(_)
@@ -161,7 +159,7 @@ impl CheckedMemoryBlock {
                         | Operation::MemoryUnprivileged(_)
                         | Operation::Memory { .. }
                         | Operation::MemoryPair { .. }
-                ),
+                    ),
                 "instruction requires a separate guest CPU authority"
             );
         }
@@ -724,7 +722,7 @@ mod tests {
     #[test]
     fn checked_low128_structure_entry_preserves_ordered_fault_prefix_and_writeback() {
         use crate::system::{
-            fp_access::{self, NoSme, StreamingState},
+            fp_access::{self, NoSme},
             scalable_controls::fp::FpControlOwner,
         };
         let domain = domain();
@@ -767,7 +765,7 @@ mod tests {
                     &ids,
                     &fp,
                     &worker.system,
-                    StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+                    NoSme::from_snapshot(&ids).unwrap(),
                     &mut registers,
                     pc,
                     |mut access| {
@@ -818,7 +816,7 @@ mod tests {
     #[test]
     fn checked_low128_literal_entry_requires_actual_context_and_preserves_full_fault_state() {
         use crate::system::{
-            fp_access::{self, NoSme, StreamingState},
+            fp_access::{self, NoSme},
             scalable_controls::fp::FpControlOwner,
         };
         use stela_compiler::aarch64::literal;
@@ -866,7 +864,7 @@ mod tests {
                         &ids,
                         &fp,
                         &worker.system,
-                        StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+                        NoSme::from_snapshot(&ids).unwrap(),
                         &mut registers,
                         pc,
                         |mut access| {
@@ -920,7 +918,7 @@ mod tests {
             &ids,
             &fp,
             &other_system,
-            StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+            NoSme::from_snapshot(&ids).unwrap(),
             &mut registers,
             pc,
             |mut access| {
@@ -949,7 +947,7 @@ mod tests {
                 &ids,
                 &disabled,
                 &worker.system,
-                StreamingState::Absent(NoSme::from_snapshot(&ids).unwrap()),
+                NoSme::from_snapshot(&ids).unwrap(),
                 &mut registers,
                 pc,
                 |_| panic!("disabled FP must trap before checked/native entry")
@@ -2113,4 +2111,42 @@ mod tests {
         );
         now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
     }
+}
+
+const NOP_WORD: u32 = 0xd503_201f;
+const CONDITIONAL_BRANCH_MASK: u32 = 0xff00_0000;
+const CONDITIONAL_BRANCH_CLASS: u32 = 0x5400_0000;
+const CONSISTENT_BRANCH_HINT: u32 = 1 << 4;
+
+fn baseline_register_operation(word: u32, operation: &Operation) -> bool {
+    // The shared decoder turns some constrained memory forms into NOPs and
+    // erases BC's HBC origin. This profile supports neither, so the word
+    // itself is checked.
+    match operation {
+        Operation::Nop => return word == NOP_WORD,
+        Operation::BranchCondition { .. } => {
+            return word & CONDITIONAL_BRANCH_MASK == CONDITIONAL_BRANCH_CLASS
+                && word & CONSISTENT_BRANCH_HINT == 0;
+        }
+        _ => {}
+    }
+    matches!(
+        operation,
+        Operation::Bitfield(_)
+            | Operation::PcRelative(_)
+            | Operation::ConditionalSelect(_)
+            | Operation::ConditionalCompare(_)
+            | Operation::IntegerMath(_)
+            | Operation::AddSubRegister { .. }
+            | Operation::AddSubCarry { .. }
+            | Operation::AddSubExtended { .. }
+            | Operation::LogicalRegister { .. }
+            | Operation::LogicalImmediate { .. }
+            | Operation::Branch { .. }
+            | Operation::BranchZero { .. }
+            | Operation::BranchBit { .. }
+            | Operation::MoveWide { .. }
+            | Operation::AddSub { .. }
+            | Operation::Return
+    )
 }

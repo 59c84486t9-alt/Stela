@@ -277,7 +277,7 @@ pub(in crate::machine::apple) mod tests {
     use super::super::tests::{configuration, descriptor, ram_at};
     use super::*;
     use crate::{
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture},
         platform::apple::{
             amcc::{Layout, LockGroup},
             interrupt::InterruptLatch,

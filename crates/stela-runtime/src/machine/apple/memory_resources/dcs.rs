@@ -129,7 +129,7 @@ mod tests {
     const REFRESH: u64 = 0x41c;
     const DRAIN: u64 = 0xa40;
     use crate::{
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, system_ram::fixture},
         platform::apple::interrupt::InterruptLatch,
     };
     use core::{cell::UnsafeCell, ptr::NonNull};

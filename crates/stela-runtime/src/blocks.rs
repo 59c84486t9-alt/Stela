@@ -5,14 +5,14 @@
 //! native blocks before returning.
 
 mod aot;
+#[cfg(feature = "std")]
 mod checked_memory;
 mod discovery;
 mod outcome;
-mod publication;
+#[cfg(feature = "std")]
 pub(crate) mod retirement;
 pub(crate) mod scalable;
 pub(crate) mod services;
-mod translation;
 mod validate;
 
 pub use discovery::{
@@ -21,25 +21,6 @@ pub use discovery::{
 pub use outcome::{
     ClockEvent, PointerAuthenticationEvent, RunOutcome, StopReason, ThreadRegisterEvent,
     ThreadState,
-};
-pub use publication::CodePublicationScope;
-pub use retirement::checked::software_el1::{
-    HostedRamService, HostedRamServiceAttempt, InitializedRamRegion, OwnedRamExtent,
-    PhysicalRamRange, SoftwareEl1Config, SoftwareEl1Declaration, SoftwareEl1InitialRam,
-    SoftwareEl1Machine, SoftwareEl1Profile, SoftwareEl1Report, SoftwareEl1Request,
-    SoftwareEl1Security, SourceRamDeclaration, SourceRamPermissions, ZeroedRamExtent,
-};
-pub use retirement::checked::software_privileged::{
-    DeclaredDebugExtendedHaltSyndrome, DeclaredDebugExternalControls, DeclaredDebugInitialization,
-    DeclaredHigherElInitialization, DeclaredPrivilegedCode, DeclaredPrivilegedConfig,
-    DeclaredPrivilegedReceipt, DeclaredPrivilegedReport, DeclaredPrivilegedRequest,
-    DeclaredPrivilegedScalable, TrapSmcWithoutEl3, run_declared_privileged,
-};
-pub(crate) use translation::{
-    ControlCodeScope, InstalledEl1SourceScope, InstalledM0SourceScope, InstalledWalkedSource,
-};
-pub(in crate::blocks) use translation::{
-    InstalledEl1Owner, InstalledEl1Sources, InstalledM0Owner, InstalledM0Sources,
 };
 
 use crate::{amx, clock, execution::platform, floating, memory, pauth, system, thread};
@@ -77,7 +58,6 @@ const REGISTER_COUNT: u8 = ZERO_REGISTER_INDEX + 1;
 #[derive(Debug)]
 struct CodeRegion {
     source: Box<[u8]>,
-    physical_binding: Option<translation::PhysicalCodeBinding>,
     end: u64,
     generation: u64,
 }
@@ -91,6 +71,7 @@ struct LoadedBlock {
     prepared: crate::artifact::LoadedArtifact,
     mapping: platform::Mapping,
     /// Checked-retirement plan facts, derived on first checked dispatch.
+    #[cfg(feature = "std")]
     checked: core::cell::OnceCell<retirement::checked::CheckedFacts>,
 }
 
@@ -98,8 +79,6 @@ struct LoadedBlock {
 /// No function pointer, mutable code slice or executable mapping escapes.
 #[derive(Debug)]
 pub struct BlockRuntime {
-    /// Identifies this runtime's source and native-code cache.
-    identity: alloc::sync::Arc<()>,
     address_space: u64,
     profile: BlockProfile,
     target: stela_compiler::TargetCpu,
@@ -201,7 +180,6 @@ impl BlockRuntime {
             base.0,
             CodeRegion {
                 source: source.into_boxed_slice(),
-                physical_binding: None,
                 end,
                 generation,
             },
@@ -530,13 +508,6 @@ impl BlockRuntime {
         block_budget: usize,
         services: RuntimeServices<'_>,
     ) -> Result<RunOutcome> {
-        ensure!(
-            !matches!(
-                self.profile,
-                BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
-            ),
-            "EL1 direct branch requires its original canonical retained owner"
-        );
         let RuntimeServices {
             pointer_authentication: mut pauth_execution,
             clock: mut clock_context,
@@ -793,9 +764,7 @@ impl BlockRuntime {
                 let dispatcher = system_dispatcher
                     .as_deref_mut()
                     .context("System exit lacks validated dispatcher")?;
-                let mut code = CodePublicationScope::new(&*self, &boundary);
-                match dispatcher.complete_with_code_scope(boundary, &mut state.registers, &mut code)
-                {
+                match dispatcher.complete(boundary, &mut state.registers) {
                     Ok(next) => state.pc = next,
                     Err(failure) => {
                         outcome.reason = StopReason::SystemFailure {

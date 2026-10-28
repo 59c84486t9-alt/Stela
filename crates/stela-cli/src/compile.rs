@@ -68,11 +68,8 @@ pub(crate) struct CompileBlock {
     system_boundaries: bool,
     /// Compile for the system-mode engine: guest VAs, EL1/EL2 code and an exit
     /// at every System instruction. No CPU or memory owner is supplied.
-    #[arg(long, conflicts_with_all = ["system_boundaries", "el1_platform", "software_pauth", "software_clock", "thread_registers", "guest_profile", "checked_memory_sa0_off", "checked_process_sa0_off"])]
-    system_mode: bool,
-    /// Prepare the typed EL1 platform ABI; no CPU, memory or service owner is supplied.
     #[arg(long, conflicts_with_all = ["system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile", "checked_memory_sa0_off", "checked_process_sa0_off"])]
-    el1_platform: bool,
+    system_mode: bool,
     /// Prepare checked GPR memory with SA0 disabled; no CPU/native entry is supplied.
     #[arg(long, conflicts_with_all = ["system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile"])]
     checked_memory_sa0_off: bool,
@@ -172,8 +169,6 @@ impl CompileBlock {
     fn profiles(&self) -> Result<(BlockProfile, Option<ExtendedBlockProfile>)> {
         let services = if self.system_mode {
             BlockProfile::SystemModeV1
-        } else if self.el1_platform {
-            BlockProfile::El1PlatformV1
         } else if self.checked_process_sa0_off {
             BlockProfile::CheckedMemoryPauthClockThread(checked_process(self.checked_pointer_mode)?)
         } else if self.checked_memory_sa0_off {
@@ -214,7 +209,6 @@ impl CompileBlock {
             cpu_target,
             guest_base,
             fpmr_enabled,
-            el1_platform,
             checked_memory_sa0_off,
             checked_process_sa0_off,
             ..
@@ -222,8 +216,7 @@ impl CompileBlock {
         let window = &source[..source
             .len()
             .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
-        let preparation_plan = if checked_memory_sa0_off || checked_process_sa0_off || el1_platform
-        {
+        let preparation_plan = if checked_memory_sa0_off || checked_process_sa0_off {
             Some(stela_compiler::block::CompilationPlan::new(
                 window,
                 stela_compiler::GuestAddress(guest_base),
@@ -260,7 +253,7 @@ impl CompileBlock {
             "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
             "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
             "verified":false});
-        if el1_platform || preparation_requirements.is_some() {
+        if preparation_requirements.is_some() {
             manifest["memory_requirements"] = serde_json::to_value(preparation_requirements)?;
         }
         if let Some(context_profile) = context_profile {
@@ -822,42 +815,6 @@ mod tests {
             assert!(
                 Cli::try_parse_from(["stela", "run-blocks", "code", "--system-boundaries"])
                     .is_err()
-            );
-        }
-
-        #[test]
-        fn el1_platform_preparation_is_explicit_and_has_no_execution_resources() {
-            let parse = |extra: &[&str]| {
-                let mut args = vec![
-                    "stela",
-                    "compile-block",
-                    "code",
-                    "--output-dir",
-                    "out",
-                    "--el1-platform",
-                ];
-                args.extend_from_slice(extra);
-                Cli::try_parse_from(args)
-            };
-            assert!(matches!(
-                parse(&[]).unwrap().command,
-                Command::CompileBlock(crate::compile::CompileBlock {
-                    el1_platform: true,
-                    ..
-                })
-            ));
-            for flag in [
-                "--system-boundaries",
-                "--software-pauth",
-                "--software-clock",
-                "--thread-registers",
-                "--checked-memory-sa0-off",
-                "--checked-process-sa0-off",
-            ] {
-                assert!(parse(&[flag]).is_err());
-            }
-            assert!(
-                Cli::try_parse_from(["stela", "run-blocks", "code", "--el1-platform"]).is_err()
             );
         }
 

@@ -4,15 +4,13 @@
 #[cfg(feature = "std")]
 pub mod checked_memory;
 
-#[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
-pub(crate) mod boot_frames;
 pub(crate) mod context;
+#[cfg(feature = "std")]
 pub(crate) mod floating_environment;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod native_image;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 pub(crate) use native_image::ReachedCall as ObservedNativeCall;
-pub(crate) type NativeStorageError = platform::StorageError;
 
 #[cfg(feature = "std")]
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};

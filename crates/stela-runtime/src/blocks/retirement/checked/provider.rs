@@ -1,14 +1,4 @@
 //! The EL0 backend: checked memory, PAuth, clock and TSD.
-mod async_resources;
-pub(super) mod hosted_wait;
-mod m0_owner;
-mod resources;
-pub(crate) use m0_owner::M0Owner;
-pub(super) use resources::M0ExecutionChecks;
-pub(crate) use resources::{
-    El1ContextResources, El1ExecutionResources, El1IrqResources, El1SystemEffectResources,
-    M0ExecutionResources,
-};
 
 use super::NativeObservation;
 use super::entry_controls::ProcessEntryControls;
@@ -23,7 +13,6 @@ use stela_compiler::{GuestAddress, GuestState};
 #[cfg(feature = "std")]
 use super::super::super::{checked_memory, complete_clock, complete_pauth_with_memory};
 #[cfg(feature = "std")]
-use super::super::software_async::NoAsyncSources;
 #[cfg(feature = "std")]
 use super::{low128_call, pauth_lr};
 #[cfg(feature = "std")]
@@ -53,7 +42,6 @@ pub(crate) struct CheckedProcessOwner<'pe> {
     memory: &'pe mut MemoryThread<MemoryControls>,
     endpoint: &'pe EventEndpoint,
     context: &'pe mut ExecutionContext,
-    pending: NoAsyncSources<'pe>,
     pauth: &'pe pauth::Context,
     clock: &'pe mut clock::Context,
     thread: &'pe mut thread::Context,
@@ -65,9 +53,8 @@ impl<'pe> CheckedProcessOwner<'pe> {
     /// Called once by the software machine constructor, before it creates its
     /// execution owner. Every resource belongs to the same PE and namespace and
     /// lives as long as it; `controls` holds the SCTLR/TCR facts, `execution`
-    /// the declared debug and optional-feature subset, and `pending` the
-    /// complete set of event producers. No raw producer, mutable control alias,
-    /// other native entry or source writer may bypass the machine. The clock is
+    /// the declared debug and optional-feature subset. No mutable control
+    /// alias, other native entry or source writer may bypass the machine. The clock is
     /// already bound.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_software(
@@ -77,7 +64,6 @@ impl<'pe> CheckedProcessOwner<'pe> {
         memory: &'pe mut MemoryThread<MemoryControls>,
         endpoint: &'pe EventEndpoint,
         context: &'pe mut ExecutionContext,
-        pending: NoAsyncSources<'pe>,
         pauth: &'pe pauth::Context,
         clock: &'pe mut clock::Context,
         thread: &'pe mut thread::Context,
@@ -90,7 +76,6 @@ impl<'pe> CheckedProcessOwner<'pe> {
             memory,
             endpoint,
             context,
-            pending,
             pauth,
             clock,
             thread,
@@ -113,9 +98,6 @@ impl<'pe> CheckedProcessOwner<'pe> {
             "unsupported context header"
         );
         self.execution.check()?;
-        self.pending
-            .check_registry()
-            .map_err(|error| anyhow::anyhow!("producer registry: {error:?}"))?;
         self.memory
             .check_event_endpoint(self.endpoint)
             .map_err(|error| anyhow::anyhow!("PE monitor: {error:?}"))?;
@@ -219,53 +201,13 @@ pub(super) mod sealed {
 #[cfg(feature = "std")]
 impl sealed::Concrete for CheckedProcessOwner<'_> {}
 
-/// What the backend requires after a System instruction retires. It does
-/// not permit IRQ entry.
-pub(crate) enum SystemRetirement {
-    Complete,
-    ArbitrateHostedIrq,
-}
-
 /// Only this module can implement a backend.
 pub(crate) trait Owner: sealed::Concrete {
     fn supports_profile(&self, profile: stela_compiler::block::BlockProfile) -> bool {
         profile.checked_memory().is_some()
-            || matches!(
-                profile,
-                stela_compiler::block::BlockProfile::El1DirectBranchV1
-                    | stela_compiler::block::BlockProfile::El1M0IntegerV1
-            )
-    }
-    fn qualify_debug_lifecycle(
-        &self,
-        debug: Option<&crate::system::debug::halted::DebugMachine>,
-        _system: &SystemState,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(debug.is_none(), "backend has no lifecycle consumer");
-        Ok(())
-    }
-    fn complete_system(
-        &mut self,
-        _bound: &BoundSource<'_>,
-        _boundary: &Boundary,
-        _system: &mut SystemState,
-        _registers: &mut GuestState,
-        _debug: Option<&mut crate::system::debug::halted::DebugMachine>,
-        _outer: &MemoryExecutionLoan,
-    ) -> super::privileged::SystemOutcome {
-        super::privileged::SystemOutcome::NoEffect(anyhow::anyhow!("System owner unavailable"))
     }
 
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan>;
-    #[cfg(feature = "std")]
-    fn reacquire_wait_loan(
-        &mut self,
-    ) -> anyhow::Result<crate::memory::domain::ExecutionLoanAttempt> {
-        anyhow::bail!("hosted wait reacquisition resources unavailable")
-    }
-    fn system_retirement(&mut self, _system: &SystemState) -> anyhow::Result<SystemRetirement> {
-        anyhow::bail!("System retirement source owner unavailable")
-    }
 
     fn prepare_source(
         &mut self,
@@ -283,79 +225,6 @@ pub(crate) trait Owner: sealed::Concrete {
         registers: &mut GuestState,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()>;
-    /// Lend this backend's own fields once. The consumer keeps them through
-    /// source and control validation, preparation, the native call,
-    /// finalization and PC settlement.
-    fn split_m0_resources(&mut self) -> anyhow::Result<M0ExecutionResources<'_>> {
-        anyhow::bail!("M0 backend resources are unavailable")
-    }
-
-    /// Only the installed EL1 owner lends these fields; other backends refuse
-    /// before the call.
-    fn split_el1_resources(&mut self) -> anyhow::Result<El1ExecutionResources<'_>> {
-        anyhow::bail!("installed branch backend resources are unavailable")
-    }
-
-    /// Mutable publication and monitor access, after all native borrows end.
-    fn split_el1_system_effect_resources(
-        &mut self,
-    ) -> anyhow::Result<El1SystemEffectResources<'_>> {
-        anyhow::bail!("owner has no original System completion resources")
-    }
-
-    fn split_el1_context_resources(&mut self) -> anyhow::Result<El1ContextResources<'_>> {
-        anyhow::bail!("EL1 context resources are unavailable")
-    }
-
-    /// Only the hosted-wait backend overrides these. It keeps the pending wait
-    /// state itself, and no backend borrow survives the release, reacquire and
-    /// re-check sequence.
-    fn prepare_wait(
-        &mut self,
-        _bound: &BoundSource<'_>,
-        _instruction: stela_compiler::block::system::SystemInstruction,
-        _system: &SystemState,
-        _registers: &GuestState,
-        _outer: &MemoryExecutionLoan,
-    ) -> anyhow::Result<hosted_wait::WaitReply> {
-        anyhow::bail!("lifetime-fixed hosted wait resources unavailable")
-    }
-    #[cfg(feature = "std")]
-    fn qualify_wake(
-        &mut self,
-        _bound: &BoundSource<'_>,
-        _system: &SystemState,
-        _registers: &mut GuestState,
-        _outer: &MemoryExecutionLoan,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("active hosted wake resources unavailable")
-    }
-    /// A backend without resources cannot hold a wait. The hosted backend
-    /// poisons its receiver instead of cancelling the wait.
-    fn abandon_wait(&mut self) {}
-    fn split_el1_irq_resources(&mut self) -> anyhow::Result<El1IrqResources<'_>> {
-        anyhow::bail!("hosted IRQ resources unavailable")
-    }
-    fn prepare_hosted_counter(
-        &mut self,
-        _bound: &BoundSource<'_>,
-        _instruction: stela_compiler::block::system::SystemInstruction,
-        _system: &SystemState,
-        _outer: &MemoryExecutionLoan,
-    ) -> anyhow::Result<hosted_wait::HostedCounterRead> {
-        anyhow::bail!("hosted system counter owner unavailable")
-    }
-    #[cfg(feature = "std")]
-    fn poll_wait(&mut self) -> anyhow::Result<hosted_wait::WaitReply> {
-        anyhow::bail!("retained wait transaction unavailable")
-    }
-    fn wait_outcome(&self) -> anyhow::Result<crate::system::events::Outcome> {
-        anyhow::bail!("retained wait receipt unavailable")
-    }
-    fn settle_wait(&mut self) -> anyhow::Result<()> {
-        anyhow::bail!("retained wait settlement unavailable")
-    }
-
     fn invoke(
         &mut self,
         bound: &BoundSource<'_>,
